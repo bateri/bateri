@@ -6,10 +6,10 @@
 //! It does not see a UI toolkit and has its own tests (`split`'s precedent), so a Linux shell can
 //! draw the same strip from the same numbers.
 //!
-//! **A tab is not a `bt_core::TabId`.** A tab is the container of a split tree's panes; `TabId` is
-//! one *pane's* identity (`TERM_SESSION_ID`, `bateri://tab/<id>`) — a tab holds one or more of
-//! them, so the relation is one to many and nothing here assumes otherwise. The identity type
-//! is generic: the shell picks whatever names its tabs.
+//! **A tab has no `bt_core::PaneUuid`.** A tab is the container of a split tree's panes;
+//! `PaneUuid` is one *pane's* identity (`TERM_SESSION_ID`, `bateri://tab/<id>`, the path's word
+//! notwithstanding) — a tab holds one or more of them, so the relation is one to many and nothing
+//! here assumes otherwise. The identity type is generic: the shell picks whatever names its tabs.
 //!
 //! **A dragged tab** is pure here too: [`Grip`] turns the pointer's travel after a press into
 //! "not yet a drag", "the tab is at this x and would take this place" or "it left the bar"

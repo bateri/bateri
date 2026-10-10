@@ -31,7 +31,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use bt_core::{KeepRunning, TabId};
+use bt_core::{KeepRunning, PaneUuid};
 use dispatch2::{DispatchQueue, DispatchTime};
 use objc2::MainThreadMarker;
 
@@ -207,10 +207,10 @@ pub(crate) struct Keeper {
     active: Arc<AtomicBool>,
     /// The panes the current holder has (a state or a release for another
     /// is dropped).
-    registered: RefCell<Vec<TabId>>,
+    registered: RefCell<Vec<PaneUuid>>,
     /// The panes registered as taken from another holder, until that holder
     /// is acknowledged ([`Keeper::confirm_taken`]).
-    unconfirmed: RefCell<Vec<TabId>>,
+    unconfirmed: RefCell<Vec<PaneUuid>>,
     /// The layout last sent: an edge that changed nothing sends nothing.
     sent_layout: RefCell<Option<Vec<u8>>>,
     /// A delayed layout job is in the main queue (at most one).
@@ -336,7 +336,7 @@ impl Keeper {
     }
 
     /// The pane closes: the holder lets its copy go.
-    pub(crate) fn release(&self, tab: &TabId) {
+    pub(crate) fn release(&self, tab: &PaneUuid) {
         let mut registered = self.registered.borrow_mut();
         let Some(index) = registered.iter().position(|known| known == tab) else {
             return;
@@ -349,7 +349,7 @@ impl Keeper {
     }
 
     /// A registered pane's newer `bt-core` state.
-    pub(crate) fn state(&self, tab: &TabId, blob: Vec<u8>) {
+    pub(crate) fn state(&self, tab: &PaneUuid, blob: Vec<u8>) {
         if !self.registered.borrow().contains(tab) {
             return;
         }

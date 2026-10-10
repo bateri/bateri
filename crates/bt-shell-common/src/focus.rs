@@ -29,9 +29,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use bt_core::TabId;
+use bt_core::PaneUuid;
 
 use crate::ssh_route::{self, SUN_PATH};
+
+/// `bateri focus`: the subcommand's word, the first argument.
+pub const SUBCOMMAND: &str = "focus";
 
 /// The listener's name in the instance directory. The sweep and ⌘Q remove it
 /// with the directory (`ssh_route::remove_instance`).
@@ -149,22 +152,22 @@ impl Answer {
     }
 }
 
-/// The request line for `tab`, newline included.
-pub fn request_line(tab: &TabId) -> String {
-    format!("{REQUEST_WORD} {WIRE_VERSION} {}\n", tab.as_str())
+/// The request line for `pane`, newline included.
+pub fn request_line(pane: &PaneUuid) -> String {
+    format!("{REQUEST_WORD} {WIRE_VERSION} {}\n", pane.as_str())
 }
 
 /// The asked pane from a request line (without its newline): `focus 1 <UUID>`
 /// exactly. Another version, another word or a broken identity is `None` and
 /// the connection closes without an answer.
-pub fn parse_request(line: &[u8]) -> Option<TabId> {
+pub fn parse_request(line: &[u8]) -> Option<PaneUuid> {
     let line = std::str::from_utf8(line).ok()?;
     let mut words = line.split(' ');
     let (word, version, id) = (words.next()?, words.next()?, words.next()?);
     if word != REQUEST_WORD || version != WIRE_VERSION || words.next().is_some() {
         return None;
     }
-    TabId::parse(id)
+    PaneUuid::parse(id)
 }
 
 /// One line from `stream`, its newline dropped: at most `limit` bytes, by
@@ -244,7 +247,7 @@ pub fn idle_secs(since: Moment, now: Moment) -> u64 {
 
 /// The server's answer source: the asked pane's answer, or `None` when it
 /// could not be had in time ([`ANSWER_WAIT`]) — the reply is `pane=unknown`.
-pub type Answerer = Arc<dyn Fn(&TabId) -> Option<Answer> + Send + Sync>;
+pub type Answerer = Arc<dyn Fn(&PaneUuid) -> Option<Answer> + Send + Sync>;
 
 /// Listens on `<dir>/`[`FOCUS_SOCKET`]: a stale file there is removed first,
 /// the socket is bound **before** this returns, the accept loop runs on its
@@ -327,10 +330,10 @@ fn answer(mut stream: UnixStream, answerer: &Answerer) {
     let Some(line) = read_line(&mut stream, REQUEST_LIMIT, deadline) else {
         return;
     };
-    let Some(tab) = parse_request(&line) else {
+    let Some(pane) = parse_request(&line) else {
         return;
     };
-    let answer = answerer(&tab).unwrap_or(Answer::Unknown);
+    let answer = answerer(&pane).unwrap_or(Answer::Unknown);
     let _ = stream.set_write_timeout(Some(SERVER_READ_LIMIT));
     let _ = stream.write_all(format!("{}\n", answer.token_line()).as_bytes());
 }
@@ -356,19 +359,19 @@ impl Reply {
 }
 
 /// Asks the live instances under `roots` ([`ssh_route::live_instances`])
-/// about `tab`: with `pid` only the instance that pid owns, otherwise all of
+/// about `pane`: with `pid` only the instance that pid owns, otherwise all of
 /// them in order — the first `pane=live` wins. None knows it → `pane=none`
 /// (no live instance at all included); one could not answer and none said
 /// live → `pane=unknown`. Each instance gets [`CLIENT_INSTANCE_LIMIT`], all of
 /// them [`CLIENT_TOTAL_LIMIT`].
-pub fn ask(roots: &[PathBuf], pid: Option<u32>, tab: &TabId) -> Reply {
+pub fn ask(roots: &[PathBuf], pid: Option<u32>, pane: &PaneUuid) -> Reply {
     let deadline = Instant::now() + CLIENT_TOTAL_LIMIT;
     let mut unknown = false;
     for instance in ssh_route::live_instances(roots) {
         if pid.is_some_and(|pid| pid != instance.pid) {
             continue;
         }
-        let reply = ask_instance(&instance.dirs, tab, deadline);
+        let reply = ask_instance(&instance.dirs, pane, deadline);
         match reply.answer {
             Answer::Live { .. } => return reply,
             Answer::None => {}
@@ -386,7 +389,7 @@ pub fn ask(roots: &[PathBuf], pid: Option<u32>, tab: &TabId) -> Reply {
 /// accepts (an older bateri, the listener not up yet, a stale file — refused
 /// or absent) → `unknown`: a live instance that cannot answer may still hold
 /// the pane.
-fn ask_instance(dirs: &[PathBuf], tab: &TabId, deadline: Instant) -> Reply {
+fn ask_instance(dirs: &[PathBuf], pane: &PaneUuid, deadline: Instant) -> Reply {
     let deadline = deadline.min(Instant::now() + CLIENT_INSTANCE_LIMIT);
     for dir in dirs {
         // No connect timeout in std: a local connect only blocks on a full
@@ -394,16 +397,16 @@ fn ask_instance(dirs: &[PathBuf], tab: &TabId, deadline: Instant) -> Reply {
         let Ok(mut stream) = UnixStream::connect(dir.join(FOCUS_SOCKET)) else {
             continue;
         };
-        return exchange(&mut stream, tab, deadline);
+        return exchange(&mut stream, pane, deadline);
     }
     Reply::canonical(Answer::Unknown)
 }
 
-fn exchange(stream: &mut UnixStream, tab: &TabId, deadline: Instant) -> Reply {
+fn exchange(stream: &mut UnixStream, pane: &PaneUuid, deadline: Instant) -> Reply {
     let left = deadline.saturating_duration_since(Instant::now());
     if left.is_zero()
         || stream.set_write_timeout(Some(left)).is_err()
-        || stream.write_all(request_line(tab).as_bytes()).is_err()
+        || stream.write_all(request_line(pane).as_bytes()).is_err()
     {
         return Reply::canonical(Answer::Unknown);
     }
@@ -429,11 +432,11 @@ pub const USAGE: &str = "usage: bateri focus [--pid PID] bateri://tab/<UUID>";
 /// [`EXIT_UNKNOWN`] or [`EXIT_USAGE`] (a diagnostic on stderr, nothing on
 /// `out`). No GUI, no AppKit.
 pub fn focus_main(args: &[String], roots: &[PathBuf], out: &mut impl Write) -> i32 {
-    let Some((pid, tab)) = parse_args(args) else {
+    let Some((pid, pane)) = parse_args(args) else {
         eprintln!("{USAGE}");
         return EXIT_USAGE;
     };
-    let reply = ask(roots, pid, &tab);
+    let reply = ask(roots, pid, &pane);
     let written = out
         .write_all(reply.line.as_bytes())
         .and_then(|()| out.write_all(b"\n"))
@@ -448,12 +451,12 @@ pub fn focus_main(args: &[String], roots: &[PathBuf], out: &mut impl Write) -> i
 }
 
 /// `[--pid P] <url>`: the pid a positive number, the URL `bateri://tab/<UUID>`.
-fn parse_args(args: &[String]) -> Option<(Option<u32>, TabId)> {
+fn parse_args(args: &[String]) -> Option<(Option<u32>, PaneUuid)> {
     match args {
-        [url] => Some((None, TabId::from_url(url)?)),
+        [url] => Some((None, PaneUuid::from_url(url)?)),
         [flag, pid, url] if flag == "--pid" => {
             let pid = pid.parse::<u32>().ok().filter(|&pid| pid > 0)?;
-            Some((Some(pid), TabId::from_url(url)?))
+            Some((Some(pid), PaneUuid::from_url(url)?))
         }
         _ => None,
     }
@@ -470,8 +473,8 @@ mod tests {
     const ID: &str = "0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0";
     const OTHER: &str = "11111111-2222-3333-4444-555555555555";
 
-    fn tab(id: &str) -> TabId {
-        TabId::parse(id).unwrap()
+    fn pane(id: &str) -> PaneUuid {
+        PaneUuid::parse(id).unwrap()
     }
 
     fn scratch(name: &str) -> PathBuf {
@@ -488,7 +491,7 @@ mod tests {
 
     /// An answerer that knows `ID` only.
     fn knows_id(focused: bool) -> Answerer {
-        Arc::new(move |asked: &TabId| {
+        Arc::new(move |asked: &PaneUuid| {
             Some(if asked.as_str() == ID {
                 Answer::Live {
                     focused,
@@ -521,11 +524,11 @@ mod tests {
 
     #[test]
     fn the_wire_round_trips() {
-        let line = request_line(&tab(ID));
+        let line = request_line(&pane(ID));
         assert_eq!(line, format!("focus 1 {ID}\n"));
         assert_eq!(
             parse_request(line.trim_end().as_bytes()),
-            Some(tab(ID)),
+            Some(pane(ID)),
             "round trip"
         );
         for answer in [
@@ -610,16 +613,16 @@ mod tests {
         let dir = instance(&root, "aaaaaaaa", None);
         serve(&dir, knows_id(true)).unwrap();
         let roots = [root.clone()];
-        let reply = ask(&roots, None, &tab(ID));
+        let reply = ask(&roots, None, &pane(ID));
         assert_eq!(reply.line, "pane=live focused=1 idle=4");
-        assert_eq!(ask(&roots, None, &tab(OTHER)).answer, Answer::None);
+        assert_eq!(ask(&roots, None, &pane(OTHER)).answer, Answer::None);
         let mut out = Vec::new();
         assert_eq!(
             focus_main(
                 &[
                     "--pid".into(),
                     std::process::id().to_string(),
-                    tab(ID).url()
+                    pane(ID).url()
                 ],
                 &roots,
                 &mut out
@@ -635,16 +638,16 @@ mod tests {
         let root = scratch("none");
         let roots = [root.clone()];
         let mut out = Vec::new();
-        assert_eq!(focus_main(&[tab(ID).url()], &roots, &mut out), EXIT_ANSWER);
+        assert_eq!(focus_main(&[pane(ID).url()], &roots, &mut out), EXIT_ANSWER);
         assert_eq!(out, b"pane=none\n");
         for args in [
             vec![],
             vec!["bateri://tab/nope".to_owned()],
-            vec!["--pid".to_owned(), tab(ID).url()],
-            vec!["--pid".to_owned(), "0".to_owned(), tab(ID).url()],
-            vec!["--pid".to_owned(), "x".to_owned(), tab(ID).url()],
-            vec!["--now".to_owned(), "1".to_owned(), tab(ID).url()],
-            vec![tab(ID).url(), tab(ID).url()],
+            vec!["--pid".to_owned(), pane(ID).url()],
+            vec!["--pid".to_owned(), "0".to_owned(), pane(ID).url()],
+            vec!["--pid".to_owned(), "x".to_owned(), pane(ID).url()],
+            vec!["--now".to_owned(), "1".to_owned(), pane(ID).url()],
+            vec![pane(ID).url(), pane(ID).url()],
         ] {
             let mut out = Vec::new();
             assert_eq!(focus_main(&args, &roots, &mut out), EXIT_USAGE, "{args:?}");
@@ -662,7 +665,7 @@ mod tests {
         let started = Instant::now();
         let mut out = Vec::new();
         assert_eq!(
-            focus_main(&[tab(ID).url()], &[root.clone()], &mut out),
+            focus_main(&[pane(ID).url()], &[root.clone()], &mut out),
             EXIT_UNKNOWN
         );
         assert_eq!(out, b"pane=unknown\n");
@@ -682,11 +685,11 @@ mod tests {
         let stale = instance(&root, "aaaaaaaa", Some(std::os::unix::process::parent_id()));
         drop(UnixListener::bind(stale.join(FOCUS_SOCKET)).unwrap());
         let roots = [root.clone()];
-        assert_eq!(ask(&roots, None, &tab(ID)).answer, Answer::Unknown);
+        assert_eq!(ask(&roots, None, &pane(ID)).answer, Answer::Unknown);
         let live = instance(&root, "bbbbbbbb", None);
         serve(&live, knows_id(false)).unwrap();
         assert_eq!(
-            ask(&roots, None, &tab(ID)).answer,
+            ask(&roots, None, &pane(ID)).answer,
             Answer::Live {
                 focused: false,
                 idle_secs: 4
@@ -702,20 +705,20 @@ mod tests {
         let theirs = instance(&root, "aaaaaaaa", Some(parent));
         serve(&theirs, knows_id(true)).unwrap();
         let ours = instance(&root, "bbbbbbbb", None);
-        serve(&ours, Arc::new(|_: &TabId| Some(Answer::None))).unwrap();
+        serve(&ours, Arc::new(|_: &PaneUuid| Some(Answer::None))).unwrap();
         let roots = [root.clone()];
         assert_eq!(
-            ask(&roots, Some(std::process::id()), &tab(ID)).answer,
+            ask(&roots, Some(std::process::id()), &pane(ID)).answer,
             Answer::None
         );
         assert_eq!(
-            ask(&roots, Some(parent), &tab(ID)).answer,
+            ask(&roots, Some(parent), &pane(ID)).answer,
             Answer::Live {
                 focused: true,
                 idle_secs: 4
             }
         );
-        assert_eq!(ask(&roots, Some(u32::MAX), &tab(ID)).answer, Answer::None);
+        assert_eq!(ask(&roots, Some(u32::MAX), &pane(ID)).answer, Answer::None);
         std::fs::remove_dir_all(&root).unwrap();
     }
 
@@ -727,7 +730,7 @@ mod tests {
         let mut idle = UnixStream::connect(dir.join(FOCUS_SOCKET)).unwrap();
         idle.write_all(b"focus 1 ").unwrap();
         let started = Instant::now();
-        let reply = ask(&[root.clone()], None, &tab(ID));
+        let reply = ask(&[root.clone()], None, &pane(ID));
         assert_eq!(reply.line, "pane=live focused=1 idle=4");
         assert!(
             started.elapsed() < SERVER_READ_LIMIT,
@@ -742,8 +745,11 @@ mod tests {
     fn an_answerer_out_of_time_is_unknown_and_a_broken_request_gets_nothing() {
         let root = scratch("late");
         let dir = instance(&root, "aaaaaaaa", None);
-        serve(&dir, Arc::new(|_: &TabId| None)).unwrap();
-        assert_eq!(ask(&[root.clone()], None, &tab(ID)).answer, Answer::Unknown);
+        serve(&dir, Arc::new(|_: &PaneUuid| None)).unwrap();
+        assert_eq!(
+            ask(&[root.clone()], None, &pane(ID)).answer,
+            Answer::Unknown
+        );
         let mut stream = UnixStream::connect(dir.join(FOCUS_SOCKET)).unwrap();
         stream
             .write_all(format!("focus 9 {ID}\n").as_bytes())
@@ -764,7 +770,7 @@ mod tests {
         std::fs::write(dir.join(FOCUS_SOCKET), "").unwrap();
         serve(&dir, knows_id(true)).unwrap();
         assert!(matches!(
-            ask(&[root.clone()], None, &tab(ID)).answer,
+            ask(&[root.clone()], None, &pane(ID)).answer,
             Answer::Live { .. }
         ));
         std::fs::remove_dir_all(&root).unwrap();

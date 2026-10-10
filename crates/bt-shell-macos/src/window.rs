@@ -85,7 +85,7 @@ use std::time::{Duration, Instant};
 
 use block2::RcBlock;
 use bt_core::{
-    ConfirmClose, ContentEdge, InitialInput, Settings, ShutdownHandle, TabId, Teardown, Theme,
+    ConfirmClose, ContentEdge, InitialInput, PaneUuid, Settings, ShutdownHandle, Teardown, Theme,
 };
 use bt_gpu::GpuError;
 use dispatch2::DispatchQueue;
@@ -599,7 +599,7 @@ pub(crate) struct Launch {
     /// The pane's persistent identity; `None` → a new one. A restored
     /// pane keeps its saved one, so `bateri://tab/<id>` and
     /// `TERM_SESSION_ID` survive the quit.
-    pub(crate) tab_id: Option<TabId>,
+    pub(crate) uuid: Option<PaneUuid>,
     /// A previous session's scrollback, replayed before the shell starts
     /// (`SessionOptions::replay`); `None` → an empty grid.
     pub(crate) replay: Option<Vec<u8>>,

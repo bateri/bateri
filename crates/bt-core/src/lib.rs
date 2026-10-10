@@ -73,7 +73,7 @@ pub use dock::{
     StatsLevel, StatsMetric, StatsThreshold, TEXT_COL as DOCK_TEXT_COL, UPLOAD_GLYPHS, footer_hit,
     footer_span, footer_spans,
 };
-pub use identity::{LC_TERMINAL, TERM_PROGRAM, TERM_PROGRAM_VERSION, TabId};
+pub use identity::{LC_TERMINAL, PaneUuid, TERM_PROGRAM, TERM_PROGRAM_VERSION, pane_env};
 pub use input::{Arrow, MouseButton, MouseModifiers};
 pub use journal::{
     HEADROOM as JOURNAL_HEADROOM, JOURNAL_FORMAT, Journal, JournalCut, JournalRecords,

@@ -43,7 +43,7 @@
 //!   layout: len u64, bytes
 //!   panes: count u32, then per pane:
 //!     'F' (one byte carrying the master by SCM_RIGHTS)
-//!     tab: len u32, UUID text | pid u32 | start u64
+//!     tab: len u32, UUID text (the pane's `PaneUuid`) | pid u32 | start u64
 //!     flags u32 (bit 0: ended, bit 1: cut — the oldest bytes were dropped,
 //!               bit 2: crashed — its bateri died and the holder rebuilt
 //!               the screen from the pane's journal)
@@ -112,7 +112,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, Weak};
 use std::time::{Duration, Instant};
 
-use bt_core::{Journal, JournalCut, TabId};
+use bt_core::{Journal, JournalCut, PaneUuid};
 
 use crate::jobs::{self, ShellParent};
 use crate::journal::{BaseSink, CompactRequest, Region, Registration};
@@ -256,7 +256,7 @@ pub const USAGE: &str = "usage: bateri hold --fd FD --dir INSTANCE_DIR [--dir IN
 /// One pane across the frame.
 #[derive(Debug)]
 pub struct HeldPane {
-    pub tab: TabId,
+    pub tab: PaneUuid,
     /// The PTY's child and its start time (`jobs::start_time`): the new
     /// bateri's exit watch is made from them (`jobs::exit_fd`).
     pub pid: u32,
@@ -283,7 +283,7 @@ pub struct HeldPane {
 impl HeldPane {
     /// A pane the old bateri gives: nothing ended yet, the buffer its tail.
     pub fn new(
-        tab: TabId,
+        tab: PaneUuid,
         pid: u32,
         start: u64,
         blob: Vec<u8>,
@@ -509,7 +509,7 @@ fn write_field(wire: &Wire<'_>, bytes: &[u8]) -> io::Result<()> {
     wire.write_all(bytes)
 }
 
-/// A tab id: its length as `u32`, then its text.
+/// A pane's identity (the frame's `tab`): its length as `u32`, then its text.
 fn write_tab(wire: &Wire<'_>, tab: &str) -> io::Result<()> {
     let len = u32::try_from(tab.len()).map_err(|_| io::ErrorKind::InvalidInput)?;
     wire.write_all(&len.to_le_bytes())?;
@@ -583,12 +583,12 @@ fn read_panes(wire: &Wire<'_>, total: &mut u64) -> Result<Vec<HeldPane>, Handove
     Ok(panes)
 }
 
-/// A tab id ([`write_tab`]).
-fn read_tab(wire: &Wire<'_>, total: &mut u64) -> Result<TabId, HandoverError> {
+/// A pane's identity ([`write_tab`]).
+fn read_tab(wire: &Wire<'_>, total: &mut u64) -> Result<PaneUuid, HandoverError> {
     let tab = read_field(wire, u64::from(wire.u32()?), TAB_LIMIT, total)?;
     std::str::from_utf8(&tab)
         .ok()
-        .and_then(TabId::parse)
+        .and_then(PaneUuid::parse)
         .ok_or(HandoverError::Malformed("tab id"))
 }
 
@@ -1871,7 +1871,7 @@ fn image_identity() -> String {
 /// A pane as bateri registers it with its bound holder ([`Bound::add`]).
 #[derive(Debug)]
 pub struct BoundPane {
-    pub tab: TabId,
+    pub tab: PaneUuid,
     /// The PTY's child and its start time (`jobs::start_time`).
     pub pid: u32,
     pub start: u64,
@@ -1927,7 +1927,7 @@ struct Shared {
     heard: Condvar,
     /// The journaled panes, for the holder's confirmations: a base it keeps
     /// frees the pane's journal before its cut.
-    journals: Mutex<Vec<(TabId, Weak<Journal>)>>,
+    journals: Mutex<Vec<(PaneUuid, Weak<Journal>)>>,
 }
 
 /// What waits to be written.
@@ -1937,7 +1937,7 @@ struct Outbox {
     orders: VecDeque<Order>,
     /// The newest unsent layout and per-pane states.
     layout: Option<Vec<u8>>,
-    states: Vec<(TabId, Vec<u8>)>,
+    states: Vec<(PaneUuid, Vec<u8>)>,
     /// Nothing more is queued: the writer flushes and ends.
     closed: bool,
 }
@@ -1950,11 +1950,11 @@ impl Outbox {
 
 enum Order {
     Add(BoundPane),
-    Drop(TabId),
-    Confirm(TabId),
+    Drop(PaneUuid),
+    Confirm(PaneUuid),
     /// A pane's newer base: in order behind its registration, never folded
     /// into a later one — each waits for its own confirmation.
-    Base(TabId, JournalCut, Vec<u8>),
+    Base(PaneUuid, JournalCut, Vec<u8>),
     Ping,
     Quit,
     Handover(Bundle),
@@ -1974,7 +1974,7 @@ struct News {
     flushed: bool,
     /// The holder's answer to the handover.
     answer: Option<bool>,
-    refused: Vec<TabId>,
+    refused: Vec<PaneUuid>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2129,7 +2129,7 @@ impl Bound {
 
     /// Where a registered pane's newer bases go ([`BaseSink`]): in order
     /// behind everything queued before.
-    pub fn sink(&self, tab: &TabId) -> Box<dyn BaseSink> {
+    pub fn sink(&self, tab: &PaneUuid) -> Box<dyn BaseSink> {
         Box::new(BaseSender {
             shared: Arc::clone(&self.shared),
             tab: tab.clone(),
@@ -2138,7 +2138,7 @@ impl Bound {
 
     /// Releases a pane: the holder closes its copy and signals nobody (the
     /// pane's own close does what closing means).
-    pub fn release(&self, tab: &TabId) {
+    pub fn release(&self, tab: &PaneUuid) {
         lock(&self.shared.outbox)
             .states
             .retain(|(pending, _)| pending != tab);
@@ -2148,7 +2148,7 @@ impl Bound {
 
     /// The holder a pane was taken from is acknowledged: the pane is this
     /// holder's to drain if bateri goes.
-    pub fn confirm(&self, tab: &TabId) {
+    pub fn confirm(&self, tab: &PaneUuid) {
         self.order(Order::Confirm(tab.clone()));
     }
 
@@ -2166,7 +2166,7 @@ impl Bound {
 
     /// A pane's newer `bt-core` state blob; only the newest unsent one per
     /// pane is written.
-    pub fn state(&self, tab: &TabId, blob: Vec<u8>) {
+    pub fn state(&self, tab: &PaneUuid, blob: Vec<u8>) {
         let mut outbox = lock(&self.shared.outbox);
         if outbox.closed {
             return;
@@ -2210,7 +2210,7 @@ impl Bound {
     }
 
     /// The panes the holder refused since the last call.
-    pub fn refused(&self) -> Vec<TabId> {
+    pub fn refused(&self) -> Vec<PaneUuid> {
         std::mem::take(&mut lock(&self.shared.news).refused)
     }
 
@@ -2301,7 +2301,7 @@ impl Drop for Bound {
 /// A pane's [`BaseSink`] on a bound connection ([`Bound::sink`]).
 struct BaseSender {
     shared: Arc<Shared>,
-    tab: TabId,
+    tab: PaneUuid,
 }
 
 impl BaseSink for BaseSender {
@@ -2367,7 +2367,7 @@ fn write_batch(
     shared: &Shared,
     orders: VecDeque<Order>,
     layout: Option<Vec<u8>>,
-    states: Vec<(TabId, Vec<u8>)>,
+    states: Vec<(PaneUuid, Vec<u8>)>,
 ) -> io::Result<()> {
     let moved = || {
         lock(&shared.news).progress += 1;
@@ -2476,7 +2476,7 @@ fn read_cut(wire: &Wire<'_>) -> io::Result<JournalCut> {
 }
 
 /// The journal registered for `tab`, if it is still alive.
-fn journal_of(shared: &Shared, tab: &TabId) -> Option<Arc<Journal>> {
+fn journal_of(shared: &Shared, tab: &PaneUuid) -> Option<Arc<Journal>> {
     lock(&shared.journals)
         .iter()
         .find(|(known, _)| known == tab)
@@ -2703,7 +2703,7 @@ enum Drain {
 
 /// A pane registered with a bound holder.
 struct Registered {
-    tab: TabId,
+    tab: PaneUuid,
     pid: u32,
     start: u64,
     parent: ShellParent,
@@ -2959,7 +2959,7 @@ fn bound_end(
 
 /// Tells bateri a pane's base at `cut` is kept ([`BASE_TAKEN`]). A failed
 /// write is the connection's end, which the next read sees.
-fn take_base(spawner: &UnixStream, tab: &TabId, cut: JournalCut) {
+fn take_base(spawner: &UnixStream, tab: &PaneUuid, cut: JournalCut) {
     let answer = Wire::new(spawner, None);
     let _ = answer
         .write_all(&[BASE_TAKEN])
@@ -2968,7 +2968,7 @@ fn take_base(spawner: &UnixStream, tab: &TabId, cut: JournalCut) {
 }
 
 /// Tells bateri the holder keeps no journal of a pane ([`BASE_REFUSED`]).
-fn refuse_base(spawner: &UnixStream, tab: &TabId) {
+fn refuse_base(spawner: &UnixStream, tab: &PaneUuid) {
     let answer = Wire::new(spawner, None);
     let _ = answer
         .write_all(&[BASE_REFUSED])
@@ -4151,8 +4151,8 @@ mod tests {
     const OTHER: &str = "11111111-2222-3333-4444-555555555555";
     const INSTANCE: &str = "11111111";
 
-    fn tab(id: &str) -> TabId {
-        TabId::parse(id).unwrap()
+    fn tab(id: &str) -> PaneUuid {
+        PaneUuid::parse(id).unwrap()
     }
 
     fn uid() -> u32 {
@@ -5576,7 +5576,7 @@ mod tests {
             cluster: true,
             initial_input: None,
             shell_marks: false,
-            tab_id: None,
+            pane_uuid: None,
             hostname: None,
             replay: None,
             journal,

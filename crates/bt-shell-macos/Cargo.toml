@@ -29,7 +29,7 @@ objc2 = { workspace = true }
 # once the window gets the theme's appearance, the view no longer sees the
 # system's light/dark change, while `NSApp.effectiveAppearance` can be
 # observed with KVO.
-# NSUUID: the tab's persistent id (`window::new_tab_id`) —
+# NSUUID: the pane's persistent id (`pane::new_pane_uuid`) —
 # `TERM_SESSION_ID` and `bateri://tab/<id>`. Only a header flag, not a new
 # crate; `Cargo.lock` did not move.
 # NSDateFormatter (with its superclass's NSFormatter): the scroll bar block

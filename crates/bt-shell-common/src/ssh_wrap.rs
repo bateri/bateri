@@ -43,7 +43,7 @@ use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use bt_core::{Settings, TERM_PROGRAM_VERSION, TabId};
+use bt_core::{PaneUuid, Settings, TERM_PROGRAM_VERSION};
 
 use crate::jobs::ssh_call;
 use crate::ssh_route::{
@@ -72,12 +72,17 @@ const COMMAND_HEAD: &str = "exec sh -c '";
 /// fixed): the version is [`bt_core::TERM_PROGRAM_VERSION`], the tab the
 /// pane's `bateri://tab/<id>` or [`NO_TAB`] without one. Both words sit
 /// outside the quotes and are read by any login shell, so only
-/// [`is_version`]'s alphabet and [`TabId::url`]'s form go there; visible in
+/// [`is_version`]'s alphabet and [`PaneUuid::url`]'s form go there; visible in
 /// `ps`, which is harmless — the tab's address only focuses.
 /// `boot` must not contain `'` ([`decide`] refuses one that does).
-pub fn remote_command(boot: &str, parent: Option<u32>, nonce: &str, tab: Option<&TabId>) -> String {
+pub fn remote_command(
+    boot: &str,
+    parent: Option<u32>,
+    nonce: &str,
+    tab: Option<&PaneUuid>,
+) -> String {
     let parent = parent.map_or_else(|| NO_PARENT.to_owned(), |parent| parent.to_string());
-    let tab = tab.map_or_else(|| NO_TAB.to_owned(), TabId::url);
+    let tab = tab.map_or_else(|| NO_TAB.to_owned(), PaneUuid::url);
     format!("{COMMAND_HEAD}{boot}' {BOOT_NAME} {parent} {nonce} {TERM_PROGRAM_VERSION} {tab}")
 }
 
@@ -166,7 +171,7 @@ pub fn wrap(
     boot: &str,
     parent: Option<u32>,
     nonce: &str,
-    tab: Option<&TabId>,
+    tab: Option<&PaneUuid>,
     control: Option<&Control>,
 ) -> Vec<String> {
     let mut wrapped = Vec::with_capacity(args.len() + 8);
@@ -203,7 +208,7 @@ fn boot_tail(last: &str) -> Option<Option<&str>> {
             if parent(first)
                 && is_nonce(nonce)
                 && is_version(version)
-                && (tab == NO_TAB || TabId::from_url(tab).is_some()) =>
+                && (tab == NO_TAB || PaneUuid::from_url(tab).is_some()) =>
         {
             Some(Some(nonce))
         }
@@ -520,7 +525,7 @@ pub fn decide(
     boot: &str,
     parent: Option<u32>,
     nonce: &str,
-    tab: Option<&TabId>,
+    tab: Option<&PaneUuid>,
     sockets: &[PathBuf],
 ) -> Option<Wrapped> {
     if boot.is_empty() || !is_inline(boot) || !is_nonce(nonce) || !tty {
@@ -918,7 +923,7 @@ pub fn ssh_argv_main(
     roots: &[PathBuf],
     boot: &str,
     nonce: Option<&str>,
-    tab: Option<&TabId>,
+    tab: Option<&PaneUuid>,
     out: &mut impl Write,
 ) -> i32 {
     let Some(nonce) = nonce else {
@@ -1235,7 +1240,7 @@ mod tests {
             let control = Control {
                 socket: PathBuf::from("/tmp/bateri-501/0a1b2c3d/u-0123456789abcdef"),
             };
-            let tab = TabId::parse("0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0").unwrap();
+            let tab = PaneUuid::parse("0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0").unwrap();
             for parent in [None, Some(7), Some(u32::MAX)] {
                 for control in [None, Some(&control)] {
                     // The identity's words unwrap with the rest.
@@ -1337,7 +1342,7 @@ mod tests {
         // without a tab; the workspace version is one `is_version` takes.
         assert!(is_version(TERM_PROGRAM_VERSION), "{TERM_PROGRAM_VERSION}");
         assert!(!is_version("") && !is_version("1 0") && !is_version("1!"));
-        let tab = TabId::parse("0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0").unwrap();
+        let tab = PaneUuid::parse("0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0").unwrap();
         assert!(
             remote_command("x", Some(7), NONCE, Some(&tab)).ends_with(&format!(
                 " bateri-boot 7 {NONCE} {TERM_PROGRAM_VERSION} bateri://tab/{}",
@@ -2427,7 +2432,7 @@ mod remote_shells {
                 cluster: false,
                 initial_input: None,
                 shell_marks: false,
-                tab_id: None,
+                pane_uuid: None,
                 hostname: None,
                 replay: None,
                 journal: None,
@@ -2754,7 +2759,7 @@ mod remote_shells {
     #[test]
     fn the_bootstrap_exports_the_identity() {
         let sh = which("sh").expect("sh");
-        let tab = bt_core::TabId::parse("0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0").unwrap();
+        let tab = bt_core::PaneUuid::parse("0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0").unwrap();
         let version = bt_core::TERM_PROGRAM_VERSION;
         let good = remote_command(boot(), Some(PARENT), NONCE, Some(&tab));
         let bad = format!(

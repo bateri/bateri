@@ -127,10 +127,10 @@ pub fn ssh_argv() -> Option<i32> {
     };
     let settings = settings::load(&settings::config_root(&home)).at_launch().0;
     // The calling pane's identity: its shell's `BATERI_TAB_URL`, in
-    // the one form `TabId` reads — anything else carries no tab.
+    // the one form `PaneUuid` reads — anything else carries no tab.
     let tab = std::env::var("BATERI_TAB_URL")
         .ok()
-        .and_then(|url| bt_core::TabId::from_url(&url));
+        .and_then(|url| bt_core::PaneUuid::from_url(&url));
     // SAFETY: `getuid` has no preconditions and cannot fail.
     let uid = unsafe { libc::getuid() };
     Some(bt_shell_common::ssh_wrap::ssh_argv_main(
@@ -188,7 +188,7 @@ pub fn ssh_fell_back() -> Option<i32> {
 /// (`app::masters`), or `--pid` would never find the instance.
 pub fn focus() -> Option<i32> {
     let mut args = std::env::args_os().skip(1);
-    if args.next()? != "focus" {
+    if args.next()? != focus::SUBCOMMAND {
         return None;
     }
     let Some(argv) = args

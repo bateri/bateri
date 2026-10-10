@@ -1085,7 +1085,7 @@ mod tests {
                 cluster: true,
                 initial_input: None,
                 shell_marks: false,
-                tab_id: None,
+                pane_uuid: None,
                 hostname: None,
                 replay: None,
                 journal: Some(Arc::clone(journal.journal())),

@@ -2,7 +2,7 @@
 //! the directory that holds it.
 //!
 //! **The model** is what comes back after a quit: windows (frame, selected tab,
-//! key), tabs (the split tree's shape, focus, zoom) and panes (the persistent `TabId`, the local
+//! key), tabs (the split tree's shape, focus, zoom) and panes (the persistent `PaneUuid`, the local
 //! directory, the point-size step, the remote target's line, whether a history file was written).
 //! The tree's leaves are **indices** into the tab's pane list ([`Shape`]): the in-process `u64`
 //! pane identity means nothing in the next process, so it never reaches the disk —
@@ -51,7 +51,7 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 
-use bt_core::TabId;
+use bt_core::PaneUuid;
 
 use crate::split::{Axis, Tree};
 
@@ -71,7 +71,7 @@ const LAYOUT: &str = "layout";
 /// The lock file's name: the layout cannot carry the lock, every save renames a new inode onto
 /// its path (`ssh_wrap`'s lock precedent).
 const LOCK: &str = "lock";
-/// A history file's extension: `{TabId}.vt`.
+/// A history file's extension: `{PaneUuid}.vt`.
 const HISTORY_EXT: &str = "vt";
 /// The temporary-name suffix; anything ending in it is a leftover of an interrupted write.
 const TEMP_SUFFIX: &str = ".tmp";
@@ -125,7 +125,7 @@ pub struct SavedTab {
 pub struct SavedPane {
     /// The persistent identity (`TERM_SESSION_ID`, `bateri://tab/<id>`); also the history
     /// file's name.
-    pub tab_id: TabId,
+    pub uuid: PaneUuid,
     /// The local working directory (OSC 7). A path that is not UTF-8 is saved as absent.
     pub dir: Option<PathBuf>,
     /// The temporary point-size offset, in steps (`zoom::Zoom::steps`).
@@ -306,7 +306,7 @@ impl Saved {
     /// empty; every pane it keeps joins `taken`. Several holders' layouts can
     /// name one program (a holder's, and the holder of the bateri that took
     /// it and crashed): walked newest first, each comes once.
-    pub fn place_after(&self, taken: &mut Vec<TabId>) -> Saved {
+    pub fn place_after(&self, taken: &mut Vec<PaneUuid>) -> Saved {
         let mut windows = Vec::new();
         for window in &self.windows {
             let mut tabs = Vec::new();
@@ -315,12 +315,12 @@ impl Saved {
                 let keep: Vec<bool> = tab
                     .panes
                     .iter()
-                    .map(|pane| !taken.contains(&pane.tab_id))
+                    .map(|pane| !taken.contains(&pane.uuid))
                     .collect();
                 let Some(tab) = tab.retain(&keep) else {
                     continue;
                 };
-                taken.extend(tab.panes.iter().map(|pane| pane.tab_id.clone()));
+                taken.extend(tab.panes.iter().map(|pane| pane.uuid.clone()));
                 if index == window.selected {
                     selected = Some(tabs.len());
                 }
@@ -479,7 +479,7 @@ impl Saved {
                     let dir = pane.dir.as_deref().and_then(Path::to_str);
                     out.push_str(&format!(
                         "P {} {} {} {} {}\n",
-                        pane.tab_id.as_str(),
+                        pane.uuid.as_str(),
                         pane.zoom_steps,
                         u8::from(pane.history),
                         render_optional(dir),
@@ -603,7 +603,7 @@ fn parse_tab<'a>(tokens: &mut impl Iterator<Item = &'a str>, version: u32) -> Op
 
 fn parse_pane<'a>(tokens: &mut impl Iterator<Item = &'a str>) -> Option<SavedPane> {
     Some(SavedPane {
-        tab_id: TabId::parse(tokens.next()?)?,
+        uuid: PaneUuid::parse(tokens.next()?)?,
         zoom_steps: tokens.next()?.parse().ok()?,
         history: parse_bit(tokens.next()?)?,
         dir: parse_optional(tokens.next()?)?.map(PathBuf::from),
@@ -658,8 +658,8 @@ pub fn lock(dir: &Path) -> Option<Lock> {
     })
 }
 
-fn history_path(dir: &Path, tab_id: &TabId) -> PathBuf {
-    dir.join(format!("{}.{HISTORY_EXT}", tab_id.as_str()))
+fn history_path(dir: &Path, uuid: &PaneUuid) -> PathBuf {
+    dir.join(format!("{}.{HISTORY_EXT}", uuid.as_str()))
 }
 
 /// Writes `bytes` to `path` through a temporary name (`0600`) and a `rename`; the temporary is
@@ -689,7 +689,7 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
 /// Saves the layout and the histories (`(tab id, bytes)` pairs). Histories first, the layout
 /// last — its rename is the commit — then whatever the new layout does not name is swept. A
 /// layout without windows is [`clear`]: there is nothing to restore.
-pub fn save(lock: &Lock, saved: &Saved, histories: &[(TabId, Vec<u8>)]) -> io::Result<()> {
+pub fn save(lock: &Lock, saved: &Saved, histories: &[(PaneUuid, Vec<u8>)]) -> io::Result<()> {
     if saved.windows.is_empty() {
         return clear(lock);
     }
@@ -699,9 +699,9 @@ pub fn save(lock: &Lock, saved: &Saved, histories: &[(TabId, Vec<u8>)]) -> io::R
     Ok(())
 }
 
-fn write_histories(lock: &Lock, histories: &[(TabId, Vec<u8>)]) -> io::Result<()> {
-    for (tab_id, bytes) in histories {
-        write_atomic(&history_path(&lock.dir, tab_id), bytes)?;
+fn write_histories(lock: &Lock, histories: &[(PaneUuid, Vec<u8>)]) -> io::Result<()> {
+    for (uuid, bytes) in histories {
+        write_atomic(&history_path(&lock.dir, uuid), bytes)?;
     }
     Ok(())
 }
@@ -714,7 +714,7 @@ fn kept_histories(saved: &Saved) -> HashSet<String> {
         .flat_map(|window| &window.tabs)
         .flat_map(|tab| &tab.panes)
         .filter(|pane| pane.history)
-        .map(|pane| format!("{}.{HISTORY_EXT}", pane.tab_id.as_str()))
+        .map(|pane| format!("{}.{HISTORY_EXT}", pane.uuid.as_str()))
         .collect()
 }
 
@@ -767,8 +767,8 @@ pub fn take(lock: &Lock, histories: bool) -> Option<Saved> {
 
 /// Reads one pane's history and deletes it; missing or unreadable is `None` (that pane starts
 /// empty, the others are not affected).
-pub fn history(lock: &Lock, tab_id: &TabId) -> Option<Vec<u8>> {
-    let path = history_path(&lock.dir, tab_id);
+pub fn history(lock: &Lock, uuid: &PaneUuid) -> Option<Vec<u8>> {
+    let path = history_path(&lock.dir, uuid);
     let bytes = fs::read(&path);
     let _ = fs::remove_file(&path);
     bytes.ok()
@@ -866,13 +866,13 @@ mod tests {
     const B: &str = "11111111-2222-3333-4444-555555555555";
     const C: &str = "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE";
 
-    fn id(text: &str) -> TabId {
-        TabId::parse(text).expect("test id must parse")
+    fn id(text: &str) -> PaneUuid {
+        PaneUuid::parse(text).expect("test id must parse")
     }
 
     fn pane(tab: &str) -> SavedPane {
         SavedPane {
-            tab_id: id(tab),
+            uuid: id(tab),
             dir: None,
             zoom_steps: 0,
             remote_line: None,
@@ -920,21 +920,21 @@ mod tests {
             },
             panes: vec![
                 SavedPane {
-                    tab_id: id(A),
+                    uuid: id(A),
                     dir: Some(PathBuf::from("/Users/ömer/My Drive/çalışma\\dosya")),
                     zoom_steps: 3,
                     remote_line: None,
                     history: true,
                 },
                 SavedPane {
-                    tab_id: id(B),
+                    uuid: id(B),
                     dir: Some(PathBuf::from("/tmp/tab\there\nnew line\rcr -")),
                     zoom_steps: -2,
                     remote_line: Some("ssh -p 2222 prod".to_owned()),
                     history: false,
                 },
                 SavedPane {
-                    tab_id: id(C),
+                    uuid: id(C),
                     dir: Some(PathBuf::from("")),
                     zoom_steps: 0,
                     remote_line: Some(String::new()),
@@ -1258,8 +1258,8 @@ mod tests {
         let [first, second] = &back.windows[0].tabs[..] else {
             panic!("two tabs");
         };
-        let held = |tab: &SavedTab| -> Vec<TabId> {
-            tab.panes.iter().map(|pane| pane.tab_id.clone()).collect()
+        let held = |tab: &SavedTab| -> Vec<PaneUuid> {
+            tab.panes.iter().map(|pane| pane.uuid.clone()).collect()
         };
         assert!(!held(first).contains(&id(ids[2])));
         assert!(held(second).contains(&id(ids[2])));

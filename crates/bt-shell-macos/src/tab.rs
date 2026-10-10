@@ -16,10 +16,11 @@
 //! panes draw nothing and ask nothing on screen ([`TerminalTab::leave_screen`],
 //! [`TerminalTab::shown`]).
 //!
-//! **A tab is not a `TabId`.** `bt_core::TabId` (`TERM_SESSION_ID`,
-//! `bateri://tab/<id>`) is a **pane's** identity, and a tab holds several
-//! panes: a tab and the `TabId`s inside it are 1:N. A lookup by `TabId`
-//! finds a pane and the tab around it, never "the tab".
+//! **A tab has no outward identity.** `bt_core::PaneUuid` (`TERM_SESSION_ID`,
+//! `bateri://tab/<id>` — the path says `tab`, the identity is a pane's) names
+//! one pane, and a tab holds several: a lookup by `PaneUuid` finds a pane and
+//! the tab around it, never "the tab". The tab's own id is the in-process
+//! number, which never leaves the process.
 //!
 //! **Upward by id, never by reference.** The panes' events reach the tab by
 //! its id ([`TabHost`]) and the tab reaches its window by the window's id:
@@ -43,7 +44,7 @@
 use std::cell::{Cell, RefCell};
 use std::time::Duration;
 
-use bt_core::{ContentEdge, HostMark, MarkSubject, Settings, TabId, Theme};
+use bt_core::{ContentEdge, HostMark, MarkSubject, PaneUuid, Settings, Theme};
 use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
@@ -65,7 +66,7 @@ use crate::uploader;
 use crate::window::{Closing, TerminalWindow, initial_rect};
 
 /// Saved scrollback, `(tab id, VT bytes)` per pane (`restore::save`'s input).
-pub(crate) type Histories = Vec<(TabId, Vec<u8>)>;
+pub(crate) type Histories = Vec<(PaneUuid, Vec<u8>)>;
 
 /// The owner handle the tab gives its panes ([`PaneHost`]).
 ///
@@ -1198,7 +1199,7 @@ impl TerminalTab {
         for pane in &panes {
             let (entry, history) = pane.saved(with_history)?;
             if let Some(history) = history {
-                histories.push((entry.tab_id.clone(), history));
+                histories.push((entry.uuid.clone(), history));
             }
             saved.push(entry);
         }

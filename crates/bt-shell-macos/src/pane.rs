@@ -1,7 +1,7 @@
 //! Terminal pane: the **whole core** of a single terminal session — the
 //! session, the display link that drives frames, its own `Renderer`, the
 //! `CAMetalLayer` surface, `BateriView`, the shell's wake end (`ShellWake`),
-//! the dock reserve, the temporary point-size delta, the tab identity, the
+//! the dock reserve, the temporary point-size delta, the pane's identity, the
 //! scrollback search panel and the upload queue.
 //!
 //! `TerminalPane` is an `NSView` subclass and is the very same thing as
@@ -43,9 +43,9 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Instant;
 
 use bt_core::{
-    BlockHandle, BlockInfo, ContentEdge, FontOptions, ProgramBar, RemoteFiles, RemoteTarget,
-    SearchCover, SearchDirection, SearchReport, SearchStatus, Session, SessionOptions, Settings,
-    TabId, Theme, TtyModes, Wake,
+    BlockHandle, BlockInfo, ContentEdge, FontOptions, PaneUuid, ProgramBar, RemoteFiles,
+    RemoteTarget, SearchCover, SearchDirection, SearchReport, SearchStatus, Session,
+    SessionOptions, Settings, Theme, TtyModes, Wake,
 };
 use bt_core::{load_shell, smoke_shell};
 use bt_gpu::{
@@ -1635,7 +1635,7 @@ pub(crate) struct PaneIvars {
     /// shell as `TERM_SESSION_ID` and `BATERI_TAB_URL`, `bateri://tab/<id>`
     /// finds the pane with it. Constant for the pane's lifetime; the
     /// in-process [`id`] is a separate thing (the key of main-queue returns).
-    tab_id: TabId,
+    uuid: PaneUuid,
     /// Closing has begun ([`TerminalPane::begin_close`]): the pane's window
     /// leaves the list one turn later (`forget_window`) and in the meantime
     /// `AppDelegate::pane` must not find it — so that a stale report from the
@@ -2101,7 +2101,7 @@ impl TerminalPane {
             keeper,
         } = launch;
         // The saved identity of a restored pane, a new one otherwise.
-        let tab_id = launch.tab_id.take().unwrap_or_else(new_tab_id);
+        let uuid = launch.uuid.take().unwrap_or_else(new_pane_uuid);
         let renderer = Rc::new(Renderer::system_default()?);
         // The layer is ours: wgpu configures its device,
         // format and drawable size, the scale stays with its owner.
@@ -2185,7 +2185,7 @@ impl TerminalPane {
             // after that.
             dock_rows: Cell::new(0),
             dock_rows_at_birth: Cell::new(0),
-            tab_id,
+            uuid,
             closed: Cell::new(false),
             search: OnceCell::new(),
             search_status: Cell::new(SearchStatus::Empty),
@@ -2304,8 +2304,8 @@ impl TerminalPane {
     /// The session's persistent identity (`TERM_SESSION_ID`, `bateri://tab/<id>`).
     /// Separate from the in-process [`TerminalPane::id`]: that one is
     /// the key of main-queue returns, this is the name given outward.
-    pub(crate) fn tab_id(&self) -> &TabId {
-        &self.ivars().tab_id
+    pub(crate) fn uuid(&self) -> &PaneUuid {
+        &self.ivars().uuid
     }
 
     /// Whether closing has begun ([`PaneIvars::closed`]).
@@ -2356,7 +2356,7 @@ impl TerminalPane {
             .then(|| session.final_history())
             .filter(|bytes| !bytes.is_empty());
         let pane = SavedPane {
-            tab_id: self.ivars().tab_id.clone(),
+            uuid: self.ivars().uuid.clone(),
             dir: session.working_directory(),
             zoom_steps: self.zoom().steps(),
             remote_line: session.remote_line(),
@@ -2710,7 +2710,7 @@ impl TerminalPane {
         let Launch {
             working_directory,
             initial_input,
-            tab_id: _,
+            uuid: _,
             replay,
             adopt,
         } = launch;
@@ -2798,7 +2798,7 @@ impl TerminalPane {
             shell_marks,
             // The identity is in every window, timed run included: the
             // variables read no file and do not move the tokens.
-            tab_id: Some(self.ivars().tab_id.clone()),
+            pane_uuid: Some(self.ivars().uuid.clone()),
             // The machine's name: `file://$HOST/…` (GNU `ls --hyperlink`)
             // and OSC 7's named authority count as local. One `gethostname`
             // per pane; the timed run's tokens do not depend on it.
@@ -3068,7 +3068,7 @@ impl TerminalPane {
             return false;
         };
         let pane = |journal| crate::handover::BoundPane {
-            tab: self.ivars().tab_id.clone(),
+            tab: self.ivars().uuid.clone(),
             pid,
             start,
             parent,
@@ -3103,7 +3103,7 @@ impl TerminalPane {
             return;
         }
         if let Some(session) = self.session() {
-            keeper.state(&self.ivars().tab_id, session.state_blob());
+            keeper.state(&self.ivars().uuid, session.state_blob());
         }
     }
 
@@ -3925,7 +3925,7 @@ impl TerminalPane {
         // output cannot finish exiting while an unread copy of its master is
         // open, and the hang-up below waits for that exit.
         if let Some(keeper) = self.ivars().keeper.as_deref() {
-            keeper.release(&self.ivars().tab_id);
+            keeper.release(&self.ivars().uuid);
         }
         self.quiesce(true);
         let session = self.ivars().session.get()?;
@@ -3982,7 +3982,7 @@ impl TerminalPane {
             history: history.clone(),
         };
         let held = crate::handover::HeldPane::new(
-            self.ivars().tab_id.clone(),
+            self.ivars().uuid.clone(),
             pid,
             start,
             state.encode(),
@@ -4851,21 +4851,21 @@ fn nudge_program(session: &Arc<Session>) {
     }
 }
 
-/// A new tab identity, from `NSUUID`.
-fn new_tab_id() -> TabId {
+/// A new pane identity, from `NSUUID`.
+fn new_pane_uuid() -> PaneUuid {
     // `UUIDString` gives the canonical 8-4-4-4-12 form; if `parse` rejects it
     // the defect is in `bt-core`'s contract, not on this line.
-    TabId::parse(&NSUUID::new().UUIDString().to_string())
+    PaneUuid::parse(&NSUUID::new().UUIDString().to_string())
         .expect("NSUUID's UUIDString must be a canonical UUID")
 }
 
 #[cfg(test)]
 mod tests {
     #[test]
-    fn tab_ids_are_canonical_and_distinct() {
-        let (a, b) = (super::new_tab_id(), super::new_tab_id());
+    fn pane_uuids_are_canonical_and_distinct() {
+        let (a, b) = (super::new_pane_uuid(), super::new_pane_uuid());
         assert_ne!(a, b, "two NSUUID identities must differ");
-        assert_eq!(bt_core::TabId::from_url(&a.url()), Some(a));
+        assert_eq!(bt_core::PaneUuid::from_url(&a.url()), Some(a));
     }
 
     /// Fake owner: records the events with their ids — no window, no

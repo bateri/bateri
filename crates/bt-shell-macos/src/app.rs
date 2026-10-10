@@ -16,9 +16,9 @@ use std::time::{Duration, Instant};
 
 use block2::RcBlock;
 use bt_core::{
-    AdoptMode, CursorMotion, HostMark, InitialInput, KeepRunning, MarkSubject, ReduceMotion,
-    RestoreWindows, SHUTDOWN_GRACE, SYSTEM_THEME, Scrollbar, Settings, SettingsEdit,
-    ShellIntegration, SmoothScroll, TabId, Teardown, Theme,
+    AdoptMode, CursorMotion, HostMark, InitialInput, KeepRunning, MarkSubject, PaneUuid,
+    ReduceMotion, RestoreWindows, SHUTDOWN_GRACE, SYSTEM_THEME, Scrollbar, Settings, SettingsEdit,
+    ShellIntegration, SmoothScroll, Teardown, Theme,
 };
 use bt_gpu::{CellMetrics, DOCK_ROWS, DisplayLink, MIN_SAMPLES, Renderer, ScrollbarMode, Stats};
 use dispatch2::{DispatchQueue, DispatchTime};
@@ -466,7 +466,7 @@ fn restored_launch(pane: &SavedPane, replay: Option<Vec<u8>>) -> Launch {
     Launch {
         working_directory: pane.dir.clone(),
         initial_input: pane.remote_line.clone().map(InitialInput::ready),
-        tab_id: Some(pane.tab_id.clone()),
+        uuid: Some(pane.uuid.clone()),
         replay,
         adopt: None,
     }
@@ -1620,7 +1620,7 @@ define_class!(
                 let Some(text) = url.absoluteString() else {
                     continue;
                 };
-                let Some(id) = TabId::from_url(&text.to_string()) else {
+                let Some(id) = PaneUuid::from_url(&text.to_string()) else {
                     continue;
                 };
                 match self.pane_by_tab(&id) {
@@ -2653,7 +2653,7 @@ fn masters(carried: Option<&str>) -> Option<Arc<Masters>> {
 /// (`pane=unknown`); a hop that runs after the wait sends to a dropped
 /// receiver and is lost.
 fn focus_answerer() -> focus::Answerer {
-    Arc::new(|tab: &TabId| {
+    Arc::new(|tab: &PaneUuid| {
         let (sender, receiver) = std::sync::mpsc::sync_channel(1);
         let tab = tab.clone();
         DispatchQueue::main().exec_async(move || {
@@ -2901,14 +2901,14 @@ impl AppDelegate {
         }
     }
 
-    /// The pane with tab identity `id`, its tab and its window; `None` if
+    /// The pane with persistent identity `id`, its tab and its window; `None` if
     /// closed (`bateri://tab/`, `application:openURLs:`): bringing to the
     /// front a pane whose teardown has started but which has not yet left the
     /// list would put a sessionless window on screen ([`find_open`]). The
     /// identity is per pane — a tab holds several (`TerminalTab`'s header).
     fn pane_by_tab(
         &self,
-        id: &TabId,
+        id: &PaneUuid,
     ) -> Option<(
         Retained<TerminalWindow>,
         Retained<TerminalTab>,
@@ -2916,7 +2916,7 @@ impl AppDelegate {
     )> {
         self.windows().into_iter().find_map(|window| {
             window.tabs().into_iter().find_map(|tab| {
-                let pane = find_open(tab.panes(), |pane| (pane.tab_id() == id, pane.is_closed()))?;
+                let pane = find_open(tab.panes(), |pane| (pane.uuid() == id, pane.is_closed()))?;
                 Some((window.clone(), tab, pane))
             })
         })
@@ -2929,7 +2929,7 @@ impl AppDelegate {
     /// the tab's focused pane this one (the search field included,
     /// [`TerminalTab::focused_pane`]) — and the whole seconds since its last
     /// input. Main thread, at the moment of the question.
-    fn focus_answer(&self, id: &TabId) -> focus::Answer {
+    fn focus_answer(&self, id: &PaneUuid) -> focus::Answer {
         let Some((_, tab, pane)) = self.pane_by_tab(id) else {
             return focus::Answer::None;
         };
@@ -3199,7 +3199,7 @@ impl AppDelegate {
                         // Not frozen: it closes today's way below, its
                         // scrollback read live first.
                         if let Some(session) = pane.session() {
-                            histories.push((pane.tab_id().clone(), session.final_history()));
+                            histories.push((pane.uuid().clone(), session.final_history()));
                         }
                         left.push(pane);
                     }
@@ -3220,7 +3220,7 @@ impl AppDelegate {
                     .flat_map(|window| window.tabs.iter_mut())
                     .flat_map(|tab| tab.panes.iter_mut())
                 {
-                    pane.history = histories.iter().any(|(tab, _)| *tab == pane.tab_id);
+                    pane.history = histories.iter().any(|(tab, _)| *tab == pane.uuid);
                 }
                 restore::save(&lock, &saved, &histories)
             };
@@ -4335,7 +4335,7 @@ impl AppDelegate {
             launch: Launch {
                 working_directory: dir,
                 initial_input: initial.map(InitialInput::run),
-                tab_id: None,
+                uuid: None,
                 replay: None,
                 adopt: None,
             },
@@ -4703,7 +4703,7 @@ impl AppDelegate {
                     .restore_lock
                     .borrow()
                     .as_ref()
-                    .and_then(|lock| restore::history(lock, &pane.tab_id))
+                    .and_then(|lock| restore::history(lock, &pane.uuid))
             } else {
                 None
             }
@@ -4716,7 +4716,7 @@ impl AppDelegate {
                     .arrival
                     .panes
                     .iter()
-                    .position(|(_, held)| held.tab == pane.tab_id)
+                    .position(|(_, held)| held.tab == pane.uuid)
                     .map(|index| arriving.arrival.panes.remove(index));
                 let safe = arriving.safe;
                 // A history the setting throws away is not read from disk.
@@ -7790,16 +7790,16 @@ mod tests {
 
     #[test]
     fn a_restored_pane_keeps_its_identity_and_readies_its_remote_line() {
-        let id = TabId::parse("0A1B2C3D-4E5F-4061-8293-A4B5C6D7E8F9").expect("canonical");
+        let id = PaneUuid::parse("0A1B2C3D-4E5F-4061-8293-A4B5C6D7E8F9").expect("canonical");
         let pane = SavedPane {
-            tab_id: id.clone(),
+            uuid: id.clone(),
             dir: Some(PathBuf::from("/tmp/proje dizini")),
             zoom_steps: 2,
             remote_line: Some("ssh prod".into()),
             history: true,
         };
         let launch = restored_launch(&pane, Some(b"ls\r\n".to_vec()));
-        assert_eq!(launch.tab_id, Some(id));
+        assert_eq!(launch.uuid, Some(id));
         assert_eq!(launch.working_directory, pane.dir);
         assert_eq!(launch.replay.as_deref(), Some(&b"ls\r\n"[..]));
         assert_eq!(
@@ -8079,7 +8079,7 @@ mod tests {
     fn held(blob: Vec<u8>, ended: bool) -> HeldPane {
         let file = std::fs::File::open("/dev/null").unwrap();
         let mut pane = HeldPane::new(
-            bt_core::TabId::parse("0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0").unwrap(),
+            bt_core::PaneUuid::parse("0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0").unwrap(),
             42,
             7,
             blob,

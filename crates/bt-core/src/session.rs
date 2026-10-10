@@ -83,7 +83,7 @@ use crate::cluster::{ClusterId, Clusters};
 use crate::color::{self, LinearRgba, Theme};
 use crate::dock::{self, Dock, DockBudget, DockCols, DockEdit, DockPoint};
 use crate::handler::ClusterHandler;
-use crate::identity::{LC_TERMINAL, TERM_PROGRAM, TERM_PROGRAM_VERSION, TabId};
+use crate::identity::{LC_TERMINAL, PaneUuid, TERM_PROGRAM, TERM_PROGRAM_VERSION};
 // The journal's side record comes in under an alias: `Side` is alacritty's
 // selection side in this module.
 use crate::input::{
@@ -1479,11 +1479,11 @@ pub struct SessionOptions {
     /// comes (a broken rc, `exec fish` at the end of the rc) the line never
     /// goes; a timeout would be an unmeasured number.
     pub shell_marks: bool,
-    /// The tab's identity: if given the child gets `TERM_SESSION_ID` and
-    /// `BATERI_TAB_URL` ([`TabId::url`]). `None` only for tests and embedded
+    /// The pane's identity: if given the child gets `TERM_SESSION_ID`,
+    /// `BATERI_TAB_URL` and `LC_BATERI_TAB_URL` (`identity::pane_env`). `None` only for tests and embedded
     /// use; the application supplies it in every window (`bt-shell` `window`,
     /// from `NSUUID`).
-    pub tab_id: Option<TabId>,
+    pub pane_uuid: Option<PaneUuid>,
     /// This machine's name: a `file://` authority equal to it counts as
     /// local — in OSC 7 and in the link hit test ([`Session::link_at`]) alike
     /// (`crate::shell::is_local_authority`). `bt-core` reads no name itself (no
@@ -4909,10 +4909,10 @@ impl Session {
         {
             env.insert("PWD".to_owned(), dir.display().to_string());
         }
-        if let Some(id) = &options.tab_id {
-            env.insert("TERM_SESSION_ID".to_owned(), id.as_str().to_owned());
-            env.insert("BATERI_TAB_URL".to_owned(), id.url());
-            env.insert("LC_BATERI_TAB_URL".to_owned(), id.url());
+        if let Some(id) = &options.pane_uuid {
+            for (name, value) in crate::identity::pane_env(id) {
+                env.insert(name.to_owned(), value);
+            }
         }
         let pty_options = tty::Options {
             shell: options
@@ -12309,7 +12309,7 @@ mod tests {
             cluster: false,
             initial_input: None,
             shell_marks: false,
-            tab_id: None,
+            pane_uuid: None,
             hostname: None,
             replay: None,
             journal: None,
@@ -15955,7 +15955,7 @@ mod tests {
         let script = "printf 'id=%s|%s|%s|%s;' \"$TERM_PROGRAM\" \
                       \"$TERM_PROGRAM_VERSION\" \"$TERM_SESSION_ID\" \
                       \"$BATERI_TAB_URL\"; sleep 5";
-        let id = TabId::parse("0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0").unwrap();
+        let id = PaneUuid::parse("0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0").unwrap();
         let options = SessionOptions {
             env: HashMap::from([
                 ("TERM_PROGRAM".into(), "Apple_Terminal".into()),
@@ -15963,7 +15963,7 @@ mod tests {
                 ("TERM_SESSION_ID".into(), "foreign".into()),
                 ("BATERI_TAB_URL".into(), "bateri://tab/foreign".into()),
             ]),
-            tab_id: Some(id.clone()),
+            pane_uuid: Some(id.clone()),
             ..test_options(sh(script), 200)
         };
 
@@ -15984,14 +15984,14 @@ mod tests {
         // inheritance) becomes `bateri`, never another terminal's value.
         let script = "printf 'lc=%s|%s|%s;' \"$LC_TERMINAL\" \
                       \"$LC_TERMINAL_VERSION\" \"$LC_BATERI_TAB_URL\"; sleep 5";
-        let id = TabId::parse("0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0").unwrap();
+        let id = PaneUuid::parse("0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0").unwrap();
         let options = SessionOptions {
             env: HashMap::from([
                 ("LC_TERMINAL".into(), "iTerm2".into()),
                 ("LC_TERMINAL_VERSION".into(), "3.5.0".into()),
                 ("LC_BATERI_TAB_URL".into(), "bateri://tab/foreign".into()),
             ]),
-            tab_id: Some(id.clone()),
+            pane_uuid: Some(id.clone()),
             ..test_options(sh(script), 200)
         };
 
@@ -16002,8 +16002,8 @@ mod tests {
     }
 
     #[test]
-    fn identity_env_without_tab_id_leaves_session_keys_to_the_map() {
-        // With `tab_id: None` there is no constant to override: the map's value
+    fn identity_env_without_pane_uuid_leaves_session_keys_to_the_map() {
+        // With `pane_uuid: None` there is no constant to override: the map's value
         // passes to the child as is; `TERM_PROGRAM` is still unconditional.
         let script = "printf 'id=%s|%s|%s;' \"$TERM_PROGRAM\" \
                       \"$TERM_SESSION_ID\" \"$BATERI_TAB_URL\"; sleep 5";

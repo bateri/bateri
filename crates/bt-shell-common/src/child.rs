@@ -777,7 +777,7 @@ pub(crate) mod tests {
                 cluster: false,
                 initial_input: None,
                 shell_marks: false,
-                tab_id: None,
+                pane_uuid: None,
                 hostname: None,
                 replay: None,
                 journal: None,
@@ -903,7 +903,7 @@ pub(crate) mod tests {
                     cluster: true,
                     initial_input: None,
                     shell_marks: false,
-                    tab_id: None,
+                    pane_uuid: None,
                     hostname: None,
                     replay: None,
                     journal: None,
@@ -999,7 +999,7 @@ pub(crate) mod tests {
                 cluster: false,
                 initial_input: None,
                 shell_marks: false,
-                tab_id: None,
+                pane_uuid: None,
                 hostname: None,
                 replay: None,
                 journal: None,
@@ -1134,7 +1134,7 @@ pub(crate) mod tests {
                 cluster: false,
                 initial_input: None,
                 shell_marks: false,
-                tab_id: None,
+                pane_uuid: None,
                 hostname: None,
                 replay: None,
                 journal: None,
@@ -1303,7 +1303,7 @@ pub(crate) mod tests {
                     cluster: false,
                     initial_input: None,
                     shell_marks: false,
-                    tab_id: None,
+                    pane_uuid: None,
                     hostname: None,
                     replay: None,
                     journal: None,
@@ -1410,7 +1410,7 @@ pub(crate) mod tests {
         crate::ssh_route::prepare_instance(&bases[0], &instance).expect("instance");
         let wrapper = copy_wrapper(&root);
         std::fs::write(home.join(".zshrc"), "PS1='$ '\n").expect(".zshrc");
-        let tab = bt_core::TabId::parse("0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0").expect("tab");
+        let tab = bt_core::PaneUuid::parse("0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0").expect("tab");
         let session = Session::spawn(
             SessionOptions {
                 command: Some((
@@ -1441,7 +1441,7 @@ pub(crate) mod tests {
                 initial_input: None,
                 shell_marks: false,
                 // The pane's identity: `BATERI_TAB_URL` and the `LC_` trio.
-                tab_id: Some(tab.clone()),
+                pane_uuid: Some(tab.clone()),
                 hostname: None,
                 replay: None,
                 journal: None,
@@ -1855,7 +1855,7 @@ pub(crate) mod tests {
                 cluster: false,
                 initial_input: None,
                 shell_marks: false,
-                tab_id: None,
+                pane_uuid: None,
                 hostname: None,
                 replay: None,
                 journal: None,
