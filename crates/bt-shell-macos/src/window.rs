@@ -57,9 +57,10 @@
 //! ([`TerminalWindow::forget_undo`]), because the picture restores the whole
 //! strip. Selecting a tab does not: the picture carries the selection and
 //! puts it back, so "move a pane to web, open web, Undo Move" brings the pane
-//! back. Taking it back is [`TerminalWindow::undo_lift`] then
-//! [`TerminalWindow::undo_place`] — the steps the moves are made of, ending in
-//! one layout edge.
+//! back. Taking it back is planned by `moves` too (`Move::Undo`) and carried
+//! out through the steps the moves are made of and three of its own —
+//! [`TerminalWindow::dissolve_tab`], [`TerminalWindow::reshape_tab`],
+//! [`TerminalWindow::put_strip`] — ending in one layout edge.
 //!
 //! **A tab moves between windows as itself** (Move Tab to New Window, Merge
 //! All Windows, and a tab dragged out of its strip or onto another window's —
@@ -131,7 +132,7 @@ use crate::split_view::SplitView;
 use crate::tab::{self, TerminalTab};
 use crate::tab_bar::{Label, TabBar};
 use crate::tabs::{self, Card, Tabs};
-use crate::undo::{Now, Record, Scene, Shape};
+use crate::undo::{Record, Scene, Shape};
 
 /// Whether the theme's background is dark — the window chrome's appearance
 /// (Aqua / DarkAqua) comes from this ([`TerminalWindow::apply_chrome`]).
@@ -2388,19 +2389,6 @@ impl TerminalWindow {
         }
     }
 
-    /// What this window holds now — the question a record asks to know it
-    /// is still true ([`Record::holds`]).
-    pub(crate) fn undo_now(&self) -> Now {
-        Now {
-            window: self.id(),
-            tabs: self
-                .tabs()
-                .iter()
-                .map(|tab| (tab.id(), tab.panes().iter().map(|pane| pane.id()).collect()))
-                .collect(),
-        }
-    }
-
     /// A move is done: the record Undo Move takes back. Written by the move
     /// that ends here, **after** its last layout edge — the outermost move,
     /// not the steps it is made of ([`Self::release_pane`] with
@@ -2420,116 +2408,96 @@ impl TerminalWindow {
         }
     }
 
-    /// **Undo Move, first half: what the move made comes apart.** Each tab
-    /// of `scene` that the move touched gives back the panes that are not
-    /// its own in the picture, and each tab the move made is taken apart —
-    /// all their panes go to `pool`, moved and not closed (their shells,
-    /// programs and questions go on). The picture is checked first
-    /// ([`Record::holds`]): a touched tab keeps at least one of its own, so
-    /// none is left empty.
-    pub(crate) fn undo_lift(&self, scene: &Scene, pool: &mut Vec<Retained<TerminalPane>>) {
-        for tab in self.tabs() {
-            if let Some(shape) = scene.shape(tab.id()) {
-                let own = shape.tree.leaves();
-                let foreign: Vec<u64> = tab
-                    .panes()
-                    .iter()
-                    .map(|pane| pane.id())
-                    .filter(|id| !own.contains(id))
-                    .collect();
-                for id in foreign {
-                    pool.extend(tab.release_pane(id));
-                }
-            } else if scene.made(tab.id()) {
-                tab.container().removeFromSuperview();
-                self.ivars()
-                    .tabs
-                    .borrow_mut()
-                    .retain(|kept| kept.id() != tab.id());
-                pool.extend(tab.drain());
-                self.retire(tab);
-            }
-        }
+    /// **The applier: a tab a move made comes apart** ([`moves::Step::Dissolve`],
+    /// Undo Move's first half): tab `id` leaves the hierarchy and the list and
+    /// is thrown away, its panes handed back — moved, not closed: their
+    /// shells, programs and questions go on. Its place in the strip stays
+    /// until the strip is put back ([`Self::put_strip`]). `None` if it is not
+    /// here.
+    pub(crate) fn dissolve_tab(&self, id: u64) -> Option<Vec<Retained<TerminalPane>>> {
+        let tab = self.tab(id)?;
+        tab.container().removeFromSuperview();
+        self.ivars()
+            .tabs
+            .borrow_mut()
+            .retain(|kept| kept.id() != id);
+        let panes = tab.drain();
+        self.retire(tab);
+        Some(panes)
     }
 
-    /// **Undo Move, for a window the move made:** its tabs leave with their
-    /// panes, which go to `pool` ([`Self::release_tab`]'s way for the last
-    /// tab, as Merge All Windows empties one); the caller closes the window.
-    pub(crate) fn undo_empty(&self, pool: &mut Vec<Retained<TerminalPane>>) {
-        for tab in self.tabs() {
-            if let Some(tab) = self.release_tab(tab.id()) {
-                pool.extend(tab.drain());
+    /// **The applier: a tab as it was** ([`moves::Step::Reshape`], Undo Move's
+    /// second half): tab `id` holds exactly the panes of `tree`, in its saved
+    /// layout and ratios, and its name `name` — the panes it lacks taken from
+    /// `pool`; a tab the move closed is born again under its own identity,
+    /// hidden and not yet in the strip ([`Self::put_strip`] puts it there). A
+    /// question a pane brought opens again once its tab is on screen.
+    pub(crate) fn reshape_tab(
+        &self,
+        id: u64,
+        tree: Tree,
+        name: Option<String>,
+        pool: &mut Vec<Retained<TerminalPane>>,
+    ) {
+        let tab = if let Some(tab) = self.tab(id) {
+            let have: Vec<u64> = tab.panes().iter().map(|pane| pane.id()).collect();
+            let incoming = take_panes(
+                pool,
+                tree.leaves().into_iter().filter(|id| !have.contains(id)),
+            );
+            let placed = tab.receive(&incoming, tree);
+            debug_assert!(placed, "the picture holds, so its tree is these panes");
+            for pane in &incoming {
+                sheets::reopen_later(pane);
             }
-        }
+            tab
+        } else {
+            let mut panes = take_panes(pool, tree.leaves()).into_iter();
+            let Some(first) = panes.next() else {
+                return;
+            };
+            let rest: Vec<Retained<TerminalPane>> = panes.collect();
+            let tab = self.born_tab(id, &first);
+            self.settle_born(&tab, &first);
+            let placed = tab.receive(&rest, tree);
+            debug_assert!(placed, "the picture holds, so its tree is these panes");
+            sheets::reopen_later(&first);
+            for pane in &rest {
+                sheets::reopen_later(pane);
+            }
+            tab
+        };
+        tab.set_name(name);
     }
 
-    /// **Undo Move, second half: the picture goes back.** Each tab of
-    /// `scene` gets the panes of its shape from `pool` — a tab the move
-    /// closed is born again under its own identity — in its saved tree and
-    /// ratios, and its name; then the strip as it was, the selection with
-    /// it. The keyboard goes to the pane that had it there (as a join's
-    /// `moves::Step::Focus` does: on screen into the pane, off it into the
-    /// tab's memory), and a tree that no longer fits the window's smallest
-    /// panes is equalized, as a restored one ([`SplitView::fits`]).
-    pub(crate) fn undo_place(&self, scene: &Scene, pool: &mut Vec<Retained<TerminalPane>>) {
+    /// **The applier: the strip as it was** ([`moves::Step::PutStrip`]): the
+    /// tabs in `order`, its selection with it — what was on screen leaves it
+    /// first, the selected tab comes up ([`Self::switch`]).
+    pub(crate) fn put_strip(&self, order: Tabs<u64>) {
         let old = self
             .ivars()
             .order
             .borrow()
             .selected()
             .and_then(|id| self.tab(id));
-        let mut restored: Vec<(Retained<TerminalTab>, &Shape)> = Vec::new();
-        for shape in &scene.shapes {
-            let tab = if let Some(tab) = self.tab(shape.tab) {
-                let have: Vec<u64> = tab.panes().iter().map(|pane| pane.id()).collect();
-                let incoming = take_panes(
-                    pool,
-                    shape
-                        .tree
-                        .leaves()
-                        .into_iter()
-                        .filter(|id| !have.contains(id)),
-                );
-                let placed = tab.receive(&incoming, shape.tree.clone());
-                debug_assert!(placed, "the picture holds, so its tree is these panes");
-                for pane in &incoming {
-                    sheets::reopen_later(pane);
-                }
-                tab
-            } else {
-                let mut panes = take_panes(pool, shape.tree.leaves()).into_iter();
-                let Some(first) = panes.next() else {
-                    continue;
-                };
-                let rest: Vec<Retained<TerminalPane>> = panes.collect();
-                let tab = self.born_tab(shape.tab, &first);
-                self.settle_born(&tab, &first);
-                let placed = tab.receive(&rest, shape.tree.clone());
-                debug_assert!(placed, "the picture holds, so its tree is these panes");
-                sheets::reopen_later(&first);
-                for pane in &rest {
-                    sheets::reopen_later(pane);
-                }
-                tab
-            };
-            tab.set_name(shape.name.clone());
-            restored.push((tab, shape));
-        }
-        let selected = scene.order.selected();
-        self.ivars().order.replace(scene.order.clone());
+        self.ivars().order.replace(order);
         self.switch(old.as_deref());
-        for (tab, shape) in &restored {
-            if let Some(pane) = tab.container().pane(shape.focus) {
-                if selected == Some(tab.id()) {
-                    tab.focus_pane(&pane);
-                } else {
-                    tab.pane_focused(shape.focus);
-                }
-            }
-            if !tab.container().fits() {
-                tab.container().equalize();
-            }
+    }
+
+    /// Tab `id`'s panes, if they no longer fit their smallest on this
+    /// window's screen, are evened out, as a restored tab's are
+    /// ([`moves::Step::Fit`], [`SplitView::fits`]).
+    pub(crate) fn fit_tab(&self, id: u64) {
+        if let Some(tab) = self.tab(id)
+            && !tab.container().fits()
+        {
+            tab.container().equalize();
         }
+    }
+
+    /// Undo Move has put this window back ([`moves::Step::Undone`]): its bar
+    /// and title are written again, and VoiceOver says so.
+    pub(crate) fn undone(&self) {
         self.refresh_bar();
         self.refresh_title();
         self.announce("Move undone");

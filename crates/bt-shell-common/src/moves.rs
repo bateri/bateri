@@ -1,6 +1,7 @@
 //! Moves of panes and tabs between tabs and windows: the **pure** half that decides what a move
-//! is, whether it may happen, what it leaves selected and focused and what Undo Move keeps of it.
-//! The platform shell carries the answer out with its appliers and nothing else.
+//! is, whether it may happen, what it leaves selected and focused, what Undo Move keeps of it and
+//! what taking it back comes to. The platform shell carries the answer out with its appliers and
+//! nothing else.
 //!
 //! **The question and the answer.** The shell hands over a picture of its windows ([`Window`]:
 //! the strip, every tab's shape, whether the window holds a question of its own) and what the
@@ -30,7 +31,7 @@
 
 use crate::split::{Direction, Tree};
 use crate::tabs::{NewTab, Tabs, gap_to_index};
-use crate::undo::{Record, Scene, Shape};
+use crate::undo::{Now, Record, Scene, Shape};
 
 /// A window as a move sees it.
 #[derive(Clone, Debug, PartialEq)]
@@ -140,6 +141,10 @@ pub enum Move {
     /// Every other window's tabs join window `into`'s at its end, in strip order, the
     /// selection staying where it was; the windows they leave close.
     MergeAllWindows { into: u64 },
+    /// Undo Move: the picture `record` keeps goes back, as one step — what the move made comes
+    /// apart (a window it made closes, no program with it), then each tab and strip is put as
+    /// it was, the selection and the focus with them. There is no redo.
+    Undo { record: Record },
 }
 
 /// Why nothing moves.
@@ -150,6 +155,9 @@ pub enum Refusal {
     /// The user asked for something that cannot be done now: a window holds a question of its
     /// own, or the panes do not fit. A beep says so.
     Beep,
+    /// Undo Move's picture is no longer what is there (a pane closed or was born since, a
+    /// window it names is gone): a beep, and the record is dropped.
+    Stale,
 }
 
 /// One thing the shell does, by ids.
@@ -178,6 +186,29 @@ pub enum Step {
     /// Tab `tab` takes place `index` in window `window`'s strip; what is on screen does not
     /// change.
     MoveTab { window: u64, tab: u64, index: usize },
+    /// Tab `tab` of window `window`, one a move made, is taken apart: its panes are taken and it
+    /// is thrown away. Its place in the strip stays until a [`Step::PutStrip`] puts the strip
+    /// back.
+    Dissolve { window: u64, tab: u64 },
+    /// Tab `tab` of window `window` holds exactly the panes of `tree`, laid out as it says, and
+    /// is named `name` again: the panes it lacks come from those the steps before took, and a
+    /// tab that is gone is born again under its own id (not in the strip until
+    /// [`Step::PutStrip`]). A question a pane brought opens again once its tab is on screen.
+    Reshape {
+        window: u64,
+        tab: u64,
+        tree: Tree,
+        name: Option<String>,
+    },
+    /// Window `window`'s strip is `order` again, its selection with it; what was on screen
+    /// leaves it first.
+    PutStrip { window: u64, order: Tabs<u64> },
+    /// Tab `tab` of window `window`, if its panes no longer fit their smallest on this screen,
+    /// is evened out.
+    Fit { window: u64, tab: u64 },
+    /// Window `window` has been put back: its bar and title are written again, and the user is
+    /// told the move was undone.
+    Undone { window: u64 },
     /// The held tab `tab` is the one tab of a new window `window`, which comes up: window
     /// `from`'s size, at the screen point `at` if there is one (its title row under it, kept on
     /// a visible screen), else at `from`'s place, cascaded.
@@ -240,6 +271,7 @@ pub fn plan(world: &[Window], wanted: Move, host: &dyn Host) -> Result<Plan, Ref
         Move::PaneToNewWindow { pane, at } => pane_to_new_window(world, pane, at, host),
         Move::TabToStrip { tab, window, index } => tab_to_strip(world, tab, window, index),
         Move::MergeAllWindows { into } => merge_all_windows(world, into),
+        Move::Undo { record } => undo(world, &record),
     }
 }
 
@@ -710,6 +742,120 @@ fn merge_all_windows(world: &[Window], into: u64) -> Result<Plan, Refusal> {
     Ok(Plan {
         steps,
         after: vec![Step::Raise { window: into }],
+        undo: None,
+    })
+}
+
+/// What window `window` holds now, as Undo Move's record asks it ([`Record::holds`]).
+fn now(window: &Window) -> Now {
+    Now {
+        window: window.id,
+        tabs: window
+            .tabs
+            .iter()
+            .map(|shape| (shape.tab, shape.tree.leaves()))
+            .collect(),
+    }
+}
+
+/// Whether Undo Move's `record` is still a picture of what `world` holds: every window it names
+/// is there and the panes it accounts for are exactly the ones there are ([`Record::holds`]).
+pub fn standing(world: &[Window], record: &Record) -> bool {
+    record.holds(&world.iter().map(now).collect::<Vec<_>>())
+}
+
+fn undo(world: &[Window], record: &Record) -> Result<Plan, Refusal> {
+    if !standing(world, record) {
+        return Err(Refusal::Stale);
+    }
+    let named = |id: u64| world.iter().find(|window| window.id == id);
+    let windows: Vec<&Window> = record
+        .scenes
+        .iter()
+        .map(|scene| scene.window)
+        .chain(record.born.iter().copied())
+        .filter_map(named)
+        .collect();
+    if windows.iter().any(|window| window.asking) {
+        return Err(Refusal::Beep);
+    }
+    let mut steps = Vec::new();
+    // What the move made comes apart: each touched tab gives back the panes that are not its own
+    // in the picture (it keeps at least one, or the picture would not stand), each tab the move
+    // made is taken apart, each window it made is emptied and closes.
+    for scene in &record.scenes {
+        let Some(window) = named(scene.window) else {
+            continue;
+        };
+        for now in &window.tabs {
+            if let Some(shape) = scene.shape(now.tab) {
+                let own = shape.tree.leaves();
+                for pane in now.tree.leaves() {
+                    if !own.contains(&pane) {
+                        steps.push(Step::ReleasePane {
+                            window: window.id,
+                            tab: now.tab,
+                            pane,
+                        });
+                    }
+                }
+            } else if scene.made(now.tab) {
+                steps.push(Step::Dissolve {
+                    window: window.id,
+                    tab: now.tab,
+                });
+            }
+        }
+    }
+    for &born in &record.born {
+        let Some(window) = named(born) else {
+            continue;
+        };
+        for &tab in window.order.ids() {
+            steps.push(Step::ReleaseTab { window: born, tab });
+            steps.push(Step::Unpack { window: born, tab });
+        }
+        steps.push(Step::CloseIfEmptied { window: born });
+    }
+    // Then each tab and strip as it was: the keyboard goes to the pane that had it, and a tree
+    // that no longer fits the window's smallest panes is evened out, as a restored one is.
+    for scene in &record.scenes {
+        let window = scene.window;
+        for shape in &scene.shapes {
+            steps.push(Step::Reshape {
+                window,
+                tab: shape.tab,
+                tree: shape.tree.clone(),
+                name: shape.name.clone(),
+            });
+        }
+        steps.push(Step::PutStrip {
+            window,
+            order: scene.order.clone(),
+        });
+        for shape in &scene.shapes {
+            steps.push(Step::Focus {
+                window,
+                tab: shape.tab,
+                pane: shape.focus,
+            });
+            steps.push(Step::Fit {
+                window,
+                tab: shape.tab,
+            });
+        }
+        steps.push(Step::Undone { window });
+    }
+    // The window the move made was the key one and is gone: the first it touched comes forward.
+    let after = match record.scenes.first() {
+        Some(scene) if !record.born.is_empty() => vec![Step::Raise {
+            window: scene.window,
+        }],
+        _ => Vec::new(),
+    };
+    Ok(Plan {
+        steps,
+        after,
         undo: None,
     })
 }
@@ -1550,6 +1696,191 @@ mod tests {
             super::plan(&world, Move::MergeAllWindows { into: 2 }, &Cramped),
             Err(Refusal::Beep)
         );
+    }
+
+    /// Tab `tab` of `window` holds `tree` now, its focus on `focus`.
+    fn reshaped(window: &mut Window, tab: u64, tree: Tree, focus: u64) {
+        let shape = window
+            .tabs
+            .iter_mut()
+            .find(|shape| shape.tab == tab)
+            .expect("the tab is in the window");
+        shape.tree = tree;
+        shape.focus = focus;
+    }
+
+    /// What taking `record` back from `world` comes to.
+    fn undoing(world: &[Window], record: Record) -> Result<Plan, Refusal> {
+        plan(world, Move::Undo { record }, &Cramped)
+    }
+
+    #[test]
+    fn undo_move_takes_a_crossed_pane_back_and_puts_both_strips_as_they_were() {
+        let before = world();
+        let record = plan(
+            &before,
+            Move::PaneToTab {
+                pane: 101,
+                into: 21,
+                place: beside(),
+            },
+            &roomy(&before),
+        )
+        .unwrap()
+        .undo
+        .unwrap();
+        let mut after = before.clone();
+        reshaped(&mut after[0], 10, Tree::Leaf(100), 100);
+        reshaped(
+            &mut after[1],
+            21,
+            split(split(Tree::Leaf(210), Tree::Leaf(211)), Tree::Leaf(101)),
+            210,
+        );
+        after[1].order.select(21);
+        assert!(standing(&after, &record));
+
+        let plan = undoing(&after, record).unwrap();
+        let put_back = |window: &Window, tab: u64, focus: u64| {
+            let shape = window.tab(tab).unwrap();
+            vec![
+                Step::Reshape {
+                    window: window.id,
+                    tab,
+                    tree: shape.tree.clone(),
+                    name: None,
+                },
+                Step::PutStrip {
+                    window: window.id,
+                    order: window.order.clone(),
+                },
+                Step::Focus {
+                    window: window.id,
+                    tab,
+                    pane: focus,
+                },
+                Step::Fit {
+                    window: window.id,
+                    tab,
+                },
+                Step::Undone { window: window.id },
+            ]
+        };
+        let mut expected = vec![Step::ReleasePane {
+            window: 2,
+            tab: 21,
+            pane: 101,
+        }];
+        expected.extend(put_back(&before[0], 10, 101));
+        expected.extend(put_back(&before[1], 21, 210));
+        assert_eq!(plan.steps, expected);
+        assert!(plan.after.is_empty());
+        assert_eq!(plan.undo, None, "there is no redo");
+    }
+
+    #[test]
+    fn undo_move_takes_apart_the_tab_and_the_window_a_move_made() {
+        let before = world();
+        let host = roomy(&before);
+        let record = plan(
+            &before,
+            Move::PaneToNewTab {
+                pane: 101,
+                window: 1,
+                gap: 1,
+            },
+            &host,
+        )
+        .unwrap()
+        .undo
+        .unwrap();
+        let mut after = before.clone();
+        reshaped(&mut after[0], 10, Tree::Leaf(100), 100);
+        after[0].tabs.insert(1, shape(NEW, Tree::Leaf(101), 101));
+        after[0].order.place_new(NEW, 1);
+        let plan = undoing(&after, record).unwrap();
+        assert_eq!(
+            plan.steps[0],
+            Step::Dissolve {
+                window: 1,
+                tab: NEW
+            }
+        );
+        assert_eq!(
+            plan.steps[2],
+            Step::PutStrip {
+                window: 1,
+                order: before[0].order.clone()
+            }
+        );
+
+        let record = super::plan(
+            &before,
+            Move::PaneToNewWindow {
+                pane: 101,
+                at: None,
+            },
+            &host,
+        )
+        .unwrap()
+        .undo
+        .unwrap();
+        let born = record.born[0];
+        let mut after = before.clone();
+        reshaped(&mut after[0], 10, Tree::Leaf(100), 100);
+        after.push(window(born, vec![shape(77, Tree::Leaf(101), 101)], 77));
+        let plan = undoing(&after, record).unwrap();
+        assert_eq!(
+            plan.steps[..3],
+            [
+                Step::ReleaseTab {
+                    window: born,
+                    tab: 77
+                },
+                Step::Unpack {
+                    window: born,
+                    tab: 77
+                },
+                Step::CloseIfEmptied { window: born },
+            ]
+        );
+        assert_eq!(
+            plan.after,
+            vec![Step::Raise { window: 1 }],
+            "the window the move made was the key one and is gone"
+        );
+    }
+
+    #[test]
+    fn undo_move_beeps_while_a_question_holds_and_drops_a_picture_no_longer_true() {
+        let before = world();
+        let record = plan(
+            &before,
+            Move::PaneToTab {
+                pane: 101,
+                into: 11,
+                place: beside(),
+            },
+            &roomy(&before),
+        )
+        .unwrap()
+        .undo
+        .unwrap();
+        let mut after = before.clone();
+        reshaped(&mut after[0], 10, Tree::Leaf(100), 100);
+        reshaped(
+            &mut after[0],
+            11,
+            split(Tree::Leaf(110), Tree::Leaf(101)),
+            110,
+        );
+        after[0].asking = true;
+        assert_eq!(undoing(&after, record.clone()), Err(Refusal::Beep));
+        after[0].asking = false;
+        // Pane 110 closed since: the picture would bring back a pane that is not there.
+        reshaped(&mut after[0], 11, Tree::Leaf(101), 101);
+        assert!(!standing(&after, &record));
+        assert_eq!(undoing(&after, record), Err(Refusal::Stale));
     }
 
     #[test]

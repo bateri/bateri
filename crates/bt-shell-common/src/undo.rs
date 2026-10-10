@@ -5,14 +5,16 @@
 //! panes) to another tab, makes a tab of it, swaps two panes or reorders a lone pane's tab
 //! writes down what it is about to change — for each window that takes part, the strip as it
 //! stood ([`Scene::order`]: order and selection) and each tab it touches as it stood
-//! ([`Shape`]: name, split tree with its ratios, the focused pane) — and the shell puts that
-//! picture back through the same steps the move used. A picture covers every move the same
+//! ([`Shape`]: name, split tree with its ratios, the focused pane) — and putting that picture
+//! back is planned like any move (`moves::Move::Undo`), through the same steps the moves use. A
+//! picture covers every move the same
 //! way (a tab that the move closed is born again from its shape; a tab the move made is taken
 //! apart), where one inverse per move would be five code paths that drift apart.
 //!
 //! **One step, and only while nothing else happened.** The shell keeps one record. Every
-//! other change of the tab list drops it (selecting, adding, closing, naming, reordering, a tab
-//! leaving or joining a window), and what no applier announces is found out here:
+//! other change of the tab list drops it (adding, closing, naming, reordering, a tab leaving or
+//! joining a window — not selecting: the picture carries the selection and puts it back), and
+//! what no applier announces is found out here:
 //! [`Record::holds`] compares the panes the picture accounts for with the panes the windows
 //! hold now, so a pane that closed or was born since (a split, an exiting shell) makes the
 //! picture false and the record goes with it, and so does a window that closed.

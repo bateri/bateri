@@ -62,7 +62,7 @@ use crate::tab::{Histories, TabHost, TerminalTab};
 use crate::tab_drag::TabDragSource;
 use crate::tab_merge::{End, Merge};
 use crate::tabs::Landing;
-use crate::undo::{Now, Record};
+use crate::undo::Record;
 use crate::watch::{Notify, Watch};
 use crate::window::{
     self, Adopted, CloseScope, Launch, Note, Placement, TerminalWindow, fallen_back,
@@ -3700,7 +3700,7 @@ impl AppDelegate {
     pub(crate) fn make_move(&self, wanted: Move) -> bool {
         match moves::plan(&self.world(), wanted, self) {
             Ok(plan) => self.carry_out(plan),
-            Err(Refusal::Beep) => {
+            Err(Refusal::Beep | Refusal::Stale) => {
                 crate::preview::beep();
                 false
             }
@@ -3735,6 +3735,10 @@ impl AppDelegate {
         if hands.failed {
             return false;
         }
+        debug_assert!(
+            hands.panes.is_empty() && hands.tabs.is_empty(),
+            "every pane and tab a plan takes out it puts somewhere"
+        );
         for step in plan.after {
             self.take_step(step, &mut hands);
         }
@@ -3853,6 +3857,45 @@ impl AppDelegate {
             Step::MoveTab { window, tab, index } => {
                 if let Some(window) = self.window(window) {
                     window.move_tab(tab, index);
+                }
+                true
+            }
+            Step::Dissolve { window, tab } => {
+                let Some(taken) = self
+                    .window(window)
+                    .and_then(|window| window.dissolve_tab(tab))
+                else {
+                    return false;
+                };
+                hands.panes.extend(taken);
+                true
+            }
+            Step::Reshape {
+                window,
+                tab,
+                tree,
+                name,
+            } => {
+                if let Some(window) = self.window(window) {
+                    window.reshape_tab(tab, tree, name, &mut hands.panes);
+                }
+                true
+            }
+            Step::PutStrip { window, order } => {
+                if let Some(window) = self.window(window) {
+                    window.put_strip(order);
+                }
+                true
+            }
+            Step::Fit { window, tab } => {
+                if let Some(window) = self.window(window) {
+                    window.fit_tab(tab);
+                }
+                true
+            }
+            Step::Undone { window } => {
+                if let Some(window) = self.window(window) {
+                    window.undone();
                 }
                 true
             }
@@ -4000,19 +4043,6 @@ impl AppDelegate {
         }
     }
 
-    /// What the windows `record` names hold now ([`Record::holds`]); a
-    /// window that is gone has nothing to say.
-    fn undo_world(&self, record: &Record) -> Vec<Now> {
-        record
-            .scenes
-            .iter()
-            .map(|scene| scene.window)
-            .chain(record.born.iter().copied())
-            .filter_map(|id| self.window(id))
-            .map(|window| window.undo_now())
-            .collect()
-    }
-
     /// Whether Undo Move can act: there is a record, the key window is one of
     /// the windows it names and not editing text, and the picture is still true. A record whose
     /// picture is not (a pane closed or was born since) is dropped here, the
@@ -4032,7 +4062,7 @@ impl AppDelegate {
         }
         let stale = match self.ivars().undo.borrow().as_ref() {
             None => return false,
-            Some(record) if record.holds(&self.undo_world(record)) => {
+            Some(record) if moves::standing(&self.world(), record) => {
                 return record.involves(key.id());
             }
             Some(_) => true,
@@ -4044,66 +4074,30 @@ impl AppDelegate {
     }
 
     /// Edit ▸ Undo Move: the picture of the last move goes back, as one step
-    /// with one layout edge, through the steps the moves are made of —
-    /// first what the move made comes apart and every pane involved lands in
-    /// one pool (a window the move made is emptied and closed, its tabs
-    /// leaving as in Merge All Windows, so no shell ends with it), then each
-    /// tab and strip is put as it was ([`TerminalWindow::undo_place`]). There
-    /// is no redo: the record is taken, and what follows is a new layout.
-    /// Nothing moves while a window of the record holds a question of its
-    /// own (a beep, like a selection would), and the record stays.
+    /// with one layout edge — what that comes to is the planner's
+    /// ([`Move::Undo`]), carried out through the appliers the moves are made
+    /// of. There is no redo: the record is taken, and what follows is a new
+    /// layout. A picture no longer true beeps and goes; nothing moves while a
+    /// window of the record holds a question of its own (a beep, like a
+    /// selection would), and the record stays.
     fn undo_move(&self) {
         let Some(record) = self.ivars().undo.take() else {
             return;
         };
-        let world = self.undo_world(&record);
-        let windows: Vec<Retained<TerminalWindow>> = record
-            .scenes
-            .iter()
-            .map(|scene| scene.window)
-            .chain(record.born.iter().copied())
-            .filter_map(|id| self.window(id))
-            .collect();
-        if !record.holds(&world) {
-            crate::preview::beep();
-            return;
-        }
-        if windows.iter().any(|window| !window.selection_free()) {
-            crate::preview::beep();
-            self.ivars().undo.replace(Some(record));
-            return;
-        }
-        let mut pool: Vec<Retained<TerminalPane>> = Vec::new();
-        for scene in &record.scenes {
-            if let Some(window) = self.window(scene.window) {
-                window.undo_lift(scene, &mut pool);
+        let wanted = Move::Undo {
+            record: record.clone(),
+        };
+        match moves::plan(&self.world(), wanted, self) {
+            Ok(plan) => {
+                self.carry_out(plan);
             }
-        }
-        for id in &record.born {
-            if let Some(window) = self.window(*id) {
-                window.undo_empty(&mut pool);
-                // Out of the list now, as Merge All Windows does: it holds no
-                // tab, so no shell ends with it.
-                self.unlist_window(*id);
-                window.close();
+            Err(Refusal::Beep) => {
+                crate::preview::beep();
+                self.ivars().undo.replace(Some(record));
             }
+            Err(Refusal::Stale) => crate::preview::beep(),
+            Err(Refusal::Quiet) => {}
         }
-        for scene in &record.scenes {
-            if let Some(window) = self.window(scene.window) {
-                window.undo_place(scene, &mut pool);
-            }
-        }
-        debug_assert!(pool.is_empty(), "every pane of the picture has a place");
-        if !record.born.is_empty()
-            && let Some(window) = record
-                .scenes
-                .first()
-                .and_then(|scene| self.window(scene.window))
-        {
-            // The window the move made was the key one and is gone.
-            window.select();
-        }
-        self.layout_changed();
     }
 
     /// The window that holds tab `tab` now.
