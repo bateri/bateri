@@ -45,6 +45,9 @@ listed here under **Going**, with what replaces it.
   the plan; a tree a verdict lends, as long as the verdict.
 - Identities stay the host's. A tab a move makes takes the picture's next
   identity, then the one after it, and the plan says how many it used.
+- `bt_world_tree_fits`: whether a tree keeps every pane of a tab at its
+  smallest size. bateri checks it once more before taking a new tree for a
+  tab, including a pane carried within its own tab, and a host does the same.
 - Split trees as versioned text (`bt_tree_encode` / `bt_tree_decode`, format
   version 1). Every later release reads every earlier version, so a layout
   kept on disk stays readable.

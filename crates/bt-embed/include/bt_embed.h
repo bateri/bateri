@@ -366,6 +366,11 @@ bool bt_world_set_spacing(BtWorld *world, uint64_t tab, uint32_t panes, double b
 /* The pane's smallest size, in points: no move, swap or divider takes it
  * below. A terminal pane's comes from bt_pane_min_size. */
 bool bt_world_set_minimum(BtWorld *world, uint64_t pane, double width, double height);
+/* Whether `tree`, laid out in the tab's area, keeps every pane at its
+ * smallest size — the check bateri makes once more before taking a new tree
+ * for a tab (a pane carried within it too): a LANDS verdict keeps room
+ * around its landing, but a tab that already did not fit is refused. */
+bool bt_world_tree_fits(const BtWorld *world, uint64_t tab, const BtTree *tree);
 /* The tab's tree with panes a and b trading places, the caller's; NULL if
  * either is not in it or a pane would go below its smallest size. */
 BtTree *bt_world_tree_swapped(const BtWorld *world, uint64_t tab, uint64_t a, uint64_t b);
@@ -507,7 +512,7 @@ bool bt_verdict_made_room(const BtVerdict *verdict);
 bool bt_verdict_fits(const BtVerdict *verdict);
 /* LANDS: the whole tab's tree once landed, lent by the verdict. Give it to a
  * _planned move; for a pane carried within its own tab it is the tab's new
- * tree (take a bt_record_of_tab first). */
+ * tree once bt_world_tree_fits agrees (take a bt_record_of_tab first). */
 const BtTree *bt_verdict_tree(const BtVerdict *verdict);
 /* TOO_SMALL: the edges of the area that would take the block. */
 size_t bt_verdict_edge_count(const BtVerdict *verdict);

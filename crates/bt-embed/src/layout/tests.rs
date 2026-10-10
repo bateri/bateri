@@ -562,6 +562,12 @@ fn the_picture_refuses_a_tab_it_could_not_hold() {
     }
 }
 
+/// Tab `tab`'s tree as the picture holds it.
+unsafe fn held_tree(world: *const BtWorld, tab: u64) -> Tree {
+    // SAFETY: the caller's live picture.
+    unsafe { (&*world).shape(tab).expect("the tab").tree.clone() }
+}
+
 #[test]
 fn layout_dividers_and_swaps_keep_every_pane_at_its_smallest() {
     // SAFETY: as above.
@@ -631,12 +637,20 @@ fn layout_dividers_and_swaps_keep_every_pane_at_its_smallest() {
 
         let swapped = bt_world_tree_swapped(world, 10, 100, 101);
         assert_eq!(c_tree_words(swapped), "(1 0.5 101 100)");
+        assert!(bt_world_tree_fits(world, 10, swapped));
         bt_tree_free(swapped);
         assert!(bt_world_set_minimum(world, 100, 700.0, 100.0));
         assert!(
             bt_world_tree_swapped(world, 10, 100, 101).is_null(),
             "a pane would not fit"
         );
+        let current = bt_tree_copy(BtTree::lend(&held_tree(world, 10)));
+        assert!(
+            !bt_world_tree_fits(world, 10, current),
+            "the tab no longer fits as it is"
+        );
+        assert!(!bt_world_tree_fits(world, 99, current), "no area");
+        bt_tree_free(current);
         assert!(bt_world_tree_swapped(world, 10, 100, 999).is_null());
         bt_world_free(world);
     }

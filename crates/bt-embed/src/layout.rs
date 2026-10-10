@@ -774,6 +774,32 @@ pub unsafe extern "C" fn bt_world_set_minimum(
     }
 }
 
+/// Whether `tree` (laid out in tab `tab`'s area) keeps every pane at its smallest size — the check
+/// bateri makes once more after taking a new tree for a tab, a pane carried within it included:
+/// a LANDS verdict keeps room around the landing, but a tab that no longer fit (its window
+/// shrank) is refused. `false` without the tab's area.
+///
+/// # Safety
+/// As [`bt_world_free`]; `tree` NULL or a live tree.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn bt_world_tree_fits(
+    world: *const BtWorld,
+    tab: u64,
+    tree: *const BtTree,
+) -> bool {
+    guarded(false, || {
+        // SAFETY: the caller's promises.
+        let (Some(world), Some(tree)) = (unsafe { world.as_ref() }, unsafe { tree.as_ref() })
+        else {
+            return false;
+        };
+        let min = |pane: u64| world.min(pane);
+        world
+            .room(tab, tree.0.leaves().len(), &min)
+            .is_some_and(|room| tree.0.fits(&room))
+    })
+}
+
 /// Tab `tab`'s tree as it would stand with panes `a` and `b` trading places, the caller's; NULL if
 /// either is not in it or a pane would go below its smallest size.
 ///
