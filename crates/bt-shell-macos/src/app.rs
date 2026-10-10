@@ -44,6 +44,7 @@ use objc2_foundation::{
     NSRunLoopCommonModes, NSSize, NSString, NSURL, NSUserDefaults, ns_string,
 };
 
+use crate::arrange::{self, HOLD_DELAY, Hold, Tool};
 use crate::handover::{self, Arrival, HeldPane, PaneState};
 use crate::keeper::{self, Keeper, QuitKind, QuitPath};
 use crate::menu::ShellMenuDelegate;
@@ -1407,9 +1408,19 @@ pub(crate) struct Ivars {
     /// The ⌘ watch of the tabs' key hints (`tab_bar::watch_command_key`):
     /// the monitor's token, kept for the process's lifetime.
     command_monitor: RefCell<Option<Retained<AnyObject>>>,
-    /// ⌘ was last seen held alone: only then does a release or a key
-    /// press walk the bars ([`AppDelegate::command_held`]).
-    command_hinted: Cell<bool>,
+    /// What the key watch last saw held ([`Hold`]): only when it was ⌘ or
+    /// ⌥⌘ does a release or a key press walk the windows
+    /// ([`AppDelegate::hold_changed`]).
+    hold: Cell<Hold>,
+    /// The window whose tab is lifted for arranging, if one is.
+    arranged: Cell<Option<u64>>,
+    /// The lift's wait: a generation, so a release or a key press makes the
+    /// pending lift stale, and whether one is pending.
+    arrange_wait: Cell<u64>,
+    arrange_pending: Cell<bool>,
+    /// A Finder drag of files is over a pane: ⌥⌘ is its copy/link keys then,
+    /// not an arrangement.
+    files_dragged: Cell<bool>,
     /// The source of the tab being carried between windows
     /// ([`tab_drag`](crate::tab_drag)), kept here from the session's start to a
     /// turn after its end: the window the drag began in may close first, and
@@ -2711,7 +2722,11 @@ impl AppDelegate {
             layout_writer: Cell::new(false),
             layout_save_pending: Cell::new(false),
             command_monitor: RefCell::new(None),
-            command_hinted: Cell::new(false),
+            hold: Cell::new(Hold::Nothing),
+            arranged: Cell::new(None),
+            arrange_wait: Cell::new(0),
+            arrange_pending: Cell::new(false),
+            files_dragged: Cell::new(false),
             tab_drag: RefCell::new(None),
             tab_drop: Cell::new(None),
             undo: RefCell::new(None),
@@ -5470,18 +5485,104 @@ impl AppDelegate {
         }
     }
 
-    /// ⌘ is held alone (`held`) or not — the key watch
-    /// (`tab_bar::watch_command_key`): the key window's bar shows its tabs'
-    /// keys, every other bar hides them.
-    pub(crate) fn command_held(&self, held: bool) {
-        // Every key press says "not held": walk the bars only when ⌘ was.
-        if self.ivars().command_hinted.replace(held) == held && !held {
+    /// What is held now — the key watch (`tab_bar::watch_command_key`): with
+    /// ⌘ alone the key window's bar shows its tabs' keys and every other bar
+    /// hides them; with ⌥⌘ alone the key window's tab lifts for arranging
+    /// after the same wait ([`crate::arrange`]).
+    pub(crate) fn hold_changed(&self, hold: Hold) {
+        // Every key press says "nothing held": walk the windows only when
+        // something was.
+        if self.ivars().hold.replace(hold) == hold && hold == Hold::Nothing {
             return;
         }
         let key = self.key_window().map(|window| window.id());
         for window in self.windows() {
-            window.bar().command_held(held && Some(window.id()) == key);
+            window
+                .bar()
+                .command_held(hold == Hold::Command && Some(window.id()) == key);
         }
+        self.arrange_hold(hold == Hold::Arrange);
+    }
+
+    /// ⌥⌘ is held alone (`on`) or not. Held: after [`HOLD_DELAY`] the key
+    /// window's selected tab lifts, unless something has made the wait stale
+    /// by then. Not held: a pending lift goes stale and a lifted tab is set
+    /// down.
+    fn arrange_hold(&self, on: bool) {
+        let iv = self.ivars();
+        if !on {
+            iv.arrange_wait.set(iv.arrange_wait.get().wrapping_add(1));
+            iv.arrange_pending.set(false);
+            self.arrange_lower(true);
+            return;
+        }
+        if iv.files_dragged.get() || iv.arranged.get().is_some() || iv.arrange_pending.replace(true)
+        {
+            return;
+        }
+        let generation = iv.arrange_wait.get().wrapping_add(1);
+        iv.arrange_wait.set(generation);
+        arrange::after(HOLD_DELAY, move |app| {
+            let iv = app.ivars();
+            if iv.arrange_wait.get() == generation {
+                iv.arrange_pending.set(false);
+                app.arrange_raise();
+            }
+        });
+    }
+
+    /// Lifts the key window's selected tab.
+    fn arrange_raise(&self) {
+        if self.ivars().files_dragged.get() || self.ivars().arranged.get().is_some() {
+            return;
+        }
+        if let Some(window) = self.key_window() {
+            window.arrange(true, true);
+            self.ivars().arranged.set(Some(window.id()));
+        }
+    }
+
+    /// Sets the lifted tab down, with the fade when `animate`.
+    pub(crate) fn arrange_lower(&self, animate: bool) {
+        if let Some(id) = self.ivars().arranged.take()
+            && let Some(window) = self.window(id)
+        {
+            window.arrange(false, animate);
+        }
+    }
+
+    /// A capsule's tool was pressed on `pane` of window `window`: the panes
+    /// are set down at once (a split's slide must not meet a lift), the work
+    /// is the window's, and once the slide has played the panes lift again if
+    /// the keys are still down.
+    pub(crate) fn arrange_act(&self, window: u64, pane: u64, tool: Tool) {
+        self.arrange_lower(false);
+        if let Some(window) = self.window(window) {
+            window.arrange_act(pane, tool);
+        }
+        arrange::after(Duration::from_millis(280), |app| {
+            let iv = app.ivars();
+            if iv.hold.get() == Hold::Arrange && !iv.arrange_pending.get() {
+                app.arrange_raise();
+            }
+        });
+    }
+
+    /// A Finder drag of files entered a pane (`entered`) or left or ended:
+    /// while it is over, ⌥⌘ is not an arrangement.
+    pub(crate) fn files_dragged(&self, entered: bool) {
+        self.ivars().files_dragged.set(entered);
+        if entered {
+            let iv = self.ivars();
+            iv.arrange_wait.set(iv.arrange_wait.get().wrapping_add(1));
+            iv.arrange_pending.set(false);
+            self.arrange_lower(false);
+        }
+    }
+
+    /// The key window changed: whatever was lifted is set down.
+    pub(crate) fn key_window_resigned(&self) {
+        self.arrange_hold(false);
     }
 
     /// Starts watching the system's scroll bar preference — **only in a user

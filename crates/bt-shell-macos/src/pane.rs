@@ -3259,6 +3259,25 @@ impl TerminalPane {
         }
     }
 
+    /// The pane is lifted for arranging ([`crate::arrange`]), or set down:
+    /// its frame reads at the focused strength while lifted.
+    pub(crate) fn set_raised(&self, raised: bool) {
+        self.ivars().card_frame.set_raised(raised);
+    }
+
+    /// The search panel's frame while it is open, in the pane's own
+    /// coordinates (the arrangement's capsule keeps clear of it).
+    pub(crate) fn search_frame(&self) -> Option<NSRect> {
+        let bar = self.ivars().search.get().filter(|bar| bar.is_shown())?;
+        Some(bar.resting_frame())
+    }
+
+    /// Whether the pane holds a question — one up on the tab's owner for
+    /// it, or parked for a place to open.
+    pub(crate) fn asking(&self) -> bool {
+        !self.ivars().opened.borrow().is_empty() || !self.ivars().parked.borrow().is_empty()
+    }
+
     /// Whether the pane is a card now.
     pub(crate) fn is_card(&self) -> bool {
         self.ivars().card_frame.carded()

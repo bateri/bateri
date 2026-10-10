@@ -442,6 +442,17 @@ pub(crate) fn question_waiting(container: &SplitView) -> bool {
     parked_in(container) || (container.isHiddenOrHasHiddenAncestor() && owner_busy(container))
 }
 
+/// Where the question up on `container`'s tab ends: the sheet's bottom
+/// edge as a distance from the container's top (the container is flipped),
+/// or `None` with no question up. The arrangement's capsules slide below it.
+pub(crate) fn question_bottom(container: &SplitView) -> Option<f64> {
+    let sheet = owner_window(container)?.attachedSheet()?;
+    let window = container.window()?;
+    let in_window = window.convertRectFromScreen(sheet.frame());
+    let rect = container.convertRect_fromView(in_window, None);
+    Some(rect.origin.y + rect.size.height)
+}
+
 // ─── The tab's owner ─────────────────────────────────────────────────────
 
 /// A tab's sheet owner: the child window its panes' sheets sit on, and the

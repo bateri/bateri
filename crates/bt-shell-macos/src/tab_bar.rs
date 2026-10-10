@@ -130,6 +130,7 @@ use objc2_foundation::{
 use objc2_quartz_core::CAMediaTimingFunction;
 
 use crate::app;
+use crate::arrange;
 use crate::tab_drag;
 use crate::tabs::{
     self, BUTTON, Bar, Card, CardCommand, Clock, Drag, FADE, Grip, Indicator, Over,
@@ -221,7 +222,7 @@ const WHEEL_STEP: f64 = 12.0;
 /// constant: ⌘ goes down before every shortcut (⌘C, ⌘V), and hints shown
 /// at once would flash across the bar at each; a hand that holds ⌘ to read
 /// them waits longer than this anyway.
-const HINT_DELAY: Duration = Duration::from_millis(300);
+pub(crate) const HINT_DELAY: Duration = Duration::from_millis(300);
 
 /// What a double click on the title row does — the system's "Double-click
 /// a window's title bar to" setting.
@@ -262,17 +263,17 @@ pub(crate) fn single_label(title: &str, notice: &str) -> String {
 
 /// An sRGB colour with its strength.
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct Tint {
-    rgb: u32,
-    alpha: f64,
+pub(crate) struct Tint {
+    pub(crate) rgb: u32,
+    pub(crate) alpha: f64,
 }
 
 impl Tint {
-    const fn of(rgb: u32, alpha: f64) -> Self {
+    pub(crate) const fn of(rgb: u32, alpha: f64) -> Self {
         Self { rgb, alpha }
     }
 
-    fn color(self) -> Retained<NSColor> {
+    pub(crate) fn color(self) -> Retained<NSColor> {
         let byte = |shift: u32| f64::from((self.rgb >> shift) & 0xff) / 255.0;
         NSColor::colorWithSRGBRed_green_blue_alpha(byte(16), byte(8), byte(0), self.alpha)
     }
@@ -441,7 +442,7 @@ fn fade(view: &NSView, to: f64, secs: f64) {
 
 /// A tracking area over `view`'s visible rect for its enter and exit —
 /// in an inactive window too, like the system's tabs.
-fn track_hover(view: &NSView) {
+pub(crate) fn track_hover(view: &NSView) {
     let options = NSTrackingAreaOptions::MouseEnteredAndExited
         | NSTrackingAreaOptions::ActiveInActiveApp
         | NSTrackingAreaOptions::InVisibleRect;
@@ -472,7 +473,7 @@ fn label(mtm: MainThreadMarker) -> Retained<NSTextField> {
 
 /// A rounded rect `rect` filled with `fill`, its inside edge stroked with
 /// `line` if any.
-fn rounded(rect: NSRect, radius: f64, fill: Tint, line: Option<Tint>) {
+pub(crate) fn rounded(rect: NSRect, radius: f64, fill: Tint, line: Option<Tint>) {
     let path = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(rect, radius, radius);
     fill.color().setFill();
     path.fill();
@@ -493,7 +494,7 @@ fn rounded(rect: NSRect, radius: f64, fill: Tint, line: Option<Tint>) {
 }
 
 /// A glyph's stroked path in `color`, round caps and joins.
-fn stroke(path: &NSBezierPath, width: f64, color: Tint) {
+pub(crate) fn stroke(path: &NSBezierPath, width: f64, color: Tint) {
     path.setLineWidth(width);
     path.setLineCapStyle(NSLineCapStyle::Round);
     path.setLineJoinStyle(NSLineJoinStyle::Round);
@@ -3632,7 +3633,7 @@ impl TabBar {
 /// Whether `flags` hold ⌘ and no other modifier a shortcut uses (⇧, ⌥,
 /// ⌃) — Caps Lock and the keypad's and the function key's bits do not
 /// count: with Caps Lock on, ⌘ alone still shows the hints.
-fn command_alone(flags: NSEventModifierFlags) -> bool {
+pub(crate) fn command_alone(flags: NSEventModifierFlags) -> bool {
     let chord = NSEventModifierFlags::Command
         | NSEventModifierFlags::Shift
         | NSEventModifierFlags::Option
@@ -3640,22 +3641,26 @@ fn command_alone(flags: NSEventModifierFlags) -> bool {
     flags.intersection(chord) == NSEventModifierFlags::Command
 }
 
-/// Watches ⌘ for the tabs' key hints: a local monitor of flag changes and
-/// key presses, the application's for its lifetime (the caller keeps the
-/// token). ⌘ alone held is a hint's start; any other modifier, its release
-/// or a key press (a chord: ⌘C) is its end
-/// (`AppDelegate::command_held`, which tells the key window's bar). The
-/// event passes on unchanged.
+/// Watches ⌘ and ⌥⌘ for the tabs' key hints and the arrangement moment: a
+/// local monitor of flag changes and key presses, the application's for its
+/// lifetime (the caller keeps the token). ⌘ alone held is a hint's start,
+/// ⌥⌘ the arrangement's ([`arrange::Hold`]); any other modifier, its release
+/// or a key press (a chord: ⌘C, ⌥⌘←) is the end of either
+/// (`AppDelegate::hold_changed`, which tells the key window). The event
+/// passes on unchanged.
 pub(crate) fn watch_command_key() -> Option<Retained<AnyObject>> {
     let block = RcBlock::new(move |event: NonNull<NSEvent>| -> *mut NSEvent {
         // SAFETY: AppKit gives the monitor a valid event.
         let event_ref = unsafe { event.as_ref() };
-        let held = event_ref.r#type() == NSEventType::FlagsChanged
-            && command_alone(event_ref.modifierFlags());
+        let hold = if event_ref.r#type() == NSEventType::FlagsChanged {
+            arrange::hold_of(event_ref.modifierFlags())
+        } else {
+            arrange::Hold::Nothing
+        };
         // audit: a local monitor runs on the main thread, before `sendEvent:`.
         let mtm = MainThreadMarker::new().expect("a local event monitor runs on the main thread");
         if let Some(app) = app::delegate(mtm) {
-            app.command_held(held);
+            app.hold_changed(hold);
         }
         event.as_ptr()
     });

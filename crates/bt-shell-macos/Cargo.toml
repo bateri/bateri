@@ -141,6 +141,10 @@ objc2-foundation = { workspace = true, features = [
 # type (the drag session's items are `NSDraggingItem`s above). Only a header
 # flag over `objc2-foundation` headers already in the set; `Cargo.lock` did not
 # move.
+# The arrangement's capsule (`arrange`): `NSVisualEffectView` blurs what is
+# behind it inside the window — the Reduce Transparency setting is the
+# system's own to apply. Only a header flag over headers already in the set;
+# `Cargo.lock` did not move.
 # A window's title as the Dock icon's menu and the Window menu list it
 # (`window::listed_title`): `NSStringDrawing` measures it in the menu font
 # (`sizeWithAttributes:`). Only a header flag over headers already in the set;
@@ -160,7 +164,7 @@ objc2-app-kit = { workspace = true, features = [
     "NSDraggingItem", "NSDraggingSession", "NSFilePromiseProvider", "NSSecureTextField",
     "NSScreen", "NSWindowRestoration", "NSScroller", "NSTrackingArea", "NSAttributedString",
     "NSToolbar", "NSBezierPath", "NSAccessibilityConstants", "NSAccessibilityProtocols",
-    "NSGradient", "NSPasteboardItem", "NSStringDrawing",
+    "NSGradient", "NSPasteboardItem", "NSStringDrawing", "NSVisualEffectView",
 ] }
 # Only for the CALayer type: NSView::setLayer(Option<&CALayer>) wants it.
 # The layer rules record this as "only attaching a CALayer".

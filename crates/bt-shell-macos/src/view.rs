@@ -56,6 +56,8 @@ use objc2_foundation::{
     NSRange, NSRangePointer, NSRect, NSSize, NSString, NSUInteger, NSURL,
 };
 
+use crate::app;
+use crate::arrange;
 use crate::clipboard;
 use crate::gesture::{Drag, Gesture, Press, Release};
 use crate::hyperlink::LinkState;
@@ -1466,6 +1468,11 @@ define_class!(
             &self,
             _sender: &ProtocolObject<dyn NSDraggingInfo>,
         ) -> NSDragOperation {
+            // ⌥⌘ is a drag's own modifier keys while files are over the pane:
+            // no arrangement lifts for the length of it.
+            if let Some(app) = app::delegate(self.mtm()) {
+                app.files_dragged(true);
+            }
             if self.pane().is_none_or(|pane| pane.accepts_drop()) {
                 NSDragOperation::Copy
             } else {
@@ -1497,8 +1504,26 @@ define_class!(
         /// `define_class!` converts the answer to ObjC's `BOOL` and the
         /// conversion is applied only to the **tail expression**, so a `return
         /// false` would conflict with the outer signature and break the compilation.
+        #[unsafe(method(draggingExited:))]
+        fn dragging_exited(&self, _sender: Option<&ProtocolObject<dyn NSDraggingInfo>>) {
+            if let Some(app) = app::delegate(self.mtm()) {
+                app.files_dragged(false);
+            }
+        }
+
+        /// The drag ended over the pane, taken or not.
+        #[unsafe(method(draggingEnded:))]
+        fn dragging_ended(&self, _sender: &ProtocolObject<dyn NSDraggingInfo>) {
+            if let Some(app) = app::delegate(self.mtm()) {
+                app.files_dragged(false);
+            }
+        }
+
         #[unsafe(method(performDragOperation:))]
         fn perform_drag_operation(&self, sender: &ProtocolObject<dyn NSDraggingInfo>) -> bool {
+            if let Some(app) = app::delegate(self.mtm()) {
+                app.files_dragged(false);
+            }
             let paths = dropped_paths(&sender.draggingPasteboard());
             match self.ivars().session.get() {
                 Some(session) if !paths.is_empty() && session.remote_target().is_some() => self
@@ -2201,6 +2226,14 @@ impl BateriView {
         // strip's presses; the overlay scroller's bargain.
         if let Some((layout, y)) = self.scrollbar_region(event.locationInWindow()) {
             self.scrollbar_press(session, button, layout, y, event.locationInWindow());
+            return;
+        }
+        // **⌥⌘ held is the arrangement's** ([`crate::arrange`]): the press
+        // reaches neither the program (no report), nor a selection, nor a
+        // ⌘-link, nor the context line and the dock — the bar above has
+        // already been served, so it works with the keys down. Nothing begins
+        // a gesture here; the release finds none and the drag ignores itself.
+        if arrange::swallows(event.modifierFlags()) {
             return;
         }
         // The upload line's buttons and the load indicator: on the

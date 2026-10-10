@@ -107,6 +107,7 @@ use objc2_foundation::{
 
 use crate::Run;
 use crate::app;
+use crate::arrange::Tool;
 use crate::jobs::Foreground;
 use crate::pane::{PaneLaunch, TerminalPane};
 use crate::preview::beep;
@@ -774,6 +775,10 @@ define_class!(
             // application ⌘-Tab brings forward: the tabs' key hints and the
             // summary card go now, not at an event we never see.
             self.bar().resigned();
+            // A lifted tab (⌥⌘ held) is set down with them.
+            if let Some(app) = app::delegate(self.mtm()) {
+                app.key_window_resigned();
+            }
             // The ⌘-hovered link clears too: ⌘'s release may go to
             // another application. The key window also resigns key when the
             // application deactivates, so this one hook covers both.
@@ -1705,6 +1710,56 @@ impl TerminalWindow {
     /// How many tabs the window carries.
     pub(crate) fn tab_count(&self) -> usize {
         self.ivars().order.borrow().len()
+    }
+
+    /// The arrangement moment ([`crate::arrange`]): lifts the selected tab,
+    /// or — setting down — every tab, since the selection may have moved
+    /// while the keys were held.
+    pub(crate) fn arrange(&self, on: bool, animate: bool) {
+        if on {
+            self.selected_tab().arrange(true, animate);
+        } else {
+            for tab in self.tabs() {
+                tab.arrange(false, animate);
+            }
+        }
+    }
+
+    /// A capsule's tool, pressed on `pane`: the pane takes the focus, then
+    /// the work is the menu's — a split from it, the move to a tab of its own
+    /// beside this one, the close that asks if it must. Through the same
+    /// callers as ⌘D, Move Split to New Tab and ⌘W, so nothing here is a
+    /// second way to change the tab list.
+    pub(crate) fn arrange_act(&self, pane: u64, tool: Tool) {
+        let Some(tab) = self.tab_holding(pane) else {
+            return;
+        };
+        let Some(target) = tab
+            .panes()
+            .into_iter()
+            .find(|candidate| candidate.id() == pane)
+        else {
+            return;
+        };
+        tab.focus_pane(&target);
+        match tool {
+            Tool::SplitRight | Tool::SplitDown => {
+                if let Some(axis) = tool.axis() {
+                    tab.split(axis);
+                }
+            }
+            Tool::NewTab => {
+                let gap = self.index_of(tab.id()).map_or(0, |index| index + 1);
+                self.pane_to_new_tab(pane, gap);
+            }
+            Tool::Close => {
+                if tab.panes().len() > 1 {
+                    self.close_pane_asking(&tab);
+                } else {
+                    self.close_tab_asking(tab.id());
+                }
+            }
+        }
     }
 
     /// Tab `id`'s place in the strip; `None` if it is not this window's.

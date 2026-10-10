@@ -383,7 +383,7 @@ impl SplitView {
     /// `1` - once the window is attached AppKit reports the size again and the
     /// layout repeats, and on a scale change the window lays out again too
     /// (`TerminalWindow`'s `windowDidChangeBackingProperties:`).
-    fn scale(&self) -> f64 {
+    pub(crate) fn scale(&self) -> f64 {
         self.window()
             .map_or(1.0, |window| window.backingScaleFactor())
     }
@@ -757,7 +757,7 @@ impl SplitView {
     }
 
     /// Whether the panes are cards now: two or more and none zoomed.
-    fn carded(&self) -> bool {
+    pub(crate) fn carded(&self) -> bool {
         let zoomed = self.ivars().zoomed.get();
         let tree = self.ivars().tree.borrow();
         let leaves = tree.leaves();

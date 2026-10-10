@@ -69,11 +69,12 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject};
 use objc2::{MainThreadMarker, MainThreadOnly, msg_send, sel};
 use objc2_app_kit::{
-    NSAlert, NSAlertSecondButtonReturn, NSEvent, NSEventModifierFlags, NSMenu, NSMenuItem,
-    NSModalResponse, NSModalResponseOK, NSOpenPanel, NSPasteboard, NSWorkspace,
+    NSAlert, NSAlertSecondButtonReturn, NSEvent, NSMenu, NSMenuItem, NSModalResponse,
+    NSModalResponseOK, NSOpenPanel, NSPasteboard, NSWorkspace,
 };
 use objc2_foundation::{NSArray, NSPoint, NSRect, NSSize, NSString, NSURL, ns_string};
 
+use crate::arrange;
 use crate::child;
 use crate::clipboard;
 use crate::links::{self, Content, LinkAction, Resolved};
@@ -430,7 +431,7 @@ fn open_url(url: &str) {
 
 /// Whether ⌘ is down **now** — the asynchronous returns have no event.
 fn command_down() -> bool {
-    NSEvent::modifierFlags_class().contains(NSEventModifierFlags::Command)
+    arrange::link_command(NSEvent::modifierFlags_class())
 }
 
 impl BateriView {
@@ -467,9 +468,7 @@ impl BateriView {
     /// ([`hover_style`] — any link with ⌘, an OSC 8 link without). Motion inside
     /// the same cell costs one flag test and one borrow — no `Term` lock.
     pub(crate) fn link_motion(&self, event: &NSEvent) {
-        let command = event
-            .modifierFlags()
-            .contains(NSEventModifierFlags::Command);
+        let command = arrange::link_command(event.modifierFlags());
         let at = self.link_cell(event.locationInWindow());
         self.ask_link(at, command);
     }
@@ -479,9 +478,7 @@ impl BateriView {
     /// the `stat` did not find is forgotten when ⌘ goes up (it is asked again
     /// at the next ⌘ — a file created meanwhile is found).
     pub(crate) fn link_flags(&self, event: &NSEvent) {
-        let command = event
-            .modifierFlags()
-            .contains(NSEventModifierFlags::Command);
+        let command = arrange::link_command(event.modifierFlags());
         if !command {
             self.link_state().borrow_mut().missing = None;
         }
@@ -907,10 +904,7 @@ impl BateriView {
     /// selection. The answer says whether the link can be dragged out to Finder:
     /// only a remote one (a local file is already in Finder).
     pub(crate) fn link_press(&self, event: &NSEvent) -> Option<bool> {
-        if !event
-            .modifierFlags()
-            .contains(NSEventModifierFlags::Command)
-        {
+        if !arrange::link_command(event.modifierFlags()) {
             return None;
         }
         let at = self.link_cell(event.locationInWindow())?;

@@ -63,6 +63,9 @@ pub(crate) struct FrameIvars {
     focused: Cell<bool>,
     /// Whether the pane is a card now.
     carded: Cell<bool>,
+    /// Whether the pane is lifted for arranging ([`crate::arrange`]): every
+    /// frame reads as the focused one.
+    raised: Cell<bool>,
     /// The frame's width, in points: one device pixel at the window's scale.
     width: Cell<f64>,
 }
@@ -95,6 +98,7 @@ impl FrameBox {
             ink: Cell::new(theme.separator_srgb()),
             focused: Cell::new(false),
             carded: Cell::new(false),
+            raised: Cell::new(false),
             width: Cell::new(0.0),
         });
         // SAFETY: `NSBox`'s `init`; the ivars are set.
@@ -126,6 +130,14 @@ impl FrameBox {
         self.ivars().carded.get()
     }
 
+    /// The pane is lifted for arranging, or set down: while lifted the frame
+    /// reads at the focused strength on every pane.
+    pub(crate) fn set_raised(&self, raised: bool) {
+        if self.ivars().raised.replace(raised) != raised {
+            self.repaint();
+        }
+    }
+
     /// Makes the pane a card, or not, at the window's `scale` (the frame is one
     /// device pixel). `true` if the answer changed.
     ///
@@ -146,7 +158,7 @@ impl FrameBox {
     fn repaint(&self) {
         let iv = self.ivars();
         let [r, g, b] = iv.ink.get().map(|byte| f64::from(byte) / 255.0);
-        let alpha = if iv.focused.get() {
+        let alpha = if iv.focused.get() || iv.raised.get() {
             FRAME_ALPHA_FOCUSED
         } else {
             FRAME_ALPHA_QUIET
@@ -248,6 +260,18 @@ const IDENTITY: CATransform3D = CATransform3D {
 /// the slide's length. The layer's model value is already the end of it, and
 /// the animation removes itself on completion: there is nothing to clean up.
 fn play(layer: &CALayer, key_path: &NSString, from: &AnyObject, to: &AnyObject, key: &NSString) {
+    play_for(layer, key_path, from, to, key, SLIDE_SECS);
+}
+
+/// [`play`] over `secs`.
+fn play_for(
+    layer: &CALayer,
+    key_path: &NSString,
+    from: &AnyObject,
+    to: &AnyObject,
+    key: &NSString,
+    secs: f64,
+) {
     let animation = CABasicAnimation::animationWithKeyPath(Some(key_path));
     // SAFETY: both values are the objects the key path's property takes
     // (an `NSValue` of a `CATransform3D`, an `NSNumber`).
@@ -255,10 +279,60 @@ fn play(layer: &CALayer, key_path: &NSString, from: &AnyObject, to: &AnyObject, 
         animation.setFromValue(Some(from));
         animation.setToValue(Some(to));
     }
-    animation.setDuration(SLIDE_SECS);
+    animation.setDuration(secs);
     let curve = CAMediaTimingFunction::functionWithControlPoints(0.2, 0.8, 0.2, 1.0);
     animation.setTimingFunction(Some(&curve));
     layer.addAnimation_forKey(&animation, Some(key));
+}
+
+/// Sets `layer` — a view's backing layer, the view standing at `frame` — to
+/// look shrunk by `scale` about its centre (`1.0` is rest), over `secs` (at
+/// once for zero). The model value is the end at once; a running lift is
+/// continued from where it is on screen. The matrix is [`fitted`]'s, checked
+/// against the layer: no reading of its axes that lands on the shrunk
+/// rectangle, no lift.
+pub(crate) fn lift(layer: &CALayer, frame: Rect, scale: f64, secs: f64) {
+    // SAFETY: reading the presentation copy of a layer we hold, on the main thread.
+    let shown = unsafe { layer.presentationLayer() };
+    let from = shown.map_or_else(|| layer.transform(), |shown| shown.transform());
+    let target = if scale == 1.0 {
+        Some(IDENTITY)
+    } else {
+        let (width, height) = (frame.width * scale, frame.height * scale);
+        let look = Rect::new(
+            frame.x + (frame.width - width) / 2.0,
+            frame.y + (frame.height - height) / 2.0,
+            width,
+            height,
+        );
+        fitted(layer, look, frame)
+    };
+    let Some(target) = target else {
+        return;
+    };
+    CATransaction::begin();
+    CATransaction::setDisableActions(true);
+    layer.setTransform(target);
+    CATransaction::commit();
+    if secs <= 0.0 {
+        layer.removeAnimationForKey(ns_string!("bateri.lift"));
+        return;
+    }
+    // SAFETY: plain `NSValue`s around `CATransform3D` values.
+    let (from, to) = unsafe {
+        (
+            NSValue::valueWithCATransform3D(from),
+            NSValue::valueWithCATransform3D(target),
+        )
+    };
+    play_for(
+        layer,
+        ns_string!("transform"),
+        &from,
+        &to,
+        ns_string!("bateri.lift"),
+        secs,
+    );
 }
 
 /// Settles whatever slide is still running on the pane's layers: the model
