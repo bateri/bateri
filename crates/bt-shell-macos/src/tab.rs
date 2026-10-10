@@ -166,6 +166,10 @@ impl PaneHost for TabHost {
         }
     }
 
+    fn ports_changed(&self, _pane: u64) {
+        // The dock shows the ports itself (`TerminalPane::publish_ports`).
+    }
+
     fn questions_changed(&self, _pane: u64) {
         // The tab's "waiting for an answer" mark: its window's bar draws its
         // chips again.

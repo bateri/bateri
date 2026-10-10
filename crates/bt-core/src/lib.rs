@@ -49,6 +49,7 @@
 mod block_index;
 mod cluster;
 mod color;
+mod commands;
 mod dock;
 mod handler;
 mod identity;
@@ -67,6 +68,7 @@ mod wake;
 
 pub use cluster::{ClusterId, Clusters};
 pub use color::{LinearRgba, Theme, contrast_ratio};
+pub use commands::{CommandId, CommandNews, CommandPhase, CommandState, news as command_news};
 pub use dock::{
     Dock, DockBudget, DockButton, DockCaret, DockCols, DockEdit, EDIT_MAX, EditCells,
     FooterControl, FooterHit, PORTS_GLYPHS, PROGRAM_GLYPHS, STATS_GLYPHS, STATS_THRESHOLDS,

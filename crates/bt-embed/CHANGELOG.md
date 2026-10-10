@@ -54,3 +54,19 @@ listed here under **Going**, with what replaces it.
 - A strip's rules (`BtStrip`): where a new tab goes, which tab comes up when
   one closes, Show Next/Previous Tab, Command-1 to 9.
 - `bt_pane_min_size`: a terminal pane's smallest size, for the engine.
+- Command events, which need the shell integration:
+  `BT_EVENT_COMMAND_STARTED` and `BT_EVENT_COMMAND_FINISHED`, carrying the
+  command's line, whether it ran in our remote shell, when it started, and
+  at its end its exit code and duration (`bt_event_exit_code`,
+  `bt_event_duration_ms`, `bt_event_started`). A start the host did not see
+  is told before the end. Only a command that came and went between two
+  activity edges (typeahead) is missed.
+- `BT_EVENT_DIRECTORY`: the shell's directory, with the host in a remote
+  session. `BT_EVENT_PORTS`: the listening ports changed.
+- Queries: the shell's phase (`bt_pane_phase`), the foreground programs
+  (`bt_pane_foreground`), the remote host and directory, and the listening
+  ports.
+- `BT_EVENT_SHELL_EXITED` carries an exit code. It is the code of the
+  shell's login process, and on macOS `login` answers 0 whatever the shell's
+  own code was: it tells a normal exit from a killed one, not the shell's
+  status.

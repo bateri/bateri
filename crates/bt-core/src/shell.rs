@@ -9548,6 +9548,49 @@ mod tests {
         assert_eq!(log.ends, Ends { ok: 0, failed: 1 }, "the remote one");
     }
 
+    /// A command read one by one ([`crate::commands::command_state`]): a prompt, then running
+    /// from its `C`, then ended with its code and duration — and still readable by its identity
+    /// once a newer prompt has taken its place. Our remote shell's are told apart.
+    #[test]
+    fn a_command_is_a_prompt_then_runs_then_ends_with_its_code() {
+        use crate::commands::{CommandPhase, command_state};
+        let newest = |log: &ShellLog| {
+            command_state(log, log.last_block().expect("a block")).expect("in the ledger")
+        };
+        let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
+        feed(&mut log, b"\x1b]133;A;bt_block=1\x07");
+        assert_eq!(newest(&log).phase, CommandPhase::Prompt);
+        feed(&mut log, b"\x1b]133;C\x07");
+        let running = newest(&log);
+        assert_eq!(
+            (running.phase, running.remote),
+            (CommandPhase::Running, false)
+        );
+        assert!(running.started.is_some(), "its start is stamped");
+        feed(&mut log, b"\x1b]133;D;2;bt_block=1\x07");
+        let done = newest(&log);
+        assert_eq!(
+            (done.phase, done.exit, done.id),
+            (CommandPhase::Finished, Some(2), running.id)
+        );
+        assert!(done.elapsed.is_some());
+        feed(&mut log, b"\x1b]133;A;bt_block=2\x07");
+        assert_ne!(newest(&log).id, done.id);
+        assert_eq!(
+            command_state(&log, done.id.0).map(|state| state.exit),
+            Some(Some(2)),
+            "read again by its identity"
+        );
+
+        let mut log = ssh_log();
+        feed(
+            &mut log,
+            b"\x1b]133;A;bt_remote=1.9.1\x07\x1b]133;C;bt_remote=1.9.1\x07",
+        );
+        let remote = newest(&log);
+        assert_eq!((remote.phase, remote.remote), (CommandPhase::Running, true));
+    }
+
     /// The tab's "running": the local phase; in a remote session our remote
     /// shell's command alone — a plain ssh runs nothing — and only while its
     /// `ssh` block is the open command.

@@ -76,6 +76,19 @@ typedef void (*BtEventHandler)(void *context, const BtEvent *event);
 #define BT_EVENT_CARRY_PRESS 9u
 /* A question of the pane was put off or taken up. */
 #define BT_EVENT_QUESTIONS 10u
+/* A command started: text = its line (NULL when the screen no longer shows
+ * it), flag = it runs in our remote shell, bt_event_started. Needs the shell
+ * integration (bt_pane_config_set_zsh_scripts). */
+#define BT_EVENT_COMMAND_STARTED 11u
+/* A command ended: as COMMAND_STARTED, with bt_event_exit_code and
+ * bt_event_duration_ms. A start the host did not see comes first; only a
+ * command that came and went between two looks (typeahead) is missed. */
+#define BT_EVENT_COMMAND_FINISHED 12u
+/* The shell's directory changed: text = path, detail = host (NULL locally),
+ * flag = remote session. */
+#define BT_EVENT_DIRECTORY 13u
+/* The listening ports changed: read them again (bt_pane_port_count). */
+#define BT_EVENT_PORTS 14u
 
 /* A notice's source (BT_EVENT_NOTICES' number). */
 #define BT_NOTICE_SOURCE_WRITE 0
@@ -98,6 +111,16 @@ int64_t bt_event_number(const BtEvent *event);
 /* The event's point, in the window's points. */
 double bt_event_x(const BtEvent *event);
 double bt_event_y(const BtEvent *event);
+/* COMMAND_FINISHED, SHELL_EXITED: the exit code; false when unknown (printed
+ * unreadably, the shell killed by a signal) or the kind has none. A
+ * SHELL_EXITED code is the shell's login process's: on macOS `login`, which
+ * answers 0 whatever the shell's own code — it tells a normal exit from a
+ * killed one, not the shell's status. */
+bool bt_event_exit_code(const BtEvent *event, int32_t *code);
+/* COMMAND_FINISHED: how long it ran, milliseconds; -1 when unknown. */
+int64_t bt_event_duration_ms(const BtEvent *event);
+/* Command events: when it started, seconds since the Unix epoch; 0 unknown. */
+int64_t bt_event_started(const BtEvent *event);
 
 /* ---- Configuration ----------------------------------------------------- */
 
@@ -190,6 +213,24 @@ char *bt_pane_uuid(BtPane *pane);
 bool bt_pane_min_size(BtPane *pane, double *width, double *height);
 /* The id the pane was configured with. 0 for NULL. */
 uint64_t bt_pane_id(BtPane *pane);
+/* What the shell is doing (BT_PHASE_*); 0 before it started and without the
+ * shell integration. */
+#define BT_PHASE_PROMPT 1u      /* the prompt is being drawn */
+#define BT_PHASE_INPUT 2u       /* the user is typing */
+#define BT_PHASE_RUNNING 3u     /* a command runs */
+#define BT_PHASE_FINISHED 4u    /* a command ended; no prompt yet */
+uint32_t bt_pane_phase(BtPane *pane);
+/* The programs in the foreground in place of the shell, one name per line,
+ * the caller's to free; NULL while the shell is in front. Asks the process
+ * table: for a question, not a loop. */
+char *bt_pane_foreground(BtPane *pane);
+/* A remote session's host as written (user@db1) and its shell's directory,
+ * the caller's to free; NULL locally (and before a directory came). */
+char *bt_pane_remote_host(BtPane *pane);
+char *bt_pane_remote_directory(BtPane *pane);
+/* The listening ports: the pane's programs' and, remotely, the server's. */
+size_t bt_pane_port_count(BtPane *pane);
+bool bt_pane_port_at(BtPane *pane, size_t index, uint16_t *port, bool *remote);
 /* The pane's NSView *, owned by the pane. */
 void *bt_pane_view(BtPane *pane);
 /* Closes the pane: its shell is told to end, nothing waits for it, its view

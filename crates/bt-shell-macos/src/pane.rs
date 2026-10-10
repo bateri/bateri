@@ -160,6 +160,10 @@ pub trait PaneHost {
     /// taken up: a mark the owner shows for a question waiting to be seen
     /// may have changed.
     fn questions_changed(&self, pane: u64);
+    /// The ports the pane's programs listen on — and, in a remote session,
+    /// the server's — changed ([`TerminalPane::listening_ports`]): a scan
+    /// found new ones or a server went. Scans run while `[shell] ports` is on.
+    fn ports_changed(&self, pane: u64);
     /// What this pane's questions cover ([`crate::sheets::Cover`]): bateri's
     /// tab container, so a question blocks that tab and not the window.
     /// `None` puts them on the pane's window, blocking all of it. Asked
@@ -1266,7 +1270,7 @@ impl Wake for ShellWake {
         self.poke_ports();
     }
 
-    fn child_exit(&self, _code: Option<i32>) {
+    fn child_exit(&self, code: Option<i32>) {
         // The shell is gone, the pane has nothing to stand on: **that window**
         // closes, not the application. Closing goes through the
         // window's own `windowWillClose:` — the red button, ⌘W and `exit` reach
@@ -1302,6 +1306,7 @@ impl Wake for ShellWake {
             // shell and the news came later) there is nothing to close. Closing
             // is the owner's job ([`PaneHost::shell_exited`]).
             if let Some(pane) = lookup(mtm, id) {
+                pane.ivars().exit_status.set(code);
                 pane.host().shell_exited(id);
             }
         });
@@ -1717,6 +1722,9 @@ pub struct PaneIvars {
     /// Whether the pane can be seen — [`TerminalPane::set_visible`]'s last
     /// word; a pane is born seen.
     seen: Cell<bool>,
+    /// The shell's exit code once it exited normally; `None` before, and for one killed by a
+    /// signal ([`TerminalPane::exit_status`]).
+    exit_status: Cell<Option<i32>>,
     /// Whether the block marks are wanted, as last told to the session
     /// ([`TerminalPane::refresh_marks_wanted`]).
     marks_wanted: Cell<bool>,
@@ -2299,6 +2307,7 @@ impl TerminalPane {
             driving: Cell::new(false),
             bar_pointer: Cell::new((false, false)),
             seen: Cell::new(true),
+            exit_status: Cell::new(None),
             marks_wanted: Cell::new(false),
             block_paced: Cell::new(None),
             block_tip,
@@ -2532,6 +2541,13 @@ impl TerminalPane {
     /// the key of main-queue returns, this is the name given outward.
     pub fn uuid(&self) -> &PaneUuid {
         &self.ivars().uuid
+    }
+
+    /// The shell's exit code, once it has exited normally; `None` before, and
+    /// for a shell killed by a signal — read when [`PaneHost::shell_exited`]
+    /// comes.
+    pub fn exit_status(&self) -> Option<i32> {
+        self.ivars().exit_status.get()
     }
 
     /// Whether closing has begun ([`PaneIvars::closed`]).
@@ -3758,7 +3774,7 @@ impl TerminalPane {
     /// The job running in the foreground outside the shell.
     /// Idle if there is no session or the reader thread has finished: the
     /// shell is gone and `child_pid` may be stale, a stale pid is not asked.
-    pub(crate) fn foreground(&self) -> Foreground {
+    pub fn foreground(&self) -> Foreground {
         let (Some(session), Some(&parent)) =
             (self.ivars().session.get(), self.ivars().shell_parent.get())
         else {
@@ -5145,6 +5161,9 @@ mod tests {
         }
         fn questions_changed(&self, pane: u64) {
             self.0.borrow_mut().push((pane, "questions".into()));
+        }
+        fn ports_changed(&self, pane: u64) {
+            self.0.borrow_mut().push((pane, "ports".into()));
         }
         fn cover(
             &self,

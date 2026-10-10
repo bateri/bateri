@@ -89,6 +89,13 @@ fn the_header_numbers_what_the_library_numbers() {
             ("BT_EVENT_FILES_DRAGGED", i64::from(kind::FILES_DRAGGED)),
             ("BT_EVENT_CARRY_PRESS", i64::from(kind::CARRY_PRESS)),
             ("BT_EVENT_QUESTIONS", i64::from(kind::QUESTIONS)),
+            ("BT_EVENT_COMMAND_STARTED", i64::from(kind::COMMAND_STARTED)),
+            (
+                "BT_EVENT_COMMAND_FINISHED",
+                i64::from(kind::COMMAND_FINISHED)
+            ),
+            ("BT_EVENT_DIRECTORY", i64::from(kind::DIRECTORY)),
+            ("BT_EVENT_PORTS", i64::from(kind::PORTS)),
         ])
     );
     assert_eq!(
@@ -113,6 +120,15 @@ fn the_header_numbers_what_the_library_numbers() {
             .map(|(name, value)| ((*name).to_owned(), i64::from(*value)))
             .collect()
     };
+    assert_eq!(
+        defines("BT_PHASE_"),
+        unsigned(&[
+            ("BT_PHASE_PROMPT", phase::PROMPT),
+            ("BT_PHASE_INPUT", phase::INPUT),
+            ("BT_PHASE_RUNNING", phase::RUNNING),
+            ("BT_PHASE_FINISHED", phase::FINISHED),
+        ])
+    );
     assert_eq!(
         defines("BT_AXIS_"),
         unsigned(&[

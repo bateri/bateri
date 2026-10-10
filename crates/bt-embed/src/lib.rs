@@ -21,16 +21,16 @@
 //! **Nothing unwinds into the host.** A panic inside a call is caught there and the call returns
 //! its failure value.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::ffi::{CStr, CString, OsStr, c_char, c_void};
-use std::os::unix::ffi::OsStrExt;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::ptr::null_mut;
 use std::rc::Rc;
 
-use bt_core::{InitialInput, Settings, Theme};
-use bt_shell_macos::embed::{self, Cover, Host, Identity, Source, TerminalPane};
+use bt_core::{CommandNews, CommandState, InitialInput, Session, Settings, Theme};
+use bt_shell_macos::embed::{self, Cover, Foreground, Host, Identity, Source, TerminalPane};
 use objc2::MainThreadMarker;
 use objc2::rc::Retained;
 use objc2_app_kit::{NSAutoresizingMaskOptions, NSView};
@@ -67,6 +67,30 @@ pub mod kind {
     pub const CARRY_PRESS: u32 = 9;
     /// A question of the pane was put off or taken up.
     pub const QUESTIONS: u32 = 10;
+    /// A command started: its line in the text (NULL when the screen no longer shows it), the
+    /// flag set for one run in our remote shell, its start time ([`bt_event_started`]).
+    pub const COMMAND_STARTED: u32 = 11;
+    /// A command ended: as [`COMMAND_STARTED`], with its exit code ([`bt_event_exit_code`]) and
+    /// how long it ran ([`bt_event_duration_ms`]).
+    pub const COMMAND_FINISHED: u32 = 12;
+    /// The shell's directory changed: the path in the text, the host in the detail and the flag
+    /// set in a remote session.
+    pub const DIRECTORY: u32 = 13;
+    /// The ports the pane's programs (or its server) listen on changed: read them again
+    /// (`bt_pane_port_count`).
+    pub const PORTS: u32 = 14;
+}
+
+/// What the shell is doing ([`bt_pane_phase`]); 0 without the shell integration.
+pub mod phase {
+    /// The prompt is being drawn.
+    pub const PROMPT: u32 = 1;
+    /// The user is typing a command.
+    pub const INPUT: u32 = 2;
+    /// A command runs.
+    pub const RUNNING: u32 = 3;
+    /// A command ended; the next prompt has not come yet.
+    pub const FINISHED: u32 = 4;
 }
 
 /// What the parse calls answer ([`bt_pane_config_set_settings_toml`] and the theme's).
@@ -556,6 +580,8 @@ pub unsafe extern "C" fn bt_pane_open(
             handler,
             context,
             closed: Cell::new(false),
+            command: Cell::new(None),
+            place: RefCell::new(None),
         });
         let mut config =
             embed::Config::new(mtm, id, host.clone(), Rc::new(identity), settings, theme);
@@ -831,6 +857,123 @@ pub unsafe extern "C" fn bt_pane_min_size(
     }
 }
 
+/// What the shell is doing (a `BT_PHASE_*`); 0 before the shell started and without the shell
+/// integration, which is what reports it.
+///
+/// # Safety
+/// As [`bt_pane_start`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn bt_pane_phase(pane: *mut BtPane) -> u32 {
+    // SAFETY: the caller's promise.
+    unsafe {
+        with_pane(pane, 0, |pane, _| {
+            match pane
+                .session()
+                .and_then(|session| session.shell_state())
+                .map(|state| state.phase)
+            {
+                Some(bt_core::ShellPhase::Prompt) => phase::PROMPT,
+                Some(bt_core::ShellPhase::Input) => phase::INPUT,
+                Some(bt_core::ShellPhase::Running) => phase::RUNNING,
+                Some(bt_core::ShellPhase::Finished) => phase::FINISHED,
+                None => 0,
+            }
+        })
+    }
+}
+
+/// The programs in the foreground in place of the shell, one name per line in process order, the
+/// caller's to free; NULL while the shell itself is in the foreground. An empty string: something
+/// runs whose name could not be read. Asks the process table — for a question, not a loop.
+///
+/// # Safety
+/// As [`bt_pane_start`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn bt_pane_foreground(pane: *mut BtPane) -> *mut c_char {
+    // SAFETY: the caller's promise.
+    unsafe {
+        with_pane(pane, null_mut(), |pane, _| match pane.foreground() {
+            Foreground::Idle => null_mut(),
+            Foreground::Running(names) => handed(names.join("\n").as_bytes()),
+        })
+    }
+}
+
+/// The host of the remote session the pane is in, as the user wrote it (`user@db1`), the
+/// caller's to free; NULL locally.
+///
+/// # Safety
+/// As [`bt_pane_start`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn bt_pane_remote_host(pane: *mut BtPane) -> *mut c_char {
+    // SAFETY: the caller's promise.
+    unsafe {
+        with_pane(pane, null_mut(), |pane, _| {
+            pane.session()
+                .and_then(|session| session.remote_target())
+                .map_or(null_mut(), |(_, target, _)| handed(target.host.as_bytes()))
+        })
+    }
+}
+
+/// The remote shell's directory as it last reported it, the caller's to free; NULL locally and
+/// before it reported one.
+///
+/// # Safety
+/// As [`bt_pane_start`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn bt_pane_remote_directory(pane: *mut BtPane) -> *mut c_char {
+    // SAFETY: the caller's promise.
+    unsafe {
+        with_pane(pane, null_mut(), |pane, _| {
+            pane.session()
+                .and_then(|session| session.remote_target())
+                .filter(|(_, _, cwd)| !cwd.is_empty())
+                .map_or(null_mut(), |(_, _, cwd)| handed(cwd.as_bytes()))
+        })
+    }
+}
+
+/// How many listening ports the pane knows: its programs' and, in a remote session, its
+/// server's. Kept up to date while `[shell] ports` is on; a PORTS event says when they changed.
+///
+/// # Safety
+/// As [`bt_pane_start`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn bt_pane_port_count(pane: *mut BtPane) -> usize {
+    // SAFETY: the caller's promise.
+    unsafe { with_pane(pane, 0, |pane, _| pane.listening_ports().len()) }
+}
+
+/// The `index`th listening port: `true` and its number in `port`, and in `remote` whether it is
+/// the server's; `false` past the end.
+///
+/// # Safety
+/// As [`bt_pane_start`]; `port` and `remote` NULL or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn bt_pane_port_at(
+    pane: *mut BtPane,
+    index: usize,
+    port: *mut u16,
+    remote: *mut bool,
+) -> bool {
+    // SAFETY: the caller's promises.
+    unsafe {
+        with_pane(pane, false, |pane, _| {
+            let Some(found) = pane.listening_ports().get(index).copied() else {
+                return false;
+            };
+            if !port.is_null() {
+                port.write(found.port);
+            }
+            if !remote.is_null() {
+                remote.write(found.remote);
+            }
+            true
+        })
+    }
+}
+
 /// The id the pane was configured with — the one its events carry. 0 for NULL.
 ///
 /// # Safety
@@ -890,6 +1033,9 @@ pub struct BtEvent {
     number: i64,
     x: f64,
     y: f64,
+    exit: Option<i32>,
+    duration_ms: Option<u64>,
+    started: Option<u32>,
 }
 
 impl BtEvent {
@@ -903,6 +1049,25 @@ impl BtEvent {
             number: 0,
             x: 0.0,
             y: 0.0,
+            exit: None,
+            duration_ms: None,
+            started: None,
+        }
+    }
+
+    /// A command's news, its line read from `session` while the screen still shows it.
+    fn command(kind: u32, pane: u64, state: CommandState, session: &Session) -> Self {
+        Self {
+            text: session
+                .command_line(state.id)
+                .and_then(|line| c_text(line.as_bytes())),
+            flag: state.remote,
+            exit: state.exit,
+            duration_ms: state
+                .elapsed
+                .map(|elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)),
+            started: state.started,
+            ..Self::new(kind, pane)
         }
     }
 }
@@ -1013,6 +1178,84 @@ pub unsafe extern "C" fn bt_event_y(event: *const BtEvent) -> f64 {
     unsafe { with_event(event, 0.0, |event| event.y) }
 }
 
+/// The exit code of a COMMAND_FINISHED or SHELL_EXITED event: `true` and written to `code`;
+/// `false` when it is not known (the shell printed it unreadably, a signal ended the shell) or the
+/// kind has none. A SHELL_EXITED code is the code of the process bateri started the shell with: on
+/// macOS that is `login`, which answers 0 whatever the shell's own exit code was — it tells a
+/// normal exit from a killed one, not the shell's status.
+///
+/// # Safety
+/// As [`bt_event_kind`]; `code` NULL or writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn bt_event_exit_code(event: *const BtEvent, code: *mut i32) -> bool {
+    // SAFETY: the caller's promises.
+    unsafe {
+        with_event(event, false, |event| {
+            let Some(exit) = event.exit else {
+                return false;
+            };
+            if !code.is_null() {
+                code.write(exit);
+            }
+            true
+        })
+    }
+}
+
+/// How long a COMMAND_FINISHED event's command ran, in milliseconds; -1 when its start was never
+/// seen or the kind has none.
+///
+/// # Safety
+/// As [`bt_event_kind`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn bt_event_duration_ms(event: *const BtEvent) -> i64 {
+    // SAFETY: the caller's promise.
+    unsafe {
+        with_event(event, -1, |event| {
+            event
+                .duration_ms
+                .map_or(-1, |ms| i64::try_from(ms).unwrap_or(i64::MAX))
+        })
+    }
+}
+
+/// When a command event's command started, seconds since the Unix epoch; 0 when unknown.
+///
+/// # Safety
+/// As [`bt_event_kind`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn bt_event_started(event: *const BtEvent) -> i64 {
+    // SAFETY: the caller's promise.
+    unsafe { with_event(event, 0, |event| event.started.map_or(0, i64::from)) }
+}
+
+/// Where the shell stands: a remote session's host, the directory as the shell last reported it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Place {
+    remote: bool,
+    host: Option<String>,
+    path: Option<Vec<u8>>,
+}
+
+impl Place {
+    fn of(session: &Session) -> Self {
+        match session.remote_target() {
+            Some((_, target, cwd)) => Self {
+                remote: true,
+                host: Some(target.host),
+                path: (!cwd.is_empty()).then(|| cwd.into_bytes()),
+            },
+            None => Self {
+                remote: false,
+                host: None,
+                path: session
+                    .working_directory()
+                    .map(|dir| dir.into_os_string().into_vec()),
+            },
+        }
+    }
+}
+
 /// The pane's owner on the C side: every event becomes a [`BtEvent`] handed to the host's handler,
 /// until the host closes the pane.
 struct CHost {
@@ -1020,6 +1263,10 @@ struct CHost {
     context: *mut c_void,
     /// The host closed the pane ([`bt_pane_close`]): its handle is gone, and so are its events.
     closed: Cell<bool>,
+    /// The newest command the last look saw ([`bt_core::command_news`]).
+    command: Cell<Option<CommandState>>,
+    /// Where the shell stood at the last look.
+    place: RefCell<Option<Place>>,
 }
 
 impl CHost {
@@ -1037,14 +1284,74 @@ impl CHost {
     fn plain(&self, kind: u32, pane: u64) {
         self.send(BtEvent::new(kind, pane));
     }
+
+    /// The session of pane `pane`, if it is open and started.
+    fn session(pane: u64) -> Option<std::sync::Arc<Session>> {
+        let mtm = MainThreadMarker::new()?;
+        embed::pane(mtm, pane).and_then(|pane| pane.session().cloned())
+    }
+
+    /// The commands' news since the last look: each start and end the look did not see.
+    fn commands(&self, pane: u64) {
+        let Some(session) = Self::session(pane) else {
+            return;
+        };
+        let now = session.last_command();
+        let before = self.command.get();
+        let before_now = before
+            .filter(|before| now.is_some_and(|now| now.id != before.id))
+            .and_then(|before| session.command(before.id));
+        for news in bt_core::command_news(before, before_now, now) {
+            let event = match news {
+                CommandNews::Started(state) => {
+                    BtEvent::command(kind::COMMAND_STARTED, pane, state, &session)
+                }
+                CommandNews::Finished(state) => {
+                    BtEvent::command(kind::COMMAND_FINISHED, pane, state, &session)
+                }
+            };
+            self.send(event);
+        }
+        if now.is_some() {
+            self.command.set(now);
+        }
+    }
+
+    /// The directory's news: where the shell stands, if it moved since the last look.
+    fn place(&self, pane: u64) {
+        let Some(session) = Self::session(pane) else {
+            return;
+        };
+        let now = Place::of(&session);
+        if self.place.borrow().as_ref() == Some(&now) {
+            return;
+        }
+        self.place.replace(Some(now.clone()));
+        if now.path.is_none() && now.host.is_none() {
+            return;
+        }
+        self.send(BtEvent {
+            text: now.path.as_deref().and_then(c_text),
+            detail: now.host.as_deref().and_then(|host| c_text(host.as_bytes())),
+            flag: now.remote,
+            ..BtEvent::new(kind::DIRECTORY, pane)
+        });
+    }
 }
 
 impl Host for CHost {
     fn title_changed(&self, pane: u64) {
         self.plain(kind::TITLE, pane);
+        self.place(pane);
     }
     fn shell_exited(&self, pane: u64) {
-        self.plain(kind::SHELL_EXITED, pane);
+        let exit = MainThreadMarker::new()
+            .and_then(|mtm| embed::pane(mtm, pane))
+            .and_then(|pane| pane.exit_status());
+        self.send(BtEvent {
+            exit,
+            ..BtEvent::new(kind::SHELL_EXITED, pane)
+        });
     }
     fn focused(&self, pane: u64) {
         self.plain(kind::FOCUSED, pane);
@@ -1053,7 +1360,11 @@ impl Host for CHost {
         self.plain(kind::UPLOADS, pane);
     }
     fn activity_changed(&self, pane: u64) {
+        self.commands(pane);
         self.plain(kind::ACTIVITY, pane);
+    }
+    fn ports_changed(&self, pane: u64) {
+        self.plain(kind::PORTS, pane);
     }
     fn notify(&self, pane: u64, title: &str, body: &str) {
         self.send(BtEvent {

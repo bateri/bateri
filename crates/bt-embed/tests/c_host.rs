@@ -8,7 +8,8 @@
 //! session (an ssh login) it says so and passes, as bateri's own launch does.
 
 use std::cell::RefCell;
-use std::ffi::{CString, c_void};
+use std::ffi::{CStr, CString, c_void};
+use std::path::Path;
 use std::process::Command;
 use std::ptr::null_mut;
 use std::time::{Duration, Instant};
@@ -21,29 +22,56 @@ use objc2_app_kit::{
 };
 use objc2_foundation::{NSDate, NSDefaultRunLoopMode, NSPoint, NSRect, NSRunLoop, NSSize};
 
-/// What the host keeps: the pane's handle until it closes it, and the kinds it heard.
+/// What the host keeps: the pane's handle until it closes it, and what it heard.
 struct Host {
     pane: *mut BtPane,
     heard: Vec<u32>,
+    /// The finished command's exit code, duration and line.
+    finished: Option<(Option<i32>, i64, String)>,
+    /// The directories the shell reported.
+    directories: Vec<String>,
+    /// The shell's exit code, when it exited.
+    exit: Option<Option<i32>>,
 }
 
 /// The pane's id: any number the host picks.
 const PANE: u64 = 7;
 
 unsafe extern "C" fn heard(context: *mut c_void, event: *const BtEvent) {
-    // SAFETY: the context is the `RefCell<Host>` below, alive for the run.
+    // SAFETY: the context is the `RefCell<Host>` below, alive for the run; the event is lent for
+    // this call.
     let host = unsafe { &*context.cast::<RefCell<Host>>() };
-    // SAFETY: the event is lent for this call.
     let (kind, pane) = unsafe { (bt_event_kind(event), bt_event_pane(event)) };
     assert_eq!(pane, PANE, "every event names the pane");
-    // Held across the close: an event arriving from inside it would find the host borrowed and
-    // fail here — a host's handle must not be reached once it is closing.
+    // SAFETY: as above.
+    let text = unsafe {
+        let text = bt_event_text(event);
+        (!text.is_null()).then(|| CStr::from_ptr(text).to_string_lossy().into_owned())
+    };
+    let mut code = 0;
+    // SAFETY: as above.
+    let exit = unsafe { bt_event_exit_code(event, &raw mut code) }.then_some(code);
+    // Held across the calls below: an event arriving from inside them would find the host
+    // borrowed and fail here — a host's handle must not be reached once it is closing.
     let mut host = host.borrow_mut();
     host.heard.push(kind);
-    if kind == kind::SHELL_EXITED {
-        let handle = std::mem::replace(&mut host.pane, null_mut());
-        // SAFETY: the handle is the open pane's, not used again.
-        unsafe { bt_pane_close(handle) };
+    match kind {
+        kind::COMMAND_FINISHED => {
+            // SAFETY: as above.
+            let duration = unsafe { bt_event_duration_ms(event) };
+            host.finished = Some((exit, duration, text.unwrap_or_default()));
+            // The command is done: the host ends the shell, typed as the user would.
+            // SAFETY: the pane is open.
+            assert!(unsafe { bt_pane_write(host.pane, b"exit 3\n".as_ptr(), 7) });
+        }
+        kind::DIRECTORY => host.directories.extend(text),
+        kind::SHELL_EXITED => {
+            host.exit = Some(exit);
+            let handle = std::mem::replace(&mut host.pane, null_mut());
+            // SAFETY: the handle is the open pane's, not used again.
+            unsafe { bt_pane_close(handle) };
+        }
+        _ => {}
     }
 }
 
@@ -94,7 +122,16 @@ fn main() {
     let host = RefCell::new(Host {
         pane: null_mut(),
         heard: Vec::new(),
+        finished: None,
+        directories: Vec::new(),
+        exit: None,
     });
+    let scripts = Path::new(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../assets/shell/zsh"
+    ))
+    .canonicalize()
+    .expect("the shell integration's scripts");
     // SAFETY: every string is alive for its call; the configuration is consumed by the open; the
     // context outlives the pane.
     unsafe {
@@ -119,9 +156,13 @@ fn main() {
             c("BT_EMBED_OUT").as_ptr(),
             c(out.to_str().expect("a UTF-8 path")).as_ptr()
         ));
+        assert!(bt_pane_config_set_zsh_scripts(
+            config,
+            c(scripts.to_str().expect("a UTF-8 path")).as_ptr()
+        ));
         assert!(bt_pane_config_set_command(
             config,
-            c(r#"printf '%s|%s' "$BT_EMBED_PROBE" "$PWD" > "$BT_EMBED_OUT"; exit"#).as_ptr()
+            c(r#"printf '%s|%s' "$BT_EMBED_PROBE" "$PWD" > "$BT_EMBED_OUT"; false"#).as_ptr()
         ));
         let pane = bt_pane_open(Retained::as_ptr(&content).cast_mut().cast(), config);
         assert!(!pane.is_null(), "the pane opens");
@@ -130,7 +171,7 @@ fn main() {
         assert!(bt_pane_start(pane), "the shell starts");
     }
 
-    let deadline = Instant::now() + Duration::from_secs(15);
+    let deadline = Instant::now() + Duration::from_secs(20);
     while !host.borrow().heard.contains(&kind::SHELL_EXITED) && Instant::now() < deadline {
         NSRunLoop::currentRunLoop().runMode_beforeDate(
             // SAFETY: a Foundation constant, alive for the process.
@@ -138,12 +179,13 @@ fn main() {
             &NSDate::dateWithTimeIntervalSinceNow(0.05),
         );
     }
-    let heard = host.borrow().heard.clone();
+    let host = host.into_inner();
+    let heard = host.heard.clone();
     assert!(
         heard.contains(&kind::SHELL_EXITED),
         "the shell's exit reached the handler; heard {heard:?}"
     );
-    assert!(host.borrow().pane.is_null(), "the handler closed the pane");
+    assert!(host.pane.is_null(), "the handler closed the pane");
     assert!(
         content.subviews().is_empty(),
         "a closed pane leaves its parent"
@@ -154,6 +196,33 @@ fn main() {
         written,
         format!("{probe}|{}", dir.display()),
         "the shell had the host's variable and directory"
+    );
+    let started = heard
+        .iter()
+        .position(|&kind| kind == kind::COMMAND_STARTED)
+        .expect("the command's start was told");
+    let finished = heard
+        .iter()
+        .position(|&kind| kind == kind::COMMAND_FINISHED)
+        .expect("the command's end was told");
+    assert!(started < finished, "{heard:?}");
+    let (exit, duration, line) = host.finished.expect("a finished command");
+    assert_eq!(exit, Some(1), "`false` ended it");
+    assert!(duration >= 0, "its duration was measured");
+    assert!(line.contains("BT_EMBED_PROBE"), "its line: {line:?}");
+    assert!(
+        host.directories
+            .iter()
+            .any(|reported| Path::new(reported) == dir),
+        "the shell's directory was told: {:?}",
+        host.directories
+    );
+    // The code is the shell's login process's: macOS `login` answers 0 whatever the shell's own
+    // `exit 3` said. A normal exit is still told apart from a signal (no code).
+    assert!(
+        matches!(host.exit, Some(Some(_))),
+        "the exit came with a code: {:?}",
+        host.exit
     );
     println!("c_host: ok ({} events)", heard.len());
 }

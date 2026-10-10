@@ -81,6 +81,7 @@ use polling::{Event as PollingEvent, PollMode, Poller};
 use crate::block_index::{self, BlockPass, Observation};
 use crate::cluster::{ClusterId, Clusters};
 use crate::color::{self, LinearRgba, Theme};
+use crate::commands::{CommandId, CommandState, command_state};
 use crate::dock::{self, Dock, DockBudget, DockCols, DockEdit, DockPoint};
 use crate::handler::ClusterHandler;
 use crate::identity::{LC_TERMINAL, PaneUuid, TERM_PROGRAM, TERM_PROGRAM_VERSION};
@@ -8978,22 +8979,57 @@ impl Session {
     /// **Journal-neutral:** reads only.
     pub fn last_block_info(&self) -> Option<BlockInfo> {
         let key = lock(&self.shell).last_block()?;
-        let (command, depth) = {
-            let term = self.term.lock();
-            if term.mode().contains(TermMode::ALT_SCREEN) {
-                return None;
-            }
-            let boundary = self.clear_boundary.load(Ordering::Relaxed);
-            let (top, bottom) = (term.topmost_line().0, term.bottommost_line().0);
-            let line = (top..=bottom).rev().find(|&probe| {
-                row_block(&term, Line(probe)) == Some(key)
-                    && !block_row_continues(&term, Line(probe - 1), key, boundary)
-            })?;
-            let history = i64::try_from(term.history_size()).ok()?;
-            let depth = u32::try_from(i64::from(line) + history).ok()?;
-            (block_text(&term, line, key), depth)
-        };
+        let (command, depth) = self.find_block(key)?;
         self.ledger_info(key, command, depth)
+    }
+
+    /// Block `key`'s command row as text and its depth (rows from the history's top), found
+    /// walking up from the bottom — the newest block's start is the last one there. `None` on
+    /// the alternate screen (the row is in the primary screen, out of reach) and when the row is
+    /// no longer in the history or past a terminal-side clear. One `Term` round.
+    fn find_block(&self, key: BlockKey) -> Option<(String, u32)> {
+        let term = self.term.lock();
+        if term.mode().contains(TermMode::ALT_SCREEN) {
+            return None;
+        }
+        let boundary = self.clear_boundary.load(Ordering::Relaxed);
+        let (top, bottom) = (term.topmost_line().0, term.bottommost_line().0);
+        let line = (top..=bottom).rev().find(|&probe| {
+            row_block(&term, Line(probe)) == Some(key)
+                && !block_row_continues(&term, Line(probe - 1), key, boundary)
+        })?;
+        let history = i64::try_from(term.history_size()).ok()?;
+        let depth = u32::try_from(i64::from(line) + history).ok()?;
+        Some((block_text(&term, line, key), depth))
+    }
+
+    /// The newest command as the shell's ledger knows it ([`CommandState`]) — what a host
+    /// that reports commands one by one looks at on every activity edge
+    /// ([`crate::command_news`]). Our remote shell's while its session runs, else the local
+    /// shell's; `None` before any prompt. One leaf-lock round; `Term` is not touched.
+    ///
+    /// **Journal-neutral:** reads only.
+    pub fn last_command(&self) -> Option<CommandState> {
+        let log = lock(&self.shell);
+        command_state(&log, log.last_block()?)
+    }
+
+    /// Command `id` as the ledger knows it now; `None` once the ledger has let it go. One
+    /// leaf-lock round.
+    ///
+    /// **Journal-neutral:** reads only.
+    pub fn command(&self, id: CommandId) -> Option<CommandState> {
+        command_state(&lock(&self.shell), id.0)
+    }
+
+    /// Command `id`'s line as the screen shows it — its prompt's rows joined
+    /// ([`BlockInfo::command`]'s text and limits). `None` on the alternate screen and once its
+    /// row has left the history. One `Term` round, a walk up from the bottom: for an event, not
+    /// for the frame path.
+    ///
+    /// **Journal-neutral:** reads only.
+    pub fn command_line(&self, id: CommandId) -> Option<String> {
+        self.find_block(id.0).map(|(text, _)| text)
     }
 
     /// The shell's last OSC 7 directory; `None` if none ever came.

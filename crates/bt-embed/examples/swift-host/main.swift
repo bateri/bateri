@@ -1,11 +1,12 @@
 // A Swift application hosting bateri's terminal pane through bt_embed.h — nothing of bateri's
 // application on the way, as a product that embeds the pane would have it.
 //
-// With no argument it is the check `make embed-swift` runs: the pane's shell is given a variable
-// and a directory and a command that writes both to a file and exits; the shell's exit must reach
-// this host as an event, and the file must hold what was given — after the layout engine has
-// answered a drag and planned its landing. With `--interactive` it is a plain
-// window with a shell, for a person to try.
+// With no argument it is the check `make embed-swift` runs: the pane's shell, with the shell
+// integration (`BT_EMBED_ZSH`), is given a variable and a directory and a command that writes both
+// to a file and fails; its start and end must reach this host as events, with its exit code, and
+// the host then types `exit` — the shell's exit must reach it too, and the file must hold what was
+// given. Before that, the layout engine answers a drag and plans its landing. With `--interactive`
+// it is a plain window with a shell, for a person to try.
 
 import AppKit
 
@@ -22,6 +23,8 @@ guard bt_embed_abi_version() == BT_EMBED_ABI_VERSION else {
 final class Host {
     var pane: OpaquePointer?
     var heard: [UInt32] = []
+    /// The finished command's exit code, as its event told it.
+    var commandExit: Int32?
     let probe = "probe-\(getpid())"
     let directory: URL
     let output: URL
@@ -56,6 +59,13 @@ final class Host {
         var failures: [String] = []
         if written != expected { failures.append("the shell wrote \"\(written)\", expected \"\(expected)\"") }
         if !heard.contains(BT_EVENT_TITLE) { failures.append("no title event") }
+        if commandExit != 1 { failures.append("the command's exit came as \(String(describing: commandExit)), expected 1") }
+        if let started = heard.firstIndex(of: BT_EVENT_COMMAND_STARTED),
+           let finished = heard.firstIndex(of: BT_EVENT_COMMAND_FINISHED) {
+            if started > finished { failures.append("the command ended before it started") }
+        } else {
+            failures.append("no command events")
+        }
         if uuid.count != 36 || uuid != uuid.uppercased() { failures.append("uuid \"\(uuid)\"") }
         if failures.isEmpty {
             print("embed-swift: ok (layout, \(heard.count) events)")
@@ -142,6 +152,14 @@ let handler: BtEventHandler = { context, event in
         if let title = host.take(bt_pane_title(host.pane)) {
             NSApp.windows.first?.title = title
         }
+    case BT_EVENT_COMMAND_FINISHED:
+        var code: Int32 = 0
+        host.commandExit = bt_event_exit_code(event, &code) ? code : nil
+        if !interactive {
+            // The command is done: the host ends the shell, typed as the user would.
+            let exit = Array("exit\n".utf8)
+            _ = bt_pane_write(host.pane, exit, exit.count)
+        }
     case BT_EVENT_SHELL_EXITED:
         host.shellExited()
     case BT_EVENT_NOTIFY:
@@ -181,8 +199,13 @@ if !interactive {
     _ = bt_pane_config_set_working_directory(config, host.directory.path)
     _ = bt_pane_config_add_env(config, "BT_EMBED_PROBE", host.probe)
     _ = bt_pane_config_add_env(config, "BT_EMBED_OUT", host.output.path)
+    guard let scripts = ProcessInfo.processInfo.environment["BT_EMBED_ZSH"] else {
+        print("embed-swift: FAILED — BT_EMBED_ZSH names no shell integration scripts")
+        exit(1)
+    }
+    _ = bt_pane_config_set_zsh_scripts(config, scripts)
     _ = bt_pane_config_set_command(
-        config, "printf '%s|%s' \"$BT_EMBED_PROBE\" \"$PWD\" > \"$BT_EMBED_OUT\"; exit")
+        config, "printf '%s|%s' \"$BT_EMBED_PROBE\" \"$PWD\" > \"$BT_EMBED_OUT\"; false")
 }
 
 guard let content = window.contentView,

@@ -65,6 +65,9 @@ impl Host for Recorder {
     fn questions_changed(&self, pane: u64) {
         self.heard("questions", pane);
     }
+    fn ports_changed(&self, pane: u64) {
+        self.heard("ports", pane);
+    }
     fn cover(&self, _pane: &TerminalPane) -> Option<Rc<dyn Cover>> {
         None
     }

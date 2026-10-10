@@ -42,9 +42,11 @@ use crate::child;
 use crate::launch::{self, Adopted, Launch};
 use crate::pane::{Holder, PaneLaunch};
 
+pub use crate::footer::ListeningPort;
 pub use crate::launch::Identity;
 pub use crate::pane::{PaneHost as Host, TerminalPane};
 pub use crate::sheets::{Cover, Owner, OwnerSlot, WeakCover};
+pub use bt_shell_common::jobs::Foreground;
 pub use bt_shell_common::notices::Source;
 
 /// What a pane is opened with.

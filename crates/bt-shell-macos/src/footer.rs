@@ -154,26 +154,53 @@ impl TerminalPane {
     /// forwards listen on — those are the server's) and, in a remote pane,
     /// the server's.
     pub(crate) fn publish_ports(&self) {
-        let (mut shown, forwarded) = {
-            let remote = self.remote_ports().borrow();
-            (remote.footer_ports(), remote.forwarded_locals())
-        };
-        shown.extend(
-            self.listeners()
-                .borrow()
-                .iter()
-                .filter(|listener| !forwarded.contains(&listener.port))
-                .map(|listener| FooterPort {
-                    port: listener.port,
-                    open: true,
-                }),
-        );
+        let (remote, local) = self.shown_ports();
+        let shown: Vec<FooterPort> = remote.into_iter().chain(local).collect();
         if let Some(session) = self.session() {
             session.set_ports(&shown);
         }
         // The ports take room the load indicator may have had: its popover
         // follows it, the hand cursor's rectangles too.
         self.stats_gauge_changed();
+        self.host().ports_changed(self.id());
+    }
+
+    /// The ports the dock shows, the server's first and then the pane's own
+    /// (but not the ones our forwards listen on — those are the server's).
+    fn shown_ports(&self) -> (Vec<FooterPort>, Vec<FooterPort>) {
+        let (remote, forwarded) = {
+            let remote = self.remote_ports().borrow();
+            (remote.footer_ports(), remote.forwarded_locals())
+        };
+        let local = self
+            .listeners()
+            .borrow()
+            .iter()
+            .filter(|listener| !forwarded.contains(&listener.port))
+            .map(|listener| FooterPort {
+                port: listener.port,
+                open: true,
+            })
+            .collect();
+        (remote, local)
+    }
+
+    /// The ports the dock shows, for a host that shows them its own way:
+    /// the server's (`remote`) in a remote session, then the pane's own.
+    /// Empty while `[shell] ports` is off or before the first scan.
+    pub fn listening_ports(&self) -> Vec<ListeningPort> {
+        let (remote, local) = self.shown_ports();
+        remote
+            .into_iter()
+            .map(|port| ListeningPort {
+                port: port.port,
+                remote: true,
+            })
+            .chain(local.into_iter().map(|port| ListeningPort {
+                port: port.port,
+                remote: false,
+            }))
+            .collect()
     }
 
     /// The ports menu's content: the tab's own listeners and the server's
@@ -330,6 +357,14 @@ pub(crate) fn open_url(url: &str) {
 }
 
 /// The ports menu's content ([`TerminalPane::ports_model`]).
+/// A port a pane's programs listen on, or its server's ([`TerminalPane::listening_ports`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ListeningPort {
+    pub port: u16,
+    /// The server's, in a remote session.
+    pub remote: bool,
+}
+
 #[derive(Clone, Debug, Default)]
 pub(crate) struct PortsModel {
     pub(crate) local: Vec<Listener>,

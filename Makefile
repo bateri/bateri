@@ -666,9 +666,10 @@ terminfo:
 #    macOS build; `/target/` is already in .gitignore), crate downloads in a
 #    named volume.
 # The C interface's sample host (`crates/bt-embed`): a Swift application built with swiftc from
-# the hand-written header opens a pane, gives its shell a variable, a directory and a command
-# that writes both to a file and exits, and passes when the shell's exit reaches it as an event
-# and the file holds what it gave. Not in `make check` (swiftc and a window); the release runs it.
+# the hand-written header asks the layout engine a verdict and a plan, then opens a pane with the
+# shell integration, gives its shell a variable, a directory and a command that writes both to a
+# file and fails, and passes when the command's start and end (with its exit code) and the shell's
+# exit reach it as events and the file holds what it gave. Not in `make check` (swiftc and a window); the release runs it.
 # The static library is built here only — in a debug build it is ~400 MB, and nothing else
 # links it. The system libraries are what rustc prints for it (`cargo rustc -p bt-embed --lib
 # --crate-type staticlib -- --print native-static-libs`); one gone missing fails the link loudly.
@@ -685,7 +686,7 @@ embed-swift:
 		-o $(EMBED_DIR)/swift-host
 	@if [ "$$(launchctl managername 2>/dev/null)" != Aqua ]; then \
 		echo "embed-swift: SKIPPED (no window server session)"; exit 0; fi; \
-	$(EMBED_DIR)/swift-host
+	BT_EMBED_ZSH=$(CURDIR)/assets/shell/zsh $(EMBED_DIR)/swift-host
 
 LINUX_DOCKERFILE = tools/linux/Dockerfile
 LINUX_RUST = $(shell sed -n 's/^FROM rust:\([0-9]*\.[0-9]*\)-.*/\1/p' $(LINUX_DOCKERFILE))
