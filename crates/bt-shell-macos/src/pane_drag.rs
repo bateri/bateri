@@ -81,7 +81,7 @@ use objc2_foundation::{
 
 use crate::app::{self, AppDelegate};
 use crate::arrange;
-use crate::card::CORNER_PT;
+use crate::card::corner_pt;
 use crate::split::{Direction, Rect, Tree, Verdict};
 use crate::tab_bar::{self, PaneTarget, Tint};
 use crate::tabs::{DRAG_SLOP, SPRING_DELAY};
@@ -96,8 +96,9 @@ const FADE_SECS: f64 = 0.12;
 const CARD_OFFSET: f64 = 16.0;
 const CARD_HEADER: f64 = 24.0;
 const CARD_CORNER: f64 = 9.0;
-/// The regions' corner, and the veil's: a pane's card has [`CORNER_PT`].
-const REGION_CORNER: f64 = 6.0;
+/// How far inside a card its dashed outline runs (the carried pane's place,
+/// a block's panes in their region), in points.
+const OUTLINE_INSET: f64 = 4.0;
 /// Keyboard code of Esc.
 const ESCAPE: u16 = 53;
 
@@ -413,20 +414,33 @@ impl Zones {
 /// The carried pane's place: its card under a veil of the ground, a dashed
 /// outline inside.
 fn paint_source(rect: NSRect, colors: Colors) {
-    tab_bar::rounded(rect, CORNER_PT, Tint::of(colors.ground, 0.78), None);
-    let inner = NSRect::new(
-        NSPoint::new(rect.origin.x + 4.0, rect.origin.y + 4.0),
-        NSSize::new(rect.size.width - 8.0, rect.size.height - 8.0),
-    );
-    let path = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(
-        inner,
-        REGION_CORNER,
-        REGION_CORNER,
-    );
+    tab_bar::rounded(rect, corner_pt(), Tint::of(colors.ground, 0.78), None);
+    let path = outline(rect);
     dashed(&path);
     path.setLineWidth(1.2);
     Tint::of(colors.ink, 0.35).color().setStroke();
     path.stroke();
+}
+
+/// A card's place, rounded as the card is: a region is where a card will
+/// stand, the veil is over one, and a different corner read as a second shape
+/// laid on the card.
+fn card_path(rect: NSRect) -> Retained<NSBezierPath> {
+    NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(rect, corner_pt(), corner_pt())
+}
+
+/// The dashed outline [`OUTLINE_INSET`] inside the card at `rect`: concentric
+/// with the card's corner, the corner less the inset.
+fn outline(rect: NSRect) -> Retained<NSBezierPath> {
+    let inner = NSRect::new(
+        NSPoint::new(rect.origin.x + OUTLINE_INSET, rect.origin.y + OUTLINE_INSET),
+        NSSize::new(
+            (rect.size.width - 2.0 * OUTLINE_INSET).max(0.0),
+            (rect.size.height - 2.0 * OUTLINE_INSET).max(0.0),
+        ),
+    );
+    let corner = (corner_pt() - OUTLINE_INSET).max(0.0);
+    NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(inner, corner, corner)
 }
 
 /// A dash pattern on `path`: five points on, four off.
@@ -440,8 +454,7 @@ fn dashed(path: &NSBezierPath) {
 /// One region: its fill, its line and its word.
 fn paint_mark(mark: &Mark, colors: Colors) {
     let rect = rect_of(mark.rect);
-    let path =
-        NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(rect, REGION_CORNER, REGION_CORNER);
+    let path = card_path(rect);
     let tone = match mark.kind {
         Kind::Lands | Kind::Suggests => colors.accent,
         Kind::Refused => colors.error,
@@ -471,18 +484,7 @@ fn paint_mark(mark: &Mark, colors: Colors) {
 
 /// One pane of a block that has landed, outlined dashed inside its region.
 fn paint_inner(rect: NSRect, colors: Colors) {
-    let inner = NSRect::new(
-        NSPoint::new(rect.origin.x + 4.0, rect.origin.y + 4.0),
-        NSSize::new(
-            (rect.size.width - 8.0).max(0.0),
-            (rect.size.height - 8.0).max(0.0),
-        ),
-    );
-    let path = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(
-        inner,
-        REGION_CORNER,
-        REGION_CORNER,
-    );
+    let path = outline(rect);
     dashed(&path);
     path.setLineWidth(1.0);
     Tint::of(colors.accent, 0.7).color().setStroke();
@@ -553,11 +555,7 @@ fn pill(rect: NSRect, text: &str, tone: u32) {
 
 /// The one warning: the whole area hatched, the words in the middle.
 fn paint_warning(bounds: NSRect, text: &str, colors: Colors) {
-    let path = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(
-        bounds,
-        REGION_CORNER,
-        REGION_CORNER,
-    );
+    let path = card_path(bounds);
     Tint::of(colors.error, 0.04).color().setFill();
     path.fill();
     hatch(&path, bounds, Tint::of(colors.error, 0.14));

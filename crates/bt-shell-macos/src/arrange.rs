@@ -18,7 +18,13 @@
 //! Reduce Motion nothing shrinks, the capsule and the frame are the whole
 //! signal. Behind each pane sits a *plate*, a rounded fill that casts the
 //! shadow: the pane's own layer clips to its corners and would clip a shadow
-//! with them. Nothing here asks for a GPU frame.
+//! with them. The plate never shows past the pane's frame: it is laid out
+//! once, by its **frame**, at the smallest look a lifted pane takes ([`LIFT`])
+//! and never moves while lifted. A transform set on a view AppKit has just
+//! added does not hold (the plate stood full size around the shrunk pane),
+//! and a plate following the pointer's 1.5 % on AppKit's clock trailed the
+//! pane's Core Animation for a few frames — both read as a second frame
+//! outside the pane's own. Nothing here asks for a GPU frame.
 //!
 //! **The pointer.** While lifted, a local monitor of mouse motion (installed
 //! on the lift, removed on the set-down) tells which pane the pointer is
@@ -53,7 +59,7 @@ use objc2_foundation::{NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
 use objc2_quartz_core::CAMediaTimingFunction;
 
 use crate::app;
-use crate::card::{self, CORNER_PT};
+use crate::card::{self, corner_pt};
 use crate::pane::TerminalPane;
 use crate::sheets;
 use crate::split::{Axis, Rect};
@@ -380,6 +386,13 @@ pub(crate) fn shrunk(rect: Rect, scale: f64) -> Rect {
         rect.y + (rect.height - height) / 2.0,
         width,
         height,
+    )
+}
+
+fn ns_rect(rect: Rect) -> NSRect {
+    NSRect::new(
+        NSPoint::new(rect.x, rect.y),
+        NSSize::new(rect.width, rect.height),
     )
 }
 
@@ -931,7 +944,7 @@ fn plate(mtm: MainThreadMarker, theme: &Theme, frame: NSRect) -> Retained<NSBox>
     plate.setBoxType(NSBoxType::Custom);
     plate.setTitlePosition(NSTitlePosition::NoTitle);
     plate.setBorderWidth(0.0);
-    plate.setCornerRadius(CORNER_PT);
+    plate.setCornerRadius(corner_pt());
     plate.setFillColor(&Tint::of(theme.background, 1.0).color());
     let shadow = NSShadow::new();
     shadow.setShadowBlurRadius(22.0);
@@ -981,7 +994,7 @@ pub(crate) struct Scene<'a> {
 /// panes, the panes it forced to read as cards, and the pointer watch.
 pub(crate) struct Raised {
     overlay: Retained<Overlay>,
-    plates: Vec<(u64, Retained<NSBox>)>,
+    plates: Vec<Retained<NSBox>>,
     forced: Vec<u64>,
     hover: Cell<Option<u64>>,
     still: bool,
@@ -1019,13 +1032,6 @@ impl Raised {
             }
             pane.set_raised(true);
 
-            let plate = plate(mtm, &theme, frame);
-            let below: &NSView = pane;
-            container.addSubview_positioned_relativeTo(
-                &plate,
-                NSWindowOrderingMode::Below,
-                Some(below),
-            );
             let shrink = if still {
                 1.0
             } else if hover == Some(pane.id()) {
@@ -1033,13 +1039,23 @@ impl Raised {
             } else {
                 LIFT
             };
-            if let Some(layer) = plate.layer() {
-                card::lift(&layer, at, shrink, 0.0);
-            }
+            // At the smallest lift, whatever the pointer: no pane look is
+            // smaller, so no lift or set-down shows the plate past the frame.
+            let plate = plate(
+                mtm,
+                &theme,
+                ns_rect(shrunk(at, if still { 1.0 } else { LIFT })),
+            );
+            let below: &NSView = pane;
+            container.addSubview_positioned_relativeTo(
+                &plate,
+                NSWindowOrderingMode::Below,
+                Some(below),
+            );
             if let Some(layer) = pane.layer() {
                 card::lift(&layer, at, shrink, if still { 0.0 } else { LIFT_SECS });
             }
-            plates.push((pane.id(), plate));
+            plates.push(plate);
 
             let Some(entry) = entries.iter().find(|entry| entry.pane == pane.id()) else {
                 continue;
@@ -1074,7 +1090,7 @@ impl Raised {
             window.invalidateCursorRectsForView(&overlay);
         }
 
-        let fade_in: Vec<Retained<NSBox>> = plates.iter().map(|(_, plate)| plate.clone()).collect();
+        let fade_in = plates.clone();
         if still {
             for plate in &fade_in {
                 plate.setAlphaValue(1.0);
@@ -1122,18 +1138,8 @@ impl Raised {
             let Some(pane) = panes.iter().find(|pane| pane.id() == id) else {
                 continue;
             };
-            let at = rect_of(pane.frame());
-            for layer in [
-                pane.layer(),
-                self.plates
-                    .iter()
-                    .find(|(plate, _)| *plate == id)
-                    .and_then(|(_, plate)| plate.layer()),
-            ]
-            .into_iter()
-            .flatten()
-            {
-                card::lift(&layer, at, scale, 0.12);
+            if let Some(layer) = pane.layer() {
+                card::lift(&layer, rect_of(pane.frame()), scale, 0.12);
             }
         }
     }
@@ -1168,7 +1174,7 @@ impl Raised {
         let views: Vec<Retained<NSView>> = self
             .plates
             .iter()
-            .map(|(_, plate)| Retained::into_super(plate.clone()))
+            .map(|plate| Retained::into_super(plate.clone()))
             .chain([Retained::into_super(self.overlay.clone())])
             .collect();
         if secs <= 0.0 {

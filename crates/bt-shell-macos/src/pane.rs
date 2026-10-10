@@ -3240,7 +3240,7 @@ impl TerminalPane {
         self.ivars().jump.paint(&theme);
     }
 
-    /// What tells this pane's focus: the card's frame is brighter on the
+    /// What tells this pane's focus: the card's frame is a step stronger on the
     /// focused pane, and `veiled` shows the dim veil over an unfocused one
     /// (`[appearance] dim_unfocused_splits`). The decision is the owner's
     /// (`TerminalTab::refresh_look`); it asks for no frame — both are AppKit's.

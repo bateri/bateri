@@ -533,7 +533,20 @@ impl Theme {
     /// carrying them is pulled back. It's still ink, so it has to be legible —
     /// [`separator_linear`] is one step dimmer and that is no longer ink.
     pub const fn quiet_linear(&self) -> LinearRgba {
-        linear_rgba(dim_toward(rgb(self.dim), self.background_rgb()))
+        linear_rgba(self.quiet_rgb())
+    }
+
+    /// The same tone as **sRGB** bytes (`[r, g, b]`) — the focused card's
+    /// frame in a split tab (`bt-shell`, `NSColor` sRGB): one step above the
+    /// separator the other cards are framed in, the pair
+    /// [`Theme::separator_srgb`] has.
+    pub const fn quiet_srgb(&self) -> [u8; 3] {
+        let Rgb { r, g, b } = self.quiet_rgb();
+        [r, g, b]
+    }
+
+    const fn quiet_rgb(&self) -> Rgb {
+        dim_toward(rgb(self.dim), self.background_rgb())
     }
 
     /// The hairlines' color, **linear** RGBA.
@@ -563,10 +576,7 @@ impl Theme {
     }
 
     const fn separator_rgb(&self) -> Rgb {
-        dim_toward(
-            dim_toward(rgb(self.dim), self.background_rgb()),
-            self.background_rgb(),
-        )
+        dim_toward(self.quiet_rgb(), self.background_rgb())
     }
 
     /// The **linear** RGBA of the palette's color number `index`.

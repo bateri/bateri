@@ -1,9 +1,11 @@
 //! A pane's look in a split tab: the **card**. With one pane the tab shows it
 //! edge to edge; with two or more every pane is a card — a gap between and
 //! around ([`GAP_PT`], the frame computation's: `split::Spacing`), corners
-//! rounded and clipped ([`CORNER_PT`]), a one-pixel frame in the dividers'
-//! tone, brighter on the focused pane. Nothing is veiled: all panes read at
-//! once (the veil is `[appearance] dim_unfocused_splits`, the pane's own
+//! rounded and clipped ([`corner_pt`], concentric with the window's corner), a frame [`FRAME_PT`] wide in the
+//! dividers' tone at full strength — as plain as the divider a split had before the
+//! cards, and no fainter: two quiet frames side by side are what tells the
+//! panes apart — and one step stronger on the focused pane (the quiet text's
+//! tone, `Theme::quiet_srgb`). Nothing is veiled: all panes read at once (the veil is `[appearance] dim_unfocused_splits`, the pane's own
 //! `DimOverlay`).
 //!
 //! **Two layers, two jobs.** The corners are the pane's *own* backing layer
@@ -23,6 +25,7 @@
 //! content frame replaces it at the final size.
 
 use std::cell::Cell;
+use std::sync::OnceLock;
 
 use bt_core::Theme;
 use objc2::rc::Retained;
@@ -30,7 +33,10 @@ use objc2::runtime::AnyObject;
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{NSBox, NSBoxType, NSColor, NSTitlePosition, NSView};
 use objc2_core_foundation::CGRect;
-use objc2_foundation::{NSNumber, NSObjectProtocol, NSPoint, NSString, NSValue, ns_string};
+use objc2_foundation::{
+    NSNumber, NSObjectProtocol, NSOperatingSystemVersion, NSPoint, NSProcessInfo, NSString,
+    NSValue, ns_string,
+};
 use objc2_quartz_core::{
     CABasicAnimation, CALayer, CAMediaTiming, CAMediaTimingFunction, CATransaction, CATransform3D,
     NSValueCATransform3DAdditions,
@@ -43,34 +49,63 @@ use crate::split::{self, Rect, Slide};
 /// that a split keeps the room a divider would have taken.
 pub(crate) const GAP_PT: f64 = 6.0;
 
-/// A card's corner radius, in points. A design constant, the canvas's.
-pub(crate) const CORNER_PT: f64 = 10.0;
+/// The window's own corner radius, in points. AppKit has no public reading
+/// of it, so it is measured: macOS 26 draws this app's window (a compact
+/// toolbar over a full-size content view) with a continuous curve of
+/// ~20.5 pt — fitted to the window's picture at 2× —; the releases before it
+/// round windows at 10 pt (the known value, not measured here).
+fn window_corner_pt() -> f64 {
+    static RADIUS: OnceLock<f64> = OnceLock::new();
+    *RADIUS.get_or_init(|| {
+        let tahoe = NSOperatingSystemVersion {
+            majorVersion: 26,
+            minorVersion: 0,
+            patchVersion: 0,
+        };
+        if NSProcessInfo::processInfo().isOperatingSystemAtLeastVersion(tahoe) {
+            20.5
+        } else {
+            10.0
+        }
+    })
+}
+
+/// A card's corner radius, in points: concentric with the window's corner —
+/// the window's radius less the gap around the cards — so the gap is as wide
+/// at the window's corners as along its edges. A fixed 10 pt was a tighter
+/// corner than macOS 26's window: the gap narrowed to ~4 pt there.
+pub(crate) fn corner_pt() -> f64 {
+    (window_corner_pt() - GAP_PT).max(0.0)
+}
 
 /// The slide's length, in seconds. A design constant, the canvas's 220 ms.
 pub(crate) const SLIDE_SECS: f64 = 0.22;
+
+/// The frame's width, in points, snapped to whole device pixels: two on a
+/// Retina screen. One device pixel was a line the eye lost on a light theme,
+/// and the frame is all that tells two cards apart.
+pub(crate) const FRAME_PT: f64 = 1.0;
 
 /// A move's slide: panes that change places settle in 200 ms, a touch quicker
 /// than a pane count changing.
 pub(crate) const MOVE_SECS: f64 = 0.20;
 
-/// The frame's opacity on the focused pane and on the others: the dividers'
-/// tone at full strength, and at half. Design constants (the canvas's frame
-/// is the foreground at 0.40 and 0.16 — the tone is already that foreground
-/// dimmed twice, so these two land close).
-const FRAME_ALPHA_FOCUSED: f64 = 1.0;
-const FRAME_ALPHA_QUIET: f64 = 0.5;
-
 pub(crate) struct FrameIvars {
-    /// The dividers' tone (`Theme::separator_srgb`).
+    /// The dividers' tone (`Theme::separator_srgb`): the frame of a pane
+    /// without the focus.
     ink: Cell<[u8; 3]>,
-    /// Whether the pane holds the focus: the frame is brighter.
+    /// One step stronger (`Theme::quiet_srgb`): the focused pane's frame, and
+    /// every frame while lifted.
+    focus_ink: Cell<[u8; 3]>,
+    /// Whether the pane holds the focus: the frame is a step stronger.
     focused: Cell<bool>,
     /// Whether the pane is a card now.
     carded: Cell<bool>,
     /// Whether the pane is lifted for arranging ([`crate::arrange`]): every
     /// frame reads as the focused one.
     raised: Cell<bool>,
-    /// The frame's width, in points: one device pixel at the window's scale.
+    /// The frame's width, in points: [`FRAME_PT`] snapped to the window's
+    /// device pixels.
     width: Cell<f64>,
 }
 
@@ -100,6 +135,7 @@ impl FrameBox {
     pub(crate) fn new(mtm: MainThreadMarker, theme: &Theme) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(FrameIvars {
             ink: Cell::new(theme.separator_srgb()),
+            focus_ink: Cell::new(theme.quiet_srgb()),
             focused: Cell::new(false),
             carded: Cell::new(false),
             raised: Cell::new(false),
@@ -110,7 +146,7 @@ impl FrameBox {
         this.setBoxType(NSBoxType::Custom);
         this.setTitlePosition(NSTitlePosition::NoTitle);
         this.setFillColor(&NSColor::clearColor());
-        this.setCornerRadius(CORNER_PT);
+        this.setCornerRadius(corner_pt());
         this.setBorderWidth(0.0);
         this.setAlphaValue(0.0);
         this.repaint();
@@ -120,10 +156,11 @@ impl FrameBox {
     /// The theme's dividers' tone.
     pub(crate) fn paint(&self, theme: &Theme) {
         self.ivars().ink.set(theme.separator_srgb());
+        self.ivars().focus_ink.set(theme.quiet_srgb());
         self.repaint();
     }
 
-    /// Whether the pane holds the focus: the frame is brighter.
+    /// Whether the pane holds the focus: the frame is a step stronger.
     pub(crate) fn set_focused(&self, focused: bool) {
         if self.ivars().focused.replace(focused) != focused {
             self.repaint();
@@ -142,15 +179,15 @@ impl FrameBox {
         }
     }
 
-    /// Makes the pane a card, or not, at the window's `scale` (the frame is one
-    /// device pixel). `true` if the answer changed.
+    /// Makes the pane a card, or not, at the window's `scale` (the frame is
+    /// [`FRAME_PT`] in whole device pixels). `true` if the answer changed.
     ///
     /// Leaving the card only turns the frame **invisible**; what it drew stays
     /// drawn, so a slide can fade it out instead of cutting it.
     pub(crate) fn set_carded(&self, carded: bool, scale: f64) -> bool {
         let iv = self.ivars();
         if carded {
-            let width = 1.0 / scale;
+            let width = (FRAME_PT * scale).round().max(1.0) / scale;
             if iv.width.replace(width) != width {
                 self.setBorderWidth(width);
             }
@@ -161,19 +198,19 @@ impl FrameBox {
 
     fn repaint(&self) {
         let iv = self.ivars();
-        let [r, g, b] = iv.ink.get().map(|byte| f64::from(byte) / 255.0);
-        let alpha = if iv.focused.get() || iv.raised.get() {
-            FRAME_ALPHA_FOCUSED
+        let ink = if iv.focused.get() || iv.raised.get() {
+            iv.focus_ink.get()
         } else {
-            FRAME_ALPHA_QUIET
+            iv.ink.get()
         };
-        self.setBorderColor(&NSColor::colorWithSRGBRed_green_blue_alpha(r, g, b, alpha));
+        let [r, g, b] = ink.map(|byte| f64::from(byte) / 255.0);
+        self.setBorderColor(&NSColor::colorWithSRGBRed_green_blue_alpha(r, g, b, 1.0));
     }
 }
 
 /// Rounds and clips the pane's own layer, or gives the corners back.
 pub(crate) fn round(layer: &CALayer, carded: bool) {
-    layer.setCornerRadius(if carded { CORNER_PT } else { 0.0 });
+    layer.setCornerRadius(if carded { corner_pt() } else { 0.0 });
     layer.setMasksToBounds(carded);
 }
 
@@ -386,7 +423,7 @@ pub(crate) fn slide(pane: &NSView, frame: &NSView, change: &Change, secs: f64) {
     // A card that stops being one keeps its clip until the next layout, so its
     // corners are still round while they open out; the radius is already 0.
     layer.setMasksToBounds(true);
-    let corners = |card: bool| NSNumber::numberWithDouble(if card { CORNER_PT } else { 0.0 });
+    let corners = |card: bool| NSNumber::numberWithDouble(if card { corner_pt() } else { 0.0 });
     play_for(
         &layer,
         ns_string!("cornerRadius"),

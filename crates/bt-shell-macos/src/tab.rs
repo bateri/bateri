@@ -33,7 +33,7 @@
 //! **The focused pane** is the pane of the window's first responder
 //! ([`TerminalTab::focused_pane`]): the title, `⇄`, upload percentage and
 //! the inheritance of a new tab or split come from it. ⌘W closes it,
-//! and in the last pane the tab. Its card's frame is the brighter one — the
+//! and in the last pane the tab. Its card's frame is the stronger one — the
 //! other panes sit under the dim veil only with `dim_unfocused_splits`
 //! ([`TerminalTab::refresh_look`]). Split, navigation, resizing, equalizing
 //! and pane closing drop the zoom (⇧⌘↩) — resizing and equalizing because the
@@ -427,7 +427,7 @@ impl TerminalTab {
     }
 
     /// What tells the focused pane from the others: its card's frame is
-    /// brighter, and — only with `[appearance] dim_unfocused_splits` — the
+    /// a step stronger, and — only with `[appearance] dim_unfocused_splits` — the
     /// others sit under the dim veil. No veil with a single pane. AppKit's
     /// work, it asks for no frame.
     pub(crate) fn refresh_look(&self) {
