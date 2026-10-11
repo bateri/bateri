@@ -10,9 +10,10 @@
 //! scroll bar from the settings and the system.
 //!
 //! **What a host is told** ([`Host`]): every event a pane has for its owner, on the main thread,
-//! with the pane's id. No event has a default a host could forget to answer, except the two
+//! with the pane's id. No event has a default a host could forget to answer, except the three
 //! whose default is a working answer (the remote copy goes to the general pasteboard; a pane
-//! that is never moved between owners hears no move).
+//! that is never moved between owners hears no move; a link the host does not take is opened by
+//! the pane as bateri opens it).
 //!
 //! **What a host does after [`open`]**: it puts the pane — an `NSView` — in its view hierarchy,
 //! tells it its frame is set ([`TerminalPane::observe_frame`]) and starts its shell
