@@ -97,6 +97,7 @@ fn the_header_numbers_what_the_library_numbers() {
             ("BT_EVENT_DIRECTORY", i64::from(kind::DIRECTORY)),
             ("BT_EVENT_PORTS", i64::from(kind::PORTS)),
             ("BT_EVENT_PROGRAM_STATUS", i64::from(kind::PROGRAM_STATUS)),
+            ("BT_EVENT_OPEN_LINK", i64::from(kind::OPEN_LINK)),
         ])
     );
     assert_eq!(
@@ -121,6 +122,14 @@ fn the_header_numbers_what_the_library_numbers() {
             .map(|(name, value)| ((*name).to_owned(), i64::from(*value)))
             .collect()
     };
+    assert_eq!(
+        defines("BT_LINK_"),
+        unsigned(&[
+            ("BT_LINK_URL", link::URL),
+            ("BT_LINK_FILE", link::FILE),
+            ("BT_LINK_DIRECTORY", link::DIRECTORY),
+        ])
+    );
     assert_eq!(
         defines("BT_PROGRAM_"),
         unsigned(&[
@@ -363,4 +372,40 @@ fn null_handles_answer_their_failure_values() {
         bt_pane_config_free(null_mut());
         bt_string_free(null_mut());
     }
+}
+
+#[test]
+fn a_link_the_handler_takes_is_not_the_panes_to_open() {
+    unsafe extern "C" fn takes_line_twelve(_: *mut c_void, event: *const BtEvent) {
+        // SAFETY: the event is lent for this call.
+        unsafe {
+            assert_eq!(bt_event_kind(event), kind::OPEN_LINK);
+            if bt_event_line(event) == 12 {
+                assert_eq!(bt_event_column(event), 5);
+                assert_eq!(bt_event_number(event), i64::from(link::FILE));
+                bt_event_set_handled(event);
+            }
+        }
+    }
+    let host = CHost {
+        handler: Some(takes_line_twelve),
+        context: null_mut(),
+        closed: Cell::new(false),
+        command: Cell::new(None),
+        place: RefCell::new(None),
+        programs: RefCell::new(Vec::new()),
+    };
+    let at_twelve = LinkRequest::Path {
+        path: "/tmp/main.rs".into(),
+        directory: false,
+        line: Some(12),
+        col: Some(5),
+    };
+    assert!(host.open_link(1, &at_twelve), "the handler took it");
+    assert!(
+        !host.open_link(1, &LinkRequest::Url("https://example.com".to_owned())),
+        "left to the pane"
+    );
+    host.closed.set(true);
+    assert!(!host.open_link(1, &at_twelve), "a closed pane asks nobody");
 }

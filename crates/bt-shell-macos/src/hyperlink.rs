@@ -77,6 +77,7 @@ use objc2_foundation::{NSArray, NSPoint, NSRect, NSSize, NSString, NSURL, ns_str
 use crate::child;
 use crate::clipboard;
 use crate::links::{self, Content, LinkAction, Resolved};
+use crate::pane::LinkRequest;
 use crate::pointer;
 use crate::remote_files::{self, RemoteEntry};
 use crate::remote_helper::{self, Answer, Query, Request};
@@ -149,6 +150,32 @@ impl Verified {
             query,
             index: self.index,
         }
+    }
+}
+
+/// What the pane's owner is asked about a link the user opened
+/// ([`crate::pane::PaneHost::open_link`]).
+fn request(link: &Verified) -> LinkRequest {
+    let (line, col) = match link.hit.kind {
+        LinkKind::Path { line, col } => (line, col),
+        LinkKind::Url | LinkKind::Osc8 => (None, None),
+    };
+    if let Some((path, entry)) = &link.remote {
+        return LinkRequest::RemotePath {
+            path: path.clone(),
+            directory: matches!(entry, RemoteEntry::Dir(_)),
+            line,
+            col,
+        };
+    }
+    match &link.resolved {
+        Some(Resolved { path, entry }) => LinkRequest::Path {
+            path: path.clone(),
+            directory: matches!(entry, links::Entry::Dir),
+            line,
+            col,
+        },
+        None => LinkRequest::Url(link.hit.target.clone()),
     }
 }
 
@@ -952,6 +979,11 @@ impl BateriView {
     /// its own policy: a file previews
     /// ([`crate::pane::TerminalPane::preview_remote`]), a folder does nothing.
     fn open_link(&self, link: &Verified) {
+        if let Some(pane) = self.pane()
+            && pane.host().open_link(pane.id(), &request(link))
+        {
+            return;
+        }
         if let Some((path, entry)) = &link.remote {
             if matches!(entry, RemoteEntry::File { .. })
                 && let Some(pane) = self.pane()

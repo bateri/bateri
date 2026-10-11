@@ -164,11 +164,45 @@ pub trait PaneHost {
     /// the server's — changed ([`TerminalPane::listening_ports`]): a scan
     /// found new ones or a server went. Scans run while `[shell] ports` is on.
     fn ports_changed(&self, pane: u64);
+    /// The user opened a link (⌘-click, or the link menu's Open): `true` if
+    /// the owner took it — a file shown in its own editor at its line — and
+    /// the pane does nothing more. The default leaves it to the pane, which
+    /// opens it as bateri does (`links::action`'s white list: a URL or a
+    /// document in its default application, the rest revealed, an uncommon
+    /// scheme asked about first).
+    fn open_link(&self, _pane: u64, _link: &LinkRequest) -> bool {
+        false
+    }
     /// What this pane's questions cover ([`crate::sheets::Cover`]): bateri's
     /// tab container, so a question blocks that tab and not the window.
     /// `None` puts them on the pane's window, blocking all of it. Asked
     /// from where the pane stands, even while it closes.
     fn cover(&self, pane: &TerminalPane) -> Option<Rc<dyn crate::sheets::Cover>>;
+}
+
+/// A link the user opened, as the pane's owner may take it
+/// ([`PaneHost::open_link`]): the link as found and checked — a path exists
+/// by the time it is asked about.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LinkRequest {
+    /// A URL as written: plain text, or an OSC 8 link's target. Its scheme
+    /// is anything the program wrote.
+    Url(String),
+    /// A local file or directory, with the line and column a
+    /// `path:line:col` named.
+    Path {
+        path: std::path::PathBuf,
+        directory: bool,
+        line: Option<u32>,
+        col: Option<u32>,
+    },
+    /// A path on the remote session's server, absolute there.
+    RemotePath {
+        path: String,
+        directory: bool,
+        line: Option<u32>,
+        col: Option<u32>,
+    },
 }
 
 /// Column count of the smallest pane: a split that would drop

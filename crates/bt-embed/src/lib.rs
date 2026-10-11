@@ -32,7 +32,9 @@ use std::rc::Rc;
 use bt_core::{
     CommandNews, CommandState, InitialInput, ProgramRecord, ProgramState, Session, Settings, Theme,
 };
-use bt_shell_macos::embed::{self, Cover, Foreground, Host, Identity, Source, TerminalPane};
+use bt_shell_macos::embed::{
+    self, Cover, Foreground, Host, Identity, LinkRequest, Source, TerminalPane,
+};
 use objc2::MainThreadMarker;
 use objc2::rc::Retained;
 use objc2_app_kit::{NSAutoresizingMaskOptions, NSView};
@@ -85,6 +87,22 @@ pub mod kind {
     /// changed or went: its id in the text (empty for the root record), its state in the number
     /// (a `BT_PROGRAM_*`; 0: it went) and its progress ([`bt_event_progress`]).
     pub const PROGRAM_STATUS: u32 = 15;
+    /// The user opened a link (⌘-click, or the link menu's Open): the URL or path in the text,
+    /// what it is in the number (a `BT_LINK_*`), the flag set for a path on the remote session's
+    /// server (its host in the detail), a path's line and column ([`bt_event_line`],
+    /// [`bt_event_column`]). The handler that opens it itself calls [`bt_event_set_handled`]
+    /// and the pane does nothing more; otherwise the pane opens it as bateri does.
+    pub const OPEN_LINK: u32 = 16;
+}
+
+/// What an opened link is ([`kind::OPEN_LINK`]'s number).
+pub mod link {
+    /// A URL, as written: plain text or an OSC 8 link's target, any scheme.
+    pub const URL: u32 = 1;
+    /// A file that exists.
+    pub const FILE: u32 = 2;
+    /// A directory that exists.
+    pub const DIRECTORY: u32 = 3;
 }
 
 /// A program status record's state ([`kind::PROGRAM_STATUS`], `bt_pane_program_state`).
@@ -1135,6 +1153,10 @@ pub struct BtEvent {
     duration_ms: Option<u64>,
     started: Option<u32>,
     progress: Option<u8>,
+    line: Option<u32>,
+    column: Option<u32>,
+    /// The handler took the event's request ([`bt_event_set_handled`]).
+    handled: Cell<bool>,
 }
 
 impl BtEvent {
@@ -1152,6 +1174,9 @@ impl BtEvent {
             duration_ms: None,
             started: None,
             progress: None,
+            line: None,
+            column: None,
+            handled: Cell::new(false),
         }
     }
 
@@ -1319,6 +1344,37 @@ pub unsafe extern "C" fn bt_event_duration_ms(event: *const BtEvent) -> i64 {
     }
 }
 
+/// An OPEN_LINK event's line (1-based, as `path:12` names it); 0 when it names none.
+///
+/// # Safety
+/// As [`bt_event_kind`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn bt_event_line(event: *const BtEvent) -> u32 {
+    // SAFETY: the caller's promise.
+    unsafe { with_event(event, 0, |event| event.line.unwrap_or(0)) }
+}
+
+/// An OPEN_LINK event's column (1-based, as `path:12:5` names it); 0 when it names none.
+///
+/// # Safety
+/// As [`bt_event_kind`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn bt_event_column(event: *const BtEvent) -> u32 {
+    // SAFETY: the caller's promise.
+    unsafe { with_event(event, 0, |event| event.column.unwrap_or(0)) }
+}
+
+/// The handler took the event's request: an OPEN_LINK it opened itself — the pane does nothing
+/// more. Only during the handler's call; for other kinds it changes nothing.
+///
+/// # Safety
+/// As [`bt_event_kind`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn bt_event_set_handled(event: *const BtEvent) {
+    // SAFETY: the caller's promise.
+    unsafe { with_event(event, (), |event| event.handled.set(true)) }
+}
+
 /// A PROGRAM_STATUS event's progress, from 0 to 100; -1 when the record gives none.
 ///
 /// # Safety
@@ -1383,18 +1439,32 @@ struct CHost {
 
 impl CHost {
     fn send(&self, event: BtEvent) {
+        self.send_ref(&event);
+    }
+
+    fn send_ref(&self, event: &BtEvent) {
         if self.closed.get() {
             return;
         }
         if let Some(handler) = self.handler {
             // SAFETY: the host's promise at `bt_pane_config_set_event_handler`: the handler takes
             // the context it gave and an event lent for the call.
-            unsafe { handler(self.context, &event) };
+            unsafe { handler(self.context, event) };
         }
     }
 
     fn plain(&self, kind: u32, pane: u64) {
         self.send(BtEvent::new(kind, pane));
+    }
+
+    /// Sends `event` and reads `answer` off it once the handler is done; `false` when nothing
+    /// heard it (the pane closed, no handler).
+    fn send_and(&self, event: BtEvent, answer: impl Fn(&BtEvent) -> bool) -> bool {
+        if self.closed.get() || self.handler.is_none() {
+            return false;
+        }
+        self.send_ref(&event);
+        answer(&event)
     }
 
     /// The session of pane `pane`, if it is open and started.
@@ -1507,6 +1577,54 @@ impl Host for CHost {
     }
     fn ports_changed(&self, pane: u64) {
         self.plain(kind::PORTS, pane);
+    }
+    fn open_link(&self, pane: u64, request: &LinkRequest) -> bool {
+        let base = BtEvent::new(kind::OPEN_LINK, pane);
+        let event = match request {
+            LinkRequest::Url(url) => BtEvent {
+                text: c_text(url.as_bytes()),
+                number: i64::from(link::URL),
+                ..base
+            },
+            LinkRequest::Path {
+                path,
+                directory,
+                line,
+                col,
+            } => BtEvent {
+                text: c_text(path.as_os_str().as_bytes()),
+                number: i64::from(if *directory {
+                    link::DIRECTORY
+                } else {
+                    link::FILE
+                }),
+                line: *line,
+                column: *col,
+                ..base
+            },
+            LinkRequest::RemotePath {
+                path,
+                directory,
+                line,
+                col,
+            } => BtEvent {
+                text: c_text(path.as_bytes()),
+                detail: Self::session(pane)
+                    .and_then(|session| session.remote_target())
+                    .and_then(|(_, target, _)| c_text(target.host.as_bytes())),
+                number: i64::from(if *directory {
+                    link::DIRECTORY
+                } else {
+                    link::FILE
+                }),
+                flag: true,
+                line: *line,
+                column: *col,
+                ..base
+            },
+        };
+        let handled = |event: &BtEvent| event.handled.get();
+        self.send_and(event, handled)
     }
     fn notify(&self, pane: u64, title: &str, body: &str) {
         self.send(BtEvent {

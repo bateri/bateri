@@ -71,6 +71,12 @@ listed here under **Going**, with what replaces it.
   that changed, came or went is told with its id, state (`BT_PROGRAM_*`) and
   progress (`bt_event_progress`). The records can also be queried
   (`bt_pane_program_count` and the getters beside it).
+- `BT_EVENT_OPEN_LINK`: the user opened a link (Command-click, or the link
+  menu's Open). The event carries a URL as written, or a file or directory
+  that exists, local or on the remote session's server, with the line and
+  column a `path:12:5` named (`bt_event_line`, `bt_event_column`). A handler
+  that opens it itself calls `bt_event_set_handled`, and the pane does
+  nothing more. Otherwise the pane opens it as bateri does.
 - `BT_EVENT_SHELL_EXITED` carries an exit code. It is the code of the
   shell's login process, and on macOS `login` answers 0 whatever the shell's
   own code was: it tells a normal exit from a killed one, not the shell's

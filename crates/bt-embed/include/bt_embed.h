@@ -94,6 +94,16 @@ typedef void (*BtEventHandler)(void *context, const BtEvent *event);
  * (BT_PROGRAM_*; GONE when it went), bt_event_progress. */
 #define BT_EVENT_PROGRAM_STATUS 15u
 
+/* The user opened a link (Command-click, or the link menu's Open): text =
+ * the URL or path, number = BT_LINK_*, flag = a path on the remote session's
+ * server (detail = its host), bt_event_line / bt_event_column. A handler that
+ * opens it itself calls bt_event_set_handled and the pane does nothing more;
+ * otherwise the pane opens it as bateri does. */
+#define BT_EVENT_OPEN_LINK 16u
+#define BT_LINK_URL 1           /* as written, any scheme */
+#define BT_LINK_FILE 2          /* exists */
+#define BT_LINK_DIRECTORY 3     /* exists */
+
 #define BT_PROGRAM_GONE 0u      /* cleared, or ended by the next prompt */
 #define BT_PROGRAM_IDLE 1u
 #define BT_PROGRAM_WORKING 2u
@@ -134,6 +144,12 @@ int64_t bt_event_duration_ms(const BtEvent *event);
 int64_t bt_event_started(const BtEvent *event);
 /* PROGRAM_STATUS: the progress, 0 to 100; -1 when the record gives none. */
 int32_t bt_event_progress(const BtEvent *event);
+/* OPEN_LINK: the line and column a path:12:5 names, 1-based; 0 when none. */
+uint32_t bt_event_line(const BtEvent *event);
+uint32_t bt_event_column(const BtEvent *event);
+/* The handler took the event's request (an OPEN_LINK it opened itself).
+ * Only during the handler's call. */
+void bt_event_set_handled(const BtEvent *event);
 
 /* ---- Configuration ----------------------------------------------------- */
 
