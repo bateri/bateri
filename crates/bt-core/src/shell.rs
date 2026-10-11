@@ -111,6 +111,7 @@ use std::time::{Duration, Instant, SystemTime};
 use unicode_width::UnicodeWidthChar;
 
 use crate::dock::{self, DockPoint};
+use crate::notify::{self, NOTIFY_OSC, NOTIFY_PAYLOAD_LIMIT, Notification, Pending};
 use crate::program_status::{
     self, PROGRESS_OSC, PROGRESS_PAYLOAD_LIMIT, ProgramStatus, Report, STATUS_OSC,
     STATUS_PAYLOAD_LIMIT,
@@ -2117,6 +2118,9 @@ pub(crate) struct ShellLog {
     /// marks, not in them: a program reports whether or not the shell has
     /// integration, and the shell's next prompt ends what it reported.
     pub(crate) program: ProgramStatus,
+    /// The notifications programs asked for, until the host takes them
+    /// ([`crate::Session::take_notifications`]).
+    pub(crate) notes: Pending,
 }
 
 /// How many commands ended, by code: `ok` with `0`, `failed` with any other;
@@ -2385,6 +2389,7 @@ impl ShellLog {
             end_since: None,
             ends: Ends::default(),
             program: ProgramStatus::default(),
+            notes: Pending::default(),
         }
     }
 
@@ -2609,6 +2614,12 @@ impl ShellLog {
             }
             ScanEvent::Progress(report) => {
                 outcome.status = self.program.apply_progress(report, Instant::now());
+            }
+            // Not gated by the remote session either: a program over ssh asking to be
+            // noticed is the common case.
+            ScanEvent::Notify(note) => {
+                self.notes.push(note);
+                outcome.notified = true;
             }
             // **While a remote session is active OSC 8133 is ignored**: the
             // local shell is behind ssh and the only 8133 that can arrive is a remote
@@ -3709,8 +3720,11 @@ enum Arm {
     Cwd,
     /// [`STATUS_OSC`] — the program status arm.
     Status,
-    /// [`PROGRESS_OSC`] — ConEmu's progress, on iTerm2's notification number.
+    /// [`PROGRESS_OSC`] — ConEmu's progress, on iTerm2's notification number; a payload
+    /// that is no progress report may be the notification ([`notify::osc9`]).
     Progress,
+    /// [`NOTIFY_OSC`] — urxvt's notification.
+    Notify,
 }
 
 /// The answer of [`ShellLog::apply_scan_answering`]: the notifications the reader
@@ -3747,6 +3761,8 @@ pub(crate) struct ScanOutcome {
     /// A program status record changed or went (`OSC 7501`, or the prompt that
     /// ended what it reported) → [`crate::Wake::program_status_changed`].
     pub(crate) status: bool,
+    /// A program asked for a notification → [`crate::Wake::notification`].
+    pub(crate) notified: bool,
 }
 
 /// The event the scanner hands out.
@@ -3798,6 +3814,9 @@ pub(crate) enum ScanEvent<'a> {
     /// `OSC 9 ; 4 ; …` mapped onto the root record ([`program_status::progress`]);
     /// applied only until a program has reported with `OSC 7501`.
     Progress(Report),
+    /// A notification a program asked for (`OSC 9 ; text`, `OSC 777 ; notify ; …`):
+    /// owned, rare.
+    Notify(Notification),
 }
 
 /// The mirror arm's events.
@@ -3842,8 +3861,10 @@ pub(crate) struct Scanner {
     /// The payload after `7501;`. A fourth buffer, a fourth bound (the protocol's
     /// 4096): one buffer cannot fit four bounds at once.
     status: Vec<u8>,
-    /// The payload after `9;`: a fifth buffer, a fifth (small) bound.
+    /// The payload after `9;`: a fifth buffer, a fifth bound.
     progress: Vec<u8>,
+    /// The payload after `777;`: a sixth buffer, the notification's bound.
+    notify: Vec<u8>,
     /// The intermediate buffer base64 output lands in; reused for every field.
     decoded: Vec<u8>,
     /// The mirror's decoded state — the buffer [`DockEvent::Update`] lends.
@@ -3886,6 +3907,7 @@ impl Scanner {
             // Allocated on the **first** report instead: most sessions never see one.
             status: Vec::new(),
             progress: Vec::new(),
+            notify: Vec::new(),
             decoded: Vec::new(),
             line: DockState::default(),
             path: String::new(),
@@ -4009,6 +4031,10 @@ impl Scanner {
                             self.progress.clear();
                             ScanState::Payload(Arm::Progress)
                         }
+                        (true, NOTIFY_OSC) => {
+                            self.notify.clear();
+                            ScanState::Payload(Arm::Notify)
+                        }
                         _ => ScanState::Skip,
                     };
                 }
@@ -4117,17 +4143,37 @@ impl Scanner {
             ScanState::Payload(Arm::Progress) => {
                 if is_terminator(byte) {
                     let report = program_status::progress(&self.progress);
+                    let note = match report {
+                        Some(_) => None,
+                        None => notify::osc9(&self.progress),
+                    };
                     self.close(byte);
                     if let Some(report) = report {
                         on_event(ScanEvent::Progress(report));
+                    } else if let Some(note) = note {
+                        on_event(ScanEvent::Notify(note));
                     }
                 } else if is_ignored(byte) {
                 } else if self.progress.len() == PROGRESS_PAYLOAD_LIMIT {
-                    // Past the bound it is not a progress report but a notification's
-                    // text: dropped, skipped to the terminator.
+                    // Past the bound it is neither a progress report nor a notification
+                    // anyone reads: dropped, skipped to the terminator.
                     self.state = ScanState::Skip;
                 } else {
                     self.progress.push(byte);
+                }
+            }
+            ScanState::Payload(Arm::Notify) => {
+                if is_terminator(byte) {
+                    let note = notify::osc777(&self.notify);
+                    self.close(byte);
+                    if let Some(note) = note {
+                        on_event(ScanEvent::Notify(note));
+                    }
+                } else if is_ignored(byte) {
+                } else if self.notify.len() == NOTIFY_PAYLOAD_LIMIT {
+                    self.state = ScanState::Skip;
+                } else {
+                    self.notify.push(byte);
                 }
             }
             ScanState::Skip => {
@@ -4203,6 +4249,7 @@ impl Scanner {
         self.cwd.clear();
         self.status.clear();
         self.progress.clear();
+        self.notify.clear();
         self.state = if terminator == 0x1b {
             ScanState::Escape
         } else {
@@ -7771,7 +7818,8 @@ mod tests {
             | ScanEvent::RemoteMark(_)
             | ScanEvent::StatusQuery
             | ScanEvent::Status(_)
-            | ScanEvent::Progress(_) => {}
+            | ScanEvent::Progress(_)
+            | ScanEvent::Notify(_) => {}
         });
 
         assert_eq!(marks, vec![Mark::PromptEnd]);
@@ -10142,6 +10190,7 @@ mod tests {
                 ScanEvent::StatusQuery => "status?".to_owned(),
                 ScanEvent::Status(report) => format!("status {report:?}"),
                 ScanEvent::Progress(report) => format!("progress {report:?}"),
+                ScanEvent::Notify(note) => format!("notify {note:?}"),
             });
         });
         assert_eq!(

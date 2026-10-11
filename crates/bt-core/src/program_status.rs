@@ -59,9 +59,10 @@ const MAX_MSG: usize = 2048;
 pub(crate) const PROGRESS_OSC: u32 = 9;
 
 /// The upper bound of the `ESC ] 9 ;` payload, in bytes. `4;3;100` is seven; the
-/// arm also meets iTerm2's notification text, which is unbounded and not ours — past
-/// the bound it is dropped and skipped to its terminator, silently.
-pub(crate) const PROGRESS_PAYLOAD_LIMIT: usize = 64;
+/// arm also carries iTerm2's notification text ([`crate::notify::osc9`]), so the bound
+/// is the notification's — past it the sequence is dropped and skipped to its
+/// terminator, silently.
+pub(crate) const PROGRESS_PAYLOAD_LIMIT: usize = crate::notify::NOTIFY_PAYLOAD_LIMIT;
 
 /// What the terminal answers to `OSC 7501 ; ?`: the same body, so a program that
 /// asked knows the terminal reads reports. Fixed bytes — nothing of the stream is

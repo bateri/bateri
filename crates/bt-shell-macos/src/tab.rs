@@ -170,6 +170,15 @@ impl PaneHost for TabHost {
         // The dock shows the ports itself (`TerminalPane::publish_ports`).
     }
 
+    fn bell(&self, _pane: u64) {
+        // bateri does not ring or flash: a bell has never shown in its tabs.
+    }
+
+    fn program_notification(&self, _pane: u64, _title: Option<&str>, _body: &str) {
+        // A program's own notification is not shown by bateri's tabs (its
+        // notifications are its own: an upload's end, a lost connection).
+    }
+
     fn questions_changed(&self, _pane: u64) {
         // The tab's "waiting for an answer" mark: its window's bar draws its
         // chips again.

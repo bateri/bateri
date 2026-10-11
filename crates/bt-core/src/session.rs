@@ -2239,10 +2239,14 @@ impl EventListener for Adapter {
             // does not move (at the end of the history) and on every change of
             // the mouse reporting mode (DECSET 1000/1002/1003), i.e. it would
             // produce empty frames.
-            Event::Bell
-            | Event::ClipboardLoad(..)
-            | Event::MouseCursorDirty
-            | Event::CursorBlinkingChange => {}
+            // The bell (`BEL` outside a sequence): bateri's tabs ignore it, a host
+            // embedding the pane hears it. Not one a holder's prefix rang hours ago.
+            Event::Bell => {
+                if !self.0.muted.load(Ordering::Acquire) {
+                    self.0.wake.bell();
+                }
+            }
+            Event::ClipboardLoad(..) | Event::MouseCursorDirty | Event::CursorBlinkingChange => {}
         }
     }
 }
@@ -2432,6 +2436,9 @@ impl io::Read for TappedPty {
             }
             if outcome.status {
                 wake.program_status_changed();
+            }
+            if outcome.notified {
+                wake.notification();
             }
             if outcome.prompt
                 && let Some(line) = initial_input.take()
@@ -9003,6 +9010,16 @@ impl Session {
         Some((block_text(&term, line, key), depth))
     }
 
+    /// The notifications programs asked for since the last call (`OSC 9 ; text`, `OSC 777 ;
+    /// notify ; title ; body`), oldest first — at most a few wait; a flood keeps the newest. Its
+    /// news is [`Wake::notification`]. One leaf-lock round.
+    ///
+    /// **Journal-neutral:** it empties the ledger's waiting notifications and never touches
+    /// `Term`.
+    pub fn take_notifications(&self) -> Vec<crate::Notification> {
+        lock(&self.shell).notes.take()
+    }
+
     /// Every program status record (`OSC 7501`, or `OSC 9;4` standing in for the root one), by
     /// id: its state and its progress — what a host embedding the pane shows of a program that
     /// reports. Its news is [`Wake::program_status_changed`]. One leaf-lock round.
@@ -12144,6 +12161,10 @@ mod tests {
         remote_edges: u32,
         /// How many times [`Wake::program_status_changed`] came.
         statuses: u32,
+        /// How many times [`Wake::bell`] came.
+        bells: u32,
+        /// How many times [`Wake::notification`] came.
+        notes: u32,
     }
 
     impl TestWake {
@@ -12264,6 +12285,16 @@ mod tests {
 
         fn program_status_changed(&self) {
             self.state.lock().unwrap().statuses += 1;
+            self.cond.notify_all();
+        }
+
+        fn bell(&self) {
+            self.state.lock().unwrap().bells += 1;
+            self.cond.notify_all();
+        }
+
+        fn notification(&self) {
+            self.state.lock().unwrap().notes += 1;
             self.cond.notify_all();
         }
 
@@ -22841,6 +22872,48 @@ e\\314\\201.'; sleep 5";
         let state = wake.state.lock().unwrap();
         assert_eq!((state.edges, state.mirrors), (2, 1));
         assert_eq!(state.commands, 1);
+    }
+
+    #[test]
+    fn a_programs_bell_and_notifications_reach_the_wake_and_wait_to_be_taken() {
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session(
+            "printf '\\007\\033]9;build ready\\007\\033]9;4;1;50\\007             \\033]777;notify;CI;tests passed\\033\\\\'; sleep 5",
+            Arc::clone(&wake),
+        );
+        let state = wake
+            .cond
+            .wait_timeout_while(
+                wake.state.lock().unwrap(),
+                Duration::from_secs(5),
+                |state| state.bells == 0 || state.notes == 0,
+            )
+            .unwrap()
+            .0;
+        assert!(state.bells >= 1, "the bell rang");
+        drop(state);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut notes = Vec::new();
+        while notes.len() < 2 && Instant::now() < deadline {
+            notes.extend(session.take_notifications());
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(
+            notes,
+            [
+                crate::Notification {
+                    title: None,
+                    body: "build ready".to_owned(),
+                },
+                crate::Notification {
+                    title: Some("CI".to_owned()),
+                    body: "tests passed".to_owned(),
+                },
+            ],
+            "the progress bar between them is no notification"
+        );
+        assert!(session.take_notifications().is_empty(), "taken once");
+        session.shutdown();
     }
 
     #[test]

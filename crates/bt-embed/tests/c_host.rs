@@ -34,6 +34,8 @@ struct Host {
     exit: Option<Option<i32>>,
     /// The program status records' news: id, state, progress.
     programs: Vec<(String, i64, i32)>,
+    /// The programs' notifications: title, body.
+    notes: Vec<(Option<String>, String)>,
 }
 
 /// The pane's id: any number the host picks.
@@ -67,6 +69,14 @@ unsafe extern "C" fn heard(context: *mut c_void, event: *const BtEvent) {
             assert!(unsafe { bt_pane_write(host.pane, b"exit 3\n".as_ptr(), 7) });
         }
         kind::DIRECTORY => host.directories.extend(text),
+        kind::PROGRAM_NOTIFICATION => {
+            // SAFETY: as above.
+            let title = unsafe {
+                let title = bt_event_detail(event);
+                (!title.is_null()).then(|| CStr::from_ptr(title).to_string_lossy().into_owned())
+            };
+            host.notes.push((title, text.unwrap_or_default()));
+        }
         kind::PROGRAM_STATUS => {
             // SAFETY: as above.
             let (state, progress) = unsafe { (bt_event_number(event), bt_event_progress(event)) };
@@ -134,6 +144,7 @@ fn main() {
         directories: Vec::new(),
         exit: None,
         programs: Vec::new(),
+        notes: Vec::new(),
     });
     let scripts = Path::new(concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -173,7 +184,8 @@ fn main() {
             config,
             c(concat!(
                 r#"printf '%s|%s' "$BT_EMBED_PROBE" "$PWD" > "$BT_EMBED_OUT"; "#,
-                r#"printf '\033]7501;state=done:id=build:progress=100\033\\'; false"#
+                r#"printf '\033]7501;state=done:id=build:progress=100\033\\'; "#,
+                r#"printf '\a\033]777;notify;CI;tests passed\a'; false"#
             ))
             .as_ptr()
         ));
@@ -221,6 +233,12 @@ fn main() {
     assert!(started < finished, "{heard:?}");
     let (exit, duration, line) = host.finished.expect("a finished command");
     assert_eq!(exit, Some(1), "`false` ended it");
+    assert!(heard.contains(&kind::BELL), "the bell rang: {heard:?}");
+    assert_eq!(
+        host.notes,
+        [(Some("CI".to_owned()), "tests passed".to_owned())],
+        "the program's notification"
+    );
     assert!(
         host.programs
             .contains(&("build".to_owned(), i64::from(program::DONE), 100)),

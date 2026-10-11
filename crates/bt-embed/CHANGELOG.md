@@ -77,6 +77,11 @@ listed here under **Going**, with what replaces it.
   column a `path:12:5` named (`bt_event_line`, `bt_event_column`). A handler
   that opens it itself calls `bt_event_set_handled`, and the pane does
   nothing more. Otherwise the pane opens it as bateri does.
+- `BT_EVENT_BELL` (the terminal's bell, at most once per main-queue turn)
+  and `BT_EVENT_PROGRAM_NOTIFICATION`: a program's `OSC 9 ; text` or
+  `OSC 777 ; notify ; title ; body`, cleaned of control and invisible
+  formatting characters and bounded. ConEmu's numeric `OSC 9` commands are
+  not notifications. bateri's own tabs still show neither.
 - `BT_EVENT_SHELL_EXITED` carries an exit code. It is the code of the
   shell's login process, and on macOS `login` answers 0 whatever the shell's
   own code was: it tells a normal exit from a killed one, not the shell's

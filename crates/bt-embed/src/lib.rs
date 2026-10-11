@@ -93,6 +93,12 @@ pub mod kind {
     /// [`bt_event_column`]). The handler that opens it itself calls [`bt_event_set_handled`]
     /// and the pane does nothing more; otherwise the pane opens it as bateri does.
     pub const OPEN_LINK: u32 = 16;
+    /// The terminal's bell rang (`BEL`) — at most once per main-queue turn.
+    pub const BELL: u32 = 17;
+    /// A program asked for a notification (`OSC 9`, `OSC 777`): its body in the text, its title
+    /// (`OSC 777`'s) in the detail. Cleaned of control characters and bounded; a flood keeps the
+    /// newest few.
+    pub const PROGRAM_NOTIFICATION: u32 = 18;
 }
 
 /// What an opened link is ([`kind::OPEN_LINK`]'s number).
@@ -1577,6 +1583,16 @@ impl Host for CHost {
     }
     fn ports_changed(&self, pane: u64) {
         self.plain(kind::PORTS, pane);
+    }
+    fn bell(&self, pane: u64) {
+        self.plain(kind::BELL, pane);
+    }
+    fn program_notification(&self, pane: u64, title: Option<&str>, body: &str) {
+        self.send(BtEvent {
+            text: c_text(body.as_bytes()),
+            detail: title.and_then(|title| c_text(title.as_bytes())),
+            ..BtEvent::new(kind::PROGRAM_NOTIFICATION, pane)
+        });
     }
     fn open_link(&self, pane: u64, request: &LinkRequest) -> bool {
         let base = BtEvent::new(kind::OPEN_LINK, pane);

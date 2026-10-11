@@ -173,6 +173,12 @@ pub trait PaneHost {
     fn open_link(&self, _pane: u64, _link: &LinkRequest) -> bool {
         false
     }
+    /// The terminal's bell rang (`BEL`), at most once per main-queue turn.
+    fn bell(&self, pane: u64);
+    /// A program asked for a notification (`OSC 9`'s text, `OSC 777`'s
+    /// title and body) — not bateri's own ([`Self::notify`]): what the
+    /// program wrote, cleaned of control characters and bounded.
+    fn program_notification(&self, pane: u64, title: Option<&str>, body: &str);
     /// What this pane's questions cover ([`crate::sheets::Cover`]): bateri's
     /// tab container, so a question blocks that tab and not the window.
     /// `None` puts them on the pane's window, blocking all of it. Asked
@@ -957,6 +963,12 @@ struct ShellWake {
     /// on the main queue — `title_pending`'s twin: at most one job, which
     /// reads the latest activity.
     activity_pending: Arc<AtomicBool>,
+    /// Whether the bell's news ([`PaneHost::bell`]) is waiting on the main
+    /// queue: a program ringing in a loop makes one job.
+    bell_pending: Arc<AtomicBool>,
+    /// Whether the notifications' news ([`PaneHost::program_notification`])
+    /// is waiting: one job, which takes every notification waiting.
+    notes_pending: Arc<AtomicBool>,
 }
 
 /// The two bits of the remote-session probe — and of the login
@@ -1451,6 +1463,47 @@ impl Wake for ShellWake {
     fn mirror_changed(&self) {
         // Reader thread, per keystroke: one delayed send per interval.
         self.push_state_later();
+    }
+
+    fn bell(&self) {
+        // Reader thread, under the `Term` lock: one job, no lock taken here.
+        if self.timed || self.bell_pending.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let pending = Arc::clone(&self.bell_pending);
+        let (id, lookup) = (self.id, self.lookup);
+        DispatchQueue::main().exec_async(move || {
+            pending.store(false, Ordering::Release);
+            // audit: a block running on the main queue is on the main thread by definition.
+            let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
+            if let Some(pane) = lookup(mtm, id) {
+                pane.host().bell(id);
+            }
+        });
+    }
+
+    fn notification(&self) {
+        // Reader thread: one job, which takes what waits in the ledger.
+        if self.timed || self.notes_pending.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let pending = Arc::clone(&self.notes_pending);
+        let (id, lookup) = (self.id, self.lookup);
+        DispatchQueue::main().exec_async(move || {
+            pending.store(false, Ordering::Release);
+            // audit: a block running on the main queue is on the main thread by definition.
+            let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
+            let Some(pane) = lookup(mtm, id) else {
+                return;
+            };
+            let Some(session) = pane.session().cloned() else {
+                return;
+            };
+            for note in session.take_notifications() {
+                pane.host()
+                    .program_notification(id, note.title.as_deref(), &note.body);
+            }
+        });
     }
 
     fn program_status_changed(&self) {
@@ -2328,6 +2381,8 @@ impl TerminalPane {
                 state_pending: Arc::default(),
                 mirror_pending: Arc::default(),
                 activity_pending: Arc::default(),
+                bell_pending: Arc::default(),
+                notes_pending: Arc::default(),
             }),
             zoom: Cell::new(zoom),
             // No dock at launch: `start` decides and computes the geometry
@@ -5198,6 +5253,12 @@ mod tests {
         }
         fn ports_changed(&self, pane: u64) {
             self.0.borrow_mut().push((pane, "ports".into()));
+        }
+        fn bell(&self, pane: u64) {
+            self.0.borrow_mut().push((pane, "bell".into()));
+        }
+        fn program_notification(&self, pane: u64, _title: Option<&str>, _body: &str) {
+            self.0.borrow_mut().push((pane, "note".into()));
         }
         fn cover(
             &self,

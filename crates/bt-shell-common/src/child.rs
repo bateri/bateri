@@ -417,6 +417,10 @@ impl bt_core::Wake for SilentWake {
     fn blocks_changed(&self) {}
     fn unseen_changed(&self) {}
     fn program_status_changed(&self) {}
+
+    fn bell(&self) {}
+
+    fn notification(&self) {}
 }
 
 /// Waits until `ready` says true; if time runs out, fails with `message`.

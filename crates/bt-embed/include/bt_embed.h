@@ -100,6 +100,12 @@ typedef void (*BtEventHandler)(void *context, const BtEvent *event);
  * opens it itself calls bt_event_set_handled and the pane does nothing more;
  * otherwise the pane opens it as bateri does. */
 #define BT_EVENT_OPEN_LINK 16u
+/* The terminal's bell rang (BEL) — at most once per main-queue turn. */
+#define BT_EVENT_BELL 17u
+/* A program asked for a notification (OSC 9, OSC 777): text = body, detail
+ * = title (OSC 777's). Cleaned of control characters and bounded; a flood
+ * keeps the newest few. */
+#define BT_EVENT_PROGRAM_NOTIFICATION 18u
 #define BT_LINK_URL 1           /* as written, any scheme */
 #define BT_LINK_FILE 2          /* exists */
 #define BT_LINK_DIRECTORY 3     /* exists */

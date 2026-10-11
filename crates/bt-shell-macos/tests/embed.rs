@@ -68,6 +68,12 @@ impl Host for Recorder {
     fn ports_changed(&self, pane: u64) {
         self.heard("ports", pane);
     }
+    fn bell(&self, pane: u64) {
+        self.heard("bell", pane);
+    }
+    fn program_notification(&self, pane: u64, _title: Option<&str>, _body: &str) {
+        self.heard("note", pane);
+    }
     fn cover(&self, _pane: &TerminalPane) -> Option<Rc<dyn Cover>> {
         None
     }

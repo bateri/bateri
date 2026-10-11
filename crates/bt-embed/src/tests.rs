@@ -98,6 +98,11 @@ fn the_header_numbers_what_the_library_numbers() {
             ("BT_EVENT_PORTS", i64::from(kind::PORTS)),
             ("BT_EVENT_PROGRAM_STATUS", i64::from(kind::PROGRAM_STATUS)),
             ("BT_EVENT_OPEN_LINK", i64::from(kind::OPEN_LINK)),
+            ("BT_EVENT_BELL", i64::from(kind::BELL)),
+            (
+                "BT_EVENT_PROGRAM_NOTIFICATION",
+                i64::from(kind::PROGRAM_NOTIFICATION),
+            ),
         ])
     );
     assert_eq!(
