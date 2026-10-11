@@ -3,7 +3,7 @@ CARGO ?= cargo
 # Prerequisite order is only guaranteed under serial make; under -j the promises
 # "cheapest gate first" and "version first" break.
 .NOTPARALLEL:
-.PHONY: check prune fmt audit clippy test shader smoke terminfo test-race scan bundle package install release publish ship release-gate sparkle dmgbuild linux embed-swift
+.PHONY: check prune fmt audit clippy test shader smoke terminfo test-race scan bundle package install release publish ship release-gate sparkle dmgbuild linux embed-swift embed-tag
 
 # Definition of done. Homebrew rustc is not pinned (there is deliberately no
 # rust-toolchain.toml): the version is printed first so a clippy failure that
@@ -687,6 +687,31 @@ embed-swift:
 	@if [ "$$(launchctl managername 2>/dev/null)" != Aqua ]; then \
 		echo "embed-swift: SKIPPED (no window server session)"; exit 0; fi; \
 	BT_EMBED_ZSH=$(CURDIR)/assets/shell/zsh $(EMBED_DIR)/swift-host
+
+# The embedding interface's own release: an annotated `bt-embed-<version>` tag on the commit
+# that turned `crates/bt-embed/CHANGELOG.md`'s Unreleased section into `## [<version>] - <date>`.
+# Its versions run apart from bateri's `v<version>` tags, which `make release` keeps for bateri
+# itself; a product that links the pane builds against one of these. The version is the
+# changelog's topmost one. It stops on a dirty tree, a non-empty Unreleased section (the version
+# was not made yet), a tag that exists here or on origin, and either check not running green — a
+# skipped Swift sample (no window server) is not green. It pushes nothing: that is a person's go,
+# as with `make publish`.
+EMBED_CHANGELOG = crates/bt-embed/CHANGELOG.md
+EMBED_VERSION = $(shell sed -n 's/^\#\# \[\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)\] - [0-9-]*$$/\1/p' $(EMBED_CHANGELOG) | head -1)
+EMBED_ABI = $(shell sed -n 's/^\#define BT_EMBED_ABI_VERSION \([0-9]*\)u$$/\1/p' crates/bt-embed/include/bt_embed.h)
+
+embed-tag:
+	@test -z "$$(git status --porcelain)" || { echo "embed-tag: the working tree is not clean; the tag must name a known code"; exit 1; }
+	@test -n "$(EMBED_VERSION)" || { echo "embed-tag: $(EMBED_CHANGELOG) has no '## [x.y.z] - date' section"; exit 1; }
+	@test -z "$$(awk '/^## \[Unreleased\]/ { on = 1; next } /^## \[/ { if (on) exit } on && NF' $(EMBED_CHANGELOG))" || \
+		{ echo "embed-tag: the Unreleased section of $(EMBED_CHANGELOG) is not empty — turn it into the version and commit first"; exit 1; }
+	@! git rev-parse -q --verify 'refs/tags/bt-embed-$(EMBED_VERSION)' >/dev/null || { echo "embed-tag: tag bt-embed-$(EMBED_VERSION) already exists — the next version goes in $(EMBED_CHANGELOG) first"; exit 1; }
+	@! git ls-remote --exit-code --tags origin 'refs/tags/bt-embed-$(EMBED_VERSION)' >/dev/null 2>&1 || { echo "embed-tag: tag bt-embed-$(EMBED_VERSION) already exists on origin"; exit 1; }
+	@$(MAKE) --no-print-directory check
+	@out=$$($(MAKE) --no-print-directory embed-swift 2>&1); echo "$$out" | tail -1; \
+		echo "$$out" | grep -q '^embed-swift: ok' || { echo "embed-tag: the Swift sample did not run green"; exit 1; }
+	git tag -a 'bt-embed-$(EMBED_VERSION)' -m 'bt-embed $(EMBED_VERSION), ABI $(EMBED_ABI)'
+	@echo "embed-tag: bt-embed-$(EMBED_VERSION) -> $$(git rev-parse --short HEAD); nothing pushed — with a person's go: git push origin main bt-embed-$(EMBED_VERSION)"
 
 LINUX_DOCKERFILE = tools/linux/Dockerfile
 LINUX_RUST = $(shell sed -n 's/^FROM rust:\([0-9]*\.[0-9]*\)-.*/\1/p' $(LINUX_DOCKERFILE))

@@ -13,7 +13,10 @@ listed here under **Going**, with what replaces it.
 The interface has its own versions, tagged `bt-embed-<version>`, apart from
 bateri's own `v<version>`: the ABI (`bt_embed_abi_version`) stays 1 while
 every change only adds, and the version's middle number grows with each
-release that adds.
+release that adds. A version is released by turning **Unreleased** into
+`## [<version>] - <date>` above a new empty Unreleased, committing that, and
+running `make embed-tag`, which checks the tree and both gates, then tags the
+commit. Pushing is a separate step.
 
 ## [Unreleased]
 
