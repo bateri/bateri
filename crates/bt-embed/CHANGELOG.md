@@ -10,7 +10,14 @@ A published function never changes its signature or meaning. A new need is a
 new function. A function on its way out stays at least one release and is
 listed here under **Going**, with what replaces it.
 
+The interface has its own versions, tagged `bt-embed-<version>`, apart from
+bateri's own `v<version>`: the ABI (`bt_embed_abi_version`) stays 1 while
+every change only adds, and the version's middle number grows with each
+release that adds.
+
 ## [Unreleased]
+
+## [0.1.0] - 2026-10-11
 
 ### Added
 
