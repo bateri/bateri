@@ -1007,9 +1007,6 @@ letter_spacing = 1.0
 - Letter spacing also applies **when you save**: the number of columns is
   recalculated and the shell receives the new size. Cmd +/− carries the
   multiplier, so at the new size the letters stay open by the same ratio.
-- At a very large font size the glyph atlas fills up quickly: once it is full,
-  characters appearing on screen for the first time are drawn as boxes (□).
-  This goes away when the size is reduced or the app is reopened.
 - The font changes the moment you save: the window size stays the same, the
   number of columns and rows is recalculated for the new cell, and the shell
   and the program inside it (vim, less) receive the new size as if the window

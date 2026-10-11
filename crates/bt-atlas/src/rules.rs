@@ -153,8 +153,9 @@ impl Faces {
     /// The key must carry the **drawn** face, not the requested one. In a
     /// single-face family (`Monaco`), `(Char, Bold)` and `(Char, Regular)`
     /// would hold byte-for-byte the same bitmap in two separate slots; with
-    /// four faces the atlas fills four times as fast, surplus glyphs fall to
-    /// tofu and the symptom is silent. The second face of the same fact as
+    /// four faces the atlas fills four times as fast — and is emptied and the
+    /// screen rasterized again four times as often — and the symptom is
+    /// silent. The second face of the same fact as
     /// `Sprite::Rule` being lowered to `Regular`: the requested face and the
     /// drawn face need not be the same.
     pub(crate) fn effective(&self, face: Face) -> Face {

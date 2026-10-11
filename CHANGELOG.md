@@ -12,6 +12,15 @@ of every installed copy. A version without a section is not released.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Letters no longer turn into boxes after a long session.** A tab that had
+  shown many different characters — hours of Chinese, Japanese or Korean
+  text, say — could start drawing every character it met for the first time as
+  an empty box, and kept doing so until the font size changed or bateri was
+  restarted. When the tab runs out of room for new characters it now makes
+  room and draws the screen again, so every character keeps its shape.
+
 ## [0.11.0] - 2026-10-10
 
 ### Added

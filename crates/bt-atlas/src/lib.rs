@@ -241,7 +241,8 @@ const SLOT_TARGET: u32 = 1024;
 /// point size's texture shrinks and the slot count drops.
 const MIN_EDGE: u16 = 1024;
 
-/// The ceiling of the texture edge, in pixels.
+/// The ceiling of the texture edge, in pixels — for the edge a new atlas
+/// derives and for the one [`Atlas::grow`] doubles to.
 ///
 /// Without a ceiling, growth would go on unbounded at the corner of
 /// [`MAX_POINT_SIZE`] × `MAX_LINE_HEIGHT` × `MAX_LETTER_SPACING`. 8192 is half
@@ -425,6 +426,15 @@ pub struct Atlas {
     font_issue: Option<FontIssue>,
     /// The grid's (column, row) slot count.
     grid: (u16, u16),
+    /// The texture edge the grid was cut from, in pixels: [`edge_for`]'s
+    /// answer at birth, doubled by every [`Atlas::grow`]. Kept because the
+    /// grid alone does not say it (the leftover strip falls into no slot).
+    edge: u16,
+    /// A request fell to tofu **because the atlas was full** since the last
+    /// [`Atlas::take_overflow`]. Only the two capacity gates in
+    /// [`Atlas::slot`] set it: a character the font does not have is a
+    /// permanent answer, not a full atlas, and recycling would not help it.
+    overflowed: bool,
     /// The slot a character was **resolved** to — not only the loaded ones: a
     /// character the font does not know also lives here as [`TOFU`], otherwise
     /// the same character would be asked of CoreText again every frame.
@@ -484,13 +494,14 @@ pub struct Atlas {
     /// The interner's strings: the identity of [`Sprite::Cluster`] is the index
     /// into this list.
     ///
-    /// There is no eviction and the policy is **the same as the slots'**: the
-    /// entry lives for the atlas's lifetime and drops together with the slots
-    /// when [`Atlas::ensure`] rebuilds the atlas. Had it had a separate
-    /// lifetime, a rebuilt atlas would be left with sequences whose identity is
-    /// alive but whose slot is dead; dropping at the same moment as the slots,
-    /// the old identity in the caller's hands is either asked again or falls to
-    /// tofu in [`Atlas::slot`].
+    /// The policy is **the same as the slots'**: the entry lives until the
+    /// slots drop — when [`Atlas::ensure`] rebuilds the atlas and when
+    /// [`Atlas::recycle`] empties it. Had it had a separate lifetime, an
+    /// emptied atlas would be left with sequences whose identity is alive but
+    /// whose slot is dead; dropping at the same moment as the slots, the old
+    /// identity in the caller's hands is either asked again or falls to tofu
+    /// in [`Atlas::slot`]. No identity outlives a frame's plan anyway: `bt-gpu`
+    /// interns while it resolves.
     clusters: Vec<Box<str>>,
     /// String → identity; the reverse direction of [`Atlas::clusters`].
     cluster_ids: HashMap<Box<str>, u32>,
@@ -598,17 +609,18 @@ impl Atlas {
         // small cell (13pt@1x, a 4096 edge already gives 116 224). `grid` is
         // still `u16`.
         //
-        // **There is no path to `capacity()`'s `u16::MAX` clamp** and the reason
-        // is the loop itself: folding runs only while the capacity is **below**
-        // the target and each fold multiplies the capacity by four, i.e. the
-        // capacity growth produces is always below `4 × SLOT_TARGET` (4096).
-        // The clamp can only be seen at a never-folded floor and that is
-        // already today's behaviour.
+        // **Birth does not reach `capacity()`'s `u16::MAX` clamp** and the
+        // reason is the loop itself: folding runs only while the capacity is
+        // **below** the target and each fold multiplies the capacity by four,
+        // i.e. the capacity folding produces is always below `4 × SLOT_TARGET`
+        // (4096). The clamp can only be seen at a never-folded floor.
+        // [`Atlas::grow`] is the other path to it, and it stops there.
         //
         // `w`/`h` are at least 1 (`rules::round_up`), i.e. the division is
         // safe; `max(1)` is also for the extreme where the cell is larger than
         // the texture.
-        let grid = grid_for(w, h);
+        let edge = edge_for(w, h);
+        let grid = grid_at(edge, w, h);
         Self {
             faces,
             small,
@@ -632,6 +644,8 @@ impl Atlas {
             },
             font_issue,
             grid,
+            edge,
+            overflowed: false,
             slots: HashMap::new(),
             shrunk: HashSet::new(),
             next: TOFU + 1,
@@ -778,9 +792,9 @@ impl Atlas {
             return Sprite::Cluster(id);
         }
         // The table has a **ceiling** and the ceiling is the negative cache's:
-        // there is no eviction and every distinct string lives for the atlas's
-        // lifetime, i.e. an interner without a ceiling would never give back the
-        // memory of random output (`cat`ed binary data, wide cells carrying
+        // every distinct string lives until the slots drop ([`Atlas::recycle`],
+        // [`Atlas::ensure`]), i.e. an interner without a ceiling would not give
+        // back the memory of random output (`cat`ed binary data, wide cells carrying
         // combining marks). A new sequence beyond the ceiling lands on its
         // **base character** — that is also the answer for a sequence that does
         // not shape, i.e. the image is no worse than before clustering; the atlas's
@@ -938,12 +952,12 @@ impl Atlas {
             }
         }
         // A **share is set aside** for rule sprites: all six are procedural,
-        // deterministic and needed for the lifetime. Without the share, after
-        // seeing a few thousand distinct glyphs (CJK text, icon-heavy TUI) the
-        // grid fills up and from then on a tofu box, instead of the line, would
-        // appear under **every** underlined cell. Characters cannot eat the
-        // last `RULE_RESERVE` slots; rules stay lazy but their places are
-        // guaranteed.
+        // deterministic and needed for the lifetime. Without the share, once
+        // the characters fill the grid (CJK text, icon-heavy TUI) a tofu box,
+        // instead of the line, would appear under **every** underlined cell —
+        // until the frame boundary empties the atlas, and for good at the
+        // edge's ceiling. Characters cannot eat the last `RULE_RESERVE` slots;
+        // rules stay lazy but their places are guaranteed.
         let cap = match sprite {
             Sprite::Rule(_) => self.capacity(),
             Sprite::Char(_) | Sprite::Cluster(_) => self.capacity().saturating_sub(RULE_RESERVE),
@@ -995,13 +1009,19 @@ impl Atlas {
             // find a slot at another point size and a record written here would
             // pin it to tofu.
             //
-            // Falling here means **more distinct glyphs than the target in a
-            // single frame** and that scenario is **not measured**. If
-            // measured, its remedy is not LRU but recycling at the frame
-            // boundary (`bt-gpu`'s `Renderer::encode`): the slot number is not
-            // stored in frame data, `slot_uv` bakes the uv at resolve time and
-            // `glyph_lists` runs once per list, four times per frame, i.e. any
-            // reuse done **mid**-frame invalidates the uvs of earlier lists.
+            // Falling here is **cumulative**, not a single frame's doing: the
+            // slots of everything the pane ever drew stay taken, and a
+            // multilingual session fills the atlas in hours (seen: a bold `I`
+            // came out as a box after a session of Chinese, Japanese and
+            // Korean text). The tofu is this frame's only; the flag tells
+            // the caller, who empties the atlas at the frame boundary and
+            // draws the frame again ([`Atlas::recycle`], `bt-gpu`'s
+            // `Renderer::encode`). Not mid-frame and not LRU: the slot number
+            // is not stored in frame data, `slot_uv` bakes the uv at resolve
+            // time and `glyph_lists` runs once per list, four times per frame,
+            // i.e. any reuse done **mid**-frame invalidates the uvs of earlier
+            // lists.
+            self.overflowed = true;
             return (
                 Placed {
                     slot: TOFU,
@@ -1229,6 +1249,9 @@ impl Atlas {
                 }) + u32::from(if half == Half::Left { 2u16 } else { 1 })
                     > u32::from(cap) =>
             {
+                // A full plane, like the gate above: the flag, or an
+                // emoji-heavy pane whose colour plane fills would never empty.
+                self.overflowed = true;
                 (
                     Placed {
                         slot: TOFU,
@@ -1370,11 +1393,12 @@ impl Atlas {
                 // frame** as long as it stayed on screen — on the main thread, in
                 // the middle of the frame budget. The eviction cost is amortized:
                 // at least `capacity()` new entries fit between two evictions.
-                // Positive entries (real slots) are kept: throwing them out
-                // wholesale would require dropping the texture too and that
-                // decision was left out of scope — the capacity derives
-                // from the cell size, i.e. the positive side filling up is now
-                // much harder.
+                // Positive entries (real slots) are kept: they go only all
+                // at once, when the slots run out ([`Atlas::recycle`], at the
+                // frame boundary, where `bt-gpu` draws the frame again and
+                // overwrites the texture in place) — this sweep runs in the
+                // middle of a frame and a slot an earlier list resolved must
+                // keep its bitmap.
                 //
                 // **The cost grew with the fallback** and this was accepted
                 // deliberately: a character asked back after the eviction now
@@ -1600,7 +1624,9 @@ impl Atlas {
     /// (used, total) slots.
     ///
     /// Tofu counts as used: the texture holds that slot too and the occupancy
-    /// ratio is read from these two numbers when measuring.
+    /// ratio is read from these two numbers when measuring. Both move: the
+    /// used count falls back to tofu's one slot on [`Atlas::recycle`], the
+    /// total rises on [`Atlas::grow`].
     pub fn occupancy(&self) -> (usize, usize) {
         (usize::from(self.next), usize::from(self.capacity()))
     }
@@ -1619,6 +1645,75 @@ impl Atlas {
         (usize::from(self.color_next), usize::from(self.capacity()))
     }
 
+    /// Whether a request fell to tofu because the atlas was full since the
+    /// last call; asking clears it.
+    ///
+    /// The frame boundary's question: `bt-gpu` asks after planning a frame
+    /// and on `true` empties the atlas and plans the frame again. Read and
+    /// clear, so the answer is about one plan — a frame that still overflowed
+    /// at the ceiling does not leave the next one starting dirty.
+    pub fn take_overflow(&mut self) -> bool {
+        std::mem::take(&mut self.overflowed)
+    }
+
+    /// Empties the atlas: every slot, the interner and the counters go; the
+    /// fonts, the metrics, the grid and the resident tofu stay.
+    ///
+    /// **Only at a frame boundary**: the caller holds no slot number past it
+    /// and draws the frame again, uploading what it still needs into the
+    /// **same** texture — the old bitmaps are overwritten in place, nothing
+    /// is reallocated. Slot 0 is never handed out again, so tofu stays
+    /// resident ([`Atlas::tofu_bitmap`]). The cost is one raster per glyph
+    /// still on screen, once per atlas's worth of new glyphs.
+    pub fn recycle(&mut self) {
+        self.slots.clear();
+        self.shrunk.clear();
+        self.clusters.clear();
+        self.cluster_ids.clear();
+        self.next = TOFU + 1;
+        self.color_next = 0;
+        self.overflowed = false;
+    }
+
+    /// Doubles the texture edge and empties the atlas ([`Atlas::recycle`]);
+    /// `false`, and nothing changes, when that would not add an addressable
+    /// slot — at [`MAX_EDGE`], or once the grid is past `capacity()`'s `u16`
+    /// clamp, where a larger texture would only hold slots no number reaches.
+    ///
+    /// For a frame that does not fit an emptied atlas, or fills more than half
+    /// of it ([`Atlas::crowded`]). `true` means **"reallocate the texture"**,
+    /// as with [`Atlas::ensure`]: [`Atlas::texture_px`] changed and every slot
+    /// origin moved with the grid's column count. The metrics do not change —
+    /// the cell is the font's, the edge only the texture's. The growth lasts
+    /// until the key changes; [`Atlas::ensure`] then builds at the derived
+    /// edge again.
+    #[must_use = "if true the texture size changed and the texture must be reallocated too"]
+    pub fn grow(&mut self) -> bool {
+        let edge = self.edge.saturating_mul(2).min(MAX_EDGE);
+        let (w, h) = self.slot_metrics.cell_px;
+        let grid = grid_at(edge, w, h);
+        if capacity_at(grid) <= capacity_at(self.grid) {
+            return false;
+        }
+        self.edge = edge;
+        self.grid = grid;
+        self.recycle();
+        true
+    }
+
+    /// More than half of a plane's character share is taken.
+    ///
+    /// The question right after a [`Atlas::recycle`]: a frame that alone fills
+    /// more than half of an empty atlas leaves the next recycle less than half
+    /// an atlas away, and every recycle rasterizes the whole screen again.
+    /// Half is a **design constant**, not a measurement: the atlas then holds
+    /// at least two frames' worth, the margin Windows Terminal sizes its own
+    /// atlas by (twice the screen).
+    pub fn crowded(&self) -> bool {
+        let half = u32::from(self.capacity().saturating_sub(RULE_RESERVE)) / 2;
+        u32::from(self.next) > half || u32::from(self.color_next) > half
+    }
+
     /// The most entries the map accepts — positive and negative together.
     /// **Twice** the capacity: one share is the largest value the positive
     /// entries can reach, the second is the share left to the negative cache.
@@ -1632,15 +1727,20 @@ impl Atlas {
         usize::from(self.capacity()).saturating_mul(2)
     }
 
-    /// The total slot count.
-    ///
-    /// Clamped to `u16`: the slot number is handed outside as `u16` and at very
-    /// small cells the grid may exceed that limit. Clamping narrows the
-    /// capacity, while overflow would silently overlap slots.
+    /// The total slot count ([`capacity_at`] of today's grid).
     fn capacity(&self) -> u16 {
-        let total = u32::from(self.grid.0) * u32::from(self.grid.1);
-        u16::try_from(total).unwrap_or(u16::MAX)
+        capacity_at(self.grid)
     }
+}
+
+/// A grid's addressable slot count — the one clamp, read by
+/// [`Atlas::capacity`] and by [`Atlas::grow`]'s "would it add a slot".
+///
+/// Clamped to `u16`: the slot number is handed outside as `u16` and at very
+/// small cells the grid may exceed that limit. Clamping narrows the
+/// capacity, while overflow would silently overlap slots.
+fn capacity_at(grid: (u16, u16)) -> u16 {
+    u16::try_from(slots_at(grid)).unwrap_or(u16::MAX)
 }
 
 /// The texture edge that falls to the cell size, in pixels — the **sole**
@@ -1663,10 +1763,11 @@ fn edge_for(w: u16, h: u16) -> u16 {
     edge
 }
 
-/// The grid's row/column count at the given edge — **one expression, two
-/// readers** (the decision of [`edge_for`] and the grid [`grid_for`] builds).
+/// The grid's row/column count at the given edge — **one expression, three
+/// readers** (the decision of [`edge_for`], the grid [`Atlas::new`] builds and
+/// the one [`Atlas::grow`] rebuilds).
 ///
-/// Had there been two copies they could silently diverge: the growth loop
+/// Had there been two copies they could silently diverge: the folding loop
 /// would say "target met" by one number while the built grid gave another.
 fn grid_at(edge: u16, w: u16, h: u16) -> (u16, u16) {
     ((edge / w).max(1), (edge / h).max(1))
@@ -1676,11 +1777,6 @@ fn grid_at(edge: u16, w: u16, h: u16) -> (u16, u16) {
 /// (13pt@1x, a 4096 edge already gives 116 224).
 fn slots_at((cols, rows): (u16, u16)) -> u32 {
     u32::from(cols) * u32::from(rows)
-}
-
-/// [`edge_for`] converted to a grid.
-fn grid_for(w: u16, h: u16) -> (u16, u16) {
-    grid_at(edge_for(w, h), w, h)
 }
 
 /// The point size that will enter the font: multiplied by the scale and
@@ -2729,13 +2825,116 @@ mod tests {
         assert_ne!(rule, TOFU, "the rule sprite fell to tofu in a full atlas");
         // A full atlas is a transient state: the same character may find a
         // slot at another point size, so they must not stay tied to tofu.
-        for (ch, face) in dropped {
+        for &(ch, face) in &dropped {
             assert!(
                 !a.slots
                     .contains_key(&(Sprite::Char(ch), face, SizeClass::Normal, Half::Whole)),
                 "'{ch}' ({face:?}) was permanently written to tofu"
             );
         }
+        // **The caller is told**, once: the frame boundary empties the atlas
+        // on this answer, and asking clears it so the next plan starts clean.
+        assert!(a.take_overflow(), "a full atlas must say so");
+        assert!(!a.take_overflow(), "asking must clear the flag");
+        assert!(a.crowded(), "a full atlas is more than half full");
+        // This corner is at the edge's ceiling: growing adds no slot, so it
+        // refuses and touches nothing.
+        let (texture, occupancy) = (a.texture_px(), a.occupancy());
+        assert!(!a.grow(), "the corner is at the ceiling and cannot grow");
+        assert_eq!(
+            a.texture_px(),
+            texture,
+            "a refused grow changed the texture"
+        );
+        assert_eq!(a.occupancy(), occupancy, "a refused grow emptied the atlas");
+        // **Recycling empties it in place**: the grid and the texture stay,
+        // only tofu is left, and a character that fell to tofu now gets a
+        // real slot with bytes to upload.
+        a.recycle();
+        assert_eq!(a.occupancy(), (1, total), "only tofu survives a recycle");
+        assert_eq!(
+            a.texture_px(),
+            texture,
+            "recycling must not move the texture"
+        );
+        assert!(!a.crowded(), "an emptied atlas is not crowded");
+        let (ch, face) = dropped[0];
+        let (placed, upload) = a.slot(Sprite::Char(ch), face, SizeClass::Normal, Half::Whole);
+        assert_ne!(
+            placed.slot, TOFU,
+            "'{ch}' ({face:?}) is still tofu after a recycle"
+        );
+        assert!(upload.is_some(), "the recycled slot must be uploaded again");
+        assert!(!a.take_overflow(), "an ask that found a slot set the flag");
+    }
+
+    /// Growing doubles the texture, keeps the cell and stops where no slot is
+    /// added.
+    ///
+    /// 13pt@1x is a small cell: the floor edge already holds thousands of
+    /// slots and two doublings pass the `u16` clamp, so the loop ends on the
+    /// clamp, not on [`MAX_EDGE`] — a texture grown past it would hold slots
+    /// no slot number reaches.
+    #[test]
+    fn grow_doubles_the_texture_and_keeps_the_cell() {
+        let mut a = atlas(POINT_SIZE, 1.0);
+        let (metrics, slot_metrics) = (a.metrics(), a.slot_metrics());
+        let _ = a.slot(
+            Sprite::Char('a'),
+            Face::Regular,
+            SizeClass::Normal,
+            Half::Whole,
+        );
+        let mut grown = 0;
+        loop {
+            let (before, texture) = (a.occupancy().1, a.texture_px());
+            if !a.grow() {
+                assert_eq!(
+                    a.texture_px(),
+                    texture,
+                    "a refused grow changed the texture"
+                );
+                assert_eq!(
+                    a.occupancy().1,
+                    before,
+                    "a refused grow changed the capacity"
+                );
+                break;
+            }
+            grown += 1;
+            assert!(grown <= 3, "the edge kept doubling past the ceiling");
+            assert!(
+                a.occupancy().1 > before,
+                "a grow must add slots: {before} → {}",
+                a.occupancy().1
+            );
+            let (tw, th) = a.texture_px();
+            assert!(
+                tw > texture.0 && th > texture.1 && tw <= MAX_EDGE && th <= MAX_EDGE,
+                "the texture did not double inside the ceiling: {texture:?} → {:?}",
+                (tw, th)
+            );
+            assert_eq!(a.occupancy().0, 1, "a grow must empty the atlas");
+            assert_eq!(
+                (a.metrics(), a.slot_metrics()),
+                (metrics, slot_metrics),
+                "growing changed the cell"
+            );
+        }
+        assert!(grown > 0, "a small cell must be able to grow");
+        assert_eq!(
+            a.occupancy().1,
+            usize::from(u16::MAX),
+            "the loop must end on the u16 clamp"
+        );
+        let (placed, upload) = a.slot(
+            Sprite::Char('a'),
+            Face::Regular,
+            SizeClass::Normal,
+            Half::Whole,
+        );
+        assert_ne!(placed.slot, TOFU, "a grown atlas must hand out slots");
+        assert!(upload.is_some(), "the grown atlas must upload again");
     }
 
     #[test]

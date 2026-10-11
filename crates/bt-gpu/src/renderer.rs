@@ -652,8 +652,8 @@ struct PlaneTexture {
 /// textures drop, the next frame builds new ones.
 struct WgpuAtlas {
     atlas: Atlas,
-    /// `None` → not created yet, or `ensure` dropped it. Created by the first
-    /// frame that draws a glyph, with the resident tofu written once
+    /// `None` → not created yet, or `ensure` or `grow` dropped it. Created by
+    /// the first frame that draws a glyph, with the resident tofu written once
     /// ([`mask_texture`]) — **by drawing**, not by `cell_metrics`: the metric
     /// path is on window resizing's hot path and must not be tied to a texture
     /// allocation.
@@ -689,6 +689,45 @@ impl WgpuAtlas {
         }
         self.fx_bind.as_ref().map(|(_, bind)| bind)
     }
+
+    /// Drops both textures and the bind group made of them, for an atlas whose
+    /// texture size changed ([`Atlas::ensure`], [`Atlas::grow`]): the next
+    /// plan builds new ones at the new edge.
+    fn drop_textures(&mut self) {
+        self.mask = None;
+        self.color = None;
+        self.fx_bind = None;
+    }
+}
+
+/// What the frame boundary does after planning a frame ([`room`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Room {
+    /// The plan stands.
+    Fits,
+    /// Empty the atlas ([`Atlas::recycle`]) and plan the frame again.
+    Recycle,
+    /// Double the texture ([`Atlas::grow`]) and plan the frame again.
+    Grow,
+}
+
+/// The frame boundary's decision: `overflowed` — the plan asked for a slot the
+/// atlas no longer had ([`Atlas::take_overflow`]); `recycled` — this frame
+/// already emptied the atlas once; `crowded` — the plan fills more than half
+/// of it ([`Atlas::crowded`]).
+///
+/// A full atlas is emptied first: what filled it is mostly glyphs no longer
+/// on screen, and the frame drawn again takes back only its own. Growing is
+/// for the frame that does not fit an empty atlas, or fills more than half
+/// of it — emptying alone would then come back every few frames, each time
+/// rasterizing the whole screen again. A crowded atlas that never overflowed
+/// is left alone: that is the slots of a long session, not this frame's.
+fn room(overflowed: bool, recycled: bool, crowded: bool) -> Room {
+    match (recycled, overflowed, crowded) {
+        (false, false, _) | (true, false, false) => Room::Fits,
+        (false, true, _) => Room::Recycle,
+        (true, _, _) => Room::Grow,
+    }
 }
 
 /// wgpu's [`SlotUpload`]: `Queue::write_texture` into the mask texture, or
@@ -696,8 +735,10 @@ impl WgpuAtlas {
 /// trait's doc says why at allocation time and not a frame earlier or later).
 ///
 /// `write_texture` is staged by the queue and lands before the next `submit`'s
-/// commands, i.e. before the frame that samples it: a new slot is never
-/// written into a texture a frame in flight is still reading.
+/// commands, i.e. before the frame that samples it — and after every frame
+/// already submitted, because the queue keeps submission order. A recycled
+/// atlas ([`Atlas::recycle`]) leans on that second half: it overwrites slots
+/// that frames in flight still sample, and those frames read the old bytes.
 struct WgpuUpload<'a> {
     gpu: &'a Gpu,
     mask: &'a wgpu::Texture,
@@ -1557,8 +1598,9 @@ impl Renderer {
     /// comes from the **same call** so the two cannot drift for a frame.
     ///
     /// **This is the only place that changes the atlas's key** (family, size and
-    /// scale), i.e. the grid geometry; drawing opens slots but never changes
-    /// the grid. When `ensure` reports a rebuild, every texture drops in the
+    /// scale), i.e. the cell geometry; drawing opens slots and may grow the
+    /// texture ([`Renderer::plan_with_room`]) but never changes the cell. When
+    /// `ensure` reports a rebuild, every texture drops in the
     /// same line: the slot map and the texture edge may have changed (the edge
     /// derives from `SLOT_TARGET` and the cell size), and writing a texture of
     /// the old size with the new metrics would corrupt silently — the colour
@@ -1580,9 +1622,7 @@ impl Renderer {
             fx_bind: None,
         });
         if entry.atlas.ensure(family, font.size, scale, spacing) {
-            entry.mask = None;
-            entry.color = None;
-            entry.fx_bind = None;
+            entry.drop_textures();
         }
         CellMetrics::from_atlas(entry.atlas.metrics(), entry.atlas.context_cell_w(), scale)
     }
@@ -1868,6 +1908,53 @@ impl Renderer {
             quad: SlotQuad::of(atlas),
             origin_y,
         });
+        Ok(())
+    }
+
+    /// [`Renderer::plan`], again while the atlas has no room for the frame —
+    /// **the frame boundary** where the atlas may be emptied or grown.
+    ///
+    /// The atlas never lets a slot go on its own, so a pane fills it over a
+    /// long session (a multilingual one in hours) and from then on every new
+    /// glyph would be a box. When a plan reports that ([`Atlas::take_overflow`])
+    /// the atlas is emptied and the frame planned again: only the glyphs of
+    /// this frame come back. A frame that does not fit an empty atlas, or
+    /// fills more than half of it, grows the texture and is planned again
+    /// ([`room`] has the rule). Here and not in the middle of a plan, because
+    /// a plan's lists carry uvs baked as they resolve: a slot reused after an
+    /// earlier list resolved would draw another glyph there. Nothing outside
+    /// the plan holds a slot number, so a whole plan is the unit.
+    ///
+    /// Bounded: one recycle, then each grow at least doubles the edge up to
+    /// the ceiling. **Known limit**: a frame that still overflows at the
+    /// ceiling keeps its boxes and pays two plans each frame it stays on
+    /// screen — only past the slot numbers' `u16` clamp with every cell a
+    /// different glyph.
+    fn plan_with_room(
+        &self,
+        frame: &Frame,
+        viewport_px: [f32; 2],
+        atlas: &mut Option<WgpuAtlas>,
+        plan: &mut Plan,
+    ) -> Result<(), GpuError> {
+        self.plan(frame, viewport_px, atlas, plan)?;
+        let mut recycled = false;
+        while let Some(entry) = atlas.as_mut() {
+            match room(entry.atlas.take_overflow(), recycled, entry.atlas.crowded()) {
+                Room::Fits => break,
+                Room::Recycle => {
+                    entry.atlas.recycle();
+                    recycled = true;
+                }
+                Room::Grow => {
+                    if !entry.atlas.grow() {
+                        break;
+                    }
+                    entry.drop_textures();
+                }
+            }
+            self.plan(frame, viewport_px, atlas, plan)?;
+        }
         Ok(())
     }
 
@@ -2306,7 +2393,7 @@ impl Renderer {
         let mut state = self.state.borrow_mut();
         let state = &mut *state;
         let plan = &mut state.plan;
-        self.plan(frame, viewport_px, &mut state.atlas, plan)?;
+        self.plan_with_room(frame, viewport_px, &mut state.atlas, plan)?;
         #[cfg(test)]
         if self.poison.take() {
             // Outside the target: validation rejects the pass.

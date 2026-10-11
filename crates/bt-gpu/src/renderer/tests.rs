@@ -2060,6 +2060,179 @@ fn atlas_occupancy_is_republished() {
     }
 }
 
+/// The frame boundary's table: a full atlas is emptied first, and only a frame
+/// that overflows or crowds an **emptied** atlas grows it.
+#[test]
+fn room_empties_first_and_grows_only_for_the_frame() {
+    // (overflowed, recycled, crowded) → room
+    let table = [
+        ((false, false, false), Room::Fits),
+        // A long session's slots: crowded but nothing missed — left alone.
+        ((false, false, true), Room::Fits),
+        ((true, false, false), Room::Recycle),
+        ((true, false, true), Room::Recycle),
+        ((false, true, false), Room::Fits),
+        // This frame alone fills more than half an empty atlas.
+        ((false, true, true), Room::Grow),
+        // This frame alone does not fit an empty atlas.
+        ((true, true, false), Room::Grow),
+        ((true, true, true), Room::Grow),
+    ];
+    for ((overflowed, recycled, crowded), want) in table {
+        assert_eq!(
+            room(overflowed, recycled, crowded),
+            want,
+            "overflowed={overflowed} recycled={recycled} crowded={crowded}"
+        );
+    }
+}
+
+/// A renderer whose atlas holds the fewest slots among large point sizes,
+/// with that capacity: read from the atlas, not assumed, because the cell —
+/// and with it the capacity — is the base font's (SF Mono here, DejaVu on
+/// Linux).
+fn crowded_renderer() -> (TestRenderer, usize) {
+    let r = renderer();
+    let mut best: Option<(f64, usize)> = None;
+    for size in (60..=144).step_by(4).map(f64::from) {
+        assert!(r.set_font(&FontOptions {
+            size,
+            ..FontOptions::default()
+        }));
+        let _ = r.cell_metrics(1.0);
+        let capacity = r.atlas_occupancy().1;
+        if best.is_none_or(|(_, least)| capacity < least) {
+            best = Some((size, capacity));
+        }
+    }
+    let (size, capacity) = best.expect("at least one size");
+    let _ = r.set_font(&FontOptions {
+        size,
+        ..FontOptions::default()
+    });
+    let _ = r.cell_metrics(1.0);
+    assert_eq!(
+        r.atlas_occupancy(),
+        (1, capacity),
+        "a fresh atlas holds only tofu"
+    );
+    (r, capacity)
+}
+
+/// More distinct glyphs than [`crowded_renderer`]'s atlas holds: the box,
+/// block and Braille sets (drawn without the font, so always a slot each, in
+/// one face) and letters every base font draws, in all four faces.
+fn atlas_pool() -> Vec<(char, bool, bool)> {
+    let drawn = ('\u{2500}'..='\u{259f}')
+        .chain('\u{2800}'..='\u{28ff}')
+        .map(|ch| (ch, false, false));
+    let letters = (' '..='~')
+        .chain('\u{a1}'..='\u{17f}')
+        .chain(('\u{391}'..='\u{3c9}').filter(|&ch| ch != '\u{3a2}'))
+        .chain('\u{410}'..='\u{44f}')
+        .filter(|ch| !ch.is_whitespace());
+    let faces = [(false, false), (true, false), (false, true), (true, true)];
+    drawn
+        .chain(letters.flat_map(move |ch| faces.map(|(bold, italic)| (ch, bold, italic))))
+        .collect()
+}
+
+/// One frame of `glyphs`, sixteen to a row, drawn offscreen.
+fn draw_glyphs(r: &TestRenderer, glyphs: &[(char, bool, bool)]) {
+    let (cw, ch) = r.cell_metrics(1.0).cell_px();
+    let mut frame = Frame::default();
+    frame.clear(grid(cw, ch), CaretStyle::default());
+    for (i, &(glyph, bold, italic)) in glyphs.iter().enumerate() {
+        frame.push(Cell {
+            bold,
+            italic,
+            ..glyph_cell((i % 16) as u16, glyph, None)
+        });
+    }
+    render_offscreen(r, 64, BACKGROUND, &frame);
+}
+
+/// A pane that keeps drawing new glyphs **empties its atlas** instead of
+/// drawing boxes from then on.
+///
+/// Before, the atlas kept every slot a pane ever used, and once it was full
+/// each glyph seen for the first time was tofu for the rest of the pane's
+/// life — seen as a bold `I` drawn as a box after hours of Chinese, Japanese
+/// and Korean text. Each frame here is far below half the atlas, so it is
+/// emptied (the used count falls) and never grown (the total stays).
+#[test]
+fn a_full_atlas_is_emptied_at_the_frame_boundary() {
+    let (r, capacity) = crowded_renderer();
+    let pool = atlas_pool();
+    assert!(
+        pool.len() > capacity,
+        "the pool ({} glyphs) cannot fill the atlas ({capacity} slots): the test has no subject",
+        pool.len()
+    );
+    let mut previous = r.atlas_occupancy().0;
+    let mut emptied = false;
+    let chunks: Vec<&[(char, bool, bool)]> = pool.chunks(128).collect();
+    for chunk in &chunks {
+        draw_glyphs(&r, chunk);
+        let (used, total) = r.atlas_occupancy();
+        assert_eq!(total, capacity, "a frame far below half the atlas grew it");
+        emptied |= used < previous;
+        previous = used;
+    }
+    assert!(
+        emptied,
+        "{} glyphs went through an atlas of {capacity} slots and it was never emptied: \
+         the glyphs past the capacity stayed tofu",
+        pool.len()
+    );
+    // The last frame's glyphs all hold a slot: drawn again it opens nothing,
+    // and a glyph that had fallen to tofu would ask again, overflow and empty
+    // the atlas.
+    let last = chunks.last().expect("a chunk");
+    draw_glyphs(&r, last);
+    assert_eq!(
+        r.atlas_occupancy().0,
+        previous,
+        "the last frame's glyphs do not all hold a slot"
+    );
+}
+
+/// A frame that does not fit even an emptied atlas **grows the texture**: all
+/// of it gets a slot, more than the old capacity held, and drawing it again
+/// opens nothing.
+#[test]
+fn a_frame_larger_than_the_atlas_grows_the_texture() {
+    let (r, capacity) = crowded_renderer();
+    let metrics = r.cell_metrics(1.0);
+    let pool = atlas_pool();
+    draw_glyphs(&r, &pool);
+    let (used, total) = r.atlas_occupancy();
+    assert!(
+        total > capacity,
+        "the atlas did not grow for a frame larger than it: {total} slots"
+    );
+    assert!(
+        used > capacity,
+        "the pool ({} glyphs) fit the old atlas ({capacity} slots): the test has no subject",
+        pool.len()
+    );
+    assert_eq!(
+        r.cell_metrics(1.0),
+        metrics,
+        "growing the texture changed the cell"
+    );
+    assert!(
+        r.plane_textures().0,
+        "the grown atlas must have a mask texture"
+    );
+    draw_glyphs(&r, &pool);
+    assert_eq!(
+        r.atlas_occupancy(),
+        (used, total),
+        "the grown frame drawn again opened slots or emptied the atlas"
+    );
+}
+
 #[test]
 fn rule_band_is_not_uniform_along_x() {
     // `bt-atlas` proves that the curl's **bitmap** is a wave (`curl_is_really_a_wave`, without
