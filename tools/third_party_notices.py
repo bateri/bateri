@@ -30,6 +30,11 @@ Choices:
   project the schemes come from, with its copyright line and license — MIT
   under the MIT text given once, Apache-2.0 under the Apache text the file
   already carries (alacritty_terminal's).
+- The fonts bateri ships (`FONTS`, the files under `assets/bundle/fonts/`):
+  OFL-1.1 requires the copyright notice and the license to travel with every
+  copy of the Font Software, so each font's own `OFL.txt` (which opens with
+  the copyright line) is given as is. A font under another license has no
+  notice path here and stops the script.
 """
 
 import json
@@ -69,6 +74,14 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE."""
 RULE = "=" * 80
+# The fonts that enter the package (`assets/bundle/fonts/`, registered by
+# `bt-atlas`'s CoreText backend): family, upstream version, source and the
+# license file shipped beside the font files. The version is the release the
+# files were taken from; the TTFs carry it too (`head.fontRevision`).
+FONTS = [
+    ("Kode Mono", "2.003", "https://github.com/isaozler/kode-mono",
+     "assets/bundle/fonts/OFL.txt"),
+]
 
 
 def product_crates():
@@ -201,6 +214,7 @@ def main():
             "full text below.", RULE, "", sparkle, ""]
 
     out += theme_notices("Version 2.0" in "\n".join(out))
+    out += font_notices()
     sys.stdout.write("\n".join(out))
 
 
@@ -229,6 +243,20 @@ def theme_notices(apache_given):
                                initial_indent="  ", subsequent_indent="    "),
                 ""]
     out += ["MIT License", "", MIT_TEXT, ""]
+    return out
+
+
+def font_notices():
+    """The notices of the bundled fonts: each one's OFL text, with its copyright line."""
+    out = []
+    for family, version, url, license_path in FONTS:
+        with open(license_path, encoding="utf-8") as f:
+            text = f.read().rstrip()
+        if "SIL OPEN FONT LICENSE Version 1.1" not in text or not text.startswith("Copyright"):
+            sys.exit(f"{family}: {license_path} is not an OFL-1.1 text with its copyright line")
+        out += ["", RULE, f"{family} {version} (font)", url,
+                "Licensed under the SIL Open Font License, Version 1.1; full text below.",
+                RULE, "", text, ""]
     return out
 
 

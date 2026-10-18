@@ -47,6 +47,12 @@ objc2-core-text = { version = "0.3", default-features = false, features = [
 # the line's font is handed to the attributed string through it and the font
 # the run actually used is read through it.
     "CTLine", "CTRun", "CTStringAttributes",
+# `CTFontManager` registers the fonts bateri ships (`assets/bundle/fonts/`) for
+# this process only (`CTFontManagerRegisterFontsForURL`, process scope), so a
+# bundled family opens by name like an installed one. The flag only turns on
+# CoreFoundation types already in the graph (`CFURL`, `CFError`, `CFArray`, …);
+# no crate enters `Cargo.lock`.
+    "CTFontManager",
 ] }
 # `CGBitmapContextCreate` is at the intersection of four headers (its own
 # `CGBitmapContext` header + `CGColorSpace` + `CGContext` + `CGImage`), `CGFont`
@@ -64,6 +70,9 @@ objc2-core-graphics = { version = "0.3", default-features = false, features = [
 # we use the names here.
 objc2-core-foundation = { version = "0.3", default-features = false, features = [
     "std", "CFString", "CFCGTypes", "CFAttributedString", "CFDictionary", "CFArray",
+# `CFURL` is the bundled font file's address for `CTFontManager` (written out
+# for the same reason: `CTFontManager` enables it, we use the name).
+    "CFURL",
 ] }
 # The macOS notification for uploads (`bt-shell-macos::uploader::notify`).
 # User-approved dependency decision (2026-09-27): Apple's supported

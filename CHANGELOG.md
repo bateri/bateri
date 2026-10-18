@@ -12,6 +12,16 @@ of every installed copy. A version without a section is not released.
 
 ## [Unreleased]
 
+### Added
+
+- **Kode Mono comes with bateri.** `family = "Kode Mono"` in `[font]`, or
+  picking it in the settings window's Font list, works without installing the
+  font: bateri carries its regular and bold faces and makes them available to
+  itself alone, so nothing is added to your Mac's fonts. It has no italic, so
+  italic text is drawn upright. The default font is still SF Mono, otherwise
+  Menlo. Kode Mono is by The Kode Mono Project Authors, under the SIL Open
+  Font License 1.1.
+
 ### Changed
 
 - **The command palette fades out as it closes**, the way it came in and like

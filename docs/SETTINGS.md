@@ -263,8 +263,9 @@ tab_position = "top"
 [font]
 # A family name as shown in Font Book. Without it bateri uses SF Mono, or
 # Menlo when SF Mono is not installed — SF Mono ships with Xcode, so it is not
-# on every machine. A character the family lacks is drawn from the system font
-# chain when it fits one cell; emoji, CJK and other wide glyphs stay as boxes.
+# on every machine. "Kode Mono" ships with bateri and works without installing
+# it. A character the family lacks is drawn from the system font chain when it
+# fits one cell; emoji, CJK and other wide glyphs stay as boxes.
 # family = "Menlo"
 # Greater than 0. Size in points.
 size = 13
@@ -1158,6 +1159,14 @@ letter_spacing = 1.0
   Mono"`, `"Menlo"`); case does not matter. The PostScript name of a single
   face (`"Menlo-Regular"`) does not count as a family and gives a "not found"
   warning.
+- **Kode Mono ships with bateri.** `family = "Kode Mono"` works on any Mac
+  without installing it: bateri registers its own copy for itself alone, so
+  nothing is installed into the system and other apps do not see it. It is
+  in the settings window's Font list too. It has a regular and a bold face;
+  there is no italic, so italic text is drawn upright (bold italic in bold).
+  It is not the default — without `family` the font is still SF Mono,
+  otherwise Menlo. If you have installed Kode Mono yourself, either copy may
+  be the one drawn; they are the same family.
 - If the family is not on the machine, the default font is used and the title
   bar says so: `font "Fira Code" not found; using Menlo`. Fixing the name and
   saving changes the font and clears the warning.

@@ -4176,6 +4176,27 @@ mod tests {
         );
     }
 
+    /// The bundled family opens by name with no issue, with its own bold
+    /// face, on a machine where it is not installed: the backend registers
+    /// `assets/bundle/fonts/` (in a test build, the repo's copy) before the
+    /// first lookup. The family has no italic; the ladder draws italic in the
+    /// regular face and bold italic in the bold one, not in the regular.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn bundled_family_opens_with_its_bold_face() {
+        let (faces, issue) = rules::Faces::from_chain(Some("Kode Mono"), POINT_SIZE);
+        assert_eq!(issue, None, "the bundled family did not open cleanly");
+        assert_eq!(faces.effective(Face::Bold), Face::Bold, "no bold face");
+        assert_eq!(faces.effective(Face::Italic), Face::Regular);
+        assert_eq!(faces.effective(Face::BoldItalic), Face::Bold);
+        assert!(
+            rules::monospaced_families()
+                .iter()
+                .any(|name| name == "Kode Mono"),
+            "the bundled family is not in the settings window's Font list"
+        );
+    }
+
     /// The (point size, scale) pairs the procedural invariants run at.
     ///
     /// All three are needed and each opens a different arithmetic (the

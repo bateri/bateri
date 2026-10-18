@@ -8,18 +8,21 @@
 //! requested (`rules::open_chain`).
 
 use std::ffi::c_void;
+use std::path::PathBuf;
 use std::ptr::{self, NonNull};
+use std::sync::Once;
 
 use objc2_core_foundation::{
     CFAttributedString, CFDictionary, CFIndex, CFNumber, CFRange, CFRetained, CFString, CFType,
-    CGPoint, CGRect, CGSize,
+    CFURL, CGPoint, CGRect, CGSize,
 };
 use objc2_core_graphics::{
     CGBitmapContextCreate, CGColorSpace, CGContext, CGGlyph, CGImageAlphaInfo, kCGColorSpaceSRGB,
 };
 use objc2_core_text::{
-    CTFont, CTFontDescriptor, CTFontOrientation, CTFontSymbolicTraits, CTLine, CTRun,
-    kCTFontAttributeName, kCTFontFamilyNameAttribute, kCTFontSymbolicTrait, kCTFontTraitsAttribute,
+    CTFont, CTFontDescriptor, CTFontManagerRegisterFontsForURL, CTFontManagerScope,
+    CTFontOrientation, CTFontSymbolicTraits, CTLine, CTRun, kCTFontAttributeName,
+    kCTFontFamilyNameAttribute, kCTFontSymbolicTrait, kCTFontTraitsAttribute,
 };
 
 use crate::raster::DrawResult;
@@ -39,6 +42,99 @@ const FALLBACK: &str = "Menlo";
 
 /// The PostScript name of `.LastResort`, the last link of CoreText's cascade.
 pub(crate) const LAST_RESORT: &str = "LastResort";
+
+/// The font files bateri ships, by name: Kode Mono's regular and bold faces
+/// (OFL-1.1, the notice is in `THIRD-PARTY-LICENSES.txt`). They are **not** a
+/// link of the default chain — the default stays SF Mono, else Menlo — they
+/// only make `family = "Kode Mono"` work on a machine where it is not
+/// installed.
+///
+/// Two static faces, not the variable font: [`CoreText::derive`] asks for the
+/// bold face by its trait bit, and a static `Bold` carries that bit by
+/// itself. There is no italic in the family; the face ladder
+/// (`rules::Faces::effective`) draws italic in the regular face and bold
+/// italic in the bold one, as it does for any family without them.
+///
+/// A list, not "every file in the directory": `make bundle` copies these by
+/// name and `cmp`s them, and `bundle_assets` holds the directory's inventory
+/// to exactly this, so a file that is not here cannot be registered by
+/// accident.
+const BUNDLED_FONTS: [&str; 2] = ["KodeMono-Regular.ttf", "KodeMono-Bold.ttf"];
+
+/// Registers [`BUNDLED_FONTS`] with CoreText **once per process**, before
+/// the first lookup by name.
+///
+/// Why registration in code and not `ATSApplicationFontsPath` in
+/// `Info.plist`: the plist key only works inside the `.app`, so a `cargo run`
+/// build and this crate's own tests would never see the family and the
+/// chain's tests could not open it. Registering here covers the package, the
+/// debug build and the tests through one path.
+///
+/// Process scope: nothing is installed for the user, nothing outlives the
+/// process, and a copy the user installed themselves still opens (CoreText
+/// matches either; they are the same family). A file that is not found is
+/// skipped **silently** — an embedding host has no `Resources/fonts`, and the
+/// family then answers "not found" through `rules::open_chain` like any
+/// missing family. A file that is found but refused is a broken package, so
+/// that one says so on stderr.
+fn register_bundled_fonts() {
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        for name in BUNDLED_FONTS {
+            let Some(path) = bundled_font(name) else {
+                continue;
+            };
+            let Some(url) = CFURL::from_file_path(&path) else {
+                continue;
+            };
+            // SAFETY: `url` is a live file URL; a null `error` is allowed
+            // ("must be a valid pointer or null") — the `bool` is the answer
+            // we act on.
+            let ok = unsafe {
+                CTFontManagerRegisterFontsForURL(&url, CTFontManagerScope::Process, ptr::null_mut())
+            };
+            if !ok {
+                eprintln!(
+                    "bateri: the bundled font {} could not be registered",
+                    path.display()
+                );
+            }
+        }
+    });
+}
+
+/// `name` in the package's `Contents/Resources/fonts` or, in a debug build,
+/// the repo's `assets/bundle/fonts`; `None` if it is in neither.
+fn bundled_font(name: &str) -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok();
+    // `…/bateri.app/Contents/MacOS/bateri` → two parents up → `Contents`.
+    // Whether it is a package is not asked; the file check answers it, and
+    // there is no `Resources/fonts` two levels above `target/debug/bateri`.
+    let packaged = exe
+        .as_deref()
+        .and_then(|exe| exe.parent()?.parent())
+        .map(|contents| contents.join("Resources/fonts").join(name));
+    packaged
+        .filter(|path| path.is_file())
+        .or_else(|| repo_font(name))
+}
+
+/// The repo's `assets/bundle/fonts/{name}` — **exists only in a debug
+/// build**. `#[cfg]`, not `cfg!`, for the reason `bt-shell-common`'s
+/// `repo_wrapper_dir` gives: the development machine's absolute path must not
+/// even reach code generation in a release binary.
+#[cfg(debug_assertions)]
+fn repo_font(name: &str) -> Option<PathBuf> {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../assets/bundle/fonts")
+        .join(name);
+    path.is_file().then_some(path)
+}
+
+#[cfg(not(debug_assertions))]
+fn repo_font(_name: &str) -> Option<PathBuf> {
+    None
+}
 
 /// CoreText and CoreGraphics behind [`FontSystem`].
 pub(crate) struct CoreText;
@@ -79,6 +175,7 @@ impl FontSystem for CoreText {
     type Font = CFRetained<CTFont>;
 
     fn open(name: &str, size: f64) -> (Self::Font, String) {
+        register_bundled_fonts();
         let wanted = CFString::from_str(name);
         // SAFETY: null `matrix` → identity matrix; `CTFontCreateWithName`
         // explicitly supports it and the return is non-null.
@@ -148,6 +245,7 @@ impl FontSystem for CoreText {
     /// it while opening. System families starting with a dot
     /// (`.AppleSystemUIFont`) are not shown to the user.
     fn families() -> Vec<String> {
+        register_bundled_fonts();
         // The `TraitMonoSpace` bit is `1 << 10`; it fits in an `i32`
         // losslessly.
         let mono = CFNumber::new_i32(CTFontSymbolicTraits::TraitMonoSpace.bits() as i32);

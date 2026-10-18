@@ -376,6 +376,14 @@ bundle: sparkle
 	rm -rf $(ICONSET)
 	@# GPL-3.0 §4: the binary ships with a copy of the license; its source is LICENSE at the root.
 	cp LICENSE assets/bundle/Credits.html assets/bundle/THIRD-PARTY-LICENSES.txt $(STAGE)/Contents/Resources/
+	@# The fonts bateri ships, file by file for the shell wrapper's reason below
+	@# (`bundle_assets` holds the directory to exactly these three). bt-atlas
+	@# registers the two faces from `Contents/Resources/fonts` at the first font
+	@# lookup; OFL.txt travels beside them (OFL-1.1 wants the notice with the
+	@# font; THIRD-PARTY-LICENSES.txt carries it too).
+	mkdir -p $(STAGE)/Contents/Resources/fonts
+	cp assets/bundle/fonts/KodeMono-Regular.ttf assets/bundle/fonts/KodeMono-Bold.ttf \
+		assets/bundle/fonts/OFL.txt $(STAGE)/Contents/Resources/fonts/
 	@# The wrapper is copied file by file, NOT with `cp -R assets/shell`:
 	@# as long as ZDOTDIR points at our directory, an arm that writes there
 	@# (`/etc/zshrc` once spawned a `.zsh_history` there) or a
@@ -427,7 +435,7 @@ bundle: sparkle
 	done; \
 	test '$(SIGN_ID)' = - || codesign -dv $(STAGE) 2>&1 | grep -q 'flags=.*runtime' || fail "no hardened runtime"; \
 	cmp -s LICENSE $$c/Resources/LICENSE || fail "LICENSE is not in the package or differs from the input"; \
-	for f in Credits.html THIRD-PARTY-LICENSES.txt; do \
+	for f in Credits.html THIRD-PARTY-LICENSES.txt fonts/KodeMono-Regular.ttf fonts/KodeMono-Bold.ttf fonts/OFL.txt; do \
 		cmp -s assets/bundle/$$f $$c/Resources/$$f || fail "$$f is not in the package or differs from the input"; \
 	done; \
 	for f in zsh/.zshenv zsh/.zprofile zsh/.zshrc zsh/.zlogin zsh/bateri.zsh zsh/zdotdir.zsh fish/vendor_conf.d/bateri.fish bash/bateri.bash; do \

@@ -2013,8 +2013,9 @@ tab_position = "top"
 [font]
 # A family name as shown in Font Book. Without it bateri uses SF Mono, or
 # Menlo when SF Mono is not installed — SF Mono ships with Xcode, so it is not
-# on every machine. A character the family lacks is drawn from the system font
-# chain when it fits one cell; emoji, CJK and other wide glyphs stay as boxes.
+# on every machine. "Kode Mono" ships with bateri and works without installing
+# it. A character the family lacks is drawn from the system font chain when it
+# fits one cell; emoji, CJK and other wide glyphs stay as boxes.
 # family = "Menlo"
 # Greater than 0. Size in points.
 size = 13

@@ -319,6 +319,81 @@ fn third_party_license_ships_with_attribution() {
     }
 }
 
+/// The bundled font's inventory is **exactly** its two faces and its
+/// license, and the two faces are real TrueType files.
+///
+/// For the shell wrappers' reason: `make bundle` copies the three by name and
+/// `cmp`s them, and `bt-atlas` registers the two faces by name
+/// (`coretext::BUNDLED_FONTS`). A third font dropped into the directory would
+/// never reach the package nor be registered while everything stays green,
+/// and a font without its license beside it is a font shipped against
+/// OFL-1.1. The `sfnt` version check catches the file that is not a font at
+/// all — an HTML error page saved in place of a download looks like a file
+/// in every other test, and CoreText refuses it only at run time, where the
+/// symptom is a quiet "font not found".
+#[test]
+fn bundled_font_inventory_is_exactly_what_the_bundle_copies() {
+    let dir = asset("fonts");
+    let mut found: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("{} could not be read: {e}", dir.display()))
+        .map(|entry| {
+            entry
+                .expect("directory entry could not be read")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .filter(|name| name != ".DS_Store")
+        .collect();
+    found.sort();
+    assert_eq!(
+        found,
+        ["KodeMono-Bold.ttf", "KodeMono-Regular.ttf", "OFL.txt"],
+        "the assets/bundle/fonts inventory changed; `make bundle`'s copy and cmp \
+         lists and bt-atlas's BUNDLED_FONTS must be updated too"
+    );
+    for face in ["KodeMono-Regular.ttf", "KodeMono-Bold.ttf"] {
+        let bytes = std::fs::read(dir.join(face))
+            .unwrap_or_else(|e| panic!("fonts/{face} could not be read: {e}"));
+        assert!(
+            bytes.starts_with(&[0x00, 0x01, 0x00, 0x00]),
+            "fonts/{face} is not a TrueType font (sfnt version 1.0)"
+        );
+    }
+}
+
+/// OFL-1.1 §2: the Font Software is redistributed only with the copyright
+/// notice and the license. The text sits beside the faces (`fonts/OFL.txt`,
+/// copied into the package next to them) and in `THIRD-PARTY-LICENSES.txt`
+/// (written by `tools/third_party_notices.py` from that same file); the
+/// About panel names the font and its license.
+#[test]
+fn bundled_font_ships_with_its_license() {
+    let copyright = "Copyright 2023 The Kode Mono Project Authors";
+    let ofl = read_asset("fonts/OFL.txt");
+    assert!(
+        ofl.starts_with(copyright),
+        "fonts/OFL.txt does not open with the font's copyright line"
+    );
+    assert!(
+        ofl.contains("SIL OPEN FONT LICENSE Version 1.1"),
+        "fonts/OFL.txt is not the OFL-1.1 text"
+    );
+    let licenses = read_asset("THIRD-PARTY-LICENSES.txt");
+    assert!(
+        licenses.contains(ofl.trim_end()),
+        "THIRD-PARTY-LICENSES.txt does not carry fonts/OFL.txt as is; \
+         run tools/third_party_notices.py"
+    );
+    let credits = read_asset("Credits.html");
+    for needle in ["Kode Mono", copyright, "SIL Open Font License, Version 1.1"] {
+        assert!(
+            credits.contains(needle),
+            "{needle:?} is not in Credits.html"
+        );
+    }
+}
+
 /// AppKit's About panel imports `Credits.html` without a declared charset
 /// and decodes it as Latin-1, so any raw non-ASCII byte in the rendered
 /// markup shows up as mojibake (`©` → `Â©`, `Ö` → `Ã–`; seen by the user
