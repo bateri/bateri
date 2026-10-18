@@ -28,6 +28,13 @@ of every installed copy. A version without a section is not released.
   → on a command opens Change Shortcut…. The change takes effect at once in the
   menu bar, the palette, the number a tab shows while its modifiers are held and
   the numbers of ⌘P.
+- **A modifier tapped twice can be a shortcut.** In Settings ▸ Keyboard tap ⇧,
+  ⌃, ⌥ or ⌘ twice instead of pressing a key (the field says "⇧ once more…"), or
+  write `command_palette = "shift+shift"`. Nothing has one until you give it.
+  Typing a capital letter, holding ⌘ for the tab keys, a click or a scroll
+  between the taps does not count. The menu bar cannot show it, so the command's
+  row in Settings and its row in the command palette do; ⌃ ⌃ and ⌘ ⌘ ask first,
+  because macOS can start Dictation on them, and fn fn is refused.
 - **Shortcuts live in a `[keys]` table of `settings.toml`**, by the command's
   fixed name: `copy_last_output = "shift+cmd+o"`, none (`""`) or two. Select Tab
   ▸, Select Group ▸ and the split commands take only the modifiers

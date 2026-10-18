@@ -13,6 +13,9 @@
 //!   the line's, the program's, one that types, macOS's, or one that is no shortcut.
 //! - [`Page`] — the rows of Settings ▸ Keyboard, made from the menu as it stands; [`record`] —
 //!   what a pressed key says and writes there ([`Outcome`]).
+//! - [`Taps`] — the count of a modifier pressed twice (`⇧ ⇧`), the one machine behind the live
+//!   trigger and the recorder; [`Resolved::judge_twice`] / [`record_twice`] — what a double press
+//!   comes to.
 //! - [`menu_key`] / [`chord_of`] / [`glyphs`] — the file's spelling ↔ the key a menu item holds,
 //!   and how a shortcut is shown (the palette's own glyph function).
 //!
@@ -24,16 +27,19 @@ mod page;
 mod record;
 mod resolve;
 mod table;
+mod tap;
 mod verdict;
 
 pub use mapping::{MenuKey, chord_of, digit_glyphs, glyphs, menu_key};
 pub use page::{
-    BUILT_IN_HEADING, BuiltIn, Chip, Filter, Listing, Page, PageRow, Section, command_names,
-    family_glyphs, is_line_editing,
+    BUILT_IN_HEADING, BuiltIn, Chip, DOUBLE_PRESS_NOTE, Filter, Listing, Page, PageRow, Section,
+    command_names, family_glyphs, is_line_editing,
 };
 pub use record::{
-    ASSIGN_ANYWAY, Outcome, USE_HERE, edit_of, record, remove_edit, reset_edit, restore_edit,
+    ASSIGN_ANYWAY, Outcome, USE_HERE, edit_of, record, record_twice, remove_edit, reset_edit,
+    restore_edit,
 };
-pub use resolve::{Assignment, Binding, Conflict, Resolved, Source, resolve};
+pub use resolve::{Assignment, Binding, Conflict, Resolved, SharedKeys, Source, resolve};
 pub use table::{COMMANDS, Command, Family, Item, by_id, by_name, family_default};
+pub use tap::{Held, Step, Tapped, Taps};
 pub use verdict::{Clash, MACOS_KEYS, MacKey, Refusal, Ruling, Verdict, refusal};

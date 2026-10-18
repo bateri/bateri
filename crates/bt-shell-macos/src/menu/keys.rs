@@ -23,8 +23,11 @@ use bt_shell_common::shortcuts::{
     self, COMMANDS, Resolved, by_id, by_name, family_default, menu_key,
 };
 use objc2::rc::Retained;
-use objc2::{MainThreadMarker, MainThreadOnly};
-use objc2_app_kit::{NSEventModifierFlags, NSMenu, NSMenuItem, NSUserInterfaceItemIdentification};
+use objc2::runtime::AnyObject;
+use objc2::{MainThreadMarker, MainThreadOnly, Message};
+use objc2_app_kit::{
+    NSApplication, NSEventModifierFlags, NSMenu, NSMenuItem, NSUserInterfaceItemIdentification,
+};
 use objc2_foundation::NSString;
 
 use super::END_PROGRAMS_TAG;
@@ -132,6 +135,9 @@ fn walk(mtm: MainThreadMarker, menu: &NSMenu, keys: &HashMap<String, Vec<Chord>>
             menu.removeItem(&item);
         }
     }
+    // The second keys wait until the keys are written: a copy goes after its item, and after the
+    // alternates that follow it, because AppKit pairs an alternate with the item right before it.
+    let mut seconds: Vec<(Retained<NSMenuItem>, Chord)> = Vec::new();
     let mut at: isize = 0;
     while at < menu.numberOfItems() {
         let Some(item) = menu.itemAtIndex(at) else {
@@ -154,10 +160,64 @@ fn walk(mtm: MainThreadMarker, menu: &NSMenu, keys: &HashMap<String, Vec<Chord>>
             align_alternate(menu, &item, at - 1);
         }
         if let Some(second) = chords.get(1) {
-            menu.insertItem_atIndex(&copy_of(mtm, &item, second), at);
-            at += 1;
+            seconds.push((item, *second));
         }
     }
+    for (item, chord) in seconds {
+        let mut place = menu.indexOfItem(&item) + 1;
+        while place < menu.numberOfItems()
+            && menu
+                .itemAtIndex(place)
+                .is_some_and(|next| next.isAlternate())
+        {
+            place += 1;
+        }
+        menu.insertItem_atIndex(&copy_of(mtm, &item, &chord), place);
+    }
+}
+
+/// Runs the command `id` (a table id: the palette's, `splitRight`, `selectTab:3`) the way its
+/// key would: the item is validated, as opening its menu would, and its action sent to its
+/// target — or, with none, down the responder chain from the key window's first responder.
+/// `false` for a command with no item and for one the menu greys. A double press runs a command
+/// by this, since no key of the bar reaches the item.
+pub(crate) fn run(mtm: MainThreadMarker, id: &str) -> bool {
+    let app = NSApplication::sharedApplication(mtm);
+    let Some(bar) = app.mainMenu() else {
+        return false;
+    };
+    let Some((menu, item)) = item_of(&bar, id) else {
+        return false;
+    };
+    menu.update();
+    // A hidden item is not validated, so what it stood for is asked: Quit and End Programs is
+    // hidden under every `keep_running` but "quit" and then is not there to run.
+    if !item.isEnabled() || (item.isHidden() && item.tag() == END_PROGRAMS_TAG) {
+        return false;
+    }
+    let Some(action) = item.action() else {
+        return false;
+    };
+    let sender: &AnyObject = item.as_ref();
+    let target = item.target();
+    // SAFETY: the item's own action, sent as the menu sends it; the sender is the item, which a
+    // tagged action reads its tag from.
+    unsafe { app.sendAction_to_from(action, target.as_deref(), Some(sender)) }
+}
+
+/// The item with the command id `id` and the menu that holds it. A hidden copy of an item (the
+/// second key) is not it.
+fn item_of(menu: &NSMenu, id: &str) -> Option<(Retained<NSMenu>, Retained<NSMenuItem>)> {
+    for item in menu.itemArray().iter() {
+        if let Some(submenu) = item.submenu() {
+            if let Some(found) = item_of(&submenu, id) {
+                return Some(found);
+            }
+        } else if !is_copy(&item) && id_of(&item).as_deref() == Some(id) {
+            return Some((menu.retain(), item));
+        }
+    }
+    None
 }
 
 /// What disagrees between the bar and the table: a keyed item the table does not list (its key

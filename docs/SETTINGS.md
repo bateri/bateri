@@ -167,11 +167,17 @@ reads and writes the [`[keys]`](#keys-1) table.
 - **Keys that are refused** have no button and the page keeps listening:
   the keys macOS keeps for itself (⌘Space, ⌃←, …) and a letter with no ⌘, ⌃ or
   ⌥, which would be typing. Function keys stand alone.
+- **A modifier twice** is recorded by tapping it twice: the field says
+  **⇧ once more…** after the first tap. ⇧ ⇧ and ⌥ ⌥ are given without a
+  question, ⌃ ⌃ and ⌘ ⌘ ask because macOS can use them for Dictation, and fn fn
+  is refused. A double press is another command's like any key is
+  (**Use Here**). Find by Key does not look for one.
 - **A family is one line.** For Select Tab ▸, Select Group ▸ and Select,
   Resize and Swap Split ▸, hold the modifiers you want and press one of the
   family's keys, a digit or an arrow: ⌥ and 1 make ⌥1…⌥9. Only the modifiers
   are written (`select_tab = "option"`). A family whose key is another
-  command's is refused.
+  command's is refused, and so is ⇧ on the digits of Select Tab and Select Group:
+  ⇧1 types `!`, which the menu cannot tell from the digit.
 - **Restore Defaults…** asks, then removes the shortcuts the file gives; its
   comments and its other settings stay.
 - **A line can show a note under it**: a key two commands share in the file
@@ -459,11 +465,13 @@ stats_interval = 3
 # comes last: a character, or left, right, up, down, tab, return, space,
 # escape, backspace, delete, home, end, pageup, pagedown, f1 to f12, plus.
 # A shortcut of only modifiers (select_tab = "option") sets the modifiers of
-# every item of a family such as the tabs' digits.
+# every item of a family such as the tabs' digits. One modifier twice
+# ("shift+shift") is that key tapped twice.
 # copy_last_output = "shift+cmd+o"
 # show_all_tabs = ""
 # show_next_tab = ["shift+cmd+]", "ctrl+tab"]
 # select_tab = "option"
+# command_palette = ["shift+cmd+p", "shift+shift"]
 ```
 
 A test ties this block to the template (`documented_template_is_the_template`).
@@ -2184,8 +2192,20 @@ the command's name.
   modifiers yours. Holding Select Tab's modifiers shows the tabs' numbers, and
   Select Group's the groups' (⌘ and ⌃⌘ unless you moved them); ⌥⌘ held is always
   the arrangement of the panes, so a family on ⌥⌘ works but shows no numbers.
-- **One modifier twice** (`shift+shift`) is that key pressed twice. It is
-  read, but not used yet.
+  The digits of Select Tab and Select Group take no `shift` (⇧1 types `!`).
+- **One modifier twice** (`shift+shift`, `ctrl+ctrl`, `option+option`,
+  `cmd+cmd`) is that key tapped twice. No command has one until you give it, and
+  it runs the command when the second tap ends, while bateri is the app in
+  front. A tap is the key pressed and let go alone, in under 0.3 seconds; the
+  second tap starts within the system's double-click interval of the first
+  one's release. A key, a click or a scroll between the two, or another
+  modifier, starts the count again, so the ⇧ of a capital letter never counts;
+  the left and the right key are the same key. The menu bar cannot show a
+  double press, so the command's row in Settings ▸ Keyboard says so, and the
+  command palette shows it on the row; give the command a shortcut of a key too
+  to see that one in the menu. `ctrl+ctrl` and `cmd+cmd` are keys macOS can start
+  Dictation on, which Settings ▸ Keyboard asks about; a family (`select_tab`)
+  cannot have one, since each of its items needs a key.
 - **A line that cannot be read**, and a name no command has, is ignored on its
   own: the command keeps its own shortcut, the other lines are read as usual,
   and the warning names the line.

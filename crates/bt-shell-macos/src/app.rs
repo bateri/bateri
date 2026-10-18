@@ -21,7 +21,7 @@ use bt_core::{
     ShellIntegration, TabPosition, Teardown, Theme,
 };
 use bt_gpu::{DisplayLink, MIN_SAMPLES, Renderer, ScrollbarMode, Stats};
-use bt_shell_common::shortcuts::{self, Resolved};
+use bt_shell_common::shortcuts::{self, Resolved, Tapped};
 use dispatch2::{DispatchQueue, DispatchTime};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
@@ -1729,6 +1729,10 @@ define_class!(
                 self.key_window().is_some_and(|window| {
                     window.root().palette().is_some() || window.palette_may_open()
                 })
+            } else if item.action() == Some(sel!(quitAndEndPrograms:)) {
+                // Hidden but for `keep_running = "quit"`, and a hidden item is not validated:
+                // the copy that carries a second key for it is hidden always and would run it.
+                crate::menu::shows_end_programs(self.settings().keep_running)
             } else if item.action() == Some(sel!(mergeWindows:)) {
                 // Merging needs a second window to take tabs from.
                 self.windows().len() > 1
@@ -5744,6 +5748,24 @@ impl AppDelegate {
     /// The shortcuts in effect ([`Ivars::keys`]): the table read against the file's `[keys]`.
     pub(crate) fn keys(&self) -> Rc<Resolved> {
         self.ivars().keys.borrow().clone()
+    }
+
+    /// A modifier was pressed twice, quickly and alone (`tab_bar::watch_command_key`): runs the
+    /// command that has that double press, as its menu item would run on a key
+    /// (`crate::menu::keys::run`). A command shares no key with the menu, so the first in the
+    /// menu's order runs, as for a chord two commands share. Nothing runs while a field of
+    /// Settings ▸ Keyboard listens — it hears the double press as one to give — and fn never
+    /// does: macOS keeps it.
+    pub(crate) fn double_pressed(&self, tapped: Tapped) {
+        let Tapped::Modifier(modifier) = tapped else {
+            return;
+        };
+        if crate::settings_window::is_recording(self.mtm()) {
+            return;
+        }
+        if let Some(command) = self.keys().owner_of_twice(modifier, "") {
+            crate::menu::keys::run(self.mtm(), command.id);
+        }
     }
 
     /// Reads `settings`' `[keys]` against the table and writes the result to the menu bar: the

@@ -11,13 +11,14 @@
 //! shortcuts come to its own defaults has its line removed, not written out: a default that
 //! later changes would otherwise stay as the file wrote it.
 
-use bt_core::{Chord, Key, Mods, NamedKey, SettingsEdit, Shortcut};
+use bt_core::{Chord, Key, Modifier, Mods, NamedKey, SettingsEdit, Shortcut};
 
 use super::mapping::glyphs;
 use super::page::{Page, family_glyphs};
 use super::resolve::Resolved;
 use super::table::{Command, Family, by_name};
-use super::verdict::{Clash, Verdict};
+use super::tap::Tapped;
+use super::verdict::{Clash, Ruling, Verdict};
 
 /// The button that says "yes, I know what it costs".
 pub const USE_HERE: &str = "Use Here";
@@ -113,12 +114,77 @@ pub fn record(
 ) -> Option<Outcome> {
     let command = by_name(name)?;
     let ruling = resolved.judge(name, pressed)?;
-    let verdict = ruling.verdict;
-    let current = resolved.binding(name)?.shortcuts.clone();
     let key = shown(pressed);
-    let (note, button) = words(page, command, &verdict, pressed, &key);
+    let (note, button) = words(page, command, &ruling.verdict, pressed, &key);
+    // What a key takes from its owner: the owner's shortcuts that bind the chord.
+    let held = |owner: &Command, shortcut: &Shortcut| {
+        owner
+            .items(shortcut)
+            .iter()
+            .any(|item| item.chord == *pressed)
+    };
+    Some(outcome(
+        resolved,
+        command,
+        slot,
+        ruling,
+        (note, button),
+        &held,
+    ))
+}
+
+/// What a double press of `tapped` comes to as the shortcut in `slot` of the command `name`;
+/// `None` for a name that is not one. fn is refused without being judged.
+pub fn record_twice(
+    page: &Page,
+    resolved: &Resolved,
+    name: &str,
+    slot: usize,
+    tapped: Tapped,
+) -> Option<Outcome> {
+    let command = by_name(name)?;
+    let Tapped::Modifier(modifier) = tapped else {
+        return Some(Outcome {
+            verdict: Verdict::FunctionTwice,
+            note: Some(
+                "fn fn is macOS’s: it starts Dictation or the emoji picker, so bateri never gets it."
+                    .to_owned(),
+            ),
+            button: None,
+            edits: Vec::new(),
+        });
+    };
+    let ruling = resolved.judge_twice(name, modifier)?;
+    let (note, button) = words_twice(page, command, &ruling.verdict, modifier);
+    let held = |_: &Command, shortcut: &Shortcut| *shortcut == Shortcut::Twice(modifier);
+    Some(outcome(
+        resolved,
+        command,
+        slot,
+        ruling,
+        (note, button),
+        &held,
+    ))
+}
+
+/// The outcome of a ruling: its words and, for a key that can be given, what accepting writes —
+/// the command's line, and when the key was another command's, that command's line without it
+/// (`held` says which of its shortcuts are the key).
+fn outcome(
+    resolved: &Resolved,
+    command: &Command,
+    slot: usize,
+    ruling: Ruling,
+    (note, button): (Option<String>, Option<&'static str>),
+    held: &dyn Fn(&Command, &Shortcut) -> bool,
+) -> Outcome {
+    let verdict = ruling.verdict;
     let mut edits = Vec::new();
     if !verdict.is_refused() {
+        let current = resolved
+            .binding(command.name)
+            .map(|binding| binding.shortcuts.clone())
+            .unwrap_or_default();
         edits.push(edit_of(command, replaced(&current, slot, ruling.stored)));
         if let Some(owner) = verdict.takes_from() {
             let left: Vec<Shortcut> = resolved
@@ -126,22 +192,17 @@ pub fn record(
                 .map(|binding| binding.shortcuts.clone())
                 .unwrap_or_default()
                 .into_iter()
-                .filter(|shortcut| {
-                    !owner
-                        .items(shortcut)
-                        .iter()
-                        .any(|item| item.chord == *pressed)
-                })
+                .filter(|shortcut| !held(owner, shortcut))
                 .collect();
             edits.push(edit_of(owner, left));
         }
     }
-    Some(Outcome {
+    Outcome {
         verdict,
         note,
         button,
         edits,
-    })
+    }
 }
 
 /// How a pressed key is shown: its glyphs, or the bare key for one that is typing.
@@ -193,6 +254,69 @@ fn example(family: Family, mods: Mods) -> String {
     glyphs(&Shortcut::Chord(Chord::new(mods, key))).unwrap_or_default()
 }
 
+/// The note of a key that is `owner`'s: whose it is and what is left to it. `binds` says which
+/// of the owner's shortcuts are the key.
+fn taken_by_note(
+    page: &Page,
+    owner: &Command,
+    key: &str,
+    binds: &dyn Fn(&Shortcut) -> bool,
+) -> String {
+    let owner_title = page.title_of(owner.name);
+    let others = page
+        .row(owner.name)
+        .map(|row| {
+            row.chips
+                .iter()
+                .filter(|chip| !binds(&chip.shortcut))
+                .map(|chip| chip.text.clone())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    match others.first() {
+        Some(left) => format!("{key} is {owner_title}’s shortcut. {owner_title} will keep {left}."),
+        None => format!("{key} is {owner_title}’s shortcut. {owner_title} will have none."),
+    }
+}
+
+/// The words of a double press: the note under the row and the button's verb.
+fn words_twice(
+    page: &Page,
+    command: &Command,
+    verdict: &Verdict,
+    modifier: Modifier,
+) -> (Option<String>, Option<&'static str>) {
+    let key = glyphs(&Shortcut::Twice(modifier)).unwrap_or_default();
+    match verdict {
+        Verdict::TakenBy(owner) => (
+            Some(taken_by_note(page, owner, &key, &|shortcut| {
+                *shortcut == Shortcut::Twice(modifier)
+            })),
+            Some(USE_HERE),
+        ),
+        Verdict::Dictation => (
+            Some(format!(
+                "{key} starts Dictation if macOS is set to it (System Settings ▸ Keyboard). \
+                 As a shortcut, both would run."
+            )),
+            Some(ASSIGN_ANYWAY),
+        ),
+        Verdict::FamilyTwice(family) => {
+            let word = family.presses();
+            (
+                Some(format!(
+                    "A double press is one shortcut — {} needs {} {word} for each of its items.",
+                    page.title_of(command.name),
+                    article(word)
+                )),
+                None,
+            )
+        }
+        // The rest is a chord's.
+        _ => (None, None),
+    }
+}
+
 fn words(
     page: &Page,
     command: &Command,
@@ -211,31 +335,9 @@ fn words(
                     "{key} is one of {owner_title}’s shortcuts ({}). {owner_title} will have none.",
                     family_glyphs(pressed.mods, family)
                 ),
-                None => {
-                    let others = page
-                        .row(owner.name)
-                        .map(|row| {
-                            row.chips
-                                .iter()
-                                .filter(|chip| {
-                                    !owner
-                                        .items(&chip.shortcut)
-                                        .iter()
-                                        .any(|i| i.chord == *pressed)
-                                })
-                                .map(|chip| chip.text.clone())
-                                .collect::<Vec<_>>()
-                        })
-                        .unwrap_or_default();
-                    match others.first() {
-                        Some(left) => format!(
-                            "{key} is {owner_title}’s shortcut. {owner_title} will keep {left}."
-                        ),
-                        None => format!(
-                            "{key} is {owner_title}’s shortcut. {owner_title} will have none."
-                        ),
-                    }
-                }
+                None => taken_by_note(page, owner, key, &|shortcut| {
+                    owner.items(shortcut).iter().any(|i| i.chord == *pressed)
+                }),
             };
             (Some(ending), Some(USE_HERE))
         }
@@ -294,6 +396,16 @@ fn words(
                 None,
             )
         }
+        // A double press is worded apart ([`words_twice`]).
+        Verdict::Dictation | Verdict::FamilyTwice(_) | Verdict::FunctionTwice => (None, None),
+        Verdict::FamilyShift(_) => (
+            Some(format!(
+                "⇧ makes a digit type another character (⇧1 types !), and the menu cannot tell it \
+                 from the digit, so {} takes no ⇧. Try other modifiers.",
+                title(command.name)
+            )),
+            None,
+        ),
         Verdict::FamilyClash { chord, with } => {
             let item = glyphs(&Shortcut::Chord(*chord)).unwrap_or_default();
             let reason = match with {
@@ -532,6 +644,18 @@ mod tests {
     }
 
     #[test]
+    fn shift_on_the_digits_says_why_and_is_refused() {
+        let done = outcome("", "select_tab", 0, "shift+cmd+!");
+        assert!(done.is_refused() && done.button.is_none() && done.edits.is_empty());
+        assert_eq!(
+            done.note.as_deref(),
+            Some(
+                "⇧ makes a digit type another character (⇧1 types !), and the menu cannot tell it from the digit, so Select Tab takes no ⇧. Try other modifiers."
+            )
+        );
+    }
+
+    #[test]
     fn a_family_whose_item_is_someone_elses_is_refused() {
         // ⌘3 is Select Tab's, but Select Tab's own modifiers on Select Group would take them.
         let done = outcome("", "select_group", 0, "cmd+1");
@@ -594,5 +718,108 @@ mod tests {
             restore_edit(),
             SettingsEdit::DefaultShortcuts { names } if names.len() == super::super::table::COMMANDS.len()
         ));
+    }
+
+    fn twice_outcome(keys: &str, name: &str, slot: usize, tapped: Tapped) -> Outcome {
+        let text = format!("[keys]\n{keys}");
+        let settings = Settings::parse(&text).expect("TOML").settings;
+        let resolved = resolve(&settings);
+        let page = Page::new(&menu(), &resolved);
+        record_twice(&page, &resolved, name, slot, tapped).expect("a command")
+    }
+
+    fn shift_twice() -> Tapped {
+        Tapped::Modifier(Modifier::Shift)
+    }
+
+    // A double press.
+
+    #[test]
+    fn a_free_double_press_is_written_at_once() {
+        let done = twice_outcome("", "copy_last_output", 0, shift_twice());
+        assert!(done.is_accepted());
+        assert_eq!(
+            done.edits,
+            [edit("copy_last_output", Some(&["shift+shift"]))]
+        );
+        // As the second shortcut it keeps the first.
+        let second = twice_outcome("", "show_next_tab", 1, Tapped::Modifier(Modifier::Option));
+        assert_eq!(
+            second.edits,
+            [edit(
+                "show_next_tab",
+                Some(&["shift+cmd+]", "option+option"])
+            )]
+        );
+    }
+
+    #[test]
+    fn control_and_command_twice_ask_about_dictation() {
+        let done = twice_outcome("", "copy_last_output", 0, Tapped::Modifier(Modifier::Ctrl));
+        assert_eq!(done.button, Some(ASSIGN_ANYWAY));
+        assert!(
+            done.note
+                .as_deref()
+                .is_some_and(|note| note.starts_with("⌃ ⌃ starts Dictation")),
+            "{:?}",
+            done.note
+        );
+        assert_eq!(done.edits, [edit("copy_last_output", Some(&["ctrl+ctrl"]))]);
+    }
+
+    #[test]
+    fn another_commands_double_press_is_taken_with_use_here() {
+        let done = twice_outcome(
+            "split_down = \"shift+shift\"\n",
+            "copy_last_output",
+            0,
+            shift_twice(),
+        );
+        assert_eq!(
+            done.note.as_deref(),
+            Some("⇧ ⇧ is Split Down’s shortcut. Split Down will have none.")
+        );
+        assert_eq!(done.button, Some(USE_HERE));
+        assert_eq!(
+            done.edits,
+            [
+                edit("copy_last_output", Some(&["shift+shift"])),
+                edit("split_down", Some(&[])),
+            ]
+        );
+        // Of two shortcuts, the other stays.
+        let two = twice_outcome(
+            "split_down = [\"cmd+j\", \"shift+shift\"]\n",
+            "copy_last_output",
+            0,
+            shift_twice(),
+        );
+        assert_eq!(
+            two.note.as_deref(),
+            Some("⇧ ⇧ is Split Down’s shortcut. Split Down will keep ⌘J.")
+        );
+        assert_eq!(two.edits[1], edit("split_down", Some(&["cmd+j"])));
+    }
+
+    #[test]
+    fn fn_twice_and_a_family_are_refused_with_no_button() {
+        let function = twice_outcome("", "copy_last_output", 0, Tapped::Function);
+        assert!(function.is_refused() && function.button.is_none() && function.edits.is_empty());
+        assert!(
+            function
+                .note
+                .as_deref()
+                .is_some_and(|note| note.starts_with("fn fn is macOS’s")),
+            "{:?}",
+            function.note
+        );
+        let family = twice_outcome("", "select_tab", 0, shift_twice());
+        assert!(family.is_refused() && family.edits.is_empty());
+        assert_eq!(
+            family.note.as_deref(),
+            Some(
+                "A double press is one shortcut — Select Tab needs a digit for each of its items."
+            )
+        );
     }
 }

@@ -43,6 +43,7 @@ use std::time::Duration;
 
 use block2::RcBlock;
 use bt_core::{Mods, Theme};
+use bt_shell_common::shortcuts::{Held, Taps};
 use dispatch2::{DispatchQueue, DispatchTime};
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
@@ -96,6 +97,23 @@ pub(crate) fn held_mods(flags: NSEventModifierFlags) -> Mods {
         flags.contains(NSEventModifierFlags::Shift),
         flags.contains(NSEventModifierFlags::Command),
     )
+}
+
+/// The keys `flags` hold that a double press counts: the four modifiers and fn.
+pub(crate) fn held_keys(flags: NSEventModifierFlags) -> Held {
+    Held {
+        mods: held_mods(flags),
+        function: flags.contains(NSEventModifierFlags::Function),
+    }
+}
+
+/// A count of a modifier pressed twice, with this shell's timing: a tap is shorter than the
+/// hint's wait ([`HINT_DELAY`] — a press that long is a hold, which shows the hints), and the
+/// second press comes within the system's double-click interval of the first one's release.
+/// Every count of a double press — the live trigger and the recorder of Settings ▸ Keyboard —
+/// is made here, so they cannot disagree on what a double press is.
+pub(crate) fn taps() -> Taps {
+    Taps::new(HINT_DELAY.as_secs_f64(), NSEvent::doubleClickInterval())
 }
 
 /// What `flags` hold, against the modifiers of Select Tab (`tabs`) and of Select Group
@@ -1366,6 +1384,20 @@ mod tests {
         );
         assert_ne!(held_mods(command | NSEventModifierFlags::Shift), Mods::CMD);
         assert_eq!(held_mods(NSEventModifierFlags::empty()), Mods::NONE);
+    }
+
+    /// A double press counts the four modifiers and fn — fn only to refuse it — and still not
+    /// Caps Lock.
+    #[test]
+    fn held_keys_are_the_four_modifiers_and_fn() {
+        let shift = NSEventModifierFlags::Shift;
+        let held = held_keys(shift | NSEventModifierFlags::CapsLock);
+        assert_eq!(held.mods, Mods::new(false, false, true, false));
+        assert!(!held.function);
+        let function = held_keys(NSEventModifierFlags::Function);
+        assert_eq!(function.mods, Mods::NONE);
+        assert!(function.function);
+        assert_eq!(held_keys(NSEventModifierFlags::empty()), Held::default());
     }
 
     #[test]

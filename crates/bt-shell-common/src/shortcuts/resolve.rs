@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 
-use bt_core::{Chord, Diagnostic, Mods, Settings, Shortcut};
+use bt_core::{Chord, Diagnostic, Modifier, Mods, Settings, Shortcut};
 
 use super::table::{COMMANDS, Command, by_name};
 use super::verdict::{MACOS_KEYS, Refusal, refusal};
@@ -46,6 +46,17 @@ pub struct Conflict {
     pub shortcut: Shortcut,
     /// In the order of the menu: the first is the one that runs.
     pub commands: Vec<&'static Command>,
+}
+
+/// A set of commands that share keys, with the first key they share and how many. A family that
+/// shares nine keys with another command is one set, not nine.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SharedKeys {
+    /// In the order of the menu: the first is the one that runs.
+    pub commands: Vec<&'static Command>,
+    /// The first key they share.
+    pub shortcut: Shortcut,
+    pub count: usize,
 }
 
 /// One menu item and the key it is given.
@@ -91,10 +102,17 @@ fn check(command: &Command, shortcut: &Shortcut) -> Result<(), String> {
             "`{mods}` is only modifiers, and {} takes a key (only a family such as select_tab takes only modifiers)",
             command.name
         )),
-        (Shortcut::Mods(mods), Some(_)) => {
+        (Shortcut::Mods(mods), Some(family)) => {
             if !(mods.cmd || mods.ctrl || mods.option) {
                 return Err(format!(
                     "`{mods}` alone is typing; the modifiers of {} need cmd, ctrl or option",
+                    command.name
+                ));
+            }
+            if mods.shift && family.is_digits() {
+                return Err(format!(
+                    "`{mods}` has shift, which makes a digit type another character (shift+1 is `!`) \
+                     that the menu cannot tell from the digit; {} takes other modifiers",
                     command.name
                 ));
             }
@@ -206,24 +224,39 @@ fn conflicts(bindings: &[Binding]) -> Vec<Conflict> {
 }
 
 impl Resolved {
+    /// The keys two or more commands have, grouped by the commands that share them: one set for
+    /// each distinct list of commands, in the order they are first met. The subtitle's warning
+    /// ([`Resolved::problems`]) and the note under a row are worded from the same sets.
+    pub fn shared_sets(&self) -> Vec<SharedKeys> {
+        let mut sets: Vec<SharedKeys> = Vec::new();
+        for conflict in &self.conflicts {
+            match sets
+                .iter_mut()
+                .find(|set| set.commands == conflict.commands)
+            {
+                Some(set) => set.count += 1,
+                None => sets.push(SharedKeys {
+                    commands: conflict.commands.clone(),
+                    shortcut: conflict.shortcut,
+                    count: 1,
+                }),
+            }
+        }
+        sets
+    }
+
     /// What is wrong with the file, as the settings report it (the subtitle, the notice and the
     /// settings window's banner): the diagnostics of [`resolve`], and one line for each set of
     /// commands that share a key — a family that shares nine keys is one line — at the line of
     /// the one the file gave it to last.
     pub fn problems(&self) -> Vec<Diagnostic> {
         let mut out = self.diagnostics.clone();
-        // The same commands in the same order, with the first key they share and how many.
-        let mut sets: Vec<(&[&'static Command], Shortcut, usize)> = Vec::new();
-        for conflict in &self.conflicts {
-            match sets
-                .iter_mut()
-                .find(|(commands, ..)| *commands == conflict.commands.as_slice())
-            {
-                Some((.., count)) => *count += 1,
-                None => sets.push((&conflict.commands, conflict.shortcut, 1)),
-            }
-        }
-        for (commands, shortcut, count) in sets {
+        for SharedKeys {
+            commands,
+            shortcut,
+            count,
+        } in self.shared_sets()
+        {
             let names: Vec<String> = commands
                 .iter()
                 .map(|command| format!("`{}`", command.name))
@@ -317,6 +350,27 @@ impl Resolved {
                 })
             })
             .map(|binding| binding.command)
+    }
+
+    /// The command that has `modifier` pressed twice, other than `except` (a name; `""` for
+    /// none). The first in the menu's order: the one a double press runs, as the menu runs the
+    /// first of two commands that share a chord.
+    pub fn owner_of_twice(&self, modifier: Modifier, except: &str) -> Option<&'static Command> {
+        self.bindings
+            .iter()
+            .filter(|binding| binding.command.name != except)
+            .find(|binding| binding.shortcuts.contains(&Shortcut::Twice(modifier)))
+            .map(|binding| binding.command)
+    }
+
+    /// The glyphs of the first double press the command `command` has (`⇧ ⇧`), for the rows that
+    /// the menu bar cannot show it on.
+    pub fn double_glyphs(&self, command: &Command) -> Option<String> {
+        self.binding(command.name)?
+            .shortcuts
+            .iter()
+            .find(|shortcut| matches!(shortcut, Shortcut::Twice(_)))
+            .and_then(super::mapping::glyphs)
     }
 
     /// The command that has taken a line-editing key from the line, if one has.
@@ -461,6 +515,8 @@ mod tests {
             ("split_right = [\"cmd+e\", \"cmd+space\"]", "Spotlight"),
             ("select_tab = \"cmd+1\"", "takes only modifiers"),
             ("select_tab = \"shift\"", "alone is typing"),
+            ("select_tab = \"shift+cmd\"", "has shift"),
+            ("select_group = \"ctrl+shift\"", "has shift"),
             ("select_tab = \"shift+shift\"", "double press"),
             ("resize_split = \"ctrl\"", "macOS uses"),
         ] {

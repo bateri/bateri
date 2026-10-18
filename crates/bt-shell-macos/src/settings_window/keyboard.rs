@@ -730,7 +730,13 @@ impl KeyboardPage {
                 }
             }
         }
-        self.rebuild();
+        if self.isHidden() {
+            // Not on screen: the table is made when the page comes (`appear`), from the settings
+            // kept above and the menu as it is by then — not at each of the window's refreshes.
+            self.invalidate_menu();
+        } else {
+            self.rebuild();
+        }
         if let Some(views) = self.ivars().views.get() {
             views.restore.setEnabled(!locked);
         }
@@ -1173,27 +1179,40 @@ impl KeyboardPage {
                     let st = self.ivars().state.borrow();
                     shortcuts::record(&st.page, &st.resolved, name, slot, &chord)
                 };
-                let Some(outcome) = outcome else {
-                    return;
-                };
-                if outcome.is_refused() {
-                    // The field keeps listening: the user presses another key.
-                    self.ivars().state.borrow_mut().refused =
-                        Some((name, outcome.note.unwrap_or_default()));
-                    self.reload();
-                } else if outcome.is_accepted() {
-                    self.stop_listening();
-                    self.save(outcome.edits);
-                } else {
-                    {
-                        let mut st = self.ivars().state.borrow_mut();
-                        st.listening = None;
-                        st.refused = None;
-                        st.pending = Some(Pending { name, outcome });
-                    }
-                    self.reload();
-                }
+                self.row_outcome(name, outcome);
             }
+            Recorded::Twice(tapped) => {
+                let outcome = {
+                    let st = self.ivars().state.borrow();
+                    shortcuts::record_twice(&st.page, &st.resolved, name, slot, tapped)
+                };
+                self.row_outcome(name, outcome);
+            }
+        }
+    }
+
+    /// What a pressed key (or a double press) came to for the row that listens: refused, with a
+    /// note and the field still listening; written at once; or kept with its question.
+    fn row_outcome(&self, name: &'static str, outcome: Option<shortcuts::Outcome>) {
+        let Some(outcome) = outcome else {
+            return;
+        };
+        if outcome.is_refused() {
+            // The field keeps listening: the user presses another key.
+            self.ivars().state.borrow_mut().refused =
+                Some((name, outcome.note.unwrap_or_default()));
+            self.reload();
+        } else if outcome.is_accepted() {
+            self.stop_listening();
+            self.save(outcome.edits);
+        } else {
+            {
+                let mut st = self.ivars().state.borrow_mut();
+                st.listening = None;
+                st.refused = None;
+                st.pending = Some(Pending { name, outcome });
+            }
+            self.reload();
         }
     }
 
@@ -1205,6 +1224,8 @@ impl KeyboardPage {
             }
             st.find = match heard {
                 Recorded::Pressed(chord) => Find::Key(chord),
+                // A double press has no chord to look for: the field listens on.
+                Recorded::Twice(_) => return,
                 Recorded::Escape | Recorded::Delete | Recorded::Lost => Find::Off,
             };
         }

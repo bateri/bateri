@@ -325,18 +325,23 @@ impl Shortcut {
     /// A shortcut's text → the shortcut. `""` is not one: that is the value that means *no
     /// shortcut*, and the caller reads it before it gets here.
     pub fn parse(text: &str) -> Result<Self, ShortcutError> {
-        let lower = text.trim().to_lowercase();
-        if lower.is_empty() {
+        let text = text.trim();
+        if text.is_empty() {
             return Err(ShortcutError::new("a shortcut cannot be empty".to_owned()));
         }
-        let parts: Vec<&str> = lower.split('+').map(str::trim).collect();
+        // The parts keep their case: a character is lowercased as one character (`İ` has no
+        // one-character lowercase, and lowering the whole text would split it in two), the
+        // modifiers and the names as words.
+        let parts: Vec<&str> = text.split('+').map(str::trim).collect();
         if parts.iter().any(|part| part.is_empty()) {
             return Err(ShortcutError::new(
                 "a `+` has nothing beside it (the plus key is written `plus`)".to_owned(),
             ));
         }
-        let modifiers: Vec<Option<Modifier>> =
-            parts.iter().map(|part| Modifier::from_name(part)).collect();
+        let modifiers: Vec<Option<Modifier>> = parts
+            .iter()
+            .map(|part| Modifier::from_name(&part.to_lowercase()))
+            .collect();
         if modifiers.iter().all(Option::is_some) {
             let modifiers: Vec<Modifier> = modifiers.into_iter().flatten().collect();
             if let [first, second] = modifiers[..]
@@ -351,7 +356,7 @@ impl Shortcut {
             .ok_or_else(|| ShortcutError::new("a shortcut cannot be empty".to_owned()))?;
         let mut mods = Mods::NONE;
         for part in held {
-            let Some(modifier) = Modifier::from_name(part) else {
+            let Some(modifier) = Modifier::from_name(&part.to_lowercase()) else {
                 return Err(ShortcutError::new(format!(
                     "`{part}` is not a modifier (ctrl, option, shift, cmd)"
                 )));
@@ -397,10 +402,11 @@ fn parse_key(text: &str) -> Result<Key, ShortcutError> {
     if let (Some(c), None) = (chars.next(), chars.next()) {
         return Key::char_of(c).map(Key::Char);
     }
+    let text = text.to_lowercase();
     if text == "plus" {
         return Ok(Key::Char('+'));
     }
-    NamedKey::from_name(text).map(Key::Named).ok_or_else(|| {
+    NamedKey::from_name(&text).map(Key::Named).ok_or_else(|| {
         ShortcutError::new(format!(
             "`{text}` is not a key (one character, or left, right, up, down, tab, return, \
              space, escape, backspace, delete, home, end, pageup, pagedown, f1 to f12, plus)"
@@ -793,6 +799,18 @@ mod tests {
         );
         assert_eq!(parse("shift+shift"), Shortcut::Twice(Modifier::Shift));
         assert_eq!(parse("CMD+cmd"), Shortcut::Twice(Modifier::Cmd));
+    }
+
+    #[test]
+    fn a_character_with_no_one_character_lowercase_is_kept_as_it_is() {
+        // Turkish-Q: ⇧ on `i` types `İ`, whose lowercase is two characters. The page writes it,
+        // so it has to be read back.
+        let written = Shortcut::Chord(Chord::new(Mods::CMD.with(Modifier::Shift), Key::Char('İ')));
+        assert_eq!(written.to_string(), "shift+cmd+İ");
+        assert_eq!(parse(&written.to_string()), written);
+        // Upper-case words are words still.
+        assert_eq!(parse("CMD+Left"), parse("cmd+left"));
+        assert_eq!(parse("Shift+CMD+D"), parse("shift+cmd+d"));
     }
 
     #[test]

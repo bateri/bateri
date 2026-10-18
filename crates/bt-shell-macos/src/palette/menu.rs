@@ -10,7 +10,7 @@
 //! A submenu the shell fills as it opens (the themes, the tabs a split can go to, Open Port) is
 //! filled the way a menu opening fills it: the delegate is asked, then the menu is updated.
 
-use bt_shell_common::palette::{MenuNode, MenuRows, Modifiers, menu_rows};
+use bt_shell_common::palette::{MenuNode, MenuRows, Modifiers, menu_rows, with_double_presses};
 use objc2::rc::Retained;
 use objc2::{MainThreadMarker, Message, sel};
 use objc2_app_kit::{
@@ -32,10 +32,14 @@ impl Snapshot {
     /// Validates and reads the whole menu bar.
     pub(super) fn take(mtm: MainThreadMarker) -> Snapshot {
         let (nodes, items) = read(mtm);
-        Snapshot {
-            rows: menu_rows(&nodes),
-            items,
+        let mut rows = menu_rows(&nodes);
+        // A double press has no key to put on a menu item: the rows of the commands that have
+        // one say it from the shortcut table.
+        if let Some(app) = crate::app::delegate(mtm) {
+            let keys = app.keys();
+            with_double_presses(&mut rows, |command| keys.double_glyphs(command));
         }
+        Snapshot { rows, items }
     }
 
     /// The menu item the row with this id runs.

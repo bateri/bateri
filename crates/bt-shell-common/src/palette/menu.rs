@@ -385,6 +385,46 @@ pub fn shortcut_command(row_id: &str) -> Option<&'static crate::shortcuts::Comma
     crate::shortcuts::by_id(row_id.strip_prefix(Kind::Command.prefix())?)
 }
 
+/// The command of the shortcut table a row stands for: a menu command's (`cmd.copyLastOutput`),
+/// or the page a menu item opens in its place (`scope.tabs` for Go to Tab…).
+fn row_command(row_id: &str) -> Option<&'static crate::shortcuts::Command> {
+    shortcut_command(row_id).or_else(|| {
+        let page = row_id.strip_prefix(Kind::Scope.prefix())?;
+        let action = [
+            ("tabs", GO_TO_TABS_ACTION),
+            ("folders", GO_TO_FOLDERS_ACTION),
+            ("jump", JUMP_TO_COMMAND_ACTION),
+            ("history", SHOW_HISTORY_ACTION),
+            ("themes", SHOW_THEMES_ACTION),
+        ]
+        .into_iter()
+        .find_map(|(name, action)| (name == page).then_some(action))?;
+        crate::shortcuts::by_id(action.trim_end_matches(':'))
+    })
+}
+
+/// Shows a double press (`⇧ ⇧`) on the rows of the commands that have one and no key in the menu
+/// bar: the item cannot show it, so the row says it from the shortcut table. `double` gives the
+/// glyphs a command's double press is shown as, if it has one. The pages that stand in for a
+/// menu item (Go to Tab…, Command History…) are the command's rows too.
+pub fn with_double_presses(
+    rows: &mut MenuRows,
+    double: impl Fn(&'static crate::shortcuts::Command) -> Option<String>,
+) {
+    let entries = rows
+        .flat
+        .iter_mut()
+        .chain(rows.pages.iter_mut().flat_map(|(_, page)| page.iter_mut()));
+    for entry in entries {
+        if entry.row.shortcut.is_some() {
+            continue;
+        }
+        if let Some(glyphs) = row_command(&entry.row.id).and_then(&double) {
+            entry.row.shortcut = Some(glyphs);
+        }
+    }
+}
+
 /// The rows of the page a command's menu opens ([`Scope::CommandActions`]); empty for any other
 /// scope and for a row that is no command of the table.
 pub fn command_actions(scope: &Scope) -> Vec<Row> {
@@ -1102,6 +1142,68 @@ mod tests {
         assert_eq!(glyphs("", CMD), None);
         assert_eq!(glyphs("d", Modifiers::default()), None);
         assert_eq!(glyphs("🎤", Modifiers::default()), None);
+    }
+
+    #[test]
+    fn a_double_press_is_shown_on_a_command_with_no_key_in_the_menu() {
+        let mut menu = rows(&[MenuNode::holder(
+            0,
+            "Edit",
+            vec![
+                MenuNode::item(1, "Copy Last Output", "copyLastOutput:"),
+                MenuNode::item(2, "Select Theme", "selectTheme:"),
+                MenuNode::item(3, "Paste", "paste:").shortcut("v", CMD),
+            ],
+        )]);
+        with_double_presses(&mut menu, |command| Some(format!("⇧ ⇧ ({})", command.name)));
+        let shown = |id: &str| {
+            menu.flat
+                .iter()
+                .find(|entry| entry.row.id == id)
+                .and_then(|entry| entry.row.shortcut.clone())
+        };
+        assert_eq!(
+            shown("cmd.copyLastOutput").as_deref(),
+            Some("⇧ ⇧ (copy_last_output)")
+        );
+        // A command the table does not name is not asked, and a key of the menu stays.
+        assert_eq!(shown("cmd.selectTheme"), None);
+        assert_eq!(shown("cmd.paste").as_deref(), Some("⌘V"));
+    }
+
+    #[test]
+    fn a_double_press_is_shown_on_the_page_that_stands_for_a_menu_item() {
+        let mut menu = rows(&[MenuNode::holder(
+            0,
+            "Edit",
+            vec![
+                MenuNode::item(1, "Command History…", SHOW_HISTORY_ACTION),
+                MenuNode::item(2, "Themes…", SHOW_THEMES_ACTION),
+                MenuNode::item(3, "Go to Tab…", GO_TO_TABS_ACTION),
+                MenuNode::item(4, "Jump to Command…", JUMP_TO_COMMAND_ACTION),
+                MenuNode::item(5, "Go to Folder…", GO_TO_FOLDERS_ACTION),
+            ],
+        )]);
+        with_double_presses(&mut menu, |command| Some(format!("⇧ ⇧ {}", command.name)));
+        let shown = |id: &str| {
+            menu.flat
+                .iter()
+                .find(|entry| entry.row.id == id)
+                .and_then(|entry| entry.row.shortcut.clone())
+        };
+        for (id, name) in [
+            ("scope.history", "command_history"),
+            ("scope.themes", "themes"),
+            ("scope.tabs", "go_to_tab"),
+            ("scope.jump", "jump_to_command"),
+            ("scope.folders", "go_to_folder"),
+        ] {
+            let found = shown(id);
+            assert!(
+                found.as_deref().is_some_and(|text| text.ends_with(name)),
+                "{id}: {found:?}"
+            );
+        }
     }
 
     #[test]

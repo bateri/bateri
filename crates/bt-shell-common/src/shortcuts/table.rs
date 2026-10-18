@@ -53,6 +53,11 @@ impl Family {
         self.keys().iter().any(|(_, own)| *own == key)
     }
 
+    /// Whether the keys of the items are digits, which Shift turns into other characters.
+    pub fn is_digits(self) -> bool {
+        matches!(self, Self::Tabs | Self::Groups)
+    }
+
     /// What the user presses beside the modifiers: the word for a note ("Press it with a
     /// digit").
     pub fn presses(self) -> &'static str {

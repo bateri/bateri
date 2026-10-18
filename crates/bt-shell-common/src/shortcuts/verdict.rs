@@ -7,7 +7,8 @@
 //! 3. [`Verdict::FamilyNeedsKey`] — a family is given its modifiers with one of its own keys
 //!    (a digit, an arrow); anything else is no way to say them. **Rejected.**
 //! 4. [`Verdict::FamilyClash`] — one of the family's items would take a key that is something
-//!    else's. **Rejected.**
+//!    else's. **Rejected.** [`Verdict::FamilyShift`] — a digit with Shift types another
+//!    character (`!`), which the menu could not tell from the digit. **Rejected.**
 //! 5. [`Verdict::TakenBy`] — another command has the key. **Asks** (Use Here).
 //! 6. [`Verdict::LineEditing`] — the key edits the line you type. **Asks** (Use Here).
 //! 7. [`Verdict::ProgramKey`] — ⌃ without ⌘ goes to the program in the terminal. **Asks**
@@ -16,10 +17,16 @@
 //!    (Assign Anyway).
 //! 9. [`Verdict::Free`] — the key is the command's. **Accepted.**
 //!
+//! A modifier pressed twice (`⇧ ⇧`) is judged apart ([`Resolved::judge_twice`]) and comes to
+//! the same [`Verdict::TakenBy`] and [`Verdict::Free`] and to three of its own:
+//! [`Verdict::Dictation`] — ⌃ ⌃ and ⌘ ⌘ are keys macOS can start Dictation on. **Asks** (Assign
+//! Anyway). [`Verdict::FamilyTwice`] — a family needs a key for each of its items.
+//! **Rejected.** [`Verdict::FunctionTwice`] — fn twice is macOS's. **Rejected.**
+//!
 //! The texts of the notes and the buttons are the page's; this is the decision. A family is
 //! judged on the item the user pressed, and what is written is the modifiers.
 
-use bt_core::{Chord, Key, Mods, NamedKey, Shortcut};
+use bt_core::{Chord, Key, Modifier, Mods, NamedKey, Shortcut};
 
 use super::resolve::Resolved;
 use super::table::{Command, Family, by_name};
@@ -216,6 +223,15 @@ pub enum Verdict {
     FamilyNeedsKey(Family),
     /// One of the family's items would take this chord from someone else.
     FamilyClash { chord: Chord, with: Clash },
+    /// Shift on the digits of a family: ⇧1 types `!`, and the menu finds a key by the character
+    /// it types, so the items would be out of its reach.
+    FamilyShift(Family),
+    /// ⌃ ⌃ or ⌘ ⌘: macOS can start Dictation on it.
+    Dictation,
+    /// A double press for a family, which needs a key for each of its items.
+    FamilyTwice(Family),
+    /// fn twice: macOS keeps it for Dictation and the emoji picker.
+    FunctionTwice,
 }
 
 impl Verdict {
@@ -227,6 +243,9 @@ impl Verdict {
                 | Self::NeedsModifier
                 | Self::FamilyNeedsKey(_)
                 | Self::FamilyClash { .. }
+                | Self::FamilyShift(_)
+                | Self::FamilyTwice(_)
+                | Self::FunctionTwice
         )
     }
 
@@ -234,7 +253,11 @@ impl Verdict {
     pub fn needs_confirmation(&self) -> bool {
         matches!(
             self,
-            Self::TakenBy(_) | Self::LineEditing(_) | Self::ProgramKey | Self::TypesCharacter
+            Self::TakenBy(_)
+                | Self::LineEditing(_)
+                | Self::ProgramKey
+                | Self::TypesCharacter
+                | Self::Dictation
         )
     }
 
@@ -287,6 +310,25 @@ impl Resolved {
         })
     }
 
+    /// The verdict on `modifier` pressed twice for the command `command` — `None` for a name that
+    /// is not one. fn is not judged here: it is always refused ([`Verdict::FunctionTwice`]).
+    pub fn judge_twice(&self, command: &str, modifier: Modifier) -> Option<Ruling> {
+        let target = by_name(command)?;
+        let verdict = if let Some(family) = target.family {
+            Verdict::FamilyTwice(family)
+        } else if let Some(owner) = self.owner_of_twice(modifier, target.name) {
+            Verdict::TakenBy(owner)
+        } else if matches!(modifier, Modifier::Ctrl | Modifier::Cmd) {
+            Verdict::Dictation
+        } else {
+            Verdict::Free
+        };
+        Some(Ruling {
+            stored: Shortcut::Twice(modifier),
+            verdict,
+        })
+    }
+
     fn judge_chord(&self, target: &'static Command, pressed: &Chord) -> Verdict {
         match refusal(pressed) {
             Some(Refusal::MacOs(key)) => return Verdict::MacOs(key),
@@ -306,6 +348,9 @@ impl Resolved {
         // The family's modifiers: what is held when one of its keys is pressed.
         if !(pressed.mods.cmd || pressed.mods.ctrl || pressed.mods.option) {
             return Verdict::NeedsModifier;
+        }
+        if pressed.mods.shift && family.is_digits() {
+            return Verdict::FamilyShift(family);
         }
         if !family.has(pressed.key) {
             return Verdict::FamilyNeedsKey(family);
@@ -509,6 +554,27 @@ mod tests {
     }
 
     #[test]
+    fn shift_on_the_digits_of_a_family_is_refused() {
+        // ⇧⌘1 arrives as `!`: the menu finds a key by the character it types, so the items of
+        // `shift+cmd` could never be reached — and the note must not say "press a digit".
+        for text in ["shift+cmd+!", "shift+cmd+1", "shift+option+cmd+2"] {
+            for name in ["select_tab", "select_group"] {
+                let found = verdict(name, text);
+                assert!(
+                    matches!(found, Verdict::FamilyShift(_)),
+                    "{name} {text}: {found:?}"
+                );
+                assert!(found.is_refused());
+            }
+        }
+        // The arrows are the same with Shift as without.
+        assert_eq!(
+            verdict("select_split", "ctrl+shift+cmd+left"),
+            Verdict::Free
+        );
+    }
+
+    #[test]
     fn a_family_whose_item_is_someone_elses_is_refused() {
         // ⌃⌘1 is Select Group's.
         let found = verdict("select_tab", "ctrl+cmd+1");
@@ -590,5 +656,104 @@ mod tests {
                 key.reason
             );
         }
+    }
+
+    // A modifier pressed twice.
+
+    fn twice(command: &str, modifier: Modifier, keys: &str) -> Verdict {
+        let text = format!("[keys]\n{keys}");
+        let settings = Settings::parse(&text).expect("TOML").settings;
+        resolve(&settings)
+            .judge_twice(command, modifier)
+            .expect("a command")
+            .verdict
+    }
+
+    #[test]
+    fn a_double_press_of_shift_or_option_is_free() {
+        for modifier in [Modifier::Shift, Modifier::Option] {
+            let ruling = resolve(&Settings::default())
+                .judge_twice("command_palette", modifier)
+                .expect("a command");
+            assert_eq!(ruling.verdict, Verdict::Free);
+            assert_eq!(ruling.stored, Shortcut::Twice(modifier));
+        }
+    }
+
+    #[test]
+    fn a_double_press_of_control_or_command_asks_about_dictation() {
+        for modifier in [Modifier::Ctrl, Modifier::Cmd] {
+            let found = twice("command_palette", modifier, "");
+            assert_eq!(found, Verdict::Dictation);
+            assert!(found.needs_confirmation() && !found.is_refused());
+            assert!(found.takes_from().is_none());
+        }
+    }
+
+    #[test]
+    fn another_commands_double_press_is_asked_about() {
+        let found = twice(
+            "command_palette",
+            Modifier::Shift,
+            "split_down = \"shift+shift\"\n",
+        );
+        assert_eq!(name_of(&found), Some("split_down"));
+        assert!(found.needs_confirmation());
+        assert_eq!(found.takes_from().map(|c| c.name), Some("split_down"));
+        // The command's own double press is not taken from anyone.
+        assert_eq!(
+            twice(
+                "split_down",
+                Modifier::Shift,
+                "split_down = \"shift+shift\"\n"
+            ),
+            Verdict::Free
+        );
+        // Asked before Dictation: the owner is who loses it.
+        assert_eq!(
+            name_of(&twice(
+                "command_palette",
+                Modifier::Ctrl,
+                "split_down = \"ctrl+ctrl\"\n"
+            )),
+            Some("split_down")
+        );
+    }
+
+    #[test]
+    fn a_family_is_refused_a_double_press() {
+        for name in ["select_tab", "select_group", "select_split"] {
+            let found = twice(name, Modifier::Shift, "");
+            assert!(
+                matches!(found, Verdict::FamilyTwice(_)),
+                "{name}: {found:?}"
+            );
+            assert!(found.is_refused() && !found.needs_confirmation());
+        }
+    }
+
+    #[test]
+    fn a_double_press_binds_no_chord_so_it_takes_none() {
+        // The same command with a chord and a double press: a chord's owner is not the double
+        // press's.
+        let resolved = resolve(
+            &Settings::parse("[keys]\nsplit_down = [\"cmd+j\", \"shift+shift\"]\n")
+                .expect("TOML")
+                .settings,
+        );
+        assert_eq!(
+            resolved.owner_of_twice(Modifier::Shift, "").map(|c| c.name),
+            Some("split_down")
+        );
+        assert!(
+            resolved
+                .owner_of_twice(Modifier::Shift, "split_down")
+                .is_none()
+        );
+        assert!(resolved.owner_of_twice(Modifier::Option, "").is_none());
+        assert_eq!(
+            resolved.owner_of(&chord("cmd+j"), "").map(|c| c.name),
+            Some("split_down")
+        );
     }
 }

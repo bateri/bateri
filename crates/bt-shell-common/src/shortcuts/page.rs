@@ -16,7 +16,7 @@
 use bt_core::{Chord, Mods, Shortcut};
 
 use super::mapping::glyphs;
-use super::resolve::Resolved;
+use super::resolve::{Resolved, SharedKeys};
 use super::table::{COMMANDS, Command, Family, by_id};
 use crate::keys::{LINE_EDITING, line_editing};
 use crate::palette::{Kind, MenuNode, Row, command_words, menu_item_id, score};
@@ -370,20 +370,16 @@ impl Page {
                 .map_or_else(|| name.replace('_', " "), |(_, title)| title.clone())
         };
         // One sentence for each set of commands, however many of their keys they share.
-        let mut sets: Vec<(Vec<&'static Command>, Shortcut, usize)> = Vec::new();
-        for conflict in &resolved.conflicts {
-            match sets
-                .iter_mut()
-                .find(|(commands, ..)| *commands == conflict.commands)
-            {
-                Some((.., count)) => *count += 1,
-                None => sets.push((conflict.commands.clone(), conflict.shortcut, 1)),
-            }
-        }
+        let sets = resolved.shared_sets();
         for section in &mut self.sections {
             for row in &mut section.rows {
                 let mut said: Vec<String> = Vec::new();
-                for (commands, shortcut, count) in &sets {
+                for SharedKeys {
+                    commands,
+                    shortcut,
+                    count,
+                } in &sets
+                {
                     if !commands.contains(&row.command) {
                         continue;
                     }
@@ -412,11 +408,19 @@ impl Page {
                 if let Some(family) = family_note(row) {
                     said.push(family);
                 }
+                // The menu bar has no way to show a double press: say so, or the row reads as a
+                // command that has no menu key.
+                if !row.chips.is_empty() && !row.in_menu_bar() {
+                    said.push(DOUBLE_PRESS_NOTE.to_owned());
+                }
                 row.note = (!said.is_empty()).then(|| said.join(" "));
             }
         }
     }
 }
+
+/// What a row says when a double press is all it has.
+pub const DOUBLE_PRESS_NOTE: &str = "Not shown in the menu bar: a double press has no key to show.";
 
 /// What a family's modifiers do to the tab strip's hints: ⌥⌘ held is the layout mode of the
 /// panes, so the tabs show no number for it.
@@ -764,11 +768,17 @@ mod tests {
 
     #[test]
     fn a_double_press_is_listed_but_not_in_the_menu_bar() {
-        let (page, _) = page("split_down = \"shift+shift\"\n");
-        let row = page.row("split_down").expect("a row");
+        let (only, _) = page("split_down = \"shift+shift\"\n");
+        let row = only.row("split_down").expect("a row");
         assert_eq!(row.chips[0].text, "⇧ ⇧");
         assert!(!row.in_menu_bar());
-        assert!(page.row("split_right").expect("a row").in_menu_bar());
+        assert!(only.row("split_right").expect("a row").in_menu_bar());
+        // Only that row says the menu bar does not show it: a command with a key beside the
+        // double press is shown by the key.
+        assert_eq!(row.note.as_deref(), Some(DOUBLE_PRESS_NOTE));
+        assert!(only.row("split_right").expect("a row").note.is_none());
+        let (beside, _) = page("split_down = [\"cmd+j\", \"shift+shift\"]\n");
+        assert!(beside.row("split_down").expect("a row").note.is_none());
     }
 
     #[test]

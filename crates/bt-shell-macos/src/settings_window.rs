@@ -67,6 +67,12 @@ use crate::zoom::{MAX_SIZE, MIN_SIZE};
 mod keyboard;
 mod recorder;
 
+/// Whether the keyboard is in a field of Settings ▸ Keyboard that listens for a shortcut: then
+/// a modifier pressed twice is a shortcut to give, not one to run.
+pub(crate) fn is_recording(mtm: MainThreadMarker) -> bool {
+    recorder::is_listening(mtm)
+}
+
 use keyboard::KeyboardPage;
 
 /// The window's opening content size, in points. The width is fixed, the

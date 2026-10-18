@@ -136,6 +136,7 @@ use std::time::{Duration, Instant};
 
 use block2::RcBlock;
 use bt_core::{HostMark, IconColors, Mods, Theme};
+use bt_shell_common::shortcuts::Step;
 use dispatch2::{DispatchQueue, DispatchTime};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Bool, ProtocolObject, Sel};
@@ -8294,38 +8295,63 @@ impl TabBar {
     }
 }
 
-/// Watches the modifiers for the tabs' key hints and the arrangement moment: a
-/// local monitor of flag changes and key presses, the application's for its
+/// Watches the modifiers for the tabs' key hints, the arrangement moment and the double press: a
+/// local monitor of flag changes, key presses, clicks and scrolls, the application's for its
 /// lifetime (the caller keeps the token). Select Tab's modifiers alone (⌘ until the file says
 /// otherwise) held are a hint's start, Select Group's the groups' hint, ⌥⌘ the arrangement's
 /// ([`arrange::Hold`]); any other modifier, its release or a key press (a chord: ⌘C, ⌥⌘←) is
-/// the end of either (`AppDelegate::hold_changed`, which tells the key window). The event
-/// passes on unchanged.
+/// the end of either (`AppDelegate::hold_changed`, which tells the key window). Clicks and
+/// scrolls are not a hold's end — ⌘-click is a click — they only spoil the count of a modifier
+/// pressed twice (`shortcuts::Taps`), which a key spoils too; the second quick tap runs the command that
+/// has it (`AppDelegate::double_pressed`). The count reads the events' own times: the watch sets
+/// no timer and asks for no frame. The event passes on unchanged.
 pub(crate) fn watch_command_key() -> Option<Retained<AnyObject>> {
+    let taps = RefCell::new(arrange::taps());
     let block = RcBlock::new(move |event: NonNull<NSEvent>| -> *mut NSEvent {
         // SAFETY: AppKit gives the monitor a valid event.
         let event_ref = unsafe { event.as_ref() };
         // audit: a local monitor runs on the main thread, before `sendEvent:`.
         let mtm = MainThreadMarker::new().expect("a local event monitor runs on the main thread");
-        if let Some(app) = app::delegate(mtm) {
-            let hold = if event_ref.r#type() == NSEventType::FlagsChanged {
+        let kind = event_ref.r#type();
+        let step = if kind == NSEventType::FlagsChanged {
+            taps.borrow_mut().flags(
+                event_ref.timestamp(),
+                arrange::held_keys(event_ref.modifierFlags()),
+            )
+        } else {
+            taps.borrow_mut().interrupt();
+            Step::Nothing
+        };
+        // A click or a scroll only spoils the count: nothing to tell the application.
+        let held_or_key = kind == NSEventType::FlagsChanged || kind == NSEventType::KeyDown;
+        if (held_or_key || matches!(step, Step::Twice(_)))
+            && let Some(app) = app::delegate(mtm)
+        {
+            if kind == NSEventType::FlagsChanged {
                 let keys = app.keys();
-                arrange::hold_of(
+                app.hold_changed(arrange::hold_of(
                     event_ref.modifierFlags(),
                     keys.family_mods("select_tab"),
                     keys.family_mods("select_group"),
-                )
-            } else {
-                arrange::Hold::Nothing
-            };
-            app.hold_changed(hold);
+                ));
+            } else if kind == NSEventType::KeyDown {
+                app.hold_changed(arrange::Hold::Nothing);
+            }
+            if let Step::Twice(tapped) = step {
+                app.double_pressed(tapped);
+            }
         }
         event.as_ptr()
     });
     // SAFETY: the block returns the valid event it was given.
     unsafe {
         NSEvent::addLocalMonitorForEventsMatchingMask_handler(
-            NSEventMask::FlagsChanged | NSEventMask::KeyDown,
+            NSEventMask::FlagsChanged
+                | NSEventMask::KeyDown
+                | NSEventMask::LeftMouseDown
+                | NSEventMask::RightMouseDown
+                | NSEventMask::OtherMouseDown
+                | NSEventMask::ScrollWheel,
             &block,
         )
     }

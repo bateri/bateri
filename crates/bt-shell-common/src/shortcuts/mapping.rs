@@ -73,7 +73,8 @@ fn named_of(c: char) -> Option<NamedKey> {
         '\u{F72B}' => NamedKey::End,
         '\u{F72C}' => NamedKey::PageUp,
         '\u{F72D}' => NamedKey::PageDown,
-        '\t' => NamedKey::Tab,
+        // U+0019 is AppKit's back-tab: the character ⇧⇥ types (`chord_of` adds the Shift).
+        '\t' | '\u{19}' => NamedKey::Tab,
         // U+0003 is the numeric keypad's Enter.
         '\r' | '\u{3}' => NamedKey::Return,
         ' ' => NamedKey::Space,
@@ -120,6 +121,12 @@ pub fn chord_of(key: &str, modifiers: Modifiers) -> Option<Chord> {
         modifiers.shift,
         modifiers.command,
     );
+    // ⇧⇥ arrives as the back-tab character, which is Tab with Shift whatever the mask says.
+    let mods = if c == '\u{19}' {
+        mods.with(Modifier::Shift)
+    } else {
+        mods
+    };
     let key = match named_of(c) {
         Some(named) => Key::Named(named),
         None => Key::of_char(c)?,
@@ -128,7 +135,7 @@ pub fn chord_of(key: &str, modifiers: Modifiers) -> Option<Chord> {
 }
 
 /// ⌃⌥⇧⌘ — the modifiers in the order macOS writes them.
-fn modifier_glyph(modifier: Modifier) -> char {
+pub(super) fn modifier_glyph(modifier: Modifier) -> char {
     match modifier {
         Modifier::Ctrl => '⌃',
         Modifier::Option => '⌥',
@@ -248,6 +255,18 @@ mod tests {
         assert_eq!(
             chord_of("\u{3}", Modifiers::COMMAND),
             Some(parse("cmd+return"))
+        );
+        // ⇧⇥ is AppKit's back-tab character: Tab with Shift, so ⌃⇧⇥ (Show Previous Tab's
+        // second key) can be recorded back.
+        let control = Modifiers {
+            control: true,
+            shift: true,
+            ..Modifiers::default()
+        };
+        assert_eq!(chord_of("\u{19}", control), Some(parse("ctrl+shift+tab")));
+        assert_eq!(
+            chord_of("\u{19}", Modifiers::default()),
+            Some(parse("shift+tab"))
         );
         // Upper case is the same key.
         assert_eq!(chord_of("D", Modifiers::COMMAND), Some(parse("cmd+d")));

@@ -2197,11 +2197,13 @@ stats_interval = 3
 # comes last: a character, or left, right, up, down, tab, return, space,
 # escape, backspace, delete, home, end, pageup, pagedown, f1 to f12, plus.
 # A shortcut of only modifiers (select_tab = "option") sets the modifiers of
-# every item of a family such as the tabs' digits.
+# every item of a family such as the tabs' digits. One modifier twice
+# ("shift+shift") is that key tapped twice.
 # copy_last_output = "shift+cmd+o"
 # show_all_tabs = ""
 # show_next_tab = ["shift+cmd+]", "ctrl+tab"]
 # select_tab = "option"
+# command_palette = ["shift+cmd+p", "shift+shift"]
 "##;
 
     /// The startup settings when the file **exists but is unusable** (can't be
@@ -2754,9 +2756,15 @@ stats_interval = 3
             None => {}
         }
         // A line of `[keys]` that cannot be read is dropped alone, so `fallback` is not asked:
-        // its command is as if the file did not say anything about it.
-        if let Some(keys) = section(text, root, "keys", &mut parsed.diagnostics) {
-            parsed.settings.keys = keys::read(text, keys, &mut parsed.diagnostics);
+        // its command is as if the file did not say anything about it. A `keys` that is no
+        // section at all (`keys = 5`) reads nothing, and then the shortcuts in use stay, like
+        // the other sections that are written as the wrong kind.
+        match section(text, root, "keys", &mut parsed.diagnostics) {
+            Some(keys) => parsed.settings.keys = keys::read(text, keys, &mut parsed.diagnostics),
+            None if root.contains_key("keys") => {
+                parsed.settings.keys.clone_from(&fallback.keys);
+            }
+            None => {}
         }
         Ok(parsed)
     }
@@ -8286,9 +8294,12 @@ cursor = \"spring\"
         let kept = Settings::parse_keeping("[keys]\ncopy_last_output = \"shift+cmd+\"\n", &current)
             .expect("parseable text");
         assert!(kept.settings.keys.is_empty());
-        // `keys` that is not a section is reported like every other section.
+        // `keys` that is not a section is reported like every other section, and leaves the
+        // shortcuts in use as they are (a line that cannot be read does not).
         let (settings, diagnostic) = rejected("keys = 5\n");
         assert!(settings.keys.is_empty());
+        let kept = Settings::parse_keeping("keys = 5\n", &current).expect("parseable text");
+        assert_eq!(kept.settings.keys, current.keys);
         assert_eq!(diagnostic.key, Some("keys"));
         assert!(
             diagnostic.message.contains("must be a section"),
