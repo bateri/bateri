@@ -47,6 +47,22 @@
 //! and the column answers the pointer with a line at the place (`TabBar::aim`) — over its own
 //! column as over another window's, where a row dragged out of its own window is answered the
 //! same way.
+//!
+//! **A row is split into a tab two ways, without keys.** Pulled out of the column onto its own
+//! window's panes, a row is the block of panes ⌥⌘ makes of a chip: the panes paint where it would
+//! land with its name (Left, Right, Above, Below) and letting go merges the tab into the one that
+//! was on screen before the press ([`crate::tab_merge`]) — out of the window it is still a window
+//! of its own, back over the column still the column's. And slid along the column onto another
+//! row, as in a browser's sidebar: over a row's middle ([`tabs::split_band`] — its middle half,
+//! its edges at most [`tabs::SPLIT_EDGE_MAX`]) that row lights at once, the others stay where they
+//! stood, and letting go joins the held tab to the lit one on its right, the lit tab coming up on
+//! screen (`TabBar::aim_row`, `TerminalWindow::split_tab_into`); over a row's edge or between rows
+//! the rows make room as they always did — before the row over its top edge, after it over its
+//! bottom ([`crate::tabs::Column::reorder_slot`]; in a column with groups the spots decide, as
+//! before). Both are read on the column as it stood before the drag, and a lit row holds a few
+//! points past its middle ([`tabs::SPLIT_HOLD`]), so the rows moving under the pointer never
+//! flip the answer. Both are one move, and Undo Move takes either back. The title row keeps its
+//! pull: a chip pulled down out of it without the keys is a window, as it always was.
 
 use std::cell::{Cell, RefCell};
 
@@ -591,6 +607,39 @@ impl TabBar {
         let count = shown.tabs.len();
         let entries = side_entries(&shown.headings, count, None, room);
         (count > 0).then(|| self.side_for(top, count + room).layout_with(&entries))
+    }
+
+    /// A row held and slid along the column, `drag`, with the pointer at `y` (the bar's space):
+    /// the row it would split into ([`Column::split_target`]) — lit at once, as a row a carried
+    /// pane is over is, with the others standing where they stood before the drag so the held row
+    /// hovers over it — and the place of the list it would take, which counts while none is lit
+    /// ([`Column::reorder_slot`]; a column with groups takes its spots' place instead). Both are
+    /// read on the column as it stood before the drag, so the rows sliding under the pointer cannot
+    /// change the answer that slid them. The first of the two is `true` when the lit row changed:
+    /// the column is laid out whole. `(false, None)` for a list the window has changed under the
+    /// held button.
+    pub(super) fn aim_row(&self, drag: &mut Dragging, y: f64) -> (bool, Option<usize>) {
+        let iv = self.ivars();
+        let (split, slot) = {
+            let shown = iv.shown.borrow();
+            let position = |tab: u64| shown.tabs.iter().position(|label| label.tab == tab);
+            let Some((held, column)) = position(drag.tab).zip(self.column_with_room(0)) else {
+                return (false, None);
+            };
+            let lit = drag.split.and_then(position);
+            let split = column
+                .split_target(y, held, lit)
+                .and_then(|index| shown.tabs.get(index))
+                .map(|label| label.tab);
+            (split, column.reorder_slot(y, held))
+        };
+        let changed = drag.split != split;
+        drag.split = split;
+        if changed {
+            iv.target.set(split);
+            iv.glide.set(true);
+        }
+        (changed, Some(slot))
     }
 
     /// Puts the name field over `row` (the bar's space), in the type the selected row's title

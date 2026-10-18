@@ -3702,6 +3702,21 @@ impl TerminalWindow {
         });
     }
 
+    /// A row of the side column slid onto another row's middle, which lit, and let go there
+    /// ([`TabBar::aim_row`](crate::tab_bar::TabBar)): tab `source` joins tab `into` on
+    /// the right — the chip menu's Merge into Current Tab ▸ Split Right, into the row's tab rather
+    /// than the one on screen — a turn later, as that merge does. The held tab was on screen (a
+    /// press selects), so `into` comes up in its place; Undo Move takes it back.
+    pub(crate) fn split_tab_into(&self, source: u64, into: u64) {
+        self.later(move |window| {
+            window.make_move(Move::TabToTab {
+                tab: source,
+                into,
+                place: Joins::Beside(Direction::Right),
+            });
+        });
+    }
+
     /// Runs `job` on this window one main-queue turn later — what a menu
     /// action does that takes tabs, and with them the chip whose event is
     /// still being handled, out from under it. Found again by id.

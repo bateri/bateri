@@ -5,6 +5,16 @@
 //! Without the keys the drop is what it always was: a
 //! window where the pointer is ([`crate::tab_drag`]).
 //!
+//! **A row of the side column needs no keys over its own window's panes.** Pulled out of the
+//! column onto the panes beside it, a row is a block of panes as with ⌥⌘ — the same regions, the
+//! same landing, Undo Move the same — the way a browser's sidebar splits its view: the column is
+//! at the panes' side, and a row taken there means the panes, where a chip pulled down out of the
+//! title row has always meant a window (and still does). Out of the window it is still a window;
+//! back over the column, the column's (`tab_side`); over another window's panes, without
+//! the keys, a window as before. Over the panes of the tab it is itself — it was on screen when
+//! it was pressed, and there is no other to land in — the panes say so and letting go leaves it
+//! where it was ([`Pulled::Itself`]). The rule is `tabs::Pull`'s.
+//!
 //! **The session is AppKit's, so this reads it from the outside.** A tab dragged out of the
 //! strip is a dragging session whose destinations are the bars; nothing else of ours is asked
 //! while it runs and no event reaches a monitor. The source reports every move of the image
@@ -29,9 +39,10 @@ use objc2_foundation::NSPoint;
 use crate::app::AppDelegate;
 use crate::arrange;
 use crate::moves::{Joins, Move};
-use crate::pane_drag::{Zones, preview};
+use crate::pane_drag::{Preview, Zones, preview};
 use crate::split::Verdict;
 use crate::tab::TerminalTab;
+use crate::tabs::{Pull, Pulled, Under};
 use crate::window::TerminalWindow;
 
 /// How often the keys are read while a tab is carried: the system reports no move when only a
@@ -42,12 +53,17 @@ const POLL: Duration = Duration::from_millis(60);
 pub(crate) struct Merge {
     /// The carried tab.
     tab: u64,
+    /// It was pulled out of a side column: over its own window's panes it is a block without
+    /// the keys ([`Pull::side`]).
+    side: bool,
     /// The regions, drawn in the tab they belong to.
     zones: Option<(u64, Retained<Zones>)>,
     verdict: Verdict,
     /// The tab on screen was changed to the one the block lands in: taken back, the carried
     /// tab is put on screen again.
     opened: bool,
+    /// The panes say the tab is over itself ([`Pulled::Itself`]).
+    itself: bool,
 }
 
 /// What the end of a tab's drag session came to.
@@ -83,6 +99,9 @@ fn arranging() -> bool {
     crate::pointer::swallows(NSEvent::modifierFlags_class())
 }
 
+/// What the panes say to a tab that is over itself: it has no other tab to be split into.
+const ITSELF: &str = "This tab is already on screen";
+
 /// Where a carried tab's block would land.
 struct Aim {
     /// The window the pointer is over, whose tab on screen (or the one the press left, in the
@@ -91,23 +110,29 @@ struct Aim {
     /// The window the tab is carried out of.
     from: Retained<TerminalWindow>,
     carried: Retained<TerminalTab>,
+    /// The tab the block lands in — or, for a tab over itself (`itself`), the tab on screen,
+    /// whose panes say it cannot.
     host: Retained<TerminalTab>,
+    itself: bool,
     /// The pointer, in the window's coordinates.
     point: NSPoint,
 }
 
 impl AppDelegate {
-    /// A tab has been pulled out of its strip: the regions of its block are read from here on.
-    pub(crate) fn tab_merge_begin(&self, tab: u64) {
+    /// A tab has been pulled out of its strip — out of a side column if `side` — and the regions
+    /// of its block are read from here on.
+    pub(crate) fn tab_merge_begin(&self, tab: u64, side: bool) {
         let iv = self.ivars();
         if let Some(mut old) = iv.tab_merge.replace(None) {
             hide(&mut old);
         }
         iv.tab_merge.replace(Some(Merge {
             tab,
+            side,
             zones: None,
             verdict: Verdict::Nothing,
             opened: false,
+            itself: false,
         }));
         let generation = iv.tab_poll.get().wrapping_add(1);
         iv.tab_poll.set(generation);
@@ -136,22 +161,23 @@ impl AppDelegate {
         self.ivars().tab_merge.replace(Some(merge));
     }
 
-    /// The tab and window a block at `screen` would land in, if the keys are down and the
-    /// pointer is over panes: not over a bar (a drop there is the bar's). In the carried tab's
-    /// own window a tab that is not the carried one is the one to land in; in another window
-    /// the tab it shows is.
-    fn aim(&self, tab: u64, screen: NSPoint) -> Option<Aim> {
-        if !arranging() {
-            return None;
-        }
+    /// The tab and window a block at `screen` would land in, if the pointer is over panes — not
+    /// over a bar (a drop there is the bar's) — and the keys are down, or the tab came out of its
+    /// own window's side column ([`Pull::comes_to`]). In the carried tab's own window a tab
+    /// that is not the carried one is the one to land in; in another window the tab it shows is.
+    /// `side`: the tab was pulled out of a side column.
+    fn aim(&self, tab: u64, side: bool, screen: NSPoint) -> Option<Aim> {
         let from = self.window_holding(tab)?;
         let carried = self.tab(tab)?;
+        // Over no window of ours, or over a bar, it is the session's whatever else holds
+        // ([`Under::Away`], [`Under::List`]): only panes are read on.
         let window = self.window_at(screen)?;
         let point = window.ns_window().convertPointFromScreen(screen);
         if window.bar().holds(point) {
             return None;
         }
-        let host = if window.id() == from.id() {
+        let own = window.id() == from.id();
+        let host = if own {
             host_of(
                 window.try_selected_tab().map(|open| open.id()),
                 window.bar().selected_before(tab),
@@ -161,12 +187,26 @@ impl AppDelegate {
         } else {
             window.try_selected_tab().map(|open| open.id())
         }
-        .and_then(|host| self.tab(host))?;
+        .and_then(|host| self.tab(host));
+        let pull = Pull {
+            over: Under::Panes,
+            keys: arranging(),
+            side,
+            own,
+            host: host.is_some(),
+        };
+        let (host, itself) = match pull.comes_to() {
+            Pulled::Splits => (host?, false),
+            // The panes on screen are the carried tab's own: they say so.
+            Pulled::Itself => (window.try_selected_tab()?, true),
+            Pulled::Session => return None,
+        };
         Some(Aim {
             window,
             from,
             carried,
             host,
+            itself,
             point,
         })
     }
@@ -181,7 +221,7 @@ impl AppDelegate {
     }
 
     fn sense(&self, merge: &mut Merge, screen: NSPoint) {
-        let Some(aim) = self.aim(merge.tab, screen) else {
+        let Some(aim) = self.aim(merge.tab, merge.side, screen) else {
             hide(merge);
             return;
         };
@@ -209,6 +249,18 @@ impl AppDelegate {
             container.addSubview(&zones);
             merge.zones = Some((host, zones));
         }
+        if aim.itself {
+            if !merge.itself
+                && let Some((_, zones)) = &merge.zones
+            {
+                zones.show(Preview {
+                    warning: Some(ITSELF.to_owned()),
+                    ..Preview::default()
+                });
+            }
+            merge.itself = true;
+            return;
+        }
         let verdict = Self::weigh(&aim);
         if verdict == merge.verdict {
             return;
@@ -230,9 +282,10 @@ impl AppDelegate {
     }
 
     /// The tab's drag session ended at `screen`. `free` is that nothing took the drop and it
-    /// was not taken back — the case where the keys decide: down over panes, the regions that
-    /// were up are the answer (the block lands where they said, or the tab stays where they
-    /// refused); otherwise the session's own end goes on.
+    /// was not taken back — the case where the keys (or, for a row of the side column, its own
+    /// window's panes) decide: over panes, the regions that were up are the answer (the block
+    /// lands where they said, or the tab stays where they refused, or over itself); otherwise the
+    /// session's own end goes on.
     pub(crate) fn tab_merge_end(
         &self,
         merge: Option<Merge>,
@@ -260,9 +313,12 @@ impl AppDelegate {
             }
             return End::Free;
         }
-        let Some(aim) = self.aim(tab, screen) else {
+        let Some(aim) = self.aim(tab, merge.side, screen) else {
             return End::Free;
         };
+        if aim.itself {
+            return End::Kept;
+        }
         let landed = match Self::weigh(&aim) {
             Verdict::Lands { placement, .. } => self.make_move(Move::TabToTab {
                 tab,
@@ -296,6 +352,7 @@ fn hide(merge: &mut Merge) {
         zones.removeFromSuperview();
     }
     merge.verdict = Verdict::Nothing;
+    merge.itself = false;
 }
 
 #[cfg(test)]

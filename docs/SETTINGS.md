@@ -559,8 +559,11 @@ shows one group at a time instead (see **In the title row** below).
   closed group's header it joins the group at its end. Pull picked rows and all
   of them go, drawn as a stack with their count, to a line that marks the place
   the same way. Over another window's column or title row a row or the picked
-  rows land in the group they are let go on; over nothing but the desktop or a
-  pane they become a window of their own, ungrouped, in the order they had. Pull
+  rows land in the group they are let go on; over nothing but the desktop or
+  another window's panes they become a window of their own, ungrouped, in the
+  order they had. One row pulled onto its own window's panes is split into the
+  tab on screen instead (see `tab_position`), and one row let go on the middle
+  of another row is split into it. Pull
   a header and the group goes: between two groups to put them in order (the
   ungrouped tabs stay first), out of the window for a window of its own under
   the group's name, or onto another window, ` 2` after a name it has already. In
@@ -1129,8 +1132,22 @@ tab_position = "top"
   on a pane's top line selects text as anywhere else. Rows are dragged as the
   tabs of the bar are: drag one to reorder, out of the column to tear it off
   into a window of its own, onto another window's column or bar to move it
-  there. A pane carried with ⌥⌘ and dropped on a row joins that tab; dropped
-  between two rows it opens a new tab. One place for every window; it applies
+  there. Dragged out of the column onto the window's own panes, with no keys
+  held, a row splits its tab into the tab that was on screen: the place it
+  would take is painted with its name (Left, Right, Above, Below), as with ⌥⌘,
+  and letting go puts its panes there, still running; over the tab it is
+  itself the panes say "This tab is already on screen" and nothing happens, and
+  Esc takes the drag back. Slid onto another row, a row splits too, as in a
+  browser's sidebar: over the middle half of a row (its top and bottom quarter,
+  at most 12 pt each, are its edges) that row lights at once and the rows stop
+  making room; let go, the dragged tab joins the lit one as a split on the
+  right (Split Right) and the lit tab comes on screen. Over a row's top edge
+  the dragged row goes before it, over its bottom edge after it, and between
+  rows or groups the rows make room as before; a group's header is never
+  lit. Undo Move takes either back. In the title row (`"top"`) a tab pulled down onto the
+  panes still opens a window of its own unless ⌥⌘ is held. A pane carried with
+  ⌥⌘ and dropped on a row joins that tab; dropped between two rows it opens a
+  new tab. One place for every window; it applies
   at once, and `"top"` brings the bar back as it was. A tab with one pane is
   set off from the column by a thin line in the divider's color; under
   `split_style = "cards"` a split tab's cards and the column stand on the

@@ -8,7 +8,9 @@
 //! session is what finds the window under the pointer. A bar takes the drop through
 //! `NSDraggingDestination`; a drop on no bar of ours ends at [`TabDragSource`] with no
 //! operation, and the tab becomes a window where the pointer let go
-//! (`AppDelegate::tab_drag_ended`).
+//! (`AppDelegate::tab_drag_ended`) — unless it is a block of panes there ([`crate::tab_merge`]):
+//! with ⌥⌘ held over any window's panes, or, for a row of the side column, over its own window's
+//! panes without them.
 //!
 //! **What is carried is tabs or a group** ([`Carried`]): a tab, several picked together in the side
 //! column, or a group by its header (or, in the title row, its button). Several tabs and a group

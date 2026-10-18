@@ -12,6 +12,26 @@ of every installed copy. A version without a section is not released.
 
 ## [Unreleased]
 
+### Added
+
+- **Drag a tab in the side column onto the terminal to split.** With the tabs
+  at the side, pull a row out of the column onto the panes beside it — no keys
+  needed — and the place it would take is painted with its name (Left, Right,
+  Above, Below), as Option-Command has always shown; let go and the whole tab
+  comes into the tab that was on screen as splits, keeping its own layout, its
+  programs still running. Over the tab it is itself the panes say so and
+  nothing happens. Out of the window it still becomes a window of its own, back
+  over the column it still reorders or changes group, and Esc takes it back.
+  Or drop a row on another row, as in a browser's sidebar: over the middle of a
+  row that row lights at once, and letting go there adds the dragged tab to it
+  as a split on the right and shows it. Over a row's top or bottom edge, or
+  between rows, the rows make room and the row goes to that place as before.
+  Rows of the same group and of other groups both work; a group's header is not a tab to split into. The tab's row
+  leaves the column, the tab it joined shows the deck of a split tab, and Undo
+  Move takes either back. The tabs in the title row are as they were: pulled
+  down onto the panes without Option-Command, a tab opens in a window of its
+  own.
+
 ### Changed
 
 - **The command palette fades out as it closes**, the way it came in and like
