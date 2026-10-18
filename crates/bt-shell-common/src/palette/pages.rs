@@ -147,6 +147,7 @@ pub fn page_rows(scope: &Scope, src: &Sources<'_>) -> Vec<Row> {
         Scope::Ports => targets::port_rows(src.targets),
         Scope::History { jump, .. } => history::command_rows(src.commands, *jump),
         Scope::HistoryActions(_) => history::actions(scope, src.commands),
+        Scope::CommandActions(_) => super::menu::command_actions(scope),
         _ => Vec::new(),
     }
 }

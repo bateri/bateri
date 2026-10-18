@@ -5482,6 +5482,17 @@ impl AppDelegate {
                     target.close_group(group);
                 }
             }
+            Act::ChangeShortcut(command) => self.show_shortcut(command),
+        }
+    }
+
+    /// Settings ▸ Keyboard, on the command named `command` (a name of the shortcut table) and
+    /// listening for its new shortcut: the palette's Change Shortcut….
+    pub(crate) fn show_shortcut(&self, command: &'static str) {
+        self.show_settings_window();
+        let window = self.ivars().settings_window.borrow().clone();
+        if let Some(window) = window {
+            window.show_shortcut(command);
         }
     }
 

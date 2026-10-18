@@ -60,9 +60,10 @@ pub use list::{
 };
 pub use matching::{Match, score};
 pub use menu::{
-    GO_TO_FOLDERS_ACTION, GO_TO_TABS_ACTION, JUMP_TO_COMMAND_ACTION, MenuNode, MenuRow, MenuRows,
-    Modifiers, PALETTE_ACTION, SHOW_HISTORY_ACTION, SHOW_THEMES_ACTION, menu_item_id,
-    rows as menu_rows, shortcut,
+    CHANGE_SHORTCUT, GO_TO_FOLDERS_ACTION, GO_TO_TABS_ACTION, JUMP_TO_COMMAND_ACTION, MenuNode,
+    MenuRow, MenuRows, Modifiers, PALETTE_ACTION, SHOW_HISTORY_ACTION, SHOW_THEMES_ACTION,
+    change_shortcut, command_actions, command_actions_heading, menu_item_id, rows as menu_rows,
+    shortcut, shortcut_command,
 };
 pub use pages::{Chosen, Sources, chosen, page_rows, root_rows, suggested_rows};
 pub use path::PathQuery;

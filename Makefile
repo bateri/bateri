@@ -65,7 +65,7 @@ fmt:
 #   `beginSheet…`/`endSheet…`/`attachedSheet` call anywhere else would open a
 #   background tab's question over the front one once a window holds several
 #   tabs, and nothing else would notice. The settings window's own panel
-#   (`settings_window.rs`, a window of its own) is exempt; comment lines are
+#   (`settings_window.rs` and its folder, a window of its own) is exempt; comment lines are
 #   skipped.
 # - The pane stands without bateri's application: in bt-shell-macos a module
 #   that is the pane's reaches no application module (app, window, tab, menu,
@@ -102,7 +102,7 @@ audit:
 		awk -v file="$$f" '/^[[:space:]]*#\[cfg\(test\)\]/{exit} /\.unwrap\(\)|\.expect\(|panic!|unreachable!/ && !/\/\/ audit: / && !/^[[:space:]]*\/\//{print file":"NR": "$$0; hit=1} END{exit hit}' "$$f" \
 			|| { echo "audit: unjustified panic path in bt-core ($$f)"; fail=1; }; \
 	done; \
-	if grep -rnE "beginSheet|endSheet|attachedSheet" crates/bt-shell-macos/src --include='*.rs' | grep -v "^crates/bt-shell-macos/src/sheets.rs:" | grep -v "^crates/bt-shell-macos/src/settings_window.rs:" | grep -v ":[[:space:]]*//"; then echo "audit: a sheet begun, ended or asked about outside the sheet gate (bt-shell-macos sheets.rs)"; fail=1; fi; \
+	if grep -rnE "beginSheet|endSheet|attachedSheet" crates/bt-shell-macos/src --include='*.rs' | grep -v "^crates/bt-shell-macos/src/sheets.rs:" | grep -v "^crates/bt-shell-macos/src/settings_window" | grep -v ":[[:space:]]*//"; then echo "audit: a sheet begun, ended or asked about outside the sheet gate (bt-shell-macos sheets.rs)"; fail=1; fi; \
 	app_mods="app|arrange|keeper|menu|palette|pane_drag|settings_window|split_view|tab|tab_bar|tab_drag|tab_group|tab_merge|tab_side|tab_switch|tab_title|updater|window"; \
 	for f in crates/bt-shell-macos/src/*.rs; do \
 		m=$$(basename "$$f" .rs); \

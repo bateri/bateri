@@ -850,6 +850,14 @@ fn tip(name: &str, key: Option<String>) -> Retained<NSString> {
     })
 }
 
+/// Gives `view` the tool tip `text` unless it already has it: AppKit restarts a tip it is
+/// handed again, and the bar is given its tabs on every change.
+fn retip(view: &NSView, text: &NSString) {
+    if view.toolTip().is_none_or(|current| *current != *text) {
+        view.setToolTip(Some(text));
+    }
+}
+
 impl CloseButton {
     fn new(mtm: MainThreadMarker) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(CloseIvars {
@@ -870,12 +878,17 @@ impl CloseButton {
         // SAFETY: AppKit's constant role string, alive for the process.
         this.setAccessibilityRole(Some(unsafe { NSAccessibilityButtonRole }));
         this.setAccessibilityLabel(Some(ns_string!("Close Tab")));
-        this.setToolTip(Some(&tip(
-            "Close Tab",
-            crate::menu::keys::glyphs_of(mtm, "close_tab"),
-        )));
+        this.retip(mtm);
         track_hover(&this);
         this
+    }
+
+    /// The tip names the key Close Tab has now: asked again when `[keys]` changes.
+    fn retip(&self, mtm: MainThreadMarker) {
+        retip(
+            self,
+            &tip("Close Tab", crate::menu::keys::glyphs_of(mtm, "close_tab")),
+        );
     }
 
     /// Shown (clickable, and faded in over `secs`) or not.
@@ -4762,24 +4775,23 @@ impl BarButton {
         // SAFETY: AppKit's constant role string, alive for the process.
         this.setAccessibilityRole(Some(unsafe { NSAccessibilityButtonRole }));
         match kind {
-            Kind::NewTab => {
-                this.setAccessibilityLabel(Some(ns_string!("New Tab")));
-                this.setToolTip(Some(&tip(
-                    "New Tab",
-                    crate::menu::keys::glyphs_of(mtm, "new_tab"),
-                )));
-            }
-            Kind::List => {
-                this.setAccessibilityLabel(Some(ns_string!("Show All Tabs")));
-                this.setToolTip(Some(&tip(
-                    "Show All Tabs",
-                    crate::menu::keys::glyphs_of(mtm, "show_all_tabs"),
-                )));
-            }
+            Kind::NewTab => this.setAccessibilityLabel(Some(ns_string!("New Tab"))),
+            Kind::List => this.setAccessibilityLabel(Some(ns_string!("Show All Tabs"))),
             Kind::Warning => {}
         }
+        this.retip(mtm);
         track_hover(&this);
         this
+    }
+
+    /// The tip names the key the button's command has now: asked again when `[keys]` changes.
+    fn retip(&self, mtm: MainThreadMarker) {
+        let (name, command) = match self.ivars().kind {
+            Kind::NewTab => ("New Tab", "new_tab"),
+            Kind::List => ("Show All Tabs", "show_all_tabs"),
+            Kind::Warning => return,
+        };
+        retip(self, &tip(name, crate::menu::keys::glyphs_of(mtm, command)));
     }
 
     fn set_look(&self, palette: Palette, radius: f64) {
@@ -5784,6 +5796,14 @@ impl TabBar {
         notice: String,
     ) {
         let iv = self.ivars();
+        // The tips of the buttons name keys that `[keys]` moves; the bar is given its tabs
+        // again whenever it does.
+        let mtm = self.mtm();
+        iv.new_tab.retip(mtm);
+        iv.list.retip(mtm);
+        for chip in iv.chips.borrow().iter() {
+            chip.ivars().close.retip(mtm);
+        }
         let open = iv.card.borrow().as_ref().map(|open| open.tab);
         let told = |shown: &Shown, tab: u64| {
             shown

@@ -74,9 +74,9 @@ according to the keyboard layout; on a Turkish Q keyboard the same key
 carries a different letter, and the menu shows that letter instead. View ▸
 Bigger also shows as `⌘:` on that layout.
 
-bateri ▸ Settings… (Cmd ,) opens the settings window: five categories on the
-left (General, Appearance, Cursor, Motion, Remote Files), the settings on the
-right. Remote Files shows `[remote] integration` at the top ("Set up shell
+bateri ▸ Settings… (Cmd ,) opens the settings window: six categories on the
+left (General, Appearance, Cursor, Motion, Keyboard, Remote Files), the
+settings on the right. Remote Files shows `[remote] integration` at the top ("Set up shell
 integration on servers"; see [Remote shell
 integration](#remote-shell-integration)), then the eight preview/download keys
 of `[remote]` and the two keys of the load indicator (`stats`,
@@ -140,6 +140,47 @@ enough.
 - The values in the template are the defaults of the day it was created: if a
   later version changes a default, this file keeps the old value. Deleting the
   line returns the key to the current default.
+
+### Settings… ▸ Keyboard
+
+The Keyboard page lists every command of the menu bar with the shortcuts it
+has, under the menu it is in, by the title and place the menu gives it. It
+reads and writes the [`[keys]`](#keys-1) table.
+
+- **Change a shortcut:** click it and press the new one. Esc gives up and ⌫
+  takes the shortcut away (`""`). A command with none has **Add Shortcut**; a
+  command can have two, and the second is added, or a shortcut removed, from
+  the right-click menu of a shortcut. **Reset** puts the command back to its
+  own shortcuts (the line leaves the file).
+- **Find a command:** the search field looks in the title, the menu and the
+  words the command palette finds it by (`pane` finds the splits). **All**,
+  **Changed** (what differs from the default) and **No Shortcut** filter the
+  list. **Find by Key** listens for a key and lists the commands that have it.
+- **Keys that cost something are asked about.** A key that is another
+  command's is taken from it with **Use Here** (the other command is left
+  without it; the file gets both lines). A ⌃ key with no ⌘ goes to the program
+  in the terminal (⌃R searches the history in a shell) and a ⌥ key with no ⌘
+  types a character on most keyboards: **Assign Anyway** gives it knowing the
+  program, or you, will no longer have it. A line-editing key (⌘⌫, ⌘←, ⌘→, ⌥⌫,
+  ⌥←, ⌥→) is the same kind of question; the keys that are taken show crossed
+  out under **Line editing — built in**.
+- **Keys that are refused** have no button and the page keeps listening:
+  the keys macOS keeps for itself (⌘Space, ⌃←, …) and a letter with no ⌘, ⌃ or
+  ⌥, which would be typing. Function keys stand alone.
+- **A family is one line.** For Select Tab ▸, Select Group ▸ and Select,
+  Resize and Swap Split ▸, hold the modifiers you want and press one of the
+  family's keys, a digit or an arrow: ⌥ and 1 make ⌥1…⌥9. Only the modifiers
+  are written (`select_tab = "option"`). A family whose key is another
+  command's is refused.
+- **Restore Defaults…** asks, then removes the shortcuts the file gives; its
+  comments and its other settings stay.
+- **A line can show a note under it**: a key two commands share in the file
+  (the menu runs the first), or that ⌥⌘ held arranges the panes, so a family on
+  it shows no numbers on the tabs.
+- Like the other pages it writes only the lines you change, and it follows the
+  file when the file changes. When the file cannot be read the page lists the
+  shortcuts but cannot change them. In the command palette, → on a command opens
+  **Change Shortcut…**, which opens this page on that command, listening.
 
 ### Template
 

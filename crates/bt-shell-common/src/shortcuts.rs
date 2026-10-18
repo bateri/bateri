@@ -11,6 +11,8 @@
 //!   wrong with the file, the keys two commands share ([`Resolved`]).
 //! - [`Resolved::judge`] — what recording a key comes to ([`Verdict`]): free, someone else's,
 //!   the line's, the program's, one that types, macOS's, or one that is no shortcut.
+//! - [`Page`] — the rows of Settings ▸ Keyboard, made from the menu as it stands; [`record`] —
+//!   what a pressed key says and writes there ([`Outcome`]).
 //! - [`menu_key`] / [`chord_of`] / [`glyphs`] — the file's spelling ↔ the key a menu item holds,
 //!   and how a shortcut is shown (the palette's own glyph function).
 //!
@@ -18,11 +20,20 @@
 //! keys that edit the line you type are `keys::LINE_EDITING`.
 
 mod mapping;
+mod page;
+mod record;
 mod resolve;
 mod table;
 mod verdict;
 
 pub use mapping::{MenuKey, chord_of, digit_glyphs, glyphs, menu_key};
+pub use page::{
+    BUILT_IN_HEADING, BuiltIn, Chip, Filter, Listing, Page, PageRow, Section, command_names,
+    family_glyphs, is_line_editing,
+};
+pub use record::{
+    ASSIGN_ANYWAY, Outcome, USE_HERE, edit_of, record, remove_edit, reset_edit, restore_edit,
+};
 pub use resolve::{Assignment, Binding, Conflict, Resolved, Source, resolve};
 pub use table::{COMMANDS, Command, Family, Item, by_id, by_name, family_default};
 pub use verdict::{Clash, MACOS_KEYS, MacKey, Refusal, Ruling, Verdict, refusal};

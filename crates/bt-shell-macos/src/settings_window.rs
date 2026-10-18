@@ -1,5 +1,6 @@
-//! bateri ▸ Settings… (Cmd-,): the settings window — a sidebar with five
-//! categories on the left, a label–control grid on the right.
+//! bateri ▸ Settings… (Cmd-,): the settings window — a sidebar with six
+//! categories on the left, a label–control grid on the right (Keyboard, the sixth, is a table
+//! of its own: [`keyboard`]).
 //!
 //! The window **holds no state of its own**: every value it shows comes from
 //! `AppDelegate`'s active settings ([`SettingsWindow::refresh`]) and every
@@ -62,6 +63,11 @@ use crate::remote_files::Sweep;
 use crate::settings::{self, FileState};
 use crate::upload::format_bytes;
 use crate::zoom::{MAX_SIZE, MIN_SIZE};
+
+mod keyboard;
+mod recorder;
+
+use keyboard::KeyboardPage;
 
 /// The window's opening content size, in points. The width is fixed, the
 /// height is not: the panes sit in a vertical scroll view, so a pane taller
@@ -127,17 +133,31 @@ enum Category {
     Appearance,
     Cursor,
     Motion,
+    Keyboard,
     RemoteFiles,
 }
 
 impl Category {
-    const ALL: [Category; 5] = [
+    const ALL: [Category; 6] = [
         Category::General,
         Category::Appearance,
         Category::Cursor,
         Category::Motion,
+        Category::Keyboard,
         Category::RemoteFiles,
     ];
+
+    /// The grid of the category in `panes`; the Keyboard page is a table of its own.
+    fn grid(self) -> Option<usize> {
+        match self {
+            Category::General => Some(0),
+            Category::Appearance => Some(1),
+            Category::Cursor => Some(2),
+            Category::Motion => Some(3),
+            Category::Keyboard => None,
+            Category::RemoteFiles => Some(4),
+        }
+    }
 
     fn title(self) -> &'static str {
         match self {
@@ -145,6 +165,7 @@ impl Category {
             Category::Appearance => "Appearance",
             Category::Cursor => "Cursor",
             Category::Motion => "Motion",
+            Category::Keyboard => "Keyboard",
             Category::RemoteFiles => "Remote Files",
         }
     }
@@ -156,6 +177,7 @@ impl Category {
             Category::Appearance => "paintpalette",
             Category::Cursor => "character.cursor.ibeam",
             Category::Motion => "wind",
+            Category::Keyboard => "keyboard",
             Category::RemoteFiles => "network",
         }
     }
@@ -1255,6 +1277,8 @@ pub(crate) struct Ivars {
     open: OnceCell<Retained<NSButton>>,
     /// One grid per category; only the selected one is visible.
     panes: OnceCell<Vec<Retained<NSGridView>>>,
+    /// Keyboard: the table of the commands and their shortcuts, shown in the grids' place.
+    keyboard: OnceCell<Retained<KeyboardPage>>,
     controls: OnceCell<Controls>,
     /// The popups' item lists — the meaning of the selected index. Rebuilt on
     /// every `refresh` (a new file in the theme directory).
@@ -1616,6 +1640,7 @@ impl SettingsWindow {
             pane_bottoms: OnceCell::new(),
             open: OnceCell::new(),
             panes: OnceCell::new(),
+            keyboard: OnceCell::new(),
             controls: OnceCell::new(),
             themes: RefCell::new(Vec::new()),
             light_themes: RefCell::new(Vec::new()),
@@ -1655,6 +1680,29 @@ impl SettingsWindow {
         }
         NSApplication::sharedApplication(self.mtm()).activate();
         window.makeKeyAndOrderFront(None);
+        // The Keyboard page lists the menu's titles: read again, as they may have changed.
+        if let Some(keyboard) = self.ivars().keyboard.get() {
+            keyboard.invalidate_menu();
+        }
+    }
+
+    /// Opens the Keyboard page on the command named `name` (a name of the shortcut table), ready
+    /// for its new shortcut.
+    pub(crate) fn show_shortcut(&self, name: &'static str) {
+        let (Some(sidebar), Some(keyboard)) =
+            (self.ivars().sidebar.get(), self.ivars().keyboard.get())
+        else {
+            return;
+        };
+        if let Some(at) = Category::ALL
+            .iter()
+            .position(|category| *category == Category::Keyboard)
+        {
+            sidebar
+                .selectRowIndexes_byExtendingSelection(&NSIndexSet::indexSetWithIndex(at), false);
+        }
+        self.show_selected();
+        keyboard.show_command(name);
     }
 
     /// Fills the controls with the active settings — the single source of the
@@ -1831,6 +1879,9 @@ impl SettingsWindow {
             };
             slide.value.setTextColor(Some(&color));
         }
+        if let Some(keyboard) = self.ivars().keyboard.get() {
+            keyboard.refresh(settings, status.locked);
+        }
         if let Some(banner) = self.ivars().banner.get() {
             banner.show(&status.banner);
         }
@@ -1967,17 +2018,28 @@ impl SettingsWindow {
         else {
             return;
         };
-        header.setStringValue(&NSString::from_str(Category::ALL[index].title()));
+        let category = Category::ALL[index];
+        header.setStringValue(&NSString::from_str(category.title()));
+        let grid = category.grid();
         for (i, pane) in panes.iter().enumerate() {
-            pane.setHidden(i != index);
+            pane.setHidden(grid != Some(i));
+        }
+        if let Some(scroll) = self.ivars().pane_scroll.get() {
+            scroll.setHidden(grid.is_none());
+        }
+        if let Some(keyboard) = self.ivars().keyboard.get() {
+            keyboard.setHidden(category != Category::Keyboard);
+            if category == Category::Keyboard {
+                keyboard.appear();
+            }
         }
         if let Some(bottoms) = self.ivars().pane_bottoms.get() {
             for (i, bottom) in bottoms.iter().enumerate() {
-                if i != index {
+                if grid != Some(i) {
                     bottom.setActive(false);
                 }
             }
-            if let Some(bottom) = bottoms.get(index) {
+            if let Some(bottom) = grid.and_then(|i| bottoms.get(i)) {
                 bottom.setActive(true);
             }
         }
@@ -2296,6 +2358,26 @@ impl SettingsWindow {
                 .bottomAnchor()
                 .constraintEqualToAnchor_constant(&open.topAnchor(), -12.0),
         ]);
+
+        // Keyboard is a table of its own, in the place the grids' scroll view has.
+        let keyboard = KeyboardPage::new(mtm);
+        detail.addSubview(&keyboard);
+        activate(&[
+            keyboard
+                .topAnchor()
+                .constraintEqualToAnchor(&scroll.topAnchor()),
+            keyboard
+                .bottomAnchor()
+                .constraintEqualToAnchor(&scroll.bottomAnchor()),
+            keyboard
+                .leadingAnchor()
+                .constraintEqualToAnchor_constant(&detail.leadingAnchor(), MARGIN),
+            keyboard
+                .trailingAnchor()
+                .constraintEqualToAnchor_constant(&detail.trailingAnchor(), -MARGIN),
+        ]);
+        keyboard.setHidden(true);
+        let _ = self.ivars().keyboard.set(keyboard);
 
         let _ = self.ivars().header.set(header);
         let _ = self.ivars().banner.set(banner);

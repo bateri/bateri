@@ -61,6 +61,8 @@
 
 mod menu;
 
+pub(crate) use menu::nodes as menu_nodes;
+
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::Path;
@@ -817,7 +819,12 @@ fn draw_row_end(
     if let Some(swatch) = &row.swatch {
         x = draw_swatch(swatch, x, slot, look) - 12.0;
     }
-    if row.opens.is_some() && row.shortcut.is_none() {
+    // A command's own menu (Change Shortcut…) is behind → and said in the band below, not on
+    // every row of the list.
+    if row.opens.is_some()
+        && row.shortcut.is_none()
+        && !matches!(row.opens, Some(rules::Scope::CommandActions(_)))
+    {
         x = draw_text_right("›", x, slot.top, slot.height, quiet) - 12.0;
     }
     if let Some(status) = &row.status {
@@ -980,6 +987,7 @@ impl Open {
         // A tab's, a group's or a command's menu says whose it is.
         if let Some(whose) = rules::actions_heading(scope, &self.places)
             .or_else(|| rules::history_actions_heading(scope, &self.commands))
+            .or_else(|| rules::command_actions_heading(scope, self.sources().menu))
         {
             list.headings.insert(0, (0, whose));
         }

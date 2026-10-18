@@ -31,16 +31,7 @@ pub(super) struct Snapshot {
 impl Snapshot {
     /// Validates and reads the whole menu bar.
     pub(super) fn take(mtm: MainThreadMarker) -> Snapshot {
-        let mut items = Vec::new();
-        let nodes: Vec<MenuNode> = NSApplication::sharedApplication(mtm)
-            .mainMenu()
-            .map(|bar| {
-                bar.itemArray()
-                    .iter()
-                    .map(|holder| node(&holder, &mut items))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let (nodes, items) = read(mtm);
         Snapshot {
             rows: menu_rows(&nodes),
             items,
@@ -51,6 +42,28 @@ impl Snapshot {
     pub(super) fn item(&self, id: &str) -> Option<Retained<NSMenuItem>> {
         self.items.get(self.rows.token_of(id)?).cloned()
     }
+}
+
+/// The whole menu bar as the toolkit-free nodes the rules read, and the items they stand for
+/// (indexed by [`MenuNode::token`]).
+fn read(mtm: MainThreadMarker) -> (Vec<MenuNode>, Vec<Retained<NSMenuItem>>) {
+    let mut items = Vec::new();
+    let nodes: Vec<MenuNode> = NSApplication::sharedApplication(mtm)
+        .mainMenu()
+        .map(|bar| {
+            bar.itemArray()
+                .iter()
+                .map(|holder| node(&holder, &mut items))
+                .collect()
+        })
+        .unwrap_or_default();
+    (nodes, items)
+}
+
+/// The menu bar as it stands, every item: the greyed, the hidden and the alternates too.
+/// Settings ▸ Keyboard lists a command by the title and the place the menu gives it.
+pub(crate) fn nodes(mtm: MainThreadMarker) -> Vec<MenuNode> {
+    read(mtm).0
 }
 
 /// Fills and validates `menu` the way opening it would, so its items say what they are now.

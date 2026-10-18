@@ -164,8 +164,12 @@ objc2-foundation = { workspace = true, features = [
 # A card's shadow is drawn once into a bitmap at the screen's scale and stretched by a layer
 # (`card::Shade`): `NSBitmapImageRep`, the bitmap and its `CGImage`. Only a header flag over
 # headers already in the set; `Cargo.lock` did not move.
+# Settings ▸ Keyboard: the filters are an `NSSegmentedControl` (and its cell's tracking mode),
+# the shortcut recorder draws with `NSBezierPath` and hears `NSEvent`s already on above, and
+# a table's rows are laid out by their own height (`usesAutomaticRowHeights`) with the
+# `NSTableView` flags the sidebar has. Only header flags; `Cargo.lock` did not move.
 objc2-app-kit = { workspace = true, features = [
-    "NSAccessibility", "NSAlert", "NSAppearance", "NSBox", "NSButton", "NSCell", "NSClipView",
+    "NSSegmentedControl", "NSSegmentedCell", "NSAccessibility", "NSAlert", "NSAppearance", "NSBox", "NSButton", "NSCell", "NSClipView",
     "NSColor", "NSControl", "NSDragging", "NSFont", "NSFontDescriptor", "NSGridView", "NSImage",
     "NSImageView", "NSLayoutAnchor", "NSLayoutConstraint", "NSLayoutGuide", "NSMenu", "NSMenuItem",
     "NSPopUpButton", "NSScrollView", "NSSlider", "NSSplitView", "NSSplitViewController",

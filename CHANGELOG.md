@@ -14,15 +14,26 @@ of every installed copy. A version without a section is not released.
 
 ### Added
 
-- **Shortcuts are yours to change in `settings.toml`.** A `[keys]` table gives a
-  menu command another shortcut, none (`""`) or two, by the command's fixed
-  name: `copy_last_output = "shift+cmd+o"`. Select Tab ▸, Select Group ▸ and the
-  split commands take only the modifiers (`select_tab = "option"` makes ⌥1…⌥9
-  select a tab). The menu bar, the command palette, the number a tab shows while
-  its modifiers are held and the numbers of ⌘P follow the file as you save it,
-  and a name no command has, or two commands on one key, is reported with its
-  line. Edit ▸ Command History… and View ▸ Themes… are now in the menu too, so
-  they can have a shortcut.
+- **Shortcuts are yours to change, in Settings ▸ Keyboard.** The new page lists
+  every command of the menu bar with its shortcuts. Click a shortcut and press
+  the new one (esc gives up, ⌫ removes it); a command with none has Add
+  Shortcut, and a second shortcut is in the right-click menu. Search finds a
+  command by its name or the word you would use for it, the filters show what
+  you changed or what has no shortcut, and Find by Key finds the command a key
+  runs. A key that is another command's asks first (Use Here), a key a program
+  in the terminal uses (⌃R) or that types a character (⌥E) says what it would
+  cost (Assign Anyway), and macOS's own keys and a bare letter are refused.
+  Select Tab ▸, Select Group ▸ and the split commands are one line each: hold
+  the modifiers you want and press a digit or an arrow. In the command palette,
+  → on a command opens Change Shortcut…. The change takes effect at once in the
+  menu bar, the palette, the number a tab shows while its modifiers are held and
+  the numbers of ⌘P.
+- **Shortcuts live in a `[keys]` table of `settings.toml`**, by the command's
+  fixed name: `copy_last_output = "shift+cmd+o"`, none (`""`) or two. Select Tab
+  ▸, Select Group ▸ and the split commands take only the modifiers
+  (`select_tab = "option"` makes ⌥1…⌥9 select a tab). A name no command has, or
+  two commands on one key, is reported with its line. Edit ▸ Command History…
+  and View ▸ Themes… are now in the menu too, so they can have a shortcut.
 
 ### Changed
 

@@ -152,6 +152,9 @@ pub enum Scope {
     TabActions(String),
     GroupActions(String),
     HistoryActions(String),
+    /// The menu of a menu command's row, by its row id (`cmd.copyLastOutput`): what can be done
+    /// with the command besides running it (Change Shortcut…).
+    CommandActions(String),
     Mark(String),
 }
 

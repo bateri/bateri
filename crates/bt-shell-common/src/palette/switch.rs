@@ -444,6 +444,9 @@ pub enum Act {
         window: u64,
         group: u64,
     },
+    /// Settings ▸ Keyboard opens on the command (a name of the shortcut table), listening for
+    /// its new shortcut.
+    ChangeShortcut(&'static str),
 }
 
 /// What the row `id` chosen with `modifier` on the page `scope` (`None`: the root) comes to;
@@ -458,6 +461,9 @@ pub fn act(id: &str, scope: Option<&Scope>, modifier: Modifier) -> Option<Act> {
     }
     if let Some((window, group)) = parse_group(id) {
         return Some(Act::GoToGroup { window, group });
+    }
+    if let Some(command) = super::menu::change_shortcut(id, scope) {
+        return Some(Act::ChangeShortcut(command));
     }
     let name = id.strip_prefix(Kind::Action.prefix())?;
     match scope? {

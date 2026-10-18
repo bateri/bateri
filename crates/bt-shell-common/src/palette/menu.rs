@@ -357,6 +357,10 @@ fn walk(
             );
         }
         row.id = unique(row.id, &node.title, seen);
+        // A command the shortcut table names has a menu of its own behind →.
+        if shortcut_command(&row.id).is_some() {
+            row.opens = Some(Scope::CommandActions(row.id.clone()));
+        }
         let entry = MenuRow {
             row,
             token: Some(node.token),
@@ -369,6 +373,54 @@ fn walk(
         }
     }
     level
+}
+
+/// The name of the row action that opens the shortcut page for a command.
+pub const CHANGE_SHORTCUT: &str = "changeShortcut";
+
+/// The command of the shortcut table a menu command's row id (`cmd.copyLastOutput`) stands for:
+/// the table's ids are the rows' keys, so the row, the menu item and Settings ▸ Keyboard name
+/// one command alike.
+pub fn shortcut_command(row_id: &str) -> Option<&'static crate::shortcuts::Command> {
+    crate::shortcuts::by_id(row_id.strip_prefix(Kind::Command.prefix())?)
+}
+
+/// The rows of the page a command's menu opens ([`Scope::CommandActions`]); empty for any other
+/// scope and for a row that is no command of the table.
+pub fn command_actions(scope: &Scope) -> Vec<Row> {
+    let Scope::CommandActions(id) = scope else {
+        return Vec::new();
+    };
+    if shortcut_command(id).is_none() {
+        return Vec::new();
+    }
+    vec![
+        Row::new(Kind::Action, CHANGE_SHORTCUT, "Change Shortcut…")
+            .keywords("keyboard key keys shortcut rebind hotkey assign"),
+    ]
+}
+
+/// What stands over the rows of a command's menu: the command's title.
+pub fn command_actions_heading(scope: &Scope, menu: &MenuRows) -> Option<String> {
+    let Scope::CommandActions(id) = scope else {
+        return None;
+    };
+    menu.flat
+        .iter()
+        .chain(menu.pages.iter().flat_map(|(_, rows)| rows))
+        .find(|entry| entry.row.id == *id)
+        .map(|entry| entry.row.title.clone())
+}
+
+/// The command whose shortcut a chosen action of a command's menu changes (a name of the table).
+pub fn change_shortcut(id: &str, scope: Option<&Scope>) -> Option<&'static str> {
+    let Scope::CommandActions(target) = scope? else {
+        return None;
+    };
+    if id != format!("{}{CHANGE_SHORTCUT}", Kind::Action.prefix()) {
+        return None;
+    }
+    shortcut_command(target).map(|command| command.name)
 }
 
 /// The page row of Go to Tab…: the item's title and shortcut, opening the tabs.
@@ -1050,6 +1102,66 @@ mod tests {
         assert_eq!(glyphs("", CMD), None);
         assert_eq!(glyphs("d", Modifiers::default()), None);
         assert_eq!(glyphs("🎤", Modifiers::default()), None);
+    }
+
+    #[test]
+    fn a_command_of_the_shortcut_table_has_a_menu_with_change_shortcut_behind_the_arrow() {
+        let menu = rows(&[MenuNode::holder(
+            0,
+            "Edit",
+            vec![
+                MenuNode::item(1, "Copy Last Output", "copyLastOutput:"),
+                MenuNode::item(2, "Select Theme", "selectTheme:"),
+            ],
+        )]);
+        let found = |id: &str| {
+            menu.flat
+                .iter()
+                .find(|entry| entry.row.id == id)
+                .map(|entry| entry.row.clone())
+                .expect("a row")
+        };
+        let last = found("cmd.copyLastOutput");
+        // ⏎ runs the command; → opens its menu.
+        assert_eq!(
+            last.opens,
+            Some(Scope::CommandActions("cmd.copyLastOutput".to_owned()))
+        );
+        assert!(!last.enters);
+        // A command the table does not name has none.
+        assert_eq!(found("cmd.selectTheme").opens, None);
+
+        let scope = Scope::CommandActions("cmd.copyLastOutput".to_owned());
+        let actions = command_actions(&scope);
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].title, "Change Shortcut…");
+        assert_eq!(actions[0].id, "act.changeShortcut");
+        assert_eq!(
+            command_actions_heading(&scope, &menu).as_deref(),
+            Some("Copy Last Output")
+        );
+        // Choosing it names the command of the table.
+        assert_eq!(
+            change_shortcut("act.changeShortcut", Some(&scope)),
+            Some("copy_last_output")
+        );
+        assert_eq!(change_shortcut("act.changeShortcut", None), None);
+        assert_eq!(
+            change_shortcut(
+                "act.changeShortcut",
+                Some(&Scope::CommandActions("cmd.selectTheme".to_owned()))
+            ),
+            None
+        );
+        assert!(command_actions(&Scope::Tabs).is_empty());
+        assert_eq!(
+            crate::palette::act(
+                "act.changeShortcut",
+                Some(&scope),
+                crate::palette::Modifier::None
+            ),
+            Some(crate::palette::Act::ChangeShortcut("copy_last_output"))
+        );
     }
 
     #[test]
