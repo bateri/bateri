@@ -19,6 +19,12 @@ of every installed copy. A version without a section is not released.
   tab's from the moment it starts to go, so what you type or click right after
   ⏎ or esc is not lost. With Reduce Motion it still goes at once.
 
+### Fixed
+
+- **"pane" finds every split command in the palette.** The menu calls a pane a
+  split, and Select Split ▸ (⌥⌘ and an arrow), Resize Split ▸, Swap Split ▸ and
+  Move Split to Previous/Next Tab were not found by the word people type.
+
 ## [0.19.0] - 2026-10-18
 
 ### Added

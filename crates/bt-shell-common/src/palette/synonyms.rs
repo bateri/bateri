@@ -73,8 +73,13 @@ const WORDS: &[(&str, &str)] = &[
     ("equalizeSplits", "balance even panes"),
     ("selectNextSplit", "pane focus"),
     ("selectPreviousSplit", "pane focus"),
+    ("selectSplit", "pane focus arrow"),
+    ("resizeSplit", "pane size grow shrink"),
+    ("swapSplit", "pane exchange"),
     ("movePaneToNewTab", "pane detach split"),
     ("movePaneToNewWindow", "pane detach split"),
+    ("movePaneToPreviousTab", "pane"),
+    ("movePaneToNextTab", "pane"),
     ("moveTabToNewGroup", "folder collect"),
     ("markHost", "production staging development color host ssh"),
     ("forgetPassword", "keychain ssh login"),
@@ -109,6 +114,33 @@ mod tests {
             assert!(
                 WORDS[n + 1..].iter().all(|(other, _)| other != name),
                 "{name} twice"
+            );
+        }
+    }
+
+    #[test]
+    fn every_command_on_a_split_is_found_by_pane() {
+        // The menu says "split" (Select Split ▸ Left), people type "pane".
+        for selector in [
+            "splitRight",
+            "splitDown",
+            "selectPreviousSplit",
+            "selectNextSplit",
+            "selectSplit",
+            "resizeSplit",
+            "swapSplit",
+            "equalizeSplits",
+            "toggleSplitZoom",
+            "movePaneToNewTab",
+            "movePaneToNewWindow",
+            "movePaneToPreviousTab",
+            "movePaneToNextTab",
+        ] {
+            assert!(
+                for_selector(selector)
+                    .split_whitespace()
+                    .any(|w| w.starts_with("pane")),
+                "{selector}"
             );
         }
     }
