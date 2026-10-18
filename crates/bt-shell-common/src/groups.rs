@@ -2601,6 +2601,7 @@ mod tests {
                 scroll: 0.0,
                 warning: false,
                 corner: 20.5,
+                row_height: tabs::TAB_HEIGHT,
             }
             .layout_with(&items.iter().map(Item::entry).collect::<Vec<_>>());
             assert_eq!(layout.rows.len(), listed.len());
@@ -2623,6 +2624,7 @@ mod tests {
             scroll: 0.0,
             warning: false,
             corner: 20.5,
+            row_height: tabs::TAB_HEIGHT,
         }
         .layout_with(&items.iter().map(Item::entry).collect::<Vec<_>>())
     }

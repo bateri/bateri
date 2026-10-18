@@ -1462,6 +1462,22 @@ pub(crate) fn tabs_at_side(mtm: MainThreadMarker) -> bool {
     app::delegate(mtm).is_some_and(|app| app.settings().tab_position == TabPosition::Side)
 }
 
+/// Whether `[appearance] tab_details` makes the side column's rows cards that say what their
+/// tab told and where it is. Without an application, plain rows.
+pub(crate) fn tab_details(mtm: MainThreadMarker) -> bool {
+    app::delegate(mtm).is_some_and(|app| app.settings().tab_details)
+}
+
+/// How tall a row of the side column is ([`tabs::Side::row_height`]): a card's height while
+/// [`tab_details`] is on, a chip's otherwise.
+pub(crate) fn side_row_height(mtm: MainThreadMarker) -> f64 {
+    if tab_details(mtm) {
+        tabs::DETAILED_ROW_HEIGHT
+    } else {
+        tabs::TAB_HEIGHT
+    }
+}
+
 define_class!(
     // SAFETY: NSView is designed for subclassing; RootView implements no
     // `Drop` and is born with `initWithFrame:`.
@@ -4153,7 +4169,9 @@ impl TerminalWindow {
     pub(crate) fn refresh_bar(&self) {
         let single = self.lone_tab();
         let side = self.bar().is_side();
-        let label = |tab: &TerminalTab| Self::label_of(tab, single);
+        // The column's rows say what their tabs told only while they are cards.
+        let detailed = side && tab_details(self.mtm());
+        let label = |tab: &TerminalTab| Self::label_of(tab, single, detailed);
         let order = self.ivars().order.borrow();
         let groups = self.ivars().groups.borrow();
         // The column lists headers and hides a closed group's other tabs; the title row shows the
@@ -4255,8 +4273,9 @@ impl TerminalWindow {
     }
 
     /// One tab as the bar shows it: a single tab's label is the window's title, an upload's
-    /// prefix included; among several each tab shows its session title.
-    fn label_of(tab: &TerminalTab, single: bool) -> Label {
+    /// prefix included; among several each tab shows its session title. `detailed` reads what
+    /// its card row says under the title (`TerminalTab::details`).
+    fn label_of(tab: &TerminalTab, single: bool, detailed: bool) -> Label {
         let title = if single {
             tab.title()
         } else {
@@ -4271,6 +4290,7 @@ impl TerminalWindow {
             running: tab.running_for(),
             upload: tab.upload(),
             mark: tab.host_mark(),
+            details: detailed.then(|| tab.details()),
         }
     }
 
@@ -4280,7 +4300,7 @@ impl TerminalWindow {
         let single = self.lone_tab();
         self.tabs()
             .iter()
-            .map(|tab| Self::label_of(tab, single))
+            .map(|tab| Self::label_of(tab, single, false))
             .collect()
     }
 

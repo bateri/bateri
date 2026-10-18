@@ -1,6 +1,6 @@
 //! The settings the palette can change: their names, their values, and the edit each value is.
 //!
-//! The palette lists the settings people reach for (34 of them) and changes them without the
+//! The palette lists the settings people reach for (35 of them) and changes them without the
 //! settings window: a row shows the value in effect, and choosing a value writes it through the
 //! same typed edit the menus and the window use ([`SettingsEdit`], `Settings::with_edit`). So the
 //! catalog owns no value of its own:
@@ -438,7 +438,7 @@ macro_rules! number {
 const WHILE_MATCHING_SYSTEM: Option<&str> = Some("while Theme is Match System");
 const NEW_SHELLS: Option<&str> = Some("new shells only");
 
-static CATALOG: [Setting; 34] = [
+static CATALOG: [Setting; 35] = [
     Setting {
         key: "appearance.theme",
         section: Section::Appearance,
@@ -659,6 +659,16 @@ static CATALOG: [Setting; 34] = [
         |s| s.tab_icons,
         SettingsEdit::TabIcons
     ),
+    toggle!(
+        "appearance.tab_details",
+        Appearance,
+        "Tab Details",
+        "sidebar card rows notification branch folder detailed",
+        true,
+        None,
+        |s| s.tab_details,
+        SettingsEdit::TabDetails
+    ),
     named!(
         "appearance.tab_icon_colors",
         Appearance,
@@ -857,8 +867,8 @@ mod tests {
     }
 
     #[test]
-    fn the_catalog_lists_the_thirty_four_settings_once_each() {
-        assert_eq!(all().len(), 34);
+    fn the_catalog_lists_the_thirty_five_settings_once_each() {
+        assert_eq!(all().len(), 35);
         for (n, setting) in all().iter().enumerate() {
             assert!(
                 all()[n + 1..]
@@ -989,7 +999,7 @@ mod tests {
         assert_eq!(dark.opens, Some(Scope::Theme(Slot::Dark)));
         assert_eq!(dark.subtitle, "while Theme is Match System");
         assert_eq!(dark.value.as_deref(), Some("bateri"));
-        assert_eq!(rows(&settings).len(), 34);
+        assert_eq!(rows(&settings).len(), 35);
     }
 
     #[test]
@@ -1039,6 +1049,7 @@ mod tests {
                 "appearance.dim_unfocused_splits",
                 "appearance.tab_position",
                 "appearance.tab_icons",
+                "appearance.tab_details",
                 "appearance.tab_icon_colors",
             ]
         );

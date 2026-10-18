@@ -2517,11 +2517,14 @@ pub(crate) struct ShellLog {
 pub(crate) struct Ends {
     pub(crate) ok: u64,
     pub(crate) failed: u64,
+    /// Every end, its code read or not ([`crate::Activity::commands`]).
+    pub(crate) commands: u64,
 }
 
 impl Ends {
     /// A command ended with `exit`.
     fn note(&mut self, exit: Option<i32>) {
+        self.commands = self.commands.wrapping_add(1);
         match exit {
             Some(0) => self.ok = self.ok.wrapping_add(1),
             Some(_) => self.failed = self.failed.wrapping_add(1),
@@ -9889,7 +9892,7 @@ mod tests {
             Some(Stripe::Success)
         );
         assert_eq!(log.last_block(), Some(BlockKey::Local(5)));
-        assert_eq!(log.ends, Ends { ok: 2, failed: 1 });
+        assert_eq!((log.ends.ok, log.ends.failed), (2, 1));
     }
 
     /// The buffer's ceiling takes the longest representable text.
@@ -11417,14 +11420,14 @@ mod tests {
               \x1b]133;A;bt_block=2\x07\x1b]133;C\x07\x1b]133;D;2;bt_block=2\x07\
               \x1b]133;A;bt_block=3\x07\x1b]133;C\x07\x1b]133;D;bt_block=3\x07",
         );
-        assert_eq!(log.ends, Ends { ok: 1, failed: 1 });
+        assert_eq!((log.ends.ok, log.ends.failed), (1, 1));
         let mut log = ssh_log();
         feed(
             &mut log,
             b"\x1b]133;A;bt_remote=1.9.1\x07\x1b]133;C;bt_remote=1.9.1\x07\
               \x1b]133;D;130;bt_remote=1.9.1\x07",
         );
-        assert_eq!(log.ends, Ends { ok: 0, failed: 1 }, "the remote one");
+        assert_eq!((log.ends.ok, log.ends.failed), (0, 1), "the remote one");
     }
 
     /// A command read one by one ([`crate::commands::command_state`]): a prompt, then running

@@ -12,6 +12,26 @@ of every installed copy. A version without a section is not released.
 
 ## [Unreleased]
 
+### Added
+
+- **The side column's rows can be cards that say what their tab is doing.**
+  Turn on `tab_details` under `[appearance]` (or Tab Details in the settings
+  window and the command palette) and, with the tabs at the side, each row
+  keeps its icon, title, × and ⌘ key on its first line and says under them
+  the last thing the tab told — a notification a program sent (`OSC 9` or
+  `OSC 777`), such as what an agent last said or the permission it asks for,
+  in up to three lines — or else how its newest command ended (`Finished ·
+  cargo build · 12s`, `Exit 2 · make test`), and on its last line the branch
+  and the folder (`main · ~/api`). A split tab shows each pane as a small
+  card of its own — its title, and what it last said under it. A row
+  is as tall as what it says: a tab
+  with nothing to say keeps a plain row's height. A notification speaks for
+  its tab until that pane's next shell command starts or ends — an agent
+  ending its turn does not clear it — and a newer one replaces it; it is not
+  posted to Notification Center. A command that still runs adds no line, the
+  icon's ring says it. The title row's chips stay one line, and the setting
+  is off by default.
+
 ### Changed
 
 - **The command palette fades out as it closes**, the way it came in and like

@@ -210,13 +210,14 @@ enum Key {
     TabIconColors,
     ResizeInSteps,
     TabPosition,
+    TabDetails,
     PythonEnv,
     NodeVersion,
 }
 
 impl Key {
     /// The order is the `tag` itself: `ALL[tag]`.
-    const ALL: [Key; 48] = [
+    const ALL: [Key; 49] = [
         Key::ConfirmClose,
         Key::Clipboard,
         Key::Scrollback,
@@ -263,6 +264,7 @@ impl Key {
         Key::TabIconColors,
         Key::ResizeInSteps,
         Key::TabPosition,
+        Key::TabDetails,
         Key::PythonEnv,
         Key::NodeVersion,
     ];
@@ -298,6 +300,7 @@ impl Key {
             Key::TabIcons => "appearance.tab_icons",
             Key::TabIconColors => "appearance.tab_icon_colors",
             Key::TabPosition => "appearance.tab_position",
+            Key::TabDetails => "appearance.tab_details",
             Key::Font => "font.family",
             Key::Size => "font.size",
             Key::LineHeight => "font.line_height",
@@ -1142,6 +1145,7 @@ struct Controls {
     tab_icons: Retained<NSSwitch>,
     tab_icon_colors: Retained<NSPopUpButton>,
     tab_position: Retained<NSPopUpButton>,
+    tab_details: Retained<NSSwitch>,
     minimum_contrast: Retained<NSPopUpButton>,
     shape: Retained<NSPopUpButton>,
     blink: Retained<NSPopUpButton>,
@@ -1391,6 +1395,7 @@ define_class!(
                 Some(Key::DimSplits) => Some(SettingsEdit::DimUnfocusedSplits(on)),
                 Some(Key::ResizeInSteps) => Some(SettingsEdit::ResizeInSteps(on)),
                 Some(Key::TabIcons) => Some(SettingsEdit::TabIcons(on)),
+                Some(Key::TabDetails) => Some(SettingsEdit::TabDetails(on)),
                 _ => None,
             };
             self.save(edit);
@@ -1730,6 +1735,7 @@ impl SettingsWindow {
         set_switch(&c.tab_icons, settings.tab_icons);
         select_choice(&c.tab_icon_colors, settings.tab_icon_colors);
         select_choice(&c.tab_position, settings.tab_position);
+        set_switch(&c.tab_details, settings.tab_details);
 
         select_choice(&c.shape, settings.cursor);
         select_choice(&c.blink, settings.cursor_blink);
@@ -2419,6 +2425,7 @@ impl SettingsWindow {
         let tab_icons = self.switch(Key::TabIcons);
         let tab_icon_colors = self.popup::<IconColors>(Key::TabIconColors);
         let tab_position = self.popup::<TabPosition>(Key::TabPosition);
+        let tab_details = self.switch(Key::TabDetails);
         let mut appearance = Form::new(mtm);
         appearance.row(Key::Theme, "Theme:", &theme, &[&theme], None);
         appearance.row(
@@ -2507,6 +2514,13 @@ impl SettingsWindow {
             &tab_position,
             &[&tab_position],
             Some("Top: a bar along the top of the window. Side: a column down the left edge, tall as the window, where the title row goes."),
+        );
+        appearance.row(
+            Key::TabDetails,
+            "Tab details:",
+            &tab_details,
+            &[&tab_details],
+            Some("With the tabs at the side, each row is a card: under the title, what the tab last told — a program's notification, or how its newest command ended — and its branch and folder."),
         );
         appearance.row(
             Key::TabIcons,
@@ -2793,6 +2807,7 @@ impl SettingsWindow {
             tab_icons,
             tab_icon_colors,
             tab_position,
+            tab_details,
             minimum_contrast,
             shape,
             blink,
@@ -3283,7 +3298,7 @@ mod tests {
                     restore_windows = []\nkeep_running = []\nscrollbar = []\n\
                     [appearance]\ntheme = []\nlight_theme = []\ndark_theme = []\n\
                     content_edge = []\nminimum_contrast = []\ndim_unfocused_splits = []\n\
-                    split_style = []\nresize_in_steps = []\ntab_icons = []\ntab_icon_colors = []\ntab_position = []\n\
+                    split_style = []\nresize_in_steps = []\ntab_icons = []\ntab_icon_colors = []\ntab_position = []\ntab_details = []\n\
                     [font]\nfamily = []\nsize = []\nline_height = []\nletter_spacing = []\n\
                     [clipboard]\nosc52 = []\n\
                     [motion]\ncursor_motion = []\nreduce_motion = []\nsmooth_scroll = []\n\
@@ -3351,6 +3366,7 @@ mod tests {
                 Key::TabIcons => SettingsEdit::TabIcons(false),
                 Key::TabIconColors => SettingsEdit::IconColors(IconColors::Brand),
                 Key::TabPosition => SettingsEdit::TabPosition(TabPosition::Side),
+                Key::TabDetails => SettingsEdit::TabDetails(true),
             };
             assert_eq!(edit.path(), key.path(), "{key:?}");
         }

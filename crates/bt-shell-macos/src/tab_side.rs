@@ -411,7 +411,12 @@ impl TabBar {
         // The list's places, headers among them: a carried tab's room opens before the row it is
         // over, below any header that stands there.
         let entries = side_entries(&shown.headings, count, flight.gap, 0);
-        let mut column = side.layout_with(&entries);
+        let heights = side_heights(
+            &super::row_heights(self.mtm(), &shown.tabs, side.width - 2.0 * tabs::EDGE),
+            flight.gap,
+            side.row_height,
+        );
+        let mut column = side.layout_sized(&entries, &heights);
         let selected_tab = shown.tabs.get(shown.selected).map(|label| label.tab);
         let was_overflowing = iv.overflowed.replace(column.overflow);
         let resized = (iv.width.replace(bounds.size.height) - bounds.size.height).abs() > 0.5;
@@ -427,7 +432,7 @@ impl TabBar {
                     scroll: target,
                     ..side
                 }
-                .layout_with(&entries);
+                .layout_sized(&entries, &heights);
                 revealed = selection_changed;
             }
         }
@@ -579,6 +584,7 @@ impl TabBar {
             scroll: iv.scroll.get(),
             warning: !iv.shown.borrow().notice.is_empty(),
             corner: card::window_corner_pt(self.window().as_deref()),
+            row_height: crate::window::side_row_height(self.mtm()),
         }
     }
 
@@ -590,7 +596,13 @@ impl TabBar {
         let shown = self.ivars().shown.borrow();
         let count = shown.tabs.len();
         let entries = side_entries(&shown.headings, count, None, room);
-        (count > 0).then(|| self.side_for(top, count + room).layout_with(&entries))
+        (count > 0).then(|| {
+            let side = self.side_for(top, count + room);
+            // The rows past the tabs (`room`) are the column's own height.
+            let heights =
+                super::row_heights(self.mtm(), &shown.tabs, side.width - 2.0 * tabs::EDGE);
+            side.layout_sized(&entries, &heights)
+        })
     }
 
     /// Puts the name field over `row` (the bar's space), in the type the selected row's title
@@ -637,6 +649,16 @@ impl TabBar {
             ),
         ));
     }
+}
+
+/// The rows' heights in the order `side_entries` lists the rows: each tab's own (`tab_heights`,
+/// in the order of the list) with, at place `gap`, the room a carried tab opens, `room` high.
+fn side_heights(tab_heights: &[f64], gap: Option<usize>, room: f64) -> Vec<f64> {
+    let mut heights = tab_heights.to_vec();
+    if let Some(gap) = gap {
+        heights.insert(gap.min(heights.len()), room);
+    }
+    heights
 }
 
 /// What stands in the column's list, top to bottom, for `count` tabs listed under `headings`:
@@ -688,6 +710,16 @@ mod tests {
 
     const TAB: Entry = Entry::Tab;
     const HEAD: Entry = Entry::Header;
+
+    #[test]
+    fn a_carried_tabs_room_takes_its_place_among_the_heights() {
+        assert_eq!(side_heights(&[40.0, 60.0], None, 56.0), [40.0, 60.0]);
+        assert_eq!(
+            side_heights(&[40.0, 60.0], Some(1), 56.0),
+            [40.0, 56.0, 60.0]
+        );
+        assert_eq!(side_heights(&[40.0], Some(5), 56.0), [40.0, 56.0]);
+    }
 
     #[test]
     fn a_column_without_groups_is_rows_alone() {

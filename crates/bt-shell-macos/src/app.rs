@@ -3968,6 +3968,7 @@ impl AppDelegate {
                         scroll: 0.0,
                         warning: false,
                         corner: 0.0,
+                        row_height: window::side_row_height(self.mtm()),
                     }
                     .layout();
                     column
@@ -6127,6 +6128,13 @@ impl AppDelegate {
         if changes.resize_in_steps {
             for window in &windows {
                 window.fit_to_cells();
+            }
+        }
+        // The column's rows a line or a card tall: every window lays its column out again, and
+        // its tabs say what they told.
+        if changes.tab_details {
+            for window in &windows {
+                window.refresh_bar();
             }
         }
         // The tab icons' look or colors: every tab bar draws its chips again.

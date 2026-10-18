@@ -1237,11 +1237,15 @@ pub struct Side {
     /// is square (full screen). The caller gives what it measured for its window
     /// ([`Fit::of`]).
     pub corner: f64,
+    /// How tall a row is: [`TAB_HEIGHT`], or [`DETAILED_ROW_HEIGHT`] while the rows are cards
+    /// (`[appearance] tab_details`). Every row of a column is as tall as the others, so a row
+    /// carried along the list makes the same room wherever it goes.
+    pub row_height: f64,
 }
 
 impl Side {
     /// Lays the column out: the list from `top` down to [`EDGE`] above New Tab, New Tab in the
-    /// window's bottom-left corner with the warning right of it. Rows are [`TAB_HEIGHT`] high with
+    /// window's bottom-left corner with the warning right of it. Rows are [`Side::row_height`] high with
     /// [`GAP`] between them and [`EDGE`] in from the column's sides, and the list scrolls when
     /// they do not fit.
     ///
@@ -1250,7 +1254,7 @@ impl Side {
     /// the diagonal) and its other three are [`TAB_RADIUS`], the rows'. Its [`Fit::inset`] is its
     /// space from the column's left edge and from the window's foot alike.
     pub fn layout(&self) -> Column {
-        self.lay(std::iter::repeat_n(Entry::Tab, self.count))
+        self.lay(std::iter::repeat_n(Entry::Tab, self.count), &[])
     }
 
     /// [`Self::layout`] for a list that has headers in it: `entries` are what stands in the list,
@@ -1262,10 +1266,19 @@ impl Side {
     /// the places a point can be over and a tab can be carried to are the tabs'; the headers are
     /// [`Column::headers`], each knowing the row that follows it.
     pub fn layout_with(&self, entries: &[Entry]) -> Column {
-        self.lay(entries.iter().copied())
+        self.lay(entries.iter().copied(), &[])
     }
 
-    fn lay(&self, entries: impl Iterator<Item = Entry>) -> Column {
+    /// [`Self::layout_with`] for rows of their own heights: the `n`th row of `entries` (headers
+    /// not counted) is `heights[n]` high, and a row past the end of `heights` is
+    /// [`Side::row_height`] — a card row is as tall as what it says ([`detailed_height`]), and
+    /// the room a carried tab opens is a row of the column's own height. A gap past the end
+    /// ([`Column::between`]) continues at the pace of [`Side::row_height`].
+    pub fn layout_sized(&self, entries: &[Entry], heights: &[f64]) -> Column {
+        self.lay(entries.iter().copied(), heights)
+    }
+
+    fn lay(&self, entries: impl Iterator<Item = Entry>, heights: &[f64]) -> Column {
         let fit = Fit::of(self.corner);
         let foot = self.height - fit.inset - BUTTON;
         let width = self.width;
@@ -1276,7 +1289,7 @@ impl Side {
         let new_tab_end = warning.map_or(width - EDGE, |button| button.x - FOOT_GAP);
         let new_tab = Rect::new(fit.inset, foot, (new_tab_end - fit.inset).max(0.0), BUTTON);
 
-        let slot = TAB_HEIGHT + GAP;
+        let slot = self.row_height + GAP;
         // The list from the top of its content, unscrolled: the rows' tops, the headers' tops with
         // the row each is followed by, and the line each "a tab here" gap sits at.
         let mut cursor = LIST_PAD;
@@ -1288,9 +1301,13 @@ impl Side {
         for entry in entries {
             match entry {
                 Entry::Tab => {
+                    let height = heights
+                        .get(rows_at.len())
+                        .copied()
+                        .unwrap_or(self.row_height);
                     marks_at.push(block.take().unwrap_or(cursor) - GAP);
-                    rows_at.push(cursor);
-                    cursor += slot;
+                    rows_at.push((cursor, height));
+                    cursor += height + GAP;
                 }
                 Entry::Header => {
                     if started {
@@ -1316,7 +1333,7 @@ impl Side {
         let overflow = max_scroll > 0.0;
         let along: Vec<Span> = rows_at
             .iter()
-            .map(|&at| Span::new(list.y + at - scroll, TAB_HEIGHT))
+            .map(|&(at, height)| Span::new(list.y + at - scroll, height))
             .collect();
         let rows = along
             .iter()
@@ -1351,6 +1368,7 @@ impl Side {
             along,
             marks,
             slot,
+            row_height: self.row_height,
         }
     }
 }
@@ -1410,6 +1428,8 @@ pub struct Column {
     marks: Vec<f64>,
     /// A row's height plus [`GAP`]: the step from one row to the next.
     slot: f64,
+    /// A row's height ([`Side::row_height`]).
+    row_height: f64,
 }
 
 impl Laid for Column {
@@ -1423,7 +1443,7 @@ impl Laid for Column {
             scroll: self.scroll,
             max_scroll: self.max_scroll,
             slot: self.slot,
-            narrowest: TAB_HEIGHT,
+            narrowest: self.row_height,
         }
     }
 }
@@ -1475,7 +1495,9 @@ impl Column {
 
 /// Where the parts of a row sit, from the row's own top-left corner ([`Row::of`]). A row is
 /// [`Column::row_width`] wide and [`TAB_HEIGHT`] high; the parts that are centred up and down (the
-/// leading element, the title) have no y here.
+/// leading element, the title) have no y here. A detailed row ([`DETAILED_ROW_HEIGHT`]) keeps
+/// these parts in its first [`TAB_HEIGHT`], where a plain row has them, and writes its lines
+/// under them ([`Row::details`]).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Row {
     /// The leading element — the icon with its deck, or the indicator — from [`ROW_LEAD`], as wide
@@ -1524,6 +1546,171 @@ impl Row {
     /// where it would have ended.
     pub fn field(width: f64) -> Span {
         Span::new(ROW_LEAD, (width - ROW_LEAD - ROW_END).max(0.0))
+    }
+
+    /// The box a detailed row `width` wide and `height` high writes its lines in
+    /// ([`Details`]): under the title's line, from where the title starts for a leading element
+    /// `lead` wide (as [`Row::of`] has it) to [`ROW_END`] from the right — the `×` and the ⌘ key
+    /// stand on the title's line, so the lines need not give way to them — and down to
+    /// [`DETAIL_BOTTOM`] above the row's foot.
+    pub fn details(width: f64, height: f64, lead: Option<f64>) -> Rect {
+        let start = lead.map_or(ROW_LEAD, |lead| ROW_LEAD + lead + ICON_GAP);
+        Rect::new(
+            start,
+            DETAIL_TOP,
+            (width - start - ROW_END).max(0.0),
+            (height - DETAIL_TOP - DETAIL_BOTTOM).max(0.0),
+        )
+    }
+
+    /// The stripe of a marked host on a row `height` high: [`Row::host_mark`]'s, as tall as the
+    /// row less the same 7 pt above and below.
+    pub fn host_mark_of(height: f64) -> Rect {
+        Rect::new(2.0, 7.0, 2.5, (height - 14.0).max(0.0))
+    }
+}
+
+/// How tall a side row is while the rows are cards (`[appearance] tab_details`) where nothing has
+/// measured it yet — the room a carried tab opens: the title's line and two lines under it. A
+/// row that is shown is as tall as what it says ([`detailed_height`]).
+pub const DETAILED_ROW_HEIGHT: f64 = 56.0;
+
+/// Where a detailed row's lines start, from its top: under the title, which stands centred in the
+/// row's first [`TAB_HEIGHT`] as in a plain row. Less than [`TAB_HEIGHT`]: the title's line has
+/// room under its text, and the lines take it.
+pub const DETAIL_TOP: f64 = 24.0;
+
+/// What a detailed row keeps free under its last line.
+pub const DETAIL_BOTTOM: f64 = 8.0;
+
+/// How many lines a detailed row gives what the tab told; a longer text ends in "…".
+pub const DETAIL_STATUS_LINES: usize = 3;
+
+/// Space between what the tab told and the line of where it is.
+pub const DETAIL_GAP: f64 = 2.0;
+
+/// Space between two panes of a split tab on its card row ([`Details::panes`]): each pane is a
+/// small card of its own there — its name, then what it said — and the space sets them apart.
+pub const PANE_GAP: f64 = 6.0;
+
+/// How many lines a split tab's pane gives what it said, under its name; fewer than a tab of one
+/// pane ([`DETAIL_STATUS_LINES`]), as several share the row.
+pub const PANE_SAID_LINES: usize = 2;
+
+/// How tall a card row is for lines `status` and `place` high, as the shell measured them in the
+/// row's width (0 for a line it does not show): the title's line, then the lines from
+/// [`DETAIL_TOP`] down with [`DETAIL_GAP`] between them, and [`DETAIL_BOTTOM`] under the last. A
+/// row with nothing to say is a plain row, [`TAB_HEIGHT`]. Whole points, so the rows below it
+/// start on a pixel.
+pub fn detailed_height(status: f64, place: f64) -> f64 {
+    let (status, place) = (status.max(0.0), place.max(0.0));
+    if status == 0.0 && place == 0.0 {
+        return TAB_HEIGHT;
+    }
+    let gap = if status > 0.0 && place > 0.0 {
+        DETAIL_GAP
+    } else {
+        0.0
+    };
+    (DETAIL_TOP + status + gap + place + DETAIL_BOTTOM)
+        .ceil()
+        .max(TAB_HEIGHT)
+}
+
+/// What a detailed row says under its title ([`details`]): what the tab told last and where it
+/// is. A part nobody knows is `None` and its line is left out, not shown empty.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Details {
+    /// A program's notification, else how its newest command ended — finished or failed — and the
+    /// tone it is drawn in. A command that still runs says nothing here: the icon's ring says it,
+    /// and an agent that runs as one long command would say only "Running" for hours.
+    pub status: Option<(String, Tone)>,
+    /// The branch and the folder: `main · ~/api`; `host:path` in a remote session.
+    pub place: Option<String>,
+    /// A split tab's panes, one line each in the order the split tree has them
+    /// ([`PaneLine::text`]); empty for a tab of one pane, whose line is [`Details::status`].
+    pub panes: Vec<PaneLine>,
+}
+
+/// One pane of a split tab on its card row ([`Details::panes`]): its name and what it last
+/// said, on a line of its own.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PaneLine {
+    /// The title its session reports.
+    pub name: String,
+    /// The notification its program sent last, while it speaks for the pane (as
+    /// [`Details::status`] for a tab of one pane); `None` when it has said nothing.
+    pub said: Option<String>,
+    /// The tab's focused pane: its line is in the title's ink, the others dimmed.
+    pub focused: bool,
+}
+
+impl PaneLine {
+    /// The line as the row writes it: `name · what it said`, or the name alone; a blank name
+    /// gives way to what it said.
+    pub fn text(&self) -> String {
+        let name = self.name.trim();
+        let said = self
+            .said
+            .as_deref()
+            .map(str::trim)
+            .filter(|said| !said.is_empty());
+        match (name.is_empty(), said) {
+            (false, Some(said)) => format!("{name} · {said}"),
+            (true, Some(said)) => said.to_owned(),
+            (_, None) => name.to_owned(),
+        }
+    }
+}
+
+/// What a detailed row of a tab says ([`Details`]). `note` is the newest notification a program
+/// in it sent (`OSC 9`, `OSC 777`), which the shell keeps until a command starts or ends; it
+/// speaks for the tab before the command does — an agent runs as one long command, and what it
+/// says is what the row is for. `command` is the newest command as the summary card reads it
+/// ([`CardCommand`]): only its end is told, never that it runs. `place` is the folder
+/// ([`place`]) and `branch` its git branch. `panes` are a split tab's lines ([`PaneLine`]):
+/// with two or more, each pane says its own and the tab's own line ([`Details::status`]) is left
+/// out — it would repeat one of them; a tab of one pane passes none.
+pub fn details(
+    note: Option<&str>,
+    command: Option<&CardCommand>,
+    place: Option<String>,
+    branch: Option<&str>,
+    panes: Vec<PaneLine>,
+) -> Details {
+    let panes = if panes.len() > 1 { panes } else { Vec::new() };
+    let joined = |parts: &[&str]| {
+        parts
+            .iter()
+            .map(|part| part.trim())
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>()
+            .join(" · ")
+    };
+    let note = note.map(str::trim).filter(|note| !note.is_empty());
+    let status = match (note, command) {
+        (Some(note), _) => Some((note.to_owned(), Tone::Title)),
+        (None, Some(CardCommand::Running { .. })) => None,
+        (None, Some(CardCommand::Finished { command, duration })) => Some((
+            joined(&["Finished", command, duration.as_deref().unwrap_or_default()]),
+            Tone::Success,
+        )),
+        (None, Some(CardCommand::Failed { command, exit })) => {
+            Some((joined(&[&format!("Exit {exit}"), command]), Tone::Error))
+        }
+        (None, None) => None,
+    }
+    .filter(|_| panes.is_empty());
+    let branch = branch.map(str::trim).filter(|branch| !branch.is_empty());
+    let place = match (branch, place) {
+        (Some(branch), Some(place)) => Some(joined(&[branch, &place])),
+        (Some(branch), None) => Some(branch.to_owned()),
+        (None, place) => place,
+    };
+    Details {
+        status,
+        place,
+        panes,
     }
 }
 
@@ -4839,7 +5026,200 @@ mod tests {
             scroll: 0.0,
             warning: false,
             corner: 20.5,
+            row_height: TAB_HEIGHT,
         }
+    }
+
+    #[test]
+    fn detailed_rows_are_taller_and_step_by_their_own_height() {
+        let plain = side(600.0, 3).layout();
+        let detailed = Side {
+            row_height: DETAILED_ROW_HEIGHT,
+            ..side(600.0, 3)
+        }
+        .layout();
+        assert_eq!(
+            detailed.rows[0].y, plain.rows[0].y,
+            "the list starts where it did"
+        );
+        assert_eq!(detailed.rows[0].height, DETAILED_ROW_HEIGHT);
+        assert_eq!(
+            detailed.rows[1].y - detailed.rows[0].y,
+            DETAILED_ROW_HEIGHT + GAP
+        );
+        // A gap past the end continues at the pace of the tall rows.
+        assert_eq!(
+            detailed.between(4) - detailed.between(3),
+            DETAILED_ROW_HEIGHT + GAP
+        );
+        // Fewer tall rows fit before the list scrolls.
+        let many = |row_height| {
+            Side {
+                row_height,
+                ..side(400.0, 6)
+            }
+            .layout()
+            .overflow
+        };
+        assert!(!many(TAB_HEIGHT));
+        assert!(many(DETAILED_ROW_HEIGHT));
+    }
+
+    #[test]
+    fn rows_of_their_own_heights_stand_one_under_the_other() {
+        let entries = [Entry::Tab, Entry::Header, Entry::Tab, Entry::Tab];
+        let column = Side {
+            row_height: DETAILED_ROW_HEIGHT,
+            ..side(600.0, 0)
+        }
+        .layout_sized(&entries, &[40.0, 90.0]);
+        assert_eq!(column.rows[0].height, 40.0);
+        assert_eq!(column.rows[1].height, 90.0);
+        assert_eq!(
+            column.rows[2].height, DETAILED_ROW_HEIGHT,
+            "past the heights, the column's own"
+        );
+        assert_eq!(
+            column.headers[0].rect.y,
+            column.rows[0].y + 40.0 + GAP + GROUP_GAP
+        );
+        assert_eq!(column.rows[2].y, column.rows[1].y + 90.0 + GAP);
+        // Without heights it is the uniform column.
+        let plain = side(600.0, 0);
+        assert_eq!(
+            plain.layout_sized(&entries, &[]),
+            plain.layout_with(&entries)
+        );
+    }
+
+    #[test]
+    fn a_card_is_as_tall_as_what_it_says() {
+        assert_eq!(detailed_height(0.0, 0.0), TAB_HEIGHT, "nothing to say");
+        assert_eq!(
+            detailed_height(0.0, 13.0),
+            (DETAIL_TOP + 13.0 + DETAIL_BOTTOM).max(TAB_HEIGHT)
+        );
+        assert_eq!(
+            detailed_height(26.4, 13.0),
+            (DETAIL_TOP + 26.4 + DETAIL_GAP + 13.0 + DETAIL_BOTTOM).ceil()
+        );
+        assert!(detailed_height(39.0, 13.0) > detailed_height(13.0, 13.0));
+    }
+
+    #[test]
+    fn a_detailed_rows_lines_start_under_the_title_where_the_title_starts() {
+        let lead = lead_width(TILE_WIDTH, 0);
+        let row = Row::of(184.0, Some(lead), 60.0, false);
+        let lines = Row::details(184.0, DETAILED_ROW_HEIGHT, Some(lead));
+        assert_eq!(lines.x, row.title.x);
+        assert_eq!(lines.y, DETAIL_TOP);
+        assert_eq!(lines.x + lines.width, 184.0 - ROW_END);
+        assert_eq!(lines.y + lines.height, DETAILED_ROW_HEIGHT - DETAIL_BOTTOM);
+        // The parts on the title's line stand where a plain row has them.
+        assert!(row.close.y + row.close.height <= TAB_HEIGHT);
+        assert_eq!(Row::host_mark_of(TAB_HEIGHT), row.host_mark);
+    }
+
+    #[test]
+    fn details_say_a_notification_before_the_command_and_the_branch_before_the_folder() {
+        let running = CardCommand::Running {
+            command: "claude".to_owned(),
+            elapsed: Duration::from_secs(5),
+        };
+        let told = details(
+            Some("Claude is waiting for your input"),
+            Some(&running),
+            Some("~/api".to_owned()),
+            Some("main"),
+            Vec::new(),
+        );
+        assert_eq!(
+            told.status,
+            Some(("Claude is waiting for your input".to_owned(), Tone::Title))
+        );
+        assert_eq!(told.place.as_deref(), Some("main · ~/api"));
+
+        let quiet = details(
+            None,
+            Some(&running),
+            Some("~/api".to_owned()),
+            None,
+            Vec::new(),
+        );
+        assert_eq!(quiet.status, None, "the ring says a command runs");
+        assert_eq!(quiet.place.as_deref(), Some("~/api"));
+
+        let failed = CardCommand::Failed {
+            command: "make test".to_owned(),
+            exit: 2,
+        };
+        assert_eq!(
+            details(Some("  "), Some(&failed), None, Some("dev"), Vec::new()),
+            Details {
+                status: Some(("Exit 2 · make test".to_owned(), Tone::Error)),
+                place: Some("dev".to_owned()),
+                panes: Vec::new(),
+            },
+            "a blank note is none"
+        );
+        let finished = CardCommand::Finished {
+            command: "cargo build".to_owned(),
+            duration: Some("12s".to_owned()),
+        };
+        assert_eq!(
+            details(None, Some(&finished), None, None, Vec::new()).status,
+            Some(("Finished · cargo build · 12s".to_owned(), Tone::Success))
+        );
+        assert_eq!(
+            details(None, None, None, None, Vec::new()),
+            Details::default()
+        );
+    }
+
+    #[test]
+    fn a_split_tab_says_each_pane_on_a_line_of_its_own() {
+        let panes = vec![
+            PaneLine {
+                name: "claude".to_owned(),
+                said: Some("Fixed the login test".to_owned()),
+                focused: true,
+            },
+            PaneLine {
+                name: "npm run dev".to_owned(),
+                said: None,
+                focused: false,
+            },
+        ];
+        let failed = CardCommand::Failed {
+            command: "make".to_owned(),
+            exit: 1,
+        };
+        let split = details(
+            Some("Fixed the login test"),
+            Some(&failed),
+            Some("~/api".to_owned()),
+            Some("main"),
+            panes.clone(),
+        );
+        assert_eq!(split.status, None, "each pane says its own");
+        assert_eq!(split.panes, panes);
+        assert_eq!(split.place.as_deref(), Some("main · ~/api"));
+        assert_eq!(panes[0].text(), "claude · Fixed the login test");
+        assert_eq!(panes[1].text(), "npm run dev");
+        // One pane is no split: its line is the tab's own.
+        let lone = details(None, Some(&failed), None, None, panes[..1].to_vec());
+        assert!(lone.panes.is_empty());
+        assert_eq!(
+            lone.status.map(|(text, _)| text).as_deref(),
+            Some("Exit 1 · make")
+        );
+        // A blank name gives way to what was said.
+        let unnamed = PaneLine {
+            name: " ".to_owned(),
+            said: Some("waiting".to_owned()),
+            focused: false,
+        };
+        assert_eq!(unnamed.text(), "waiting");
     }
 
     #[test]

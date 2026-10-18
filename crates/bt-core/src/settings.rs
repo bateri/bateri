@@ -1472,6 +1472,13 @@ pub struct Settings {
     /// `[appearance] tab_position`: the tabs in a bar at the top or in a column
     /// at the left ([`TabPosition`]). Doesn't enter `TerminalOptions`.
     pub tab_position: TabPosition,
+    /// `[appearance] tab_details`: whether a row of the side column is a card
+    /// that says, under its title, what the tab last told — a program's
+    /// notification, else its newest command's end — and where it is, the
+    /// branch and the folder. Off by default: a row is its title alone. Only
+    /// the column reads it; the title row's chips stay one line. Doesn't
+    /// enter `TerminalOptions`.
+    pub tab_details: bool,
     /// `[font] family` and `size`.
     pub font: FontOptions,
     /// `[clipboard] osc52`: `"copy"` or `"off"`.
@@ -1563,6 +1570,7 @@ impl Default for Settings {
             tab_icons: true,
             tab_icon_colors: IconColors::default(),
             tab_position: TabPosition::default(),
+            tab_details: false,
             font: FontOptions::default(),
             osc52: Osc52::Copy,
             cursor_motion: CursorMotion::default(),
@@ -1683,6 +1691,8 @@ pub enum SettingsEdit {
     /// View ▸ Tabs ▸ and the settings window's "Tabs": `[appearance]
     /// tab_position`.
     TabPosition(TabPosition),
+    /// The settings window's "Tab details": `[appearance] tab_details`.
+    TabDetails(bool),
     /// Shell ▸ Mark … as ▸: the `[remote] hosts` edit that makes
     /// `host`'s mark `mark`. Not a single key's value but the array's entries —
     /// the rule is in this arm of [`Settings::with_edit`]. `host` is the form the
@@ -1781,6 +1791,7 @@ impl SettingsEdit {
                 "appearance.tab_icon_colors",
             ),
             Self::TabPosition(_) => ("appearance", "tab_position", "appearance.tab_position"),
+            Self::TabDetails(_) => ("appearance", "tab_details", "appearance.tab_details"),
             Self::FontFamily(_) => ("font", "family", "font.family"),
             Self::FontSize(_) => ("font", "size", "font.size"),
             Self::LineHeight(_) => ("font", "line_height", "font.line_height"),
@@ -1859,7 +1870,8 @@ impl SettingsEdit {
             | Self::ShellNodeVersion(on)
             | Self::DimUnfocusedSplits(on)
             | Self::ResizeInSteps(on)
-            | Self::TabIcons(on) => (*on).into(),
+            | Self::TabIcons(on)
+            | Self::TabDetails(on) => (*on).into(),
             Self::CursorRadius(value)
             | Self::CursorGlow(value)
             | Self::BlinkInterval(value)
@@ -2009,6 +2021,12 @@ tab_icon_colors = "theme"
 # goes and the traffic lights sit at the column's head. One place for every
 # window.
 tab_position = "top"
+# true | false. Turns each row of the side column into a card: under the
+# title, the last thing the tab told — a program's notification, like an
+# agent saying what it last did, else how its newest command ended — and
+# below it the branch and the folder. Off: a row is its title alone. The
+# tabs in the title row stay one line either way.
+tab_details = false
 
 [font]
 # A family name as shown in Font Book. Without it bateri uses SF Mono, or
@@ -2467,6 +2485,15 @@ stats_interval = 3
                         &mut parsed.diagnostics,
                     );
                 }
+                if let Some(item) = appearance.get("tab_details") {
+                    parsed.settings.tab_details = boolean(
+                        text,
+                        item,
+                        "appearance.tab_details",
+                        fallback.tab_details,
+                        &mut parsed.diagnostics,
+                    );
+                }
             }
             None if root.contains_key("appearance") => {
                 for (_, _, slot, kept) in names {
@@ -2480,6 +2507,7 @@ stats_interval = 3
                 parsed.settings.tab_icons = fallback.tab_icons;
                 parsed.settings.tab_icon_colors = fallback.tab_icon_colors;
                 parsed.settings.tab_position = fallback.tab_position;
+                parsed.settings.tab_details = fallback.tab_details;
             }
             None => {}
         }
@@ -2785,6 +2813,7 @@ stats_interval = 3
             tab_icons: self.tab_icons != new.tab_icons
                 || self.tab_icon_colors != new.tab_icon_colors,
             tab_position: self.tab_position != new.tab_position,
+            tab_details: self.tab_details != new.tab_details,
             ports: self.shell_ports != new.shell_ports,
             environment: self.shell_python_env != new.shell_python_env
                 || self.shell_node_version != new.shell_node_version,
@@ -3495,6 +3524,10 @@ pub struct Changes {
     /// window's tabs between the bar and the column in place. A field of its
     /// own, for [`Self::caret`]'s reason.
     pub tab_position: bool,
+    /// [`Settings::tab_details`] changed: the platform shell lays every
+    /// window's column out again, its rows a line or a card tall. A field of
+    /// its own, for [`Self::caret`]'s reason.
+    pub tab_details: bool,
     /// [`Settings::resize_in_steps`] changed: turned on, the platform shell
     /// fits every window to its lone pane's cells at once instead of at the
     /// next drag. A field of its own, for [`Self::caret`]'s reason.
@@ -4333,6 +4366,7 @@ mod tests {
             ("appearance", "tab_icons"),
             ("appearance", "tab_icon_colors"),
             ("appearance", "tab_position"),
+            ("appearance", "tab_details"),
             ("font", "size"),
             ("font", "line_height"),
             ("font", "letter_spacing"),
@@ -4516,6 +4550,7 @@ mod tests {
                 resize_in_steps: false,
                 tab_icons: false,
                 tab_position: false,
+                tab_details: false,
                 ports: false,
                 environment: false,
             }
@@ -4559,6 +4594,7 @@ mod tests {
             tab_icons: false,
             tab_icon_colors: IconColors::Brand,
             tab_position: TabPosition::Side,
+            tab_details: true,
             font: FontOptions::default(),
             osc52: Osc52::Copy,
             cursor_motion: CursorMotion::Spring,
@@ -4756,6 +4792,7 @@ mod tests {
             resize_in_steps: false,
             tab_icons: false,
             tab_position: false,
+            tab_details: false,
             ports: false,
             environment: false,
         };
@@ -4956,6 +4993,7 @@ mod tests {
                 resize_in_steps: false,
                 tab_icons: false,
                 tab_position: false,
+                tab_details: false,
                 ports: false,
                 environment: false,
             }
@@ -5114,6 +5152,7 @@ found {found}; using \"spring\""
                 resize_in_steps: false,
                 tab_icons: false,
                 tab_position: false,
+                tab_details: false,
                 ports: false,
                 environment: false,
             }
@@ -5212,6 +5251,7 @@ found {found}; using \"system\""
                 resize_in_steps: false,
                 tab_icons: false,
                 tab_position: false,
+                tab_details: false,
                 ports: false,
                 environment: false,
             }
@@ -6402,6 +6442,7 @@ found 1.5; using 0.1"
                     resize_in_steps: false,
                     tab_icons: false,
                     tab_position: false,
+                    tab_details: false,
                     ports: false,
                     environment: false,
                 },
@@ -6509,6 +6550,7 @@ found 1.5; using 0.1"
                 resize_in_steps: false,
                 tab_icons: false,
                 tab_position: false,
+                tab_details: false,
                 ports: false,
                 environment: false,
             }
@@ -6620,6 +6662,7 @@ found 1.5; using 0.1"
                 resize_in_steps: false,
                 tab_icons: false,
                 tab_position: false,
+                tab_details: false,
                 ports: false,
                 environment: false,
             }
@@ -7157,6 +7200,7 @@ cursor = \"spring\"
             SettingsEdit::SplitStyle(style) => settings.split_style = style,
             SettingsEdit::ResizeInSteps(on) => settings.resize_in_steps = on,
             SettingsEdit::TabIcons(on) => settings.tab_icons = on,
+            SettingsEdit::TabDetails(on) => settings.tab_details = on,
             SettingsEdit::IconColors(colors) => settings.tab_icon_colors = colors,
             SettingsEdit::TabPosition(position) => settings.tab_position = position,
             SettingsEdit::FontFamily(name) => {

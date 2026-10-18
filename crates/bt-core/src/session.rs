@@ -867,6 +867,13 @@ pub struct Activity {
     /// `error` is counted in [`Self::finished`] / [`Self::failed`] like a
     /// command's end.
     pub program: Option<ProgramActivity>,
+    /// How many of the shell's own commands ended, whatever their code — the
+    /// ends in [`Self::finished`] and [`Self::failed`] less a reporting
+    /// program's, and a `D` whose code could not be read too. A count that
+    /// only grows: what a program says it finished (an agent's turn, an
+    /// `OSC 9 ; 4` progress that clears) does not move it, only the shell
+    /// does.
+    pub commands: u64,
 }
 
 /// The inputs [`TrackMarks::blocks`] was last built from.
@@ -9541,6 +9548,7 @@ impl Session {
             finished: log.ends.ok.wrapping_add(log.program.done),
             failed: log.ends.failed.wrapping_add(log.program.failed),
             program: log.program.activity(Instant::now()),
+            commands: log.ends.commands,
         }
     }
 

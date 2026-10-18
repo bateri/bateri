@@ -259,6 +259,12 @@ tab_icon_colors = "theme"
 # goes and the traffic lights sit at the column's head. One place for every
 # window.
 tab_position = "top"
+# true | false. Turns each row of the side column into a card: under the
+# title, the last thing the tab told — a program's notification, like an
+# agent saying what it last did, else how its newest command ended — and
+# below it the branch and the folder. Off: a row is its title alone. The
+# tabs in the title row stay one line either way.
+tab_details = false
 
 [font]
 # A family name as shown in Font Book. Without it bateri uses SF Mono, or
@@ -978,6 +984,7 @@ resize_in_steps = false
 tab_icons = true
 tab_icon_colors = "theme"
 tab_position = "top"
+tab_details = false
 ```
 
 | key | type | default | meaning |
@@ -993,6 +1000,7 @@ tab_position = "top"
 | `tab_icons` | `true` \| `false` | `true` | show the program a tab runs as an icon on a tile before its title |
 | `tab_icon_colors` | `"theme"` \| `"brand"` | `"theme"` | whether the icon uses the theme's colors only, or keeps the program's own color where it has one |
 | `tab_position` | `"top"` \| `"side"` | `"top"` | where a window's tabs sit: a bar along the top, or a column at the left edge |
+| `tab_details` | `true` \| `false` | `false` | make each row of the side column a card that says what the tab last told and its branch and folder |
 
 - `theme = "system"` leaves the theme to the macOS appearance: `light_theme`
   in light, `dark_theme` in dark. When the appearance changes, the theme
@@ -1136,6 +1144,23 @@ tab_position = "top"
   `split_style = "cards"` a split tab's cards and the column stand on the
   ground together, the line fades as the ground comes in, and the first card
   keeps its 8 pt from the column like its other sides.
+- `tab_details = true` makes each row of the side column a card. The icon,
+  the title, the × and the ⌘ key stay on its first line, where a plain row
+  has them. Under them, in up to three lines, is the last thing the tab told:
+  a notification a program sent (`OSC 9` or `OSC 777`) — an agent can send
+  what it last said, or the permission it asks for — in the title's ink,
+  until that pane's next shell command starts or ends (a program ending its
+  own turn, an `OSC 9 ; 4` progress that clears, does not count); otherwise
+  how its newest command ended — `Finished · cargo build · 12s` or `Exit 2 ·
+  make test`, in the colors of the summary card. A command that still runs
+  adds no line: the icon's ring says it. A split tab shows each of its panes
+  instead, in the split's order, as a small card of its own: the pane's title,
+  and under it what it last said in up to two lines — bright for the focused
+  pane, dimmed for the others — with a little space between two panes. The last line is the branch and the folder, dimmed, `main · ~/api` (`host:path` in a remote session). A part
+  nobody knows is left out, and a row is as tall as what it says: one with
+  nothing to say keeps a plain row's height. The notifications are not
+  posted to Notification Center; they stay on the tab. The title row's chips
+  stay one line either way.
 
 ### `[font]`
 
