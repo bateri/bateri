@@ -1965,6 +1965,23 @@ pub(crate) fn jump_to_command(window: &TerminalWindow) {
     );
 }
 
+/// Edit ▸ Command History…: opens the palette on the commands the panes ran (⏎ writes the
+/// line), or — open — comes to that page.
+pub(crate) fn show_command_history(window: &TerminalWindow) {
+    go_to(
+        window,
+        Scope::History {
+            jump: false,
+            query: None,
+        },
+    );
+}
+
+/// View ▸ Themes…: opens the palette on the themes, or — open — comes to that page.
+pub(crate) fn show_themes(window: &TerminalWindow) {
+    go_to(window, Scope::Theme(rules::Slot::Active));
+}
+
 fn go_to(window: &TerminalWindow, page: Scope) {
     if let Some(scrim) = window.root().palette() {
         scrim.ivars().card.go_to_page(page);

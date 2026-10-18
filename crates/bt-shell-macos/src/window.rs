@@ -2648,6 +2648,17 @@ impl TerminalWindow {
         palette::go_to_folder(self);
     }
 
+    /// Edit ▸ Command History…: the palette on the commands the panes ran
+    /// ([`palette::show_command_history`]).
+    pub(crate) fn show_command_history(&self) {
+        palette::show_command_history(self);
+    }
+
+    /// View ▸ Themes…: the palette on the themes ([`palette::show_themes`]).
+    pub(crate) fn show_themes(&self) {
+        palette::show_themes(self);
+    }
+
     /// Window ▸ Jump to Command…: the palette on the command history, ⏎ going to the output, or
     /// its highlight one command on ([`palette::jump_to_command`]).
     pub(crate) fn jump_to_command(&self) {
@@ -4169,6 +4180,8 @@ impl TerminalWindow {
         };
         let mut labels = Vec::with_capacity(items.len());
         let mut headings = Vec::new();
+        // The keys the groups are reached by, with the modifiers Select Group has now.
+        let group_mods = crate::menu::keys::family_mods(self.mtm(), "select_group");
         for item in items {
             match item {
                 Item::Tab(id) => labels.extend(self.tab(id).map(|tab| label(&tab))),
@@ -4183,9 +4196,9 @@ impl TerminalWindow {
                         collapsed: group.collapsed,
                         tabs: members.len(),
                         indicator: self.cluster_indicator(&members),
-                        hint: groups
-                            .position(id)
-                            .and_then(|at| tabs::shortcut_digit(at, groups.len())),
+                        hint: groups.position(id).and_then(|at| {
+                            bt_shell_common::palette::group_key(Some(at), groups.len(), group_mods)
+                        }),
                         first_row: labels.len(),
                     });
                 }
@@ -4198,14 +4211,16 @@ impl TerminalWindow {
         // The title row of a window with groups leads with the button that switches between them.
         let switcher = (!side && !groups.is_empty()).then(|| {
             let on_screen = groups.shown(&order);
-            let rows = std::iter::once((None, "Ungrouped".to_owned(), Some(0)))
-                .chain(groups.groups().iter().enumerate().map(|(at, group)| {
-                    (
-                        Some(group.id),
-                        group.name.clone(),
-                        tabs::shortcut_digit(at, groups.len()),
-                    )
-                }))
+            let key =
+                |position| bt_shell_common::palette::group_key(position, groups.len(), group_mods);
+            let rows = std::iter::once((None, "Ungrouped".to_owned(), key(None)))
+                .chain(
+                    groups
+                        .groups()
+                        .iter()
+                        .enumerate()
+                        .map(|(at, group)| (Some(group.id), group.name.clone(), key(Some(at)))),
+                )
                 .map(|(group, name, hint)| SwitchRow {
                     group,
                     name,
@@ -4310,7 +4325,12 @@ impl TerminalWindow {
         let order = self.ivars().order.borrow();
         let groups = self.ivars().groups.borrow();
         let keys = if key {
-            rules::tab_keys(&groups, &order, self.listing())
+            rules::tab_keys(
+                &groups,
+                &order,
+                self.listing(),
+                crate::menu::keys::family_mods(self.mtm(), "select_tab"),
+            )
         } else {
             Vec::new()
         };
@@ -4355,7 +4375,13 @@ impl TerminalWindow {
                     group: of.map(GroupId::get),
                     name,
                     key: key
-                        .then(|| rules::group_key(position, groups.len()))
+                        .then(|| {
+                            rules::group_key(
+                                position,
+                                groups.len(),
+                                crate::menu::keys::family_mods(self.mtm(), "select_group"),
+                            )
+                        })
                         .flatten(),
                     indicator: self.cluster_indicator(&members),
                     tabs: members.len(),

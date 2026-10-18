@@ -37,7 +37,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use bt_core::{HostMark, ProgramActivity};
+use bt_core::{HostMark, Mods, ProgramActivity};
 
 use crate::program::identity::Kind;
 use crate::split::Rect;
@@ -289,14 +289,16 @@ pub fn tab_index(tag: u8, count: usize) -> Option<usize> {
     }
 }
 
-/// The shortcut hint a tab shows while ⌘ is held: `⌘n` on the first eight, `⌘9` on the last one
-/// when it is past them, nothing on the tabs in between — exactly the tabs [`tab_index`] reaches,
-/// each with the key that reaches it.
-pub fn shortcut_hint(index: usize, count: usize) -> Option<String> {
-    shortcut_digit(index, count).map(|digit| format!("⌘{digit}"))
+/// The shortcut hint a tab shows while the modifiers of Select Tab (`mods`, ⌘ until the file
+/// says otherwise) are held: `⌘n` on the first eight, `⌘9` on the last one when it is past them,
+/// nothing on the tabs in between — exactly the tabs [`tab_index`] reaches, each with the key
+/// that reaches it.
+pub fn shortcut_hint(index: usize, count: usize, mods: Mods) -> Option<String> {
+    shortcut_digit(index, count).map(|digit| crate::shortcuts::digit_glyphs(mods, digit))
 }
 
-/// The digit of [`shortcut_hint`]: the key that reaches the tab at `index` with ⌘. The Show All
+/// The digit of [`shortcut_hint`]: the key that reaches the tab at `index` with Select Tab's
+/// modifiers. The Show All
 /// Tabs list gives its rows the same keys.
 pub fn shortcut_digit(index: usize, count: usize) -> Option<u8> {
     if index >= count {
@@ -2614,7 +2616,7 @@ mod tests {
     fn hints_name_the_first_eight_and_the_last() {
         let hints = |count| -> Vec<Option<String>> {
             (0..count)
-                .map(|index| shortcut_hint(index, count))
+                .map(|index| shortcut_hint(index, count, Mods::CMD))
                 .collect()
         };
         let three: Vec<_> = hints(3).into_iter().flatten().collect();
@@ -2631,15 +2633,20 @@ mod tests {
             "the ones in between have none"
         );
         assert_eq!(twelve[11].as_deref(), Some("⌘9"));
-        assert_eq!(shortcut_hint(8, 9).as_deref(), Some("⌘9"));
-        assert_eq!(shortcut_hint(3, 3), None, "past the end");
+        assert_eq!(shortcut_hint(8, 9, Mods::CMD).as_deref(), Some("⌘9"));
+        assert_eq!(shortcut_hint(3, 3, Mods::CMD), None, "past the end");
+        // The modifiers are the family's: the file moves them, the hint follows.
+        let option = Mods::NONE.with(bt_core::Modifier::Option);
+        assert_eq!(shortcut_hint(2, 3, option).as_deref(), Some("⌥3"));
+        let both = Mods::CMD.with(bt_core::Modifier::Ctrl);
+        assert_eq!(shortcut_hint(0, 3, both).as_deref(), Some("⌃⌘1"));
     }
 
     #[test]
     fn every_hint_names_the_key_that_reaches_its_tab() {
         for count in 1..=20 {
             for index in 0..count {
-                let Some(hint) = shortcut_hint(index, count) else {
+                let Some(hint) = shortcut_hint(index, count, Mods::CMD) else {
                     continue;
                 };
                 let digit = hint.trim_start_matches('⌘').parse::<u8>().unwrap();
@@ -2811,7 +2818,7 @@ mod tests {
         for count in 1..=12 {
             for index in 0..count {
                 let digit = shortcut_digit(index, count);
-                let hint = shortcut_hint(index, count);
+                let hint = shortcut_hint(index, count, Mods::CMD);
                 assert_eq!(
                     hint,
                     digit.map(|digit| format!("⌘{digit}")),

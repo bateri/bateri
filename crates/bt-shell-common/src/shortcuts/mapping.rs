@@ -137,6 +137,14 @@ fn modifier_glyph(modifier: Modifier) -> char {
     }
 }
 
+/// The key a family's item shows with the family's modifiers: `⌘3`, `⌃⌘0`, `⌥1`. The tab strip's
+/// hint, the digit of a row in the palette and the groups' keys are written by this.
+pub fn digit_glyphs(mods: Mods, digit: u8) -> String {
+    let mut text: String = mods.iter().map(modifier_glyph).collect();
+    text.push_str(&digit.to_string());
+    text
+}
+
 /// The glyphs a shortcut is shown as: `⇧⌘D`, `⌥⇧⌘[`, `⌃⇥`, `F5`. Only modifiers (a family's)
 /// give just the modifiers (`⌥⌘`), and a double press its key twice (`⇧ ⇧`). `None` for a chord
 /// that is no shortcut a user could press (a letter with no modifier).

@@ -12,6 +12,18 @@ of every installed copy. A version without a section is not released.
 
 ## [Unreleased]
 
+### Added
+
+- **Shortcuts are yours to change in `settings.toml`.** A `[keys]` table gives a
+  menu command another shortcut, none (`""`) or two, by the command's fixed
+  name: `copy_last_output = "shift+cmd+o"`. Select Tab ▸, Select Group ▸ and the
+  split commands take only the modifiers (`select_tab = "option"` makes ⌥1…⌥9
+  select a tab). The menu bar, the command palette, the number a tab shows while
+  its modifiers are held and the numbers of ⌘P follow the file as you save it,
+  and a name no command has, or two commands on one key, is reported with its
+  line. Edit ▸ Command History… and View ▸ Themes… are now in the menu too, so
+  they can have a shortcut.
+
 ### Changed
 
 - **The command palette fades out as it closes**, the way it came in and like

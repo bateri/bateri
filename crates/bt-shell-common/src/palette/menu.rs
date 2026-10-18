@@ -59,6 +59,15 @@ pub const GO_TO_FOLDERS_ACTION: &str = "goToFolder:";
 /// again.
 pub const JUMP_TO_COMMAND_ACTION: &str = "jumpToCommand:";
 
+/// The action of Edit ▸ Command History…: the **page** of the commands the panes ran
+/// (`scope.history`), with the menu item's own shortcut — the page the root offers on its own
+/// when the menu has no such item.
+pub const SHOW_HISTORY_ACTION: &str = "showCommandHistory:";
+
+/// The action of View ▸ Themes…: the **page** of the themes (`scope.themes`), with the menu
+/// item's own shortcut, like Command History….
+pub const SHOW_THEMES_ACTION: &str = "showThemes:";
+
 /// The actions of the items Select Tab ▸ and Select Group ▸ hold (⌘1…⌘9, ⌃⌘0…⌃⌘9): the tabs
 /// page lists the tabs and the groups themselves, with these very keys, so listing the items
 /// too would say each twice.
@@ -305,6 +314,26 @@ fn walk(
             level.push(page);
             continue;
         }
+        if selector == SHOW_HISTORY_ACTION || selector == SHOW_THEMES_ACTION {
+            // The root lists these two pages once: this row stands in for the one it would
+            // offer, with the item's shortcut.
+            let base = if selector == SHOW_HISTORY_ACTION {
+                super::pages::history_page()
+            } else {
+                super::pages::themes_page()
+            };
+            let mut row = base.subtitle(path.join(" › "));
+            row.title.clone_from(&node.title);
+            if let Some(glyphs) = shortcut(&node.key, node.modifiers) {
+                row = row.shortcut(glyphs);
+            }
+            let page = MenuRow { row, token: None };
+            if !under_paged && !out.flat.iter().any(|listed| listed.row.id == page.row.id) {
+                out.flat.push(page.clone());
+            }
+            level.push(page);
+            continue;
+        }
         if selector == JUMP_TO_COMMAND_ACTION {
             let page = MenuRow {
                 row: jump_page(node, path),
@@ -385,13 +414,19 @@ fn jump_page(node: &MenuNode, path: &[String]) -> Row {
     row
 }
 
-/// The key a menu item's command goes by: its selector, and its tag when it has one.
-fn command_key(node: &MenuNode, selector: &str) -> String {
+/// The key a menu item's command goes by: its selector, and its tag when it has one. The
+/// shortcut table's ids are these ([`crate::shortcuts::COMMANDS`]), so the palette's row, the
+/// menu item and the settings page name one command alike.
+pub fn menu_item_id(selector: &str, tag: isize) -> String {
     let mut key = selector.trim_end_matches(':').to_owned();
-    if node.tag != 0 {
-        key.push_str(&format!(":{}", node.tag));
+    if tag != 0 {
+        key.push_str(&format!(":{tag}"));
     }
     key
+}
+
+fn command_key(node: &MenuNode, selector: &str) -> String {
+    menu_item_id(selector, node.tag)
 }
 
 /// The keys one level of a menu gives to items of different titles: the themes all run
@@ -816,6 +851,52 @@ mod tests {
         assert!(page.row.enters);
         assert_eq!(page.row.shortcut.as_deref(), Some("⌘O"));
         assert_eq!(page.token, None, "a page runs no menu item");
+    }
+
+    #[test]
+    fn command_history_and_themes_are_the_pages_with_the_items_own_shortcut() {
+        let bar = vec![
+            MenuNode::holder(
+                0,
+                "Edit",
+                vec![
+                    MenuNode::item(1, "Command History…", SHOW_HISTORY_ACTION).shortcut(
+                        "h",
+                        Modifiers {
+                            shift: true,
+                            command: true,
+                            ..Modifiers::default()
+                        },
+                    ),
+                    MenuNode::item(2, "Copy", "copy:"),
+                ],
+            ),
+            MenuNode::holder(
+                3,
+                "View",
+                vec![MenuNode::item(4, "Themes…", SHOW_THEMES_ACTION)],
+            ),
+        ];
+        let menu = rows(&bar);
+        let ids: Vec<&str> = menu
+            .flat
+            .iter()
+            .map(|entry| entry.row.id.as_str())
+            .collect();
+        assert_eq!(ids, ["scope.history", "cmd.copy", "scope.themes"]);
+        let history = &menu.flat[0];
+        assert_eq!(
+            history.row.opens,
+            Some(Scope::History {
+                jump: false,
+                query: None
+            })
+        );
+        assert!(history.row.enters);
+        assert_eq!(history.row.shortcut.as_deref(), Some("⇧⌘H"));
+        assert_eq!(history.row.subtitle, "Edit");
+        assert_eq!(history.token, None, "a page runs no menu item");
+        assert_eq!(menu.flat[2].row.shortcut, None, "no key, no glyphs");
     }
 
     #[test]

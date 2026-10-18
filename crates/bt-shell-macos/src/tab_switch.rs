@@ -893,17 +893,14 @@ impl GroupList {
             ));
         };
         for (at, (row, span)) in rows.iter().zip(&layout.rows).enumerate() {
-            let key = row
-                .hint
-                .map(|digit| format!("\u{2303}\u{2318}{digit}"))
-                .unwrap_or_default();
+            let key = row.hint.clone().unwrap_or_default();
             put(at, *span, &row.name, &key, row.group == shown);
         }
         put(
             rows.len(),
             layout.new_row,
             "New Group",
-            "\u{21e7}\u{2318}N",
+            &crate::menu::keys::glyphs_of(self.mtm(), "new_group").unwrap_or_default(),
             false,
         );
         let size = NSSize::new(layout.width, layout.height);

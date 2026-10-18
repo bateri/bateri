@@ -206,6 +206,57 @@ fn conflicts(bindings: &[Binding]) -> Vec<Conflict> {
 }
 
 impl Resolved {
+    /// What is wrong with the file, as the settings report it (the subtitle, the notice and the
+    /// settings window's banner): the diagnostics of [`resolve`], and one line for each set of
+    /// commands that share a key — a family that shares nine keys is one line — at the line of
+    /// the one the file gave it to last.
+    pub fn problems(&self) -> Vec<Diagnostic> {
+        let mut out = self.diagnostics.clone();
+        // The same commands in the same order, with the first key they share and how many.
+        let mut sets: Vec<(&[&'static Command], Shortcut, usize)> = Vec::new();
+        for conflict in &self.conflicts {
+            match sets
+                .iter_mut()
+                .find(|(commands, ..)| *commands == conflict.commands.as_slice())
+            {
+                Some((.., count)) => *count += 1,
+                None => sets.push((&conflict.commands, conflict.shortcut, 1)),
+            }
+        }
+        for (commands, shortcut, count) in sets {
+            let names: Vec<String> = commands
+                .iter()
+                .map(|command| format!("`{}`", command.name))
+                .collect();
+            let line = commands
+                .iter()
+                .filter_map(|command| match self.binding(command.name)?.source {
+                    Source::File(line) => line,
+                    Source::Default => None,
+                })
+                .max();
+            let message = if count == 1 {
+                format!(
+                    "`{shortcut}` is the shortcut of {}; the menu runs {}'s",
+                    names.join(" and "),
+                    names[0]
+                )
+            } else {
+                format!(
+                    "{} share {count} shortcuts, as `{shortcut}`; the menu runs {}'s",
+                    names.join(" and "),
+                    names[0]
+                )
+            };
+            out.push(Diagnostic {
+                key: Some("keys"),
+                line,
+                message,
+            });
+        }
+        out
+    }
+
     /// Every command with the shortcuts it has, in the menu's order.
     pub fn bindings(&self) -> &[Binding] {
         &self.bindings
@@ -235,6 +286,19 @@ impl Resolved {
             }
         }
         out
+    }
+
+    /// The chords of each menu item, by the item's id, in the order the file gave them: the first
+    /// is the key the item shows, the second the key of its hidden copy. A double press binds no
+    /// item, so it takes no place in the order. The menu is written from this.
+    pub fn item_keys(&self) -> HashMap<String, Vec<Chord>> {
+        let mut keys: HashMap<String, Vec<Chord>> = HashMap::new();
+        for assignment in self.assignments() {
+            keys.entry(assignment.id)
+                .or_default()
+                .push(assignment.chord);
+        }
+        keys
     }
 
     /// The command that has `chord`, other than `except` (a name). The first in the menu's
@@ -423,6 +487,36 @@ mod tests {
     }
 
     #[test]
+    fn a_menu_item_has_its_chords_in_the_order_the_file_gave_them() {
+        let keys = |text: &str| read(text).item_keys();
+        let chord = |text: &str| match Shortcut::parse(text) {
+            Ok(Shortcut::Chord(chord)) => chord,
+            other => panic!("{text}: {other:?}"),
+        };
+        // The two keys of Show Next Tab: the item's and its hidden copy's.
+        let table = keys("");
+        assert_eq!(
+            table["showNextTab"],
+            [chord("shift+cmd+]"), chord("ctrl+tab")]
+        );
+        assert_eq!(table["showPreviousTab"].len(), 2);
+        // A command with no key has no entry.
+        assert!(!table.contains_key("copyLastOutput"));
+        // A double press binds no item and takes no place: the chord after it is the first.
+        let twice = keys("command_palette = [\"shift+shift\", \"cmd+k\"]\n");
+        assert_eq!(twice["toggleCommandPalette"], [chord("cmd+k")]);
+        // A family gives each of its items its own key, and a second shortcut a second one.
+        let option = keys("select_tab = \"option\"\n");
+        assert_eq!(option["selectTab:3"], [chord("option+3")]);
+        assert_eq!(option["selectTab:9"], [chord("option+9")]);
+        assert!(!option.contains_key("selectTab"), "its tags are 1 to 9");
+        // Select Group's 0 is the item with no tag.
+        assert_eq!(table["selectGroup"], [chord("ctrl+cmd+0")]);
+        let two = keys("select_tab = [\"option\", \"cmd\"]\n");
+        assert_eq!(two["selectTab:1"], [chord("option+1"), chord("cmd+1")]);
+    }
+
+    #[test]
     fn a_double_press_is_kept_for_a_command_that_is_not_a_family() {
         let resolved = read("command_palette = [\"shift+cmd+p\", \"shift+shift\"]\n");
         assert_eq!(resolved.diagnostics, Vec::new());
@@ -480,6 +574,40 @@ mod tests {
                 .iter()
                 .all(|c| names(c) == ["select_tab", "select_group"])
         );
+    }
+
+    #[test]
+    fn the_problems_are_the_diagnostics_and_one_line_for_each_set_of_commands_that_share_a_key() {
+        let resolved = read(
+            "copy_last_output = \"shift+cmd+d\"\nnot_a_command = \"cmd+j\"\n\
+             select_tab = \"ctrl+cmd\"\n",
+        );
+        let problems = resolved.problems();
+        let texts: Vec<_> = problems
+            .iter()
+            .map(|problem| (problem.line, problem.message.as_str()))
+            .collect();
+        assert_eq!(
+            texts,
+            [
+                (
+                    Some(3),
+                    "`keys.not_a_command` is not the name of a command; the line is ignored"
+                ),
+                (
+                    Some(2),
+                    "`shift+cmd+d` is the shortcut of `split_down` and `copy_last_output`; the menu runs `split_down`'s"
+                ),
+                // Nine digits are shared, one line says so.
+                (
+                    Some(4),
+                    "`select_tab` and `select_group` share 9 shortcuts, as `ctrl+cmd+1`; the menu runs `select_tab`'s"
+                ),
+            ]
+        );
+        assert!(problems.iter().all(|problem| problem.key == Some("keys")));
+        // A file that says nothing has nothing to report.
+        assert_eq!(resolve(&Settings::default()).problems(), Vec::new());
     }
 
     #[test]

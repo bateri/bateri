@@ -135,7 +135,7 @@ use std::ptr::NonNull;
 use std::time::{Duration, Instant};
 
 use block2::RcBlock;
-use bt_core::{HostMark, IconColors, Theme};
+use bt_core::{HostMark, IconColors, Mods, Theme};
 use dispatch2::{DispatchQueue, DispatchTime};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Bool, ProtocolObject, Sel};
@@ -842,6 +842,14 @@ define_class!(
     }
 );
 
+/// A tool tip: the name and, after two spaces, the key the command has now (when it has one).
+fn tip(name: &str, key: Option<String>) -> Retained<NSString> {
+    NSString::from_str(&match key {
+        Some(key) => format!("{name}  {key}"),
+        None => name.to_owned(),
+    })
+}
+
 impl CloseButton {
     fn new(mtm: MainThreadMarker) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(CloseIvars {
@@ -862,7 +870,10 @@ impl CloseButton {
         // SAFETY: AppKit's constant role string, alive for the process.
         this.setAccessibilityRole(Some(unsafe { NSAccessibilityButtonRole }));
         this.setAccessibilityLabel(Some(ns_string!("Close Tab")));
-        this.setToolTip(Some(ns_string!("Close Tab  \u{2318}W")));
+        this.setToolTip(Some(&tip(
+            "Close Tab",
+            crate::menu::keys::glyphs_of(mtm, "close_tab"),
+        )));
         track_hover(&this);
         this
     }
@@ -3776,8 +3787,9 @@ struct Seen {
     visible: bool,
     reduce: bool,
     style: IconStyle,
-    /// ⌘ is held: the chips show their keys.
-    hints: bool,
+    /// Select Tab's modifiers are held ([`TabBar::hint_mods`]): the chips show the keys that
+    /// reach them, written with these.
+    hints: Option<Mods>,
 }
 
 /// How one chip stands in the layout ([`Seen::look`]).
@@ -3840,8 +3852,7 @@ impl Seen {
             reduce: self.reduce,
             hint: self
                 .hints
-                .then(|| tabs::shortcut_hint(index, self.count))
-                .flatten(),
+                .and_then(|mods| tabs::shortcut_hint(index, self.count, mods)),
             spoken: tabs::spoken(
                 &label.title,
                 label.indicator,
@@ -4753,11 +4764,17 @@ impl BarButton {
         match kind {
             Kind::NewTab => {
                 this.setAccessibilityLabel(Some(ns_string!("New Tab")));
-                this.setToolTip(Some(ns_string!("New Tab  \u{2318}T")));
+                this.setToolTip(Some(&tip(
+                    "New Tab",
+                    crate::menu::keys::glyphs_of(mtm, "new_tab"),
+                )));
             }
             Kind::List => {
                 this.setAccessibilityLabel(Some(ns_string!("Show All Tabs")));
-                this.setToolTip(Some(ns_string!("Show All Tabs  \u{21e7}\u{2318}\\")));
+                this.setToolTip(Some(&tip(
+                    "Show All Tabs",
+                    crate::menu::keys::glyphs_of(mtm, "show_all_tabs"),
+                )));
             }
             Kind::Warning => {}
         }
@@ -5121,8 +5138,9 @@ pub(crate) struct Heading {
     /// What a closed group's dot says: the most urgent thing that asks for the user in any of its
     /// tabs (`tabs::group_indicator`).
     pub(crate) indicator: Option<Indicator>,
-    /// The digit of the key that reaches the group with ⌃⌘ ([`tabs::shortcut_digit`]).
-    pub(crate) hint: Option<u8>,
+    /// The key that reaches the group, with Select Group's modifiers (`⌃⌘3`;
+    /// [`bt_shell_common::palette::group_key`]).
+    pub(crate) hint: Option<String>,
     /// The index in [`Shown::tabs`] of the first row below the header; the number of rows when
     /// nothing is below it (a closed group whose tab is not the one on screen).
     pub(crate) first_row: usize,
@@ -5151,9 +5169,9 @@ pub(crate) struct SwitchRow {
     pub(crate) name: String,
     /// What the group asks of the user (`tabs::group_indicator`).
     pub(crate) indicator: Option<Indicator>,
-    /// The digit of the key that reaches it with ⌃⌘ ([`tabs::shortcut_digit`]; 0 for the ungrouped
-    /// tabs); none for a group past the ninth that no key reaches.
-    pub(crate) hint: Option<u8>,
+    /// The key that reaches it, with Select Group's modifiers (`⌃⌘3`; 0 for the ungrouped tabs);
+    /// none for a group past the ninth that no key reaches.
+    pub(crate) hint: Option<String>,
 }
 
 /// What the bar shows; the window gives it ([`TabBar::show`]).
@@ -5425,7 +5443,7 @@ pub(crate) struct BarIvars {
     /// The card's going: a going's removal counts only while this is the generation it was
     /// scheduled for (a card that came back, or went again, makes it stale).
     card_out: Cell<u64>,
-    /// ⌘ is held (past [`HINT_DELAY`]): the tabs show their keys.
+    /// Select Tab's modifiers are held (past [`HINT_DELAY`]): the tabs show their keys.
     hints: Cell<bool>,
     /// A pending hint — ⌘'s release or a chord makes it stale.
     hint_wait: Cell<u64>,
@@ -6249,7 +6267,7 @@ impl TabBar {
             visible,
             reduce,
             style,
-            hints: iv.hints.get(),
+            hints: self.hint_mods(),
         };
         for (index, chip) in chips.iter().enumerate() {
             let label = &shown.tabs[index];
@@ -6797,6 +6815,8 @@ impl TabBar {
         let mtm = self.mtm();
         let style = IconStyle::current(mtm);
         let menu = NSMenu::new(mtm);
+        // The rows show the keys that reach them, with Select Tab's modifiers now.
+        let select_tab_mods = crate::menu::keys::family_mods(mtm, "select_tab");
         for label in &labels {
             let item = window_item(
                 mtm,
@@ -6812,9 +6832,11 @@ impl TabBar {
             // without icons a status dot — a clear one where the tab reports nothing.
             item.setImage(Some(&list_image(label, style, palette)));
             let listed = shown.tabs.iter().position(|shown| shown.tab == label.tab);
-            if let Some(digit) = listed.and_then(|at| tabs::shortcut_digit(at, shown.tabs.len())) {
+            if let Some(digit) = listed.and_then(|at| tabs::shortcut_digit(at, shown.tabs.len()))
+                && let Some(mods) = select_tab_mods
+            {
                 item.setKeyEquivalent(&NSString::from_str(&digit.to_string()));
-                item.setKeyEquivalentModifierMask(NSEventModifierFlags::Command);
+                item.setKeyEquivalentModifierMask(crate::menu::keys::flags_of(mods.into()));
             }
             menu.addItem(&item);
         }
@@ -8175,10 +8197,20 @@ impl TabBar {
         self.close_group_list(false);
     }
 
-    // ─── ⌘ hints ─────────────────────────────────────────────────────────
+    // ─── key hints ───────────────────────────────────────────────────────
 
-    /// ⌘ is held alone in this window (`true`) or not — from the
-    /// application's key watch (`AppDelegate::command_held`) and the window
+    /// The modifiers the hints are written with while they show: Select Tab's now, so the file
+    /// can move them; `None` when the hints are not up (or the file took the modifiers away).
+    fn hint_mods(&self) -> Option<Mods> {
+        self.ivars()
+            .hints
+            .get()
+            .then(|| crate::menu::keys::family_mods(self.mtm(), "select_tab"))
+            .flatten()
+    }
+
+    /// Select Tab's modifiers are held alone in this window (`true`) or not — from the
+    /// application's key watch (`AppDelegate::hold_changed`) and the window
     /// resigning key. Holding shows the keys after [`HINT_DELAY`]; anything
     /// else hides them at once and makes a pending show stale.
     pub(crate) fn command_held(&self, held: bool) {
@@ -8242,36 +8274,30 @@ impl TabBar {
     }
 }
 
-/// Whether `flags` hold ⌘ and no other modifier a shortcut uses (⇧, ⌥,
-/// ⌃) — Caps Lock and the keypad's and the function key's bits do not
-/// count: with Caps Lock on, ⌘ alone still shows the hints.
-pub(crate) fn command_alone(flags: NSEventModifierFlags) -> bool {
-    let chord = NSEventModifierFlags::Command
-        | NSEventModifierFlags::Shift
-        | NSEventModifierFlags::Option
-        | NSEventModifierFlags::Control;
-    flags.intersection(chord) == NSEventModifierFlags::Command
-}
-
-/// Watches ⌘ and ⌥⌘ for the tabs' key hints and the arrangement moment: a
+/// Watches the modifiers for the tabs' key hints and the arrangement moment: a
 /// local monitor of flag changes and key presses, the application's for its
-/// lifetime (the caller keeps the token). ⌘ alone held is a hint's start,
-/// ⌥⌘ the arrangement's ([`arrange::Hold`]); any other modifier, its release
-/// or a key press (a chord: ⌘C, ⌥⌘←) is the end of either
-/// (`AppDelegate::hold_changed`, which tells the key window). The event
+/// lifetime (the caller keeps the token). Select Tab's modifiers alone (⌘ until the file says
+/// otherwise) held are a hint's start, Select Group's the groups' hint, ⌥⌘ the arrangement's
+/// ([`arrange::Hold`]); any other modifier, its release or a key press (a chord: ⌘C, ⌥⌘←) is
+/// the end of either (`AppDelegate::hold_changed`, which tells the key window). The event
 /// passes on unchanged.
 pub(crate) fn watch_command_key() -> Option<Retained<AnyObject>> {
     let block = RcBlock::new(move |event: NonNull<NSEvent>| -> *mut NSEvent {
         // SAFETY: AppKit gives the monitor a valid event.
         let event_ref = unsafe { event.as_ref() };
-        let hold = if event_ref.r#type() == NSEventType::FlagsChanged {
-            arrange::hold_of(event_ref.modifierFlags())
-        } else {
-            arrange::Hold::Nothing
-        };
         // audit: a local monitor runs on the main thread, before `sendEvent:`.
         let mtm = MainThreadMarker::new().expect("a local event monitor runs on the main thread");
         if let Some(app) = app::delegate(mtm) {
+            let hold = if event_ref.r#type() == NSEventType::FlagsChanged {
+                let keys = app.keys();
+                arrange::hold_of(
+                    event_ref.modifierFlags(),
+                    keys.family_mods("select_tab"),
+                    keys.family_mods("select_group"),
+                )
+            } else {
+                arrange::Hold::Nothing
+            };
             app.hold_changed(hold);
         }
         event.as_ptr()
@@ -8292,8 +8318,8 @@ mod tests {
         CARD_SCALE, CARD_SLIDE, CHIP_ABOVE, CHIP_HEIGHT, DISCS, Emblem, GLYPH_OVERHANG, GlyphLook,
         HOLLOW_ROOM, IconStyle, Label, Motion, Palette, Picks, ROW_LEFT, Spin, TAB_RADIUS,
         TILE_BADGE_INSET, TILE_ROOM, Tint, TitleAction, badge_centre, card_arrival, card_beside,
-        card_x, command_alone, contains, content_line, counted, disc_side, glyph_slot, inks,
-        kept_picks, line_span, pick_click, single_label, spin_of, title_double_click,
+        card_x, contains, content_line, counted, disc_side, glyph_slot, inks, kept_picks,
+        line_span, pick_click, single_label, spin_of, title_double_click,
     };
     use super::{MAP_SCRIM_NAME_ONLY, TileShot, paint_tile};
     use crate::groups::Click;
@@ -8941,19 +8967,6 @@ mod tests {
         assert!(lit >= 253, "the lit picture is not whole: {lit}");
         // The face (8 %) shows through the rest: 1 − 0.92 · 0.14 of full.
         assert!((215..=230).contains(&dim), "the dimmed picture is at {dim}");
-    }
-
-    /// ⌘ alone shows the hints, Caps Lock or not; a chord's other modifier
-    /// hides them.
-    #[test]
-    fn command_alone_ignores_caps_lock() {
-        let command = NSEventModifierFlags::Command;
-        assert!(command_alone(command));
-        assert!(command_alone(command | NSEventModifierFlags::CapsLock));
-        assert!(command_alone(command | NSEventModifierFlags::Function));
-        assert!(!command_alone(command | NSEventModifierFlags::Shift));
-        assert!(!command_alone(command | NSEventModifierFlags::Option));
-        assert!(!command_alone(NSEventModifierFlags::empty()));
     }
 
     /// ⇧ picks a range and ⌘ one row, alone or with Caps Lock; ⌥⌘ is the arrangement's and ⌃ opens

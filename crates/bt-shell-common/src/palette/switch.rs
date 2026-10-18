@@ -21,6 +21,8 @@
 
 use std::time::Duration;
 
+use bt_core::Mods;
+
 use crate::groups::{Groups, View};
 use crate::tabs::{self, Indicator, Tabs};
 
@@ -108,26 +110,37 @@ pub fn listing_order(visits: &Visits<u64>, strip: &[u64], here: Option<u64>) -> 
     order
 }
 
-/// The ⌘ hint of each tab the window lists in `view`: the bar's numbers (⌘1…⌘8, the last tab ⌘9),
-/// none for a tab no key reaches (a closed group's hidden ones, the middle of a long list).
-pub fn tab_keys<K: Copy + Eq>(groups: &Groups<K>, tabs: &Tabs<K>, view: View) -> Vec<(K, String)> {
+/// The hint of each tab the window lists in `view`: the bar's numbers (⌘1…⌘8, the last tab ⌘9, with
+/// the modifiers Select Tab has — `None` when the file took them away, and then no tab has a
+/// hint), none for a tab no key reaches (a closed group's hidden ones, the middle of a long list).
+pub fn tab_keys<K: Copy + Eq>(
+    groups: &Groups<K>,
+    tabs: &Tabs<K>,
+    view: View,
+    mods: Option<Mods>,
+) -> Vec<(K, String)> {
+    let Some(mods) = mods else {
+        return Vec::new();
+    };
     let listed = groups.numbered(tabs, view);
     let count = listed.len();
     listed
         .iter()
         .enumerate()
-        .filter_map(|(at, &tab)| tabs::shortcut_hint(at, count).map(|hint| (tab, hint)))
+        .filter_map(|(at, &tab)| tabs::shortcut_hint(at, count, mods).map(|hint| (tab, hint)))
         .collect()
 }
 
-/// The ⌃⌘ hint of the group at `position` among `count` groups (`None`: the ungrouped tabs,
-/// ⌃⌘0): the digits the Select Group items carry.
-pub fn group_key(position: Option<usize>, count: usize) -> Option<String> {
+/// The hint of the group at `position` among `count` groups (`None`: the ungrouped tabs, key 0):
+/// the digits the Select Group items carry, with Select Group's modifiers (`mods`; `None` when the
+/// file took them away and then no group has a hint).
+pub fn group_key(position: Option<usize>, count: usize, mods: Option<Mods>) -> Option<String> {
+    let mods = mods?;
     let digit = match position {
         None => 0,
         Some(at) => tabs::shortcut_digit(at, count)?,
     };
-    Some(format!("⌃⌘{digit}"))
+    Some(crate::shortcuts::digit_glyphs(mods, digit))
 }
 
 // ─── Rows ─────────────────────────────────────────────────────────────────
@@ -483,6 +496,9 @@ mod tests {
     use super::*;
     use crate::groups::Target;
 
+    /// Select Group's modifiers, as the table has them.
+    const CTRL_CMD: Mods = Mods::new(true, false, false, true);
+
     fn tab(id: u64, title: &str) -> TabFacts {
         TabFacts {
             tab: id,
@@ -643,7 +659,7 @@ mod tests {
         let mut facts = group(Some(2), "ops");
         facts.tabs = 3;
         facts.back_to = Some("deploy".to_owned());
-        facts.key = group_key(Some(1), 3);
+        facts.key = group_key(Some(1), 3, Some(CTRL_CMD));
         facts.indicator = Some(Indicator::Question);
         let row = group_row(&facts);
         assert_eq!(row.id, "grp.1.2");
@@ -662,7 +678,11 @@ mod tests {
         // The ungrouped tabs are a row but have no menu.
         let loose = group_row(&group(None, "Ungrouped"));
         assert_eq!((loose.id.as_str(), loose.opens), ("grp.1.0", None));
-        assert_eq!(group_key(None, 3).as_deref(), Some("⌃⌘0"));
+        assert_eq!(group_key(None, 3, Some(CTRL_CMD)).as_deref(), Some("⌃⌘0"));
+        // The file moves the modifiers and the hint follows; with none, no group has a hint.
+        let option = Mods::NONE.with(bt_core::Modifier::Option);
+        assert_eq!(group_key(Some(0), 3, Some(option)).as_deref(), Some("⌥1"));
+        assert_eq!(group_key(Some(0), 3, None), None);
     }
 
     #[test]
@@ -673,13 +693,13 @@ mod tests {
             order.append(id);
         }
         let groups = Groups::new();
-        let keys = tab_keys(&groups, &order, View::Top);
+        let keys = tab_keys(&groups, &order, View::Top, Some(Mods::CMD));
         assert_eq!(keys.len(), 9);
         assert_eq!(keys[0], (1, "⌘1".to_owned()));
         assert_eq!(keys[7], (8, "⌘8".to_owned()));
         assert_eq!(keys[8], (12, "⌘9".to_owned()));
         // The column counts the same strip.
-        assert_eq!(tab_keys(&groups, &order, View::Side), keys);
+        assert_eq!(tab_keys(&groups, &order, View::Side, Some(Mods::CMD)), keys);
     }
 
     #[test]
@@ -697,7 +717,7 @@ mod tests {
         let closed = groups.groups()[1].id;
         groups.set_collapsed(closed, true);
         // The column: 6, then a's 1, b is closed and 6 is not its tab, then c's 4 and 5.
-        let column = tab_keys(&groups, &order, View::Side);
+        let column = tab_keys(&groups, &order, View::Side, Some(Mods::CMD));
         assert_eq!(
             column,
             [
@@ -708,10 +728,13 @@ mod tests {
             ]
         );
         // The bar: the ungrouped cluster on screen, counted from 1.
-        assert_eq!(tab_keys(&groups, &order, View::Top), [(6, "⌘1".to_owned())]);
+        assert_eq!(
+            tab_keys(&groups, &order, View::Top, Some(Mods::CMD)),
+            [(6, "⌘1".to_owned())]
+        );
         groups.select(&mut order, 4);
         assert_eq!(
-            tab_keys(&groups, &order, View::Top),
+            tab_keys(&groups, &order, View::Top, Some(Mods::CMD)),
             [(4, "⌘1".to_owned()), (5, "⌘2".to_owned())]
         );
     }

@@ -40,21 +40,33 @@ pub struct Sources<'a> {
     pub fresh_ports: &'a [String],
 }
 
+/// The page of the commands the panes ran. The menu's Edit ▸ Command History… stands for it
+/// ([`super::menu::SHOW_HISTORY_ACTION`]).
+pub(super) fn history_page() -> Row {
+    Row::new(Kind::Scope, "history", "Command History…")
+        .keywords("commands ran previous terminal shell output")
+        .opens(
+            Scope::History {
+                jump: false,
+                query: None,
+            },
+            true,
+        )
+}
+
+/// The page of the themes. The menu's View ▸ Themes… stands for it
+/// ([`super::menu::SHOW_THEMES_ACTION`]).
+pub(super) fn themes_page() -> Row {
+    Row::new(Kind::Scope, "themes", "Themes…")
+        .keywords("theme colors color scheme appearance dark light")
+        .opens(Scope::Theme(Slot::Active), true)
+}
+
 /// The pages the root offers beside what a query finds.
 fn go_to() -> [Row; 3] {
     [
-        Row::new(Kind::Scope, "history", "Command History…")
-            .keywords("commands ran previous terminal shell output")
-            .opens(
-                Scope::History {
-                    jump: false,
-                    query: None,
-                },
-                true,
-            ),
-        Row::new(Kind::Scope, "themes", "Themes…")
-            .keywords("theme colors color scheme appearance dark light")
-            .opens(Scope::Theme(Slot::Active), true),
+        history_page(),
+        themes_page(),
         Row::new(Kind::Scope, "settings", "All Settings…")
             .keywords("preferences options configure")
             .opens(Scope::Settings, true),
@@ -90,7 +102,12 @@ pub fn root_rows(src: &Sources<'_>) -> Vec<Row> {
     rows.extend(targets::host_rows(src.targets));
     rows.extend(targets::port_rows(src.targets));
     rows.extend(history::command_rows(src.commands, false));
-    rows.extend(go_to());
+    // The menu's own Command History… and Themes… stand for their pages: a page is listed once.
+    for page in go_to() {
+        if !rows.iter().any(|listed| listed.id == page.id) {
+            rows.push(page);
+        }
+    }
     rows.extend(targets::go_to(src.targets));
     rows
 }
@@ -261,6 +278,52 @@ mod tests {
         // ...but what else it holds is a command like the rest, and runs the menu's item.
         assert!(ids.contains(&"cmd.openThemesFolder"));
         assert_eq!(menu.token_of("cmd.openThemesFolder"), Some(5));
+    }
+
+    #[test]
+    fn a_page_the_menu_has_an_item_for_is_listed_once_with_the_items_shortcut() {
+        use super::super::menu::{Modifiers, SHOW_HISTORY_ACTION, SHOW_THEMES_ACTION};
+        let held = Modifiers {
+            shift: true,
+            command: true,
+            ..Modifiers::default()
+        };
+        let menu = menu_rows(&[
+            MenuNode::holder(
+                0,
+                "Edit",
+                vec![
+                    MenuNode::item(1, "Command History…", SHOW_HISTORY_ACTION).shortcut("h", held),
+                ],
+            ),
+            MenuNode::holder(
+                2,
+                "View",
+                vec![MenuNode::item(3, "Themes…", SHOW_THEMES_ACTION)],
+            ),
+        ]);
+        let (settings, themes) = (Settings::default(), entries());
+        let rows = root_rows(&Sources {
+            menu: &menu,
+            settings: &settings,
+            themes: &themes,
+            places: &Places::default(),
+            targets: &Targets::default(),
+            commands: &Commands::default(),
+            fresh_ports: &[],
+        });
+        let pages: Vec<_> = rows
+            .iter()
+            .filter(|row| row.id == "scope.history" || row.id == "scope.themes")
+            .map(|row| (row.id.as_str(), row.title.as_str(), row.shortcut.as_deref()))
+            .collect();
+        assert_eq!(
+            pages,
+            [
+                ("scope.history", "Command History…", Some("⇧⌘H")),
+                ("scope.themes", "Themes…", None)
+            ]
+        );
     }
 
     #[test]

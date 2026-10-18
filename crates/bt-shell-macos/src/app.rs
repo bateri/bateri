@@ -21,6 +21,7 @@ use bt_core::{
     ShellIntegration, TabPosition, Teardown, Theme,
 };
 use bt_gpu::{DisplayLink, MIN_SAMPLES, Renderer, ScrollbarMode, Stats};
+use bt_shell_common::shortcuts::{self, Resolved};
 use dispatch2::{DispatchQueue, DispatchTime};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
@@ -1056,6 +1057,11 @@ pub(crate) struct Ivars {
     /// this. An unusable save does **not change** it: the next appearance
     /// change chooses with the last good settings.
     settings: RefCell<Settings>,
+    /// The shortcuts in effect: the table read against `[keys]` of [`Ivars::settings`], written
+    /// by [`AppDelegate::apply_keys`] at launch and on every change of `[keys]`. The menu holds
+    /// them as keys, the rest reads them here — the tab bar's hints, the palette's numbers, the
+    /// holds that show them — so no surface keeps a modifier of its own.
+    keys: RefCell<Rc<Resolved>>,
     /// The setting a preview shows over the file's, while the palette's highlight is on one
     /// ([`AppDelegate::preview_edit`]); then [`Ivars::settings`] holds what is shown and this
     /// holds what the file says.
@@ -1281,6 +1287,8 @@ define_class!(
             // first for the diagnostics to reach the subtitle: the new window takes
             // its subtitle over from the slots (`open_window`).
             self.load_settings();
+            // The menu was built with the table's defaults; the file's `[keys]` go in now.
+            self.apply_keys(&self.settings());
             // Quit and End Programs is there only under `keep_running = "quit"`.
             crate::menu::set_end_programs_visible(mtm, self.settings().keep_running);
             // The preview cache's launch sweep and the daily one:
@@ -1490,7 +1498,14 @@ define_class!(
             let user = settings::user_theme_names(&root);
             // The file's theme is the checked one, whatever a preview shows.
             let settings = self.file_settings();
-            crate::menu::fill_themes(self.mtm(), menu, &settings.theme, &embedded, &user);
+            crate::menu::fill_themes(
+                self.mtm(),
+                menu,
+                &settings.theme,
+                &embedded,
+                &user,
+                &self.keys(),
+            );
         }
 
         /// "Does this menu have a counterpart for this key": no, the theme items
@@ -1705,6 +1720,8 @@ define_class!(
                 || item.action() == Some(sel!(goToTab:))
                 || item.action() == Some(sel!(goToFolder:))
                 || item.action() == Some(sel!(jumpToCommand:))
+                || item.action() == Some(sel!(showCommandHistory:))
+                || item.action() == Some(sel!(showThemes:))
             {
                 // Grey without a terminal window to open it over, and while a question is up
                 // on it; open, the same item takes it down (⇧⌘P) or moves it one row on (⌘P,
@@ -1741,6 +1758,24 @@ define_class!(
         fn go_to_tab(&self, _sender: Option<&AnyObject>) {
             if let Some(window) = self.key_window() {
                 window.go_to_tab();
+            }
+        }
+
+        /// Edit ▸ Command History…: the key window's palette opens on the commands the panes
+        /// ran, ⏎ writing the line; open elsewhere, it comes to them.
+        #[unsafe(method(showCommandHistory:))]
+        fn show_command_history(&self, _sender: Option<&AnyObject>) {
+            if let Some(window) = self.key_window() {
+                window.show_command_history();
+            }
+        }
+
+        /// View ▸ Themes…: the key window's palette opens on the themes; open elsewhere, it
+        /// comes to them.
+        #[unsafe(method(showThemes:))]
+        fn show_themes(&self, _sender: Option<&AnyObject>) {
+            if let Some(window) = self.key_window() {
+                window.show_themes();
             }
         }
 
@@ -2654,6 +2689,7 @@ impl AppDelegate {
             background: Cell::new(None),
             notices: RefCell::new(Notices::default()),
             settings: RefCell::new(Settings::default()),
+            keys: RefCell::new(Rc::new(shortcuts::resolve(&Settings::default()))),
             preview: RefCell::new(None),
             config_watch: RefCell::new(None),
             theme_watch: RefCell::new(None),
@@ -5694,6 +5730,29 @@ impl AppDelegate {
         self.ivars().settings.borrow()
     }
 
+    /// The shortcuts in effect ([`Ivars::keys`]): the table read against the file's `[keys]`.
+    pub(crate) fn keys(&self) -> Rc<Resolved> {
+        self.ivars().keys.borrow().clone()
+    }
+
+    /// Reads `settings`' `[keys]` against the table and writes the result to the menu bar: the
+    /// items' keys, the second keys' hidden copies, the keys of the menus the shell fills as they
+    /// open (on their next opening, [`crate::menu::fill_themes`]). The tab bar's hints, the
+    /// palette's numbers and the holds that show them read [`AppDelegate::keys`] when they next
+    /// draw. What is wrong with the file (a name no command has, a key two commands share) is
+    /// reported with the file's other problems (`Loaded::state`), not here.
+    pub(crate) fn apply_keys(&self, settings: &Settings) {
+        let resolved = Rc::new(shortcuts::resolve(settings));
+        self.ivars().keys.replace(resolved.clone());
+        if let Some(bar) = NSApplication::sharedApplication(self.mtm()).mainMenu() {
+            crate::menu::keys::apply(self.mtm(), &bar, &resolved);
+        }
+        // The groups' keys sit in the bar's own model: it is given afresh, with the keys of now.
+        for window in self.windows() {
+            window.refresh_bar();
+        }
+    }
+
     /// The copy of the measurement ledger that goes to the window (the link).
     pub(crate) fn stats(&self) -> Option<Arc<Stats>> {
         self.ivars().stats.clone()
@@ -6066,6 +6125,11 @@ impl AppDelegate {
         let switch = keeper::switch(before, new.keep_running);
         let ask = keeper::asks_notification_permission(Some(before), new.keep_running);
         crate::menu::set_end_programs_visible(self.mtm(), new.keep_running);
+        // The shortcuts the file gives the commands: the menu's keys and everything that names
+        // one. Before the slot is written, from `new`, as the arms above.
+        if changes.keys {
+            self.apply_keys(&new);
+        }
         self.ivars().settings.replace(new.clone());
         self.switch_keeper(switch);
         if ask {
@@ -6634,9 +6698,9 @@ impl AppDelegate {
     }
 
     /// What is held now — the key watch (`tab_bar::watch_command_key`): with
-    /// ⌘ alone the key window's bar shows its tabs' keys and every other bar
-    /// hides them; with ⌥⌘ alone the key window's tab lifts for arranging
-    /// after the same wait ([`crate::arrange`]).
+    /// Select Tab's modifiers alone (⌘ unless the file moved them) the key window's bar shows its
+    /// tabs' keys and every other bar hides them, with Select Group's its groups'; with ⌥⌘ alone
+    /// the key window's tab lifts for arranging after the same wait ([`crate::arrange`]).
     pub(crate) fn hold_changed(&self, hold: Hold) {
         // Every key press says "nothing held": walk the windows only when
         // something was.
@@ -6647,7 +6711,7 @@ impl AppDelegate {
         for window in self.windows() {
             window
                 .bar()
-                .command_held(hold == Hold::Command && Some(window.id()) == key);
+                .command_held(hold == Hold::Tabs && Some(window.id()) == key);
             window
                 .bar()
                 .group_held(hold == Hold::Group && Some(window.id()) == key);

@@ -4,8 +4,8 @@
 //! Forget Password, Cancel Upload, Open Port ▸, Go to Folder…, Copy Folder Path, Show Folder in
 //! Finder, Split
 //! Right, Split Down, Close Tab/Close, Close Window), Edit (Undo Move, Cut, Copy, Paste, Paste
-//! Escaped Text, Select All, Copy Last Command, Copy Last Output, Clear to Start, Clear Scrollback, Find ▸
-//! Find…/Find Next/Find Previous/Use Selection for Find), View (Theme ▸, Tabs ▸,
+//! Escaped Text, Select All, Copy Last Command, Copy Last Output, Command History…, Clear to Start, Clear Scrollback, Find ▸
+//! Find…/Find Next/Find Previous/Use Selection for Find), View (Themes…, Theme ▸, Tabs ▸,
 //! Bigger, Smaller, Actual Size, Scroll to Top, Scroll to Bottom, Page Up,
 //! Page Down) and Window (Minimize,
 //! Zoom, Show Previous/Next Tab, Go to Tab…, Jump to Command…, Select Tab ▸, Show All Tabs, Rename Tab…, splits — Select Previous/Next
@@ -40,9 +40,10 @@
 //! `toggleHostIntegration:`
 //! (its title, checkmark and grey state in the app delegate's
 //! `validateMenuItem:`, from [`integration_menu`]) and
-//! `toggleCommandPalette:`, `goToTab:`, `goToFolder:` and `jumpToCommand:` (View ▸ Command
-//! Palette… ⇧⌘P, Window ▸ Go to Tab… ⌘P, Shell ▸ Go to Folder… ⌘O, Window ▸ Jump to Command…: the
-//! key window's palette; grey while a question is up on it) and
+//! `toggleCommandPalette:`, `goToTab:`, `goToFolder:`, `jumpToCommand:`, `showCommandHistory:` and
+//! `showThemes:` (View ▸ Command Palette… ⇧⌘P, Window ▸ Go to Tab… ⌘P, Shell ▸ Go to Folder… ⌘O,
+//! Window ▸ Jump to Command…, Edit ▸ Command History…, View ▸ Themes…: the key window's palette;
+//! grey while a question is up on it) and
 //! `newWindow:`/`newTab:`/`newLocalTab:`/`quitAndEndPrograms:` to the app delegate
 //! (the same path as the settings record's `settingsDidChange:` — they spread to all
 //! windows or must work even when there is no window);
@@ -72,6 +73,10 @@
 //! `submenuAction:`, and `update` does not touch its `setEnabled`), so the
 //! grey state and the title are set by hand on opening.
 //!
+//! **No item is built with a key**: the keys are the shortcut table's ([`keys`]), written to the
+//! bar once it is built and again whenever `[keys]` changes. A command is added to the bar
+//! after the table lists it (`bt_shell_common::shortcuts::COMMANDS`).
+//!
 //! Shortcuts come from here too: AppKit gives a Command key to the main menu
 //! before `keyDown:` (`performKeyEquivalent:`), and the `view` swallows what is
 //! not caught. **A Control key is also** asked of the menu first (measured):
@@ -98,14 +103,17 @@
 //! registered with `setWindowsMenu` it adds the window list and placement items.
 
 use bt_core::{HostMark, KeepRunning, MarkSubject, SYSTEM_THEME, bare_host};
+use bt_shell_common::shortcuts::{self, Resolved};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject, Sel};
 use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSApplication, NSControlStateValueOff, NSControlStateValueOn, NSEventModifierFlags, NSMenu,
-    NSMenuDelegate, NSMenuItem,
+    NSApplication, NSControlStateValueOff, NSControlStateValueOn, NSMenu, NSMenuDelegate,
+    NSMenuItem,
 };
 use objc2_foundation::{NSObject, NSObjectProtocol, NSString};
+
+pub(crate) mod keys;
 
 /// The title of Window ▸ Move Split to Tab ▸ — also how its delegate knows the
 /// menu ([`ShellMenuDelegate`]): the list is the key window's other tabs, built
@@ -157,10 +165,7 @@ pub(crate) fn set_end_programs_visible(mtm: MainThreadMarker, keep: KeepRunning)
 /// delegate — today's quit with its question, the programs end. Hidden until
 /// [`set_end_programs_visible`] says otherwise.
 fn end_programs_item(mtm: MainThreadMarker) -> Retained<NSMenuItem> {
-    let item = with_modifiers(
-        item(mtm, "Quit and End Programs", sel!(quitAndEndPrograms:), "q"),
-        NSEventModifierFlags::Command | NSEventModifierFlags::Option,
-    );
+    let item = item(mtm, "Quit and End Programs", sel!(quitAndEndPrograms:));
     item.setAlternate(true);
     item.setTag(END_PROGRAMS_TAG);
     item.setHidden(true);
@@ -281,6 +286,11 @@ define_class!(
             if menu.title().to_string() == MOVE_TO_GROUP_TITLE {
                 let targets = app.as_ref().map(|app| app.key_group_targets());
                 fill_group_targets(self.mtm(), menu, &targets.unwrap_or_default());
+                // New Group… is a command of the table, built afresh with the list: it keeps
+                // its key.
+                if let Some(app) = &app {
+                    keys::apply(self.mtm(), menu, &app.keys());
+                }
                 return;
             }
             // Open Port ▸: the focused pane's listening ports, grey without
@@ -327,14 +337,14 @@ define_class!(
 fn fill_move_targets(mtm: MainThreadMarker, menu: &NSMenu, targets: &[(u64, String)]) {
     menu.removeAllItems();
     for (id, title) in targets {
-        let entry = item(mtm, title, sel!(movePaneToTab:), "");
+        let entry = item(mtm, title, sel!(movePaneToTab:));
         entry.setTag(crate::tabs::menu_tag(*id));
         menu.addItem(&entry);
     }
     if targets.is_empty() {
         // No tab tag: the window's validation greys it too, but this menu is
         // filled as it opens, so it is said here as well.
-        let none = item(mtm, "No Other Tabs", sel!(movePaneToTab:), "");
+        let none = item(mtm, "No Other Tabs", sel!(movePaneToTab:));
         none.setEnabled(false);
         menu.addItem(&none);
     }
@@ -346,19 +356,14 @@ fn fill_move_targets(mtm: MainThreadMarker, menu: &NSMenu, targets: &[(u64, Stri
 fn fill_group_targets(mtm: MainThreadMarker, menu: &NSMenu, targets: &[(isize, String, bool)]) {
     menu.removeAllItems();
     for (group, name, _) in targets {
-        let entry = item(mtm, name, sel!(moveTabToGroup:), "");
+        let entry = item(mtm, name, sel!(moveTabToGroup:));
         entry.setTag(*group);
         menu.addItem(&entry);
     }
     if !targets.is_empty() {
         menu.addItem(&NSMenuItem::separatorItem(mtm));
     }
-    menu.addItem(&item(
-        mtm,
-        "New Group\u{2026}",
-        sel!(moveTabToNewGroup:),
-        "",
-    ));
+    menu.addItem(&item(mtm, "New Group\u{2026}", sel!(moveTabToNewGroup:)));
 }
 
 impl ShellMenuDelegate {
@@ -388,17 +393,15 @@ pub(crate) fn install(
     updater: Option<&AnyObject>,
     handover_test: bool,
 ) -> Retained<ShellMenuDelegate> {
-    let command = NSEventModifierFlags::Command;
     let mut app_items = vec![item(
         mtm,
         "About bateri",
         sel!(orderFrontStandardAboutPanel:),
-        "",
     )];
     // macOS's place: right under About (Sparkle's documentation points
     // there too).
     if let Some(updater) = updater {
-        let check = item(mtm, "Check for Updates…", sel!(checkForUpdates:), "");
+        let check = item(mtm, "Check for Updates…", sel!(checkForUpdates:));
         // SAFETY: the target is `SPUStandardUpdaterController`; `checkForUpdates:` is
         // its documented, single-`id`-argument, no-return action. The item holds the
         // target weakly and the app delegate keeps the updater alive for the whole
@@ -414,22 +417,18 @@ pub(crate) fn install(
             mtm,
             "Relaunch with Handover",
             sel!(relaunchWithHandover:),
-            "",
         ));
     }
     app_items.extend([
         NSMenuItem::separatorItem(mtm),
-        item(mtm, "Settings…", sel!(openSettings:), ","),
-        item(mtm, "Open settings.toml", sel!(openSettingsFile:), ""),
+        item(mtm, "Settings…", sel!(openSettings:)),
+        item(mtm, "Open settings.toml", sel!(openSettingsFile:)),
         NSMenuItem::separatorItem(mtm),
-        item(mtm, "Hide bateri", sel!(hide:), "h"),
-        with_modifiers(
-            item(mtm, "Hide Others", sel!(hideOtherApplications:), "h"),
-            command | NSEventModifierFlags::Option,
-        ),
-        item(mtm, "Show All", sel!(unhideAllApplications:), ""),
+        item(mtm, "Hide bateri", sel!(hide:)),
+        item(mtm, "Hide Others", sel!(hideOtherApplications:)),
+        item(mtm, "Show All", sel!(unhideAllApplications:)),
         NSMenuItem::separatorItem(mtm),
-        item(mtm, "Quit bateri", sel!(terminate:), "q"),
+        item(mtm, "Quit bateri", sel!(terminate:)),
         end_programs_item(mtm),
     ]);
     let app_menu = submenu(mtm, "bateri", &app_items);
@@ -443,18 +442,10 @@ pub(crate) fn install(
         mtm,
         "Find",
         &[
-            item(mtm, "Find…", sel!(findInScrollback:), "f"),
-            item(mtm, "Find Next", sel!(findNextMatch:), "g"),
-            with_modifiers(
-                item(mtm, "Find Previous", sel!(findPreviousMatch:), "g"),
-                command | NSEventModifierFlags::Shift,
-            ),
-            item(
-                mtm,
-                "Use Selection for Find",
-                sel!(useSelectionForFind:),
-                "e",
-            ),
+            item(mtm, "Find…", sel!(findInScrollback:)),
+            item(mtm, "Find Next", sel!(findNextMatch:)),
+            item(mtm, "Find Previous", sel!(findPreviousMatch:)),
+            item(mtm, "Use Selection for Find", sel!(useSelectionForFind:)),
         ],
     );
     let edit_menu = submenu(
@@ -466,29 +457,26 @@ pub(crate) fn install(
             // application, and the item would be grey for good. The application
             // (`AppDelegate`'s `validateMenuItem:`) takes the last move of splits
             // back, and is grey with none or while a text field is being edited.
-            item(mtm, "Undo", sel!(undoMove:), "z"),
+            item(mtm, "Undo", sel!(undoMove:)),
             NSMenuItem::separatorItem(mtm),
-            item(mtm, "Cut", sel!(cut:), "x"),
-            item(mtm, "Copy", sel!(copy:), "c"),
-            item(mtm, "Paste", sel!(paste:), "v"),
-            with_modifiers(
-                item(mtm, "Paste Escaped Text", sel!(pasteEscaped:), "v"),
-                command | NSEventModifierFlags::Control,
-            ),
+            item(mtm, "Cut", sel!(cut:)),
+            item(mtm, "Copy", sel!(copy:)),
+            item(mtm, "Paste", sel!(paste:)),
+            item(mtm, "Paste Escaped Text", sel!(pasteEscaped:)),
             NSMenuItem::separatorItem(mtm),
-            item(mtm, "Select All", sel!(selectAll:), "a"),
+            item(mtm, "Select All", sel!(selectAll:)),
             NSMenuItem::separatorItem(mtm),
             // The command memory's two (`TerminalPane`): the newest command's line and output.
-            item(mtm, "Copy Last Command", sel!(copyLastCommand:), ""),
-            item(mtm, "Copy Last Output", sel!(copyLastOutput:), ""),
+            item(mtm, "Copy Last Command", sel!(copyLastCommand:)),
+            item(mtm, "Copy Last Output", sel!(copyLastOutput:)),
+            // The palette's commands page, opened from here: the app delegate's, like Go to
+            // Folder…. The palette lists it as that page, once.
+            item(mtm, "Command History\u{2026}", sel!(showCommandHistory:)),
             NSMenuItem::separatorItem(mtm),
             // Terminal.app's place and shortcuts; the selectors are
             // our own names, the handler is `TerminalPane`.
-            item(mtm, "Clear to Start", sel!(clearToStart:), "k"),
-            with_modifiers(
-                item(mtm, "Clear Scrollback", sel!(clearScrollback:), "k"),
-                command | NSEventModifierFlags::Option,
-            ),
+            item(mtm, "Clear to Start", sel!(clearToStart:)),
+            item(mtm, "Clear Scrollback", sel!(clearScrollback:)),
             NSMenuItem::separatorItem(mtm),
             find_menu,
         ],
@@ -505,17 +493,22 @@ pub(crate) fn install(
             // The palette lists this very menu: a command exists in it exactly when it is
             // here. Handled by the app delegate, which opens the key window's palette; its
             // validation is the delegate's too.
-            with_modifiers(
-                item(
-                    mtm,
-                    "Command Palette\u{2026}",
-                    sel!(toggleCommandPalette:),
-                    "p",
-                ),
-                command | NSEventModifierFlags::Shift,
-            ),
+            item(mtm, "Command Palette\u{2026}", sel!(toggleCommandPalette:)),
             NSMenuItem::separatorItem(mtm),
+            // The palette's themes page, opened from here (the app delegate's, listed by the
+            // palette as that page); Theme ▸ is the list itself.
+            item(mtm, "Themes\u{2026}", sel!(showThemes:)),
             theme_menu,
+            // Open Themes Folder's key runs from here. Theme ▸'s delegate answers "no key" to
+            // AppKit's search (`menuHasKeyEquivalent:`, so `themes/` is not read at every Command
+            // key), which means no item inside it is ever found by its key: the item there shows
+            // the key, this invisible twin — built once, there when the key is pressed — runs it.
+            {
+                let twin = item(mtm, "Open Themes Folder", sel!(openThemesFolder:));
+                twin.setHidden(true);
+                twin.setAllowsKeyEquivalentWhenHidden(true);
+                twin
+            },
             // Where the window's tabs sit: the check and the grey state come from the app
             // delegate's `validateMenuItem:`, not from a delegate of the submenu's own (one
             // that defines `menuNeedsUpdate:` enters AppKit's shortcut search, see above).
@@ -523,45 +516,39 @@ pub(crate) fn install(
                 mtm,
                 "Tabs",
                 &[
-                    item(mtm, "Top", sel!(tabsAtTop:), ""),
-                    item(mtm, "Side", sel!(tabsAtSide:), ""),
+                    item(mtm, "Top", sel!(tabsAtTop:)),
+                    item(mtm, "Side", sel!(tabsAtSide:)),
                 ],
             ),
             NSMenuItem::separatorItem(mtm),
             // `+` is a Shift character: the menu matches Cmd-Shift-= and shows
             // "⌘+". `-` is an ASCII hyphen, not the minus sign (U+2212) — the keyboard does
             // not produce it.
-            item(mtm, "Bigger", sel!(makeFontBigger:), "+"),
-            item(mtm, "Smaller", sel!(makeFontSmaller:), "-"),
-            item(mtm, "Actual Size", sel!(resetFontSize:), "0"),
+            item(mtm, "Bigger", sel!(makeFontBigger:)),
+            item(mtm, "Smaller", sel!(makeFontSmaller:)),
+            item(mtm, "Actual Size", sel!(resetFontSize:)),
             NSMenuItem::separatorItem(mtm),
             // AppKit's function-key code points (`NSHomeFunctionKey`,
             // `NSEndFunctionKey`, `NSPageUpFunctionKey`,
             // `NSPageDownFunctionKey`): the menu shows them like "⌘↖".
-            item(mtm, "Scroll to Top", sel!(scrollToTop:), "\u{F729}"),
-            item(mtm, "Scroll to Bottom", sel!(scrollToBottom:), "\u{F72B}"),
-            item(mtm, "Page Up", sel!(scrollPageUp:), "\u{F72C}"),
-            item(mtm, "Page Down", sel!(scrollPageDown:), "\u{F72D}"),
+            item(mtm, "Scroll to Top", sel!(scrollToTop:)),
+            item(mtm, "Scroll to Bottom", sel!(scrollToBottom:)),
+            item(mtm, "Page Up", sel!(scrollPageUp:)),
+            item(mtm, "Page Down", sel!(scrollPageDown:)),
         ],
     );
     let shell_menu = submenu(
         mtm,
         "Shell",
         &[
-            item(mtm, "New Window", sel!(newWindow:), "n"),
-            item(mtm, "New Tab", sel!(newTab:), "t"),
+            item(mtm, "New Window", sel!(newWindow:)),
+            item(mtm, "New Tab", sel!(newTab:)),
             // On a remote tab ⌘T goes to the same host; this is always local.
-            with_modifiers(
-                item(mtm, "New Local Tab", sel!(newLocalTab:), "t"),
-                command | NSEventModifierFlags::Option,
-            ),
+            item(mtm, "New Local Tab", sel!(newLocalTab:)),
             // Greyed only without a key window (the app delegate's `validateMenuItem:`): in the
             // title row it is the way to a window's first group, whose button comes with it.
-            with_modifiers(
-                item(mtm, "New Group", sel!(newGroup:), "n"),
-                command | NSEventModifierFlags::Shift,
-            ),
-            item(mtm, "New Ungrouped Tab", sel!(newUngroupedTab:), ""),
+            item(mtm, "New Group", sel!(newGroup:)),
+            item(mtm, "New Ungrouped Tab", sel!(newUngroupedTab:)),
             NSMenuItem::separatorItem(mtm),
             // Its title and grey state on opening ([`ShellMenuDelegate`]); the items go to the
             // app delegate with `markHost:` (the active tab's host).
@@ -574,18 +561,17 @@ pub(crate) fn install(
                 mtm,
                 &integration_menu(None).title,
                 sel!(toggleHostIntegration:),
-                "",
             ),
             // The tab's saved ssh password: the handler is the focused
             // pane (`forgetPassword:`), grey without one (`validateMenuItem:`).
             {
-                let forget = item(mtm, &forget_title(None), sel!(forgetPassword:), "");
+                let forget = item(mtm, &forget_title(None), sel!(forgetPassword:));
                 forget.setTag(FORGET_TAG);
                 forget
             },
             // The whole queue of uploads to the remote directory; enabled only
             // while there is a queue (`TerminalPane`'s `validateMenuItem:`).
-            item(mtm, "Cancel Upload", sel!(cancelUpload:), "."),
+            item(mtm, "Cancel Upload", sel!(cancelUpload:)),
             // The focused pane's listening ports (`[shell] ports`): filled on
             // opening ([`ShellMenuDelegate`]); an item opens its address in the
             // browser, the focused pane handles it (`openPort:`).
@@ -598,197 +584,114 @@ pub(crate) fn install(
             // The palette's folders page (⌘O), handled by the app delegate like Go to Tab…. The
             // two beside it act on the focused pane's folder (`TerminalPane`): a remote tab
             // copies `host:folder` and has no Finder folder to show.
-            item(mtm, "Go to Folder\u{2026}", sel!(goToFolder:), "o"),
-            item(mtm, "Copy Folder Path", sel!(copyFolderPath:), ""),
-            item(mtm, "Show Folder in Finder", sel!(showFolderInFinder:), ""),
+            item(mtm, "Go to Folder\u{2026}", sel!(goToFolder:)),
+            item(mtm, "Copy Folder Path", sel!(copyFolderPath:)),
+            item(mtm, "Show Folder in Finder", sel!(showFolderInFinder:)),
             NSMenuItem::separatorItem(mtm),
             // Splits (Ghostty/iTerm2 precedent): the handler is
             // `TerminalWindow` (splits the focused pane); grey at the smallest pane
             // limit (`validateMenuItem:`).
-            item(mtm, "Split Right", sel!(splitRight:), "d"),
-            with_modifiers(
-                item(mtm, "Split Down", sel!(splitDown:), "d"),
-                command | NSEventModifierFlags::Shift,
-            ),
+            item(mtm, "Split Right", sel!(splitRight:)),
+            item(mtm, "Split Down", sel!(splitDown:)),
             NSMenuItem::separatorItem(mtm),
             // Not `performClose:` (measured): after the red button's cancelled
             // group close AppKit broadcasts `performClose:` to the whole group, so ⌘W would
             // ask about the window instead of a tab. Its title is "Close" with many panes
             // (it closes the focused pane; `TerminalWindow`'s `validateMenuItem:`).
-            item(mtm, "Close Tab", sel!(closeTab:), "w"),
-            with_modifiers(
-                item(mtm, "Close Window", sel!(closeWindow:), "w"),
-                command | NSEventModifierFlags::Shift,
-            ),
+            item(mtm, "Close Tab", sel!(closeTab:)),
+            item(mtm, "Close Window", sel!(closeWindow:)),
         ],
     );
     let mut select_tab: Vec<_> = (1..=8)
-        .map(|n| {
-            tagged(
-                item(mtm, &format!("Tab {n}"), sel!(selectTab:), &n.to_string()),
-                n,
-            )
-        })
+        .map(|n| tagged(item(mtm, &format!("Tab {n}"), sel!(selectTab:)), n))
         .collect();
-    select_tab.push(tagged(item(mtm, "Last Tab", sel!(selectTab:), "9"), 9));
-    // ⌃⌘1…⌃⌘8 the nth group, ⌃⌘9 the last, ⌃⌘0 the ungrouped tabs. Static, with the title and the
-    // grey state written by the window's `validateMenuItem:` — a shortcut is found in an item that
-    // is there when the key is pressed, not in one made as a menu opens.
-    let command_control = command | NSEventModifierFlags::Control;
+    select_tab.push(tagged(item(mtm, "Last Tab", sel!(selectTab:)), 9));
+    // The nth group 1…8, the last 9, the ungrouped tabs 0 (the keys come from the table). Static,
+    // with the title and the grey state written by the window's `validateMenuItem:` — a shortcut
+    // is found in an item that is there when the key is pressed, not in one made as a menu opens.
     let mut select_group: Vec<_> = (1..=8)
-        .map(|n| {
-            with_modifiers(
-                tagged(
-                    item(
-                        mtm,
-                        &format!("Group {n}"),
-                        sel!(selectGroup:),
-                        &n.to_string(),
-                    ),
-                    n,
-                ),
-                command_control,
-            )
-        })
+        .map(|n| tagged(item(mtm, &format!("Group {n}"), sel!(selectGroup:)), n))
         .collect();
-    select_group.push(with_modifiers(
-        tagged(item(mtm, "Last Group", sel!(selectGroup:), "9"), 9),
-        command_control,
-    ));
-    select_group.push(with_modifiers(
-        tagged(item(mtm, "Ungrouped", sel!(selectGroup:), "0"), 0),
-        command_control,
-    ));
+    select_group.push(tagged(item(mtm, "Last Group", sel!(selectGroup:)), 9));
+    select_group.push(tagged(item(mtm, "Ungrouped", sel!(selectGroup:)), 0));
     let move_to_group = submenu(
         mtm,
         MOVE_TO_GROUP_TITLE,
-        &[item(mtm, "New Group\u{2026}", sel!(moveTabToNewGroup:), "")],
+        &[item(mtm, "New Group\u{2026}", sel!(moveTabToNewGroup:))],
     );
-    // Direction items: `tag` is the order of `split::Direction::from_tag` (left,
-    // right, up, down); the shortcut is AppKit's arrow-key code points
-    // (`NSLeftArrowFunctionKey` U+F702, `NSRightArrowFunctionKey` U+F703,
-    // `NSUpArrowFunctionKey` U+F700, `NSDownArrowFunctionKey` U+F701).
-    let arrows = [
-        ("Left", "\u{F702}"),
-        ("Right", "\u{F703}"),
-        ("Up", "\u{F700}"),
-        ("Down", "\u{F701}"),
-    ];
-    let directed = |action, modifiers| -> Vec<_> {
+    // Direction items: `tag` is the order of `split::Direction::from_tag` (left, right, up,
+    // down); the keys are the arrows, from the table.
+    let directed = |action| -> Vec<_> {
         (0u8..)
-            .zip(arrows)
-            .map(|(tag, (title, key))| {
-                tagged(
-                    with_modifiers(item(mtm, title, action, key), modifiers),
-                    tag,
-                )
-            })
+            .zip(["Left", "Right", "Up", "Down"])
+            .map(|(tag, title)| tagged(item(mtm, title, action), tag))
             .collect()
     };
-    let select_split = directed(sel!(selectSplit:), command | NSEventModifierFlags::Option);
-    let resize_split = directed(sel!(resizeSplit:), command | NSEventModifierFlags::Control);
-    let swap_split = directed(
-        sel!(swapSplit:),
-        command | NSEventModifierFlags::Option | NSEventModifierFlags::Shift,
-    );
+    let select_split = directed(sel!(selectSplit:));
+    let resize_split = directed(sel!(resizeSplit:));
+    let swap_split = directed(sel!(swapSplit:));
     // The tabs a split can go to are filled when the menu opens
     // ([`ShellMenuDelegate`]); the placeholder is what a menu that never
     // opened would show.
     let move_to_tab = submenu(
         mtm,
         MOVE_TO_TAB_TITLE,
-        &[item(mtm, "No Other Tabs", sel!(movePaneToTab:), "")],
+        &[item(mtm, "No Other Tabs", sel!(movePaneToTab:))],
     );
     let window_menu = submenu(
         mtm,
         "Window",
         &[
-            item(mtm, "Minimize", sel!(performMiniaturize:), "m"),
-            item(mtm, "Zoom", sel!(performZoom:), ""),
+            item(mtm, "Minimize", sel!(performMiniaturize:)),
+            item(mtm, "Zoom", sel!(performZoom:)),
             NSMenuItem::separatorItem(mtm),
             // `{`/`}` are Shift characters: the menu matches ⇧⌘[ / ⇧⌘] (the same idiom as
             // Bigger's `+`).
-            item(mtm, "Show Previous Tab", sel!(showPreviousTab:), "{"),
-            item(mtm, "Show Next Tab", sel!(showNextTab:), "}"),
+            item(mtm, "Show Previous Tab", sel!(showPreviousTab:)),
+            item(mtm, "Show Next Tab", sel!(showNextTab:)),
             // The palette's tabs page (⌘P): handled by the app delegate, like the palette's own
             // item. Open, the same key takes the highlight one tab further.
-            item(mtm, "Go to Tab\u{2026}", sel!(goToTab:), "p"),
+            item(mtm, "Go to Tab\u{2026}", sel!(goToTab:)),
             // The command history with ⏎ going to a command's output: the app delegate's, no
             // key (the palette's Command History… is the same list with ⏎ writing the line).
-            item(mtm, "Jump to Command\u{2026}", sel!(jumpToCommand:), ""),
-            hidden_shortcut(with_modifiers(
-                item(mtm, "Show Previous Tab", sel!(showPreviousTab:), "\t"),
-                NSEventModifierFlags::Control | NSEventModifierFlags::Shift,
-            )),
-            hidden_shortcut(with_modifiers(
-                item(mtm, "Show Next Tab", sel!(showNextTab:), "\t"),
-                NSEventModifierFlags::Control,
-            )),
+            item(mtm, "Jump to Command\u{2026}", sel!(jumpToCommand:)),
             submenu(mtm, "Select Tab", &select_tab),
             submenu(mtm, "Select Group", &select_group),
             move_to_group.clone(),
-            item(mtm, "Rename Group\u{2026}", sel!(renameGroup:), ""),
-            item(
-                mtm,
-                "Move Group to New Window",
-                sel!(moveGroupToNewWindow:),
-                "",
-            ),
+            item(mtm, "Rename Group\u{2026}", sel!(renameGroup:)),
+            item(mtm, "Move Group to New Window", sel!(moveGroupToNewWindow:)),
             // `|` is the Shift character of `\`: the menu matches ⇧⌘\. Grey with a single
             // tab (`TerminalWindow`'s `validateMenuItem:`).
-            item(mtm, "Show All Tabs", sel!(showTabList:), "|"),
-            item(mtm, "Rename Tab\u{2026}", sel!(renameTab:), ""),
+            item(mtm, "Show All Tabs", sel!(showTabList:)),
+            item(mtm, "Rename Tab\u{2026}", sel!(renameTab:)),
             NSMenuItem::separatorItem(mtm),
             // Splits (Ghostty/iTerm2 precedent): the handler is
             // `TerminalWindow`; grey with a single pane (`validateMenuItem:`).
-            item(
-                mtm,
-                "Select Previous Split",
-                sel!(selectPreviousSplit:),
-                "[",
-            ),
-            item(mtm, "Select Next Split", sel!(selectNextSplit:), "]"),
+            item(mtm, "Select Previous Split", sel!(selectPreviousSplit:)),
+            item(mtm, "Select Next Split", sel!(selectNextSplit:)),
             submenu(mtm, "Select Split", &select_split),
             submenu(mtm, "Resize Split", &resize_split),
             submenu(mtm, "Swap Split", &swap_split),
-            with_modifiers(
-                item(mtm, "Equalize Splits", sel!(equalizeSplits:), "="),
-                command | NSEventModifierFlags::Control,
-            ),
-            with_modifiers(
-                item(mtm, "Zoom Split", sel!(toggleSplitZoom:), "\r"),
-                command | NSEventModifierFlags::Shift,
-            ),
+            item(mtm, "Equalize Splits", sel!(equalizeSplits:)),
+            item(mtm, "Zoom Split", sel!(toggleSplitZoom:)),
             NSMenuItem::separatorItem(mtm),
             // A split leaves for a tab or a window (`TerminalWindow`'s
             // appliers); the shortcuts are Previous / Next Tab's with ⌥ —
             // `{`/`}` carry the Shift as there. Greyed by `validateMenuItem:`.
-            item(mtm, "Move Split to New Tab", sel!(movePaneToNewTab:), ""),
+            item(mtm, "Move Split to New Tab", sel!(movePaneToNewTab:)),
             move_to_tab.clone(),
+            item(mtm, "Move Split to New Window", sel!(movePaneToNewWindow:)),
             item(
                 mtm,
-                "Move Split to New Window",
-                sel!(movePaneToNewWindow:),
-                "",
+                "Move Split to Previous Tab",
+                sel!(movePaneToPreviousTab:),
             ),
-            with_modifiers(
-                item(
-                    mtm,
-                    "Move Split to Previous Tab",
-                    sel!(movePaneToPreviousTab:),
-                    "{",
-                ),
-                command | NSEventModifierFlags::Option,
-            ),
-            with_modifiers(
-                item(mtm, "Move Split to Next Tab", sel!(movePaneToNextTab:), "}"),
-                command | NSEventModifierFlags::Option,
-            ),
+            item(mtm, "Move Split to Next Tab", sel!(movePaneToNextTab:)),
             NSMenuItem::separatorItem(mtm),
-            item(mtm, "Move Tab to New Window", sel!(detachTab:), ""),
-            item(mtm, "Merge All Windows", sel!(mergeWindows:), ""),
+            item(mtm, "Move Tab to New Window", sel!(detachTab:)),
+            item(mtm, "Merge All Windows", sel!(mergeWindows:)),
             NSMenuItem::separatorItem(mtm),
-            item(mtm, "Bring All to Front", sel!(arrangeInFront:), ""),
+            item(mtm, "Bring All to Front", sel!(arrangeInFront:)),
         ],
     );
     let bar = NSMenu::new(mtm);
@@ -797,6 +700,18 @@ pub(crate) fn install(
     bar.addItem(&edit_menu);
     bar.addItem(&view_menu);
     bar.addItem(&window_menu);
+    // Every key of the bar is the table's: the defaults now, the file's once it is read
+    // ([`keys::apply`] again, on launch and on every change of `[keys]`).
+    keys::apply(
+        mtm,
+        &bar,
+        &shortcuts::resolve(&bt_core::Settings::default()),
+    );
+    debug_assert!(
+        keys::problems(&bar, updater.is_some()).is_empty(),
+        "the menu and the shortcut table disagree: {:?}",
+        keys::problems(&bar, updater.is_some())
+    );
     let app = NSApplication::sharedApplication(mtm);
     app.setMainMenu(Some(&bar));
     app.setWindowsMenu(window_menu.submenu().as_deref());
@@ -819,7 +734,7 @@ pub(crate) fn install(
 fn mark_holder(mtm: MainThreadMarker) -> Retained<NSMenuItem> {
     let items: Vec<_> = (0u8..)
         .zip(MARKS)
-        .map(|(tag, (title, _))| tagged(item(mtm, title, sel!(markHost:), ""), tag))
+        .map(|(tag, (title, _))| tagged(item(mtm, title, sel!(markHost:)), tag))
         .collect();
     let model = mark_menu(None);
     let holder = submenu(mtm, &model.title, &items);
@@ -847,10 +762,11 @@ pub(crate) fn fill_themes(
     selected: &str,
     embedded: &[Vec<&str>],
     user: &[String],
+    resolved: &Resolved,
 ) {
     menu.removeAllItems();
     let theme = |name: &str, title: &str| {
-        let theme = item(mtm, title, sel!(selectTheme:), "");
+        let theme = item(mtm, title, sel!(selectTheme:));
         // SAFETY: `representedObject` is retained by the item and any object
         // is accepted; `selectTheme:` reads it back as the `NSString` put here.
         unsafe { theme.setRepresentedObject(Some(&NSString::from_str(name))) };
@@ -859,7 +775,7 @@ pub(crate) fn fill_themes(
         }
         theme
     };
-    let system = item(mtm, "Match System", sel!(matchSystemTheme:), "");
+    let system = item(mtm, "Match System", sel!(matchSystemTheme:));
     if selected == SYSTEM_THEME {
         system.setState(NSControlStateValueOn);
     }
@@ -880,12 +796,10 @@ pub(crate) fn fill_themes(
     // Where a user's theme files go; the item is the same action wherever the menu is read
     // (the palette lists it as a command of its own).
     menu.addItem(&NSMenuItem::separatorItem(mtm));
-    menu.addItem(&item(
-        mtm,
-        "Open Themes Folder",
-        sel!(openThemesFolder:),
-        "",
-    ));
+    menu.addItem(&item(mtm, "Open Themes Folder", sel!(openThemesFolder:)));
+    // The menu is built afresh on every opening: Open Themes Folder takes the key the table
+    // gives it again.
+    keys::apply(mtm, menu, resolved);
 }
 
 /// The theme name a Theme ▸ item carries ([`fill_themes`]).
@@ -896,8 +810,10 @@ pub(crate) fn theme_of_item(item: &NSMenuItem) -> Option<String> {
         .map(|name| name.to_string())
 }
 
-/// A target-less item. If `key` is empty there is no shortcut; the modifier default is Command.
-fn item(mtm: MainThreadMarker, title: &str, action: Sel, key: &str) -> Retained<NSMenuItem> {
+/// A target-less item with **no key**: the keys of the menu are the shortcut table's
+/// ([`keys::apply`]), written to the items once the bar is built and again whenever `[keys]`
+/// changes, so a key typed here would be one the settings page cannot move.
+fn item(mtm: MainThreadMarker, title: &str, action: Sel) -> Retained<NSMenuItem> {
     // SAFETY: `action` is a valid selector built with `sel!` and each of its
     // receivers (`BateriView`, `TerminalPane`, `TerminalWindow`, `NSWindow`,
     // `AppDelegate`, `NSApplication`) defines it as a no-return action with a single
@@ -907,28 +823,9 @@ fn item(mtm: MainThreadMarker, title: &str, action: Sel, key: &str) -> Retained<
             NSMenuItem::alloc(mtm),
             &NSString::from_str(title),
             Some(action),
-            &NSString::from_str(key),
+            &NSString::new(),
         )
     }
-}
-
-/// Sets the item's shortcut modifiers to `modifiers`.
-fn with_modifiers(
-    item: Retained<NSMenuItem>,
-    modifiers: NSEventModifierFlags,
-) -> Retained<NSMenuItem> {
-    item.setKeyEquivalentModifierMask(modifiers);
-    item
-}
-
-/// An item that is invisible but whose shortcut **works**: it attaches a second
-/// shortcut to the menu without showing the title twice (⌃⇥ / ⌃⇧⇥ — Safari's
-/// idiom). A hidden item's shortcut is ignored by default; the flag turns it back
-/// on.
-fn hidden_shortcut(item: Retained<NSMenuItem>) -> Retained<NSMenuItem> {
-    item.setHidden(true);
-    item.setAllowsKeyEquivalentWhenHidden(true);
-    item
 }
 
 /// Sets the item's `tag` to `tag` — Select Tab ▸'s order
@@ -973,6 +870,69 @@ mod tests {
         assert!(NSWindow::class().responds_to(sel!(undo:)));
         assert!(!NSWindow::class().responds_to(sel!(undoMove:)));
         assert!(crate::app::AppDelegate::class().responds_to(sel!(undoMove:)));
+    }
+
+    /// The text of this file that builds the bar: above its tests.
+    fn building() -> &'static str {
+        let source = include_str!("menu.rs");
+        &source[..source
+            .find("#[cfg(test)]\nmod tests")
+            .expect("the tests module follows")]
+    }
+
+    /// The menu cannot be built off the main thread, which is where libtest runs: what the
+    /// smoke run checks live (`keys::problems`, asserted when the bar is installed in a debug
+    /// build) is held here from the source — no key is written where the bar is built, and every
+    /// command of the table is an item with the selector the table names.
+    #[test]
+    fn the_bar_is_built_without_a_key_and_has_an_item_for_every_command_of_the_table() {
+        let building = building();
+        for forbidden in ["setKeyEquivalent", "with_modifiers", "hidden_shortcut"] {
+            assert!(
+                !building.contains(forbidden),
+                "`{forbidden}`: a key written beside the table is one the settings cannot move"
+            );
+        }
+        for command in shortcuts::COMMANDS {
+            let selector = command.id.split(':').next().expect("an id");
+            assert!(
+                building.contains(&format!("sel!({selector}:)")),
+                "{} ({}) is no item of the bar",
+                command.name,
+                command.id
+            );
+        }
+    }
+
+    #[test]
+    fn the_tags_the_table_names_are_the_tags_the_bar_gives() {
+        // The ids with a tag that is not a family's digit are the items' markers.
+        assert_eq!(
+            shortcuts::by_name("forget_password").map(|c| c.id),
+            Some(format!("forgetPassword:{FORGET_TAG}").as_str())
+        );
+        assert_eq!(
+            shortcuts::by_name("quit_and_end_programs").map(|c| c.id),
+            Some(format!("quitAndEndPrograms:{END_PROGRAMS_TAG}").as_str())
+        );
+        // Mark … as ▸ items are tagged by their place in `MARKS`: the table names them so.
+        for (index, command) in [
+            "mark_production",
+            "mark_staging",
+            "mark_development",
+            "mark_none",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let id = if index == 0 {
+                "markHost".to_owned()
+            } else {
+                format!("markHost:{index}")
+            };
+            assert_eq!(shortcuts::by_name(command).map(|c| c.id), Some(id.as_str()));
+        }
+        assert_eq!(MARKS.len(), 4);
     }
 
     #[test]

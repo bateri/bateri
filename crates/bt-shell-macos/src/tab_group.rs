@@ -462,9 +462,9 @@ impl GroupHeader {
         iv.hint.setHidden(true);
         let mut dot_at = None;
         if look.hints
-            && let Some(digit) = heading.hint
+            && let Some(hint) = &heading.hint
         {
-            right = ended(&iv.hint, &format!("\u{2303}\u{2318}{digit}"), right);
+            right = ended(&iv.hint, hint, right);
         } else if heading.collapsed {
             right = ended(&iv.count, &heading.tabs.to_string(), right);
             if heading.indicator.is_some() {

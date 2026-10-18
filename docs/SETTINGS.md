@@ -626,6 +626,7 @@ error (or the ⚠) stays visible there too.
 | a key's value is not accepted | only that key falls back to its default (or its limit; off for `osc52` and `[remote] integration`, `"layout"` for `restore_windows`), warning |
 | unrecognized key or section | silently ignored |
 | a `[keys]` name no command has, or a shortcut that cannot be read | only that line is ignored (the command keeps its own shortcut), warning with the line |
+| two commands with the same `[keys]` shortcut | both keep it, warning with the line; the menu runs the one that comes first in it |
 | the chosen theme cannot be found | the built-in theme matching the appearance (`bateri` in dark, `bateri-light` in light), warning |
 | the theme file cannot be read, is empty or is invalid TOML | the built-in theme matching the appearance, warning (a built-in theme with the same name is **not** used) |
 | a color in the theme file is not accepted | only that color comes from `bateri`, warning |
@@ -2116,8 +2117,17 @@ the command's name.
   `[keys]` changes nothing. Deleting a line gives the command its own shortcut
   back.
 - **`""`** leaves the command with no shortcut (`show_all_tabs = ""` leaves
-  Show All Tabs without one). A list of **two** gives it two, and the menu shows the first. More
-  than two is not accepted.
+  Show All Tabs without one, and the key goes to nothing: the terminal does not
+  get it either). A list of **two** gives it two, and the menu shows the first.
+  More than two is not accepted.
+- **Every command of the menu bar has a name**, the menu's own order and the
+  ones that have no shortcut today too, plus Edit ▸ Command History… and View ▸
+  Themes…, which open the command palette on those pages. The entries of a list
+  that changes — the themes, Open Port ▸, Move Split to Tab ▸ and the groups of
+  Move Tab to Group ▸ — have none; the command palette finds all of them.
+- **A change is at once**: the menu, the command palette's rows, the number a
+  tab shows while its modifiers are held and the numbers of ⌘P follow the file
+  as it is saved.
 - **A shortcut** is the modifiers and the key, joined by `+`, modifiers first:
   `shift+cmd+o`, `ctrl+tab`, `cmd+left`, `f5`. The modifiers are `ctrl`,
   `option`, `shift` and `cmd`, in any order, one of each. The key is one
@@ -2130,7 +2140,9 @@ the command's name.
 - **Only modifiers** (`select_tab = "option"`) is the shortcut of a family:
   Select Tab ▸, Select Group ▸ and Select, Resize and Swap Split ▸ are one
   line each, with the digits (tabs 1–9, groups 0–9) or the arrows fixed and the
-  modifiers yours.
+  modifiers yours. Holding Select Tab's modifiers shows the tabs' numbers, and
+  Select Group's the groups' (⌘ and ⌃⌘ unless you moved them); ⌥⌘ held is always
+  the arrangement of the panes, so a family on ⌥⌘ works but shows no numbers.
 - **One modifier twice** (`shift+shift`) is that key pressed twice. It is
   read, but not used yet.
 - **A line that cannot be read**, and a name no command has, is ignored on its

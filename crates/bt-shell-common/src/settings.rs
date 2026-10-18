@@ -467,7 +467,13 @@ impl Loaded {
                 FileState::Locked(format!("{FILE_NAME} could not be read: {err}"))
             }
             Loaded::Unparseable(diagnostic) => FileState::Locked(notice(diagnostic)),
-            Loaded::Parsed(parsed) => FileState::Usable(parsed.diagnostics.clone()),
+            Loaded::Parsed(parsed) => {
+                // The names the file gives the commands are the shell's to judge: `bt-core`
+                // reads the table and does not know the commands.
+                let mut diagnostics = parsed.diagnostics.clone();
+                diagnostics.extend(crate::shortcuts::resolve(&parsed.settings).problems());
+                FileState::Usable(diagnostics)
+            }
         }
     }
 
@@ -542,6 +548,27 @@ mod tests {
         assert_eq!(
             config_root(Path::new("/Users/someone")),
             PathBuf::from("/Users/someone/.config/bateri")
+        );
+    }
+
+    #[test]
+    fn the_shortcuts_the_commands_cannot_have_are_reported_with_the_other_problems_of_the_file() {
+        // A name that is no command and a key two commands share: the parser has no table of
+        // commands, the shell's read of the file adds both to the subtitle and the window.
+        let root = TempRoot::new("keys-problems");
+        std::fs::write(
+            root.0.join(FILE_NAME),
+            "[keys]\nnot_a_command = \"cmd+j\"\ncopy_last_output = \"shift+cmd+d\"\n",
+        )
+        .expect("write failed");
+        let (settings, notices) = load(&root.0).at_launch();
+        assert_eq!(settings.keys.len(), 2);
+        assert_eq!(
+            notices,
+            [
+                "settings.toml: line 2: `keys.not_a_command` is not the name of a command; the line is ignored",
+                "settings.toml: line 3: `shift+cmd+d` is the shortcut of `split_down` and `copy_last_output`; the menu runs `split_down`'s",
+            ]
         );
     }
 

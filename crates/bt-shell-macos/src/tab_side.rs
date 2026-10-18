@@ -446,7 +446,7 @@ impl TabBar {
             visible,
             reduce,
             style: IconStyle::current(self.mtm()),
-            hints: iv.hints.get(),
+            hints: self.hint_mods(),
         };
         // The rows live in the list's space: its top-left corner is theirs.
         iv.strip.setFrame(ns_rect(column.list));

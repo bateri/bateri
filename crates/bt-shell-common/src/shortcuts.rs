@@ -22,7 +22,7 @@ mod resolve;
 mod table;
 mod verdict;
 
-pub use mapping::{MenuKey, chord_of, glyphs, menu_key};
+pub use mapping::{MenuKey, chord_of, digit_glyphs, glyphs, menu_key};
 pub use resolve::{Assignment, Binding, Conflict, Resolved, Source, resolve};
 pub use table::{COMMANDS, Command, Family, Item, by_id, by_name, family_default};
 pub use verdict::{Clash, MACOS_KEYS, MacKey, Refusal, Ruling, Verdict, refusal};

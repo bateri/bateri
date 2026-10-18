@@ -42,7 +42,7 @@ use std::ptr::NonNull;
 use std::time::Duration;
 
 use block2::RcBlock;
-use bt_core::Theme;
+use bt_core::{Mods, Theme};
 use dispatch2::{DispatchQueue, DispatchTime};
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
@@ -72,12 +72,13 @@ use crate::tab_bar::{self, HINT_DELAY, Tint};
 pub(crate) enum Hold {
     #[default]
     Nothing,
-    /// ⌘ alone: the tabs show their keys after a wait.
-    Command,
+    /// Select Tab's modifiers and nothing else (⌘ until the file says otherwise): the tabs show
+    /// their keys after a wait.
+    Tabs,
     /// ⌥⌘ and nothing else: the arrangement, after the same wait.
     Arrange,
-    /// ⌃⌘ and nothing else: the column's group headers show their keys (⌃⌘1…⌃⌘9), after the
-    /// same wait.
+    /// Select Group's modifiers and nothing else (⌃⌘): the column's group headers show their
+    /// keys (⌃⌘1…⌃⌘9), after the same wait.
     Group,
 }
 
@@ -86,28 +87,40 @@ pub(crate) enum Hold {
 /// once would flash at each.
 pub(crate) const HOLD_DELAY: Duration = HINT_DELAY;
 
-/// What `flags` hold: ⌘ alone ([`tab_bar::command_alone`]: Caps Lock and the
-/// keypad's and the function key's bits do not count), ⌥⌘ and no ⇧ or ⌃, ⌃⌘ and no ⇧ or ⌥, or
-/// neither.
-pub(crate) fn hold_of(flags: NSEventModifierFlags) -> Hold {
-    let chord = NSEventModifierFlags::Command
-        | NSEventModifierFlags::Shift
-        | NSEventModifierFlags::Option
-        | NSEventModifierFlags::Control;
-    if tab_bar::command_alone(flags) {
-        Hold::Command
-    } else if flags.intersection(chord)
-        == NSEventModifierFlags::Command | NSEventModifierFlags::Option
-    {
+/// The modifiers `flags` hold among the four a shortcut uses: Caps Lock and the keypad's and the
+/// function key's bits are not among them, so ⌘ alone is still ⌘ alone with Caps Lock on.
+pub(crate) fn held_mods(flags: NSEventModifierFlags) -> Mods {
+    Mods::new(
+        flags.contains(NSEventModifierFlags::Control),
+        flags.contains(NSEventModifierFlags::Option),
+        flags.contains(NSEventModifierFlags::Shift),
+        flags.contains(NSEventModifierFlags::Command),
+    )
+}
+
+/// What `flags` hold, against the modifiers of Select Tab (`tabs`) and of Select Group
+/// (`groups`) — the file moves them, `None` when it took them away: those modifiers alone are
+/// the hold that shows the keys. ⌥⌘ alone is the arrangement's whatever the file says, so a
+/// family that has ⌥⌘ shows no hint (its keys still work). Anything else is no hold.
+pub(crate) fn hold_of(
+    flags: NSEventModifierFlags,
+    tabs: Option<Mods>,
+    groups: Option<Mods>,
+) -> Hold {
+    let held = held_mods(flags);
+    if held == ARRANGE_MODS {
         Hold::Arrange
-    } else if flags.intersection(chord)
-        == NSEventModifierFlags::Command | NSEventModifierFlags::Control
-    {
+    } else if Some(held) == tabs {
+        Hold::Tabs
+    } else if Some(held) == groups {
         Hold::Group
     } else {
         Hold::Nothing
     }
 }
+
+/// ⌥⌘: the modifiers that lift the panes for arranging.
+const ARRANGE_MODS: Mods = Mods::new(false, true, false, true);
 
 /// Runs `job` on the main queue after `delay`, with the application: found
 /// again by the queue, as it is not `Send`.
@@ -155,13 +168,16 @@ impl Tool {
         }
     }
 
-    fn key(self) -> Option<&'static str> {
-        match self {
-            Self::SplitRight => Some("\u{2318}D"),
-            Self::SplitDown => Some("\u{21e7}\u{2318}D"),
-            Self::NewTab => None,
-            Self::Close => Some("\u{2318}W"),
-        }
+    /// The key of the menu command the tool is, as the bar shows it now (`⌘D`): the file moves
+    /// it, so it is asked of the table when the tip is made. `None` for a tool with no command.
+    fn key(self, mtm: MainThreadMarker) -> Option<String> {
+        let command = match self {
+            Self::SplitRight => "split_right",
+            Self::SplitDown => "split_down",
+            Self::NewTab => return None,
+            Self::Close => "close_tab",
+        };
+        crate::menu::keys::glyphs_of(mtm, command)
     }
 
     pub(crate) fn axis(self) -> Option<Axis> {
@@ -726,7 +742,7 @@ impl ToolButton {
         // SAFETY: `initWithFrame:` is NSView's designated initializer and the
         // ivars are set.
         let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: frame] };
-        let tip = match tool.key() {
+        let tip = match tool.key(mtm) {
             Some(key) => format!("{}  {key}", tool.name()),
             None => tool.name().to_owned(),
         };
@@ -1265,45 +1281,91 @@ mod tests {
         new_tab: true,
     };
 
+    /// Select Tab's and Select Group's modifiers as the table has them.
+    const TABS: Option<Mods> = Some(Mods::CMD);
+    const GROUPS: Option<Mods> = Some(Mods::new(true, false, false, true));
+
+    fn hold(flags: NSEventModifierFlags) -> Hold {
+        hold_of(flags, TABS, GROUPS)
+    }
+
     #[test]
-    fn the_holds_are_command_alone_and_option_command_alone() {
+    fn the_holds_are_the_families_modifiers_alone_and_option_command_alone() {
         let command = NSEventModifierFlags::Command;
         let option = NSEventModifierFlags::Option;
-        assert_eq!(hold_of(command), Hold::Command);
-        assert_eq!(hold_of(command | option), Hold::Arrange);
+        assert_eq!(hold(command), Hold::Tabs);
+        assert_eq!(hold(command | option), Hold::Arrange);
         // Caps Lock, the keypad and the function key are not chords.
+        assert_eq!(hold(command | NSEventModifierFlags::CapsLock), Hold::Tabs);
         assert_eq!(
-            hold_of(command | NSEventModifierFlags::CapsLock),
-            Hold::Command
-        );
-        assert_eq!(
-            hold_of(command | option | NSEventModifierFlags::CapsLock),
+            hold(command | option | NSEventModifierFlags::CapsLock),
             Hold::Arrange
         );
         assert_eq!(
-            hold_of(command | option | NSEventModifierFlags::Function),
+            hold(command | option | NSEventModifierFlags::Function),
             Hold::Arrange
         );
         // A third modifier is a shortcut of its own.
         assert_eq!(
-            hold_of(command | option | NSEventModifierFlags::Shift),
+            hold(command | option | NSEventModifierFlags::Shift),
             Hold::Nothing
         );
         assert_eq!(
-            hold_of(command | option | NSEventModifierFlags::Control),
+            hold(command | option | NSEventModifierFlags::Control),
             Hold::Nothing
         );
         assert_eq!(
-            hold_of(command | NSEventModifierFlags::Control),
+            hold(command | NSEventModifierFlags::Control),
             Hold::Group,
             "⌃⌘ alone shows the groups' keys"
         );
         assert_eq!(
-            hold_of(command | NSEventModifierFlags::Control | NSEventModifierFlags::Shift),
+            hold(command | NSEventModifierFlags::Control | NSEventModifierFlags::Shift),
             Hold::Nothing
         );
-        assert_eq!(hold_of(option), Hold::Nothing);
-        assert_eq!(hold_of(NSEventModifierFlags::empty()), Hold::Nothing);
+        assert_eq!(hold(option), Hold::Nothing);
+        assert_eq!(hold(NSEventModifierFlags::empty()), Hold::Nothing);
+    }
+
+    #[test]
+    fn the_file_moves_the_hold_a_family_shows_its_keys_with() {
+        let option = NSEventModifierFlags::Option;
+        let command = NSEventModifierFlags::Command;
+        let only_option = Some(Mods::NONE.with(bt_core::Modifier::Option));
+        // `select_tab = "option"`: ⌥ alone shows the tabs' keys, ⌘ alone none.
+        assert_eq!(hold_of(option, only_option, GROUPS), Hold::Tabs);
+        assert_eq!(hold_of(command, only_option, GROUPS), Hold::Nothing);
+        // `select_tab = "option+cmd"`: the keys work, the hold is the arrangement's.
+        let arrange = Some(ARRANGE_MODS);
+        assert_eq!(hold_of(option | command, arrange, GROUPS), Hold::Arrange);
+        // `select_tab = ""`: no hold shows tab keys; `select_group` follows its own.
+        assert_eq!(hold_of(command, None, GROUPS), Hold::Nothing);
+        assert_eq!(
+            hold_of(command | NSEventModifierFlags::Control, None, GROUPS),
+            Hold::Group
+        );
+        assert_eq!(
+            hold_of(command | NSEventModifierFlags::Control, TABS, None),
+            Hold::Nothing
+        );
+    }
+
+    /// The modifiers a shortcut uses, Caps Lock or not; the keypad's and the function key's bits
+    /// are none of them.
+    #[test]
+    fn held_mods_ignore_caps_lock() {
+        let command = NSEventModifierFlags::Command;
+        assert_eq!(held_mods(command), Mods::CMD);
+        assert_eq!(
+            held_mods(command | NSEventModifierFlags::CapsLock),
+            Mods::CMD
+        );
+        assert_eq!(
+            held_mods(command | NSEventModifierFlags::Function),
+            Mods::CMD
+        );
+        assert_ne!(held_mods(command | NSEventModifierFlags::Shift), Mods::CMD);
+        assert_eq!(held_mods(NSEventModifierFlags::empty()), Mods::NONE);
     }
 
     #[test]
