@@ -66,6 +66,7 @@ pub mod remote_helper;
 pub mod remote_stats;
 pub mod restore;
 pub mod settings;
+pub mod shortcuts;
 pub mod split;
 pub mod ssh_hosts;
 pub mod ssh_route;

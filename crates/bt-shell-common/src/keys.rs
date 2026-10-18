@@ -7,7 +7,7 @@
 
 use std::borrow::Cow;
 
-use bt_core::{Arrow, DockKey};
+use bt_core::{Arrow, Chord, DockKey, Key, Mods, NamedKey};
 
 /// AppKit's function key range: U+F700–U+F8FF. The named constants
 /// (`NSUpArrowFunctionKey` … `NSModeSwitchFunctionKey`) use its first slice. Arrows are turned
@@ -64,6 +64,73 @@ pub fn only_char(chars: &str) -> Option<char> {
         (Some(c), None) => Some(c),
         _ => None,
     }
+}
+
+/// A key that edits the line you type. It reaches the terminal as a gesture of its own
+/// ([`encode_key`] gives it bytes), not as the menu's command.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LineKey {
+    pub chord: Chord,
+    /// The character AppKit reports for the key — the one [`encode_key`] and
+    /// `view::reaches_terminal` read.
+    pub character: char,
+    /// What the gesture is called, as a row of the shortcut list.
+    pub title: &'static str,
+    /// What the key does, finishing "⌘← …".
+    pub effect: &'static str,
+}
+
+const fn line_key(option: bool, command: bool, key: NamedKey) -> Chord {
+    Chord::plain(Mods::new(false, option, false, command), Key::Named(key))
+}
+
+/// The keys [`encode_key`] gives a meaning of its own beyond the plain key: ⌘ and ⌥ with ⌫, ← and
+/// →. The list is **named** because other readers need it: a shortcut given to one of these
+/// takes it from the line (the menu catches the key first), and the shortcut list shows them
+/// as built in. [`encode_key`] and this list are tied by a test — a key given a gesture there
+/// has to be here, and the other way round.
+pub const LINE_EDITING: [LineKey; 6] = [
+    LineKey {
+        chord: line_key(false, true, NamedKey::Backspace),
+        character: BACKSPACE,
+        title: "Delete to Start of Line",
+        effect: "deletes the line you type, back to its start",
+    },
+    LineKey {
+        chord: line_key(false, true, NamedKey::Left),
+        character: ARROW_LEFT,
+        title: "Move to Start of Line",
+        effect: "moves to the start of the line you type",
+    },
+    LineKey {
+        chord: line_key(false, true, NamedKey::Right),
+        character: ARROW_RIGHT,
+        title: "Move to End of Line",
+        effect: "moves to the end of the line you type",
+    },
+    LineKey {
+        chord: line_key(true, false, NamedKey::Backspace),
+        character: BACKSPACE,
+        title: "Delete Word Backward",
+        effect: "deletes the word before the cursor",
+    },
+    LineKey {
+        chord: line_key(true, false, NamedKey::Left),
+        character: ARROW_LEFT,
+        title: "Move One Word Left",
+        effect: "moves the cursor one word left",
+    },
+    LineKey {
+        chord: line_key(true, false, NamedKey::Right),
+        character: ARROW_RIGHT,
+        title: "Move One Word Right",
+        effect: "moves the cursor one word right",
+    },
+];
+
+/// The line-editing key a chord is, if it is one.
+pub fn line_editing(chord: &Chord) -> Option<&'static LineKey> {
+    LINE_EDITING.iter().find(|key| key.chord == *chord)
 }
 
 /// [`encode_key`]'s answer: a key with known bytes, or an arrow.
@@ -289,6 +356,79 @@ pub fn dock_key(key: KeyPress<'_>, shift: bool) -> Option<DockKey> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `encode_key` with ⌘ or ⌥ held, and with nothing held, for one character.
+    fn held_and_plain(
+        c: char,
+        option: bool,
+        command: bool,
+    ) -> (Option<KeyInput>, Option<KeyInput>) {
+        let chars = c.to_string();
+        let held = KeyPress {
+            chars: &chars,
+            ctrl: false,
+            option,
+            command,
+        };
+        let plain = KeyPress {
+            chars: &chars,
+            ctrl: false,
+            option: false,
+            command: false,
+        };
+        (encode_key(held), encode_key(plain))
+    }
+
+    #[test]
+    fn every_line_editing_key_is_coded_by_encode_key_and_no_other_is() {
+        // Each key of the list gets bytes of its own under its modifier.
+        for key in &LINE_EDITING {
+            let (held, plain) =
+                held_and_plain(key.character, key.chord.mods.option, key.chord.mods.cmd);
+            assert!(held.is_some(), "{}", key.title);
+            assert_ne!(held, plain, "{} is coded like the plain key", key.title);
+            assert!(
+                !key.chord.mods.ctrl && !key.chord.mods.shift,
+                "{}",
+                key.title
+            );
+            assert_eq!(line_editing(&key.chord), Some(key));
+        }
+        // And a key that gets bytes of its own under ⌘ or ⌥ is in the list: every printable
+        // ASCII character, AppKit's function keys, and the control characters a key reports.
+        let candidates = (' '..='~')
+            .chain('\u{f700}'..='\u{f8ff}')
+            .chain(['\r', '\t', '\u{1b}', '\u{3}', '\u{8}', '\u{7f}']);
+        for c in candidates {
+            for (option, command) in [(true, false), (false, true)] {
+                let (held, plain) = held_and_plain(c, option, command);
+                if held != plain {
+                    assert!(
+                        LINE_EDITING.iter().any(|key| key.character == c
+                            && key.chord.mods.option == option
+                            && key.chord.mods.cmd == command),
+                        "{c:?} with {} has a meaning in encode_key and is not in LINE_EDITING",
+                        if option { "⌥" } else { "⌘" }
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_commands_allow_list_is_the_lists_command_keys() {
+        // `view::reaches_terminal` lets ⌘⌫, ⌘← and ⌘→ through to the terminal: the ⌘ keys of
+        // the list, by their characters.
+        let mut with_command: Vec<char> = LINE_EDITING
+            .iter()
+            .filter(|key| key.chord.mods.cmd)
+            .map(|key| key.character)
+            .collect();
+        with_command.sort_unstable();
+        let mut allowed = vec![ARROW_LEFT, ARROW_RIGHT, BACKSPACE];
+        allowed.sort_unstable();
+        assert_eq!(with_command, allowed);
+    }
 
     #[test]
     fn the_dock_keys_are_the_plain_eight() {

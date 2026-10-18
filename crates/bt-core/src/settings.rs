@@ -31,6 +31,12 @@ use toml_edit::{Document, Item, TableLike};
 
 use crate::session::{Osc52, TerminalOptions};
 
+mod keys;
+
+pub use keys::{
+    Chord, Key, KeyEntry, MAX_SHORTCUTS, Modifier, Mods, NamedKey, Shortcut, ShortcutError,
+};
+
 /// The scrollback's ceiling: the limit of **the alacritty application**.
 ///
 /// The source is `alacritty/src/config/scrolling.rs` → `MAX_SCROLLBACK_LINES =
@@ -1530,6 +1536,10 @@ pub struct Settings {
     /// value that is not accepted and an unusable file turn it **off**: a wrong
     /// guess here writes to servers silently.
     pub remote_integration: bool,
+    /// `[keys]`: the shortcuts the file gives the commands, by the command's fixed name, in the
+    /// file's order. A command that has no entry has its default; the names are the shell
+    /// layer's, and an entry for a name it does not know is kept here and reported there.
+    pub keys: Vec<KeyEntry>,
 }
 
 impl Default for Settings {
@@ -1583,6 +1593,7 @@ impl Default for Settings {
             remote_files: RemoteFiles::default(),
             remote_stats: RemoteStatsSettings::default(),
             remote_integration: true,
+            keys: Vec::new(),
         }
     }
 }
@@ -1723,6 +1734,18 @@ pub enum SettingsEdit {
     RemoteStats(RemoteStatsMode),
     /// Seconds.
     StatsInterval(u8),
+    /// Settings ▸ Keyboard: the `[keys]` line of the command `name`. `None` removes the line (the
+    /// command is back to its default); an empty list writes `""` (no shortcut); one shortcut a
+    /// string, two a list. The name is the shell layer's: it is written as given.
+    Shortcut {
+        name: String,
+        shortcuts: Option<Vec<Shortcut>>,
+    },
+    /// Settings ▸ Keyboard's Restore Defaults…: removes the `[keys]` lines of these names — the
+    /// ones the shell layer knows. A comment and a line of another name stay.
+    DefaultShortcuts {
+        names: Vec<String>,
+    },
 }
 
 impl SettingsEdit {
@@ -1812,6 +1835,9 @@ impl SettingsEdit {
             Self::DownloadNotify(_) => ("remote", "download_notify", "remote.download_notify"),
             Self::RemoteStats(_) => ("remote", "stats", "remote.stats"),
             Self::StatsInterval(_) => ("remote", "stats_interval", "remote.stats_interval"),
+            // The key is the command's name, which a constant cannot hold: the writers
+            // ([`keys::with_shortcut`], [`keys::without_shortcuts`]) take it from the variant.
+            Self::Shortcut { .. } | Self::DefaultShortcuts { .. } => ("keys", "", "keys"),
         }
     }
 
@@ -1850,6 +1876,9 @@ impl SettingsEdit {
             Self::DownloadConflict(conflict) => conflict.name().into(),
             Self::RemoteStats(mode) => mode.name().into(),
             Self::StatsInterval(seconds) => i64::from(*seconds).into(),
+            // The line's value; a removal writes none and never asks.
+            Self::Shortcut { shortcuts, .. } => keys::value_of(shortcuts.as_deref()),
+            Self::DefaultShortcuts { .. } => String::new().into(),
             Self::PreviewMaxSize(bytes) | Self::PreviewLimit(bytes) => format_size(*bytes).into(),
             Self::PreviewReadOnly(on)
             | Self::DownloadNotify(on)
@@ -2160,6 +2189,19 @@ download_notify = true
 stats = "sparkline"
 # Seconds between two samples, 2 to 60.
 stats_interval = 3
+
+[keys]
+# A command's shortcut, by the command's name (Settings > Keyboard lists them
+# all). A name left out keeps the command's own shortcut, "" leaves it with
+# none, and a list gives it two. Modifiers: ctrl, option, shift, cmd; the key
+# comes last: a character, or left, right, up, down, tab, return, space,
+# escape, backspace, delete, home, end, pageup, pagedown, f1 to f12, plus.
+# A shortcut of only modifiers (select_tab = "option") sets the modifiers of
+# every item of a family such as the tabs' digits.
+# copy_last_output = "shift+cmd+o"
+# show_all_tabs = ""
+# show_next_tab = ["shift+cmd+]", "ctrl+tab"]
+# select_tab = "option"
 "##;
 
     /// The startup settings when the file **exists but is unusable** (can't be
@@ -2711,6 +2753,11 @@ stats_interval = 3
             }
             None => {}
         }
+        // A line of `[keys]` that cannot be read is dropped alone, so `fallback` is not asked:
+        // its command is as if the file did not say anything about it.
+        if let Some(keys) = section(text, root, "keys", &mut parsed.diagnostics) {
+            parsed.settings.keys = keys::read(text, keys, &mut parsed.diagnostics);
+        }
         Ok(parsed)
     }
 
@@ -2788,6 +2835,7 @@ stats_interval = 3
             ports: self.shell_ports != new.shell_ports,
             environment: self.shell_python_env != new.shell_python_env
                 || self.shell_node_version != new.shell_node_version,
+            keys: self.keys != new.keys,
         }
     }
 
@@ -2823,7 +2871,10 @@ stats_interval = 3
     /// write the array's entries, not a single value; their rules are in
     /// [`with_host_mark`] and [`with_host_integration`], with the same contract (text
     /// that can't be parsed and a broken array are `Err`, every other byte stays
-    /// in place).
+    /// in place). [`SettingsEdit::Shortcut`] and [`SettingsEdit::DefaultShortcuts`] are the
+    /// two edits that **remove** a line: the `[keys]` line of the command (Reset) or of
+    /// every command named (Restore Defaults…); a comment, a blank line and a line they do not
+    /// name stay (`keys.rs`).
     pub fn with_edit(text: &str, edit: &SettingsEdit) -> Result<String, Diagnostic> {
         match edit {
             SettingsEdit::RemoteHostMark {
@@ -2835,6 +2886,12 @@ stats_interval = 3
             }
             SettingsEdit::RemoteHostIntegration { host, on } => {
                 return with_host_integration(text, host, *on);
+            }
+            SettingsEdit::Shortcut { name, shortcuts } => {
+                return keys::with_shortcut(text, name, shortcuts.as_deref());
+            }
+            SettingsEdit::DefaultShortcuts { names } => {
+                return keys::without_shortcuts(text, names);
             }
             _ => {}
         }
@@ -3512,6 +3569,9 @@ pub struct Changes {
     /// changed: every pane shows or hides that part of its context row. One
     /// field for both, because the pane does the same for either.
     pub environment: bool,
+    /// [`Settings::keys`] changed: the platform shell writes the shortcuts again — the menu's,
+    /// the tab strip's hints. A position in the file is no change ([`KeyEntry`]'s equality).
+    pub keys: bool,
 }
 
 /// Parses the text into a TOML document; a one-line diagnostic if it can't be
@@ -4518,6 +4578,7 @@ mod tests {
                 tab_position: false,
                 ports: false,
                 environment: false,
+                keys: false,
             }
         );
         assert_eq!(
@@ -4579,6 +4640,7 @@ mod tests {
             remote_files: RemoteFiles::default(),
             remote_stats: RemoteStatsSettings::default(),
             remote_integration: true,
+            keys: Vec::new(),
         };
         let parsed = Settings::parse_keeping(
             "[terminal]\nscrollback = \"100000\"\n[appearance]\ntheme = 3\n",
@@ -4758,6 +4820,7 @@ mod tests {
             tab_position: false,
             ports: false,
             environment: false,
+            keys: false,
         };
         assert_eq!(before.changes(&clean("[font]\nsize = 14\n")), font_only);
         assert_eq!(
@@ -4958,6 +5021,7 @@ mod tests {
                 tab_position: false,
                 ports: false,
                 environment: false,
+                keys: false,
             }
         );
         assert_eq!(
@@ -5116,6 +5180,7 @@ found {found}; using \"spring\""
                 tab_position: false,
                 ports: false,
                 environment: false,
+                keys: false,
             }
         );
         assert_eq!(after.changes(&after), Changes::default());
@@ -5214,6 +5279,7 @@ found {found}; using \"system\""
                 tab_position: false,
                 ports: false,
                 environment: false,
+                keys: false,
             }
         );
         assert_eq!(after.changes(&after), Changes::default());
@@ -6404,6 +6470,7 @@ found 1.5; using 0.1"
                     tab_position: false,
                     ports: false,
                     environment: false,
+                    keys: false,
                 },
                 "{text}"
             );
@@ -6511,6 +6578,7 @@ found 1.5; using 0.1"
                 tab_position: false,
                 ports: false,
                 environment: false,
+                keys: false,
             }
         );
         // The same value again is no change.
@@ -6622,6 +6690,7 @@ found 1.5; using 0.1"
                 tab_position: false,
                 ports: false,
                 environment: false,
+                keys: false,
             }
         );
         assert_eq!(after.changes(&after), Changes::default());
@@ -7213,6 +7282,19 @@ cursor = \"spring\"
             SettingsEdit::DownloadNotify(on) => settings.remote_files.download_notify = on,
             SettingsEdit::RemoteStats(mode) => settings.remote_stats.mode = mode,
             SettingsEdit::StatsInterval(seconds) => settings.remote_stats.interval = seconds,
+            SettingsEdit::Shortcut { name, shortcuts } => {
+                settings.keys.retain(|entry| entry.name != name);
+                if let Some(shortcuts) = shortcuts {
+                    settings.keys.push(KeyEntry {
+                        name,
+                        shortcuts,
+                        line: None,
+                    });
+                }
+            }
+            SettingsEdit::DefaultShortcuts { names } => {
+                settings.keys.retain(|entry| !names.contains(&entry.name));
+            }
         }
         settings
     }
@@ -7286,6 +7368,23 @@ cursor = \"spring\"
             SettingsEdit::DownloadNotify(false),
             SettingsEdit::RemoteStats(RemoteStatsMode::Alerts),
             SettingsEdit::StatsInterval(10),
+            // The removing edits are not here: they delete a line, and this list's
+            // consumers ask for one line changed or added.
+            SettingsEdit::Shortcut {
+                name: "copy_last_output".to_owned(),
+                shortcuts: Some(vec![Shortcut::parse("shift+cmd+o").expect("a shortcut")]),
+            },
+            SettingsEdit::Shortcut {
+                name: "show_next_tab".to_owned(),
+                shortcuts: Some(vec![
+                    Shortcut::parse("shift+cmd+]").expect("a shortcut"),
+                    Shortcut::parse("ctrl+tab").expect("a shortcut"),
+                ]),
+            },
+            SettingsEdit::Shortcut {
+                name: "show_all_tabs".to_owned(),
+                shortcuts: Some(Vec::new()),
+            },
         ]
     }
 
@@ -7685,8 +7784,14 @@ cursor = \"spring\"
         // The user's file: the template's comments and order, plus a key and
         // section we don't recognize, a comment next to a value.
         let rich = format!(
-            "{}future = true\n\n[notes]\nx = 1\n",
-            Settings::TEMPLATE.replace("scrollback = 10000", "scrollback = 10000  # plenty")
+            "{}\n[notes]\nx = 1\n",
+            Settings::TEMPLATE
+                .replace("scrollback = 10000", "scrollback = 10000  # plenty")
+                // A key we don't recognize inside a section we do.
+                .replace(
+                    "stats_interval = 3\n",
+                    "stats_interval = 3\nfuture = true\n"
+                )
         );
         let crlf = rich.replace('\n', "\r\n");
         for edit in every_edit() {
@@ -8138,5 +8243,197 @@ cursor = \"spring\"
         assert_eq!(line_of("a\nb\nc", 2), Some(2));
         assert_eq!(line_of("a\nb\nc", 4), Some(3));
         assert_eq!(line_of("a", 99), None);
+    }
+
+    #[test]
+    fn keys_are_read_by_name_and_a_file_without_them_changes_nothing() {
+        assert!(clean("[terminal]\nscrollback = 5\n").keys.is_empty());
+        assert!(clean("[keys]\n").keys.is_empty());
+        let settings = clean("[keys]\nsplit_right = \"cmd+d\"\nshow_all_tabs = \"\"\n");
+        let names: Vec<&str> = settings
+            .keys
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect();
+        assert_eq!(names, ["split_right", "show_all_tabs"]);
+        assert!(settings.keys[1].shortcuts.is_empty());
+        // The inline spelling is the same table.
+        assert_eq!(clean("keys = { split_right = \"cmd+d\" }\n").keys.len(), 1);
+    }
+
+    #[test]
+    fn an_unreadable_shortcut_is_a_diagnostic_with_its_line_and_spoils_nothing_else() {
+        let (settings, diagnostic) = rejected(
+            "[terminal]\nscrollback = 500\n\n[keys]\ncopy_last_output = \"shift+cmd+\"\nsplit_right = \"cmd+d\"\n",
+        );
+        assert_eq!(settings.scrollback, 500);
+        assert_eq!(settings.keys.len(), 1);
+        assert_eq!(settings.keys[0].name, "split_right");
+        assert_eq!(diagnostic.key, Some("keys"));
+        assert_eq!(diagnostic.line, Some(5));
+        assert!(
+            diagnostic
+                .to_string()
+                .starts_with("line 5: `keys.copy_last_output`:"),
+            "{diagnostic}"
+        );
+        // The save-time fallback does not enter: the line is dropped, as if the file had not
+        // said anything about the command.
+        let current = Settings {
+            keys: clean("[keys]\ncopy_last_output = \"shift+cmd+o\"\n").keys,
+            ..Settings::default()
+        };
+        let kept = Settings::parse_keeping("[keys]\ncopy_last_output = \"shift+cmd+\"\n", &current)
+            .expect("parseable text");
+        assert!(kept.settings.keys.is_empty());
+        // `keys` that is not a section is reported like every other section.
+        let (settings, diagnostic) = rejected("keys = 5\n");
+        assert!(settings.keys.is_empty());
+        assert_eq!(diagnostic.key, Some("keys"));
+        assert!(
+            diagnostic.message.contains("must be a section"),
+            "{diagnostic}"
+        );
+    }
+
+    #[test]
+    fn keys_change_with_a_shortcut_and_not_with_a_line_number() {
+        let before = clean("[keys]\nsplit_right = \"cmd+d\"\n");
+        let moved = clean("[terminal]\nscrollback = 500\n\n\n[keys]\n\nsplit_right = \"cmd+d\"\n");
+        let edited = clean("[keys]\nsplit_right = \"cmd+e\"\n");
+        let removed = clean("");
+        assert!(!before.changes(&before).keys);
+        assert!(before.changes(&edited).keys);
+        assert!(before.changes(&removed).keys);
+        assert!(removed.changes(&before).keys);
+        // The only thing that moved is a position; the scrollback moved the section down.
+        let moved_changes = before.changes(&moved);
+        assert!(!moved_changes.keys);
+        assert!(moved_changes.terminal);
+        assert_eq!(
+            clean("[keys]\nsplit_right = \"cmd+d\"\n")
+                .changes(&clean("\n\n[keys]\nsplit_right = \"cmd+d\"\n")),
+            Changes::default()
+        );
+    }
+
+    fn shortcut(text: &str) -> Shortcut {
+        Shortcut::parse(text).expect("a shortcut")
+    }
+
+    fn set_shortcut(text: &str, name: &str, shortcuts: &[&str]) -> String {
+        let edit = SettingsEdit::Shortcut {
+            name: name.to_owned(),
+            shortcuts: Some(shortcuts.iter().map(|text| shortcut(text)).collect()),
+        };
+        Settings::with_edit(text, &edit).expect("writable text")
+    }
+
+    fn reset_shortcut(text: &str, name: &str) -> String {
+        let edit = SettingsEdit::Shortcut {
+            name: name.to_owned(),
+            shortcuts: None,
+        };
+        Settings::with_edit(text, &edit).expect("writable text")
+    }
+
+    #[test]
+    fn shortcut_write_keeps_comments_and_unknown_keys() {
+        let text = format!(
+            "{}\n[future]\ny = true\n",
+            Settings::TEMPLATE.replace("scrollback = 10000", "scrollback = 10000  # plenty")
+        );
+        let written = set_shortcut(&text, "copy_last_output", &["shift+cmd+o"]);
+        assert!(one_line_apart(&text, &written, "\n"), "{written}");
+        assert!(written.contains("scrollback = 10000  # plenty"));
+        assert!(written.contains("[future]\ny = true"));
+        assert!(written.contains("# A command's shortcut"));
+        assert_eq!(
+            clean(&written).keys,
+            clean("[keys]\ncopy_last_output = \"shift+cmd+o\"\n").keys
+        );
+        // A second command goes beside the first; the first line is not touched.
+        let two = set_shortcut(&written, "show_all_tabs", &[]);
+        assert!(two.contains("copy_last_output = \"shift+cmd+o\"\nshow_all_tabs = \"\"\n"));
+        assert_eq!(clean(&two).keys.len(), 2);
+    }
+
+    #[test]
+    fn a_reset_is_the_write_taken_back_byte_for_byte() {
+        for text in [
+            Settings::TEMPLATE.to_owned(),
+            Settings::TEMPLATE.replace('\n', "\r\n"),
+            "[terminal]\nscrollback = 5\n".to_owned(),
+            String::new(),
+        ] {
+            let written = set_shortcut(&text, "copy_last_output", &["shift+cmd+o"]);
+            assert_ne!(written, text);
+            let back = reset_shortcut(&written, "copy_last_output");
+            // A text that had no `[keys]` is left with the empty section the write added.
+            if text.contains("[keys]") {
+                assert_eq!(back, text);
+            } else {
+                assert!(clean(&back).keys.is_empty(), "{back}");
+                assert!(back.starts_with(&text), "{back}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_reset_keeps_comments_and_unknown_keys() {
+        let text = "# mine\n[terminal]\nscrollback = 500 # lots\n\n[keys]\n\
+                    # the table's comment\nsplit_right = \"cmd+d\" # why\n\
+                    copy_last_output = [\n  \"shift+cmd+o\",\n  \"ctrl+o\",\n] # two\n\
+                    future_command = \"cmd+9\"\n\n[notes]\nx = 1\n";
+        let written = reset_shortcut(text, "split_right");
+        assert_eq!(written, text.replace("split_right = \"cmd+d\" # why\n", ""));
+        // The list that takes several lines goes whole, with the comment on its last one.
+        let written = reset_shortcut(text, "copy_last_output");
+        assert_eq!(
+            written,
+            text.replace(
+                "copy_last_output = [\n  \"shift+cmd+o\",\n  \"ctrl+o\",\n] # two\n",
+                ""
+            )
+        );
+        assert_eq!(clean(&written).keys.len(), 2);
+    }
+
+    #[test]
+    fn restore_defaults_keeps_comments_and_unknown_keys() {
+        let text = "[terminal]\r\nscrollback = 500 # lots\r\n[keys]\r\n# note\r\n\
+                    split_right = \"cmd+d\"\r\ncopy_last_output = \"shift+cmd+o\"\r\n\
+                    mystery = \"cmd+9\"\r\n";
+        let edit = SettingsEdit::DefaultShortcuts {
+            names: vec!["split_right".to_owned(), "copy_last_output".to_owned()],
+        };
+        let written = Settings::with_edit(text, &edit).expect("writable text");
+        assert_eq!(
+            written,
+            "[terminal]\r\nscrollback = 500 # lots\r\n[keys]\r\n# note\r\nmystery = \"cmd+9\"\r\n"
+        );
+        // The same edit on an inline table.
+        let inline = "keys = { split_right = \"cmd+d\", mystery = \"cmd+9\" }\n";
+        assert_eq!(
+            Settings::with_edit(inline, &edit).expect("writable text"),
+            "keys = { mystery = \"cmd+9\" }\n"
+        );
+    }
+
+    #[test]
+    fn a_shortcut_is_not_written_where_it_would_erase_something() {
+        let edit = SettingsEdit::Shortcut {
+            name: "split_right".to_owned(),
+            shortcuts: Some(vec![shortcut("cmd+d")]),
+        };
+        let err = Settings::with_edit("keys = 5\n", &edit).expect_err("not a section");
+        assert_eq!(err.key, Some("keys"));
+        let reset = SettingsEdit::Shortcut {
+            name: "split_right".to_owned(),
+            shortcuts: None,
+        };
+        // The reset refuses it too: the text is not changed.
+        assert!(Settings::with_edit("[[keys]]\nx = 1\n", &reset).is_err());
+        assert_eq!(edit.path(), "keys");
     }
 }

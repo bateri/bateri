@@ -483,8 +483,15 @@ fn slug(path: &[String]) -> String {
 pub fn shortcut(key: &str, modifiers: Modifiers) -> Option<String> {
     let (text, shifted) = key_glyph(key)?;
     // A key with no ⌃⌥⇧⌘ is no shortcut the user could press from the menu (AppKit's Start
-    // Dictation is fn-D): it is not shown as a bare letter.
-    if !(modifiers.control || modifiers.option || modifiers.shift || modifiers.command || shifted) {
+    // Dictation is fn-D): it is not shown as a bare letter. A function key is the exception:
+    // F5 is a shortcut by itself.
+    if !(modifiers.control
+        || modifiers.option
+        || modifiers.shift
+        || modifiers.command
+        || shifted
+        || function_key(key).is_some())
+    {
         return None;
     }
     let mut out = String::new();
@@ -504,8 +511,23 @@ pub fn shortcut(key: &str, modifiers: Modifiers) -> Option<String> {
     Some(out)
 }
 
+/// The number of a function key (F1 to F12) a menu key equivalent names: AppKit spells them
+/// U+F704 to U+F70F.
+fn function_key(key: &str) -> Option<u32> {
+    let mut chars = key.chars();
+    let (first, None) = (chars.next()?, chars.next()) else {
+        return None;
+    };
+    (0xF704..=0xF70F)
+        .contains(&u32::from(first))
+        .then(|| u32::from(first) - 0xF703)
+}
+
 /// The glyph of a key, and whether it is typed with ⇧ on top of the modifiers.
 fn key_glyph(key: &str) -> Option<(String, bool)> {
+    if let Some(number) = function_key(key) {
+        return Some((format!("F{number}"), false));
+    }
     let mut chars = key.chars();
     let first = chars.next()?;
     if chars.next().is_some() {
@@ -517,6 +539,7 @@ fn key_glyph(key: &str) -> Option<(String, bool)> {
         '\u{F701}' => glyph("↓"),
         '\u{F702}' => glyph("←"),
         '\u{F703}' => glyph("→"),
+        '\u{F728}' => glyph("⌦"),
         '\u{F729}' => glyph("↖"),
         '\u{F72B}' => glyph("↘"),
         '\u{F72C}' => glyph("⇞"),

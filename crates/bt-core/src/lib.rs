@@ -110,14 +110,15 @@ pub use session::{
 };
 pub use settings::{
     CURSOR_BLINK_INTERVAL, CURSOR_BLINK_RANGE, CURSOR_GLOW, CURSOR_GLOW_RANGE, CURSOR_RADIUS,
-    CURSOR_RADIUS_RANGE, CaretShape, CaretStyle, Changes, ConfirmClose, ContentEdge, CursorBlink,
-    CursorMotion, Diagnostic, DockArrival, DownloadConflict, Erase, FontOptions, HostMark,
-    HostRule, IconColors, KeepRunning, Keypress, LETTER_SPACING_RANGE, LINE_HEIGHT_RANGE,
-    MAX_LETTER_SPACING, MAX_LINE_HEIGHT, MIN_SPACING, MINIMUM_CONTRAST, MINIMUM_CONTRAST_RANGE,
-    MarkSubject, Parsed, PreviewKeep, ReduceMotion, RemoteFiles, RemoteStatsMode,
-    RemoteStatsSettings, RestoreWindows, SCROLLBACK_MAX, SIZE_UNITS, STATS_INTERVAL_RANGE,
-    SYSTEM_THEME, Scrollbar, Settings, SettingsEdit, ShellIntegration, SmoothScroll, SplitStyle,
-    TabPosition, UnfocusedCaret, bare_host, expand_home, format_size, host_mark, parse_size,
+    CURSOR_RADIUS_RANGE, CaretShape, CaretStyle, Changes, Chord, ConfirmClose, ContentEdge,
+    CursorBlink, CursorMotion, Diagnostic, DockArrival, DownloadConflict, Erase, FontOptions,
+    HostMark, HostRule, IconColors, KeepRunning, Key, KeyEntry, Keypress, LETTER_SPACING_RANGE,
+    LINE_HEIGHT_RANGE, MAX_LETTER_SPACING, MAX_LINE_HEIGHT, MAX_SHORTCUTS, MIN_SPACING,
+    MINIMUM_CONTRAST, MINIMUM_CONTRAST_RANGE, MarkSubject, Modifier, Mods, NamedKey, Parsed,
+    PreviewKeep, ReduceMotion, RemoteFiles, RemoteStatsMode, RemoteStatsSettings, RestoreWindows,
+    SCROLLBACK_MAX, SIZE_UNITS, STATS_INTERVAL_RANGE, SYSTEM_THEME, Scrollbar, Settings,
+    SettingsEdit, ShellIntegration, Shortcut, ShortcutError, SmoothScroll, SplitStyle, TabPosition,
+    UnfocusedCaret, bare_host, expand_home, format_size, host_mark, parse_size,
 };
 pub use shell::{
     ButtonState, DockContext, DockEnvironment, DockFault, DockState, DockStatus,
