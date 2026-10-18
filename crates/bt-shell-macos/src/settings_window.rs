@@ -3347,7 +3347,7 @@ mod tests {
                 Key::NodeVersion => SettingsEdit::ShellNodeVersion(false),
                 Key::DimSplits => SettingsEdit::DimUnfocusedSplits(true),
                 Key::ResizeInSteps => SettingsEdit::ResizeInSteps(true),
-                Key::SplitStyle => SettingsEdit::SplitStyle(SplitStyle::Lines),
+                Key::SplitStyle => SettingsEdit::SplitStyle(SplitStyle::Cards),
                 Key::TabIcons => SettingsEdit::TabIcons(false),
                 Key::TabIconColors => SettingsEdit::IconColors(IconColors::Brand),
                 Key::TabPosition => SettingsEdit::TabPosition(TabPosition::Side),

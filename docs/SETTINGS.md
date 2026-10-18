@@ -239,7 +239,7 @@ dim_unfocused_splits = false
 # ground of their own with a gap round them, rounded and lit from above;
 # lines lets the panes touch with one thin line between them, for the most
 # room.
-split_style = "cards"
+split_style = "lines"
 # true | false. Resizes a window a whole cell at a time while you drag its
 # edge, so a lone pane's text keeps the same margin on both sides and the
 # strip at its top its least height. Off: the window follows the pointer, and
@@ -973,7 +973,7 @@ dark_theme = "bateri"
 content_edge = "fade"
 minimum_contrast = 3.0
 dim_unfocused_splits = false
-split_style = "cards"
+split_style = "lines"
 resize_in_steps = false
 tab_icons = true
 tab_icon_colors = "theme"
@@ -988,7 +988,7 @@ tab_position = "top"
 | `content_edge` | `"fade"` \| `"line"` \| `"cut"` | `"fade"` | what the text does where it meets the tab bar, or the frame of a split pane |
 | `minimum_contrast` | decimal, `1.0`–`21.0` | `3.0` | the least contrast ratio a program's text keeps against its background; `1` turns it off |
 | `dim_unfocused_splits` | `true` \| `false` | `false` | dim the panes of a split tab that don't have the focus |
-| `split_style` | `"cards"` \| `"lines"` | `"cards"` | how a split tab sets its panes apart: cards on a ground, or panes divided by a line |
+| `split_style` | `"cards"` \| `"lines"` | `"lines"` | how a split tab sets its panes apart: cards on a ground, or panes divided by a line |
 | `resize_in_steps` | `true` \| `false` | `false` | resize a window a whole cell at a time while its edge is dragged |
 | `tab_icons` | `true` \| `false` | `true` | show the program a tab runs as an icon on a tile before its title |
 | `tab_icon_colors` | `"theme"` \| `"brand"` | `"theme"` | whether the icon uses the theme's colors only, or keeps the program's own color where it has one |
@@ -1070,9 +1070,10 @@ tab_position = "top"
   (and back) slides the panes into place in a fifth of a second — at once
   with Reduce Motion — and the program in each pane is resized once, not on
   every frame. A zoomed pane (Shift Cmd Return) fills the tab again.
-- `split_style = "lines"` lets the panes touch instead, with a one-pixel line
-  in the divider's color between them, square corners and the plain
-  background — the most room for text. The focused pane is then told by its
+- `split_style = "lines"`, the default, lets the panes touch instead, with a
+  one-pixel line in the divider's color between them, square corners and the
+  plain background — the most room for text, and the look a tab of one pane
+  already has, so splitting a tab doesn't change how the window looks. The focused pane is then told by its
   cursor alone, or also by `dim_unfocused_splits`. It applies at once.
 - A tab's chip shows which program runs in it, before its title: Claude Code,
   Codex, OpenCode, Antigravity, Gemini CLI, Pi, Herdr, Cursor CLI, Copilot

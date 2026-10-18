@@ -560,10 +560,12 @@ pub enum SplitStyle {
     /// Every pane a card on the window's ground: a gap round and between
     /// them, rounded corners, no line — a card stands off the ground by its
     /// light and its shadow, the focused one nearer.
-    #[default]
     Cards,
     /// The panes touch, one line in the divider's colour between them,
-    /// square corners and the plain background: the most room for text.
+    /// square corners and the plain background: the most room for text. The
+    /// default, because it is how a tab of one pane already looks: splitting
+    /// a tab doesn't change the window's look until someone picks cards.
+    #[default]
     Lines,
 }
 
@@ -1989,7 +1991,7 @@ dim_unfocused_splits = false
 # ground of their own with a gap round them, rounded and lit from above;
 # lines lets the panes touch with one thin line between them, for the most
 # room.
-split_style = "cards"
+split_style = "lines"
 # true | false. Resizes a window a whole cell at a time while you drag its
 # edge, so a lone pane's text keeps the same margin on both sides and the
 # strip at its top its least height. Off: the window follows the pointer, and
@@ -4554,7 +4556,7 @@ mod tests {
             content_edge: ContentEdge::Line,
             minimum_contrast: 4.5,
             dim_unfocused_splits: true,
-            split_style: SplitStyle::Lines,
+            split_style: SplitStyle::Cards,
             resize_in_steps: true,
             tab_icons: false,
             tab_icon_colors: IconColors::Brand,
@@ -5827,16 +5829,16 @@ found 1.5; using 0.1"
     }
 
     #[test]
-    fn split_style_is_read_and_defaults_to_cards() {
-        assert_eq!(clean("").split_style, SplitStyle::Cards);
+    fn split_style_is_read_and_defaults_to_lines() {
+        assert_eq!(clean("").split_style, SplitStyle::Lines);
         for (value, expected) in [("cards", SplitStyle::Cards), ("lines", SplitStyle::Lines)] {
             let text = format!("[appearance]\nsplit_style = \"{value}\"\n");
             assert_eq!(clean(&text).split_style, expected, "{value}");
             assert_eq!(expected.name(), value);
         }
         // A change is its own: only the split tabs are laid out again.
-        let lines = clean("[appearance]\nsplit_style = \"lines\"\n");
-        assert!(clean("").changes(&lines).split_style);
+        let cards = clean("[appearance]\nsplit_style = \"cards\"\n");
+        assert!(clean("").changes(&cards).split_style);
         assert!(!clean("").changes(&clean("")).split_style);
     }
 
@@ -7239,7 +7241,7 @@ cursor = \"spring\"
             SettingsEdit::ContentEdge(ContentEdge::Cut),
             SettingsEdit::MinimumContrast(4.5),
             SettingsEdit::DimUnfocusedSplits(true),
-            SettingsEdit::SplitStyle(SplitStyle::Lines),
+            SettingsEdit::SplitStyle(SplitStyle::Cards),
             SettingsEdit::ResizeInSteps(true),
             SettingsEdit::TabIcons(false),
             SettingsEdit::IconColors(IconColors::Brand),

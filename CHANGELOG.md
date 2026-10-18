@@ -14,6 +14,12 @@ of every installed copy. A version without a section is not released.
 
 ### Changed
 
+- **Split tabs keep the look of the tab they came from.** Split style
+  (`[appearance] split_style`) now defaults to "Lines": splitting a tab no
+  longer turns its panes into cards on a ground, so the window looks the same
+  with one pane and with two. "Cards" is one choice away in Settings ▸
+  Appearance ▸ Split style. A settings file that already says
+  `split_style = "cards"` keeps it.
 - **The command palette fades out as it closes**, the way it came in and like
   the find panel, instead of vanishing at once. The keys and the pointer are the
   tab's from the moment it starts to go, so what you type or click right after
