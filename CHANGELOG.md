@@ -19,6 +19,17 @@ of every installed copy. A version without a section is not released.
   tab's from the moment it starts to go, so what you type or click right after
   ⏎ or esc is not lost. With Reduce Motion it still goes at once.
 
+### Fixed
+
+- **With the tabs at the side, the window moves by an empty spot of the panes
+  along its top**, as Arc moves its window by an empty part of the page. A
+  press within a title bar's height of the window's top, on no text — the
+  margin above the first line or a blank cell — drags the window, and a double
+  click there zooms or minimizes as System Settings says, as on the tab
+  column's empty space; a press on text there selects it. This works even
+  while a program such as vim or an agent has the mouse: a press on text or on
+  a coloured cell there is still the program's.
+
 ## [0.19.0] - 2026-10-18
 
 ### Added

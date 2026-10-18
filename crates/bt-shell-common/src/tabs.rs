@@ -1183,6 +1183,21 @@ pub fn side_width(wanted: f64, window: f64) -> f64 {
         .min(window)
 }
 
+/// Whether a press on a pane moves the window, with the tabs in the side column. There is no
+/// title row over the content then — the panes start at the window's top — so the window is
+/// moved, besides by the column's empty part, by an empty spot of the panes near the top, the
+/// way Arc moves its window by an empty part of the page: a press `from_top` points below the
+/// window's top, within the title row's height (`row`), on a part of a pane that draws no text
+/// to aim at (`blank`, the pane's to say: its margin above the first row, the fade the rows
+/// thin away in, or a blank cell — even on a program's screen that has the mouse, whose glyphs
+/// and coloured cells stay its). A press on text there is the
+/// pane's, so a selection starts on the top line as anywhere else; below the band every part of
+/// a pane stays the pane's, so only the panes along the window's top edge move it, and a pane
+/// lower in a split tab never does. In full screen nothing moves the window.
+pub fn side_grab(from_top: f64, row: f64, full_screen: bool, blank: bool) -> bool {
+    blank && !full_screen && (0.0..row).contains(&from_top)
+}
+
 /// Space above the first row and below the last, in the scrolled content: the rows keep off the
 /// title row's foot and off New Tab.
 pub const LIST_PAD: f64 = 6.0;
@@ -5579,6 +5594,37 @@ mod tests {
             "a row with no lead starts at the field"
         );
         assert_eq!(Row::field(width).end(), long.title.end());
+    }
+
+    /// A pane's blank top moves the window in the title row's band and nowhere else: not below
+    /// the band (a pane lower in a split tab, a tall margin's foot), not on text, not in full
+    /// screen.
+    #[test]
+    fn a_panes_blank_top_moves_the_window_within_the_title_rows_band() {
+        let row = 28.0;
+        assert!(side_grab(0.0, row, false, true), "the window's very top");
+        assert!(
+            side_grab(12.0, row, false, true),
+            "the margin over the first line"
+        );
+        assert!(
+            !side_grab(12.0, row, false, false),
+            "on text the press is the pane's"
+        );
+        assert!(
+            !side_grab(28.0, row, false, true),
+            "the band ends at the row's height"
+        );
+        assert!(
+            !side_grab(300.0, row, false, true),
+            "a pane lower in a split tab"
+        );
+        assert!(!side_grab(-1.0, row, false, true), "above the window");
+        assert!(
+            !side_grab(12.0, row, true, true),
+            "full screen does not move"
+        );
+        assert!(!side_grab(0.0, 0.0, false, true), "no row measured yet");
     }
 
     /// The column's width is the window's to give, within the bounds: a wide window takes what was

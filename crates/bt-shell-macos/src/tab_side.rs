@@ -21,7 +21,11 @@
 //!
 //! **A press on the column's empty part moves the window** (the bar's `mouseDown:`,
 //! `performWindowDragWithEvent:`), as it does on the bar's. The band of the title row over the
-//! content is claimed by a [`RowClaim`] of the root view, so a press there is the pane's.
+//! content is claimed by a [`RowClaim`] of the root view, so the window server does not move the
+//! window from there and a press is the pane's: on text it selects, and on an empty spot — the
+//! margin or fade above the first line, a blank cell, even on a program's screen that has the mouse — the pane moves
+//! the window itself, the same press and double click as here ([`super::title_press`],
+//! `tabs::side_grab`), as Arc does from an empty part of its page.
 //!
 //! **The summary card** opens at the row's right, [`CARD_BESIDE`](super::CARD_BESIDE) off the
 //! column and level with the row, slid to fit the window (`card_beside`): the same card, the

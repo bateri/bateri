@@ -153,7 +153,7 @@ use objc2_app_kit::{
     NSFontWeightRegular, NSFontWeightSemibold, NSGradient, NSGradientDrawingOptions,
     NSGraphicsContext, NSImage, NSImageScaling, NSImageView, NSLineBreakMode, NSLineCapStyle,
     NSLineJoinStyle, NSMenu, NSMenuItem, NSShadow, NSTextAlignment, NSTextField,
-    NSTextFieldDelegate, NSTitlePosition, NSTrackingArea, NSTrackingAreaOptions, NSView,
+    NSTextFieldDelegate, NSTitlePosition, NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow,
     NSWindowButton, NSWindowOrderingMode, NSWindowStyleMask,
 };
 use objc2_core_foundation::CFRetained;
@@ -354,6 +354,29 @@ pub(crate) fn title_double_click(action: Option<&str>, legacy_minimize: bool) ->
         Some(_) => TitleAction::Zoom,
         None if legacy_minimize => TitleAction::Minimize,
         None => TitleAction::Zoom,
+    }
+}
+
+/// A press that stands for one on the title bar — on the bar's or the column's empty part
+/// ([`TabBar`]'s `mouseDown:`), or on an empty spot of a pane under the title row with the tabs
+/// in the side column (`BateriView`'s press): one click moves `window`
+/// (`performWindowDragWithEvent:`), a double click does what the system's setting says
+/// ([`title_double_click`]). One body, so every place that moves the window answers the double
+/// click the same way.
+pub(crate) fn title_press(window: &NSWindow, event: &NSEvent) {
+    if event.clickCount() < 2 {
+        window.performWindowDragWithEvent(event);
+        return;
+    }
+    let defaults = NSUserDefaults::standardUserDefaults();
+    let action = defaults
+        .stringForKey(ns_string!("AppleActionOnDoubleClick"))
+        .map(|action| action.to_string());
+    let legacy = defaults.boolForKey(ns_string!("AppleMiniaturizeOnDoubleClick"));
+    match title_double_click(action.as_deref(), legacy) {
+        TitleAction::Zoom => window.performZoom(None),
+        TitleAction::Minimize => window.performMiniaturize(None),
+        TitleAction::Nothing => {}
     }
 }
 
@@ -5502,22 +5525,8 @@ define_class!(
         /// system's setting says.
         #[unsafe(method(mouseDown:))]
         fn mouse_down(&self, event: &NSEvent) {
-            let Some(window) = self.window() else {
-                return;
-            };
-            if event.clickCount() < 2 {
-                window.performWindowDragWithEvent(event);
-                return;
-            }
-            let defaults = NSUserDefaults::standardUserDefaults();
-            let action = defaults
-                .stringForKey(ns_string!("AppleActionOnDoubleClick"))
-                .map(|action| action.to_string());
-            let legacy = defaults.boolForKey(ns_string!("AppleMiniaturizeOnDoubleClick"));
-            match title_double_click(action.as_deref(), legacy) {
-                TitleAction::Zoom => window.performZoom(None),
-                TitleAction::Minimize => window.performMiniaturize(None),
-                TitleAction::Nothing => {}
+            if let Some(window) = self.window() {
+                title_press(&window, event);
             }
         }
 

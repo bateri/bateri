@@ -1440,7 +1440,9 @@ pub(crate) struct RootIvars {
     ruled: Cell<bool>,
     /// With the tabs in the side column, the title row's band over the content: a claim on it,
     /// so a press there is the pane's and the window server does not move the window
-    /// ([`RowClaim`]). Hidden while the bar is in the row. Above every container.
+    /// ([`RowClaim`]) — a press on text there selects; one on an empty spot of a pane moves the
+    /// window by the pane's own hand (`tabs::side_grab`). Hidden while the bar is in the row.
+    /// Above every container.
     claim: Retained<RowClaim>,
     /// The side column's right edge, which resizes it ([`SideEdge`]): the top of the stack, over
     /// the claim and every container. Hidden while the bar is in the row.
@@ -1669,7 +1671,8 @@ impl RootView {
     /// In the side column it is the window's height and the column's width at the left
     /// ([`RootView::column_for`]), the containers beside it from the window's top — there is no
     /// title row over the content — the row's band over them is claimed, so a press there is the
-    /// pane's, and the column's last [`EDGE_GRIP`] is its resizing edge.
+    /// pane's (which moves the window from an empty spot, `tabs::side_grab`), and the column's
+    /// last [`EDGE_GRIP`] is its resizing edge.
     fn place(&self, row: f64) {
         let bounds = self.bounds();
         let row = row.min(bounds.size.height);

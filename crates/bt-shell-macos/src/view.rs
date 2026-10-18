@@ -49,7 +49,7 @@ use objc2_app_kit::{
     NSCursor, NSDragOperation, NSDraggingContext, NSDraggingDestination, NSDraggingInfo,
     NSDraggingSession, NSDraggingSource, NSEvent, NSEventModifierFlags, NSEventPhase, NSMenuItem,
     NSPasteboard, NSPasteboardTypeFileURL, NSResponder, NSTextInputClient, NSTrackingArea,
-    NSTrackingAreaOptions, NSView,
+    NSTrackingAreaOptions, NSView, NSWindow, NSWindowStyleMask,
 };
 use objc2_foundation::{
     NSArray, NSAttributedString, NSAttributedStringKey, NSNotFound, NSObjectProtocol, NSPoint,
@@ -293,6 +293,29 @@ fn cell_at(
             pixel(y, cell_h * f64::from(rows)),
         )),
     })
+}
+
+/// Whether a point of the view stands over no text the grid draws at the pane's top — the blank
+/// a press there may move the window from (`tabs::side_grab`). **Pure**, with
+/// [`point_to_pointer`]'s units and from the same drawn frame: `window_y_px` the point's
+/// physical pixels from the view's top, `origin_px` the grid's origin, `edge_px` the top fade's
+/// height and `fill_rows` the fill band's length ([`bt_gpu::Origin`]).
+///
+/// Only above the origin, where no row of the grid stands — a press there is refused as a cell
+/// ([`OutOfGrid::Reject`]), so it never starts a selection or a report — and there only where
+/// [`OutOfGrid::Clamp`] calls it the edge: in the fade, where a row only thins away, or anywhere
+/// above the origin while no fill band is drawn there. The band's rows below the fade are the
+/// scrollback's text, seen if not selectable, and a press on them stays the pane's; so does a
+/// grid row a tall dock band lifted into the fade, which is not above the origin. The grid's own
+/// rows answer for themselves, cell by cell ([`Session::blank_at`]).
+pub(crate) fn blank_above_grid(
+    window_y_px: f64,
+    origin_px: f64,
+    edge_px: f64,
+    fill_rows: u16,
+) -> bool {
+    let in_fade = edge_px > 0.0 && window_y_px < edge_px;
+    window_y_px < origin_px && (fill_rows == 0 || in_fade)
 }
 
 /// The cells the search panel covers - **pure**, with [`point_to_pointer`]'s
@@ -2348,6 +2371,23 @@ impl BateriView {
         if button == MouseButton::Left && self.context_control(event) {
             return;
         }
+        // **An empty spot of the pane's top under the title row moves the window** with the
+        // tabs in the side column, as the title bar it stands in for would
+        // ([`Self::grabs_window`]): the margin above the first row, or a blank cell of the rows
+        // in the band — a program's mouse reporting or not. **Nothing reaches the program**:
+        // `report_button` is never called, so no press goes; the ledger is opened and left
+        // empty ([`Gesture::begin_press`] clears the left button's bits and no `pressed` sets
+        // one), so whatever of this press still reaches the view afterwards — a `mouseUp:`, a
+        // `mouseDragged:` once `performWindowDragWithEvent:`'s own loop lets go — finds no
+        // sent bit and no selection: [`Release::Done`] and [`Drag::Ignore`], no release and no
+        // motion with a button held.
+        if button == MouseButton::Left
+            && let Some(window) = self.grabs_window(event, session)
+        {
+            self.with_gesture(|g| g.begin_press(button));
+            crate::tab_bar::title_press(&window, event);
+            return;
+        }
         self.forget_link_menu();
         self.with_gesture(|g| g.begin_press(button));
         // **A ⌘-press on the shown link is the link's in every mode**:
@@ -2616,6 +2656,71 @@ impl BateriView {
             cols,
             rows,
         )
+    }
+
+    /// The window a press on this pane moves, with the tabs in the side column — Arc's way: an
+    /// empty spot near the window's top is the window's to drag. The press is plain (no
+    /// modifier: Shift extends a selection, ⌘ opens a link, ⌥⌘ carries the pane), in the title
+    /// row's band at the window's top, the window not in full screen (`tabs::side_grab`), and
+    /// over no text:
+    ///
+    /// - the margin or the fade above the grid's first row ([`blank_above_grid`]), or
+    /// - a cell of the grid that draws nothing and is not in the selection
+    ///   ([`Session::blank_at`]) — **even while a program has the mouse** (vim, htop, tmux, an
+    ///   agent such as Claude Code that turns reporting on for its whole screen): the program
+    ///   loses only the presses on blank, plain-ground cells of this band, and none of them
+    ///   reaches it ([`Self::button_event`]); a glyph, a coloured cell (a status bar, a
+    ///   header, an agent's own boxes), every press below the band and the wheel stay its.
+    ///
+    /// Not the dock's input line, which has its own presses. `None` for every other press,
+    /// which stays the pane's: with the tabs in the title row, on the top line's text (a
+    /// selection starts there as anywhere), below the band, in a pane lower in a split tab, and
+    /// in a pane embedded in another application (no window of ours to ask the row of). The
+    /// trade is Arc's and kept to the band: a drag that starts on a blank cell there moves the
+    /// window instead of selecting; started on a letter, it selects.
+    ///
+    /// The window server leaves this band to the panes ([`crate::tab_bar::RowClaim`] claims it,
+    /// so a press on the top line selects instead of moving the window); the move is this
+    /// press's own, `performWindowDragWithEvent:` as from the column's empty part.
+    fn grabs_window(&self, event: &NSEvent, session: &Session) -> Option<Retained<NSWindow>> {
+        let mtm = self.mtm();
+        if !crate::window::tabs_at_side(mtm) {
+            return None;
+        }
+        let plain = !event.modifierFlags().intersects(
+            NSEventModifierFlags::Shift
+                | NSEventModifierFlags::Command
+                | NSEventModifierFlags::Option
+                | NSEventModifierFlags::Control,
+        );
+        if !plain {
+            return None;
+        }
+        let window = self.window()?;
+        let row = crate::app::delegate(mtm)?
+            .window_owning(&window)?
+            .title_row();
+        let full_screen = window.styleMask().contains(NSWindowStyleMask::FullScreen);
+        // The window's coordinates run up from its bottom; the content view is the whole window
+        // (a full-size content view), so its height is where the window's top is.
+        let at = event.locationInWindow();
+        let from_top = window.contentView()?.frame().size.height - at.y;
+        // The band first: a press below it asks nothing of the grid.
+        if !crate::tabs::side_grab(from_top, row, full_screen, true)
+            || self.window_point_dock(at, OutOfGrid::Reject).is_some()
+        {
+            return None;
+        }
+        let origin = self.origin();
+        let blank = blank_above_grid(
+            self.convertPoint_fromView(at, None).y * window.backingScaleFactor(),
+            origin.map_or(0.0, |origin| f64::from(origin.px())),
+            origin.map_or(0.0, |origin| f64::from(origin.edge_px())),
+            origin.map_or(0, Origin::fill_rows),
+        ) || self
+            .window_point_pointer(at, OutOfGrid::Reject)
+            .is_some_and(|pointer| session.blank_at(pointer.cell));
+        crate::tabs::side_grab(from_top, row, full_screen, blank).then_some(window)
     }
 
     /// Window point → row + column + half in the dock's input block. `None`
@@ -3570,6 +3675,46 @@ mod tests {
             Some((99, CellHalf::Right)),
             "without padding the same point overflows the grid"
         );
+    }
+
+    /// A pane's blank top is where the clamp calls the space above the origin the edge: all of
+    /// it while no fill band is drawn, only the fade while one is; never the grid's own rows.
+    /// The scene: the origin 40 px down, a 16 px fade.
+    #[test]
+    fn the_blank_above_the_grid_is_the_margin_and_the_fade_not_the_text() {
+        let (origin, fade) = (40.0, 16.0);
+        // No band: the margin over the first row, fade or not.
+        assert!(blank_above_grid(0.0, origin, fade, 0), "the view's top");
+        assert!(
+            blank_above_grid(30.0, origin, fade, 0),
+            "under the fade, over the row"
+        );
+        assert!(blank_above_grid(30.0, origin, 0.0, 0), "the cut's leftover");
+        assert!(
+            !blank_above_grid(40.0, origin, fade, 0),
+            "the first row is text"
+        );
+        assert!(
+            !blank_above_grid(90.0, origin, fade, 0),
+            "and so is the rest"
+        );
+        // A band of history above the origin: only the fade is blank.
+        assert!(
+            blank_above_grid(10.0, origin, fade, 2),
+            "the fade over the band"
+        );
+        assert!(
+            !blank_above_grid(30.0, origin, fade, 2),
+            "the band's text below it"
+        );
+        assert!(
+            !blank_above_grid(10.0, origin, 0.0, 2),
+            "no fade: the band is text"
+        );
+        // A grid row lifted into the fade by a tall dock band is a row.
+        assert!(!blank_above_grid(10.0, 8.0, fade, 0), "a row in the fade");
+        // No frame drawn yet: origin zero, nothing is above it.
+        assert!(!blank_above_grid(0.0, 0.0, 0.0, 0));
     }
 
     /// The scene's measure above the origin: 9×18 cell, @2x, **180 physical
