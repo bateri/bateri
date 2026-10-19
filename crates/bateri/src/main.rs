@@ -43,6 +43,11 @@ fn main() -> ExitCode {
     if let Some(code) = bt_shell_macos::compact() {
         return ExitCode::from(u8::try_from(code).unwrap_or(1));
     }
+    // `bateri config list|get|set|reset|path|edit`: settings from a
+    // shell — no GUI, any session (ssh included), the same reasons.
+    if let Some(code) = bt_shell_macos::config() {
+        return ExitCode::from(u8::try_from(code).unwrap_or(1));
+    }
     // An unknown subcommand must not open a window: a typo, or a
     // subcommand of a newer bateri asked of an older one, would otherwise
     // start the whole GUI. Arguments starting with `-` pass —

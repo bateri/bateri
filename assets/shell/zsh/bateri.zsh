@@ -280,6 +280,15 @@ __bateri_hooks() {
   if [[ -n $__bateri_bin ]] && (( ! ${+aliases[ssh]} && ! ${+functions[ssh]} )); then
     ssh() { __bateri_ssh "$@" }
   fi
+  # `bateri` AS A COMMAND: the app's binary is not on PATH (it lives inside
+  # the `.app`), so inside bateri a `bateri` function runs the very binary
+  # that started this shell — `bateri config set …`, `bateri help`. The same
+  # rule as `ssh`'s, defined here for the same reason: a `bateri` of the
+  # user's own — an alias, a function, or a command on PATH (a symlink they
+  # made) — is seen and wins, and we define nothing.
+  if [[ -n $__bateri_bin ]] && (( ! ${+aliases[bateri]} && ! ${+functions[bateri]} && ! ${+commands[bateri]} )); then
+    bateri() { command "$__bateri_bin" "$@" }
+  fi
 }
 
 # Runs the user's `ssh`, wrapped when bateri says so.

@@ -258,6 +258,41 @@ pub fn compact() -> Option<i32> {
     Some(bt_shell_common::journal::compact_main(&argv))
 }
 
+/// `bateri config …`: `Some(exit code)` when the process was started to read or change a
+/// setting from a shell, `None` otherwise. `main` calls it before the window-server check — it
+/// has no GUI and works over ssh — and before the unknown-subcommand rule. The body is
+/// [`bt_shell_common::config_command::config_main`]; here only the platform's input: the
+/// settings root, by **the same expression** the application reads it from (`child::home()` →
+/// `settings::config_root`), so the command and the app can't look at two files.
+pub fn config() -> Option<i32> {
+    use bt_shell_common::config_command::{self, EXIT_USAGE, Io, USAGE};
+    let mut args = std::env::args_os().skip(1);
+    if args.next()? != config_command::SUBCOMMAND {
+        return None;
+    }
+    let Some(argv) = args
+        .map(|arg| arg.into_string().ok())
+        .collect::<Option<Vec<String>>>()
+    else {
+        eprintln!("{USAGE}");
+        return Some(EXIT_USAGE);
+    };
+    let Some(home) = child::home() else {
+        eprintln!("bateri config: no home directory (HOME is unset or not absolute)");
+        return Some(config_command::EXIT_CONFIG);
+    };
+    let root = bt_shell_common::settings::config_root(&home);
+    Some(config_command::config_main(
+        &argv,
+        &mut Io {
+            root: &root,
+            out: &mut std::io::stdout().lock(),
+            err: &mut std::io::stderr().lock(),
+            style: bt_shell_common::cli::Style::for_stdout(),
+        },
+    ))
+}
+
 /// The shell of the smoke and measurement runs. **Not** the user's `$SHELL`:
 /// the result must not depend on the rc files.
 ///

@@ -835,6 +835,19 @@ static CATALOG: [Setting; 34] = [
 mod tests {
     use super::*;
 
+    #[test]
+    fn every_palette_setting_is_a_template_key() {
+        // `bateri config` lists the template's keys; a setting the palette offers must be
+        // one of them, or the two would disagree about what exists.
+        for setting in all() {
+            assert!(
+                bt_core::template_key(setting.key()).is_some(),
+                "{} is in the palette but not in the template",
+                setting.key()
+            );
+        }
+    }
+
     /// What the file says after `edit`, read back by the settings parser — the whole path a
     /// chosen value takes.
     fn written(edit: &SettingsEdit) -> Settings {

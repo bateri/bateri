@@ -12,6 +12,19 @@ of every installed copy. A version without a section is not released.
 
 ## [Unreleased]
 
+### Added
+
+- **`bateri config` changes settings from the terminal.** `bateri config list`
+  shows every setting with its value, its default, the values it takes and
+  what it does (`--changed` only what you changed); `get`, `set` and `reset`
+  read and change one, `path` says where `settings.toml` is and `edit` opens it
+  in your `$EDITOR`. `set` writes only that line, the way the settings window
+  does, keeps your comments, and refuses a value bateri would not accept,
+  saying which values the setting takes. It applies at once in every open
+  window, and works over ssh. Inside bateri, `bateri` is now a command of the
+  shell (unless you have one of your own); elsewhere it is
+  `/Applications/bateri.app/Contents/MacOS/bateri`.
+
 ### Changed
 
 - **The command palette fades out as it closes**, the way it came in and like

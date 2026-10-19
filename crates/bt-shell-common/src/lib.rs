@@ -39,6 +39,8 @@
 //! {bt-atlas, bt-core}`; nothing here depends upward (`make audit` checks it).
 
 pub mod child;
+pub mod cli;
+pub mod config_command;
 pub mod download;
 pub mod environment;
 pub mod focus;
