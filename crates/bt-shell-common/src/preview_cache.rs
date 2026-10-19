@@ -121,7 +121,14 @@ pub fn touch(dir: &Path, path: &Path, now: u64) {
 ///
 /// A damaged index is started afresh: the copies it knew become unknown and are
 /// never deleted, the safe side. A failure to record leaves the copy unknown too.
+///
+/// **Only a regular file is sealed.** `chmod` follows a link: a link at `path`
+/// would make its target — any path of this Mac — read-only. The download
+/// already refuses one (`download::land`); this is the second lock on the same door.
 pub fn seal(dir: &Path, path: &Path, read_only: bool, now: u64) {
+    if !fs::symlink_metadata(path).is_ok_and(|meta| meta.is_file()) {
+        return;
+    }
     if read_only {
         use std::os::unix::fs::PermissionsExt;
         let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o444));
@@ -388,6 +395,26 @@ mod tests {
         fs::write(partial.join("half"), vec![b'x'; 500]).unwrap();
         assert!(dir.join(INDEX_NAME).is_file());
         assert_eq!(usage(&dir), (150, 2));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn sealing_a_link_changes_nothing_it_points_to_and_records_nothing() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = scratch("seal-link");
+        let dir = root.join("Previews");
+        fs::create_dir_all(dir.join("prod")).unwrap();
+        let victim = root.join("victim");
+        fs::create_dir_all(&victim).unwrap();
+        fs::set_permissions(&victim, fs::Permissions::from_mode(0o755)).unwrap();
+        let path = dir.join("prod/notes.txt");
+        std::os::unix::fs::symlink(&victim, &path).unwrap();
+        seal(&dir, &path, true, 7);
+        assert_eq!(
+            fs::metadata(&victim).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        assert!(load(&dir).unwrap().records.is_empty());
         let _ = fs::remove_dir_all(&root);
     }
 

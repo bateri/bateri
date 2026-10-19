@@ -1517,7 +1517,10 @@ fn file_url(path: &Path) -> Retained<NSURL> {
 /// download's `seal` hook: it runs on the stream thread while the item is still
 /// in its hidden temporary folder, so the item never has its name unmarked.
 /// Foundation's resource values are thread-safe. A failure leaves the item
-/// unmarked and is not an error: the bytes arrived.
+/// unmarked and is not an error: the bytes arrived. A link inside a folder is
+/// marked itself, never its target (the resource value is the link's own), and
+/// the walk never descends through one (`symlink_metadata`): nothing outside the
+/// download is touched.
 fn quarantine(path: &Path, agent: &str) {
     let properties = NSDictionary::<NSString, NSString>::from_slices(
         &[

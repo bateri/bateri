@@ -7,9 +7,10 @@
 //! **Nothing half-written ever takes the item's name.** The archive unpacks into a
 //! hidden temporary folder next to the destination (same folder, same volume) and
 //! only the finished item is moved out with one `rename`; cancel, failure and a full
-//! disk delete the temporary folder. Only the expected item leaves it — anything
-//! else a hostile archive carries is deleted with the folder (local tar already
-//! refuses `..` and absolute paths). tar keeps the remote mtime: the local half of
+//! disk delete the temporary folder. Only the expected item leaves it, and only
+//! as a file or a folder ([`land`]) — anything else a hostile archive carries is
+//! deleted with the folder (local tar already refuses `..`, absolute paths and
+//! extracting through a link). tar keeps the remote mtime: the local half of
 //! the preview cache's "did it change" question.
 //!
 //! On a background thread, like the upload; the queue is `upload::Transfers`.
@@ -228,6 +229,15 @@ fn stream(
 }
 
 /// Moves the unpacked `item` to `landing` (or its next free name), after `seal`.
+///
+/// **Only a regular file or a folder lands.** The stream is the remote's: a
+/// correct server dereferences a linked item (`download_script`'s `tar -h`), but
+/// a hostile one can send the item as a link with an absolute target — `seal`
+/// (the preview's `chmod 0444`) and the preview's open would then act on a path
+/// of this Mac the server chose, `~` or `~/.ssh`. A link, a FIFO, a socket or a
+/// device is refused before `seal` sees it, and the temporary folder takes it
+/// away. A folder's inner links stay links: the local tar refuses to extract
+/// through one, so nothing lands outside the folder by them.
 fn land(
     item: &Path,
     landing: &Path,
@@ -236,6 +246,16 @@ fn land(
 ) -> Result<PathBuf, String> {
     let meta = fs::symlink_metadata(item)
         .map_err(|_| "the remote item did not arrive in the archive".to_owned())?;
+    if !meta.is_file() && !meta.is_dir() {
+        let kind = if meta.file_type().is_symlink() {
+            "a link"
+        } else {
+            "a special file"
+        };
+        return Err(format!(
+            "the remote item arrived as {kind}, not a file or a folder"
+        ));
+    }
     seal(item);
     let target = match conflict {
         Conflict::KeepBoth => keep_both_name(landing, meta.is_dir(), |path| {
@@ -446,6 +466,102 @@ mod tests {
         let landed = landed.expect("landed");
         assert!(fs::symlink_metadata(&landed).unwrap().is_file());
         assert_eq!(fs::read(&landed).unwrap(), b"server {}");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A hostile server in place of ssh: it ignores the download script and
+    /// `tar c`s whatever `operands` name from `dir` — a link as the item, a FIFO,
+    /// a folder whose own link points out of it. The remote command arrives as
+    /// `$0` and is never run.
+    fn hostile_ssh(operands: &str) -> Vec<String> {
+        vec![
+            "/bin/sh".to_owned(),
+            "-c".to_owned(),
+            format!("exec /usr/bin/tar -c -f - {operands}"),
+        ]
+    }
+
+    fn mode(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    #[test]
+    fn a_link_or_a_special_file_sent_as_the_item_never_lands_and_is_never_sealed() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = scratch("hostile-item");
+        let server = root.join("server");
+        let downloads = root.join("Downloads");
+        fs::create_dir_all(&server).unwrap();
+        fs::create_dir_all(&downloads).unwrap();
+        // The user's own file, outside the download.
+        let victim = root.join("victim");
+        fs::write(&victim, b"mine").unwrap();
+        fs::set_permissions(&victim, fs::Permissions::from_mode(0o644)).unwrap();
+        // `notes.txt` is a link with an absolute target: a correct server
+        // dereferences a linked item (`tar -h`), this one does not.
+        std::os::unix::fs::symlink(&victim, server.join("notes.txt")).unwrap();
+        let fifo = std::ffi::CString::new(server.join("pipe").to_str().unwrap()).unwrap();
+        // SAFETY: `fifo` is a NUL-terminated path that outlives the call.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o644) }, 0, "mkfifo");
+
+        for name in ["notes.txt", "pipe"] {
+            let sealed = std::cell::Cell::new(false);
+            let (outcome, landed) = transfer(
+                &hostile_ssh(&format!("-C '{}' ./{name}", server.display())),
+                &format!("/srv/{name}"),
+                &downloads.join(name),
+                Conflict::Replace,
+                &Arc::new(Shared::default()),
+                || {},
+                // What the preview's seal does to the landed path.
+                |item| {
+                    sealed.set(true);
+                    let _ = fs::set_permissions(item, fs::Permissions::from_mode(0o444));
+                },
+            );
+            assert!(matches!(outcome, Outcome::Failed(_)), "{name}: {outcome:?}");
+            assert_eq!(landed, None, "{name}");
+            assert!(!sealed.get(), "{name} was sealed");
+            assert!(names(&downloads).is_empty(), "{:?}", names(&downloads));
+        }
+        assert_eq!(mode(&victim), 0o644, "the link's target was changed");
+        assert_eq!(fs::read(&victim).unwrap(), b"mine");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_folder_cannot_write_through_its_own_link_out_of_the_download() {
+        // The folder's inner links stay links (only the item itself is
+        // dereferenced); the local tar refuses to extract **through** one, so the
+        // entry after the link never reaches the folder it points to.
+        let root = scratch("hostile-folder");
+        let (first, second) = (root.join("first"), root.join("second"));
+        let downloads = root.join("Downloads");
+        let victim = root.join("victim");
+        fs::create_dir_all(first.join("site")).unwrap();
+        fs::create_dir_all(second.join("site/link")).unwrap();
+        fs::create_dir_all(&downloads).unwrap();
+        fs::create_dir_all(&victim).unwrap();
+        std::os::unix::fs::symlink(&victim, first.join("site/link")).unwrap();
+        fs::write(second.join("site/link/planted"), b"evil").unwrap();
+        let (outcome, landed) = transfer(
+            &hostile_ssh(&format!(
+                "-C '{}' ./site -C '{}' ./site/link/planted",
+                first.display(),
+                second.display()
+            )),
+            "/srv/site",
+            &downloads.join("site"),
+            Conflict::KeepBoth,
+            &Arc::new(Shared::default()),
+            || {},
+            |_| {},
+        );
+        assert!(matches!(outcome, Outcome::Failed(_)), "{outcome:?}");
+        assert_eq!(landed, None);
+        assert!(names(&victim).is_empty(), "{:?}", names(&victim));
+        assert!(names(&downloads).is_empty(), "{:?}", names(&downloads));
         let _ = fs::remove_dir_all(&root);
     }
 
