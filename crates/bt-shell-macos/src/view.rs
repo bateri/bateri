@@ -527,10 +527,11 @@ fn reaches_terminal(flags: NSEventModifierFlags, chars: Option<&str>) -> bool {
 }
 
 /// Whether `keyDown:` stops after the text stack: `consumed` is
-/// [`ViewIvars::consumed`], `commanded` is [`ViewIvars::commanded`], both read
-/// after `interpretKeyEvents:` returns.
+/// [`ViewIvars::consumed`], `committed` [`ViewIvars::committed`] and
+/// `commanded` [`ViewIvars::commanded`], all read after `interpretKeyEvents:`
+/// returns.
 ///
-/// **The stack keeps the key only if it took the event and named no command
+/// **The stack keeps the key unless it committed text and named a command
 /// for it.** An input method may do both for one key: Korean 2-Set, with a
 /// syllable pending, commits it with `insertText:` on Return, an arrow or Tab
 /// **and then** names `insertNewline:`/`moveLeft:`/`insertTab:` for the same
@@ -540,13 +541,22 @@ fn reaches_terminal(flags: NSEventModifierFlags, chars: Option<&str>) -> bool {
 /// `interpretKeyEvents:`, so falling to `encode_key` keeps the order: **the
 /// text first, then the key's bytes**.
 ///
+/// **A command beside a composition step that commits nothing stays kept**,
+/// as every consumed key was before: `setMarkedText:` consumes too, and an
+/// input method that updates or cancels its marked text and names
+/// `cancelOperation:` or an arrow for the same key would otherwise send Esc or
+/// the arrow on to the program - vim would leave insert mode in the middle of
+/// a word. Only the shape that was observed (text committed, then a command)
+/// opens the door.
+///
 /// An input method that ends a composition on Return **without** naming a
 /// command (Japanese and Chinese conversion: Return accepts the candidate, it
 /// does not submit the line) stays kept, as does every letter, completed dead
 /// key and composition step. A command with nothing taken falls through as
 /// it always did: its bytes come from `encode_key`, not from the selector.
-fn stack_kept_the_key(consumed: bool, commanded: bool) -> bool {
-    consumed && !commanded
+fn stack_kept_the_key(consumed: bool, committed: &str, commanded: bool) -> bool {
+    let key_follows_text = commanded && !committed.is_empty();
+    consumed && !key_follows_text
 }
 
 /// The key's own part of `characters` when the stack committed text **and**
@@ -620,8 +630,8 @@ pub(crate) struct ViewIvars {
     consumed: Cell<bool>,
     /// **Whether the text stack named a command for this event** -
     /// `doCommandBySelector:` raises it, `keyDown:` lowers it beside
-    /// [`ViewIvars::consumed`] before `interpretKeyEvents:` and reads the two
-    /// together on return ([`stack_kept_the_key`]).
+    /// [`ViewIvars::consumed`] before `interpretKeyEvents:` and reads it with
+    /// that flag and [`ViewIvars::committed`] on return ([`stack_kept_the_key`]).
     ///
     /// The selector itself is not kept: the key's bytes come from
     /// `encode_key`, as they do for a command that arrives alone, so
@@ -635,10 +645,11 @@ pub(crate) struct ViewIvars {
     commanded: Cell<bool>,
     /// **The text `insertText:` wrote during this `keyDown:`** - emptied
     /// beside [`ViewIvars::consumed`] before `interpretKeyEvents:`, taken on
-    /// return. It is read only when the stack also named a command: then the
-    /// key goes to `encode_key` and its `characters` may begin with this very
-    /// text (a dead key followed by Return: `"´\r"`), which
-    /// [`key_after_commit`] cuts so the text does not go out twice.
+    /// return. Text here **and** a command named is what sends the key on
+    /// ([`stack_kept_the_key`]); then the key goes to `encode_key` and its
+    /// `characters` may begin with this very text (a dead key followed by
+    /// Return: `"´\r"`), which [`key_after_commit`] cuts so the text does not
+    /// go out twice.
     ///
     /// Appended, not replaced: nothing promises one `insertText:` per event,
     /// and `characters` would then begin with all of them in order. A call
@@ -1256,8 +1267,8 @@ define_class!(
         ///    numpad Enter's U+0003 to AppKit's choice, so the trade is "every
         ///    command may be interrupted" against "a rare accent".
         /// 5. **The rest** is given to the stack; if the stack did not take the
-        ///    event ([`ViewIvars::consumed`]), or took it and also named a
-        ///    command for it ([`ViewIvars::commanded`]), it falls to
+        ///    event ([`ViewIvars::consumed`]), or committed text and also named
+        ///    a command for it ([`ViewIvars::commanded`]), it falls to
         ///    `encode_key` anyway.
         #[unsafe(method(keyDown:))]
         fn key_down(&self, event: &NSEvent) {
@@ -1356,6 +1367,7 @@ define_class!(
                 let committed = self.ivars().committed.take();
                 if stack_kept_the_key(
                     self.ivars().consumed.get(),
+                    &committed,
                     self.ivars().commanded.get(),
                 ) {
                     return;
@@ -1374,9 +1386,9 @@ define_class!(
             // keys, Enter/Tab/Esc/Backspace, Control letters, Option
             // navigation/deletion (the stack gives them to `doCommandBySelector:`
             // and that method only records that it came) and ⌘⌫/⌘←/⌘→ that
-            // passed the allow list. **And a key the stack took and named a
-            // command for** (Korean Return mid-syllable, a dead key then
-            // Return): its text is already out, the key's own bytes follow.
+            // passed the allow list. **And a key the stack committed text for
+            // and named a command for** (Korean Return mid-syllable, a dead key
+            // then Return): its text is already out, the key's own bytes follow.
             //
             // We do not pass to `super`: `NSResponder::keyDown:` beeps on a key
             // it does not recognise and every arrow key in the terminal would beep.
@@ -4006,18 +4018,25 @@ mod tests {
         // same event (commanded). The text has already gone out inside
         // `interpretKeyEvents:`; the key must follow it through `encode_key`,
         // or the line is not submitted and a second Return is needed. The
-        // arrows and Tab mid-syllable are the same shape.
-        assert!(!stack_kept_the_key(true, true));
-        // A letter, a completed dead key, a composition step (`setMarkedText:`)
-        // and Japanese/Chinese Return during conversion (the IME commits and
-        // names no command): the stack kept the key, nothing else goes out.
-        assert!(stack_kept_the_key(true, false));
+        // arrows and Tab mid-syllable are the same shape, and so is a dead
+        // key followed by Return (`insertText:"´"` + `insertNewline:`).
+        assert!(!stack_kept_the_key(true, "한", true));
+        assert!(!stack_kept_the_key(true, "´", true));
+        // A letter, a completed dead key and Japanese/Chinese Return during
+        // conversion (the IME commits and names no command): the stack kept
+        // the key, nothing else goes out.
+        assert!(stack_kept_the_key(true, "a", false));
+        // A composition step (`setMarkedText:`, nothing committed), alone or
+        // with a command named beside it: kept, so an Esc or an arrow that
+        // only changed the marked text does not also reach the program.
+        assert!(stack_kept_the_key(true, "", false));
+        assert!(stack_kept_the_key(true, "", true));
         // A command alone (Return, an arrow, Option+arrow with nothing
         // pending): the key's bytes come from `encode_key`, as they always did.
-        assert!(!stack_kept_the_key(false, true));
+        assert!(!stack_kept_the_key(false, "", true));
         // The stack never answered (an unrecognised text type, a pure
         // modifier): it falls to `encode_key` too.
-        assert!(!stack_kept_the_key(false, false));
+        assert!(!stack_kept_the_key(false, "", false));
     }
 
     #[test]
