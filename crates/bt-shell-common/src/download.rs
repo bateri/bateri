@@ -154,9 +154,9 @@ fn stream(
     };
     shared.track(&[&remote, &local_tar]);
 
-    let remote_err = collect_stderr(remote.stderr.take(), None);
+    let remote_err = collect_stderr(remote.stderr.take(), None, None);
     // The full disk is this Mac's: the local tar says so.
-    let local_err = collect_stderr(local_tar.stderr.take(), Some(Arc::clone(shared)));
+    let local_err = collect_stderr(local_tar.stderr.take(), Some(Arc::clone(shared)), None);
     let mut watcher = TarWatcher::default();
     if let (Some(mut source), Some(mut sink)) = (remote.stdout.take(), local_tar.stdin.take()) {
         let mut buffer = vec![0; 64 * 1024];

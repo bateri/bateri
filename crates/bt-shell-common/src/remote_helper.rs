@@ -128,7 +128,7 @@ impl HelperSession {
             let _ = child.wait();
             return Err(format!("ssh could not be started for {host}"));
         };
-        let stderr = Some(collect_stderr(child.stderr.take(), None));
+        let stderr = Some(collect_stderr(child.stderr.take(), None, None));
         let (tx, lines) = mpsc::channel();
         thread::Builder::new()
             .name("remote helper output".into())

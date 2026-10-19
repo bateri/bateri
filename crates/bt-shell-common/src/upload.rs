@@ -318,14 +318,255 @@ fn df_available(line: &str) -> Option<u64> {
 /// The script that unpacks the stream remotely: change into the target directory
 /// and extract from standard input. `-p` keeps permissions, `-o` does **not** keep
 /// ownership — a file uploaded as root must not end up with the local user's uid.
+///
+/// `-v` makes the remote tar **say which entry it has reached** ([`Heard`]): the
+/// only account of how far the server got. What we have read locally is no
+/// measure of it — the pipe, ssh's window and the network hold megabytes between
+/// the two. GNU tar and busybox list the name on standard output, bsdtar as
+/// `x name` on standard error.
 fn extract_script(dir: &str) -> String {
-    format!("cd {} && exec tar -x -p -o -f -", sq(dir))
+    format!("cd {} && exec tar -x -v -p -o -f -", sq(dir))
 }
 
 /// The script that deletes the half-written file on cancel (or when the disk fills);
 /// `rel` is its path in the stream (`./static/app.js`), relative to the directory.
 fn cleanup_script(dir: &str, rel: &str) -> String {
     format!("cd {} && rm -f -- {}", sq(dir), sq(rel))
+}
+
+/// How long the cleanup's connection may take — a **design constant**. An `rm`
+/// over an open connection takes a fraction of a second and a new one a few; a
+/// cancel is likeliest exactly when the link has stalled, and until the stream
+/// thread returns the queue refuses every drop and an update waits. Past this the
+/// connection is killed and the line says the partial file may remain.
+const CLEANUP_LIMIT: Duration = Duration::from_secs(10);
+
+/// How long a stopped upload waits for the server's last lines ([`Heard`]) — a
+/// **design constant**. ssh's pipes close the moment it is killed, and what it
+/// had passed on is read in a blink; but a session riding a `ControlMaster` hands
+/// its pipes to the master, which holds them until it lets go of the channel — on
+/// a dead link, minutes. A line still on its way then only ever means deleting less.
+const HEARING_LIMIT: Duration = Duration::from_secs(2);
+
+/// The most entries kept waiting for the remote listing ([`Heard`]) — a **design
+/// constant**: the listing trails the stream by what is in flight, a few thousand
+/// entries of small files at most. A listing that falls further behind is one we
+/// cannot read (a buffered or an unrecognised one); we stop keeping it and no
+/// longer delete anything.
+const UNHEARD_LIMIT: usize = 64 * 1024;
+
+/// What the remote tar has said it reached ([`extract_script`]'s `-v`), matched
+/// against what we sent. **The only ground for deleting a file on cancel:** a file
+/// the server has not listed may be one that was there before the upload, untouched.
+///
+/// The entries we sent wait here in stream order until the listing names them;
+/// a line is taken only for the entry it must come next ([`lists`]), so the rc
+/// file's noise, a name in a form we do not read or a name broken over two lines
+/// stalls the match — the listing then seems behind, which only ever means
+/// deleting less.
+#[derive(Debug, Default)]
+pub(crate) struct Heard {
+    unheard: VecDeque<String>,
+    /// The listing outran [`UNHEARD_LIMIT`]: nothing is known any more.
+    lost: bool,
+}
+
+impl Heard {
+    /// The entry's header is about to be sent — **before** its bytes go, so its
+    /// line cannot come back first.
+    fn sent(&mut self, name: String) {
+        if self.lost {
+            return;
+        }
+        if self.unheard.len() >= UNHEARD_LIMIT {
+            self.lost = true;
+            self.unheard = VecDeque::new();
+            return;
+        }
+        self.unheard.push_back(name);
+    }
+
+    /// A line from the remote tar; `true` if it was the listing of the next entry.
+    fn hear(&mut self, line: &str) -> bool {
+        let heard = self.unheard.front().is_some_and(|next| lists(line, next));
+        if heard {
+            self.unheard.pop_front();
+        }
+        heard
+    }
+
+    /// Whether the server has listed every entry we sent: it is then at the last
+    /// one and cannot be further.
+    fn caught_up(&self) -> bool {
+        !self.lost && self.unheard.is_empty()
+    }
+
+    /// A line of the remote's standard error, where bsdtar lists — and where its
+    /// listing **must not become the failure text**: without `-v` bsdtar says
+    /// nothing on success, and the reason a failure gives is the last line there.
+    ///
+    /// bsdtar writes `x name` when an entry begins and ends the line only when the
+    /// entry does, with `: error` if it failed. So the line of the entry it is in
+    /// when the link drops is never ended, and **ssh's own message lands on it**:
+    /// `x ./big.binclient_loop: send disconnect: Broken pipe`. Whatever follows the
+    /// next entry's name is therefore the line's own news ([`leaves`]). A listing
+    /// line that does not name the next entry — the match has stalled on a name we
+    /// do not read, or [`UNHEARD_LIMIT`] was passed — is still listing: every name
+    /// we send starts with `./` ([`transfer`]), so `x ./` is bsdtar speaking. It
+    /// is kept out of the text ([`Told::Unplaced`]); else, once stalled, every
+    /// later line of a million-file folder would pile up there.
+    fn told(&mut self, line: &str) -> Told {
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        let Some(listed) = line.strip_prefix("x ") else {
+            return if self.hear(line) {
+                Told::Listing(None)
+            } else {
+                Told::Other
+            };
+        };
+        if let Some(rest) = self.unheard.front().and_then(|next| after(listed, next)) {
+            self.unheard.pop_front();
+            return Told::Listing(leaves(listed, rest));
+        }
+        if listed.starts_with("./") {
+            Told::Unplaced
+        } else {
+            Told::Other
+        }
+    }
+
+    /// What the last listing line we could not place ([`Told::Unplaced`]) leaves for
+    /// the error text, once the stream has ended — it is the line ssh's message is
+    /// glued to if the link dropped while the match was stalled. Its entry is one we
+    /// sent and the server had not been heard to reach, so it is sought among those
+    /// (the longest name that fits, as `./a b` before `./a`); once, at the end, so
+    /// a long stalled listing costs no search per line.
+    fn glued(&self, line: &str) -> Option<String> {
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        let listed = line.strip_prefix("x ")?;
+        let rest = self
+            .unheard
+            .iter()
+            .filter_map(|name| Some((name.len(), after(listed, name)?)))
+            .max_by_key(|(len, _)| *len)?
+            .1;
+        leaves(listed, rest)
+    }
+}
+
+/// A line of the remote's standard error as [`Heard::told`] reads it.
+enum Told {
+    /// Not the listing: it goes to the error text as it is.
+    Other,
+    /// The listing of the next entry, and what it leaves for the error text.
+    Listing(Option<String>),
+    /// bsdtar's listing of an entry we cannot place: kept out of the text.
+    Unplaced,
+}
+
+/// What follows the entry `name` at the start of the listing `text`, which names it
+/// as it is or C-escaped ([`unescape`]); `None` if `text` does not start with it.
+/// Of the two readings, one that ends the listing (nothing, or `: error`) wins.
+fn after(text: &str, name: &str) -> Option<String> {
+    let unescaped = unescape(text);
+    let rests = [
+        text.strip_prefix(name).map(str::as_bytes),
+        unescaped.strip_prefix(name.as_bytes()),
+    ];
+    let rest = rests
+        .iter()
+        .flatten()
+        .find(|rest| rest.is_empty() || rest.starts_with(b": "))
+        .or_else(|| rests.iter().flatten().next())?;
+    Some(String::from_utf8_lossy(rest).into_owned())
+}
+
+/// What bsdtar's `x {listed}` leaves for the error text, `rest` being what follows
+/// the entry's name: nothing for the listing alone; for an entry that failed the
+/// line as bsdtar writes it without `-v` (`./b: Can't create 'b'`), so the text
+/// reads as it did before; anything else is not bsdtar's — ssh's message, glued
+/// to the line bsdtar had not ended.
+fn leaves(listed: &str, rest: String) -> Option<String> {
+    if rest.is_empty() {
+        None
+    } else if rest.starts_with(": ") {
+        Some(listed.to_owned())
+    } else {
+        Some(rest)
+    }
+}
+
+/// Whether the remote tar's `line` lists the entry `name`: GNU tar and busybox
+/// print the name (GNU escaping what is not printable, `\303\251` for `é`),
+/// bsdtar `x name` — escaped the same way, and with `: error` after it when the
+/// entry failed (bsdtar ends the line only once the entry is done). bsdtar on a
+/// Mac lists a non-ASCII name decomposed (`c\314\247` for the stream's `ç`): that
+/// line is not matched, which only ever means deleting less.
+fn lists(line: &str, name: &str) -> bool {
+    let line = line.strip_suffix('\r').unwrap_or(line);
+    let name = name.as_bytes();
+    let said = |text: &str, suffixed: bool| {
+        [text.as_bytes().to_vec(), unescape(text)]
+            .iter()
+            .any(|said| {
+                said == name
+                    || (suffixed
+                        && said
+                            .strip_prefix(name)
+                            .is_some_and(|rest| rest.starts_with(b": ")))
+            })
+    };
+    said(line, false) || line.strip_prefix("x ").is_some_and(|rest| said(rest, true))
+}
+
+/// C escapes back to bytes: `\\`, `\n`, `\t` and their kin, `\ooo`; anything
+/// else stays as it is.
+fn unescape(text: &str) -> Vec<u8> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut at = 0;
+    while let Some(&byte) = bytes.get(at) {
+        at += 1;
+        if byte != b'\\' {
+            out.push(byte);
+            continue;
+        }
+        let Some(&next) = bytes.get(at) else {
+            out.push(byte);
+            break;
+        };
+        let simple = match next {
+            b'\\' => Some(b'\\'),
+            b'a' => Some(0x07),
+            b'b' => Some(0x08),
+            b'f' => Some(0x0c),
+            b'n' => Some(b'\n'),
+            b'r' => Some(b'\r'),
+            b't' => Some(b'\t'),
+            b'v' => Some(0x0b),
+            _ => None,
+        };
+        if let Some(simple) = simple {
+            out.push(simple);
+            at += 1;
+            continue;
+        }
+        let digits = bytes[at..]
+            .iter()
+            .take(3)
+            .take_while(|digit| (b'0'..=b'7').contains(digit))
+            .count();
+        if digits == 0 {
+            out.push(byte);
+            continue;
+        }
+        // Three octal digits reach 0o777; the byte is the low eight bits, as in C.
+        out.push(bytes[at..at + digits].iter().fold(0u8, |acc, &digit| {
+            acc.wrapping_mul(8).wrapping_add(digit - b'0')
+        }));
+        at += digits;
+    }
+    out
 }
 
 // ─── tar stream reader ───────────────────────────────────────────────────
@@ -352,7 +593,9 @@ enum Entry {
 /// files finished, how many content bytes passed and which file is being written now.
 ///
 /// That is why progress is exact: we carry the bytes and see every file's boundary.
-/// The half-written file ([`Self::current`]) is the one deleted on cancel.
+/// The half-written file ([`Self::current`]) is the one **we** are in — on an
+/// upload the server is behind us, and only its own listing ([`Heard`]) says
+/// whether it got that far.
 ///
 /// bsdtar puts a pax header (`x`) before the record for long, non-ASCII or large
 /// files, and the `path=` there overrides the next header's name; for large files
@@ -374,6 +617,10 @@ pub(crate) struct TarWatcher {
     pub files: u64,
     /// Content bytes passed (file data only).
     pub bytes: u64,
+    /// The names of the entries whose header has passed, in stream order, until
+    /// taken — every entry tar lists (pax headers are not entries). `None` keeps
+    /// no record ([`Self::listing`]).
+    pub(crate) begun: Option<Vec<String>>,
 }
 
 impl Default for TarWatcher {
@@ -388,11 +635,21 @@ impl Default for TarWatcher {
             current: None,
             files: 0,
             bytes: 0,
+            begun: None,
         }
     }
 }
 
 impl TarWatcher {
+    /// A watcher that records every entry it sees begin ([`Self::begun`]): the
+    /// upload matches them against the remote tar's listing ([`Heard`]).
+    pub(crate) fn listing() -> Self {
+        Self {
+            begun: Some(Vec::new()),
+            ..Self::default()
+        }
+    }
+
     /// The next chunk of the stream.
     pub(crate) fn feed(&mut self, mut bytes: &[u8]) {
         while !bytes.is_empty() {
@@ -446,9 +703,14 @@ impl TarWatcher {
             b'x' => Entry::Pax,
             _ => Entry::Other,
         };
-        let name = self.next_path.take();
+        // A global pax header (`g`) is no entry either: tar lists neither.
+        let listed = !matches!(kind, b'x' | b'g');
+        let name = listed.then(|| self.next_path.take().unwrap_or_else(|| tar_name(header)));
+        if let (Some(begun), Some(name)) = (&mut self.begun, &name) {
+            begun.push(name.clone());
+        }
         if self.entry == Entry::File {
-            self.current = Some(name.unwrap_or_else(|| tar_name(header)));
+            self.current = name;
         } else if self.entry == Entry::Pax {
             self.pax.clear();
         }
@@ -687,6 +949,8 @@ struct Tally {
     /// Its name if there is a single item ([`label`]).
     single: Option<String>,
     ways: Ways,
+    /// The item that may have left a partial file on the server ([`Queue::left`]).
+    left: Option<String>,
 }
 
 impl Tally {
@@ -705,6 +969,7 @@ impl Tally {
                 _ => None,
             },
             ways: Ways::of(entries.iter().map(|entry| entry.job.way.direction())),
+            left: None,
         }
     }
 
@@ -734,14 +999,26 @@ const LOCAL_DISK_FULL: &str = "disk full on this Mac";
 /// The result line's body, its tone and the number of leading characters drawn in
 /// that tone: success green, cancel dim, the failure text red and the
 /// count after it dim.
+///
+/// A stop says what became of the half-written file: removed, or — when the server
+/// could not be shown to have reached it, or the cleanup did not get through
+/// ([`Shared::partial_left`]) — that it may remain, and in which item.
 fn end_line(end: &End, host: &str, tally: &Tally) -> (String, TransferTone, usize) {
     let verb = tally.ways.verb();
+    let left = tally
+        .left
+        .as_ref()
+        .map(|name| format!("partial file may remain at {name}"));
     if let Some(reason) = failure_reason(end, host) {
         let head = format!("Failed — {reason}");
         let lead = head.chars().count();
-        let body = format!("{head} · {} of {} {verb}", tally.done, tally.items);
+        let mut body = format!("{head} · {} of {} {verb}", tally.done, tally.items);
+        if let Some(left) = left {
+            let _ = write!(body, ", {left}");
+        }
         return (body, TransferTone::Error, lead);
     }
+    let partial = left.unwrap_or_else(|| "partial file removed".to_owned());
     let body = match (end, &tally.dest) {
         (End::Done, Some(dest)) => format!("✓ {} → {dest}", tally.what()),
         (End::Done, None) => format!(
@@ -751,10 +1028,10 @@ fn end_line(end: &End, host: &str, tally: &Tally) -> (String, TransferTone, usiz
             files_word(tally.items as u64)
         ),
         _ if tally.items > 1 => format!(
-            "Cancelled — {} of {} {verb}, partial file removed",
+            "Cancelled — {} of {} {verb}, {partial}",
             tally.done, tally.items
         ),
-        _ => "Cancelled — partial file removed".to_owned(),
+        _ => format!("Cancelled — {partial}"),
     };
     let tone = if *end == End::Done {
         TransferTone::Success
@@ -1027,6 +1304,35 @@ fn run_ssh(ssh: &[String], script: &str) -> std::io::Result<(Option<i32>, String
     ))
 }
 
+/// Runs the remote script over ssh (without input) for at most `limit`: `true` if
+/// it exited with 0 in time. Past the limit the ssh is killed — **nothing waits on
+/// a dead link**; standard output and error go nowhere, so no pipe an open master
+/// connection still holds can keep us waiting either.
+fn run_ssh_within(ssh: &[String], script: &str, limit: Duration) -> bool {
+    let child = Command::new(&ssh[0])
+        .args(&ssh[1..])
+        .arg(remote_command(script))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+    let Ok(mut child) = child else {
+        return false;
+    };
+    let deadline = Instant::now() + limit;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+        }
+    }
+}
+
 /// The work before the sheet, on a background thread: local measurement and the
 /// remote probe. `Err` → the error sheet's text.
 pub fn probe(
@@ -1072,6 +1378,11 @@ pub struct Shared {
     pids: Mutex<Vec<u32>>,
     /// Whether a progress report is waiting on the main queue (at most one).
     pub tick_pending: AtomicBool,
+    /// The upload stopped (cancel, disk full) and a half-written file may remain on
+    /// the server: the server had not said it reached the file we were in, or the
+    /// cleanup did not finish. The result line says so ([`Transfers::finish_item`])
+    /// instead of "partial file removed".
+    pub(crate) partial_left: AtomicBool,
 }
 
 impl Shared {
@@ -1211,7 +1522,13 @@ const LOCAL_TAR_FLAGS: [&str; 7] = [
 ///
 /// Cancel or disk full: both processes are killed and the file **being written** is
 /// deleted remotely — for a single file the file itself, for a folder only the one
-/// being written at that moment; finished ones stay.
+/// being written at that moment; finished ones stay. **Only when the server has
+/// said it reached that file** ([`Heard`]) and we were still in it, so the server
+/// cannot be past it: the file we were reading can be dozens of files ahead of the
+/// one the server was writing, and one it never reached may be the user's own
+/// copy from before. Otherwise nothing is deleted and [`Shared::partial_left`]
+/// says a partial file may remain; the cleanup's connection is bounded
+/// ([`CLEANUP_LIMIT`]).
 pub fn transfer(
     ssh: &[String],
     local: &Local,
@@ -1224,7 +1541,7 @@ pub fn transfer(
         .args(&ssh[1..])
         .arg(remote_command(&extract_script(dir)))
         .stdin(Stdio::piped())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn();
     let mut remote = match remote {
@@ -1251,9 +1568,15 @@ pub fn transfer(
     };
     shared.track(&[&local_tar, &remote]);
 
-    let remote_err = collect_stderr(remote.stderr.take(), Some(Arc::clone(shared)));
-    let local_err = collect_stderr(local_tar.stderr.take(), None);
-    let mut watcher = TarWatcher::default();
+    let heard = Arc::new(Mutex::new(Heard::default()));
+    let remote_out = hear(remote.stdout.take(), Arc::clone(&heard));
+    let remote_err = collect_stderr(
+        remote.stderr.take(),
+        Some(Arc::clone(shared)),
+        Some(Arc::clone(&heard)),
+    );
+    let local_err = collect_stderr(local_tar.stderr.take(), None, None);
+    let mut watcher = TarWatcher::listing();
     if let (Some(mut source), Some(mut sink)) = (local_tar.stdout.take(), remote.stdin.take()) {
         let mut buffer = vec![0; 64 * 1024];
         let mut last = Instant::now();
@@ -1263,6 +1586,12 @@ pub fn transfer(
                 Ok(read) => read,
             };
             watcher.feed(&buffer[..read]);
+            if let Some(begun) = watcher.begun.as_mut().filter(|begun| !begun.is_empty()) {
+                let mut heard = heard.lock().unwrap_or_else(PoisonError::into_inner);
+                for name in begun.drain(..) {
+                    heard.sent(name);
+                }
+            }
             if sink.write_all(&buffer[..read]).is_err() {
                 break;
             }
@@ -1277,8 +1606,25 @@ pub fn transfer(
     }
     let remote_status = wait_untracked(&mut remote, shared);
     let local_status = wait_untracked(&mut local_tar, shared);
-    let remote_err = remote_err.join().unwrap_or_default();
-    let local_err = local_err.join().unwrap_or_default();
+    // Every line the server wrote before its end is heard before anything is
+    // decided — after a stop only for as long as [`HEARING_LIMIT`]: ssh was killed
+    // on purpose, and pipes a master connection holds may not close for minutes.
+    let stopped = shared.cancel.load(Ordering::Acquire) || shared.disk_full.load(Ordering::Acquire);
+    let (remote_err, local_err) = if stopped {
+        let deadline = Instant::now() + HEARING_LIMIT;
+        while !(remote_out.is_finished() && remote_err.is_finished()) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        // A stop's outcome reads no text: a reader still waiting is not waited
+        // for, it ends on its own with its pipe.
+        (String::new(), String::new())
+    } else {
+        let _ = remote_out.join();
+        (
+            remote_err.join().unwrap_or_default(),
+            local_err.join().unwrap_or_default(),
+        )
+    };
 
     let interrupted = if shared.disk_full.load(Ordering::Acquire) {
         Some(Outcome::DiskFull)
@@ -1288,8 +1634,22 @@ pub fn transfer(
         None
     };
     if let Some(outcome) = interrupted {
-        if let Some(partial) = watcher.current.take() {
-            let _ = run_ssh(ssh, &cleanup_script(dir, &partial));
+        let caught_up = heard
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .caught_up();
+        // The server listed the file we were still in: it is there, and it cannot
+        // be whole. Any other file may be one the server never reached.
+        let clean = match watcher.current.take() {
+            Some(partial) if caught_up => {
+                run_ssh_within(ssh, &cleanup_script(dir, &partial), CLEANUP_LIMIT)
+            }
+            // No file began: nothing can be half-written.
+            None if watcher.files == 0 => true,
+            _ => false,
+        };
+        if !clean {
+            shared.partial_left.store(true, Ordering::Release);
         }
         return outcome;
     }
@@ -1318,28 +1678,102 @@ pub fn transfer(
 /// Reads a process's error output to the end on a separate thread (so the pipe does
 /// not fill up and block the process); if `disk` is given, stops the stream at once
 /// on a "disk full" line — GNU tar keeps swallowing the stream after the error and
-/// the remaining gigabytes would be wasted.
+/// the remaining gigabytes would be wasted. With `listing`, bsdtar's `x name` lines
+/// go there ([`Heard::told`]) and only what they say beyond the listing reaches the
+/// text. A line that is not UTF-8 is read lossily: the reading must not stop
+/// while the process still writes — a listing goes on for every entry.
 pub(crate) fn collect_stderr(
     stream: Option<std::process::ChildStderr>,
     disk: Option<Arc<Shared>>,
+    listing: Option<Arc<Mutex<Heard>>>,
 ) -> thread::JoinHandle<String> {
     thread::spawn(move || {
         let Some(stream) = stream else {
             return String::new();
         };
         let mut text = String::new();
-        for line in BufReader::new(stream).lines() {
-            let Ok(line) = line else { break };
+        // The last listing line not placed and where the text stood after it: the
+        // one ssh's message may be glued to ([`Heard::glued`]).
+        let mut unplaced: Option<(String, usize)> = None;
+        let mut reader = BufReader::new(stream);
+        let mut bytes = Vec::new();
+        loop {
+            bytes.clear();
+            match reader.read_until(b'\n', &mut bytes) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+            // As `lines` would: without the `\n`, or the `\r\n`.
+            let end = bytes
+                .strip_suffix(b"\n")
+                .map(|line| line.strip_suffix(b"\r").unwrap_or(line));
+            let line = String::from_utf8_lossy(end.unwrap_or(&bytes));
             if let Some(shared) = &disk
                 && line.contains(DISK_FULL)
             {
                 shared.disk_full.store(true, Ordering::Release);
                 shared.kill();
             }
-            text.push_str(&line);
-            text.push('\n');
+            let told = listing.as_ref().map_or(Told::Other, |listing| {
+                listing
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .told(&line)
+            });
+            let kept = match told {
+                Told::Other => Some(line.into_owned()),
+                Told::Listing(kept) => {
+                    unplaced = None;
+                    kept
+                }
+                Told::Unplaced => {
+                    unplaced = Some((line.into_owned(), text.len()));
+                    None
+                }
+            };
+            if let Some(kept) = kept {
+                text.push_str(&kept);
+                text.push('\n');
+            }
+        }
+        if let (Some(listing), Some((line, at))) = (&listing, unplaced)
+            && let Some(glued) = listing
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .glued(&line)
+        {
+            text.insert_str(at, &format!("{glued}\n"));
         }
         text
+    })
+}
+
+/// Reads the remote tar's standard output to the end on a separate thread: the
+/// listing of GNU tar and busybox ([`Heard`]). Read whatever it is — a full pipe
+/// would stop the remote tar. A name that is not UTF-8 is read lossily and so
+/// never matches: the listing seems behind, which only deletes less.
+fn hear(
+    stream: Option<std::process::ChildStdout>,
+    listing: Arc<Mutex<Heard>>,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        let Some(stream) = stream else {
+            return;
+        };
+        let mut reader = BufReader::new(stream);
+        let mut line = Vec::new();
+        loop {
+            line.clear();
+            match reader.read_until(b'\n', &mut line) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+            let text = String::from_utf8_lossy(line.strip_suffix(b"\n").unwrap_or(&line));
+            listing
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .hear(&text);
+        }
     })
 }
 
@@ -1563,6 +1997,10 @@ struct Queue {
     /// queue's end once everything else finished, unless that end is already
     /// something else.
     side_failure: Option<End>,
+    /// The stopped upload that may have left a half-written file on the server
+    /// ([`Shared::partial_left`]), by its [`label`]: the result line names it
+    /// instead of saying the partial file was removed.
+    left: Option<String>,
 }
 
 impl Queue {
@@ -1830,6 +2268,7 @@ impl Transfers {
             rate: None,
             ending: None,
             side_failure: None,
+            left: None,
         });
         if queue.command != command || queue.ending.is_some() {
             return false;
@@ -2141,6 +2580,11 @@ impl Transfers {
         let (bytes, _) = current.shared.progress();
         let index = queue.entries.iter().position(|entry| entry.id == id)?;
         let direction = queue.entries[index].job.way.direction();
+        if current.shared.partial_left.load(Ordering::Acquire) {
+            queue
+                .left
+                .get_or_insert_with(|| label(&queue.entries[index].job.local));
+        }
         // Queue lane items still to finish: a side lane's failure must not stop them.
         let queue_pending = queue.entries.iter().any(|entry| {
             entry.id != id && entry.job.way.lane() == Lane::Queue && entry.state != EntryState::Done
@@ -2242,7 +2686,8 @@ impl Transfers {
             Some(End::Closed) if all_done && queue.side_failure.is_none() => End::Done,
             ending => ending.or(queue.side_failure).unwrap_or(End::Done),
         };
-        let tally = Tally::of(&queue.entries);
+        let mut tally = Tally::of(&queue.entries);
+        tally.left = queue.left;
         let (body, tone, lead) = end_line(&end, &queue.host, &tally);
         // A queue of previews only that succeeded opens its files: the opened
         // window is the news, a notification would repeat it. The
@@ -3976,5 +4421,456 @@ mod tests {
         );
         assert!(matches!(outcome, Outcome::Failed(_)), "{outcome:?}");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_server_listing_is_read_in_every_tar_dialect_and_only_in_order() {
+        let name = "./static/café.txt";
+        // GNU tar and busybox, bsdtar, both escaped, and bsdtar's failed entry.
+        for line in [
+            name,
+            "./static/caf\\303\\251.txt",
+            "x ./static/café.txt",
+            "x ./static/caf\\303\\251.txt",
+            "x ./static/café.txt: Write failed",
+        ] {
+            assert!(lists(line, name), "{line}");
+        }
+        for line in [
+            "./static/café",
+            "./static/café.txt.bak",
+            "./static/café.txt: Write failed",
+            "tar: ./static/café.txt: Cannot open: Permission denied",
+            "Welcome!",
+        ] {
+            assert!(!lists(line, name), "{line}");
+        }
+        assert_eq!(unescape("a\\\\b\\tc\\q\\"), b"a\\b\tc\\q\\");
+
+        let mut heard = Heard::default();
+        for name in ["./static/", "./static/a", "./static/b"] {
+            heard.sent(name.to_owned());
+        }
+        // The rc file's noise and a name out of turn do not move the server on.
+        assert!(!heard.hear("Welcome!"));
+        assert!(!heard.hear("./static/b"));
+        assert!(heard.hear("./static/"));
+        assert!(heard.hear("x ./static/a"));
+        assert!(!heard.caught_up(), "the server has not listed b");
+        assert!(heard.hear("./static/b"));
+        assert!(heard.caught_up());
+
+        // This Mac's own bsdtar, unpacking a stream with a pax header for a long
+        // name with a space: every line it lists is heard, in turn. (A non-ASCII
+        // name it lists decomposed, `c\314\247` for the stream's `ç`: that line is
+        // not heard, and the listing only seems behind.)
+        let dir = scratch("listing");
+        let tree = dir.join("src/static");
+        std::fs::create_dir_all(tree.join("css")).unwrap();
+        std::fs::write(tree.join("app.js"), b"x").unwrap();
+        let long = format!("a b{}.txt", "x".repeat(150));
+        std::fs::write(tree.join("css").join(&long), b"y").unwrap();
+        let stream = tar_of(&dir.join("src"), "static");
+        let mut watcher = TarWatcher::listing();
+        watcher.feed(&stream);
+        let begun = watcher.begun.take().unwrap();
+        assert_eq!(begun.len(), 4, "{begun:?}");
+        assert!(begun.contains(&format!("./static/css/{long}")), "{begun:?}");
+        let into = dir.join("dst");
+        std::fs::create_dir_all(&into).unwrap();
+        let mut child = Command::new("/usr/bin/tar")
+            .args(["-x", "-v", "-f", "-", "-C"])
+            .arg(&into)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(&stream).unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        let mut heard = Heard::default();
+        for name in begun {
+            heard.sent(name);
+        }
+        for out in [&output.stdout, &output.stderr] {
+            for line in String::from_utf8_lossy(out).lines() {
+                heard.hear(line);
+            }
+        }
+        assert!(heard.caught_up(), "{heard:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_stop_that_could_not_clean_up_says_the_partial_file_may_remain() {
+        let mut uploads = queue_of(vec![job("static", true, 2, 1_000), job("b", false, 1, 1)]);
+        let (_, _, shared) = uploads.start_next(Instant::now()).unwrap();
+        assert_eq!(uploads.stop(None, true), None);
+        shared.partial_left.store(true, Ordering::Release);
+        assert_eq!(
+            uploads.finish(Outcome::Cancelled).unwrap().line.body,
+            "Cancelled — 0 of 2 uploaded, partial file may remain at static/"
+        );
+
+        let mut uploads = queue_of(vec![job("backup.tar.gz", false, 1, 1_000)]);
+        let (_, _, shared) = uploads.start_next(Instant::now()).unwrap();
+        shared.partial_left.store(true, Ordering::Release);
+        let ended = uploads.finish(Outcome::DiskFull).unwrap();
+        assert_eq!(
+            ended.line.body,
+            "Failed — disk full on prod · 0 of 1 uploaded, partial file may remain at \
+             backup.tar.gz"
+        );
+        assert_eq!(
+            ended
+                .line
+                .body
+                .chars()
+                .take(ended.line.lead)
+                .collect::<String>(),
+            "Failed — disk full on prod",
+            "only the error text is red"
+        );
+
+        let mut uploads = queue_of(vec![job("backup.tar.gz", false, 1, 1_000)]);
+        let (_, _, shared) = uploads.start_next(Instant::now()).unwrap();
+        shared.partial_left.store(true, Ordering::Release);
+        assert_eq!(uploads.stop(None, true), None);
+        assert_eq!(
+            uploads.finish(Outcome::Cancelled).unwrap().line.body,
+            "Cancelled — partial file may remain at backup.tar.gz"
+        );
+    }
+
+    /// A stand-in for ssh: `/bin/sh -c <fake> ssh <remote command>`. The stream's
+    /// script (`tar -x`) runs `extract`, every other one (the cleanup) runs `other`;
+    /// both find the remote command in `$1`.
+    fn fake_ssh(extract: &str, other: &str) -> Vec<String> {
+        let fake = format!("case \"$1\" in *'tar -x'*) {extract} ;; *) {other} ;; esac");
+        words(&["/bin/sh", "-c", &fake, "ssh"])
+    }
+
+    /// A server that takes the first blocks of the stream, lists `heard` the way GNU
+    /// tar does and then stalls without reading on — the link that stopped. The
+    /// stalled `sleep` is the process ssh's pid stands for, so a cancel ends it.
+    fn stalled_after(heard: &[&str]) -> String {
+        let lines: Vec<String> = heard.iter().map(|name| sq(name)).collect();
+        format!(
+            "head -c 1024 >/dev/null; printf '%s\\n' {}; exec sleep 30",
+            lines.join(" ")
+        )
+    }
+
+    /// Runs [`transfer`] on its own thread and cancels it once `ready` says the
+    /// local side is far enough; the outcome, or `None` if it did not end within
+    /// `limit`.
+    fn cancelled_transfer(
+        ssh: Vec<String>,
+        item: Local,
+        dir: &Path,
+        ready: impl Fn(&Shared) -> bool,
+        limit: Duration,
+    ) -> (Option<Outcome>, Arc<Shared>) {
+        let shared = Arc::new(Shared::default());
+        let (sender, ended) = std::sync::mpsc::channel();
+        let dir = dir.to_str().unwrap().to_owned();
+        thread::spawn({
+            let shared = Arc::clone(&shared);
+            move || {
+                let _ = sender.send(transfer(&ssh, &item, &dir, &shared, || {}));
+            }
+        });
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !ready(&shared) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(ready(&shared), "the stream never got going");
+        // The server has written its listing by now; the stream reads it off the
+        // pipe before it decides either way.
+        thread::sleep(Duration::from_millis(300));
+        shared.cancel();
+        (ended.recv_timeout(limit).ok(), shared)
+    }
+
+    #[test]
+    fn a_cancel_never_removes_a_file_the_server_had_not_reached() {
+        let root = scratch("unreached");
+        let source = root.join("src/static");
+        let target = root.join("dst");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(target.join("static")).unwrap();
+        std::fs::write(source.join("a"), b"x").unwrap();
+        std::fs::write(source.join("b"), b"x").unwrap();
+        // The archive's order is the directory's: the first file becomes the small
+        // one the server finishes, the second the large one the local side runs into.
+        let mut watcher = TarWatcher::default();
+        let mut names = Vec::new();
+        for block in tar_of(&root.join("src"), "static").chunks(BLOCK) {
+            watcher.feed(block);
+            if let Some(name) = watcher.current.take() {
+                names.push(name);
+            }
+        }
+        let [first, second] = names.as_slice() else {
+            panic!("{names:?}");
+        };
+        let file = |name: &str| name.rsplit('/').next().unwrap().to_owned();
+        std::fs::write(source.join(file(first)), b"tiny").unwrap();
+        std::fs::write(source.join(file(second)), vec![b'z'; 4 << 20]).unwrap();
+        // Both are already on the server: the second must come through untouched.
+        for name in [first, second] {
+            std::fs::write(target.join("static").join(file(name)), b"old").unwrap();
+        }
+        let ssh = fake_ssh(
+            &stalled_after(&["./static/", first]),
+            "exec /bin/sh -c \"$1\"",
+        );
+        let (outcome, shared) = cancelled_transfer(
+            ssh,
+            measure(&source).unwrap(),
+            &target,
+            // The first file passed, and the second's header with it.
+            |shared| shared.progress().1 >= 1,
+            Duration::from_secs(20),
+        );
+        assert_eq!(outcome, Some(Outcome::Cancelled));
+        assert_eq!(
+            std::fs::read(target.join("static").join(file(second))).unwrap(),
+            b"old",
+            "the server never reached {second}"
+        );
+        assert!(
+            shared.partial_left.load(Ordering::Acquire),
+            "the line must not say a partial file was removed"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_cancel_removes_the_file_the_server_said_it_was_writing() {
+        let root = scratch("reached");
+        let target = root.join("dst");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(root.join("big.bin"), vec![b'z'; 4 << 20]).unwrap();
+        // The server's half-written copy.
+        std::fs::write(target.join("big.bin"), b"half").unwrap();
+        let ssh = fake_ssh(&stalled_after(&["./big.bin"]), "exec /bin/sh -c \"$1\"");
+        let (outcome, shared) = cancelled_transfer(
+            ssh,
+            measure(&root.join("big.bin")).unwrap(),
+            &target,
+            |shared| shared.progress().0 > 0,
+            Duration::from_secs(20),
+        );
+        assert_eq!(outcome, Some(Outcome::Cancelled));
+        assert!(!target.join("big.bin").exists(), "the partial file stayed");
+        assert!(!shared.partial_left.load(Ordering::Acquire));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_cleanup_on_a_dead_link_gives_up_instead_of_holding_the_queue() {
+        let root = scratch("dead");
+        let target = root.join("dst");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(root.join("big.bin"), vec![b'z'; 4 << 20]).unwrap();
+        let tried = root.join("tried");
+        // The cleanup's connection never answers.
+        let ssh = fake_ssh(
+            &stalled_after(&["./big.bin"]),
+            &format!(": > {}; exec sleep 120", sq(tried.to_str().unwrap())),
+        );
+        let started = Instant::now();
+        let (outcome, shared) = cancelled_transfer(
+            ssh,
+            measure(&root.join("big.bin")).unwrap(),
+            &target,
+            |shared| shared.progress().0 > 0,
+            CLEANUP_LIMIT + Duration::from_secs(20),
+        );
+        assert_eq!(outcome, Some(Outcome::Cancelled), "the stream thread hung");
+        assert!(tried.exists(), "the cleanup was never tried");
+        assert!(started.elapsed() < CLEANUP_LIMIT + Duration::from_secs(10));
+        assert!(
+            shared.partial_left.load(Ordering::Acquire),
+            "the cleanup never got through"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_stop_does_not_wait_on_pipes_a_master_connection_still_holds() {
+        let root = scratch("held");
+        let target = root.join("dst");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(root.join("big.bin"), vec![b'z'; 4 << 20]).unwrap();
+        std::fs::write(target.join("big.bin"), b"half").unwrap();
+        // Over a `ControlMaster` the session's pipes outlive the killed ssh: here a
+        // process the fake leaves behind holds them.
+        let holder = root.join("holder");
+        let ssh = fake_ssh(
+            &format!(
+                "sleep 30 & echo $! > {}; {}",
+                sq(holder.to_str().unwrap()),
+                stalled_after(&["./big.bin"])
+            ),
+            "exec /bin/sh -c \"$1\"",
+        );
+        let (outcome, shared) = cancelled_transfer(
+            ssh,
+            measure(&root.join("big.bin")).unwrap(),
+            &target,
+            |shared| shared.progress().0 > 0,
+            HEARING_LIMIT + Duration::from_secs(8),
+        );
+        if let Some(pid) = std::fs::read_to_string(&holder)
+            .ok()
+            .and_then(|pid| pid.trim().parse::<libc::pid_t>().ok())
+        {
+            // SAFETY: `kill(2)` takes only a pid and a signal: the test's own sleep.
+            unsafe {
+                libc::kill(pid, libc::SIGTERM);
+            }
+        }
+        assert_eq!(
+            outcome,
+            Some(Outcome::Cancelled),
+            "the stop waited on the pipes"
+        );
+        // What had arrived was heard: the server's half-written copy is gone.
+        assert!(!target.join("big.bin").exists(), "the partial file stayed");
+        assert!(!shared.partial_left.load(Ordering::Acquire));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// [`collect_stderr`] with a listing, over a process that writes `said` to its
+    /// standard error, after the stream began the entries `sent`.
+    fn failure_text(said: &str, sent: &[&str]) -> (String, Arc<Mutex<Heard>>) {
+        let heard = Arc::new(Mutex::new(Heard::default()));
+        for name in sent {
+            heard.lock().unwrap().sent((*name).to_owned());
+        }
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "printf '%s' \"$1\" >&2", "sh", said])
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let text = collect_stderr(child.stderr.take(), None, Some(Arc::clone(&heard)))
+            .join()
+            .unwrap();
+        let _ = child.wait();
+        (text, heard)
+    }
+
+    #[test]
+    fn a_stalled_bsdtar_listing_stays_out_of_the_failure_text() {
+        // The match stalls on `ç`, which bsdtar on a Mac lists decomposed: every
+        // later line is still listing and none of it is the reason a failure gives.
+        let sent = ["./static/", "./static/ç", "./static/a", "./static/b"];
+        let listing = "x ./static/\nx ./static/c\\314\\247\nx ./static/a\nx ./static/b\n";
+        let (text, heard) = failure_text(
+            &format!("Welcome!\n{listing}tar: Error exit delayed from previous errors.\n"),
+            &sent,
+        );
+        assert_eq!(
+            text,
+            "Welcome!\ntar: Error exit delayed from previous errors.\n"
+        );
+        assert!(!heard.lock().unwrap().caught_up(), "the match stalled");
+
+        // A silent ssh then fails with its own exit code, not a listing line.
+        let (text, _) = failure_text(listing, &sent);
+        assert_eq!(last_line(&text), "");
+
+        // Past the limit nothing is placed any more, and nothing piles up either.
+        let names: Vec<String> = (0..=UNHEARD_LIMIT).map(|n| format!("./f{n}")).collect();
+        let sent: Vec<&str> = names.iter().map(String::as_str).collect();
+        let (text, heard) = failure_text("x ./f0\nx ./f1\nx ./f2\n", &sent);
+        assert_eq!(text, "");
+        assert!(heard.lock().unwrap().lost);
+    }
+
+    #[test]
+    fn an_ssh_message_glued_to_bsdtars_unended_line_is_the_failure_text() {
+        // bsdtar had begun `big.bin` and not ended its line when the link dropped.
+        let (text, heard) = failure_text(
+            "x ./big.binclient_loop: send disconnect: Broken pipe\n",
+            &["./big.bin"],
+        );
+        assert_eq!(text, "client_loop: send disconnect: Broken pipe\n");
+        assert!(
+            heard.lock().unwrap().caught_up(),
+            "the server did reach big.bin"
+        );
+
+        // The name escaped, as bsdtar writes what it does not print.
+        let (text, _) = failure_text(
+            "x ./caf\\303\\251.binclient_loop: send disconnect: Broken pipe\n",
+            &["./café.bin"],
+        );
+        assert_eq!(text, "client_loop: send disconnect: Broken pipe\n");
+
+        // The match had stalled: the glued line is found among the entries not yet
+        // heard, the longest name that fits, and keeps its place in the text.
+        let (text, heard) = failure_text(
+            "x ./c\\314\\247\nx ./a bTimeout, server prod not responding.\nlost connection\n",
+            &["./ç", "./a", "./a b"],
+        );
+        assert_eq!(
+            text,
+            "Timeout, server prod not responding.\nlost connection\n"
+        );
+        assert!(!heard.lock().unwrap().caught_up());
+    }
+
+    #[test]
+    fn a_failed_entry_reads_the_same_with_the_listing_as_without_it() {
+        // SAFETY: `geteuid` only reads the process's own effective uid.
+        if unsafe { libc::geteuid() } == 0 {
+            return; // root writes anywhere: nothing would fail
+        }
+        // This machine's own tar, unpacking into a folder it may not write: with
+        // `-v` the error text is what it was without, word for word.
+        let dir = scratch("failed-entry");
+        std::fs::create_dir_all(dir.join("src/static")).unwrap();
+        std::fs::write(dir.join("src/static/a"), b"x").unwrap();
+        let stream = tar_of(&dir.join("src"), "static");
+        let into = dir.join("dst");
+        std::fs::create_dir_all(into.join("static")).unwrap();
+        let unpack = |verbose: bool| {
+            let mut child = Command::new("/usr/bin/tar")
+                .arg("-x")
+                .args(verbose.then_some("-v"))
+                .args(["-f", "-", "-C"])
+                .arg(&into)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let mut watcher = TarWatcher::listing();
+            watcher.feed(&stream);
+            let heard = Arc::new(Mutex::new(Heard::default()));
+            for name in watcher.begun.take().unwrap() {
+                heard.lock().unwrap().sent(name);
+            }
+            let text = collect_stderr(child.stderr.take(), None, Some(heard));
+            child.stdin.take().unwrap().write_all(&stream).unwrap();
+            assert!(!child.wait().unwrap().success());
+            text.join().unwrap()
+        };
+        let mode = |mode| {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(into.join("static"), std::fs::Permissions::from_mode(mode))
+                .unwrap();
+        };
+        mode(0o555);
+        let plain = unpack(false);
+        let listed = unpack(true);
+        mode(0o755);
+        assert!(plain.contains("static/a"), "{plain}");
+        assert_eq!(listed, plain);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
