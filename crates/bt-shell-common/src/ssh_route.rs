@@ -10,7 +10,8 @@
 //!   argv; otherwise open ours. The process calls are behind a seam
 //!   ([`SshRunner`]); [`SystemSsh`] is the real body.
 //! - **Socket path** ([`socket_path`], [`host_key`]): a short base + a 16-digit
-//!   digest of the canonical (user, host, port, jump) quadruple, checked against
+//!   digest of the canonical (user, host, port, jump) quadruple (and the proxy
+//!   command, when there is one), checked against
 //!   the unix socket limit **including** ssh's temporary suffix; a fallback base,
 //!   and [`Route::Direct`] (today's behaviour) when neither fits.
 //! - **Master connection** ([`master_argv`], [`askpass_env`]): `-M -N -f` with
@@ -30,11 +31,13 @@
 //!   the user's terminal.
 //! - **Saved passwords** ([`PasswordStore`], [`Account`]): the
 //!   platform shell's store (the macOS Keychain) behind a trait. A saved
-//!   password answers the first password prompt without a sheet; a background
+//!   password answers the destination's first password prompt — never a jump
+//!   host's ([`Destination`]) — without a sheet; a background
 //!   job opens a master **only** with one (one prompt), and a saved password
 //!   the server refused is not tried again in the background until the user
 //!   signs in ([`Masters`]'s flag) — a stale password must not lock the
-//!   account out.
+//!   account out — nor is one whose jump host asked for its own password
+//!   (its hold): the background cannot answer the bastion.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
@@ -155,15 +158,25 @@ impl SshRunner for SystemSsh {
     }
 }
 
-/// What `ssh -G` says about the target: the four parts of the socket's key and
-/// the user's own connection sharing.
+/// What `ssh -G` says about the target: the parts of the socket's key, the
+/// name ssh's password prompt gives the server and the user's own connection
+/// sharing.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SshConfig {
     pub user: String,
     pub hostname: String,
     pub port: String,
-    /// `none` when there is no jump host (ssh's own spelling).
+    /// `none` when there is no jump host (ssh's own spelling). `%n` is
+    /// expanded ([`parse_config`]), the other tokens are not.
     pub proxyjump: String,
+    /// The `ProxyCommand` as written (`ssh bastion -W %h:%p` — `-G` leaves
+    /// the tokens unexpanded) but for `%n`, which [`parse_config`] expands;
+    /// `None` for `none` or an absent line. `-G` prints only one of the two:
+    /// whichever of `ProxyJump` and `ProxyCommand` comes first wins.
+    pub proxycommand: Option<String>,
+    /// `HostKeyAlias`: the name ssh's prompts give the server in place of
+    /// the host name. `None` for `none` or an absent line.
+    pub host_key_alias: Option<String>,
     /// `None` for `none` or an absent line.
     pub control_path: Option<PathBuf>,
     /// `ControlMaster` is anything but `no` (`-G` spells it `false`): the user
@@ -178,25 +191,56 @@ impl SshConfig {
     pub fn shares_connections(&self) -> bool {
         self.control_master || self.control_path.is_some()
     }
+
+    /// What stands between this Mac and the server, as `-G` spells it
+    /// (`proxyjump admin@bastion`, `proxycommand ssh bastion -W %h:%p`);
+    /// `None` when ssh reaches it directly. **Behind a route the host name is
+    /// the far side's**: `10.0.0.5` through one bastion and through another
+    /// are two machines, so the route is part of who the server is — its
+    /// socket ([`host_key`]), its saved password ([`Account`]) and the
+    /// prompts the saved password may answer ([`Destination`]).
+    pub fn route(&self) -> Option<String> {
+        if let Some(command) = &self.proxycommand {
+            return Some(format!("proxycommand {command}"));
+        }
+        let jump = &self.proxyjump;
+        (!jump.is_empty() && !jump.eq_ignore_ascii_case("none"))
+            .then(|| format!("proxyjump {jump}"))
+    }
 }
 
 /// `ssh -G`'s output (one `key value` per line, keys in lower case). `None`
 /// without a host name: an output without one is not a configuration.
+///
+/// The route's `%n` — the host as the user typed it — is expanded from `-G`'s
+/// `host` line, which prints it as typed (OpenSSH `readconf.c`: `host_arg`,
+/// what ssh puts in `%n`), while `-G` leaves the route's tokens as written.
+/// **`%n` is the one token that is not in the key already** (`%h`, `%p` and
+/// `%r` are the host name, port and user beside it): with `Host prod-*
+/// stage-*` and `ProxyCommand ssh %n-bastion -W %h:%p`, `prod-app` and
+/// `stage-app` print the same lines, yet reach the same inner address
+/// through two bastions — two servers that, left unexpanded, would share one
+/// socket and one saved password. A route without `%n` is the text it always
+/// was: its key does not move.
 pub fn parse_config(out: &str) -> Option<SshConfig> {
     let mut config = SshConfig {
         proxyjump: "none".to_owned(),
         ..SshConfig::default()
     };
+    let mut typed = None;
     for line in out.lines() {
         let Some((key, value)) = line.trim().split_once(' ') else {
             continue;
         };
         let value = value.trim();
         match key {
+            "host" => typed = Some(value),
             "user" => config.user = value.to_owned(),
             "hostname" => config.hostname = value.to_owned(),
             "port" => config.port = value.to_owned(),
             "proxyjump" => config.proxyjump = value.to_owned(),
+            "proxycommand" if value != "none" => config.proxycommand = Some(value.to_owned()),
+            "hostkeyalias" if value != "none" => config.host_key_alias = Some(value.to_owned()),
             "controlpath" if value != "none" => config.control_path = Some(PathBuf::from(value)),
             "controlmaster" => {
                 config.control_master =
@@ -205,7 +249,36 @@ pub fn parse_config(out: &str) -> Option<SshConfig> {
             _ => {}
         }
     }
+    if let Some(typed) = typed {
+        config.proxyjump = expand_typed_host(&config.proxyjump, typed);
+        config.proxycommand = config
+            .proxycommand
+            .map(|command| expand_typed_host(&command, typed));
+    }
     (!config.hostname.is_empty()).then_some(config)
+}
+
+/// `value` with every `%n` replaced by `typed`, the way ssh's
+/// `percent_expand` reads it: `%%` is one token (a literal `%`), so `%%n` is
+/// not `%n` and stays as written — as does every other token.
+fn expand_typed_host(value: &str, typed: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut chars = value.chars();
+    while let Some(c) = chars.next() {
+        if c != '%' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push_str(typed),
+            Some(token) => {
+                out.push('%');
+                out.push(token);
+            }
+            None => out.push('%'),
+        }
+    }
+    out
 }
 
 /// The argv of `ssh -G`, `-O check` and the master: the user's program and
@@ -262,16 +335,13 @@ fn config(runner: &dyn SshRunner, target: &RemoteTarget) -> Option<SshConfig> {
 
 /// The name this Mac reaches the server by **directly** — `ssh -G`'s
 /// `hostname`, the real name behind an `~/.ssh/config` alias. `None` when
-/// the configuration cannot be read or a jump host stands between: a jump
-/// host's inner address (`10.0.0.5`) may name another machine on this Mac's
-/// own network, and opening it would open the wrong server. Blocking (one
-/// `ssh -G`); for a thread of its own.
+/// the configuration cannot be read or a jump host or a proxy command stands
+/// between ([`SshConfig::route`]): the inner address (`10.0.0.5`) may name
+/// another machine on this Mac's own network, and opening it would open the
+/// wrong server. Blocking (one `ssh -G`); for a thread of its own.
 pub fn direct_hostname(runner: &dyn SshRunner, target: &RemoteTarget) -> Option<String> {
     let config = config(runner, target)?;
-    config
-        .proxyjump
-        .eq_ignore_ascii_case("none")
-        .then_some(config.hostname)
+    config.route().is_none().then_some(config.hostname)
 }
 
 /// [`plan`] and the configuration it read — the saved password's key
@@ -356,17 +426,29 @@ pub const SUN_PATH: usize =
     std::mem::size_of::<libc::sockaddr_un>() - std::mem::offset_of!(libc::sockaddr_un, sun_path);
 
 /// The socket's name: FNV-1a 64 of the canonical (user, host name, port, jump)
-/// quadruple as [`KEY_DIGITS`] hex digits. The **one** place of the algorithm —
+/// quadruple — and the proxy command after it when there is one — as
+/// [`KEY_DIGITS`] hex digits. The **one** place of the algorithm —
 /// the user's terminal session is a master at the same path. FNV and not `DefaultHasher`: the name must not change with the
 /// Rust version, a master outlives the process that opened it.
+///
+/// The proxy command is a fifth part **only when there is one**: two
+/// bastions' `ProxyCommand`s to one inner address are two servers (one key
+/// would hand a job the other's master — an upload written on the wrong
+/// machine), while every host without one keeps the name it had before — a
+/// master an older bateri opened, or one carried over an update, is found
+/// again at the same path.
 pub fn host_key(config: &SshConfig) -> String {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for part in [
-        &config.user,
-        &config.hostname,
-        &config.port,
-        &config.proxyjump,
-    ] {
+        Some(&config.user),
+        Some(&config.hostname),
+        Some(&config.port),
+        Some(&config.proxyjump),
+        config.proxycommand.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
         for byte in part.bytes().chain([0]) {
             hash ^= u64::from(byte);
             hash = hash.wrapping_mul(0x0100_0000_01b3);
@@ -706,12 +788,18 @@ pub fn askpass_main() -> Option<i32> {
 // ─── saved passwords ─────────────────────────────────────────────────────
 
 /// The key of one saved password: the host name, user and port
-/// ssh resolves (`ssh -G`) — the alias the user typed is not the server.
+/// ssh resolves (`ssh -G`) — the alias the user typed is not the server —
+/// and the route to it ([`SshConfig::route`]): behind a jump host the host
+/// name is the far side's, and the same `deploy@10.0.0.5` through another
+/// bastion is another machine that must never be sent this one's password.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Account {
     pub host: String,
     pub user: String,
     pub port: u16,
+    /// `None` for a server ssh reaches directly — the account every password
+    /// saved before routes counted is under, unchanged.
+    pub route: Option<String>,
 }
 
 impl Account {
@@ -722,13 +810,33 @@ impl Account {
             host: config.hostname.clone(),
             user: config.user.clone(),
             port,
+            route: config.route(),
         })
     }
 
+    /// The account name the store keeps the password under: the user, and
+    /// behind a route the route after it (`deploy via proxyjump bastion`).
+    /// **The route goes into a field every lookup names** — the Keychain
+    /// matches a field a query leaves out as anything, so a route kept in a
+    /// field of its own (a path) would still be found by the direct host's
+    /// query: the same inner address on this Mac's own network would be sent
+    /// the far server's password. A direct host's name is the bare user, as
+    /// it always was: its saved password keeps matching.
+    pub fn stored_user(&self) -> String {
+        match &self.route {
+            Some(route) => format!("{} via {route}", self.user),
+            None => self.user.clone(),
+        }
+    }
+
     /// The item's label — a UI string: the user finds it by "bateri" in
-    /// Keychain Access.
+    /// Keychain Access, and a routed one by its route.
     pub fn label(&self) -> String {
-        format!("bateri \u{2014} {}@{}:{}", self.user, self.host, self.port)
+        let label = format!("bateri \u{2014} {}@{}:{}", self.user, self.host, self.port);
+        match &self.route {
+            Some(route) => format!("{label} via {route}"),
+            None => label,
+        }
     }
 }
 
@@ -917,6 +1025,17 @@ pub struct Masters {
     /// application's lifetime; neither a new remote generation nor time clears
     /// it — only the user's successful sign-in and Forget Password do.
     rejected: Mutex<HashSet<Account>>,
+    /// The accounts whose background attempt stopped at the jump host's own
+    /// password prompt ([`Responder::foreign`]): nobody answers it in the
+    /// background, so a background job does not try again — **not**
+    /// [`Self::rejected`]: the saved password was never sent, it is neither
+    /// stale at the sheet nor removed by an unticked sign-in. Without the
+    /// hold every background tick ([`crate::remote_helper::RETRY_AFTER`])
+    /// would open one more connection to the bastion and drop it at the
+    /// prompt — a stream of failed logins a bastion's fail2ban or
+    /// `MaxStartups` counts. Cleared like the mark: the user's successful
+    /// sign-in and Forget Password.
+    held: Mutex<HashSet<Account>>,
     /// The account each target resolved to, by its argv — the main thread's
     /// question (Forget Password's menu item) must not start `ssh -G`.
     accounts: Mutex<HashMap<Vec<String>, Account>>,
@@ -962,6 +1081,7 @@ impl Masters {
             store,
             flights: Mutex::new(HashMap::new()),
             rejected: Mutex::new(HashSet::new()),
+            held: Mutex::new(HashSet::new()),
             accounts: Mutex::new(HashMap::new()),
             known: Mutex::new(HashMap::new()),
             sockets: Mutex::new(HashMap::new()),
@@ -976,12 +1096,13 @@ impl Masters {
     /// alive → ours; the user's alive → today's argv; otherwise open ours.
     /// Blocks (ssh processes, a sheet, the Keychain): never on the main thread.
     ///
-    /// - [`Ask::Sheet`]: the saved password answers the first prompt, the sheet
-    ///   the rest.
+    /// - [`Ask::Sheet`]: the saved password answers the destination's first
+    ///   password prompt ([`Destination`]), the sheet the rest.
     /// - [`Ask::Never`]: with a saved password not yet refused, one silent
     ///   attempt (`NumberOfPasswordPrompts=1`, no sheet); a refusal marks the
     ///   account and gives [`Denied::SignIn`], as does an account already
-    ///   marked. Without a saved password: today's argv (a key, an agent).
+    ///   marked — or held at its jump host's prompt ([`Self::held`]). Without
+    ///   a saved password: today's argv (a key, an agent).
     ///
     /// A job that finds an opening in progress waits for it — a background job
     /// too, or its today's-argv failure would be held ([`crate::remote_helper::RETRY_AFTER`])
@@ -991,7 +1112,7 @@ impl Masters {
     pub fn ensure(&self, target: &RemoteTarget, ask: Ask) -> Result<Route, Denied> {
         let user = matches!(ask, Ask::Sheet(_));
         loop {
-            let (plan, account) = self.resolve(target);
+            let (plan, account, destination) = self.resolve(target);
             let socket = match plan {
                 Plan::Ready(route) => return Ok(route),
                 Plan::Open(socket) => socket,
@@ -999,7 +1120,10 @@ impl Masters {
             let rejected = account
                 .as_ref()
                 .is_some_and(|account| lock(&self.rejected).contains(account));
-            if !user && rejected {
+            let held = account
+                .as_ref()
+                .is_some_and(|account| lock(&self.held).contains(account));
+            if !user && (rejected || held) {
                 return Err(Denied::SignIn);
             }
             // An opening in progress is joined before anything is read: the
@@ -1042,7 +1166,7 @@ impl Masters {
             };
             // An account already marked: its saved password is known to be
             // refused — the sheet says so at once and a new password replaces it.
-            let responder = Responder::new(sheet, saved, rejected);
+            let responder = Responder::new(sheet, saved, rejected, destination);
             let outcome = self.open_flight(target, &socket, &flight, account.as_ref(), responder);
             return match outcome {
                 Ok(()) => Ok(Route::Ours(socket)),
@@ -1086,17 +1210,18 @@ impl Masters {
     }
 
     /// [`resolve`] through the real ssh; the account and the socket go to the
-    /// caches.
-    fn resolve(&self, target: &RemoteTarget) -> (Plan, Option<Account>) {
+    /// caches. The destination is whose prompts the saved password answers.
+    fn resolve(&self, target: &RemoteTarget) -> (Plan, Option<Account>, Option<Destination>) {
         let (plan, config, socket) = resolve(&SystemSsh, target, self.bases());
         let account = config.as_ref().and_then(Account::from_config);
+        let destination = config.as_ref().map(Destination::from_config);
         if let Some(account) = &account {
             lock(&self.accounts).insert(target.argv.clone(), account.clone());
         }
         if let Some(socket) = socket {
             lock(&self.sockets).insert(target.argv.clone(), socket);
         }
-        (plan, account)
+        (plan, account, destination)
     }
 
     /// The owner's half of [`Masters::ensure`]: open, settle the store and the
@@ -1137,9 +1262,10 @@ impl Masters {
     /// opened the master is saved if the box was ticked; an unticked one that
     /// replaced a refused saved password removes it (the next background
     /// attempt would replay a known-bad password). A saved password the server
-    /// refused marks the account; the user's success clears the mark. **Only
-    /// after the master is up** is anything written — a wrong password is never
-    /// saved.
+    /// refused marks the account; a background attempt that met the jump
+    /// host's own prompt holds it ([`Self::held`]); the user's success clears
+    /// both. **Only after the master is up** is anything written — a wrong
+    /// password is never saved.
     fn settle(
         &self,
         target: &RemoteTarget,
@@ -1166,9 +1292,14 @@ impl Masters {
                 }
                 if !background {
                     lock(&self.rejected).remove(account);
+                    lock(&self.held).remove(account);
                 }
             } else if saved_refused {
                 lock(&self.rejected).insert(account.clone());
+            } else if background && responder.foreign {
+                // The bastion asked and nobody answers in the background,
+                // whatever ended the attempt: no retry would get further.
+                lock(&self.held).insert(account.clone());
             }
         }
         match opened {
@@ -1197,7 +1328,7 @@ impl Masters {
     }
 
     /// Shell ▸ Forget Password: the saved password goes, the refused
-    /// mark with it, and our master for the account stops taking new jobs
+    /// mark and the jump host's hold with it, and our master for the account stops taking new jobs
     /// (`-O stop` — the transfers on it finish; never the user's master) so the
     /// next background job finds no login and the pane offers Sign In…. Runs
     /// ssh: never on the main thread.
@@ -1208,6 +1339,7 @@ impl Masters {
         if let Some(account) = Account::from_config(&config) {
             self.keep(&account, None);
             lock(&self.rejected).remove(&account);
+            lock(&self.held).remove(&account);
         }
         if names_control_path(target) {
             return;
@@ -1383,37 +1515,111 @@ pub fn dial(
     Ok(crate::upload::ssh_argv_for(target, &route))
 }
 
+/// The server a password prompt must name for it to be the account's: the
+/// user and the name ssh's prompts give the server — `HostKeyAlias` or the
+/// host name (OpenSSH `sshconnect2.c`: `user@host's password:` for
+/// `password`, `(user@host) ` before every `keyboard-interactive` prompt), as
+/// `-G` prints them. Only a routed server asks for the name: there the jump
+/// host's ssh asks through the same askpass, first, for **its** password.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Destination {
+    user: String,
+    host: String,
+    /// A jump host or a proxy command stands between ([`SshConfig::route`]).
+    routed: bool,
+}
+
+impl Destination {
+    fn from_config(config: &SshConfig) -> Self {
+        Self {
+            user: config.user.clone(),
+            host: config
+                .host_key_alias
+                .clone()
+                .unwrap_or_else(|| config.hostname.clone()),
+            routed: config.route().is_some(),
+        }
+    }
+
+    /// Whether `prompt` (a password prompt) is the destination's. Directly,
+    /// every one is — only one ssh asks, today's behaviour. Behind a route,
+    /// only one that **begins** with the destination's `user@host` (an
+    /// `xdeploy@app` must not pass for `deploy@app`); a prompt naming no host
+    /// (`Password:`, an old ssh's `keyboard-interactive`) could be the jump
+    /// host's, and the saved password is not sent on a guess.
+    fn asks(&self, prompt: &str) -> bool {
+        if !self.routed {
+            return true;
+        }
+        let text = prompt.trim_start().to_lowercase();
+        let name = format!("{}@{}", self.user, self.host).to_lowercase();
+        text.starts_with(&format!("{name}'s ")) || text.starts_with(&format!("({name}) "))
+    }
+}
+
 /// Who answers one attempt's prompts: the saved password **once** (the first
-/// password prompt), then the sheet — or, for a background job, nobody: the
+/// password prompt that is the destination's), then the sheet — or, for a background job, nobody: the
 /// second password prompt and every other prompt (a key's passphrase, a code)
 /// go unanswered.
 struct Responder {
     /// `None`: a background job.
     sheet: Option<Answerer>,
     saved: Option<String>,
+    /// Whose password prompt is the account's; `None` when the configuration
+    /// was not read (nothing is saved for it either).
+    destination: Option<Destination>,
     /// The saved password was given in this attempt.
     offered_saved: bool,
     /// ssh asked for the password again after the saved one: it was refused.
     saved_refused: bool,
+    /// A password prompt came that is not the destination's — the jump
+    /// host's ([`Destination::asks`]): a background attempt, which nobody
+    /// answers, cannot get past it however often it is repeated.
+    foreign: bool,
     /// The last typed password — on success, the one that opened the master.
     typed: Option<Typed>,
 }
 
 impl Responder {
     /// `refused`: the saved password was already refused (not offered again).
-    fn new(sheet: Option<Answerer>, saved: Option<String>, refused: bool) -> Self {
+    fn new(
+        sheet: Option<Answerer>,
+        saved: Option<String>,
+        refused: bool,
+        destination: Option<Destination>,
+    ) -> Self {
         Self {
             sheet,
             saved,
+            destination,
             offered_saved: false,
             saved_refused: refused,
+            foreign: false,
             typed: None,
         }
     }
 
     /// The answer to one prompt; `None` — unanswered.
+    ///
+    /// A password prompt that is not the destination's ([`Destination::asks`]
+    /// — the jump host's ssh inherits the askpass variables and asks first)
+    /// is [`Prompt::Other`] here: the saved password does not answer it, a
+    /// second one does not make the saved one stale, and what the sheet gets
+    /// for it is neither remembered nor kept as the account's. It is noted
+    /// ([`Self::foreign`]): a background attempt that met it is held.
     fn answer(&mut self, prompt: String) -> Option<String> {
-        let class = classify(&prompt);
+        let class = match classify(&prompt) {
+            Prompt::Password
+                if !self
+                    .destination
+                    .as_ref()
+                    .is_none_or(|destination| destination.asks(&prompt)) =>
+            {
+                self.foreign = true;
+                Prompt::Other
+            }
+            class => class,
+        };
         let password = class == Prompt::Password;
         if password {
             if self.offered_saved && self.typed.is_none() {
@@ -2217,6 +2423,8 @@ mod tests {
             hostname: "prod".into(),
             port: "22".into(),
             proxyjump: "none".into(),
+            proxycommand: None,
+            host_key_alias: None,
             control_path: None,
             control_master: false,
         };
@@ -2232,6 +2440,8 @@ mod tests {
         };
         assert_ne!(other(|c| c.port = "2222".into()), key);
         assert_ne!(other(|c| c.proxyjump = "jump".into()), key);
+        assert_ne!(other(|c| c.proxycommand = Some("nc %h %p".into())), key);
+        assert_eq!(other(|c| c.host_key_alias = Some("other".into())), key);
         assert_ne!(other(|c| c.user = "root".into()), key);
         // The separator keeps the parts apart: ("ab", "c") is not ("a", "bc").
         let a = SshConfig {
@@ -2245,6 +2455,83 @@ mod tests {
             ..config.clone()
         };
         assert_ne!(host_key(&a), host_key(&b));
+    }
+
+    /// Two bastions' `ProxyCommand`s to the same inner address are two
+    /// servers: two sockets, or a job rides a master to the other one. A
+    /// host without one keeps its pinned name — its master may outlive this
+    /// build (an update's handover finds it by that name).
+    #[test]
+    fn a_proxy_command_separates_the_key_and_a_direct_host_keeps_its_own() {
+        let through = |bastion: &str| {
+            parse_config(&format!(
+                "user deploy\nhostname 10.0.0.5\nport 22\n\
+                 proxycommand ssh {bastion} -W %h:%p\n"
+            ))
+            .unwrap()
+        };
+        let direct = parse_config("user deploy\nhostname 10.0.0.5\nport 22\n").unwrap();
+        let (prod, stage) = (through("prod-bastion"), through("stage-bastion"));
+        assert_ne!(host_key(&prod), host_key(&stage));
+        assert_ne!(host_key(&prod), host_key(&direct));
+        // Pinned from the four-part algorithm before `ProxyCommand` joined it.
+        assert_eq!(host_key(&direct), "cbbcc57ce2bb27a8");
+        let spelled = parse_config(
+            "user deploy\nhostname 10.0.0.5\nport 22\nproxyjump none\nproxycommand none\n",
+        )
+        .unwrap();
+        assert_eq!(host_key(&spelled), "cbbcc57ce2bb27a8");
+    }
+
+    /// `%n` is the host as typed, and `-G` prints it unexpanded: one
+    /// `ProxyCommand ssh %n-bastion -W %h:%p` for `prod-app` and `stage-app`
+    /// is two bastions to the same inner address — two sockets, two saved
+    /// passwords. The `host` line (as typed) expands it; `%%n` is a literal
+    /// `%n`, and a route without the token keeps its key.
+    #[test]
+    fn the_typed_host_in_a_route_tells_two_bastions_apart() {
+        let typed = |host: &str, route: &str| {
+            parse_config(&format!(
+                "host {host}\nuser deploy\nhostname 10.0.0.5\nport 22\n{route}\n"
+            ))
+            .unwrap()
+        };
+        let command = "proxycommand ssh %n-bastion -W %h:%p";
+        let (prod, stage) = (typed("prod-app", command), typed("stage-app", command));
+        assert_eq!(
+            prod.proxycommand.as_deref(),
+            Some("ssh prod-app-bastion -W %h:%p")
+        );
+        assert_ne!(host_key(&prod), host_key(&stage));
+        let account = |config: &SshConfig| Account::from_config(config).unwrap();
+        assert_ne!(account(&prod), account(&stage));
+        assert_ne!(account(&prod).stored_user(), account(&stage).stored_user());
+
+        // ssh expands `%n` in a `ProxyJump` too (`ssh_config(5)` TOKENS).
+        let jump = "proxyjump %n-bastion";
+        let (prod, stage) = (typed("prod-app", jump), typed("stage-app", jump));
+        assert_eq!(prod.proxyjump, "prod-app-bastion");
+        assert_ne!(host_key(&prod), host_key(&stage));
+        assert_ne!(account(&prod), account(&stage));
+
+        // `%%` is one token: `%%n` is the text `%n`, left as written.
+        let literal = typed("prod-app", "proxycommand hop %%n %h");
+        assert_eq!(literal.proxycommand.as_deref(), Some("hop %%n %h"));
+        // Without `%n` the host line changes nothing: the pinned direct key,
+        // and a route's own text.
+        let direct = typed("web", "proxyjump none");
+        assert_eq!(host_key(&direct), "cbbcc57ce2bb27a8");
+        let plain = "proxycommand ssh bastion -W %h:%p";
+        assert_eq!(
+            host_key(&typed("prod-app", plain)),
+            host_key(&typed("stage-app", plain))
+        );
+        assert_eq!(
+            typed("prod-app", plain).proxycommand.as_deref(),
+            Some("ssh bastion -W %h:%p")
+        );
+        assert_eq!(expand_typed_host("%n%", "a"), "a%");
+        assert_eq!(expand_typed_host("%%%n", "a"), "%%a");
     }
 
     #[test]
@@ -2611,7 +2898,10 @@ mod tests {
     /// `ControlPath` (`-O stop` removes it), and `-M` asks through
     /// `$SSH_ASKPASS` (`NumberOfPasswordPrompts` times, three by default),
     /// then plays `-f` — the marker, exit 0.
-    /// The host `stranger` has no known host key. POSIX `sh`: Debian's is dash.
+    /// The host `stranger` has no known host key; the host `jumped` is behind
+    /// `-J admin@bastion`, whose ssh asks first (`admin@bastion's password:`,
+    /// `b4st`) through the same askpass — the jump's ssh inherits the
+    /// variables. POSIX `sh`: Debian's is dash.
     ///
     /// It records what the tests assert: every `-M` (`opens`), an askpass that
     /// failed and was followed by another try — ssh's empty password
@@ -2637,7 +2927,8 @@ for arg in "$@"; do
 done
 if [ "$mode" != M ] && [ -n "$SSH_ASKPASS$BATERI_ASKPASS" ]; then echo "$mode" >> "$root/leak"; fi
 case "$mode" in
-  G) printf 'user u\nhostname %s\nport 22\nproxyjump none\n' "$dest"; exit 0;;
+  G) jump=none; [ "$dest" = jumped ] && jump='admin@bastion'
+     printf 'user u\nhostname %s\nport 22\nproxyjump %s\n' "$dest" "$jump"; exit 0;;
   O) if [ "$op" = stop ]; then echo "$cp" >> "$root/stops"; rm -f "$cp"; exit 0; fi
      if [ -e "$cp" ]; then echo 'Master running' >&2; exit 0; fi
      echo "Control socket connect($cp): No such file or directory" >&2; exit 255;;
@@ -2645,6 +2936,11 @@ case "$mode" in
      if [ "$dest" = stranger ]; then
        echo 'No ED25519 host key is known for stranger and you have requested strict checking.' >&2
        echo 'Host key verification failed.' >&2; exit 255
+     fi
+     if [ "$dest" = jumped ]; then
+       if ! hop=$("$SSH_ASKPASS" "admin@bastion's password: ") || [ "$hop" != b4st ]; then
+         echo 'admin@bastion: Permission denied (password).' >&2; exit 255
+       fi
      fi
      n=0
      while [ $n -lt "${{prompts:-3}}" ]; do
@@ -2743,6 +3039,7 @@ exit $code
             host: "prod".to_owned(),
             user: "u".to_owned(),
             port: 22,
+            route: None,
         }
     }
 
@@ -3193,6 +3490,89 @@ exit $code
         std::fs::remove_dir_all(&root).unwrap();
     }
 
+    /// The fake's account behind its jump host (`jumped`).
+    fn jumped_account() -> Account {
+        Account::from_config(
+            &parse_config("user u\nhostname jumped\nport 22\nproxyjump admin@bastion\n").unwrap(),
+        )
+        .unwrap()
+    }
+
+    /// The jump host asks first: the saved password is not its answer — it
+    /// would be sent to another machine. The sheet asks for the bastion's
+    /// (not as the account's: nothing to remember, nothing stale), the saved
+    /// one answers the destination, and the bastion's is never saved over it.
+    #[test]
+    fn the_saved_password_goes_to_the_destination_and_never_to_its_jump_host() {
+        let (root, masters, store) = rig_saved("jump", "s3cr3t", None);
+        lock(&store.saved).insert(jumped_account(), "s3cr3t".to_owned());
+        let target = host_target(&root, "jumped");
+        let (asker, asked) = remembering(&[Some("b4st")]);
+        assert!(matches!(
+            masters.ensure(&target, Ask::Sheet(asker)),
+            Ok(Route::Ours(_))
+        ));
+        let asked = lock(&asked).clone();
+        assert_eq!(asked.len(), 1, "{asked:?}");
+        assert_eq!(asked[0].prompt, "admin@bastion's password: ");
+        assert_eq!(asked[0].class, Prompt::Other);
+        assert!(!asked[0].stale && !asked[0].again);
+        assert!(lock(&store.writes).is_empty(), "the bastion's was saved");
+        assert_eq!(store.read(&jumped_account()).as_deref(), Some("s3cr3t"));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A background job stops at the jump host's question without sending the
+    /// saved password there — and without calling it refused: the user's
+    /// sign-in then neither hears it is stale nor loses it.
+    #[test]
+    fn a_jump_hosts_question_in_the_background_leaves_the_saved_password_alone() {
+        let (root, masters, store) = rig_saved("jumpbg", "s3cr3t", None);
+        lock(&store.saved).insert(jumped_account(), "s3cr3t".to_owned());
+        let target = host_target(&root, "jumped");
+        assert_eq!(masters.ensure(&target, Ask::Never), Err(Denied::SignIn));
+        assert_eq!(lines(&root.join("empty")), 0);
+        let (asker, asked) = scripted(&[Some("b4st")]);
+        assert!(matches!(
+            masters.ensure(&target, Ask::Sheet(asker)),
+            Ok(Route::Ours(_))
+        ));
+        let asked = lock(&asked).clone();
+        assert_eq!(asked.len(), 1, "{asked:?}");
+        assert!(!asked[0].stale, "the saved password was called stale");
+        assert_eq!(store.read(&jumped_account()).as_deref(), Some("s3cr3t"));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// The background cannot answer the jump host, so it does not knock
+    /// again: one attempt — the bastion's prompt, dropped — then the account
+    /// is held, not called refused (the saved password was never sent, it
+    /// stays). Without the hold every background tick would open another
+    /// connection to the bastion. The user's sign-in lifts it.
+    #[test]
+    fn a_jump_hosts_question_stops_the_background_until_the_user_signs_in() {
+        let (root, masters, store) = rig_saved("jumphold", "s3cr3t", None);
+        lock(&store.saved).insert(jumped_account(), "s3cr3t".to_owned());
+        let target = host_target(&root, "jumped");
+        for _ in 0..3 {
+            assert_eq!(masters.ensure(&target, Ask::Never), Err(Denied::SignIn));
+        }
+        assert_eq!(lines(&root.join("opens")), 1, "the bastion was asked again");
+        assert_eq!(store.read(&jumped_account()).as_deref(), Some("s3cr3t"));
+        assert!(lock(&masters.rejected).is_empty(), "held as refused");
+        // The user answers the bastion; the saved password the destination.
+        let (asker, asked) = scripted(&[Some("b4st")]);
+        assert!(masters.ensure(&target, Ask::Sheet(asker)).is_ok());
+        assert!(!lock(&asked)[0].stale);
+        assert_eq!(store.read(&jumped_account()).as_deref(), Some("s3cr3t"));
+        // Lifted: the next background job may try once more — and once only.
+        master_gone(&root);
+        assert_eq!(masters.ensure(&target, Ask::Never), Err(Denied::SignIn));
+        assert_eq!(masters.ensure(&target, Ask::Never), Err(Denied::SignIn));
+        assert_eq!(lines(&root.join("opens")), 3);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
     #[test]
     fn forget_removes_the_password_and_stops_our_master() {
         let (root, masters, store) = rig_saved("forget", "s3cr3t", Some("s3cr3t"));
@@ -3247,6 +3627,99 @@ exit $code
         assert!(!password_refused(
             "u@prod: Permission denied (publickey).\r\n"
         ));
+    }
+
+    /// The same inner address behind two bastions is two servers, and one
+    /// server's saved password must never be the other's. A host reached
+    /// directly keeps the account — and the label — it was saved under.
+    #[test]
+    fn a_saved_password_belongs_to_the_route_it_was_saved_through() {
+        let account = |extra: &str| {
+            Account::from_config(
+                &parse_config(&format!("user deploy\nhostname 10.0.0.5\nport 22\n{extra}"))
+                    .unwrap(),
+            )
+            .unwrap()
+        };
+        let direct = account("");
+        let prod = account("proxyjump prod-bastion\n");
+        let staging = account("proxyjump staging-bastion\n");
+        let command = account("proxycommand ssh prod-bastion -W %h:%p\n");
+        assert_ne!(prod, staging);
+        assert_ne!(prod, direct);
+        assert_ne!(command, prod);
+        assert_ne!(command, direct);
+        assert_eq!(account("proxyjump none\n"), direct);
+        assert_eq!(direct.label(), "bateri \u{2014} deploy@10.0.0.5:22");
+        // What the Keychain matches on: the direct host's is the bare user, as
+        // before; a routed one names its route in the same field.
+        assert_eq!(direct.route, None);
+        assert_eq!(direct.stored_user(), "deploy");
+        assert_eq!(prod.stored_user(), "deploy via proxyjump prod-bastion");
+        assert_ne!(prod.stored_user(), staging.stored_user());
+        assert_eq!(
+            command.label(),
+            "bateri \u{2014} deploy@10.0.0.5:22 via proxycommand ssh prod-bastion -W %h:%p"
+        );
+    }
+
+    /// Behind a route the saved password answers only a prompt that begins
+    /// with the destination's `user@host` (or its `HostKeyAlias`) — ssh's
+    /// `password` and `keyboard-interactive` spellings both; directly, every
+    /// password prompt is the destination's, as it always was.
+    #[test]
+    fn the_saved_password_answers_only_prompts_that_name_the_destination() {
+        let destination = |extra: &str| {
+            Destination::from_config(
+                &parse_config(&format!("user deploy\nhostname app\nport 22\n{extra}")).unwrap(),
+            )
+        };
+        let jumped = destination("proxyjump admin@bastion\n");
+        assert!(jumped.asks("deploy@app's password: "));
+        assert!(jumped.asks("(deploy@app) Password: "));
+        assert!(jumped.asks("(Deploy@APP) Parola: "));
+        assert!(!jumped.asks("admin@bastion's password: "));
+        assert!(!jumped.asks("(admin@bastion) Password: "));
+        assert!(!jumped.asks("xdeploy@app's password: "));
+        assert!(!jumped.asks("deploy@app.evil's password: "));
+        assert!(!jumped.asks("Password:"));
+        let aliased = destination("proxycommand ssh b -W %h:%p\nhostkeyalias app-key\n");
+        assert!(aliased.asks("deploy@app-key's password: "));
+        assert!(!aliased.asks("deploy@app's password: "));
+        let direct = destination("");
+        assert!(direct.asks("Password:"));
+        assert!(direct.asks("deploy@app's password: "));
+
+        // The responder: the bastion's prompt goes to the sheet as another
+        // question, the destination's gets the saved password.
+        let (asker, asked) = remembering(&[Some("b4st"), Some("b4st")]);
+        let mut responder = Responder::new(Some(asker), Some("s3cr3t".into()), false, Some(jumped));
+        assert_eq!(
+            responder
+                .answer("admin@bastion's password: ".into())
+                .as_deref(),
+            Some("b4st")
+        );
+        assert_eq!(
+            responder
+                .answer("admin@bastion's password: ".into())
+                .as_deref(),
+            Some("b4st")
+        );
+        assert_eq!(
+            responder
+                .answer("deploy@app's password: ".into())
+                .as_deref(),
+            Some("s3cr3t")
+        );
+        assert!(!responder.saved_refused, "a bastion's retry made it stale");
+        assert_eq!(responder.typed, None, "the bastion's would be kept");
+        let asked = lock(&asked).clone();
+        assert!(
+            asked
+                .iter()
+                .all(|q| q.class == Prompt::Other && !q.again && !q.stale)
+        );
     }
 
     #[test]
@@ -3965,6 +4438,7 @@ exit $code
                 host: "127.0.0.1".to_owned(),
                 user: "deneme".to_owned(),
                 port: 2222,
+                route: None,
             },
             "parola123".to_owned(),
         );

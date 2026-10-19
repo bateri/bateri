@@ -295,11 +295,19 @@ impl Session {
 /// The state file's key for a server: `user@hostname:port` as `ssh -G`
 /// resolves them — the same triple as the saved password's account
 /// ([`Account`]), so `ssh web` and `ssh deploy@10.0.0.5` on one
-/// machine are learned once. `None` without a user, a readable port or a host
-/// name, and for a value that would break a row (a tab or a line break).
+/// machine are learned once. Behind a jump host or a proxy command the route
+/// follows (`deploy@10.0.0.5:22 via proxyjump bastion`), as it does in the
+/// account: the same inner address through another bastion is another
+/// server, and what one runs says nothing of the other; a direct host's key
+/// is the triple it always was. `None` without a user, a readable port or a
+/// host name, and for a value that would break a row (a tab or a line break).
 pub fn host_key(out: &str) -> Option<String> {
     let account = Account::from_config(&parse_config(out)?)?;
-    let key = format!("{}@{}:{}", account.user, account.host, account.port);
+    let mut key = format!("{}@{}:{}", account.user, account.host, account.port);
+    if let Some(route) = &account.route {
+        key.push_str(" via ");
+        key.push_str(route);
+    }
     (!key.contains(['\t', '\n', '\r'])).then_some(key)
 }
 
@@ -1502,6 +1510,31 @@ mod tests {
             host_key("user deploy\nhostname 10.0.0.5\nport 22\n").as_deref(),
             Some("deploy@10.0.0.5:22")
         );
+        assert_eq!(
+            host_key("user deploy\nhostname 10.0.0.5\nport 22\nproxyjump none\n").as_deref(),
+            Some("deploy@10.0.0.5:22")
+        );
+        assert_eq!(
+            host_key("user deploy\nhostname 10.0.0.5\nport 22\nproxyjump prod-bastion\n")
+                .as_deref(),
+            Some("deploy@10.0.0.5:22 via proxyjump prod-bastion")
+        );
+        assert_eq!(
+            host_key("user deploy\nhostname 10.0.0.5\nport 22\nproxycommand nc\tx %h %p\n"),
+            None
+        );
+        // `%n` is the host as typed: one wildcard block's bastions differ.
+        let typed = |host: &str| {
+            host_key(&format!(
+                "host {host}\nuser deploy\nhostname 10.0.0.5\nport 22\n\
+                 proxycommand ssh %n-bastion -W %h:%p\n"
+            ))
+        };
+        assert_eq!(
+            typed("prod-app").as_deref(),
+            Some("deploy@10.0.0.5:22 via proxycommand ssh prod-app-bastion -W %h:%p")
+        );
+        assert_ne!(typed("prod-app"), typed("stage-app"));
         assert_eq!(host_key("user deploy\nhostname h\nport x\n"), None);
         assert_eq!(host_key("hostname h\nport 22\n"), None);
     }

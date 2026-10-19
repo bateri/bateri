@@ -4,7 +4,11 @@
 //! - **What**: an *internet password* (`kSecClassInternetPassword`) — server
 //!   the host, account the user, the port, protocol SSH — labelled
 //!   `bateri — user@host:port`, so Keychain Access shows it under the host and
-//!   finds it by "bateri". The login keychain, **not** the
+//!   finds it by "bateri". Behind a jump host or a proxy command the route
+//!   follows the user in the account (`deploy via proxyjump bastion`,
+//!   [`Account::stored_user`]): every query names the account, so a direct
+//!   host and a routed one with the same inner address never find each
+//!   other's password. The login keychain, **not** the
 //!   data-protection keychain (`kSecUseDataProtectionKeychain` is not set: that
 //!   one wants a provisioning profile's entitlement).
 //! - **Who**: only the application process. The askpass helper (the same
@@ -47,7 +51,7 @@ fn query(
     extra: &[(&'static CFString, &CFType)],
 ) -> CFRetained<CFDictionary<CFString, CFType>> {
     let host = CFString::from_str(&account.host);
-    let user = CFString::from_str(&account.user);
+    let user = CFString::from_str(&account.stored_user());
     let port = CFNumber::new_i32(i32::from(account.port));
     // SAFETY: the `kSec*` statics are immutable constants Security.framework
     // exports; reading them has no precondition.
