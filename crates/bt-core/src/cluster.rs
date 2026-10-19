@@ -165,16 +165,13 @@ pub(crate) fn width(cluster: &str) -> usize {
     if base >= 2 {
         return 2;
     }
-    let widened = chars.any(|(at, c)| {
-        cluster
-            .get(..at + c.len_utf8())
-            .is_some_and(|prefix| prefix.width() >= 2)
-    });
+    let widened = chars.any(|(at, c)| cluster.get(..at + c.len_utf8()).is_some_and(widens));
     if widened { 2 } else { base }
 }
 
 /// Did the newest code point of `open` take a **narrow** cluster to two
-/// columns — the grid wrapper's question after each extension.
+/// columns — the grid wrapper's question after each extension, and the one
+/// [`width`] asks of every prefix, so the two cannot part.
 ///
 /// **Only the whole string is measured, not every prefix as [`width`]
 /// does:** the wrapper asks after every extension of a narrow cell, so each

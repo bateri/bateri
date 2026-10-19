@@ -82,7 +82,6 @@ use alacritty_terminal::vte::ansi::{
 // vte does not re-export this type; the reason for the edge is in the root
 // `Cargo.toml`.
 use cursor_icon::CursorIcon;
-use unicode_width::UnicodeWidthChar;
 
 use crate::graphics::{Commands, Env, Hub, Motion, Outcome, Pending, Sink, screen_of};
 use crate::input::PIXEL_MOUSE_MODE;
@@ -441,7 +440,7 @@ impl<U: EventListener> Handler for ClusterHandler<'_, U> {
         // cell —, so the ceiling is asked before either path: past it the code
         // point is dropped. Asked of the cell's length, before `open` is
         // built, so a long run costs the same per mark however long it is.
-        if UnicodeWidthChar::width(c) == Some(0) && self.is_full(at) {
+        if crate::dock::column_width(c) == 0 && self.is_full(at) {
             return;
         }
         if !open_cluster {
