@@ -1130,10 +1130,15 @@ enum Seq {
     DcsEntry,
     DcsParam,
     DcsIntermediate,
-    /// DCS passthrough: CAN, SUB, ESC and the 8-bit ST end it.
+    /// DCS passthrough: CAN, SUB, ESC and the 8-bit ST end it. Its body is
+    /// **not kept**: alacritty's `hook`, `put` and `unhook` only log
+    /// (`vte/src/ansi.rs`), so what opened it is all a fresh parser needs to
+    /// stand here. A handler that reads a DCS body one day (DECRQSS, sixel)
+    /// needs it kept, capped as [`Seq::Apc`] is.
     DcsBody,
     /// SOS/PM and an ignored DCS: only CAN, SUB and ESC end them — not
-    /// `0x9c`, which a UTF-8 payload carries as a continuation byte.
+    /// `0x9c`, which a UTF-8 payload carries as a continuation byte. vte
+    /// itself throws the body away, so only what opened it is kept.
     Ignored,
     /// An application program command (`ESC _`), which the parser hands to the
     /// handler: like [`Seq::Ignored`], but its `ESC` does not end it by itself.
@@ -1142,6 +1147,11 @@ enum Seq {
     /// byte cancels it and is read as the byte after an `ESC` that starts afresh.
     ApcEscape,
     Osc,
+    /// An OSC past [`OSC_KEEP`]: the tail holds `ESC ] ;` in its place — an
+    /// OSC whose first parameter is empty, which alacritty's `osc_dispatch`
+    /// returns on before it reads anything and our scanner skips — and it
+    /// ends where the OSC does.
+    OscDropped,
 }
 
 /// How many bytes of capacity [`Tail`] keeps once a sequence ends — one
@@ -1154,6 +1164,31 @@ const TAIL_KEEP: usize = 4096;
 /// grow the tail without end.
 const APC_KEEP: usize = crate::graphics::PAYLOAD_LIMIT + 4096;
 
+/// The most bytes of a CSI, or of an escape's or a DCS's parameters and
+/// intermediates, [`Tail`] keeps. A sequence vte still acts on is far
+/// shorter: at most 32 parameters (vte's `MAX_PARAMS`) of at most seven
+/// digits once [`Tail::keep_param`] has left out those that cannot change a
+/// value, 31 separators, a private marker and two intermediates — under 300
+/// bytes. **Past that vte has set its `ignoring` flag or gone to an ignore
+/// state**, and both last until the sequence ends: alacritty's
+/// `csi_dispatch` returns on the flag, its `esc_dispatch` reads only the
+/// first two intermediates, which are kept, and a DCS hook does nothing at
+/// all. So the bytes the replay misses past the cap change nothing.
+const PARAMS_KEEP: usize = 1024;
+
+/// The most bytes of an OSC [`Tail`] keeps: as much as a graphics command
+/// ([`APC_KEEP`]), the largest sequence this terminal takes whole elsewhere —
+/// a clipboard copy (OSC 52) of some 48 MiB of text. Unlike the others an
+/// OSC is kept whole by vte (`osc_raw` is an unbounded `Vec` under `std`)
+/// and alacritty acts on all of it, so no shorter OSC can stand in for a
+/// longer one: past the cap the tail gives the OSC up ([`Seq::OscDropped`]).
+///
+/// **Known limit:** an OSC that long, cut by a handover, comes back
+/// **ignored** — the copy or the title it carried is lost, never cut short.
+/// The live parser still grows with it: that buffer is vte's (the
+/// `ClipboardStore` arm in `session.rs` names it).
+const OSC_KEEP: usize = APC_KEEP;
+
 /// The bytes since the parser last stood in its **ground state**: a read
 /// that ended inside a CSI/OSC/DCS or inside one character's UTF-8 left
 /// them with no effect on `Term` yet — vte dispatches only at the final
@@ -1164,6 +1199,17 @@ const APC_KEEP: usize = crate::graphics::PAYLOAD_LIMIT + 4096;
 /// same bytes on the read path. The C0 controls vte **executes** inside an
 /// escape or a CSI are left out — they already took effect.
 ///
+/// **Bounded in every state.** Every read of every pane goes through here
+/// and a program decides how long a sequence is: holding each byte of one
+/// that never ends (`printf '\eX'; cat /dev/zero`) would grow the tail at
+/// PTY speed until the app runs out of memory. So the tail keeps what puts
+/// a fresh parser **where the old one stands** and makes the rest come out
+/// the same, not the bytes as they came: a body vte or its handler throws
+/// away is not kept ([`Seq::Ignored`], [`Seq::DcsBody`]), nor a digit that
+/// cannot change its parameter, nor parameters and intermediates past
+/// [`PARAMS_KEEP`]; a command stops at [`APC_KEEP`] and an OSC past
+/// [`OSC_KEEP`] is given up.
+///
 /// **Known limit:** the cut is per code point, not per cluster
 /// ([`crate::handler::ClusterHandler`]'s `last_input` is the reader's): an
 /// emoji sequence cut **between** two code points comes back as two
@@ -1173,6 +1219,9 @@ pub(crate) struct Tail {
     state: Seq,
     /// UTF-8 continuation bytes still missing in the ground state.
     utf8_need: u8,
+    /// The value of the parameter the last kept digit belongs to, counted
+    /// as vte counts it (`action_paramnext`, a saturating `u16`).
+    param: u16,
     bytes: Vec<u8>,
 }
 
@@ -1218,6 +1267,39 @@ impl Tail {
     fn enter(&mut self, byte: u8, state: Seq) {
         self.bytes.push(byte);
         self.state = state;
+    }
+
+    /// A parameter or intermediate byte of a CSI, a DCS or an escape, kept
+    /// unless vte comes out the same without it: past [`PARAMS_KEEP`], or a
+    /// digit that leaves the value of the parameter it extends as it was —
+    /// a leading zero, or any digit once the value is saturated. vte goes
+    /// on with a parameter across what it ignores (`DEL`, an executed C0),
+    /// which is not kept either, so a digit behind a kept digit extends it.
+    fn keep_param(&mut self, byte: u8) {
+        if self.bytes.len() >= PARAMS_KEEP {
+            return;
+        }
+        if byte.is_ascii_digit() {
+            let digit = u16::from(byte - b'0');
+            if self.bytes.last().is_some_and(u8::is_ascii_digit) {
+                let value = self.param.saturating_mul(10).saturating_add(digit);
+                if value == self.param {
+                    return;
+                }
+                self.param = value;
+            } else {
+                self.param = digit;
+            }
+        }
+        self.bytes.push(byte);
+    }
+
+    /// The OSC ran past [`OSC_KEEP`]: what is kept stands for one the
+    /// replay ignores ([`Seq::OscDropped`]), and the capacity goes with it,
+    /// the OSC may never end.
+    fn drop_osc(&mut self) {
+        self.bytes = b"\x1b];".to_vec();
+        self.state = Seq::OscDropped;
     }
 
     fn step(&mut self, byte: u8) {
@@ -1268,31 +1350,34 @@ impl Tail {
             },
             Seq::EscapeIntermediate => match byte {
                 _ if executed => {}
-                0x20..=0x2f => self.bytes.push(byte),
+                0x20..=0x2f => self.keep_param(byte),
                 0x30..=0x7e => self.ground(),
                 _ => self.anywhere(byte),
             },
             Seq::Csi => match byte {
                 _ if executed => {}
-                0x20..=0x3f => self.bytes.push(byte),
+                0x20..=0x3f => self.keep_param(byte),
                 0x40..=0x7e => self.ground(),
                 _ => self.anywhere(byte),
             },
             Seq::DcsEntry => match byte {
                 0x20..=0x2f => self.enter(byte, Seq::DcsIntermediate),
-                0x30..=0x3f => self.enter(byte, Seq::DcsParam),
+                0x30..=0x3f => {
+                    self.state = Seq::DcsParam;
+                    self.keep_param(byte);
+                }
                 0x40..=0x7e => self.enter(byte, Seq::DcsBody),
                 _ => self.anywhere(byte),
             },
             Seq::DcsParam => match byte {
                 0x20..=0x2f => self.enter(byte, Seq::DcsIntermediate),
-                0x30..=0x3b => self.bytes.push(byte),
+                0x30..=0x3b => self.keep_param(byte),
                 0x3c..=0x3f => self.enter(byte, Seq::Ignored),
                 0x40..=0x7e => self.enter(byte, Seq::DcsBody),
                 _ => self.anywhere(byte),
             },
             Seq::DcsIntermediate => match byte {
-                0x20..=0x2f => self.bytes.push(byte),
+                0x20..=0x2f => self.keep_param(byte),
                 0x30..=0x3f => self.enter(byte, Seq::Ignored),
                 0x40..=0x7e => self.enter(byte, Seq::DcsBody),
                 _ => self.anywhere(byte),
@@ -1300,7 +1385,7 @@ impl Tail {
             Seq::Ignored => match byte {
                 0x18 | 0x1a => self.ground(),
                 0x1b => self.escape(),
-                _ => self.bytes.push(byte),
+                _ => {}
             },
             Seq::Apc => match byte {
                 0x18 | 0x1a => self.ground(),
@@ -1321,14 +1406,16 @@ impl Tail {
             Seq::DcsBody => match byte {
                 0x18 | 0x1a | 0x9c => self.ground(),
                 0x1b => self.escape(),
-                _ => self.bytes.push(byte),
+                _ => {}
             },
-            Seq::Osc => match byte {
+            Seq::Osc | Seq::OscDropped => match byte {
                 0x07 | 0x18 | 0x1a => self.ground(),
                 0x1b => self.escape(),
                 // Ignored inside an OSC.
                 _ if executed => {}
-                _ => self.bytes.push(byte),
+                _ if self.state == Seq::OscDropped => {}
+                _ if self.bytes.len() < OSC_KEEP => self.bytes.push(byte),
+                _ => self.drop_osc(),
             },
         }
     }
@@ -2034,10 +2121,17 @@ pub(crate) mod tests {
     fn a_stream_cut_anywhere_comes_back_whole_with_its_tail() {
         let stream = "ab\x1b[1;31mred\x1b[0m 👍 é\x1b]2;title\x07\x1b[2;3Hz\x1bP1$qm\x1b\\\r\nnext"
             .as_bytes();
+        comes_back_whole(stream, 0..=stream.len());
+    }
+
+    /// Cuts `stream` at each of `cuts` and hands the rest to a fresh
+    /// terminal behind the snapshot and the tail: each must come out as the
+    /// terminal that read the stream whole.
+    fn comes_back_whole(stream: &[u8], cuts: impl IntoIterator<Item = usize>) {
         let (mut whole, whole_recorder) = live_term(20, 6);
         feed_into(&mut whole, stream);
         let (expected, _) = encode_of(&mut whole, &whole_recorder);
-        for cut in 0..=stream.len() {
+        for cut in cuts {
             let (mut old, recorder) = live_term(20, 6);
             feed_into(&mut old, &stream[..cut]);
             let mut tail = Tail::default();
@@ -2080,7 +2174,97 @@ pub(crate) mod tests {
         // continuation byte (`Ŝ`).
         assert_eq!(tail_of(b"\x1bPq\x9c"), b"");
         assert_eq!(tail_of("\x1b_Ŝ".as_bytes()), "\x1b_Ŝ".as_bytes());
-        assert_eq!(tail_of(b"\x1bP1<q\x9c"), b"\x1bP1<q\x9c");
+        assert_eq!(tail_of(b"\x1bP1<q\x9c"), b"\x1bP1<");
+        // A body the parser drops is not kept, only what opens it.
+        assert_eq!(tail_of(b"\x1bXjunk"), b"\x1bX");
+        assert_eq!(tail_of(b"\x1bP1$qm"), b"\x1bP1$q");
+        // Nor a digit that cannot change its parameter.
+        assert_eq!(tail_of(b"\x1b[0005;00"), b"\x1b[05;0");
+        assert_eq!(tail_of(b"\x1b[1234567899"), b"\x1b[123456");
+    }
+
+    #[test]
+    fn a_sequence_that_never_ends_does_not_grow_the_tail_in_any_state() {
+        // An introducer and what a program might stream behind it with no
+        // byte that ends it: `printf '\eX'; cat /dev/zero`, `printf '\eP'; yes`.
+        let cases: [(&[u8], &[u8]); 14] = [
+            (b"\x1bX", b"y\n"),
+            (b"\x1b^", b"\0"),
+            (b"\x1bPq", b"y\n"),
+            (b"\x1bP1<", b"y\n"),
+            (b"\x1bP", b"1"),
+            (b"\x1bP", b";"),
+            (b"\x1bP!", b"!"),
+            (b"\x1b[", b"0"),
+            (b"\x1b[", b"9"),
+            (b"\x1b[", b";"),
+            (b"\x1b[", b"1:"),
+            (b"\x1b[?", b"<"),
+            (b"\x1b ", b" "),
+            (b"\x1b[1", b"\x7f"),
+        ];
+        for (start, filler) in cases {
+            let mut tail = Tail::default();
+            tail.feed(start);
+            let chunk = filler.repeat((1 << 20) / filler.len());
+            for _ in 0..4 {
+                tail.feed(&chunk);
+            }
+            // The cap and the bytes that move a DCS on to its next state.
+            assert!(
+                tail.bytes().len() <= PARAMS_KEEP + 2,
+                "{:?} then {:?}: {} bytes",
+                String::from_utf8_lossy(start),
+                String::from_utf8_lossy(filler),
+                tail.bytes().len()
+            );
+            tail.feed(b"\x18");
+            assert!(tail.bytes().is_empty());
+        }
+    }
+
+    #[test]
+    fn an_osc_past_its_cap_is_given_up_for_one_the_replay_ignores() {
+        let mut tail = Tail::default();
+        tail.feed(b"\x1b]0;");
+        let chunk = vec![b'y'; 1 << 20];
+        for _ in 0..(OSC_KEEP >> 20) + 2 {
+            tail.feed(&chunk);
+        }
+        assert!(tail.bytes() == b"\x1b];", "{} bytes", tail.bytes().len());
+        assert!(tail.bytes.capacity() <= TAIL_KEEP);
+        // The rest of the OSC behind it — a title, as far as its bytes go —
+        // changes nothing; the text after it lands as it would have.
+        let (mut new, recorder) = live_term(20, 6);
+        feed_into(&mut new, b"\x1b]2;before\x07");
+        let bytes = [tail.bytes(), b"yy;2;after\x07x"].concat();
+        feed_into(&mut new, &bytes);
+        assert_eq!(recorder.title().as_deref(), Some("before"));
+        assert_eq!(new.grid()[Line(0)][Column(0)].c, 'x');
+        tail.feed(b"\x07");
+        assert!(tail.bytes().is_empty());
+    }
+
+    #[test]
+    fn a_sequence_cut_past_its_cap_comes_back_as_the_whole_one_did() {
+        // An SGR of two zero-padded parameters, a saturated one before one
+        // that counts,
+        // one with too many parameters to be read, a DCS and an SOS with
+        // long bodies and an escape with too many intermediates: each one
+        // runs past what the tail keeps of it.
+        let long = |byte: &str| byte.repeat(3 * PARAMS_KEEP);
+        let stream = format!(
+            "a\x1b[{zeros}31;{zeros}1mr\x1b[0m\x1b[{nines};1mb\x1b[{semis}4mc\x1b[0m\
+             \x1bP1;{ones}$q{body}\x1b\\d\x1bX{body}\x1b\\e\x1b{spaces}Ff\r\nnext",
+            zeros = long("0"),
+            nines = long("9"),
+            semis = long(";"),
+            ones = long("1"),
+            body = long("m"),
+            spaces = long(" "),
+        );
+        let stream = stream.as_bytes();
+        comes_back_whole(stream, (0..=stream.len()).step_by(97));
     }
 
     /// Counts the application program commands a parser completes.
