@@ -252,7 +252,7 @@ impl Store {
             .then(|| self.numbered(echo.number).map(|image| image.generation))
             .flatten();
         let in_range = |image: &Image| image.id != 0 && (command.x..=command.y).contains(&image.id);
-        let mut touched = Vec::new();
+        let mut touched = HashSet::new();
         {
             let Self {
                 images, placements, ..
@@ -285,7 +285,7 @@ impl Store {
                     Scope::Frames => false,
                 };
                 if hit {
-                    touched.push(placement.image);
+                    touched.insert(placement.image);
                 }
                 !hit
             });
