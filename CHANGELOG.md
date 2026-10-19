@@ -12,6 +12,8 @@ of every installed copy. A version without a section is not released.
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-10-19
+
 ### Added
 
 - **Shortcuts are yours to change, in Settings ▸ Keyboard.** The new page lists
