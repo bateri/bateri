@@ -824,8 +824,10 @@ impl KeyboardPage {
         let Some(views) = self.ivars().views.get() else {
             return;
         };
-        let st = self.ivars().state.borrow();
-        let (title, listening) = match st.find {
+        // Read with no borrow held after: hiding the field that listens takes its keyboard, and
+        // the field tells the page so (`find_heard`), which writes the state.
+        let find = self.ivars().state.borrow().find;
+        let (title, listening) = match find {
             Find::Off => ("Find by Key".to_owned(), false),
             Find::Listening => ("Find by Key".to_owned(), true),
             Find::Key(chord) => (
