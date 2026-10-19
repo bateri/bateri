@@ -117,7 +117,8 @@ pub use settings::{
     MarkSubject, Parsed, PreviewKeep, ReduceMotion, RemoteFiles, RemoteStatsMode,
     RemoteStatsSettings, RestoreWindows, SCROLLBACK_MAX, SIZE_UNITS, STATS_INTERVAL_RANGE,
     SYSTEM_THEME, Scrollbar, Settings, SettingsEdit, ShellIntegration, SmoothScroll, SplitStyle,
-    TabPosition, UnfocusedCaret, bare_host, expand_home, format_size, host_mark, parse_size,
+    TabPosition, TemplateKey, UnfocusedCaret, bare_host, expand_home, format_size, host_mark,
+    parse_size, plain_value, template_key, template_keys,
 };
 pub use shell::{
     ButtonState, DockContext, DockEnvironment, DockFault, DockState, DockStatus,

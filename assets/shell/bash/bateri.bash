@@ -429,3 +429,11 @@ __bateri_ssh() {
 if [[ -n $__bateri_bin ]] && ! declare -F ssh > /dev/null && ! alias ssh > /dev/null 2>&1; then
   ssh() { __bateri_ssh "$@"; }
 fi
+
+# `bateri` as a command: the binary that started this shell, which is not on PATH (it lives
+# inside the `.app`) — `bateri config set …`, `bateri help`. The `ssh` function's rule: a
+# `bateri` of the user's own (a function, an alias, a command on PATH) wins.
+if [[ -n $__bateri_bin ]] && ! declare -F bateri > /dev/null && ! alias bateri > /dev/null 2>&1 \
+  && ! type -P bateri > /dev/null; then
+  bateri() { command "$__bateri_bin" "$@"; }
+fi

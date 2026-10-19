@@ -39,6 +39,8 @@
 //! {bt-atlas, bt-core}`; nothing here depends upward (`make audit` checks it).
 
 pub mod child;
+pub mod cli;
+pub mod config_command;
 pub mod download;
 pub mod environment;
 pub mod focus;
@@ -46,6 +48,7 @@ pub mod gesture;
 pub mod grid;
 pub mod groups;
 pub mod handover;
+pub mod help;
 pub mod icon;
 pub mod jobs;
 pub mod journal;
@@ -74,6 +77,7 @@ pub mod tabs;
 pub mod tree_text;
 pub mod undo;
 pub mod upload;
+pub mod welcome;
 // Bodies exist for macOS and Linux only; elsewhere the module is absent
 // rather than half-present (a `Notify` without a `Watch`).
 #[cfg(any(target_os = "macos", target_os = "linux"))]

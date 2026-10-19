@@ -92,6 +92,7 @@ function __bateri_begin --on-event fish_prompt
         __bateri_branch
     end
     __bateri_ssh_arm
+    __bateri_command_arm
 end
 
 # `D` closes the FINISHED block: the counter has not moved yet.
@@ -273,6 +274,21 @@ function __bateri_ssh_arm
     functions -q ssh; and return
     function ssh --description 'bateri: ssh through the remote integration'
         __bateri_ssh $argv
+    end
+end
+
+# `bateri` as a command: the binary that started this shell, which is not on
+# PATH (it lives inside the `.app`) — `bateri config set …`, `bateri help`.
+# Defined at the first prompt, as `ssh` is, so a `bateri` function or alias of
+# the user's, or a `bateri` command on PATH, is seen and wins.
+function __bateri_command_arm
+    set -q __bateri_command_armed; and return
+    set -g __bateri_command_armed 1
+    test -n "$__bateri_bin"; or return
+    functions -q bateri; and return
+    command -q bateri; and return
+    function bateri --description 'bateri: run the bateri that started this shell'
+        command $__bateri_bin $argv
     end
 end
 

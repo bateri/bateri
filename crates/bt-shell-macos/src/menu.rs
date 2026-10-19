@@ -10,7 +10,7 @@
 //! Page Down) and Window (Minimize,
 //! Zoom, Show Previous/Next Tab, Go to Tab…, Jump to Command…, Select Tab ▸, Show All Tabs, Rename Tab…, splits — Select Previous/Next
 //! Split, Select Split ▸, Resize Split ▸, Equalize Splits, Zoom Split —, Move
-//! Tab to New Window, Merge All Windows, Bring All to Front). Settings… (⌘,) opens the settings window
+//! Tab to New Window, Merge All Windows, Bring All to Front) and Help (Welcome to bateri). Settings… (⌘,) opens the settings window
 //! (`settings_window`; it used to open the file in the editor, that job is now
 //! on the window's "Open settings.toml" button); the item and shortcut are the same.
 //!
@@ -43,7 +43,7 @@
 //! `toggleCommandPalette:`, `goToTab:`, `goToFolder:` and `jumpToCommand:` (View ▸ Command
 //! Palette… ⇧⌘P, Window ▸ Go to Tab… ⌘P, Shell ▸ Go to Folder… ⌘O, Window ▸ Jump to Command…: the
 //! key window's palette; grey while a question is up on it) and
-//! `newWindow:`/`newTab:`/`newLocalTab:`/`quitAndEndPrograms:` to the app delegate
+//! `newWindow:`/`newTab:`/`newLocalTab:`/`quitAndEndPrograms:`/`showWelcome:` to the app delegate
 //! (the same path as the settings record's `settingsDidChange:` — they spread to all
 //! windows or must work even when there is no window);
 //! `terminate:`, `hide:`, `arrangeInFront:` and
@@ -791,15 +791,24 @@ pub(crate) fn install(
             item(mtm, "Bring All to Front", sel!(arrangeInFront:), ""),
         ],
     );
+    // Help: the welcome window (`welcome`), the app delegate's. Registered as the help menu,
+    // so macOS adds its own search field to it.
+    let help_menu = submenu(
+        mtm,
+        "Help",
+        &[item(mtm, "Welcome to bateri", sel!(showWelcome:), "")],
+    );
     let bar = NSMenu::new(mtm);
     bar.addItem(&app_menu);
     bar.addItem(&shell_menu);
     bar.addItem(&edit_menu);
     bar.addItem(&view_menu);
     bar.addItem(&window_menu);
+    bar.addItem(&help_menu);
     let app = NSApplication::sharedApplication(mtm);
     app.setMainMenu(Some(&bar));
     app.setWindowsMenu(window_menu.submenu().as_deref());
+    app.setHelpMenu(help_menu.submenu().as_deref());
     let shell_delegate = ShellMenuDelegate::new(mtm);
     if let Some(menu) = shell_menu.submenu() {
         menu.setDelegate(Some(ProtocolObject::from_ref(&*shell_delegate)));
@@ -1076,6 +1085,88 @@ mod tests {
         let written = bt_core::Settings::with_edit(prod, &edit).expect("writable text");
         assert!(model(&written, "prod-web").checked);
         assert!(!model(&written, "prod-db").checked);
+    }
+
+    /// `menu.rs` without whitespace outside string literals and without a trailing comma
+    /// before `)`: `item(mtm,"Split Right",sel!(splitRight:),"d")` however rustfmt wrapped it.
+    fn compact_source() -> String {
+        let source = include_str!("menu.rs");
+        let mut out = String::with_capacity(source.len());
+        let mut in_string = false;
+        let mut escaped = false;
+        for c in source.chars() {
+            if in_string {
+                out.push(c);
+                match c {
+                    _ if escaped => escaped = false,
+                    '\\' => escaped = true,
+                    '"' => in_string = false,
+                    _ => {}
+                }
+            } else if c == '"' {
+                in_string = true;
+                out.push(c);
+            } else if !c.is_whitespace() {
+                out.push(c);
+            }
+        }
+        out.replace(",)", ")")
+    }
+
+    /// `bateri help`'s shortcuts are this menu's: for each entry of
+    /// `bt_shell_common::help::SHORTCUTS`, an item with that title, action and key is built
+    /// here, with the same modifiers (an item outside `with_modifiers` has ⌘ alone, AppKit's
+    /// default). The guide can't run AppKit (it works over ssh), so it carries a copy, and
+    /// this is what keeps the copy true: move a shortcut here and this fails until the guide
+    /// follows.
+    #[test]
+    fn the_help_guides_shortcuts_are_the_menus() {
+        use bt_shell_common::help::SHORTCUTS;
+        let source = compact_source();
+        for entry in SHORTCUTS.iter().flat_map(|(_, items)| items.iter()) {
+            let key: String = entry.key.escape_default().collect();
+            let spellings = [
+                entry.title.to_owned(),
+                entry.title.replace('\u{2026}', "\\u{2026}"),
+            ];
+            let found = spellings.iter().find_map(|title| {
+                let call = format!("item(mtm,\"{title}\",sel!({}),\"{key}\")", entry.selector);
+                source.find(&call).map(|at| (at, call.len()))
+            });
+            let Some((at, len)) = found else {
+                panic!(
+                    "{} ({}, key {key:?}) is not an item of the menu",
+                    entry.title, entry.selector
+                );
+            };
+            let modifiers = if source[..at].ends_with("with_modifiers(") {
+                let rest = &source[at + len..];
+                let expression = &rest[..rest.find(')').expect("with_modifiers closes")];
+                bt_shell_common::palette::Modifiers {
+                    control: expression.contains("Control"),
+                    option: expression.contains("Option"),
+                    shift: expression.contains("Shift"),
+                    command: expression.contains("command") || expression.contains("Command"),
+                }
+            } else {
+                bt_shell_common::palette::Modifiers::COMMAND
+            };
+            assert_eq!(
+                modifiers, entry.modifiers,
+                "{}: the menu's modifiers differ from the guide's",
+                entry.title
+            );
+        }
+    }
+
+    #[test]
+    fn help_welcome_is_the_welcome_models_action_and_the_delegates() {
+        let action = bt_shell_common::welcome::ACTION;
+        assert!(compact_source().contains(&format!(
+            "item(mtm,\"{}\",sel!({action}),\"\")",
+            bt_shell_common::welcome::TITLE
+        )));
+        assert!(crate::app::AppDelegate::class().responds_to(sel!(showWelcome:)));
     }
 
     #[test]

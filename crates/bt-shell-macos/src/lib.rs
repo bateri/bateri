@@ -79,6 +79,7 @@ mod tab_merge;
 mod updater;
 mod uploader;
 mod view;
+mod welcome;
 mod window;
 
 // The platform-independent half lives in `bt-shell-common`; imported
@@ -256,6 +257,156 @@ pub fn compact() -> Option<i32> {
         return Some(bt_shell_common::journal::COMPACT_USAGE);
     };
     Some(bt_shell_common::journal::compact_main(&argv))
+}
+
+/// `bateri config …`: `Some(exit code)` when the process was started to read or change a
+/// setting from a shell, `None` otherwise. `main` calls it before the window-server check — it
+/// has no GUI and works over ssh — and before the unknown-subcommand rule. The body is
+/// [`bt_shell_common::config_command::config_main`]; here only the platform's input: the
+/// settings root, by **the same expression** the application reads it from (`child::home()` →
+/// `settings::config_root`), so the command and the app can't look at two files.
+pub fn config() -> Option<i32> {
+    use bt_shell_common::config_command::{self, EXIT_USAGE, Io, USAGE};
+    let mut args = std::env::args_os().skip(1);
+    if args.next()? != config_command::SUBCOMMAND {
+        return None;
+    }
+    let Some(argv) = args
+        .map(|arg| arg.into_string().ok())
+        .collect::<Option<Vec<String>>>()
+    else {
+        eprintln!("{USAGE}");
+        return Some(EXIT_USAGE);
+    };
+    let Some(home) = child::home() else {
+        eprintln!("bateri config: no home directory (HOME is unset or not absolute)");
+        return Some(config_command::EXIT_CONFIG);
+    };
+    let root = bt_shell_common::settings::config_root(&home);
+    Some(config_command::config_main(
+        &argv,
+        &mut Io {
+            root: &root,
+            out: &mut std::io::stdout().lock(),
+            err: &mut std::io::stderr().lock(),
+            style: bt_shell_common::cli::Style::for_stdout(),
+        },
+    ))
+}
+
+/// `bateri help …` (and a bare `bateri --help` / `-h`, which `main` routes here): `Some(exit
+/// code)` when the process was started to print the guide or the welcome, `None` otherwise.
+/// Before the window-server check like [`config`]: the guide is text, readable over ssh. The
+/// body is [`bt_shell_common::help::help_main`]; here only the home directory, by the same
+/// expression as the settings root (`child::home()`).
+pub fn help() -> Option<i32> {
+    use bt_shell_common::help::{self, EXIT_USAGE, Io, USAGE};
+    let mut args = std::env::args_os().skip(1);
+    let first = args.next()?;
+    // `bateri --help` and `bateri -h` alone are the guide too: no GUI takes these, and
+    // LaunchServices only ever passes `-psn_…` (main's unknown-subcommand rule lets every
+    // other dashed argument through to the application).
+    let rest: Vec<std::ffi::OsString> = if first == help::SUBCOMMAND {
+        args.collect()
+    } else if (first == "--help" || first == "-h") && args.next().is_none() {
+        Vec::new()
+    } else {
+        return None;
+    };
+    let Some(argv) = rest
+        .into_iter()
+        .map(|arg| arg.into_string().ok())
+        .collect::<Option<Vec<String>>>()
+    else {
+        eprintln!("{USAGE}");
+        return Some(EXIT_USAGE);
+    };
+    let Some(home) = child::home() else {
+        eprintln!("bateri help: no home directory (HOME is unset or not absolute)");
+        return Some(1);
+    };
+    if argv == ["--welcome"] && show_welcome_in_running_app(&home) {
+        println!("The welcome is open in bateri.");
+        return Some(0);
+    }
+    if argv == ["--welcome"] {
+        eprintln!("bateri: no running bateri to show the welcome in; here is the guide instead.");
+    }
+    Some(help::help_main(
+        &argv,
+        &mut Io {
+            home: &home,
+            out: &mut std::io::stdout().lock(),
+            err: &mut std::io::stderr().lock(),
+            style: bt_shell_common::cli::Style::for_stdout(),
+        },
+    ))
+}
+
+/// `bateri help --welcome`'s way to the window: asks the running bateri to show it, and says
+/// whether it could. Only in a window-server session with a live instance of this user's
+/// bateri ([`ssh_route::live_instances`], the instances `bateri focus` asks) — over ssh, or with
+/// no bateri running, the caller prints the guide instead of starting the app.
+///
+/// The request is `open` with `bateri://welcome`: the URL scheme bateri already registers for
+/// `bateri://tab/…`, so no new socket or wire is added (the focus socket's contract is "only
+/// answers about a pane"). `open -a` names the very `.app` this binary is in, so the request
+/// goes to the bateri the shell runs in, not to another copy; an unbundled binary falls back to
+/// the bundle identifier.
+fn show_welcome_in_running_app(home: &std::path::Path) -> bool {
+    let aqua = std::process::Command::new("launchctl")
+        .arg("managername")
+        .output()
+        .is_ok_and(|out| String::from_utf8_lossy(&out.stdout).trim() == "Aqua");
+    if !aqua {
+        return false;
+    }
+    // SAFETY: `getuid` has no preconditions and cannot fail.
+    let uid = unsafe { libc::getuid() };
+    let roots = ssh_route::socket_bases(Some(home), uid);
+    if ssh_route::live_instances(&roots).is_empty() {
+        return false;
+    }
+    let mut open = std::process::Command::new("/usr/bin/open");
+    match std::env::current_exe().ok().as_deref().and_then(app_bundle) {
+        Some(app) => open.arg("-a").arg(app),
+        None => open.arg("-b").arg("dev.bateri.bateri"),
+    };
+    open.arg(bt_shell_common::welcome::URL)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+/// The `.app` an executable at `…/X.app/Contents/MacOS/bin` is in.
+fn app_bundle(exe: &std::path::Path) -> Option<std::path::PathBuf> {
+    let macos = exe.parent()?;
+    let contents = macos.parent()?;
+    let app = contents.parent()?;
+    (macos.file_name()? == "MacOS"
+        && contents.file_name()? == "Contents"
+        && app.extension()? == "app")
+        .then(|| app.to_path_buf())
+}
+
+/// Draws the welcome window's pages into PNGs in `dir` without showing anything — for
+/// `tests/welcome_pictures.rs` and for a review's screenshots. Not part of the application's
+/// interface.
+#[doc(hidden)]
+pub fn welcome_pictures(
+    mtm: MainThreadMarker,
+    dir: &std::path::Path,
+) -> std::io::Result<Vec<std::path::PathBuf>> {
+    welcome::pictures(mtm, dir)
+}
+
+/// Sends synthesized keys `(key code, characters, shift, command)` to a welcome window through
+/// its own event path and returns the page (1-based) after each — for
+/// `tests/welcome_pictures.rs`. Not part of the application's interface.
+#[doc(hidden)]
+pub fn welcome_key_walk(mtm: MainThreadMarker, keys: &[(u16, &str, bool, bool)]) -> Vec<usize> {
+    welcome::key_walk(mtm, keys)
 }
 
 /// The shell of the smoke and measurement runs. **Not** the user's `$SHELL`:
@@ -466,5 +617,20 @@ pub(crate) fn watchdog() {
         });
     if let Err(err) = spawned {
         eprintln!("bateri: watchdog thread not created ({err}), nothing cuts a hung teardown");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::app_bundle;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn the_app_an_executable_is_in() {
+        assert_eq!(
+            app_bundle(Path::new("/Applications/bateri.app/Contents/MacOS/bateri")),
+            Some(PathBuf::from("/Applications/bateri.app"))
+        );
+        assert_eq!(app_bundle(Path::new("/repo/target/debug/bateri")), None);
     }
 }

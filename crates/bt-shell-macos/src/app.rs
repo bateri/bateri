@@ -65,6 +65,7 @@ use crate::tab_merge::{End, Merge};
 use crate::tabs::{self, Landing};
 use crate::undo::Record;
 use crate::watch::{Notify, Watch};
+use crate::welcome::WelcomeView;
 use crate::window::{self, CloseScope, Placement, Seat, TerminalWindow};
 use crate::zoom::Zoom;
 use crate::{Options, Run, Workload};
@@ -563,6 +564,11 @@ fn copy_bundle(bundle: &handover::Bundle) -> Option<handover::Bundle> {
 /// a crash later than this is another fault than the restore and must not
 /// push the next launch toward giving the programs up. A design constant.
 const SETTLE_DELAY: Duration = Duration::from_secs(5);
+
+/// How long after the first window the welcome opens on a first launch: the window has drawn
+/// and the shell has started, so the welcome lands on a terminal that is already there. A
+/// design constant.
+const WELCOME_DELAY: Duration = Duration::from_millis(700);
 
 /// How long the system waits before it shows ⌘Q's reminder that programs
 /// keep running ([`AppDelegate::leave_quit_notice`]). A notification arriving
@@ -1107,6 +1113,13 @@ pub(crate) struct Ivars {
     /// terminal window — it does not enter [`Ivars::windows`], i.e. ⌘Q's
     /// confirmation, settings propagation and tab jobs do not see it. Never born in a timed run.
     settings_window: RefCell<Option<Retained<SettingsWindow>>>,
+    /// Help ▸ Welcome to bateri ([`crate::welcome`]): born on first open, hidden when closed,
+    /// like the settings window and for the same reasons not a terminal window. Never born in
+    /// a timed run.
+    welcome: RefCell<Option<Retained<WelcomeView>>>,
+    /// The launch brought windows back (a saved session or an update's programs): the welcome
+    /// that opens by itself then does not take the keyboard from them.
+    launched_restored: Cell<bool>,
     /// The settings file's state at its last read: the settings
     /// window's lock and line diagnostics come from here. Written at startup
     /// and at every live read, so even if the window opens later it sees the file's state.
@@ -1324,6 +1337,8 @@ define_class!(
             // The launch settles a moment after its windows are built
             // ([`AppDelegate::settled`]).
             self.settle_later();
+            // The first launch on this Mac opens the welcome, once the first window is up.
+            self.welcome_at_launch();
             // The system's Reduce Motion notification is app-wide and once; the
             // window's first value descended to its own link in `start`.
             self.observe_reduce_motion();
@@ -1393,7 +1408,9 @@ define_class!(
         ///
         /// **Security invariant: this path only focuses.** Any app can open the
         /// scheme; here not a single byte goes to the shell, no command runs, no
-        /// window opens. Arms: `bateri://tab/<id>` and a live pane → its tab to
+        /// terminal window opens. Arms: `bateri://welcome` → the welcome window (text and
+        /// choices, nothing run, nothing written but what its reader picks — `bateri help
+        /// --welcome`'s way in); `bateri://tab/<id>` and a live pane → its tab to
         /// the front and the keyboard to that pane ([`TerminalWindow::bring_to_front`]);
         /// a recognized but dead id →
         /// only the app to the front; every other form (`block/` included) → nothing.
@@ -1407,6 +1424,19 @@ define_class!(
                 let Some(text) = url.absoluteString() else {
                     continue;
                 };
+                // `bateri://welcome` (`bateri help --welcome`): the welcome window — a window
+                // of text and choices, no shell, no byte to any pane; a turn later, so a cold
+                // start's URL finds the settings read and the first window up.
+                if text.to_string() == bt_shell_common::welcome::URL {
+                    DispatchQueue::main().exec_async(|| {
+                        // audit: a block running on the main queue is on the main thread by definition.
+                        let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
+                        if let Some(app) = delegate(mtm) {
+                            app.show_welcome(true);
+                        }
+                    });
+                    continue;
+                }
                 let Some(id) = PaneUuid::from_url(&text.to_string()) else {
                     continue;
                 };
@@ -1816,6 +1846,13 @@ define_class!(
         #[unsafe(method(openSettings:))]
         fn open_settings(&self, _sender: Option<&AnyObject>) {
             self.show_settings_window();
+        }
+
+        /// Help ▸ Welcome to bateri (and so the palette's row of the same name): the welcome
+        /// window, on its first page, with the keyboard.
+        #[unsafe(method(showWelcome:))]
+        fn show_welcome_action(&self, _sender: Option<&AnyObject>) {
+            self.show_welcome(true);
         }
 
         /// bateri ▸ Open settings.toml: the settings window's button of the same name, from the
@@ -2663,6 +2700,8 @@ impl AppDelegate {
             appearance_dark: Cell::new(None),
             scrollbar: Cell::new(None),
             settings_window: RefCell::new(None),
+            welcome: RefCell::new(None),
+            launched_restored: Cell::new(false),
             settings_state: RefCell::new(settings::FileState::Missing),
             shell_menu: OnceCell::new(),
             updater: OnceCell::new(),
@@ -4476,6 +4515,7 @@ impl AppDelegate {
                 mode => {
                     safe = mode == restore::AttemptMode::Safe;
                     if self.restore_arrival(arrival, safe) {
+                        self.ivars().launched_restored.set(true);
                         return Ok(());
                     }
                 }
@@ -4487,6 +4527,7 @@ impl AppDelegate {
         if let Some(saved) = self.take_saved(!safe)
             && self.restore_saved(&saved, None)
         {
+            self.ivars().launched_restored.set(true);
             return Ok(());
         }
         self.open_window(None, Opening::Window).map(drop)
@@ -6374,6 +6415,89 @@ impl AppDelegate {
         Ok(())
     }
 
+    /// Help ▸ Welcome to bateri, `bateri://welcome` and the first launch: the welcome window
+    /// (born the first time), dressed in the theme on screen and brought up on its first page.
+    /// `take_keys`: it becomes the key window ([`WelcomeView::show`]). Nothing in a timed run
+    /// or without a settings file to write.
+    pub(crate) fn show_welcome(&self, take_keys: bool) {
+        let Inputs::User {
+            config_root: Some(_),
+        } = self.inputs()
+        else {
+            return;
+        };
+        let view = self
+            .ivars()
+            .welcome
+            .borrow_mut()
+            .get_or_insert_with(|| WelcomeView::new(self.mtm()))
+            .clone();
+        self.fill_welcome(&view);
+        view.show(take_keys);
+    }
+
+    /// The welcome window, if it was ever born.
+    pub(crate) fn welcome_view(&self) -> Option<Retained<WelcomeView>> {
+        self.ivars().welcome.borrow().clone()
+    }
+
+    /// Re-dresses an open welcome window: the theme on screen, the file's choices.
+    pub(crate) fn refresh_welcome(&self) {
+        let Some(view) = self.ivars().welcome.borrow().clone() else {
+            return;
+        };
+        if view.is_open() {
+            self.fill_welcome(&view);
+        }
+    }
+
+    fn fill_welcome(&self, view: &WelcomeView) {
+        let Inputs::User {
+            config_root: Some(root),
+        } = self.inputs()
+        else {
+            return;
+        };
+        let theme = self
+            .windows()
+            .first()
+            .map_or_else(|| self.resolve_theme(), |window| window.bar().theme());
+        // What is on screen, a preview included: the welcome's theme row previews as it moves.
+        let settings = self.settings().clone();
+        let embedded = Theme::embedded_groups();
+        let user = settings::user_theme_names(&root);
+        view.refresh(&settings, &theme, self.reduce_motion(), &embedded, &user);
+    }
+
+    /// The first launch on this Mac opens the welcome by itself, a moment after the first
+    /// window is up ([`WELCOME_DELAY`]) — the marker decides, once
+    /// ([`bt_shell_common::welcome::first_launch`]). Over a restored session it comes to the
+    /// front without the keyboard: a keystroke meant for a pane must not land in it. Never in a
+    /// timed run.
+    fn welcome_at_launch(&self) {
+        if self.ivars().run.is_some() {
+            return;
+        }
+        let Some(home) = child::home() else {
+            return;
+        };
+        if !bt_shell_common::welcome::first_launch(&home) {
+            return;
+        }
+        let take_keys = !self.ivars().launched_restored.get();
+        let Ok(when) = DispatchTime::try_from(WELCOME_DELAY) else {
+            self.show_welcome(take_keys);
+            return;
+        };
+        let _ = DispatchQueue::main().after(when, move || {
+            // audit: a block running on the main queue is on the main thread by definition.
+            let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
+            if let Some(app) = delegate(mtm) {
+                app.show_welcome(take_keys);
+            }
+        });
+    }
+
     /// bateri ▸ Settings…: spawns the settings window (the first time), fills it with the
     /// active settings and brings it to the front. In a timed run and when the home directory
     /// cannot be resolved it does **nothing** ([`Inputs::Hermetic`]): there is no file to
@@ -6412,6 +6536,9 @@ impl AppDelegate {
     /// nobody sees; reopening refreshes
     /// ([`AppDelegate::show_settings_window`]).
     pub(crate) fn refresh_settings_window(&self) {
+        // The welcome reads the same moments: a write from its setup page, a save in the
+        // editor, a new theme.
+        self.refresh_welcome();
         let Some(window) = self.ivars().settings_window.borrow().clone() else {
             return;
         };
@@ -6528,6 +6655,7 @@ impl AppDelegate {
         for window in &windows {
             window.set_theme(theme);
         }
+        self.refresh_welcome();
     }
 
     /// Starts watching for the Mac logging out, restarting or shutting down —

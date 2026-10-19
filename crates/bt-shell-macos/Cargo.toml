@@ -241,3 +241,8 @@ bt-shell-common = { workspace = true, features = ["test-support"] }
 [[test]]
 name = "embed"
 harness = false
+
+# The welcome window's pages drawn into pictures: AppKit wants the main thread.
+[[test]]
+name = "welcome_pictures"
+harness = false

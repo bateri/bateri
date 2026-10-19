@@ -39,16 +39,20 @@ does not exist (see [Settings…](#settings-1)). Creating the directory and the
 file by hand works too. The file may be a symbolic link to somewhere else (a
 dotfiles repository); the link's target is read.
 
-The app writes to this file from five places: **Open settings.toml** creates
+The app writes to this file from six places: **Open settings.toml** creates
 the template when the file does not exist, choosing a theme from **View ▸
 Theme ▸** writes the `[appearance] theme` line (see [View ▸ Theme
 ▸](#view--theme-)), choosing **View ▸ Tabs ▸ Top** or **Side** writes the
 `[appearance] tab_position` line (see [View ▸ Tabs ▸](#view--tabs-)),
 **Shell ▸ Mark “host” as ▸** and **Shell ▸ Shell
 Integration on “host”** write that host's entry in `[remote] hosts` (see
-[`[remote]`](#remote)), and the **settings window** writes the line of the
-setting you changed. No other line of an existing file — comments, order,
-keys it does not recognize — is touched.
+[`[remote]`](#remote)), the **settings window** writes the line of the
+setting you changed (as does the welcome window's setup page, see [`bateri
+help` and the welcome](#bateri-help-and-the-welcome)), and so does **`bateri
+config set`** and **`reset`** from
+a shell (see [From the command line](#from-the-command-line)) — through the
+same writer as the window. No other line of an existing file — comments,
+order, keys it does not recognize — is touched.
 
 A change takes effect **the moment you save** — in the settings file and in
 the file of the theme in use alike; the shell and the program inside it keep
@@ -140,6 +144,102 @@ enough.
 - The values in the template are the defaults of the day it was created: if a
   later version changes a default, this file keeps the old value. Deleting the
   line returns the key to the current default.
+
+### From the command line
+
+Every setting can be read and changed from a shell, without the settings
+window — over ssh into your Mac too, since nothing here needs a window:
+
+```
+bateri config list [--changed] [FILTER]   every key: value, default, values, meaning
+bateri config get KEY                     the value in effect (plain, for scripts)
+bateri config set KEY VALUE               change one setting
+bateri config reset KEY                   put one setting back to its default
+bateri config path                        where settings.toml is
+bateri config edit                        open settings.toml in $VISUAL / $EDITOR
+```
+
+`KEY` is the section and the key (`appearance.split_style`), or the key alone
+where only one section has it (`split_style`; `integration` is in both
+`[shell]` and `[remote]`, so it needs its section). A string value can be
+typed bare — `bateri config set split_style lines`, `bateri config set
+font.family JetBrains Mono` — and anything else as TOML (`14.5`, `true`).
+
+```
+$ bateri config set split_style lines
+appearance.split_style = "lines"  (was "cards")
+$ bateri config set cursor triangle
+bateri config: `terminal.cursor` must be "block", "underline" or "beam", found "triangle"; nothing was written
+  terminal.cursor takes: "block" | "underline" | "beam"
+$ bateri config get split_style
+lines
+```
+
+- **The same rules as the window.** `set` writes only that key's line, keeps
+  comments and order, and adds the key to its section if the file lacks it;
+  without a file it first creates the [template](#template), as Open
+  settings.toml does. The value is checked by the same reading the app does
+  when you save, so a value the app would not accept is not written: the
+  command says why and which values the key takes, and exits with 64. A file
+  that cannot be read or parsed is not written over (exit 78).
+- **It applies at once.** The running app watches `~/.config/bateri/` and
+  takes a `set` like a save from your editor: every open window changes.
+  `[shell] integration` takes effect in the next shell, as always.
+- **`list`** shows every key the template has, with its value, its default
+  when you changed it, the values it takes and a line on what it does; a value
+  the app did not accept is marked with its reason. `--changed` shows only
+  what differs from the defaults; a word narrows the list (`bateri config
+  list remote.`). **`reset`** writes the default value into the key's line
+  (`font.family`, which has no default, becomes `""`, the default font).
+- The list is read off the template below, so a setting added to bateri shows
+  up here with no other change.
+
+**Typing `bateri`.** In a shell started by bateri (with shell integration on,
+the default) `bateri` is a shell function that runs the bateri you are in, so
+`bateri config …` and `bateri help` just work. If you already have a `bateri`
+of your own — an alias, a function or a command on your `PATH` — yours is left
+alone. Outside bateri (another terminal, a script, ssh into the Mac) run the
+binary inside the app, or link it onto your `PATH` once:
+
+```
+/Applications/bateri.app/Contents/MacOS/bateri config list
+ln -s /Applications/bateri.app/Contents/MacOS/bateri /usr/local/bin/bateri
+```
+
+### `bateri help` and the welcome
+
+`bateri help` (also `bateri --help` and `bateri -h`) prints a short guide in
+the terminal: the most useful shortcuts — tabs, splits, the command palette,
+find — exactly as the menus have them, where the side column is, how
+settings work (this file, `bateri config`, the window) and where these docs
+are. Like `bateri config` it needs no window, so it works over ssh; piped or
+with `NO_COLOR` set it prints plain text.
+
+**The welcome window.** The first time bateri opens on a Mac, a small window
+comes up over the first terminal window: four pages — what bateri is, the
+keys you will reach for (the menus' own shortcuts), a quick setup and where to
+go next. It is driven from the keyboard alone, whatever the Full Keyboard
+Access setting: ⏎ goes on, esc or ⌘W closes it, ⇥ and ⇧⇥, ⌘] and ⌘[ (or ⌘→
+and ⌘←) move between the pages on every page — ← → too outside the setup page,
+and ⌫ goes back — and ⌘1–⌘4 jump to one. On the setup page ↑ ↓
+move a highlight between its rows and ← → change the highlighted row's value
+at once; on the theme row each step shows the theme on every window, letters
+jump to a theme by its name, ␣ opens the list, and the file is written once
+the keys stop. A line under each page names its keys. The mouse works as
+well. The setup page writes `[appearance] tab_position`, `split_style` and `theme`
+through the same writer as the settings window, so a choice is one changed
+line in this file and applies to every window at once, the welcome included.
+It wears the theme in use, light or dark, and changes nothing about the
+terminal windows. When the launch brings back a saved session it comes to the
+front without taking the keyboard, so nothing typed into a pane lands in it.
+
+It opens by itself once: whether it has is the empty file
+`~/Library/Application Support/bateri/welcomed`, created by that launch
+(delete it to see the welcome at the next launch). Open it again any time from
+**Help ▸ Welcome to bateri**, from the command palette ("welcome"), or with
+`bateri help --welcome`, which asks the running bateri to show it (through the
+`bateri://welcome` address); over ssh, or with no bateri running, that command
+prints the guide instead.
 
 ### Template
 

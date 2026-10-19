@@ -123,6 +123,31 @@ pub fn write_edit(root: &Path, edit: &SettingsEdit) -> Result<(), String> {
         SettingsEdit::Theme(_) => "theme",
         _ => "setting",
     };
+    write_with(root, subject, |text| Settings::with_edit(text, edit))
+}
+
+/// Writing a single key from the command line — `bateri config set` and `reset`: makes the
+/// key at the dotted `path` hold `value` (TOML text) in `{root}/settings.toml`, through
+/// [`Settings::with_checked_value`], i.e. the settings window's writer
+/// ([`Settings::with_edit`]'s body) with the parser's verdict in front of it.
+///
+/// Everything else is [`write_edit`]'s, by the same body: the file is read at that moment,
+/// a missing one is created from the template first (the "Open settings.toml" path), it is
+/// written in place, and a file that can't be read or parsed is not written. A value the
+/// parser would reject is not written either; the error is the parser's sentence.
+pub fn write_value(root: &Path, path: &str, value: &str) -> Result<(), String> {
+    write_with(root, "setting", |text| {
+        Settings::with_checked_value(text, path, value)
+    })
+}
+
+/// The body of [`write_edit`] and [`write_value`]: `edit` turns the file's text into the text
+/// to write; `subject` names what was not saved.
+fn write_with(
+    root: &Path,
+    subject: &str,
+    edit: impl FnOnce(&str) -> Result<String, Diagnostic>,
+) -> Result<(), String> {
     let not_saved = |reason: String| format!("{reason}; the {subject} was not saved");
     let path = create_if_missing(root)
         .map_err(|err| format!("{FILE_NAME} could not be created: {err}"))?;
@@ -134,7 +159,7 @@ pub fn write_edit(root: &Path, edit: &SettingsEdit) -> Result<(), String> {
         // Deleted between creation and reading.
         Text::Missing => return Err(not_saved(format!("{FILE_NAME} was removed"))),
     };
-    let written = Settings::with_edit(&text, edit).map_err(|d| not_saved(notice(&d)))?;
+    let written = edit(&text).map_err(|d| not_saved(notice(&d)))?;
     std::fs::write(&path, written).map_err(|err| format!("{FILE_NAME} could not be written: {err}"))
 }
 
@@ -291,6 +316,19 @@ fn read_text(path: &Path) -> Text {
         Err(err) if err.kind() == io::ErrorKind::NotFound => Text::Missing,
         Err(err) => Text::Unreadable(err),
         Ok(text) => Text::Read(text),
+    }
+}
+
+/// `{root}/settings.toml`'s text through the same gate as every read here (a link without a
+/// target, a FIFO and a directory are errors, not "no file"); `Ok(None)` when there is no file
+/// or it is empty, the state in which every key has its default. For `bateri config`, which
+/// shows the keys as the file writes them.
+pub fn file_text(root: &Path) -> io::Result<Option<String>> {
+    match read_text(&root.join(FILE_NAME)) {
+        Text::Missing => Ok(None),
+        Text::Read(text) if text.trim().is_empty() => Ok(None),
+        Text::Read(text) => Ok(Some(text)),
+        Text::Unreadable(err) => Err(err),
     }
 }
 

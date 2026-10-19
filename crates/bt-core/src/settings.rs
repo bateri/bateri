@@ -2839,56 +2839,415 @@ stats_interval = 3
             _ => {}
         }
         let (section_name, key, path) = edit.place();
-        let value = edit.value();
-        let parsed = document(text)?;
-        // On the document with positions for the rejection: `into_mut` drops the
-        // positions, the diagnostic's line comes from them.
-        let mut refused = Vec::new();
-        // An inline table (`theme = { … }`) is a section too: `is_value` would let
-        // it through and writing in its place would in this spelling silently
-        // delete the content that `[appearance.theme]` is rejected for
-        // (a code-review finding).
-        if let Some(table) = section(text, parsed.as_table(), section_name, &mut refused)
-            && let Some(item) = table
-                .get(key)
-                .filter(|item| !item.is_value() || item.is_inline_table())
-        {
-            let expected = match value {
-                toml_edit::Value::String(_) => "a string",
-                toml_edit::Value::Integer(_) => "an integer",
-                toml_edit::Value::Boolean(_) => "a boolean",
-                _ => "a number",
-            };
-            refused.push(Diagnostic {
-                key: Some(path),
-                line: item.span().and_then(|span| line_of(text, span.start)),
-                message: format!("`{path}` must be {expected}, found {}", kind(item)),
+        write_value(text, section_name, key, path, edit.value())
+    }
+
+    /// Makes the key at the dotted `path` (`appearance.split_style`) hold
+    /// `value`, given as TOML text (`"lines"`, `13`, `true`) — the untyped
+    /// sibling of [`Settings::with_edit`] that `bateri config set` writes
+    /// through.
+    ///
+    /// **The same writer**: the section, key and value go to the very function
+    /// [`Settings::with_edit`] ends in, so the command line keeps the window's
+    /// contract to the byte — only that key's value changes, a missing key is
+    /// added to its section, a missing section is appended, comments and order
+    /// stay, text that can't be parsed is `Err` and is not written over.
+    ///
+    /// The key must be one of [`template_keys`]; the value is **not** checked
+    /// here, as `with_edit` doesn't check a range — [`Settings::with_checked_value`]
+    /// is this plus the parser's verdict. A `[remote] hosts` value replaces the
+    /// whole array (the menu's per-host rules are `with_edit`'s).
+    pub fn with_value(text: &str, path: &str, value: &str) -> Result<String, Diagnostic> {
+        let Some(found) = template_key(path) else {
+            return Err(Diagnostic {
+                key: None,
+                line: None,
+                message: format!("`{path}` is not a setting"),
             });
+        };
+        let parsed = value.parse::<toml_edit::Value>().map_err(|_| Diagnostic {
+            key: Some(found.path),
+            line: None,
+            message: format!(
+                "`{}` can't take {value}: it is not a TOML value",
+                found.path
+            ),
+        })?;
+        write_value(text, found.section, found.key, found.path, parsed)
+    }
+
+    /// [`Settings::with_value`], refused when the parser would not accept the
+    /// value: the written text is read back by [`Settings::parse`] — the reading
+    /// the application itself does on every save — and a diagnostic on `path`
+    /// is the `Err`, so nothing the app would reject is ever produced, and the
+    /// command line and the app can't disagree about what a value means.
+    /// Diagnostics on **other** keys are the file's own business and don't stop
+    /// the write, as they don't stop the settings window's.
+    pub fn with_checked_value(text: &str, path: &str, value: &str) -> Result<String, Diagnostic> {
+        let written = Self::with_value(text, path, value)?;
+        let parsed = Self::parse(&written)?;
+        match parsed
+            .diagnostics
+            .into_iter()
+            .find(|diagnostic| diagnostic.key.is_some_and(|key| key == path))
+        {
+            // The line is the written file's, which the user hasn't seen.
+            Some(diagnostic) => Err(Diagnostic {
+                line: None,
+                ..diagnostic
+            }),
+            None => Ok(written),
         }
-        if let Some(diagnostic) = refused.pop() {
-            return Err(diagnostic);
-        }
-        let mut doc = parsed.into_mut();
-        ensure_section(&mut doc, section_name);
-        // There is no `else` arm: a section that isn't a section was rejected
-        // above, and a missing one was just added as a table.
-        if let Some(table) = doc.get_mut(section_name).and_then(Item::as_table_like_mut) {
-            match table.get_mut(key).and_then(Item::as_value_mut) {
-                // The decor (the space after `=`, the comment at line end) sits on
-                // the value; if the new value doesn't inherit it the comment would
-                // be dropped.
-                Some(old) => {
-                    let decor = old.decor().clone();
-                    *old = value;
-                    *old.decor_mut() = decor;
-                }
-                None => {
-                    table.insert(key, Item::Value(value));
-                }
+    }
+}
+
+/// The body of [`Settings::with_edit`] and [`Settings::with_value`]: makes
+/// `section_name.key` hold `value` and leaves every other byte in place (the
+/// contract is `with_edit`'s doc).
+fn write_value(
+    text: &str,
+    section_name: &'static str,
+    key: &'static str,
+    path: &'static str,
+    value: toml_edit::Value,
+) -> Result<String, Diagnostic> {
+    let parsed = document(text)?;
+    // On the document with positions for the rejection: `into_mut` drops the
+    // positions, the diagnostic's line comes from them.
+    let mut refused = Vec::new();
+    // An inline table (`theme = { … }`) is a section too: `is_value` would let
+    // it through and writing in its place would in this spelling silently
+    // delete the content that `[appearance.theme]` is rejected for
+    // (a code-review finding).
+    if let Some(table) = section(text, parsed.as_table(), section_name, &mut refused)
+        && let Some(item) = table
+            .get(key)
+            .filter(|item| !item.is_value() || item.is_inline_table())
+    {
+        let expected = match value {
+            toml_edit::Value::String(_) => "a string",
+            toml_edit::Value::Integer(_) => "an integer",
+            toml_edit::Value::Boolean(_) => "a boolean",
+            _ => "a number",
+        };
+        refused.push(Diagnostic {
+            key: Some(path),
+            line: item.span().and_then(|span| line_of(text, span.start)),
+            message: format!("`{path}` must be {expected}, found {}", kind(item)),
+        });
+    }
+    if let Some(diagnostic) = refused.pop() {
+        return Err(diagnostic);
+    }
+    let mut doc = parsed.into_mut();
+    ensure_section(&mut doc, section_name);
+    // There is no `else` arm: a section that isn't a section was rejected
+    // above, and a missing one was just added as a table.
+    if let Some(table) = doc.get_mut(section_name).and_then(Item::as_table_like_mut) {
+        match table.get_mut(key).and_then(Item::as_value_mut) {
+            // The decor (the space after `=`, the comment at line end) sits on
+            // the value; if the new value doesn't inherit it the comment would
+            // be dropped.
+            Some(old) => {
+                let decor = old.decor().clone();
+                *old = value;
+                *old.decor_mut() = decor;
+            }
+            None => {
+                table.insert(key, Item::Value(value));
             }
         }
-        Ok(rendered(text, &doc))
     }
+    Ok(rendered(text, &doc))
+}
+
+/// One key of [`Settings::TEMPLATE`], as the template writes it: the list
+/// `bateri config` shows and the keys [`Settings::with_value`] writes.
+///
+/// **Read off the template, not listed a second time.** The template is
+/// already the place every setting has to be written with its default and its
+/// comment (`template_is_the_defaults`, and the documented copy in
+/// `docs/SETTINGS.md`), and its comments already follow one convention: the
+/// first sentence names the values (`"cards" | "lines".`, `0 to 100000.`,
+/// `true | false.`), the rest says what the key does. So a key added to the
+/// template — the step every new setting takes anyway — is a key of the
+/// command line with its default, its values and its meaning, with no edit
+/// anywhere else; and a reworded comment changes `bateri config list` with it.
+///
+/// What a key *accepts* is still the parser's to say, not this text's:
+/// `with_checked_value` asks [`Settings::parse`], and a test holds every value a
+/// comment lists to being accepted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TemplateKey {
+    /// `[appearance]`'s `appearance`.
+    pub section: &'static str,
+    /// `split_style`.
+    pub key: &'static str,
+    /// `appearance.split_style` — the form [`Diagnostic::key`] and
+    /// [`SettingsEdit::path`] carry.
+    pub path: &'static str,
+    /// The default as the template writes it, in TOML (`"cards"`, `10000`,
+    /// `true`, `[]`). `None` for a key the template only shows in a comment
+    /// because it has no default value (`# family = "Menlo"`).
+    pub default: Option<&'static str>,
+    /// The commented example of a key without a default (`"Menlo"`).
+    pub example: Option<&'static str>,
+    /// The comment above the key, `# ` taken off each line, lines joined by
+    /// `\n`. A key written right under another without a comment of its own
+    /// (`dark_theme` under `light_theme`) shares that one's.
+    pub comment: String,
+}
+
+impl TemplateKey {
+    /// The comment as one paragraph.
+    fn prose(&self) -> String {
+        self.comment.split('\n').collect::<Vec<_>>().join(" ")
+    }
+
+    /// The values the key takes, as the comment's first sentence states them
+    /// (`"cards" | "lines"`, `0.0 to 0.5`, `true | false`), or — for a comment
+    /// that starts with what the key does — the kind of TOML value its default
+    /// is ("a string").
+    pub fn allowed(&self) -> String {
+        let prose = self.prose();
+        let (first, _) = first_sentence(&prose);
+        if states_values(first) {
+            return first.trim_end_matches('.').to_owned();
+        }
+        let sample = self.default.or(self.example).unwrap_or("\"\"");
+        match sample.parse::<toml_edit::Value>() {
+            Ok(toml_edit::Value::Boolean(_)) => "true | false".to_owned(),
+            Ok(toml_edit::Value::Integer(_)) => "a whole number".to_owned(),
+            Ok(toml_edit::Value::Float(_)) => "a number".to_owned(),
+            Ok(toml_edit::Value::Array(_)) => "a list".to_owned(),
+            _ => "a string".to_owned(),
+        }
+    }
+
+    /// What the key does, in one line: the first sentence after the values,
+    /// up to its first colon or semicolon (`"How a split tab sets its panes
+    /// apart"`); the whole comment is [`Self::comment`].
+    pub fn summary(&self) -> String {
+        let prose = self.prose();
+        let (first, rest) = first_sentence(&prose);
+        let meaning = if states_values(first) { rest } else { &prose };
+        let (sentence, _) = first_sentence(meaning);
+        // `": "`, not `':'`: `↗ :3000` is part of a sentence.
+        let end = [": ", "; "]
+            .iter()
+            .filter_map(|stop| sentence.find(stop))
+            .min()
+            .unwrap_or(sentence.len());
+        sentence[..end].trim().trim_end_matches('.').to_owned()
+    }
+}
+
+impl TemplateKey {
+    /// The value that puts the key back to its default, in TOML: the
+    /// template's, or for a key without one (`font.family`) the empty string
+    /// the parser reads as "no value" — a key is never deleted, as the window's
+    /// writer never deletes one.
+    pub fn default_value(&self) -> &'static str {
+        self.default.unwrap_or("\"\"")
+    }
+
+    /// The key's value as `text` writes it, in TOML and exactly as written
+    /// (`0.10` stays `0.10`); `None` when the file doesn't hold the key or
+    /// can't be parsed.
+    pub fn written_in(&self, text: &str) -> Option<String> {
+        let doc = document(text).ok()?;
+        let item = doc.get(self.section)?.as_table_like()?.get(self.key)?;
+        let span = item.span()?;
+        Some(text.get(span)?.trim().to_owned())
+    }
+
+    /// Whether the TOML `value` is the key's default — by value, not by
+    /// spelling: `13` and `13.0`, `'x'` and `"x"` are the same.
+    pub fn is_default(&self, value: &str) -> bool {
+        same_value(value, self.default_value())
+    }
+
+    /// The TOML text for `raw`, a value as typed on a command line: what
+    /// already is TOML stays as typed (`13`, `true`, `"lines"`), and a bare
+    /// word for a key that takes a string becomes one (`lines` → `"lines"`),
+    /// so a shell's quoting needn't survive. For any other key a word that
+    /// isn't TOML is quoted too, and the parser then says what it wanted.
+    pub fn toml_value(&self, raw: &str) -> String {
+        let sample = self.default.or(self.example).unwrap_or("\"\"");
+        let takes_string = matches!(
+            sample.parse::<toml_edit::Value>(),
+            Ok(toml_edit::Value::String(_))
+        );
+        match raw.parse::<toml_edit::Value>() {
+            Ok(toml_edit::Value::String(_)) => raw.trim().to_owned(),
+            Ok(_) if !takes_string => raw.trim().to_owned(),
+            _ => toml_edit::Value::from(raw).to_string(),
+        }
+    }
+}
+
+/// A TOML value as a person reads it: a string without its quotes, anything
+/// else as written. For `bateri config get`, whose answer a script takes.
+pub fn plain_value(toml: &str) -> String {
+    match toml.parse::<toml_edit::Value>() {
+        Ok(toml_edit::Value::String(text)) => text.value().clone(),
+        _ => toml.trim().to_owned(),
+    }
+}
+
+/// Whether two TOML values are the same value: numbers by their number,
+/// strings by their text, the rest by their text without spaces.
+fn same_value(a: &str, b: &str) -> bool {
+    use toml_edit::Value as V;
+    let number = |value: &V| match value {
+        V::Integer(n) => Some(*n.value() as f64),
+        V::Float(n) => Some(*n.value()),
+        _ => None,
+    };
+    match (a.parse::<V>(), b.parse::<V>()) {
+        (Ok(V::String(a)), Ok(V::String(b))) => a.value() == b.value(),
+        (Ok(V::Boolean(a)), Ok(V::Boolean(b))) => a.value() == b.value(),
+        (Ok(a), Ok(b)) => match (number(&a), number(&b)) {
+            (Some(a), Some(b)) => a == b,
+            _ => {
+                let bare = |value: &V| value.to_string().split_whitespace().collect::<String>();
+                bare(&a) == bare(&b)
+            }
+        },
+        _ => a.trim() == b.trim(),
+    }
+}
+
+/// `text`'s first sentence (with its full stop) and the rest. A full stop
+/// counts when a space or the end follows it, so `0.05 to 5.0.` stays whole.
+fn first_sentence(text: &str) -> (&str, &str) {
+    let text = text.trim();
+    match text.find(". ") {
+        Some(at) => (&text[..=at], text[at + 1..].trim_start()),
+        None => (text, ""),
+    }
+}
+
+/// Whether a comment's first sentence is the template's statement of the
+/// values: a quoted name (`"block" | …`, `"system" or a theme name`), a
+/// number range (`0 to 100000`), `true | false`, or a bound (`Greater than 0`).
+fn states_values(sentence: &str) -> bool {
+    sentence.starts_with('"')
+        || sentence.starts_with(|c: char| c.is_ascii_digit())
+        || sentence.starts_with("true |")
+        || sentence.starts_with("Greater than")
+}
+
+/// Every key of [`Settings::TEMPLATE`], in the template's order: the written
+/// ones and the one shown only in a comment (`font.family`).
+///
+/// Read once and kept: the strings it hands out are slices of the template
+/// (`'static`, like [`Diagnostic::key`] needs), and the dotted path, which is
+/// no slice of it, is made once per key for the life of the process.
+pub fn template_keys() -> &'static [TemplateKey] {
+    static KEYS: std::sync::LazyLock<Vec<TemplateKey>> =
+        std::sync::LazyLock::new(|| scan_template(Settings::TEMPLATE));
+    &KEYS
+}
+
+/// The template key at the dotted `path`.
+pub fn template_key(path: &str) -> Option<&'static TemplateKey> {
+    template_keys().iter().find(|found| found.path == path)
+}
+
+/// Reads the keys out of a template's text, line by line: a `[section]`
+/// header, a `key = value` line, or a `# …` comment line. A comment line that
+/// is itself a `key = value` naming no written key of its section is the
+/// example of a key without a default (`# family = "Menlo"`); one naming a
+/// written key (`# cursor_motion = "snap" turns it off…`) is prose. A blank
+/// line ends a comment. The template is ours and simple; the test
+/// `template_keys_are_the_documents_keys` holds this reading to `toml_edit`'s.
+fn scan_template(template: &'static str) -> Vec<TemplateKey> {
+    let written = document(template).ok();
+    let is_written = |section: &str, key: &str| {
+        written
+            .as_ref()
+            .and_then(|doc| doc.get(section))
+            .and_then(|table| table.get(key))
+            .is_some()
+    };
+    let mut keys: Vec<TemplateKey> = Vec::new();
+    let mut section: &'static str = "";
+    let mut comment: Vec<&'static str> = Vec::new();
+    // The comment of the key above, for a key without one of its own.
+    let mut previous = String::new();
+    for line in template.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            comment.clear();
+        } else if let Some(text) = line.strip_prefix('#') {
+            let text = text.strip_prefix(' ').unwrap_or(text);
+            match key_value(text) {
+                Some((key, value)) if !section.is_empty() && !is_written(section, key) => {
+                    push_key(
+                        &mut keys,
+                        &mut comment,
+                        &mut previous,
+                        (section, key),
+                        None,
+                        Some(value),
+                    );
+                }
+                _ => comment.push(text),
+            }
+        } else if let Some(name) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
+            section = name.trim();
+            comment.clear();
+            previous.clear();
+        } else if let Some((key, value)) = key_value(line) {
+            push_key(
+                &mut keys,
+                &mut comment,
+                &mut previous,
+                (section, key),
+                Some(value),
+                None,
+            );
+        }
+    }
+    keys
+}
+
+/// One key of [`scan_template`]: takes the comment gathered above it, or the
+/// key above's when it has none.
+fn push_key(
+    keys: &mut Vec<TemplateKey>,
+    comment: &mut Vec<&'static str>,
+    previous: &mut String,
+    (section, key): (&'static str, &'static str),
+    default: Option<&'static str>,
+    example: Option<&'static str>,
+) {
+    let own = comment.join("\n");
+    comment.clear();
+    if !own.is_empty() {
+        *previous = own;
+    }
+    keys.push(TemplateKey {
+        section,
+        key,
+        path: format!("{section}.{key}").leak(),
+        default,
+        example,
+        comment: previous.clone(),
+    });
+}
+
+/// `key = value` when the line is exactly one bare key and one whole TOML
+/// value.
+fn key_value(line: &'static str) -> Option<(&'static str, &'static str)> {
+    let (key, value) = line.split_once('=')?;
+    let (key, value) = (key.trim(), value.trim());
+    let bare = !key.is_empty()
+        && key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    (bare && value.parse::<toml_edit::Value>().is_ok()).then_some((key, value))
 }
 
 /// Adds an empty `[name]` to the document if the section is missing; if present
@@ -4375,6 +4734,346 @@ mod tests {
             "no family example in the template"
         );
         assert!(clean(&uncommented).font.family.is_some());
+    }
+
+    #[test]
+    fn template_keys_are_the_documents_keys() {
+        // The line reading of `scan_template` against `toml_edit`'s reading of
+        // the same text: every written key, in order, with its value.
+        let doc = document(Settings::TEMPLATE).expect("template TOML");
+        let mut written = Vec::new();
+        for (section, table) in doc.as_table().iter() {
+            let table = table.as_table_like().expect("a section");
+            for (key, item) in table.iter() {
+                // The value's own text, as written (`0.10`, not `0.1`).
+                let span = item.span().expect("a parsed value has a span");
+                let value = Settings::TEMPLATE[span].trim();
+                written.push((format!("{section}.{key}"), value.to_owned()));
+            }
+        }
+        let scanned: Vec<(String, String)> = template_keys()
+            .iter()
+            .filter_map(|found| Some((found.path.to_owned(), found.default?.to_owned())))
+            .collect();
+        assert_eq!(scanned, written);
+        // The one key shown only in a comment.
+        let commented: Vec<&str> = template_keys()
+            .iter()
+            .filter(|found| found.default.is_none())
+            .map(|found| found.path)
+            .collect();
+        assert_eq!(commented, ["font.family"]);
+        assert_eq!(
+            template_key("font.family").and_then(|found| found.example),
+            Some("\"Menlo\"")
+        );
+        // Every key has something to say about itself.
+        for found in template_keys() {
+            assert!(!found.summary().is_empty(), "{} has no summary", found.path);
+            assert!(!found.allowed().is_empty(), "{} has no values", found.path);
+            assert_eq!(found.path, format!("{}.{}", found.section, found.key));
+        }
+    }
+
+    #[test]
+    fn a_template_key_reads_its_values_and_meaning_off_its_comment() {
+        let split = template_key("appearance.split_style").expect("split_style");
+        assert_eq!(split.default, Some("\"cards\""));
+        assert_eq!(split.allowed(), "\"cards\" | \"lines\"");
+        assert_eq!(split.summary(), "How a split tab sets its panes apart");
+        let scrollback = template_key("terminal.scrollback").expect("scrollback");
+        assert_eq!(scrollback.allowed(), "0 to 100000");
+        assert_eq!(
+            scrollback.summary(),
+            "Lines of history kept above the screen"
+        );
+        assert_eq!(
+            template_key("terminal.cursor_blink_interval").map(TemplateKey::allowed),
+            Some("0.05 to 5.0".to_owned())
+        );
+        assert_eq!(
+            template_key("appearance.tab_icons").map(TemplateKey::allowed),
+            Some("true | false".to_owned())
+        );
+        // A comment that starts with what the key does: the default's kind.
+        assert_eq!(
+            template_key("remote.download_dir").map(TemplateKey::allowed),
+            Some("a string".to_owned())
+        );
+        assert_eq!(
+            template_key("remote.stats_interval").map(TemplateKey::allowed),
+            Some("a whole number".to_owned())
+        );
+        // `dark_theme` is written under `light_theme`'s comment and shares it.
+        let light = template_key("appearance.light_theme").expect("light_theme");
+        let dark = template_key("appearance.dark_theme").expect("dark_theme");
+        assert_eq!(dark.comment, light.comment);
+        assert!(dark.comment.starts_with("Theme names"));
+        // The commented example's comment is its own, not the next key's.
+        let family = template_key("font.family").expect("family");
+        assert!(family.comment.starts_with("A family name"));
+        let size = template_key("font.size").expect("size");
+        assert_eq!(size.allowed(), "Greater than 0");
+        assert_eq!(size.summary(), "Size in points");
+        assert_eq!(
+            template_key("shell.ports")
+                .map(TemplateKey::summary)
+                .as_deref(),
+            Some(
+                "Shows the ports your programs listen on at the right of the dock's bottom \
+                 line, like ↗ :3000 for a dev server, and lists them under Shell > Open Port"
+            )
+        );
+    }
+
+    #[test]
+    fn a_template_key_reads_and_spells_a_value() {
+        let split = template_key("appearance.split_style").expect("split_style");
+        let size = template_key("font.size").expect("size");
+        let family = template_key("font.family").expect("family");
+        // A bare word for a string key is quoted; TOML stays as typed.
+        assert_eq!(split.toml_value("lines"), "\"lines\"");
+        assert_eq!(split.toml_value("\"lines\""), "\"lines\"");
+        assert_eq!(size.toml_value("14.5"), "14.5");
+        assert_eq!(size.toml_value("big"), "\"big\"");
+        assert_eq!(family.toml_value("13"), "\"13\"");
+        assert_eq!(family.toml_value("JetBrains Mono"), "\"JetBrains Mono\"");
+        // Defaults by value.
+        assert!(size.is_default("13.0"));
+        assert!(!size.is_default("14"));
+        assert!(split.is_default("'cards'"));
+        assert!(family.is_default("\"\""));
+        assert!(template_key("remote.hosts").is_some_and(|hosts| hosts.is_default("[ ]")));
+        // What the file writes, as written.
+        let text = "[terminal]\ncursor_radius = 0.10 # round\n";
+        let radius = template_key("terminal.cursor_radius").expect("radius");
+        assert_eq!(radius.written_in(text).as_deref(), Some("0.10"));
+        assert_eq!(size.written_in(text), None);
+        assert_eq!(plain_value("\"lines\""), "lines");
+        assert_eq!(plain_value("0.10"), "0.10");
+    }
+
+    #[test]
+    fn every_value_a_comment_lists_is_accepted() {
+        // The template's `"a" | "b"` and `A to B` are what `bateri config`
+        // shows as a key's values; the parser is what accepts them. A comment
+        // that lists a value the parser refuses — a renamed one — fails here.
+        let mut checked = 0;
+        for found in template_keys() {
+            let allowed = found.allowed();
+            let mut values: Vec<String> = Vec::new();
+            if allowed.contains(" | ") {
+                values.extend(allowed.split(" | ").map(|v| v.trim().to_owned()));
+            } else if let Some((low, high)) = allowed.split_once(" to ") {
+                values.push(low.to_owned());
+                values.push(high.to_owned());
+            }
+            for value in values {
+                let written = Settings::with_checked_value(Settings::TEMPLATE, found.path, &value);
+                assert!(written.is_ok(), "{} = {value}: {written:?}", found.path);
+                checked += 1;
+            }
+        }
+        assert!(checked > 60, "only {checked} values checked");
+    }
+
+    #[test]
+    fn with_value_writes_one_line_through_the_windows_writer() {
+        let text = Settings::TEMPLATE
+            .replace("split_style = \"cards\"", "split_style = \"cards\"  # mine");
+        let written = Settings::with_checked_value(&text, "appearance.split_style", "\"lines\"")
+            .expect("written");
+        assert_eq!(
+            written,
+            text.replace(
+                "split_style = \"cards\"  # mine",
+                "split_style = \"lines\"  # mine"
+            )
+        );
+        // The same bytes `with_edit` writes for the typed edit.
+        assert_eq!(
+            Settings::with_value(Settings::TEMPLATE, "font.size", "14.5"),
+            Settings::with_edit(Settings::TEMPLATE, &SettingsEdit::FontSize(14.5))
+        );
+        // A key missing from the file is added to its section.
+        let added = Settings::with_checked_value("[font]\nsize = 12\n", "font.family", "\"Menlo\"")
+            .expect("written");
+        assert_eq!(added, "[font]\nsize = 12\nfamily = \"Menlo\"\n");
+    }
+
+    #[test]
+    fn with_checked_value_refuses_what_the_parser_refuses() {
+        let refused = Settings::with_checked_value(
+            Settings::TEMPLATE,
+            "appearance.split_style",
+            "\"stripes\"",
+        )
+        .expect_err("refused");
+        assert_eq!(refused.key, Some("appearance.split_style"));
+        assert!(
+            refused.message.contains("\"cards\" or \"lines\""),
+            "{refused}"
+        );
+        assert!(
+            Settings::with_checked_value(Settings::TEMPLATE, "terminal.scrollback", "-1").is_err()
+        );
+        assert!(Settings::with_checked_value(Settings::TEMPLATE, "font.line_height", "9").is_err());
+        assert!(
+            Settings::with_checked_value(Settings::TEMPLATE, "appearance.tab_icons", "\"yes\"")
+                .is_err()
+        );
+        let unknown = Settings::with_checked_value(Settings::TEMPLATE, "appearance.nope", "1")
+            .expect_err("unknown");
+        assert_eq!(unknown.key, None);
+        // A file that can't be parsed is not written over.
+        assert!(Settings::with_checked_value("[font\n", "font.size", "12").is_err());
+        // Another key's problem is the file's own and doesn't stop the write.
+        assert!(
+            Settings::with_checked_value(
+                "[terminal]\ncursor = \"x\"\n",
+                "terminal.scrollback",
+                "5"
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn every_edit_the_app_writes_is_a_template_key() {
+        // Every key the menus and the settings window can write is a key of the
+        // template, so `bateri config` reaches it. The match has no `_` arm:
+        // a new `SettingsEdit` variant doesn't compile here until it has a
+        // sample below, and the sample's path must be a template key.
+        fn sample(edit: &SettingsEdit) -> usize {
+            use SettingsEdit as E;
+            match edit {
+                E::Scrollback(_) => 0,
+                E::Cursor(_) => 1,
+                E::CursorBlink(_) => 2,
+                E::CursorRadius(_) => 3,
+                E::CursorGlow(_) => 4,
+                E::CursorUnfocused(_) => 5,
+                E::BlinkInterval(_) => 6,
+                E::ConfirmClose(_) => 7,
+                E::RestoreWindows(_) => 8,
+                E::KeepRunning(_) => 9,
+                E::Scrollbar(_) => 10,
+                E::Theme(_) => 11,
+                E::LightTheme(_) => 12,
+                E::DarkTheme(_) => 13,
+                E::ContentEdge(_) => 14,
+                E::MinimumContrast(_) => 15,
+                E::FontFamily(_) => 16,
+                E::FontSize(_) => 17,
+                E::LineHeight(_) => 18,
+                E::LetterSpacing(_) => 19,
+                E::Osc52(_) => 20,
+                E::CursorMotion(_) => 21,
+                E::ReduceMotion(_) => 22,
+                E::SmoothScroll(_) => 23,
+                E::Keypress(_) => 24,
+                E::Erase(_) => 25,
+                E::DockArrival(_) => 26,
+                E::ShellIntegration(_) => 27,
+                E::ShellPorts(_) => 28,
+                E::ShellPythonEnv(_) => 29,
+                E::ShellNodeVersion(_) => 30,
+                E::DimUnfocusedSplits(_) => 31,
+                E::SplitStyle(_) => 32,
+                E::ResizeInSteps(_) => 33,
+                E::TabIcons(_) => 34,
+                E::IconColors(_) => 35,
+                E::TabPosition(_) => 36,
+                E::RemoteHostMark { .. } => 37,
+                E::RemoteIntegration(_) => 38,
+                E::RemoteHostIntegration { .. } => 39,
+                E::PreviewMaxSize(_) => 40,
+                E::PreviewReadOnly(_) => 41,
+                E::PreviewDir(_) => 42,
+                E::PreviewKeep(_) => 43,
+                E::PreviewLimit(_) => 44,
+                E::DownloadDir(_) => 45,
+                E::DownloadConflict(_) => 46,
+                E::DownloadNotify(_) => 47,
+                E::RemoteStats(_) => 48,
+                E::StatsInterval(_) => 49,
+            }
+        }
+        let d = Settings::default();
+        let samples = [
+            SettingsEdit::Scrollback(d.scrollback),
+            SettingsEdit::Cursor(d.cursor),
+            SettingsEdit::CursorBlink(d.cursor_blink),
+            SettingsEdit::CursorRadius(d.caret.radius_ratio),
+            SettingsEdit::CursorGlow(d.caret.glow),
+            SettingsEdit::CursorUnfocused(d.caret.unfocused),
+            SettingsEdit::BlinkInterval(d.blink_interval),
+            SettingsEdit::ConfirmClose(d.confirm_close),
+            SettingsEdit::RestoreWindows(d.restore_windows),
+            SettingsEdit::KeepRunning(d.keep_running),
+            SettingsEdit::Scrollbar(d.scrollbar),
+            SettingsEdit::Theme(d.theme.clone()),
+            SettingsEdit::LightTheme(d.light_theme.clone()),
+            SettingsEdit::DarkTheme(d.dark_theme.clone()),
+            SettingsEdit::ContentEdge(d.content_edge),
+            SettingsEdit::MinimumContrast(d.minimum_contrast),
+            SettingsEdit::FontFamily(String::new()),
+            SettingsEdit::FontSize(d.font.size),
+            SettingsEdit::LineHeight(d.font.line_height),
+            SettingsEdit::LetterSpacing(d.font.letter_spacing),
+            SettingsEdit::Osc52(d.osc52),
+            SettingsEdit::CursorMotion(d.cursor_motion),
+            SettingsEdit::ReduceMotion(d.reduce_motion),
+            SettingsEdit::SmoothScroll(d.smooth_scroll),
+            SettingsEdit::Keypress(d.keypress),
+            SettingsEdit::Erase(d.erase),
+            SettingsEdit::DockArrival(d.dock_arrival),
+            SettingsEdit::ShellIntegration(d.shell_integration),
+            SettingsEdit::ShellPorts(d.shell_ports),
+            SettingsEdit::ShellPythonEnv(d.shell_python_env),
+            SettingsEdit::ShellNodeVersion(d.shell_node_version),
+            SettingsEdit::DimUnfocusedSplits(d.dim_unfocused_splits),
+            SettingsEdit::SplitStyle(d.split_style),
+            SettingsEdit::ResizeInSteps(d.resize_in_steps),
+            SettingsEdit::TabIcons(d.tab_icons),
+            SettingsEdit::IconColors(d.tab_icon_colors),
+            SettingsEdit::TabPosition(d.tab_position),
+            SettingsEdit::RemoteHostMark {
+                host: "prod".to_owned(),
+                mark: HostMark::None,
+                subject: MarkSubject::Host,
+            },
+            SettingsEdit::RemoteIntegration(d.remote_integration),
+            SettingsEdit::RemoteHostIntegration {
+                host: "prod".to_owned(),
+                on: true,
+            },
+            SettingsEdit::PreviewMaxSize(d.remote_files.preview_max_size),
+            SettingsEdit::PreviewReadOnly(d.remote_files.preview_read_only),
+            SettingsEdit::PreviewDir("~/x".to_owned()),
+            SettingsEdit::PreviewKeep(d.remote_files.preview_keep),
+            SettingsEdit::PreviewLimit(d.remote_files.preview_limit),
+            SettingsEdit::DownloadDir("~/x".to_owned()),
+            SettingsEdit::DownloadConflict(d.remote_files.download_conflict),
+            SettingsEdit::DownloadNotify(d.remote_files.download_notify),
+            SettingsEdit::RemoteStats(d.remote_stats.mode),
+            SettingsEdit::StatsInterval(d.remote_stats.interval),
+        ];
+        let mut seen: Vec<usize> = samples.iter().map(sample).collect();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(
+            seen,
+            (0..samples.len()).collect::<Vec<_>>(),
+            "one sample per variant"
+        );
+        for edit in &samples {
+            assert!(
+                template_key(edit.path()).is_some(),
+                "`{}` is written by the app but missing from the template",
+                edit.path()
+            );
+        }
     }
 
     #[test]

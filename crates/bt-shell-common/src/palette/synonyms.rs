@@ -80,6 +80,7 @@ const WORDS: &[(&str, &str)] = &[
     ("forgetPassword", "keychain ssh login"),
     ("cancelUpload", "stop transfer"),
     ("matchSystemTheme", "auto macos appearance"),
+    ("showWelcome", "intro tour onboarding help getting started"),
 ];
 
 /// The extra words of the command with this selector (`splitRight` or `splitRight:`); empty
