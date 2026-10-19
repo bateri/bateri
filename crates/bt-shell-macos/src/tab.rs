@@ -49,7 +49,7 @@ use bt_core::{ContentEdge, HostMark, MarkSubject, PaneUuid, Settings, Theme};
 use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
-use objc2_app_kit::{NSEvent, NSView, NSWindow, NSWindowOcclusionState};
+use objc2_app_kit::{NSEvent, NSResponder, NSView, NSWindow, NSWindowOcclusionState};
 use objc2_core_foundation::CFRetained;
 use objc2_core_graphics::CGImage;
 use objc2_foundation::{NSObject, NSObjectProtocol, NSPoint, NSRect};
@@ -451,6 +451,49 @@ impl TerminalTab {
             .find(|candidate| candidate.id() == pane.id())
     }
 
+    /// Who holds the window's keyboard, from this tab's side: one of its
+    /// panes, nobody (the window itself, or no window yet), or a view that is
+    /// not this tab's ([`handover`]).
+    fn keyboard_holder(&self) -> Holder {
+        let Some(window) = self.ns_window() else {
+            return Holder::Window;
+        };
+        let Some(responder) = window.firstResponder() else {
+            return Holder::Window;
+        };
+        let itself: &NSResponder = &window;
+        if std::ptr::eq(&*responder, itself) {
+            return Holder::Window;
+        }
+        self.responder_pane()
+            .map_or(Holder::Elsewhere, |pane| Holder::Pane(pane.id()))
+    }
+
+    /// What becomes of the focus if pane `id` leaves now ([`handover`]) —
+    /// asked **before** it leaves, while the first responder may still be in it.
+    fn handover(&self, id: u64) -> Handover {
+        let shown = !self.ivars().container.isHiddenOrHasHiddenAncestor();
+        handover(
+            id,
+            self.ivars().focused.get(),
+            self.keyboard_holder(),
+            shown,
+        )
+    }
+
+    /// The focus goes to the neighbour `next` as `handover` says: the
+    /// keyboard and the memory, the memory alone, or nothing.
+    fn hand_over(&self, handover: Handover, next: Option<Retained<TerminalPane>>) {
+        let Some(next) = next else {
+            return;
+        };
+        match handover {
+            Handover::Keyboard => self.focus_pane(&next),
+            Handover::Memory => self.pane_focused(next.id()),
+            Handover::Nothing => {}
+        }
+    }
+
     /// The pane's `BateriView` became first responder (`PaneHost::focused`,
     /// and the window's focus watch): the focus moved to it, the title is
     /// its.
@@ -832,15 +875,18 @@ impl TerminalTab {
     /// If the focused pane is closing the focus goes to the neighbour in the
     /// tree ([`Removal::Removed`]) and **before the teardown**: taking apart
     /// the view that carries the first responder would leave the window
-    /// without a responder. The closing is the pane's own sequence
-    /// ([`TerminalPane::begin_close`], not waited on); the Dock icon's total
-    /// again, because the closed pane's queue is gone.
+    /// without a responder. The keyboard goes with it only if it was the
+    /// closing pane's ([`handover`]): a pane closing in a background tab
+    /// moves that tab's memory, never the window's first responder. The
+    /// closing is the pane's own sequence ([`TerminalPane::begin_close`], not
+    /// waited on); the Dock icon's total again, because the closed pane's
+    /// queue is gone.
     pub(crate) fn close_pane(&self, id: u64) {
         let container = &self.ivars().container;
         let Some(pane) = container.pane(id) else {
             return;
         };
-        let was_focused = self.focused_pane().id() == id;
+        let handover = self.handover(id);
         match container.remove_leaf(id) {
             Removal::Missing => {}
             Removal::Last => {
@@ -850,9 +896,7 @@ impl TerminalTab {
             }
             Removal::Removed { focus } => {
                 self.set_zoom(None);
-                if was_focused && let Some(next) = container.pane(focus) {
-                    self.focus_pane(&next);
-                }
+                self.hand_over(handover, container.pane(focus));
                 drop(pane.begin_close());
                 drop(container.detach(id));
                 self.refresh_title();
@@ -913,23 +957,22 @@ impl TerminalTab {
     /// questions and its programs go on. Its questions are lowered while it
     /// still stands here ([`sheets::lift`]), the focus goes to its neighbour
     /// first when it had it (the window must not be left without a
-    /// responder, as in [`Self::close_pane`]) and the zoom drops. `None` if
-    /// it is not here or is the last.
+    /// responder, as in [`Self::close_pane`], and the keyboard only if it was
+    /// the pane's, [`handover`]) and the zoom drops. `None` if it is not here
+    /// or is the last.
     pub(crate) fn release_pane(&self, id: u64) -> Option<Retained<TerminalPane>> {
         let container = &self.ivars().container;
         let pane = container.pane(id)?;
         if container.panes().len() < 2 {
             return None;
         }
-        let was_focused = self.focused_pane().id() == id;
+        let handover = self.handover(id);
         self.set_zoom(None);
         let Removal::Removed { focus } = container.remove_leaf(id) else {
             return None;
         };
         sheets::lift(&pane);
-        if was_focused && let Some(next) = container.pane(focus) {
-            self.focus_pane(&next);
-        }
+        self.hand_over(handover, container.pane(focus));
         let released = container.detach(id)?;
         self.refresh_title();
         self.refresh_look();
@@ -1682,4 +1725,99 @@ fn program_blocked(pane: &TerminalPane) -> bool {
             .program
             .is_some_and(|program| program.blocked)
     })
+}
+
+/// Who holds the window's keyboard (its first responder) at the moment a
+/// pane leaves a tab, as the tab sees it ([`TerminalTab::keyboard_holder`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Holder {
+    /// One of this tab's panes — `BateriView` or its search field's field
+    /// editor ([`TerminalTab::responder_pane`]): the pane's id.
+    Pane(u64),
+    /// Nobody: the window itself, or no first responder at all.
+    Window,
+    /// A view that is not this tab's: another tab's pane (the one on screen
+    /// when this tab is in the background), the palette's field, a tab's name
+    /// field.
+    Elsewhere,
+}
+
+/// What becomes of the focus when a pane leaves a tab ([`handover`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Handover {
+    /// The keyboard goes to the neighbour ([`TerminalTab::focus_pane`]).
+    Keyboard,
+    /// Only the tab's memory moves to the neighbour
+    /// ([`TerminalTab::pane_focused`]); the window's first responder stays.
+    Memory,
+    /// Neither: the leaving pane was not the tab's focus.
+    Nothing,
+}
+
+/// What becomes of the focus when pane `leaving` leaves a tab whose
+/// remembered focus ([`TabIvars::focused`]) is `remembered`, with the
+/// window's keyboard at `holder` and the tab on screen or not (`shown`)
+/// ([`TerminalTab::close_pane`], [`TerminalTab::release_pane`]).
+///
+/// **The keyboard moves only when it is the leaving pane's to give**: the
+/// pane holds it, or nobody does and the tab is the one on screen. Asking
+/// [`TerminalTab::focused_pane`] instead, as these paths once did, answers
+/// with the remembered pane whenever the first responder is not in this tab
+/// — and a background tab's is never in it: the tabs of a window share its
+/// one `NSWindow` and the others are only hidden containers, so a shell
+/// exiting in the background took the keyboard from the pane the user was
+/// typing in and gave it to a hidden one, Return and all. The palette's field
+/// over the tab on screen is the same case: it keeps the keyboard. In both the
+/// tab's memory still moves to the neighbour, the pane its selection (or the
+/// palette's closing, [`TerminalWindow::focus_selected_tab`]) gives the
+/// keyboard to.
+fn handover(leaving: u64, remembered: u64, holder: Holder, shown: bool) -> Handover {
+    match holder {
+        Holder::Pane(pane) if pane == leaving => Handover::Keyboard,
+        Holder::Window if shown && remembered == leaving => Handover::Keyboard,
+        _ if remembered == leaving => Handover::Memory,
+        _ => Handover::Nothing,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_pane_leaving_a_background_tab_leaves_the_keyboard_in_the_tab_on_screen() {
+        // The user types in the tab on screen (`Elsewhere`, from the
+        // background tab's side) while the background tab's remembered pane
+        // closes — its shell timed out, a `kill` from elsewhere. The
+        // neighbour becomes the tab's focus for when it is selected; the
+        // keyboard does not go to a hidden view.
+        assert_eq!(handover(1, 1, Holder::Elsewhere, false), Handover::Memory);
+        // With nobody holding the keyboard a hidden view still must not take it.
+        assert_eq!(handover(1, 1, Holder::Window, false), Handover::Memory);
+    }
+
+    #[test]
+    fn the_pane_holding_the_keyboard_hands_it_to_its_neighbour() {
+        assert_eq!(handover(1, 1, Holder::Pane(1), true), Handover::Keyboard);
+    }
+
+    #[test]
+    fn a_field_over_the_tab_on_screen_keeps_the_keyboard() {
+        // The palette's field is the first responder over the tab on screen
+        // when its remembered pane closes: the field keeps the keyboard, the
+        // neighbour is where it goes back to when the palette closes.
+        assert_eq!(handover(1, 1, Holder::Elsewhere, true), Handover::Memory);
+    }
+
+    #[test]
+    fn with_nobody_holding_the_keyboard_the_tab_on_screen_gives_it_to_the_neighbour() {
+        assert_eq!(handover(1, 1, Holder::Window, true), Handover::Keyboard);
+    }
+
+    #[test]
+    fn a_pane_that_was_not_the_tabs_focus_moves_nothing() {
+        assert_eq!(handover(2, 1, Holder::Pane(1), true), Handover::Nothing);
+        assert_eq!(handover(2, 1, Holder::Elsewhere, false), Handover::Nothing);
+        assert_eq!(handover(2, 1, Holder::Window, true), Handover::Nothing);
+    }
 }
