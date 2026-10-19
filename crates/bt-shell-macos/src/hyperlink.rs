@@ -72,7 +72,9 @@ use objc2_app_kit::{
     NSAlert, NSAlertSecondButtonReturn, NSEvent, NSMenu, NSMenuItem, NSModalResponse,
     NSModalResponseOK, NSOpenPanel, NSPasteboard, NSWorkspace,
 };
-use objc2_foundation::{NSArray, NSPoint, NSRect, NSSize, NSString, NSURL, ns_string};
+use objc2_foundation::{
+    NSArray, NSPoint, NSRect, NSSize, NSString, NSURL, NSURLBookmarkResolutionOptions, ns_string,
+};
 
 use crate::child;
 use crate::clipboard;
@@ -169,7 +171,7 @@ fn request(link: &Verified) -> LinkRequest {
         };
     }
     match &link.resolved {
-        Some(Resolved { path, entry }) => LinkRequest::Path {
+        Some(Resolved { path, entry, .. }) => LinkRequest::Path {
             path: path.clone(),
             directory: matches!(entry, links::Entry::Dir),
             line,
@@ -433,8 +435,14 @@ pub(crate) fn extension_content(ext: &str) -> Content {
 /// `links::action`'s content oracle: a package (`.app`, `.pkg`, a bundle) first —
 /// opening it would launch or install it —, then the extension's type.
 ///
+/// **Asked about a real path only** (`links::Resolved::target`, every symlink
+/// and Finder alias followed — [`stat`]): `isFilePackageAtPath` answers `false`
+/// for a symlink to an `.app` and the extension of a link is its own name's, so
+/// asked about the link both questions would be answered about the wrong object.
+///
 /// On the main thread at click time: `isFilePackageAtPath` reads the disk, but
-/// only once per click on a path the background `stat` already found.
+/// only once per click on a path the background `stat` already found and
+/// followed.
 fn content_of(path: &Path) -> Content {
     let text = NSString::from_str(&path.to_string_lossy());
     if NSWorkspace::sharedWorkspace().isFilePackageAtPath(&text) {
@@ -449,14 +457,64 @@ fn file_url(path: &Path) -> Retained<NSURL> {
     NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy()))
 }
 
+/// The macOS `stat` for `links::resolve`: a **Finder alias** is resolved first, then
+/// `links::stat` follows the symlinks and reads what is there.
+///
+/// An alias is a regular file (a bookmark with the `kIsAlias` FinderInfo flag), so
+/// `canonicalize` does not follow it — `notes.md` that is an alias to an `.app` would stay
+/// a non-executable `.md` file and pass for a document — while Launch Services, handed it,
+/// resolves it and launches the app (or runs the `.terminal` behind a `README.txt`). Plain
+/// `tar` keeps the FinderInfo and a DMG carries aliases, neither quarantined. Resolved
+/// here, the alias is judged and opened as what it names, like a symlink.
+///
+/// `URLByResolvingAliasFileAtURL` follows symlinks too and **whole chains** (alias → link →
+/// alias, up to 32 hops; a loop or a longer chain is an error), and answers a path that is
+/// no alias with itself. `WithoutUI` and `WithoutMounting`: never a dialog, never a volume
+/// mounted for a hover. **An alias that does not resolve is no link** (`None`, as a dangling
+/// symlink is): its target may be on a volume Launch Services would mount and launch from.
+///
+/// Blocking like `links::stat` — on the view's background queue ([`BateriView::verify_paths`])
+/// and in [`folder_action`]; `NSURL` is thread-safe.
+fn stat(path: &Path) -> Option<(links::Entry, std::path::PathBuf)> {
+    let url = NSURL::from_file_path(path)?;
+    let options =
+        NSURLBookmarkResolutionOptions::WithoutUI | NSURLBookmarkResolutionOptions::WithoutMounting;
+    let resolved = NSURL::URLByResolvingAliasFileAtURL_options_error(&url, options).ok()?;
+    links::stat(&resolved.to_file_path()?)
+}
+
 /// Opens the folder `path` in a Finder window (Shell ▸ Show Folder in Finder, the palette's ⌘⏎
-/// on a folder); a path that is not a folder beeps.
+/// on a folder); a path that is not a folder beeps ([`folder_action`]).
+///
+/// On the main thread: a few `lstat`s, an alias check and one `isFilePackageAtPath` on a
+/// folder the user picked — the `is_dir` this always read, now followed to the real folder.
 pub(crate) fn show_folder(path: &Path) {
-    if path.is_dir() {
-        NSWorkspace::sharedWorkspace().openURL(&file_url(path));
-    } else {
-        crate::preview::beep();
+    let workspace = NSWorkspace::sharedWorkspace();
+    match folder_action(path) {
+        Some(LinkAction::OpenDir(target)) => {
+            workspace.openURL(&file_url(&target));
+        }
+        Some(LinkAction::Reveal(path)) => {
+            workspace
+                .activateFileViewerSelectingURLs(&NSArray::from_retained_slice(&[file_url(&path)]));
+        }
+        _ => crate::preview::beep(),
     }
+}
+
+/// [`show_folder`]'s decision, the link policy's two directory rows: a folder opens at its
+/// real path, **a package is revealed** — the folder comes from OSC 7 (a `cd Evil.app`, or
+/// any output that prints the sequence) or from the palette, and `openURL` on `Evil.app` (or
+/// on a link or an alias to it) launches it. `None` for anything that is not a folder.
+fn folder_action(path: &Path) -> Option<LinkAction> {
+    let (links::Entry::Dir, target) = stat(path)? else {
+        return None;
+    };
+    Some(if content_of(&target) == Content::Package {
+        LinkAction::Reveal(path.to_path_buf())
+    } else {
+        LinkAction::OpenDir(target)
+    })
 }
 
 /// Hands a URL string to its default application; a string `NSURL` rejects does nothing.
@@ -769,10 +827,11 @@ impl BateriView {
         }
     }
 
-    /// Throws the `stat`s to the view's serial queue — every candidate of a
-    /// path query in one job, the first that exists wins
-    /// ([`links::resolve_first`]); the answer returns to the main queue by pane
-    /// id — to the hover ([`BateriView::settle_hover`]) or to the context menu
+    /// Throws the `stat`s ([`stat`]: Finder aliases and symlinks followed) to
+    /// the view's serial queue — every candidate of a path query in one job,
+    /// the first that exists wins ([`links::resolve_first`]); the answer
+    /// returns to the main queue by pane id — to the hover
+    /// ([`BateriView::settle_hover`]) or to the context menu
     /// ([`BateriView::settle_menu`]).
     fn verify_paths(&self, paths: Vec<std::path::PathBuf>, hit: LinkHit, then: Then) {
         let (Some(pane), Some(session)) = (self.pane(), self.session()) else {
@@ -791,7 +850,7 @@ impl BateriView {
                 paths.iter().map(std::path::PathBuf::as_path),
                 cwd.as_deref(),
                 home.as_deref(),
-                links::stat,
+                stat,
             );
             DispatchQueue::main().exec_async(move || {
                 // audit: a block running on the main queue is on the main thread by definition.
@@ -1435,5 +1494,166 @@ mod tests {
             assert_eq!(extension_content(ext), Content::Other, ".{ext}");
         }
         assert_eq!(extension_content("no-such-extension-xyz"), Content::Other);
+    }
+
+    /// The whole click on a real disk — the background `stat`, then the policy with
+    /// `content_of` — for links whose own names lie: `isFilePackageAtPath` does not
+    /// follow a symlink, and a name's extension is the link's, not the target's.
+    #[test]
+    fn a_symlink_is_judged_by_what_it_opens_not_by_its_own_name() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let dir = std::env::temp_dir().join(format!("bt-hyperlink-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let calculator = Path::new("/System/Applications/Calculator.app");
+        symlink(calculator, dir.join("docs")).expect("link to an app");
+        symlink(calculator, dir.join("Calculator.app")).expect("app-named link");
+        std::fs::write(dir.join("payload.terminal"), "x").expect("write payload");
+        std::fs::set_permissions(
+            dir.join("payload.terminal"),
+            std::fs::Permissions::from_mode(0o644),
+        )
+        .expect("chmod");
+        symlink("payload.terminal", dir.join("README.txt")).expect("txt-named link");
+        std::fs::write(dir.join("real.md"), "# x").expect("write doc");
+        symlink("real.md", dir.join("latest.txt")).expect("link to a doc");
+        std::fs::create_dir_all(dir.join("v2")).expect("folder");
+        symlink("v2", dir.join("current")).expect("link to a folder");
+        let click = |name: &str| {
+            let kind = LinkKind::Path {
+                line: None,
+                col: None,
+            };
+            let resolved = links::resolve(Path::new(name), Some(&dir), None, stat);
+            links::action(name, &kind, resolved.as_ref(), content_of)
+        };
+        let real = |name: &str| std::fs::canonicalize(dir.join(name)).expect("canonical");
+        // A link to an application is revealed, whatever it is called: opening it launches.
+        assert_eq!(
+            click("docs"),
+            Some(LinkAction::Reveal(dir.join("docs"))),
+            "a link to an app"
+        );
+        assert_eq!(
+            click("Calculator.app"),
+            Some(LinkAction::Reveal(dir.join("Calculator.app")))
+        );
+        // A text name over a `.terminal` is not a document: revealed, never run.
+        assert_eq!(
+            click("README.txt"),
+            Some(LinkAction::Reveal(dir.join("README.txt")))
+        );
+        // A link to a real document or folder still opens — what it points to.
+        assert_eq!(
+            click("latest.txt"),
+            Some(LinkAction::OpenFile(real("real.md")))
+        );
+        assert_eq!(click("current"), Some(LinkAction::OpenDir(real("v2"))));
+        // Shell ▸ Show Folder in Finder and the palette's ⌘⏎ take the same care with
+        // a folder that is an application (OSC 7 can name one).
+        assert_eq!(
+            folder_action(&dir.join("docs")),
+            Some(LinkAction::Reveal(dir.join("docs")))
+        );
+        assert_eq!(
+            folder_action(calculator),
+            Some(LinkAction::Reveal(calculator.to_path_buf()))
+        );
+        assert_eq!(
+            folder_action(&dir.join("current")),
+            Some(LinkAction::OpenDir(real("v2")))
+        );
+        assert_eq!(folder_action(&dir.join("real.md")), None);
+        assert_eq!(folder_action(&dir.join("nope")), None);
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// The same click for **Finder aliases** — regular files `canonicalize` does not
+    /// follow, which a plain `tar` or a DMG delivers unquarantined and Launch Services
+    /// resolves when it opens them: `notes.md` that is an alias to an app must not open.
+    #[test]
+    fn a_finder_alias_is_judged_by_what_it_opens_not_by_its_own_name() {
+        use objc2_foundation::NSURLBookmarkCreationOptions;
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("bt-hyperlink-alias-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        // What Finder's Make Alias writes: a bookmark file with the alias flag.
+        let alias = |target: &Path, name: &str| {
+            let target = NSURL::from_file_path(target).expect("target URL");
+            let data = target
+                .bookmarkDataWithOptions_includingResourceValuesForKeys_relativeToURL_error(
+                    NSURLBookmarkCreationOptions::SuitableForBookmarkFile,
+                    None,
+                    None,
+                )
+                .expect("bookmark");
+            let file = NSURL::from_file_path(dir.join(name)).expect("alias URL");
+            NSURL::writeBookmarkData_toURL_options_error(&data, &file, 0).expect("write alias");
+        };
+        let calculator = Path::new("/System/Applications/Calculator.app");
+        alias(calculator, "notes.md");
+        alias(&dir.join("notes.md"), "chain.md");
+        std::fs::write(dir.join("payload.terminal"), "x").expect("write payload");
+        std::fs::set_permissions(
+            dir.join("payload.terminal"),
+            std::fs::Permissions::from_mode(0o644),
+        )
+        .expect("chmod");
+        alias(&dir.join("payload.terminal"), "README.txt");
+        std::fs::write(dir.join("real.md"), "# x").expect("write doc");
+        alias(&dir.join("real.md"), "latest.txt");
+        std::fs::create_dir_all(dir.join("v2")).expect("folder");
+        alias(&dir.join("v2"), "current");
+        std::fs::write(dir.join("gone.md"), "x").expect("write doc");
+        alias(&dir.join("gone.md"), "dangling.md");
+        std::fs::remove_file(dir.join("gone.md")).expect("remove target");
+        // The hole: to the portable `stat` an alias to an app is a plain `.md` file.
+        assert_eq!(
+            links::stat(&dir.join("notes.md")).map(|(entry, _)| entry),
+            Some(links::Entry::File { executable: false })
+        );
+        let click = |name: &str| {
+            let kind = LinkKind::Path {
+                line: None,
+                col: None,
+            };
+            let resolved = links::resolve(Path::new(name), Some(&dir), None, stat);
+            links::action(name, &kind, resolved.as_ref(), content_of)
+        };
+        let real = |name: &str| std::fs::canonicalize(dir.join(name)).expect("canonical");
+        // An alias to an application, directly or through another alias: revealed.
+        assert_eq!(
+            click("notes.md"),
+            Some(LinkAction::Reveal(dir.join("notes.md"))),
+            "an alias to an app"
+        );
+        assert_eq!(
+            click("chain.md"),
+            Some(LinkAction::Reveal(dir.join("chain.md")))
+        );
+        // A text name over a `.terminal`: revealed, never run.
+        assert_eq!(
+            click("README.txt"),
+            Some(LinkAction::Reveal(dir.join("README.txt")))
+        );
+        // An alias to a real document or folder opens what it names.
+        assert_eq!(
+            click("latest.txt"),
+            Some(LinkAction::OpenFile(real("real.md")))
+        );
+        assert_eq!(click("current"), Some(LinkAction::OpenDir(real("v2"))));
+        // An alias that does not resolve is no link at all.
+        assert_eq!(click("dangling.md"), None);
+        // Show Folder in Finder: an alias to an app is revealed, one to a folder opens it.
+        assert_eq!(
+            folder_action(&dir.join("notes.md")),
+            Some(LinkAction::Reveal(dir.join("notes.md")))
+        );
+        assert_eq!(
+            folder_action(&dir.join("current")),
+            Some(LinkAction::OpenDir(real("v2")))
+        );
+        assert_eq!(folder_action(&dir.join("dangling.md")), None);
+        std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 }

@@ -335,9 +335,11 @@ pub fn remote_paths(candidates: &[String], cwd: &str, home: Option<&str>) -> Vec
     candidates
         .iter()
         .map(|candidate| {
-            links::resolve(Path::new(candidate), cwd, home, |_| Some(Entry::Dir))
-                .and_then(|resolved| resolved.path.to_str().map(str::to_owned))
-                .filter(|path| is_safe(path))
+            links::resolve(Path::new(candidate), cwd, home, |path| {
+                Some((Entry::Dir, path.to_path_buf()))
+            })
+            .and_then(|resolved| resolved.path.to_str().map(str::to_owned))
+            .filter(|path| is_safe(path))
         })
         .collect()
 }

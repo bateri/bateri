@@ -9,7 +9,9 @@
 //!   every `file://` of a remote session).
 //! - [`resolve`] — that text → an existing [`Resolved`] (`~` to the home directory, a relative
 //!   path to the pane's OSC 7 directory); the `stat` is **injected**, so the tests use a fake
-//!   and the shell passes [`stat`]. **A path that does not exist is not a link.**
+//!   and the shell passes [`stat`]. **A path that does not exist is not a link.** The `stat`
+//!   also follows the path's symlinks to the object they name ([`Resolved::target`]): a link's
+//!   own name says nothing about what opening it opens.
 //! - [`resolve_first`] — a path query's candidates (`My Drive`'s `Drive`, …, `My Drive`) →
 //!   the first that exists, iTerm2's semantic history.
 //! - [`action`] — the policy table: a **white list**, the
@@ -45,8 +47,21 @@ pub enum Entry {
 /// A path that exists, with what it is.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Resolved {
+    /// The path as the link names it — a symlink stays the symlink: what is revealed in
+    /// Finder, copied and handed to the pane's owner.
     pub path: PathBuf,
+    /// What [`Resolved::target`] is.
     pub entry: Entry,
+    /// The object `path` names once every symlink (and `..`) on it is followed — `realpath`,
+    /// read by the same background `stat` as `entry`. **What a click would open is judged
+    /// here and opened from here**, never from `path`: `isFilePackageAtPath` does not follow
+    /// a symlink and a name's extension is the link's own, so `docs -> Evil.app` would pass
+    /// for a folder and `README.txt -> payload.terminal` for a text file — and Launch
+    /// Services, handed the link, follows it and launches or runs the target. The macOS
+    /// shell's `stat` resolves a **Finder alias** before this one runs — an alias is a
+    /// regular file `canonicalize` does not follow, which Launch Services does. `path`
+    /// itself when nothing on it is a link, an alias or a `..`.
+    pub target: PathBuf,
 }
 
 /// The platform's answer about a resolved path's content (UTType on macOS).
@@ -147,12 +162,13 @@ fn file_url_path(url: &str) -> Option<PathBuf> {
 ///
 /// The `:line:col` suffix is already off the candidate (`bt-core` splits it into
 /// [`LinkKind::Path`]); it is **not** stripped again here, so a file whose name really ends
-/// in `:12` still resolves. `stat` follows symlinks ([`stat`]).
+/// in `:12` still resolves. `stat` follows symlinks and answers with what it found there
+/// ([`stat`]): the object and its path, [`Resolved::target`].
 pub fn resolve(
     candidate: &Path,
     cwd: Option<&Path>,
     home: Option<&Path>,
-    stat: impl Fn(&Path) -> Option<Entry>,
+    stat: impl Fn(&Path) -> Option<(Entry, PathBuf)>,
 ) -> Option<Resolved> {
     let text = candidate.as_os_str();
     if text.is_empty() {
@@ -178,8 +194,12 @@ pub fn resolve(
             .components()
             .collect()
     };
-    let entry = stat(&path)?;
-    Some(Resolved { path, entry })
+    let (entry, target) = stat(&path)?;
+    Some(Resolved {
+        path,
+        entry,
+        target,
+    })
 }
 
 /// A path query's answer (iTerm2's semantic history): the
@@ -194,7 +214,7 @@ pub fn resolve_first<'a>(
     candidates: impl IntoIterator<Item = &'a Path>,
     cwd: Option<&Path>,
     home: Option<&Path>,
-    stat: impl Fn(&Path) -> Option<Entry>,
+    stat: impl Fn(&Path) -> Option<(Entry, PathBuf)>,
 ) -> Option<(usize, Resolved)> {
     candidates
         .into_iter()
@@ -204,22 +224,30 @@ pub fn resolve_first<'a>(
         })
 }
 
-/// The production `stat`: `std::fs::metadata` (symlinks followed — a link to a script is a
-/// script). Blocking: on a network disk it can hang, which is why the platform shell calls it
-/// on a background queue, never on the main thread or in the frame path.
-pub fn stat(path: &Path) -> Option<Entry> {
-    let meta = std::fs::metadata(path).ok()?;
-    Some(if meta.is_dir() {
+/// The production `stat`: `std::fs::canonicalize`, then `std::fs::metadata` of what it
+/// found (symlinks followed — **a link to a script is a script, a link to an `.app` is an
+/// `.app`**): what the object is and its real path ([`Resolved::target`]), both from one
+/// follow. A Finder alias is not a symlink: the macOS shell's `stat` resolves it first and
+/// then calls this one. Blocking: on a network disk it can hang, which is why the platform
+/// shell calls it on a background queue, never on the main thread or in the frame path.
+pub fn stat(path: &Path) -> Option<(Entry, PathBuf)> {
+    let target = std::fs::canonicalize(path).ok()?;
+    let meta = std::fs::metadata(&target).ok()?;
+    let entry = if meta.is_dir() {
         Entry::Dir
     } else {
         Entry::File {
             executable: meta.permissions().mode() & 0o111 != 0,
         }
-    })
+    };
+    Some((entry, target))
 }
 
 /// The policy table. `resolved` is [`resolve`]'s answer for a link that
-/// names a local path ([`local_path`]); `content` is asked only for a resolved path.
+/// names a local path ([`local_path`]); `content` is asked only for a resolved path, and
+/// about its [`Resolved::target`] — **the object judged is the object opened**: a document
+/// or a directory opens at the target, while a revealed link is shown as itself (the user
+/// sees the link they clicked; revealing is safe whatever it points to).
 ///
 /// | link | action |
 /// |---|---|
@@ -249,13 +277,18 @@ pub fn action(
         return Some(LinkAction::Swallow);
     }
     if local_path(target, kind).is_some() {
-        let Resolved { path, entry } = resolved?;
-        let path = path.clone();
-        return Some(match (entry, content(&path)) {
-            (Entry::Dir, Content::Package) => LinkAction::Reveal(path),
-            (Entry::Dir, _) => LinkAction::OpenDir(path),
-            (Entry::File { executable: false }, Content::Document) => LinkAction::OpenFile(path),
-            (Entry::File { .. }, _) => LinkAction::Reveal(path),
+        let Resolved {
+            path,
+            entry,
+            target: real,
+        } = resolved?;
+        return Some(match (entry, content(real)) {
+            (Entry::Dir, Content::Package) => LinkAction::Reveal(path.clone()),
+            (Entry::Dir, _) => LinkAction::OpenDir(real.clone()),
+            (Entry::File { executable: false }, Content::Document) => {
+                LinkAction::OpenFile(real.clone())
+            }
+            (Entry::File { .. }, _) => LinkAction::Reveal(path.clone()),
         });
     }
     if has_scheme(target, "file") {
@@ -297,17 +330,30 @@ mod tests {
     const HOME: &str = "/Users/me";
     const CWD: &str = "/work/proj";
 
-    /// The fake disk: a script, a document, a directory and a package.
-    fn fake(path: &Path) -> Option<Entry> {
-        match path.to_str()? {
-            "/work/proj/src/main.rs" | "/Users/me/notes.md" | "/work/proj/a:12" => {
-                Some(Entry::File { executable: false })
+    /// The fake disk: a script, a document, a directory and a package — and symlinks whose
+    /// names lie about what they point to, followed as the production [`stat`] does.
+    fn fake(path: &Path) -> Option<(Entry, PathBuf)> {
+        let target = match path.to_str()? {
+            "/work/proj/docs" => "/work/proj/.x/Evil.app",
+            "/work/proj/README.md" => "/work/proj/payload.terminal",
+            "/work/proj/latest.md" => "/work/proj/notes/2024.md",
+            "/work/proj/current" => "/work/proj/src",
+            other => other,
+        };
+        let entry = match target {
+            "/work/proj/src/main.rs"
+            | "/Users/me/notes.md"
+            | "/work/proj/a:12"
+            | "/work/proj/payload.terminal"
+            | "/work/proj/notes/2024.md" => Entry::File { executable: false },
+            "/work/proj/run.sh" => Entry::File { executable: true },
+            "/Users/me" | "/work/proj/src" | "/Applications/Foo.app" | "/work/proj/.x/Evil.app" => {
+                Entry::Dir
             }
-            "/work/proj/run.sh" => Some(Entry::File { executable: true }),
-            "/Users/me" | "/work/proj/src" | "/Applications/Foo.app" => Some(Entry::Dir),
-            "/tmp/a b" => Some(Entry::File { executable: false }),
-            _ => None,
-        }
+            "/tmp/a b" => Entry::File { executable: false },
+            _ => return None,
+        };
+        Some((entry, target.into()))
     }
 
     fn res(candidate: &str) -> Option<Resolved> {
@@ -347,6 +393,7 @@ mod tests {
             Some(Resolved {
                 path: "/work/proj/src/main.rs".into(),
                 entry: Entry::File { executable: false },
+                target: "/work/proj/src/main.rs".into(),
             })
         );
         assert_eq!(res("./src").map(|r| r.entry), Some(Entry::Dir));
@@ -363,10 +410,13 @@ mod tests {
 
     #[test]
     fn the_first_existing_candidate_wins() {
-        let disk = |path: &Path| match path.to_str()? {
-            "/work/proj/My Drive" | "/work/proj/Screen Studio Projects" => Some(Entry::Dir),
-            "/work/proj/Drive" | "/work/proj/foo.txt" => Some(Entry::File { executable: false }),
-            _ => None,
+        let disk = |path: &Path| {
+            let entry = match path.to_str()? {
+                "/work/proj/My Drive" | "/work/proj/Screen Studio Projects" => Entry::Dir,
+                "/work/proj/Drive" | "/work/proj/foo.txt" => Entry::File { executable: false },
+                _ => return None,
+            };
+            Some((entry, path.to_path_buf()))
         };
         let first = |candidates: &[&str]| {
             resolve_first(
@@ -565,6 +615,40 @@ mod tests {
         }
     }
 
+    /// `ls` in a cloned repo lists `docs -> .x/Evil.app` and `README.md -> payload.terminal`:
+    /// the policy reads what the link points to, so neither launches nor runs anything.
+    #[test]
+    fn a_symlink_is_judged_by_its_target_and_revealed_as_itself() {
+        // A link to a package is a directory by `stat`, a package by its target: revealed.
+        assert_eq!(
+            act("docs", path_kind()),
+            Some(LinkAction::Reveal("/work/proj/docs".into()))
+        );
+        // A document's name over a target that is not one: revealed, never opened.
+        assert_eq!(
+            act("README.md", path_kind()),
+            Some(LinkAction::Reveal("/work/proj/README.md".into()))
+        );
+        // A link to a real document or folder still opens — at its target, the object
+        // that was judged.
+        assert_eq!(
+            act("latest.md", path_kind()),
+            Some(LinkAction::OpenFile("/work/proj/notes/2024.md".into()))
+        );
+        assert_eq!(
+            act("current", path_kind()),
+            Some(LinkAction::OpenDir("/work/proj/src".into()))
+        );
+        // The content oracle hears only the target, never the link's own name.
+        let asked = std::cell::RefCell::new(Vec::new());
+        let resolved = res("docs");
+        action("docs", &path_kind(), resolved.as_ref(), |path: &Path| {
+            asked.borrow_mut().push(path.to_path_buf());
+            content(path)
+        });
+        assert_eq!(*asked.borrow(), [PathBuf::from("/work/proj/.x/Evil.app")]);
+    }
+
     #[test]
     fn content_is_asked_only_for_a_resolved_path() {
         let ask = |_: &Path| -> Content { panic!("asked for a URL") };
@@ -585,10 +669,36 @@ mod tests {
         std::fs::write(&doc, "x").expect("write doc");
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
         std::fs::set_permissions(&doc, std::fs::Permissions::from_mode(0o644)).expect("chmod");
-        assert_eq!(stat(&dir), Some(Entry::Dir));
-        assert_eq!(stat(&script), Some(Entry::File { executable: true }));
-        assert_eq!(stat(&doc), Some(Entry::File { executable: false }));
+        let entry = |path: &Path| stat(path).map(|(entry, _)| entry);
+        assert_eq!(entry(&dir), Some(Entry::Dir));
+        assert_eq!(entry(&script), Some(Entry::File { executable: true }));
+        assert_eq!(entry(&doc), Some(Entry::File { executable: false }));
         assert_eq!(stat(&dir.join("nope")), None);
+        std::fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn the_production_stat_follows_a_symlink_to_its_real_path() {
+        let dir = std::env::temp_dir().join(format!("bt-links-follow-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("sub")).expect("temp dir");
+        let script = dir.join("run.sh");
+        std::fs::write(&script, "#!/bin/sh\n").expect("write script");
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        std::os::unix::fs::symlink("run.sh", dir.join("notes.txt")).expect("link");
+        std::os::unix::fs::symlink("../sub", dir.join("sub/up")).expect("link");
+        std::os::unix::fs::symlink("gone", dir.join("dangling")).expect("link");
+        // `temp_dir` is itself under a link on macOS (`/var` → `/private/var`).
+        let real = std::fs::canonicalize(&dir).expect("canonical");
+        assert_eq!(
+            stat(&dir.join("notes.txt")),
+            Some((Entry::File { executable: true }, real.join("run.sh")))
+        );
+        assert_eq!(
+            stat(&dir.join("sub/up/..")),
+            Some((Entry::Dir, real.clone()))
+        );
+        assert_eq!(stat(&dir), Some((Entry::Dir, real)));
+        assert_eq!(stat(&dir.join("dangling")), None);
         std::fs::remove_dir_all(&dir).expect("cleanup");
     }
 
