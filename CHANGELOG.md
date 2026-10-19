@@ -54,6 +54,57 @@ of every installed copy. A version without a section is not released.
 - **"pane" finds every split command in the palette.** The menu calls a pane a
   split, and Select Split ▸ (⌥⌘ and an arrow), Resize Split ▸, Swap Split ▸ and
   Move Split to Previous/Next Tab were not found by the word people type.
+- **A long run of combining marks no longer freezes the pane.** Output with a
+  letter followed by tens of thousands of accents (a hostile file, a remote
+  host) stalled the terminal for minutes. A cell now keeps at most 32 code
+  points of a cluster and drops the marks past that, as other terminals do; the
+  command line under the prompt cuts the run at the same place, so it stays
+  aligned with the grid.
+- **A program that opens an escape sequence and never ends it no longer grows
+  bateri's memory without end.** Output like `printf '\eX'; cat /dev/zero` or
+  an endless DCS, CSI or escape was held byte for byte for the update handover;
+  bateri now keeps only what a new parser needs to pick the sequence up, and
+  gives up an OSC past 64 MiB.
+- **A graphics query can no longer freeze a pane.** A query carrying a small
+  compressed image that claims hundreds of megabytes of pixels is refused
+  before anything is decoded, and each screen keeps at most 4096 images and
+  16384 placements, so output that repeats a placement millions of times no
+  longer slows every frame or keeps growing memory.
+- **Restored scrollback keeps its oldest lines when long lines had wrapped.**
+  After an update or a crash, a pane whose history held lines wider than the
+  window no longer silently loses the start of that history.
+- **A cancelled or disk-full upload no longer deletes a file the server never
+  reached.** The half-written file is removed only once the server's own tar
+  has listed it; otherwise the result says “partial file may remain at …”. A
+  cleanup that does not answer is given up after a few seconds instead of
+  holding the queue.
+- **A Korean Return that ends a syllable submits the line.** With Korean
+  2-Set and a syllable pending, Return commits the syllable and runs the line,
+  and an arrow or Tab commits it and still moves or completes, instead of
+  needing the key a second time. A dead key followed by Return, Esc or Tab
+  still sends the accent once.
+- **A split closing in a background tab no longer takes your keyboard.** When
+  the focused split's shell exited (or the split was moved away) in a tab you
+  weren't looking at, your next keystrokes went to that hidden shell. The tab
+  you are typing in keeps the keyboard, and the background tab focuses the
+  neighbouring split when you open it.
+
+### Security
+
+- **A download whose item arrives as a link or a special file is refused.** A
+  hostile server could send a previewed file as a link to a path of this Mac;
+  the preview then made that path read-only (your home folder, `~/.ssh`) and
+  opened it. Only a file or a folder lands now, and the preview's seal never
+  changes a link's target.
+- **⌘-clicking a symlink or a Finder alias no longer launches what it points
+  to.** A `docs` link or a `notes.md` alias that leads to an app, or a
+  `README.txt` that leads to a `.terminal` file, is shown in Finder instead of
+  opened; a link to a real document or folder still opens it, and Show Folder
+  in Finder shows an app instead of launching it.
+- **Servers behind different bastions are told apart.** A job never rides
+  another server's connection, and a saved password goes only to the server it
+  was saved for, never to its jump host. A password saved earlier for a server
+  behind a jump host or a proxy command is asked for once more.
 
 ## [0.19.0] - 2026-10-18
 
