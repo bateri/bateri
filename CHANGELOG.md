@@ -78,11 +78,12 @@ of every installed copy. A version without a section is not released.
   has listed it; otherwise the result says “partial file may remain at …”. A
   cleanup that does not answer is given up after a few seconds instead of
   holding the queue.
-- **A Korean Return that ends a syllable submits the line.** With Korean
-  2-Set and a syllable pending, Return commits the syllable and runs the line,
-  and an arrow or Tab commits it and still moves or completes, instead of
-  needing the key a second time. A dead key followed by Return, Esc or Tab
-  still sends the accent once.
+- **The key that ends a composition is no longer lost.** With Korean 2-Set
+  and a syllable pending, Return commits the syllable and runs the line, and an
+  arrow or Tab commits it and still moves or completes, instead of needing the
+  key a second time. An accent typed with a dead key (`^` or `´` on a Turkish
+  keyboard, ⌥E on a US one) works the same way: Return after it writes the
+  accent once and runs the line, and an arrow writes it and moves.
 - **A split closing in a background tab no longer takes your keyboard.** When
   the focused split's shell exited (or the split was moved away) in a tab you
   weren't looking at, your next keystrokes went to that hidden shell. The tab
