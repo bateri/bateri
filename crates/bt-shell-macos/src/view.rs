@@ -21,7 +21,8 @@
 //! we do not read the layout data. If the stack did not take the event
 //! ([`ViewIvars::consumed`]) the event falls to `encode_key` anyway:
 //! function keys, Enter/Tab/Esc/Backspace and everything unrecognised go
-//! through it.
+//! through it - and so does a key whose composition the stack committed
+//! **and** named a command for ([`ViewIvars::commanded`]), after its text.
 //!
 //! **The view is also a drag destination** (`NSDraggingDestination`): the
 //! path of a file dropped from Finder is escaped
@@ -525,6 +526,54 @@ fn reaches_terminal(flags: NSEventModifierFlags, chars: Option<&str>) -> bool {
     )
 }
 
+/// Whether `keyDown:` stops after the text stack: `consumed` is
+/// [`ViewIvars::consumed`], `commanded` is [`ViewIvars::commanded`], both read
+/// after `interpretKeyEvents:` returns.
+///
+/// **The stack keeps the key only if it took the event and named no command
+/// for it.** An input method may do both for one key: Korean 2-Set, with a
+/// syllable pending, commits it with `insertText:` on Return, an arrow or Tab
+/// **and then** names `insertNewline:`/`moveLeft:`/`insertTab:` for the same
+/// event. Had `consumed` alone decided, the syllable would go out and the key
+/// would be lost - the line is not submitted and the user presses Return a
+/// second time. The text has already reached the session inside
+/// `interpretKeyEvents:`, so falling to `encode_key` keeps the order: **the
+/// text first, then the key's bytes**.
+///
+/// An input method that ends a composition on Return **without** naming a
+/// command (Japanese and Chinese conversion: Return accepts the candidate, it
+/// does not submit the line) stays kept, as does every letter, completed dead
+/// key and composition step. A command with nothing taken falls through as
+/// it always did: its bytes come from `encode_key`, not from the selector.
+fn stack_kept_the_key(consumed: bool, commanded: bool) -> bool {
+    consumed && !commanded
+}
+
+/// The key's own part of `characters` when the stack committed text **and**
+/// named a command for one event ([`stack_kept_the_key`] is `false` with
+/// `consumed`): `committed` is what `insertText:` wrote during this
+/// `keyDown:` ([`ViewIvars::committed`]), and it is cut from the front.
+///
+/// **`characters` can carry the committed text in front of the key.** A dead
+/// key followed by Return, Esc or Tab (ABC, Option+e then Return, measured
+/// in code review with an `NSTextInputClient` probe) arrives as `insertText:"´"` +
+/// `insertNewline:` with `characters` = `"´\r"` (`"´\x1b"`, `"´\t"`): the
+/// layout's dead state comes out in front of the key. Handed whole to
+/// `encode_key`, that string has more than one character, goes out by its
+/// plain-text arm and the shell receives `´´\r` - a line the user never
+/// typed, run. Cut, it is `"\r"` and the accent goes out once, from
+/// `insertText:`.
+///
+/// Korean 2-Set does not put the syllable there (`insertText:"한"` +
+/// `insertNewline:`, `characters` = `"\r"`): nothing matches and the string
+/// is left whole. Neither do Backspace and the arrows after a dead key (a
+/// single `"\x7f"`, U+F702). Not `charactersIgnoringModifiers` instead: it
+/// would also undo what the modifiers did to the key itself - Shift+Tab's
+/// U+0019 would become `"\t"`.
+fn key_after_commit<'a>(chars: &'a str, committed: &str) -> &'a str {
+    chars.strip_prefix(committed).unwrap_or(chars)
+}
+
 pub(crate) struct ViewIvars {
     /// The view must be born **before** the session: the grid size is derived
     /// from the contentView's bounds and `Session::spawn` asks for that size.
@@ -564,7 +613,38 @@ pub(crate) struct ViewIvars {
     /// directions separate with one key round and the defence is built
     /// **after** that measurement - an arm written today could pick the wrong
     /// half without knowing which is real.
+    ///
+    /// **It is not the whole verdict:** an input method can take the event
+    /// and name a command for it too ([`ViewIvars::commanded`]), and then the
+    /// key goes out after the text ([`stack_kept_the_key`]).
     consumed: Cell<bool>,
+    /// **Whether the text stack named a command for this event** -
+    /// `doCommandBySelector:` raises it, `keyDown:` lowers it beside
+    /// [`ViewIvars::consumed`] before `interpretKeyEvents:` and reads the two
+    /// together on return ([`stack_kept_the_key`]).
+    ///
+    /// The selector itself is not kept: the key's bytes come from
+    /// `encode_key`, as they do for a command that arrives alone, so
+    /// `insertNewline:` and `moveLeft:` need no table of their own. Only the
+    /// fact counts - with `consumed` it is how Korean Return mid-syllable
+    /// (`insertText:"한"` + `insertNewline:`) is told apart from Japanese
+    /// Return mid-conversion (`insertText:` alone).
+    ///
+    /// A call from outside `keyDown:` (a menu, the responder chain) may leave
+    /// it raised; nobody reads it there, and the next key lowers it first.
+    commanded: Cell<bool>,
+    /// **The text `insertText:` wrote during this `keyDown:`** - emptied
+    /// beside [`ViewIvars::consumed`] before `interpretKeyEvents:`, taken on
+    /// return. It is read only when the stack also named a command: then the
+    /// key goes to `encode_key` and its `characters` may begin with this very
+    /// text (a dead key followed by Return: `"´\r"`), which
+    /// [`key_after_commit`] cuts so the text does not go out twice.
+    ///
+    /// Appended, not replaced: nothing promises one `insertText:` per event,
+    /// and `characters` would then begin with all of them in order. A call
+    /// from outside `keyDown:` (the character viewer) appends too; the next
+    /// key empties it first.
+    committed: RefCell<String>,
     /// The **minimal** state of the composition (marked text): the stack's
     /// not-yet-completed input. There is **no drawing** - `bt-gpu`'s
     /// underlined preedit surface is not born in this set; here there is only
@@ -1176,7 +1256,9 @@ define_class!(
         ///    numpad Enter's U+0003 to AppKit's choice, so the trade is "every
         ///    command may be interrupted" against "a rare accent".
         /// 5. **The rest** is given to the stack; if the stack did not take the
-        ///    event ([`ViewIvars::consumed`]) it falls to `encode_key` anyway.
+        ///    event ([`ViewIvars::consumed`]), or took it and also named a
+        ///    command for it ([`ViewIvars::commanded`]), it falls to
+        ///    `encode_key` anyway.
         #[unsafe(method(keyDown:))]
         fn key_down(&self, event: &NSEvent) {
             self.note_interaction();
@@ -1194,7 +1276,7 @@ define_class!(
             //
             // It is read **before** the Cmd arm: the allow list's criterion is
             // now the key's identity, not its flags.
-            let chars = event.characters().map(|c| c.to_string());
+            let mut chars = event.characters().map(|c| c.to_string());
             // While Command is held a key is a shortcut, not input. The menu
             // catches it first with `performKeyEquivalent:` (Cmd-C/V/Q/,,
             // Cmd +/−/0); what it does not catch arrives here and is
@@ -1263,19 +1345,38 @@ define_class!(
                 // composition completes it gives the text back with
                 // `insertText:`. The flag is lowered **before** the call; since
                 // the stack calls us again, the ivar carries the answer, not
-                // `keyDown:`'s stack frame.
+                // `keyDown:`'s stack frame. `commanded` and `committed` are
+                // lowered beside it: the three are one answer.
                 self.ivars().consumed.set(false);
+                self.ivars().commanded.set(false);
+                self.ivars().committed.borrow_mut().clear();
                 // A one-event array: the stack consumes it synchronously and
                 // the read below is valid after the return.
                 self.interpretKeyEvents(&NSArray::from_slice(&[event]));
-                if self.ivars().consumed.get() {
+                let committed = self.ivars().committed.take();
+                if stack_kept_the_key(
+                    self.ivars().consumed.get(),
+                    self.ivars().commanded.get(),
+                ) {
                     return;
                 }
+                // The text is out; **only the key's own part** of
+                // `characters` follows it. A dead key followed by Return
+                // brings `"´\r"` and the accent has already gone through
+                // `insertText:` - sent whole, the shell would run `´´`
+                // ([`key_after_commit`]). With nothing committed the cut
+                // leaves the string as it is.
+                chars = chars
+                    .as_deref()
+                    .map(|c| key_after_commit(c, &committed).to_owned());
             }
             // An event the stack did not take (or never visited): function
             // keys, Enter/Tab/Esc/Backspace, Control letters, Option
             // navigation/deletion (the stack gives them to `doCommandBySelector:`
-            // and that method is a silent no-op) and ⌘⌫/⌘←/⌘→ that passed the allow list.
+            // and that method only records that it came) and ⌘⌫/⌘←/⌘→ that
+            // passed the allow list. **And a key the stack took and named a
+            // command for** (Korean Return mid-syllable, a dead key then
+            // Return): its text is already out, the key's own bytes follow.
             //
             // We do not pass to `super`: `NSResponder::keyDown:` beeps on a key
             // it does not recognise and every arrow key in the terminal would beep.
@@ -1304,8 +1405,9 @@ define_class!(
     ///
     /// Three **write** the composition state (`insertText:`,
     /// `setMarkedText:`, `unmarkText`), three **read** it (`selectedRange`,
-    /// `markedRange`, `hasMarkedText`); `doCommandBySelector:` is deliberately
-    /// empty and the remaining four give fixed answers - each with its own "why".
+    /// `markedRange`, `hasMarkedText`); `doCommandBySelector:` only records
+    /// that a command came and the remaining four give fixed answers - each
+    /// with its own "why".
     unsafe impl NSTextInputClient for BateriView {
         /// The composition completed (or a plain letter arrived): the text goes to the PTY.
         ///
@@ -1341,6 +1443,10 @@ define_class!(
             // this event", not "bytes were written". If the session is not yet
             // attached the key is lost but `encode_key` does not send it a second time.
             self.ivars().consumed.set(true);
+            // What went out is noted for `keyDown:`: should the stack also
+            // name a command for this event, the key's `characters` may
+            // repeat it in front ([`key_after_commit`]).
+            self.ivars().committed.borrow_mut().push_str(&text);
             // `type_text`, not `write`: if there is a selection in the dock the
             // letter is typed in its place.
             if let Some(session) = self.ivars().session.get() {
@@ -1350,15 +1456,25 @@ define_class!(
 
         /// An editing command the stack recognises (Enter → `insertNewline:`,
         /// Tab → `insertTab:`, Esc → `cancelOperation:`, `^A` →
-        /// `moveToBeginningOfParagraph:`…): a **silent no-op**.
+        /// `moveToBeginningOfParagraph:`…): **nothing is done here**, only
+        /// [`ViewIvars::commanded`] is raised.
         ///
         /// The method cannot be left without a body, even an empty one:
         /// otherwise `NSResponder`'s default runs and **beeps** on a selector it
         /// does not recognise - the very rationale for not passing to `super`
-        /// in `keyDown:`, through a new door. The flag is not set, so the event
-        /// falls to `encode_key` and its bytes come from where they do today.
+        /// in `keyDown:`, through a new door. `consumed` is not set, so a
+        /// command alone falls to `encode_key` and its bytes come from where
+        /// they always did.
+        ///
+        /// **The record is for the command that follows a commit.** Korean
+        /// 2-Set sends `insertText:"한"` and then `insertNewline:` for one
+        /// Return; `insertText:` has raised `consumed`, and without this flag
+        /// `keyDown:` would stop there and the Return would be lost
+        /// ([`stack_kept_the_key`]).
         #[unsafe(method(doCommandBySelector:))]
-        fn do_command_by_selector(&self, _selector: Sel) {}
+        fn do_command_by_selector(&self, _selector: Sel) {
+            self.ivars().commanded.set(true);
+        }
 
         /// The composition continues (a dead key was pressed, not yet
         /// completed): the state is updated. **No drawing** - the underlined
@@ -1707,6 +1823,8 @@ impl BateriView {
             session: OnceCell::new(),
             gesture: Cell::new(Gesture::default()),
             consumed: Cell::new(false),
+            commanded: Cell::new(false),
+            committed: RefCell::new(String::new()),
             marked_text: RefCell::new(String::new()),
             scroll_carry: Cell::new(0.0),
             smooth_scroll: Cell::new(true),
@@ -3879,6 +3997,45 @@ mod tests {
         for flags in extras {
             assert!(reaches_terminal(flags, Some("t")), "{flags:?}");
         }
+    }
+
+    #[test]
+    fn a_key_that_commits_a_syllable_and_names_a_command_still_goes_out() {
+        // Korean 2-Set, "한" pending, Return: the stack commits the syllable
+        // with `insertText:` (consumed) **and** names `insertNewline:` for the
+        // same event (commanded). The text has already gone out inside
+        // `interpretKeyEvents:`; the key must follow it through `encode_key`,
+        // or the line is not submitted and a second Return is needed. The
+        // arrows and Tab mid-syllable are the same shape.
+        assert!(!stack_kept_the_key(true, true));
+        // A letter, a completed dead key, a composition step (`setMarkedText:`)
+        // and Japanese/Chinese Return during conversion (the IME commits and
+        // names no command): the stack kept the key, nothing else goes out.
+        assert!(stack_kept_the_key(true, false));
+        // A command alone (Return, an arrow, Option+arrow with nothing
+        // pending): the key's bytes come from `encode_key`, as they always did.
+        assert!(!stack_kept_the_key(false, true));
+        // The stack never answered (an unrecognised text type, a pure
+        // modifier): it falls to `encode_key` too.
+        assert!(!stack_kept_the_key(false, false));
+    }
+
+    #[test]
+    fn a_key_after_a_commit_sends_only_its_own_part_of_characters() {
+        // ABC, Option+e then Return/Esc/Tab (measured in code review with an
+        // `NSTextInputClient` probe): `insertText:"´"` + a command, and
+        // `characters` repeats the accent in front of the key. Only the key
+        // goes on - whole, the shell would receive `´´\r` and run it.
+        assert_eq!(key_after_commit("´\r", "´"), "\r");
+        assert_eq!(key_after_commit("´\x1b", "´"), "\x1b");
+        assert_eq!(key_after_commit("´\t", "´"), "\t");
+        // Korean 2-Set, "한" pending, Return: `characters` does not carry the
+        // syllable, the key is left whole and goes out as CR.
+        assert_eq!(key_after_commit("\r", "한"), "\r");
+        // An arrow after a dead key is a single U+F702 already: whole.
+        assert_eq!(key_after_commit("\u{f702}", "´"), "\u{f702}");
+        // Nothing committed (a command alone): whole.
+        assert_eq!(key_after_commit("\r", ""), "\r");
     }
 
     /// The smooth arm's step; the unit is 9 points (trackpad), remainder zero.
