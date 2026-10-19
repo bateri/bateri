@@ -16,7 +16,8 @@
 //!   [`Pending`] record or, for a query whose pixels are in the sequence, an
 //!   answer. This is cheap on purpose — the parser runs under the terminal's
 //!   lock. A query that carries its own pixels is decoded there, and may only
-//!   be small ([`QUERY_LIMIT`]).
+//!   be small: in its text ([`QUERY_LIMIT`]) and in the pixels the text comes
+//!   to ([`QUERY_BYTES`]).
 //! - **The decoding** ([`Hub::decode_pending`]) is the expensive part —
 //!   base64, zlib, PNG, and the file or shared memory a command names. A
 //!   command that needs it ends with the parser *halted* right behind it: the
@@ -82,7 +83,7 @@ pub(crate) use receive::{Env, Outcome, Receiver};
 pub(crate) use store::{Window, screen_of};
 
 use command::{Action, Command, Medium};
-use receive::Decoded;
+use receive::{Decoded, Room};
 use store::Images;
 
 /// The most stored pixel bytes one screen keeps: kitty's own quota, so a
@@ -117,6 +118,30 @@ pub(crate) const NAME_LIMIT: usize = 2048;
 /// moment it is read, so it is decoded there and then, in the read path; real
 /// ones are a pixel. A query that names a file reads at most the same.
 pub(crate) const QUERY_LIMIT: usize = 64 * 1024;
+
+/// The most pixel bytes (RGBA) the image a query carries in its sequence may
+/// come to. [`QUERY_LIMIT`] bounds the text, but the text is not what the
+/// decoding costs: a PNG or a zlib stream of a few kilobytes can say it holds
+/// the quota's worth of pixels, and the query is decoded where it ends, under
+/// the terminal's lock, with every frame waiting for it. **The size is judged
+/// before anything is inflated or allocated** — from the keys of raw pixels,
+/// from the PNG's header — and a compressed payload may inflate to no more
+/// than this either. A 512 × 512 image: real queries are a pixel, and no raw
+/// payload [`QUERY_LIMIT`] lets through comes near it.
+pub(crate) const QUERY_BYTES: usize = 1024 * 1024;
+
+/// The most images one screen keeps. The quota counts bytes, so on its own it
+/// lets in millions of one-pixel images, and storing one looks through all
+/// of them; past this an image goes the way it goes past the quota (those no
+/// placement shows first, then the oldest). Far more than a screen and its
+/// history can show.
+pub(crate) const IMAGE_LIMIT: usize = 4096;
+
+/// The most placements one screen keeps. A put with no placement id adds one
+/// every time (some 17 bytes of output), and every frame looks through them
+/// all, sorts those it shows and hands each over; past this the oldest
+/// placement goes, and its image stays for the program to show again.
+pub(crate) const PLACEMENT_LIMIT: usize = 16 * 1024;
 
 /// How long a chunked transmission may wait for its next chunk before it is
 /// dropped. Checked when the next command arrives, not by a timer.
@@ -595,7 +620,7 @@ impl Hub {
         let decoded = if remote && command.medium != Medium::Direct {
             Err(Error::unreadable())
         } else {
-            receive::decode_payload(&command, text)
+            receive::decode_payload(&command, text, Room::Store)
         };
         match decoded {
             // A query that names a file is a transmission that is not kept:

@@ -5,7 +5,18 @@
 //! go when it leaves, and the main screen's wait for it to come back. A
 //! store also holds the screen's placements, which are what the frame draws;
 //! how they keep their rows is [`super::follow`]'s.
+//!
+//! **A store is bounded three ways**, because what fills it is whatever a
+//! program prints: the bytes of its pixels ([`QUOTA_BYTES`]), the number of
+//! its images ([`IMAGE_LIMIT`]) and the number of its placements
+//! ([`PLACEMENT_LIMIT`]). The quota alone lets in millions of one-pixel
+//! images, and a put with no placement id adds a placement every time it is
+//! repeated. What walks the lot (a store, a delete, every frame) looks through
+//! each list once, not once for every entry of the other.
+//!
+//! [`QUOTA_BYTES`]: super::QUOTA_BYTES
 
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
 use alacritty_terminal::grid::Dimensions;
@@ -15,7 +26,7 @@ use super::command::{Action, Command, Scope};
 use super::follow::{self, Seen};
 use super::place::{Motion, Picture, Placement, Screen, Spec};
 use super::receive::Decoded;
-use super::{Echo, Error, Reply};
+use super::{Echo, Error, IMAGE_LIMIT, PLACEMENT_LIMIT, Reply};
 
 /// Ids the terminal hands out for an image sent by number (`I=`) start
 /// here, far from the small ids programs choose themselves.
@@ -42,6 +53,15 @@ impl Image {
     }
 }
 
+/// `images` by generation, for what looks one up for every placement: one
+/// look through the images, not one for each.
+fn by_generation(images: &[Image]) -> HashMap<u64, &Image> {
+    images
+        .iter()
+        .map(|image| (image.generation, image))
+        .collect()
+}
+
 /// The lines of a surface a frame draws and how they are numbered there.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Window {
@@ -58,8 +78,9 @@ pub(crate) struct Store {
     bytes: usize,
     quota: usize,
     next_auto: u32,
-    /// In the order they were made.
-    pub(super) placements: Vec<Placement>,
+    /// In the order they were made: the oldest, which goes past the limit,
+    /// at the front.
+    pub(super) placements: VecDeque<Placement>,
     next_seq: u64,
     /// The main screen's rows as of the last look ([`follow`]).
     pub(super) seen: Option<Seen>,
@@ -74,7 +95,7 @@ impl Store {
             bytes: 0,
             quota,
             next_auto: AUTO_ID_BASE,
-            placements: Vec::new(),
+            placements: VecDeque::new(),
             next_seq: 0,
             seen: None,
             rows: Vec::new(),
@@ -95,11 +116,13 @@ impl Store {
         }
     }
 
-    /// Whether any placement shows the image.
-    fn shown(&self, generation: u64) -> bool {
+    /// The images some placement shows, by generation: one look through the
+    /// placements for all the images that ask.
+    fn shown(&self) -> HashSet<u64> {
         self.placements
             .iter()
-            .any(|placement| placement.image == generation)
+            .map(|placement| placement.image)
+            .collect()
     }
 
     /// Takes an image out, and its placements with it.
@@ -111,9 +134,9 @@ impl Store {
     }
 
     /// Keeps `image`, replacing a stored image of the same id (and ending its
-    /// placements), and makes room: images no placement shows go first,
-    /// oldest first, then the oldest of the rest. The new image is never the
-    /// one that goes.
+    /// placements), and makes room — in bytes, and in images
+    /// ([`IMAGE_LIMIT`]): images no placement shows go first, oldest first,
+    /// then the oldest of the rest. The new image is never the one that goes.
     fn insert(&mut self, image: Image) -> Result<(), Error> {
         let size = image.bytes();
         if size > self.quota {
@@ -126,13 +149,16 @@ impl Store {
         }
         self.bytes += size;
         self.images.push(image);
-        while self.bytes > self.quota {
+        // Taken once: an image that goes unshown takes no placement with it,
+        // and one that goes shown is not looked for again.
+        let shown = self.shown();
+        while self.bytes > self.quota || self.images.len() > IMAGE_LIMIT {
             let newest = self.images.len() - 1;
             let victim = self
                 .images
                 .iter()
                 .take(newest)
-                .position(|image| !self.shown(image.generation))
+                .position(|image| !shown.contains(&image.generation))
                 .unwrap_or(0);
             self.remove(victim);
         }
@@ -159,8 +185,10 @@ impl Store {
     }
 
     /// Shows an image at the cursor. A placement of the same id on the same
-    /// image is the one being moved, not a second one. Showing an image makes
-    /// it the newest, so the quota goes after the ones nobody looked at.
+    /// image is the one being moved, not a second one; one with no id is
+    /// always another, and past [`PLACEMENT_LIMIT`] the oldest placement goes
+    /// for it. Showing an image makes it the newest, so the quota goes after
+    /// the ones nobody looked at.
     fn place(&mut self, generation: u64, command: &Command, screen: &Screen, motion: Motion) {
         let Some(at) = self
             .images
@@ -178,7 +206,7 @@ impl Store {
                 .retain(|placement| !(placement.image == generation && placement.id == id));
         }
         self.next_seq += 1;
-        self.placements.push(Placement {
+        self.placements.push_back(Placement {
             seq: self.next_seq,
             image: generation,
             id,
@@ -186,17 +214,24 @@ impl Store {
             col: screen.cursor.1,
             spec: Spec::new(command, size),
         });
+        // The image of the one that goes stays, for the program to show again
+        // or for the quota to take first.
+        if self.placements.len() > PLACEMENT_LIMIT {
+            self.placements.pop_front();
+        }
     }
 
     /// Takes out the images no placement shows that `only` names — those
     /// the program can still address too when `free`, else only the
     /// anonymous ones, which nothing can address again.
     fn sweep(&mut self, free: bool, only: impl Fn(&Image) -> bool) {
+        // What goes is shown by nothing: the placements stay as they are.
+        let shown = self.shown();
         let mut index = self.images.len();
         while index > 0 {
             index -= 1;
             let image = &self.images[index];
-            if !self.shown(image.generation) && (free || image.id == 0) && only(image) {
+            if !shown.contains(&image.generation) && (free || image.id == 0) && only(image) {
                 self.remove(index);
             }
         }
@@ -222,8 +257,8 @@ impl Store {
             let Self {
                 images, placements, ..
             } = self;
-            let image_of =
-                |generation: u64| images.iter().find(|image| image.generation == generation);
+            let images = by_generation(images);
+            let image_of = |generation: u64| images.get(&generation).copied();
             let named =
                 |placement: &Placement| echo.placement == 0 || placement.id == echo.placement;
             placements.retain(|placement| {
@@ -319,13 +354,13 @@ impl Store {
                     && placement.col < columns
             })
             .collect();
+        if shown.is_empty() {
+            return;
+        }
         shown.sort_by_key(|placement| (placement.spec.z, placement.seq));
+        let images = by_generation(&self.images);
         for placement in shown {
-            let Some(image) = self
-                .images
-                .iter()
-                .find(|image| image.generation == placement.image)
-            else {
+            let Some(image) = images.get(&placement.image) else {
                 continue;
             };
             let spec = &placement.spec;
@@ -371,7 +406,7 @@ impl Store {
     }
 
     #[cfg(test)]
-    pub(crate) fn placements(&self) -> &[Placement] {
+    pub(crate) fn placements(&self) -> &VecDeque<Placement> {
         &self.placements
     }
 
@@ -401,7 +436,7 @@ impl Store {
         let size = self
             .get(id)
             .map_or((1, 1), |image| (image.width, image.height));
-        self.placements.push(Placement {
+        self.placements.push_back(Placement {
             seq: self.next_seq,
             image: generation,
             id: 0,

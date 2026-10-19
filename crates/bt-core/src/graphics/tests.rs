@@ -835,6 +835,39 @@ fn an_image_larger_than_the_quota_is_refused_and_evicts_nothing() {
 }
 
 #[test]
+fn past_the_image_limit_images_without_a_placement_go_first_then_the_oldest() {
+    let mut images = Images::with_quota(QUOTA_BYTES);
+    let store = |images: &mut Images, id: usize| {
+        images.store(
+            &Screen::blank(false),
+            &parsed(&format!("i={id}")),
+            decoded(4),
+            Motion::NONE,
+        )
+    };
+    for id in 1..=IMAGE_LIMIT {
+        store(&mut images, id);
+    }
+    assert_eq!(images.main().len(), IMAGE_LIMIT);
+    // 1 is shown, 2 is the oldest that is not.
+    images.main_mut().pin(1);
+    let next = IMAGE_LIMIT + 1;
+    assert_eq!(store(&mut images, next).encode(), Some(ok(next as u32)));
+    let ids = images.main().ids();
+    assert_eq!(ids.len(), IMAGE_LIMIT);
+    assert_eq!(ids[..2], [1, 3]);
+    assert_eq!(ids.last(), Some(&(next as u32)));
+    // A flood of one-pixel images keeps the limit, and the shown one.
+    for id in next + 1..=next + 3 * IMAGE_LIMIT {
+        store(&mut images, id);
+    }
+    let ids = images.main().ids();
+    assert_eq!(ids.len(), IMAGE_LIMIT);
+    assert_eq!(ids[0], 1);
+    assert_eq!(images.main().bytes(), IMAGE_LIMIT * 4);
+}
+
+#[test]
 fn each_screen_has_its_own_store_and_the_alternate_one_goes_when_it_is_left() {
     let mut rig = Rig::new();
     rig.run(&wire("a=t,f=32,s=1,v=1,i=1", &[1; 4]));
@@ -998,6 +1031,82 @@ fn a_query_is_decoded_where_it_ends_and_may_only_be_small() {
     let text = error_of(&rig.queries.concat());
     assert!(text.starts_with("\x1b_Gi=5;EFBIG:"), "{text:?}");
     assert!(!rig.hub.is_parked());
+}
+
+/// A grey PNG of zeros, one bit a pixel: a few bytes of file for a great
+/// many pixels.
+fn blank_png(width: u32, height: u32) -> Vec<u8> {
+    let row = width.div_ceil(8) as usize;
+    png_file(
+        width,
+        height,
+        png::ColorType::Grayscale,
+        png::BitDepth::One,
+        None,
+        None,
+        &vec![0; row * height as usize],
+    )
+}
+
+#[test]
+fn a_query_whose_few_bytes_hold_a_great_many_pixels_is_refused_before_they_are_decoded() {
+    // 10000 × 8388 pixels in some 26 KB of file, 35 KB of base64: under the
+    // query's text limit, and 335 MB of pixels once decoded.
+    let huge = blank_png(10_000, 8_388);
+    assert!(base64(&huge).len() < QUERY_LIMIT);
+    // 600 × 600 is past what a query may come to, whatever carries it.
+    let past = blank_png(600, 600);
+    for (control, payload) in [
+        ("i=5,a=q,f=100,o=z", zlib(&huge)),
+        ("i=5,a=q,f=100", huge),
+        ("i=5,a=q,f=100", past.clone()),
+        ("i=5,a=q,f=100,o=z", zlib(&past)),
+        (
+            "i=5,a=q,f=32,o=z,s=600,v=600",
+            zlib(&vec![0; 600 * 600 * 4]),
+        ),
+    ] {
+        let mut rig = Rig::new();
+        let started = Instant::now();
+        rig.run(&wire(control, &payload));
+        let text = error_of(&rig.queries.concat());
+        assert!(text.starts_with("\x1b_Gi=5;EFBIG:"), "{control}: {text:?}");
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "{control}: refused from the header, nothing inflated"
+        );
+        assert!(!rig.hub.is_parked());
+    }
+    // As big as a query may be, it is answered as it always was.
+    let most = blank_png(512, 512);
+    let colour = png_file(
+        512,
+        512,
+        png::ColorType::Rgba,
+        png::BitDepth::Eight,
+        None,
+        None,
+        &rgba(512, 512, 0),
+    );
+    assert!(base64(&colour).len() < QUERY_LIMIT);
+    for (control, payload) in [
+        ("i=6,a=q,f=100", colour),
+        ("i=6,a=q,f=100", most.clone()),
+        ("i=6,a=q,f=100,o=z", zlib(&most)),
+        (
+            "i=6,a=q,f=32,o=z,s=512,v=512",
+            zlib(&vec![0; 512 * 512 * 4]),
+        ),
+    ] {
+        let mut rig = Rig::new();
+        rig.run(&wire(control, &payload));
+        assert_eq!(rig.queries, [ok(6)], "{control}");
+    }
+    // What a query can only ask by being decoded is still asked of a
+    // transmission: the store's limits are the store's.
+    let mut rig = Rig::new();
+    let (_, answers) = rig.run(&wire("a=t,f=100,i=7", &past));
+    assert_eq!(answers, ok(7));
 }
 
 #[test]
@@ -1214,6 +1323,24 @@ fn a_placement_id_moves_the_placement_it_names_and_no_id_adds_one() {
         [(1, 7, 2), (1, 9, 9), (1, 12, 0), (1, 13, 0)],
         "p=3 was moved, the two without an id were added"
     );
+}
+
+#[test]
+fn a_flood_of_puts_keeps_the_newest_placements_up_to_the_limit() {
+    let mut rig = Rig::new();
+    rig.run(&wire("a=t,f=32,s=1,v=1,i=1", &[0; 4]));
+    rig.cursor = (5, 5);
+    rig.run(&wire("a=p,i=1,C=1", &[]));
+    rig.cursor = (0, 0);
+    let put = wire("a=p,i=1,C=1,q=1", &[]);
+    rig.run(&put.repeat(100_000));
+    rig.cursor = (3, 7);
+    rig.run(&put);
+    let placed = placed(&rig);
+    assert_eq!(placed.len(), PLACEMENT_LIMIT);
+    assert!(!placed.contains(&(1, 5, 5)), "the oldest went");
+    assert_eq!(placed.last(), Some(&(1, 3, 7)), "the newest is kept");
+    assert_eq!(rig.main_ids(), [1]);
 }
 
 #[test]

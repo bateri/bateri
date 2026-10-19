@@ -23,8 +23,8 @@ use super::command::{self, Action, Command, Format, Medium};
 use super::place::{Motion, Spec};
 use super::source;
 use super::{
-    Echo, Error, FILE_LIMIT, MAX_DIMENSION, NAME_LIMIT, OPEN_TIMEOUT, Pending, QUERY_LIMIT,
-    QUOTA_BYTES, Reply, TRANSMISSION_LIMIT,
+    Echo, Error, FILE_LIMIT, MAX_DIMENSION, NAME_LIMIT, OPEN_TIMEOUT, Pending, QUERY_BYTES,
+    QUERY_LIMIT, QUOTA_BYTES, Reply, TRANSMISSION_LIMIT,
 };
 use crate::shell::decode_base64;
 
@@ -61,6 +61,38 @@ pub(crate) struct Decoded {
     pub(crate) width: u32,
     pub(crate) height: u32,
     pub(crate) pixels: Vec<u8>,
+}
+
+/// How big a decoded image may come out, by what it is decoded for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Room {
+    /// To be kept, or asked about as an image that would be (a query that
+    /// names a file): as big as the store keeps ([`QUOTA_BYTES`]). It is
+    /// decoded where no lock is held.
+    Store,
+    /// To answer a query that carries its pixels in the sequence: it is
+    /// decoded where it ends, under the terminal's lock, so it may only come
+    /// to a little ([`QUERY_BYTES`]).
+    Query,
+}
+
+impl Room {
+    /// The most pixel bytes the image may hold, and the most a compressed PNG
+    /// may inflate to.
+    fn bytes(self) -> usize {
+        match self {
+            Self::Store => QUOTA_BYTES,
+            Self::Query => QUERY_BYTES,
+        }
+    }
+
+    /// What an image larger than that is told.
+    fn refusal(self) -> Error {
+        match self {
+            Self::Store => Error::no_space("the image does not fit the storage quota"),
+            Self::Query => Error::too_big("a query carries a few bytes of image"),
+        }
+    }
 }
 
 /// What a command comes to.
@@ -291,7 +323,10 @@ impl Receiver {
     /// to decode it while the parser is halted behind the command, and so does
     /// a query that names a file (it is answered when the halt is resolved,
     /// in order); a query with its pixels in the sequence is answered here
-    /// and now, so it is decoded now — which is why it may only be small.
+    /// and now, so it is decoded now — which is why it may only be small: in
+    /// its text ([`QUERY_LIMIT`]), and in what the text comes to
+    /// ([`Room::Query`]), which is judged before anything is inflated. A few
+    /// kilobytes of PNG can say they hold hundreds of megabytes of pixels.
     fn finish(
         &mut self,
         open: Open,
@@ -350,7 +385,7 @@ impl Receiver {
         let decoded = if text.len() > QUERY_LIMIT {
             Err(Error::too_big("a query carries a few bytes of image"))
         } else {
-            decode_payload(&command, text)
+            decode_payload(&command, text, Room::Query)
         };
         out(Outcome::Query(match decoded {
             Ok(_) => Reply::ok(echo),
@@ -467,25 +502,30 @@ fn png_size(head: &[u8]) -> Option<(u32, u32)> {
 }
 
 /// The image a transmission holds, as RGBA: `text` is its base64 or, for a
-/// command that names a file or shared memory object, the name.
-pub(crate) fn decode_payload(command: &Command, text: Vec<u8>) -> Result<Decoded, Error> {
+/// command that names a file or shared memory object, the name. `room`: how
+/// big the image may come out.
+pub(crate) fn decode_payload(
+    command: &Command,
+    text: Vec<u8>,
+    room: Room,
+) -> Result<Decoded, Error> {
     // The dimensions first: an image that will be refused is refused before
     // any of its text is decoded, or any file is touched.
     if let Some(per_pixel) = command.format.bytes_per_pixel() {
-        raw_size(command, per_pixel)?;
+        raw_size(command, per_pixel, room)?;
     }
     if command.medium != Medium::Direct {
-        let bytes = source::load(command, &text, read_limit(command)?)?;
+        let bytes = source::load(command, &text, read_limit(command, room)?)?;
         // Whatever is wrong with what was read, the program is told the same
         // thing: a corrupt file and a missing one must not be told apart.
-        return decode(command, bytes).map_err(|_| Error::unreadable());
+        return decode(command, bytes, room).map_err(|_| Error::unreadable());
     }
     let mut bytes = Vec::with_capacity(text.len() / 4 * 3 + 3);
     if decode_base64(&text, &mut bytes).is_none() {
         return Err(Error::invalid("the payload is not valid base64"));
     }
     drop(text);
-    decode(command, bytes)
+    decode(command, bytes, room)
 }
 
 /// How many bytes of a file or shared memory object are read: all a raw
@@ -493,10 +533,10 @@ pub(crate) fn decode_payload(command: &Command, text: Vec<u8>) -> Result<Decoded
 /// keys (a PNG, compressed data), as much as a transmission may add up to.
 /// A query that names a file reads what a transmission would: it asks whether
 /// this one can be shown.
-fn read_limit(command: &Command) -> Result<usize, Error> {
+fn read_limit(command: &Command, room: Room) -> Result<usize, Error> {
     match command.format.bytes_per_pixel() {
         Some(per_pixel) if !command.zlib => {
-            let size = raw_size(command, per_pixel)?;
+            let size = raw_size(command, per_pixel, room)?;
             if size > FILE_LIMIT {
                 return Err(Error::too_big("the image data is too large"));
             }
@@ -506,15 +546,19 @@ fn read_limit(command: &Command) -> Result<usize, Error> {
     }
 }
 
-/// The pixels a payload holds, as RGBA.
-fn decode(command: &Command, bytes: Vec<u8>) -> Result<Decoded, Error> {
+/// The pixels a payload holds, as RGBA, no more than `room` has for them.
+fn decode(command: &Command, bytes: Vec<u8>, room: Room) -> Result<Decoded, Error> {
     let raw = command.format.bytes_per_pixel();
     let expected = match raw {
-        Some(per_pixel) => Some(raw_size(command, per_pixel)?),
+        Some(per_pixel) => Some(raw_size(command, per_pixel, room)?),
         None => None,
     };
+    // A compressed PNG is a file of no size known before it is inflated: it
+    // may come to as many bytes as its pixels may (its own data is compressed
+    // already, so the file is smaller than they are but for a few bytes a
+    // row).
     let bytes = if command.zlib {
-        match decompress_to_vec_zlib_with_limit(&bytes, expected.unwrap_or(QUOTA_BYTES)) {
+        match decompress_to_vec_zlib_with_limit(&bytes, expected.unwrap_or(room.bytes())) {
             Ok(inflated) => inflated,
             Err(error) if error.status == TINFLStatus::HasMoreOutput => {
                 return Err(Error::too_big("the image data is larger than it should be"));
@@ -525,7 +569,7 @@ fn decode(command: &Command, bytes: Vec<u8>) -> Result<Decoded, Error> {
         bytes
     };
     match (command.format, expected) {
-        (Format::Png, _) => decode_png(&bytes),
+        (Format::Png, _) => decode_png(&bytes, room),
         (_, Some(expected)) => decode_raw(command, bytes, expected),
         // `expected` exists exactly for the raw formats.
         _ => Err(Error::invalid("unknown pixel format")),
@@ -533,12 +577,12 @@ fn decode(command: &Command, bytes: Vec<u8>) -> Result<Decoded, Error> {
 }
 
 /// The payload size the dimensions of a raw image call for.
-fn raw_size(command: &Command, per_pixel: usize) -> Result<usize, Error> {
+fn raw_size(command: &Command, per_pixel: usize, room: Room) -> Result<usize, Error> {
     let (width, height) = (command.width, command.height);
     if width == 0 || height == 0 {
         return Err(Error::invalid("the image has no dimensions (s= and v=)"));
     }
-    check_dimensions(width, height)?;
+    check_dimensions(width, height, room)?;
     // Both sides are bounded by the dimension limit, so this cannot overflow
     // a 64-bit `usize`; a 32-bit one answers "too large" instead.
     (width as usize)
@@ -547,15 +591,15 @@ fn raw_size(command: &Command, per_pixel: usize) -> Result<usize, Error> {
         .ok_or_else(|| Error::too_big("the image is too large"))
 }
 
-/// An image past the side limit or past what the store keeps is refused
+/// An image past the side limit or past what `room` has for it is refused
 /// before any pixel is allocated.
-fn check_dimensions(width: u32, height: u32) -> Result<(), Error> {
+fn check_dimensions(width: u32, height: u32, room: Room) -> Result<(), Error> {
     if width > MAX_DIMENSION || height > MAX_DIMENSION {
         return Err(Error::too_big("the image is too large"));
     }
     let stored = (u64::from(width) * u64::from(height)).saturating_mul(4);
-    if stored > QUOTA_BYTES as u64 {
-        return Err(Error::no_space("the image does not fit the storage quota"));
+    if stored > room.bytes() as u64 {
+        return Err(room.refusal());
     }
     Ok(())
 }
@@ -591,17 +635,23 @@ fn decode_raw(command: &Command, bytes: Vec<u8>, expected: usize) -> Result<Deco
     })
 }
 
-fn decode_png(bytes: &[u8]) -> Result<Decoded, Error> {
+fn decode_png(bytes: &[u8], room: Room) -> Result<Decoded, Error> {
     let corrupt = |_| Error::invalid("the PNG data cannot be decoded");
     let mut decoder = png::Decoder::new(Cursor::new(bytes));
-    decoder.set_limits(png::Limits { bytes: QUOTA_BYTES });
+    // What the decoder keeps besides the pixels (a colour profile it
+    // inflates, text chunks) has no more room than they do.
+    decoder.set_limits(png::Limits {
+        bytes: room.bytes(),
+    });
     decoder.set_transformations(png::Transformations::normalize_to_color8());
+    // Only the header is read here: the size is judged before a pixel is
+    // inflated or a buffer allocated for them.
     let mut reader = decoder.read_info().map_err(corrupt)?;
     let (width, height) = reader.info().size();
-    check_dimensions(width, height)?;
+    check_dimensions(width, height, room)?;
     let size = reader
         .output_buffer_size()
-        .filter(|&size| size <= QUOTA_BYTES)
+        .filter(|&size| size <= room.bytes())
         .ok_or_else(|| Error::too_big("the image is too large"))?;
     let mut buffer = vec![0; size];
     let frame = reader.next_frame(&mut buffer).map_err(corrupt)?;
