@@ -164,9 +164,11 @@ let handler: BtEventHandler = { context, event in
         host.shellExited()
     case BT_EVENT_OPEN_LINK:
         // A host with an editor of its own takes files at their line; URLs are left to the pane.
-        let target = bt_event_text(event).map { String(cString: $0) } ?? ""
+        // The text is the link as named, the target is where its symlinks lead: what is opened.
+        let link = bt_event_text(event).map { String(cString: $0) } ?? ""
+        let target = bt_event_target(event).map { String(cString: $0) } ?? link
         if bt_event_number(event) == Int64(BT_LINK_FILE) {
-            print("embed-swift: open \(target) at line \(bt_event_line(event)), column \(bt_event_column(event))")
+            print("embed-swift: open \(target) (linked as \(link)) at line \(bt_event_line(event)), column \(bt_event_column(event))")
             bt_event_set_handled(event)
         }
     case BT_EVENT_NOTIFY:

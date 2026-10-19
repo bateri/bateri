@@ -49,6 +49,13 @@ commit. Pushing is a separate step.
   (square), which is the margin the pane always had; a value that is not a
   radius is square too and one past 64 points is taken as 64. Call it on
   layout, since the pane takes its geometry again when a radius moves.
+- `bt_event_target(event)`: an `OPEN_LINK` event's local path once every
+  symlink and Finder alias on it is followed; NULL for a URL and a remote path.
+  The text stays the link as it names it. A handler that hands a path to the
+  system should open the target: Launch Services follows a symlink, so a
+  `README.txt` that points at an `.app` or a `.command` script, handed over
+  as the text, would launch or run it. bateri judges and opens the target
+  itself, and a handler that leaves the link to the pane gets that.
 
 ## [0.1.0] - 2026-10-11
 

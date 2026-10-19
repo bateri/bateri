@@ -209,9 +209,15 @@ pub enum LinkRequest {
     /// is anything the program wrote.
     Url(String),
     /// A local file or directory, with the line and column a
-    /// `path:line:col` named.
+    /// `path:line:col` named. `path` is the link as it names it — a symlink
+    /// stays the symlink; `target` is the object it leads to once every
+    /// symlink and Finder alias on it is followed (`links::Resolved::target`).
+    /// An owner that hands the link to the system judges and opens `target`:
+    /// Launch Services follows `path` and would launch an `.app` or run a
+    /// script a harmless-looking name points at.
     Path {
         path: std::path::PathBuf,
+        target: std::path::PathBuf,
         directory: bool,
         line: Option<u32>,
         col: Option<u32>,

@@ -171,8 +171,13 @@ fn request(link: &Verified) -> LinkRequest {
         };
     }
     match &link.resolved {
-        Some(Resolved { path, entry, .. }) => LinkRequest::Path {
+        Some(Resolved {
+            path,
+            entry,
+            target,
+        }) => LinkRequest::Path {
             path: path.clone(),
+            target: target.clone(),
             directory: matches!(entry, links::Entry::Dir),
             line,
             col,

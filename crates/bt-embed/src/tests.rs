@@ -370,6 +370,7 @@ fn null_handles_answer_their_failure_values() {
     unsafe {
         assert_eq!(bt_event_kind(null()), 0);
         assert!(bt_event_text(null()).is_null());
+        assert!(bt_event_target(null()).is_null());
         assert!(!bt_pane_start(null_mut()));
         assert!(bt_pane_title(null_mut()).is_null());
         assert_eq!(bt_pane_id(null_mut()), 0);
@@ -402,6 +403,7 @@ fn a_link_the_handler_takes_is_not_the_panes_to_open() {
     };
     let at_twelve = LinkRequest::Path {
         path: "/tmp/main.rs".into(),
+        target: "/tmp/main.rs".into(),
         directory: false,
         line: Some(12),
         col: Some(5),
@@ -413,4 +415,40 @@ fn a_link_the_handler_takes_is_not_the_panes_to_open() {
     );
     host.closed.set(true);
     assert!(!host.open_link(1, &at_twelve), "a closed pane asks nobody");
+}
+
+#[test]
+fn a_local_link_names_itself_in_the_text_and_where_it_leads_in_the_target() {
+    unsafe extern "C" fn opens_the_target(_: *mut c_void, event: *const BtEvent) {
+        // SAFETY: the event is lent for this call; its texts live as long.
+        unsafe {
+            if bt_event_number(event) == i64::from(link::URL) {
+                assert!(bt_event_target(event).is_null(), "a URL leads nowhere else");
+                return;
+            }
+            assert_eq!(CStr::from_ptr(bt_event_text(event)), c"/work/README.txt");
+            assert_eq!(
+                CStr::from_ptr(bt_event_target(event)),
+                c"/Applications/Calculator.app"
+            );
+            bt_event_set_handled(event);
+        }
+    }
+    let host = CHost {
+        handler: Some(opens_the_target),
+        context: null_mut(),
+        closed: Cell::new(false),
+        command: Cell::new(None),
+        place: RefCell::new(None),
+        programs: RefCell::new(Vec::new()),
+    };
+    let symlink = LinkRequest::Path {
+        path: "/work/README.txt".into(),
+        target: "/Applications/Calculator.app".into(),
+        directory: true,
+        line: None,
+        col: None,
+    };
+    assert!(host.open_link(1, &symlink), "the handler saw both");
+    assert!(!host.open_link(1, &LinkRequest::Url("https://example.com".to_owned())));
 }

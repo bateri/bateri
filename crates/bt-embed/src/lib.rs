@@ -90,7 +90,8 @@ pub mod kind {
     /// The user opened a link (⌘-click, or the link menu's Open): the URL or path in the text,
     /// what it is in the number (a `BT_LINK_*`), the flag set for a path on the remote session's
     /// server (its host in the detail), a path's line and column ([`bt_event_line`],
-    /// [`bt_event_column`]). The handler that opens it itself calls [`bt_event_set_handled`]
+    /// [`bt_event_column`]), and a local path's target once its symlinks are followed
+    /// ([`bt_event_target`]). The handler that opens it itself calls [`bt_event_set_handled`]
     /// and the pane does nothing more; otherwise the pane opens it as bateri does.
     pub const OPEN_LINK: u32 = 16;
     /// The terminal's bell rang (`BEL`) — at most once per main-queue turn.
@@ -1228,6 +1229,8 @@ pub struct BtEvent {
     progress: Option<u8>,
     line: Option<u32>,
     column: Option<u32>,
+    /// A local link's target once its symlinks are followed ([`bt_event_target`]).
+    target: Option<CString>,
     /// The handler took the event's request ([`bt_event_set_handled`]).
     handled: Cell<bool>,
 }
@@ -1249,6 +1252,7 @@ impl BtEvent {
             progress: None,
             line: None,
             column: None,
+            target: None,
             handled: Cell::new(false),
         }
     }
@@ -1435,6 +1439,26 @@ pub unsafe extern "C" fn bt_event_line(event: *const BtEvent) -> u32 {
 pub unsafe extern "C" fn bt_event_column(event: *const BtEvent) -> u32 {
     // SAFETY: the caller's promise.
     unsafe { with_event(event, 0, |event| event.column.unwrap_or(0)) }
+}
+
+/// An OPEN_LINK event's local path once every symlink and Finder alias on it is followed, lent
+/// for the handler's call; NULL for a URL, a remote path and other kinds. The text is the link as
+/// it names it: a handler that hands the path to the system opens this one — Launch Services
+/// follows a symlink, and `README.txt -> Evil.app` would launch the app.
+///
+/// # Safety
+/// As [`bt_event_kind`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn bt_event_target(event: *const BtEvent) -> *const c_char {
+    // SAFETY: the caller's promise.
+    unsafe {
+        with_event(event, std::ptr::null(), |event| {
+            event
+                .target
+                .as_deref()
+                .map_or(std::ptr::null(), CStr::as_ptr)
+        })
+    }
 }
 
 /// The handler took the event's request: an OPEN_LINK it opened itself — the pane does nothing
@@ -1671,11 +1695,13 @@ impl Host for CHost {
             },
             LinkRequest::Path {
                 path,
+                target,
                 directory,
                 line,
                 col,
             } => BtEvent {
                 text: c_text(path.as_os_str().as_bytes()),
+                target: c_text(target.as_os_str().as_bytes()),
                 number: i64::from(if *directory {
                     link::DIRECTORY
                 } else {

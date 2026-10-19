@@ -96,9 +96,10 @@ typedef void (*BtEventHandler)(void *context, const BtEvent *event);
 
 /* The user opened a link (Command-click, or the link menu's Open): text =
  * the URL or path, number = BT_LINK_*, flag = a path on the remote session's
- * server (detail = its host), bt_event_line / bt_event_column. A handler that
- * opens it itself calls bt_event_set_handled and the pane does nothing more;
- * otherwise the pane opens it as bateri does. */
+ * server (detail = its host), bt_event_line / bt_event_column, and a local
+ * path's target once its symlinks are followed (bt_event_target). A handler
+ * that opens it itself calls bt_event_set_handled and the pane does nothing
+ * more; otherwise the pane opens it as bateri does. */
 #define BT_EVENT_OPEN_LINK 16u
 /* The terminal's bell rang (BEL) — at most once per main-queue turn. */
 #define BT_EVENT_BELL 17u
@@ -153,6 +154,12 @@ int32_t bt_event_progress(const BtEvent *event);
 /* OPEN_LINK: the line and column a path:12:5 names, 1-based; 0 when none. */
 uint32_t bt_event_line(const BtEvent *event);
 uint32_t bt_event_column(const BtEvent *event);
+/* OPEN_LINK: a local path once every symlink and Finder alias on it is
+ * followed, lent; NULL for a URL and a remote path. The text is the link as
+ * it names it. A handler that hands the path to the system (NSWorkspace)
+ * opens this one: Launch Services follows a symlink, and a README.txt that
+ * points at an .app or a script would launch or run it. */
+const char *bt_event_target(const BtEvent *event);
 /* The handler took the event's request (an OPEN_LINK it opened itself).
  * Only during the handler's call. */
 void bt_event_set_handled(const BtEvent *event);
