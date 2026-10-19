@@ -3146,6 +3146,30 @@ impl ShellLog {
         self.context.remote.is_none() && self.raw.is_some() && self.running_command() == self.raw
     }
 
+    /// Whether the keyboard reaches a shell's own line editor — its prompt —
+    /// rather than a program it started: the shell's marks have been seen and
+    /// no command is running. In a remote session ssh is the local command,
+    /// so the remote shell's own trail answers ([`Self::remote`]), and only
+    /// once our remote shell has spoken; a remote shell without our
+    /// integration is never at a prompt here. The trail outlives its session
+    /// (a dropped connection leaves no remote `D`), so a later session to a
+    /// server without our integration may read an old prompt: the error is
+    /// toward the prompt's form, the side that types nothing into a line.
+    ///
+    /// Read by the function keys' encoding ([`crate::input::function_key`]):
+    /// at a prompt a key goes in the form the shell binds. **No marks is
+    /// "not at a prompt"** — a shell without our integration gets the keys as
+    /// every terminal sends them, which is what its own configuration expects.
+    pub(crate) fn at_prompt(&self) -> bool {
+        let idle = |state: Option<ShellState>| {
+            state.is_some_and(|state| state.phase != ShellPhase::Running)
+        };
+        if self.context.remote.is_some() {
+            return self.remote_shell.is_some() && idle(self.remote.state);
+        }
+        self.local.state.is_some() && self.running_command().is_none()
+    }
+
     /// The user sent input ([`crate::Session::send_input`], the single funnel):
     /// `true` once per command generation, at the first input after the
     /// remote session's login was seen ([`Self::typed`]) — the edge
@@ -10237,6 +10261,43 @@ mod tests {
             "the old generation's stamp is still there"
         );
         assert!(!log.raw_active(), "a new `C` invalidates it");
+    }
+
+    #[test]
+    fn a_prompt_is_where_no_command_runs_on_the_shell_that_has_the_keys() {
+        let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
+        assert!(!log.at_prompt(), "no marks: a shell we cannot see");
+        log.apply(Mark::PromptStart {
+            id: Some(1),
+            click_events: false,
+        });
+        assert!(log.at_prompt(), "the prompt is being drawn");
+        log.apply(Mark::PromptEnd);
+        assert!(log.at_prompt());
+        log.apply(Mark::CommandStart);
+        assert!(!log.at_prompt(), "a program has the keys");
+        // ssh: the local command runs, the remote shell's trail answers.
+        assert!(log.set_remote(Some(&RemoteTarget::ssh("prod"))));
+        assert!(!log.at_prompt(), "no remote shell of ours has spoken");
+        log.apply_remote(remote(1, 1, Mark::PromptEnd));
+        assert!(log.at_prompt(), "the remote prompt");
+        log.apply_remote(remote(1, 1, Mark::CommandStart));
+        assert!(!log.at_prompt(), "a remote program");
+        log.apply_remote(remote(
+            1,
+            1,
+            Mark::CommandEnd {
+                exit: Some(0),
+                id: None,
+            },
+        ));
+        assert!(log.at_prompt(), "between remote commands");
+        // Our `D` ends ssh: the local prompt again.
+        log.apply(Mark::CommandEnd {
+            exit: Some(0),
+            id: Some(1),
+        });
+        assert!(log.at_prompt());
     }
 
     #[test]

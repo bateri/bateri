@@ -11,11 +11,13 @@
 
 use alacritty_terminal::term::TermMode;
 
+use crate::Mods;
+
 /// Arrow key: the keyboard's four, the wheel's two.
 ///
 /// `bt-shell` translates the key into this, not into bytes: the format depends
 /// on DECCKM ([`arrow`]) and the mode lives in `Term`
-/// ([`crate::Session::write_arrow`]). If `bt-shell` wrote the byte it would
+/// ([`crate::Session::write_key`], [`FunctionKey::Arrow`]). If `bt-shell` wrote the byte it would
 /// have to know the mode, meaning it would either keep it or see the alacritty
 /// type. The wheel's arrows take the same path: the DECCKM question is
 /// answered in one place in the repo.
@@ -48,6 +50,97 @@ pub(crate) fn arrow(arrow: Arrow, mode: TermMode) -> [u8; 3] {
         Arrow::Left => b'D',
     };
     [0x1b, intro, last]
+}
+
+/// A key whose bytes depend on the terminal's state: the arrows, Home and
+/// End, the page keys, forward delete and F1–F12. `bt-shell` translates the
+/// key into this and its modifiers into [`Mods`]; the bytes are written here
+/// ([`function_key`]), because the mode lives in `Term` and whether a shell is
+/// reading the line lives in the shell's ledger
+/// ([`crate::Session::write_key`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FunctionKey {
+    Arrow(Arrow),
+    Home,
+    End,
+    PageUp,
+    PageDown,
+    /// ⌦ (fn-⌫).
+    Delete,
+    /// F1–F12; another number has no bytes.
+    F(u8),
+}
+
+/// xterm's modifier parameter: 1 + Shift + 2·Option + 4·Control. ⌘ has no
+/// place in it — a ⌘ key is the menu's, the three that reach the terminal
+/// are written as bytes of their own in `bt-shell`.
+fn modifier_param(mods: Mods) -> u8 {
+    1 + u8::from(mods.shift) + 2 * u8::from(mods.option) + 4 * u8::from(mods.ctrl)
+}
+
+/// A function key's bytes — xterm's PC-style encoding, the one
+/// `xterm-256color`'s terminfo describes (`kLFT=\E[1;2D`, `kf17=\E[15;2~`).
+///
+/// Without a modifier a key keeps its plain form: an arrow follows DECCKM
+/// ([`arrow`]), Home and End too (`\eOH` in application mode, `\e[H`
+/// otherwise), F1–F4 are SS3 (`\eOP`), the rest `CSI n ~`. **With a
+/// modifier** the form is always CSI and carries the parameter
+/// ([`modifier_param`]): `\e[1;2D` is ⇧←, `\e[1;5P` ⌃F1, `\e[15;2~` ⇧F5,
+/// `\e[3;5~` ⌃⌦ — programs that read keys themselves (vim, less, Codex,
+/// helix, fish) tell them apart by it.
+///
+/// **`at_prompt`: a shell's own line editor has the keyboard**
+/// ([`crate::shell::ShellLog::at_prompt`]). zsh and bash leave these
+/// sequences unbound and an unbound sequence is not dropped there, it lands
+/// in the line: ⇧← types `;2D`, F5 `5~` (measured on zsh 5.9 with macOS's
+/// `/etc/zshrc` and on bash 5.3). At the prompt every key therefore goes in
+/// the form it had before the modifiers were sent: the modifier is dropped,
+/// a function key is swallowed. **Home and End are the exception**, and they
+/// go in their SS3 form whatever DECCKM says: that is the form the shells
+/// bind — macOS's `/etc/zshrc` binds `terminfo[khome]` (`\eOH`) while zsh
+/// leaves application mode off, so `\e[H` would do nothing, and bash and fish
+/// take both forms.
+///
+/// An empty result writes nothing.
+pub(crate) fn function_key(
+    key: FunctionKey,
+    mods: Mods,
+    mode: TermMode,
+    at_prompt: bool,
+) -> Vec<u8> {
+    let param = if at_prompt { 1 } else { modifier_param(mods) };
+    let app = mode.contains(TermMode::APP_CURSOR);
+    // `CSI 1 ; m <final>`, or the plain form when there is no modifier.
+    let lettered = |last: u8, plain_intro: u8| -> Vec<u8> {
+        if param == 1 {
+            vec![0x1b, plain_intro, last]
+        } else {
+            format!("\x1b[1;{param}{}", char::from(last)).into_bytes()
+        }
+    };
+    // `CSI n ~`, or `CSI n ; m ~` with a modifier.
+    let tilde = |n: u8| -> Vec<u8> {
+        if param == 1 {
+            format!("\x1b[{n}~").into_bytes()
+        } else {
+            format!("\x1b[{n};{param}~").into_bytes()
+        }
+    };
+    match key {
+        FunctionKey::Arrow(direction) if param == 1 => arrow(direction, mode).to_vec(),
+        FunctionKey::Arrow(direction) => lettered(arrow(direction, mode)[2], b'['),
+        FunctionKey::Home if at_prompt => b"\x1bOH".to_vec(),
+        FunctionKey::End if at_prompt => b"\x1bOF".to_vec(),
+        FunctionKey::Home => lettered(b'H', if app { b'O' } else { b'[' }),
+        FunctionKey::End => lettered(b'F', if app { b'O' } else { b'[' }),
+        FunctionKey::PageUp => tilde(5),
+        FunctionKey::PageDown => tilde(6),
+        FunctionKey::Delete => tilde(3),
+        FunctionKey::F(_) if at_prompt => Vec::new(),
+        FunctionKey::F(n @ 1..=4) => lettered(b'P' + (n - 1), b'O'),
+        FunctionKey::F(n @ 5..=12) => tilde([15, 17, 18, 19, 20, 21, 23, 24][usize::from(n - 5)]),
+        FunctionKey::F(_) => Vec::new(),
+    }
 }
 
 /// The wheel's backward (up) button; forward (down) is [`WHEEL_DOWN`].
@@ -365,6 +458,112 @@ mod tests {
         assert_eq!(&arrow(Arrow::Down, ss3), b"\x1bOB");
         assert_eq!(&arrow(Arrow::Right, ss3), b"\x1bOC");
         assert_eq!(&arrow(Arrow::Left, ss3), b"\x1bOD");
+    }
+
+    /// [`function_key`] in a program (not at a prompt), as text.
+    fn in_program(key: FunctionKey, mods: Mods, mode: TermMode) -> String {
+        String::from_utf8(function_key(key, mods, mode, false)).expect("ASCII")
+    }
+
+    const SHIFT: Mods = Mods::new(false, false, true, false);
+    const OPTION: Mods = Mods::new(false, true, false, false);
+    const CTRL: Mods = Mods::new(true, false, false, false);
+
+    #[test]
+    fn a_function_key_without_a_modifier_keeps_its_plain_form() {
+        let (csi, ss3) = (TermMode::empty(), TermMode::APP_CURSOR);
+        for mode in [csi, ss3] {
+            for direction in [Arrow::Up, Arrow::Down, Arrow::Left, Arrow::Right] {
+                assert_eq!(
+                    function_key(FunctionKey::Arrow(direction), Mods::NONE, mode, false),
+                    arrow(direction, mode)
+                );
+            }
+        }
+        assert_eq!(in_program(FunctionKey::Home, Mods::NONE, csi), "\x1b[H");
+        assert_eq!(in_program(FunctionKey::End, Mods::NONE, csi), "\x1b[F");
+        assert_eq!(in_program(FunctionKey::Home, Mods::NONE, ss3), "\x1bOH");
+        assert_eq!(in_program(FunctionKey::End, Mods::NONE, ss3), "\x1bOF");
+        assert_eq!(in_program(FunctionKey::PageUp, Mods::NONE, csi), "\x1b[5~");
+        assert_eq!(
+            in_program(FunctionKey::PageDown, Mods::NONE, csi),
+            "\x1b[6~"
+        );
+        assert_eq!(in_program(FunctionKey::Delete, Mods::NONE, csi), "\x1b[3~");
+        // xterm-256color's kf1–kf12.
+        let fkeys = [
+            "\x1bOP", "\x1bOQ", "\x1bOR", "\x1bOS", "\x1b[15~", "\x1b[17~", "\x1b[18~", "\x1b[19~",
+            "\x1b[20~", "\x1b[21~", "\x1b[23~", "\x1b[24~",
+        ];
+        for (n, bytes) in (1..=12).zip(fkeys) {
+            assert_eq!(
+                in_program(FunctionKey::F(n), Mods::NONE, csi),
+                bytes,
+                "F{n}"
+            );
+            assert_eq!(
+                in_program(FunctionKey::F(n), Mods::NONE, ss3),
+                bytes,
+                "F{n}"
+            );
+        }
+        assert!(function_key(FunctionKey::F(13), Mods::NONE, csi, false).is_empty());
+        assert!(function_key(FunctionKey::F(0), Mods::NONE, csi, false).is_empty());
+    }
+
+    #[test]
+    fn a_modifier_rides_in_xterms_parameter_in_either_cursor_mode() {
+        for mode in [TermMode::empty(), TermMode::APP_CURSOR] {
+            let left = FunctionKey::Arrow(Arrow::Left);
+            assert_eq!(in_program(left, SHIFT, mode), "\x1b[1;2D");
+            assert_eq!(in_program(left, OPTION, mode), "\x1b[1;3D");
+            assert_eq!(in_program(left, CTRL, mode), "\x1b[1;5D");
+            let all = Mods::new(true, true, true, false);
+            assert_eq!(in_program(left, all, mode), "\x1b[1;8D");
+            // ⌘ is not xterm's to carry.
+            assert_eq!(
+                in_program(left, Mods::CMD, mode),
+                in_program(left, Mods::NONE, mode)
+            );
+            assert_eq!(
+                in_program(FunctionKey::Arrow(Arrow::Up), SHIFT, mode),
+                "\x1b[1;2A"
+            );
+            assert_eq!(in_program(FunctionKey::Home, SHIFT, mode), "\x1b[1;2H");
+            assert_eq!(in_program(FunctionKey::End, CTRL, mode), "\x1b[1;5F");
+            assert_eq!(in_program(FunctionKey::F(1), SHIFT, mode), "\x1b[1;2P");
+            assert_eq!(in_program(FunctionKey::F(4), CTRL, mode), "\x1b[1;5S");
+            assert_eq!(in_program(FunctionKey::F(5), SHIFT, mode), "\x1b[15;2~");
+            assert_eq!(in_program(FunctionKey::F(12), OPTION, mode), "\x1b[24;3~");
+            assert_eq!(in_program(FunctionKey::PageUp, CTRL, mode), "\x1b[5;5~");
+            assert_eq!(in_program(FunctionKey::Delete, SHIFT, mode), "\x1b[3;2~");
+        }
+    }
+
+    #[test]
+    fn at_a_prompt_a_key_goes_as_the_shell_binds_it() {
+        let at_prompt = |key, mods, mode| function_key(key, mods, mode, true);
+        for mode in [TermMode::empty(), TermMode::APP_CURSOR] {
+            // The modifier drops: zsh and bash would type `;2D` into the line.
+            for direction in [Arrow::Up, Arrow::Down, Arrow::Left, Arrow::Right] {
+                let key = FunctionKey::Arrow(direction);
+                assert_eq!(at_prompt(key, SHIFT, mode), arrow(direction, mode));
+            }
+            assert_eq!(at_prompt(FunctionKey::Delete, CTRL, mode), b"\x1b[3~");
+            assert_eq!(at_prompt(FunctionKey::PageUp, CTRL, mode), b"\x1b[5~");
+            // A function key would type `5~`: it is swallowed.
+            for n in 1..=12 {
+                assert!(
+                    at_prompt(FunctionKey::F(n), Mods::NONE, mode).is_empty(),
+                    "F{n}"
+                );
+            }
+            // Home and End go in the form `/etc/zshrc` binds, whatever DECCKM says.
+            for mods in [Mods::NONE, SHIFT] {
+                assert_eq!(at_prompt(FunctionKey::Home, mods, mode), b"\x1bOH");
+                assert_eq!(at_prompt(FunctionKey::End, mods, mode), b"\x1bOF");
+            }
+        }
     }
 
     #[test]

@@ -41,6 +41,23 @@ of every installed copy. A version without a section is not released.
   (`select_tab = "option"` makes ⌥1…⌥9 select a tab). A name no command has, or
   two commands on one key, is reported with its line. Edit ▸ Command History…
   and View ▸ Themes… are now in the menu too, so they can have a shortcut.
+- **Programs see the modifiers on arrows and the other function keys.** ⇧←,
+  ⌃→, ⌥↑, ⇧⌦, ⌃PgUp and the like reach a program in the terminal as xterm sends
+  them, so Codex, vim, helix and fish can tell them from the plain key. At a
+  prompt of zsh, bash 4.4+ or fish with bateri's shell integration (`[shell]
+  integration` other than `"off"`) they still do what they did before, because zsh
+  and bash would type `;2D` into the line; a shell without it gets them as other
+  terminals send them.
+- **Home, End and F1–F12 work.** fn+← and fn+→ (Home and End) move to the start
+  and end of the line at the prompt and in programs; the F keys reach programs
+  like htop and Midnight Commander. F13–F20 go as ⇧F1–⇧F8, the way xterm names
+  them.
+- **⌥⌦ deletes the next word** (fn+⌥⌫ on a laptop), the mirror of ⌥⌫.
+- **⌥⏎ starts a new line without running it** in Codex, Claude Code, zsh and
+  fish.
+- **Programs that ask to hear the focus get it.** vim, tmux and others that turn
+  on focus events learn when the pane gains or loses the keyboard: switching
+  windows, tabs or splits, or opening the search field.
 
 ### Changed
 

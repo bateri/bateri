@@ -1,22 +1,31 @@
-//! Keystroke → PTY bytes or an arrow, the scroll decision for Shift+PgUp/PgDn, and the dock
-//! selection's keys ([`dock_key`]).
+//! Keystroke → PTY bytes or a function key, the scroll decision for Shift+PgUp/PgDn, and the
+//! dock selection's keys ([`dock_key`]).
 //! **Pure and AppKit-free**, and therefore testable.
 //!
-//! An arrow's bytes are **not written** here, only which arrow it is (`bt_core::Arrow`, the reason
-//! is there).
+//! A function key's bytes are **not written** here, only which key it is and which modifiers
+//! ride with it (`bt_core::FunctionKey`, the reason is there).
 
 use std::borrow::Cow;
 
-use bt_core::{Arrow, Chord, DockKey, Key, Mods, NamedKey};
+use bt_core::{Arrow, Chord, DockKey, FunctionKey, Key, Mods, NamedKey};
 
 /// AppKit's function key range: U+F700–U+F8FF. The named constants
-/// (`NSUpArrowFunctionKey` … `NSModeSwitchFunctionKey`) use its first slice. Arrows are turned
-/// into [`KeyInput::Arrow`], PgUp/PgDn and forward delete into their own sequences; the
+/// (`NSUpArrowFunctionKey` … `NSModeSwitchFunctionKey`) use its first slice. The arrows, Home,
+/// End, PgUp/PgDn, forward delete and F1–F20 are turned into [`KeyInput::Key`]; the
 /// **unrecognised rest** of the range is swallowed on purpose, because turning a key code we do
 /// not know into UTF-8 and sending it to the shell is always worse. The Private Use Area is wider
 /// than this (it starts at U+E000) and is **out of scope**: a real character such as a powerline
 /// glyph goes through the plain-text branch.
 const FUNCTION_KEYS: std::ops::RangeInclusive<char> = '\u{f700}'..='\u{f8ff}';
+
+/// `NSF1FunctionKey`–`NSF12FunctionKey`, and `NSF13FunctionKey`–`NSF20FunctionKey` after them.
+/// xterm has no F13: `xterm-256color` calls ⇧F1 `kf13`, so F13–F20 go as ⇧F1–⇧F8.
+const F1_TO_F12: std::ops::RangeInclusive<char> = '\u{f704}'..='\u{f70f}';
+const F13_TO_F20: std::ops::RangeInclusive<char> = '\u{f710}'..='\u{f717}';
+
+/// `NSHomeFunctionKey` and `NSEndFunctionKey` — fn+← and fn+→ on a laptop.
+const HOME: char = '\u{f729}';
+const END: char = '\u{f72b}';
 
 /// `NSPageUpFunctionKey` and `NSPageDownFunctionKey`. Read in two places — the plain form's
 /// sequence ([`encode_key`]) and the Shift form's scroll ([`page_scroll`]) — and a number written
@@ -42,8 +51,8 @@ pub const BACKSPACE: char = '\u{7f}';
 pub const ARROW_LEFT: char = '\u{f702}';
 pub const ARROW_RIGHT: char = '\u{f703}';
 
-/// `NSDeleteFunctionKey` — forward delete (⌦, fn-⌫). Read in two places: its byte
-/// ([`encode_key`]) and the dock selection's key ([`dock_key`]).
+/// `NSDeleteFunctionKey` — forward delete (⌦, fn-⌫). Read in three places: its key and its
+/// Option gesture ([`encode_key`], [`LINE_EDITING`]) and the dock selection's key ([`dock_key`]).
 const FORWARD_DELETE: char = '\u{f728}';
 
 /// Whether the string is **exactly one character** — if so that character, otherwise `None`.
@@ -84,12 +93,14 @@ const fn line_key(option: bool, command: bool, key: NamedKey) -> Chord {
     Chord::plain(Mods::new(false, option, false, command), Key::Named(key))
 }
 
-/// The keys [`encode_key`] gives a meaning of its own beyond the plain key: ⌘ and ⌥ with ⌫, ← and
-/// →. The list is **named** because other readers need it: a shortcut given to one of these
+/// The keys [`encode_key`] gives a meaning of its own beyond the plain key: ⌘ with ⌫, ← and →, ⌥
+/// with ⌫, ⌦, ←, → and ⏎. A modifier that only rides along with its key (⇧←, ⌃F5 — xterm's
+/// encoding, [`KeyInput::Key`]) is not a meaning of its own and is not here. The list is
+/// **named** because other readers need it: a shortcut given to one of these
 /// takes it from the line (the menu catches the key first), and the shortcut list shows them
 /// as built in. [`encode_key`] and this list are tied by a test — a key given a gesture there
 /// has to be here, and the other way round.
-pub const LINE_EDITING: [LineKey; 6] = [
+pub const LINE_EDITING: [LineKey; 8] = [
     LineKey {
         chord: line_key(false, true, NamedKey::Backspace),
         character: BACKSPACE,
@@ -115,6 +126,12 @@ pub const LINE_EDITING: [LineKey; 6] = [
         effect: "deletes the word before the cursor",
     },
     LineKey {
+        chord: line_key(true, false, NamedKey::Delete),
+        character: FORWARD_DELETE,
+        title: "Delete Word Forward",
+        effect: "deletes the word after the cursor",
+    },
+    LineKey {
         chord: line_key(true, false, NamedKey::Left),
         character: ARROW_LEFT,
         title: "Move One Word Left",
@@ -126,6 +143,12 @@ pub const LINE_EDITING: [LineKey; 6] = [
         title: "Move One Word Right",
         effect: "moves the cursor one word right",
     },
+    LineKey {
+        chord: line_key(true, false, NamedKey::Return),
+        character: '\r',
+        title: "Insert Line Break",
+        effect: "starts a new line without running what you typed",
+    },
 ];
 
 /// The line-editing key a chord is, if it is one.
@@ -133,29 +156,30 @@ pub fn line_editing(chord: &Chord) -> Option<&'static LineKey> {
     LINE_EDITING.iter().find(|key| key.chord == *chord)
 }
 
-/// [`encode_key`]'s answer: a key with known bytes, or an arrow.
+/// [`encode_key`]'s answer: a key with known bytes, or a function key with its modifiers.
 #[derive(Debug, PartialEq, Eq)]
 pub enum KeyInput {
-    /// Bytes independent of the mode: a letter, Enter, PgUp…
+    /// Bytes independent of the terminal's state: a letter, Enter, ⌥←…
     Bytes(Cow<'static, [u8]>),
-    /// Goes to `Session::write_arrow`.
-    Arrow(Arrow),
+    /// Goes to `Session::write_key`: its bytes depend on the mode and on whether a shell is
+    /// reading the line. ⌘ never rides here — a ⌘ key that reaches the terminal is bytes.
+    Key(FunctionKey, Mods),
 }
 
 /// [`encode_key`]'s input: the half of `NSEvent` that concerns this function.
 ///
-/// **One record**, not four separate parameters, because the arms now ask the flags **together
+/// **One record**, not five separate parameters, because the arms ask the flags **together
 /// with** the character — ⌘⌫ and ⌥⌫ differ only by flag from the same `characters` (`BACKSPACE`)
 /// — and every new modifier would mean walking the call sites one by one.
-///
-/// **No Shift**, and that is not an omission: no arm asks for it. The only place Shift means
-/// anything is the scroll decision ([`page_scroll`]), which cannot be thought of without Shift; an
-/// unused flag here would loosen the record's contract ("these flags are read").
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KeyPress<'a> {
     /// `NSEvent.characters` — the form with modifiers **applied** (Option-held `ø`, Ctrl-C →
     /// U+0003).
     pub chars: &'a str,
+    /// Shift is held. A letter already carries it (`characters` is `A`, Shift+Tab is U+0019); a
+    /// function key carries it in its modifiers ([`KeyInput::Key`]), and it chooses the dock's
+    /// selection keys ([`dock_key`]).
+    pub shift: bool,
     /// Control is held.
     pub ctrl: bool,
     /// Option (⌥) is held. It only enables the navigation/deletion class; it does not touch
@@ -167,7 +191,7 @@ pub struct KeyPress<'a> {
     pub command: bool,
 }
 
-/// Keystroke ([`KeyPress`]) → PTY bytes or an arrow.
+/// Keystroke ([`KeyPress`]) → PTY bytes or a function key.
 ///
 /// **Not every key comes here any more.** The text path goes through AppKit's stack
 /// (`view::BateriView`'s `NSTextInputClient` conformance) and the usual producer of a printable
@@ -176,9 +200,10 @@ pub struct KeyPress<'a> {
 /// 1. **An event with Control** — `keyDown:` never hands it to the stack (numpad Enter's U+0003
 ///    and Ctrl-Y's U+0019 are shared; leaving the arm to AppKit could interrupt every command).
 /// 2. **A key the stack hands to `doCommandBySelector:`** — Enter, Tab, Escape, Backspace, the
-///    arrows, Shift+Tab, PgUp/PgDn, fn+Backspace **and Option navigation/deletion**
-///    (`moveWordLeft:`, `deleteWordBackward:`). That method is a silent no-op and the event
-///    returns unflagged, so its bytes come from here.
+///    arrows, Home/End, the F keys, Shift+Tab, PgUp/PgDn, fn+Backspace **and Option
+///    navigation/deletion** (`moveWordLeft:`, `deleteWordBackward:`, `deleteWordForward:`,
+///    `insertNewlineIgnoringFieldEditor:`). That method is a silent no-op and the event returns
+///    unflagged, so its bytes come from here.
 /// 3. **Shift+PgUp/PgDn rejected by the session** — there is no scrolling on the alternate
 ///    screen, the key goes to the application as the plain sequence.
 /// 4. **Text the stack hands over with a type we do not recognise** — if `insertText:`'s
@@ -191,21 +216,28 @@ pub struct KeyPress<'a> {
 ///
 /// `None` → the key is swallowed; the caller writes nothing.
 ///
+/// **Function keys carry their modifiers** ([`KeyInput::Key`]): ⇧← reaches a program as xterm's
+/// `\e[1;2D`, ⌃F5 as `\e[15;5~` — except at a shell's prompt, where `bt-core` drops them
+/// (`bt_core::FunctionKey`). Option's line gestures are not this: ⌥← stays the Meta `\eb` every
+/// line editor binds, with or without Shift or Control beside it.
+///
 /// **Out of scope:** IME; **Option as Meta across the board** — Meta encoding only for the
 /// navigation/deletion class, printable letters do not change (`Option+7` keeps typing `{` on
-/// Turkish Q); the kitty keyboard protocol; **modified arrows** (`\e[1;5A`) — Option+arrow's
-/// `\eb` does not replace them, it is a Meta sequence, not xterm's modifier encoding; **backspace
-/// with Control** and **forward delete with Option/Control** (⌦, U+F728); Home/End (their
-/// sequences are not written yet — a debt; swallowed below). **Dead keys stay out of scope and are
-/// no longer a debt**: AppKit's stack completes the composition, it never passes through here.
+/// Turkish Q); the kitty keyboard protocol (⇧⏎ told apart from ⏎); **modified Enter, Tab and
+/// Backspace** (xterm's `modifyOtherKeys`; ⌥⏎ is the Meta `\e\r`); Insert, which a Mac keyboard
+/// does not have. **Dead keys stay out of scope and are no longer a debt**: AppKit's stack
+/// completes the composition, it never passes through here.
 pub fn encode_key(key: KeyPress<'_>) -> Option<KeyInput> {
     let c = key.chars.chars().next()?;
     // Whether `characters` is a single character — the shared guard of the arms that come out of
-    // a single `c` (below: backspace, arrows, PgUp/PgDn, forward delete and Control):
+    // a single `c` (below: backspace, the function keys and Control):
     // multi-character input (a dead-key composition, marked text) is not read from its first
     // character. The criterion's owner is [`only_char`] — `page_scroll` and
     // `view::reaches_terminal` ask the same question from there too.
     let single = only_char(key.chars).is_some();
+    // What rides with a function key. ⌘ never does: the three ⌘ keys that reach here are bytes.
+    let mods = Mods::new(key.ctrl, key.option, key.shift, false);
+    let function = |key: FunctionKey, mods: Mods| Some(KeyInput::Key(key, mods));
     let bytes: Cow<'static, [u8]> = match (c, key.ctrl) {
         // The first key of Cmd's closed allow-list: ⌘⌫ → `\x15` (`^U`, `kill-whole-line` in
         // zsh). macOS's strict meaning is "delete **up to the start** of the line", but in zsh
@@ -221,9 +253,10 @@ pub fn encode_key(key: KeyPress<'_>) -> Option<KeyInput> {
         // An earlier decision had rejected these two keys and its reasoning had two parts: "not asked
         // for" and "the Home/End sequences are unbound in zsh". The first fell away (the user
         // asked, 2026-09-21), the second **was never a reason about these keys**: the
-        // measurement shows zero bindings for `^[[H`/`^[[F`/`^[OH`/`^[OF`, but `^A`/`^E` are
-        // bound to `beginning-of-line`/`end-of-line` in the emacs keymap (zsh's default) — so
-        // the rejection's measurement belonged to the shape of Home/End, not to these bytes.
+        // measurement (a zsh without macOS's `/etc/zshrc`, which binds `^[OH`/`^[OF`) showed no
+        // binding for Home/End, but `^A`/`^E` are bound to `beginning-of-line`/`end-of-line` in
+        // the emacs keymap (zsh's default) — so the rejection's measurement belonged to the shape
+        // of Home/End, not to these bytes.
         // Ghostty, VS Code and Warp send the same two bytes too.
         //
         // **Known cost, in the same class as ⌘⌫'s:** in the `viins` keymap `^A`/`^E` are
@@ -238,16 +271,24 @@ pub fn encode_key(key: KeyPress<'_>) -> Option<KeyInput> {
         // **lowercase**: the uppercase form is bound to other widgets in zsh (`\eA` =
         // `accept-and-hold`; measured).
         //
-        // They come here from group 2: the stack hands Option+arrow/⌫ to
+        // They come here from group 2: the stack hands Option+arrow/⌫/⌦/⏎ to
         // `doCommandBySelector:` (`moveWordLeft:`, `deleteWordBackward:`), that method is a
         // silent no-op and the event returns unconsumed. Giving that method a body would
         // silently kill this arm.
         //
         // Accompanying modifiers are not consulted (the `page_scroll` precedent): Option+arrow
         // with Ctrl or Shift also moves by word, ⌥ has no second meaning in this class.
+        //
+        // ⌥⌦ is ⌥⌫'s mirror, macOS's "delete the next word": `\ed` is `kill-word` in zsh, bash
+        // and fish (measured; no garbage at their prompts). ⌥⏎ is `\e\r`, the sequence Codex and
+        // Claude Code read as a new line without sending — and so do zsh and fish at their prompt
+        // (measured: the line gets a line break); bash leaves it unbound and nothing happens.
+        // Control beside ⌥⏎ is not this gesture: ⌃⌥⏎ stays a plain ⏎.
         (BACKSPACE, _) if key.option && single => Cow::Borrowed(b"\x1b\x7f"),
+        (FORWARD_DELETE, _) if key.option && single => Cow::Borrowed(b"\x1bd"),
         (ARROW_LEFT, _) if key.option && single => Cow::Borrowed(b"\x1bb"),
         (ARROW_RIGHT, _) if key.option && single => Cow::Borrowed(b"\x1bf"),
+        ('\r', false) if key.option && single => Cow::Borrowed(b"\x1b\r"),
         // The numeric keypad's Enter and Fn-Return give `NSEnterCharacter` = U+0003 — the same
         // as Ctrl-C's byte. If Ctrl is NOT held this is a line ending; without this arm it would
         // pass through the plain-text branch as 0x03 and numpad Enter would interrupt every
@@ -259,25 +300,53 @@ pub fn encode_key(key: KeyPress<'_>) -> Option<KeyInput> {
         // apart, exactly like the U+0003 arm above. The Ctrl form goes out as 0x19 through the
         // plain-text branch.
         ('\u{19}', false) if single => Cow::Borrowed(b"\x1b[Z"),
-        ('\u{f700}', _) if single => return Some(KeyInput::Arrow(Arrow::Up)),
-        ('\u{f701}', _) if single => return Some(KeyInput::Arrow(Arrow::Down)),
-        (ARROW_LEFT, _) if single => return Some(KeyInput::Arrow(Arrow::Left)),
-        (ARROW_RIGHT, _) if single => return Some(KeyInput::Arrow(Arrow::Right)),
+        // The function keys: which key, and what rides with it. Their bytes are `bt-core`'s
+        // (DECCKM, the prompt), the reason is in `bt_core::FunctionKey`. They are all in the
+        // function key range and are written **before** the swallowing arm below.
+        ('\u{f700}', _) if single => return function(FunctionKey::Arrow(Arrow::Up), mods),
+        ('\u{f701}', _) if single => return function(FunctionKey::Arrow(Arrow::Down), mods),
+        (ARROW_LEFT, _) if single => return function(FunctionKey::Arrow(Arrow::Left), mods),
+        (ARROW_RIGHT, _) if single => return function(FunctionKey::Arrow(Arrow::Right), mods),
+        (HOME, _) if single => return function(FunctionKey::Home, mods),
+        (END, _) if single => return function(FunctionKey::End, mods),
         // `xterm-256color`'s `kpp`/`knp`: less and vim read paging from these two sequences. The
         // Shift form **does not come** here — that is the terminal's scrolling
         // ([`page_scroll`]), which `view` asks first. When scrolling is rejected on the alternate
-        // screen, the Shift key falls through to here too and the application receives a plain
-        // PgUp: Shift's `;2` encoding, like the modifiers on arrows, is out of scope.
+        // screen, the Shift key falls through to here and goes **without** its Shift: less reads
+        // no `\e[5;2~`, and in less and vim Shift+PgUp turns the page like PgUp.
         //
         // `single` (above): the same criterion as `page_scroll`; multi-character input is
         // swallowed whole in the function key arm below.
-        (PAGE_UP, _) if single => Cow::Borrowed(b"\x1b[5~"),
-        (PAGE_DOWN, _) if single => Cow::Borrowed(b"\x1b[6~"),
-        // `kdch1`: deletes the character to the right of the cursor. Because it is in the
-        // function key range it is written **before** the swallowing arm below; its modified form
-        // (`\e[3;5~`) is out of scope like the arrows and gets the plain sequence.
+        (PAGE_UP | PAGE_DOWN, _) if single => {
+            let key = if c == PAGE_UP {
+                FunctionKey::PageUp
+            } else {
+                FunctionKey::PageDown
+            };
+            return function(
+                key,
+                Mods {
+                    shift: false,
+                    ..mods
+                },
+            );
+        }
+        // `kdch1`: deletes the character to the right of the cursor.
         // `NSDeleteFunctionKey`: fn+Backspace, Delete (⌦) on a full keyboard.
-        (FORWARD_DELETE, _) if single => Cow::Borrowed(b"\x1b[3~"),
+        (FORWARD_DELETE, _) if single => return function(FunctionKey::Delete, mods),
+        (c, _) if single && F1_TO_F12.contains(&c) => {
+            return function(FunctionKey::F(fkey_number(c, *F1_TO_F12.start())), mods);
+        }
+        (c, _) if single && F13_TO_F20.contains(&c) => {
+            let number = fkey_number(c, *F13_TO_F20.start());
+            return function(
+                FunctionKey::F(number),
+                Mods {
+                    shift: true,
+                    ..mods
+                },
+            );
+        }
         // AppKit applies Control to `characters` itself for most keys (Ctrl-C → U+0003) and that
         // form goes through the plain-text branch below. But not for all of them — with
         // Ctrl-Shift-C the letter stays a letter. The conversion is repeated here so that both
@@ -288,9 +357,9 @@ pub fn encode_key(key: KeyPress<'_>) -> Option<KeyInput> {
         (c, true) if c.is_ascii_alphabetic() && single => {
             Cow::Owned(vec![(c.to_ascii_lowercase() as u8) & 0x1f])
         }
-        // A function key whose sequence we do not know (F1, Home, End…). These are not real
-        // characters but AppKit's private use codes: turning them into UTF-8 and writing them to
-        // the PTY would send garbage to the shell.
+        // A function key whose sequence we do not know (F21, Insert, Print Screen…). These are
+        // not real characters but AppKit's private use codes: turning them into UTF-8 and writing
+        // them to the PTY would send garbage to the shell.
         (c, _) if FUNCTION_KEYS.contains(&c) => return None,
         // Enter, Tab, Escape and Backspace also pass through here: AppKit has already turned
         // them into the right byte (U+000D, U+0009, U+001B, U+007F) and writing separate arms
@@ -299,6 +368,12 @@ pub fn encode_key(key: KeyPress<'_>) -> Option<KeyInput> {
         _ => Cow::Owned(key.chars.as_bytes().to_vec()),
     };
     Some(KeyInput::Bytes(bytes))
+}
+
+/// The number of an F key in a run of AppKit's codes that starts at F1's (`first` is the run's
+/// first code): `NSF5FunctionKey` → 5.
+fn fkey_number(c: char, first: char) -> u8 {
+    u8::try_from(u32::from(c) - u32::from(first) + 1).unwrap_or(0)
 }
 
 /// Shift+PgUp/PgDn → the number of pages to scroll (±1); `None` → not a scroll key. Plus is
@@ -329,11 +404,11 @@ pub fn page_scroll(chars: &str, shift: bool) -> Option<i32> {
 /// Command is never a dock key: ⌥⌫ is `backward-kill-word`, ⌘⌫ is `kill-whole-line`, and both go
 /// their current way and remove the selection — the "any other key" arm. Shift+⌫ counts as a
 /// plain ⌫: it is the same key on macOS too.
-pub fn dock_key(key: KeyPress<'_>, shift: bool) -> Option<DockKey> {
+pub fn dock_key(key: KeyPress<'_>) -> Option<DockKey> {
     if key.ctrl || key.option || key.command {
         return None;
     }
-    match (only_char(key.chars)?, shift) {
+    match (only_char(key.chars)?, key.shift) {
         (BACKSPACE, _) => Some(DockKey::Backspace),
         (FORWARD_DELETE, _) => Some(DockKey::Delete),
         (ARROW_LEFT, false) => Some(DockKey::Left),
@@ -366,17 +441,28 @@ mod tests {
         let chars = c.to_string();
         let held = KeyPress {
             chars: &chars,
+            shift: false,
             ctrl: false,
             option,
             command,
         };
         let plain = KeyPress {
             chars: &chars,
+            shift: false,
             ctrl: false,
             option: false,
             command: false,
         };
         (encode_key(held), encode_key(plain))
+    }
+
+    /// Whether `held` is only `plain` with the held modifier riding along — the same function key
+    /// in xterm's encoding (⌥↑, ⌥F5), not a meaning of its own.
+    fn rides_along(held: &Option<KeyInput>, plain: &Option<KeyInput>) -> bool {
+        matches!(
+            (held, plain),
+            (Some(KeyInput::Key(held, _)), Some(KeyInput::Key(plain, _))) if held == plain
+        )
     }
 
     #[test]
@@ -395,14 +481,15 @@ mod tests {
             assert_eq!(line_editing(&key.chord), Some(key));
         }
         // And a key that gets bytes of its own under ⌘ or ⌥ is in the list: every printable
-        // ASCII character, AppKit's function keys, and the control characters a key reports.
+        // ASCII character, AppKit's function keys, and the control characters a key reports. A
+        // modifier that only rides along with a function key is not a meaning of its own.
         let candidates = (' '..='~')
             .chain('\u{f700}'..='\u{f8ff}')
             .chain(['\r', '\t', '\u{1b}', '\u{3}', '\u{8}', '\u{7f}']);
         for c in candidates {
             for (option, command) in [(true, false), (false, true)] {
                 let (held, plain) = held_and_plain(c, option, command);
-                if held != plain {
+                if held != plain && !rides_along(&held, &plain) {
                     assert!(
                         LINE_EDITING.iter().any(|key| key.character == c
                             && key.chord.mods.option == option
@@ -432,18 +519,24 @@ mod tests {
 
     #[test]
     fn the_dock_keys_are_the_plain_eight() {
-        assert_eq!(dock_key(plain("\u{7f}"), false), Some(DockKey::Backspace));
-        assert_eq!(dock_key(plain("\u{7f}"), true), Some(DockKey::Backspace));
-        assert_eq!(dock_key(plain("\u{f728}"), false), Some(DockKey::Delete));
-        assert_eq!(dock_key(plain("\u{f702}"), false), Some(DockKey::Left));
-        assert_eq!(dock_key(plain("\u{f703}"), false), Some(DockKey::Right));
-        assert_eq!(dock_key(plain("\u{f702}"), true), Some(DockKey::ShiftLeft));
-        assert_eq!(dock_key(plain("\u{f703}"), true), Some(DockKey::ShiftRight));
-        assert_eq!(dock_key(plain("\r"), true), Some(DockKey::NewLine));
-        assert_eq!(dock_key(plain("\r"), false), Some(DockKey::Enter));
-        assert_eq!(dock_key(plain("\u{3}"), false), Some(DockKey::Enter));
+        assert_eq!(dock_key(plain("\u{7f}")), Some(DockKey::Backspace));
+        assert_eq!(dock_key(shifted(plain("\u{7f}"))), Some(DockKey::Backspace));
+        assert_eq!(dock_key(plain("\u{f728}")), Some(DockKey::Delete));
+        assert_eq!(dock_key(plain("\u{f702}")), Some(DockKey::Left));
+        assert_eq!(dock_key(plain("\u{f703}")), Some(DockKey::Right));
+        assert_eq!(
+            dock_key(shifted(plain("\u{f702}"))),
+            Some(DockKey::ShiftLeft)
+        );
+        assert_eq!(
+            dock_key(shifted(plain("\u{f703}"))),
+            Some(DockKey::ShiftRight)
+        );
+        assert_eq!(dock_key(shifted(plain("\r"))), Some(DockKey::NewLine));
+        assert_eq!(dock_key(plain("\r")), Some(DockKey::Enter));
+        assert_eq!(dock_key(plain("\u{3}")), Some(DockKey::Enter));
         // Ctrl-C (the same `characters`, with Control) is not a dock key.
-        assert_eq!(dock_key(ctrl("\u{3}"), false), None);
+        assert_eq!(dock_key(ctrl("\u{3}")), None);
         // ⌥⏎ and ⌘⏎ are not dock keys.
         for flag in [
             KeyPress {
@@ -455,19 +548,10 @@ mod tests {
                 ..plain("\r")
             },
         ] {
-            assert_eq!(dock_key(flag, false), None);
+            assert_eq!(dock_key(flag), None);
         }
         // ⌥⇧⏎ and ⌃⇧⏎ are not dock keys.
-        assert_eq!(
-            dock_key(
-                KeyPress {
-                    option: true,
-                    ..plain("\r")
-                },
-                true
-            ),
-            None
-        );
+        assert_eq!(dock_key(shifted(option("\r"))), None);
         // "Any other key": modified ones and text.
         for key in [
             KeyPress {
@@ -486,7 +570,7 @@ mod tests {
             plain("\u{f700}"),
             plain("\u{7f}\u{7f}"),
         ] {
-            assert_eq!(dock_key(key, false), None, "{:?}", key.chars);
+            assert_eq!(dock_key(key), None, "{:?}", key.chars);
         }
     }
 
@@ -495,11 +579,25 @@ mod tests {
     fn plain(chars: &str) -> KeyPress<'_> {
         KeyPress {
             chars,
+            shift: false,
             ctrl: false,
             option: false,
             command: false,
         }
     }
+
+    fn shifted(key: KeyPress<'_>) -> KeyPress<'_> {
+        KeyPress { shift: true, ..key }
+    }
+
+    /// A function key with its modifiers, as [`encode_key`] answers.
+    fn key(key: FunctionKey, mods: Mods) -> Option<KeyInput> {
+        Some(KeyInput::Key(key, mods))
+    }
+
+    const SHIFT: Mods = Mods::new(false, false, true, false);
+    const OPTION: Mods = Mods::new(false, true, false, false);
+    const CTRL: Mods = Mods::new(true, false, false, false);
 
     fn ctrl(chars: &str) -> KeyPress<'_> {
         KeyPress {
@@ -560,30 +658,62 @@ mod tests {
         // An arrow's bytes depend on DECCKM (`\e[A` or `\eOA`) and the mode is in `bt-core`:
         // `\e[A` used to be written here unconditionally, whereas less, reading
         // `xterm-256color`'s terminfo, turns DECCKM on at startup and expects `\eOA`.
-        assert_eq!(
-            encode_key(plain("\u{f700}")),
-            Some(KeyInput::Arrow(Arrow::Up))
-        );
-        assert_eq!(
-            encode_key(plain("\u{f701}")),
-            Some(KeyInput::Arrow(Arrow::Down))
-        );
-        assert_eq!(
-            encode_key(plain("\u{f702}")),
-            Some(KeyInput::Arrow(Arrow::Left))
-        );
-        assert_eq!(
-            encode_key(plain("\u{f703}")),
-            Some(KeyInput::Arrow(Arrow::Right))
-        );
-        // An arrow with Control is a plain arrow too: modified arrows (`\e[1;5A`) are out of scope.
-        assert_eq!(
-            encode_key(ctrl("\u{f700}")),
-            Some(KeyInput::Arrow(Arrow::Up))
-        );
+        let arrow = |direction| key(FunctionKey::Arrow(direction), Mods::NONE);
+        assert_eq!(encode_key(plain("\u{f700}")), arrow(Arrow::Up));
+        assert_eq!(encode_key(plain("\u{f701}")), arrow(Arrow::Down));
+        assert_eq!(encode_key(plain("\u{f702}")), arrow(Arrow::Left));
+        assert_eq!(encode_key(plain("\u{f703}")), arrow(Arrow::Right));
         // Single-character match, the same criterion as PgUp: a composition starting with an
         // arrow is not read as an arrow from its first character.
         assert_eq!(encode_key(plain("\u{f700}x")), None);
+    }
+
+    #[test]
+    fn a_function_key_carries_shift_and_control() {
+        // `bt-core` turns them into xterm's parameter (`\e[1;2D`), or drops them at a prompt.
+        let left = FunctionKey::Arrow(Arrow::Left);
+        assert_eq!(encode_key(shifted(plain("\u{f702}"))), key(left, SHIFT));
+        assert_eq!(encode_key(ctrl("\u{f702}")), key(left, CTRL));
+        let up = FunctionKey::Arrow(Arrow::Up);
+        let both = Mods::new(true, false, true, false);
+        assert_eq!(encode_key(shifted(ctrl("\u{f700}"))), key(up, both));
+        assert_eq!(
+            encode_key(shifted(plain("\u{f729}"))),
+            key(FunctionKey::Home, SHIFT)
+        );
+        assert_eq!(encode_key(ctrl("\u{f728}")), key(FunctionKey::Delete, CTRL));
+        // A ⌘ key that reaches the terminal is bytes; ⌘ never rides with a function key.
+        assert_eq!(encode(shifted(command("\u{f702}"))), b"\x01");
+    }
+
+    #[test]
+    fn home_end_and_the_f_keys_are_keys() {
+        // fn+← and fn+→ on a laptop. They used to be swallowed.
+        assert_eq!(
+            encode_key(plain("\u{f729}")),
+            key(FunctionKey::Home, Mods::NONE)
+        );
+        assert_eq!(
+            encode_key(plain("\u{f72b}")),
+            key(FunctionKey::End, Mods::NONE)
+        );
+        // `NSF1FunctionKey` … `NSF12FunctionKey`.
+        for n in 1..=12u8 {
+            let c = char::from_u32(0xf703 + u32::from(n)).expect("a function key");
+            assert_eq!(
+                encode_key(plain(&c.to_string())),
+                key(FunctionKey::F(n), Mods::NONE),
+                "F{n}"
+            );
+        }
+        // F13–F20 are xterm's ⇧F1–⇧F8 (`kf13=\E[1;2P`).
+        assert_eq!(encode_key(plain("\u{f710}")), key(FunctionKey::F(1), SHIFT));
+        assert_eq!(encode_key(plain("\u{f717}")), key(FunctionKey::F(8), SHIFT));
+        assert_eq!(
+            encode_key(ctrl("\u{f714}")),
+            key(FunctionKey::F(5), Mods::new(true, false, true, false))
+        );
+        assert_eq!(encode_key(plain("\u{f704}x")), None);
     }
 
     #[test]
@@ -623,12 +753,12 @@ mod tests {
         // `keyDown:`'s fallback as `None` and never comes here; the test still pins the
         // swallowing contract.
         assert!(encode_key(plain("")).is_none());
-        // F1 and Home are in the private use area. Turning them into UTF-8 and writing them to
-        // the PTY would send garbage to the shell; their sequences are in 00X. **The stack does
+        // F21 and Insert are in the private use area and have no sequence here. Turning them
+        // into UTF-8 and writing them to the PTY would send garbage to the shell. **The stack does
         // not swallow these**: both fall to `doCommandBySelector:`, pass through the no-op, and
         // the swallowing decision is still here.
-        assert!(encode_key(plain("\u{f704}")).is_none(), "F1");
-        assert!(encode_key(plain("\u{f729}")).is_none(), "Home");
+        assert!(encode_key(plain("\u{f718}")).is_none(), "F21");
+        assert!(encode_key(plain("\u{f727}")).is_none(), "Insert");
     }
 
     #[test]
@@ -636,8 +766,24 @@ mod tests {
         // PgUp/PgDn are no longer swallowed in the function key range: less and vim expect these
         // two sequences to page through. The sequences are `xterm-256color`'s `kpp`/`knp` —
         // `TERM` does not change.
-        assert_eq!(encode(plain("\u{f72c}")), b"\x1b[5~");
-        assert_eq!(encode(plain("\u{f72d}")), b"\x1b[6~");
+        assert_eq!(
+            encode_key(plain("\u{f72c}")),
+            key(FunctionKey::PageUp, Mods::NONE)
+        );
+        assert_eq!(
+            encode_key(plain("\u{f72d}")),
+            key(FunctionKey::PageDown, Mods::NONE)
+        );
+        // Shift is the terminal's scrolling: when the session refuses it (the alternate
+        // screen) the key goes without it — less reads no `\e[5;2~`. Control rides along.
+        assert_eq!(
+            encode_key(shifted(plain("\u{f72c}"))),
+            key(FunctionKey::PageUp, Mods::NONE)
+        );
+        assert_eq!(
+            encode_key(ctrl("\u{f72d}")),
+            key(FunctionKey::PageDown, CTRL)
+        );
         // Single-character match, the same criterion as `page_scroll`: a multi-character
         // `characters` starting with PgUp does not produce a sequence and drop the rest without a
         // trace — it is swallowed whole, like an unrecognised function key.
@@ -652,7 +798,10 @@ mod tests {
         // fn+Backspace is `NSDeleteFunctionKey` (U+F728): it used to be swallowed in the function
         // key arm.
         assert_eq!(encode(plain("\u{19}")), b"\x1b[Z");
-        assert_eq!(encode(plain("\u{f728}")), b"\x1b[3~");
+        assert_eq!(
+            encode_key(plain("\u{f728}")),
+            key(FunctionKey::Delete, Mods::NONE)
+        );
         // U+0019 is also Ctrl-Y's `characters` (`'y' & 0x1f`) — readline's yank. Only the
         // Control flag tells them apart, like the numpad Enter/Ctrl-C pair; if mixed up, Ctrl-Y
         // becomes back-tab.
@@ -660,9 +809,6 @@ mod tests {
         assert_eq!(encode(ctrl("y")), b"\x19");
         // Single-character match, the same criterion as PgUp.
         assert!(encode_key(plain("\u{f728}x")).is_none());
-        // Forward delete (⌦) with Option is a plain `kdch1` too: the Meta class is for backspace
-        // and the arrows, forward delete is **out of scope** (`encode_key`'s doc).
-        assert_eq!(encode(option("\u{f728}")), b"\x1b[3~");
     }
 
     #[test]
@@ -675,22 +821,48 @@ mod tests {
         // `accept-and-hold`), so `\eB` would not move by word.
         assert_eq!(encode(option("\u{f702}")), b"\x1bb", "Option+←");
         assert_eq!(encode(option("\u{f703}")), b"\x1bf", "Option+→");
-        assert_eq!(encode(option("\u{7f}")), b"\x1b\x7f", "Option+Delete");
+        assert_eq!(encode(option("\u{7f}")), b"\x1b\x7f", "Option+Backspace");
+        // ⌫'s mirror: `\ed` is `kill-word` in zsh, bash and fish.
+        assert_eq!(
+            encode(option("\u{f728}")),
+            b"\x1bd",
+            "Option+Forward Delete"
+        );
+        // Accompanying modifiers are not consulted: ⇧⌥← still moves by word.
+        assert_eq!(encode(shifted(option("\u{f702}"))), b"\x1bb");
         // The form without Option stays untouched: an arrow is still an arrow (its bytes depend
         // on DECCKM), ⌫ is still a single byte.
         assert_eq!(
             encode_key(plain("\u{f702}")),
-            Some(KeyInput::Arrow(Arrow::Left))
+            key(FunctionKey::Arrow(Arrow::Left), Mods::NONE)
         );
         assert_eq!(encode(plain("\u{7f}")), b"\x7f");
-        // Up/down arrows with Option are still arrows: moving by word is a horizontal gesture,
-        // it has no vertical counterpart.
+        // Up/down arrows with Option are not this class: moving by word is a horizontal gesture,
+        // and ⌥ rides along with ↑ in xterm's encoding (Codex's ⌥↑).
         assert_eq!(
             encode_key(option("\u{f700}")),
-            Some(KeyInput::Arrow(Arrow::Up))
+            key(FunctionKey::Arrow(Arrow::Up), OPTION)
         );
         // Single-character match, the same criterion as PgUp.
         assert!(encode_key(option("\u{f702}x")).is_none());
+    }
+
+    #[test]
+    fn option_return_is_a_line_break() {
+        // `\e\r`: Codex and Claude Code read it as a new line without sending; zsh and fish put
+        // a line break in the line at their prompt.
+        assert_eq!(encode(option("\r")), b"\x1b\r");
+        assert_eq!(encode(shifted(option("\r"))), b"\x1b\r");
+        // Not with Control, and plain Return still runs the line.
+        assert_eq!(
+            encode(KeyPress {
+                option: true,
+                ..ctrl("\r")
+            }),
+            b"\r"
+        );
+        assert_eq!(encode(plain("\r")), b"\r");
+        assert_eq!(encode(shifted(plain("\r"))), b"\r");
     }
 
     #[test]
@@ -746,10 +918,13 @@ mod tests {
             b"\x01"
         );
         // An arrow without Cmd is still an **arrow**, not bytes: `bt-core` knows the mode.
-        assert_eq!(encode_key(plain(&left)), Some(KeyInput::Arrow(Arrow::Left)));
+        assert_eq!(
+            encode_key(plain(&left)),
+            key(FunctionKey::Arrow(Arrow::Left), Mods::NONE)
+        );
         assert_eq!(
             encode_key(plain(&right)),
-            Some(KeyInput::Arrow(Arrow::Right))
+            key(FunctionKey::Arrow(Arrow::Right), Mods::NONE)
         );
         // Single-character match, the same criterion as PgUp and ⌘⌫: a composition's first
         // character is not read as start-of-line.

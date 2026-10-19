@@ -667,7 +667,10 @@ mod tests {
         assert!(!listed.contains(&"Split Down"), "{listed:?}");
         // The built-in keys are listed under All only.
         assert!(page.listing(Filter::Changed, "", None).built_in.is_empty());
-        assert_eq!(page.listing(Filter::All, "", None).built_in.len(), 6);
+        assert_eq!(
+            page.listing(Filter::All, "", None).built_in.len(),
+            LINE_EDITING.len()
+        );
     }
 
     #[test]

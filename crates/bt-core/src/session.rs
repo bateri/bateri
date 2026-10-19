@@ -93,9 +93,10 @@ use crate::history::{self, CommandMemory, CommandRecord, RecordState, Remembered
 use crate::identity::{LC_TERMINAL, PaneUuid, TERM_PROGRAM, TERM_PROGRAM_VERSION};
 // The journal's side record comes in under an alias: `Side` is alacritty's
 // selection side in this module.
+use crate::Mods;
 use crate::input::{
-    self, Arrow, ButtonRoute, MouseButton, MouseEncoding, MouseModifiers, WHEEL_DOWN, WHEEL_UP,
-    WheelRoute,
+    self, Arrow, ButtonRoute, FunctionKey, MouseButton, MouseEncoding, MouseModifiers, WHEEL_DOWN,
+    WHEEL_UP, WheelRoute,
 };
 use crate::journal::{Base, Journal, Side as JournalSide};
 use crate::link;
@@ -4875,6 +4876,9 @@ pub struct Session {
     /// owns the caret and re-deriving that decision would mean
     /// writing `frame()`'s three preconditions a second time.
     caret_in_dock: AtomicBool,
+    /// The keyboard focus last heard ([`Session::set_focus`]); `None` before
+    /// the pane first said. A leaf lock, never taken under `Term`.
+    focus: Mutex<Option<bool>>,
     /// `[appearance] minimum_contrast` as `f64` bits — the ratio a program's
     /// text keeps against its ground in [`Session::frame`]
     /// ([`LinearRgba::legible_on`]); [`Session::set_minimum_contrast`]
@@ -5518,6 +5522,7 @@ impl Session {
             // From then on the content frames write it.
             alt_screen: AtomicBool::new(alt_at_birth),
             caret_in_dock: AtomicBool::new(false),
+            focus: Mutex::new(None),
             minimum_contrast: AtomicU64::new(crate::settings::MINIMUM_CONTRAST.to_bits()),
             search: Mutex::new(SearchSlot::default()),
             // Nothing wanted at opening: the shell asks when a bar is wide.
@@ -8252,14 +8257,42 @@ impl Session {
         self.send_report(report)
     }
 
-    /// An arrow key — the keyboard's arrow enters not as bytes but as a key; why
-    /// is in [`Arrow`].
+    /// A function key with its modifiers — an arrow, Home, End, a page key,
+    /// ⌦ or F1–F12 enters not as bytes but as a key, because its bytes depend
+    /// on the mode and on whether a shell is reading the line
+    /// ([`input::function_key`]).
     ///
     /// User input like [`Session::write`]: it clears the selection and returns
     /// the window to the bottom; the mode question and the two are in the **same**
-    /// `Term` lock (`send_input`), i.e. an arrow key pays a single lock per stroke.
-    pub fn write_arrow(&self, arrow: Arrow) {
-        self.send_input(|mode| input::arrow(arrow, mode).to_vec());
+    /// `Term` lock (`send_input`), i.e. a key pays a single lock per stroke. The
+    /// prompt question is asked **before** it, in the shell's leaf lock, which
+    /// never goes under `Term`. A key with no bytes (F5 at a prompt) writes
+    /// nothing and touches neither the selection nor the window.
+    pub fn write_key(&self, key: FunctionKey, mods: Mods) {
+        let at_prompt = lock(&self.shell).at_prompt();
+        self.send_input(|mode| input::function_key(key, mods, mode, at_prompt));
+    }
+
+    /// The pane gained (`true`) or lost the keyboard: a program that asked for
+    /// focus events (`CSI ? 1004 h` — vim, tmux) hears `CSI I` or `CSI O`.
+    ///
+    /// Only a **change** is reported, and the first call only records: a pane
+    /// learns its focus when it is born and when it adopts a session after an
+    /// update, and neither is news to the program. The report is not typing:
+    /// it goes straight to the PTY like a mouse report, keeping the selection
+    /// and the scrolled window where they are.
+    ///
+    /// **Journal-neutral:** writes only to the PTY, `Term` is read for the mode.
+    pub fn set_focus(&self, focused: bool) {
+        let before = lock(&self.focus).replace(focused);
+        if before.is_none_or(|before| before == focused) {
+            return;
+        }
+        if !self.term.lock().mode().contains(TermMode::FOCUS_IN_OUT) {
+            return;
+        }
+        let report: &'static [u8] = if focused { b"\x1b[I" } else { b"\x1b[O" };
+        self.send(Msg::Input(report.into()));
     }
 
     /// Scrolls the visible window by `pages` pages (Shift+PgUp/PgDn); a positive
@@ -11747,14 +11780,16 @@ impl Session {
     /// `write` with a slice would mean a second full copy.
     ///
     /// An empty vector is silently dropped; `write` and `paste` both go through
-    /// this gate and together with the arrow key ([`Session::write_arrow`]) all
+    /// this gate and together with the function keys ([`Session::write_key`]) all
     /// meet in `send_input` — that is the **single** send point of user input.
-    /// The other two places that build a `Msg::Input` are not user input, and
+    /// The other places that build a `Msg::Input` are not user input, and
     /// neither the return to the bottom below nor the clearing of the selection
     /// applies to them: `Adapter::reply` answers the application's question
     /// (there is no `Session` there, the adapter writes to its own channel and
     /// the reader thread holds the `Term` lock), [`Session::scroll_wheel`] gives
-    /// the wheel's report or arrow to the application (rationale there). Cmd-C
+    /// the wheel's report or arrow to the application (rationale there), and a
+    /// mouse or focus report ([`Session::set_focus`]) tells it where the pointer
+    /// or the keyboard is. Cmd-C
     /// does not write at all ([`Session::selection_text`]). Which of the paths
     /// clears is pinned by `input_clears_the_selection` and
     /// `wheel_and_replies_keep_the_selection`.
@@ -23584,8 +23619,8 @@ mod tests {
         let (plain, wake) = dump_session(40, "printf '\\033[?2004h'", |mode| {
             mode.contains(TermMode::BRACKETED_PASTE)
         });
-        plain.write_arrow(Arrow::Up);
-        plain.write_arrow(Arrow::Left);
+        plain.write_key(FunctionKey::Arrow(Arrow::Up), Mods::NONE);
+        plain.write_key(FunctionKey::Arrow(Arrow::Left), Mods::NONE);
         expect_sent(&plain, &wake, b"\x1b[A\x1b[D");
 
         // DECCKM on (less and ncurses's `smkx`): SS3 — the keyboard and the wheel
@@ -23593,9 +23628,59 @@ mod tests {
         let (app, wake) = dump_session(40, "printf '\\033[?1049h\\033[?1h'", |mode| {
             mode.contains(TermMode::ALT_SCREEN | TermMode::APP_CURSOR)
         });
-        app.write_arrow(Arrow::Down);
+        app.write_key(FunctionKey::Arrow(Arrow::Down), Mods::NONE);
         assert_eq!(scroll(&app, 1), Wheel::Sent);
         expect_sent(&app, &wake, b"\x1bOB\x1bOA");
+    }
+
+    #[test]
+    fn a_modifier_reaches_a_program_but_not_a_prompt() {
+        let shift = Mods::new(false, false, true, false);
+        // No marks: whatever reads the keys gets xterm's form.
+        let (program, wake) = dump_session(40, "printf '\\033[?2004h'", |mode| {
+            mode.contains(TermMode::BRACKETED_PASTE)
+        });
+        program.write_key(FunctionKey::Arrow(Arrow::Left), shift);
+        program.write_key(FunctionKey::F(5), Mods::NONE);
+        expect_sent(&program, &wake, b"\x1b[1;2D\x1b[15~");
+
+        // At a prompt the shell's line editor reads them: the modifier drops, the
+        // function key is swallowed, Home goes in the form the shell binds.
+        let (prompt, wake) = dump_session(
+            40,
+            "printf '\\033]133;A\\007\\033]133;B\\007\\033[?2004h'",
+            |mode| mode.contains(TermMode::BRACKETED_PASTE),
+        );
+        wait_until("the prompt did not end", Duration::from_secs(5), || {
+            prompt.shell_state().map(|s| s.phase) == Some(ShellPhase::Input)
+        });
+        prompt.write_key(FunctionKey::Arrow(Arrow::Left), shift);
+        prompt.write_key(FunctionKey::F(5), Mods::NONE);
+        prompt.write_key(FunctionKey::Home, Mods::NONE);
+        expect_sent(&prompt, &wake, b"\x1b[D\x1bOH");
+    }
+
+    #[test]
+    fn a_focus_change_is_reported_only_to_a_program_that_asked() {
+        // Not asked: nothing goes, whatever the focus does.
+        let (quiet, wake) = dump_session(40, "printf '\\033[?2004h'", |mode| {
+            mode.contains(TermMode::BRACKETED_PASTE)
+        });
+        quiet.set_focus(true);
+        quiet.set_focus(false);
+        quiet.set_focus(true);
+        expect_sent(&quiet, &wake, b"");
+
+        // Asked: the first word only records, a repeat is no news.
+        let (asked, wake) = dump_session(40, "printf '\\033[?1004h'", |mode| {
+            mode.contains(TermMode::FOCUS_IN_OUT)
+        });
+        asked.set_focus(true);
+        asked.set_focus(true);
+        asked.set_focus(false);
+        asked.set_focus(false);
+        asked.set_focus(true);
+        expect_sent(&asked, &wake, b"\x1b[O\x1b[I");
     }
 
     #[test]
@@ -23841,7 +23926,7 @@ mod tests {
         // The arrow key too: the mode question and the return to the bottom in the same lock.
         assert_eq!(scroll(&session, 5), Wheel::Scrolled(5));
         wait_settled(&session);
-        session.write_arrow(Arrow::Up);
+        session.write_key(FunctionKey::Arrow(Arrow::Up), Mods::NONE);
         assert_eq!(
             display_offset(&session),
             0,
@@ -23920,7 +24005,9 @@ mod tests {
         }
         clears(&session, "yazma", |s| s.write(b"x"));
         clears(&session, "paste", |s| s.paste(b"y".to_vec()));
-        clears(&session, "arrow key", |s| s.write_arrow(Arrow::Up));
+        clears(&session, "arrow key", |s| {
+            s.write_key(FunctionKey::Arrow(Arrow::Up), Mods::NONE);
+        });
 
         // Empty input does not touch the selection — nor the window
         // (`input_returns_the_view_to_the_bottom`): if there is no byte to send

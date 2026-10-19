@@ -84,9 +84,9 @@
 //! allow-list stays untouched; Ctrl-I still goes to zsh as a tab.
 //! **A function key too**: ⌘Home/⌘End/⌘PgUp/⌘PgDn are View items, the
 //! shortcut character is AppKit's function-key code point
-//! (`NSHomeFunctionKey` U+F729 …). A menu shortcut, not a key encoding — the
-//! swallowing of Home/End in `keyDown:` and the invariant of `bt_core::Arrow` are
-//! untouched. The splits' shortcuts go the same way: ⌘[ / ⌘],
+//! (`NSHomeFunctionKey` U+F729 …). A menu shortcut, not a key encoding — plain
+//! Home/End still reach the program from `keyDown:` (`bt_core::FunctionKey`), the
+//! menu matches only the ⌘ form. The splits' shortcuts go the same way: ⌘[ / ⌘],
 //! ⌥⌘/⌃⌘ + arrow (the arrow keys' code points U+F700–U+F703), ⌃⌘= and ⇧⌘↩ —
 //! `keyDown:`'s three-key Cmd allow-list (⌘⌫, ⌘←, ⌘→) and the dock's ⇧⏎ do not
 //! change, because the menu matches them together with their modifiers.

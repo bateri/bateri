@@ -1502,7 +1502,7 @@ mod tests {
         let built_in = shown
             .filter(|entry| matches!(entry, Entry::BuiltIn(_)))
             .count();
-        assert_eq!(built_in, 6);
+        assert_eq!(built_in, bt_shell_common::keys::LINE_EDITING.len());
     }
 
     #[test]

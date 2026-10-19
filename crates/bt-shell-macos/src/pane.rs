@@ -4302,8 +4302,21 @@ impl TerminalPane {
         if let Some(link) = self.ivars().link.get() {
             link.set_keyboard_in_terminal(here);
         }
+        self.report_focus(self.is_active(), here);
         if here {
             self.host().focused(self.ivars().id);
+        }
+    }
+
+    /// Tells the program in the terminal whether it has the keyboard
+    /// ([`Session::set_focus`], heard only by one that asked): the pane's
+    /// window is the user's (`window`) **and** the keyboard is in its terminal
+    /// (`keyboard`) — the two bits the caret fills on, so a program hears focus
+    /// exactly when the caret is solid. The keyboard in the search field is
+    /// away from the program, as it is in another pane of the split.
+    fn report_focus(&self, window: bool, keyboard: bool) {
+        if let Some(session) = self.session() {
+            session.set_focus(window && keyboard);
         }
     }
 
@@ -4826,7 +4839,8 @@ impl TerminalPane {
         self.view().release_scrollbar_hover();
     }
 
-    /// The focus changed — forwards it to `bt-gpu`.
+    /// The focus changed — forwards it to `bt-gpu` and to the program in the
+    /// terminal ([`Self::report_focus`]).
     ///
     /// **Never called in a hermetic run** and the gate is here, not in
     /// `bt-gpu`'s default: `DisplayLink`'s `focused` is born `true` anyway but
@@ -4850,6 +4864,7 @@ impl TerminalPane {
         if let Some(link) = self.ivars().link.get() {
             link.set_focused(focused);
         }
+        self.report_focus(focused, self.view().is_first_responder());
     }
 
     /// The pane's share of the closing sequence — **starts, does not wait**.

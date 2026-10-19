@@ -1332,15 +1332,13 @@ define_class!(
             // would come out accented; found in code review).
             if self.ivars().marked_text.borrow().is_empty()
                 && let Some(chars) = chars.as_deref()
-                && let Some(key) = dock_key(
-                    KeyPress {
-                        chars,
-                        ctrl,
-                        option,
-                        command,
-                    },
+                && let Some(key) = dock_key(KeyPress {
+                    chars,
                     shift,
-                )
+                    ctrl,
+                    option,
+                    command,
+                })
                 && session.dock_key(key)
             {
                 return;
@@ -1397,14 +1395,16 @@ define_class!(
             };
             let key = KeyPress {
                 chars: &chars,
+                shift,
                 ctrl,
                 option,
                 command,
             };
             match encode_key(key) {
                 Some(KeyInput::Bytes(bytes)) => session.write(&bytes),
-                // The arrow's bytes depend on DECCKM, the mode is in `bt-core`.
-                Some(KeyInput::Arrow(arrow)) => session.write_arrow(arrow),
+                // A function key's bytes depend on DECCKM and on whether a shell reads the
+                // line, both in `bt-core`.
+                Some(KeyInput::Key(key, mods)) => session.write_key(key, mods),
                 None => {}
             }
         }
