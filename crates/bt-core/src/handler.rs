@@ -14,7 +14,10 @@
 //! extends it and the cluster's column count does not change it lands in the
 //! head cell's `zerowidth`; if it grows the cluster from one column to two
 //! the head cell is rewritten through alacritty's **own** wide path (see
-//! [`ClusterHandler::widen`]). The rule is in [`crate::cluster`].
+//! [`ClusterHandler::widen`]). The rule is in [`crate::cluster`]. A
+//! zero-width code point that finds the head cell already holding
+//! [`crate::cluster::MAX_CODE_POINTS`] is dropped, on the open and the
+//! closed path alike, so no cell's cluster grows past the ceiling.
 //!
 //! **The open cluster's position is not stored, it is derived from the
 //! grid** — by the method of alacritty's `zerowidth` branch (cursor − 1, the
@@ -79,6 +82,7 @@ use alacritty_terminal::vte::ansi::{
 // vte does not re-export this type; the reason for the edge is in the root
 // `Cargo.toml`.
 use cursor_icon::CursorIcon;
+use unicode_width::UnicodeWidthChar;
 
 use crate::graphics::{Commands, Env, Hub, Motion, Outcome, Pending, Sink, screen_of};
 use crate::input::PIXEL_MOUSE_MODE;
@@ -317,6 +321,15 @@ impl<'a, U: EventListener> ClusterHandler<'a, U> {
         Point::new(line, column)
     }
 
+    /// Does the head cell's cluster hold [`crate::cluster::MAX_CODE_POINTS`]
+    /// already. Read from the length of `zerowidth`, not from the cluster's
+    /// text: the answer costs the same for a cell of two code points as for
+    /// one that alacritty's own path filled before clustering was asked.
+    fn is_full(&self, at: Point) -> bool {
+        let cell = &self.term.grid()[at.line][at.column];
+        1 + cell.zerowidth().map_or(0, <[char]>::len) >= crate::cluster::MAX_CODE_POINTS
+    }
+
     /// The head cell's cluster: base character + `zerowidth`.
     fn open(&self, at: Point) -> String {
         let cell = &self.term.grid()[at.line][at.column];
@@ -419,10 +432,21 @@ impl<U: EventListener> Handler for ClusterHandler<'_, U> {
             return self.term.input(c);
         }
         let open_cluster = std::mem::replace(self.last_input, true);
-        if !open_cluster || !crate::cluster::may_extend(c) {
+        if !crate::cluster::may_extend(c) {
             return self.term.input(c);
         }
         let at = self.head();
+        // A zero-width code point lands on the head cell whether the cluster
+        // is open or not — alacritty's own zero-width branch picks the same
+        // cell —, so the ceiling is asked before either path: past it the code
+        // point is dropped. Asked of the cell's length, before `open` is
+        // built, so a long run costs the same per mark however long it is.
+        if UnicodeWidthChar::width(c) == Some(0) && self.is_full(at) {
+            return;
+        }
+        if !open_cluster {
+            return self.term.input(c);
+        }
         let mut open = self.open(at);
         if !crate::cluster::extends(&open, c) {
             return self.term.input(c);
@@ -432,8 +456,11 @@ impl<U: EventListener> Handler for ClusterHandler<'_, U> {
             .contains(Flags::WIDE_CHAR);
         open.push(c);
         // Width is asked after **every** extension, including those from the
-        // zero-width arm: `1` + VS16 + `U+20E3` widens at the VS16.
-        if narrow && crate::cluster::width(&open) >= 2 {
+        // zero-width arm: `1` + VS16 + `U+20E3` widens at the VS16. Only the
+        // newest prefix is measured ([`crate::cluster::widens`]): the shorter
+        // ones were measured as they arrived, and a narrow cell says none of
+        // them reached two columns.
+        if narrow && crate::cluster::widens(&open) {
             self.widen(at, &open);
         } else {
             self.term.grid_mut()[at.line][at.column].push_zerowidth(c);
@@ -635,6 +662,7 @@ impl<U: EventListener> Handler for ClusterHandler<'_, U> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cluster::MAX_CODE_POINTS;
     use alacritty_terminal::event::VoidListener;
     use alacritty_terminal::index::{Column, Line};
     use alacritty_terminal::term::Config;
@@ -937,6 +965,75 @@ mod tests {
         let mut cut = term(10, 1);
         feed(&mut cut, true, "👍\x1b_Xnot ours\x1b\\🏽");
         assert_eq!(rows(&cut)[0], "[👍]|·|[🏽]|·");
+    }
+
+    /// A run of combining marks behind a narrow letter — the input that used
+    /// to cost the cube of its length under `Term`'s lock — goes through in
+    /// time linear in the run, and the cell keeps [`MAX_CODE_POINTS`] code
+    /// points. The parse runs on a thread of its own and is waited for with a
+    /// deadline, so a regression fails here instead of hanging the suite.
+    #[test]
+    fn a_long_run_of_combining_marks_is_cut_at_the_ceiling_and_stays_fast() {
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut t = term(10, 2);
+            feed(&mut t, true, &format!("a{}b", "\u{301}".repeat(50_000)));
+            let _ = done.send((rows(&t), t.grid().cursor.point.column));
+        });
+        let (rows, cursor) = finished
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("50 000 marks took more than two seconds");
+        let kept = format!("a{}", "\u{301}".repeat(MAX_CODE_POINTS - 1));
+        assert_eq!(rows[0], format!("{kept}|b"));
+        assert_eq!(cursor, Column(2));
+    }
+
+    /// The ceiling holds when every mark arrives with the cluster closed (an
+    /// SGR in front of each): alacritty's own zero-width branch would push
+    /// them all onto the same cell, and the next mark through the wrapper
+    /// would rebuild them all.
+    #[test]
+    fn marks_behind_a_closed_cluster_stop_at_the_ceiling_too() {
+        let mut t = term(10, 2);
+        feed(&mut t, true, &format!("a{}", "\x1b[m\u{301}".repeat(100)));
+        let kept = format!("a{}", "\u{301}".repeat(MAX_CODE_POINTS - 1));
+        assert_eq!(rows(&t)[0], kept);
+        // With clustering off the bytes are alacritty's, ceiling or not.
+        let mut off = term(10, 2);
+        feed(
+            &mut off,
+            false,
+            &format!("a{}", "\x1b[m\u{301}".repeat(100)),
+        );
+        assert_eq!(rows(&off)[0], format!("a{}", "\u{301}".repeat(100)));
+    }
+
+    /// Past the ceiling the grid takes the columns the cluster walk says —
+    /// the dock's and the freshness gate's reading of the same text: a
+    /// dropped mark takes none, an emoji behind a full ZWJ run starts a wide
+    /// cell of its own, and a mark behind a wide head that has room still
+    /// joins it.
+    #[test]
+    fn past_the_ceiling_the_grid_keeps_the_walks_columns() {
+        let marks = "\u{301}".repeat(MAX_CODE_POINTS + 8);
+        let joiners = "\u{200D}".repeat(MAX_CODE_POINTS + 3);
+        for text in [
+            format!("a{marks}b"),
+            format!("👨{joiners}👩x"),
+            format!("x👍🏽{marks}y"),
+            format!("1\u{FE0F}{marks}\u{20E3}z"),
+        ] {
+            let mut walked = 0;
+            crate::cluster::Walk::new().run(text.chars(), |cluster| walked += cluster.width);
+            let mut t = term(80, 2);
+            feed(&mut t, true, &text);
+            assert_eq!(t.grid().cursor.point.column, Column(walked), "{text:?}");
+            let longest = rows(&t)[0]
+                .split('|')
+                .map(|cell| cell.trim_matches(['[', ']']).chars().count())
+                .max();
+            assert_eq!(longest, Some(MAX_CODE_POINTS), "{text:?}");
+        }
     }
 
     /// Wherever one read or two cut the stream — inside a two-, three- or

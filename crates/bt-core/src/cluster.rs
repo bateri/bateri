@@ -7,7 +7,11 @@
 //! (`last_ink`) ask only the two functions here. The day the two rules
 //! diverge, the dock shifts by a column or the freshness gate says "stale"
 //! permanently, and the symptom is silent (the walk's counterpart of the
-//! shared width table).
+//! shared width table). The grid asks [`width`] in its step-by-step form,
+//! [`widens`], which gives the same answer one extension at a time.
+//!
+//! **A cluster has a ceiling** ([`MAX_CODE_POINTS`]), asked inside
+//! [`extends`] so every reader cuts a long run at the same code point.
 //!
 //! **The rule comes from the emoji arms only**, not all of UAX #29: a
 //! general "the table swallowed the sequence" arm also collapsed Arabic `لا`
@@ -32,6 +36,27 @@ const ZWJ: char = '\u{200D}';
 /// Emoji presentation selector (VS16). [`emoji_capable`]'s question is "does
 /// this code point become a two-column emoji with VS16".
 const VS16: char = '\u{FE0F}';
+
+/// The most code points one cluster keeps, its head included.
+///
+/// **The bound is what keeps a cluster's cost per code point constant.**
+/// The grid's wrapper rebuilds the head cell's cluster on every extension and
+/// asks its width; without a ceiling, `a` followed by tens of thousands of
+/// `U+0301` (a `cat` of a hostile file, a remote host) made every mark cost
+/// the length of the run, and the run cubic, on the reader thread under
+/// `Term`'s lock — the pane and the frame waiting on that lock froze for
+/// minutes.
+///
+/// **32 holds every real sequence with room to spare:** the longest RGI
+/// emoji (the kiss with two skin tones) is ten code points, a family seven,
+/// a tag flag seven, stacked accents of real scripts a handful. A code point that
+/// would make the cluster longer does not extend it ([`extends`]): one of
+/// width zero has no cell to land on and the grid drops it — the way other
+/// terminals drop combining marks past their own limit —, and one with a
+/// column starts a cluster of its own. The dock's walk reads the same answer
+/// from [`extends`], so the two keep the same columns past the ceiling too: a
+/// dropped mark takes no column in either.
+pub(crate) const MAX_CODE_POINTS: usize = 32;
 
 /// Regional indicator (RI) — the two halves of a flag pair.
 fn is_regional_indicator(c: char) -> bool {
@@ -92,11 +117,16 @@ pub(crate) fn may_extend(c: char) -> bool {
 /// is no such head cell in the grid — the combiner lands on the previous
 /// cell — and the ZWJ of `‍👍` would become the head of a two-column
 /// cluster.
+///
+/// **A full cluster extends with nothing** ([`is_full`]): the ceiling is
+/// asked here, before the arms, so the grid, the dock and the walks cut a
+/// long run at the same code point.
 pub(crate) fn extends(open: &str, c: char) -> bool {
-    if open
-        .chars()
-        .next()
-        .is_none_or(|head| crate::dock::column_width(head) == 0)
+    if is_full(open)
+        || open
+            .chars()
+            .next()
+            .is_none_or(|head| crate::dock::column_width(head) == 0)
     {
         return false;
     }
@@ -118,7 +148,9 @@ pub(crate) fn extends(open: &str, c: char) -> bool {
 ///
 /// **Every prefix is asked, not just the result:** the grid asks about
 /// widening after every extension, and `1` + VS16 + `U+20E3` widens at the
-/// VS16 — a rule looking at the final string would miss that step.
+/// VS16 — a rule looking at the final string would miss that step. The
+/// walk costs the square of the cluster's length, which [`MAX_CODE_POINTS`]
+/// bounds; the grid, which asks after every code point, asks [`widens`].
 ///
 /// **A single-code-point cluster uses [`crate::dock::column_width`]'s
 /// table** (a control character is 1, tab included): `UnicodeWidthStr` says
@@ -139,6 +171,33 @@ pub(crate) fn width(cluster: &str) -> usize {
             .is_some_and(|prefix| prefix.width() >= 2)
     });
     if widened { 2 } else { base }
+}
+
+/// Did the newest code point of `open` take a **narrow** cluster to two
+/// columns — the grid wrapper's question after each extension.
+///
+/// **Only the whole string is measured, not every prefix as [`width`]
+/// does:** the wrapper asks after every extension of a narrow cell, so each
+/// shorter prefix was measured when its own last code point arrived, and the
+/// cell is still narrow because none reached two columns. The one prefix
+/// nobody has measured is the newest, and [`width`]'s every-prefix walk would
+/// make each extension cost the square of the cluster's length. `1` + VS16 +
+/// `U+20E3` still widens at the VS16: that step's newest prefix is `1️`.
+///
+/// **The one cell the premise misses** is one whose marks came in while the
+/// cluster was closed (an SGR between them): alacritty's own zero-width
+/// branch put them there unmeasured, and such a cell widens only if the
+/// newest prefix reaches two columns. The dock's stream has no SGR to close a
+/// cluster, so its reading of that line parted from the grid's at the mark
+/// that came in closed, not here.
+pub(crate) fn widens(open: &str) -> bool {
+    open.width() >= 2
+}
+
+/// Has `open` reached [`MAX_CODE_POINTS`]. At most that many code points are
+/// read, whatever the string's length.
+pub(crate) fn is_full(open: &str) -> bool {
+    open.chars().nth(MAX_CODE_POINTS - 1).is_some()
 }
 
 /// The walk that splits a stream into clusters: for each cluster the
@@ -419,6 +478,57 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The grid's step-by-step question widens a narrow cluster at the same
+    /// code point as [`width`]'s every-prefix walk — the keycap at its VS16,
+    /// the kiss at its first code point — and never widens one that stays
+    /// narrow.
+    #[test]
+    fn the_newest_prefix_widens_where_every_prefix_does() {
+        for sequence in [
+            "🇹🇷",
+            "❤\u{FE0F}",
+            "☺\u{FE0F}\u{200D}🔥",
+            "1\u{FE0F}\u{20E3}",
+            "#\u{FE0F}\u{20E3}",
+            "🏳\u{FE0F}\u{200D}🌈",
+            "🧑🏻\u{200D}❤\u{FE0F}\u{200D}💋\u{200D}🧑🏼",
+            "e\u{301}\u{302}",
+            "a\u{200D}\u{FE0F}",
+            "1\u{301}\u{FE0F}",
+        ] {
+            let ends: Vec<usize> = sequence
+                .char_indices()
+                .map(|(at, c)| at + c.len_utf8())
+                .collect();
+            let mut narrow = crate::dock::column_width(sequence.chars().next().unwrap_or(' ')) < 2;
+            for &end in ends.iter().skip(1) {
+                let prefix = &sequence[..end];
+                if narrow && widens(prefix) {
+                    narrow = false;
+                }
+                assert_eq!(narrow, width(prefix) < 2, "{prefix:?}");
+            }
+        }
+    }
+
+    /// A cluster stops at [`MAX_CODE_POINTS`]: the marks past it are
+    /// columnless clusters of their own (the grid drops them), and an emoji
+    /// behind a full ZWJ run is a new two-column cluster (the grid's new wide
+    /// cell).
+    #[test]
+    fn a_cluster_stops_growing_at_the_ceiling() {
+        let full = format!("a{}", "\u{301}".repeat(MAX_CODE_POINTS - 1));
+        let mut want = vec![(full.clone(), 1)];
+        want.extend(std::iter::repeat_n(("\u{301}".to_owned(), 0), 3));
+        want.push(("b".to_owned(), 1));
+        assert_eq!(split(&format!("{full}\u{301}\u{301}\u{301}b")), want);
+        let joined = format!("👨{}", "\u{200D}".repeat(MAX_CODE_POINTS - 1));
+        assert_eq!(
+            split(&format!("{joined}👩")),
+            vec![(joined, 2), ("👩".to_owned(), 2)]
+        );
     }
 
     /// A single-code-point cluster by the dock's table: a tab and a control

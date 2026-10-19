@@ -5622,6 +5622,33 @@ mod tests {
         assert_eq!(x.col, TEXT_COL + 6, "the off reading is as today");
     }
 
+    /// A pasted run of combining marks is cut where the grid cuts it
+    /// ([`crate::cluster::MAX_CODE_POINTS`]): the letter behind it lands on the
+    /// grid's column, and the frame's walks cost the run's length, not its
+    /// square — on the main thread, every frame. The drawing runs on a thread
+    /// of its own with a deadline, so a regression fails instead of hanging.
+    #[test]
+    fn a_long_run_of_marks_is_cut_at_the_grids_ceiling() {
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let columns = ["a", "👍"].map(|head| {
+                let text = format!("{head}{}x", "\u{301}".repeat(50_000));
+                let mut state = live("", &text, "", 0);
+                state.cluster = true;
+                let (cells, _) = draw(&state, COLS);
+                cells
+                    .iter()
+                    .find(|cell| cell.ch == Some('x'))
+                    .map(|x| x.col)
+            });
+            let _ = done.send(columns);
+        });
+        let columns = finished
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("drawing 50 000 marks took more than five seconds");
+        assert_eq!(columns, [Some(TEXT_COL + 1), Some(TEXT_COL + 2)]);
+    }
+
     /// If `CURSOR` falls **inside** a cluster the caret is at the cluster's
     /// start: between the two RIs and in the middle of a ZWJ sequence alike.
     #[test]
