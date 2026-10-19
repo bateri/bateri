@@ -25,20 +25,24 @@ use bt_shell_common::shortcuts::{
 };
 use objc2::rc::{Retained, Weak};
 use objc2::runtime::{AnyObject, ProtocolObject};
-use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send, sel};
+use objc2::{
+    AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send, sel,
+};
 use objc2_app_kit::{
     NSAlert, NSAlertFirstButtonReturn, NSBezelStyle, NSButton, NSColor, NSControlSize,
-    NSControlTextEditingDelegate, NSFont, NSFontAttributeName, NSForegroundColorAttributeName,
-    NSLayoutAttribute, NSLayoutConstraintOrientation, NSLineBreakMode, NSMenu, NSMenuItem,
-    NSModalResponse, NSScrollView, NSSearchField, NSSegmentSwitchTracking, NSSegmentedControl,
-    NSStackView, NSStackViewGravity, NSStrikethroughStyleAttributeName, NSTableCellView,
-    NSTableColumn, NSTableView, NSTableViewDataSource, NSTableViewDelegate,
-    NSTableViewGridLineStyle, NSTableViewSelectionHighlightStyle, NSTableViewStyle, NSTextField,
-    NSUserInterfaceLayoutOrientation, NSView,
+    NSControlTextEditingDelegate, NSEvent, NSFont, NSFontAttributeName,
+    NSForegroundColorAttributeName, NSLayoutAttribute, NSLayoutConstraintOrientation,
+    NSLineBreakMode, NSMenu, NSMenuItem, NSModalResponse, NSScrollView, NSSearchField,
+    NSSegmentSwitchTracking, NSSegmentedControl, NSStackView, NSStackViewGravity,
+    NSStrikethroughStyleAttributeName, NSTableCellView, NSTableColumn, NSTableView,
+    NSTableViewDataSource, NSTableViewDelegate, NSTableViewGridLineStyle,
+    NSTableViewSelectionHighlightStyle, NSTableViewStyle, NSTextField, NSTrackingArea,
+    NSTrackingAreaOptions, NSUserInterfaceLayoutOrientation, NSView,
 };
 use objc2_foundation::{
     NSArray, NSAttributedString, NSAttributedStringKey, NSDictionary, NSInteger, NSNumber,
-    NSObjectNSDelayedPerforming, NSObjectProtocol, NSRunLoopCommonModes, NSString, ns_string,
+    NSObjectNSDelayedPerforming, NSObjectProtocol, NSRect, NSRunLoopCommonModes, NSString,
+    ns_string,
 };
 
 use super::recorder::{Recorded, ShortcutRecorder};
@@ -529,6 +533,79 @@ where
     raw.retain()
 }
 
+struct RowIvars {
+    /// What the row offers only under the pointer: Add Shortcut beside a lone shortcut, so the
+    /// second one is not found in the chip's menu alone and every row is not a row of buttons.
+    on_hover: Option<Retained<NSView>>,
+}
+
+define_class!(
+    // SAFETY: NSView is designed for subclassing; the row implements no `Drop` and is born with
+    // `initWithFrame:`.
+    #[unsafe(super(NSView))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "BateriKeyboardRow"]
+    #[ivars = RowIvars]
+    struct CommandRow;
+
+    unsafe impl NSObjectProtocol for CommandRow {}
+
+    impl CommandRow {
+        #[unsafe(method(mouseEntered:))]
+        fn mouse_entered(&self, _event: &NSEvent) {
+            self.reveal(true);
+        }
+
+        /// The table is made again under the pointer after every change: the row born there hears
+        /// no `mouseEntered:`, only the pointer's next move.
+        #[unsafe(method(mouseMoved:))]
+        fn mouse_moved(&self, _event: &NSEvent) {
+            self.reveal(true);
+        }
+
+        #[unsafe(method(mouseExited:))]
+        fn mouse_exited(&self, _event: &NSEvent) {
+            self.reveal(false);
+        }
+    }
+);
+
+impl CommandRow {
+    fn new(mtm: MainThreadMarker, on_hover: Option<Retained<NSView>>) -> Retained<Self> {
+        let hovers = on_hover.is_some();
+        let this = Self::alloc(mtm).set_ivars(RowIvars { on_hover });
+        // SAFETY: NSView's designated initializer.
+        let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] };
+        if hovers {
+            let options = NSTrackingAreaOptions::MouseEnteredAndExited
+                | NSTrackingAreaOptions::MouseMoved
+                | NSTrackingAreaOptions::ActiveInKeyWindow
+                | NSTrackingAreaOptions::InVisibleRect;
+            // SAFETY: `owner` is the row, which owns the area and outlives it; no user info.
+            // `InVisibleRect` follows the view's bounds, so the rect is ignored.
+            let area = unsafe {
+                NSTrackingArea::initWithRect_options_owner_userInfo(
+                    NSTrackingArea::alloc(),
+                    NSRect::ZERO,
+                    options,
+                    Some(&this),
+                    None,
+                )
+            };
+            this.addTrackingArea(&area);
+        }
+        this
+    }
+
+    fn reveal(&self, shown: bool) {
+        if let Some(view) = &self.ivars().on_hover
+            && view.isHidden() == shown
+        {
+            view.setHidden(!shown);
+        }
+    }
+}
+
 /// The tag a control carries: which line of the table, and which of its shortcuts.
 fn tag_of(entry: usize, slot: usize) -> isize {
     ((entry << 2) | (slot & 3)) as isize
@@ -893,6 +970,20 @@ impl KeyboardPage {
 
         let mut field = None;
         let mut keys: Vec<Retained<NSView>> = Vec::new();
+        // Left of the chips, so the chips and Reset keep their place when it shows.
+        let on_hover = (!row.chips.is_empty()
+            && row.chips.len() < bt_core::MAX_SHORTCUTS
+            && row.command.family.is_none()
+            && st.listening.is_none_or(|(own, _)| own != name)
+            && !st.locked)
+            .then(|| {
+                let add = self.button(mtm, "Add Shortcut", sel!(addClicked:), tag_of(index, 0));
+                add.setHidden(true);
+                as_view(add)
+            });
+        if let Some(add) = &on_hover {
+            keys.push(add.clone());
+        }
         for (slot, chip) in row.chips.iter().enumerate() {
             if st.listening == Some((name, slot)) {
                 let recorder = self.recorder(mtm, name, slot);
@@ -958,7 +1049,7 @@ impl KeyboardPage {
         }
         let refs: Vec<&NSView> = rows.iter().map(|view| &**view).collect();
         let whole = stack(mtm, &refs, NSUserInterfaceLayoutOrientation::Vertical, 4.0);
-        let cell = NSTableCellView::new(mtm);
+        let cell = CommandRow::new(mtm, on_hover);
         whole.setTranslatesAutoresizingMaskIntoConstraints(false);
         cell.addSubview(&whole);
         for constraint in [
