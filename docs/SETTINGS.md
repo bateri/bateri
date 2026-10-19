@@ -676,7 +676,7 @@ error (or the ⚠) stays visible there too.
 | unrecognized key or section | silently ignored |
 | a `[keys]` name no command has | only that line is ignored, warning with the line |
 | a `[keys]` shortcut that cannot be read | only that line is ignored: the command keeps the shortcut it had before the file was saved (its own at launch), warning with the line |
-| a `[keys]` shortcut the command cannot take (modifiers alone for a command that is not a family, say) | the command keeps its own shortcut, warning with the line |
+| a `[keys]` shortcut the command cannot take (modifiers alone for a command that is not a family, say) | only that line is ignored: the command keeps the shortcut it had before the file was saved (its own at launch), warning with the line |
 | two commands with the same `[keys]` shortcut | both keep it, warning with the line; the menu runs the one that comes first in it |
 | the chosen theme cannot be found | the built-in theme matching the appearance (`bateri` in dark, `bateri-light` in light), warning |
 | the theme file cannot be read, is empty or is invalid TOML | the built-in theme matching the appearance, warning (a built-in theme with the same name is **not** used) |
@@ -2213,7 +2213,7 @@ the command's name.
   command whose line cannot be read keeps the shortcut it had before you saved
   the file (its own when bateri has just started), so a typo does not undo a
   shortcut that was working. A shortcut that reads but that the command cannot
-  take (the warning says why) leaves the command with its own.
+  take (the warning says why) is treated the same way.
 
 The names, the comments and the keys bateri does not know stay where they are
 when Settings ▸ Keyboard writes the file: it changes only the lines you change.

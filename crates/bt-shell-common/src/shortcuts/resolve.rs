@@ -4,10 +4,17 @@
 //! and, as data, what is wrong with the file: a name no command has, a shortcut that cannot
 //! mean what it says, and the keys that two commands share. The menu, the palette, the tab
 //! strip's hints and the settings page ask this one answer.
+//!
+//! A shortcut that reads but that its command cannot take is judged once, by [`check`], in two
+//! places that differ in what the command has then. [`admit`] is the read of a file
+//! ([`crate::settings::load_keeping`]): the line goes, and the command keeps the shortcut it
+//! was running with — the one of the settings the read replaces, the table's own when it had
+//! none — exactly as `bt-core` treats a line it cannot read. [`resolve`] has no such memory,
+//! so for settings that did not come through that read it can only give the command its own.
 
 use std::collections::HashMap;
 
-use bt_core::{Chord, Diagnostic, Modifier, Mods, Settings, Shortcut};
+use bt_core::{Chord, Diagnostic, KeyEntry, Modifier, Mods, Settings, Shortcut};
 
 use super::table::{COMMANDS, Command, by_name};
 use super::verdict::{MACOS_KEYS, Refusal, refusal};
@@ -134,7 +141,62 @@ fn check(command: &Command, shortcut: &Shortcut) -> Result<(), String> {
     }
 }
 
-/// Reads the settings against the table.
+/// Why `entry`'s line cannot be what its command (`command`, found by the entry's name) has:
+/// one of its shortcuts is one the command cannot take. The text of both places that judge it.
+fn refused(command: &Command, entry: &KeyEntry) -> Option<Diagnostic> {
+    let reason = entry
+        .shortcuts
+        .iter()
+        .find_map(|shortcut| check(command, shortcut).err())?;
+    Some(Diagnostic {
+        key: Some("keys"),
+        line: entry.line,
+        message: format!("`keys.{}`: {reason}; the line is ignored", entry.name),
+    })
+}
+
+/// Takes the lines of `settings.keys` that their commands cannot have out of it, and gives
+/// each of those commands what it had: the entry of the same name in `previous` (the settings
+/// this read replaces), at the place the name stands now — the shortcuts stay, the position is
+/// the line's, as `bt-core` keeps a line it cannot read — or, with no such entry, nothing, which
+/// is the table's own. Returns what was refused, to be reported with the file's other problems.
+///
+/// The file of the last read is what `previous` holds, never a preview: a save with a typo must
+/// not give a command another key than the one it was running with, which may be the very key
+/// the user has since moved to a different command. A name no command has stays (it is
+/// [`resolve`]'s to report) and so does a line the commands can take.
+pub fn admit(settings: &mut Settings, previous: &Settings) -> Vec<Diagnostic> {
+    let mut refusals = Vec::new();
+    let mut entries = Vec::with_capacity(settings.keys.len());
+    for entry in std::mem::take(&mut settings.keys) {
+        let Some(command) = by_name(&entry.name) else {
+            entries.push(entry);
+            continue;
+        };
+        let Some(refusal) = refused(command, &entry) else {
+            entries.push(entry);
+            continue;
+        };
+        refusals.push(refusal);
+        // What it had must itself be something a command can have (the settings that were
+        // handed in may not have come through this read).
+        if let Some(held) = previous
+            .keys
+            .iter()
+            .find(|held| held.name == entry.name && refused(command, held).is_none())
+        {
+            entries.push(KeyEntry {
+                shortcuts: held.shortcuts.clone(),
+                ..entry
+            });
+        }
+    }
+    settings.keys = entries;
+    refusals
+}
+
+/// Reads the settings against the table. A line its command cannot take gives the command its
+/// own shortcut here: what it had before is the read's to keep ([`admit`]).
 pub fn resolve(settings: &Settings) -> Resolved {
     let mut bindings: Vec<Binding> = COMMANDS
         .iter()
@@ -157,19 +219,8 @@ pub fn resolve(settings: &Settings) -> Resolved {
             });
             continue;
         };
-        if let Some(reason) = entry
-            .shortcuts
-            .iter()
-            .find_map(|shortcut| check(command, shortcut).err())
-        {
-            diagnostics.push(Diagnostic {
-                key: Some("keys"),
-                line: entry.line,
-                message: format!(
-                    "`keys.{}`: {reason}; the command keeps its own shortcut",
-                    entry.name
-                ),
-            });
+        if let Some(refusal) = refused(command, entry) {
+            diagnostics.push(refusal);
             continue;
         }
         if let Some(binding) = bindings
@@ -415,6 +466,22 @@ mod tests {
         resolve(&parsed.settings)
     }
 
+    /// The settings of `keys` as a file's `[keys]` says them, without the judging.
+    fn settings_of(keys: &str) -> Settings {
+        let text = format!("[keys]\n{keys}");
+        let parsed = Settings::parse(&text).expect("TOML");
+        assert_eq!(parsed.diagnostics, Vec::new(), "{text}");
+        parsed.settings
+    }
+
+    /// `keys` read over the settings in use, as a file saved while they were in effect: the
+    /// settings it gives, and what the read refused.
+    fn admitted(keys: &str, previous: &Settings) -> (Settings, Vec<Diagnostic>) {
+        let mut settings = settings_of(keys);
+        let refused = admit(&mut settings, previous);
+        (settings, refused)
+    }
+
     fn names(conflict: &Conflict) -> Vec<&'static str> {
         conflict
             .commands
@@ -506,7 +573,7 @@ mod tests {
     }
 
     #[test]
-    fn a_shortcut_that_cannot_work_is_reported_and_the_command_keeps_its_own() {
+    fn a_shortcut_that_cannot_work_is_reported_and_resolved_alone_it_gives_the_command_its_own() {
         for (line, needle) in [
             ("split_right = \"cmd+space\"", "Spotlight"),
             ("split_right = \"d\"", "alone is typing"),
@@ -540,6 +607,114 @@ mod tests {
                 Source::Default
             );
         }
+    }
+
+    #[test]
+    fn a_shortcut_the_command_cannot_take_keeps_what_the_command_had() {
+        // What cannot be taken, for a command of a key and for a family.
+        let cases = [
+            ("split_right", "d", "cmd+e", "alone is typing"),
+            ("split_right", "cmd+space", "cmd+e", "Spotlight"),
+            ("split_right", "option", "cmd+e", "takes a key"),
+            ("select_tab", "shift+cmd", "option", "has shift"),
+            ("select_tab", "cmd+1", "option", "takes only modifiers"),
+            ("select_group", "shift", "ctrl", "alone is typing"),
+        ];
+        for (name, bad, held, needle) in cases {
+            let line = format!("{name} = \"{bad}\"\n");
+            // The first read has nothing the command was running with: its own.
+            let (first, refused) = admitted(&line, &Settings::default());
+            assert_eq!(first.keys, Vec::new(), "{name} = {bad}");
+            assert_eq!(refused.len(), 1, "{name} = {bad}: {refused:?}");
+            assert_eq!(refused[0].line, Some(2));
+            assert!(refused[0].message.contains(needle), "{}", refused[0]);
+            assert!(
+                refused[0].message.ends_with("the line is ignored"),
+                "{}",
+                refused[0]
+            );
+            let resolved = resolve(&first);
+            assert_eq!(resolved.diagnostics, Vec::new());
+            let binding = resolved.binding(name).expect("a command");
+            assert_eq!(binding.source, Source::Default, "{name} = {bad}");
+            assert!(!binding.changed());
+            // The command had a shortcut of the file: it goes on with it, at the line's place.
+            let previous = settings_of(&format!("\n{name} = \"{held}\"\n"));
+            let (again, refused) = admitted(&line, &previous);
+            assert_eq!(refused.len(), 1, "{name} = {bad}");
+            assert_eq!(again.keys, previous.keys, "{name} = {bad}");
+            assert_eq!(again.keys[0].line, Some(2));
+            let resolved = resolve(&again);
+            assert_eq!(resolved.diagnostics, Vec::new());
+            let binding = resolved.binding(name).expect("a command");
+            assert_eq!(binding.source, Source::File(Some(2)));
+            assert!(binding.changed(), "{name} = {bad}");
+            // The same text again changes nothing: the next save of the typo is the same.
+            let (twice, _) = admitted(&line, &again);
+            assert_eq!(twice.keys, again.keys, "{name} = {bad}");
+            assert_eq!(twice.keys[0].line, Some(2));
+        }
+        // The command was at its own (an entry that says what the table says is still one):
+        // it stays there, and a command that had `""` stays without.
+        let own = settings_of("split_right = \"cmd+d\"\n");
+        let (kept, _) = admitted("split_right = \"d\"\n", &own);
+        assert_eq!(kept.keys, own.keys);
+        assert!(
+            !resolve(&kept)
+                .binding("split_right")
+                .expect("a command")
+                .changed()
+        );
+        let none = settings_of("show_all_tabs = \"\"\n");
+        let (kept, _) = admitted("show_all_tabs = \"d\"\n", &none);
+        assert_eq!(kept.keys, none.keys);
+        assert!(
+            resolve(&kept)
+                .binding("show_all_tabs")
+                .expect("a command")
+                .shortcuts
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn the_other_lines_of_the_file_are_read_as_usual_beside_a_refused_one() {
+        let previous = settings_of("split_right = \"cmd+e\"\ncopy_last_output = \"shift+cmd+o\"\n");
+        let (settings, refused) = admitted(
+            "split_down = \"cmd+j\"\nsplit_right = \"d\"\nnothing_like_it = \"cmd+k\"\n\
+             copy_last_output = \"shift+cmd+u\"\n",
+            &previous,
+        );
+        // Only the refused line is reported; the name is `resolve`'s to report.
+        assert_eq!(refused.len(), 1);
+        assert_eq!((refused[0].line, refused[0].key), (Some(3), Some("keys")));
+        let shown: Vec<(&str, String, Option<usize>)> = settings
+            .keys
+            .iter()
+            .map(|entry| {
+                (
+                    entry.name.as_str(),
+                    entry.shortcuts[0].to_string(),
+                    entry.line,
+                )
+            })
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                ("split_down", "cmd+j".to_owned(), Some(2)),
+                ("split_right", "cmd+e".to_owned(), Some(3)),
+                ("nothing_like_it", "cmd+k".to_owned(), Some(4)),
+                ("copy_last_output", "shift+cmd+u".to_owned(), Some(5)),
+            ]
+        );
+        let resolved = resolve(&settings);
+        assert_eq!(resolved.diagnostics.len(), 1);
+        assert!(resolved.diagnostics[0].message.contains("not the name"));
+        // A previous entry that is itself one the command cannot take is not "what it had".
+        let mut unjudged = settings_of("split_right = \"d\"\n");
+        let refused = admit(&mut unjudged, &settings_of("split_right = \"d\"\n"));
+        assert_eq!((unjudged.keys.len(), refused.len()), (0, 1));
     }
 
     #[test]

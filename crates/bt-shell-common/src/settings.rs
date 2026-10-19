@@ -302,7 +302,8 @@ pub fn load(root: &Path) -> Loaded {
 
 /// The save-time read: a rejected value takes `current`'s ([`Settings::parse_keeping`];
 /// except `osc52`, which falls back to off). If a `scrollback` saved with the wrong type fell
-/// back to the default, it would trim the history irreversibly.
+/// back to the default, it would trim the history irreversibly. A shortcut its command cannot
+/// take is a rejected value too ([`crate::shortcuts::admit`]).
 ///
 /// An empty file (whitespace only) counts as no file. An editor that saves in place first
 /// truncates (`O_TRUNC`) and then writes, and the truncation also fires an event: if the empty
@@ -314,7 +315,14 @@ pub fn load_keeping(root: &Path, current: &Settings) -> Loaded {
         Text::Read(text) if text.trim().is_empty() => Loaded::Missing,
         Text::Unreadable(err) => Loaded::Unreadable(err),
         Text::Read(text) => match Settings::parse_keeping(&text, current) {
-            Ok(parsed) => Loaded::Parsed(Box::new(parsed)),
+            Ok(mut parsed) => {
+                // The shortcuts a command cannot take are the shell's to judge (`bt-core` reads
+                // the table and does not know the commands): such a line is dropped and its
+                // command keeps what `current` had for it, like a line `bt-core` cannot read.
+                let refused = crate::shortcuts::admit(&mut parsed.settings, current);
+                parsed.diagnostics.extend(refused);
+                Loaded::Parsed(Box::new(parsed))
+            }
             Err(diagnostic) => Loaded::Unparseable(diagnostic),
         },
     }
@@ -469,7 +477,8 @@ impl Loaded {
             Loaded::Unparseable(diagnostic) => FileState::Locked(notice(diagnostic)),
             Loaded::Parsed(parsed) => {
                 // The names the file gives the commands are the shell's to judge: `bt-core`
-                // reads the table and does not know the commands.
+                // reads the table and does not know the commands. (The shortcuts a command
+                // cannot take were judged by the read already, `parsed.diagnostics`.)
                 let mut diagnostics = parsed.diagnostics.clone();
                 diagnostics.extend(crate::shortcuts::resolve(&parsed.settings).problems());
                 FileState::Usable(diagnostics)
@@ -570,6 +579,55 @@ mod tests {
                 "settings.toml: line 3: `shift+cmd+d` is the shortcut of `split_down` and `copy_last_output`; the menu runs `split_down`'s",
             ]
         );
+    }
+
+    #[test]
+    fn a_shortcut_its_command_cannot_take_keeps_what_the_command_was_running_with() {
+        let root = TempRoot::new("keys-refused");
+        let write = |keys: &str| {
+            std::fs::write(root.0.join(FILE_NAME), format!("[keys]\n{keys}"))
+                .expect("write failed");
+        };
+        let split = |settings: &Settings| -> Vec<String> {
+            settings
+                .keys
+                .iter()
+                .filter(|entry| entry.name == "split_right")
+                .flat_map(|entry| entry.shortcuts.iter().map(ToString::to_string))
+                .collect()
+        };
+        let refused = "settings.toml: line 2: `keys.split_right`: `d` alone is typing; a shortcut needs cmd, ctrl or option; the line is ignored";
+        // The first read has nothing the command was running with: its own, and the line is
+        // reported once (the subtitle's and the window's are the same text).
+        write("split_right = \"d\"\n");
+        let (first, notices) = load(&root.0).at_launch();
+        assert_eq!(split(&first), Vec::<String>::new());
+        assert_eq!(notices, [refused]);
+        assert_eq!(load(&root.0).state().notices(), [refused]);
+        // A command that was running with a shortcut of the file keeps it, at the line's place.
+        write("split_right = \"cmd+j\"\n");
+        let running = load(&root.0).at_launch().0;
+        assert_eq!(split(&running), ["cmd+j"]);
+        write("\nsplit_right = \"d\"\n");
+        let (kept, notices) = load_keeping(&root.0, &running).live();
+        let kept = kept.expect("a usable file");
+        assert_eq!(split(&kept), ["cmd+j"]);
+        assert_eq!(kept.keys[0].line, Some(3));
+        assert_eq!(
+            notices,
+            [refused.replace("line 2", "line 3")],
+            "reported once, at the line it is on now"
+        );
+        // Saved again as it is: nothing moves.
+        let (again, _) = load_keeping(&root.0, &kept).live();
+        assert_eq!(again.expect("a usable file").keys, kept.keys);
+        // The one at its own stays at its own: the other lines are read as usual.
+        write("split_down = \"cmd+k\"\nsplit_right = \"d\"\n");
+        let (own, _) = load_keeping(&root.0, &Settings::default()).live();
+        let own = own.expect("a usable file");
+        assert_eq!(split(&own), Vec::<String>::new());
+        assert_eq!(own.keys.len(), 1);
+        assert_eq!(own.keys[0].name, "split_down");
     }
 
     #[test]

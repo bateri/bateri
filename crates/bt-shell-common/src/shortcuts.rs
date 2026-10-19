@@ -39,7 +39,7 @@ pub use record::{
     ASSIGN_ANYWAY, Outcome, USE_HERE, edit_of, record, record_twice, remove_edit, reset_edit,
     restore_edit,
 };
-pub use resolve::{Assignment, Binding, Conflict, Resolved, SharedKeys, Source, resolve};
+pub use resolve::{Assignment, Binding, Conflict, Resolved, SharedKeys, Source, admit, resolve};
 pub use table::{COMMANDS, Command, Family, Item, by_id, by_name, family_default};
 pub use tap::{Held, Step, Tapped, Taps};
 pub use verdict::{Clash, MACOS_KEYS, MacKey, Refusal, Ruling, Verdict, refusal};
