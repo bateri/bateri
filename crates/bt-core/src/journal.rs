@@ -956,10 +956,13 @@ pub fn rebuild(blob: &[u8], base: &[u8], records: &JournalRecords) -> Option<Reb
     if let Some(carried) = Carried::decode(blob) {
         log.restore(carried, 0);
     }
+    // The ceiling the VT was read from: the scratch's, as the last options
+    // record left it.
     let history = history_of_vt(
         &next.vt,
         next.cols,
         next.rows,
+        next.options.scrollback,
         next.cluster,
         log.history_cut(),
         &log.saved_stripes(),
@@ -1546,6 +1549,30 @@ mod tests {
         };
         assert!(rebuild(&[], &base.encode(), &released).is_none());
         assert!(rebuild(&[], b"not a base", &records).is_none());
+    }
+
+    /// The rebuilt history keeps every row the scrollback held, the rows a
+    /// long line wrapped onto included: the VT has one `\n` per **line**,
+    /// not per row, and a scratch sized by them dropped the oldest lines.
+    #[test]
+    fn a_rebuild_keeps_the_oldest_lines_of_a_history_of_wrapped_lines() {
+        // 30 lines of 50 cells on 20 columns: 90 rows, 84 of them history —
+        // inside the scrollback of 100, past the 30 line breaks.
+        let bytes: Vec<u8> = (0..30)
+            .flat_map(|line| format!("L{line:02}{}\r\n", "x".repeat(47)).into_bytes())
+            .collect();
+        let base = Base::birth(Vec::new(), 20, 6, (10, 20), options(), true);
+        let records = JournalRecords {
+            bytes_at: 0,
+            bytes,
+            sides_at: 0,
+            sides: Vec::new(),
+        };
+        let rebuilt = rebuild(&[], &base.encode(), &records).expect("rebuilds");
+        let history = String::from_utf8_lossy(&rebuilt.history).into_owned();
+        for line in 0..30 {
+            assert!(history.contains(&format!("L{line:02}")), "L{line:02} lost");
+        }
     }
 
     #[test]

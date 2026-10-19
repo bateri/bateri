@@ -8376,6 +8376,7 @@ impl Session {
             &frozen.vt,
             frozen.cols,
             frozen.rows,
+            self.scrollback.load(Ordering::Relaxed),
             self.cluster,
             cut,
             &stripes,
@@ -8385,20 +8386,32 @@ impl Session {
 
 /// [`Session::final_history`] of a terminal known only by its handover VT
 /// (`encode_live`'s): replayed into a scratch `Term` of `cols` × `rows`
-/// — the same screens, links and cursor — and cut by `cut` and `stripes`.
+/// with `scrollback` rows of history — **the ceiling of the `Term` the VT
+/// was read from** — the same screens, links and cursor, and cut by `cut`
+/// and `stripes`.
+///
+/// **The ceiling is the source's, not a count of the VT's line breaks.**
+/// `encode_live` writes a row that wraps with no break and lets autowrap
+/// carry it on to the next (`snapshot::write_rows`), so the VT holds one
+/// `\n` per **line**, and a history of long lines has several rows per
+/// `\n`: a scratch sized by them dropped the oldest rows, silently, from
+/// the scrollback a handover or a crash's rebuild saves. Replayed at the
+/// same size every row comes back as one row, so the source's history fits
+/// in the source's ceiling — `encode_live`'s own contract ("at least as
+/// much `scrolling_history`"). Nothing is allocated for it up front:
+/// alacritty grows the history as rows scroll in (`Storage::initialize`, in
+/// chunks of a thousand rows), so a large ceiling costs what the VT fills.
 pub(crate) fn history_of_vt(
     vt: &[u8],
     cols: u16,
     rows: u16,
+    scrollback: usize,
     cluster: bool,
     cut: HistoryCut,
     stripes: &crate::shell::SavedStripes,
 ) -> Vec<u8> {
-    // Room for every line the VT carries: it holds no more than the
-    // scrollback it was read from.
-    let lines = vt.iter().filter(|&&byte| byte == b'\n').count();
     let config = Config {
-        scrolling_history: lines,
+        scrolling_history: scrollback,
         ..Config::default()
     };
     let grid = GridSize::for_spawn(cols, rows);
@@ -13683,6 +13696,28 @@ mod tests {
             "ALTSCREEN",
         );
         assert_eq!(history, "primary\r\n");
+    }
+
+    #[test]
+    fn frozen_history_keeps_the_oldest_lines_of_a_history_of_wrapped_lines() {
+        // 30 lines of 100 cells on 40 columns: 90 rows, 81 of them history —
+        // inside the scrollback of 100, but the frozen VT carries a `\n` per
+        // line only (a wrapped row goes on by autowrap), and a scratch sized
+        // by those dropped the oldest lines.
+        let lines: String = (0..30)
+            .map(|line| format!("L{line:02}{}\\r\\n", "x".repeat(97)))
+            .collect();
+        let session = spawn_with_cols(
+            sh(&format!("printf '{lines}READY'; sleep 8")),
+            40,
+            Arc::new(TestWake::default()),
+        );
+        wait_text(&session, "READY");
+        let frozen = session.freeze().expect("the session did not freeze");
+        let history = String::from_utf8(session.frozen_history(&frozen)).expect("UTF-8 history");
+        for line in 0..30 {
+            assert!(history.contains(&format!("L{line:02}")), "L{line:02} lost");
+        }
     }
 
     #[test]
