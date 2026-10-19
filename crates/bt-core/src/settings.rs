@@ -2755,12 +2755,16 @@ stats_interval = 3
             }
             None => {}
         }
-        // A line of `[keys]` that cannot be read is dropped alone, so `fallback` is not asked:
-        // its command is as if the file did not say anything about it. A `keys` that is no
-        // section at all (`keys = 5`) reads nothing, and then the shortcuts in use stay, like
-        // the other sections that are written as the wrong kind.
+        // A line of `[keys]` that cannot be read is dropped alone and its command keeps what
+        // `fallback` had for it — the shortcut it was running with, or its default if it had
+        // none (the first read has no `fallback` entries); the other lines are read as usual.
+        // A `keys` that is no section at all (`keys = 5`) reads nothing, and then all the
+        // shortcuts in use stay, like the other sections that are written as the wrong kind.
         match section(text, root, "keys", &mut parsed.diagnostics) {
-            Some(keys) => parsed.settings.keys = keys::read(text, keys, &mut parsed.diagnostics),
+            Some(keys) => {
+                parsed.settings.keys =
+                    keys::read(text, keys, &fallback.keys, &mut parsed.diagnostics);
+            }
             None if root.contains_key("keys") => {
                 parsed.settings.keys.clone_from(&fallback.keys);
             }
@@ -8285,15 +8289,33 @@ cursor = \"spring\"
                 .starts_with("line 5: `keys.copy_last_output`:"),
             "{diagnostic}"
         );
-        // The save-time fallback does not enter: the line is dropped, as if the file had not
-        // said anything about the command.
+        // The first read has nothing the command was running with, so it stays as it is by
+        // default (the `rejected` above). A re-read keeps the shortcut the command had: the
+        // line is dropped alone, the diagnostic still names it.
         let current = Settings {
             keys: clean("[keys]\ncopy_last_output = \"shift+cmd+o\"\n").keys,
             ..Settings::default()
         };
         let kept = Settings::parse_keeping("[keys]\ncopy_last_output = \"shift+cmd+\"\n", &current)
             .expect("parseable text");
-        assert!(kept.settings.keys.is_empty());
+        assert_eq!(kept.settings.keys, current.keys);
+        assert_eq!(kept.settings.keys[0].line, Some(2));
+        assert_eq!(kept.diagnostics.len(), 1);
+        assert_eq!(kept.diagnostics[0].line, Some(2));
+        // A command that had none goes on without, and the other lines are read as usual.
+        let kept = Settings::parse_keeping(
+            "[keys]\nsplit_right = \"cmd+d\"\ncopy_last_output = \"shift+cmd+\"\nshow_all_tabs = \"cmd+\"\n",
+            &current,
+        )
+        .expect("parseable text");
+        let names: Vec<&str> = kept
+            .settings
+            .keys
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect();
+        assert_eq!(names, ["split_right", "copy_last_output"]);
+        assert_eq!(kept.settings.keys[1].shortcuts, current.keys[0].shortcuts);
         // `keys` that is not a section is reported like every other section, and leaves the
         // shortcuts in use as they are (a line that cannot be read does not).
         let (settings, diagnostic) = rejected("keys = 5\n");

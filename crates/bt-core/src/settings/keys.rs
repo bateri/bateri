@@ -458,11 +458,18 @@ impl PartialEq for KeyEntry {
 pub const MAX_SHORTCUTS: usize = 2;
 
 /// Reads `[keys]`. A line that cannot be read leaves a diagnostic (its `key` is `keys`, the
-/// line's name is in the message) and gives no entry — the command stays as the shell layer
-/// has it by default, and the other lines are read as usual.
+/// line's name is in the message) and is dropped alone, the other lines are read as usual.
+///
+/// What its command has then is what it had before: `previous` is the entries of the settings
+/// this read replaces ([`super::Settings::parse_keeping`]'s `fallback`), and the line takes the one of
+/// the same name — a file saved with a typo must not give the command another shortcut than the
+/// one it was running with, which could be the very key the user has moved to a different command
+/// since. With no entry of that name (the first read, or a command that had its default) the
+/// line gives none, and the command stays as the shell layer has it by default.
 pub(super) fn read(
     text: &str,
     keys: &dyn TableLike,
+    previous: &[KeyEntry],
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Vec<KeyEntry> {
     let mut entries = Vec::new();
@@ -474,11 +481,21 @@ pub(super) fn read(
                 shortcuts,
                 line,
             }),
-            Err(reason) => diagnostics.push(Diagnostic {
-                key: Some("keys"),
-                line,
-                message: format!("`keys.{name}`: {reason}; the line is ignored"),
-            }),
+            Err(reason) => {
+                diagnostics.push(Diagnostic {
+                    key: Some("keys"),
+                    line,
+                    message: format!("`keys.{name}`: {reason}; the line is ignored"),
+                });
+                // The shortcuts stay, the position is where the name stands now.
+                if let Some(held) = previous.iter().find(|entry| entry.name == name) {
+                    entries.push(KeyEntry {
+                        name: name.to_owned(),
+                        shortcuts: held.shortcuts.clone(),
+                        line,
+                    });
+                }
+            }
         }
     }
     entries
@@ -836,10 +853,17 @@ mod tests {
     }
 
     fn entries(text: &str) -> (Vec<KeyEntry>, Vec<Diagnostic>) {
+        entries_over(text, &[])
+    }
+
+    /// `text` read over `previous`, the entries of the settings it replaces.
+    fn entries_over(text: &str, previous: &[KeyEntry]) -> (Vec<KeyEntry>, Vec<Diagnostic>) {
         let doc = document(text).expect("TOML");
         let mut diagnostics = Vec::new();
         let keys = section(text, doc.as_table(), "keys", &mut diagnostics);
-        let entries = keys.map_or_else(Vec::new, |keys| read(text, keys, &mut diagnostics));
+        let entries = keys.map_or_else(Vec::new, |keys| {
+            read(text, keys, previous, &mut diagnostics)
+        });
         (entries, diagnostics)
     }
 
@@ -919,6 +943,56 @@ mod tests {
             "{}",
             diagnostics[2]
         );
+    }
+
+    #[test]
+    fn a_line_that_cannot_be_read_keeps_what_the_command_had() {
+        // The first read has nothing the command had: it is as if the line were not there.
+        let text = "[keys]\nsplit_right = \"cmd+d\"\ncopy_last_output = \"shift+cmd+\"\n\
+                    show_all_tabs = [\"cmd+a\", \"cmd+b\", \"cmd+c\"]\nnot_a_command = 5\n\
+                    select_tab = \"option\"\n";
+        let (first, first_diagnostics) = entries(text);
+        assert_eq!(
+            first
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            ["split_right", "select_tab"]
+        );
+        assert_eq!(first_diagnostics.len(), 3);
+        // A read over the settings in use: the commands that had an entry run with it, in the
+        // place of the line, the position being where the name stands now. The one that had none
+        // stays without, and so does a name that nothing has.
+        let (before, _) = entries(
+            "[keys]\nselect_tab = \"ctrl\"\ncopy_last_output = \"shift+cmd+o\"\n\
+             show_all_tabs = \"\"\nnot_a_command = \"cmd+x\"\n",
+        );
+        let (again, diagnostics) = entries_over(text, &before);
+        let shown: Vec<(&str, Vec<String>, Option<usize>)> = again
+            .iter()
+            .map(|entry| {
+                (
+                    entry.name.as_str(),
+                    entry.shortcuts.iter().map(ToString::to_string).collect(),
+                    entry.line,
+                )
+            })
+            .collect();
+        assert_eq!(
+            shown,
+            vec![
+                ("split_right", vec!["cmd+d".to_owned()], Some(2)),
+                ("copy_last_output", vec!["shift+cmd+o".to_owned()], Some(3)),
+                ("show_all_tabs", vec![], Some(4)),
+                ("not_a_command", vec!["cmd+x".to_owned()], Some(5)),
+                ("select_tab", vec!["option".to_owned()], Some(6)),
+            ]
+        );
+        // The line is still reported, once, whatever it had.
+        assert_eq!(diagnostics.len(), 3);
+        assert!(diagnostics.iter().all(|d| d.message.contains("ignored")));
+        // Nothing of it is a change, but the line it took over.
+        assert_eq!(entries_over(text, &again).0, again);
     }
 
     #[test]
