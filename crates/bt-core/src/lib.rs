@@ -4,8 +4,8 @@
 //! `alacritty_terminal` is **encapsulated**: no alacritty type appears in the
 //! `pub` API, the outside sees only `Session`, `Cell`, `UnderlineStyle`, `Cursor`, `Block`,
 //! `Blocks`,
-//! `SelectionPoint`, `Pointer`, `SelectKind`, `CellHalf`, `Arrow`, `FunctionKey`, `Wheel`,
-//! `ScrollIntent`,
+//! `SelectionPoint`, `Pointer`, `SelectKind`, `CellHalf`, `Arrow`, `FunctionKey`, `TextKey`,
+//! `Wheel`, `ScrollIntent`,
 //! search's `SearchQuery`, `SearchStatus`, `SearchRun`, `SearchRuns`,
 //! the scroll bar's `ScrollPosition`, `TrackMark`, `TrackBlock`, `TrackMarks`,
 //! the block marks' `BlockHandle`, `BlockInfo` and `BlockReport`,
@@ -87,7 +87,7 @@ pub use dock::{
 pub use graphics::{Picture, PictureLayer, Pictures};
 pub use history::{CommandRecord, MEMORY_LIMIT as COMMAND_MEMORY_LIMIT, RecordState};
 pub use identity::{LC_TERMINAL, PaneUuid, TERM_PROGRAM, TERM_PROGRAM_VERSION, pane_env};
-pub use input::{Arrow, FunctionKey, MouseButton, MouseModifiers};
+pub use input::{Arrow, FunctionKey, MouseButton, MouseModifiers, TextKey};
 pub use journal::{
     HEADROOM as JOURNAL_HEADROOM, JOURNAL_FORMAT, Journal, JournalCut, JournalRecords,
     JournalStore, JournalStream, Rebuilt, STALL as JOURNAL_STALL, due as journal_due,

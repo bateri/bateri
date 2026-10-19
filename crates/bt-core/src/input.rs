@@ -1,4 +1,4 @@
-//! Input encoding: arrow key, mouse button and wheel report → PTY bytes.
+//! Input encoding: function key, typing key, mouse button and wheel report → PTY bytes.
 //!
 //! **Pure and lock-free.** The mode question (`TermMode`) is answered under
 //! the caller's `Term` lock and only the answer arrives here; the decision
@@ -8,6 +8,8 @@
 //! out of one body ([`mouse_report`]): the wheel's press and the button's
 //! press/release share the same encoding, the same limit and the same
 //! rejection.
+
+use std::borrow::Cow;
 
 use alacritty_terminal::term::TermMode;
 
@@ -73,9 +75,22 @@ pub enum FunctionKey {
 
 /// xterm's modifier parameter: 1 + Shift + 2·Option + 4·Control. ⌘ has no
 /// place in it — a ⌘ key is the menu's, the three that reach the terminal
-/// are written as bytes of their own in `bt-shell`.
+/// are written as bytes of their own in `bt-shell`. The kitty keyboard
+/// protocol's modifiers are the same bits ([`text_key`]).
 fn modifier_param(mods: Mods) -> u8 {
     1 + u8::from(mods.shift) + 2 * u8::from(mods.option) + 4 * u8::from(mods.ctrl)
+}
+
+/// Whether the program asked to have its keys told apart: the kitty keyboard
+/// protocol's first level, "disambiguate escape codes" (`CSI > 1 u`). It is
+/// the only level kept — the stream's wrapper takes the others off what a
+/// program pushes ([`crate::handler::ClusterHandler`]), so `CSI ? u` answers
+/// with what is really sent.
+///
+/// A shell that asks (fish 4 does, at its prompt) has said it reads every
+/// form, so the prompt's caution ([`function_key`]) does not hold for it.
+fn tells_keys_apart(mode: TermMode) -> bool {
+    mode.contains(TermMode::DISAMBIGUATE_ESC_CODES)
 }
 
 /// A function key's bytes — xterm's PC-style encoding, the one
@@ -99,7 +114,12 @@ fn modifier_param(mods: Mods) -> u8 {
 /// go in their SS3 form whatever DECCKM says: that is the form the shells
 /// bind — macOS's `/etc/zshrc` binds `terminfo[khome]` (`\eOH`) while zsh
 /// leaves application mode off, so `\e[H` would do nothing, and bash and fish
-/// take both forms.
+/// take both forms. A line editor that asked to have keys told apart
+/// ([`tells_keys_apart`]) is not cautioned: it gets the keys a program gets.
+///
+/// **F3 under the kitty protocol** is `CSI 13 ~`: ⇧F3's `CSI 1;2R` is also
+/// the answer to a cursor position query, and a program that asked to have
+/// keys told apart reads F3 from this form.
 ///
 /// An empty result writes nothing.
 pub(crate) fn function_key(
@@ -108,6 +128,8 @@ pub(crate) fn function_key(
     mode: TermMode,
     at_prompt: bool,
 ) -> Vec<u8> {
+    let kitty = tells_keys_apart(mode);
+    let at_prompt = at_prompt && !kitty;
     let param = if at_prompt { 1 } else { modifier_param(mods) };
     let app = mode.contains(TermMode::APP_CURSOR);
     // `CSI 1 ; m <final>`, or the plain form when there is no modifier.
@@ -137,10 +159,68 @@ pub(crate) fn function_key(
         FunctionKey::PageDown => tilde(6),
         FunctionKey::Delete => tilde(3),
         FunctionKey::F(_) if at_prompt => Vec::new(),
+        FunctionKey::F(3) if kitty => tilde(13),
         FunctionKey::F(n @ 1..=4) => lettered(b'P' + (n - 1), b'O'),
         FunctionKey::F(n @ 5..=12) => tilde([15, 17, 18, 19, 20, 21, 23, 24][usize::from(n - 5)]),
         FunctionKey::F(_) => Vec::new(),
     }
+}
+
+/// A key that types a character of its own — a letter, a digit, Esc, ⏎, ⇥,
+/// ⌫ — with the modifiers it was pressed with. `bt-shell` sends it here when
+/// it may mean more than its text: Esc, ⏎, ⇥ and ⌫, and any key with
+/// Control. What it sends is the program's choice ([`text_key`]), so the
+/// bytes are decided under `Term`'s lock ([`crate::Session::write_text_key`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TextKey {
+    /// The key's character with no modifier applied: `c` for ⌃⇧C, `[` for
+    /// ⌃[ (whose everyday byte is Esc's), U+001B for Esc, `\r` for ⏎.
+    pub key: char,
+    /// What was held. ⌘ never rides here; Option does only where it composed
+    /// no text (with Control, or on ⏎, ⇥, ⌫ and Esc).
+    pub mods: Mods,
+    /// What the key sends where nobody asked for more: ⌃C's 0x03, ⇧⇥'s
+    /// `CSI Z`, ⇧⏎'s `\r`. `bt-shell` knows these: they are the platform's.
+    pub legacy: Cow<'static, [u8]>,
+}
+
+/// Esc's character, and its code in the kitty protocol.
+const ESC: char = '\u{1b}';
+
+/// A typing key's bytes. Where the program asked to have keys told apart
+/// ([`tells_keys_apart`]), the keys whose everyday bytes stand for two keys
+/// or lose a modifier go as the kitty protocol's `CSI code ; modifiers u`:
+///
+/// - Esc always (`CSI 27 u`): its byte also starts every other sequence, so
+///   a program has to wait to know it was Esc;
+/// - ⏎, ⇥ and ⌫ with any modifier (⇧⏎ = `CSI 13;2u`, ⇧⇥ = `CSI 9;2u`, ⌃⌫ =
+///   `CSI 127;5u`); without one they keep `\r`, `\t` and 0x7f, so a shell
+///   left in the mode by a program that died still runs what is typed;
+/// - any key with Control or Option (⌃C = `CSI 99;5u`, ⌃[ = `CSI 91;5u`).
+///
+/// The code is the key's lower-case character, as the protocol has it.
+/// Everything else, and every key where nobody asked, sends its everyday
+/// bytes. An empty result writes nothing.
+pub(crate) fn text_key(key: &TextKey, mode: TermMode) -> Vec<u8> {
+    let mods = key.mods;
+    let told_apart = match key.key {
+        ESC => true,
+        '\r' | '\t' | '\u{7f}' => mods.shift || mods.option || mods.ctrl,
+        _ => mods.option || mods.ctrl,
+    };
+    if !told_apart || !tells_keys_apart(mode) {
+        return key.legacy.to_vec();
+    }
+    let mut lower = key.key.to_lowercase();
+    let code = match (lower.next(), lower.next()) {
+        (Some(c), None) => u32::from(c),
+        _ => u32::from(key.key),
+    };
+    match modifier_param(mods) {
+        1 => format!("\x1b[{code}u"),
+        param => format!("\x1b[{code};{param}u"),
+    }
+    .into_bytes()
 }
 
 /// The wheel's backward (up) button; forward (down) is [`WHEEL_DOWN`].
@@ -564,6 +644,69 @@ mod tests {
                 assert_eq!(at_prompt(FunctionKey::End, mods, mode), b"\x1bOF");
             }
         }
+    }
+
+    #[test]
+    fn a_shell_that_asked_to_tell_keys_apart_gets_the_keys_a_program_gets() {
+        let kitty = TermMode::DISAMBIGUATE_ESC_CODES;
+        let at_prompt = |key, mods| function_key(key, mods, kitty, true);
+        assert_eq!(
+            at_prompt(FunctionKey::Arrow(Arrow::Left), SHIFT),
+            b"\x1b[1;2D"
+        );
+        assert_eq!(at_prompt(FunctionKey::Home, Mods::NONE), b"\x1b[H");
+        assert_eq!(at_prompt(FunctionKey::F(5), Mods::NONE), b"\x1b[15~");
+        // F3 leaves the form a cursor position report has.
+        assert_eq!(at_prompt(FunctionKey::F(3), Mods::NONE), b"\x1b[13~");
+        assert_eq!(at_prompt(FunctionKey::F(3), SHIFT), b"\x1b[13;2~");
+        assert_eq!(at_prompt(FunctionKey::F(4), SHIFT), b"\x1b[1;2S");
+    }
+
+    /// A typing key, as [`text_key`] sends it in `mode`.
+    fn typed(key: char, mods: Mods, legacy: &'static [u8], mode: TermMode) -> String {
+        let key = TextKey {
+            key,
+            mods,
+            legacy: Cow::Borrowed(legacy),
+        };
+        String::from_utf8(text_key(&key, mode)).expect("ASCII")
+    }
+
+    #[test]
+    fn a_typing_key_sends_its_everyday_bytes_where_nobody_asked() {
+        let mode = TermMode::APP_CURSOR;
+        assert_eq!(typed('\u{1b}', Mods::NONE, b"\x1b", mode), "\x1b");
+        assert_eq!(typed('\r', SHIFT, b"\r", mode), "\r");
+        assert_eq!(typed('\t', SHIFT, b"\x1b[Z", mode), "\x1b[Z");
+        assert_eq!(typed('c', CTRL, b"\x03", mode), "\x03");
+    }
+
+    #[test]
+    fn a_program_that_asked_tells_esc_and_modified_keys_apart() {
+        let kitty = TermMode::DISAMBIGUATE_ESC_CODES;
+        let ctrl_shift = Mods::new(true, false, true, false);
+        let ctrl_option = Mods::new(true, true, false, false);
+        // Esc, alone or not.
+        assert_eq!(typed('\u{1b}', Mods::NONE, b"\x1b", kitty), "\x1b[27u");
+        assert_eq!(typed('\u{1b}', SHIFT, b"\x1b", kitty), "\x1b[27;2u");
+        // ⏎, ⇥ and ⌫ keep their byte alone and tell any modifier.
+        assert_eq!(typed('\r', Mods::NONE, b"\r", kitty), "\r");
+        assert_eq!(typed('\t', Mods::NONE, b"\t", kitty), "\t");
+        assert_eq!(typed('\u{7f}', Mods::NONE, b"\x7f", kitty), "\x7f");
+        assert_eq!(typed('\r', SHIFT, b"\r", kitty), "\x1b[13;2u");
+        assert_eq!(typed('\r', CTRL, b"\r", kitty), "\x1b[13;5u");
+        assert_eq!(typed('\t', SHIFT, b"\x1b[Z", kitty), "\x1b[9;2u");
+        assert_eq!(typed('\u{7f}', CTRL, b"\x08", kitty), "\x1b[127;5u");
+        assert_eq!(typed('\u{7f}', OPTION, b"\x1b\x7f", kitty), "\x1b[127;3u");
+        // Control and Option name the key, by its lower-case character.
+        assert_eq!(typed('c', CTRL, b"\x03", kitty), "\x1b[99;5u");
+        assert_eq!(typed('c', ctrl_shift, b"\x03", kitty), "\x1b[99;6u");
+        assert_eq!(typed('C', ctrl_shift, b"\x03", kitty), "\x1b[99;6u");
+        assert_eq!(typed('c', ctrl_option, b"\x03", kitty), "\x1b[99;7u");
+        assert_eq!(typed('[', CTRL, b"\x1b", kitty), "\x1b[91;5u");
+        assert_eq!(typed(' ', CTRL, b"\x00", kitty), "\x1b[32;5u");
+        // Shift alone is text.
+        assert_eq!(typed('a', SHIFT, b"A", kitty), "A");
     }
 
     #[test]

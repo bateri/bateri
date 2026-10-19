@@ -20,7 +20,7 @@ dependencies = [
 [[package]]
 name = "alacritty_terminal"
 version = "0.26.0"
-source = "git+https://github.com/bateri/kablo?rev=c13f3fbdf1d28222d6db33dfd4ae06a9b8621b44#c13f3fbdf1d28222d6db33dfd4ae06a9b8621b44"
+source = "git+https://github.com/bateri/kablo?rev=c277a02cfa02e47ba1560a2fcd5182dbcd0eaff8#c277a02cfa02e47ba1560a2fcd5182dbcd0eaff8"
 dependencies = [
  "base64",
  "bitflags",
@@ -1248,7 +1248,7 @@ checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 [[package]]
 name = "vte"
 version = "0.15.0"
-source = "git+https://github.com/bateri/kablo?rev=c13f3fbdf1d28222d6db33dfd4ae06a9b8621b44#c13f3fbdf1d28222d6db33dfd4ae06a9b8621b44"
+source = "git+https://github.com/bateri/kablo?rev=c277a02cfa02e47ba1560a2fcd5182dbcd0eaff8#c277a02cfa02e47ba1560a2fcd5182dbcd0eaff8"
 dependencies = [
  "arrayvec",
  "bitflags",

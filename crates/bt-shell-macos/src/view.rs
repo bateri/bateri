@@ -1321,6 +1321,12 @@ define_class!(
             }
             let ctrl = flags.contains(NSEventModifierFlags::Control);
             let option = flags.contains(NSEventModifierFlags::Option);
+            // The key with no modifier applied: `c` for ⌃⇧C, `[` for ⌃[ whose
+            // `characters` is Esc's. A program that asked for the kitty
+            // protocol is told the key by it (`KeyPress::bare`).
+            let bare = event
+                .charactersByApplyingModifiers(NSEventModifierFlags::empty())
+                .and_then(|bare| only_char(&bare.to_string()));
             // **The dock selection's keys**, BEFORE the stack: ⌫
             // and the arrows would fall to `doCommandBySelector:` in the stack
             // and take their bytes from `encode_key`, i.e. instead of deleting
@@ -1338,6 +1344,7 @@ define_class!(
                     ctrl,
                     option,
                     command,
+                    bare,
                 })
                 && session.dock_key(key)
             {
@@ -1399,12 +1406,16 @@ define_class!(
                 ctrl,
                 option,
                 command,
+                bare,
             };
             match encode_key(key) {
                 Some(KeyInput::Bytes(bytes)) => session.write(&bytes),
                 // A function key's bytes depend on DECCKM and on whether a shell reads the
                 // line, both in `bt-core`.
                 Some(KeyInput::Key(key, mods)) => session.write_key(key, mods),
+                // Whether a typing key is told apart is the program's choice (the kitty
+                // protocol), in `bt-core`.
+                Some(KeyInput::Text(key)) => session.write_text_key(&key),
                 None => {}
             }
         }

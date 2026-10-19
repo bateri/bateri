@@ -44,10 +44,10 @@ of every installed copy. A version without a section is not released.
 - **Programs see the modifiers on arrows and the other function keys.** ⇧←,
   ⌃→, ⌥↑, ⇧⌦, ⌃PgUp and the like reach a program in the terminal as xterm sends
   them, so Codex, vim, helix and fish can tell them from the plain key. At a
-  prompt of zsh, bash 4.4+ or fish with bateri's shell integration (`[shell]
-  integration` other than `"off"`) they still do what they did before, because zsh
-  and bash would type `;2D` into the line; a shell without it gets them as other
-  terminals send them.
+  prompt of zsh or bash 4.4+ with bateri's shell integration (`[shell]
+  integration` other than `"off"`) they still do what they did before, because
+  they would type `;2D` into the line; fish 4 asks for every form and gets them,
+  and a shell without the integration gets them as other terminals send them.
 - **Home, End and F1–F12 work.** fn+← and fn+→ (Home and End) move to the start
   and end of the line at the prompt and in programs; the F keys reach programs
   like htop and Midnight Commander. F13–F20 go as ⇧F1–⇧F8, the way xterm names
@@ -55,6 +55,12 @@ of every installed copy. A version without a section is not released.
 - **⌥⌦ deletes the next word** (fn+⌥⌫ on a laptop), the mirror of ⌥⌫.
 - **⌥⏎ starts a new line without running it** in Codex, Claude Code, zsh and
   fish.
+- **⇧⏎ starts a new line in Codex and Claude Code, and keys are told apart
+  for the programs that ask.** bateri speaks the first level of the kitty
+  keyboard protocol: a program that turns it on (Codex, Claude Code, fish 4)
+  hears ⇧⏎ and ⌃⏎ apart from ⏎, Esc without waiting to see whether more of a
+  sequence follows, and ⌃I, ⌃M and ⌃[ apart from ⇥, ⏎ and Esc. Programs that do
+  not ask get every key as before.
 - **Programs that ask to hear the focus get it.** vim, tmux and others that turn
   on focus events learn when the pane gains or loses the keyboard: switching
   windows, tabs or splits, or opening the search field.

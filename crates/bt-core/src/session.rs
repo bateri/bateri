@@ -95,8 +95,8 @@ use crate::identity::{LC_TERMINAL, PaneUuid, TERM_PROGRAM, TERM_PROGRAM_VERSION}
 // selection side in this module.
 use crate::Mods;
 use crate::input::{
-    self, Arrow, ButtonRoute, FunctionKey, MouseButton, MouseEncoding, MouseModifiers, WHEEL_DOWN,
-    WHEEL_UP, WheelRoute,
+    self, Arrow, ButtonRoute, FunctionKey, MouseButton, MouseEncoding, MouseModifiers, TextKey,
+    WHEEL_DOWN, WHEEL_UP, WheelRoute,
 };
 use crate::journal::{Base, Journal, Side as JournalSide};
 use crate::link;
@@ -1661,10 +1661,12 @@ impl Osc52 {
 /// ([`Session::set_terminal_options`]).
 ///
 /// The definition of a word (`semantic_escape_chars`) comes not from the
-/// options but from a constant ([`WORD_SEPARATORS`]); the remaining fields
-/// (cursor styles, `kitty_keyboard`) are at alacritty's default: nothing sets
-/// them, so they do not move between two calls either.
-/// `term_config_keeps_every_other_field` pins this.
+/// options but from a constant ([`WORD_SEPARATORS`]), and the kitty keyboard
+/// protocol is always on (`kitty_keyboard`): a program asks for it and reads
+/// the answer, nothing in the settings changes it — and a change would empty
+/// every keyboard stack (`Term::set_options`). The remaining fields (cursor
+/// styles) are at alacritty's default: nothing sets them, so they do not move
+/// between two calls either. `term_config_keeps_every_other_field` pins this.
 pub(crate) fn term_config(options: TerminalOptions) -> Config {
     Config {
         semantic_escape_chars: WORD_SEPARATORS.to_owned(),
@@ -1690,6 +1692,7 @@ pub(crate) fn term_config(options: TerminalOptions) -> Config {
             shape: caret_shape(options.cursor),
             blinking: matches!(options.blink, CursorBlink::Auto),
         },
+        kitty_keyboard: true,
         ..Config::default()
     }
 }
@@ -8273,6 +8276,18 @@ impl Session {
         self.send_input(|mode| input::function_key(key, mods, mode, at_prompt));
     }
 
+    /// A typing key that may mean more than its text — Esc, ⏎, ⇥, ⌫, a
+    /// Control key — enters as a key: a program that asked to have keys told
+    /// apart (the kitty keyboard protocol) gets `CSI code ; modifiers u`,
+    /// everyone else the key's everyday bytes ([`input::text_key`]). ⇧⏎ is
+    /// how Codex and Claude Code start a new line.
+    ///
+    /// User input like [`Session::write`], with the mode read in the same
+    /// `Term` lock (`send_input`).
+    pub fn write_text_key(&self, key: &TextKey) {
+        self.send_input(|mode| input::text_key(key, mode));
+    }
+
     /// The pane gained (`true`) or lost the keyboard: a program that asked for
     /// focus events (`CSI ? 1004 h` — vim, tmux) hears `CSI I` or `CSI O`.
     ///
@@ -13030,6 +13045,7 @@ enum Taken {
 
 #[cfg(test)]
 mod tests {
+    use std::borrow::Cow;
     use std::sync::{Condvar, Mutex};
     use std::time::{Duration, Instant};
 
@@ -18083,7 +18099,13 @@ mod tests {
             assert_eq!(config.semantic_escape_chars, WORD_SEPARATORS);
         }
 
-        // Nothing is set outside the **four** fields.
+        // The kitty keyboard protocol is on whatever the options say: a change
+        // would empty the keyboard stacks of a live session.
+        for config in [&before, &scrolled, &copying, &shaped, &auto] {
+            assert!(config.kitty_keyboard);
+        }
+
+        // Nothing is set outside the **five** fields.
         for config in [before, scrolled, copying, shaped] {
             assert_eq!(
                 Config {
@@ -18091,6 +18113,7 @@ mod tests {
                     osc52: Config::default().osc52,
                     default_cursor_style: Config::default().default_cursor_style,
                     semantic_escape_chars: Config::default().semantic_escape_chars,
+                    kitty_keyboard: Config::default().kitty_keyboard,
                     ..config
                 },
                 Config::default()
@@ -23658,6 +23681,43 @@ mod tests {
         prompt.write_key(FunctionKey::F(5), Mods::NONE);
         prompt.write_key(FunctionKey::Home, Mods::NONE);
         expect_sent(&prompt, &wake, b"\x1b[D\x1bOH");
+    }
+
+    #[test]
+    fn a_program_that_asked_for_the_kitty_protocol_hears_the_keys_told_apart() {
+        let shift = Mods::new(false, false, true, false);
+        let ctrl = Mods::new(true, false, false, false);
+        let key = |key, mods, legacy: &'static [u8]| TextKey {
+            key,
+            mods,
+            legacy: Cow::Borrowed(legacy),
+        };
+        // Not asked: the everyday bytes. The line discipline keeps its hands off
+        // ⏎ and ⌃C, so `od` sees what was sent.
+        let (plain, wake) = dump_session(40, "stty -isig -icrnl; printf '\\033[?2004h'", |mode| {
+            mode.contains(TermMode::BRACKETED_PASTE)
+        });
+        plain.write_text_key(&key('\r', shift, b"\r"));
+        plain.write_text_key(&key('c', ctrl, b"\x03"));
+        plain.write_text_key(&key('\u{1b}', Mods::NONE, b"\x1b"));
+        expect_sent(&plain, &wake, b"\r\x03\x1b");
+
+        // Asked — and at a prompt too: a shell that pushes the protocol (fish)
+        // reads every form it asked for.
+        let (asked, wake) = dump_session(
+            40,
+            "stty -isig -icrnl; printf '\\033]133;A\\007\\033]133;B\\007\\033[>1u'",
+            |mode| mode.contains(TermMode::DISAMBIGUATE_ESC_CODES),
+        );
+        wait_until("the prompt did not end", Duration::from_secs(5), || {
+            asked.shell_state().map(|s| s.phase) == Some(ShellPhase::Input)
+        });
+        asked.write_text_key(&key('\r', shift, b"\r"));
+        asked.write_text_key(&key('\r', Mods::NONE, b"\r"));
+        asked.write_text_key(&key('c', ctrl, b"\x03"));
+        asked.write_text_key(&key('\u{1b}', Mods::NONE, b"\x1b"));
+        asked.write_key(FunctionKey::Arrow(Arrow::Left), shift);
+        expect_sent(&asked, &wake, b"\x1b[13;2u\r\x1b[99;5u\x1b[27u\x1b[1;2D");
     }
 
     #[test]

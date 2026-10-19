@@ -706,9 +706,8 @@ fn keyboard_bits(mode: TermMode) -> KeyboardModes {
 ///
 /// The top entry is not observable by popping (`pop_keyboard_modes` shows
 /// the entry **under** the popped one, and `mode()` may differ from the top
-/// after `CSI = u`), so a dummy is pushed first. A no-op while
-/// `kitty_keyboard` is off (bateri's config): push and pop return at once
-/// and the stack reads empty.
+/// after `CSI = u`), so a dummy is pushed first. With `kitty_keyboard` off
+/// push and pop return at once and the stack reads empty.
 fn probe_keyboard<T: EventListener>(term: &mut Term<T>) -> Vec<KeyboardModes> {
     term.push_keyboard_mode(KeyboardModes::NO_MODE);
     let mut stack: Vec<KeyboardModes> = (0..=KEYBOARD_DEPTH)
@@ -1765,8 +1764,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// A term with the kitty protocol on: bateri's is off, but the probe
-    /// must read the stacks when it is not.
+    /// A term with the kitty protocol on, as bateri's is.
     fn live_term(cols: usize, rows: usize) -> (Term<Recorder>, Recorder) {
         let config = Config {
             scrolling_history: 1000,
@@ -1900,7 +1898,7 @@ pub(crate) mod tests {
     fn modes_palette_style_keyboard_titles_tabs_and_the_active_set_come_back() {
         let bytes = "\x1b]4;1;rgb:12/34/56\x07\x1b]11;rgb:01/02/03\x07\x1b]12;#ff0000\x07\
                      \x1b[6 q\
-                     \x1b[>1u\x1b[>3u\x1b[=5;1u\
+                     \x1b[>1u\x1b[>2u\x1b[>3u\x1b[=0;1u\
                      \x1b]2;first\x07\x1b[22t\x1b]2;second\x07\x1b[22t\x1b]2;now\x07\
                      \x1b[3g\x1b[5G\x1bH\x1b[13G\x1bH\
                      \x1b)0\x0e\x1b[2;3Habc\
@@ -1909,12 +1907,15 @@ pub(crate) mod tests {
         let probed = &trip.probed;
         assert_eq!(probed.tabs, [4, 12]);
         assert_eq!(probed.charset, CharsetIndex::G1);
+        // The stream's wrapper keeps the one level: `2` is pushed as nothing,
+        // `3` as `1`, and the set (`0`) leaves the top where it was.
         assert_eq!(
             probed.keyboard,
             [
                 vec![
                     KeyboardModes::DISAMBIGUATE_ESC_CODES,
-                    KeyboardModes::from_bits_truncate(3)
+                    KeyboardModes::NO_MODE,
+                    KeyboardModes::DISAMBIGUATE_ESC_CODES
                 ],
                 Vec::new()
             ]
@@ -1949,28 +1950,50 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_program_that_pushes_past_the_keyboard_stacks_depth_does_not_end_the_terminal() {
+        // A full stack drops its own bottom entry. alacritty 0.26.0 took the
+        // title stack's instead, and an empty title stack panicked the thread
+        // that parses the output; the handover's probe pushes one more.
+        let (mut term, recorder) = live_term(20, 6);
+        feed_into(&mut term, b"\x1b[>0u");
+        feed_into(&mut term, &b"\x1b[>1u".repeat(KEYBOARD_DEPTH));
+        assert!(term.mode().contains(TermMode::DISAMBIGUATE_ESC_CODES));
+        let (_, probed) = encode_of(&mut term, &recorder);
+        // The probe's own push costs a full stack its bottom entry.
+        assert_eq!(
+            probed.keyboard[0],
+            vec![KeyboardModes::DISAMBIGUATE_ESC_CODES; KEYBOARD_DEPTH - 1]
+        );
+        assert!(probed.titles.is_empty());
+    }
+
+    #[test]
     fn the_keyboard_stack_kept_off_the_alternate_screen_comes_back() {
         // alacritty keeps the alternate stack when the screen is left and
         // gives it back on the next entry.
-        let bytes = b"\x1b[>1u\x1b[?1049h\x1b[>2u\x1b[>4u\x1b[?1049l";
+        let bytes = b"\x1b[>1u\x1b[?1049h\x1b[>3u\x1b[>2u\x1b[>5u\x1b[?1049l";
         let trip = live_trip(20, 6, bytes);
         assert_eq!(
             trip.probed.keyboard,
             [
                 vec![KeyboardModes::DISAMBIGUATE_ESC_CODES],
                 vec![
-                    KeyboardModes::REPORT_EVENT_TYPES,
-                    KeyboardModes::REPORT_ALTERNATE_KEYS
+                    KeyboardModes::DISAMBIGUATE_ESC_CODES,
+                    KeyboardModes::NO_MODE,
+                    KeyboardModes::DISAMBIGUATE_ESC_CODES
                 ]
             ]
         );
         // And on the alternate screen, its stack is the active one.
-        let trip = live_trip(20, 6, b"\x1b[>1u\x1b[?1049h\x1b[>2u");
+        let trip = live_trip(20, 6, b"\x1b[>1u\x1b[?1049h\x1b[>3u\x1b[>2u");
         assert_eq!(
             trip.probed.keyboard,
             [
                 vec![KeyboardModes::DISAMBIGUATE_ESC_CODES],
-                vec![KeyboardModes::REPORT_EVENT_TYPES]
+                vec![
+                    KeyboardModes::DISAMBIGUATE_ESC_CODES,
+                    KeyboardModes::NO_MODE
+                ]
             ]
         );
     }

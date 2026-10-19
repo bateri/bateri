@@ -516,6 +516,27 @@ impl<U: EventListener> Handler for ClusterHandler<'_, U> {
         self.term.reset_state();
     }
 
+    /// The kitty keyboard protocol's `CSI > flags u`, with only the level the
+    /// keys are encoded for: "disambiguate escape codes" (`input::text_key`).
+    /// A program that asks for more (Codex adds the alternate keys and the
+    /// event types) gets that level and `CSI ? u` tells it so, instead of
+    /// promising release events and shifted keys nobody sends.
+    ///
+    /// The push stays a push when nothing is left of it: the program pops
+    /// as many as it pushed, and a dropped push would pop its parent's.
+    fn push_keyboard_mode(&mut self, mode: KeyboardModes) {
+        *self.last_input = false;
+        self.term
+            .push_keyboard_mode(mode & KeyboardModes::DISAMBIGUATE_ESC_CODES);
+    }
+
+    /// `CSI = flags ; how u`, kept to the one level like a push.
+    fn set_keyboard_mode(&mut self, mode: KeyboardModes, behavior: KeyboardModesApplyBehavior) {
+        *self.last_input = false;
+        self.term
+            .set_keyboard_mode(mode & KeyboardModes::DISAMBIGUATE_ESC_CODES, behavior);
+    }
+
     /// OSC 22 ([`crate::pointer`]): the request goes to the current screen's
     /// stack, a query is answered the way the terminal's other answers go and
     /// the shell hears of a new shape. Without a sink (a replay) it is read
@@ -649,9 +670,7 @@ impl<U: EventListener> Handler for ClusterHandler<'_, U> {
         fn set_hyperlink(&mut self, hyperlink: Option<Hyperlink>);
         fn set_mouse_cursor_icon(&mut self, icon: CursorIcon);
         fn report_keyboard_mode(&mut self);
-        fn push_keyboard_mode(&mut self, mode: KeyboardModes);
         fn pop_keyboard_modes(&mut self, to_pop: u16);
-        fn set_keyboard_mode(&mut self, mode: KeyboardModes, behavior: KeyboardModesApplyBehavior);
         fn set_modify_other_keys(&mut self, mode: ModifyOtherKeys);
         fn report_modify_other_keys(&mut self);
         fn set_scp(&mut self, char_path: ScpCharPath, update_mode: ScpUpdateMode);
@@ -1057,5 +1076,52 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The terminal's answers (`Event::PtyWrite`), in order.
+    #[derive(Clone, Default)]
+    struct Answers(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+
+    impl EventListener for Answers {
+        fn send_event(&self, event: alacritty_terminal::event::Event) {
+            if let alacritty_terminal::event::Event::PtyWrite(text) = event {
+                self.0.lock().unwrap().push(text);
+            }
+        }
+    }
+
+    #[test]
+    fn a_program_gets_the_one_keyboard_level_there_is_and_is_told_so() {
+        let config = Config {
+            kitty_keyboard: true,
+            ..Config::default()
+        };
+        let answers = Answers::default();
+        let mut term = Term::new(config, &TermSize::new(10, 2), answers.clone());
+        let feed = |term: &mut Term<Answers>, bytes: &[u8]| {
+            let mut parser: Processor = Processor::new();
+            let mut last_input = false;
+            parser.advance(&mut ClusterHandler::new(term, true, &mut last_input), bytes);
+        };
+        let level = |term: &Term<Answers>| *term.mode() & TermMode::KITTY_KEYBOARD_PROTOCOL;
+        let one = TermMode::DISAMBIGUATE_ESC_CODES;
+
+        // Codex's push: disambiguate, alternate keys, event types.
+        feed(&mut term, b"\x1b[>7u\x1b[?u");
+        assert_eq!(level(&term), one);
+        // A push with nothing left of it is still a push: the pop that
+        // answers it gives the level under it back.
+        feed(&mut term, b"\x1b[>8u");
+        assert_eq!(level(&term), TermMode::empty());
+        feed(&mut term, b"\x1b[<u\x1b[?u");
+        assert_eq!(level(&term), one);
+        // A set is kept to the level too, whichever way it applies.
+        feed(&mut term, b"\x1b[=5;1u");
+        assert_eq!(level(&term), one);
+        feed(&mut term, b"\x1b[=4;3u");
+        assert_eq!(level(&term), one);
+        feed(&mut term, b"\x1b[=1;3u");
+        assert_eq!(level(&term), TermMode::empty());
+        assert_eq!(*answers.0.lock().unwrap(), ["\x1b[?1u", "\x1b[?1u"]);
     }
 }

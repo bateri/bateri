@@ -220,5 +220,5 @@ bt-shell-macos = { path = "crates/bt-shell-macos" }
 # dependency decision (2026-10-17, the command palette): the same care as vte's — `make audit`
 # fails if the patch stops applying, and a newer upstream release is merged by hand.
 [patch.crates-io]
-vte = { git = "https://github.com/bateri/kablo", rev = "c13f3fbdf1d28222d6db33dfd4ae06a9b8621b44" }
-alacritty_terminal = { git = "https://github.com/bateri/kablo", rev = "c13f3fbdf1d28222d6db33dfd4ae06a9b8621b44" }
+vte = { git = "https://github.com/bateri/kablo", rev = "c277a02cfa02e47ba1560a2fcd5182dbcd0eaff8" }
+alacritty_terminal = { git = "https://github.com/bateri/kablo", rev = "c277a02cfa02e47ba1560a2fcd5182dbcd0eaff8" }

@@ -3,11 +3,13 @@
 //! **Pure and AppKit-free**, and therefore testable.
 //!
 //! A function key's bytes are **not written** here, only which key it is and which modifiers
-//! ride with it (`bt_core::FunctionKey`, the reason is there).
+//! ride with it (`bt_core::FunctionKey`, the reason is there). A typing key that may mean more
+//! than its text (Esc, ⏎, ⇥, ⌫, a Control key) carries its everyday bytes and its identity
+//! (`bt_core::TextKey`): which of the two goes is the program's choice, in `bt-core`.
 
 use std::borrow::Cow;
 
-use bt_core::{Arrow, Chord, DockKey, FunctionKey, Key, Mods, NamedKey};
+use bt_core::{Arrow, Chord, DockKey, FunctionKey, Key, Mods, NamedKey, TextKey};
 
 /// AppKit's function key range: U+F700–U+F8FF. The named constants
 /// (`NSUpArrowFunctionKey` … `NSModeSwitchFunctionKey`) use its first slice. The arrows, Home,
@@ -156,14 +158,19 @@ pub fn line_editing(chord: &Chord) -> Option<&'static LineKey> {
     LINE_EDITING.iter().find(|key| key.chord == *chord)
 }
 
-/// [`encode_key`]'s answer: a key with known bytes, or a function key with its modifiers.
+/// [`encode_key`]'s answer: a key with known bytes, a function key with its modifiers, or a
+/// typing key whose bytes the program chooses.
 #[derive(Debug, PartialEq, Eq)]
 pub enum KeyInput {
-    /// Bytes independent of the terminal's state: a letter, Enter, ⌥←…
+    /// Bytes independent of the terminal's state: a letter, ⌥←, ⌘⌫…
     Bytes(Cow<'static, [u8]>),
     /// Goes to `Session::write_key`: its bytes depend on the mode and on whether a shell is
     /// reading the line. ⌘ never rides here — a ⌘ key that reaches the terminal is bytes.
     Key(FunctionKey, Mods),
+    /// Goes to `Session::write_text_key`: Esc, ⏎, ⇥, ⌫ or a Control key, which a program that
+    /// asked for the kitty keyboard protocol hears as the key it is (⇧⏎ apart from ⏎, ⌃[ apart
+    /// from Esc) and everyone else as the bytes it always sent.
+    Text(TextKey),
 }
 
 /// [`encode_key`]'s input: the half of `NSEvent` that concerns this function.
@@ -189,6 +196,11 @@ pub struct KeyPress<'a> {
     /// (`view::reaches_terminal`), so the flag's only job is to tell the list's three keys (⌘⌫,
     /// ⌘←, ⌘→) apart from their Option forms.
     pub command: bool,
+    /// The key's character with **no** modifier applied (`charactersByApplyingModifiers:` with
+    /// none): `c` for ⌃⇧C, `[` for ⌃[ whose `characters` is Esc's. It names a typing key to a
+    /// program that asked for the kitty protocol ([`KeyInput::Text`]); `None` when AppKit
+    /// gives none or more than one character.
+    pub bare: Option<char>,
 }
 
 /// Keystroke ([`KeyPress`]) → PTY bytes or a function key.
@@ -217,15 +229,23 @@ pub struct KeyPress<'a> {
 /// `None` → the key is swallowed; the caller writes nothing.
 ///
 /// **Function keys carry their modifiers** ([`KeyInput::Key`]): ⇧← reaches a program as xterm's
-/// `\e[1;2D`, ⌃F5 as `\e[15;5~` — except at a shell's prompt, where `bt-core` drops them
-/// (`bt_core::FunctionKey`). Option's line gestures are not this: ⌥← stays the Meta `\eb` every
-/// line editor binds, with or without Shift or Control beside it.
+/// `\e[1;2D`, ⌃F5 as `\e[15;5~` — except at the prompt of a shell that did not ask for the
+/// kitty protocol, where `bt-core` drops them (`bt_core::FunctionKey`). Option's line gestures are not this: ⌥← stays the Meta `\eb` every
+/// line editor binds, with or without Shift or Control beside it — under the kitty protocol too,
+/// as a key binding of the terminal's.
+///
+/// **Typing keys that may mean more than their text** — Esc, ⏎, ⇥, ⌫ and every key with Control
+/// — carry their everyday bytes and their bare character ([`KeyInput::Text`]): a program that
+/// asked for the kitty keyboard protocol hears ⇧⏎ apart from ⏎ and ⌃[ apart from Esc
+/// (`bt_core::TextKey`). A printable key without Control is text, Option or not: Option composes
+/// a character on a Mac.
 ///
 /// **Out of scope:** IME; **Option as Meta across the board** — Meta encoding only for the
 /// navigation/deletion class, printable letters do not change (`Option+7` keeps typing `{` on
-/// Turkish Q); the kitty keyboard protocol (⇧⏎ told apart from ⏎); **modified Enter, Tab and
-/// Backspace** (xterm's `modifyOtherKeys`; ⌥⏎ is the Meta `\e\r`); Insert, which a Mac keyboard
-/// does not have. **Dead keys stay out of scope and are no longer a debt**: AppKit's stack
+/// Turkish Q); xterm's `modifyOtherKeys` (where no program asked for the kitty protocol, a
+/// modified ⏎, ⇥ or ⌫ keeps its plain byte); the kitty protocol's levels above the first
+/// (release events, the shifted and base-layout keys, text as escape codes) and the keypad as
+/// keys of its own — numpad Enter is ⏎; Insert, which a Mac keyboard does not have. **Dead keys stay out of scope and are no longer a debt**: AppKit's stack
 /// completes the composition, it never passes through here.
 pub fn encode_key(key: KeyPress<'_>) -> Option<KeyInput> {
     let c = key.chars.chars().next()?;
@@ -238,6 +258,27 @@ pub fn encode_key(key: KeyPress<'_>) -> Option<KeyInput> {
     // What rides with a function key. ⌘ never does: the three ⌘ keys that reach here are bytes.
     let mods = Mods::new(key.ctrl, key.option, key.shift, false);
     let function = |key: FunctionKey, mods: Mods| Some(KeyInput::Key(key, mods));
+    // A typing key that may mean more than its text — Esc, ⏎, ⇥, ⌫, any key with Control —
+    // carries what it is beside its everyday bytes; which of the two the program hears is
+    // `bt-core`'s (`bt_core::TextKey`). Anything else is its bytes.
+    // AppKit's layouts name ⌫ by BS (U+0008) when no modifier is applied, though `characters`
+    // says DEL (measured): the key is ⌫ either way, and the protocol knows it as DEL. No other key
+    // is BS bare — ⌃H is `h`.
+    let bare_of =
+        |bare: Option<char>| bare.map(|bare| if bare == '\u{8}' { BACKSPACE } else { bare });
+    let typing = |legacy: Cow<'static, [u8]>, bare: Option<char>| {
+        let bare = bare_of(bare);
+        Some(match bare {
+            Some(bare) if key.ctrl || matches!(bare, '\u{1b}' | '\r' | '\t' | BACKSPACE) => {
+                KeyInput::Text(TextKey {
+                    key: bare,
+                    mods,
+                    legacy,
+                })
+            }
+            _ => KeyInput::Bytes(legacy),
+        })
+    };
     let bytes: Cow<'static, [u8]> = match (c, key.ctrl) {
         // The first key of Cmd's closed allow-list: ⌘⌫ → `\x15` (`^U`, `kill-whole-line` in
         // zsh). macOS's strict meaning is "delete **up to the start** of the line", but in zsh
@@ -292,14 +333,14 @@ pub fn encode_key(key: KeyPress<'_>) -> Option<KeyInput> {
         // The numeric keypad's Enter and Fn-Return give `NSEnterCharacter` = U+0003 — the same
         // as Ctrl-C's byte. If Ctrl is NOT held this is a line ending; without this arm it would
         // pass through the plain-text branch as 0x03 and numpad Enter would interrupt every
-        // command instead of running it.
-        ('\u{3}', false) => Cow::Borrowed(b"\r"),
+        // command instead of running it. To a program it is ⏎.
+        ('\u{3}', false) => return typing(Cow::Borrowed(b"\r"), Some('\r')),
         // Shift+Tab: `characters` gives `NSBackTabCharacter` = U+0019. `xterm-256color`'s `kcbt`
         // is `\e[Z` — zsh's completion menu and readline read back-tab from this sequence, not
         // from a raw 0x19. U+0019 is also Ctrl-Y's byte (yank); again the Control flag tells them
         // apart, exactly like the U+0003 arm above. The Ctrl form goes out as 0x19 through the
-        // plain-text branch.
-        ('\u{19}', false) if single => Cow::Borrowed(b"\x1b[Z"),
+        // plain-text branch. To a program that tells keys apart it is ⇧⇥.
+        ('\u{19}', false) if single => return typing(Cow::Borrowed(b"\x1b[Z"), Some('\t')),
         // The function keys: which key, and what rides with it. Their bytes are `bt-core`'s
         // (DECCKM, the prompt), the reason is in `bt_core::FunctionKey`. They are all in the
         // function key range and are written **before** the swallowing arm below.
@@ -355,7 +396,8 @@ pub fn encode_key(key: KeyPress<'_>) -> Option<KeyInput> {
         // came in, everything after the first character would be dropped without a trace. Such
         // input should go to the plain-text branch, where all of it passes through.
         (c, true) if c.is_ascii_alphabetic() && single => {
-            Cow::Owned(vec![(c.to_ascii_lowercase() as u8) & 0x1f])
+            let legacy = Cow::Owned(vec![(c.to_ascii_lowercase() as u8) & 0x1f]);
+            return typing(legacy, key.bare.or(Some(c.to_ascii_lowercase())));
         }
         // A function key whose sequence we do not know (F21, Insert, Print Screen…). These are
         // not real characters but AppKit's private use codes: turning them into UTF-8 and writing
@@ -365,6 +407,12 @@ pub fn encode_key(key: KeyPress<'_>) -> Option<KeyInput> {
         // them into the right byte (U+000D, U+0009, U+001B, U+007F) and writing separate arms
         // would describe the same byte a second time.
         // `return_and_delete_are_single_bytes` pins the contract.
+        _ if single => {
+            return typing(
+                Cow::Owned(key.chars.as_bytes().to_vec()),
+                key.bare.or(Some(c)),
+            );
+        }
         _ => Cow::Owned(key.chars.as_bytes().to_vec()),
     };
     Some(KeyInput::Bytes(bytes))
@@ -445,6 +493,7 @@ mod tests {
             ctrl: false,
             option,
             command,
+            bare: Some(c),
         };
         let plain = KeyPress {
             chars: &chars,
@@ -452,17 +501,22 @@ mod tests {
             ctrl: false,
             option: false,
             command: false,
+            bare: Some(c),
         };
         (encode_key(held), encode_key(plain))
     }
 
     /// Whether `held` is only `plain` with the held modifier riding along — the same function key
-    /// in xterm's encoding (⌥↑, ⌥F5), not a meaning of its own.
+    /// in xterm's encoding (⌥↑, ⌥F5), or the same typing key with the same everyday bytes (⌥⇥,
+    /// which only a program that asked tells apart) — not a meaning of its own.
     fn rides_along(held: &Option<KeyInput>, plain: &Option<KeyInput>) -> bool {
-        matches!(
-            (held, plain),
-            (Some(KeyInput::Key(held, _)), Some(KeyInput::Key(plain, _))) if held == plain
-        )
+        match (held, plain) {
+            (Some(KeyInput::Key(held, _)), Some(KeyInput::Key(plain, _))) => held == plain,
+            (Some(KeyInput::Text(held)), Some(KeyInput::Text(plain))) => {
+                held.key == plain.key && held.legacy == plain.legacy
+            }
+            _ => false,
+        }
     }
 
     #[test]
@@ -583,6 +637,7 @@ mod tests {
             ctrl: false,
             option: false,
             command: false,
+            bare: only_char(chars),
         }
     }
 
@@ -620,11 +675,86 @@ mod tests {
         }
     }
 
+    /// What a key sends where no program asked for the kitty protocol: its bytes, or a typing
+    /// key's everyday bytes. A function key has none here.
     fn encode(key: KeyPress<'_>) -> Vec<u8> {
         match encode_key(key) {
             Some(KeyInput::Bytes(bytes)) => bytes.into_owned(),
+            Some(KeyInput::Text(key)) => key.legacy.into_owned(),
             other => panic!("{key:?} gave no bytes: {other:?}"),
         }
+    }
+
+    /// A typing key, as [`encode_key`] answers.
+    fn typing(key: char, mods: Mods, legacy: &'static [u8]) -> Option<KeyInput> {
+        Some(KeyInput::Text(TextKey {
+            key,
+            mods,
+            legacy: Cow::Borrowed(legacy),
+        }))
+    }
+
+    #[test]
+    fn a_typing_key_that_may_mean_more_says_what_it_is() {
+        // Esc, ⏎, ⇥ and ⌫, with or without a modifier: `bt-core` decides whether a program hears
+        // more than the byte.
+        assert_eq!(
+            encode_key(plain("\u{1b}")),
+            typing('\u{1b}', Mods::NONE, b"\x1b")
+        );
+        assert_eq!(encode_key(plain("\r")), typing('\r', Mods::NONE, b"\r"));
+        assert_eq!(encode_key(shifted(plain("\r"))), typing('\r', SHIFT, b"\r"));
+        assert_eq!(encode_key(ctrl("\r")), typing('\r', CTRL, b"\r"));
+        assert_eq!(encode_key(option("\t")), typing('\t', OPTION, b"\t"));
+        assert_eq!(
+            encode_key(shifted(ctrl("\u{7f}"))),
+            typing('\u{7f}', Mods::new(true, false, true, false), b"\x7f")
+        );
+        // ⇧⇥ and numpad Enter keep their everyday bytes and say which key they are.
+        assert_eq!(
+            encode_key(shifted(plain("\u{19}"))),
+            typing('\t', SHIFT, b"\x1b[Z")
+        );
+        assert_eq!(encode_key(plain("\u{3}")), typing('\r', Mods::NONE, b"\r"));
+        // A Control key is named by its bare character, not by its control byte: ⌃[ is not Esc.
+        let bare = |key: KeyPress<'static>, bare| KeyPress {
+            bare: Some(bare),
+            ..key
+        };
+        assert_eq!(
+            encode_key(bare(ctrl("\u{3}"), 'c')),
+            typing('c', CTRL, b"\x03")
+        );
+        assert_eq!(
+            encode_key(bare(ctrl("\u{1b}"), '[')),
+            typing('[', CTRL, b"\x1b")
+        );
+        assert_eq!(
+            encode_key(bare(shifted(ctrl("C")), 'c')),
+            typing('c', Mods::new(true, false, true, false), b"\x03")
+        );
+        // ⌫ is BS in the layout and DEL to the protocol.
+        assert_eq!(
+            encode_key(bare(shifted(plain("\u{7f}")), '\u{8}')),
+            typing('\u{7f}', SHIFT, b"\x7f")
+        );
+        // Without a bare character a Control letter is named by its own.
+        assert_eq!(
+            encode_key(KeyPress {
+                bare: None,
+                ..ctrl("C")
+            }),
+            typing('c', CTRL, b"\x03")
+        );
+        // Text is text, with Shift or Option: a Mac composes a character with Option.
+        assert_eq!(
+            encode_key(shifted(plain("A"))),
+            Some(KeyInput::Bytes(Cow::Borrowed(b"A")))
+        );
+        assert_eq!(
+            encode_key(bare(option("å"), 'a')),
+            Some(KeyInput::Bytes(Cow::Borrowed("å".as_bytes())))
+        );
     }
 
     #[test]

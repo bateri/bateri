@@ -3157,7 +3157,8 @@ impl ShellLog {
     /// toward the prompt's form, the side that types nothing into a line.
     ///
     /// Read by the function keys' encoding ([`crate::input::function_key`]):
-    /// at a prompt a key goes in the form the shell binds. **No marks is
+    /// at a prompt a key goes in the form the shell binds, unless the shell
+    /// asked for the kitty keyboard protocol (fish 4 does). **No marks is
     /// "not at a prompt"** — a shell without our integration gets the keys as
     /// every terminal sends them, which is what its own configuration expects.
     pub(crate) fn at_prompt(&self) -> bool {
