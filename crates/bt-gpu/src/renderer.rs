@@ -43,7 +43,7 @@ use bt_core::{Clusters, FontOptions, LinearRgba, Picture, PictureLayer};
 use crate::GpuError;
 use crate::frame::{
     CursorBlock, FX_INSTANCE_OFFSETS, Frame, FxCell, FxInstance, GLYPH_INSTANCE_OFFSETS, GlyphCell,
-    GlyphInstance, INSTANCE_OFFSETS, Instance, PictureSurface, RuleCell, WaveDraw,
+    GlyphInstance, INSTANCE_OFFSETS, Instance, PictureQuad, PictureSurface, RuleCell, WaveDraw,
 };
 use crate::metrics::{CellMetrics, FontNotice};
 use crate::slots::{self, SlotUpload};
@@ -2394,12 +2394,30 @@ impl Renderer {
         let fill_origin = frame.fill_origin_px();
         let free = f32::INFINITY;
         // The padding first, in window space and unfaded
-        // ([`Frame::padding`]): everything else is drawn over it.
+        // ([`Frame::padding`]): everything else is drawn over it. The
+        // pictures' share ([`Frame::picture_padding`]) stands as their layers
+        // stand over the cells: the ground layer's under the cells' padding,
+        // the others over it.
         let padding = frame.padding(viewport_px);
-        if !padding.is_empty() {
+        let lent = self.lent_pictures(images, frame, viewport_px);
+        if !padding.is_empty() || !lent.is_empty() {
             plan.ops.push(Op::Viewport(0.0));
             plan.ops.push(Op::Edge(0.0));
+            let (ground, over): (Vec<_>, Vec<_>) = lent
+                .into_iter()
+                .partition(|(layer, ..)| *layer == PictureLayer::Ground);
+            let images_of = |plan: &mut Plan, lent: Vec<(PictureLayer, u64, PictureQuad)>| {
+                for (_, key, quad) in lent {
+                    plan.ops.push(Op::Image {
+                        key,
+                        rect: quad.rect,
+                        uv: quad.uv,
+                    });
+                }
+            };
+            images_of(plan, ground);
             plan.quads(&padding);
+            images_of(plan, over);
         }
         plan.ops.push(Op::Viewport(origin));
         plan.ops.push(Op::Edge(frame.edge_px()));
@@ -2729,6 +2747,30 @@ impl Renderer {
                 uv: quad.uv,
             });
         }
+    }
+
+    /// The grid's pictures' quads in the padding ([`Frame::picture_padding`]),
+    /// each with its layer and its texture's key, in drawing order; a picture
+    /// that cannot have a texture lends nothing.
+    fn lent_pictures(
+        &self,
+        images: &mut ImageCache,
+        frame: &Frame,
+        viewport_px: [f32; 2],
+    ) -> Vec<(PictureLayer, u64, PictureQuad)> {
+        let mut out = Vec::new();
+        for picture in frame.pictures(PictureSurface::Grid) {
+            let quads = frame.picture_padding(viewport_px, picture);
+            if quads.is_empty() || !images.ensure(self.gpu, picture) {
+                continue;
+            }
+            out.extend(
+                quads
+                    .into_iter()
+                    .map(|quad| (picture.layer(), picture.image, quad)),
+            );
+        }
+        out
     }
 
     /// Draws the frame into `target` and **submits** it: one render pass, the

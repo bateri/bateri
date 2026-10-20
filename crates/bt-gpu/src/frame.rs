@@ -1141,6 +1141,23 @@ pub(crate) struct PictureQuad {
     pub(crate) uv: [f32; 4],
 }
 
+/// The grid's edges in window space, the padding lying outside them
+/// ([`Frame::margins`]).
+#[derive(Clone, Copy, Debug)]
+struct Margins {
+    top: f32,
+    bottom: f32,
+    left: f32,
+    right: f32,
+}
+
+/// How far short of the grid's edge a picture may stop and still count as
+/// reaching it ([`Frame::picture_padding`]): half a pixel, room for float
+/// arithmetic and no more — a picture a pixel short leaves a line of the
+/// theme between itself and its stretched edge. A geometric tolerance, not a
+/// measured number.
+const REACH_SLACK_PX: f32 = 0.5;
+
 #[derive(Default)]
 pub(crate) struct Frame {
     /// The command blocks' stripes in the left margin; through the **same**
@@ -4057,22 +4074,18 @@ impl Frame {
     /// and both are the shell's own surfaces, never a program's.
     pub(crate) fn padding(&self, viewport: [f32; 2]) -> Vec<Instance> {
         let mut out = Vec::new();
-        let (cols, rows) = (self.grid_cols, self.grid_rows);
-        let (w, h) = self.cell_px;
-        if self.dock.is_some()
-            || self.fill_rows != 0
-            || cols == 0
-            || rows == 0
-            || w <= 0.0
-            || h <= 0.0
-        {
+        let Some(Margins {
+            top,
+            bottom,
+            left,
+            right,
+        }) = self.margins()
+        else {
             return out;
-        }
-        let top = self.origin_px();
-        let left = self.grid_left_px;
-        let right = left + f32::from(cols) * w;
+        };
+        let (cols, rows) = (self.grid_cols, self.grid_rows);
+        let h = self.cell_px.1;
         let right_w = viewport[0] - right;
-        let bottom = top + f32::from(rows) * h;
         let ends = |row: u16| -> Option<([f32; 4], [f32; 4])> {
             let edge = self.row_edges.get(usize::from(row))?;
             let (last_col, last) = edge.last?;
@@ -4107,6 +4120,100 @@ impl Frame {
             quad(right, y, right_w, height, last);
         }
         out
+    }
+
+    /// A picture's share of the padding, in **window space**: the rule of
+    /// [`Frame::padding`] with the picture in the cells' place. A program
+    /// that draws its whole screen as one picture (an app rendered on the GPU
+    /// and shown in the terminal) leaves the cells under it with the theme's
+    /// background, so the cells lend nothing and the picture would stand in a
+    /// frame of the theme's colour.
+    ///
+    /// The picture lends only when it spans the grid from its first column to
+    /// its last — a row painted to both ends. Its first and last pixel
+    /// columns are stretched across the padding beside the rows it covers,
+    /// and, when it reaches the grid's top or bottom, its first or last pixel
+    /// row across the strip above or below, corners included. Each quad's
+    /// `uv` is degenerate along the stretched axis, so the sampler (linear,
+    /// clamped to the edge) gives the edge texel; a picture wider than the
+    /// grid, cut at its edge, lends the texels at the cut, blended where the
+    /// cut falls inside a texel.
+    ///
+    /// The plan draws the ground layer's share under the cells' padding and
+    /// the other layers' over it, the way the layers stand over the cells'
+    /// backgrounds in the grid. **Known limit:** a ground-layer picture under
+    /// a row whose end cells have a background of their own, but which is not
+    /// painted end to end, lends its edge to the padding while the grid's
+    /// edge shows the cell.
+    pub(crate) fn picture_padding(
+        &self,
+        viewport: [f32; 2],
+        picture: &Picture,
+    ) -> Vec<PictureQuad> {
+        let mut out = Vec::new();
+        let (Some(m), Some(quad)) = (
+            self.margins(),
+            self.picture_quad(PictureSurface::Grid, picture),
+        ) else {
+            return out;
+        };
+        let [x, y, width, height] = quad.rect;
+        let [u0, v0, u1, v1] = quad.uv;
+        if x > m.left + REACH_SLACK_PX || x + width < m.right - REACH_SLACK_PX {
+            return out;
+        }
+        let right_w = viewport[0] - m.right;
+        let mut lend = |rect: [f32; 4], uv: [f32; 4]| {
+            if rect[2] > 0.0 && rect[3] > 0.0 {
+                out.push(PictureQuad { rect, uv });
+            }
+        };
+        let row_y = m.top + y;
+        lend([0.0, row_y, m.left, height], [u0, v0, u0, v1]);
+        lend([m.right, row_y, right_w, height], [u1, v0, u1, v1]);
+        let grid_h = m.bottom - m.top;
+        for (reaches, edge_y, edge_h, v) in [
+            (y <= REACH_SLACK_PX, 0.0, m.top, v0),
+            (
+                y + height >= grid_h - REACH_SLACK_PX,
+                m.bottom,
+                viewport[1] - m.bottom,
+                v1,
+            ),
+        ] {
+            if reaches {
+                lend([m.left, edge_y, m.right - m.left, edge_h], [u0, v, u1, v]);
+                lend([0.0, edge_y, m.left, edge_h], [u0, v, u0, v]);
+                lend([m.right, edge_y, right_w, edge_h], [u1, v, u1, v]);
+            }
+        }
+        out
+    }
+
+    /// Where the padding is, for [`Frame::padding`] and
+    /// [`Frame::picture_padding`] alike, or `None` when it is not the grid's
+    /// to paint (the dock or the history band is drawn, or the grid is
+    /// empty).
+    fn margins(&self) -> Option<Margins> {
+        let (cols, rows) = (self.grid_cols, self.grid_rows);
+        let (w, h) = self.cell_px;
+        if self.dock.is_some()
+            || self.fill_rows != 0
+            || cols == 0
+            || rows == 0
+            || w <= 0.0
+            || h <= 0.0
+        {
+            return None;
+        }
+        let top = self.origin_px();
+        let left = self.grid_left_px;
+        Some(Margins {
+            top,
+            bottom: top + f32::from(rows) * h,
+            left,
+            right: left + f32::from(cols) * w,
+        })
     }
 
     /// This frame's command block stripes.
@@ -4628,6 +4735,91 @@ mod tests {
             ..Default::default()
         });
         assert!(frame.padding([100.0, 80.0]).is_empty());
+    }
+
+    /// A picture of 2 × 2 texels drawn `width` × `height` pixels big from the
+    /// cell at (`col`, `row`).
+    fn picture_at((col, row): (u16, i32), (width, height): (u32, u32)) -> Picture {
+        Picture {
+            col,
+            row,
+            x_offset: 0,
+            y_offset: 0,
+            width,
+            height,
+            source: [0, 0, 2, 2],
+            z: 0,
+            image: 1,
+            size: (2, 2),
+            pixels: std::sync::Arc::new(vec![0; 16]),
+        }
+    }
+
+    fn lent(quads: &[PictureQuad]) -> Vec<([f32; 4], [f32; 4])> {
+        quads.iter().map(|quad| (quad.rect, quad.uv)).collect()
+    }
+
+    #[test]
+    fn a_picture_across_the_grid_lends_its_edges_to_the_padding() {
+        // A 3×2 grid of 10×20 cells after a 10-pixel gutter, half a row down,
+        // in a window of 100×80: the grid spans x 10..40 and y 10..50.
+        let mut frame = Frame::default();
+        frame.clear(gutted(), CaretStyle::default());
+        frame.set_grid(3, 2);
+        frame.set_origin_rows(0.5);
+        let picture = picture_at((0, 0), (30, 40));
+        assert_eq!(
+            lent(&frame.picture_padding([100.0, 80.0], &picture)),
+            vec![
+                // Beside the rows: the first and the last texel column.
+                ([0.0, 10.0, 10.0, 40.0], [0.0, 0.0, 0.0, 1.0]),
+                ([40.0, 10.0, 60.0, 40.0], [1.0, 0.0, 1.0, 1.0]),
+                // Above: the first texel row, then its corners.
+                ([10.0, 0.0, 30.0, 10.0], [0.0, 0.0, 1.0, 0.0]),
+                ([0.0, 0.0, 10.0, 10.0], [0.0, 0.0, 0.0, 0.0]),
+                ([40.0, 0.0, 60.0, 10.0], [1.0, 0.0, 1.0, 0.0]),
+                // Below: the last.
+                ([10.0, 50.0, 30.0, 30.0], [0.0, 1.0, 1.0, 1.0]),
+                ([0.0, 50.0, 10.0, 30.0], [0.0, 1.0, 0.0, 1.0]),
+                ([40.0, 50.0, 60.0, 30.0], [1.0, 1.0, 1.0, 1.0]),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_picture_short_of_either_end_lends_nothing() {
+        let mut frame = Frame::default();
+        frame.clear(gutted(), CaretStyle::default());
+        frame.set_grid(3, 2);
+        // Two columns of three, from the first and from the second.
+        for picture in [picture_at((0, 0), (20, 40)), picture_at((1, 0), (20, 40))] {
+            assert!(frame.picture_padding([100.0, 80.0], &picture).is_empty());
+        }
+    }
+
+    #[test]
+    fn a_picture_between_the_top_and_the_bottom_lends_only_beside_its_rows() {
+        let mut frame = Frame::default();
+        frame.clear(gutted(), CaretStyle::default());
+        frame.set_grid(3, 3);
+        let picture = picture_at((0, 1), (30, 20));
+        assert_eq!(
+            lent(&frame.picture_padding([100.0, 80.0], &picture)),
+            vec![
+                ([0.0, 20.0, 10.0, 20.0], [0.0, 0.0, 0.0, 1.0]),
+                ([40.0, 20.0, 60.0, 20.0], [1.0, 0.0, 1.0, 1.0]),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_band_keeps_the_padding_from_the_pictures_as_from_the_cells() {
+        let mut frame = Frame::default();
+        frame.clear(gutted(), CaretStyle::default());
+        frame.set_grid(3, 2);
+        frame.set_fill_rows(1);
+        let picture = picture_at((0, 0), (30, 40));
+        assert!(frame.picture_padding([100.0, 80.0], &picture).is_empty());
     }
 
     #[test]

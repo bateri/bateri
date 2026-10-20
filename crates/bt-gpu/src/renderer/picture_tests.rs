@@ -7,7 +7,8 @@ use std::sync::Arc;
 use bt_core::{CaretStyle, LinearRgba, Picture, Pictures};
 
 use super::tests::{
-    ACCENT, bg_cell, fitting_cell_px, glyph_cell, grid, pixel_at, render_offscreen, renderer,
+    ACCENT, bg_cell, fitting_cell_px, glyph_cell, grid, grid_with_gutter, pixel_at,
+    render_offscreen, renderer,
 };
 use super::*;
 
@@ -115,7 +116,9 @@ fn a_picture_paints_its_rectangle_in_the_colour_it_was_sent() {
 fn a_picture_rides_the_origin_with_the_text() {
     let r = renderer();
     const EDGE: usize = 16;
-    let mut frame = frame_of((CELL, CELL), (1, 1), vec![solid(1, RED, (0, 0), (8, 8), 0)]);
+    // Two columns, the picture in the first: a picture across the grid would
+    // lend its edges to the padding above, which is not this test's subject.
+    let mut frame = frame_of((CELL, CELL), (2, 1), vec![solid(1, RED, (0, 0), (8, 8), 0)]);
     // The content is one row pinned to the bottom: the row is the second.
     frame.set_origin_rows(1.0);
     let pixels = render_offscreen(&r, EDGE, ACCENT, &frame);
@@ -133,18 +136,21 @@ fn a_picture_rides_the_origin_with_the_text() {
 fn a_picture_is_cut_to_the_grid_and_not_stretched_into_it() {
     let r = renderer();
     const EDGE: usize = 32;
-    // Starts a row above the grid and is wider and taller than it: only the
-    // 16 × 16 pixels of the 2 × 2 cells show.
+    // Starts a row above the grid, in its second column, and runs past its
+    // right edge and its bottom: only the 16 × 16 pixels of the last 2 × 2
+    // cells show. Not from the first column: a picture across the grid lends
+    // its edges to the padding ([`Frame::picture_padding`]), and the cut is
+    // this test's subject.
     let frame = frame_of(
         (CELL, CELL),
-        (2, 2),
-        vec![solid(1, RED, (0, -1), (32, 32), 0)],
+        (3, 2),
+        vec![solid(1, RED, (1, -1), (32, 32), 0)],
     );
     let pixels = render_offscreen(&r, EDGE, ACCENT, &frame);
-    for (x, y) in [(0, 0), (15, 15), (8, 8)] {
+    for (x, y) in [(8, 0), (23, 15), (16, 8)] {
         assert_eq!(pixel_at(&pixels, EDGE, x, y), (0xff, 0, 0), "({x}, {y})");
     }
-    for (x, y) in [(16, 4), (4, 16), (20, 20), (31, 31)] {
+    for (x, y) in [(4, 4), (24, 4), (12, 16), (28, 20), (31, 31)] {
         assert!(
             near(pixel_at(&pixels, EDGE, x, y), clear()),
             "({x}, {y}) is outside the grid"
@@ -165,6 +171,69 @@ fn a_picture_is_cut_to_the_grid_and_not_stretched_into_it() {
     for x in [0, 4, 7] {
         assert_eq!(pixel_at(&pixels, EDGE, x, 4), (0xff, 0, 0), "x = {x}");
     }
+}
+
+#[test]
+fn a_picture_across_the_grid_paints_the_padding_with_its_edges() {
+    let r = renderer();
+    const EDGE: usize = 32;
+    // Two columns of 8 after a 4-pixel gutter, two rows from the top: the
+    // grid spans x 4..20 and y 0..16, the padding is the gutter, the 12
+    // pixels at the right and the 16 below. The picture is red | green.
+    let mut frame = Frame::default();
+    frame.clear(grid_with_gutter(CELL, CELL, 4), CaretStyle::default());
+    frame.set_grid(2, 2);
+    frame.put_pictures(Pictures::new(
+        vec![picture(1, &[RED, GREEN], (2, 1), (0, 0), (16, 16), 0)],
+        Vec::new(),
+    ));
+    let pixels = render_offscreen(&r, EDGE, ACCENT, &frame);
+    let at = |x, y| pixel_at(&pixels, EDGE, x, y);
+    for (x, y, want, what) in [
+        (1, 8, (0xff, 0, 0), "the gutter, from the first column"),
+        (28, 8, (0, 0xff, 0), "the right, from the last column"),
+        (1, 30, (0xff, 0, 0), "the corner below the gutter"),
+        (30, 30, (0, 0xff, 0), "the corner at the right"),
+    ] {
+        assert_eq!(at(x, y), want, "{what}, at ({x}, {y})");
+    }
+    // Below, each column is the grid's last pixel row: two texels over 16
+    // pixels are a ramp from red to green (the sampler is linear), and the
+    // strip carries the ramp, not one colour.
+    for x in 4..20 {
+        assert_eq!(at(x, 24), at(x, 15), "below the grid, at x = {x}");
+    }
+    assert_ne!(at(4, 24), at(19, 24), "the strip is the picture's row");
+}
+
+#[test]
+fn the_padding_stands_in_the_layers_order() {
+    let r = renderer();
+    const EDGE: usize = 32;
+    // Both rows painted blue end to end, and a red picture across them: under
+    // the backgrounds the cells lend the padding, over them the picture does.
+    let blue = LinearRgba::from_srgb(0, 0, 0xff);
+    let gutter = |z: i32| {
+        let mut frame = Frame::default();
+        frame.clear(grid_with_gutter(CELL, CELL, 4), CaretStyle::default());
+        frame.set_grid(2, 2);
+        for (col, row) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+            frame.push(bg_cell(col, row, blue));
+        }
+        frame.put_pictures(Pictures::new(
+            vec![solid(1, RED, (0, 0), (16, 16), z)],
+            Vec::new(),
+        ));
+        let pixels = render_offscreen(&r, EDGE, ACCENT, &frame);
+        pixel_at(&pixels, EDGE, 1, 8)
+    };
+    assert_eq!(gutter(-1_073_741_825), (0, 0, 0xff), "the ground layer");
+    assert_eq!(
+        gutter(-1),
+        (0xff, 0, 0),
+        "between the backgrounds and the text"
+    );
+    assert_eq!(gutter(0), (0xff, 0, 0), "over the text");
 }
 
 #[test]

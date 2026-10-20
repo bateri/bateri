@@ -12,6 +12,17 @@ of every installed copy. A version without a section is not released.
 
 ## [Unreleased]
 
+### Fixed
+
+- **An app that draws its whole screen as one picture now fills the pane to
+  its edges.** Programs that render with the GPU and show the frame through
+  the kitty graphics protocol (gpuix's terminal mode, for one) stood in a
+  frame of the theme's colour, because the padding around the text only took
+  the colours of painted cells. A picture that spans the grid from its first
+  column to its last now lends its edge pixels to the padding beside it, and
+  above and below when it reaches the top or the bottom row, the way a program
+  that paints its own background already did.
+
 ## [0.21.0] - 2026-10-21
 
 ### Added
