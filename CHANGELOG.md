@@ -12,6 +12,8 @@ of every installed copy. A version without a section is not released.
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-10-21
+
 ### Added
 
 - **⌘V pastes a screenshot into Claude Code, Codex, Gemini CLI and OpenCode.**
