@@ -660,8 +660,9 @@ pub(crate) mod tests {
     use std::sync::Arc;
 
     use bt_core::{
-        Blocks, CaretShape, CursorBlink, DockState, DockStatus, Osc52, ScrollGlide, Session,
-        SessionOptions, ShellPhase, ShellState, TerminalOptions, Theme,
+        Blocks, CaretShape, CellHalf, Click, CursorBlink, DockState, DockStatus, MouseModifiers,
+        Osc52, ScrollGlide, SelectionPoint, Session, SessionOptions, ShellPhase, ShellState,
+        TerminalOptions, Theme,
     };
 
     use super::*;
@@ -4198,6 +4199,91 @@ pub(crate) mod tests {
         assert_eq!(read_dock(&session, &blocks).status, DockStatus::Idle);
         assert!(!session.can_edit_dock());
         session.write(b"\x03");
+        session.shutdown();
+    }
+
+    // ── every shell ──────────────────────────────────────────────────────
+
+    /// A command turns on what a TUI asks for — mouse reports, in pixels, focus reports, kitty's
+    /// key forms — and ends without turning it off, the way a program killed or cut off by a
+    /// dropped ssh does. At the next prompt the script has turned it off: the pointer is the
+    /// terminal's again, and no report reaches a line editor that would take it for typed
+    /// text.
+    fn a_command_takes_its_input_modes_with_it(session: &Session) {
+        at_the_prompt(session);
+        session.write(
+            b"printf '\\033[?1003h\\033[?1006h\\033[?1004h\\033[?1016h\\033[>1u'; sleep 1\r",
+        );
+        // Pixel reports are the one mode read without the terminal's lock, so they say the
+        // command ran without a report being sent to anyone.
+        wait_until("the command did not turn the modes on", || {
+            session.pixel_mouse()
+        });
+        wait_until("the command did not end", || {
+            session
+                .shell_state()
+                .is_some_and(|state| state.phase == ShellPhase::Input && state.last_exit == Some(0))
+        });
+        // The report's route is asked under the terminal's lock, which waits for the bytes
+        // the marks came with to be parsed; the pixel flag only after it.
+        let at = SelectionPoint {
+            col: 0,
+            row: 0,
+            half: CellHalf::Left,
+        };
+        assert_eq!(
+            session.mouse_motion(None, at, MouseModifiers::default()),
+            Click::Ignored
+        );
+        assert!(!session.pixel_mouse());
+    }
+
+    #[test]
+    fn a_zsh_command_takes_its_input_modes_with_it() {
+        let root = TempRoot::new("zsh-modes");
+        let home = root.0.join("home");
+        std::fs::create_dir_all(&home).expect("could not set up the fake home directory");
+        let wrapper = copy_wrapper(&root.0);
+        let env = HashMap::from([
+            ("HOME".to_owned(), home.display().to_string()),
+            ("ZDOTDIR".to_owned(), wrapper.display().to_string()),
+            ("BATERI_DOCK".to_owned(), "off".to_owned()),
+        ]);
+        let session = Session::spawn(
+            shell_options(
+                (
+                    "/bin/zsh".to_owned(),
+                    vec!["-l".to_owned(), "-i".to_owned()],
+                ),
+                &home,
+                env,
+                false,
+            ),
+            Arc::new(SilentWake),
+        )
+        .expect("could not open the session");
+        a_command_takes_its_input_modes_with_it(&session);
+        session.shutdown();
+    }
+
+    #[test]
+    fn a_bash_command_takes_its_input_modes_with_it() {
+        let Some(bash) = bash() else { return };
+        let root = TempRoot::new("bash-modes");
+        let home = root.0.join("home");
+        std::fs::create_dir_all(&home).expect("could not set up the fake home directory");
+        let session = spawn_bash(&bash, &home, &[]);
+        a_command_takes_its_input_modes_with_it(&session);
+        session.shutdown();
+    }
+
+    #[test]
+    fn a_fish_command_takes_its_input_modes_with_it() {
+        let Some(fish) = fish() else { return };
+        let root = TempRoot::new("fish-modes");
+        let home = root.0.join("home");
+        let session = spawn_fish(&fish, &home, None, &[("BATERI_DOCK", "off".to_owned())]);
+        a_command_takes_its_input_modes_with_it(&session);
         session.shutdown();
     }
 }

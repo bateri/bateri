@@ -372,6 +372,14 @@ __bateri_precmd() {
   if (( __bateri_ran )); then
     __bateri_ran=0
     print -nr -- $'\e]133;D;'$code$';bt_block='$__bateri_block$'\a'
+    # The input modes the command left on go with it: mouse reports (SGR and
+    # pixel forms too), focus reports, kitty's key forms. A program that dies
+    # without its exit path — a dropped ssh, a killed TUI — never turns them
+    # off, and ZLE takes the reports for typed text (`35;12;7M…` on the line
+    # at every mouse move) and the kitty forms for keys it does not bind.
+    # Bracketed paste is the shell's own; the alternate screen is what is on
+    # screen, not how input arrives — neither is touched.
+    print -nr -- $'\e[?1000;1002;1003;1004;1005;1006;1016l\e[<4096u'
   fi
   (( __bateri_block++ ))
   # The slot that carries the id to the prompt; `%9v` reads it in the anchor

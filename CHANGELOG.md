@@ -14,6 +14,13 @@ of every installed copy. A version without a section is not released.
 
 ### Fixed
 
+- **Moving the mouse after a dropped ssh no longer types `35;12;7M…` into the
+  prompt.** A program that turned on mouse reporting and died without turning
+  it off (a dropped connection, a killed full-screen program) left bateri
+  sending every mouse move to the shell, which wrote it into the command line.
+  When a command ends, the shell integration now turns off what it left on:
+  mouse and focus reports and the kitty keyboard modes. The mouse selects text
+  again at the next prompt.
 - **A command line taller than the window no longer leaves a frozen copy in
   the dock.** In bash and fish the dock kept showing the line as it was when it
   last fit, under the line growing on the screen; the dock now steps aside

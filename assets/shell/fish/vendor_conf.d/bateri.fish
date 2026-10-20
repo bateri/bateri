@@ -100,6 +100,12 @@ function __bateri_end --on-event fish_postexec
     if test $__bateri_ran = 1
         set -g __bateri_ran 0
         printf '\e]133;D;%s;bt_block=%s\a' $code $__bateri_block
+        # The input modes the command left on go with it (the zsh script says
+        # why). fish drops a mouse report, but the terminal goes on sending
+        # them instead of selecting. fish sets its own kitty flags at its
+        # prompt, after this; it pushes none, so the pop takes only the dead
+        # program's.
+        printf '\e[?1000;1002;1003;1004;1005;1006;1016l\e[<4096u'
     end
 end
 

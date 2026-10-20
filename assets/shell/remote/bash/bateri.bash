@@ -116,6 +116,8 @@ __bateri_precmd() {
     if (( __bateri_ran )); then
       __bateri_ran=0
       printf '\033]133;D;%s;bt_remote=%s.%s\007' "$status" "$__bateri_rshell" "$__bateri_block"
+      # The input modes the command left on go with it (the local wrapper's reason).
+      printf '\033[?1000;1002;1003;1004;1005;1006;1016l\033[<4096u'
     fi
     __bateri_block=$(( __bateri_block + 1 ))
     printf '\033]133;A;bt_remote=%s.%s\007\033]8;;bateri://rblock/%s.%s\007' \
