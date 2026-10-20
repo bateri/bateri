@@ -12,6 +12,15 @@ of every installed copy. A version without a section is not released.
 
 ## [Unreleased]
 
+### Added
+
+- **⌘V pastes a screenshot into Claude Code, Codex, Gemini CLI and OpenCode.**
+  A terminal pastes text, so an image on the clipboard did nothing until you
+  pressed ⌃V. Now, when the clipboard holds an image and no text and one of
+  these agents runs in the pane, ⌘V hands the agent ⌃V and it reads the image
+  itself. Over ssh the agent runs on the server and cannot see this Mac's
+  clipboard; it says it found no image.
+
 ### Fixed
 
 - **Moving the mouse after a dropped ssh no longer types `35;12;7M…` into the

@@ -61,8 +61,8 @@ use crate::clipboard;
 use crate::gesture::{Drag, Gesture, Press, Release};
 use crate::hyperlink::LinkState;
 use crate::keys::{
-    ARROW_LEFT, ARROW_RIGHT, BACKSPACE, KeyInput, KeyPress, dock_key, encode_key, only_char,
-    page_scroll,
+    ARROW_LEFT, ARROW_RIGHT, BACKSPACE, KeyInput, KeyPress, dock_key, encode_key, image_paste_key,
+    only_char, page_scroll,
 };
 use crate::pane::TerminalPane;
 use crate::pointer;
@@ -852,16 +852,31 @@ define_class!(
         ///
         /// It enters through the `paste()` path: if mode 2004 is set it is
         /// wrapped in bracketed paste, otherwise written raw. Raw bytes do not
-        /// touch `session.write`. Silent if there is no text on the
-        /// pasteboard. If there is a selection in the dock the payload
-        /// replaces it - the deletion is inside `paste()` too.
+        /// touch `session.write`. If there is a selection in the dock the
+        /// payload replaces it - the deletion is inside `paste()` too.
+        ///
+        /// **An image with no text** is not pasted - a terminal's paste is
+        /// text - but a coding agent that reads the clipboard's image itself
+        /// on ⌃V (Claude Code, Codex…) hears ⌃V in its place, as the key
+        /// sends it ([`image_paste_key`]): ⌘V attaches a screenshot the way
+        /// it pastes text. Anywhere else, and with no image either, Cmd-V is
+        /// silent. Text wins over an image: what copies both (a cell from a
+        /// spreadsheet) pastes as before. An empty string beside an image is
+        /// no text - it would paste nothing and hide the image.
         #[unsafe(method(paste:))]
         fn paste_clipboard(&self, _sender: Option<&AnyObject>) {
             let Some(session) = self.ivars().session.get() else {
                 return;
             };
-            if let Some(text) = clipboard::read(&NSPasteboard::generalPasteboard()) {
+            let board = NSPasteboard::generalPasteboard();
+            if let Some(text) = clipboard::read(&board).filter(|text| !text.is_empty()) {
                 session.paste(text.into_bytes());
+            } else if clipboard::has_image(&board)
+                && let Some(key) = self
+                    .pane()
+                    .and_then(|pane| image_paste_key(pane.program_kind()))
+            {
+                send_key(session, key);
             }
         }
 
@@ -1408,15 +1423,8 @@ define_class!(
                 command,
                 bare,
             };
-            match encode_key(key) {
-                Some(KeyInput::Bytes(bytes)) => session.write(&bytes),
-                // A function key's bytes depend on DECCKM and on whether a shell reads the
-                // line, both in `bt-core`.
-                Some(KeyInput::Key(key, mods)) => session.write_key(key, mods),
-                // Whether a typing key is told apart is the program's choice (the kitty
-                // protocol), in `bt-core`.
-                Some(KeyInput::Text(key)) => session.write_text_key(&key),
-                None => {}
+            if let Some(input) = encode_key(key) {
+                send_key(session, input);
             }
         }
     }
@@ -1814,6 +1822,20 @@ fn dropped_paths(board: &NSPasteboard) -> Vec<String> {
                 .map(|path| path.to_string())
         })
         .collect()
+}
+
+/// A key [`encode_key`] gave, on its way to the PTY - the keyboard's and the
+/// one Cmd-V sends in a paste's place ([`image_paste_key`]).
+fn send_key(session: &Session, input: KeyInput) {
+    match input {
+        KeyInput::Bytes(bytes) => session.write(&bytes),
+        // A function key's bytes depend on DECCKM and on whether a shell reads the
+        // line, both in `bt-core`.
+        KeyInput::Key(key, mods) => session.write_key(key, mods),
+        // Whether a typing key is told apart is the program's choice (the kitty
+        // protocol), in `bt-core`.
+        KeyInput::Text(key) => session.write_text_key(&key),
+    }
 }
 
 /// `NSNotFound`'s type in `NSRange` fields. The constant comes as `NSInteger`

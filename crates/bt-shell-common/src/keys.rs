@@ -1,5 +1,6 @@
-//! Keystroke → PTY bytes or a function key, the scroll decision for Shift+PgUp/PgDn, and the
-//! dock selection's keys ([`dock_key`]).
+//! Keystroke → PTY bytes or a function key, the scroll decision for Shift+PgUp/PgDn, the dock
+//! selection's keys ([`dock_key`]) and the key ⌘V sends an agent for an image
+//! ([`image_paste_key`]).
 //! **Pure and AppKit-free**, and therefore testable.
 //!
 //! A function key's bytes are **not written** here, only which key it is and which modifiers
@@ -10,6 +11,8 @@
 use std::borrow::Cow;
 
 use bt_core::{Arrow, Chord, DockKey, FunctionKey, Key, Mods, NamedKey, TextKey};
+
+use crate::program::identity::Kind;
 
 /// AppKit's function key range: U+F700–U+F8FF. The named constants
 /// (`NSUpArrowFunctionKey` … `NSModeSwitchFunctionKey`) use its first slice. The arrows, Home,
@@ -416,6 +419,26 @@ pub fn encode_key(key: KeyPress<'_>) -> Option<KeyInput> {
         _ => Cow::Owned(key.chars.as_bytes().to_vec()),
     };
     Some(KeyInput::Bytes(bytes))
+}
+
+/// What ⌘V sends in a paste's place when the clipboard holds an image and no text, to a pane
+/// running `kind`: ⌃V to a coding agent that reads the image off the system clipboard itself
+/// ([`crate::program::identity::Agent::pastes_clipboard_images`]), nothing to anything else — to a
+/// shell ⌃V is a key of its own (quoted insert). The key goes as the keyboard sends it,
+/// [`encode_key`] on the event AppKit gives for ⌃V, not as a byte: a program that asked for the
+/// kitty protocol hears `CSI 118;5u`, as it would from the key.
+pub fn image_paste_key(kind: Kind) -> Option<KeyInput> {
+    match kind {
+        Kind::Agent(agent) if agent.pastes_clipboard_images() => encode_key(KeyPress {
+            chars: "\u{16}",
+            shift: false,
+            ctrl: true,
+            option: false,
+            command: false,
+            bare: Some('v'),
+        }),
+        _ => None,
+    }
 }
 
 /// The number of an F key in a run of AppKit's codes that starts at F1's (`first` is the run's
@@ -854,6 +877,25 @@ mod tests {
         assert_eq!(encode(ctrl("\u{3}")), b"\x03");
         assert_eq!(encode(ctrl("c")), b"\x03");
         assert_eq!(encode(ctrl("C")), b"\x03", "same with Shift");
+    }
+
+    #[test]
+    fn an_image_paste_is_the_agents_own_key() {
+        use crate::program::identity::Agent;
+        // ⌘V's stand-in for an image is the key a coding agent binds, sent as the keyboard sends
+        // it: SYN where nobody asked for more, the key's name under the kitty protocol.
+        let pressed = KeyPress {
+            bare: Some('v'),
+            ..ctrl("\u{16}")
+        };
+        let claude = image_paste_key(Kind::Agent(Agent::ClaudeCode));
+        assert_eq!(claude, encode_key(pressed));
+        assert_eq!(claude, typing('v', CTRL, b"\x16"));
+        // A shell would insert the next key literally; an agent that does not read the
+        // clipboard hears a key it never asked for.
+        assert_eq!(image_paste_key(Kind::Shell), None);
+        assert_eq!(image_paste_key(Kind::Agent(Agent::Pi)), None);
+        assert_eq!(image_paste_key(Kind::Editor), None);
     }
 
     #[test]

@@ -23,8 +23,10 @@
 use std::ptr;
 use std::sync::atomic::{AtomicPtr, Ordering};
 
-use objc2_app_kit::{NSPasteboard, NSPasteboardTypeString};
-use objc2_foundation::NSString;
+use objc2_app_kit::{
+    NSPasteboard, NSPasteboardTypePNG, NSPasteboardTypeString, NSPasteboardTypeTIFF,
+};
+use objc2_foundation::{NSArray, NSString};
 
 /// Writes the selected text to the pasteboard. If there is no text to write the
 /// pasteboard is left **untouched** and `false` is returned.
@@ -72,6 +74,17 @@ pub(crate) fn copy(board: &NSPasteboard, text: Option<String>) -> bool {
 pub(crate) fn read(board: &NSPasteboard) -> Option<String> {
     // SAFETY: the same static access as above.
     unsafe { board.stringForType(NSPasteboardTypeString) }.map(|s| s.to_string())
+}
+
+/// Whether the pasteboard holds an image: a screenshot copied to the clipboard, an image copied
+/// in Preview or a browser. Only the types are asked, nothing is read — the program the image is
+/// for reads it itself.
+pub(crate) fn has_image(board: &NSPasteboard) -> bool {
+    // SAFETY: the same static access as above, for the two image types.
+    let images = unsafe { [NSPasteboardTypePNG, NSPasteboardTypeTIFF] };
+    board
+        .availableTypeFromArray(&NSArray::from_slice(&images))
+        .is_some()
 }
 
 /// The text OSC 52 sends to the pasteboard: the reader thread puts it, the main
@@ -224,6 +237,24 @@ pub(crate) mod tests {
         assert!(copy(&board, Some("önce".to_owned())));
         assert!(!copy(&board, Some(String::new())));
         assert_eq!(read(&board).as_deref(), Some("önce"));
+    }
+
+    #[test]
+    fn an_image_is_told_from_text() {
+        let _pasteboard = pasteboard_lock();
+        let Some(board) = board() else {
+            eprintln!("{HEADLESS}");
+            return;
+        };
+        // Text alone is no image.
+        assert!(!has_image(&board));
+        // A screenshot copied to the clipboard: PNG and no text.
+        board.clearContents();
+        let png = objc2_foundation::NSData::with_bytes(b"\x89PNG\r\n\x1a\n");
+        // SAFETY: the static access of `read`.
+        assert!(board.setData_forType(Some(&png), unsafe { NSPasteboardTypePNG }));
+        assert!(has_image(&board));
+        assert_eq!(read(&board), None);
     }
 
     #[test]

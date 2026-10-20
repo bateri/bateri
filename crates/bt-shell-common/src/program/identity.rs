@@ -59,6 +59,33 @@ pub enum Agent {
     Other,
 }
 
+impl Agent {
+    /// Whether the agent reads an image off the system clipboard itself when it hears ⌃V. A
+    /// terminal's paste is text, so ⌘V on a clipboard that holds only an image sends such an
+    /// agent ⌃V in the paste's place ([`crate::keys::image_paste_key`]). Each was read
+    /// in its own source: Claude Code's and OpenCode's `ctrl+v` binding, Gemini CLI's
+    /// `input.paste` and Codex's fixed `paste_image`. An agent not read hears nothing: to a
+    /// program that does not bind it this way ⌃V is a key of its own.
+    ///
+    /// In a remote session the agent reads the server's clipboard, finds no image and says so —
+    /// still more than a paste that does nothing.
+    ///
+    /// No wildcard: a new agent is a decision.
+    pub fn pastes_clipboard_images(self) -> bool {
+        match self {
+            Agent::ClaudeCode | Agent::Codex | Agent::GeminiCli | Agent::OpenCode => true,
+            Agent::Antigravity
+            | Agent::Pi
+            | Agent::Herdr
+            | Agent::CursorCli
+            | Agent::CopilotCli
+            | Agent::QwenCode
+            | Agent::KimiCli
+            | Agent::Other => false,
+        }
+    }
+}
+
 /// What a pane runs, as far as an icon tells.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Kind {
