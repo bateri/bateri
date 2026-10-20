@@ -103,7 +103,7 @@ if [[ $__bateri_rblock =~ ^[0-9]+$ ]] &&
   (( BASH_VERSINFO[0] * 100 + BASH_VERSINFO[1] >= 404 )); then
   __bateri_blocks=1
   __bateri_rshell=$__bateri_rblock.$$
-  PS0='${__bateri_none[__bateri_ran=1]-}\e]8;;\a\e]133;C;bt_remote=${__bateri_rshell}.${__bateri_block}\a'"${PS0-}"
+  PS0='${__bateri_none[__bateri_ran=1]-}\e]8;;\a\e]133;C;bt_remote=${__bateri_rshell}.${__bateri_block}\a\e[22t'"${PS0-}"
 fi
 
 # Before the prompt: the directory, the finished command's `D`, the next
@@ -116,8 +116,9 @@ __bateri_precmd() {
     if (( __bateri_ran )); then
       __bateri_ran=0
       printf '\033]133;D;%s;bt_remote=%s.%s\007' "$status" "$__bateri_rshell" "$__bateri_block"
-      # The input modes the command left on go with it (the local wrapper's reason).
-      printf '\033[?1000;1002;1003;1004;1005;1006;1016l\033[<4096u'
+      # The input modes the command left on go with it, and the title it set (the local
+      # wrapper's reasons).
+      printf '\033[?1000;1002;1003;1004;1005;1006;1016l\033[<4096u\033[23t'
     fi
     __bateri_block=$(( __bateri_block + 1 ))
     printf '\033]133;A;bt_remote=%s.%s\007\033]8;;bateri://rblock/%s.%s\007' \

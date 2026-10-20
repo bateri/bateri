@@ -60,8 +60,9 @@ if string match -qr '^[0-9]+$' -- "$__bateri_rblock"; and set -q fish_pid
         if test $__bateri_ran = 1
             set -g __bateri_ran 0
             printf '\e]133;D;%s;bt_remote=%s.%s\a' $code $__bateri_rshell $__bateri_block
-            # The input modes the command left on go with it (the local wrapper's reason).
-            printf '\e[?1000;1002;1003;1004;1005;1006;1016l\e[<4096u'
+            # The input modes the command left on go with it, and the title it set (the
+            # local wrapper's reasons).
+            printf '\e[?1000;1002;1003;1004;1005;1006;1016l\e[<4096u\e[23t'
         end
     end
 
@@ -73,6 +74,6 @@ if string match -qr '^[0-9]+$' -- "$__bateri_rblock"; and set -q fish_pid
 
     function __bateri_start --on-event fish_preexec
         set -g __bateri_ran 1
-        printf '\e]8;;\a\e]133;C;bt_remote=%s.%s\a' $__bateri_rshell $__bateri_block
+        printf '\e]8;;\a\e]133;C;bt_remote=%s.%s\a\e[22t' $__bateri_rshell $__bateri_block
     end
 end

@@ -22,6 +22,12 @@ of every installed copy. A version without a section is not released.
   column to its last now lends its edge pixels to the padding beside it, and
   above and below when it reaches the top or the bottom row, the way a program
   that paints its own background already did.
+- **A program's name leaves the tab when the program ends.** A program that
+  names the window (vim, htop, an app drawn in the terminal) and quits or dies
+  without putting the old name back left its name on the tab until something
+  wrote another. The shell integration now puts back the name the tab had when
+  the command started, before your own prompt hooks run, so a prompt that names
+  the window itself still has the last word.
 
 ## [0.21.0] - 2026-10-21
 

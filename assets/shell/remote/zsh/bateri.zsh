@@ -32,6 +32,7 @@ __bateri_hooks() {
     typeset -g __bateri_rshell=$__bateri_rblock.$$ __bateri_block=0 __bateri_ran=0
     add-zsh-hook precmd __bateri_precmd
     add-zsh-hook preexec __bateri_preexec
+    precmd_functions=(__bateri_title_back ${precmd_functions:#__bateri_title_back})
   fi
 }
 
@@ -71,6 +72,17 @@ __bateri_precmd() {
 __bateri_preexec() {
   __bateri_ran=1
   print -nr -- $'\e]8;;\a\e]133;C;bt_remote='$__bateri_rshell.$__bateri_block$'\a'
+  # The title as the command finds it, for `__bateri_title_back`.
+  print -nr -- $'\e[22t'
+}
+
+# The title the command set goes back, first among the precmd hooks so a
+# user's hook that names the window at every prompt still has the last word
+# (the local wrapper's reason).
+__bateri_title_back() {
+  local code=$?
+  (( __bateri_ran )) && print -nr -- $'\e[23t'
+  return code
 }
 
 # Reports the working directory with OSC 7, per prompt (the encoder,

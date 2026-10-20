@@ -191,10 +191,12 @@ __bateri_block=0
 __bateri_ran=0
 __bateri_ps0_user=${PS0-}
 __bateri_ps0=
+# After `C`, the title as the command finds it goes onto the terminal's title stack (`CSI 22 t`)
+# for `__bateri_precmd` to put back (the zsh script says why).
 if (( __bateri_dock )); then
-  __bateri_ps0_marks='\e]8133;e\a\e]8;;\a\e]133;C\a'
+  __bateri_ps0_marks='\e]8133;e\a\e]8;;\a\e]133;C\a\e[22t'
 else
-  __bateri_ps0_marks='\e]8;;\a\e]133;C\a'
+  __bateri_ps0_marks='\e]8;;\a\e]133;C\a\e[22t'
 fi
 __bateri_ps0() {
   # A `PS0` that is not the one left last time is a new text of the user's.
@@ -223,6 +225,9 @@ __bateri_precmd() {
     printf '\033]133;D;%s;bt_block=%s\007' "$status" "$__bateri_block"
     # The input modes the command left on go with it (the zsh script says why).
     printf '\033[?1000;1002;1003;1004;1005;1006;1016l\033[<4096u'
+    # So does the title it set: ours is the first `PROMPT_COMMAND`, so a user's entry or a
+    # `PS1` that names the window still has the last word.
+    printf '\033[23t'
   fi
   __bateri_block=$(( __bateri_block + 1 ))
   printf '\033]133;A;bt_block=%s\007' "$__bateri_block"

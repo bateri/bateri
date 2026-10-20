@@ -4286,4 +4286,113 @@ pub(crate) mod tests {
         a_command_takes_its_input_modes_with_it(&session);
         session.shutdown();
     }
+
+    /// A command names the window and ends without naming it back, the way a program drawn in
+    /// the terminal or a killed TUI does. At the next prompt the tab has the name it had before
+    /// the command, not the program's.
+    fn a_command_takes_its_title_with_it(session: &Session) {
+        at_the_prompt(session);
+        let before = session.title();
+        session.write(b"printf '\\033]2;Todo\\007'; sleep 1\r");
+        wait_until("the command did not name the window", || {
+            session.title() == "Todo"
+        });
+        wait_until("the command did not end", || {
+            session
+                .shell_state()
+                .is_some_and(|state| state.phase == ShellPhase::Input && state.last_exit == Some(0))
+        });
+        wait_until("the command's title stayed on the tab", || {
+            session.title() == before
+        });
+    }
+
+    /// zsh with our wrapper and the user's files in `home`, no dock.
+    fn spawn_zsh(root: &TempRoot, home: &Path) -> Session {
+        let wrapper = copy_wrapper(&root.0);
+        let env = HashMap::from([
+            ("HOME".to_owned(), home.display().to_string()),
+            ("ZDOTDIR".to_owned(), wrapper.display().to_string()),
+            ("BATERI_DOCK".to_owned(), "off".to_owned()),
+        ]);
+        Session::spawn(
+            shell_options(
+                (
+                    "/bin/zsh".to_owned(),
+                    vec!["-l".to_owned(), "-i".to_owned()],
+                ),
+                home,
+                env,
+                false,
+            ),
+            Arc::new(SilentWake),
+        )
+        .expect("could not open the session")
+    }
+
+    #[test]
+    fn a_zsh_command_takes_its_title_with_it() {
+        let root = TempRoot::new("zsh-title");
+        let home = root.0.join("home");
+        std::fs::create_dir_all(&home).expect("could not set up the fake home directory");
+        let session = spawn_zsh(&root, &home);
+        a_command_takes_its_title_with_it(&session);
+        session.shutdown();
+    }
+
+    #[test]
+    fn a_zsh_prompt_that_names_the_window_keeps_the_last_word() {
+        // oh-my-zsh's shape: a precmd hook of the user's names the window after the directory.
+        // The command moves to another directory and names the window itself; at the prompt
+        // the user's hook has the last word — the new directory's name, not the name from
+        // before the command, which is what putting the old title back behind the user's
+        // hooks would leave.
+        let root = TempRoot::new("zsh-title-hook");
+        let home = root.0.join("home");
+        std::fs::create_dir_all(home.join("sub")).expect("could not set up the fake home");
+        std::fs::write(
+            home.join(".zshrc"),
+            "autoload -Uz add-zsh-hook\n\
+             __user_title() { print -nr -- $'\\e]2;user:'${PWD:t}$'\\a' }\n\
+             add-zsh-hook precmd __user_title\n",
+        )
+        .expect(".zshrc not written");
+        let session = spawn_zsh(&root, &home);
+        at_the_prompt(&session);
+        wait_until("the user's hook did not name the window", || {
+            session.title() == "user:home"
+        });
+        session.write(b"cd sub; printf '\\033]2;Todo\\007'; sleep 1\r");
+        wait_until("the command did not name the window", || {
+            session.title() == "Todo"
+        });
+        wait_until("the user's hook did not have the last word", || {
+            session.title() == "user:sub"
+        });
+        // And it stays: nothing after the hook puts an older name back.
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert_eq!(session.title(), "user:sub");
+        session.shutdown();
+    }
+
+    #[test]
+    fn a_bash_command_takes_its_title_with_it() {
+        let Some(bash) = bash() else { return };
+        let root = TempRoot::new("bash-title");
+        let home = root.0.join("home");
+        std::fs::create_dir_all(&home).expect("could not set up the fake home directory");
+        let session = spawn_bash(&bash, &home, &[]);
+        a_command_takes_its_title_with_it(&session);
+        session.shutdown();
+    }
+
+    #[test]
+    fn a_fish_command_takes_its_title_with_it() {
+        let Some(fish) = fish() else { return };
+        let root = TempRoot::new("fish-title");
+        let home = root.0.join("home");
+        let session = spawn_fish(&fish, &home, None, &[("BATERI_DOCK", "off".to_owned())]);
+        a_command_takes_its_title_with_it(&session);
+        session.shutdown();
+    }
 }

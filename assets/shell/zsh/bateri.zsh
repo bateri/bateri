@@ -219,6 +219,9 @@ __bateri_hooks() {
   typeset -g __bateri_ps1=$__bateri_anchor'  '$'%{\e]133;B\a%}'
   add-zsh-hook precmd __bateri_precmd
   add-zsh-hook preexec __bateri_preexec
+  # FIRST, not appended: the title a command set goes back before the user's
+  # hooks run (`__bateri_title_back` says why).
+  precmd_functions=(__bateri_title_back ${precmd_functions:#__bateri_title_back})
   # MIRROR: ZLE's display state goes to the terminal on every line draw.
   #
   # NOT `zle -N zle-line-pre-redraw`: that binding has a single owner and
@@ -355,6 +358,28 @@ __bateri_ssh() {
   else
     command ssh "$@"
   fi
+}
+
+# The window title a command set goes with it: `__bateri_preexec` pushes the
+# title onto the terminal's title stack (`CSI 22 t`) as the command starts, and
+# this pops it (`CSI 23 t`) once the command is over. A program that names the
+# window (vim, htop, an app drawn in the terminal) and never puts the old name
+# back would otherwise leave its name on the tab until something wrote another.
+# It rides the stream, so the parser sees it in order after the program's last
+# bytes; a program that pushed its own and pops it on the way out leaves the
+# stack as it found it.
+#
+# A HOOK OF ITS OWN, FIRST AMONG THE PRECMD HOOKS: ours is appended and runs
+# after the user's, and a user hook that names the window at every prompt
+# (oh-my-zsh's `user@host:dir`) would be undone by a pop behind it — the tab
+# would keep the name from before the command, a `cd` behind. Not printed with
+# `D` for the same reason.
+#
+# `$?` is handed back: the hooks after this one read the command's status.
+__bateri_title_back() {
+  local code=$?
+  (( __bateri_ran )) && print -nr -- $'\e[23t'
+  return code
 }
 
 # Before the prompt is drawn: the finished command's code (`D`), then the prompt start (`A`).
@@ -575,6 +600,8 @@ __bateri_preexec() {
   # is unaffected (that block's id is no longer the block being written).
   print -nr -- $'\e]8;;\a'
   print -nr -- $'\e]133;C\a'
+  # The title as the command finds it, for `__bateri_title_back` to put back.
+  print -nr -- $'\e[22t'
 }
 
 # ── ZLE's display mirror ─────────────────────────────────────────────────

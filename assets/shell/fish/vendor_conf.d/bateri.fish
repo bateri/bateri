@@ -106,6 +106,9 @@ function __bateri_end --on-event fish_postexec
         # prompt, after this; it pushes none, so the pop takes only the dead
         # program's.
         printf '\e[?1000;1002;1003;1004;1005;1006;1016l\e[<4096u'
+        # So does the title it set (the zsh script says why). fish names the
+        # window itself as it draws the prompt (`fish_title`), after this.
+        printf '\e[23t'
     end
 end
 
@@ -125,7 +128,8 @@ function __bateri_start --on-event fish_preexec
     if test $__bateri_dock = 1
         printf '\e]8133;e\a'
     end
-    printf '\e]8;;\a\e]133;C\a'
+    # The title as the command finds it, for `__bateri_end` to put back.
+    printf '\e]8;;\a\e]133;C\a\e[22t'
 end
 
 # The prompt the terminal draws a dock for: nothing of the user's.
