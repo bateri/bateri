@@ -88,7 +88,7 @@ use crate::commands::{CommandId, CommandPhase, CommandState, command_state};
 use crate::dock::{self, Dock, DockBudget, DockCols, DockEdit, DockPoint};
 use crate::graphics::{self, Hub, Pictures};
 use crate::grid_input;
-use crate::handler::ClusterHandler;
+use crate::handler::{ClusterHandler, KeptModes, resize_report};
 use crate::history::{self, CommandMemory, CommandRecord, RecordState, Remembered};
 use crate::identity::{LC_TERMINAL, PaneUuid, TERM_PROGRAM, TERM_PROGRAM_VERSION};
 // The journal's side record comes in under an alias: `Side` is alacritty's
@@ -2070,15 +2070,16 @@ struct AdapterInner {
     /// command while it holds `Term`, so the reverse order exists nowhere.
     /// The decoding of an image never takes it; only the applying does.
     graphics: Hub,
-    /// DECSET 1016: the application wants pointer reports in pixels. The
-    /// stream's wrapper writes it ([`crate::handler::ClusterHandler`]; it is
-    /// not in `Term`, alacritty does not know the mode), the mouse methods
-    /// and the shell's throttle read it, and the handover carries it as
-    /// `?1016h` in the VT ([`snapshot::encode_live`]).
-    pixel_mouse: AtomicBool,
+    /// DECSET 1016 and 2048 ([`KeptModes`]): the application wants pointer
+    /// reports in pixels, and the size in the stream. The stream's wrapper
+    /// writes them ([`crate::handler::ClusterHandler`]; they are not in
+    /// `Term`, alacritty does not know the modes), the mouse methods and the
+    /// shell's throttle read 1016, the resize reads 2048, and the handover
+    /// carries them as `?1016h`/`?2048h` in the VT ([`snapshot::encode_live`]).
+    modes: KeptModes,
     /// The pointer shapes the application asked for (OSC 22, [`crate::pointer`]):
     /// the stream's wrapper keeps them, the shell reads the shown one
-    /// ([`Session::pointer_shape`]). Unlike `pixel_mouse` no replay carries
+    /// ([`Session::pointer_shape`]). Unlike `modes` no replay carries
     /// them — the module says why.
     pointer: PointerShapes,
 }
@@ -2105,7 +2106,7 @@ impl Adapter {
             child_exited: AtomicBool::new(false),
             muted: AtomicBool::new(false),
             graphics: Hub::new(),
-            pixel_mouse: AtomicBool::new(false),
+            modes: KeptModes::default(),
             pointer: PointerShapes::default(),
         }))
     }
@@ -2154,8 +2155,8 @@ impl graphics::Sink for Adapter {
         }
     }
 
-    fn pixel_mouse(&self) -> &AtomicBool {
-        &self.0.pixel_mouse
+    fn kept_modes(&self) -> &KeptModes {
+        &self.0.modes
     }
 
     fn pointer(&self) -> &PointerShapes {
@@ -5468,11 +5469,11 @@ impl Session {
             let mut parser: ansi::Processor = ansi::Processor::new();
             let mut last_input = false;
             let mut term = term.lock();
-            // The handover's VT carries DECSET 1016 as it carries the other
-            // modes; it lands in the flag the reader keeps from here on.
+            // The handover's VT carries DECSET 1016 and 2048 as it carries the
+            // other modes; they land in the flags the reader keeps from here on.
             parser.advance(
                 &mut ClusterHandler::new(&mut term, options.cluster, &mut last_input)
-                    .pixel_mouse(&adapter.0.pixel_mouse),
+                    .kept_modes(&adapter.0.modes),
                 bytes,
             );
         }
@@ -8098,7 +8099,7 @@ impl Session {
                 input::arrow(arrow, *term.mode()).to_vec()
             }
             WheelRoute::Report(encoding) => {
-                let encoding = encoding.pixel(self.adapter.0.pixel_mouse.load(Ordering::Acquire));
+                let encoding = encoding.pixel(self.adapter.0.modes.pixel_mouse());
                 let offset = term.grid().display_offset() as i32;
                 let button = if lines > 0 { WHEEL_UP } else { WHEEL_DOWN };
                 let report =
@@ -8126,7 +8127,14 @@ impl Session {
     /// the stream's wrapper keeps. It says nothing of whether mouse
     /// reporting itself is on — that is [`Session::mouse_motion`]'s route.
     pub fn pixel_mouse(&self) -> bool {
-        self.adapter.0.pixel_mouse.load(Ordering::Acquire)
+        self.adapter.0.modes.pixel_mouse()
+    }
+
+    /// Whether the application turned DECSET 2048 on, i.e. it is told every
+    /// size the PTY is given in the stream as well ([`Session::resize`]); a
+    /// lock-free read of the flag the stream's wrapper keeps.
+    pub fn resize_reports(&self) -> bool {
+        self.adapter.0.modes.resize_reports()
     }
 
     /// The pointer shape the application asks for over the grid (OSC 22,
@@ -8206,9 +8214,7 @@ impl Session {
         let encoding = match input::button_route(*term.mode(), shift) {
             ButtonRoute::Select if pressed => return Click::Select,
             ButtonRoute::Select => return Click::Ignored,
-            ButtonRoute::Report(encoding) => {
-                encoding.pixel(self.adapter.0.pixel_mouse.load(Ordering::Acquire))
-            }
+            ButtonRoute::Report(encoding) => encoding.pixel(self.adapter.0.modes.pixel_mouse()),
         };
         let offset = term.grid().display_offset() as i32;
         let byte = input::button_byte(button, modifiers);
@@ -8262,7 +8268,7 @@ impl Session {
         let Some(encoding) = input::motion_route(*term.mode(), button.is_some()) else {
             return Click::Ignored;
         };
-        let encoding = encoding.pixel(self.adapter.0.pixel_mouse.load(Ordering::Acquire));
+        let encoding = encoding.pixel(self.adapter.0.modes.pixel_mouse());
         let offset = term.grid().display_offset() as i32;
         let byte = input::motion_byte(button, modifiers);
         let report = mouse_report_at(encoding, byte, at, offset, true, self.adapter.cell_px());
@@ -8548,8 +8554,13 @@ impl Session {
         // `Term` → the leaf title slot: the order the title events already
         // take (module header).
         let mut term = self.term.lock();
-        let pixel_mouse = self.pixel_mouse();
-        snapshot::encode_live(&mut term, &|| lock(title).clone(), &|| (), pixel_mouse).0
+        snapshot::encode_live(
+            &mut term,
+            &|| lock(title).clone(),
+            &|| (),
+            &self.adapter.0.modes,
+        )
+        .0
     }
 
     /// `bt-core`'s own state as a versioned blob — the handover's second half
@@ -12176,6 +12187,7 @@ impl Session {
         });
         *prev = size;
         self.send(Msg::Resize(size));
+        self.report_size(size);
         // A size change is the only path that changes the grid but produces no
         // `Wakeup`, which is why we raise the flag by hand. Waking is the caller's
         // job (`bt-shell` opens the link after the resize); the flag wakes nobody.
@@ -12239,6 +12251,25 @@ impl Session {
         });
         if !direct {
             self.send(Msg::Resize(sent));
+        }
+        self.report_size(sent);
+    }
+
+    /// DECSET 2048: the size the PTY was just told, told to the program in
+    /// the stream too ([`resize_report`]) — every size the PTY is given, the
+    /// nudge's included, so the program that reads the reports instead of
+    /// `SIGWINCH` redraws when the PTY says to. Through the reader's queue,
+    /// behind the resize it sends; lockless, so callable under the size's
+    /// lock and `Term`'s.
+    ///
+    /// **Journal-neutral:** an answer to the program, nothing in `Term`.
+    fn report_size(&self, size: WindowSize) {
+        if self.adapter.0.modes.resize_reports() {
+            self.adapter.reply(resize_report(
+                size.num_lines,
+                size.num_cols,
+                (size.cell_width, size.cell_height),
+            ));
         }
     }
 
@@ -24383,6 +24414,42 @@ mod tests {
     }
 
     #[test]
+    fn dec_2048_tells_every_size_the_pty_is_given() {
+        // 40 × 10 cells of 9 × 18. The mode is set before `od` starts: the report it sends
+        // waits in the line discipline and is the first thing dumped.
+        let (session, wake) = dump_session(40, "printf '\\033[?2048h\\033[?2004h'", |mode| {
+            mode.contains(TermMode::BRACKETED_PASTE)
+        });
+        assert!(session.resize_reports());
+        expect_sent(&session, &wake, b"\x1b[48;10;40;180;360t");
+        // A resize: the new size, in the cell it came with.
+        assert!(session.resize(30, 8, (10, 20)));
+        expect_sent(&session, &wake, b"\x1b[48;8;30;160;300t");
+        // The redraw nudge gives the PTY another width for a moment, and says so.
+        session.nudge_size(true);
+        expect_sent(&session, &wake, b"\x1b[48;8;29;160;290t");
+        session.nudge_size(false);
+        expect_sent(&session, &wake, b"\x1b[48;8;30;160;300t");
+    }
+
+    #[test]
+    fn dec_2048_off_leaves_the_size_to_the_pty() {
+        // Set and reset: the set's report, then a resize that tells the PTY alone. The empty
+        // step comes second, but no dump before it holds a block of padding alone (the
+        // report's 19 bytes leave 13 dots in its last block), so only "nothing went" shows
+        // one.
+        let (session, wake) = dump_session(
+            40,
+            "printf '\\033[?2048h\\033[?2048l\\033[?2004h'",
+            |mode| mode.contains(TermMode::BRACKETED_PASTE),
+        );
+        assert!(!session.resize_reports());
+        expect_sent(&session, &wake, b"\x1b[48;10;40;180;360t");
+        assert!(session.resize(30, 8, (10, 20)));
+        expect_sent(&session, &wake, b"");
+    }
+
+    #[test]
     fn dec_1016_motion_reports_every_pixel_and_dec_1016l_goes_back_to_cells() {
         let (session, wake) = dump_session(
             40,
@@ -30229,9 +30296,9 @@ e\\314\\201.'; sleep 5";
         );
         let mut parser: ansi::Processor = ansi::Processor::new();
         let mut last_input = false;
-        let copy_pixels = AtomicBool::new(false);
+        let copy_modes = KeptModes::default();
         parser.advance(
-            &mut ClusterHandler::new(&mut copy, true, &mut last_input).pixel_mouse(&copy_pixels),
+            &mut ClusterHandler::new(&mut copy, true, &mut last_input).kept_modes(&copy_modes),
             &base.vt,
         );
 
@@ -30240,9 +30307,9 @@ e\\314\\201.'; sleep 5";
         let (live_shown, live_vt, live_probed) = {
             let mut term = lo.session.term.lock();
             let shown = readable(&*term);
-            let pixels = lo.session.pixel_mouse();
+            let modes = &lo.session.adapter.0.modes;
             let (vt, probed) =
-                snapshot::encode_live(&mut *term, &|| lock(slot).clone(), &|| (), pixels);
+                snapshot::encode_live(&mut *term, &|| lock(slot).clone(), &|| (), modes);
             (shown, vt, probed)
         };
         assert_eq!(readable(&copy), live_shown, "seed {seed}");
@@ -30252,7 +30319,7 @@ e\\314\\201.'; sleep 5";
             &mut copy,
             &move || lock(&copy_titles.0).clone(),
             &|| (),
-            copy_pixels.load(Ordering::Acquire),
+            &copy_modes,
         );
         assert_eq!(
             String::from_utf8_lossy(&copy_vt),
@@ -30272,13 +30339,13 @@ e\\314\\201.'; sleep 5";
             titles.clone(),
         );
         let mut last_input = false;
-        let crash_pixels = AtomicBool::new(false);
+        let crash_modes = KeptModes::default();
         for bytes in [&rebuilt.vt, &rebuilt.tail] {
             // A fresh parser for each, the handover's order.
             let mut parser: ansi::Processor = ansi::Processor::new();
             parser.advance(
                 &mut ClusterHandler::new(&mut crash, true, &mut last_input)
-                    .pixel_mouse(&crash_pixels),
+                    .kept_modes(&crash_modes),
                 bytes,
             );
         }
@@ -30289,7 +30356,7 @@ e\\314\\201.'; sleep 5";
             &mut crash,
             &move || lock(&crash_titles.0).clone(),
             &|| (),
-            crash_pixels.load(Ordering::Acquire),
+            &crash_modes,
         );
         assert_eq!(
             String::from_utf8_lossy(&crash_vt),
@@ -30735,9 +30802,14 @@ e\\314\\201.'; sleep 5";
         );
         let live_shown = readable(&*session.term.lock());
         assert_eq!(readable(&copy), live_shown);
-        let (copy_vt, _) = snapshot::encode_live(&mut copy, &|| None, &|| (), false);
-        let (live_vt, _) =
-            snapshot::encode_live(&mut *session.term.lock(), &|| None, &|| (), false);
+        let (copy_vt, _) =
+            snapshot::encode_live(&mut copy, &|| None, &|| (), &KeptModes::default());
+        let (live_vt, _) = snapshot::encode_live(
+            &mut *session.term.lock(),
+            &|| None,
+            &|| (),
+            &KeptModes::default(),
+        );
         assert_eq!(
             String::from_utf8_lossy(&copy_vt),
             String::from_utf8_lossy(&live_vt)
@@ -31400,9 +31472,14 @@ e\\314\\201.'; sleep 5";
             session.term.lock().grid().cursor.point
         );
         assert_eq!(readable(&copy), readable(&*session.term.lock()));
-        let (copy_vt, _) = snapshot::encode_live(&mut copy, &|| None, &|| (), false);
-        let (live_vt, _) =
-            snapshot::encode_live(&mut *session.term.lock(), &|| None, &|| (), false);
+        let (copy_vt, _) =
+            snapshot::encode_live(&mut copy, &|| None, &|| (), &KeptModes::default());
+        let (live_vt, _) = snapshot::encode_live(
+            &mut *session.term.lock(),
+            &|| None,
+            &|| (),
+            &KeptModes::default(),
+        );
         assert_eq!(
             String::from_utf8_lossy(&copy_vt),
             String::from_utf8_lossy(&live_vt)

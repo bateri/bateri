@@ -105,7 +105,7 @@ function __bateri_end --on-event fish_postexec
         # them instead of selecting. fish sets its own kitty flags at its
         # prompt, after this; it pushes none, so the pop takes only the dead
         # program's.
-        printf '\e[?1000;1002;1003;1004;1005;1006;1016l\e[<4096u'
+        printf '\e[?1000;1002;1003;1004;1005;1006;1016;2048l\e[<4096u'
         # So does the title it set (the zsh script says why). fish names the
         # window itself as it draws the prompt (`fish_title`), after this.
         printf '\e[23t'

@@ -431,7 +431,7 @@ where
         let mut handler = ClusterHandler::new(&mut terminal, self.cluster, &mut state.last_input)
             .commands(&mut state.commands);
         if let Some(graphics) = self.graphics.as_deref() {
-            handler = handler.pixel_mouse(graphics.pixel_mouse());
+            handler = handler.kept_modes(graphics.kept_modes());
         }
         state.parser.stop_sync(&mut handler);
     }
@@ -908,11 +908,12 @@ mod tests {
 
     use super::*;
     use crate::graphics::Hub;
+    use crate::handler::KeptModes;
 
     /// The graphics side of a session, without a session.
     struct TestSink {
         hub: Hub,
-        pixel_mouse: AtomicBool,
+        modes: KeptModes,
         pointer: PointerShapes,
     }
 
@@ -927,8 +928,8 @@ mod tests {
 
         fn reply(&self, _: Vec<u8>) {}
 
-        fn pixel_mouse(&self) -> &AtomicBool {
-            &self.pixel_mouse
+        fn kept_modes(&self) -> &KeptModes {
+            &self.modes
         }
 
         fn pointer(&self) -> &PointerShapes {
@@ -1212,7 +1213,7 @@ mod tests {
     fn quiet_sink() -> Arc<TestSink> {
         Arc::new(TestSink {
             hub: Hub::new(),
-            pixel_mouse: AtomicBool::new(false),
+            modes: KeptModes::default(),
             pointer: PointerShapes::default(),
         })
     }

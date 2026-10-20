@@ -224,7 +224,7 @@ __bateri_precmd() {
     __bateri_ran=0
     printf '\033]133;D;%s;bt_block=%s\007' "$status" "$__bateri_block"
     # The input modes the command left on go with it (the zsh script says why).
-    printf '\033[?1000;1002;1003;1004;1005;1006;1016l\033[<4096u'
+    printf '\033[?1000;1002;1003;1004;1005;1006;1016;2048l\033[<4096u'
     # So does the title it set: ours is the first `PROMPT_COMMAND`, so a user's entry or a
     # `PS1` that names the window still has the last word.
     printf '\033[23t'

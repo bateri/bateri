@@ -4204,20 +4204,20 @@ pub(crate) mod tests {
 
     // ── every shell ──────────────────────────────────────────────────────
 
-    /// A command turns on what a TUI asks for — mouse reports, in pixels, focus reports, kitty's
-    /// key forms — and ends without turning it off, the way a program killed or cut off by a
-    /// dropped ssh does. At the next prompt the script has turned it off: the pointer is the
-    /// terminal's again, and no report reaches a line editor that would take it for typed
-    /// text.
+    /// A command turns on what a TUI asks for — mouse reports, in pixels, focus reports, size
+    /// reports, kitty's key forms — and ends without turning it off, the way a program killed or
+    /// cut off by a dropped ssh does. At the next prompt the script has turned it off: the
+    /// pointer is the terminal's again, and no report reaches a line editor that would take it
+    /// for typed text.
     fn a_command_takes_its_input_modes_with_it(session: &Session) {
         at_the_prompt(session);
         session.write(
-            b"printf '\\033[?1003h\\033[?1006h\\033[?1004h\\033[?1016h\\033[>1u'; sleep 1\r",
+            b"printf '\\033[?1003h\\033[?1006h\\033[?1004h\\033[?1016h\\033[?2048h\\033[>1u'; sleep 1\r",
         );
         // Pixel reports are the one mode read without the terminal's lock, so they say the
         // command ran without a report being sent to anyone.
         wait_until("the command did not turn the modes on", || {
-            session.pixel_mouse()
+            session.pixel_mouse() && session.resize_reports()
         });
         wait_until("the command did not end", || {
             session
@@ -4236,6 +4236,7 @@ pub(crate) mod tests {
             Click::Ignored
         );
         assert!(!session.pixel_mouse());
+        assert!(!session.resize_reports());
     }
 
     #[test]

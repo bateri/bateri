@@ -60,7 +60,7 @@ __bateri_precmd() {
     __bateri_ran=0
     print -nr -- $'\e]133;D;'$code';bt_remote='$__bateri_rshell.$__bateri_block$'\a'
     # The input modes the command left on go with it (the local wrapper's reason).
-    print -nr -- $'\e[?1000;1002;1003;1004;1005;1006;1016l\e[<4096u'
+    print -nr -- $'\e[?1000;1002;1003;1004;1005;1006;1016;2048l\e[<4096u'
   fi
   (( __bateri_block++ ))
   print -nr -- $'\e]133;A;bt_remote='$__bateri_rshell.$__bateri_block$'\a'

@@ -12,6 +12,17 @@ of every installed copy. A version without a section is not released.
 
 ## [Unreleased]
 
+### Added
+
+- **Programs can ask to be told the window's size in their output.** An app
+  that turns on in-band resize reports (DECSET 2048, as kitty and Ghostty
+  offer it) now gets the rows, the columns and the size in pixels in one
+  sequence whenever the pane changes size, and once when it asks, instead of
+  only a signal it has to follow up on. The mode survives an update and a
+  crash like the other modes, and the shell integration turns it off when a
+  command ends, so a program that dies with it on cannot type size reports
+  into your prompt.
+
 ### Fixed
 
 - **An app that draws its whole screen as one picture now fills the pane to

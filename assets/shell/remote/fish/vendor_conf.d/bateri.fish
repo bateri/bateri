@@ -62,7 +62,7 @@ if string match -qr '^[0-9]+$' -- "$__bateri_rblock"; and set -q fish_pid
             printf '\e]133;D;%s;bt_remote=%s.%s\a' $code $__bateri_rshell $__bateri_block
             # The input modes the command left on go with it, and the title it set (the
             # local wrapper's reasons).
-            printf '\e[?1000;1002;1003;1004;1005;1006;1016l\e[<4096u\e[23t'
+            printf '\e[?1000;1002;1003;1004;1005;1006;1016;2048l\e[<4096u\e[23t'
         end
     end
 

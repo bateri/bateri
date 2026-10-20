@@ -72,6 +72,7 @@ use std::time::{Duration, Instant};
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::term::Term;
 
+use crate::handler::KeptModes;
 use crate::pointer::PointerShapes;
 use crate::shell::BlockKey;
 
@@ -815,11 +816,11 @@ pub(crate) trait Sink: Send + Sync {
     /// answers go.
     fn reply(&self, bytes: Vec<u8>);
 
-    /// The session's DECSET 1016 flag ([`crate::input::PIXEL_MOUSE_MODE`]),
-    /// which the wrapper sets and clears as the stream says. It lives with
-    /// the session rather than in `Term` because alacritty does not know the
-    /// mode; the pointer reports read it.
-    fn pixel_mouse(&self) -> &AtomicBool;
+    /// The session's DECSET 1016 and 2048 ([`KeptModes`]), which the wrapper
+    /// sets and clears as the stream says. They live with the session rather
+    /// than in `Term` because alacritty does not know the modes; the pointer
+    /// reports read 1016, the resize reads 2048.
+    fn kept_modes(&self) -> &KeptModes;
 
     /// The session's pointer shapes (OSC 22, [`crate::pointer`]), which the
     /// wrapper applies the stream's requests, screen moves and resets to.

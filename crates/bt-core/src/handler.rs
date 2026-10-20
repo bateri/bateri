@@ -48,11 +48,11 @@
 //! the screen (`CSI 2 J`, `CSI 3 J`) and a reset delete the placements in
 //! stream order, before the rows move.
 //!
-//! **DECSET 1016 is kept here too.** alacritty parses the mode as unknown
-//! and drops it, and `TermMode` has no bit for it; the wrapper keeps the flag
-//! the pointer reports read ([`ClusterHandler::pixel_mouse`]) and answers
-//! DECRQM for it. A stream with no flag to keep reads the mode and does
-//! nothing.
+//! **DECSET 1016 and 2048 are kept here too** ([`KeptModes`]). alacritty
+//! parses both modes as unknown and drops them, and `TermMode` has no bit for
+//! either; the wrapper keeps the flags (the pointer reports read 1016, the
+//! session's resize reads 2048) and answers DECRQM for them. A stream with no
+//! modes to keep reads them and does nothing.
 //!
 //! **So is OSC 22, the pointer's shape** ([`crate::pointer`]): the fork hands
 //! the request over as written, the shapes are the session's ([`Sink`]), one
@@ -86,6 +86,72 @@ use cursor_icon::CursorIcon;
 use crate::graphics::{Commands, Env, Hub, Motion, Outcome, Pending, Sink, screen_of};
 use crate::input::PIXEL_MOUSE_MODE;
 
+/// DECSET 2048: the program wants the terminal's size in the stream, as
+/// `CSI 48 ; rows ; cols ; height ; width t` ([`resize_report`]), whenever it
+/// changes and once when the mode is set — the size and the pixels in one
+/// sequence, in order with the output, where `SIGWINCH` leaves the program to
+/// ask the kernel and races the redraw.
+pub(crate) const RESIZE_REPORT_MODE: u16 = 2048;
+
+/// The DEC private modes the stream's wrapper keeps because alacritty does
+/// not know them: `Term` has no bit for either, so they live with the session
+/// ([`Sink::kept_modes`]). Every stream that rebuilds a session's `Term` (a
+/// handover's VT, the journal's scratch copy) binds a `KeptModes` of its own
+/// ([`ClusterHandler::kept_modes`]) and hands it to
+/// [`crate::snapshot::encode_live`], which writes the set ones back; one held
+/// together, so a path cannot carry one mode across and drop the other.
+#[derive(Debug, Default)]
+pub(crate) struct KeptModes {
+    /// DECSET 1016 ([`PIXEL_MOUSE_MODE`]): pointer reports in pixels.
+    pixel_mouse: AtomicBool,
+    /// DECSET 2048 ([`RESIZE_REPORT_MODE`]): the size in the stream.
+    resize_reports: AtomicBool,
+}
+
+impl KeptModes {
+    pub(crate) fn pixel_mouse(&self) -> bool {
+        self.pixel_mouse.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn resize_reports(&self) -> bool {
+        self.resize_reports.load(Ordering::Acquire)
+    }
+
+    /// The mode's number if it is one of the kept ones, `None` for a mode
+    /// `Term` knows (or drops).
+    fn number(mode: PrivateMode) -> Option<u16> {
+        match mode {
+            PrivateMode::Unknown(number @ (PIXEL_MOUSE_MODE | RESIZE_REPORT_MODE)) => Some(number),
+            _ => None,
+        }
+    }
+
+    /// The flag of a kept mode's number ([`KeptModes::number`]).
+    fn flag(&self, number: u16) -> &AtomicBool {
+        if number == PIXEL_MOUSE_MODE {
+            &self.pixel_mouse
+        } else {
+            &self.resize_reports
+        }
+    }
+
+    /// RIS: both off, as on a fresh terminal.
+    fn reset(&self) {
+        self.pixel_mouse.store(false, Ordering::Release);
+        self.resize_reports.store(false, Ordering::Release);
+    }
+}
+
+/// DECSET 2048's report of a size: `rows` × `cols` cells of `cell` pixels —
+/// the cell the PTY is told (`TIOCSWINSZ`'s pixel fields are cols and rows
+/// times it, and so are `CSI 14 t`'s and `CSI 16 t`'s answers), so the
+/// pixels the program is told are the pixels it is given.
+pub(crate) fn resize_report(rows: u16, cols: u16, (cell_w, cell_h): (u16, u16)) -> String {
+    let height = u32::from(rows) * u32::from(cell_h);
+    let width = u32::from(cols) * u32::from(cell_w);
+    format!("\x1b[48;{rows};{cols};{height};{width}t")
+}
+
 /// The `Handler` the parser sees: it borrows `Term` and forwards calls to
 /// it. It is reborn **on every `advance` and `stop_sync` call** — one lock
 /// round can hold several `advance`s (`pty_read`'s read loop) — so it has no
@@ -102,11 +168,11 @@ pub(crate) struct ClusterHandler<'a, U: EventListener> {
     /// stream that is not the live one (the journal's replay, the handover's
     /// snapshot): there a command only moves the cursor.
     graphics: Option<&'a dyn Sink>,
-    /// The session's DECSET 1016 flag ([`PIXEL_MOUSE_MODE`]) — where the
-    /// mode lands, since `Term` does not keep it. `None` for a stream with
-    /// no flag to keep: the mode is read and does nothing, as the graphics
-    /// commands do without a [`Sink`].
-    pixels: Option<&'a AtomicBool>,
+    /// The session's DECSET 1016 and 2048 ([`KeptModes`]) — where the modes
+    /// land, since `Term` does not keep them. `None` for a stream with no
+    /// modes to keep: they are read and do nothing, as the graphics commands
+    /// do without a [`Sink`].
+    modes: Option<&'a KeptModes>,
     /// The stream's graphics commands, between this wrapper's lives
     /// ([`ClusterHandler::commands`]). `None`: the parser's application
     /// program commands are let go.
@@ -120,25 +186,26 @@ impl<'a, U: EventListener> ClusterHandler<'a, U> {
             cluster,
             last_input,
             graphics: None,
-            pixels: None,
+            modes: None,
             commands: None,
         }
     }
 
     /// Lets the wrapper apply the graphics commands the stream carries (it
-    /// needs [`ClusterHandler::commands`] too). The session's 1016 flag comes
-    /// with the sink: the live stream keeps it and answers its query.
+    /// needs [`ClusterHandler::commands`] too). The session's kept modes come
+    /// with the sink: the live stream keeps them and answers their queries.
     pub(crate) fn graphics(mut self, graphics: Option<&'a dyn Sink>) -> Self {
         self.graphics = graphics;
-        self.pixels = graphics.map(|sink| sink.pixel_mouse());
+        self.modes = graphics.map(|sink| sink.kept_modes());
         self
     }
 
-    /// Lets the wrapper keep DECSET 1016 in `flag` for a stream that has no
-    /// sink: the replays that rebuild a session's `Term` (a handover's VT,
-    /// the journal's scratch copy) carry the mode across with it.
-    pub(crate) fn pixel_mouse(mut self, flag: &'a AtomicBool) -> Self {
-        self.pixels = Some(flag);
+    /// Lets the wrapper keep DECSET 1016 and 2048 in `modes` for a stream
+    /// that has no sink: the replays that rebuild a session's `Term` (a
+    /// handover's VT, the journal's scratch copy) carry the modes across with
+    /// it.
+    pub(crate) fn kept_modes(mut self, modes: &'a KeptModes) -> Self {
+        self.modes = Some(modes);
         self
     }
 
@@ -245,25 +312,49 @@ impl<'a, U: EventListener> ClusterHandler<'a, U> {
         }
     }
 
-    /// DECSET/DECRST 1016: the pointer reports turn to pixels or back.
-    fn pixel_mouse_mode(&mut self, on: bool) {
+    /// DECSET/DECRST of a kept mode: 1016 turns the pointer reports to pixels
+    /// or back, 2048 turns the size reports on or off. Setting 2048 reports
+    /// the size there and then, so the program has it without waiting for
+    /// the window to move — through the sink, the parser's own replies'
+    /// FIFO; a replay has no sink and tells nobody. `false`: not a kept mode.
+    fn kept_mode(&mut self, mode: PrivateMode, on: bool) -> bool {
+        let Some(number) = KeptModes::number(mode) else {
+            return false;
+        };
         *self.last_input = false;
-        if let Some(pixels) = self.pixels {
-            pixels.store(on, Ordering::Release);
+        let Some(modes) = self.modes else {
+            return true;
+        };
+        modes.flag(number).store(on, Ordering::Release);
+        if on
+            && number == RESIZE_REPORT_MODE
+            && let Some(graphics) = self.graphics
+        {
+            let rows = u16::try_from(self.term.screen_lines()).unwrap_or(u16::MAX);
+            let cols = u16::try_from(self.term.columns()).unwrap_or(u16::MAX);
+            graphics.reply(resize_report(rows, cols, graphics.cell()).into_bytes());
         }
+        true
     }
 
-    /// DECRQM for 1016, answered the way alacritty answers the modes it
-    /// knows (`CSI ? Ps ; Pm $ y`: 1 set, 2 reset) — through the sink, so it
-    /// takes the same FIFO as the parser's own replies. A stream without a
-    /// sink is a replay and replies to nobody.
-    fn report_pixel_mouse(&mut self) {
-        *self.last_input = false;
-        let (Some(graphics), Some(pixels)) = (self.graphics, self.pixels) else {
-            return;
+    /// DECRQM for a kept mode, answered the way alacritty answers the modes
+    /// it knows (`CSI ? Ps ; Pm $ y`: 1 set, 2 reset) — through the sink, so
+    /// it takes the same FIFO as the parser's own replies. A stream without a
+    /// sink is a replay and replies to nobody. `false`: not a kept mode.
+    fn report_kept_mode(&mut self, mode: PrivateMode) -> bool {
+        let Some(number) = KeptModes::number(mode) else {
+            return false;
         };
-        let state = if pixels.load(Ordering::Acquire) { 1 } else { 2 };
-        graphics.reply(format!("\x1b[?{PIXEL_MOUSE_MODE};{state}$y").into_bytes());
+        *self.last_input = false;
+        if let (Some(graphics), Some(modes)) = (self.graphics, self.modes) {
+            let state = if modes.flag(number).load(Ordering::Acquire) {
+                1
+            } else {
+                2
+            };
+            graphics.reply(format!("\x1b[?{number};{state}$y").into_bytes());
+        }
+        true
     }
 
     /// `CSI 2 J` deletes the placements that reach onto the screen, `CSI 3 J`
@@ -467,8 +558,8 @@ impl<U: EventListener> Handler for ClusterHandler<'_, U> {
     }
 
     fn set_private_mode(&mut self, mode: PrivateMode) {
-        if mode == PrivateMode::Unknown(PIXEL_MOUSE_MODE) {
-            return self.pixel_mouse_mode(true);
+        if self.kept_mode(mode, true) {
+            return;
         }
         // The command that took the screen is on the screen being left until this very call:
         // its text is read now, or it is out of reach for as long as the program runs.
@@ -482,15 +573,15 @@ impl<U: EventListener> Handler for ClusterHandler<'_, U> {
     }
 
     fn unset_private_mode(&mut self, mode: PrivateMode) {
-        if mode == PrivateMode::Unknown(PIXEL_MOUSE_MODE) {
-            return self.pixel_mouse_mode(false);
+        if self.kept_mode(mode, false) {
+            return;
         }
         self.switching_screens(|term| term.unset_private_mode(mode));
     }
 
     fn report_private_mode(&mut self, mode: PrivateMode) {
-        if mode == PrivateMode::Unknown(PIXEL_MOUSE_MODE) {
-            return self.report_pixel_mouse();
+        if self.report_kept_mode(mode) {
+            return;
         }
         *self.last_input = false;
         self.term.report_private_mode(mode);
@@ -505,8 +596,8 @@ impl<U: EventListener> Handler for ClusterHandler<'_, U> {
         if let Some(graphics) = self.graphics {
             graphics.hub().reset();
         }
-        if let Some(pixels) = self.pixels {
-            pixels.store(false, Ordering::Release);
+        if let Some(modes) = self.modes {
+            modes.reset();
         }
         if let Some(graphics) = self.graphics
             && graphics.pointer().clear()

@@ -2649,6 +2649,24 @@ pub(crate) mod tests {
         });
     }
 
+    /// DECSET 2048 crosses the same way, held in the same place: a program
+    /// that reads the size from the stream is still told it after the update.
+    #[test]
+    fn the_resize_report_mode_crosses_the_handover() {
+        let (_old, new, ..) = hand_over(
+            "printf '\\033[?2048h'; echo ready; while :; do sleep 1; done",
+            "ready",
+            b"",
+        );
+        assert!(new.resize_reports(), "the mode did not come across");
+        let (_old, new, ..) = hand_over(
+            "printf '\\033[?2048h\\033[?2048l'; echo ready; while :; do sleep 1; done",
+            "ready",
+            b"",
+        );
+        assert!(!new.resize_reports(), "a mode turned off came back on");
+    }
+
     /// The adopting side asks the foreground program to redraw without
     /// touching the size: `SIGWINCH` to the PTY's foreground group reaches
     /// the shell script, and nothing sent it before.

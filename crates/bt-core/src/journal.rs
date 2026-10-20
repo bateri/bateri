@@ -80,7 +80,7 @@ use alacritty_terminal::term::Term;
 use alacritty_terminal::vte::ansi::{self, Handler as _, Timeout as _};
 
 use crate::graphics::Commands;
-use crate::handler::ClusterHandler;
+use crate::handler::{ClusterHandler, KeptModes};
 use crate::reader::{MAX_LOCKED_READ, READ_BUFFER_SIZE};
 use crate::session::{GridSize, Osc52, TerminalOptions, history_of_vt, term_config, wipe};
 use crate::settings::{CaretShape, CursorBlink};
@@ -1005,9 +1005,10 @@ struct Scratch {
     parser: ansi::Processor,
     last_input: bool,
     commands: Commands,
-    /// DECSET 1016 as the replay has it: `Term` does not keep the mode, the
-    /// wrapper does, and the encoder writes it back into the new base's VT.
-    pixels: AtomicBool,
+    /// DECSET 1016 and 2048 as the replay has them: `Term` does not keep the
+    /// modes, the wrapper does, and the encoder writes them back into the new
+    /// base's VT.
+    modes: KeptModes,
     tail: Tail,
     options: TerminalOptions,
     cluster: bool,
@@ -1024,12 +1025,12 @@ impl Scratch {
         let mut term = Term::new(term_config(base.options), &grid, title.clone());
         let mut parser: ansi::Processor = ansi::Processor::new();
         let mut last_input = false;
-        let pixels = AtomicBool::new(false);
+        let modes = KeptModes::default();
         // The chunks cut wherever `CHUNK` falls, characters included.
         for chunk in base.vt.chunks(CHUNK) {
             parser.advance(
                 &mut ClusterHandler::new(&mut term, base.cluster, &mut last_input)
-                    .pixel_mouse(&pixels),
+                    .kept_modes(&modes),
                 chunk,
             );
             progress.fetch_add(1, Ordering::AcqRel);
@@ -1040,7 +1041,7 @@ impl Scratch {
             term,
             title,
             parser: ansi::Processor::new(),
-            pixels,
+            modes,
             commands,
             last_input: base.last_input,
             tail: Tail::default(),
@@ -1064,7 +1065,7 @@ impl Scratch {
         }
         self.parser.advance(
             &mut ClusterHandler::new(&mut self.term, self.cluster, &mut self.last_input)
-                .pixel_mouse(&self.pixels)
+                .kept_modes(&self.modes)
                 .commands(&mut self.commands),
             bytes,
         );
@@ -1077,7 +1078,7 @@ impl Scratch {
         }
         self.parser.advance(
             &mut ClusterHandler::new(&mut self.term, self.cluster, &mut self.last_input)
-                .pixel_mouse(&self.pixels)
+                .kept_modes(&self.modes)
                 .commands(&mut self.commands),
             bytes,
         );
@@ -1101,7 +1102,7 @@ impl Scratch {
             Side::CursorStyleReset => self.term.set_cursor_style(None),
             Side::StopSync => self.parser.stop_sync(
                 &mut ClusterHandler::new(&mut self.term, self.cluster, &mut self.last_input)
-                    .pixel_mouse(&self.pixels)
+                    .kept_modes(&self.modes)
                     .commands(&mut self.commands),
             ),
         }
@@ -1118,14 +1119,13 @@ impl Scratch {
         let cols = u16::try_from(self.term.columns()).unwrap_or(u16::MAX);
         let rows = u16::try_from(self.term.screen_lines()).unwrap_or(u16::MAX);
         let slot = self.title.clone();
-        let pixels = self.pixels.load(Ordering::Acquire);
         let (vt, _) = snapshot::encode_live(
             &mut self.term,
             &move || lock(&slot.0).clone(),
             &|| {
                 progress.fetch_add(1, Ordering::AcqRel);
             },
-            pixels,
+            &self.modes,
         );
         Base {
             vt,
@@ -1549,6 +1549,37 @@ mod tests {
         };
         assert!(rebuild(&[], &base.encode(), &released).is_none());
         assert!(rebuild(&[], b"not a base", &records).is_none());
+    }
+
+    /// The modes `Term` does not keep cross a rebuild in the scratch's own
+    /// flags: one set in the base's VT and one set in the bytes come back in
+    /// the new VT, one turned off does not.
+    #[test]
+    fn a_rebuild_carries_the_modes_the_wrapper_keeps() {
+        let base = Base::birth(
+            b"\x1b[?1016hbase".to_vec(),
+            20,
+            6,
+            (10, 20),
+            options(),
+            true,
+        );
+        let rebuilt_of = |bytes: &[u8]| {
+            let records = JournalRecords {
+                bytes_at: 0,
+                bytes: bytes.to_vec(),
+                sides_at: 0,
+                sides: Vec::new(),
+            };
+            let rebuilt = rebuild(&[], &base.encode(), &records).expect("rebuilds");
+            String::from_utf8_lossy(&rebuilt.vt).into_owned()
+        };
+        let vt = rebuilt_of(b"\x1b[?2048h");
+        assert!(vt.contains("\x1b[?1016h"), "the base's mode: {vt:?}");
+        assert!(vt.contains("\x1b[?2048h"), "the bytes' mode: {vt:?}");
+        let vt = rebuilt_of(b"\x1b[?2048h\x1b[?2048l\x1b[?1016l");
+        assert!(!vt.contains("\x1b[?2048h"), "{vt:?}");
+        assert!(!vt.contains("\x1b[?1016h"), "{vt:?}");
     }
 
     /// The rebuilt history keeps every row the scrollback held, the rows a

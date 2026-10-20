@@ -1548,7 +1548,7 @@ mod screenful {
     use alacritty_terminal::vte::ansi::Processor;
 
     use super::*;
-    use crate::handler::ClusterHandler;
+    use crate::handler::{ClusterHandler, KeptModes};
     use crate::pointer::{PointerShape, PointerShapes};
 
     const CELL: (u16, u16) = (10, 20);
@@ -1572,7 +1572,7 @@ mod screenful {
     struct Sinker {
         hub: Hub,
         told: Told,
-        pixel_mouse: AtomicBool,
+        modes: KeptModes,
         pointer: PointerShapes,
         /// How many times the shown pointer shape changed.
         pointer_changes: AtomicUsize,
@@ -1591,8 +1591,8 @@ mod screenful {
             self.told.0.lock().expect("lock").extend(bytes);
         }
 
-        fn pixel_mouse(&self) -> &AtomicBool {
-            &self.pixel_mouse
+        fn kept_modes(&self) -> &KeptModes {
+            &self.modes
         }
 
         fn pointer(&self) -> &PointerShapes {
@@ -1633,7 +1633,7 @@ mod screenful {
                 sink: Sinker {
                     hub: Hub::new(),
                     told: told.clone(),
-                    pixel_mouse: AtomicBool::new(false),
+                    modes: KeptModes::default(),
                     pointer: PointerShapes::default(),
                     pointer_changes: AtomicUsize::new(0),
                 },
@@ -2104,17 +2104,17 @@ mod screenful {
         screen.feed(b"\x1b[?1016$p");
         assert_eq!(screen.told(), b"\x1b[?1016;2$y", "off: reset");
         screen.feed(b"\x1b[?1016h");
-        assert!(screen.sink.pixel_mouse.load(Ordering::Acquire));
+        assert!(screen.sink.modes.pixel_mouse());
         screen.feed(b"\x1b[?1016$p");
         assert_eq!(screen.told(), b"\x1b[?1016;1$y", "on: set");
         screen.feed(b"\x1b[?1016l");
-        assert!(!screen.sink.pixel_mouse.load(Ordering::Acquire));
+        assert!(!screen.sink.modes.pixel_mouse());
         // A reset takes the mode with the rest.
         screen.feed(b"\x1b[?1016h\x1bc");
-        assert!(!screen.sink.pixel_mouse.load(Ordering::Acquire));
+        assert!(!screen.sink.modes.pixel_mouse());
         // The other mouse modes are alacritty's and do not move it.
         screen.feed(b"\x1b[?1016h\x1b[?1000h\x1b[?1006h\x1b[?1000l");
-        assert!(screen.sink.pixel_mouse.load(Ordering::Acquire));
+        assert!(screen.sink.modes.pixel_mouse());
     }
 
     #[test]
@@ -2147,21 +2147,47 @@ mod screenful {
     }
 
     #[test]
-    fn a_replay_keeps_the_mode_in_its_own_flag_and_answers_nobody() {
-        let flag = AtomicBool::new(false);
+    fn the_resize_report_flag_follows_the_stream_and_reports_the_size_when_set() {
+        let mut screen = Screenful::new(20, 10, 100);
+        screen.feed(b"\x1b[?2048$p");
+        assert_eq!(screen.told(), b"\x1b[?2048;2$y", "off: reset");
+        // Set, it tells the size there and then: the grid, and its pixels in the cell the
+        // session gives.
+        screen.feed(b"\x1b[?2048h");
+        assert!(screen.sink.modes.resize_reports());
+        let (w, h) = CELL;
+        let report = format!("\x1b[48;10;20;{};{}t", 10 * u32::from(h), 20 * u32::from(w));
+        assert_eq!(screen.told(), report.as_bytes());
+        screen.feed(b"\x1b[?2048$p");
+        assert_eq!(screen.told(), b"\x1b[?2048;1$y", "on: set");
+        // Off says nothing; a reset takes it with the rest, 1016 too.
+        screen.feed(b"\x1b[?2048l");
+        assert!(!screen.sink.modes.resize_reports());
+        assert_eq!(screen.told(), b"");
+        screen.feed(b"\x1b[?2048h\x1b[?1016h");
+        screen.told();
+        screen.feed(b"\x1bc");
+        assert!(!screen.sink.modes.resize_reports());
+        assert!(!screen.sink.modes.pixel_mouse());
+    }
+
+    #[test]
+    fn a_replay_keeps_the_modes_in_its_own_flags_and_answers_nobody() {
+        let modes = KeptModes::default();
         let mut term = Term::new(Config::default(), &size(20, 10), Told::default());
         let mut parser: Processor = Processor::new();
         let mut last_input = false;
         parser.advance(
-            &mut ClusterHandler::new(&mut term, true, &mut last_input).pixel_mouse(&flag),
-            b"\x1b[?1016h\x1b[?1016$p",
+            &mut ClusterHandler::new(&mut term, true, &mut last_input).kept_modes(&modes),
+            b"\x1b[?1016h\x1b[?2048h\x1b[?1016$p\x1b[?2048$p",
         );
-        assert!(flag.load(Ordering::Acquire));
-        // Without a flag to keep the mode is read and does nothing.
+        assert!(modes.pixel_mouse());
+        assert!(modes.resize_reports());
+        // Without modes to keep they are read and do nothing.
         let mut bare = Term::new(Config::default(), &size(20, 10), Told::default());
         parser.advance(
             &mut ClusterHandler::new(&mut bare, true, &mut last_input),
-            b"\x1b[?1016h",
+            b"\x1b[?1016h\x1b[?2048h",
         );
     }
 

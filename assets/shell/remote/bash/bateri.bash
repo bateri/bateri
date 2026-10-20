@@ -118,7 +118,7 @@ __bateri_precmd() {
       printf '\033]133;D;%s;bt_remote=%s.%s\007' "$status" "$__bateri_rshell" "$__bateri_block"
       # The input modes the command left on go with it, and the title it set (the local
       # wrapper's reasons).
-      printf '\033[?1000;1002;1003;1004;1005;1006;1016l\033[<4096u\033[23t'
+      printf '\033[?1000;1002;1003;1004;1005;1006;1016;2048l\033[<4096u\033[23t'
     fi
     __bateri_block=$(( __bateri_block + 1 ))
     printf '\033]133;A;bt_remote=%s.%s\007\033]8;;bateri://rblock/%s.%s\007' \
