@@ -5994,13 +5994,15 @@ impl Session {
         // oldest prompt a job notification was printed under. An input line
         // that is not on the window (scrolled back) hides nothing.
         blocks.line_read = false;
-        let grid_found = suppressed_block
+        let located = suppressed_block
             .filter(|input| input.grid && !alt_screen)
-            .and_then(|input| {
+            .map(|input| {
                 grid_input::locate(&term, cursor_point.line.0, rows, |uri| {
                     block_key(uri) == Some(BlockKey::Local(input.block))
                 })
             });
+        let grid_found = located.and_then(Result::ok);
+        let grid_taller = located == Some(Err(grid_input::Unlocated::Taller));
         if let Some(found) = grid_found {
             blocks.line.cluster = blocks.input_cluster;
             let Blocks {
@@ -7083,11 +7085,19 @@ impl Session {
             if log.publish_grid(&blocks.line, &blocks.line_cells, blocks.line_block, answers) {
                 cursor.input_rows = input_rows_of(dock::needed_rows(&log.dock, budget.cols));
             }
-        } else if suppressed_block.is_some_and(|input| input.grid) {
-            // The line could not be found this frame (its anchor is out of reach, the
-            // alternate screen is up): the places of the last one are not where it
-            // is now, and a click must not use them.
-            lock(&self.shell).dock_cells.clear();
+        } else if let Some(input) = suppressed_block.filter(|input| input.grid) {
+            // The line could not be found this frame. Taller than the screen, it is
+            // the grid's — the dock lets it go, and the band shrinks in this same
+            // frame for the reason above. Otherwise (no anchor near the cursor yet,
+            // the alternate screen is up) nothing is known about it; either way the
+            // places of the last one are not where it is now, and a click must not
+            // use them.
+            let mut log = lock(&self.shell);
+            if !grid_taller {
+                log.dock_cells.clear();
+            } else if log.release_grid(input.block) {
+                cursor.input_rows = input_rows_of(dock::needed_rows(&log.dock, budget.cols));
+            }
         }
         // **The stale hover drops here**, after the `Term` lock (a leaf lock does
         // not go under it), and only if the slot still holds the copy this frame
@@ -16037,6 +16047,73 @@ mod tests {
             state.display_chars == 2
         });
         assert_eq!(line_places(&session), [(2, 2), (2, 2), (2, 4)]);
+        session.shutdown();
+    }
+
+    #[test]
+    fn a_grid_line_taller_than_the_screen_is_the_grids_until_it_fits_again() {
+        // The shell echoes a line of three rows, grows it past the screen's ten, then draws
+        // its prompt again with a short line — a key from the test starts each step.
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_docked_session(
+            &format!(
+                "stty raw -echo; x() {{ i=0; while [ $i -lt $1 ]; do printf xxxxxxxxxx; \
+                 i=$((i+1)); done; }}; printf '{}cmd1{}{}'; x 10; dd bs=1 count=1 2>/dev/null; \
+                 x 50; dd bs=1 count=1 2>/dev/null; printf '\\033[H\\033[2J{}back'; sleep 5",
+                anchored_prompt(1),
+                ran(1, 0, "out"),
+                grid_prompt(2),
+                grid_repaint(2),
+            ),
+            wake,
+        );
+        let (_, cursor, _) = wait_grid_line(&session, "the line was not read", |state| {
+            state.status == DockStatus::Live && state.display_chars == 100
+        });
+        assert!(cursor.input_rows > 1, "{cursor:?}");
+
+        // Too tall: the dock lets the line go — in the very frame that finds it so, the
+        // caret is the grid's and the band one row, not the last line that fitted.
+        session.write(b"k");
+        let mut state = DockState::default();
+        let mut released = None;
+        wait_until("the dock kept the line", Duration::from_secs(5), || {
+            let mut cells = Vec::new();
+            let cursor = session.frame(
+                |cell| cells.push(cell),
+                |_| (),
+                &mut Blocks::default(),
+                &mut SelectionRuns::default(),
+                &mut SearchRuns::default(),
+                &mut TrackMarks::default(),
+                &mut Clusters::default(),
+                &mut Pictures::default(),
+                ScrollGlide::default(),
+                BUDGET,
+            );
+            session.dock_state(&mut state);
+            let tall = state.status == DockStatus::Unavailable(DockFault::Tall);
+            if tall {
+                released = Some((cells, cursor));
+            }
+            tall
+        });
+        let (cells, cursor) = released.unwrap();
+        assert_eq!(state.buffer, "");
+        assert!(!cursor.caret_in_dock, "{cursor:?}");
+        assert!(cursor.visible, "{cursor:?}");
+        assert_eq!(cursor.input_rows, BUDGET.fit(1, cursor.rows), "{cursor:?}");
+        assert_eq!(
+            row_glyphs(&cells, cursor.row - 1),
+            "x".repeat(40),
+            "the grid hid the line"
+        );
+
+        // Short enough again: back in the dock.
+        session.write(b"k");
+        wait_grid_line(&session, "the line did not come back", |state| {
+            state.status == DockStatus::Live && state.buffer == "back"
+        });
         session.shutdown();
     }
 

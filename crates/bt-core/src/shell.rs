@@ -1515,7 +1515,8 @@ pub enum DockStatus {
     Idle,
     /// The fields are fresh and valid.
     Live,
-    /// A mirror arrived but could not be read; the fields are **empty**.
+    /// A mirror arrived but could not be read, or a line read from the grid
+    /// is too tall to be read; the fields are **empty**.
     Unavailable(DockFault),
     /// The mirror was **read and is valid**, but the display carries a control
     /// character the dock **does not draw** (the `\x01` of `Ctrl-V Ctrl-A`): the dock
@@ -1546,19 +1547,23 @@ pub enum DockStatus {
     Control,
 }
 
-/// Why the mirror could not be read.
+/// Why the line could not be read.
 ///
-/// The two are separate, because they say two different things: `Overflow` that
+/// The three are separate, because they say different things: `Overflow` that
 /// the limit is narrow (and the limit is a design number derived in
-/// [`DOCK_PAYLOAD_LIMIT`]'s doc), `Malformed` that the channel is corrupt. If
-/// reduced to a single variant the answer to "do I need to raise the limit"
-/// would be lost.
+/// [`DOCK_PAYLOAD_LIMIT`]'s doc), `Malformed` that the channel is corrupt,
+/// `Tall` that the line outgrew the screen it is read from. If reduced to a
+/// single variant the answer to "do I need to raise the limit" would be lost.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DockFault {
     /// The payload exceeded [`DOCK_PAYLOAD_LIMIT`].
     Overflow,
     /// The payload could not be decoded: field count, base64 or UTF-8.
     Malformed,
+    /// A line read from the grid ([`ShellLog::dock_grid`]) is taller than the
+    /// screen, so its top is out of the frame's reach
+    /// ([`crate::grid_input::Unlocated::Taller`]).
+    Tall,
 }
 
 /// One record of `region_highlight`: a range of the display and its style.
@@ -3782,6 +3787,35 @@ impl ShellLog {
         true
     }
 
+    /// The frame found the grid-sourced line taller than the screen
+    /// ([`crate::grid_input::Unlocated::Taller`]): the grid shows it, so the
+    /// dock lets it go. Kept, the last line that fitted would stay in the dock
+    /// — frozen, with the caret, under the line the user goes on typing in
+    /// the grid. The mirror's answer to a line too big for the dock is the
+    /// same ([`DockStatus::Unavailable`]: the line and its caret stay on the
+    /// grid); the next line that fits is published `Live` again
+    /// ([`Self::publish_grid`]). `true` if the dock changed.
+    ///
+    /// The gate is [`Self::publish_grid`]'s, asked again under the lock for
+    /// its reasons — and one more: an `Unavailable` would end a held
+    /// `line-finish`.
+    pub(crate) fn release_grid(&mut self, block: u32) -> bool {
+        self.dock_cells.clear();
+        let current = matches!(
+            self.local.blocks.last(),
+            Some((last, Outcome::Pending { .. })) if last == block
+        );
+        if !current
+            || !self.grid_open()
+            || self.dock.status == DockStatus::Unavailable(DockFault::Tall)
+        {
+            return false;
+        }
+        self.apply_dock(DockEvent::Unavailable(DockFault::Tall), 0);
+        self.observe_caret();
+        true
+    }
+
     /// Whether a grid-sourced line may be published and clicked at this
     /// moment: the shell said `g` at this prompt, the line is still being
     /// written, and the dock has an input row at all — a remote session or a
@@ -5942,7 +5976,11 @@ impl Carried {
         let mut out = format!("{STATE_HEADER} {STATE_VERSION}\n");
         let dock = &self.dock;
         let status = match dock.status {
-            DockStatus::Idle => "idle",
+            // A line too tall for the dock is the frame's reading of the grid,
+            // not the shell's state: the first frame after the update reads it
+            // again, so it crosses as the empty line it shows — the format
+            // stays the one the version before reads.
+            DockStatus::Idle | DockStatus::Unavailable(DockFault::Tall) => "idle",
             DockStatus::Live => "live",
             DockStatus::Control => "control",
             DockStatus::Unavailable(DockFault::Overflow) => "overflow",
@@ -9338,6 +9376,44 @@ mod tests {
         assert!(!log.publish_grid(&typed("ab"), &moved, 1, 2));
         assert_eq!(log.dock.answers, 1, "the stamp moved without the text");
         assert_eq!(log.grid_click(), Some(moved[0]));
+    }
+
+    #[test]
+    fn a_grid_line_taller_than_the_screen_leaves_the_dock_until_it_fits() {
+        // The line outgrew the screen: the grid shows it, so the dock keeps nothing of it
+        // — no text, no places, no selection — and the caret is the grid's.
+        let mut log = clicked_log(0);
+        assert_eq!(log.caret(Instant::now()).home, CaretHome::Dock);
+        assert!(log.release_grid(1));
+        assert_eq!(log.dock.status, DockStatus::Unavailable(DockFault::Tall));
+        assert_eq!(log.dock.buffer, "");
+        assert!(log.dock_cells.is_empty());
+        assert!(log.dock_selection.is_none());
+        assert_eq!(log.caret(Instant::now()).home, CaretHome::Grid);
+        // Every frame asks again while it is too tall; only the first one changes the dock.
+        assert!(!log.release_grid(1));
+        // Deleted back until it fits: the dock has the line again, and the caret.
+        assert!(log.publish_grid(&typed("ab"), &cells_of_ab(), 1, 2));
+        assert_eq!(log.dock.status, DockStatus::Live);
+        assert_eq!(log.dock.buffer, "ab");
+        assert_eq!(log.caret(Instant::now()).home, CaretHome::Dock);
+
+        // Another block's line is not the open prompt's: the dock stays, the places go.
+        let mut log = clicked_log(0);
+        assert!(!log.release_grid(2));
+        assert_eq!(log.dock.status, DockStatus::Live);
+        assert!(log.dock_cells.is_empty());
+    }
+
+    #[test]
+    fn a_line_too_tall_for_the_dock_crosses_the_handover_as_an_empty_one() {
+        // The frame's reading, not the shell's: the version before reads the blob, and the
+        // first frame after the update finds the line too tall again.
+        let mut log = clicked_log(0);
+        assert!(log.release_grid(1));
+        let carried = Carried::decode(&log.carried(None, 0).encode()).unwrap();
+        assert_eq!(carried.dock.status, DockStatus::Idle);
+        assert!(carried.dock_grid);
     }
 
     /// fish prints its own identity-less marks beside ours; in the recorded

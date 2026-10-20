@@ -94,19 +94,20 @@ fn wraps(row: &Row<Cell>) -> bool {
 ///
 /// A cursor row that holds no anchored cell (the shell has just moved to a
 /// fresh line inside the command) borrows the nearest anchored row above it.
-/// `None` when no anchor is within `reach` rows, or the line is taller than
-/// `reach`: the grid keeps showing it, the safe direction.
+/// An error when no anchor is within `reach` rows, or the line is taller than
+/// `reach`: the grid keeps showing it, the safe direction — and the dock has
+/// to step aside for a line that is taller ([`Unlocated::Taller`]).
 pub(crate) fn locate<T>(
     term: &Term<T>,
     cursor_line: i32,
     reach: i32,
     is_anchor: impl Fn(&str) -> bool,
-) -> Option<InputLines> {
+) -> Result<InputLines, Unlocated> {
     let floor = cursor_line.saturating_sub(reach);
     let mut line = cursor_line;
     let link = loop {
         if line < floor {
-            return None;
+            return Err(Unlocated::NoAnchor);
         }
         if let Some(link) = row_at(term, line).and_then(|row| anchor_in(row, &is_anchor)) {
             break link;
@@ -116,7 +117,7 @@ pub(crate) fn locate<T>(
     let mut top = line;
     while row_at(term, top - 1).is_some_and(|row| carries(row, link.id())) {
         if top <= floor {
-            return None;
+            return Err(Unlocated::Taller);
         }
         top -= 1;
     }
@@ -124,7 +125,23 @@ pub(crate) fn locate<T>(
     while bottom < term.bottommost_line().0 && row_at(term, bottom).is_some_and(wraps) {
         bottom += 1;
     }
-    Some(InputLines { top, bottom })
+    Ok(InputLines { top, bottom })
+}
+
+/// Why [`locate`] found no input line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Unlocated {
+    /// No anchor of the prompt near the cursor: the prompt is not on the grid,
+    /// or not yet — while an image is decoded mid-read, or a synchronized
+    /// update holds the bytes back, a frame can see a new prompt's marks before
+    /// its anchor is drawn. Nothing is known about the line, so nothing about
+    /// the dock changes.
+    NoAnchor,
+    /// The anchor is near, but the run of rows that carries its link goes on
+    /// past the reach: the line is taller than that. Every cell the shell
+    /// draws for the line carries the link (the scripts close it only when
+    /// the command starts), so this is the line's own height, not a guess.
+    Taller,
 }
 
 /// A color as the mirror carries it: resolved, `0xRRGGBB`.

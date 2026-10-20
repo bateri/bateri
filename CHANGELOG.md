@@ -12,6 +12,13 @@ of every installed copy. A version without a section is not released.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A command line taller than the window no longer leaves a frozen copy in
+  the dock.** In bash and fish the dock kept showing the line as it was when it
+  last fit, under the line growing on the screen; the dock now steps aside
+  while the line is taller than the window, and takes it back once it fits.
+
 ## [0.20.0] - 2026-10-19
 
 ### Added
