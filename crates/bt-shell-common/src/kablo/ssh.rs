@@ -35,7 +35,7 @@ use bt_core::{PaneUuid, RemoteKind, RemoteTarget, Settings};
 
 use super::Cause;
 use super::install::{self, Bundle, Failure, Installed, SshChannel};
-use super::service::{Backend, Carried, PaneInfo, PaneLink, Peer, Refusal};
+use super::service::{Backend, Carried, Letter, PaneInfo, PaneLink, Peer, Refusal};
 use crate::ssh_route::{self, Ask, Asker, Denied, Masters, Plan, Route, SshRunner};
 use crate::ssh_wrap::{self, Fact, KabloHost};
 use crate::upload::ssh_argv_for;
@@ -53,6 +53,10 @@ pub type ChangeNews = Box<dyn Fn(&PaneUuid) + Send + Sync>;
 
 /// Told the account whose terminals in the background are not what they were.
 pub type BackgroundNews = Box<dyn Fn(&str) + Send + Sync>;
+
+/// What the application does with what a program on a server said to it
+/// ([`Backend::mail`]): it hops to its own thread and answers the letter there.
+pub type MailNews = Box<dyn Fn(Letter) + Send + Sync>;
 
 /// What the service gets from the application, as closures and values.
 pub struct SshBackend {
@@ -90,6 +94,9 @@ pub struct SshBackend {
     /// The terminals an account keeps in the background are not what they were
     /// ([`Backend::background_changed`]).
     pub listed: BackgroundNews,
+    /// The application takes what the programs on a server say to it: `Some` makes the
+    /// accounts' clients ask for tickets ([`Backend::takes_mail`]). `None`: it takes none.
+    pub mail: Option<MailNews>,
 }
 
 impl SshBackend {
@@ -313,6 +320,16 @@ impl Backend for SshBackend {
 
     fn background_changed(&self, account: &str) {
         (self.listed)(account);
+    }
+
+    fn takes_mail(&self) -> bool {
+        self.mail.is_some()
+    }
+
+    fn mail(&self, letter: Letter) {
+        if let Some(mail) = &self.mail {
+            mail(letter);
+        }
     }
 }
 

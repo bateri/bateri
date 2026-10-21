@@ -3,7 +3,8 @@
 
 use std::time::{Duration, Instant};
 
-use kablo_proto::v1::{MAX_HISTORY, Message, Packet, PacketDecoder, View};
+use kablo_proto::v1::stream;
+use kablo_proto::v1::{MAX_HISTORY, Message, Offers, Packet, PacketDecoder, View};
 
 use super::fake::{Age, Bridge};
 use super::*;
@@ -1347,6 +1348,445 @@ fn a_detached_terminal_is_not_asked_for_again_and_a_closed_client_sends_nothing(
     rig.client.close();
     assert!(!rig.client.has_outgoing());
     assert!(!rig.client.list());
+}
+
+// Mail: what a program on the server hands the app
+
+/// A rig whose client takes tickets, connected to a bridge of today.
+fn mail_rig() -> Rig {
+    let mut rig = Rig::new(Age::Current);
+    rig.client.take_tickets();
+    rig.connect();
+    rig.take();
+    rig
+}
+
+/// The app's streams the client opened to answer tickets, in order.
+fn app_streams(rig: &Rig) -> Vec<u32> {
+    rig.bridge
+        .received_streams
+        .iter()
+        .filter(|p| matches!(p.message, stream::Message::OpenTicket { .. }))
+        .map(|p| p.stream)
+        .collect()
+}
+
+fn talks_over(events: &[Event]) -> Vec<(Talk, Over)> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            Event::TalkOver { talk, over } => Some((*talk, over.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_client_that_takes_no_tickets_says_nothing_of_features() {
+    let mut rig = Rig::new(Age::Current);
+    rig.connect();
+    assert!(
+        rig.bridge
+            .received
+            .iter()
+            .all(|p| !matches!(p.message, Message::Features | Message::FeaturesWith(_))),
+        "{:?}",
+        rig.bridge.received
+    );
+    // So the bridge gives it nothing, and `kablo app` is told there is no app.
+    assert_eq!(rig.bridge.mail(None, 100), None);
+    assert_eq!(rig.client.mailbox(), None);
+}
+
+#[test]
+fn a_client_that_takes_tickets_says_so_on_every_connection_and_learns_the_mailbox() {
+    let mut rig = Rig::new(Age::Current);
+    rig.client.take_tickets();
+    rig.connect();
+    let said = |rig: &Rig| {
+        rig.bridge
+            .received
+            .iter()
+            .filter(|p| p.message == Message::FeaturesWith(Offers::with_tickets()))
+            .count()
+    };
+    assert_eq!(said(&rig), 1);
+    assert_eq!(rig.client.mailbox(), Some(true));
+
+    // The next connection is another bridge process as far as the app can tell:
+    // what it said and was told are of the connection.
+    rig.drop_connection();
+    assert_eq!(rig.client.mailbox(), None);
+    rig.redial();
+    assert_eq!(said(&rig), 2);
+    assert_eq!(rig.client.mailbox(), Some(true));
+    assert!(rig.bridge.mail(None, 100).is_some());
+}
+
+#[test]
+fn a_client_that_starts_taking_tickets_on_a_live_connection_says_so_at_once() {
+    let mut rig = Rig::new(Age::Current);
+    rig.connect();
+    assert_eq!(rig.bridge.mail(None, 100), None);
+    rig.client.take_tickets();
+    rig.pump();
+    assert_eq!(rig.client.mailbox(), Some(true));
+    assert!(rig.bridge.mail(None, 100).is_some());
+}
+
+#[test]
+fn a_bridge_from_before_features_or_without_a_mailbox_gives_no_ticket_and_it_is_no_error() {
+    // From before `features`: the question is skipped and nothing is answered.
+    let mut rig = Rig::new(Age::Old);
+    rig.client.take_tickets();
+    rig.connect();
+    assert_eq!(rig.client.mailbox(), None);
+    assert_eq!(rig.bridge.mail(None, 100), None);
+    assert!(
+        !rig.events
+            .iter()
+            .any(|e| matches!(e, Event::Failed { .. } | Event::Lost { .. })),
+        "{:?}",
+        rig.events
+    );
+
+    // A bridge that answers and keeps no mailbox says so.
+    let mut rig = Rig::with(Bridge::new(Age::Current).without_mailbox());
+    rig.client.take_tickets();
+    rig.connect();
+    assert_eq!(rig.client.mailbox(), Some(false));
+    assert_eq!(rig.bridge.mail(None, 100), None);
+}
+
+#[test]
+fn a_ticket_names_the_terminal_the_program_runs_in_and_none_when_it_runs_in_none() {
+    let mut rig = mail_rig();
+    let work = id("work");
+    let first = rig.bridge.mail(Some(&work), 100).expect("a ticket");
+    let second = rig.bridge.mail(None, 100).expect("a ticket");
+    rig.pump();
+    assert_eq!(
+        rig.take(),
+        [
+            Event::Ticket {
+                ticket: first,
+                from: Some(work)
+            },
+            Event::Ticket {
+                ticket: second,
+                from: None
+            }
+        ]
+    );
+}
+
+#[test]
+fn a_ticket_nobody_asked_for_is_not_acted_on() {
+    let mut rig = Rig::new(Age::Current);
+    rig.connect();
+    rig.take();
+    rig.bridge.inject(&Packet::connection(Message::Ticket(5)));
+    rig.pump();
+    assert!(rig.take().is_empty());
+    assert_eq!(rig.client.accept(5), None);
+}
+
+#[test]
+fn a_conversation_goes_both_ways_and_is_over_when_both_ends_have_said_all_they_had() {
+    let mut rig = mail_rig();
+    let ticket = rig.bridge.mail(None, 1000).expect("a ticket");
+    rig.pump();
+    rig.take();
+
+    let talk = rig.client.accept(ticket).expect("a talk");
+    // Said before the program took the app's end: it waits for the `opened`.
+    assert!(rig.client.say(talk, b"ok "));
+    rig.pump();
+    let stream = app_streams(&rig)[0];
+    assert_eq!(
+        rig.bridge.received_streams.first(),
+        Some(&stream::Packet::new(
+            stream,
+            stream::Message::OpenTicket {
+                window: mail::WINDOW,
+                ticket
+            }
+        ))
+    );
+    assert_eq!(rig.bridge.said_to_sender(stream), b"ok ");
+
+    // What the program sends comes as it is, and is credited back as it is handed over.
+    rig.bridge.sender_data(stream, b"place\n");
+    rig.bridge.sender_data(stream, b"terminal t4\n");
+    rig.bridge.sender_eof(stream);
+    rig.pump();
+    assert_eq!(
+        rig.take(),
+        [
+            Event::TalkData {
+                talk,
+                data: b"place\n".to_vec()
+            },
+            Event::TalkData {
+                talk,
+                data: b"terminal t4\n".to_vec()
+            },
+            Event::TalkEof { talk },
+        ]
+    );
+    assert_eq!(rig.bridge.credited_by_app(stream), 18);
+
+    // The app may go on answering after the program has said all it had.
+    assert!(rig.client.say(talk, b"t9\n"));
+    assert!(rig.client.finish(talk));
+    rig.pump();
+    assert_eq!(rig.bridge.said_to_sender(stream), b"ok t9\n");
+    assert!(rig.bridge.app_finished(stream));
+    assert_eq!(talks_over(&rig.take()), [(talk, Over::Finished)]);
+    assert_eq!(rig.bridge.breaches(), 0);
+    // The conversation is gone: nothing more is said into it.
+    assert!(!rig.client.say(talk, b"x"));
+    assert!(!rig.client.finish(talk));
+}
+
+#[test]
+fn the_app_finishing_first_waits_for_the_program_to_do_the_same() {
+    let mut rig = mail_rig();
+    let ticket = rig.bridge.mail(None, 1000).expect("a ticket");
+    rig.pump();
+    let talk = rig.client.accept(ticket).expect("a talk");
+    rig.pump();
+    let stream = app_streams(&rig)[0];
+    rig.take();
+
+    rig.client.say(talk, b"answer");
+    rig.client.finish(talk);
+    rig.pump();
+    assert!(rig.bridge.app_finished(stream));
+    assert!(
+        talks_over(&rig.take()).is_empty(),
+        "the program has more to say"
+    );
+    // Nothing is sent after the app's own `eof`.
+    assert!(!rig.client.say(talk, b"more"));
+
+    rig.bridge.sender_data(stream, b"late");
+    rig.bridge.sender_eof(stream);
+    rig.pump();
+    let events = rig.take();
+    assert_eq!(
+        events,
+        [
+            Event::TalkData {
+                talk,
+                data: b"late".to_vec()
+            },
+            Event::TalkEof { talk },
+            Event::TalkOver {
+                talk,
+                over: Over::Finished
+            }
+        ]
+    );
+    assert_eq!(rig.bridge.breaches(), 0);
+}
+
+#[test]
+fn what_the_app_says_goes_as_far_as_the_window_the_program_gave_and_waits_for_its_credit() {
+    let mut rig = mail_rig();
+    rig.bridge.sender_reads(false);
+    let ticket = rig.bridge.mail(None, 10).expect("a ticket");
+    rig.pump();
+    let talk = rig.client.accept(ticket).expect("a talk");
+    rig.pump();
+    let stream = app_streams(&rig)[0];
+
+    let text: Vec<u8> = (0..25u8).collect();
+    assert!(rig.client.say(talk, &text));
+    assert!(rig.client.finish(talk));
+    rig.pump();
+    assert_eq!(rig.bridge.said_to_sender(stream), text.get(..10).unwrap());
+    assert!(
+        !rig.bridge.app_finished(stream),
+        "the `eof` follows the bytes"
+    );
+
+    rig.bridge.sender_credit(stream, 10);
+    rig.pump();
+    assert_eq!(rig.bridge.said_to_sender(stream), text.get(..20).unwrap());
+    assert!(!rig.bridge.app_finished(stream));
+
+    rig.bridge.sender_credit(stream, 5);
+    rig.pump();
+    assert_eq!(rig.bridge.said_to_sender(stream), text);
+    assert!(rig.bridge.app_finished(stream));
+    assert_eq!(rig.bridge.breaches(), 0);
+}
+
+#[test]
+fn a_long_answer_goes_in_pieces_no_larger_than_a_data_message_takes() {
+    let mut rig = mail_rig();
+    let ticket = rig.bridge.mail(None, 300_000).expect("a ticket");
+    rig.pump();
+    let talk = rig.client.accept(ticket).expect("a talk");
+    rig.pump();
+    let stream = app_streams(&rig)[0];
+
+    let answer: Vec<u8> = (0..100_000u32).map(|n| (n % 251) as u8).collect();
+    assert!(rig.client.say(talk, &answer));
+    rig.pump();
+    assert_eq!(rig.bridge.said_to_sender(stream), answer);
+    let pieces: Vec<usize> = rig
+        .bridge
+        .received_streams
+        .iter()
+        .filter_map(|p| match &p.message {
+            stream::Message::Data(bytes) => Some(bytes.len()),
+            _ => None,
+        })
+        .collect();
+    assert!(pieces.len() >= 4, "{pieces:?}");
+    assert!(
+        pieces
+            .iter()
+            .all(|n| *n <= kablo_proto::v1::stream::MAX_DATA)
+    );
+    assert_eq!(rig.bridge.breaches(), 0);
+}
+
+#[test]
+fn a_ticket_is_declined_in_the_apps_words_and_only_once() {
+    let mut rig = mail_rig();
+    let ticket = rig.bridge.mail(None, 100).expect("a ticket");
+    rig.pump();
+    assert!(rig.client.decline(ticket, "bateri is not taking requests"));
+    rig.pump();
+    assert_eq!(
+        rig.bridge.declined(),
+        [(ticket, "bateri is not taking requests".to_owned())]
+    );
+    // Answered: neither accepted nor declined again.
+    assert_eq!(rig.client.accept(ticket), None);
+    assert!(!rig.client.decline(ticket, "again"));
+
+    // A long text is cut to what a person reads, on a character boundary.
+    let ticket = rig.bridge.mail(None, 100).expect("a ticket");
+    rig.pump();
+    assert!(rig.client.decline(ticket, &"é".repeat(200)));
+    rig.pump();
+    let (_, said) = rig.bridge.declined().last().expect("declined").clone();
+    assert_eq!(said, "é".repeat(128));
+}
+
+#[test]
+fn a_ticket_that_is_not_outstanding_is_not_answered() {
+    let mut rig = mail_rig();
+    assert_eq!(rig.client.accept(99), None);
+    assert!(!rig.client.decline(99, "no"));
+    let ticket = rig.bridge.mail(None, 100).expect("a ticket");
+    rig.pump();
+    assert!(rig.client.accept(ticket).is_some());
+    assert_eq!(rig.client.accept(ticket), None, "a ticket is answered once");
+}
+
+#[test]
+fn a_ticket_the_program_gave_up_is_refused_by_the_bridge_and_the_owner_is_told() {
+    let mut rig = mail_rig();
+    let ticket = rig.bridge.mail(None, 100).expect("a ticket");
+    rig.pump();
+    rig.take();
+    rig.bridge.mail_given_up(ticket);
+    let talk = rig.client.accept(ticket).expect("the client cannot know");
+    rig.pump();
+    let over = talks_over(&rig.take());
+    assert_eq!(over.len(), 1, "{over:?}");
+    let (told, how) = over.into_iter().next().expect("one");
+    assert_eq!(told, talk);
+    assert!(
+        matches!(&how, Over::Failed { code, text } if *code == FailCode::BAD_REQUEST && text == "no such ticket"),
+        "{how:?}"
+    );
+    assert!(!rig.client.say(talk, b"x"));
+}
+
+#[test]
+fn a_program_that_gives_up_ends_the_conversation_and_a_hang_up_is_the_apps_own_end() {
+    let mut rig = mail_rig();
+    let one = rig.bridge.mail(None, 100).expect("a ticket");
+    let two = rig.bridge.mail(None, 100).expect("a ticket");
+    rig.pump();
+    let first = rig.client.accept(one).expect("a talk");
+    let second = rig.client.accept(two).expect("a talk");
+    rig.pump();
+    let streams = app_streams(&rig);
+    rig.take();
+
+    rig.bridge.sender_close(streams[0]);
+    rig.pump();
+    assert_eq!(talks_over(&rig.take()), [(first, Over::Closed)]);
+    assert!(!rig.client.say(first, b"x"));
+
+    // The app's own end is a `close` on the wire and not news.
+    assert!(rig.client.hang_up(second));
+    rig.pump();
+    assert!(rig.bridge.app_closed(streams[1]));
+    assert!(talks_over(&rig.take()).is_empty());
+    assert!(!rig.client.hang_up(second));
+}
+
+#[test]
+fn a_lost_connection_ends_every_conversation_and_the_old_talks_are_no_talks_of_the_next() {
+    let mut rig = mail_rig();
+    let one = rig.bridge.mail(None, 100).expect("a ticket");
+    let two = rig.bridge.mail(None, 100).expect("a ticket");
+    let waiting = rig.bridge.mail(None, 100).expect("a ticket");
+    rig.pump();
+    let first = rig.client.accept(one).expect("a talk");
+    let second = rig.client.accept(two).expect("a talk");
+    rig.pump();
+    rig.take();
+
+    rig.drop_connection();
+    let events = rig.take();
+    assert_eq!(
+        talks_over(&events),
+        [(first, Over::Lost), (second, Over::Lost)]
+    );
+    // Before the news of the connection itself.
+    let at = |wanted: &dyn Fn(&Event) -> bool| events.iter().position(wanted).expect("an event");
+    assert!(
+        at(&|e| matches!(e, Event::TalkOver { .. })) < at(&|e| matches!(e, Event::Lost { .. }))
+    );
+    // A ticket of the connection that went is no ticket of the next.
+    assert_eq!(rig.client.accept(waiting), None);
+
+    rig.redial();
+    rig.take();
+    let ticket = rig.bridge.mail(None, 100).expect("a ticket");
+    rig.pump();
+    let again = rig.client.accept(ticket).expect("a talk");
+    rig.pump();
+    // The stream numbers start again on the new connection; the old talk is not that stream.
+    assert_ne!(again, first);
+    assert!(!rig.client.say(first, b"stale"));
+    assert!(rig.client.say(again, b"fresh"));
+    rig.pump();
+    let streams = app_streams(&rig);
+    assert_eq!(streams.last(), Some(&1));
+    assert_eq!(rig.bridge.said_to_sender(1), b"fresh");
+}
+
+#[test]
+fn closing_the_client_ends_the_conversations_too() {
+    let mut rig = mail_rig();
+    let ticket = rig.bridge.mail(None, 100).expect("a ticket");
+    rig.pump();
+    let talk = rig.client.accept(ticket).expect("a talk");
+    rig.pump();
+    rig.take();
+    rig.client.close();
+    rig.drain();
+    assert_eq!(talks_over(&rig.take()), [(talk, Over::Lost)]);
 }
 
 // A real pipe

@@ -63,6 +63,17 @@
 //! end** until they are seen to have: a connection that is down cannot carry the
 //! request, and a quit does not wait for a server that does not answer
 //! ([`Service::end_all`]); the next connection to the account ends them first.
+//!
+//! **What the programs on a server say to the app.** A backend that takes mail
+//! ([`Backend::takes_mail`]) has its accounts' clients ask for tickets
+//! ([`crate::kablo::mail`]): a program that runs `kablo app` on the server gets a
+//! conversation with the application, and the service takes it at once (the program
+//! waits ten seconds for that), keeps what the program says until it has said all it
+//! had, and hands the whole of it to [`Backend::mail`] as a [`Letter`] with the way to
+//! answer it. The answer is the application's own time: a [`Letter`] that is answered
+//! sends the bytes and ends the conversation; one that is dropped hangs up, so a program
+//! is never left waiting on an application that forgot it. What a letter says and what the
+//! answer means is between the program and the application; the service reads none of it.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{self, Read, Write};
@@ -82,7 +93,7 @@ use super::hub::{Declined, HoldId, Hub, HubEvent};
 use super::install::Installed;
 use super::ledger::Ledger;
 use super::roster::{Background, Roster, background_note, sort_recent_first};
-use super::{Attach, Cause, Client, ErrorCode, Event, Link, SessionId, Size};
+use super::{Attach, Cause, Client, ErrorCode, Event, Link, SessionId, Size, Talk};
 use crate::hold::HOLD_SOCKET;
 use crate::hold::wire::{CHUNK, Open, Target};
 use crate::ssh_wrap::{self, KabloHost};
@@ -349,6 +360,70 @@ pub trait Backend: Send + Sync + 'static {
     /// account, which is not a change of the server's list — a terminal a pane starts to show leaves
     /// the background. Called on the service's thread; the application hops to its own.
     fn background_changed(&self, _account: &str) {}
+
+    /// Whether the application takes what the programs on a server say to it
+    /// (`kablo app`): asked when an account's client is made, so that the bridge is
+    /// told to give it tickets, and again for each ticket (a `false` then declines
+    /// it). The default is no: the bridge gives such a client nothing and `kablo app`
+    /// finds no app.
+    fn takes_mail(&self) -> bool {
+        false
+    }
+
+    /// A program on the server said all it had to the application. Called on the
+    /// service's thread, which must not wait: the application hops to its own and
+    /// answers the [`Letter`] when it has the answer. The default does not answer,
+    /// which hangs up.
+    fn mail(&self, _letter: Letter) {}
+}
+
+/// The most a program may say to the application in one conversation, in bytes.
+/// What a conversation keeps while the program is still talking is bounded by this
+/// (anything on the same computer may start one): a program that says more is hung up
+/// on. Far above any request of a few lines.
+pub const LETTER_LIMIT: usize = 256 * 1024;
+
+/// What a program on a server said to the application, all of it, and the way to
+/// answer.
+pub struct Letter {
+    /// The server's account ([`ssh_wrap::host_key`]).
+    pub account: String,
+    /// The terminal the program runs in, as the kernel's record of the program at
+    /// the other end of the bridge's mailbox says (never what the program says of
+    /// itself); `None` when it runs in none (a cron job).
+    pub from: Option<SessionId>,
+    /// What it said, up to its end.
+    pub bytes: Vec<u8>,
+    tx: Sender<Msg>,
+    talk: Talk,
+    answered: bool,
+}
+
+impl Letter {
+    /// Says `bytes` to the program and ends the conversation. Nothing happens
+    /// when the connection to the server went meanwhile: the program saw that.
+    pub fn answer(mut self, bytes: Vec<u8>) {
+        self.answered = true;
+        let _ = self.tx.send(Msg::Answer {
+            account: self.account.clone(),
+            talk: self.talk,
+            bytes,
+        });
+    }
+
+    /// Ends the conversation without an answer; so does dropping the letter.
+    pub fn hang_up(self) {}
+}
+
+impl Drop for Letter {
+    fn drop(&mut self) {
+        if !self.answered {
+            let _ = self.tx.send(Msg::Hang {
+                account: self.account.clone(),
+                talk: self.talk,
+            });
+        }
+    }
 }
 
 /// Why a bridge could not be started, as far as the error says: a login the
@@ -431,6 +506,17 @@ enum Msg {
     Wake,
     /// Ask every account for its terminals ([`Service::refresh_background`]).
     Relist,
+    /// The application answers a [`Letter`]: the bytes are said and the conversation ends.
+    Answer {
+        account: String,
+        talk: Talk,
+        bytes: Vec<u8>,
+    },
+    /// The application let go of a [`Letter`] unanswered.
+    Hang {
+        account: String,
+        talk: Talk,
+    },
     Stop,
 }
 
@@ -601,6 +687,7 @@ impl Service {
             refresh: false,
             takes: BTreeMap::new(),
             ending: Vec::new(),
+            drafts: BTreeMap::new(),
             grace,
             rx,
             generation: 0,
@@ -880,9 +967,18 @@ struct Core {
     takes: BTreeMap<(String, SessionId), Instant>,
     /// Terminals asked to hang up that are killed if they are still there.
     ending: Vec<Ending>,
+    /// What programs on the servers are saying to the application, until each has said
+    /// all it had ([`Letter`]).
+    drafts: BTreeMap<(String, Talk), Draft>,
     grace: Duration,
     rx: Receiver<Msg>,
     generation: u64,
+}
+
+/// A conversation a program is still talking in.
+struct Draft {
+    from: Option<SessionId>,
+    bytes: Vec<u8>,
 }
 
 /// A quit that waits for the terminals it asked to end.
@@ -1028,6 +1124,21 @@ impl Core {
                 self.refresh = true;
             }
             Msg::Relist => self.relist.extend(self.accounts.keys().cloned()),
+            Msg::Answer {
+                account,
+                talk,
+                bytes,
+            } => {
+                if let Some(client) = self.hub.client_mut(&account) {
+                    client.say(talk, &bytes);
+                    client.finish(talk);
+                }
+            }
+            Msg::Hang { account, talk } => {
+                if let Some(client) = self.hub.client_mut(&account) {
+                    client.hang_up(talk);
+                }
+            }
             Msg::Stop => {}
         }
     }
@@ -1117,6 +1228,13 @@ impl Core {
                                     .retain(|e| !(e.account == account && e.terminal == terminal));
                                 self.finished(&account, &terminal);
                             }
+                            Event::Ticket { ticket, from } => self.ticketed(&account, ticket, from),
+                            Event::TalkData { talk, data } => self.talked(&account, talk, &data),
+                            Event::TalkEof { talk } => self.said_all(&account, talk),
+                            // Over before it said all it had: nothing was handed to anybody.
+                            Event::TalkOver { talk, .. } => {
+                                self.drafts.remove(&(account.clone(), talk));
+                            }
                             _ => {}
                         }
                     }
@@ -1134,6 +1252,59 @@ impl Core {
             }
         }
         self.write_shown();
+    }
+
+    /// A program on the server of `account` wants the application: taken at once
+    /// when the backend takes mail, declined with a line the program shows otherwise.
+    fn ticketed(&mut self, account: &str, ticket: u32, from: Option<SessionId>) {
+        let takes = self.shared.backend.takes_mail();
+        let Some(client) = self.hub.client_mut(account) else {
+            return;
+        };
+        if !takes {
+            client.decline(ticket, "bateri is not taking requests from programs now");
+            return;
+        }
+        if let Some(talk) = client.accept(ticket) {
+            self.drafts.insert(
+                (account.to_owned(), talk),
+                Draft {
+                    from,
+                    bytes: Vec::new(),
+                },
+            );
+        }
+    }
+
+    /// The program said more. A program that says more than a request is ever
+    /// hung up on.
+    fn talked(&mut self, account: &str, talk: Talk, data: &[u8]) {
+        let key = (account.to_owned(), talk);
+        let Some(draft) = self.drafts.get_mut(&key) else {
+            return;
+        };
+        draft.bytes.extend_from_slice(data);
+        if draft.bytes.len() > LETTER_LIMIT {
+            self.drafts.remove(&key);
+            if let Some(client) = self.hub.client_mut(account) {
+                client.hang_up(talk);
+            }
+        }
+    }
+
+    /// The program has said all it had: the application gets it, whole.
+    fn said_all(&mut self, account: &str, talk: Talk) {
+        let Some(draft) = self.drafts.remove(&(account.to_owned(), talk)) else {
+            return;
+        };
+        self.shared.backend.mail(Letter {
+            account: account.to_owned(),
+            from: draft.from,
+            bytes: draft.bytes,
+            tx: self.shared.tx.clone(),
+            talk,
+            answered: false,
+        });
     }
 
     /// What each pane shows, written where [`Service::shown`] reads it. Only
@@ -1785,7 +1956,11 @@ impl Core {
             .backend
             .version()
             .is_some_and(|version| version != installed.version);
-        self.hub.add_client(&key, Client::new(name.as_deref(), now));
+        let mut client = Client::new(name.as_deref(), now);
+        if self.shared.backend.takes_mail() {
+            client.take_tickets();
+        }
+        self.hub.add_client(&key, client);
         self.accounts.insert(
             key,
             Account {

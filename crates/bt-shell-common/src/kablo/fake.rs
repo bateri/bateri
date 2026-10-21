@@ -9,6 +9,9 @@
 //! questions are answered, a terminal kept for a while once an app that asked
 //! was told it ended, a terminal another client can take, and an old version of
 //! itself (a relay from before the view's flags and names, that ignores them).
+//! It keeps a mailbox too, as the bridge of today does: a test plays the program
+//! that runs `kablo app` ([`Bridge::mail`] and the `sender_*` methods) and looks at
+//! what the app answered ([`Bridge::said_to_sender`]).
 //! Nothing here is timed: the test says when the program writes and when the
 //! connection breaks.
 //!
@@ -20,9 +23,10 @@
 use std::collections::BTreeMap;
 
 use kablo_proto::hello::{Protocol, negotiate};
+use kablo_proto::v1::stream::{self, FailCode, Incoming, IncomingDecoder, MAX_DATA, Side};
 use kablo_proto::v1::{
-    ClientName, ErrorCode, Exit, Message, NewSession, OFFSET_END, Packet, PacketDecoder, Size,
-    State, Status, TerminalState, View,
+    ClientName, ErrorCode, Exit, Features, Message, NewSession, OFFSET_END, Packet, Size, State,
+    Status, TerminalState, View,
 };
 use kablo_proto::{Error, SIGNATURE, SessionId};
 
@@ -129,6 +133,28 @@ impl Session {
     }
 }
 
+/// One end of a conversation, as the bridge counts what it is owed.
+struct Leg {
+    /// The bytes this end may still send before the other credits it.
+    left: u32,
+    eof: bool,
+}
+
+/// A conversation the app took: the program's `kablo app` on one end, the client on the other.
+struct Talking {
+    /// What the program sends (the client gave the window).
+    from_sender: Leg,
+    /// What the app sends (the program gave the window).
+    from_app: Leg,
+    /// What the app said, in order.
+    said: Vec<u8>,
+    /// The bytes the app has credited the program with (it has taken that much of what the
+    /// program sent).
+    credit_from_app: u32,
+    /// The app closed it.
+    closed: bool,
+}
+
 /// The bridge. One value is the server: its terminals outlive a connection;
 /// [`Bridge::disconnect`] ends the connection and the next bytes fed are a new one.
 pub struct Bridge {
@@ -139,9 +165,26 @@ pub struct Bridge {
     hello: Vec<u8>,
     greeted: bool,
     shut: bool,
-    decoder: PacketDecoder,
+    decoder: IncomingDecoder,
     out: Vec<u8>,
     made: u32,
+    /// The bridge keeps a mailbox (a relay of today does, and says so in `features_reply`).
+    mailbox: bool,
+    /// The client said it takes tickets, on this connection.
+    tickets: bool,
+    /// The last ticket given.
+    last_ticket: u32,
+    /// The conversations a program opened that the app has not answered: the ticket and
+    /// the window the program gave.
+    waiting: BTreeMap<u32, u32>,
+    /// The conversations the app took, by its stream.
+    talks: BTreeMap<u32, Talking>,
+    /// The program behind `kablo app` credits what the app says as it takes it.
+    sender_reads: bool,
+    /// Every ticket the app declined, with its words.
+    declined: Vec<(u32, String)>,
+    /// How many times an end sent more than it was given, or after its `eof`.
+    breaches: u32,
     /// A terminal's program takes a hang-up for no reason to end (only the
     /// kill does).
     stubborn: bool,
@@ -149,6 +192,8 @@ pub struct Bridge {
     pub connections: u32,
     /// Every packet the client sent, in order, over every connection.
     pub received: Vec<Packet>,
+    /// Every stream message the client sent, in order, over every connection.
+    pub received_streams: Vec<stream::Packet>,
 }
 
 impl Bridge {
@@ -162,13 +207,29 @@ impl Bridge {
             hello: Vec::new(),
             greeted: false,
             shut: false,
-            decoder: PacketDecoder::new(),
+            decoder: IncomingDecoder::new(),
             out: Vec::new(),
             made: 0,
+            mailbox: true,
+            tickets: false,
+            last_ticket: 0,
+            waiting: BTreeMap::new(),
+            talks: BTreeMap::new(),
+            sender_reads: true,
+            declined: Vec::new(),
+            breaches: 0,
             stubborn: false,
             connections: 0,
             received: Vec::new(),
+            received_streams: Vec::new(),
         }
+    }
+
+    /// A relay that answers `features` and keeps no mailbox: no ticket is ever given.
+    /// ([`Age::Old`] answers nothing at all.)
+    pub fn without_mailbox(mut self) -> Bridge {
+        self.mailbox = false;
+        self
     }
 
     /// The programs of its terminals do not end on a hang-up.
@@ -346,11 +407,16 @@ impl Bridge {
         self.hello.clear();
         self.greeted = false;
         self.shut = false;
-        self.decoder = PacketDecoder::new();
+        self.decoder = IncomingDecoder::new();
         self.out.clear();
         for session in self.sessions.values_mut() {
             session.attached = false;
         }
+        // The mailbox goes with the connection to the app: its tickets and what it said of
+        // itself are of the connection.
+        self.tickets = false;
+        self.waiting.clear();
+        self.talks.clear();
     }
 
     /// What the bridge has to say, taken.
@@ -394,6 +460,111 @@ impl Bridge {
             Err(Error::Io(_)) => {}
             Err(_) => self.shut = true,
         }
+    }
+
+    // The program behind `kablo app`
+
+    /// A program on the server opens a conversation on the mailbox, giving `window` (the bytes
+    /// the app may send it before it credits the app). The ticket, when the bridge gives one:
+    /// not to a client that did not say it takes tickets, nor from a bridge without a mailbox.
+    /// `from` is the terminal the program runs in, as the bridge found it.
+    pub fn mail(&mut self, from: Option<&SessionId>, window: u32) -> Option<u32> {
+        if !self.mailbox || !self.tickets || self.age == Age::Old {
+            return None;
+        }
+        self.last_ticket += 1;
+        let ticket = self.last_ticket;
+        self.waiting.insert(ticket, window);
+        self.send(&Packet {
+            session: from.cloned(),
+            message: Message::Ticket(ticket),
+        });
+        Some(ticket)
+    }
+
+    /// The program gives its conversation up before the app answered: the ticket is forgotten
+    /// (the app is told nothing; its `open` is refused when it comes).
+    pub fn mail_given_up(&mut self, ticket: u32) {
+        self.waiting.remove(&ticket);
+    }
+
+    /// The program sends bytes into the conversation the app's stream `stream` is the end of.
+    pub fn sender_data(&mut self, stream: u32, bytes: &[u8]) {
+        let Some(talking) = self.talks.get_mut(&stream) else {
+            return;
+        };
+        let size = u32::try_from(bytes.len()).unwrap_or(u32::MAX);
+        if talking.from_sender.eof || size > talking.from_sender.left {
+            self.breaches += 1;
+            return;
+        }
+        talking.from_sender.left -= size;
+        self.send_stream(stream, stream::Message::Data(bytes.to_vec()));
+    }
+
+    /// The program has nothing more to send.
+    pub fn sender_eof(&mut self, stream: u32) {
+        if let Some(talking) = self.talks.get_mut(&stream) {
+            talking.from_sender.eof = true;
+            self.send_stream(stream, stream::Message::Eof);
+        }
+    }
+
+    /// The program ends the conversation (its `kablo app` was interrupted).
+    pub fn sender_close(&mut self, stream: u32) {
+        if self.talks.remove(&stream).is_some() {
+            self.send_stream(stream, stream::Message::Close);
+        }
+    }
+
+    /// The program's side has taken `bytes` more of what the app said and the app may send
+    /// that many more.
+    pub fn sender_credit(&mut self, stream: u32, bytes: u32) {
+        if let Some(talking) = self.talks.get_mut(&stream) {
+            talking.from_app.left = talking.from_app.left.saturating_add(bytes);
+            self.send_stream(stream, stream::Message::Credit(bytes));
+        }
+    }
+
+    /// Whether the program takes what the app says as it comes (it does, until a test says
+    /// otherwise): when it does not, the app's `data` is held to the window until
+    /// [`Bridge::sender_credit`].
+    pub fn sender_reads(&mut self, on: bool) {
+        self.sender_reads = on;
+    }
+
+    /// What the app said in the conversation, in order.
+    pub fn said_to_sender(&self, stream: u32) -> Vec<u8> {
+        self.talks
+            .get(&stream)
+            .map(|t| t.said.clone())
+            .unwrap_or_default()
+    }
+
+    /// How many bytes the app has credited the program with: what it took of what was sent.
+    pub fn credited_by_app(&self, stream: u32) -> u32 {
+        self.talks.get(&stream).map_or(0, |t| t.credit_from_app)
+    }
+
+    /// Whether the app said it has nothing more.
+    pub fn app_finished(&self, stream: u32) -> bool {
+        self.talks.get(&stream).is_some_and(|t| t.from_app.eof)
+    }
+
+    /// Whether the app ended the conversation with a `close`.
+    pub fn app_closed(&self, stream: u32) -> bool {
+        self.talks.get(&stream).is_some_and(|t| t.closed)
+    }
+
+    /// The tickets the app declined, with its words.
+    pub fn declined(&self) -> &[(u32, String)] {
+        &self.declined
+    }
+
+    /// How many times an end sent more than it was given, or after its own `eof`: the real
+    /// bridge ends the conversation at the first.
+    pub fn breaches(&self) -> u32 {
+        self.breaches
     }
 
     // What a test looks at
@@ -510,11 +681,19 @@ impl Bridge {
 
     fn serve(&mut self) {
         loop {
-            match self.decoder.next_packet() {
-                Ok(Some(packet)) => {
+            match self.decoder.next_incoming() {
+                Ok(Some(Incoming::Session(packet))) => {
                     self.received.push(packet.clone());
                     self.answer(packet);
                 }
+                Ok(Some(Incoming::Stream {
+                    from: Side::Client,
+                    packet,
+                })) => {
+                    self.received_streams.push(packet.clone());
+                    self.streamed(packet);
+                }
+                Ok(Some(_)) => {}
                 Ok(None) => break,
                 Err(e) if e.is_recoverable() => {}
                 Err(_) => {
@@ -538,7 +717,14 @@ impl Bridge {
                 self.send(&Packet::connection(Message::ListReply(all)));
             }
             Message::Ping(bytes) => self.send(&Packet::connection(Message::Pong(bytes))),
-            Message::Features | Message::FeaturesWith(_) => {}
+            Message::Features | Message::FeaturesWith(_) if self.age == Age::Old => {}
+            Message::Features => self.features(false),
+            Message::FeaturesWith(offers) => self.features(offers.tickets),
+            Message::Decline { ticket, text } => {
+                if self.waiting.remove(&ticket).is_some() {
+                    self.declined.push((ticket, text));
+                }
+            }
             other => {
                 let Some(id) = session else {
                     self.error(None, ErrorCode::BAD_REQUEST, "no session");
@@ -550,6 +736,96 @@ impl Bridge {
                 }
                 self.about(id, other);
             }
+        }
+    }
+
+    fn features(&mut self, tickets: bool) {
+        self.tickets = tickets;
+        let features = Features::with_streams();
+        let features = if self.mailbox {
+            features.with_mailbox()
+        } else {
+            features
+        };
+        self.send(&Packet::connection(Message::FeaturesReply(features)));
+    }
+
+    fn send_stream(&mut self, stream: u32, message: stream::Message) {
+        stream::Packet::new(stream, message)
+            .encode(Side::Server, &mut self.out)
+            .expect("a stream message of the bridge's own encodes");
+    }
+
+    /// A message of the client on channel 1: the app answering a ticket, or talking.
+    fn streamed(&mut self, packet: stream::Packet) {
+        let stream::Packet { stream, message } = packet;
+        match message {
+            stream::Message::OpenTicket { window, ticket } => {
+                let Some(given) = self.waiting.remove(&ticket) else {
+                    self.send_stream(
+                        stream,
+                        stream::Message::Failed {
+                            code: FailCode::BAD_REQUEST,
+                            text: "no such ticket".to_owned(),
+                        },
+                    );
+                    return;
+                };
+                self.talks.insert(
+                    stream,
+                    Talking {
+                        from_sender: Leg {
+                            left: window,
+                            eof: false,
+                        },
+                        from_app: Leg {
+                            left: given,
+                            eof: false,
+                        },
+                        said: Vec::new(),
+                        credit_from_app: 0,
+                        closed: false,
+                    },
+                );
+                self.send_stream(stream, stream::Message::Opened { window: given });
+            }
+            stream::Message::Data(bytes) => {
+                let reads = self.sender_reads;
+                let Some(talking) = self.talks.get_mut(&stream) else {
+                    return;
+                };
+                let size = u32::try_from(bytes.len()).unwrap_or(u32::MAX);
+                if talking.from_app.eof || bytes.len() > MAX_DATA || size > talking.from_app.left {
+                    self.breaches += 1;
+                    return;
+                }
+                talking.said.extend_from_slice(&bytes);
+                if reads {
+                    self.send_stream(stream, stream::Message::Credit(size));
+                } else {
+                    talking.from_app.left -= size;
+                }
+            }
+            stream::Message::Credit(bytes) => {
+                if let Some(talking) = self.talks.get_mut(&stream) {
+                    talking.from_sender.left = talking.from_sender.left.saturating_add(bytes);
+                    talking.credit_from_app += bytes;
+                }
+            }
+            stream::Message::Eof => {
+                if let Some(talking) = self.talks.get_mut(&stream) {
+                    if talking.from_app.eof {
+                        self.breaches += 1;
+                    }
+                    talking.from_app.eof = true;
+                }
+            }
+            stream::Message::Close => {
+                if let Some(talking) = self.talks.get_mut(&stream) {
+                    talking.closed = true;
+                }
+            }
+            _ => {}
         }
     }
 

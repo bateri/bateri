@@ -46,17 +46,24 @@
 //! ssh (the master connection on the pane's terminal, the install, the bridge) and
 //! `install` the rules for putting kablo on a server from the package's files.
 //!
+//! `mail` is the other direction: what a program on the server (`kablo app`) hands the
+//! app, as tickets the bridge gives a client that said it takes them and the
+//! conversations the client opens to answer them (`take_tickets`, `accept`, `say`,
+//! `finish`); the service turns a conversation into one letter for the application.
+//!
 //! `fake` (under `cfg(test)` and the `test-support` feature) is the server side of
 //! the same pipe for tests: the bridge with a few terminals, a journal of a chosen
-//! size and an old version of itself.
+//! size, a mailbox and an old version of itself.
 
 use std::collections::{BTreeMap, VecDeque};
 use std::time::{Duration, Instant};
 
 pub use kablo_proto::v1::{ErrorCode, Exit, NewSession, Size, Status, TerminalState};
 pub use kablo_proto::{Error, SessionId};
+pub use mail::{FailCode, Over, Talk};
 
-use kablo_proto::v1::{ClientName, MAX_HISTORY, Message, OFFSET_END, Packet, PacketDecoder, View};
+use kablo_proto::v1::stream::{Incoming, IncomingDecoder};
+use kablo_proto::v1::{ClientName, MAX_HISTORY, Message, OFFSET_END, Packet, View};
 use kablo_proto::{NOISE_LIMIT, WIRE};
 
 #[cfg(any(test, feature = "test-support"))]
@@ -64,6 +71,7 @@ pub mod fake;
 pub mod hub;
 pub mod install;
 pub mod ledger;
+pub mod mail;
 pub mod quit;
 pub mod roster;
 pub mod service;
@@ -330,6 +338,38 @@ pub enum Event {
     Status(Status),
     /// The answer to [`Client::list`].
     Listed(Vec<Status>),
+    /// A program on the server has bytes for the app (`kablo app`): answered with
+    /// [`Client::accept`] or [`Client::decline`], at once — the program waits
+    /// ten seconds for it. `from` is the terminal the program runs in, found by
+    /// the bridge from the program itself (`None`: it runs in none).
+    Ticket {
+        /// The ticket's number.
+        ticket: u32,
+        /// The terminal the program runs in.
+        from: Option<SessionId>,
+    },
+    /// The program said these bytes in a conversation the app took. They are
+    /// credited back already; the owner bounds what it keeps (see [`mail`]).
+    TalkData {
+        /// The conversation.
+        talk: Talk,
+        /// The bytes.
+        data: Vec<u8>,
+    },
+    /// The program has nothing more to say in the conversation; the app may
+    /// go on answering.
+    TalkEof {
+        /// The conversation.
+        talk: Talk,
+    },
+    /// The conversation is over, and how. Not told of an end the owner asked for
+    /// ([`Client::hang_up`]).
+    TalkOver {
+        /// The conversation.
+        talk: Talk,
+        /// How.
+        over: Over,
+    },
 }
 
 /// Where a terminal is in the client's care.
@@ -421,7 +461,7 @@ pub struct Client {
     linked_at: Option<Instant>,
     /// Bytes of the handshake that have not made it whole.
     handshake: Vec<u8>,
-    decoder: PacketDecoder,
+    decoder: IncomingDecoder,
     outbox: Vec<u8>,
     events: VecDeque<Event>,
     terminals: BTreeMap<SessionId, Terminal>,
@@ -429,6 +469,8 @@ pub struct Client {
     heard: Instant,
     /// When a `ping` was sent that nothing has come after.
     ping: Option<Instant>,
+    /// What the app takes from programs on the server ([`mail`]).
+    mail: mail::Mail,
 }
 
 impl Client {
@@ -445,12 +487,13 @@ impl Client {
             failures: 0,
             linked_at: None,
             handshake: Vec::new(),
-            decoder: PacketDecoder::new(),
+            decoder: IncomingDecoder::new(),
             outbox: Vec::new(),
             events: VecDeque::new(),
             terminals: BTreeMap::new(),
             heard: now,
             ping: None,
+            mail: mail::Mail::default(),
         }
     }
 
@@ -510,6 +553,7 @@ impl Client {
         {
             self.failures = 0;
         }
+        self.end_talks();
         self.reset_connection();
         for terminal in self.terminals.values_mut() {
             match terminal.phase {
@@ -565,6 +609,7 @@ impl Client {
 
     /// Give up on the server: nothing is dialed or sent again.
     pub fn close(&mut self) {
+        self.end_talks();
         self.reset_connection();
         self.link = Link::Over(Cause::Refused);
     }
@@ -847,7 +892,8 @@ impl Client {
 
     fn reset_connection(&mut self) {
         self.handshake.clear();
-        self.decoder = PacketDecoder::new();
+        self.decoder = IncomingDecoder::new();
+        self.mail.reset();
         self.outbox.clear();
         self.linked_at = None;
         self.ping = None;
@@ -879,6 +925,10 @@ impl Client {
                 self.link = Link::Live;
                 self.linked_at = Some(now);
                 self.events.push_back(Event::Linked);
+                self.mail.begin();
+                if self.mail.offered() {
+                    self.offer_tickets();
+                }
                 self.attach_again();
                 if !after.is_empty() {
                     self.decoder.push(&after);
@@ -920,8 +970,11 @@ impl Client {
 
     fn read_packets(&mut self, now: Instant) {
         while self.link.is_live() {
-            match self.decoder.next_packet() {
-                Ok(Some(packet)) => self.handle(packet, now),
+            match self.decoder.next_incoming() {
+                Ok(Some(Incoming::Session(packet))) => self.handle(packet, now),
+                Ok(Some(Incoming::Stream { from, packet })) => self.heard_stream(from, packet),
+                // A channel this build does not know (the codec skips what it cannot read).
+                Ok(Some(_)) => {}
                 Ok(None) => break,
                 Err(e) if e.is_recoverable() => {}
                 Err(_) => {
@@ -1134,6 +1187,8 @@ impl Client {
                 }
             }
             Message::ListReply(list) => self.events.push_back(Event::Listed(list)),
+            Message::FeaturesReply(features) => self.mail.said_mailbox(features.mailbox),
+            Message::Ticket(ticket) => self.ticketed(session, ticket),
             Message::Error { code, text } => self.handle_error(session, code, &text, now),
             _ => {}
         }

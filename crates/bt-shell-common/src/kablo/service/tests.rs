@@ -10,7 +10,7 @@ use std::sync::atomic::AtomicU32;
 use std::thread::JoinHandle;
 
 use kablo_proto::SessionId;
-use kablo_proto::v1::Exit;
+use kablo_proto::v1::{Exit, stream};
 
 use super::*;
 use crate::hold::wire::Target;
@@ -83,6 +83,10 @@ struct Fake {
     fronted: Mutex<Vec<PaneUuid>>,
     /// The accounts told their terminals in the background are not what they were, in order.
     background: Mutex<Vec<String>>,
+    /// The application takes what the programs on a server say to it.
+    mail: AtomicBool,
+    /// What the programs said, not yet answered.
+    letters: Mutex<Vec<Letter>>,
 }
 
 impl Fake {
@@ -104,6 +108,8 @@ impl Fake {
             changed: Mutex::new(Vec::new()),
             fronted: Mutex::new(Vec::new()),
             background: Mutex::new(Vec::new()),
+            mail: AtomicBool::new(false),
+            letters: Mutex::new(Vec::new()),
         })
     }
 
@@ -122,6 +128,20 @@ impl Fake {
 
     fn fronted(&self) -> usize {
         self.fronted.lock().expect("lock").len()
+    }
+
+    /// The next letter a program said to the application, once there is one.
+    fn letter(&self) -> Letter {
+        let mut found = None;
+        until("a letter", || {
+            let mut letters = self.letters.lock().expect("lock");
+            if letters.is_empty() {
+                return false;
+            }
+            found = Some(letters.remove(0));
+            true
+        });
+        found.expect("a letter")
     }
 
     fn background_told(&self) -> Vec<String> {
@@ -309,6 +329,14 @@ impl Backend for Fake {
             .lock()
             .expect("lock")
             .push(account.to_owned());
+    }
+
+    fn takes_mail(&self) -> bool {
+        self.mail.load(Ordering::SeqCst)
+    }
+
+    fn mail(&self, letter: Letter) {
+        self.letters.lock().expect("lock").push(letter);
     }
 }
 
@@ -2226,4 +2254,190 @@ fn a_terminal_moved_here_is_taken_and_one_opened_the_usual_way_is_not() {
         [Some("iMac".to_owned())],
         "opened beside, taking nothing"
     );
+}
+
+// Mail: what a program on the server says to the application
+
+/// A rig whose application takes mail, with one terminal on the server (so the account's
+/// bridge is up and has been told the app takes tickets).
+fn mail_rig(name: &str) -> (Rig, Holder, SessionId) {
+    let world = Fake::new(Bridge::new(Age::Current));
+    world.mail.store(true, Ordering::SeqCst);
+    let rig = Rig::over(name, world);
+    let holder = Holder::new(&rig.socket(), "b-1");
+    let terminal = rig.terminals(1).remove(0);
+    (rig, holder, terminal)
+}
+
+/// How many conversations the app has taken so far, as the bridge saw the answers to tickets.
+fn taken(rig: &Rig) -> usize {
+    rig.world
+        .bridge()
+        .received_streams
+        .iter()
+        .filter(|p| matches!(p.message, stream::Message::OpenTicket { .. }))
+        .count()
+}
+
+/// A program on the server calls the app: the ticket the bridge gave.
+fn program_calls(rig: &Rig, from: Option<&SessionId>) -> u32 {
+    let mut ticket = None;
+    until("the bridge knows the app takes tickets", || {
+        ticket = rig.world.bridge().mail(from, 1000);
+        ticket.is_some()
+    });
+    ticket.expect("a ticket")
+}
+
+/// A program on the server opens a conversation and the service takes it at once: the app's
+/// stream the program talks into.
+fn program_opens(rig: &Rig, from: Option<&SessionId>) -> u32 {
+    let before = taken(rig);
+    program_calls(rig, from);
+    until("the conversation is taken", || taken(rig) > before);
+    rig.world
+        .bridge()
+        .received_streams
+        .iter()
+        .rev()
+        .find(|p| matches!(p.message, stream::Message::OpenTicket { .. }))
+        .map(|p| p.stream)
+        .expect("a stream")
+}
+
+#[test]
+fn a_letter_is_handed_over_whole_with_the_terminal_it_is_from_and_the_answer_goes_back() {
+    let (rig, _holder, terminal) = mail_rig("letter");
+    // The conversation is taken at once, before a word of it: the program waits ten seconds
+    // for that, and the application as long as it needs for the answer.
+    let stream = program_opens(&rig, Some(&terminal));
+    rig.world
+        .bridge()
+        .sender_data(stream, b"place\nterminal t4\n");
+    rig.world.bridge().sender_data(stream, b"side below\n");
+    assert!(rig.world.letters.lock().expect("lock").is_empty());
+    rig.world.bridge().sender_eof(stream);
+
+    let letter = rig.world.letter();
+    assert_eq!(letter.account, "u@rasp:22");
+    assert_eq!(letter.from, Some(terminal));
+    assert_eq!(letter.bytes, b"place\nterminal t4\nside below\n");
+
+    letter.answer(b"ok landed as_asked\n".to_vec());
+    until("the answer", || {
+        rig.world.bridge().said_to_sender(stream) == b"ok landed as_asked\n"
+            && rig.world.bridge().app_finished(stream)
+    });
+    assert_eq!(rig.world.bridge().breaches(), 0);
+}
+
+#[test]
+fn a_program_in_no_terminal_is_a_letter_from_none() {
+    let (rig, _holder, _terminal) = mail_rig("letter-none");
+    let stream = program_opens(&rig, None);
+    rig.world.bridge().sender_eof(stream);
+    let letter = rig.world.letter();
+    assert_eq!(letter.from, None);
+    assert!(letter.bytes.is_empty());
+    letter.answer(Vec::new());
+    until("the end", || rig.world.bridge().app_finished(stream));
+}
+
+#[test]
+fn a_letter_that_is_dropped_hangs_up_so_that_the_program_is_not_left_waiting() {
+    let (rig, _holder, _terminal) = mail_rig("letter-dropped");
+    let stream = program_opens(&rig, None);
+    rig.world.bridge().sender_data(stream, b"ls\n");
+    rig.world.bridge().sender_eof(stream);
+    let letter = rig.world.letter();
+    drop(letter);
+    until("the hang up", || rig.world.bridge().app_closed(stream));
+}
+
+#[test]
+fn a_letter_can_be_answered_from_another_thread() {
+    fn is_send<T: Send>() {}
+    is_send::<Letter>();
+}
+
+#[test]
+fn a_program_that_gives_up_before_it_has_said_all_it_had_hands_nothing_over() {
+    let (rig, _holder, _terminal) = mail_rig("letter-gave-up");
+    let first = program_opens(&rig, None);
+    rig.world.bridge().sender_data(first, b"place\n");
+    rig.world.bridge().sender_close(first);
+    // A second conversation after it, so that the end of the first is known to have been seen.
+    let second = program_opens(&rig, None);
+    rig.world.bridge().sender_eof(second);
+    let letter = rig.world.letter();
+    assert!(letter.bytes.is_empty(), "{:?}", letter.bytes);
+    assert!(rig.world.letters.lock().expect("lock").is_empty());
+    drop(letter);
+}
+
+#[test]
+fn a_program_that_says_more_than_a_request_is_ever_hung_up_on() {
+    let (rig, _holder, _terminal) = mail_rig("letter-long");
+    let stream = program_opens(&rig, None);
+    let chunk = vec![b'x'; 16 * 1024];
+    let mut sent = 0u32;
+    while sent as usize <= LETTER_LIMIT && !rig.world.bridge().app_closed(stream) {
+        rig.world.bridge().sender_data(stream, &chunk);
+        sent += chunk.len() as u32;
+        // The window the app gave is a bounded one: wait for it to be credited back.
+        until("the bytes credited", || {
+            rig.world.bridge().credited_by_app(stream) >= sent
+                || rig.world.bridge().app_closed(stream)
+        });
+    }
+    until("the hang up", || rig.world.bridge().app_closed(stream));
+    rig.world.bridge().sender_eof(stream);
+    assert!(rig.world.letters.lock().expect("lock").is_empty());
+    assert_eq!(rig.world.bridge().breaches(), 0);
+}
+
+#[test]
+fn an_application_that_takes_no_mail_is_given_none_and_a_ticket_that_comes_anyway_is_declined() {
+    // It says nothing of tickets, so the bridge has none to give.
+    let rig = Rig::new("no-mail");
+    let _holder = Holder::new(&rig.socket(), "b-1");
+    rig.terminals(1);
+    assert_eq!(rig.world.bridge().mail(None, 100), None);
+    drop(rig);
+
+    // It took mail when the account was made and does not now: the ticket is declined, in words.
+    let (rig, _holder, _terminal) = mail_rig("mail-off");
+    rig.world.mail.store(false, Ordering::SeqCst);
+    let ticket = program_calls(&rig, None);
+    until("the decline", || !rig.world.bridge().declined().is_empty());
+    assert_eq!(
+        rig.world.bridge().declined(),
+        [(
+            ticket,
+            "bateri is not taking requests from programs now".to_owned()
+        )]
+    );
+    assert!(rig.world.letters.lock().expect("lock").is_empty());
+}
+
+#[test]
+fn an_answer_to_a_letter_of_a_connection_that_went_is_not_said_on_the_next() {
+    let (rig, _holder, _terminal) = mail_rig("letter-stale");
+    let stream = program_opens(&rig, None);
+    rig.world.bridge().sender_eof(stream);
+    let old = rig.world.letter();
+
+    rig.world.break_connection();
+    until("the bridge is made again", || rig.world.count("carry") == 2);
+    // The new connection numbers its streams from 1 again, as the old one did.
+    let again = program_opens(&rig, None);
+    assert_eq!(again, stream);
+    old.answer(b"too late\n".to_vec());
+    rig.world.bridge().sender_eof(again);
+    let new = rig.world.letter();
+    new.answer(b"ok\n".to_vec());
+    until("the new conversation's answer", || {
+        rig.world.bridge().app_finished(again)
+    });
+    assert_eq!(rig.world.bridge().said_to_sender(again), b"ok\n");
 }

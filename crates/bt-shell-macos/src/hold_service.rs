@@ -395,6 +395,7 @@ pub(crate) fn serve(
         changed: Box::new(terminal_changed),
         program: Box::new(program_changed),
         listed: Box::new(background_changed),
+        mail: None,
     };
     if let Ok(service) = Service::start(dir, Arc::new(backend), ledger()) {
         let _ = SERVICE.set(service);

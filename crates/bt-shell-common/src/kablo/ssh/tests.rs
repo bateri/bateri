@@ -93,6 +93,7 @@ impl World {
             changed: Box::new(|_| ()),
             program: Box::new(|_| ()),
             listed: Box::new(|_| ()),
+            mail: None,
         }
     }
 
@@ -454,4 +455,13 @@ fn a_renewal_that_cannot_be_done_now_says_so_and_writes_nothing_down() {
     assert!(backend.refresh(&host).is_none());
     assert!(!ssh_wrap::load(&world.state).knows(Fact::NoKablo, "u@h:22"));
     assert!(world.upgrades("0.2.0").is_empty());
+}
+
+#[test]
+fn the_application_takes_mail_when_it_brought_a_handler_for_it() {
+    let world = stand_in("mail", 0);
+    let mut backend = world.backend(None);
+    assert!(!backend.takes_mail());
+    backend.mail = Some(Box::new(|_| ()));
+    assert!(backend.takes_mail());
 }
