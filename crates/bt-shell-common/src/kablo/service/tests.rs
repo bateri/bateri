@@ -17,6 +17,7 @@ use crate::hold::wire::Target;
 use crate::hold::{Config, Outcome, run};
 use crate::kablo::fake::{Activity, Age, Bridge};
 use crate::kablo::install::Installed;
+use crate::program::identity::{Agent, Kind};
 
 /// A private directory with a path short enough for a socket.
 fn scratch(name: &str) -> PathBuf {
@@ -77,6 +78,9 @@ struct Fake {
     links: Mutex<Vec<(PaneUuid, PaneLink)>>,
     /// The panes that were told the terminal they show came or went, in order.
     changed: Mutex<Vec<PaneUuid>>,
+    /// The panes that were told the program in front of their terminal is another one as far as
+    /// an icon tells, in order.
+    fronted: Mutex<Vec<PaneUuid>>,
     /// The accounts told their terminals in the background are not what they were, in order.
     background: Mutex<Vec<String>>,
 }
@@ -98,6 +102,7 @@ impl Fake {
             eof_cause: Arc::new(Mutex::new(Cause::Dropped)),
             links: Mutex::new(Vec::new()),
             changed: Mutex::new(Vec::new()),
+            fronted: Mutex::new(Vec::new()),
             background: Mutex::new(Vec::new()),
         })
     }
@@ -113,6 +118,10 @@ impl Fake {
 
     fn changed(&self) -> Vec<PaneUuid> {
         self.changed.lock().expect("lock").clone()
+    }
+
+    fn fronted(&self) -> usize {
+        self.fronted.lock().expect("lock").len()
     }
 
     fn background_told(&self) -> Vec<String> {
@@ -289,6 +298,10 @@ impl Backend for Fake {
 
     fn terminal_changed(&self, pane: &PaneUuid) {
         self.changed.lock().expect("lock").push(pane.clone());
+    }
+
+    fn program_changed(&self, pane: &PaneUuid) {
+        self.fronted.lock().expect("lock").push(pane.clone());
     }
 
     fn background_changed(&self, account: &str) {
@@ -829,6 +842,66 @@ fn a_pane_is_found_by_the_terminal_it_shows_with_the_program_in_front() {
     rig.world.bridge().exit(&terminal, Exit::Code(0));
     assert_eq!(holder.outcome(), Outcome::Exit(0));
     until("the pane let go of", || rig.service.shown(&pane).is_none());
+}
+
+/// The pane's icon is the kind of the program in front, so it is told when the **kind** is
+/// another, not when the name is: the server of an older kablo says `2.1.296` for Claude Code, a
+/// newer one `claude` (both are in the world), and neither is a reason to redraw when it is the
+/// same nothing — and the terminal that appears with a program already in front, or goes, is one.
+#[test]
+fn a_pane_is_told_when_the_kind_of_the_program_in_front_changes_and_not_its_name() {
+    let rig = Rig::new("fronted");
+    let pane = pane_named(&rig.world);
+    let mut holder = Holder::new(&rig.socket(), "b-1");
+    let terminal = rig.terminals(1).remove(0);
+    until("the pane found", || rig.service.shown(&pane).is_some());
+    assert_eq!(rig.world.fronted(), 0, "the server has not said");
+
+    // A program the table knows comes in front: the kind is another.
+    rig.world.bridge().set_state(&terminal, saying("npm"));
+    until("told of npm", || rig.world.fronted() == 1);
+    assert_eq!(
+        rig.service.shown(&pane).and_then(|shown| shown.kind()),
+        Some(Kind::Task)
+    );
+    // The program Claude Code is, by the name a newer kablo gives it.
+    rig.world.bridge().set_state(&terminal, saying("claude"));
+    until("told of claude", || rig.world.fronted() == 2);
+    assert_eq!(
+        rig.service.shown(&pane).and_then(|shown| shown.kind()),
+        Some(Kind::Agent(Agent::ClaudeCode))
+    );
+    // The file's version number is what an older kablo says: no kind, so the server's icon
+    // returns — told once, and the next such name is not news.
+    rig.world.bridge().set_state(&terminal, saying("2.1.296"));
+    until("told of the version", || rig.world.fronted() == 3);
+    assert_eq!(rig.service.shown(&pane).and_then(|s| s.kind()), None);
+    rig.world.bridge().set_state(&terminal, saying("node"));
+    until("the name", || {
+        rig.service
+            .shown(&pane)
+            .is_some_and(|shown| shown.program.as_deref() == Some("node"))
+    });
+    // Both are no kind: the second is not news, whatever the first was.
+    std::thread::sleep(Duration::from_millis(150));
+    assert_eq!(
+        rig.world.fronted(),
+        3,
+        "a name no one knows for one is no news"
+    );
+    rig.world.bridge().set_state(&terminal, saying("vim"));
+    until("told of vim", || rig.world.fronted() == 4);
+    rig.world.bridge().set_state(&terminal, saying("-zsh"));
+    // The shell back in front is the server's icon as well.
+    until("told of the shell", || rig.world.fronted() == 5);
+
+    // A terminal that goes with a program in front is told too: the pane is the server's again.
+    rig.world.bridge().set_state(&terminal, saying("htop"));
+    until("told of htop", || rig.world.fronted() == 6);
+    rig.world.bridge().exit(&terminal, Exit::Code(0));
+    assert_eq!(holder.outcome(), Outcome::Exit(0));
+    until("told it went", || rig.world.fronted() == 7);
+    assert!(rig.service.shown(&pane).is_none());
 }
 
 #[test]

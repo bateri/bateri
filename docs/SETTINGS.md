@@ -1176,7 +1176,9 @@ tab_position = "top"
   Claude Code, Antigravity, Gemini CLI and Qwen Code keep their own colors as
   the tile's ground; the others and the marks bateri draws stay in the
   theme's. Both apply at once, and the Show All Tabs list wears the same
-  icons.
+  icons. In a terminal that a server keeps, the icon is of the program the
+  server says is in front (Claude Code, vim, npm…); the server's shell at its
+  prompt keeps the server's mark.
 - `dim_unfocused_splits = true` brings back the veil over the panes that
   don't have the focus: the theme's background at 30% over their text, as
   other terminals do. It applies at once.

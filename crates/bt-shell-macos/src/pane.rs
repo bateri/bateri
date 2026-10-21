@@ -4781,14 +4781,49 @@ impl TerminalPane {
     }
 
     /// Which program the pane runs now, as its tab's icon draws it: what the program said of
-    /// itself (`app=` of `OSC 7501`), else what the process table named, else what the bateri
-    /// the pane was carried over from showed for the same command, else what the command's
-    /// line said — the shell when no command runs, the server in a remote session none of them
-    /// knows ([`identity::decide`]). Read live from the three, so a program that speaks up later
-    /// is heard on the tab's next refresh; the readings that cost a screen walk or a syscall are
-    /// the probe's ([`Self::probe_identity`]) and kept. Remembers what it saw while a command
-    /// runs, for [`Self::ended_kind`]. A leaf lock or two; no `Term`.
+    /// itself (`app=` of `OSC 7501`), else — in a pane that shows a terminal a server keeps —
+    /// what the server says is in front of it ([`Self::server_kind`]), else what the process
+    /// table named, else what the bateri the pane was carried over from showed for the same
+    /// command, else what the command's line said — the shell when no command runs, the server
+    /// in a remote session none of them knows ([`identity::decide`]). Read live from the
+    /// sources, so a program that speaks up later is heard on the tab's next refresh; the
+    /// readings that cost a screen walk or a syscall are the probe's ([`Self::probe_identity`])
+    /// and kept. Remembers what it saw while a command runs, for [`Self::ended_kind`]. A leaf
+    /// lock or two; no `Term`.
     pub(crate) fn program_kind(&self) -> Kind {
+        self.decided(self.server_kind(), true)
+    }
+
+    /// What the pane runs **here**: [`Self::program_kind`] without the server's word. What a
+    /// program on a server cannot do is what this Mac has — the clipboard ⌘V pastes an image
+    /// from, a program that is handed to the next bateri.
+    pub(crate) fn local_program_kind(&self) -> Kind {
+        // What the pane ran is [`Self::program_kind`]'s to remember: where the server has a
+        // word the local reading is another kind than the pane's, and two writers would have
+        // [`Self::ended_kind`] say one or the other by who looked last.
+        self.decided(None, self.server_kind().is_none())
+    }
+
+    /// The icon of the program in front of the terminal a server keeps for this pane, by the
+    /// name the server gave it ([`Shown::kind`]). `None` in a pane that is not a server pane
+    /// (a plain `ssh` has no such word, and a pane that is not in a remote session does not
+    /// listen to one: the gate is [`Self::server_target`]'s), while the server has not said,
+    /// and for a name nothing here knows — the pane keeps the server's icon.
+    fn server_kind(&self) -> Option<Kind> {
+        self.server_target()?;
+        self.host().kept_terminal(self.uuid())?.kind()
+    }
+
+    /// The program in front of the terminal the pane shows is another one as far as the icon
+    /// tells (`Backend::program_changed`): the tab reads the pane's kind again. The server's
+    /// word is the news, so there is no probe to run.
+    pub(crate) fn server_program_changed(&self) {
+        self.host().program_changed(self.ivars().id);
+    }
+
+    /// The decision over the sources with `server` as the server's word; `remember` writes it to
+    /// the memo of what ran ([`Self::ended_kind`]).
+    fn decided(&self, server: Option<Kind>, remember: bool) -> Kind {
         let Some(session) = self.session() else {
             return Kind::Shell;
         };
@@ -4814,8 +4849,9 @@ impl TerminalPane {
             .filter(|(generation, _)| *generation == running)
             .map(|(_, kind)| kind);
         let remote = session.remote_line().is_some();
-        let kind = identity::decide(app, group, carried.or(line), remote);
-        if let Some(id) = command
+        let kind = identity::decide(app, server, group, carried.or(line), remote);
+        if remember
+            && let Some(id) = command
             && memo.ran != Some((id, kind))
         {
             self.ivars().program_memo.set(ProgramMemo {
@@ -4842,7 +4878,7 @@ impl TerminalPane {
     /// shell or the server — those it tells by itself, and a pane carrying none is written in
     /// the format a rolled-back bateri still reads (`handover::PaneState`).
     fn carried_program(&self) -> Option<Kind> {
-        Some(self.program_kind()).filter(|kind| !matches!(kind, Kind::Shell | Kind::Remote))
+        Some(self.local_program_kind()).filter(|kind| !matches!(kind, Kind::Shell | Kind::Remote))
     }
 
     /// The identity probe: reads what [`Self::program_kind`] cannot cheaply — the newest command's
@@ -6367,6 +6403,28 @@ mod tests {
         // the holder race, and the second to arrive is the one that opens the gate.
         let changed = entry(include_str!("hold_service.rs"), "fn terminal_changed(");
         assert!(changed.contains("remote_edge()"));
+    }
+
+    /// The server's word of what is in front of its terminal is for the icon: what a program on
+    /// this Mac can do is asked of [`TerminalPane::local_program_kind`] — a program on a server
+    /// reads the server's clipboard, so ⌘V's image key (⌃V) is not sent to it, and the next
+    /// bateri is carried what runs here. A source scan, because the panes need a window server.
+    #[test]
+    fn what_only_a_program_here_can_do_asks_the_kind_of_the_program_here() {
+        let paste = include_str!("view.rs");
+        let paste = &paste[..paste.find("#[cfg(test)]").unwrap_or(paste.len())];
+        assert!(paste.contains("image_paste_key(pane.local_program_kind())"));
+        assert!(!paste.contains("image_paste_key(pane.program_kind())"));
+        let pane = include_str!("pane.rs");
+        let at = pane.find("fn carried_program(").expect("carried_program");
+        let body = &pane[at..at + pane[at..].find("\n    }\n").expect("its end")];
+        assert!(body.contains("local_program_kind()"));
+        assert!(!body.contains(" self.program_kind()"));
+        // The server's word reaches the pane through its own entry and no other.
+        let hold = include_str!("hold_service.rs");
+        let at = hold.find("fn program_changed(").expect("program_changed");
+        let body = &hold[at..at + hold[at..].find("\n}\n").expect("its end")];
+        assert!(body.contains("server_program_changed()"));
     }
 
     #[test]

@@ -84,6 +84,9 @@ pub struct SshBackend {
     /// A pane began to show a terminal a server keeps, or stopped
     /// ([`Backend::terminal_changed`]).
     pub changed: ChangeNews,
+    /// The program in front of a pane's terminal is another one as far as the
+    /// pane's icon tells ([`Backend::program_changed`]).
+    pub program: ChangeNews,
     /// The terminals an account keeps in the background are not what they were
     /// ([`Backend::background_changed`]).
     pub listed: BackgroundNews,
@@ -298,6 +301,10 @@ impl Backend for SshBackend {
 
     fn terminal_changed(&self, pane: &PaneUuid) {
         (self.changed)(pane);
+    }
+
+    fn program_changed(&self, pane: &PaneUuid) {
+        (self.program)(pane);
     }
 
     fn link_changed(&self, pane: &PaneUuid, link: PaneLink) {

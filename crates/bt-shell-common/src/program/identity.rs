@@ -821,13 +821,38 @@ pub fn from_line(line: &str) -> Option<Kind> {
     }
 }
 
+/// The kind the program in front of a terminal on a server is, from the name
+/// the server gave it (what kablo says of the terminal, controls removed): the
+/// table of a local name and nothing else, so `claude` and `npm` are what they
+/// are on this Mac. The name is all there is, no argv: an interpreter (`node`,
+/// `python3`) is no one's, and a versioned file name (`2.1.296`, what a server
+/// whose kablo is older reports for Claude Code) names nothing — the pane keeps
+/// the server's icon. The server's shell is the server, not a shell: `None`
+/// too.
+pub fn from_server(program: &str) -> Option<Kind> {
+    if super::is_shell_name(program) {
+        return None;
+    }
+    by_name(program)
+}
+
 /// The pane's kind from what is known, in the order of trust: the program's
-/// own word, the process table, the command line; else the shell. In a remote
-/// session the process table shows only the local `ssh`, so it is not asked
-/// (`group` is ignored) and a command nothing knows leaves the server.
-pub fn decide(app: Option<Kind>, group: Option<Kind>, line: Option<Kind>, remote: bool) -> Kind {
+/// own word, the server's word of the terminal the pane shows
+/// ([`from_server`]), the process table, the command line; else the shell. In a
+/// remote session the process table shows only the local `ssh` and the line is
+/// the `ssh` itself, so the table is not asked (`group` is ignored) and a
+/// command nothing knows leaves the server — which is why the server's word, when
+/// there is one, comes before the line.
+pub fn decide(
+    app: Option<Kind>,
+    server: Option<Kind>,
+    group: Option<Kind>,
+    line: Option<Kind>,
+    remote: bool,
+) -> Kind {
     let group = if remote { None } else { group };
-    app.or(group)
+    app.or(server)
+        .or(group)
         .or(line)
         .unwrap_or(if remote { Kind::Remote } else { Kind::Shell })
 }
@@ -1307,15 +1332,81 @@ mod tests {
             Some(Kind::Editor),
             Some(Kind::Task),
         );
-        assert_eq!(decide(app, group, line, false), agent(Agent::Codex));
-        assert_eq!(decide(None, group, line, false), Kind::Editor);
-        assert_eq!(decide(None, None, line, false), Kind::Task);
-        assert_eq!(decide(None, None, None, false), Kind::Shell);
+        assert_eq!(decide(app, None, group, line, false), agent(Agent::Codex));
+        assert_eq!(decide(None, None, group, line, false), Kind::Editor);
+        assert_eq!(decide(None, None, None, line, false), Kind::Task);
+        assert_eq!(decide(None, None, None, None, false), Kind::Shell);
         // Remote: the process table says `ssh` and nothing of the far side.
-        assert_eq!(decide(None, Some(Kind::Remote), line, true), Kind::Task);
-        assert_eq!(decide(None, Some(Kind::Remote), None, true), Kind::Remote);
-        assert_eq!(decide(None, None, None, true), Kind::Remote);
-        assert_eq!(decide(app, None, line, true), agent(Agent::Codex));
+        assert_eq!(
+            decide(None, None, Some(Kind::Remote), line, true),
+            Kind::Task
+        );
+        assert_eq!(
+            decide(None, None, Some(Kind::Remote), None, true),
+            Kind::Remote
+        );
+        assert_eq!(decide(None, None, None, None, true), Kind::Remote);
+        assert_eq!(decide(app, None, None, line, true), agent(Agent::Codex));
+    }
+
+    #[test]
+    fn the_server_is_heard_over_the_line_that_is_only_the_ssh_and_under_the_programs_own_word() {
+        let claude = agent(Agent::ClaudeCode);
+        // The line of a pane on a server is the `ssh` itself, which names the server.
+        let ssh = from_line("ssh rasp");
+        assert_eq!(ssh, Some(Kind::Remote));
+        assert_eq!(decide(None, Some(claude), None, ssh, true), claude);
+        // A server that says nothing the table knows leaves the server's own icon.
+        assert_eq!(decide(None, None, None, ssh, true), Kind::Remote);
+        // What the program says of itself is still first.
+        assert_eq!(
+            decide(Some(agent(Agent::Codex)), Some(claude), None, ssh, true),
+            agent(Agent::Codex)
+        );
+        // And the server is first over a table that is not asked on a server.
+        assert_eq!(
+            decide(None, Some(Kind::Task), Some(Kind::Editor), None, true),
+            Kind::Task
+        );
+    }
+
+    #[test]
+    fn a_program_a_server_names_is_the_icon_the_same_name_has_here() {
+        for (name, kind) in [
+            ("npm", Some(Kind::Task)),
+            ("claude", Some(agent(Agent::ClaudeCode))),
+            ("codex", Some(agent(Agent::Codex))),
+            ("vim", Some(Kind::Editor)),
+            ("htop", Some(Kind::Monitor)),
+            ("ssh", Some(Kind::Remote)),
+            // The table spells names in lowercase.
+            ("Claude", Some(agent(Agent::ClaudeCode))),
+        ] {
+            assert_eq!(from_server(name), kind, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_name_nothing_here_knows_is_no_icon_and_the_servers_shell_is_the_server() {
+        // A version number is what a server whose kablo is older says for Claude Code, and the
+        // interpreter of a script is no one's without the argv that names the script.
+        for name in [
+            "2.1.296",
+            "node",
+            "python3",
+            "bun",
+            "sudo",
+            "gcc",
+            "a.out",
+            "",
+            "claude\u{1b}x",
+        ] {
+            assert_eq!(from_server(name), None, "{name:?}");
+        }
+        // The shell in front of a terminal on a server is a terminal waiting for a command.
+        for name in ["zsh", "-zsh", "bash", "-bash", "fish", "-fish", "sh"] {
+            assert_eq!(from_server(name), None, "{name}");
+        }
     }
 
     #[test]

@@ -181,6 +181,17 @@ impl Shown {
         self.host == target.host
     }
 
+    /// What the pane's icon draws for the program in front of the terminal, by the
+    /// name the server gave it and the table of a local program's
+    /// ([`crate::program::identity::from_server`]): the same kind the same program
+    /// has in a pane on this Mac. `None` while the server has not said, and for a
+    /// name nothing here knows — the pane keeps the server's icon.
+    pub fn kind(&self) -> Option<crate::program::identity::Kind> {
+        self.program
+            .as_deref()
+            .and_then(crate::program::identity::from_server)
+    }
+
     /// What a question about closing the pane calls the program that would
     /// end: the program in front with the server it runs on (`npm on rasp`), or
     /// `None` when the shell is in front (waiting for a command) or the server
@@ -312,6 +323,14 @@ pub trait Backend: Send + Sync + 'static {
     /// work open in a pane that is a plain one. Called on the service's
     /// thread; the application hops to its own.
     fn terminal_changed(&self, _pane: &PaneUuid) {}
+
+    /// The program in front of the terminal `pane` shows is another one as far as
+    /// the pane's icon tells ([`Shown::kind`]): `npm` for `claude`, a program
+    /// for the shell. Told once per change of that kind — not of the name: one
+    /// program nothing here knows for another is not news — and with the terminal
+    /// appearing (a program already in front) or going (the pane has the server's
+    /// icon again). Called on the service's thread; the application hops to its own.
+    fn program_changed(&self, _pane: &PaneUuid) {}
 
     /// The terminals the account's server keeps in the background
     /// ([`Service::background`]) are not the ones they were: one came, went, or says something
@@ -1096,6 +1115,19 @@ impl Core {
         let went = before.keys().filter(|pane| !shown.contains_key(*pane));
         for pane in came.chain(went) {
             self.shared.backend.terminal_changed(pane);
+        }
+        // The icon follows the kind of the program, not its name, and a pane that came or went
+        // is a pane whose terminal had a kind or has one.
+        let kind_of = |shown: &HashMap<PaneUuid, Shown>, pane: &PaneUuid| {
+            shown.get(pane).and_then(Shown::kind)
+        };
+        for pane in shown
+            .keys()
+            .chain(before.keys().filter(|p| !shown.contains_key(*p)))
+        {
+            if kind_of(&before, pane) != kind_of(&shown, pane) {
+                self.shared.backend.program_changed(pane);
+            }
         }
         self.write_background();
     }

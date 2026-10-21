@@ -889,7 +889,7 @@ define_class!(
             } else if clipboard::has_image(&board)
                 && let Some(key) = self
                     .pane()
-                    .and_then(|pane| image_paste_key(pane.program_kind()))
+                    .and_then(|pane| image_paste_key(pane.local_program_kind()))
             {
                 send_key(session, key);
             }

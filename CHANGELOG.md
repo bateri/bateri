@@ -114,6 +114,17 @@ of every installed copy. A version without a section is not released.
   closing it with *Close*. A shell waiting at its prompt closes without a
   question, as before.
 
+- **A tab shows the program running in a terminal on a server.** In a pane that
+  shows a terminal the server keeps, the tab's icon follows the program the
+  server says is in front, the way it does for a program on this Mac: Claude
+  Code, Codex, npm, cargo, vim, htop and the rest bateri has an icon for replace
+  the server's `⇄` while they run, and the shell at its prompt, or a program
+  with no icon (`node`, `python3`), leaves `⇄` as it was. A server whose kablo
+  is older names Claude Code by its version number, which has no icon. The
+  question closing the pane names the same program. A plain `ssh` has no such
+  word and keeps `⇄`, and ⌘V still pastes a screenshot only into an agent on
+  this Mac — one on a server reads the server's clipboard, not yours.
+
 - **A newer bateri brings its kablo to the servers without ending anything.**
   The kablo that bateri puts on a server is the one that came in its package; an
   older one that is there stays where it is, and the terminals running under it

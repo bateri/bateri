@@ -267,6 +267,20 @@ fn terminal_changed(pane: &PaneUuid) {
     });
 }
 
+/// The program in front of the terminal a pane shows is another one as far as the tab's icon
+/// tells: the pane's tab reads its kind again. Nothing is asked of the server — its word is what
+/// changed.
+fn program_changed(pane: &PaneUuid) {
+    let pane = pane.clone();
+    DispatchQueue::main().exec_async(move || {
+        // audit: a block running on the main queue is on the main thread by definition.
+        let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
+        if let Some(pane) = delegate(mtm).and_then(|delegate| delegate.pane_with_uuid(&pane)) {
+            pane.server_program_changed();
+        }
+    });
+}
+
 /// How long a folder waits for the `ssh` it is for.
 const START_WAIT: Duration = Duration::from_secs(30);
 
@@ -346,6 +360,7 @@ pub(crate) fn serve(
         masters,
         linked: Box::new(link_changed),
         changed: Box::new(terminal_changed),
+        program: Box::new(program_changed),
         listed: Box::new(background_changed),
     };
     if let Ok(service) = Service::start(dir, Arc::new(backend), ledger()) {
