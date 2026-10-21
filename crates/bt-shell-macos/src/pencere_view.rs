@@ -66,7 +66,7 @@ use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
-use block2::{DynBlock, RcBlock};
+use block2::DynBlock;
 use bt_core::pencere::{Shelf, ViewSource, ViewStart};
 use bt_core::{Session, Theme};
 use bt_shell_common::palette::{Modifiers, menu_item_id};
@@ -80,19 +80,19 @@ use objc2::{
 };
 use objc2_app_kit::{
     NSApplication, NSAutoresizingMaskOptions, NSColor, NSEvent, NSEventModifierFlags, NSEventType,
-    NSImage, NSMenu, NSMenuItem, NSView,
+    NSMenu, NSMenuItem, NSView,
 };
 use objc2_core_foundation::CFRetained;
 use objc2_core_graphics::CGImage;
 use objc2_foundation::{
-    NSBundle, NSData, NSDictionary, NSError, NSHTTPURLResponse, NSLocale, NSNumber, NSObject,
+    NSBundle, NSData, NSDictionary, NSError, NSHTTPURLResponse, NSLocale, NSObject,
     NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSTimeZone, NSURL, NSURLRequest,
 };
 use objc2_web_kit::{
-    WKFrameInfo, WKNavigationAction, WKNavigationActionPolicy, WKNavigationDelegate,
-    WKScriptMessage, WKScriptMessageHandler, WKSecurityOrigin, WKSnapshotConfiguration,
-    WKUIDelegate, WKURLSchemeHandler, WKURLSchemeTask, WKUserContentController, WKWebView,
-    WKWebViewConfiguration, WKWebsiteDataStore,
+    WKFrameInfo, WKNavigation, WKNavigationAction, WKNavigationActionPolicy, WKNavigationDelegate,
+    WKScriptMessage, WKScriptMessageHandler, WKSecurityOrigin, WKUIDelegate, WKURLSchemeHandler,
+    WKURLSchemeTask, WKUserContentController, WKWebView, WKWebViewConfiguration,
+    WKWebsiteDataStore,
 };
 use objc2_web_kit::{WKMediaCaptureType, WKPermissionDecision};
 
@@ -176,6 +176,16 @@ pub(crate) fn is_content_item(item: &NSMenuItem) -> bool {
     };
     let id = menu_item_id(&action.name().to_string_lossy(), item.tag());
     by_id(&id).is_some_and(|command| command.content)
+}
+
+/// What the program calls itself, as its view's start says (`serverInfo`'s title or name);
+/// `None` when it gave none, or nothing is left of it. These are the words for the program in
+/// the strip and in the questions, before what the pane read (`TerminalPane::view_strip`).
+pub(crate) fn said_program(start: &ViewStart) -> Option<&str> {
+    start
+        .program
+        .as_deref()
+        .filter(|name| !name.trim().is_empty())
 }
 
 /// The view's area in a pane of `bounds` (the pane's unflipped points): all of it under the
@@ -334,6 +344,9 @@ struct BridgeIvars {
     page: serve::Page,
     /// The shell page was asked for as the top document: it is loaded once.
     shell_loaded: std::cell::Cell<bool>,
+    /// The tab card's picture of the view, shared with the host: the bridge takes the first
+    /// one when the shell has loaded ([`still::first`]).
+    shot: still::Shared,
 }
 
 define_class!(
@@ -396,6 +409,14 @@ define_class!(
             },));
         }
 
+        /// The shell page has loaded: the view's first picture is taken now, so a card that
+        /// opens before it has asked for one has something of the view to show
+        /// ([`still::first`]).
+        #[unsafe(method(webView:didFinishNavigation:))]
+        fn did_finish(&self, web_view: &WKWebView, _navigation: Option<&WKNavigation>) {
+            still::first(web_view, self.mtm(), &self.ivars().shot);
+        }
+
         /// The web content process died: a view that cannot answer its teardown
         /// is closed now and not after the wait for an answer.
         #[unsafe(method(webViewWebContentProcessDidTerminate:))]
@@ -436,11 +457,17 @@ define_class!(
 );
 
 impl Bridge {
-    fn new(mtm: MainThreadMarker, session: Arc<Session>, page: serve::Page) -> Retained<Self> {
+    fn new(
+        mtm: MainThreadMarker,
+        session: Arc<Session>,
+        page: serve::Page,
+        shot: still::Shared,
+    ) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(BridgeIvars {
             session,
             page,
             shell_loaded: std::cell::Cell::new(false),
+            shot,
         });
         // SAFETY: `NSObject`'s `init`.
         unsafe { msg_send![super(this), init] }
@@ -546,6 +573,9 @@ pub(crate) struct ViewHost {
     bridge: Retained<Bridge>,
     /// The picture the tab's card has of the view ([`still`]).
     shot: still::Shared,
+    /// What the program calls itself ([`said_program`]), for the questions the view asks
+    /// after it started.
+    program: Option<String>,
 }
 
 impl ViewHost {
@@ -581,7 +611,8 @@ impl ViewHost {
             &start.allow,
             &serve::css_color(ground),
         );
-        let bridge = Bridge::new(mtm, Arc::clone(session), page);
+        let shot = still::Shared::default();
+        let bridge = Bridge::new(mtm, Arc::clone(session), page, Rc::clone(&shot));
 
         // SAFETY: configuring a fresh configuration on the main thread; the
         // handlers are the bridge, which the host keeps alive.
@@ -627,7 +658,8 @@ impl ViewHost {
             web,
             strip,
             bridge,
-            shot: still::Shared::default(),
+            shot,
+            program: said_program(start).map(str::to_owned),
         };
         host.paint(theme);
         // SAFETY: a request for the shell's own URL.
@@ -636,6 +668,11 @@ impl ViewHost {
                 .map(|url| host.web.loadRequest(&NSURLRequest::requestWithURL(&url)))
         };
         loaded.map(|_| host)
+    }
+
+    /// What the program that opened the view calls itself, when it said.
+    pub(crate) fn program(&self) -> Option<&str> {
+        self.program.as_deref()
     }
 
     /// The web view, to put in the pane.
@@ -719,30 +756,10 @@ impl ViewHost {
             still::Still::answered(&self.shot, generation, None);
             return;
         };
-        let [x, y, width, height] = capture.rect;
-        // SAFETY: main thread (`MainThreadOnly`); a fresh configuration set before it is
-        // used, with values that are plain numbers.
-        let configuration = unsafe {
-            let configuration = WKSnapshotConfiguration::new(self.web.mtm());
-            configuration.setRect(NSRect::new(NSPoint::new(x, y), NSSize::new(width, height)));
-            configuration.setSnapshotWidth(Some(&NSNumber::new_f64(capture.width)));
-            // A view that is not on screen (the card is for tabs that are not shown) has
-            // no screen update to wait for.
-            configuration.setAfterScreenUpdates(false);
-            configuration
-        };
         let shared = Rc::clone(&self.shot);
-        let answer = RcBlock::new(move |image: *mut NSImage, _error: *mut NSError| {
-            // SAFETY: the web view's image, or null; it lives through this call.
-            let image = unsafe { image.as_ref() }.and_then(still::cg_image);
+        still::shoot(&self.web, self.web.mtm(), capture, move |image| {
             still::Still::answered(&shared, generation, image);
         });
-        // SAFETY: main thread; the web view copies the block, which holds only the shared
-        // cell and not the host, so a view that is gone before the answer costs nothing.
-        unsafe {
-            self.web
-                .takeSnapshotWithConfiguration_completionHandler(Some(&configuration), &answer);
-        }
     }
 
     /// Takes the web view down: stops it loading, takes it out of the pane and

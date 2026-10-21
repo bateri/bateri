@@ -82,6 +82,16 @@ pub fn strip(title: Option<&str>, tool: &str, place: Option<&str>, program: Opti
     }
 }
 
+/// The name the strip calls the program by: what the program calls itself (`said`: its
+/// `serverInfo`'s title or name), as long as something is left of it once it is cleaned, else
+/// what the application reads in the pane (`read`: the process in front, the server's word for
+/// a terminal it keeps). The program's own words are the ones a person knows it by (“Docker UI”
+/// where the process is `node`); the questions to the person name it the same way.
+pub fn program_name<'a>(said: Option<&'a str>, read: Option<&'a str>) -> Option<&'a str> {
+    said.filter(|text| !clean(text, NAME_LIMIT).is_empty())
+        .or(read)
+}
+
 /// `text` as the strip may show it: control characters gone, line breaks and runs of spaces one
 /// space, the characters that hide or reverse text gone, and at most `limit` characters with a
 /// trailing "…" when it was cut.
@@ -255,6 +265,37 @@ mod tests {
             super::strip(Some("  \n "), "list", None, None).title,
             "list"
         );
+    }
+
+    #[test]
+    fn the_strip_names_the_program_as_it_names_itself_and_the_tool_as_it_titles_it() {
+        // `node` is the process; “Docker UI” is what the program says it is, and “Containers” is
+        // what it calls the tool whose result the view shows.
+        let program = program_name(Some("Docker UI"), Some("node"));
+        let strip = strip(Some("Containers"), "list_containers", None, program);
+        assert_eq!(strip.title, "Containers");
+        assert_eq!(strip.context, "Docker UI · in this pane");
+        assert_eq!(strip.quit, "Quit Docker UI");
+        // On a server's terminal the place is still first.
+        let strip = super::strip(
+            Some("Containers"),
+            "list_containers",
+            Some("prod"),
+            program_name(Some("Docker UI"), None),
+        );
+        assert_eq!(strip.context, "prod · Docker UI · in this pane");
+        // A program that gave no name is the process, or the server's word for it; one that gave
+        // nothing that shows is as if it gave none.
+        assert_eq!(program_name(None, Some("node")), Some("node"));
+        assert_eq!(
+            program_name(Some(" \u{200b}\n"), Some("node")),
+            Some("node")
+        );
+        assert_eq!(program_name(None, None), None);
+        assert_eq!(program_name(Some("\u{202e}"), None), None);
+        // A title the program did not give is the tool's name, whatever the program is called.
+        let strip = super::strip(None, "list_containers", None, program);
+        assert_eq!(strip.title, "list_containers");
     }
 
     #[test]

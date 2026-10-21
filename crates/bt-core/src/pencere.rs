@@ -383,10 +383,6 @@ pub(crate) struct Desk {
 
 struct Inner {
     conversation: Conversing,
-    /// The tool the last `open` that could be accepted names ([`tool`]): what
-    /// the shell asks for while it asks the person, which is before the crate
-    /// says it. `None` when the text did not give one.
-    tool: Option<String>,
     /// The font list the view is given.
     font_mono: String,
     /// The theme the view was last given.
@@ -433,7 +429,6 @@ impl Desk {
         Self {
             inner: Mutex::new(Inner {
                 conversation: Conversation::new(config, store, entropy),
-                tool: None,
                 font_mono,
                 theme,
             }),
@@ -476,12 +471,6 @@ impl Desk {
                     alternate_screen: Some(alternate),
                     ..seen
                 });
-                // Only an `open` that has a token to be accepted with: one that
-                // comes while a view opens or runs is refused, and must not
-                // change what the question being asked is about.
-                if message.kind == "open" && inner.conversation.state() == State::Offered {
-                    inner.tool = tool::open_tool(&message.payload);
-                }
                 inner.conversation.message(message);
             }
             self.drain(&mut inner)
@@ -552,13 +541,6 @@ impl Desk {
         self.deliver(writes, notify, write);
     }
 
-    /// The tool the open that is being answered names, as read from its
-    /// message: for the question to the person, which the crate asks before the
-    /// view starts and so before it says the tool.
-    pub(crate) fn opening_tool(&self) -> Option<String> {
-        lock(&self.inner).tool.clone()
-    }
-
     /// What the shell is to do, in order; empties the slot.
     pub(crate) fn take_views(&self) -> Vec<Action> {
         mem::take(&mut lock(&self.slots).views)
@@ -608,8 +590,6 @@ impl Desk {
         }
     }
 }
-
-mod tool;
 
 #[cfg(test)]
 pub(crate) mod tests;

@@ -3325,12 +3325,16 @@ impl TerminalPane {
     /// [`TerminalPane::release_snapshot`].
     ///
     /// **A pane that shows a program's view is the view's picture**, not the terminal's under it:
-    /// the web view's own, asked for and kept (`pencere_view::still`) — the first call has none.
-    /// The terminal's still path is not called for it, as it was not before.
+    /// the web view's own, asked for and kept (`pencere_view::still`). The view takes its first
+    /// picture when it has loaded, so there is one almost always; for the call or two before
+    /// any has come (or after the card let go of them) the pane's terminal is what the tile
+    /// shows, below, since a tile is never empty.
     pub fn snapshot(&self, size: (f64, f64), scale: f64) -> Option<CFRetained<CGImage>> {
         let tile = |points: f64| (points * scale).round().max(1.0) as u32;
-        if let Some(host) = self.view_host() {
-            return host.still((tile(size.0), tile(size.1)), scale);
+        if let Some(host) = self.view_host()
+            && let Some(image) = host.still((tile(size.0), tile(size.1)), scale)
+        {
+            return Some(image);
         }
         let link = self.link()?;
         // A still asked for from inside a still (the session's notices run on this thread) gets
@@ -5375,10 +5379,25 @@ impl TerminalPane {
         if self.ivars().run.is_some() {
             return;
         }
+        if focused {
+            self.keep_keyboard_in_view();
+        }
         if let Some(link) = self.ivars().link.get() {
             link.set_focused(focused);
         }
         self.report_focus(focused, self.keyboard_here());
+    }
+
+    /// The keyboard is in the terminal that a program's view covers: it goes to the view. The
+    /// terminal under a view is nobody's to type in, and something other than [`Self::focus`]
+    /// left it there — the window gave it to the pane's terminal before its view started (a
+    /// restored window's first responder, a tab shown again) — which is what a view started again
+    /// by a handover found: a pane that is the user's and has its keyboard in the covered
+    /// terminal has it in the view from the moment it is the user's.
+    fn keep_keyboard_in_view(&self) {
+        if self.shows_view() && self.view().is_first_responder() {
+            self.focus();
+        }
     }
 
     /// The pane's share of the closing sequence — **starts, does not wait**.
@@ -5719,11 +5738,11 @@ impl TerminalPane {
                 Action::DestroyView => self.end_view(),
                 Action::Consent(consent) => {
                     let app = self.ivars().identity.app_name.clone();
-                    let origin = self.view_origin(&session);
+                    let origin = self.view_origin();
                     pencere_view::ask::consent(self, &session, consent, &origin, &app);
                 }
                 Action::OpenLink { link, url } => {
-                    let origin = self.view_origin(&session);
+                    let origin = self.view_origin();
                     pencere_view::ask::link(self, &session, link, &url, &origin);
                 }
                 _ => {}
@@ -5738,14 +5757,18 @@ impl TerminalPane {
         &self.ivars().view_asking
     }
 
-    /// Who a program's view is asking for: where its program runs, what it is called and the
-    /// tool the view is of ([`TerminalPane::view_whereabouts`]).
-    fn view_origin(&self, session: &Session) -> bt_shell_common::view_ask::Origin {
+    /// Who a program's view is asking for: where its program runs and what it is called
+    /// ([`TerminalPane::view_whereabouts`]), and what it calls itself once its view is up. The
+    /// tool the view is of is the question's own ([`bt_core::pencere::Consent::tool`]), not read
+    /// here.
+    fn view_origin(&self) -> bt_shell_common::view_ask::Origin {
         let (place, program) = self.view_whereabouts();
         bt_shell_common::view_ask::Origin {
             place,
             program,
-            tool: session.view_tool(),
+            said: self
+                .view_host()
+                .and_then(|host| host.program().map(str::to_owned)),
         }
     }
 
@@ -5882,12 +5905,18 @@ impl TerminalPane {
         });
     }
 
-    /// What the strip over the view of `start` says: where the program runs and what it is
-    /// called ([`TerminalPane::view_whereabouts`]), with the view's title — the tool's name
-    /// for now, as the program's list of tools has its title to give (`view_strip::strip`).
+    /// What the strip over the view of `start` says: where the program runs
+    /// ([`TerminalPane::view_whereabouts`]) and what it is called — what the program calls
+    /// itself, else what the pane read —, with the view's title: what the program calls the
+    /// tool, else the tool's name (`view_strip::strip`). Both words are the crate's, cleaned.
     fn view_strip(&self, start: &bt_core::pencere::ViewStart) -> view_strip::Strip {
         let (place, program) = self.view_whereabouts();
-        view_strip::strip(None, &start.tool, place.as_deref(), program.as_deref())
+        view_strip::strip(
+            start.title.as_deref(),
+            &start.tool,
+            place.as_deref(),
+            view_strip::program_name(pencere_view::said_program(start), program.as_deref()),
+        )
     }
 
     /// Where the program that showed the view runs (the server's name; `None` on this Mac)
@@ -6904,6 +6933,45 @@ mod tests {
         assert!(body.contains("restart_view()"));
         // After the early return, so a retry that changes nothing restarts nothing.
         assert!(body.find("return;").expect("the return") < body.find("restart_view()").unwrap());
+    }
+
+    /// A pane that shows a program's view has the keyboard in the view, and the window's ways of
+    /// giving the keyboard to a pane (a pane switched to, a tab shown, the name field giving it up)
+    /// go through [`TerminalPane::focus`], which knows it: given to the terminal under the view
+    /// instead, the keyboard is in a view nobody can see and the program's view takes no key — a
+    /// restored view found that after a handover. The one place that gives it to a terminal
+    /// directly is a window's birth, when no pane has a view yet; and a pane that is the user's
+    /// with its keyboard in the covered terminal moves it ([`TerminalPane::apply_focus`]). A source
+    /// scan, because what it guards needs a window server and a pane with a view in a window.
+    #[test]
+    fn the_keyboard_is_given_to_a_pane_through_the_pane_and_not_to_the_terminal_under_a_view() {
+        let live =
+            |source: &'static str| &source[..source.find("#[cfg(test)]").unwrap_or(source.len())];
+        // The arguments of every `makeFirstResponder(` that name a terminal view.
+        let to_a_terminal = |source: &str| {
+            source
+                .match_indices("makeFirstResponder(")
+                .filter(|(at, _)| {
+                    let call = &source[*at..(*at + 120).min(source.len())];
+                    call[..call.find(");").unwrap_or(call.len())].contains(".view()")
+                })
+                .count()
+        };
+        assert_eq!(
+            to_a_terminal(live(include_str!("window.rs"))),
+            1,
+            "only a window's birth gives the keyboard to a terminal itself"
+        );
+        assert_eq!(to_a_terminal(live(include_str!("tab.rs"))), 0);
+        let pane = live(include_str!("pane.rs"));
+        let at = pane
+            .find("pub(crate) fn apply_focus(")
+            .expect("apply_focus");
+        let body = &pane[at..at + pane[at..].find("\n    }\n").expect("its end")];
+        assert!(body.contains("self.keep_keyboard_in_view();"), "{body}");
+        let at = pane.find("fn keep_keyboard_in_view(").expect("the rule");
+        let body = &pane[at..at + pane[at..].find("\n    }\n").expect("its end")];
+        assert!(body.contains("self.shows_view()") && body.contains("self.focus()"));
     }
 
     #[test]

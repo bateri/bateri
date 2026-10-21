@@ -2836,10 +2836,7 @@ impl TerminalWindow {
     /// name field, which gave it up.
     pub(crate) fn focus_selected_tab(&self) {
         if let Some(tab) = self.try_selected_tab() {
-            let _ = self
-                .ivars()
-                .window
-                .makeFirstResponder(Some(tab.focused_pane().view()));
+            let _ = tab.focused_pane().focus();
         }
     }
 
@@ -3937,10 +3934,7 @@ impl TerminalWindow {
         }
         // The keyboard to the tab's focused pane — the one it had when it
         // left the screen; the old tab's responder is hidden now.
-        let _ = self
-            .ivars()
-            .window
-            .makeFirstResponder(Some(new.focused_pane().view()));
+        let _ = new.focused_pane().focus();
         // What ended while it was away is seen now: its tick or dot goes
         // before the bar is drawn.
         new.look();

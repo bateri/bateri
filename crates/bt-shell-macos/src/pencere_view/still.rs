@@ -10,10 +10,17 @@
 //!
 //! **Asked and kept, not waited for.** The web view answers on the main queue, later, and
 //! the card asks every half second (`tabs::MAP_REFRESH`): a call asks for a new picture and
-//! gives back the last one that came. The first call of a view has none, so a card that
-//! opens on it shows an empty tile until its next turn. A view that cannot be shot (a
-//! web process that is gone) leaves the last picture where it was; a request that never
-//! comes back is asked again after [`PATIENCE`].
+//! gives back the last one that came. A view that cannot be shot (a web process that is
+//! gone) leaves the last picture where it was; a request that never comes back is asked again
+//! after [`PATIENCE`].
+//!
+//! **A card that opens on a view has something to show.** The first picture is taken when the
+//! shell page has loaded ([`first`]), before any card asked, in the page's own shape and
+//! [`FIRST_WIDTH`] across: not the tile's, which is not known yet, so it fills the tile a little
+//! out of shape until the call that follows it brings one cut to the tile. A card that opens
+//! before even that has come, or after the card let go of its pictures, gets the pane's
+//! terminal instead (`TerminalPane::snapshot`) for the call or two it takes: a tile is
+//! never empty.
 //!
 //! **The tile is filled the way the terminal's is**: the picture covers it in both directions
 //! and what spills over is cropped, keeping the left edge and the bottom
@@ -28,14 +35,23 @@ use std::ptr::NonNull;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+use block2::RcBlock;
+use objc2::MainThreadMarker;
 use objc2_app_kit::NSImage;
 use objc2_core_foundation::CFRetained;
 use objc2_core_graphics::CGImage;
+use objc2_foundation::{NSError, NSNumber, NSPoint, NSRect, NSSize};
+use objc2_web_kit::{WKSnapshotConfiguration, WKWebView};
 
 /// How long a request for a picture may stay unanswered before the next call asks again. A
 /// policy value, not a measurement: a snapshot takes milliseconds, and one that has not
 /// come in two seconds is not coming.
 pub(super) const PATIENCE: Duration = Duration::from_secs(2);
+
+/// How wide, in points, the first picture of a view is: a card's tile is a couple of hundred
+/// points across, and a page taken whole at its own width would be megabytes nobody looks at. A
+/// design constant, not measured.
+pub(super) const FIRST_WIDTH: f64 = 360.0;
 
 /// What the card has of the view: the last picture that came and whether one is on its way.
 #[derive(Default)]
@@ -81,6 +97,16 @@ impl Still {
         }
     }
 
+    /// The first picture ([`first`]) came back, made at `generation`. It is not an answer to
+    /// the card's request (that may be on its way and stays so) and it never takes the place
+    /// of a picture the card asked for, which is cut to its tile.
+    pub(super) fn first_came(shared: &Shared, generation: u64, image: Option<CFRetained<CGImage>>) {
+        let mut still = shared.borrow_mut();
+        if still.generation == generation && still.image.is_none() {
+            still.image = image;
+        }
+    }
+
     /// The card is done with its pictures: the last one goes, and a request on its way will
     /// find that it was made before.
     pub(super) fn release(shared: &Shared) {
@@ -89,6 +115,58 @@ impl Still {
         still.asked = None;
         still.generation += 1;
     }
+}
+
+/// Asks `web` for what `capture` says, on the main queue's next turns. `done` gets the picture,
+/// or nothing when the web view cannot give one. The block holds `done` and nothing of the host,
+/// so a view that is gone before the answer costs nothing.
+pub(super) fn shoot(
+    web: &WKWebView,
+    mtm: MainThreadMarker,
+    capture: Capture,
+    done: impl Fn(Option<CFRetained<CGImage>>) + 'static,
+) {
+    let [x, y, width, height] = capture.rect;
+    // SAFETY: main thread (`MainThreadOnly`); a fresh configuration set before it is used, with
+    // values that are plain numbers.
+    let configuration = unsafe {
+        let configuration = WKSnapshotConfiguration::new(mtm);
+        configuration.setRect(NSRect::new(NSPoint::new(x, y), NSSize::new(width, height)));
+        configuration.setSnapshotWidth(Some(&NSNumber::new_f64(capture.width)));
+        // A view that is not on screen (the card is for tabs that are not shown) has no screen
+        // update to wait for.
+        configuration.setAfterScreenUpdates(false);
+        configuration
+    };
+    let answer = RcBlock::new(move |image: *mut NSImage, _error: *mut NSError| {
+        // SAFETY: the web view's image, or null; it lives through this call.
+        let image = unsafe { image.as_ref() }.and_then(cg_image);
+        done(image);
+    });
+    // SAFETY: main thread; the web view copies the block.
+    unsafe {
+        web.takeSnapshotWithConfiguration_completionHandler(Some(&configuration), &answer);
+    }
+}
+
+/// The view's first picture: the whole page, [`FIRST_WIDTH`] across, asked for when the shell
+/// page has loaded. Kept only if no other picture has come by the time it does.
+pub(super) fn first(web: &WKWebView, mtm: MainThreadMarker, shared: &Shared) {
+    let page = web.bounds().size;
+    if !(page.width >= 1.0 && page.height >= 1.0) {
+        return;
+    }
+    let generation = shared.borrow().generation;
+    let shared = Rc::clone(shared);
+    shoot(
+        web,
+        mtm,
+        Capture {
+            rect: [0.0, 0.0, page.width, page.height],
+            width: page.width.min(FIRST_WIDTH),
+        },
+        move |image| Still::first_came(&shared, generation, image),
+    );
 }
 
 /// What to ask the web view for, in points: the part of its page that fills the tile and

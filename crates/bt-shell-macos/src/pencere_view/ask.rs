@@ -27,6 +27,13 @@
 //! thread and written nowhere: an answer is for a program in a place with a tool and a set.
 //! A question whose tool could not be read is asked every time.
 //!
+//! **Questions that ask the same are one question** ([`Waiting`]): panes restored together
+//! that open the same tool each put the question up before anyone has answered the first, so
+//! the memory has nothing yet when they ask. The person's answer to one is then the answer to
+//! the others that are up, and their sheets go with it (`answer_same`): asking twice for one
+//! answer is what the person would call a bug. Only an answer the person gave does this —
+//! Escape is "not now" for the pane it was said in, and the others stay asked.
+//!
 //! **A link** ([`link`]) is opened in the person's browser on this Mac, after the person
 //! agrees, and nothing else is: the question names where the program runs, so a link a
 //! program on a server asked for is not taken to open there. One question at a time per pane;
@@ -38,7 +45,7 @@ use std::sync::Arc;
 use block2::RcBlock;
 use bt_core::Session;
 use bt_core::pencere::{Consent, Grant, State};
-use bt_shell_common::view_ask::{self, Memory, Origin, Question};
+use bt_shell_common::view_ask::{self, Memory, Origin, Question, Waiting};
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{MainThreadMarker, MainThreadOnly};
@@ -49,7 +56,7 @@ use objc2_app_kit::{
 use objc2_foundation::{NSString, NSURL};
 
 use crate::hyperlink::open_url;
-use crate::pane::TerminalPane;
+use crate::pane::{PaneLookup, TerminalPane};
 use crate::sheets::{self, Asker};
 use crate::uploader::{ESCAPE, add_key_monitor, remove_monitor};
 
@@ -57,6 +64,28 @@ thread_local! {
     /// The answers the person has given since the application started: the main
     /// thread's, which is where every sheet's answer arrives.
     static MEMORY: RefCell<Memory> = const { RefCell::new(Memory::new()) };
+    /// The questions about access that are up in any pane, by what they ask.
+    static WAITING: RefCell<Waiting<Up>> = const { RefCell::new(Waiting::new()) };
+}
+
+/// A question about access that is up: whose it is (the pane, and the number it gave the
+/// question), and what the pane's view declared, so that another's answer can be applied to it.
+struct Up {
+    pane: u64,
+    number: u64,
+    consent: Consent,
+}
+
+impl Up {
+    /// Whether this is question `number` of `pane`.
+    fn is(&self, pane: u64, number: u64) -> bool {
+        self.pane == pane && self.number == number
+    }
+}
+
+/// The question `number` of `pane` is not up any more, however it ended.
+fn gone(pane: u64, number: u64) {
+    WAITING.with(|waiting| waiting.borrow_mut().gone(|up| up.is(pane, number)));
 }
 
 /// The questions a pane has up for its program's view.
@@ -181,9 +210,13 @@ pub(crate) fn consent(
     asking.consent.set(number);
     let (id, lookup) = (pane.id(), pane.lookup());
     let answering = Arc::clone(session);
+    let waits = consent.clone();
+    let asked = key.clone();
     let sheet = put(pane, &question, move |response| {
         // audit: the sheet's completion block runs on the main thread.
         let mtm = MainThreadMarker::new().expect("a sheet's block is on the main thread");
+        // Whatever happened to the sheet, this question is not up any more.
+        gone(id, number);
         let Some(pane) = lookup(mtm, id) else {
             return;
         };
@@ -193,21 +226,40 @@ pub(crate) fn consent(
         let allowed = response == NSAlertSecondButtonReturn;
         // The person's own answer, as against a sheet that was taken away.
         let given = allowed || response == NSAlertFirstButtonReturn;
+        let mut same = Vec::new();
         if given
             && answering.view_state() == Some(State::Opening)
             && let Some(key) = key.clone()
         {
-            MEMORY.with(|memory| memory.borrow_mut().remember(key, allowed));
+            MEMORY.with(|memory| memory.borrow_mut().remember(key.clone(), allowed));
+            // The others that ask the same are answered by this: taken out before any sheet
+            // is ended, which runs their blocks.
+            same = WAITING.with(|waiting| waiting.borrow_mut().answered(&key));
         }
         answering.view_consent(if allowed {
             consent.grant_all()
         } else {
             Grant::none()
         });
+        for other in same {
+            answer_same(mtm, lookup, &other, allowed);
+        }
     });
     match sheet {
         Some(window) => {
             asking.sheet.replace(Some(window));
+            if let Some(key) = asked {
+                WAITING.with(|waiting| {
+                    waiting.borrow_mut().up(
+                        key,
+                        Up {
+                            pane: id,
+                            number,
+                            consent: waits,
+                        },
+                    );
+                });
+            }
         }
         None => {
             // The pane is in no window: nobody can be asked, and the view starts with
@@ -218,13 +270,45 @@ pub(crate) fn consent(
     }
 }
 
+/// The person answered a question that `other` asks the same as: it is answered with the same,
+/// and its sheet goes. `other` is up in another pane, which may be in a tab behind (its sheet is
+/// parked) or have closed (nothing to do).
+fn answer_same(mtm: MainThreadMarker, lookup: PaneLookup, other: &Up, allowed: bool) {
+    let Some(pane) = lookup(mtm, other.pane) else {
+        return;
+    };
+    let asking = pane.view_asking();
+    let sheet = asking.sheet.borrow().clone();
+    // Finished first, so that the sheet's own block, which ending it runs, finds nothing to do.
+    if !asking.finish(other.number) {
+        return;
+    }
+    if let Some(sheet) = sheet
+        && let Some(seat) = sheets::seat(Asker::Pane(&pane))
+    {
+        seat.end(&sheet, NSModalResponseCancel);
+    }
+    let Some(session) = pane.session().cloned() else {
+        return;
+    };
+    if session.view_state() == Some(State::Opening) {
+        session.view_consent(if allowed {
+            other.consent.grant_all()
+        } else {
+            Grant::none()
+        });
+    }
+}
+
 /// Takes away the question about access that is up, without an answer: the open it was
 /// for is over, or another has come.
 pub(crate) fn withdraw(pane: &TerminalPane) {
     let asking = pane.view_asking();
-    if asking.consent.replace(0) == 0 {
+    let number = asking.consent.replace(0);
+    if number == 0 {
         return;
     }
+    gone(pane.id(), number);
     let sheet = asking.sheet.borrow_mut().take();
     if let Some(sheet) = sheet
         && let Some(seat) = sheets::seat(Asker::Pane(pane))

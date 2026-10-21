@@ -628,9 +628,9 @@ impl TerminalTab {
         {
             self.set_zoom(None);
         }
-        if let Some(window) = self.ns_window() {
-            let _ = window.makeFirstResponder(Some(pane.view()));
-        }
+        // Through the pane's own gate: a pane that shows a program's view has its keyboard in
+        // the view, not in the terminal that the view covers.
+        let _ = pane.focus();
         self.pane_focused(pane.id());
         self.refresh_look();
     }

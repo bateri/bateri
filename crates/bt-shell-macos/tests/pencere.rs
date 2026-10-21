@@ -179,6 +179,10 @@ impl Program {
             welcome.contains("pencere-test"),
             "the host is the application that opened the pane: {welcome}"
         );
+        assert!(
+            welcome.contains("\"dismiss\""),
+            "the host closes a view the program dismisses, and says so: {welcome}"
+        );
         welcome
             .split("\"token\":\"")
             .nth(1)
@@ -229,7 +233,8 @@ impl Program {
             "msg",
             &format!(
                 "{{\"jsonrpc\":\"2.0\",\"id\":{id},\"result\":{{\"protocolVersion\":\"2025-11-25\",\
-\"capabilities\":{{\"tools\":{{}}}},\"serverInfo\":{{\"name\":\"show\",\"version\":\"0\"}}}}}}"
+\"capabilities\":{{\"tools\":{{}}}},\"serverInfo\":{{\"name\":\"show\",\"title\":\"Pencere Test\",\
+\"version\":\"0\"}}}}}}"
             ),
         );
         let tools = self.wait_for("\"method\":\"tools/list\"");
@@ -237,7 +242,7 @@ impl Program {
         self.send(
             "msg",
             &format!(
-                "{{\"jsonrpc\":\"2.0\",\"id\":{id},\"result\":{{\"tools\":[{{\"name\":\"show\",\
+                "{{\"jsonrpc\":\"2.0\",\"id\":{id},\"result\":{{\"tools\":[{{\"name\":\"show\",\"title\":\"Show things\",\
 \"inputSchema\":{{\"type\":\"object\"}},\"_meta\":{{\"ui\":{{\"resourceUri\":\"ui://show/view\"}}}}}}]}}}}"
             ),
         );
@@ -361,6 +366,26 @@ fn covered(pane: &TerminalPane) -> bool {
     web_view(pane).is_some()
 }
 
+/// The pane's terminal, the view the shell is drawn in: a subview of the pane of its own class,
+/// under the program's view when there is one.
+fn terminal_view(pane: &TerminalPane) -> Option<Retained<NSView>> {
+    pane.subviews().iter().find(|view| {
+        let name = view.class().name().to_string_lossy().into_owned();
+        name.contains("BateriView") && !name.contains("BateriPencere")
+    })
+}
+
+/// Whether the window's keyboard is in the program's view of `pane`, or something inside it.
+fn holds_keyboard(window: &NSWindow, pane: &TerminalPane) -> bool {
+    let Some(web) = web_view(pane) else {
+        return false;
+    };
+    window
+        .firstResponder()
+        .and_then(|responder| responder.downcast::<NSView>().ok())
+        .is_some_and(|view| view.isDescendantOf(&web))
+}
+
 /// The strip the application keeps over a view: a subview of the pane of its own class.
 fn strip_view(pane: &TerminalPane) -> Option<Retained<NSView>> {
     pane.subviews().iter().find(|view| {
@@ -438,7 +463,13 @@ fn press(window: &NSWindow, sheet: &NSWindow, title: &str) {
         .unwrap_or_else(|| panic!("the sheet has no {title:?} button"));
     // SAFETY: a button of the sheet, clicked on the main thread; no sender is named.
     unsafe { button.performClick(None) };
-    until("the sheet to end", || window.attachedSheet().is_none());
+    // Ended: the window has no sheet, or another one, which a question that waits behind this
+    // one opens the moment it is gone.
+    until("the sheet to end", || {
+        window
+            .attachedSheet()
+            .is_none_or(|current| !std::ptr::eq(&*current, sheet))
+    });
 }
 
 fn scratch() -> PathBuf {
@@ -465,25 +496,16 @@ fn main() {
     }
 }
 
-fn run(dir: &Path) {
-    let mtm = MainThreadMarker::new().expect("a harness-less test runs on the main thread");
-    let app = NSApplication::sharedApplication(mtm);
-    app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
-
-    let frame_rect = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(640.0, 400.0));
-    // SAFETY: with `defer` false the window exists at once; the `Retained` is its owner.
-    let window = unsafe {
-        NSWindow::initWithContentRect_styleMask_backing_defer(
-            NSWindow::alloc(mtm),
-            frame_rect,
-            NSWindowStyleMask::Borderless,
-            NSBackingStoreType::Buffered,
-            false,
-        )
-    };
-    // SAFETY: only changes who owns the window; the `Retained` above does.
-    unsafe { window.setReleasedWhenClosed(false) };
-
+/// A pane in `window` whose shell is a cable between its tty and two files in `dir`, and the
+/// program's side of the files. The pane is `id` to its host.
+fn open_pane(
+    mtm: MainThreadMarker,
+    window: &NSWindow,
+    frame_rect: NSRect,
+    dir: &Path,
+    id: u64,
+) -> (Retained<TerminalPane>, Program) {
+    fs::create_dir_all(dir.join("zdot")).expect("the pane's folder");
     let identity = Rc::new(Identity {
         app_name: "pencere-test".to_owned(),
         helper: None,
@@ -493,7 +515,7 @@ fn run(dir: &Path) {
     });
     let mut config = embed::Config::new(
         mtm,
-        PANE,
+        id,
         Rc::new(Quiet::default()),
         identity,
         Settings::default(),
@@ -514,7 +536,7 @@ fn run(dir: &Path) {
 
     let input = dir.join("in");
     fs::write(&input, b"").expect("the input file");
-    let mut program = Program {
+    let program = Program {
         output: dir.join("out"),
         input,
         next: 1,
@@ -535,6 +557,29 @@ fn run(dir: &Path) {
     until("the program to be ready", || dir.join("ready").exists());
     // A moment for `stty` to have been applied before the first frame is heard.
     spin(0.3);
+    (pane, program)
+}
+
+fn run(dir: &Path) {
+    let mtm = MainThreadMarker::new().expect("a harness-less test runs on the main thread");
+    let app = NSApplication::sharedApplication(mtm);
+    app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+
+    let frame_rect = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(640.0, 400.0));
+    // SAFETY: with `defer` false the window exists at once; the `Retained` is its owner.
+    let window = unsafe {
+        NSWindow::initWithContentRect_styleMask_backing_defer(
+            NSWindow::alloc(mtm),
+            frame_rect,
+            NSWindowStyleMask::Borderless,
+            NSBackingStoreType::Buffered,
+            false,
+        )
+    };
+    // SAFETY: only changes who owns the window; the `Retained` above does.
+    unsafe { window.setReleasedWhenClosed(false) };
+
+    let (pane, mut program) = open_pane(mtm, &window, frame_rect, dir, PANE);
 
     // The view is for the alternate screen (§6.5).
     program.say(&format!("{ESC}[?1049h"));
@@ -575,6 +620,20 @@ fn run(dir: &Path) {
     let strip = strip_view(&pane).expect("the strip is a subview of the pane");
     let (area, bounds) = (web.frame(), pane.bounds());
     assert_eq!(strip.frame().size.height, view_strip::HEIGHT);
+    // It says what the program calls the tool and itself, in the words the program gave
+    // (`tools/list`'s title, `serverInfo`'s), and not the tool's name and the process's.
+    let words: Vec<String> = descendants(strip.clone())
+        .iter()
+        .filter_map(|view| {
+            view.downcast_ref::<NSTextField>()
+                .map(|field| field.stringValue().to_string())
+        })
+        .collect();
+    assert!(words.contains(&"Show things".to_owned()), "{words:?}");
+    assert!(
+        words.contains(&"Pencere Test · in this pane".to_owned()),
+        "{words:?}"
+    );
     assert_eq!(
         strip.frame().origin.y + strip.frame().size.height,
         bounds.size.height
@@ -583,27 +642,38 @@ fn run(dir: &Path) {
     assert_eq!(area.size.height, bounds.size.height - view_strip::HEIGHT);
     assert_eq!(area.size.width, bounds.size.width);
 
-    // The picture a tab's card shows of this pane is the view's own (the terminal's still
-    // path is not what a pane under a view gives): asked for by the first call and given by
-    // one a turn of the run loop later, in the tile's shape — the page fills the tile and
-    // what spills over is cut.
+    // The picture a tab's card shows of this pane is the view's own (not the terminal's under
+    // it). A card that opens on a view has one at once: the view took its first when it
+    // loaded, the page's own shape (the pane less the strip) and no wider than a tile needs
+    // — not the tile's, and not the terminal's (whose shape is the tile's), which is what a
+    // card would get if the view had none. The call asked for the tile's own, which a turn of
+    // the run loop later is what the card is given: the page fills the tile and what spills
+    // over is cut.
     let tile = (200.0, 120.0);
+    let shape_of = |image: &CGImage| {
+        let (width, height) = (CGImage::width(Some(image)), CGImage::height(Some(image)));
+        assert!(width > 0 && height > 0, "a picture with something in it");
+        width as f64 / height as f64
+    };
+    let first = pane
+        .snapshot(tile, 2.0)
+        .expect("a card that opens on a view has a picture to show");
+    let page = pane.bounds().size;
     assert!(
-        pane.snapshot(tile, 2.0).is_none(),
-        "the first call asks, there is nothing yet"
+        (shape_of(&first) - page.width / (page.height - view_strip::HEIGHT)).abs() < 0.02,
+        "the view's first picture is the page's shape, not the tile's"
     );
-    let mut card = None;
-    until("the web view's picture for the card", || {
-        card = pane.snapshot(tile, 2.0);
-        card.is_some()
+    let wanted = tile.0 / tile.1;
+    until("the web view's picture cut to the tile", || {
+        pane.snapshot(tile, 2.0)
+            .is_some_and(|card| (shape_of(&card) - wanted).abs() < 0.05)
     });
-    let card = card.expect("a picture");
-    let (width, height) = (CGImage::width(Some(&card)), CGImage::height(Some(&card)));
-    assert!(width > 0 && height > 0, "a picture with something in it");
-    let (shape, wanted) = (width as f64 / height as f64, tile.0 / tile.1);
+    // The card lets go of its pictures; the next one that opens is not empty either.
+    pane.release_snapshot();
     assert!(
-        (shape - wanted).abs() < 0.05,
-        "the tile's shape: {width}x{height}"
+        pane.snapshot(tile, 2.0).is_some(),
+        "a card is never given an empty tile: the pane's terminal stands in until the view's \
+         picture comes"
     );
     pane.release_snapshot();
 
@@ -693,8 +763,8 @@ fn run(dir: &Path) {
     for needle in [
         "Allow this view to reach other sites?",
         "Connect to\n• https://api.example.com",
-        "of its tool “show”",
-        "on this Mac opened a view",
+        "of its tool “Show things”",
+        "“Pencere Test” on this Mac opened a view",
         "pencere-test keeps your answer until it quits.",
     ] {
         assert!(text.contains(needle), "{needle:?} is not in:\n{text}");
@@ -799,6 +869,111 @@ fn run(dir: &Path) {
     program.wait_for("\"link\":\"denied\"");
     program.bye(&token);
     until("the link view to go", || !covered(&pane));
+
+    // The program closes its view and keeps running (`dismiss`), and opens the tool again: the
+    // pane is the terminal's between, the host still has every file of the bundle, so the second
+    // open sends none, and the person is not asked again for what they have answered.
+    let token = program.hello();
+    program.open(&token, Some(&files));
+    program.wait_for("pencere;need");
+    program.start_up(None);
+    watch_it_start(&pane, &mut program);
+    program.send("dismiss", &format!("{{\"token\":\"{token}\"}}"));
+    let closed = program.wait_for("pencere;closed");
+    assert!(closed.contains("\"reason\":\"program\""), "{closed}");
+    until("the dismissed view to go", || !covered(&pane));
+    let token = program.hello();
+    program.open(&token, Some(&files));
+    let missing = program.wait_for("pencere;need");
+    assert!(
+        missing.ends_with("{\"missing\":[]}"),
+        "the second open after a dismiss sends no file: {missing}"
+    );
+    program.start_up(None);
+    watch_it_start(&pane, &mut program);
+    assert!(window.attachedSheet().is_none(), "nothing is asked again");
+    program.bye(&token);
+    until("the reopened view to go", || !covered(&pane));
+
+    // The pane's view started again where the screen came back without its messages (a
+    // handover, a reconnection): the pane that is the user's has the keyboard in the new view
+    // as it had in the first, and a keyboard that finds its way into the terminal under the
+    // view goes back to the view when the pane is the user's again.
+    assert!(pane.focus(), "the keyboard is in the pane's terminal");
+    assert!(!holds_keyboard(&window, &pane));
+    pane.session().expect("a session").restart_view();
+    let offer = program.wait_for("pencere;welcome");
+    assert!(offer.contains("\"restart\":true"), "{offer}");
+    let token = offer
+        .split("\"token\":\"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .expect("a token in the restart")
+        .to_owned();
+    program.open(&token, Some(&files));
+    program.start_up(None);
+    watch_it_start(&pane, &mut program);
+    assert!(
+        holds_keyboard(&window, &pane),
+        "the restarted view has the keyboard of the pane that had it"
+    );
+    let terminal = terminal_view(&pane).expect("the terminal is a subview of the pane");
+    assert!(window.makeFirstResponder(Some(&terminal)));
+    assert!(!holds_keyboard(&window, &pane));
+    pane.window_became_key();
+    assert!(
+        holds_keyboard(&window, &pane),
+        "a pane that is the user's does not keep its keyboard in the terminal under its view"
+    );
+    program.bye(&token);
+    until("the restarted view to go", || !covered(&pane));
+
+    // Two panes that open the same tool at once (a restored session) ask the same question, and
+    // the person answers it once: the answer to the first is the answer to the other, whose
+    // sheet goes with it. A pane that asks for something else is still asked.
+    let (twin, mut twin_program) = open_pane(mtm, &window, frame_rect, &dir.join("twin"), PANE + 1);
+    twin_program.say(&format!("{ESC}[?1049h"));
+    for (first_domain, second_domain) in [
+        ("https://twin.example.com", "https://twin.example.com"),
+        ("https://alpha.example.com", "https://beta.example.com"),
+    ] {
+        let same = first_domain == second_domain;
+        let first = program.hello();
+        program.open_declaring(&first, Some(&files), first_domain);
+        program.wait_for("pencere;need");
+        program.start_up(None);
+        let sheet = sheet_of(&window);
+        assert!(sheet_text(&sheet).contains(first_domain));
+        // The first pane's question is up; the second pane asks while it is.
+        let second = twin_program.hello();
+        twin_program.open_declaring(&second, Some(&files), second_domain);
+        twin_program.wait_for("pencere;need");
+        twin_program.start_up(None);
+        spin(0.5);
+        assert!(
+            !covered(&twin),
+            "the second pane's view waits for its answer"
+        );
+        press(&window, &sheet, "Allow");
+        watch_it_start(&pane, &mut program);
+        if same {
+            watch_it_start(&twin, &mut twin_program);
+            spin(0.5);
+            assert!(
+                window.attachedSheet().is_none(),
+                "the same question is not asked twice"
+            );
+        } else {
+            let sheet = sheet_of(&window);
+            assert!(sheet_text(&sheet).contains(second_domain));
+            press(&window, &sheet, "Allow");
+            watch_it_start(&twin, &mut twin_program);
+        }
+        program.bye(&first);
+        twin_program.bye(&second);
+        until("both views to go", || !covered(&pane) && !covered(&twin));
+    }
+    twin.close();
 
     pane.close();
     println!("pencere: ok");

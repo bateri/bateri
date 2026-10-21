@@ -616,12 +616,53 @@ fn a_page_or_a_tile_with_nothing_in_it_has_no_picture() {
 }
 
 fn picture() -> objc2_core_foundation::CFRetained<objc2_core_graphics::CGImage> {
+    picture_of(2, 2)
+}
+
+fn picture_of(
+    width: u32,
+    height: u32,
+) -> objc2_core_foundation::CFRetained<objc2_core_graphics::CGImage> {
     crate::snapshot::image(&bt_gpu::Snapshot {
-        width: 2,
-        height: 2,
-        rgba: vec![255; 16],
+        width,
+        height,
+        rgba: vec![255; (width * height * 4) as usize],
     })
     .expect("a picture")
+}
+
+/// The view's first picture, taken when it loaded, is what a card finds the first time it
+/// asks: the tile is not empty while the card's own request is on its way. Once a picture cut
+/// to the tile has come, a first one that is late does not take its place, and one that was
+/// taken before the card let go of its pictures is not kept.
+#[test]
+fn the_first_picture_is_there_for_the_first_card_and_gives_way_to_the_cards_own() {
+    use objc2_core_graphics::CGImage;
+    use std::time::Instant;
+    let now = Instant::now();
+    let shared = Shared::default();
+    // The view loaded and its picture came before any card asked (generation 0 is a view's
+    // own first).
+    Still::first_came(&shared, 0, Some(picture_of(8, 4)));
+    let (image, ask) = Still::call(&shared, now);
+    let image = image.expect("the first call has the first picture");
+    assert_eq!(CGImage::width(Some(&image)), 8);
+    let generation = ask.expect("and still asks for the tile's own");
+    // The tile's own comes and replaces it.
+    Still::answered(&shared, generation, Some(picture_of(4, 4)));
+    let (image, _) = Still::call(&shared, now + std::time::Duration::from_millis(500));
+    assert_eq!(CGImage::width(Some(&image.expect("a picture"))), 4);
+    // A first picture that is late does not take the tile's place.
+    Still::first_came(&shared, generation, Some(picture_of(8, 4)));
+    let (image, _) = Still::call(&shared, now + std::time::Duration::from_millis(600));
+    assert_eq!(CGImage::width(Some(&image.expect("a picture"))), 4);
+    // The card lets go: what was taken before is not kept after, and a view that gave nothing
+    // leaves the card with nothing (the pane shows its terminal then).
+    Still::release(&shared);
+    Still::first_came(&shared, generation, Some(picture_of(8, 4)));
+    assert!(Still::call(&shared, now).0.is_none());
+    Still::first_came(&shared, generation + 1, None);
+    assert!(Still::call(&shared, now).0.is_none());
 }
 
 /// The card asks every half second: a call asks for the next picture and gives the last one
