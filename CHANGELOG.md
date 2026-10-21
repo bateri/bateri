@@ -48,14 +48,23 @@ of every installed copy. A version without a section is not released.
   The program can also close its view and keep running. The view has the keyboard but
   for your shortcuts —
   ⌘T, ⌘D, ⌘W, ⌘P and the rest, as you set them in `[keys]` — and the commands that
-  work on the terminal's text, which are grey meanwhile; ⌘C, ⌘V and ⌘F are the
-  view's. The view reaches nothing on its own: a program that wants other sites,
+  work on the terminal's text, which are grey meanwhile; ⌘C, ⌘V, ⌘F and ⌘Z are the
+  view's while the keyboard is in it (⌘Z undoes a pane move again wherever it is not). The
+  view reaches nothing on its own: a program that wants other sites,
   the camera or the clipboard is asked about in a sheet on the pane (the answer is
-  kept until bateri quits, per program and tool, and asked once when several panes
-  of a restored window open the same tool), and a link the view opens is
-  asked about and opens in this Mac's browser. The tab's card shows what the view
+  kept until bateri quits, per program and tool — for a `node` or `python` program the
+  script it runs, so another script of the same interpreter is asked again, and a program
+  bateri cannot tell from another, such as a plain `ssh` or a terminal a server keeps, is
+  asked every time — and asked once when several panes of a restored window open the same
+  tool), and a link the view opens is
+  asked about and opens in this Mac's browser; the question goes when its view does. A
+  request the view passes on to the program that goes unanswered for a minute fails for
+  the view. The tab's card shows what the view
   shows. After an update, or when the connection to a server's terminal comes back,
-  the program is told to open its view again and it comes back in the same pane.
+  the program is told to open its view again and it comes back in the same pane; one that
+  does not within half a minute loses the token it was offered. Words that reach
+  the pane while the shell itself holds the terminal (its prompt is being drawn) are not
+  answered into the shell's input, on macOS too.
 
 - **A terminal on a server shows that it is waiting when the connection is
   gone.** The pane keeps its last screen, veiled, with no caret, and the line at

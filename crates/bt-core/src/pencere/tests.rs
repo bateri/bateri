@@ -128,16 +128,12 @@ impl Rig {
     fn build(observer: Option<Observer>) -> (Arc<Self>, Arc<CountingWake>) {
         let wake = Arc::new(CountingWake::default());
         let desk = observer.map(|observer| {
-            Desk::new(
-                ViewOptions::new("bateri-test", "0.0.0"),
-                Theme::BATERI,
-                Size {
-                    width: 800,
-                    height: 600,
-                },
-                wake.clone(),
-                observer,
-            )
+            let mut options = ViewOptions::new("bateri-test", "0.0.0");
+            options.size = Size {
+                width: 800,
+                height: 600,
+            };
+            Desk::new(options, Theme::BATERI, wake.clone(), observer)
         });
         let rig = Arc::new(Self {
             hub: Hub::new(),
@@ -863,7 +859,7 @@ fn a_local_pane_is_seen_by_its_tty_and_a_remote_pane_by_the_shells_marks_alone()
     });
     // Local: the foreground group is the shell's own, the tty echoes.
     assert_eq!(
-        observed(false, false, tty, 500),
+        observed(false, false, tty, Some(500)),
         Observed {
             prompt_editing: false,
             alternate_screen: None,
@@ -873,13 +869,13 @@ fn a_local_pane_is_seen_by_its_tty_and_a_remote_pane_by_the_shells_marks_alone()
     );
     // A program's own group.
     assert_eq!(
-        observed(false, false, tty, 400).shell_in_foreground,
+        observed(false, false, tty, Some(400)).shell_in_foreground,
         Some(false)
     );
     // The prompt is the shell's mark and goes through whatever the tty is.
-    assert!(observed(true, false, tty, 400).prompt_editing);
+    assert!(observed(true, false, tty, Some(400)).prompt_editing);
     // The tty is `ssh`'s, not the program's: neither check is made.
-    let remote = observed(true, true, tty, 400);
+    let remote = observed(true, true, tty, Some(400));
     assert_eq!(
         (remote.shell_in_foreground, remote.tty_canonical_or_echo),
         (None, None)
@@ -889,7 +885,7 @@ fn a_local_pane_is_seen_by_its_tty_and_a_remote_pane_by_the_shells_marks_alone()
         "the remote shell's mark still stands"
     );
     // A tty that could not be read, or has no foreground group: not checked.
-    let none = observed(false, false, None, 400);
+    let none = observed(false, false, None, Some(400));
     assert_eq!(
         (none.shell_in_foreground, none.tty_canonical_or_echo),
         (None, None)
@@ -898,10 +894,63 @@ fn a_local_pane_is_seen_by_its_tty_and_a_remote_pane_by_the_shells_marks_alone()
         foreground: None,
         canonical_or_echo: false,
     });
-    let seen = observed(false, false, ungrouped, 400);
+    let seen = observed(false, false, ungrouped, Some(400));
     assert_eq!(
         (seen.shell_in_foreground, seen.tty_canonical_or_echo),
         (None, Some(false))
+    );
+}
+
+#[test]
+fn a_shell_that_cannot_be_found_is_not_a_shell_out_of_the_foreground() {
+    // `login(1)` has not forked its shell, or the table cannot be read: whether the shell
+    // is in front is not known. "No" would answer a `hello` into a line editor.
+    let tty = Some(Tty {
+        foreground: Some(500),
+        canonical_or_echo: false,
+    });
+    assert_eq!(observed(false, false, tty, None).shell_in_foreground, None);
+}
+
+#[test]
+fn the_group_the_shell_leads_is_the_childs_own_only_where_the_child_is_the_shell() {
+    // Where the child is the shell: its pid is its group's.
+    assert_eq!(Shell::new(None, 700).group(), Some(700));
+
+    // Where the child is `login(1)` (macOS): the shell is its child, in a group of its
+    // own, and the terminal's foreground group is compared with that, not with `login`'s
+    // pid — which is what the check compared with until the child was named a shell.
+    let asked = Arc::new(AtomicUsize::new(0));
+    let first_nothing = Arc::clone(&asked);
+    let login = Shell::new(
+        Some(ShellGroup::new(move |child| {
+            assert_eq!(child, 700, "asked of the pane's child");
+            // The first time the shell is not forked yet.
+            (first_nothing.fetch_add(1, Ordering::AcqRel) > 0).then_some(701)
+        })),
+        700,
+    );
+    assert_eq!(login.group(), None, "not forked yet: not known");
+    assert_eq!(login.group(), Some(701));
+    assert_eq!(login.group(), Some(701));
+    assert_eq!(
+        asked.load(Ordering::Acquire),
+        2,
+        "found once, then remembered: the table is not read on every frame"
+    );
+    // A shell in the foreground of the terminal is seen as one.
+    let tty = Some(Tty {
+        foreground: Some(701),
+        canonical_or_echo: false,
+    });
+    assert_eq!(
+        observed(false, false, tty, login.group()).shell_in_foreground,
+        Some(true)
+    );
+    assert_eq!(
+        observed(false, false, tty, Some(700)).shell_in_foreground,
+        Some(false),
+        "the child's own pid names the wrong group, and said the shell was not in front"
     );
 }
 
@@ -1025,4 +1074,146 @@ fn clones_of_a_shelf_are_one_store() {
     assert!(two.contains(&digest));
     assert_eq!(two.get(&digest).as_deref(), Some(&b"shared"[..]));
     assert_eq!(format!("{one:?}"), "Shelf(..)");
+}
+
+#[test]
+fn the_systems_random_bytes_are_one_helper_for_the_token_and_the_views_origin() {
+    let (one, two) = (
+        system_random().expect("bytes"),
+        system_random().expect("bytes"),
+    );
+    assert_ne!(one, two);
+    assert_ne!(one, [0u8; 16]);
+}
+
+// ---- the area the view is told ---------------------------------------------
+
+/// The view's `ui/initialize`, which comes first.
+const INITIALIZE: &str = r#"{"jsonrpc":"2.0","id":1,"method":"ui/initialize","params":{"protocolVersion":"2025-11-21","appCapabilities":{},"appInfo":{"name":"t","version":"0"}}}"#;
+
+/// What the view is told its container is: the host context of its `ui/initialize`
+/// answer, from a started view.
+fn container_of(pane: &mut Pane) -> String {
+    let desk = pane.rig.desk.as_ref().expect("a desk");
+    desk.take_views();
+    desk.apply(|_| {}, |conversation| conversation.view_message(INITIALIZE));
+    let told = desk.take_views();
+    let Some(Action::ToView(answer)) = told.first() else {
+        panic!("an answer for the view, not {told:?}");
+    };
+    answer.clone()
+}
+
+#[test]
+fn the_view_is_told_the_area_the_application_gave_and_not_a_guess_in_another_unit() {
+    let (rig, _, _) = Rig::new(true);
+    let mut pane = Pane::new(rig);
+    open_a_view(&mut pane);
+    let answer = container_of(&mut pane);
+    // The rig's options say 800 × 600 points. The grid's device pixels, which this crate
+    // used to multiply out, are twice that on a Retina display.
+    assert!(answer.contains("\"width\":800"), "{answer}");
+    assert!(answer.contains("\"height\":600"), "{answer}");
+}
+
+// ---- the requests a view has out ------------------------------------------
+
+#[test]
+fn a_message_of_the_view_that_goes_to_the_program_says_so() {
+    let (rig, _, _) = Rig::new(true);
+    let mut pane = Pane::new(rig);
+    open_a_view(&mut pane);
+    let desk = pane.rig.desk.as_ref().expect("a desk");
+    desk.take_views();
+    let input = Arc::clone(&pane.rig.input);
+    let write = |bytes: Vec<u8>| lock(&input).extend_from_slice(&bytes);
+    // The view's start-up and a `ping` are the host's own to answer.
+    assert!(!desk.view_message(INITIALIZE, write));
+    assert!(!desk.view_message(r#"{"jsonrpc":"2.0","id":7,"method":"ping"}"#, write));
+    // A request for a tool is the program's: it is out until the program answers.
+    assert!(desk.view_message(
+        r#"{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"list_containers","arguments":{}}}"#,
+        write,
+    ));
+    let sent = decoded(&mem::take(&mut *lock(&input)));
+    assert!(
+        sent.iter().any(|message| is_request(message, "tools/call")),
+        "{sent:?}"
+    );
+    // Given up on, the view hears that it failed.
+    desk.take_views();
+    desk.apply(|_| {}, Conversing::requests_timed_out);
+    let told = desk.take_views();
+    assert!(
+        told.iter().any(|action| matches!(
+            action,
+            Action::ToView(text) if text.contains("did not answer in time")
+        )),
+        "{told:?}"
+    );
+}
+
+// ---- the shelf ------------------------------------------------------------
+
+/// A store whose `insert` waits for the test, as a write of 8 MiB does.
+struct Slow {
+    inside: std::sync::mpsc::Sender<()>,
+    release: Mutex<std::sync::mpsc::Receiver<()>>,
+    other: Arc<[u8]>,
+    other_digest: Digest,
+}
+
+impl Shared for Slow {
+    fn contains(&self, digest: &Digest) -> bool {
+        *digest == self.other_digest
+    }
+
+    fn insert(&self, _file: Verified) {
+        self.inside.send(()).expect("the test is there");
+        lock(&self.release).recv().expect("released");
+    }
+
+    fn get(&self, digest: &Digest) -> Option<Arc<[u8]>> {
+        (*digest == self.other_digest).then(|| Arc::clone(&self.other))
+    }
+}
+
+#[test]
+fn a_file_being_stored_does_not_make_a_pane_wait_for_another_file() {
+    let (inside, entered) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel();
+    let other = Verified::from_bytes(b"the web view is waiting for this".to_vec());
+    let other_digest = *other.digest();
+    let shelf = Shelf::shared(Slow {
+        inside,
+        release: Mutex::new(released),
+        other: Arc::from(&b"the web view is waiting for this"[..]),
+        other_digest,
+    });
+    let mut writer = shelf.clone();
+    let writing = std::thread::spawn(move || {
+        writer.insert(Verified::from_bytes(b"a big file".to_vec()));
+    });
+    entered
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("the write began");
+    // The write is in progress. A read of another file is served all the same: one lock
+    // around the store would hold it until the write was done.
+    let (answered, heard) = std::sync::mpsc::channel();
+    let reading = std::thread::spawn(move || {
+        answered
+            .send((shelf.contains(&other_digest), shelf.get(&other_digest)))
+            .expect("the test is there");
+    });
+    let (there, bytes) = heard
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .expect("a read does not wait for a write");
+    assert!(there);
+    assert_eq!(
+        bytes.as_deref(),
+        Some(&b"the web view is waiting for this"[..])
+    );
+    release.send(()).expect("the writer waits");
+    writing.join().expect("the writer ends");
+    reading.join().expect("the reader ends");
 }

@@ -9,12 +9,13 @@ use bt_shell_common::view_strip;
 use objc2_app_kit::NSEventModifierFlags;
 use objc2_foundation::{NSPoint, NSRect, NSSize};
 
+use super::files::Pending;
 use super::serve::{
     self, DOCUMENT_PATH, Document, Page, Route, SANDBOX, Served, css_color, deliver_script,
     ground_script, js_string, route,
 };
 use super::still::{self, Capture, PATIENCE, Shared, Still};
-use super::wait::{OPENING, TEARDOWN, Waits};
+use super::wait::{OFFERED, OPENING, REQUESTS, TEARDOWN, Waits};
 use super::{is_interrupt, modifiers_of, strip_area, view_area};
 
 const INSTANCE: &str = "v-0123456789abcdef0123456789abcdef";
@@ -432,7 +433,7 @@ fn control_c_alone_is_the_interrupt() {
 #[test]
 fn a_wait_is_set_once_for_the_state_that_waits_and_for_no_other() {
     let mut waits = Waits::default();
-    for quiet in [State::Idle, State::Offered, State::Open, State::Ended] {
+    for quiet in [State::Idle, State::Open, State::Ended] {
         assert_eq!(waits.observe(Some(quiet)), None, "{quiet:?}");
     }
     assert_eq!(waits.observe(None), None, "a pane that hosts no views");
@@ -491,6 +492,80 @@ fn the_deadlines_are_policy_values_in_the_order_their_reasons_give() {
         "files cross a link; a view that answers does not"
     );
     assert!(TEARDOWN >= Duration::from_secs(1));
+    assert!(
+        OFFERED > TEARDOWN,
+        "a program opens again at once, or is busy"
+    );
+    assert!(REQUESTS >= OPENING, "a tool call is not a start-up");
+}
+
+#[test]
+fn a_token_nobody_took_up_is_forgotten_after_a_time() {
+    // After a restart the program is offered a new token, and the conversation is `Offered`:
+    // it waits, and the token is gone when the time is up. Before, no deadline ran and
+    // a program that never opened again kept an unasked token valid for as long as the pane.
+    let mut waits = Waits::default();
+    let (offered, delay) = waits.observe(Some(State::Offered)).expect("an offer waits");
+    assert_eq!(delay, OFFERED);
+    assert_eq!(waits.observe(Some(State::Offered)), None, "once");
+    assert!(waits.expired(offered));
+}
+
+#[test]
+fn an_offer_that_ran_out_is_not_waited_for_again_until_the_conversation_has_been_elsewhere() {
+    let mut waits = Waits::default();
+    let (first, _) = waits.observe(Some(State::Offered)).expect("set");
+    assert!(waits.expired(first));
+    // A token for a `hello` is the same state, and the end of its wait changed nothing: a wait
+    // set again at every look would run for as long as the pane sits there.
+    assert_eq!(waits.observe(Some(State::Offered)), None);
+    assert_eq!(waits.observe(Some(State::Offered)), None);
+    // The program opened (or was forgotten): another state, and the next offer waits again.
+    assert_eq!(
+        waits.observe(Some(State::Opening)).map(|(_, d)| d),
+        Some(OPENING)
+    );
+    let (second, _) = waits
+        .observe(Some(State::Offered))
+        .expect("a new offer waits");
+    assert_ne!(first, second);
+    assert!(waits.expired(second));
+    // A restart offer that follows one that ran out is a new offer even where nothing was
+    // observed between.
+    assert_eq!(waits.observe(Some(State::Offered)), None);
+    waits.restart_offered();
+    assert!(waits.observe(Some(State::Offered)).is_some());
+}
+
+#[test]
+fn the_requests_of_a_view_are_waited_for_once_for_a_burst() {
+    let mut waits = Waits::default();
+    let (first, delay) = waits.requests_out().expect("a request waits");
+    assert_eq!(delay, REQUESTS);
+    assert_eq!(
+        waits.requests_out(),
+        None,
+        "the burst's wait is the first's"
+    );
+    assert!(waits.requests_expired(first));
+    assert!(!waits.requests_expired(first), "once");
+    // The next request sets a wait of its own.
+    let (second, _) = waits.requests_out().expect("again");
+    assert_ne!(first, second);
+    // The view went: the wait that is set wakes for nothing.
+    waits.requests_over();
+    assert!(!waits.requests_expired(second));
+    let (third, _) = waits.requests_out().expect("the next view's");
+    assert!(
+        !waits.requests_expired(second),
+        "and the old number stays nothing"
+    );
+    assert!(waits.requests_expired(third));
+    // The wait of a state and the wait of the requests are two: neither's number is the other's.
+    let (opening, _) = waits.observe(Some(State::Opening)).expect("set");
+    let (request, _) = waits.requests_out().expect("set");
+    assert!(waits.expired(opening));
+    assert!(waits.requests_expired(request));
 }
 
 // ---- the strip and the view's area ------------------------------------------
@@ -718,4 +793,121 @@ fn a_picture_that_comes_after_the_card_let_go_is_not_kept() {
         Still::call(&shared, now).0.is_none(),
         "and the late one is not kept"
     );
+}
+
+// ---- the files that are read off the main thread ------------------------------
+
+#[test]
+fn only_the_files_of_a_bundle_are_read_off_the_main_thread() {
+    let page = bundle_page();
+    assert_eq!(
+        page.file_of(&url("index.html")).as_deref(),
+        Some("index.html")
+    );
+    assert_eq!(
+        page.file_of(&url("app/main.js")).as_deref(),
+        Some("app/main.js")
+    );
+    // The shell page, a path the page refuses and another view's origin are answered from
+    // memory: nothing waits for a file.
+    assert_eq!(page.file_of(&Page::shell_url()), None);
+    assert_eq!(page.file_of(&url("../etc/passwd")), None);
+    assert_eq!(
+        page.file_of("bateri-view://v-ffffffffffffffffffffffffffffffff/index.html"),
+        None
+    );
+    // The one document a program handed is held by the page.
+    let document = Page::new(
+        INSTANCE.to_owned(),
+        Document::Html(Arc::from(&b"<html></html>"[..])),
+        POLICY.to_owned(),
+        "",
+        "#101010",
+    );
+    assert_eq!(document.file_of(&url(DOCUMENT_PATH)), None);
+    // And a reply that is not a file's never asks the file service.
+    let asked = std::cell::Cell::new(false);
+    for text in [Page::shell_url(), url("../x")] {
+        page.reply(&text, &|_| {
+            asked.set(true);
+            None
+        });
+    }
+    document.reply(&url(DOCUMENT_PATH), &|_| {
+        asked.set(true);
+        None
+    });
+    assert!(!asked.get());
+}
+
+#[test]
+fn a_task_is_answered_when_its_file_is_ready_and_only_if_it_is_still_held() {
+    let mut pending = Pending::new();
+    let (view, other) = (1usize, 2usize);
+    let kept = pending.hold(view, "kept");
+    let stopped = pending.hold(view, "stopped");
+    let theirs = pending.hold(other, "theirs");
+    // The web view stopped one before its file came back.
+    assert!(pending.stop(|task| *task == "stopped"));
+    assert!(!pending.stop(|task| *task == "stopped"), "once");
+    assert_eq!(
+        pending.finish(stopped),
+        None,
+        "a stopped task is not answered"
+    );
+    assert_eq!(pending.finish(kept), Some("kept"));
+    assert_eq!(pending.finish(kept), None, "and answered once");
+    // A view that closes takes its tasks with it and no one else's.
+    let late = pending.hold(view, "late");
+    pending.forget(view);
+    assert_eq!(pending.finish(late), None);
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending.finish(theirs), Some("theirs"));
+}
+
+#[test]
+fn the_scheme_handler_reads_a_file_off_the_main_thread_and_answers_on_it() {
+    // The call of the file service (`Session::serve_view_file`: it waits for the conversation
+    // and reads and checks up to 8 MiB) is made on the file queue, and the task is
+    // answered back on the main queue from the reply that came. A call in the handler's own
+    // body would be the main thread waiting.
+    let source = include_str!("../pencere_view.rs");
+    let at = |text: &str| source.find(text).unwrap_or_else(|| panic!("`{text}`"));
+    let answer = &source[at("    fn answer(")..at("    fn respond(")];
+    assert!(
+        !answer.contains("serve_view_file"),
+        "the handler's body does not call the file service"
+    );
+    assert!(
+        answer.matches(".reply(").count() == 1 && answer.contains("&|_| None"),
+        "the one reply the handler's body makes is the one that asks for no file"
+    );
+    assert!(answer.contains("file_of("));
+    let queued = &answer[answer.find("files_queue()").expect("the file queue")..];
+    let (on_queue, back) = queued
+        .split_once("DispatchQueue::main()")
+        .expect("and back on the main queue");
+    assert!(
+        on_queue.contains("read_file_reply("),
+        "the file is read on the queue"
+    );
+    assert!(
+        back.contains("respond("),
+        "and the task is answered on the main queue"
+    );
+    // The one call is the queue's reader.
+    let reader = &source[at("fn read_file_reply(")..];
+    assert!(reader.contains("serve_view_file"));
+    let calls = source
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//") && line.contains("serve_view_file"))
+        .count();
+    assert_eq!(calls, 1, "the file service is called from one place");
+}
+
+#[test]
+fn the_view_asks_the_systems_random_bytes_of_the_core_and_not_of_libc() {
+    let source = include_str!("../pencere_view.rs");
+    assert!(!source.contains("getentropy"));
+    assert!(source.contains("system_random()"));
 }

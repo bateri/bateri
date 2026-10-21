@@ -42,7 +42,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
-use bt_core::pencere::{Action, Size as ViewSize, ViewOptions, font_stack};
+use bt_core::pencere::{Action, ShellGroup, ViewOptions, font_stack};
 use bt_core::{
     BlockHandle, BlockInfo, Chord, CommandId, CommandPhase, ContentEdge, FontOptions, PaneUuid,
     ProgramBar, RemoteFiles, RemoteTarget, SearchCover, SearchDirection, SearchReport,
@@ -1854,12 +1854,15 @@ impl Wake for ShellWake {
     }
 
     fn view_changed(&self) {
-        // The reader thread (or the thread of the call the news answers), no
-        // `Term` lock and no desk lock held: a program's view has something for
-        // the pane, or a wait that only the pane has a clock for. The pane takes
-        // everything on the next main-queue turn — no frame; at most one job
-        // (`search_changed`'s pattern). The flag goes down **before** the take,
-        // so news that comes while the pane acts on it is another job.
+        // The reader thread (or the thread of the call the news answers), and the
+        // `Term` lock may be held — a command's end or the child's exit that tore
+        // the view down says so under it — while the desk's own locks are not: a
+        // program's view has something for the pane, or a wait that only the pane
+        // has a clock for. Nothing is taken here (the three prohibitions of
+        // `Wake`); the pane takes everything on the next main-queue turn — no
+        // frame; at most one job (`search_changed`'s pattern). The flag goes down
+        // **before** the take, so news that comes while the pane acts on it is
+        // another job.
         if self.views_pending.swap(true, Ordering::AcqRel) {
             return;
         }
@@ -3828,7 +3831,7 @@ impl TerminalPane {
             // shown, in every pane but a timed run's: there the program is the
             // gate's own script, the pane's reader hears no frame and nothing is
             // written to it.
-            views: self.view_options(),
+            views: self.view_options(shell_parent),
         };
         let wake = Arc::clone(&self.ivars().wake) as Arc<dyn Wake>;
         // The update's handover: the running program is carried
@@ -3879,7 +3882,7 @@ impl TerminalPane {
         // conversation answers only where a program is in front of the pane (§6.2), and a pane
         // that had no view gets nothing written.
         if carried_on && view_was_open {
-            session.restart_view();
+            self.restart_view_offered(&session);
         }
         if nudge {
             nudge_program(&session);
@@ -4379,9 +4382,9 @@ impl TerminalPane {
         // (`PaneLink::comes_back`): a reconnection's failed attempts are no news.
         if before.comes_back(link)
             && self.shows_view()
-            && let Some(session) = self.session()
+            && let Some(session) = self.session().cloned()
         {
-            session.restart_view();
+            self.restart_view_offered(&session);
         }
     }
 
@@ -5674,9 +5677,12 @@ impl TerminalPane {
 impl TerminalPane {
     /// What the session is opened with to host views: the application's name and
     /// version, the process's shelf of bundle files, the font family and the
-    /// person's language and time zone. `None` in a timed run, whose program is
-    /// the gate's own script.
-    fn view_options(&self) -> Option<ViewOptions> {
+    /// person's language and time zone, the pane's area in the unit a view is told it in
+    /// (points: `0 × 0` where the pane has no layout yet), and how the shell is found
+    /// from the child (`shell_parent`, recorded where the command was chosen: `login(1)`
+    /// forks the shell on macOS, and the terminal's foreground group is the shell's, not
+    /// the child's). `None` in a timed run, whose program is the gate's own script.
+    fn view_options(&self, shell_parent: ShellParent) -> Option<ViewOptions> {
         let ivars = self.ivars();
         if ivars.run.is_some() {
             return None;
@@ -5689,6 +5695,10 @@ impl TerminalPane {
         options.font_mono = font_stack(ivars.font.borrow().family.as_deref());
         options.locale = pencere_view::locale_tag();
         options.time_zone = pencere_view::time_zone_name();
+        options.size = pencere_view::content_size(self.bounds());
+        options.shell_group = Some(ShellGroup::new(move |child| {
+            jobs::shell_group(shell_parent, child, &SystemTable)
+        }));
         Some(options)
     }
 
@@ -5766,6 +5776,7 @@ impl TerminalPane {
         bt_shell_common::view_ask::Origin {
             place,
             program,
+            identity: self.view_identity(),
             said: self
                 .view_host()
                 .and_then(|host| host.program().map(str::to_owned)),
@@ -5820,6 +5831,7 @@ impl TerminalPane {
         let Some(host) = self.ivars().pencere.take() else {
             return;
         };
+        self.view_gone();
         if host.holds_keyboard()
             && let Some(window) = self.window()
         {
@@ -5837,8 +5849,17 @@ impl TerminalPane {
     /// teardown is asked of the view and no frame comes back.
     fn drop_view(&self) {
         if let Some(host) = self.ivars().pencere.take() {
+            self.view_gone();
             host.close();
         }
+    }
+
+    /// What was the view's goes with it: the requests it had out are not waited for, and the
+    /// question it asked about a link is taken down — its answer would open a link for a view
+    /// that is not there and shut the next view's out.
+    fn view_gone(&self) {
+        self.ivars().view_waits.borrow_mut().requests_over();
+        pencere_view::ask::view_ended(self);
     }
 
     /// Sets the deadline the conversation's state calls for: one delayed block on
@@ -5851,9 +5872,15 @@ impl TerminalPane {
             .view_asking
             .deadline_state(session.view_state());
         let plan = self.ivars().view_waits.borrow_mut().observe(state);
-        let Some((number, delay)) = plan else {
-            return;
-        };
+        if let Some((number, delay)) = plan {
+            self.after_on_main(number, delay, Self::view_wait_ended);
+        }
+    }
+
+    /// One delayed block on the main queue, for the wait `number`: it finds the pane again by its
+    /// id (the pane may be gone) and calls `ended` with the number, which says whether it is
+    /// still the wait that is set.
+    fn after_on_main(&self, number: u64, delay: Duration, ended: fn(&TerminalPane, u64)) {
         let Ok(when) = DispatchTime::try_from(delay) else {
             return;
         };
@@ -5862,7 +5889,7 @@ impl TerminalPane {
             // audit: a block running on the main queue is on the main thread by definition.
             let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
             if let Some(pane) = lookup(mtm, id) {
-                pane.view_wait_ended(number);
+                ended(&pane, number);
             }
         });
     }
@@ -5880,6 +5907,45 @@ impl TerminalPane {
         self.drain_views();
     }
 
+    /// The view's message made the pane write to the program ([`Session::view_message`]): a
+    /// request is out, and the program has until the time of the wait to answer it. The first
+    /// of a burst sets the wait; the others are in it.
+    pub(crate) fn view_requests_out(&self) {
+        let plan = self.ivars().view_waits.borrow_mut().requests_out();
+        if let Some((number, delay)) = plan {
+            self.after_on_main(number, delay, Self::view_requests_ended);
+        }
+    }
+
+    /// The time for the program's answers ran out: if it is still the wait that is set, the
+    /// requests that are out fail the way MCP defines, and the view hears it at once.
+    fn view_requests_ended(&self, number: u64) {
+        let Some(session) = self.session().cloned() else {
+            return;
+        };
+        if !self
+            .ivars()
+            .view_waits
+            .borrow_mut()
+            .requests_expired(number)
+        {
+            return;
+        }
+        session.view_requests_overdue();
+        self.drain_views();
+    }
+
+    /// The program is offered a restart (an update's handover; the connection to its terminal
+    /// came back): what the screen restored, the messages a view lives on did not. The offer
+    /// is a token the program was handed unasked, so it has a time to be taken up
+    /// ([`pencere_view`]'s `wait`), and this is the one way to offer it — a call that does not
+    /// set the time leaves the token valid for as long as the pane lives.
+    fn restart_view_offered(&self, session: &Arc<Session>) {
+        session.restart_view();
+        self.ivars().view_waits.borrow_mut().restart_offered();
+        self.wait_for_view(session);
+    }
+
     /// Tells the conversation how big the view's container is: the pane's area below
     /// the strip, in CSS pixels, which are points. The same size is not told twice.
     fn sync_view_size(&self) {
@@ -5890,19 +5956,13 @@ impl TerminalPane {
             return;
         }
         // The view's area is the pane's less the application's strip.
-        let area = pencere_view::view_area(self.bounds());
-        let size = (
-            area.size.width.max(0.0).floor() as u32,
-            area.size.height.max(0.0).floor() as u32,
-        );
-        if size.0 == 0 || size.1 == 0 || size == self.ivars().view_size.get() {
+        let size = pencere_view::content_size(self.bounds());
+        let size_pair = (size.width, size.height);
+        if size.width == 0 || size.height == 0 || size_pair == self.ivars().view_size.get() {
             return;
         }
-        self.ivars().view_size.set(size);
-        session.set_view_size(ViewSize {
-            width: size.0,
-            height: size.1,
-        });
+        self.ivars().view_size.set(size_pair);
+        session.set_view_size(size);
     }
 
     /// What the strip over the view of `start` says: where the program runs
@@ -5918,6 +5978,23 @@ impl TerminalPane {
             place.as_deref(),
             view_strip::program_name(pencere_view::said_program(start), program.as_deref()),
         )
+    }
+
+    /// What tells the program in front of this pane from another that is run the same way, for
+    /// the answers the person gives about it (`bt_shell_common::view_ask::Origin::identity`):
+    /// the process table's name for it, and for `node` and `python` the script — never what the
+    /// program says of itself. `None` where it is not known: a pane that shows a terminal a
+    /// server keeps or a plain `ssh` (the process table there is `ssh`'s), and a program that
+    /// is an interpreter running no script. An answer is then not kept.
+    fn view_identity(&self) -> Option<String> {
+        if self.host().kept_terminal(self.uuid()).is_some()
+            || self.session()?.remote_target().is_some()
+        {
+            return None;
+        }
+        let parent = *self.ivars().shell_parent.get()?;
+        let child = self.session()?.child_pid();
+        identity::kept_name(parent, child, &SystemTable)
     }
 
     /// Where the program that showed the view runs (the server's name; `None` on this Mac)
@@ -6924,16 +7001,110 @@ mod tests {
         let body = &pane[at..at + pane[at..].find("nudge_program(&session);").expect("nudge")];
         assert!(body.contains("view_was_open = viewed;"));
         assert!(body.contains("carried_on && view_was_open"));
-        assert!(body.contains("session.restart_view();"));
+        assert!(body.contains("self.restart_view_offered(&session);"));
         let at = pane
             .find("pub(crate) fn set_connection(")
             .expect("set_connection");
         let body = &pane[at..at + pane[at..].find("\n    }\n").expect("its end")];
         assert!(body.contains("before.comes_back(link)"));
         assert!(body.contains("self.shows_view()"));
-        assert!(body.contains("restart_view()"));
+        assert!(body.contains("restart_view_offered("));
         // After the early return, so a retry that changes nothing restarts nothing.
-        assert!(body.find("return;").expect("the return") < body.find("restart_view()").unwrap());
+        assert!(
+            body.find("return;").expect("the return") < body.find("restart_view_offered(").unwrap()
+        );
+    }
+
+    /// The token a restart offers the program is a token it was handed unasked, and a program
+    /// that never opens its view again must not leave it valid for as long as the pane lives:
+    /// the offer has a time to be taken up (`Waits`), set where the offer is made. A call of
+    /// `restart_view` anywhere else would offer a token with no clock behind it.
+    #[test]
+    fn a_restart_is_offered_only_where_the_offer_has_its_time() {
+        let pane = include_str!("pane.rs");
+        let pane = &pane[..pane.find("#[cfg(test)]").unwrap_or(pane.len())];
+        let calls = pane
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//") && line.contains(".restart_view()"))
+            .count();
+        assert_eq!(calls, 1, "one call, in the function that sets the time");
+        let at = pane.find("fn restart_view_offered(").expect("the offer");
+        let body = &pane[at..at + pane[at..].find("\n    }\n").expect("its end")];
+        assert!(body.contains(".restart_view()"));
+        assert!(body.contains("restart_offered()") && body.contains("wait_for_view("));
+    }
+
+    /// The requests a view has out are given up when their time runs out: the bridge says when a
+    /// message of the view made the pane write to the program (`view_message` returns it), the
+    /// pane sets the wait, and when it is up the conversation fails them and the view is told at
+    /// once. `Session::view_requests_overdue` had no caller: the wait was never set. A source scan,
+    /// because the panes need a window server and the time is a minute.
+    #[test]
+    fn the_requests_a_view_has_out_are_given_up_when_their_time_runs_out() {
+        let bridge = include_str!("pencere_view.rs");
+        let at = bridge.find("fn receive(").expect("the message handler");
+        let body = &bridge[at..at + bridge[at..].find("\n        }\n").expect("its end")];
+        assert!(
+            body.contains(".view_message(") && body.contains("view_requests_out()"),
+            "a message that went to the program sets the wait"
+        );
+        let pane = include_str!("pane.rs");
+        let pane = &pane[..pane.find("#[cfg(test)]").unwrap_or(pane.len())];
+        let at = pane
+            .find("fn view_requests_ended(")
+            .expect("the wait's end");
+        let body = &pane[at..at + pane[at..].find("\n    }\n").expect("its end")];
+        assert!(body.contains("requests_expired(number)"));
+        assert!(body.contains("session.view_requests_overdue()") && body.contains("drain_views()"));
+        let at = pane
+            .find("fn view_requests_out(")
+            .expect("the wait's start");
+        let body = &pane[at..at + pane[at..].find("\n    }\n").expect("its end")];
+        assert!(body.contains("requests_out()") && body.contains("Self::view_requests_ended"));
+    }
+
+    /// A session is opened to host views with how its shell is found from its child (`login(1)`
+    /// forks it on macOS: the child's own pid is not the shell's group, and a pane that took it
+    /// for one answered a `hello` into a line editor) and with the pane's area in points (the
+    /// grid's device pixels are twice that on a Retina display).
+    #[test]
+    fn a_pane_gives_its_session_how_to_find_the_shell_and_the_area_in_points() {
+        let pane = include_str!("pane.rs");
+        let pane = &pane[..pane.find("#[cfg(test)]").unwrap_or(pane.len())];
+        let at = pane.find("fn view_options(").expect("view_options");
+        let body = &pane[at..at + pane[at..].find("\n    }\n").expect("its end")];
+        assert!(body.contains("shell_parent: ShellParent"));
+        assert!(body.contains("jobs::shell_group(shell_parent, child, &SystemTable)"));
+        assert!(body.contains("pencere_view::content_size(self.bounds())"));
+        // The parent is the one the command was chosen with, in the same branch.
+        assert!(pane.contains("views: self.view_options(shell_parent),"));
+    }
+
+    /// The news that a view has something for the pane arrives on the reader's thread, possibly
+    /// under the `Term` lock (a command's end that tore the view down): it takes nothing and posts
+    /// one job, which the comment says as `Wake` does — not "no `Term` lock held".
+    #[test]
+    fn the_news_of_a_view_is_a_job_posted_with_nothing_taken() {
+        let pane = include_str!("pane.rs");
+        let pane = &pane[..pane.find("#[cfg(test)]").unwrap_or(pane.len())];
+        let at = pane
+            .find("    fn view_changed(&self) {")
+            .expect("view_changed");
+        let body = &pane[at..at + pane[at..].find("\n    }\n").expect("its end")];
+        assert!(body.contains("`Term` lock may be held"), "{body}");
+        assert!(!body.contains("no `Term` lock"), "{body}");
+        for taken in ["session", "lock(", ".lock()", "borrow"] {
+            assert!(
+                !body.contains(taken),
+                "nothing is taken in the news: {taken}"
+            );
+        }
+        assert!(body.contains("pane.drain_views()"));
+        let wake = include_str!("../../bt-core/src/wake.rs");
+        assert!(
+            wake.contains("possibly under it when a command's"),
+            "the trait says the `Term` lock may be held"
+        );
     }
 
     /// A pane that shows a program's view has the keyboard in the view, and the window's ways of

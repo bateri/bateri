@@ -390,6 +390,18 @@ impl Page {
         )
     }
 
+    /// The path of the bundle file a request for `url` is for, or `None` when the answer
+    /// is not a file of the bundle's — the shell page, the one document a program handed,
+    /// anything refused — which [`Page::reply`] gives from memory. Asking for a file is
+    /// what takes time (the file service waits for the conversation and reads and checks up
+    /// to 8 MiB), so only these are served off the main thread.
+    pub(super) fn file_of(&self, url: &str) -> Option<String> {
+        match (route(&self.instance, url), &self.document) {
+            (Route::View(path), Document::Bundle(_)) => Some(path),
+            _ => None,
+        }
+    }
+
     /// The answer to a request for `url`. `files` is the crate's file service
     /// (`Session::serve_view_file`): the bytes and media type of a file of the
     /// bundle, or nothing for a path the manifest does not name.

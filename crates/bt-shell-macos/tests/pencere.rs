@@ -870,6 +870,33 @@ fn run(dir: &Path) {
     program.bye(&token);
     until("the link view to go", || !covered(&pane));
 
+    // The question about a link that is still up when the view ends goes with the view: its
+    // Open would open a link for a view that is not there, and its being up would refuse the next
+    // view's link. The next view's link is asked about.
+    let token = program.hello();
+    program.open(&token, None);
+    program.start_up(Some(LINK_VIEW));
+    watch_it_start(&pane, &mut program);
+    let _left_up = sheet_of(&window);
+    program.bye(&token);
+    until("the link question of a view that ended to go", || {
+        window.attachedSheet().is_none()
+    });
+    until("the view that ended to go", || !covered(&pane));
+    let token = program.hello();
+    program.open(&token, None);
+    program.start_up(Some(LINK_VIEW));
+    watch_it_start(&pane, &mut program);
+    let sheet = sheet_of(&window);
+    assert!(
+        sheet_text(&sheet).contains("Open this link?"),
+        "the next view's link is asked about"
+    );
+    press(&window, &sheet, "Cancel");
+    program.wait_for("\"link\":\"denied\"");
+    program.bye(&token);
+    until("the next link view to go", || !covered(&pane));
+
     // The program closes its view and keeps running (`dismiss`), and opens the tool again: the
     // pane is the terminal's between, the host still has every file of the bundle, so the second
     // open sends none, and the person is not asked again for what they have answered.

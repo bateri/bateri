@@ -73,8 +73,16 @@ pub struct Origin {
     pub place: Option<String>,
     /// The program's name as the application reads it from the pane (the process in front,
     /// the server's word for a terminal it keeps); `None` when nothing here knows it (a
-    /// plain `ssh`, a server that has not said). This is what an answer is kept by.
+    /// plain `ssh`, a server that has not said). The words a question quotes, no more: an
+    /// interpreter's name is every script's, so an answer is not kept by it ([`Self::identity`]).
     pub program: Option<String>,
+    /// What tells this program from another that is run the same way, which the program cannot
+    /// pick for itself: the file it was executed from, and for `node` and `python` the script
+    /// they run (`program::identity::kept_name`). **This is what an answer is kept by**; `None`
+    /// when nothing tells it from the next program the same interpreter runs (a REPL, a plain
+    /// `ssh`, a terminal a server keeps) and an answer is then not kept: the question is
+    /// asked again.
+    pub identity: Option<String>,
     /// What the program calls itself (`serverInfo`'s title or name), when it said: the words
     /// a question quotes in the program's place. The program wrote it and it is the one
     /// thing here that says nothing about which program it is, so no answer is kept by it.
@@ -346,17 +354,19 @@ pub fn web_target(url: &str) -> Option<&str> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Key {
     place: Option<String>,
-    program: Option<String>,
+    identity: String,
     tool: String,
     domains: Vec<(&'static str, String)>,
     permissions: Vec<&'static str>,
 }
 
 /// The key of `consent` as `origin` asks it; `None` when the tool is not known (the crate left
-/// nothing of its name), and an answer is then not remembered: asking again is the way to be
-/// wrong that costs a question. The tool is the crate's reading of the `open`
-/// ([`Consent::tool`]); the program is the application's ([`Origin::program`]).
+/// nothing of its name) or the program cannot be told from another ([`Origin::identity`]), and
+/// an answer is then not remembered: asking again is the way to be wrong that costs a
+/// question. The tool is the crate's reading of the `open` ([`Consent::tool`]) and the program
+/// wrote it, so it names nothing; the identity is the application's.
 pub fn key(origin: &Origin, consent: &Consent) -> Option<Key> {
+    let identity = origin.identity.clone().filter(|name| !name.is_empty())?;
     let tool = consent.tool.clone().filter(|tool| !tool.is_empty())?;
     let mut domains: Vec<(&'static str, String)> = consent
         .domains
@@ -379,7 +389,7 @@ pub fn key(origin: &Origin, consent: &Consent) -> Option<Key> {
     permissions.dedup();
     Some(Key {
         place: origin.place.clone(),
-        program: origin.program.clone(),
+        identity,
         tool,
         domains,
         permissions,
@@ -514,12 +524,40 @@ mod tests {
         consent
     }
 
+    /// An origin whose program is told from others by the name it is called by.
     fn origin(place: Option<&str>, program: Option<&str>) -> Origin {
         Origin {
             place: place.map(str::to_owned),
             program: program.map(str::to_owned),
+            identity: program.map(str::to_owned),
             said: None,
         }
+    }
+
+    #[test]
+    fn a_program_that_cannot_be_told_from_another_has_no_answer_kept() {
+        let set = tool(
+            consent_of(&[(Directive::Connect, "https://api.example.com")], &[]),
+            "show",
+        );
+        // `node` is every script's name: the pane read the interpreter, and no script.
+        let interpreter = Origin {
+            identity: None,
+            ..origin(None, Some("node"))
+        };
+        assert_eq!(key(&interpreter, &set), None);
+        // A plain `ssh`: the place is known, the program is not.
+        assert_eq!(key(&origin(Some("prod"), None), &set), None);
+        // Two scripts one interpreter runs are two programs, whatever the pane called them.
+        let script = |name: &str| Origin {
+            identity: Some(name.to_owned()),
+            ..origin(None, Some("node"))
+        };
+        assert_ne!(
+            key(&script("containers.js"), &set),
+            key(&script("evil.js"), &set)
+        );
+        assert!(key(&script("containers.js"), &set).is_some());
     }
 
     #[test]
@@ -792,8 +830,8 @@ tool “a bc”, and the view asks to:"
         }
         // This Mac and a server that is named like it are not the same place.
         assert_ne!(
-            key(&origin(Some("this Mac"), None), &set),
-            key(&origin(None, None), &set)
+            key(&origin(Some("this Mac"), Some("maps")), &set),
+            key(&origin(None, Some("maps")), &set)
         );
     }
 

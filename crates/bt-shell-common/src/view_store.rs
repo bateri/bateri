@@ -12,24 +12,30 @@
 //! under the bundle identifier, so a development build and the installed
 //! application have separate ones), but a file in it may be damaged or may be
 //! something else that wrote there. A file is believed when its bytes have the
-//! digest of its name: [`DiskStore::get`] checks it on every read, and
-//! [`DiskStore::contains`] checks it the first time it is asked about a file in
-//! this process (what has been checked is remembered, and a file that has gone
-//! since is not "contained"). A file that fails is deleted. Nothing is ever
-//! served from a file by name alone.
+//! digest of its name: the first time this process asks about it, [`DiskStore::contains`]
+//! or [`DiskStore::get`] checks it, and what has been checked is remembered **with its
+//! size**. A file read again is not hashed again while its size is what it was — the web view
+//! asks for a file at every load, and up to 8 MiB hashed each time is what the file queue
+//! would spend its time on — and a file that has gone since is not "contained". A file
+//! that fails the check is deleted. Nothing is ever served from a file by name alone
+//! that was not checked once.
 //!
 //! **What it keeps.** [`STORE_LIMIT`] bytes: past it, the files **least recently
 //! used** go first — a file's modification time is when it was last stored or
 //! read — and never the one just stored, so the open it is for finds it.
 //!
 //! **I/O.** Every function blocks on the disk and runs off the main thread (the
-//! pane's reader thread); a store may drop an entry or fail to keep one at any
+//! pane's reader thread, the file queue); a store may drop an entry or fail to keep one at any
 //! time (§8.5 of the protocol), so no error is reported: a file that could not be
 //! kept is asked for again at the next `open`. Writes are a temporary file and
 //! one `rename`, so a crash leaves no half-written file under a digest's name.
+//! **No lock is held across the disk for a read or a write**: the store's lock guards what was
+//! checked and is taken for a few instructions, so the write of one file does not make the
+//! read of another wait ([`Shared`]). Counting the folder and dropping the oldest files is
+//! the one thing done a store at a time, behind a lock of its own that no read takes.
 //! Platform-free: the tests run in a temporary folder here and on `make linux`.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::fs;
 use std::io::Write as _;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
@@ -38,7 +44,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::SystemTime;
 
-use bt_core::pencere::{Digest, Store, Verified};
+use bt_core::pencere::{Digest, Shared, Verified};
 
 /// The most bytes the store keeps. A view's bundle is at most 64 MiB (the
 /// protocol's limit), so one bundle always fits with room for others; the number
@@ -62,14 +68,18 @@ pub struct DiskStore {
     dir: PathBuf,
     limit: u64,
     state: Mutex<State>,
+    /// Held by the store that counts the folder and drops what is over the limit: one at a
+    /// time, so that the count it acts on is the folder's as it is. No read takes it.
+    counting: Mutex<()>,
+    /// How many times a file's bytes were hashed to check them: what the tests count.
+    #[cfg(test)]
+    hashed: AtomicU64,
 }
 
 struct State {
-    /// The bytes in the folder, once counted (at the first store).
-    total: Option<u64>,
     /// The files whose bytes have been checked against their names in this
-    /// process.
-    checked: HashSet<Digest>,
+    /// process, with their sizes then.
+    checked: HashMap<Digest, u64>,
 }
 
 impl DiskStore {
@@ -85,16 +95,18 @@ impl DiskStore {
             dir: dir.into(),
             limit,
             state: Mutex::new(State {
-                total: None,
-                checked: HashSet::new(),
+                checked: HashMap::new(),
             }),
+            counting: Mutex::new(()),
+            #[cfg(test)]
+            hashed: AtomicU64::new(0),
         }
     }
 
     /// A shelf ([`bt_core::pencere::Shelf`]) over a store of this folder, to
     /// hand to every pane.
     pub fn shelf(dir: impl Into<PathBuf>) -> bt_core::pencere::Shelf {
-        bt_core::pencere::Shelf::new(Self::new(dir))
+        bt_core::pencere::Shelf::shared(Self::new(dir))
     }
 
     fn path(&self, digest: &Digest) -> PathBuf {
@@ -103,18 +115,23 @@ impl DiskStore {
 
     /// The bytes of the file named by `digest` if they have it; a file that
     /// does not is deleted. The file is read whole: at most 8 MiB, the
-    /// protocol's limit for one file, and larger files are not stored.
+    /// protocol's limit for one file, and larger files are not stored. A file checked before
+    /// is believed while its size is the size it had then; any other is hashed, once.
     fn read_checked(&self, digest: &Digest) -> Option<Vec<u8>> {
         let path = self.path(digest);
         let bytes = fs::read(&path).ok()?;
+        let size = bytes.len() as u64;
+        if lock(&self.state).checked.get(digest) == Some(&size) {
+            return Some(bytes);
+        }
+        #[cfg(test)]
+        self.hashed.fetch_add(1, Ordering::Relaxed);
         if Digest::of(&bytes) == *digest {
+            lock(&self.state).checked.insert(*digest, size);
             return Some(bytes);
         }
         let _ = fs::remove_file(&path);
-        let mut state = lock(&self.state);
-        state.checked.remove(digest);
-        // Its size was counted; the next store counts again.
-        state.total = None;
+        lock(&self.state).checked.remove(digest);
         None
     }
 
@@ -124,11 +141,10 @@ impl DiskStore {
             let _ = file.set_modified(SystemTime::now());
         }
     }
-}
 
-impl Store for DiskStore {
-    fn contains(&self, digest: &Digest) -> bool {
-        if lock(&self.state).checked.contains(digest) {
+    /// Whether the store holds the file with this digest, checking it the first time.
+    pub fn contains(&self, digest: &Digest) -> bool {
+        if lock(&self.state).checked.contains_key(digest) {
             // Checked before; still there?
             let there = self.path(digest).is_file();
             if !there {
@@ -136,44 +152,55 @@ impl Store for DiskStore {
             }
             return there;
         }
-        if self.read_checked(digest).is_none() {
-            return false;
-        }
-        lock(&self.state).checked.insert(*digest);
-        true
+        self.read_checked(digest).is_some()
     }
 
-    fn insert(&mut self, file: Verified) {
+    /// Keeps a verified file. The write is outside every lock: a read of another file is not
+    /// held up by up to 8 MiB going to the disk.
+    pub fn insert(&self, file: Verified) {
         let (digest, bytes) = file.into_parts();
         let path = self.path(&digest);
-        let mut state = lock(&self.state);
-        let before = *state.total.get_or_insert_with(|| folder_size(&self.dir));
         if path.is_file() {
-            // Already here: this is a use, not a new file.
+            // Already here: this is a use, not a new file. What is there is not believed
+            // for having the name: the first read checks it.
             Self::touch(&path);
-            state.checked.insert(digest);
             return;
         }
         if write_whole(&self.dir, &path, &bytes).is_err() {
             return;
         }
-        let total = before.saturating_add(bytes.len() as u64);
-        state.total = Some(total);
-        state.checked.insert(digest);
-        if total > self.limit {
-            let kept = sweep(&self.dir, self.limit, &digest);
-            state.total = Some(kept.total);
-            for gone in kept.dropped {
-                state.checked.remove(&gone);
-            }
+        // The bytes were verified and the rename is whole: what is here is what was checked.
+        lock(&self.state).checked.insert(digest, bytes.len() as u64);
+        // The folder is counted as it is when this store's turn comes, after every write that
+        // finished before it: the last turn sees them all, so the folder is within the limit
+        // when the stores are done. Nothing is carried from one count to the next to drift.
+        let _turn = lock(&self.counting);
+        let kept = sweep(&self.dir, self.limit, &digest);
+        let mut state = lock(&self.state);
+        for gone in kept.dropped {
+            state.checked.remove(&gone);
         }
     }
 
-    fn get(&self, digest: &Digest) -> Option<Arc<[u8]>> {
+    /// The file with this digest, checked the first time it is asked for and marked used.
+    pub fn get(&self, digest: &Digest) -> Option<Arc<[u8]>> {
         let bytes = self.read_checked(digest)?;
-        lock(&self.state).checked.insert(*digest);
         Self::touch(&self.path(digest));
         Some(bytes.into())
+    }
+}
+
+impl Shared for DiskStore {
+    fn contains(&self, digest: &Digest) -> bool {
+        Self::contains(self, digest)
+    }
+
+    fn insert(&self, file: Verified) {
+        Self::insert(self, file);
+    }
+
+    fn get(&self, digest: &Digest) -> Option<Arc<[u8]>> {
+        Self::get(self, digest)
     }
 }
 
@@ -183,6 +210,7 @@ fn digest_of(name: &str) -> Option<Digest> {
 }
 
 /// The bytes of the digest-named files in `dir`; 0 if it cannot be read.
+#[cfg(test)]
 fn folder_size(dir: &Path) -> u64 {
     let Ok(entries) = fs::read_dir(dir) else {
         return 0;
@@ -220,8 +248,6 @@ fn write_whole(dir: &Path, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 
 /// What a sweep left.
 struct Swept {
-    /// The bytes in the folder now.
-    total: u64,
     /// The files that were dropped.
     dropped: Vec<Digest>,
 }
@@ -258,7 +284,7 @@ fn sweep(dir: &Path, limit: u64, keep: &Digest) -> Swept {
             dropped.push(digest);
         }
     }
-    Swept { total, dropped }
+    Swept { dropped }
 }
 
 #[cfg(test)]
@@ -301,7 +327,7 @@ mod tests {
     #[test]
     fn a_file_stored_is_given_back_and_contained() {
         let folder = Folder::new("round-trip");
-        let mut store = DiskStore::new(&folder.0);
+        let store = DiskStore::new(&folder.0);
         let held = file(7, 1000);
         let digest = *held.digest();
         assert!(!store.contains(&digest), "nothing there yet");
@@ -327,7 +353,7 @@ mod tests {
     #[test]
     fn a_file_with_other_bytes_than_its_name_says_is_never_given() {
         let folder = Folder::new("damaged");
-        let mut store = DiskStore::new(&folder.0);
+        let store = DiskStore::new(&folder.0);
         let held = file(1, 100);
         let digest = *held.digest();
         store.insert(held);
@@ -345,9 +371,78 @@ mod tests {
     }
 
     #[test]
+    fn a_file_is_hashed_the_first_time_it_is_asked_about_and_not_at_every_read() {
+        let folder = Folder::new("hashed");
+        let held = file(4, 4096);
+        let digest = *held.digest();
+        DiskStore::new(&folder.0).insert(held);
+        // A store of the next process: nothing is known of the file yet.
+        let store = DiskStore::new(&folder.0);
+        let hashed = || store.hashed.load(Ordering::Relaxed);
+        assert!(store.contains(&digest));
+        assert_eq!(hashed(), 1, "checked when first asked about");
+        // The web view asks at every load: no more hashing of up to 8 MiB each time.
+        for _ in 0..3 {
+            assert_eq!(store.get(&digest).as_deref(), Some(&[4u8; 4096][..]));
+            assert!(store.contains(&digest));
+        }
+        assert_eq!(
+            hashed(),
+            1,
+            "believed after, as long as its size is its size"
+        );
+        // What this process stored is verified bytes and is not hashed for its own sake.
+        let kept = file(5, 100);
+        let kept_digest = *kept.digest();
+        store.insert(kept);
+        assert_eq!(store.get(&kept_digest).as_deref(), Some(&[5u8; 100][..]));
+        assert_eq!(hashed(), 1);
+        // A file whose size is not what it was is checked again, and fails.
+        fs::write(folder.0.join(kept_digest.to_string()), b"cut").unwrap();
+        assert!(store.get(&kept_digest).is_none());
+        assert_eq!(hashed(), 2);
+    }
+
+    #[test]
+    fn a_file_found_in_the_folder_when_one_is_stored_is_not_believed_for_its_name() {
+        let folder = Folder::new("found");
+        let held = file(6, 50);
+        let digest = *held.digest();
+        fs::create_dir_all(&folder.0).unwrap();
+        // Another writer put something under the name before this process stored the file.
+        fs::write(folder.0.join(digest.to_string()), vec![0u8; 50]).unwrap();
+        let store = DiskStore::new(&folder.0);
+        store.insert(held);
+        assert!(
+            store.get(&digest).is_none(),
+            "checked at the first read, and it fails"
+        );
+    }
+
+    #[test]
+    fn stores_at_once_count_every_file_and_keep_to_the_limit() {
+        let folder = Folder::new("at-once");
+        let store = Arc::new(DiskStore::with_limit(&folder.0, 250));
+        let threads: Vec<_> = (0..8u8)
+            .map(|fill| {
+                let store = Arc::clone(&store);
+                std::thread::spawn(move || store.insert(file(fill + 1, 60)))
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        // The last turn counted every file that was written before it: within the limit, and
+        // whatever was stored last is there.
+        let left = folder_size(&folder.0);
+        assert!(left <= 250, "the folder is within the limit: {left}");
+        assert!(left >= 60, "and what was stored last is there");
+    }
+
+    #[test]
     fn a_file_that_has_gone_is_not_contained() {
         let folder = Folder::new("gone");
-        let mut store = DiskStore::new(&folder.0);
+        let store = DiskStore::new(&folder.0);
         let held = file(2, 10);
         let digest = *held.digest();
         store.insert(held);
@@ -363,7 +458,7 @@ mod tests {
     #[test]
     fn past_the_limit_the_oldest_goes_and_never_the_one_just_stored() {
         let folder = Folder::new("limit");
-        let mut store = DiskStore::with_limit(&folder.0, 100);
+        let store = DiskStore::with_limit(&folder.0, 100);
         let (a, b, c) = (file(1, 60), file(2, 60), file(3, 60));
         let digests = [*a.digest(), *b.digest(), *c.digest()];
         store.insert(a.clone());
@@ -381,7 +476,7 @@ mod tests {
     #[test]
     fn what_was_read_last_stays_longest() {
         let folder = Folder::new("used");
-        let mut store = DiskStore::with_limit(&folder.0, 130);
+        let store = DiskStore::with_limit(&folder.0, 130);
         let (a, b, c) = (file(1, 60), file(2, 60), file(3, 60));
         let digests = [*a.digest(), *b.digest(), *c.digest()];
         store.insert(a.clone());
@@ -401,7 +496,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let folder = Folder::new("private");
-        let mut store = DiskStore::new(folder.0.join("nested").join("pencere"));
+        let store = DiskStore::new(folder.0.join("nested").join("pencere"));
         let held = file(9, 8);
         let digest = held.digest().to_string();
         store.insert(held);
@@ -420,7 +515,7 @@ mod tests {
     #[test]
     fn a_store_with_no_folder_is_empty_and_keeps_nothing_it_cannot() {
         let folder = Folder::new("absent");
-        let mut store = DiskStore::new(folder.0.join("never-made"));
+        let store = DiskStore::new(folder.0.join("never-made"));
         let held = file(5, 5);
         assert!(!store.contains(held.digest()));
         // A folder that cannot be made (its parent is a file) loses the file
@@ -428,7 +523,7 @@ mod tests {
         fs::create_dir_all(&folder.0).unwrap();
         let blocker = folder.0.join("blocker");
         fs::write(&blocker, b"x").unwrap();
-        let mut blocked = DiskStore::new(blocker.join("inside"));
+        let blocked = DiskStore::new(blocker.join("inside"));
         let digest = *held.digest();
         blocked.insert(held.clone());
         assert!(!blocked.contains(&digest));

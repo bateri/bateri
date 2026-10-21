@@ -233,6 +233,11 @@ pub const COMMANDS: &[Command] = &[
     command("close_tab", "closeTab", &["cmd+w"]),
     command("close_window", "closeWindow", &["shift+cmd+w"]),
     // Edit
+    // Undo Move is a window's command that sits on the content's key: ⌘Z is the text undo of a
+    // program's view while the keyboard is in it, and Undo Move's wherever it is not
+    // (`AppDelegate::undo_ready` asks where the keyboard is, and this mark whether the
+    // key is then the view's). Without the mark the application would keep ⌘Z from a view's
+    // own fields.
     content(command("undo", "undoMove", &["cmd+z"])),
     content(command("cut", "cut", &["cmd+x"])),
     content(command("copy", "copy", &["cmd+c"])),

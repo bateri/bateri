@@ -302,6 +302,14 @@ enum Inputs {
 }
 
 /// [`Inputs`]'s decision — pure, tested.
+/// Whether ⌘Z is not Undo Move's to take: the keyboard is in a field being edited, or in a
+/// program's view where Undo is the content's (the shortcut table marks it so:
+/// `content_in_view`). A pane that shows a view while the keyboard is somewhere else is not
+/// either.
+fn undo_is_not_ours(editing: bool, content_in_view: bool) -> bool {
+    editing || content_in_view
+}
+
 fn decide_inputs(run: Option<Run>, home: Option<PathBuf>) -> Inputs {
     match run {
         Some(_) => Inputs::Hermetic,
@@ -4320,13 +4328,22 @@ impl AppDelegate {
             return false;
         };
         // A field being edited (the search panel, a tab's name) has ⌘Z to
-        // itself: typing never moves a split. So has a program's view in the
-        // pane that has the keyboard: Undo is Edit's, and Edit is the content's.
-        let editing = key
-            .ns_window()
+        // itself: typing never moves a split. So has a program's view that has the
+        // keyboard: Undo is Edit's, and Edit is the content's. Where the keyboard is,
+        // not which pane is focused: a pane that shows a view while the keyboard is
+        // elsewhere (the tab bar, a field of the window) has no ⌘Z of its own to keep.
+        let window = key.ns_window();
+        let editing = window
             .firstResponder()
             .is_some_and(|responder| responder.isKindOfClass(NSText::class()));
-        if editing || key.selected_tab().focused_pane().shows_view() {
+        // Whether Undo is the content's is the shortcut table's word, as for every key the
+        // view is kept from.
+        let content =
+            bt_shell_common::shortcuts::by_id("undoMove").is_some_and(|command| command.content);
+        if undo_is_not_ours(
+            editing,
+            content && crate::pencere_view::keyboard_in_view(window),
+        ) {
             return false;
         }
         let stale = match self.ivars().undo.borrow().as_ref() {
@@ -7922,6 +7939,22 @@ mod tests {
 
     use super::*;
     use crate::launch::{dock_rows_at_birth, smooth_scroll as resolve_smooth_scroll, with_helper};
+
+    #[test]
+    fn undo_move_is_given_up_where_the_keyboard_is_and_not_where_a_view_merely_is() {
+        assert!(undo_is_not_ours(true, false), "a field being edited");
+        assert!(undo_is_not_ours(false, true), "the keyboard is in a view");
+        assert!(!undo_is_not_ours(false, false));
+        // `undo_ready` asks where the keyboard is. A pane that shows a view and has the focus
+        // while the keyboard is in the tab bar or a field of the window used to refuse ⌘Z.
+        let source = include_str!("app.rs");
+        let at = source.find("    fn undo_ready(").expect("undo_ready");
+        let body = &source[at..at + source[at..].find("    fn undo_move(").expect("next")];
+        assert!(
+            body.contains("keyboard_in_view(") && !body.contains("shows_view()"),
+            "the pane's showing a view is not where the keyboard is"
+        );
+    }
 
     /// [`super::shell_integration_env`] as the zsh and fish tests ask it: their two process
     /// variables, an up-to-date bash, and the environment alone as the answer.

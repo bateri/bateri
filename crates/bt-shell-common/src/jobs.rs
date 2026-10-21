@@ -247,6 +247,17 @@ pub(crate) fn shell_pid(parent: ShellParent, child: u32, table: &impl ProcessTab
     }
 }
 
+/// The process group the pane's shell leads, which the terminal's foreground group is
+/// compared with to tell the shell in front of it ([`bt_core::pencere::ShellGroup`] is the
+/// pane's question of it): the group of the shell [`shell_pid`] names — on the `login` path
+/// the child's child, **not** the child's own pid, which names `login`'s group and made every
+/// shell look like a program. `None` while there is no shell yet or its group cannot be
+/// read: not known, and the caller does not take that for "a program is in front".
+pub fn shell_group(parent: ShellParent, child: u32, table: &impl ProcessTable) -> Option<u32> {
+    let shell = shell_pid(parent, child, table)?;
+    table.groups(shell).map(|groups| groups.own)
+}
+
 /// Whether a job outside the shell's own process group holds the terminal —
 /// the gate before asking whether the running program reads the keyboard
 /// itself ([`bt_core::Session::note_raw`]). The criterion is [`remote`]'s
@@ -1686,6 +1697,36 @@ pub(crate) mod tests {
             .with(101, 100, 101, "zsh");
         assert!(!job_in_foreground(ShellParent::Login, 100, &unreadable));
         assert!(!job_in_foreground(ShellParent::Login, 100, &login_shell(0)));
+    }
+
+    #[test]
+    fn the_shells_group_is_the_shells_and_not_the_childs_where_login_forks_it() {
+        // `login` 100 → `zsh` 101: the shell's group is 101, which the foreground group of
+        // the terminal is when the prompt is up.
+        assert_eq!(
+            shell_group(ShellParent::Login, 100, &login_shell(101)),
+            Some(101)
+        );
+        // The child's own pid is `login`'s group.
+        assert_ne!(
+            shell_group(ShellParent::Login, 100, &login_shell(101)),
+            Some(100)
+        );
+        // Where the child is the shell.
+        assert_eq!(
+            shell_group(ShellParent::Direct, 101, &login_shell(101)),
+            Some(101)
+        );
+        // No shell forked yet, or a group that cannot be read: not known.
+        let unforked = Table::new(Some(200)).with(100, 1, 100, "login");
+        assert_eq!(shell_group(ShellParent::Login, 100, &unforked), None);
+        let unreadable = Table::new(None)
+            .with(100, 1, 100, "login")
+            .with(101, 100, 101, "zsh");
+        assert_eq!(shell_group(ShellParent::Login, 100, &unreadable), None);
+        // The terminal's foreground, with a program in front, is not the shell's group.
+        let python = login_shell(200).with(200, 101, 200, "python3");
+        assert_eq!(shell_group(ShellParent::Login, 100, &python), Some(101));
     }
 
     #[test]

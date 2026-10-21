@@ -5477,19 +5477,14 @@ impl Session {
         //
         // **Before** `TappedPty`: the first input goes through its channel.
         let desk = options.views.take().map(|views| {
-            // The content area before the shell says what it is: the grid's, in
-            // the units the PTY was told (the shell sets the real one before a
-            // view starts).
-            let area = pencere::Size {
-                width: u32::from(options.cols) * u32::from(options.cell_px.0),
-                height: u32::from(options.rows) * u32::from(options.cell_px.1),
-            };
+            // How the shell is found (`login(1)` forks it on macOS) goes to the observer; the
+            // content area is the application's word, in the unit a view is told it in.
+            let group = views.shell_group.clone();
             Desk::new(
                 views,
                 options.theme,
-                area,
                 Arc::clone(&wake),
-                pencere::pane_observer(Arc::clone(&shell), Arc::clone(&master), child_pid),
+                pencere::pane_observer(Arc::clone(&shell), Arc::clone(&master), child_pid, group),
             )
         });
         let adapter = Adapter::new(
@@ -11868,9 +11863,16 @@ impl Session {
 
     /// A message from the view, as JSON text ([`pencere::Action::StartView`]'s
     /// bridge). The crate drops what is not JSON-RPC or is over its limit.
-    pub fn view_message(&self, text: &str) {
+    ///
+    /// Whether it made the pane write to the program: a request of the view was passed
+    /// on, and until the program answers it the shell's clock runs
+    /// ([`Session::view_requests_overdue`]).
+    pub fn view_message(&self, text: &str) -> bool {
         self.adapter
-            .view(|conversation| conversation.view_message(text));
+            .0
+            .desk
+            .as_ref()
+            .is_some_and(|desk| desk.view_message(text, |bytes| self.adapter.input(bytes)))
     }
 
     /// The person's answer to the question a [`pencere::Action::Consent`] asked, whose
@@ -11901,7 +11903,10 @@ impl Session {
     }
 
     /// The wait for the program's answers to the view's requests ran out: they
-    /// fail the way MCP defines.
+    /// fail the way MCP defines. The shell sets it when
+    /// [`Session::view_message`] says a request went out, and calls this when it
+    /// runs out; the requests that are out then are all given up, the ones that
+    /// went out last with the rest.
     pub fn view_requests_overdue(&self) {
         self.adapter.view(pencere::Conversing::requests_timed_out);
     }

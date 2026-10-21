@@ -99,8 +99,11 @@ pub(crate) struct Asking {
     consent: Cell<u32>,
     /// The window of the sheet of that question, to take it away.
     sheet: RefCell<Option<Retained<NSWindow>>>,
-    /// A question about a link is up.
-    link: Cell<bool>,
+    /// The request ([`pencere::Action::OpenLink::link`]) of the question about a link that is
+    /// up, if one is: one at a time.
+    link: Cell<Option<u32>>,
+    /// The window of the sheet of that question, to take it away.
+    link_sheet: RefCell<Option<Retained<NSWindow>>>,
 }
 
 impl Asking {
@@ -133,6 +136,24 @@ impl Asking {
         }
         self.consent.set(0);
         Some(self.sheet.borrow_mut().take())
+    }
+
+    /// The question about the link `request` is not asked any more, however it ended: `None`
+    /// when it was not the one that is up (its answer is for nobody: the view it was asked for
+    /// is gone), else its sheet's window if it had one, to take away. Nothing is up after, so
+    /// the next view's link can be asked about, and the sheet's own block, which taking the
+    /// sheet away runs, finds nothing to do.
+    fn take_back_link(&self, request: u32) -> Option<Option<Retained<NSWindow>>> {
+        if self.link.get() != Some(request) {
+            return None;
+        }
+        self.link.set(None);
+        Some(self.link_sheet.borrow_mut().take())
+    }
+
+    /// The question about a link that is up, taken back whichever it is.
+    fn take_back_any_link(&self) -> Option<Option<Retained<NSWindow>>> {
+        self.take_back_link(self.link.get()?)
     }
 }
 
@@ -347,19 +368,25 @@ pub(crate) fn link(
         refuse();
         return;
     };
-    if NSURL::URLWithString(&NSString::from_str(&link.target)).is_none() || asking.link.get() {
+    if NSURL::URLWithString(&NSString::from_str(&link.target)).is_none()
+        || asking.link.get().is_some()
+    {
         refuse();
         return;
     }
-    asking.link.set(true);
+    asking.link.set(Some(request));
     let (id, lookup) = (pane.id(), pane.lookup());
     let answering = Arc::clone(session);
     let target = link.target;
     let sheet = put(pane, &link.question, move |response| {
         // audit: the sheet's completion block runs on the main thread.
         let mtm = MainThreadMarker::new().expect("a sheet's block is on the main thread");
-        if let Some(pane) = lookup(mtm, id) {
-            pane.view_asking().link.set(false);
+        // Taken back (the view ended, and the sheet with it) or the pane gone: nobody is
+        // asking, and nothing is opened.
+        let up = lookup(mtm, id)
+            .is_some_and(|pane| pane.view_asking().take_back_link(request).is_some());
+        if !up {
+            return;
         }
         let allowed = response == NSAlertSecondButtonReturn;
         answering.view_link_decision(request, allowed);
@@ -367,9 +394,32 @@ pub(crate) fn link(
             open_url(&target);
         }
     });
-    if sheet.is_none() {
-        asking.link.set(false);
-        refuse();
+    match sheet {
+        Some(window) => {
+            // Answered already (the sheet's block ran before it came back): nothing to keep.
+            if asking.link.get() == Some(request) {
+                asking.link_sheet.replace(Some(window));
+            }
+        }
+        None => {
+            asking.link.set(None);
+            refuse();
+        }
+    }
+}
+
+/// The pane's view ended — torn down, replaced by a restart, or the pane going: the question
+/// about a link it asked is taken down without an answer. Left up, its Open would still open a
+/// link for a view that is not there, and its being up would refuse every link of the next
+/// view.
+pub(crate) fn view_ended(pane: &TerminalPane) {
+    let Some(sheet) = pane.view_asking().take_back_any_link() else {
+        return;
+    };
+    if let Some(sheet) = sheet
+        && let Some(seat) = sheets::seat(Asker::Pane(pane))
+    {
+        seat.end(&sheet, NSModalResponseCancel);
     }
 }
 
@@ -394,6 +444,43 @@ mod tests {
         // Nothing is up, so nothing is anyone's answer, and nothing is "question 0".
         assert!(!asking.finish(2));
         assert!(!asking.finish(0));
+    }
+
+    #[test]
+    fn the_question_about_a_link_is_one_at_a_time_and_goes_with_its_view() {
+        let asking = Asking::default();
+        assert_eq!(asking.take_back_any_link(), None, "nothing is up");
+        asking.link.set(Some(4));
+        // The view ended: the question is taken down, and nothing of it is up after.
+        assert_eq!(asking.take_back_any_link(), Some(None));
+        assert_eq!(asking.link.get(), None);
+        // Its sheet's own block finds nothing to do: no answer reaches the conversation, and
+        // no link is opened.
+        assert_eq!(asking.take_back_link(4), None);
+        // The next view's link can be asked about, and is its own question.
+        asking.link.set(Some(1));
+        assert_eq!(
+            asking.take_back_link(4),
+            None,
+            "another view's request is not this one's"
+        );
+        assert_eq!(asking.link.get(), Some(1));
+        assert_eq!(asking.take_back_link(1), Some(None));
+    }
+
+    #[test]
+    fn a_pane_takes_the_link_question_down_when_its_view_ends_by_every_way_there_is() {
+        // `end_view` (the program's end, a restart, a stale view replaced) and `drop_view` (the
+        // pane going) both go through `view_gone`; a way that did not would leave the sheet up.
+        let source = include_str!("../pane.rs");
+        let at = |text: &str| source.find(text).unwrap_or_else(|| panic!("`{text}`"));
+        let end = &source[at("    fn end_view(")..at("    fn drop_view(")];
+        assert!(end.contains("self.view_gone()"));
+        let drop = &source[at("    fn drop_view(")..at("    fn view_gone(")];
+        assert!(drop.contains("self.view_gone()"));
+        let gone =
+            &source[at("    fn view_gone(")..at("    /// Sets the deadline the conversation")];
+        assert!(gone.contains("ask::view_ended(self)") && gone.contains("requests_over()"));
     }
 
     #[test]
@@ -436,7 +523,10 @@ mod tests {
 
     #[test]
     fn a_question_taken_back_is_not_among_those_a_person_answers_for_others() {
-        let origin = Origin::default();
+        let origin = Origin {
+            identity: Some("maps".to_owned()),
+            ..Origin::default()
+        };
         let first = question(1, "show");
         let key = view_ask::key(&origin, &first).expect("a tool is named");
         let ask = |pane: u64, consent: Consent| {

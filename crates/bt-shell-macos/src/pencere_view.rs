@@ -7,7 +7,9 @@
 //! that page frames the view's document in a sandboxed `<iframe>` of another
 //! origin (`serve`). Both documents are served by this module's
 //! `WKURLSchemeHandler` from the crate's file service and nothing else: the web
-//! view has no network, no file, no cookie that outlives it and nowhere to go.
+//! view has no network, no file, no cookie that outlives it and nowhere to go. A file of the
+//! bundle is read off the main thread (`files`): the handler holds the web view's task, and
+//! answers it on the main queue when the file is ready.
 //!
 //! What crosses between the view and the application is JSON-RPC text, both ways:
 //! the view's `postMessage` reaches the shell page, which passes it to the
@@ -53,6 +55,7 @@
 //! deadlines) is `pane`'s.
 
 pub(crate) mod ask;
+mod files;
 mod serve;
 mod still;
 mod strip;
@@ -61,26 +64,29 @@ mod wait;
 #[cfg(test)]
 mod tests;
 
+use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use block2::DynBlock;
-use bt_core::pencere::{Shelf, ViewSource, ViewStart};
+use bt_core::pencere::{Shelf, Size as ViewSize, ViewSource, ViewStart, system_random};
 use bt_core::{Session, Theme};
 use bt_shell_common::palette::{Modifiers, menu_item_id};
 use bt_shell_common::shortcuts::{by_id, chord_of};
 use bt_shell_common::view_store::DiskStore;
 use bt_shell_common::view_strip::{self, Strip};
+use dispatch2::{DispatchQueue, DispatchRetained};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2::{
-    AllocAnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send,
+    AllocAnyThread, ClassType, DefinedClass, MainThreadMarker, MainThreadOnly, Message,
+    define_class, msg_send,
 };
 use objc2_app_kit::{
     NSApplication, NSAutoresizingMaskOptions, NSColor, NSEvent, NSEventModifierFlags, NSEventType,
-    NSMenu, NSMenuItem, NSView,
+    NSMenu, NSMenuItem, NSView, NSWindow,
 };
 use objc2_core_foundation::CFRetained;
 use objc2_core_graphics::CGImage;
@@ -193,6 +199,35 @@ pub(crate) fn said_program(start: &ViewStart) -> Option<&str> {
 pub(crate) fn view_area(bounds: NSRect) -> NSRect {
     let height = (bounds.size.height - view_strip::HEIGHT).max(0.0);
     NSRect::new(bounds.origin, NSSize::new(bounds.size.width, height))
+}
+
+/// The size of the view's area in a pane of `bounds`, in CSS pixels — which are points — as the
+/// conversation is told its container ([`bt_core::Session::set_view_size`]): the one place it
+/// is worked out, for the size a session is opened with and for the one told afterwards.
+pub(crate) fn content_size(bounds: NSRect) -> ViewSize {
+    let area = view_area(bounds);
+    ViewSize {
+        width: area.size.width.max(0.0).floor() as u32,
+        height: area.size.height.max(0.0).floor() as u32,
+    }
+}
+
+/// Whether the window's keyboard is in a program's view or something inside one: the first
+/// responder is a view's web view, or a view of its own page. Where the keyboard is, not which
+/// pane has the focus: a pane that shows a view and has no keyboard in it (it is in the tab
+/// bar, in a field of the window) is not "in the view".
+pub(crate) fn keyboard_in_view(window: &NSWindow) -> bool {
+    let mut at = window
+        .firstResponder()
+        .and_then(|responder| responder.downcast::<NSView>().ok());
+    while let Some(view) = at {
+        if view.isKindOfClass(PencereView::class()) {
+            return true;
+        }
+        // SAFETY: reading the superview of a view on the main thread.
+        at = unsafe { view.superview() };
+    }
+    false
 }
 
 /// The strip's place in a pane of `bounds`: the top [`view_strip::HEIGHT`] points, or all of a
@@ -340,8 +375,9 @@ struct BridgeIvars {
     /// The conversation with the program: where the view's messages go, and
     /// where the files it is made of come from.
     session: Arc<Session>,
-    /// What is served and what may be loaded ([`serve::Page`]).
-    page: serve::Page,
+    /// What is served and what may be loaded ([`serve::Page`]); shared with the file queue,
+    /// which makes the answer for a file.
+    page: Arc<serve::Page>,
     /// The shell page was asked for as the top document: it is loaded once.
     shell_loaded: std::cell::Cell<bool>,
     /// The tab card's picture of the view, shared with the host: the bridge takes the first
@@ -360,16 +396,25 @@ define_class!(
     unsafe impl NSObjectProtocol for Bridge {}
 
     unsafe impl WKURLSchemeHandler for Bridge {
-        /// A request for the shell page or a file of the view: answered at
-        /// once, from memory, so there is never a task left open when the web
-        /// view stops one.
+        /// A request for the shell page or a file of the view: the shell page is answered
+        /// at once, from memory; a file of the bundle is held and answered on the main
+        /// queue when it has been read off it.
         #[unsafe(method(webView:startURLSchemeTask:))]
         fn start_task(&self, _web_view: &WKWebView, task: &ProtocolObject<dyn WKURLSchemeTask>) {
             self.answer(task);
         }
 
+        /// The web view gave a request up: a task that waits for its file is not answered when
+        /// the file is ready (AppKit raises when a stopped task is).
         #[unsafe(method(webView:stopURLSchemeTask:))]
-        fn stop_task(&self, _web_view: &WKWebView, _task: &ProtocolObject<dyn WKURLSchemeTask>) {}
+        fn stop_task(&self, _web_view: &WKWebView, task: &ProtocolObject<dyn WKURLSchemeTask>) {
+            let stopped = std::ptr::from_ref(task);
+            WAITING.with(|waiting| {
+                waiting
+                    .borrow_mut()
+                    .stop(|held| Retained::as_ptr(held) == stopped);
+            });
+        }
     }
 
     unsafe impl WKScriptMessageHandler for Bridge {
@@ -385,8 +430,19 @@ define_class!(
             }
             // SAFETY: as above.
             let body = unsafe { message.body() };
-            if let Some(text) = body.downcast_ref::<NSString>() {
-                self.ivars().session.view_message(&text.to_string());
+            if let Some(text) = body.downcast_ref::<NSString>()
+                && self.ivars().session.view_message(&text.to_string())
+            {
+                // A request was passed on to the program: the pane's clock runs until it
+                // answers.
+                // SAFETY: a plain read of the message the web view just delivered.
+                let web = unsafe { message.webView() };
+                if let Some(pane) = web
+                    .and_then(|web| web.downcast::<PencereView>().ok())
+                    .and_then(|view| view.pane())
+                {
+                    pane.view_requests_out();
+                }
             }
         }
     }
@@ -465,7 +521,7 @@ impl Bridge {
     ) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(BridgeIvars {
             session,
-            page,
+            page: Arc::new(page),
             shell_loaded: std::cell::Cell::new(false),
             shot,
         });
@@ -480,20 +536,49 @@ impl Bridge {
         Some((url, text))
     }
 
-    /// Answers one request of the web view from [`serve::Page::reply`].
+    /// Answers one request of the web view. The shell page and what is refused come from memory,
+    /// at once. **A file of the bundle is read off the main thread**: the file service waits for
+    /// the conversation (busy while a file of 8 MiB is checked) and reads and checks one, so the
+    /// task is held ([`WAITING`]), the reply is made on the file queue, and the task is answered
+    /// on the main queue if it is still held then.
     fn answer(&self, task: &ProtocolObject<dyn WKURLSchemeTask>) {
-        // SAFETY: the task is the web view's own and is answered before this
-        // returns, so it has not been stopped.
+        // SAFETY: the task is the web view's own and has not been stopped: it is being started.
         let request = unsafe { task.request() };
-        let Some((url, text)) = Self::url_of(&request) else {
+        let Some((_, text)) = Self::url_of(&request) else {
             fail(task);
             return;
         };
         let ivars = self.ivars();
-        let session = &ivars.session;
-        let reply = ivars
-            .page
-            .reply(&text, &|path| session.serve_view_file(path));
+        if ivars.page.file_of(&text).is_none() {
+            Self::respond(task, &ivars.page.reply(&text, &|_| None));
+            return;
+        }
+        let serial = WAITING.with(|waiting| {
+            waiting
+                .borrow_mut()
+                .hold(std::ptr::from_ref(self) as usize, task.retain())
+        });
+        let (page, session) = (Arc::clone(&ivars.page), Arc::clone(&ivars.session));
+        files_queue().exec_async(move || {
+            let reply = read_file_reply(&page, &session, &text);
+            DispatchQueue::main().exec_async(move || {
+                let held = WAITING.with(|waiting| waiting.borrow_mut().finish(serial));
+                // Stopped by the web view, or its view closed: nobody to answer.
+                if let Some(task) = held {
+                    Self::respond(&task, &reply);
+                }
+            });
+        });
+    }
+
+    /// Gives the task `reply` and ends it. The task is live: it was started and not stopped.
+    fn respond(task: &ProtocolObject<dyn WKURLSchemeTask>, reply: &serve::Reply) {
+        // SAFETY: as above.
+        let request = unsafe { task.request() };
+        let Some((url, _)) = Self::url_of(&request) else {
+            fail(task);
+            return;
+        };
         let keys: Vec<Retained<NSString>> = reply
             .headers
             .iter()
@@ -528,6 +613,15 @@ impl Bridge {
         }
     }
 
+    /// The view closed: the tasks it was holding for files are not answered.
+    fn forget_tasks(&self) {
+        WAITING.with(|waiting| {
+            waiting
+                .borrow_mut()
+                .forget(std::ptr::from_ref(self) as usize);
+        });
+    }
+
     /// Whether the navigation the web view asks about is one it may make.
     fn allows(&self, action: &WKNavigationAction) -> bool {
         // SAFETY: plain reads of the action the web view just made.
@@ -559,6 +653,25 @@ fn fail(task: &ProtocolObject<dyn WKURLSchemeTask>) {
     };
     // SAFETY: the task is live; a failure ends it.
     unsafe { task.didFailWithError(&error) };
+}
+
+thread_local! {
+    /// The web view's tasks that wait for a file of their bundle, on the main thread.
+    static WAITING: RefCell<files::Pending<Retained<ProtocolObject<dyn WKURLSchemeTask>>>> =
+        const { RefCell::new(files::Pending::new()) };
+}
+
+/// The serial queue the files of bundles are read on: one at a time, in the order the web view
+/// asked, and never on the main thread.
+fn files_queue() -> &'static DispatchRetained<DispatchQueue> {
+    static QUEUE: OnceLock<DispatchRetained<DispatchQueue>> = OnceLock::new();
+    QUEUE.get_or_init(|| DispatchQueue::new("dev.bateri.pencere.files", None))
+}
+
+/// The reply for a request of a file of the bundle: the file service's bytes and media type, or
+/// the refusal. **Blocks** — on the conversation's lock and on the disk: the file queue's.
+fn read_file_reply(page: &serve::Page, session: &Session, url: &str) -> serve::Reply {
+    page.reply(url, &|path| session.serve_view_file(path))
 }
 
 /// A view's web view and the bridge it talks to: what a pane holds while a program
@@ -598,12 +711,8 @@ impl ViewHost {
                 serve::Document::Html(Arc::from(html.as_bytes().to_vec()))
             }
         };
-        let mut random = [0u8; 16];
-        // SAFETY: the pointer is valid for `random.len()` writes, and
-        // `getentropy` takes up to 256 bytes at a time.
-        if unsafe { libc::getentropy(random.as_mut_ptr().cast(), random.len()) } != 0 {
-            return None;
-        }
+        // The same source the token of an `open` comes from, and the same refusal when it fails.
+        let random = system_random()?;
         let page = serve::Page::new(
             serve::instance(random),
             document,
@@ -777,6 +886,8 @@ impl ViewHost {
         }
         self.web.removeFromSuperview();
         self.strip.removeFromSuperview();
+        // The files that were being read for it are for nobody now.
+        self.bridge.forget_tasks();
         // The bridge is held until here on purpose: the web view held its
         // delegates weakly.
         let _ = &self.bridge;

@@ -643,6 +643,63 @@ pub fn find(parent: ShellParent, child: u32, table: &impl ProcessTable) -> Seen 
     from_group(&group).map_or(Seen::Nothing, Seen::Kind)
 }
 
+/// The name of the program in a pane's foreground that a person's answer about it is kept by
+/// (`view_ask::key`): a name the program cannot pick for itself, so that another program is
+/// not taken for it. The first leaf of the foreground group (the one a close question names
+/// first), by the file it executed — `containers`, `claude` —, and for `node` and `python` the
+/// **script** they run, base name only (`containers.js`): an interpreter's own name is every
+/// script's, and an answer kept by it would be given to the next script the same interpreter
+/// runs.
+///
+/// `None` when no name is known: no job in front, a group that cannot be read, a leaf that is
+/// an interpreter running no script (a REPL, `-e`), another interpreter, or a shell — what they
+/// run is not read, and an answer about a program that cannot be told from another is not kept.
+/// **Only a name is taken from an argv** (the module's rule); nothing else of the record is
+/// kept and no variable is asked for.
+pub fn kept_name(parent: ShellParent, child: u32, table: &impl ProcessTable) -> Option<String> {
+    let shell = jobs::shell_pid(parent, child, table)?;
+    let groups = table
+        .groups(shell)
+        .filter(|groups| groups.foreground != 0 && groups.foreground != groups.own)?;
+    let mut pids = table.members(groups.foreground);
+    pids.sort_unstable();
+    let parents: Vec<Option<u32>> = pids.iter().map(|&pid| table.parent(pid)).collect();
+    let leaf = pids
+        .iter()
+        .copied()
+        .find(|pid| !parents.contains(&Some(*pid)))?;
+    kept_name_of(&Process::read(leaf, table)?)
+}
+
+/// [`kept_name`] of one process.
+fn kept_name_of(process: &Process) -> Option<String> {
+    fn named(name: &str) -> Option<&str> {
+        Some(name).filter(|name| !name.is_empty())
+    }
+    let record = || process.member.candidate.as_ref()?.record.as_ref();
+    let name = match Family::of_name(&process.name) {
+        Some(Family::Node) => {
+            let args = record()?.args.get(1..).unwrap_or_default();
+            node_script(args).and_then(|(path, _)| named(base(path)))
+        }
+        Some(Family::Python) => {
+            let args = record()?.args.get(1..).unwrap_or_default();
+            match python_line(args).1 {
+                PythonRuns::Script(path, _) => named(base(path)),
+                PythonRuns::Module(module, _) => named(module),
+                PythonRuns::Nothing | PythonRuns::Code => None,
+            }
+        }
+        // Another interpreter, a client: what it runs is not read here.
+        Some(Family::Bun | Family::Deno | Family::Ruby) => None,
+        Some(Family::Database(_) | Family::Container | Family::Kubernetes) => named(&process.name),
+        Some(Family::Root | Family::Nested(_)) => None,
+        None if shell::is_shell(&process.name) => None,
+        None => named(&process.name),
+    };
+    name.map(str::to_owned)
+}
+
 /// What a command line is, once its wrappers are looked through.
 enum Command {
     /// The command and its arguments.
@@ -899,6 +956,77 @@ mod tests {
 
     fn seen(table: &Table) -> Seen {
         find(ShellParent::Login, 100, table)
+    }
+
+    fn kept(table: &Table) -> Option<String> {
+        kept_name(ShellParent::Login, 100, table)
+    }
+
+    #[test]
+    fn two_scripts_of_one_interpreter_are_two_programs_to_keep_an_answer_by() {
+        let node = |script: &'static str| {
+            login_shell(200).run(200, 101, 200, &["node", script, "--token", "secret"])
+        };
+        assert_eq!(
+            kept(&node("/home/me/tools/containers.js")).as_deref(),
+            Some("containers.js")
+        );
+        assert_eq!(
+            kept(&node("/tmp/evil/containers-two.js")).as_deref(),
+            Some("containers-two.js")
+        );
+        // Only a name: not the path, not the arguments.
+        let name = kept(&node("/home/me/tools/containers.js")).expect("a name");
+        assert!(!name.contains('/') && !name.contains("secret"), "{name}");
+        let python = |argv: &[&'static str]| login_shell(200).run(200, 101, 200, argv);
+        assert_eq!(
+            kept(&python(&["python3", "-u", "tools/db.py", "--dsn", "x"])).as_deref(),
+            Some("db.py")
+        );
+        assert_eq!(
+            kept(&python(&["python3", "-m", "tools.db"])).as_deref(),
+            Some("tools.db")
+        );
+        // A program that is not an interpreter is its own name.
+        assert_eq!(
+            kept(&login_shell(200).run(200, 101, 200, &["/usr/local/bin/containers"])).as_deref(),
+            Some("containers")
+        );
+    }
+
+    #[test]
+    fn a_program_that_cannot_be_told_from_another_is_not_named() {
+        // An interpreter with no script: a REPL, inline code, or an argv it rewrote.
+        for argv in [
+            &["node"][..],
+            &["node", "-e", "serve()"],
+            &["python3"],
+            &["python3", "-c", "serve()"],
+            &["bun", "run", "dev"],
+            &["ruby", "tool.rb"],
+        ] {
+            assert_eq!(
+                kept(&login_shell(200).run(200, 101, 200, argv)),
+                None,
+                "{argv:?}"
+            );
+        }
+        // A shell, however it was started, runs anything.
+        assert_eq!(
+            kept(&login_shell(200).run(200, 101, 200, &["bash", "tool.sh"])),
+            None
+        );
+        // Nothing in front, or the group cannot be read.
+        assert_eq!(kept(&login_shell(101)), None);
+        let unreadable = Table::new(None)
+            .with(100, 1, 100, "login")
+            .with(101, 100, 101, "zsh");
+        assert_eq!(kept(&unreadable), None);
+        // The leaf of a wrapper is what runs: `sh` → `node` is the node script's.
+        let wrapped = login_shell(200)
+            .run(200, 101, 200, &["sh", "-c", "node tool.js"])
+            .run(201, 200, 200, &["node", "tool.js"]);
+        assert_eq!(kept(&wrapped).as_deref(), Some("tool.js"));
     }
 
     fn kind(kind: Kind) -> Seen {

@@ -47,12 +47,13 @@
 //! foreground of the tty, the tty is raw) is read when the frame is heard, which
 //! is what keeps a stale `hello` from being answered into the shell's input.
 
+use std::cell::Cell;
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::fs::File;
 use std::mem;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use ::pencere::frame::Message;
@@ -117,6 +118,15 @@ pub struct ViewOptions {
     pub locale: Option<String>,
     /// The person's time zone (IANA), when known.
     pub time_zone: Option<String>,
+    /// The pane's content area as the application knows it, in CSS pixels, which are
+    /// points — the unit a view is told its container in. This crate has no scale to
+    /// turn the grid's device pixels into them, so the application says; a pane it does
+    /// not know the area of yet is `0 × 0`, and the view is told the real one
+    /// ([`crate::Session::set_view_size`]) before it starts.
+    pub size: Size,
+    /// How to find the group the pane's shell leads ([`ShellGroup`]); `None` for a pane
+    /// whose child is the shell itself.
+    pub shell_group: Option<ShellGroup>,
 }
 
 impl ViewOptions {
@@ -132,7 +142,100 @@ impl ViewOptions {
             font_mono: font_stack(None),
             locale: None,
             time_zone: None,
+            size: Size {
+                width: 0,
+                height: 0,
+            },
+            shell_group: None,
         }
+    }
+}
+
+/// How a pane finds the process group its shell leads, from the pid of the pane's child.
+///
+/// The child is the shell where the platform starts it directly. On macOS it is `login(1)`,
+/// which forks the shell, so the group the terminal's foreground is compared with is a
+/// child's, and finding it takes the process table, which this crate does not read: the
+/// application hands the question down. `None` is "not known (yet)": `login` has not forked,
+/// or the table could not be read.
+#[derive(Clone)]
+pub struct ShellGroup(Arc<dyn Fn(u32) -> Option<u32> + Send + Sync>);
+
+impl ShellGroup {
+    /// A finder: `find(child)` is the group the shell of the pane whose child is `child` leads.
+    pub fn new(find: impl Fn(u32) -> Option<u32> + Send + Sync + 'static) -> Self {
+        Self(Arc::new(find))
+    }
+}
+
+impl fmt::Debug for ShellGroup {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ShellGroup(..)")
+    }
+}
+
+/// The group a pane's shell leads, found when first asked and kept: the shell is forked once
+/// and keeps its group, and the process table is not asked on every frame.
+struct Shell {
+    find: Option<ShellGroup>,
+    child: u32,
+    /// `0` for not found yet: no process group has that id.
+    found: AtomicU32,
+}
+
+impl Shell {
+    fn new(find: Option<ShellGroup>, child: u32) -> Self {
+        Self {
+            find,
+            child,
+            found: AtomicU32::new(0),
+        }
+    }
+
+    /// The group, or `None` when it cannot be told yet — which makes the check of the
+    /// foreground unknown ([`observed`]), not failed.
+    fn group(&self) -> Option<u32> {
+        let Some(find) = &self.find else {
+            // The child is the shell, and a shell is the leader of its own group.
+            return Some(self.child);
+        };
+        match self.found.load(Ordering::Acquire) {
+            0 => {
+                let group = (find.0)(self.child).filter(|group| *group > 0)?;
+                self.found.store(group, Ordering::Release);
+                Some(group)
+            }
+            group => Some(group),
+        }
+    }
+}
+
+/// A store that locks for itself: panes call it at once, and what takes a while in it — a
+/// file written, read and checked — does not make a call for another file wait.
+pub trait Shared: Send + Sync {
+    /// Whether the store holds the file with this digest.
+    fn contains(&self, digest: &Digest) -> bool;
+    /// Keeps a verified file.
+    fn insert(&self, file: Verified);
+    /// The file with this digest.
+    fn get(&self, digest: &Digest) -> Option<Arc<[u8]>>;
+}
+
+/// A [`Store`] that needs `&mut` made [`Shared`] by one lock around each call: for the
+/// stores that are memory only and fast.
+struct Locked<S>(Mutex<S>);
+
+impl<S: Store + Send> Shared for Locked<S> {
+    fn contains(&self, digest: &Digest) -> bool {
+        lock(&self.0).contains(digest)
+    }
+
+    fn insert(&self, file: Verified) {
+        lock(&self.0).insert(file);
+    }
+
+    fn get(&self, digest: &Digest) -> Option<Arc<[u8]>> {
+        lock(&self.0).get(digest)
     }
 }
 
@@ -140,17 +243,23 @@ impl ViewOptions {
 /// (on disk, with its own policy for how much it keeps) or an in-memory one.
 /// Clones are the same store.
 ///
-/// One lock for all the panes, held for a call of the store: a pane's
-/// `contains` may wait for another's `get`, which reads one file. Both run
-/// off the main thread (the reader's), and the crate asks for the files of a
-/// bundle once per `open`.
+/// **No lock of its own** for a store that locks for itself ([`Shelf::shared`]): a
+/// pane's `get`, which the web view waits for, is not held up by another's
+/// `insert`, which writes up to 8 MiB. A store that needs `&mut` ([`Shelf::new`])
+/// gets one lock for all the panes, held for a call. Every call runs off the main
+/// thread (the reader's, or the file queue's).
 #[derive(Clone)]
-pub struct Shelf(Arc<Mutex<Box<dyn Store + Send>>>);
+pub struct Shelf(Arc<dyn Shared>);
 
 impl Shelf {
-    /// A shelf over `store`.
+    /// A shelf over `store`, one lock around every call.
     pub fn new(store: impl Store + Send + 'static) -> Self {
-        Self(Arc::new(Mutex::new(Box::new(store))))
+        Self(Arc::new(Locked(Mutex::new(store))))
+    }
+
+    /// A shelf over a store that does its own locking.
+    pub fn shared(store: impl Shared + 'static) -> Self {
+        Self(Arc::new(store))
     }
 
     /// A shelf in memory, bounded by [`MEMORY_LIMIT`]: the oldest file goes
@@ -162,15 +271,15 @@ impl Shelf {
 
 impl Store for Shelf {
     fn contains(&self, digest: &Digest) -> bool {
-        lock(&self.0).contains(digest)
+        self.0.contains(digest)
     }
 
     fn insert(&mut self, file: Verified) {
-        lock(&self.0).insert(file);
+        self.0.insert(file);
     }
 
     fn get(&self, digest: &Digest) -> Option<Arc<[u8]>> {
-        lock(&self.0).get(digest)
+        self.0.get(digest)
     }
 }
 
@@ -242,15 +351,23 @@ pub(crate) struct SystemEntropy {
 
 impl Entropy for SystemEntropy {
     fn token_bytes(&mut self) -> [u8; 16] {
-        let mut bytes = [0u8; 16];
-        // SAFETY: the pointer is valid for `bytes.len()` writes, and
-        // `getentropy` takes up to 256 bytes at a time.
-        let done = unsafe { libc::getentropy(bytes.as_mut_ptr().cast(), bytes.len()) } == 0;
-        if !done {
+        system_random().unwrap_or_else(|| {
             self.failed.store(true, Ordering::Release);
-        }
-        bytes
+            [0u8; 16]
+        })
     }
+}
+
+/// Sixteen unpredictable bytes from the operating system (`getentropy`); `None` if the call
+/// fails. **The one place the application asks for them**: the token of an `open` and the
+/// random name of a view's origin both come from here, so a source that cannot be trusted
+/// is one fix and there is no second `unsafe` call to keep in step with it.
+pub fn system_random() -> Option<[u8; 16]> {
+    let mut bytes = [0u8; 16];
+    // SAFETY: the pointer is valid for `bytes.len()` writes, and `getentropy`
+    // takes up to 256 bytes at a time.
+    let done = unsafe { libc::getentropy(bytes.as_mut_ptr().cast(), bytes.len()) } == 0;
+    done.then_some(bytes)
 }
 
 /// The crate's conversation, as a pane has it.
@@ -293,8 +410,11 @@ fn read_tty(master: BorrowedFd<'_>) -> Option<Tty> {
 /// What the protocol needs to know of a pane (§6.2, §6.5), from what was read
 /// of it. On a pane in a remote session the tty is `ssh`'s, not the program's:
 /// the two checks of the tty are skipped there (`None`), and the shell's own
-/// marks stand. `shell` is the pid the pane's shell has.
-fn observed(editing: bool, remote: bool, tty: Option<Tty>, shell: u32) -> Observed {
+/// marks stand. `shell` is the group the pane's shell leads, if it can be told:
+/// when it cannot, whether the shell is in front is **unknown** (`None`), never
+/// "no" — a check that said "no" for a shell that is in front would answer a
+/// `hello` into its line editor.
+fn observed(editing: bool, remote: bool, tty: Option<Tty>, shell: Option<u32>) -> Observed {
     let local = if remote { None } else { tty };
     Observed {
         prompt_editing: editing,
@@ -302,19 +422,24 @@ fn observed(editing: bool, remote: bool, tty: Option<Tty>, shell: u32) -> Observ
         alternate_screen: None,
         shell_in_foreground: local
             .and_then(|tty| tty.foreground)
-            .map(|group| group == shell),
+            .zip(shell)
+            .map(|(group, shell)| group == shell),
         tty_canonical_or_echo: local.map(|tty| tty.canonical_or_echo),
     }
 }
 
 /// The observer of a pane: the shell's log for the prompt and the remote
 /// session, the master's copy for the tty. Each is read with its own leaf lock
-/// and none is held while another is taken.
+/// and none is held while another is taken. `child_pid` is the pid of the
+/// pane's child, which `group` turns into the shell's group where the child is
+/// not the shell (`login(1)` on macOS).
 pub(crate) fn pane_observer(
     shell: Arc<Mutex<ShellLog>>,
     master: Arc<Mutex<Option<File>>>,
-    shell_pid: u32,
+    child_pid: u32,
+    group: Option<ShellGroup>,
 ) -> Observer {
+    let leads = Shell::new(group, child_pid);
     Box::new(move || {
         let (editing, remote) = {
             let log = lock(&shell);
@@ -327,7 +452,7 @@ pub(crate) fn pane_observer(
                 .as_ref()
                 .and_then(|file| read_tty(file.as_fd()))
         };
-        observed(editing, remote, tty, shell_pid)
+        observed(editing, remote, tty, leads.group())
     })
 }
 
@@ -403,12 +528,11 @@ struct Slots {
 }
 
 impl Desk {
-    /// The desk of a pane with `options`, the opening `theme` and the pane's
-    /// content area in CSS pixels.
+    /// The desk of a pane with `options` (its content area in CSS pixels
+    /// among them) and the opening `theme`.
     pub(crate) fn new(
         options: ViewOptions,
         theme: Theme,
-        size: Size,
         wake: Arc<dyn Wake>,
         observer: Observer,
     ) -> Self {
@@ -419,6 +543,9 @@ impl Desk {
             font_mono,
             locale,
             time_zone,
+            size,
+            // The observer's: how it finds the shell is [`pane_observer`]'s.
+            shell_group: _,
         } = options;
         let mut config = Config::new(host, view_theme(&theme, &font_mono), size);
         config.view.locale = locale;
@@ -493,6 +620,24 @@ impl Desk {
         };
         self.deliver(writes, notify, write);
         result
+    }
+
+    /// Hands the view's message to the conversation; whether the pane wrote anything to
+    /// the program for it. What is written for a message of the view is a request of the
+    /// view passed on (or the call of the tool the view is for): it is out until the
+    /// program answers, and the shell is the one with a clock to give up waiting
+    /// ([`crate::Session::view_requests_overdue`]). The bytes are the crate's own word
+    /// that a request went out, so nothing of the message is read here.
+    pub(crate) fn view_message(&self, text: &str, write: impl Fn(Vec<u8>)) -> bool {
+        let wrote = Cell::new(false);
+        self.apply(
+            |bytes| {
+                wrote.set(true);
+                write(bytes);
+            },
+            |conversation| conversation.view_message(text),
+        );
+        wrote.get()
     }
 
     /// The program ended (§10.3): the command's `D`, or the child's exit.
