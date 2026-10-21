@@ -1,3 +1,4 @@
+use crate::agent::Anchor;
 use kablo_proto::SessionId;
 use kablo_proto::v1::{Exit, Size, State, Status};
 
@@ -872,4 +873,57 @@ fn a_string_is_escaped_the_way_kablo_escapes_it() {
         json_ratio(&mut out, ratio);
         assert_eq!(out, text, "{ratio}");
     }
+}
+
+#[test]
+fn the_rows_know_who_opened_each_terminal_and_which_wait_for_a_pane() {
+    let records = [
+        (
+            Terminal(7),
+            Record {
+                opener: Anchor::parse("t4"),
+                keep_open: false,
+            },
+        ),
+        (
+            Terminal(8),
+            Record {
+                opener: None,
+                keep_open: false,
+            },
+        ),
+    ];
+    let rows = rows(
+        vec![
+            status("t7", "npm"),
+            status("t8", "make"),
+            status("t9", "zsh"),
+            // A terminal a person made with kablo has no number to be found by.
+            status("mine", "vim"),
+        ],
+        &records,
+        &|terminal| terminal == Terminal(9),
+    );
+    let opened: Vec<_> = rows.iter().map(|row| row.opened_by.as_deref()).collect();
+    assert_eq!(opened, [Some("t4"), None, None, None]);
+    let waiting: Vec<_> = rows.iter().map(|row| row.waiting).collect();
+    assert_eq!(waiting, [false, false, true, false]);
+    // And they read in the table.
+    let scene = Scene {
+        caller: None,
+        typing: None,
+        windows: Some(Vec::new()),
+        terminals: rows,
+    };
+    let text = scene.text(NOW);
+    let line = text
+        .lines()
+        .find(|line| line.starts_with("t7"))
+        .expect("t7");
+    assert!(line.contains("t4"), "{line}");
+    let line = text
+        .lines()
+        .find(|line| line.starts_with("t9"))
+        .expect("t9");
+    assert!(line.contains("waiting"), "{line}");
 }

@@ -91,6 +91,10 @@ struct Fake {
     letters: Mutex<Vec<Letter>>,
     /// The number the server's counter gives next; 0 is a server that cannot count.
     next_number: AtomicU64,
+    /// Who opened what, as the server's records say.
+    records: Mutex<Vec<(crate::agent::Terminal, crate::agent::notes::Record)>>,
+    /// How long reading the records takes.
+    records_take: Mutex<Duration>,
 }
 
 impl Fake {
@@ -116,6 +120,8 @@ impl Fake {
             mail: AtomicBool::new(false),
             letters: Mutex::new(Vec::new()),
             next_number: AtomicU64::new(0),
+            records: Mutex::new(Vec::new()),
+            records_take: Mutex::new(Duration::ZERO),
         })
     }
 
@@ -352,6 +358,12 @@ impl Backend for Fake {
 
     fn takes_mail(&self) -> bool {
         self.mail.load(Ordering::SeqCst)
+    }
+
+    fn records(&self, _: &KabloHost) -> Vec<(crate::agent::Terminal, crate::agent::notes::Record)> {
+        self.note("records");
+        thread::sleep(*self.records_take.lock().expect("lock"));
+        self.records.lock().expect("lock").clone()
     }
 
     fn reachable(&self, account: &str, server: &KabloHost) {
@@ -660,6 +672,54 @@ fn a_numbered_terminal_is_found_again_by_its_number_after_a_restart() {
     until("the pane found again", || second.shown(&pane).is_some());
     assert_eq!(second.shown(&pane).expect("shown").terminal, terminal);
     second.stop();
+}
+
+/// A number a person took by hand (`kablo new --id t7`) is skipped: the counter is asked again,
+/// the terminal starts under the next number, the holder is shown it and is not let fall back to
+/// a plain `ssh`, and the row written for the number that was taken goes — that terminal is not
+/// the pane's to end.
+#[test]
+fn a_number_a_person_took_by_hand_is_skipped_and_the_terminal_starts_under_the_next() {
+    let ledger = Arc::new(Ledger::memory());
+    let world = Fake::new(Bridge::new(Age::Current));
+    world.counts_from(7);
+    let pane = pane_named(&world);
+    let hand_made = world.bridge().add("t7", Size::default());
+    let rig = Rig::kept("renumber", world, ledger.clone(), END_GRACE);
+    let mut holder = Holder::new(&rig.socket(), "b-1");
+    rig.has_terminals(&["t7", "t8"]);
+    let next = SessionId::new("t8").expect("a name");
+    rig.world.bridge().write(&next, b"mine");
+    // The terminal the person made is a line the holder reads first (it runs in the background);
+    // what follows is the new terminal's.
+    until("the holder shows the next number", || {
+        holder.shown.bytes().ends_with(b"mine")
+    });
+    assert_eq!(rig.world.count("number"), 2, "asked again");
+    until("the pane found", || rig.service.shown(&pane).is_some());
+    assert_eq!(rig.service.shown(&pane).expect("shown").terminal, next);
+    assert!(ledger.keeps("u@rasp:22", &next));
+    assert!(
+        !ledger.keeps("u@rasp:22", &hand_made),
+        "the person's terminal is not the pane's"
+    );
+    rig.world.bridge().exit(&next, Exit::Code(0));
+    assert_eq!(holder.outcome(), Outcome::Exit(0));
+}
+
+/// A server whose numbers are all taken is given up on after a few tries: the pane is the plain
+/// `ssh`'s, as it is for a server that cannot count.
+#[test]
+fn numbers_that_are_all_taken_are_given_up_on_and_the_pane_falls_back() {
+    let world = Fake::new(Bridge::new(Age::Current));
+    world.counts_from(7);
+    for number in 7..20 {
+        world.bridge().add(&format!("t{number}"), Size::default());
+    }
+    let rig = Rig::over("renumber-all", world);
+    let mut holder = Holder::new(&rig.socket(), "b-1");
+    assert_eq!(holder.outcome(), Outcome::FallBack);
+    assert_eq!(rig.world.count("number"), usize::from(RENUMBER_TRIES) + 1);
 }
 
 /// A holder of version 2 is not told a name, so it is not numbered: the server's counter is not
@@ -2692,4 +2752,78 @@ fn an_answer_to_a_letter_of_a_connection_that_went_is_not_said_on_the_next() {
         rig.world.bridge().app_finished(again)
     });
     assert_eq!(rig.world.bridge().said_to_sender(again), b"ok\n");
+}
+
+// Survey: every terminal of an account as the server has it now, with who opened each
+
+/// The answer to a survey, once it comes.
+fn surveyed(rig: &Rig, account: &str) -> Survey {
+    let (tx, rx) = mpsc::channel();
+    rig.service.survey(account, move |survey| {
+        let _ = tx.send(survey);
+    });
+    rx.recv_timeout(Duration::from_secs(15)).expect("a survey")
+}
+
+#[test]
+fn a_survey_is_the_servers_list_asked_for_now_with_the_records_read_beside_it() {
+    let world = Fake::new(Bridge::new(Age::Current));
+    world.records.lock().expect("lock").push((
+        crate::agent::Terminal(1),
+        crate::agent::notes::Record {
+            opener: crate::agent::Anchor::parse("t4"),
+            keep_open: true,
+        },
+    ));
+    let rig = Rig::over("survey", world);
+    let _holder = Holder::new(&rig.socket(), "b-1");
+    let terminals = rig.terminals(1);
+    let survey = surveyed(&rig, "u@rasp:22");
+    let list = survey.terminals.expect("the server's list");
+    assert_eq!(
+        list.iter()
+            .map(|status| status.id.clone())
+            .collect::<Vec<_>>(),
+        terminals
+    );
+    assert_eq!(survey.records.len(), 1);
+    assert!(survey.records[0].1.keep_open);
+    assert_eq!(rig.world.count("records"), 1);
+    // A terminal that came after is in the next one: the list is asked for, not remembered.
+    let _second = Holder::new(&rig.socket(), "b-2");
+    rig.terminals(2);
+    let list = surveyed(&rig, "u@rasp:22").terminals.expect("a list");
+    assert_eq!(list.len(), 2);
+}
+
+#[test]
+fn a_survey_of_an_account_that_is_not_connected_is_answered_at_once_with_nothing() {
+    let rig = Rig::new("survey-none");
+    let survey = surveyed(&rig, "nobody@nowhere:22");
+    assert!(survey.terminals.is_none() && survey.records.is_empty());
+    assert_eq!(rig.world.count("records"), 0, "nothing is read for it");
+}
+
+#[test]
+fn a_survey_whose_records_are_slow_waits_for_them() {
+    let world = Fake::new(Bridge::new(Age::Current));
+    *world.records_take.lock().expect("lock") = Duration::from_millis(300);
+    world.records.lock().expect("lock").push((
+        crate::agent::Terminal(1),
+        crate::agent::notes::Record {
+            opener: None,
+            keep_open: false,
+        },
+    ));
+    let rig = Rig::over("survey-slow", world);
+    let _holder = Holder::new(&rig.socket(), "b-1");
+    rig.terminals(1);
+    let started = Instant::now();
+    let survey = surveyed(&rig, "u@rasp:22");
+    assert!(
+        started.elapsed() >= Duration::from_millis(250),
+        "the records were waited for"
+    );
+    assert!(survey.terminals.is_some());
+    assert_eq!(survey.records.len(), 1);
 }

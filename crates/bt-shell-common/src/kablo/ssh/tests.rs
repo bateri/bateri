@@ -411,6 +411,33 @@ fn what_the_script_left_for_the_application_is_read_over_the_master_and_removed(
     assert_eq!(steps(&world), before);
 }
 
+/// Who opened which terminal is read over the master the same way, and left where it is; a build
+/// without the package asks nothing.
+#[test]
+fn who_opened_what_is_read_over_the_master_and_left_on_the_server() {
+    let world = stand_in("records", 0);
+    let host = world
+        .backend(Some(world.package()))
+        .route(&["rasp".into()])
+        .expect("kablo");
+    let dir = world.home.join(".local/share/bateri/terminals");
+    std::fs::create_dir_all(&dir).expect("dir");
+    std::fs::write(dir.join("t3"), "opener t4\nkeep-open yes\n").expect("a record");
+
+    let backend = world.backend(Some(world.package()));
+    let records = backend.records(&host);
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].0, crate::agent::Terminal(3));
+    assert_eq!(records[0].1.opener, crate::agent::Anchor::parse("t4"));
+    assert!(records[0].1.keep_open);
+    assert!(dir.join("t3").exists(), "read, not taken");
+
+    let bare = world.backend(None);
+    let before = world.calls().len();
+    assert!(bare.records(&host).is_empty());
+    assert_eq!(world.calls().len(), before, "no call was made");
+}
+
 #[test]
 fn what_ssh_says_when_the_bridge_ends_tells_a_login_from_a_network() {
     // A password the server would have taken: the user's to give.

@@ -25,7 +25,9 @@ use bt_shell_common::kablo::SessionId;
 use bt_shell_common::kablo::install::Bundle;
 use bt_shell_common::kablo::ledger::Ledger;
 use bt_shell_common::kablo::roster::Background;
-use bt_shell_common::kablo::service::{PaneInfo, PaneLink, Peer, QUIT_END_WAIT, Service, Shown};
+use bt_shell_common::kablo::service::{
+    PaneInfo, PaneLink, Peer, QUIT_END_WAIT, Service, Shown, Survey,
+};
 use bt_shell_common::kablo::ssh::SshBackend;
 
 /// The running service: for as long as the process lives.
@@ -187,6 +189,16 @@ pub(crate) fn end_terminal(account: &str, terminal: &SessionId) {
     }
 }
 
+/// Every terminal the server of `account` has as it says now, with who opened each
+/// ([`Service::survey`]): `done` runs on the service's thread and must only hand the answer on.
+/// No service, no answer: it runs at once with nothing.
+pub(crate) fn survey(account: &str, done: impl FnOnce(Survey) + Send + 'static) {
+    match SERVICE.get() {
+        Some(service) => service.survey(account, done),
+        None => done(Survey::default()),
+    }
+}
+
 /// ⏎ in a pane that waits for its connection: the account of the terminal it
 /// shows dials now instead of waiting out its pause.
 pub(crate) fn retry(pane: &PaneUuid) {
@@ -311,7 +323,7 @@ fn terminal_changed(pane: &PaneUuid) {
             found.remote_edge();
         }
         // A terminal some pane was waiting to stand beside may have a pane now.
-        crate::agent::terminal_shown(&app, &pane);
+        crate::agent::terminal_shown(&pane);
     });
 }
 

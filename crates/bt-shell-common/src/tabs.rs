@@ -1920,6 +1920,9 @@ pub struct Card {
     /// A transfer flowing: the item's name, the percentage, and `true` when it is a download.
     pub upload: Option<(String, u8, bool)>,
     pub mark: HostMark,
+    /// Who asked for the tab's pane, when a program on a server did (`bateri split`): the words
+    /// that name it, "Claude (t4)".
+    pub opened_by: Option<String>,
     /// The tab's panes in tree order, each a tile of the map — a tab of one pane is a map of one
     /// tile, the same tile a split tab's panes have; empty only for a card with no picture.
     pub panes: Vec<CardPane>,
@@ -2092,9 +2095,10 @@ pub fn place(
 
 /// The card's lines, top to bottom: the title; the directory (`host:path` in a remote session);
 /// what the newest command did — "Running · {command} · {time}", "Finished · {command} · {time}",
-/// "Exit {n} · {command}"; a flowing transfer; a marked host's kind. A card with a map keeps only
-/// the title, the directory and the host's kind: what each pane is doing is on its map, a tab of
-/// one pane's as much as a split tab's. A card with no picture keeps all of them. A part nobody
+/// "Exit {n} · {command}"; a flowing transfer; a marked host's kind; who opened the pane when a
+/// program asked for it. A card with a map keeps only the title, the directory, the host's kind
+/// and who opened it: what each pane is doing is on its map, a tab of one pane's as much as a
+/// split tab's. A card with no picture keeps all of them. A part nobody
 /// knows is left out rather than shown empty.
 pub fn card_lines(card: &Card) -> Vec<(String, Tone)> {
     let mut lines = vec![(card.title.clone(), Tone::Title)];
@@ -2144,6 +2148,9 @@ pub fn card_lines(card: &Card) -> Vec<(String, Tone)> {
     }
     if let Some(name) = host_name(card.mark) {
         lines.push((format!("{name} host"), Tone::Mark));
+    }
+    if let Some(who) = &card.opened_by {
+        lines.push((format!("Opened by {who}"), Tone::Dim));
     }
     lines
 }
@@ -2214,6 +2221,14 @@ impl Unseen {
             }
             Finish::Stopped => {}
         }
+    }
+
+    /// A program of the tab asked the user for a look (`bateri notify`, whose words are a
+    /// notification when bateri is behind): the tab is marked as something finished that was not
+    /// seen, until it is looked at ([`Self::looked`]). Like an end, nothing is marked while the
+    /// tab is selected — it is the one the user left on screen.
+    pub fn noted(&mut self, selected: bool, ran: Kind) {
+        self.observe_transfer(Finish::Done, selected, ran);
     }
 
     /// What the mark on the chip is of: the failure's program while one is marked (the dot is
@@ -4091,6 +4106,26 @@ mod tests {
         );
     }
 
+    /// What an agent's `bateri notify` leaves on a tab it is not looking at: the tick, until the
+    /// tab is selected; nothing on the selected one.
+    #[test]
+    fn a_notice_an_agent_asks_for_marks_a_tab_that_is_not_the_one_on_screen() {
+        let mut unseen = Unseen::default();
+        unseen.noted(true, Kind::Agent(Agent::Codex));
+        assert_eq!(unseen, Unseen::default(), "the selected tab");
+        unseen.noted(false, Kind::Agent(Agent::Codex));
+        assert!(unseen.finished && !unseen.failed);
+        assert_eq!(
+            indicator(Signals {
+                finished: true,
+                ..Signals::default()
+            }),
+            Some(Indicator::Finished)
+        );
+        unseen.looked();
+        assert_eq!(unseen, Unseen::default());
+    }
+
     /// The tick a transfer left stays while another one flows, and a failure stays above a later
     /// success: the indicator ranks both above an upload still going.
     #[test]
@@ -4669,6 +4704,16 @@ mod tests {
             ]
         );
         assert!(card.pictured());
+        // A pane a program asked for says so, picture or not.
+        let asked = Card {
+            opened_by: Some("Claude (t4)".to_owned()),
+            ..card.clone()
+        };
+        assert_eq!(
+            card_lines(&asked).last(),
+            Some(&("Opened by Claude (t4)".to_owned(), Tone::Dim))
+        );
+        assert_eq!(card_lines(&asked).len(), card_lines(&card).len() + 1);
         // A tab of one pane is a map of one tile: the same lines as a split tab's.
         let one = Card {
             panes: vec![pane_on_the_map(1, Rect::new(0.0, 0.0, 1.0, 1.0), None)],

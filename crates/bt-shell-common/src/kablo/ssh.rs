@@ -385,6 +385,27 @@ impl Backend for SshBackend {
             notes,
         );
     }
+
+    fn records(
+        &self,
+        server: &KabloHost,
+    ) -> Vec<(crate::agent::Terminal, crate::agent::notes::Record)> {
+        // Only a server kablo is kept on has been written to by the script.
+        if self.bundle.is_none() {
+            return Vec::new();
+        }
+        let target = self.target(server);
+        let channel = SshChannel {
+            argv: ssh_argv_for(&target, &self.route_of(&target)),
+            limit: install::RECORDS_LIMIT,
+        };
+        match channel.run(crate::agent::notes::RECORDS, &[]) {
+            Ok(reply) if reply.status == Some(0) => {
+                crate::agent::notes::parse_records(reply.out.as_bytes())
+            }
+            _ => Vec::new(),
+        }
+    }
 }
 
 /// The server's running terminals are renewed with the binary just checked

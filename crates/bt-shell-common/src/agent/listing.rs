@@ -35,6 +35,7 @@ use bt_core::running_counter;
 use kablo_proto::v1::{Exit, State, Status};
 
 use super::Terminal;
+use super::notes::Record;
 use crate::kablo::roster::{Activity, activity_at};
 use crate::program::is_shell_name;
 use crate::server_card::running_text;
@@ -159,6 +160,31 @@ pub struct Scene {
     /// The windows, or `None` when the Mac is not connected and nothing of the layout is known.
     pub windows: Option<Vec<Window>>,
     pub terminals: Vec<Row>,
+}
+
+/// The table's rows: each terminal the server said it has, with the terminal that opened it as
+/// the server's records say (a terminal with no record, or opened from none, has no opener) and
+/// whether its pane waits for the Mac (`waits`).
+pub fn rows(
+    terminals: Vec<Status>,
+    records: &[(Terminal, Record)],
+    waits: &dyn Fn(Terminal) -> bool,
+) -> Vec<Row> {
+    terminals
+        .into_iter()
+        .map(|status| {
+            let terminal = Terminal::parse(status.id.as_str());
+            let opened_by = terminal
+                .and_then(|terminal| records.iter().find(|(found, _)| *found == terminal))
+                .and_then(|(_, record)| record.opener.as_ref())
+                .map(|opener| opener.name().to_owned());
+            Row {
+                waiting: terminal.is_some_and(waits),
+                opened_by,
+                status,
+            }
+        })
+        .collect()
 }
 
 const ELSEWHERE: &str = "another machine";

@@ -16,9 +16,13 @@
 # The number is written back BEFORE it is printed, so a caller that dies in
 # between loses a number, which is allowed, and never repeats one.
 #
-# A lock whose holder died is taken over after about five seconds: the holder
-# only reads and renames a file, so it is never held that long for a living
-# reason. The taking over is a rename (one contender wins it).
+# A lock whose holder died is taken over: the holder writes its process number
+# into the lock as its first act, and a waiter that finds that process gone
+# takes the lock at once, one that finds none written takes it after about five
+# seconds (the holder died before it wrote one), and one that finds the process
+# alive waits (a lock held a full minute is taken over all the same: a number
+# something else took over would hold it for ever). The taking over is a rename
+# (one contender wins it). A holder only releases a lock that is still its own.
 #
 # Exits 1, printing nothing, when it cannot count: no home, a directory it
 # cannot write, a counter that is not a number (it is never guessed at — a
@@ -32,19 +36,57 @@ bt_state=$HOME/.local/share/bateri
 (umask 077 && mkdir -p "$bt_state") 2>/dev/null || exit 1
 bt_lock=$bt_state/next.lock
 
+bt_nap=
+bt_limit=
 bt_tries=0
+bt_waited=0
 until (umask 077 && mkdir "$bt_lock") 2>/dev/null; do
+  if [ -z "$bt_nap" ]; then
+    # Whether a nap can be a tenth of a second (not every `sleep` can), and so how many naps
+    # are about five seconds.
+    if sleep 0.1 2>/dev/null; then
+      bt_nap=0.1
+      bt_limit=50
+    else
+      bt_nap=1
+      bt_limit=5
+      sleep 1
+    fi
+  else
+    sleep "$bt_nap" 2>/dev/null || sleep 1
+  fi
   bt_tries=$((bt_tries + 1))
-  if [ "$bt_tries" -ge 50 ]; then
+  bt_waited=$((bt_waited + 1))
+  bt_holder=$(cat "$bt_lock/pid" 2>/dev/null)
+  case $bt_holder in
+    '' | *[!0-9]*) ;;
+    *)
+      if kill -0 "$bt_holder" 2>/dev/null; then
+        bt_tries=0
+      else
+        bt_tries=$bt_limit
+      fi
+      ;;
+  esac
+  if [ "$bt_tries" -ge "$bt_limit" ] || [ "$bt_waited" -ge $((bt_limit * 12)) ]; then
     if mv "$bt_lock" "$bt_lock.dead.$$" 2>/dev/null; then
       rm -rf "$bt_lock.dead.$$"
     fi
     bt_tries=0
+    bt_waited=0
   fi
-  sleep 0.1 2>/dev/null || sleep 1
 done
-trap 'rmdir "$bt_lock" 2>/dev/null' EXIT
+bt_release() {
+  # Only a lock that is still ours: one taken over from a holder that was merely slow is
+  # the next one's.
+  if [ "$(cat "$bt_lock/pid" 2>/dev/null)" = "$$" ]; then
+    rm -f "$bt_lock/pid"
+    rmdir "$bt_lock" 2>/dev/null
+  fi
+}
+trap bt_release EXIT
 trap 'exit 1' HUP INT TERM
+printf '%s\n' "$$" > "$bt_lock/pid" 2>/dev/null
 
 bt_n=1
 if [ -e "$bt_state/next" ]; then

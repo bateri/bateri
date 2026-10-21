@@ -15,7 +15,8 @@
 //! written.
 //!
 //! `~/.local/share/bateri/terminals/tN` says who opened a terminal and whether it stays open when
-//! its program ends ([`Record`]); the same script writes it, `ls` and the summary read it.
+//! its program ends ([`Record`]); the same script writes it, and `ls` ([`RECORDS`] reads them all,
+//! leaving them) and `close` (who may close a terminal without asking) read it.
 
 use super::message::{MAX_BYTES, Place, Request};
 use super::{Anchor, Terminal};
@@ -45,6 +46,27 @@ done
 exit 0
 "#;
 
+/// The script that reads who opened what: run with `sh -c` on the server, it prints every
+/// `terminals/tN` record the way [`READ`] prints a note — `bateri-record tN LENGTH`, the bytes, a
+/// newline — and removes nothing. A record over 1 KiB is none (the script writes two short lines).
+pub const RECORDS: &str = r#"dir="$HOME/.local/share/bateri/terminals"
+[ -d "$dir" ] || exit 0
+for file in "$dir"/t*; do
+  [ -f "$file" ] && [ ! -L "$file" ] || continue
+  name=${file##*/}
+  case ${name#t} in
+    '' | *[!0-9]*) continue ;;
+  esac
+  size=$(wc -c < "$file" 2>/dev/null) || continue
+  size=$(( ${size:-0} + 0 ))
+  [ "$size" -le 1024 ] || continue
+  printf 'bateri-record %s %s\n' "$name" "$size"
+  cat "$file"
+  printf '\n'
+done
+exit 0
+"#;
+
 /// A note: the pane the Mac was asked for, as the script wrote it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Note {
@@ -57,7 +79,27 @@ pub struct Note {
 /// note is read when nobody names its sender) and one that is not text are left out; so is
 /// whatever comes after a note that is shorter than its header says.
 pub fn parse(output: &[u8]) -> Vec<Note> {
-    let mut notes = Vec::new();
+    frames(output, "bateri-note")
+        .into_iter()
+        .filter_map(|(terminal, body)| note_of(terminal, body))
+        .collect()
+}
+
+/// The records in what [`RECORDS`] printed, framed like the notes; a frame that is no record is
+/// left out.
+pub fn parse_records(output: &[u8]) -> Vec<(Terminal, Record)> {
+    frames(output, "bateri-record")
+        .into_iter()
+        .filter_map(|(terminal, body)| {
+            Record::parse(std::str::from_utf8(body).ok()?).map(|record| (terminal, record))
+        })
+        .collect()
+}
+
+/// The frames a script printed under header word `word`: the terminal its file is named for and
+/// the bytes of it.
+fn frames<'a>(output: &'a [u8], word: &str) -> Vec<(Terminal, &'a [u8])> {
+    let mut found = Vec::new();
     let mut rest = output;
     while !rest.is_empty() {
         let (line, after) = match rest.iter().position(|&byte| byte == b'\n') {
@@ -65,7 +107,7 @@ pub fn parse(output: &[u8]) -> Vec<Note> {
             None => (rest, &rest[rest.len()..]),
         };
         rest = after;
-        let Some((terminal, size)) = header(line) else {
+        let Some((terminal, size)) = header(line, word) else {
             continue;
         };
         if rest.len() < size {
@@ -73,17 +115,15 @@ pub fn parse(output: &[u8]) -> Vec<Note> {
         }
         let (body, tail) = rest.split_at(size);
         rest = tail.strip_prefix(b"\n").unwrap_or(tail);
-        if let Some(note) = note_of(terminal, body) {
-            notes.push(note);
-        }
+        found.push((terminal, body));
     }
-    notes
+    found
 }
 
-fn header(line: &[u8]) -> Option<(Terminal, usize)> {
+fn header(line: &[u8], word: &str) -> Option<(Terminal, usize)> {
     let line = std::str::from_utf8(line).ok()?;
     let mut words = line.split(' ');
-    if words.next()? != "bateri-note" {
+    if words.next()? != word {
         return None;
     }
     let terminal = Terminal::parse(words.next()?)?;
@@ -261,6 +301,79 @@ mod tests {
         // Not text.
         assert!(parse(b"bateri-note t5 2\n\xff\xfe\n").is_empty());
         assert!(parse(b"").is_empty());
+    }
+
+    /// Runs [`RECORDS`] with `sh` (and `dash`) over a home that holds `files` in `terminals/`; both
+    /// print the same, and nothing is removed.
+    fn records_of(name: &str, files: &[(&str, &[u8])]) -> (Vec<u8>, TempRoot) {
+        let root = TempRoot::new(&format!("agent-records-{name}"));
+        let dir = root.0.join(".local/share/bateri/terminals");
+        std::fs::create_dir_all(&dir).expect("a directory");
+        for (file, bytes) in files {
+            std::fs::write(dir.join(file), bytes).expect("a record");
+        }
+        let mut printed = Vec::new();
+        for shell in ["/bin/sh", "dash"] {
+            let Ok(output) = Command::new(shell)
+                .arg("-c")
+                .arg(RECORDS)
+                .env("HOME", &root.0)
+                .output()
+            else {
+                continue;
+            };
+            assert!(output.status.success(), "{shell}");
+            if printed.is_empty() {
+                printed = output.stdout;
+            } else {
+                assert_eq!(output.stdout, printed, "{shell} reads the same");
+            }
+        }
+        (printed, root)
+    }
+
+    #[test]
+    fn the_records_of_who_opened_what_are_read_and_left_where_they_are() {
+        let big = vec![b'x'; 2000];
+        let (printed, root) = records_of(
+            "all",
+            &[
+                ("t1", b"opener t4\nkeep-open no\n"),
+                ("t2", b"opener -\nkeep-open yes\n"),
+                // Being written, not a number, too big for a record, no record: not read.
+                ("t3.tmp.9", b"opener t4\n"),
+                ("t4x", b"opener t4\n"),
+                ("t5", &big),
+                ("t6", b"what is this\n"),
+            ],
+        );
+        let records = parse_records(&printed);
+        assert_eq!(records.len(), 2, "{records:?}");
+        assert_eq!(records[0].0, Terminal(1));
+        assert_eq!(records[0].1.opener, Anchor::parse("t4"));
+        assert!(!records[0].1.keep_open);
+        assert_eq!(records[1].0, Terminal(2));
+        assert_eq!(records[1].1.opener, None);
+        assert!(records[1].1.keep_open);
+        let dir = root.0.join(".local/share/bateri/terminals");
+        assert!(
+            dir.join("t1").exists() && dir.join("t5").exists(),
+            "nothing is removed"
+        );
+        // No directory: nothing printed and no failure.
+        let none = TempRoot::new("agent-records-none");
+        let output = Command::new("/bin/sh")
+            .arg("-c")
+            .arg(RECORDS)
+            .env("HOME", &none.0)
+            .output()
+            .expect("sh");
+        assert!(output.status.success() && output.stdout.is_empty());
+        // What a login shell says first, and a frame cut short, are left out.
+        let mut text = b"Welcome\nbateri-record oops\n".to_vec();
+        text.extend(b"bateri-record t7 23\nopener t4\nkeep-open no\n\n");
+        text.extend(b"bateri-record t8 99\nshort");
+        assert_eq!(parse_records(&text).len(), 1);
     }
 
     #[test]

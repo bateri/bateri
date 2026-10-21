@@ -27,6 +27,8 @@ pub struct Waiting {
     pub anchor: Anchor,
     /// What was asked.
     pub place: Place,
+    /// The terminal the request came from, as kablo said it then.
+    pub opener: Option<String>,
 }
 
 /// The requests that wait, oldest first.
@@ -71,6 +73,14 @@ impl Queue {
         });
     }
 
+    /// Whether a request for a pane of `terminal` of `account`'s server waits: `ls` says so
+    /// (`waiting`), and `close` takes the request away with the terminal.
+    pub fn waits(&self, account: &str, terminal: Terminal) -> bool {
+        self.waiting
+            .iter()
+            .any(|waiting| waiting.server.account == account && waiting.place.terminal == terminal)
+    }
+
     pub fn is_empty(&self) -> bool {
         self.waiting.is_empty()
     }
@@ -100,7 +110,19 @@ mod tests {
                 keep_open: false,
                 focus: false,
             },
+            opener: None,
         }
+    }
+
+    #[test]
+    fn a_request_is_known_to_wait_by_its_terminal_on_its_server() {
+        let mut queue = Queue::default();
+        queue.add(waiting("a", 7, "t4"));
+        assert!(queue.waits("a", Terminal(7)));
+        assert!(!queue.waits("a", Terminal(8)));
+        assert!(!queue.waits("b", Terminal(7)));
+        queue.forget("a", Terminal(7));
+        assert!(!queue.waits("a", Terminal(7)));
     }
 
     #[test]

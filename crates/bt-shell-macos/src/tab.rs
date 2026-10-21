@@ -1430,6 +1430,35 @@ impl TerminalTab {
         window.transfer_ended(self.id(), finish);
     }
 
+    /// A program in pane `pane` asked the user for a look (`bateri notify`): a tab that is not the
+    /// one on screen is marked with the tick until it is selected ([`Unseen::noted`]), the pane's
+    /// own entry too, and the bar draws it.
+    pub(crate) fn news_from(&self, pane: u64) {
+        let Some(window) = self.window() else {
+            return;
+        };
+        let ran = self
+            .panes()
+            .iter()
+            .find(|candidate| candidate.id() == pane)
+            .map_or_else(|| self.focused_pane().program_kind(), |p| p.program_kind());
+        let selected = window.is_selected(self.id());
+        let mut unseen = self.ivars().unseen.get();
+        unseen.noted(selected, ran);
+        self.ivars().unseen.set(unseen);
+        let mut ends = self.ivars().ends.borrow_mut();
+        match ends.iter_mut().find(|(id, _)| *id == pane) {
+            Some((_, mine)) => mine.noted(selected, ran),
+            None => {
+                let mut mine = Unseen::default();
+                mine.noted(selected, ran);
+                ends.push((pane, mine));
+            }
+        }
+        drop(ends);
+        window.refresh_bar();
+    }
+
     /// The user saw the tab: its ends so far are seen and its tick or dot
     /// goes. The window's switch calls it for the tab coming on screen —
     /// before the bar is drawn — and for the one leaving it: an end whose
@@ -1540,6 +1569,13 @@ impl TerminalTab {
             command,
             upload,
             mark: self.host_mark(),
+            // The focused pane's asker, else the first pane a program asked for.
+            opened_by: std::iter::once(pane.clone())
+                .chain(self.panes())
+                .find_map(|pane| {
+                    let shown = crate::hold_service::shown(pane.uuid())?;
+                    crate::agent::opened_by(&shown.account, shown.terminal.as_str())
+                }),
             panes: self.card_panes(),
             aspect: {
                 let area = self.container().bounds().size;

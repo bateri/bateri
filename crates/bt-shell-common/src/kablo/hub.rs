@@ -77,6 +77,19 @@ pub enum HubEvent {
         /// who has the terminal (this Mac was among those attached a moment ago).
         showed: Option<(String, SessionId)>,
     },
+    /// The terminal the application numbered for a holder (`t7`) is there already — one a person
+    /// made by hand with that name — and the holder was not shown anything: its request is
+    /// waiting again, and the owner starts it under the next number ([`Hub::start`] with `spec`).
+    Collided {
+        /// The holder.
+        hold: HoldId,
+        /// The account whose server has the name.
+        account: String,
+        /// The name that was taken.
+        terminal: SessionId,
+        /// What was asked for, to ask for again.
+        spec: Box<NewSession>,
+    },
     /// Something a client reported that the hub does not act on itself: the
     /// connection's life, a terminal's state, the answer to a question. Output
     /// and pictures are not passed on; they went to the holder.
@@ -141,6 +154,10 @@ struct Hold {
     /// The holder was asked to run a program and has not said it ended.
     running: bool,
     bound: Option<Binding>,
+    /// What a terminal the application numbered was asked with, until the server has made it:
+    /// the name may be taken by one a person made, and then it is asked for again
+    /// ([`HubEvent::Collided`]).
+    renumber: Option<(NewSession, Open)>,
     /// Nothing is read from this holder any more and, once `out` is written,
     /// its connection is to be closed.
     finished: bool,
@@ -155,6 +172,7 @@ impl Hold {
             pending: None,
             running: false,
             bound: None,
+            renumber: None,
             finished: false,
         }
     }
@@ -287,6 +305,8 @@ impl Hub {
                 if let Some(hold) = hold_of(self, &status.id)
                     && let Some(hold) = self.holds.get_mut(&hold)
                 {
+                    // The server has the terminal under the name it was asked with.
+                    hold.renumber = None;
                     // A holder of version 3 or later is told the name the terminal has, which
                     // is the one it asked with unless the application numbered it; an
                     // older one is not (it would take the frame for a broken peer) and
@@ -328,6 +348,25 @@ impl Hub {
                         .get(&hold)
                         .and_then(|h| h.bound.as_ref())
                         .is_some_and(|b| b.shown);
+                    // A number somebody took by hand is not the holder's failure: its request
+                    // waits for the owner to ask again under the next number.
+                    if *code == ErrorCode::SESSION_EXISTS
+                        && !shown
+                        && let Some((spec, open)) =
+                            self.holds.get_mut(&hold).and_then(|h| h.renumber.take())
+                    {
+                        self.release(hold, false);
+                        if let Some(entry) = self.holds.get_mut(&hold) {
+                            entry.pending = Some(open);
+                        }
+                        self.events.push_back(HubEvent::Collided {
+                            hold,
+                            account: account.to_owned(),
+                            terminal: terminal.clone(),
+                            spec: Box::new(spec),
+                        });
+                        return;
+                    }
                     self.release(hold, false);
                     if let Some(hold) = self.holds.get_mut(&hold) {
                         if shown {
@@ -611,7 +650,9 @@ impl Hub {
         // A name a holder cannot be told is not used: it would ask for the terminal by the
         // name it made, which the server does not know.
         let version = self.holds.get(&hold).map_or(0, |entry| entry.version);
+        let mut renumber = None;
         if let Some(name) = name.filter(|_| version >= wire::NAMED) {
+            renumber = Some((spec.clone(), open.clone()));
             open.terminal = name;
         }
         if client
@@ -622,6 +663,9 @@ impl Hub {
             return Err(self.put_back(hold, open, Declined::Refused));
         }
         self.bind(hold, account, open.terminal, 0, false, false);
+        if let Some(entry) = self.holds.get_mut(&hold) {
+            entry.renumber = renumber;
+        }
         Ok(())
     }
 

@@ -2276,6 +2276,17 @@ impl TerminalWindow {
         self.ivars().id
     }
 
+    /// The ⌘ hint of each tab a key reaches in this window, as the palette and the bar say them
+    /// (they reach the key window's tabs alone — the caller asks only for that one).
+    pub(crate) fn tab_keys(&self) -> Vec<(u64, String)> {
+        bt_shell_common::palette::tab_keys(
+            &self.ivars().groups.borrow(),
+            &self.ivars().order.borrow(),
+            self.listing(),
+            crate::menu::keys::family_mods(self.mtm(), "select_tab"),
+        )
+    }
+
     /// The window's tabs, in strip order.
     pub(crate) fn tabs(&self) -> Vec<Retained<TerminalTab>> {
         let tabs = self.ivars().tabs.borrow();

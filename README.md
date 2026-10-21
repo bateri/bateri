@@ -28,6 +28,10 @@ glides instead of jumping, and an idle window draws nothing at all.
   host, colored by how you marked it (production, staging, development). Drop
   files from Finder onto the window to upload them to the remote directory,
   with progress, cancel and a summary.
+- **Agent aware.** Claude Code, Codex or any program on a server you `ssh` into
+  can open panes and tabs in bateri, list what is open, close what it opened and
+  send a notification, with the `bateri` command bateri puts on that server (see
+  [Agents on a server](#agents-on-a-server)).
 - **Modern text rendering.** Emoji sequences (flags, ZWJ families, skin tones),
   wide characters, and box-drawing, block and Braille characters drawn to fit
   the cell exactly.
@@ -56,15 +60,47 @@ bateri's EdDSA key and verified before it is installed.
 
 ## Shell integration
 
-bateri sets up **zsh** and **fish** automatically when it starts a shell. It
-never writes to your dotfiles: the integration is loaded through `ZDOTDIR`
-(zsh) or `XDG_DATA_DIRS` (fish) and your own startup files run as usual. This
-is what enables command blocks, the input dock and the ssh status bar.
+bateri sets up **zsh**, **fish** and **bash** (4.4 or newer) automatically when
+it starts a shell. It never writes to your dotfiles: the integration is loaded
+through `ZDOTDIR` (zsh), `XDG_DATA_DIRS` (fish) or `ENV` (bash) and your own
+startup files run as usual. This is what enables command blocks, the input dock
+and the ssh status bar.
 
 If you prefer to keep your own prompt and edit on the grid like a classic
 terminal, set `integration = "blocks"` (blocks and marks stay, the dock goes)
-or `"off"` in the `[shell]` section of your settings. bash support is
-planned.
+or `"off"` in the `[shell]` section of your settings.
+
+## Agents on a server
+
+In a terminal bateri opened on a server over `ssh`, the `bateri` command is on
+the `PATH` (zsh, bash and fish; cron jobs call
+`~/.local/share/bateri/shell/bin/bateri`). The terminal itself lives on the
+server, under kablo, so these keep working with your Mac asleep; the pane takes
+its place when bateri connects. bateri on the Mac is never asked to run
+anything: what a program sends it only places, lists or closes panes and shows a
+notification. A terminal is named by its number (`t9`), which is what the
+opening command prints.
+
+```sh
+bateri split --below --ratio 30 -- npm run dev   # prints t9; the pane appears below this terminal
+bateri tab -- make watch                         # in a tab of its own, next to this one
+bateri new -- make                               # a terminal with no pane, listed under "running in the background"
+bateri ls [--json]                               # windows, tabs, splits, and the server's terminals
+bateri send t9 'q'                               # type into a terminal (kablo's send)
+bateri send-key t9 enter
+bateri capture t9                                # what is on its screen
+bateri wait t9 [--for TIME]                      # until its program ends; exits with its status
+bateri close [t9]                                # asks you first about a terminal the caller did not open
+bateri notify "tests failed"                     # a notification when bateri is behind
+```
+
+`split` takes `--left`, `--right`, `--above` or `--below`, `--ratio PERCENT`,
+`--cwd DIR`, `--keep-open` (the pane stays when the program ends), `--wait` (the
+command waits for the program and exits with its status) and `--focus` (the pane
+takes the keyboard; by default the focus stays where it was). Without a program
+the pane runs bateri's shell. Exit codes: 0, 1, 64 (a mistake in the command),
+69 (needs bateri and none is connected), 77 (refused) and, for `wait`, the
+program's own.
 
 ## Configuration
 

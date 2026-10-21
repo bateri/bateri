@@ -101,13 +101,15 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use bt_core::{PaneUuid, RemoteTarget};
-use kablo_proto::v1::NewSession;
+use kablo_proto::v1::{NewSession, Status};
 
 use super::hub::{Declined, HoldId, Hub, HubEvent};
 use super::install::Installed;
 use super::ledger::Ledger;
 use super::roster::{Background, Roster, background_note, sort_recent_first};
 use super::{Attach, Cause, Client, ErrorCode, Event, Link, SessionId, Size, Talk};
+use crate::agent::Terminal;
+use crate::agent::notes::Record;
 use crate::hold::HOLD_SOCKET;
 use crate::hold::wire::{self, CHUNK, Open, Target};
 use crate::ssh_wrap::{self, KabloHost};
@@ -404,7 +406,32 @@ pub trait Backend: Send + Sync + 'static {
     /// read now. Called on a thread of its own, once per connection, so it may take as long as
     /// the server does.
     fn reachable(&self, _account: &str, _server: &KabloHost) {}
+
+    /// Who opened which of the server's terminals, as the script there wrote it down
+    /// ([`crate::agent::notes::RECORDS`]); empty when it cannot be read. Called on a thread of
+    /// its own, for a [`Service::survey`], so it may wait on the server.
+    fn records(&self, _server: &KabloHost) -> Vec<(Terminal, Record)> {
+        Vec::new()
+    }
 }
+
+/// What a [`Service::survey`] came back with.
+#[derive(Debug, Default)]
+pub struct Survey {
+    /// Every terminal the server has, as it said it just now; `None` when it could not be asked
+    /// (no connection to it, or no answer in time).
+    pub terminals: Option<Vec<Status>>,
+    /// Who opened which of them, as far as it could be read.
+    pub records: Vec<(Terminal, Record)>,
+}
+
+/// How many times a terminal is started again under the next number when a person's terminal
+/// has the one the counter gave.
+const RENUMBER_TRIES: u8 = 5;
+
+/// How long a [`Service::survey`] waits for the server's list and for the records: a program is
+/// waiting for the answer, and half an answer is better than none.
+const SURVEY_WAIT: Duration = Duration::from_secs(10);
 
 /// The most a program may say to the application in one conversation, in bytes.
 /// What a conversation keeps while the program is still talking is bounded by this
@@ -559,6 +586,17 @@ enum Msg {
     Hang {
         account: String,
         talk: Talk,
+    },
+    /// The application wants every terminal of an account as the server has it just now
+    /// ([`Service::survey`]).
+    Survey {
+        account: String,
+        done: Box<dyn FnOnce(Survey) + Send>,
+    },
+    /// The records of survey `id` were read ([`Backend::records`]).
+    Recorded {
+        id: u64,
+        records: Vec<(Terminal, Record)>,
     },
     Stop,
 }
@@ -741,6 +779,9 @@ impl Service {
             takes: BTreeMap::new(),
             ending: Vec::new(),
             drafts: BTreeMap::new(),
+            collisions: BTreeMap::new(),
+            surveys: Vec::new(),
+            surveyed: 0,
             grace,
             rx,
             generation: 0,
@@ -876,6 +917,18 @@ impl Service {
     /// signalled, as [`Service::end`] must be said: the holder's going is what loses the pane.
     pub fn leave(&self, pane: &PaneUuid) {
         let _ = self.tx.send(Msg::Leave(pane.clone()));
+    }
+
+    /// Every terminal the server of `account` has, as it says it now (a list asked for now, not the
+    /// cache the other readers use), with who opened each, handed to `done` — on the service's
+    /// thread, which must not wait: the application hops to its own. An account that is not
+    /// connected, or a server that does not answer in [`SURVEY_WAIT`], gives what there is
+    /// ([`Survey::terminals`] `None` when there is not even the list). Asked for `bateri ls`.
+    pub fn survey(&self, account: &str, done: impl FnOnce(Survey) + Send + 'static) {
+        let _ = self.tx.send(Msg::Survey {
+            account: account.to_owned(),
+            done: Box::new(done),
+        });
     }
 
     /// The user ended a terminal no pane shows — one of the server's card: it is
@@ -1045,6 +1098,13 @@ struct Core {
     /// What programs on the servers are saying to the application, until each has said
     /// all it had ([`Letter`]).
     drafts: BTreeMap<(String, Talk), Draft>,
+    /// How many times each holder's terminal was started again under another number
+    /// ([`Core::collided`]).
+    collisions: BTreeMap<HoldId, u8>,
+    /// The surveys the application is waiting for ([`Service::survey`]).
+    surveys: Vec<Surveying>,
+    /// How many surveys were asked for: the next one's identity.
+    surveyed: u64,
     grace: Duration,
     rx: Receiver<Msg>,
     generation: u64,
@@ -1054,6 +1114,16 @@ struct Core {
 struct Draft {
     from: Option<SessionId>,
     bytes: Vec<u8>,
+}
+
+/// A survey that waits for the server's list and for the records.
+struct Surveying {
+    id: u64,
+    account: String,
+    due: Instant,
+    terminals: Option<Vec<Status>>,
+    records: Option<Vec<(Terminal, Record)>>,
+    done: Box<dyn FnOnce(Survey) + Send>,
 }
 
 /// A quit that waits for the terminals it asked to end.
@@ -1079,6 +1149,7 @@ impl Core {
                 .filter_map(|account| self.hub.client(account))
                 .filter_map(Client::next_deadline)
                 .chain(self.ending.iter().map(|ending| ending.at))
+                .chain(self.surveys.iter().map(|survey| survey.due))
                 .min()
                 .map_or(Duration::from_secs(3600), |at| {
                     at.saturating_duration_since(now)
@@ -1228,6 +1299,13 @@ impl Core {
                     client.hang_up(talk);
                 }
             }
+            Msg::Survey { account, done } => self.survey(account, done, now),
+            Msg::Recorded { id, records } => {
+                if let Some(survey) = self.surveys.iter_mut().find(|survey| survey.id == id) {
+                    survey.records = Some(records);
+                }
+                self.finish_surveys(now);
+            }
             Msg::Stop => {}
         }
     }
@@ -1253,6 +1331,7 @@ impl Core {
     /// let go of — until nothing changes.
     fn settle(&mut self) {
         self.kill_due(Instant::now());
+        self.finish_surveys(Instant::now());
         for _ in 0..64 {
             let now = Instant::now();
             for account in std::mem::take(&mut self.relist) {
@@ -1272,6 +1351,12 @@ impl Core {
                 moved = true;
                 match event {
                     HubEvent::Wants { hold, open } => self.wants(hold, open),
+                    HubEvent::Collided {
+                        hold,
+                        account,
+                        terminal,
+                        spec,
+                    } => self.collided(hold, &account, &terminal, *spec),
                     HubEvent::Ran { hold, status } => {
                         if let Some(reply) = self.waiting.remove(&hold) {
                             let _ = reply.send(status);
@@ -1279,6 +1364,7 @@ impl Core {
                     }
                     HubEvent::Gone { hold, showed } => {
                         self.waiting.remove(&hold);
+                        self.collisions.remove(&hold);
                         self.conns.remove(&hold);
                         self.panes.remove(&hold);
                         // This Mac was attached to the terminal until now, and what the server
@@ -1296,6 +1382,11 @@ impl Core {
                             .entry(account.clone())
                             .or_default()
                             .apply(&event);
+                        match &*event {
+                            Event::Listed(list) => self.listed_for_surveys(&account, list),
+                            Event::Lost { .. } => self.lost_for_surveys(&account),
+                            _ => {}
+                        }
                         match *event {
                             // A connection that came up is asked for its terminals.
                             Event::Linked => {
@@ -1366,6 +1457,89 @@ impl Core {
         let _ = thread::Builder::new()
             .name("ssh-hold reads the server's notes".into())
             .spawn(move || backend.reachable(&account, &server));
+    }
+
+    /// [`Service::survey`]: the server is asked for its list now and the records are read on a
+    /// thread of their own; an account that is not connected is answered at once with nothing.
+    fn survey(&mut self, account: String, done: Box<dyn FnOnce(Survey) + Send>, now: Instant) {
+        let live = self
+            .hub
+            .client(&account)
+            .is_some_and(|client| matches!(client.link(), Link::Live));
+        let Some(entry) = self.accounts.get(&account).filter(|_| live) else {
+            done(Survey::default());
+            return;
+        };
+        self.surveyed += 1;
+        let id = self.surveyed;
+        let (backend, server, tx) = (
+            Arc::clone(&self.shared.backend),
+            entry.server.clone(),
+            self.shared.tx.clone(),
+        );
+        let _ = thread::Builder::new()
+            .name("ssh-hold reads who opened what".into())
+            .spawn(move || {
+                let records = backend.records(&server);
+                let _ = tx.send(Msg::Recorded { id, records });
+            });
+        self.relist.insert(account.clone());
+        self.surveys.push(Surveying {
+            id,
+            account,
+            due: now + SURVEY_WAIT,
+            terminals: None,
+            records: None,
+            done,
+        });
+    }
+
+    /// The server's list came: the surveys of the account that wait for it have it.
+    fn listed_for_surveys(&mut self, account: &str, list: &[Status]) {
+        for survey in &mut self.surveys {
+            if survey.account == account && survey.terminals.is_none() {
+                survey.terminals = Some(list.to_vec());
+            }
+        }
+        self.finish_surveys(Instant::now());
+    }
+
+    /// The connection to the account went: the surveys that wait for its list are answered with
+    /// what they have.
+    fn lost_for_surveys(&mut self, account: &str) {
+        let mut over = Vec::new();
+        let mut kept = Vec::new();
+        for survey in std::mem::take(&mut self.surveys) {
+            if survey.account == account && survey.terminals.is_none() {
+                over.push(survey);
+            } else {
+                kept.push(survey);
+            }
+        }
+        self.surveys = kept;
+        for survey in over {
+            (survey.done)(Survey {
+                terminals: None,
+                records: survey.records.unwrap_or_default(),
+            });
+        }
+    }
+
+    /// The surveys that have the list and the records, or whose time is out, are answered.
+    fn finish_surveys(&mut self, now: Instant) {
+        let mut kept = Vec::new();
+        for survey in std::mem::take(&mut self.surveys) {
+            let whole = survey.terminals.is_some() && survey.records.is_some();
+            if whole || survey.due <= now {
+                (survey.done)(Survey {
+                    terminals: survey.terminals,
+                    records: survey.records.unwrap_or_default(),
+                });
+            } else {
+                kept.push(survey);
+            }
+        }
+        self.surveys = kept;
     }
 
     /// A program on the server of `account` wants the application: taken at once
@@ -2167,19 +2341,7 @@ impl Core {
                 }
                 return;
             }
-            let shared = Arc::clone(&self.shared);
-            let spawned = thread::Builder::new()
-                .name("ssh-hold numbers".into())
-                .spawn(move || {
-                    let number = shared.backend.number(&server);
-                    let _ = shared.tx.send(Msg::Numbered {
-                        hold,
-                        account,
-                        spec,
-                        number,
-                    });
-                });
-            if spawned.is_err() {
+            if !self.ask_number(hold, server, account, spec) {
                 self.hub.refuse(hold, true, "");
             }
             return;
@@ -2196,6 +2358,57 @@ impl Core {
             });
         if spawned.is_err() {
             self.hub.refuse(hold, true, "");
+        }
+    }
+
+    /// The server's counter is asked for the number of the terminal `hold` wants, on a thread of
+    /// its own; the answer comes back as [`Msg::Numbered`]. `false` when the thread could not be
+    /// made.
+    fn ask_number(
+        &self,
+        hold: HoldId,
+        server: KabloHost,
+        account: String,
+        spec: NewSession,
+    ) -> bool {
+        let shared = Arc::clone(&self.shared);
+        thread::Builder::new()
+            .name("ssh-hold numbers".into())
+            .spawn(move || {
+                let number = shared.backend.number(&server);
+                let _ = shared.tx.send(Msg::Numbered {
+                    hold,
+                    account,
+                    spec,
+                    number,
+                });
+            })
+            .is_ok()
+    }
+
+    /// The number the counter gave was taken by a terminal a person made: the row it wrote for
+    /// it goes (that terminal is not this pane's, and must not be ended with it), and the next
+    /// number is asked for — a few times, then the holder is let fall back to a plain `ssh`.
+    fn collided(&mut self, hold: HoldId, account: &str, terminal: &SessionId, spec: NewSession) {
+        self.shared.ledger.gone(account, terminal);
+        // A row that was the account's only one took the account with it.
+        if let Some(entry) = self.accounts.get(account) {
+            self.shared.ledger.remember(&entry.server, &entry.installed);
+        }
+        let tries = self.collisions.entry(hold).or_insert(0);
+        *tries += 1;
+        let again = *tries <= RENUMBER_TRIES;
+        let server = self.accounts.get(account).map(|entry| entry.server.clone());
+        match server {
+            Some(server) if again => {
+                if !self.ask_number(hold, server, account.to_owned(), spec) {
+                    self.hub.refuse(hold, true, "");
+                }
+            }
+            _ => {
+                self.collisions.remove(&hold);
+                self.hub.refuse(hold, true, "");
+            }
         }
     }
 

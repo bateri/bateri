@@ -14,6 +14,30 @@ of every installed copy. A version without a section is not released.
 
 ### Added
 
+- **A program on a server can open panes and tabs in bateri, look at what is
+  open and close what it opened.** Claude Code, Codex or a script on a server
+  types `bateri split --below --ratio 30 -- npm run dev` and the program starts
+  on the server — `bateri send`, `capture` and `wait` reach it from there — and
+  its pane appears beside the terminal that asked, in that terminal's tab or,
+  when there is no room left, in a tab of its own next to it (`bateri tab` asks
+  for one). Nothing the user was looking at moves: the keyboard stays where it
+  was (`--focus` takes it), a pane that fills its tab keeps filling it (the new
+  one waits behind), and a new tab opens beside the asker's without being
+  selected. The pane closes when its program ends, unless `--keep-open` asked it
+  to stay. When bateri is not connected the
+  terminal starts anyway and its pane takes its place the moment bateri
+  connects; one notification says so (“Claude opened 3 terminals on rasp”)
+  rather than one for each. `bateri ls` tells the program what is open — the
+  windows, the tabs, each tab's splits as they are — and lists the server's
+  terminals with what each is doing and who opened it; `bateri close` closes
+  what the program opened (or the terminal it runs in) at once and asks you
+  before closing any other, and a no is a refusal it can read; `bateri notify
+  "tests failed"` shows a notification when bateri is behind and marks the
+  program's tab with a tick unless you are on it. The terminals bateri itself
+  opens on a server (⌘T, ⌘D) are numbered the same way, so the program sees them
+  in `bateri ls` and can use `capture` and `send` on them; terminals opened
+  before this update keep the names they had.
+
 - **A terminal on a server shows that it is waiting when the connection is
   gone.** The pane keeps its last screen, veiled, with no caret, and the line at
   the bottom says `⇄ rasp  Reconnecting… · ⏎ try now`: keys are not sent (a line

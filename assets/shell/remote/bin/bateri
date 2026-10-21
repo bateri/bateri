@@ -35,15 +35,22 @@
 #
 # WHO OPENED WHAT. `~/.local/share/bateri/terminals/tN` says which terminal
 # opened tN (`kablo here` — what the system says of the process, never a
-# variable) and whether it stays open. `close` ends what the caller opened
-# itself and asks the Mac about the rest. The state is under `$HOME`, not
-# `XDG_DATA_HOME`: the Mac and a cron job do not have a login shell's
-# environment (the counter's reason, `next.sh`).
+# variable) and whether it stays open. `close` goes to the Mac, which closes
+# the pane that shows the terminal as the user closing it would (a pane that
+# stays open for `--keep-open` goes too: closing it is the opener's) and
+# asks the user about a terminal the caller did not open; named nothing it is
+# the caller's own terminal, under whatever name it has. With no Mac to ask,
+# what the caller opened (or is) is ended with `kablo end` and the rest is
+# refused. The state is under `$HOME`, not `XDG_DATA_HOME`: the Mac and a cron
+# job do not have a login shell's environment (the counter's reason, `next.sh`).
 #
 # The quoted word below is filled in when the bootstrap writes this file
 # (`ssh_wrap`): kablo's place relative to home.
 
 unset CDPATH
+# The state this writes is the user's alone, but the terminals it starts are the user's to use:
+# they get the umask the caller had, not this one (`bt_open`).
+bt_umask=$(umask)
 umask 077
 
 bt_kablo_rel='__BATERI_KABLO__'
@@ -355,7 +362,13 @@ bt_open() {
       '' | *[!0-9]* | 0*) bt_die 1 "cannot number a terminal: $bt_state is not writable, or bateri's files are not in $bt_shelldir" ;;
     esac
     bt_id=t$bt_n
-    if bt_err=$("$bt_kablo" new --id "$bt_id" --cwd "$bt_cwd" --env "PATH=$PATH" -- "$@" 2>&1 >/dev/null); then
+    # In a subshell: the new terminal inherits this process, so it gets the caller's umask and
+    # none of the caller's own terminal identity (the tab it stands in is not the new pane's).
+    if bt_err=$(
+      umask "$bt_umask" 2>/dev/null
+      unset LC_BATERI_TAB_URL BATERI_TAB_URL TERM_SESSION_ID
+      "$bt_kablo" new --id "$bt_id" --cwd "$bt_cwd" --env "PATH=$PATH" -- "$@" 2>&1 >/dev/null
+    ); then
       break
     fi
     bt_tries=$((bt_tries + 1))
@@ -498,6 +511,9 @@ bt_open_report() {
     waiting)
       if [ -n "$bt_orphan" ]; then
         bt_say "$bt_id waits in the Mac's list of terminals running in the background: this ran in no terminal, so it has no pane to go beside"
+      elif [ -n "$bt_mac_waits" ] && [ -z "$bt_next" ]; then
+        # The Mac kept nothing to place it by: it could not make the pane just now.
+        bt_say "$bt_id waits in the Mac's list of terminals running in the background: the Mac could not make its pane now"
       elif [ -n "$bt_mac_waits" ]; then
         bt_say "$bt_id waits in the Mac's list of terminals running in the background, until $bt_said is on screen"
       else
@@ -528,19 +544,50 @@ bt_close() {
     esac
   done
   bt_here
+  bt_own=
   if [ -z "$bt_target" ]; then
     [ -n "$bt_me" ] || bt_die 64 'this is run in no terminal; name the one to close (close t4)'
+    # The caller's own terminal under whatever name it has: a target has to be a number
+    # only where it is written, and nobody wrote this one.
     bt_target=$bt_me
+    bt_own=yes
+  else
+    bt_need_terminal "$bt_target"
+    [ "$bt_target" != "$bt_me" ] || bt_own=yes
   fi
-  bt_need_terminal "$bt_target"
 
+  # The Mac closes it (the pane and the terminal as one), and asks the user when the terminal
+  # is not the caller's own or one it opened.
+  bt_mac_failed=
+  bt_ask "bateri 1${nl}close${nl}terminal $bt_target${nl}"
+  if [ "$bt_status" = 0 ]; then
+    bt_read_reply
+    case $bt_kind in
+      ok)
+        # A kill that does not wait out the grace is kablo's to do.
+        if [ -n "$bt_force" ]; then
+          "$bt_kablo" end "$bt_target" --force >/dev/null 2>&1
+        fi
+        rm -f "$bt_state/terminals/$bt_target" "$bt_state/placing/$bt_target"
+        exit 0
+        ;;
+      'error failed') bt_mac_failed=yes ;;
+      'error '*) bt_fail_reply ;;
+      *)
+        bt_mac_failed=yes
+        bt_kind=
+        ;;
+    esac
+  fi
+
+  # No Mac to ask, or it could not tell: what the caller is or opened is its to end.
   bt_opener=
   if [ -r "$bt_state/terminals/$bt_target" ]; then
     while IFS=' ' read -r bt_k bt_v; do
       [ "$bt_k" = opener ] && bt_opener=$bt_v
     done < "$bt_state/terminals/$bt_target"
   fi
-  if [ -n "$bt_me" ] && [ "$bt_opener" = "$bt_me" ]; then
+  if [ -n "$bt_own" ] || { [ -n "$bt_me" ] && [ "$bt_opener" = "$bt_me" ]; }; then
     if [ -n "$bt_force" ]; then
       "$bt_kablo" end "$bt_target" --force
     else
@@ -553,15 +600,14 @@ bt_close() {
     exit "$bt_code"
   fi
 
-  # Not the caller's to close: the user is asked on the Mac.
-  bt_ask "bateri 1${nl}close${nl}terminal $bt_target${nl}"
-  if [ "$bt_status" = 0 ]; then
-    bt_read_reply
-    case $bt_kind in
-      ok) exit 0 ;;
-      'error '*) bt_fail_reply ;;
-    esac
+  if [ -n "$bt_mac_failed" ]; then
+    if [ -n "$bt_kind" ]; then
+      bt_fail_reply
+    fi
     bt_die 1 'the Mac answered with something this does not read'
+  fi
+  if [ "$bt_status" != 69 ]; then
+    bt_die 77 "$bt_target was not opened by this terminal, and the Mac did not answer"
   fi
   bt_die 77 "$bt_target was not opened by this terminal, and no Mac is connected to ask"
 }
@@ -575,6 +621,7 @@ bt_ls() {
     esac
   done
   bt_ask "bateri 1${nl}ls${nl}$bt_format"
+  bt_why='no Mac is connected'
   if [ "$bt_status" = 0 ]; then
     bt_read_reply
     case $bt_kind in
@@ -582,11 +629,14 @@ bt_ls() {
         printf '%s' "$bt_body" | bt_clean
         exit 0
         ;;
+      # It could not tell just now (the server's list did not come in time): what the server
+      # has is better than nothing, as it is with no Mac.
+      'error failed') bt_why='the Mac could not tell what is on screen' ;;
       'error '*) bt_fail_reply ;;
     esac
   fi
   # No Mac: what the server has, and what waits to be placed.
-  bt_say 'no Mac is connected: these are the terminals on this server, and none says where its pane is'
+  bt_say "$bt_why: these are the terminals on this server, and none says where its pane is"
   if [ -n "$bt_format" ]; then
     exec "$bt_kablo" list --json
   fi

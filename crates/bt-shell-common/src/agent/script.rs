@@ -49,6 +49,8 @@ case $cmd in
       echo "kablo: a session called $id exists already" >&2
       exit 1
     fi
+    umask > "$STUB_DIR/umask.new"
+    env | grep -E '^(LC_BATERI_TAB_URL|BATERI_TAB_URL|TERM_SESSION_ID)=' > "$STUB_DIR/env.new"
     printf '%s\n' "$id"
     ;;
   app)
@@ -179,11 +181,19 @@ impl Server {
     }
 
     fn run_file(&self, shell: &Path, file: &Path, here: Option<&str>, args: &[&str]) -> Said {
-        let mut command = Command::new(shell);
+        // The caller has a umask of its own (the script must not keep its owner-only one for
+        // what it starts) and stands in a tab (which a terminal it starts is not in).
+        let mut command = Command::new("/bin/sh");
         command
+            .arg("-c")
+            .arg("umask 0027; exec \"$0\" \"$@\"")
+            .arg(shell)
             .arg(file)
             .args(args)
             .env_clear()
+            .env("LC_BATERI_TAB_URL", "bateri://tab/caller")
+            .env("BATERI_TAB_URL", "bateri://tab/caller")
+            .env("TERM_SESSION_ID", "caller")
             .env("HOME", &self.home)
             .env("PATH", std::env::var_os("PATH").unwrap_or_default())
             .env("STUB_DIR", &self.stub)
@@ -454,12 +464,12 @@ fn a_pane_that_did_not_land_as_asked_is_told_on_one_line() {
         "bateri: t1 is in a tab of its own: there was no room beside t4\n"
     );
     // The Mac has it, waiting for the anchor to be on screen: that is not "when a Mac connects".
-    server.mac_says("bateri 1\nok placed\nlanded waiting\nsqueezed no\nhidden no\n");
+    server.mac_says("bateri 1\nok placed\nlanded waiting\nnext-to t4\nsqueezed no\nhidden no\n");
     let said = server.run(shell, Some("t4"), &["split", "--json"]);
     assert_eq!(said.status, 0);
     assert_eq!(
         said.out,
-        "{\"terminal\":\"t2\",\"landed\":\"waiting\",\"next_to\":null,\"squeezed\":false,\"hidden\":false}\n"
+        "{\"terminal\":\"t2\",\"landed\":\"waiting\",\"next_to\":\"t4\",\"squeezed\":false,\"hidden\":false}\n"
     );
     assert_eq!(
         said.err,
@@ -470,10 +480,19 @@ fn a_pane_that_did_not_land_as_asked_is_told_on_one_line() {
         None,
         "the Mac has it; nothing waits on the server"
     );
-    server.mac_says("bateri 1\nok placed\nlanded as_asked\nnext-to t4\nsqueezed no\nhidden yes\n");
+    // The Mac could not make the pane just now and kept nothing to place it by: it does not say
+    // the pane will come when the anchor is on screen.
+    server.mac_says("bateri 1\nok placed\nlanded waiting\nsqueezed no\nhidden no\n");
     let said = server.run(shell, Some("t4"), &["split"]);
     assert_eq!(said.out, "t3\n");
-    assert_eq!(said.err, "bateri: t3 is behind a pane that fills its tab\n");
+    assert_eq!(
+        said.err,
+        "bateri: t3 waits in the Mac's list of terminals running in the background: the Mac could not make its pane now\n"
+    );
+    server.mac_says("bateri 1\nok placed\nlanded as_asked\nnext-to t4\nsqueezed no\nhidden yes\n");
+    let said = server.run(shell, Some("t4"), &["split"]);
+    assert_eq!(said.out, "t4\n");
+    assert_eq!(said.err, "bateri: t4 is behind a pane that fills its tab\n");
 }
 
 /// A terminal the Mac opened before the numbers existed, and one a person made with kablo.
@@ -542,7 +561,9 @@ fn a_pane_that_waits_for_the_terminal_that_asked_says_so_without_its_long_name()
     let server = Server::new("anchor-waiting");
     let shell = Path::new("/bin/sh");
     // The Mac has it, waiting for the anchor to be on screen.
-    server.mac_says("bateri 1\nok placed\nlanded waiting\nsqueezed no\nhidden no\n");
+    server.mac_says(&format!(
+        "bateri 1\nok placed\nlanded waiting\nnext-to {MADE}\nsqueezed no\nhidden no\n"
+    ));
     let said = server.run(shell, Some(MADE), &["split"]);
     assert_eq!(
         said.err,
@@ -647,6 +668,29 @@ fn a_request_the_mac_refuses_leaves_no_terminal_running() {
         server.mac_says(&format!("bateri 1\nerror {kind} it went wrong\n"));
         let said = server.run(Path::new("/bin/sh"), Some("t4"), &["tab"]);
         assert_eq!(said.status, status, "{kind}");
+    }
+}
+
+#[test]
+fn the_terminal_it_starts_has_the_callers_umask_and_none_of_the_callers_tab() {
+    use std::os::unix::fs::PermissionsExt;
+    for (name, shell) in shells() {
+        let server = Server::new(&format!("umask-{name}"));
+        server.mac_says(PLACED);
+        let said = server.run(&shell, Some("t4"), &["split", "--", "make"]);
+        assert_eq!(said.status, 0, "{}", said.err);
+        // What kablo started it with is the caller's, not the owner-only one the state is written with.
+        assert_eq!(
+            std::fs::read_to_string(server.stub.join("umask.new")).expect("umask"),
+            "0027\n"
+        );
+        // And not the tab the caller stands in: that tab's pane is not this terminal's.
+        assert_eq!(
+            std::fs::read_to_string(server.stub.join("env.new")).expect("env"),
+            ""
+        );
+        let record = std::fs::metadata(server.state().join("terminals/t1")).expect("a record");
+        assert_eq!(record.permissions().mode() & 0o777, 0o600);
     }
 }
 
@@ -913,6 +957,53 @@ fn the_counter_gives_each_caller_its_own_number_and_survives_a_dead_lock() {
     }
 }
 
+/// The counter's lock names its holder: one that is gone loses it at once, one that is alive
+/// keeps it however long it takes.
+#[test]
+fn a_lock_held_by_a_live_process_is_waited_for_and_one_held_by_a_dead_one_is_not() {
+    let server = Server::new("counter-holder");
+    let counter = server.shell_dir().join("next.sh");
+    let lock = server.state().join("next.lock");
+    let run = || {
+        Command::new("/bin/sh")
+            .arg(&counter)
+            .env_clear()
+            .env("HOME", &server.home)
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("the counter")
+    };
+    // A process that has ended: its number is nobody's now.
+    let mut gone = Command::new("true").spawn().expect("true");
+    let dead = gone.id();
+    gone.wait().expect("ended");
+    std::fs::create_dir(&lock).expect("a lock");
+    std::fs::write(lock.join("pid"), format!("{dead}\n")).expect("its holder");
+    let started = std::time::Instant::now();
+    let out = run().wait_with_output().expect("the counter's end");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "1\n");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(4),
+        "taken over at once, not after the wait for a holder that wrote nothing"
+    );
+    assert!(!lock.exists());
+
+    // This process is alive: a lock it holds is waited for past the five seconds a lock that
+    // names nobody gets.
+    std::fs::create_dir(&lock).expect("a lock");
+    std::fs::write(lock.join("pid"), format!("{}\n", std::process::id())).expect("its holder");
+    let mut waiting = run();
+    std::thread::sleep(std::time::Duration::from_secs(7));
+    assert!(
+        waiting.try_wait().expect("a state").is_none(),
+        "a live holder's lock is not taken"
+    );
+    std::fs::remove_dir_all(&lock).expect("the holder lets go");
+    let out = waiting.wait_with_output().expect("the counter's end");
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "2\n");
+}
+
 #[test]
 fn a_terminal_without_a_program_runs_the_bootstrap_from_its_file() {
     for (name, shell) in shells() {
@@ -966,7 +1057,7 @@ fn a_terminal_without_a_program_runs_the_bootstrap_from_its_file() {
 }
 
 #[test]
-fn close_ends_what_the_caller_opened_and_asks_the_mac_about_the_rest() {
+fn close_goes_to_the_mac_and_without_one_ends_what_the_caller_opened() {
     for (name, shell) in shells() {
         let server = Server::new(&format!("close-{name}"));
         server.mac_says(PLACED);
@@ -976,18 +1067,19 @@ fn close_ends_what_the_caller_opened_and_asks_the_mac_about_the_rest() {
         assert!(server.note("t2").is_some());
         server.forget_calls();
 
-        // Its opener closes it: kablo ends it, nobody is asked, the records go.
+        // No Mac, and its opener closes it: kablo ends it, nobody is asked, the records go.
         let said = server.run(&shell, Some("t4"), &["close", "t1"]);
         assert_eq!(said.status, 0, "{}", said.err);
         assert_eq!(server.calls_of("end"), [["end", "t1"]]);
-        assert!(server.told().is_empty());
         assert!(!server.state().join("terminals/t1").exists());
-        // With the words kablo takes.
+        // The Mac was asked first, and nobody was there.
+        assert_eq!(server.told(), ["bateri 1\nclose\nterminal t1\n"]);
+        // With the words kablo takes. Named nothing, it is the caller's own terminal.
         server.forget_calls();
-        assert_eq!(
-            server.run(&shell, Some("t9"), &["close", "--force"]).status,
-            77
-        );
+        let said = server.run(&shell, Some("t9"), &["close", "--force"]);
+        assert_eq!(said.status, 0, "{}", said.err);
+        assert_eq!(server.calls_of("end"), [["end", "t9", "--force"]]);
+        server.forget_calls();
         let said = server.run(&shell, Some("t9"), &["close", "t2", "--force"]);
         assert_eq!(said.status, 0);
         assert_eq!(server.calls_of("end"), [["end", "t2", "--force"]]);
@@ -1007,25 +1099,81 @@ fn close_ends_what_the_caller_opened_and_asks_the_mac_about_the_rest() {
         );
         assert!(server.calls_of("end").is_empty());
 
-        // The Mac is asked, and its answer is the status.
+        // With a Mac the question is its, whoever opened it: it closes the pane and the terminal,
+        // and the script ends nothing itself unless it was told to kill.
         server.forget_calls();
         server.mac_says("bateri 1\nok\n");
         assert_eq!(server.run(&shell, Some("t9"), &["close", "t3"]).status, 0);
         assert_eq!(server.told(), ["bateri 1\nclose\nterminal t3\n"]);
         assert_eq!(
             Request::parse(&server.told()[0]),
-            Ok(Request::Close(Terminal(3)))
+            Ok(Request::Close(Anchor::of(Terminal(3))))
         );
+        assert!(server.calls_of("end").is_empty());
+        assert!(
+            !server.state().join("terminals/t3").exists(),
+            "the record goes with the terminal"
+        );
+        let said = server.run(&shell, Some("t9"), &["close", "t3", "--force"]);
+        assert_eq!(said.status, 0);
+        assert_eq!(server.calls_of("end"), [["end", "t3", "--force"]]);
+        // The user said no; the Mac does not know it; the Mac could not tell.
+        server.forget_calls();
         server.mac_says("bateri 1\nerror refused the user said no\n");
         let said = server.run(&shell, Some("t9"), &["close", "t3"]);
         assert_eq!(
             (said.status, said.err.as_str()),
             (77, "bateri: the user said no\n")
         );
+        server.mac_says("bateri 1\nerror unknown t3 is no terminal on this server\n");
+        let said = server.run(&shell, Some("t9"), &["close", "t3"]);
+        assert_eq!(
+            (said.status, said.err.as_str()),
+            (1, "bateri: t3 is no terminal on this server\n")
+        );
+        server.mac_says("bateri 1\nerror failed the server did not answer\n");
+        let said = server.run(&shell, Some("t9"), &["close", "t3"]);
+        assert_eq!(
+            (said.status, said.err.as_str()),
+            (1, "bateri: the server did not answer\n")
+        );
+        assert!(server.calls_of("end").is_empty());
+        // What is the caller's own is ended all the same when the Mac could not tell.
+        let said = server.run(&shell, Some("t9"), &["close"]);
+        assert_eq!(said.status, 0, "{}", said.err);
+        assert_eq!(server.calls_of("end"), [["end", "t9"]]);
+
         // Outside every terminal nothing is the caller's own.
         server.no_mac();
         assert_eq!(server.run(&shell, None, &["close", "t3"]).status, 77);
         assert_eq!(server.run(&shell, None, &["close"]).status, 64);
+    }
+}
+
+#[test]
+fn a_terminal_named_nothing_is_the_callers_own_whatever_it_is_called() {
+    let made = format!("b-{}", "0123456789abcdef".repeat(2));
+    for (name, shell) in shells() {
+        let server = Server::new(&format!("close-own-{name}"));
+        // No Mac: kablo ends it by the name it has.
+        let said = server.run(&shell, Some(&made), &["close"]);
+        assert_eq!(said.status, 0, "{}", said.err);
+        assert_eq!(server.calls_of("end"), [["end".to_owned(), made.clone()]]);
+        // With one the Mac is told which terminal, so that it closes the pane that shows it.
+        server.forget_calls();
+        server.mac_says("bateri 1\nok\n");
+        let said = server.run(&shell, Some(&made), &["close"]);
+        assert_eq!(said.status, 0, "{}", said.err);
+        assert_eq!(
+            Request::parse(&server.told()[0]),
+            Ok(Request::Close(Anchor::parse(&made).expect("a name")))
+        );
+        assert!(server.calls_of("end").is_empty());
+        // The rule that a target is a number is for what is written: this one is not a number.
+        server.forget_calls();
+        let said = server.run(&shell, Some("t4"), &["close", &made]);
+        assert_eq!(said.status, 64);
+        assert!(server.told().is_empty());
     }
 }
 
@@ -1057,9 +1205,24 @@ fn ls_prints_what_the_mac_says_and_without_one_what_the_server_has() {
         assert!(said.err.starts_with("bateri: no Mac is connected"));
         let said = server.run(&shell, Some("t4"), &["ls", "--json"]);
         assert_eq!(said.out, "[]\n");
-        // The Mac's mistakes are the status, as for any request.
-        server.mac_says("bateri 1\nerror failed no window\n");
-        assert_eq!(server.run(&shell, Some("t4"), &["ls"]).status, 1);
+        // The Mac's mistakes are the status, as for any request...
+        server.mac_says("bateri 1\nerror usage no such format\n");
+        assert_eq!(server.run(&shell, Some("t4"), &["ls"]).status, 64);
+        // ...but one that is only that it could not tell now leaves the server's own list.
+        server.mac_says("bateri 1\nerror failed the server did not give its terminals in time\n");
+        let said = server.run(&shell, Some("t4"), &["ls"]);
+        assert_eq!(said.status, 0);
+        assert!(
+            said.out.starts_with("ID  PROGRAM\nt1  zsh\n"),
+            "{}",
+            said.out
+        );
+        assert!(
+            said.err
+                .starts_with("bateri: the Mac could not tell what is on screen:"),
+            "{}",
+            said.err
+        );
     }
 }
 

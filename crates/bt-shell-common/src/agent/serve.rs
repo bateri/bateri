@@ -14,14 +14,20 @@
 //! - The anchor is in no tab of this Mac ([`Placing::NoAnchor`]): the answer says `landed waiting`
 //!   and the request is kept in a [`Queue`](super::wait::Queue) until a pane shows the anchor.
 //! - A pane cannot be made at all now ([`Placing::Unable`]: a bateri with no pipe to a server,
-//!   a timed run): the same answer, and nothing is kept — the terminal is in the list.
+//!   a timed run): the answer says it waits and names no anchor, and nothing is kept — the
+//!   terminal is in the list.
 //! - The terminal already has a pane: the request is done ([`Landed::AsAsked`]), not an error
 //!   — an error would end a terminal the user is looking at.
 //!
-//! A request this version does not answer (`ls`, `close`, `notify`) is [`Answer::Pass`]: the
-//! conversation is hung up on and the script does what it does when there is no Mac.
+//! The other three requests need the Mac's windows, a question to the user or the server's own
+//! list, none of which a decision with no window in it has: they are an [`Answer`] of their own
+//! (`List`, `Close`, `Notify`) that the shell carries out — building `ls` from the live windows
+//! and a [`survey`](crate::kablo::service::Service::survey), asking before it closes what the
+//! asker did not open ([`may_close`]), showing a notification — and answers when it has.
 
-use super::message::{Failure, Kind, Place, Placed, Reply, Request};
+use kablo_proto::v1::{State, Status};
+
+use super::message::{Failure, Format, Kind, Place, Placed, Reply, Request};
 use super::notes::Note;
 use super::place::Landed;
 use super::wait::Waiting;
@@ -47,7 +53,15 @@ pub trait Shell {
     /// Shows `place.terminal` in a pane beside the pane of `anchor` — wherever on this Mac that
     /// is — as `place` asks: where it goes is the rule's ([`super::place::place`]), the pane is
     /// born without the keyboard unless `place.focus` says so, and a zoomed tab keeps its zoom.
-    fn place(&mut self, server: &Server, anchor: &Anchor, place: &Place) -> Placing;
+    /// `opener` is the terminal the request came from, when it is known (a note read later does
+    /// not say, and the pane is said to be opened from beside its anchor).
+    fn place(
+        &mut self,
+        server: &Server,
+        anchor: &Anchor,
+        place: &Place,
+        opener: Option<&str>,
+    ) -> Placing;
 }
 
 /// What the shell did.
@@ -68,8 +82,24 @@ pub enum Answer {
     Reply(Reply),
     /// This, and the request is kept until its anchor has a pane.
     Wait(Reply, Waiting),
-    /// Not answered: the conversation is hung up on.
-    Pass,
+    /// `ls`: the shell builds the text from the windows as they are and what the server says.
+    List(Format),
+    /// `close` of a terminal of this server: the shell decides with [`may_close`] whether to
+    /// ask, closes it, and answers.
+    Close(Anchor),
+    /// `notify`: the shell shows it and answers.
+    Notify(String),
+}
+
+/// Whether `caller` — the terminal a request runs in, as kablo says it — may close `terminal`
+/// without the user being asked: its own, or one it opened (`opener`, what the server's record of
+/// the terminal says). A program that runs in no terminal opened nothing. Anything else is the
+/// user's to allow.
+pub fn may_close(caller: Option<&str>, terminal: &Anchor, opener: Option<&Anchor>) -> bool {
+    let Some(caller) = caller else {
+        return false;
+    };
+    caller == terminal.name() || opener.is_some_and(|opener| opener.name() == caller)
 }
 
 fn waiting_reply(anchor: &Anchor) -> Reply {
@@ -81,13 +111,27 @@ fn waiting_reply(anchor: &Anchor) -> Reply {
     })
 }
 
+/// A pane that could not be made now: the terminal is in the list of what runs in the background
+/// and nothing is kept to place it — no anchor in the answer, which is how the script knows it will
+/// not take its place by itself.
+fn unable_reply() -> Reply {
+    Reply::Placed(Placed {
+        landed: Landed::Waiting,
+        next_to: None,
+        squeezed: false,
+        hidden: false,
+    })
+}
+
 /// The answer to a letter: `text` is what the program said, `from` the terminal kablo says it
 /// runs in (never what it says of itself), `server` the server it came on.
 pub fn serve(server: &Server, from: Option<&str>, text: &str, shell: &mut dyn Shell) -> Answer {
     match Request::parse(text) {
         Err(failure) => Answer::Reply(Reply::Failed(failure)),
         Ok(Request::Place(place)) => place_for(server, from, place, shell),
-        Ok(Request::Ls(_) | Request::Close(_) | Request::Notify(_)) => Answer::Pass,
+        Ok(Request::Ls(format)) => Answer::List(format),
+        Ok(Request::Close(terminal)) => Answer::Close(terminal),
+        Ok(Request::Notify(text)) => Answer::Notify(text),
     }
 }
 
@@ -110,7 +154,7 @@ fn place_for(server: &Server, from: Option<&str>, place: Place, shell: &mut dyn 
             hidden: false,
         }));
     }
-    match shell.place(server, &anchor, &place) {
+    match shell.place(server, &anchor, &place, from) {
         Placing::Done(placed) => Answer::Reply(Reply::Placed(placed)),
         Placing::NoAnchor => {
             let reply = waiting_reply(&anchor);
@@ -120,11 +164,22 @@ fn place_for(server: &Server, from: Option<&str>, place: Place, shell: &mut dyn 
                     server: server.clone(),
                     anchor,
                     place,
+                    opener: from.map(str::to_owned),
                 },
             )
         }
-        Placing::Unable => Answer::Reply(waiting_reply(&anchor)),
+        Placing::Unable => Answer::Reply(unable_reply()),
     }
+}
+
+/// Whether the server's list (a [`survey`](crate::kablo::service::Service::survey), asked for
+/// now) says a pane can be made for `terminal`: it runs, or it ended and was asked to stay open.
+pub fn alive_in(terminals: &[Status], terminal: Terminal, keep_open: bool) -> bool {
+    let name = terminal.to_string();
+    terminals.iter().any(|status| {
+        status.id.as_str() == name
+            && (status.state == State::RUNNING || (keep_open && status.state == State::ENDED))
+    })
 }
 
 /// What reading a server's notes came to.
@@ -154,12 +209,13 @@ pub fn settle_notes(
         if !alive(terminal, place.keep_open) || shell.shows(server, terminal) {
             continue;
         }
-        match shell.place(server, &anchor, &place) {
+        match shell.place(server, &anchor, &place, None) {
             Placing::Done(_) => read.placed += 1,
             Placing::NoAnchor => read.waiting.push(Waiting {
                 server: server.clone(),
                 anchor,
                 place,
+                opener: None,
             }),
             Placing::Unable => {}
         }
@@ -179,17 +235,19 @@ pub fn settle_waiting(
         server,
         anchor,
         place,
+        opener,
     } = waiting;
     if !alive(place.terminal, place.keep_open) || shell.shows(&server, place.terminal) {
         return (None, false);
     }
-    match shell.place(&server, &anchor, &place) {
+    match shell.place(&server, &anchor, &place, opener.as_deref()) {
         Placing::Done(_) => (None, true),
         Placing::NoAnchor => (
             Some(Waiting {
                 server,
                 anchor,
                 place,
+                opener,
             }),
             false,
         ),
@@ -218,6 +276,8 @@ mod tests {
         shown: Vec<Terminal>,
         unable: bool,
         placed: Vec<(String, Terminal, Option<Side>, bool)>,
+        /// Who each ask said it came from, in order.
+        openers: Vec<Option<String>>,
     }
 
     impl Shell for Pretend {
@@ -225,7 +285,14 @@ mod tests {
             self.shown.contains(&terminal)
         }
 
-        fn place(&mut self, _: &Server, anchor: &Anchor, place: &Place) -> Placing {
+        fn place(
+            &mut self,
+            _: &Server,
+            anchor: &Anchor,
+            place: &Place,
+            opener: Option<&str>,
+        ) -> Placing {
+            self.openers.push(opener.map(str::to_owned));
             if self.unable {
                 return Placing::Unable;
             }
@@ -274,6 +341,29 @@ mod tests {
             mac.placed,
             [("t4".to_owned(), Terminal(9), Some(Side::Below), true)]
         );
+    }
+
+    #[test]
+    fn the_shell_is_told_who_asked_and_a_request_that_waits_remembers_it() {
+        let mut mac = Pretend {
+            anchors: vec!["t4".to_owned()],
+            ..Pretend::default()
+        };
+        // Named anchor and a different sender: the sender is the opener.
+        serve(&server(), Some("t9"), &place_text("anchor t4\n"), &mut mac);
+        assert_eq!(mac.openers, [Some("t9".to_owned())]);
+        // Waiting for its anchor, it keeps who asked and says it when it is placed.
+        let mut idle = Pretend::default();
+        let Answer::Wait(_, waiting) =
+            serve(&server(), Some("t9"), &place_text("anchor t4\n"), &mut idle)
+        else {
+            panic!("waits");
+        };
+        assert_eq!(waiting.opener.as_deref(), Some("t9"));
+        idle.anchors.push("t4".to_owned());
+        idle.openers.clear();
+        settle_waiting(waiting, &|_, _| true, &mut idle);
+        assert_eq!(idle.openers, [Some("t9".to_owned())]);
     }
 
     #[test]
@@ -360,10 +450,11 @@ mod tests {
             panic!("{answer:?}");
         };
         assert_eq!(placed.landed, Landed::Waiting);
+        assert_eq!(placed.next_to, None, "nothing is kept to place it by");
     }
 
     #[test]
-    fn a_request_that_is_wrong_is_answered_with_the_mistake_and_the_rest_is_passed() {
+    fn a_request_that_is_wrong_is_answered_with_the_mistake() {
         let mut mac = Pretend::default();
         for text in [
             "",
@@ -381,18 +472,79 @@ mod tests {
             panic!("a later version");
         };
         assert_eq!(failure.kind, Kind::Version);
-        for text in [
-            "bateri 1\nls\n",
-            "bateri 1\nclose\nterminal t3\n",
-            "bateri 1\nnotify\ntext hi\n",
-        ] {
-            assert_eq!(
-                serve(&server(), None, text, &mut mac),
-                Answer::Pass,
-                "{text:?}"
-            );
-        }
         assert!(mac.placed.is_empty());
+    }
+
+    #[test]
+    fn ls_close_and_notify_are_for_the_shell_to_carry_out() {
+        let mut mac = Pretend::default();
+        assert_eq!(
+            serve(&server(), None, "bateri 1\nls\n", &mut mac),
+            Answer::List(Format::Text)
+        );
+        assert_eq!(
+            serve(&server(), None, "bateri 1\nls\nformat json\n", &mut mac),
+            Answer::List(Format::Json)
+        );
+        assert_eq!(
+            serve(&server(), None, "bateri 1\nclose\nterminal t3\n", &mut mac),
+            Answer::Close(Anchor::of(Terminal(3)))
+        );
+        assert_eq!(
+            serve(&server(), None, "bateri 1\nnotify\ntext hi\n", &mut mac),
+            Answer::Notify("hi".to_owned())
+        );
+        // A target that is no name kablo has is no request.
+        let Answer::Reply(Reply::Failed(failure)) =
+            serve(&server(), None, "bateri 1\nclose\nterminal a b\n", &mut mac)
+        else {
+            panic!("not a terminal name");
+        };
+        assert_eq!(failure.kind, Kind::Usage);
+        assert!(mac.placed.is_empty());
+    }
+
+    #[test]
+    fn a_pane_can_be_made_for_a_terminal_the_server_says_runs_or_that_ended_and_was_to_stay() {
+        use kablo_proto::SessionId;
+        let status = |id: &str, state: State| {
+            let mut status = Status::new(SessionId::new(id).expect("a name"));
+            status.state = state;
+            status
+        };
+        let list = [
+            status("t5", State::RUNNING),
+            status("t6", State::ENDED),
+            status("t7", State::BROKEN),
+        ];
+        assert!(alive_in(&list, Terminal(5), false));
+        assert!(!alive_in(&list, Terminal(6), false));
+        assert!(alive_in(&list, Terminal(6), true));
+        assert!(!alive_in(&list, Terminal(7), true));
+        assert!(
+            !alive_in(&list, Terminal(8), true),
+            "the server has no such terminal"
+        );
+    }
+
+    #[test]
+    fn a_terminal_is_closed_unasked_by_itself_and_by_the_one_that_opened_it_and_by_no_other() {
+        let opener = Anchor::parse("t4");
+        let made = format!("b-{}", "0123456789abcdef".repeat(2));
+        // The opener, and the terminal itself (an agent ending the terminal it runs in).
+        let seven = Anchor::of(Terminal(7));
+        assert!(may_close(Some("t4"), &seven, opener.as_ref()));
+        assert!(may_close(Some("t7"), &seven, None));
+        // A terminal the Mac opened before the numbers existed is its own, whatever its name,
+        // and is one that opened others.
+        let older = Anchor::parse(&made).expect("a name");
+        assert!(may_close(Some(&made), &older, None));
+        assert!(may_close(Some(&made), &seven, Some(&older)));
+        // Anybody else, a program that runs in no terminal, a terminal nobody opened.
+        assert!(!may_close(Some("t5"), &seven, opener.as_ref()));
+        assert!(!may_close(None, &seven, opener.as_ref()));
+        assert!(!may_close(Some("t4"), &seven, None));
+        assert!(!may_close(Some("t7"), &Anchor::of(Terminal(70)), None));
     }
 
     fn note(terminal: u64, anchor: &str, keep_open: bool) -> Note {
@@ -453,6 +605,7 @@ mod tests {
             server: server(),
             anchor: Anchor::parse("t4").expect("a name"),
             place: note(terminal, "t4", false).place,
+            opener: None,
         };
         // Gone.
         assert_eq!(

@@ -19,7 +19,9 @@
 //!
 //! The `terminal` is the one just started, and an agent's number. The `anchor` is a terminal as
 //! kablo names it: `t4` when the agent wrote one, and the caller's own name, whatever it is, when
-//! it did not (a terminal the Mac opened before the numbers existed is `b-` and 32 digits).
+//! it did not (a terminal the Mac opened before the numbers existed is `b-` and 32 digits). The
+//! `terminal` of a `close` is named the same way, because a `close` that names none closes the
+//! caller's own.
 //!
 //! **A reply** starts with `bateri 1` too and then says `ok` (`ok placed` and the lines that
 //! tell how, `ok text` and the rest of the message as the text to print) or `error KIND TEXT`
@@ -158,8 +160,10 @@ pub enum Request {
     Place(Place),
     /// Say what is open: the windows and tabs, then the terminals.
     Ls(Format),
-    /// Close a terminal.
-    Close(Terminal),
+    /// Close a terminal: an agent's number, or — the one a request that names none means, the
+    /// caller's own — the name kablo has for it, whatever that is (a terminal the Mac opened
+    /// before the numbers existed is `b-` and 32 digits).
+    Close(Anchor),
     /// Tell the user something.
     Notify(String),
 }
@@ -245,7 +249,7 @@ impl Request {
             }
             Request::Close(terminal) => {
                 out.push_str("close\n");
-                push(&mut out, "terminal", &terminal.to_string())?;
+                push(&mut out, "terminal", terminal.name())?;
             }
             Request::Notify(text) => {
                 out.push_str("notify\n");
@@ -427,7 +431,10 @@ fn read_v1<'a>(verb: &'a str, lines: impl Iterator<Item = &'a str>) -> Result<Re
         }
         "close" => {
             let fields = Fields::read(verb, lines, &["terminal"])?;
-            Ok(Request::Close(fields.terminal("terminal")?))
+            Ok(Request::Close(anchor_of(
+                "terminal",
+                fields.need("terminal")?,
+            )?))
         }
         "notify" => {
             let fields = Fields::read(verb, lines, &["text"])?;
@@ -541,6 +548,9 @@ mod tests {
     const V1_PLACE_MADE: &str =
         "bateri 1\nplace\nterminal t9\nanchor b-0123456789abcdef0123456789abcdef\nside right\n";
     const V1_REPLY_PLACED_MADE: &str = "bateri 1\nok placed\nlanded as_asked\nnext-to b-0123456789abcdef0123456789abcdef\nsqueezed no\nhidden no\n";
+    // Added the same way: the terminal `close` names may be one that is no agent's number, because
+    // a request that names none closes the one it comes from.
+    const V1_CLOSE_MADE: &str = "bateri 1\nclose\nterminal b-0123456789abcdef0123456789abcdef\n";
     const V1_REPLY_DONE: &str = "bateri 1\nok\n";
     const V1_REPLY_PLACED: &str =
         "bateri 1\nok placed\nlanded beside_group\nnext-to t4\nsqueezed no\nhidden yes\n";
@@ -580,7 +590,13 @@ mod tests {
             (V1_PLACE_BARE, Request::Place(bare())),
             (V1_LS, Request::Ls(Format::Text)),
             (V1_LS_JSON, Request::Ls(Format::Json)),
-            (V1_CLOSE, Request::Close(Terminal(7))),
+            (V1_CLOSE, Request::Close(Anchor::of(Terminal(7)))),
+            (
+                V1_CLOSE_MADE,
+                Request::Close(
+                    Anchor::parse("b-0123456789abcdef0123456789abcdef").expect("a name"),
+                ),
+            ),
             (
                 V1_NOTIFY,
                 Request::Notify("The build is done: 3 tests failed".to_owned()),
@@ -634,7 +650,19 @@ mod tests {
             usage("bateri 1\nplace\nterminal b-0123456789abcdef0123456789abcdef\n").kind,
             Kind::Usage
         );
-        assert_eq!(usage("bateri 1\nclose\nterminal mine\n").kind, Kind::Usage);
+        // `close` names the terminal the same way, since it may close the one it comes from.
+        assert_eq!(
+            Request::parse(V1_CLOSE_MADE),
+            Ok(Request::Close(
+                Anchor::parse("b-0123456789abcdef0123456789abcdef").expect("a name")
+            ))
+        );
+        assert_eq!(
+            Request::parse("bateri 1\nclose\nterminal mine\n"),
+            Ok(Request::Close(Anchor::parse("mine").expect("a name")))
+        );
+        assert_eq!(usage("bateri 1\nclose\nterminal a b\n").kind, Kind::Usage);
+        assert_eq!(usage("bateri 1\nclose\nterminal ../x\n").kind, Kind::Usage);
     }
 
     #[test]
@@ -647,7 +675,8 @@ mod tests {
                 ..bare()
             }),
             Request::Ls(Format::Json),
-            Request::Close(Terminal(120)),
+            Request::Close(Anchor::of(Terminal(120))),
+            Request::Close(Anchor::parse("b-0123456789abcdef0123456789abcdef").expect("a name")),
             Request::Notify("two  spaces, and a trailing one ".to_owned()),
         ];
         for request in requests {

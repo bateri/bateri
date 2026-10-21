@@ -60,6 +60,25 @@ pub enum Agent {
 }
 
 impl Agent {
+    /// What a sentence for a person calls the agent ("Claude opened 3 terminals"); `None` for
+    /// the agents that share the generic mark, which have no name here to say.
+    pub fn title(self) -> Option<&'static str> {
+        match self {
+            Agent::ClaudeCode => Some("Claude"),
+            Agent::Codex => Some("Codex"),
+            Agent::OpenCode => Some("OpenCode"),
+            Agent::Antigravity => Some("Antigravity"),
+            Agent::GeminiCli => Some("Gemini"),
+            Agent::Pi => Some("Pi"),
+            Agent::Herdr => Some("Herdr"),
+            Agent::CursorCli => Some("Cursor"),
+            Agent::CopilotCli => Some("Copilot"),
+            Agent::QwenCode => Some("Qwen"),
+            Agent::KimiCli => Some("Kimi"),
+            Agent::Other => None,
+        }
+    }
+
     /// Whether the agent reads an image off the system clipboard itself when it hears ⌃V. A
     /// terminal's paste is text, so ⌘V on a clipboard that holds only an image sends such an
     /// agent ⌃V in the paste's place ([`crate::keys::image_paste_key`]). Each was read

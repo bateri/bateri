@@ -26,38 +26,57 @@
 //! - **The user is told once.** Panes that open while bateri is behind are one notification
 //!   per server that grows ("Claude opened 3 terminals on rasp"), not one for each; it is
 //!   forgotten when bateri comes to the front ([`seen`]).
+//! - **`ls` is what is on screen and what the server has, side by side.** The windows, tabs and
+//!   split trees are read where they stand when the server's list arrives ([`windows_of`]); the
+//!   terminals are the server's own words, asked for now ([`hold_service::survey`]), so the
+//!   answer is the same table the script prints without a Mac, with the tabs filled in.
+//! - **`close` asks about what is not the asker's.** A program closes without a question the
+//!   terminal it runs in and the ones it opened ([`may_close`]); anything else is the user's to
+//!   allow, in a sheet on the pane that shows it (or the asker's, or a window), and a "no" is
+//!   the script's 77. Closing is what the user closing the pane does — the pane goes and the
+//!   server's terminal ends with it — or, for a terminal with no pane, the card's End.
+//! - **`notify` is one notification and a tick.** The notification only when bateri is behind;
+//!   the tab the program runs in is marked as having news unless it is the one on screen.
 //!
 //! Everything here runs on the main thread: the service's thread hands a letter over by hopping
 //! to the main queue ([`letter`], [`notes`]), and the state that outlives a request ([`STATE`])
 //! is read and written there only.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::rc::Rc;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use block2::RcBlock;
 use bt_core::PaneUuid;
-use bt_shell_common::agent::message::{Failure, Kind, Place, Placed, Reply};
+use bt_shell_common::agent::listing::{self, Node, Pane, Scene, Tab, Window};
+use bt_shell_common::agent::message::{Failure, Format, Kind, Place, Placed, Reply};
 use bt_shell_common::agent::notes::Note;
 use bt_shell_common::agent::place::{Ask, Spot};
-use bt_shell_common::agent::serve::{self, Answer, Placing, Server, Shell};
+use bt_shell_common::agent::serve::{self, Answer, Placing, Server, Shell, may_close};
 use bt_shell_common::agent::summary;
-use bt_shell_common::agent::wait::Queue;
+use bt_shell_common::agent::wait::{Queue, Waiting};
 use bt_shell_common::agent::{Anchor, Terminal};
 use bt_shell_common::kablo::SessionId;
-use bt_shell_common::kablo::service::{Letter, Shown};
+use bt_shell_common::kablo::service::{Letter, Shown, Survey};
 use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
-use objc2::{MainThreadMarker, MainThreadOnly};
-use objc2_app_kit::NSApplication;
+use objc2::{MainThreadMarker, MainThreadOnly, Message};
+use objc2_app_kit::{
+    NSAlert, NSAlertSecondButtonReturn, NSApplication, NSModalResponse, NSWindow,
+    NSWindowNumberListOptions,
+};
+use objc2_foundation::{NSString, ns_string};
 
 use crate::app::{self, AppDelegate, Opening, Start, pipe_installed};
 use crate::embed;
 use crate::hold_service;
 use crate::launch::{Held, Resume};
 use crate::pane::TerminalPane;
+use crate::sheets::{self, Asker};
 use crate::tab::TerminalTab;
-use crate::uploader;
-use crate::window::initial_rect;
+use crate::uploader::{self, ESCAPE, add_key_monitor, remove_monitor};
+use crate::window::{TerminalWindow, initial_rect};
 
 /// What outlives a request.
 #[derive(Default)]
@@ -71,7 +90,14 @@ struct State {
     /// terminal until the pane's pipe has reached it, and a second request for the same
     /// terminal in between must not make a second pane.
     made: Vec<(String, Terminal, Instant)>,
+    /// Who asked for the pane of each terminal that was made for a program (`account`, the
+    /// terminal's name, the words that name the asker), the oldest first: the summary card
+    /// says it. In memory — a restart forgets it, and `ls` has it from the server's records.
+    opened: Vec<(String, String, String)>,
 }
+
+/// How many askers are remembered.
+const OPENED_KEPT: usize = 128;
 
 /// How long a pane just made stands in for the service's word that it shows its terminal.
 const MADE_FOR: Duration = Duration::from_secs(30);
@@ -113,7 +139,7 @@ pub(crate) fn notes(server: Server, notes: Vec<Note>) {
 /// A pane began to show a terminal, or stopped (`Backend::terminal_changed`, on the main
 /// queue): what waited for that terminal to have a pane goes beside it now, and what waited
 /// for a pane of its own is done.
-pub(crate) fn terminal_shown(app: &AppDelegate, pane: &PaneUuid) {
+pub(crate) fn terminal_shown(pane: &PaneUuid) {
     let Some(shown) = hold_service::shown(pane) else {
         return;
     };
@@ -131,12 +157,48 @@ pub(crate) fn terminal_shown(app: &AppDelegate, pane: &PaneUuid) {
     if due.is_empty() {
         return;
     }
+    // Whether a terminal can still be shown is asked of the server now: the cache of what runs
+    // there is not told of a terminal the script on the server started, so it cannot say.
+    let mut by_server: Vec<(String, Vec<Waiting>)> = Vec::new();
+    for waiting in due {
+        match by_server
+            .iter_mut()
+            .find(|(account, _)| *account == waiting.server.account)
+        {
+            Some((_, found)) => found.push(waiting),
+            None => by_server.push((waiting.server.account.clone(), vec![waiting])),
+        }
+    }
+    for (account, due) in by_server {
+        hold_service::survey(&account, move |survey| {
+            DispatchQueue::main().exec_async(move || {
+                // audit: a block running on the main queue is on the main thread by definition.
+                let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
+                if let Some(app) = app::delegate(mtm) {
+                    settle_due(&app, due, survey);
+                }
+            });
+        });
+    }
+}
+
+/// The requests that waited for an anchor that has a pane now, against the server's list: those
+/// whose terminal can be shown go beside it. A server that could not be asked keeps them waiting
+/// (the connection is down, and a pane could not be made for a terminal there).
+fn settle_due(app: &AppDelegate, due: Vec<Waiting>, survey: Survey) {
+    let Some(statuses) = survey.terminals else {
+        state(|state| {
+            for waiting in due {
+                state.waiting.add(waiting);
+            }
+        });
+        return;
+    };
     let mut world = World::new(app);
     for waiting in due {
-        let account = waiting.server.account.clone();
         let (again, _) = serve::settle_waiting(
             waiting,
-            &|terminal, keep_open| alive(&account, terminal, keep_open),
+            &|terminal, keep_open| serve::alive_in(&statuses, terminal, keep_open),
             &mut world,
         );
         if let Some(again) = again {
@@ -144,6 +206,19 @@ pub(crate) fn terminal_shown(app: &AppDelegate, pane: &PaneUuid) {
         }
     }
     world.finish();
+}
+
+/// Who asked for the pane that shows `terminal` of the server `account` ("Claude (t4)"), when a
+/// program did: what the summary card of its tab says.
+pub(crate) fn opened_by(account: &str, terminal: &str) -> Option<String> {
+    state(|state| {
+        state
+            .opened
+            .iter()
+            .rev()
+            .find(|(found, name, _)| found == account && name == terminal)
+            .map(|(_, _, who)| who.clone())
+    })
 }
 
 /// bateri came to the front: what it said while it was behind has been seen.
@@ -174,7 +249,9 @@ fn take(app: &AppDelegate, mut letter: Letter) {
             state(|state| state.waiting.add(waiting));
             letter.answer(reply.encode().into_bytes());
         }
-        Answer::Pass => letter.hang_up(),
+        Answer::List(format) => list(letter, server, from, format),
+        Answer::Close(target) => close(letter, server, from, target),
+        Answer::Notify(text) => notify(app, letter, &server, from.as_deref(), &text),
     }
     world.finish();
 }
@@ -376,16 +453,35 @@ impl Shell for World<'_> {
         just_made || find_pane(self.app, &server.account, &terminal.to_string()).is_some()
     }
 
-    fn place(&mut self, server: &Server, anchor: &Anchor, place: &Place) -> Placing {
+    fn place(
+        &mut self,
+        server: &Server,
+        anchor: &Anchor,
+        place: &Place,
+        opener: Option<&str>,
+    ) -> Placing {
         let Some((tab, pane, shown)) = find_pane(self.app, &server.account, anchor.name()) else {
             return Placing::NoAnchor;
         };
         match self.put(server, &tab, &pane, anchor, place) {
             Ok(placed) => {
+                // The terminal that asked; a note that was read later does not say, and the pane
+                // is said to come from the terminal it stands beside.
+                let asker = opener.unwrap_or(anchor.name());
+                let program = find_pane(self.app, &server.account, asker)
+                    .and_then(|(_, _, found)| found.program)
+                    .or_else(|| shown.program.clone());
+                let who = summary::opener(program.as_deref(), asker);
                 state(|state| {
                     state
                         .made
                         .push((server.account.clone(), place.terminal, Instant::now()));
+                    state
+                        .opened
+                        .push((server.account.clone(), place.terminal.to_string(), who));
+                    if state.opened.len() > OPENED_KEPT {
+                        state.opened.remove(0);
+                    }
                 });
                 self.opened.push(Opened {
                     account: server.account.clone(),
@@ -403,6 +499,361 @@ impl Shell for World<'_> {
             }
         }
     }
+}
+
+// ─── ls ──────────────────────────────────────────────────────────────────
+
+/// `bateri ls`: the server is asked for its terminals now, and when they come the windows are read
+/// on the main queue, so the two are of the same moment.
+fn list(letter: Letter, server: Server, from: Option<String>, format: Format) {
+    let account = server.account.clone();
+    hold_service::survey(&account, move |survey| {
+        DispatchQueue::main().exec_async(move || {
+            // audit: a block running on the main queue is on the main thread by definition.
+            let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
+            match app::delegate(mtm) {
+                Some(app) => listed(&app, letter, &server, from.as_deref(), format, survey),
+                None => letter.hang_up(),
+            }
+        });
+    });
+}
+
+fn listed(
+    app: &AppDelegate,
+    letter: Letter,
+    server: &Server,
+    from: Option<&str>,
+    format: Format,
+    survey: Survey,
+) {
+    let Some(statuses) = survey.terminals else {
+        refuse(
+            letter,
+            Kind::Failed,
+            "the server did not give its terminals in time",
+        );
+        return;
+    };
+    let (windows, typing) = windows_of(app, &server.account);
+    let rows = state(|state| {
+        listing::rows(statuses, &survey.records, &|terminal| {
+            state.waiting.waits(&server.account, terminal)
+        })
+    });
+    let scene = Scene {
+        caller: from.map(str::to_owned),
+        typing,
+        windows: Some(windows),
+        terminals: rows,
+    };
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs());
+    let mut text = match format {
+        Format::Text => scene.text(now),
+        Format::Json => scene.json(),
+    };
+    if !text.ends_with('\n') {
+        text.push('\n');
+    }
+    letter.answer(Reply::Text(text).encode().into_bytes());
+}
+
+/// Answers a request with a mistake or a refusal.
+fn refuse(letter: Letter, kind: Kind, text: &str) {
+    letter.answer(
+        Reply::Failed(Failure::new(kind, text))
+            .encode()
+            .into_bytes(),
+    );
+}
+
+/// Our windows front to back (`windowNumbersWithOptions:`, every space), those the system does
+/// not list after them in the order the application keeps them.
+fn windows_front_to_back(app: &AppDelegate) -> Vec<Retained<TerminalWindow>> {
+    let mut rest = app.windows();
+    let mut ordered = Vec::with_capacity(rest.len());
+    if let Some(numbers) =
+        NSWindow::windowNumbersWithOptions(NSWindowNumberListOptions::AllSpaces, app.mtm())
+    {
+        for number in numbers.iter() {
+            if let Some(at) = rest
+                .iter()
+                .position(|window| window.ns_window().windowNumber() == number.integerValue())
+            {
+                ordered.push(rest.remove(at));
+            }
+        }
+    }
+    ordered.extend(rest);
+    ordered
+}
+
+/// The terminal of the server `account` that `pane` shows, by its name there.
+fn terminal_of(pane: &TerminalPane, account: &str) -> Option<String> {
+    hold_service::shown(pane.uuid())
+        .filter(|shown| shown.account == account)
+        .map(|shown| shown.terminal.as_str().to_owned())
+}
+
+/// The windows as `ls` tells them for the server `account`, and the terminal of it the user is
+/// typing in, if one. A pane of anything else is `another machine` and nothing more.
+fn windows_of(app: &AppDelegate, account: &str) -> (Vec<Window>, Option<String>) {
+    let mut typing = None;
+    let mut windows = Vec::new();
+    for window in windows_front_to_back(app) {
+        // ⌘1… reach the key window's tabs alone.
+        let keys = if window.ns_window().isKeyWindow() {
+            window.tab_keys()
+        } else {
+            Vec::new()
+        };
+        let mut tabs = Vec::new();
+        for tab in window.tabs() {
+            let panes = tab.panes();
+            let named = |id: u64| -> Pane {
+                panes
+                    .iter()
+                    .find(|pane| pane.id() == id)
+                    .and_then(|pane| terminal_of(pane, account))
+                    .map_or(Pane::Elsewhere, Pane::Terminal)
+            };
+            let focused = tab.focused_pane();
+            let own = terminal_of(&focused, account);
+            if typing.is_none() && focused.is_active() {
+                typing.clone_from(&own);
+            }
+            tabs.push(Tab {
+                keys: keys
+                    .iter()
+                    .find(|(id, _)| *id == tab.id())
+                    .map(|(_, hint)| hint.clone()),
+                // The user's name for it, else the title of a terminal of this server.
+                name: tab
+                    .name()
+                    .or_else(|| own.as_ref().and_then(|_| tab.automatic_title())),
+                selected: window.is_selected(tab.id()),
+                tree: Node::of(&tab.container().tree(), &named),
+                zoomed: tab.zoomed().map(named),
+            });
+        }
+        windows.push(Window {
+            visible: window.window_visible(),
+            tabs,
+        });
+    }
+    (windows, typing)
+}
+
+// ─── close ───────────────────────────────────────────────────────────────
+
+/// `bateri close`: the server says what it has and who opened it, then the terminal is closed —
+/// without a question when it is the asker's own or one it opened, with one when it is not.
+fn close(letter: Letter, server: Server, from: Option<String>, target: Anchor) {
+    let account = server.account.clone();
+    hold_service::survey(&account, move |survey| {
+        DispatchQueue::main().exec_async(move || {
+            // audit: a block running on the main queue is on the main thread by definition.
+            let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
+            match app::delegate(mtm) {
+                Some(app) => closing(&app, letter, server, from, target, survey),
+                None => letter.hang_up(),
+            }
+        });
+    });
+}
+
+fn closing(
+    app: &AppDelegate,
+    letter: Letter,
+    server: Server,
+    from: Option<String>,
+    target: Anchor,
+    survey: Survey,
+) {
+    let Some(statuses) = survey.terminals else {
+        refuse(letter, Kind::Failed, "the server did not answer");
+        return;
+    };
+    let known = statuses
+        .iter()
+        .any(|status| status.id.as_str() == target.name());
+    if !known && find_pane(app, &server.account, target.name()).is_none() {
+        refuse(
+            letter,
+            Kind::Unknown,
+            &format!("{target} is no terminal on this server"),
+        );
+        return;
+    }
+    let opener = target
+        .terminal()
+        .and_then(|terminal| survey.records.iter().find(|(found, _)| *found == terminal))
+        .and_then(|(_, record)| record.opener.clone());
+    if may_close(from.as_deref(), &target, opener.as_ref()) {
+        letter.answer(Reply::Done.encode().into_bytes());
+        carry_out_close(app, &server, &target);
+        return;
+    }
+    ask_to_close(app, letter, server, from, target);
+}
+
+/// The terminal ends. With a pane that shows it that is the user closing the pane — the pane
+/// goes, the server's terminal ends with it; with none it is the card's End.
+fn carry_out_close(app: &AppDelegate, server: &Server, target: &Anchor) {
+    if let Some(terminal) = target.terminal() {
+        state(|state| state.waiting.forget(&server.account, terminal));
+    }
+    match find_pane(app, &server.account, target.name()) {
+        Some((tab, pane, _)) => tab.close_pane(pane.id()),
+        None => {
+            if let Ok(terminal) = SessionId::new(target.name()) {
+                hold_service::end_terminal(&server.account, &terminal);
+            }
+        }
+    }
+}
+
+/// The user is asked whether a program may close a terminal it did not open: a sheet on the pane
+/// that shows the terminal, else on the pane the program runs in, else on a window. "Cancel" is
+/// the default and Esc, and the sheet cannot be answered by a Return typed to the terminal.
+fn ask_to_close(
+    app: &AppDelegate,
+    letter: Letter,
+    server: Server,
+    from: Option<String>,
+    target: Anchor,
+) {
+    let mtm = app.mtm();
+    let account = server.account.clone();
+    let program = from
+        .as_deref()
+        .and_then(|name| find_pane(app, &account, name).and_then(|(_, _, shown)| shown.program));
+    let pane = find_pane(app, &account, target.name())
+        .or_else(|| {
+            from.as_deref()
+                .and_then(|name| find_pane(app, &account, name))
+        })
+        .map(|(_, pane, _)| pane);
+    let window = windows_front_to_back(app)
+        .into_iter()
+        .find(|window| window.ns_window().isKeyWindow())
+        .or_else(|| windows_front_to_back(app).into_iter().next());
+    // The seat can be asked for again when the Esc monitor needs it: a monitor that outlived
+    // its sheet must not pin the pane or the window.
+    let reseat: Box<dyn Fn(MainThreadMarker) -> Option<sheets::Seat>> = match (&pane, &window) {
+        (Some(pane), _) => {
+            let (id, lookup) = (pane.id(), pane.lookup());
+            Box::new(move |mtm| lookup(mtm, id).and_then(|pane| sheets::seat(Asker::Pane(&pane))))
+        }
+        (None, Some(window)) => {
+            let window = window.ns_window().retain();
+            Box::new(move |_| sheets::seat(Asker::Window(&window)))
+        }
+        (None, None) => {
+            refuse(letter, Kind::Refused, "there is no window to ask in");
+            return;
+        }
+    };
+    let Some(seat) = reseat(mtm) else {
+        refuse(letter, Kind::Refused, "there is no window to ask in");
+        return;
+    };
+    if seat.is_taken() {
+        refuse(
+            letter,
+            Kind::Failed,
+            "the user is answering another question in bateri; ask again",
+        );
+        return;
+    }
+    let (text, under) = summary::close_question(
+        program.as_deref(),
+        from.as_deref(),
+        target.name(),
+        &server.host,
+    );
+    let alert = NSAlert::new(mtm);
+    alert.setMessageText(&NSString::from_str(&text));
+    alert.setInformativeText(&NSString::from_str(&under));
+    alert.addButtonWithTitle(ns_string!("Cancel"));
+    alert.addButtonWithTitle(ns_string!("Close"));
+    let monitor: Rc<Cell<Option<Retained<objc2::runtime::AnyObject>>>> = Rc::default();
+    let sheet_window = alert.window();
+    let installed = add_key_monitor(move |event| {
+        if event.keyCode() != ESCAPE {
+            return false;
+        }
+        // audit: the local event monitor runs on the main thread.
+        let mtm = MainThreadMarker::new().expect("the event monitor is on the main thread");
+        let on_sheet = event
+            .window(mtm)
+            .is_some_and(|window| Retained::as_ptr(&window) == Retained::as_ptr(&sheet_window));
+        if on_sheet && let Some(seat) = reseat(mtm) {
+            seat.end(&sheet_window, objc2_app_kit::NSAlertFirstButtonReturn);
+        }
+        on_sheet
+    });
+    monitor.set(installed);
+    let slot = Rc::clone(&monitor);
+    let waiting = Cell::new(Some(letter));
+    let answered = RcBlock::new(move |response: NSModalResponse| {
+        remove_monitor(slot.take());
+        let Some(letter) = waiting.take() else {
+            return;
+        };
+        // audit: AppKit calls the sheet's completion on the main thread.
+        let mtm = MainThreadMarker::new().expect("a sheet answers on the main thread");
+        match app::delegate(mtm) {
+            Some(app) if response == NSAlertSecondButtonReturn => {
+                letter.answer(Reply::Done.encode().into_bytes());
+                carry_out_close(&app, &server, &target);
+            }
+            Some(_) => refuse(letter, Kind::Refused, "the user said no"),
+            None => letter.hang_up(),
+        }
+    });
+    seat.begin(&alert, &answered);
+}
+
+// ─── notify ──────────────────────────────────────────────────────────────
+
+/// The longest a notification's words are, in characters.
+const NOTICE_LIMIT: usize = 1000;
+
+/// `bateri notify`: a notification when bateri is behind, and the tab the program runs in is
+/// marked as having news unless the user is looking at it. Answered at once: the words are
+/// delivered, what the system does with them is its own — except that a program no tab of this
+/// Mac shows, asking while bateri is in front, is told nothing could be shown.
+fn notify(app: &AppDelegate, letter: Letter, server: &Server, from: Option<&str>, text: &str) {
+    let found = from.and_then(|name| find_pane(app, &server.account, name));
+    if let Some((tab, pane, _)) = &found {
+        tab.news_from(pane.id());
+    }
+    if NSApplication::sharedApplication(app.mtm()).isActive() {
+        // The system silences a notification delivered while bateri is in front, so the tab is
+        // what shows it; with no tab of the asker here, nothing was shown and the program is told.
+        if found.is_none() {
+            refuse(
+                letter,
+                Kind::Failed,
+                "bateri is in front and has no tab of this terminal to mark, so nothing was shown",
+            );
+            return;
+        }
+    } else {
+        let program = found
+            .as_ref()
+            .and_then(|(_, _, shown)| shown.program.as_deref());
+        let body: String = text
+            .chars()
+            .filter(|c| !c.is_control())
+            .take(NOTICE_LIMIT)
+            .collect();
+        uploader::deliver_notification(&summary::notified(program, &server.host), &body);
+    }
+    letter.answer(Reply::Done.encode().into_bytes());
 }
 
 // ─── Telling the user ────────────────────────────────────────────────────
