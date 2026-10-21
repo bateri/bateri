@@ -10605,32 +10605,10 @@ impl Session {
         changed
     }
 
-    /// Shows (`Some`) or hides the ssh status bar's Sign In…
-    /// button of remote generation `command`; `true` if it changed.
-    /// The [`Self::set_remote_stats`] gates: another generation's or a finished
-    /// ssh's late word is a no-op, the same value asks for no frame (zero
-    /// frames while idle); only the leaf lock, dropped before `request_frame`.
-    pub fn set_sign_in(&self, command: u64, sign_in: Option<crate::SignIn>) -> bool {
-        let changed = {
-            let mut log = lock(&self.shell);
-            let current = log.running_command() == Some(command) && log.context.remote.is_some();
-            if !current || log.context.sign_in == sign_in {
-                false
-            } else {
-                log.context.sign_in = sign_in;
-                true
-            }
-        };
-        if changed {
-            self.request_frame();
-        }
-        changed
-    }
-
     /// Tells the context row that the pane shows a terminal a server keeps
     /// (`true`), which makes the remote form's `⇄ host` the door to the
     /// server's card, or that it does not; `true` if it changed. Gated like
-    /// [`Self::set_sign_in`]: `command` is the generation of the remote target
+    /// [`Self::set_remote_stats`]: `command` is the generation of the remote target
     /// ([`Self::remote_target`]), another one's or a finished ssh's late word is a
     /// no-op, and the same value asks for no frame.
     pub fn set_server(&self, command: u64, server: bool) -> bool {
@@ -10657,7 +10635,7 @@ impl Session {
     /// so ([`crate::RemoteLink`]) and the caret is not drawn — the grid is a
     /// picture of a moment that has passed.
     ///
-    /// Not gated by a remote generation, unlike [`Self::set_sign_in`]: the
+    /// Not gated by a remote generation, unlike [`Self::set_server`]: the
     /// bridge's news is about the terminal the pane shows, not about the local
     /// command that started it, and it may arrive a turn before the remote
     /// state does. It lands in the context all the same and goes with the
@@ -10688,18 +10666,6 @@ impl Session {
         let log = lock(&self.shell);
         log.context.remote.as_ref()?;
         log.context.link
-    }
-
-    /// The Sign In… button as drawn and the remote generation it belongs to;
-    /// `None` while it is not shown. The session is the button's
-    /// one owner: it clears it with the remote state ([`Self::set_remote`],
-    /// `C`/`D`/`A`), so the pane asks here rather than keeping a copy. Takes
-    /// only the leaf lock.
-    pub fn sign_in(&self) -> Option<(u64, crate::SignIn)> {
-        let log = lock(&self.shell);
-        let shown = log.context.sign_in?;
-        log.context.remote.as_ref()?;
-        Some((log.running_command()?, shown))
     }
 
     /// The context row's clickable parts and their dock-local column ranges
@@ -19469,40 +19435,6 @@ mod tests {
         assert!(session.set_remote_stats(command, Some(&stats)));
         assert!(session.set_remote(command, Some(&RemoteTarget::ssh("stage"))));
         assert_eq!(shown(), None);
-        // The Sign In… button has the same gates and the same fate.
-        let sign_in = Some(crate::SignIn);
-        assert!(
-            !session.set_sign_in(command + 1, sign_in),
-            "another generation"
-        );
-        assert!(session.set_sign_in(command, sign_in));
-        assert!(!session.set_sign_in(command, sign_in), "the same value");
-        assert_eq!(
-            session.footer_span(80, crate::FooterControl::SignIn),
-            crate::footer_span(
-                &lock(&session.shell).context,
-                80,
-                crate::FooterControl::SignIn
-            ),
-            "the hit test reads the drawing's layout"
-        );
-        assert!(
-            session
-                .footer_span(80, crate::FooterControl::SignIn)
-                .is_some()
-        );
-        assert_eq!(session.sign_in(), Some((command, crate::SignIn)));
-        assert!(session.set_remote(command, Some(&RemoteTarget::ssh("prod"))));
-        assert_eq!(
-            session.sign_in(),
-            None,
-            "the session's own clearing is seen"
-        );
-        assert_eq!(
-            lock(&session.shell).context.sign_in,
-            None,
-            "another host's login"
-        );
         // The server's name is a door only after the pane said it shows a kept
         // terminal, with the same gates and the same fate.
         assert!(!session.set_server(command + 1, true), "another generation");
@@ -19523,7 +19455,7 @@ mod tests {
                 .footer_span(80, crate::FooterControl::Server)
                 .is_some()
         );
-        assert!(session.set_remote(command, Some(&RemoteTarget::ssh("stage"))));
+        assert!(session.set_remote(command, Some(&RemoteTarget::ssh("prod"))));
         assert!(
             !lock(&session.shell).context.server,
             "another host is not this one's terminal"

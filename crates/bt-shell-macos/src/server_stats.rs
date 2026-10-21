@@ -146,7 +146,7 @@ pub(crate) fn set_card(account: &str, pane: u64, open: bool) {
     }
 }
 
-/// The user signed in: a run that ended on a failed open samples again at once.
+/// The login changed (Forget Password): a run that ended on a failed open samples again at once.
 pub(crate) fn retry(account: &str) {
     let actions = with(|registry| {
         let slot = registry.slots.get_mut(account)?;
@@ -260,23 +260,16 @@ fn answered(account: &str, epoch: u64, answer: Result<Answer, String>) {
         Some((
             answered,
             slot.account.members().to_vec(),
-            slot.carrier,
             registry.lookups.clone(),
         ))
     });
-    let Some((answered, members, carrier, lookups)) = result else {
+    let Some((answered, members, lookups)) = result else {
         return;
     };
     // audit: a block running on the main queue is on the main thread by definition.
     let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
-    if let Ok(Answer::Load(LoadReply::Unreachable(text))) = &answer
-        && let Some(member) = members.iter().find(|member| Some(member.pane) == carrier)
-        && let Some(pane) = lookups
-            .get(&member.pane)
-            .and_then(|lookup| lookup(mtm, member.pane))
-    {
-        pane.background_failed(member.command, text);
-    }
+    // A server nobody is logged in for (`Unreachable`) shows nothing: no load, and no
+    // button — the connection's login is the pane's own business (`Needs your password`).
     if let Some(stats) = answered.shown {
         for member in &members {
             let Some(pane) = lookups
@@ -285,8 +278,6 @@ fn answered(account: &str, epoch: u64, answer: Result<Answer, String>) {
             else {
                 continue;
             };
-            // A sample is a login: a Sign In… left from before goes.
-            pane.hide_sign_in();
             if let Some(session) = pane.session() {
                 session.set_remote_stats(member.command, Some(&stats));
             }
@@ -343,8 +334,12 @@ mod tests {
 
     #[test]
     fn every_failure_of_a_load_request_is_named_for_the_schedule() {
-        let unreachable = Ok(Answer::Load(LoadReply::Unreachable("no".to_owned())));
-        assert!(matches!(reply_of(&unreachable), Reply::Unreachable));
+        // A server nobody is logged in for is an unreachable one and nothing more: the
+        // schedule hides the load, and no pane is told to offer anything.
+        for text in ["no", bt_shell_common::ssh_route::SIGN_IN_NEEDED] {
+            let unreachable = Ok(Answer::Load(LoadReply::Unreachable(text.to_owned())));
+            assert!(matches!(reply_of(&unreachable), Reply::Unreachable));
+        }
         assert!(matches!(
             reply_of(&Ok(Answer::Load(LoadReply::NoProc))),
             Reply::NoProc

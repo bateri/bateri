@@ -138,7 +138,6 @@ impl TerminalPane {
                     self.toggle_server_card(hit.control, span);
                 }
             }
-            FooterControl::SignIn => self.sign_in(),
             FooterControl::List => self.toggle_upload_list(span),
             FooterControl::Cancel => self.request_stop(true),
         }

@@ -20,12 +20,13 @@
 //!   sheet, a pane that is gone, [`TerminalPane::close_password`] on
 //!   `begin_close` (⌘W, ⌘Q). The job's thread then sees `None` and ssh is
 //!   stopped before it could try an empty password.
-//! - **Sign In…**: a background job (the link check, the load
-//!   indicator) that could not log in by itself says so
-//!   ([`ssh_route::SIGN_IN_NEEDED`]); the ssh status bar then shows the
-//!   button, whose click opens this sheet. Any user job's successful login
-//!   hides it and the background jobs try again at once
-//!   ([`TerminalPane::signed_in`]).
+//! - **No Sign In… on a server's pane.** A background job (the link check,
+//!   the load indicator) that could not log in by itself does nothing
+//!   visible: it never asks, the load simply stays hidden and the link check's
+//!   label says why. The server's login is the connection's — the jobs ride
+//!   on the main connection the pane's own `ssh` made — and when it is not
+//!   there the pane says so once, `Needs your password · ⏎ log in`, and ⏎
+//!   opens this sheet ([`TerminalPane::log_in_to_reconnect`]).
 //! - **Forget Password**: Shell ▸ Forget Password for “{host}” drops the
 //!   saved password and stops our master for it
 //!   ([`crate::ssh_route::Masters::forget`]).
@@ -36,7 +37,6 @@ use std::sync::mpsc::{self, Sender};
 use std::thread;
 
 use block2::RcBlock;
-use bt_core::SignIn;
 use objc2::rc::Retained;
 use objc2::{MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
@@ -49,7 +49,7 @@ use crate::pane::TerminalPane;
 use crate::preview::beep;
 use crate::remote_helper::Dial;
 use crate::sheets::{self, Asker};
-use crate::ssh_route::{self, Answerer, Ask, Denied, Prompt, Question, Route, Typed};
+use crate::ssh_route::{Answerer, Ask, Denied, Prompt, Question, Typed};
 use crate::uploader::on_pane;
 
 /// The job that asks — the sheet's text says what the password is for.
@@ -59,8 +59,6 @@ pub(crate) enum Job {
     Download,
     Preview,
     Finder,
-    /// The ssh status bar's Sign In….
-    SignIn,
     /// The terminals the server keeps wait for a login: a pane's ⏎ on
     /// "Needs your password" ([`TerminalPane::log_in_to_reconnect`]).
     Reconnect,
@@ -73,7 +71,6 @@ impl Job {
             Self::Download => "Log in to download the file.".to_owned(),
             Self::Preview => "Log in to preview the file.".to_owned(),
             Self::Finder => "Log in to copy the file to Finder.".to_owned(),
-            Self::SignIn => "Log in to use remote files.".to_owned(),
             Self::Reconnect => format!("Log in to reconnect the terminals on {host}."),
         }
     }
@@ -105,27 +102,13 @@ impl TerminalPane {
     /// A remote job's route gate: `job` `Some` — the user started it
     /// and a sheet may ask; `holds` — the job already holds the pane's sheet
     /// gate (the upload's probe, the download's count). `None` — a background
-    /// job, which never asks. A user job's successful dial is a login: the
-    /// Sign In… button goes and the background jobs try again
-    /// ([`Self::signed_in`]).
+    /// job, which never asks.
     pub(crate) fn dial(&self, target: bt_core::RemoteTarget, job: Option<(Job, bool)>) -> Dial {
         let Some((job, holds)) = job else {
             return Dial::gated(self.masters(), target, Ask::Never);
         };
         let ask = Ask::Sheet(self.password_asker(target.host.clone(), job, holds));
-        let dial = Dial::gated(self.masters(), target, ask);
-        let (id, lookup) = (self.id(), self.lookup());
-        let argv = dial.argv;
-        Dial {
-            argv: Box::new(move || {
-                let route = argv();
-                if route.is_ok() {
-                    on_pane(lookup, id, |pane| pane.signed_in());
-                }
-                route
-            }),
-            ..dial
-        }
+        Dial::gated(self.masters(), target, ask)
     }
 
     /// The answerer a job's thread calls for every prompt: the question goes to
@@ -243,100 +226,6 @@ impl TerminalPane {
         }
     }
 
-    // ─── Sign In… ────────────────────────────────────────────────────────
-    //
-    // The button's one owner is the session (`Session::sign_in`): it clears it
-    // with the remote state, so the pane keeps no copy that could disagree.
-
-    /// A background job of remote generation `command` failed with `text`:
-    /// if signing in would fix it, the ssh status bar shows Sign In…. A late
-    /// reply of another generation does nothing.
-    pub(crate) fn background_failed(&self, command: u64, text: &str) {
-        if text != ssh_route::SIGN_IN_NEEDED || self.masters().is_none() {
-            return;
-        }
-        let Some(session) = self.session() else {
-            return;
-        };
-        let current = self.server_target().map(|(now, ..)| now);
-        if current != Some(command) || session.sign_in().is_some() {
-            return;
-        }
-        session.set_sign_in(command, Some(SignIn));
-        self.view().sync_cursor_rects();
-        // The pointer may already be over the new button.
-        self.rehover_footer();
-    }
-
-    /// A background job logged in (a sample, a link check): the button goes
-    /// and the load indicator samples again — the login works now, whoever
-    /// made it (another pane's sign-in, `ssh-add`, the user's own master).
-    pub(crate) fn background_succeeded(&self) {
-        if self.hide_sign_in() {
-            self.remote_helper().borrow_mut().retry();
-            self.retry_stats();
-        }
-    }
-
-    /// Hides the button; `true` if one was shown. The load indicator's own
-    /// sample calls it directly — sampling already runs.
-    pub(crate) fn hide_sign_in(&self) -> bool {
-        let Some(session) = self.session() else {
-            return false;
-        };
-        let Some((command, _)) = session.sign_in() else {
-            return false;
-        };
-        session.set_sign_in(command, None);
-        self.view().sync_cursor_rects();
-        true
-    }
-
-    /// A user job's dial succeeded while the button is shown: the background
-    /// jobs try again at once (the helper forgets its held failure, the load
-    /// indicator samples) and their success hides it
-    /// ([`Self::background_succeeded`]) — the dial alone does not say a login
-    /// happened (today's argv is a success too).
-    pub(crate) fn signed_in(&self) {
-        if self
-            .session()
-            .and_then(|session| session.sign_in())
-            .is_none()
-        {
-            return;
-        }
-        self.remote_helper().borrow_mut().retry();
-        self.retry_stats();
-    }
-
-    /// The button's job: the route gate with the sheet, on its own thread.
-    /// Our master up is a login: the button goes and the background tries
-    /// again. Today's argv (no socket of ours possible, the user's own master)
-    /// only retries — the background's own success or failure decides. A
-    /// cancel says nothing more; a failure (ssh's reason, an unknown host key)
-    /// is a sheet.
-    pub(crate) fn sign_in(&self) {
-        let (Some(masters), Some((_, target, _))) = (self.masters(), self.server_target()) else {
-            return;
-        };
-        let asker = self.password_asker(target.host.clone(), Job::SignIn, false);
-        let (id, lookup) = (self.id(), self.lookup());
-        let _ = thread::Builder::new()
-            .name("ssh sign in".into())
-            .spawn(move || {
-                let outcome = masters.ensure(&target, Ask::Sheet(asker));
-                let host = target.host;
-                on_pane(lookup, id, move |pane| match outcome {
-                    Ok(Route::Ours(_)) => pane.background_succeeded(),
-                    Ok(Route::Direct) => pane.signed_in(),
-                    Err(Denied::Cancelled) => {}
-                    Err(denied) => {
-                        pane.failure_sheet(&format!("Can't sign in to {host}"), &denied.text());
-                    }
-                });
-            });
-    }
-
     // ─── Log in to reconnect ─────────────────────────────────────────────
 
     /// ⏎ on a pane that says "Needs your password": the sheet that logs the
@@ -415,8 +304,7 @@ impl TerminalPane {
 
     /// Shell ▸ Forget Password for “{host}”: the saved password goes and our
     /// master stops taking jobs; the pane's helper session closes too, so the
-    /// next background job asks the gate afresh and finds no login — the
-    /// status bar's Sign In….
+    /// next background job asks the gate afresh and finds no login.
     pub(crate) fn forget_password(&self) {
         let (Some(masters), Some((_, target, _))) = (self.masters(), self.server_target()) else {
             return;

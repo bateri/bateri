@@ -809,20 +809,9 @@ impl BateriView {
             .and_then(|pane| pane.server_target())
             .is_some_and(|(now, ..)| now == command);
         let (found, note) = match found {
-            Ok(found) if current => {
-                // The helper answered: the login works.
-                if let Some(pane) = self.pane() {
-                    pane.background_succeeded();
-                }
-                (found, None)
-            }
+            Ok(found) if current => (found, None),
             Ok(_) => (None, None),
-            Err(text) => {
-                if current && let Some(pane) = self.pane() {
-                    pane.background_failed(command, &text);
-                }
-                (None, current.then_some(text))
-            }
+            Err(text) => (None, current.then_some(text)),
         };
         let found = found.map(|(index, path, entry)| {
             move |query| Verified::found_remote(query, index, path, entry)

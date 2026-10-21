@@ -389,9 +389,9 @@ impl Schedule {
         })
     }
 
-    /// The user signed in: a generation that ended on a failed
+    /// The login changed (Forget Password): a generation that ended on a failed
     /// open samples again at once, without waiting for a new generation. It
-    /// counts as an interaction — the user just clicked.
+    /// counts as an interaction — the user just acted.
     pub fn retry(&mut self, now: Instant) -> Vec<Action> {
         self.change(now, true, |schedule| {
             schedule.ended = false;
@@ -765,7 +765,7 @@ impl Account {
         self.settle(actions)
     }
 
-    /// The user signed in: a run that ended on a failed open samples again at
+    /// The login changed: a run that ended on a failed open samples again at
     /// once.
     pub fn retry(&mut self, now: Instant) -> Vec<Action> {
         let actions = self.schedule.retry(now);
@@ -1306,7 +1306,7 @@ mod tests {
                 }]
             );
         }
-        // A sign-in brings the same generation back at once.
+        // A retry brings the same generation back at once.
         let mut schedule = started(t0);
         assert_eq!(
             schedule.answered(t0, 7, Outcome::Unreachable),
@@ -1590,7 +1590,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unreachable_server_hides_the_value_of_every_pane_and_signing_in_retries() {
+    fn an_unreachable_server_hides_the_value_of_every_pane_and_a_retry_samples_again() {
         let t0 = Instant::now();
         let mut account = account_started(t0);
         account.join(t0, member(2, true));

@@ -127,10 +127,10 @@ pub use shell::{
     ButtonState, DockContext, DockEnvironment, DockFault, DockState, DockStatus,
     EnvironmentRequest, FIRST_BLOCK, FooterPort, Highlight, HighlightColor, HighlightStyle,
     ProgramBar, ProgramTone, Reconnect, RemoteKind, RemoteLink, RemoteSetupFault, RemoteStats,
-    RemoteTarget, STATS_HISTORY, ShellEnvironment, ShellPhase, ShellState, SignIn, StatsForm,
-    Transfer, TransferAction, TransferControls, TransferTone, TtyModes, counter_period,
-    counter_tier_end, decode_percent, finished_counter, first_command_begun, first_command_ended,
-    next_tick, running_counter,
+    RemoteTarget, STATS_HISTORY, ShellEnvironment, ShellPhase, ShellState, StatsForm, Transfer,
+    TransferAction, TransferControls, TransferTone, TtyModes, counter_period, counter_tier_end,
+    decode_percent, finished_counter, first_command_begun, first_command_ended, next_tick,
+    running_counter,
 };
 pub use wake::Wake;
 

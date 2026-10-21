@@ -917,7 +917,9 @@ pub enum Denied {
     /// A question went unanswered: the job ends with [`CANCELLED`].
     Cancelled,
     /// A background job cannot log in by itself — no saved password, or the
-    /// saved one was refused: the pane offers Sign In… ([`SIGN_IN_NEEDED`]).
+    /// saved one was refused ([`SIGN_IN_NEEDED`]). The job ends with that text
+    /// and nothing asks: the login is the pane's own connection's, which says
+    /// so once when it needs one.
     SignIn,
     /// ssh refused: the job's error text.
     Failed(String),
@@ -928,8 +930,7 @@ pub enum Denied {
 pub const CANCELLED: &str = "Cancelled";
 
 /// The text of a background job that needs the user to sign in — the
-/// link label says it and the pane recognises it to show the status bar's
-/// Sign In… button. A UI string.
+/// link label says it. A UI string.
 pub const SIGN_IN_NEEDED: &str = "Sign in to use remote files";
 
 impl Denied {
@@ -1336,7 +1337,7 @@ impl Masters {
     /// Shell ▸ Forget Password: the saved password goes, the refused
     /// mark and the jump host's hold with it, and our master for the account stops taking new jobs
     /// (`-O stop` — the transfers on it finish; never the user's master) so the
-    /// next background job finds no login and the pane offers Sign In…. Runs
+    /// next background job finds no login. Runs
     /// ssh: never on the main thread.
     pub fn forget(&self, target: &RemoteTarget) {
         let Some(config) = config(&SystemSsh, target) else {
@@ -3610,7 +3611,7 @@ exit $code
             socket.display().to_string()
         );
         // The next background job has nothing to log in with: today's argv,
-        // which the server refuses — the pane's Sign In….
+        // which the server refuses.
         assert_eq!(masters.ensure(&target, Ask::Never), Ok(Route::Direct));
         std::fs::remove_dir_all(&root).unwrap();
     }

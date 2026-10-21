@@ -587,7 +587,7 @@ pub struct KabloHost {
 /// the shell function checks before it runs this at all. `None` → the plain
 /// `ssh`, and from then on **nothing of bateri's is on that connection**: it
 /// is not a server pane, so the add-ons that work on a server (file drops,
-/// previews, the load indicator, the ports, the ⌘ path check, Sign In…) are
+/// previews, the load indicator, the ports, the ⌘ path check) are
 /// not offered and bateri opens no connection of its own to the host.
 pub fn kablo_path(
     args: &[String],

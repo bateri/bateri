@@ -681,22 +681,13 @@ pub struct DockContext {
     /// ([`Self::clear_remote`], [`ShellLog::set_remote`]) — otherwise a new host
     /// would show the previous one's numbers until its first sample.
     pub stats: Option<RemoteStats>,
-    /// The ssh status bar's **Sign In…** button: a background job
-    /// (the link check, the load indicator) could not log in by itself — no
-    /// saved password, or the saved one was refused. `None` otherwise.
-    ///
-    /// Its writer is `bt-shell`'s pane ([`crate::Session::set_sign_in`]); it
-    /// belongs to the remote state and goes with it, like [`Self::stats`]. While
-    /// it is shown the load indicator is not (there is no sample without a
-    /// login) and the upload row wins over both.
-    pub sign_in: Option<SignIn>,
     /// The pane shows a terminal a server keeps, and the remote form's `⇄ host`
     /// is the door to that server's card ([`crate::FooterControl::Server`]). A
     /// plain `ssh` — an `ssh` the application sets nothing up on — has none, and its
     /// name is only a name.
     ///
     /// Its writer is `bt-shell`'s pane ([`crate::Session::set_server`]), generation
-    /// gated like [`Self::sign_in`]; it belongs to the remote state and goes with
+    /// gated like [`Self::stats`]; it belongs to the remote state and goes with
     /// it ([`Self::clear_remote`], [`ShellLog::set_remote`]).
     pub server: bool,
     /// The remote session's connection is down and the terminal waits for it:
@@ -707,7 +698,7 @@ pub struct DockContext {
     ///
     /// Its writer is `bt-shell`'s pane ([`crate::Session::set_remote_link`]),
     /// from what the application's bridge to the server reports; it belongs to
-    /// the remote state and goes with it like [`Self::sign_in`]. While it is set
+    /// the remote state and goes with it like [`Self::stats`]. While it is set
     /// the caret is not drawn (the grid is a picture of a moment that has
     /// passed) and the load indicator's numbers are as old as the connection.
     pub link: Option<RemoteLink>,
@@ -757,7 +748,7 @@ pub struct DockContext {
     /// it stays while a command runs and changes only with the next report.
     pub environment: DockEnvironment,
     /// The context row's part under the mouse — the **one** hover slot of its
-    /// controls: an upload button's fill darkens, Sign In…'s too. A field of
+    /// controls: an upload button's fill darkens. A field of
     /// its own, so the rows' refreshes (an upload's progress) do not write it.
     /// Its writer is `bt-shell`'s pointer ([`crate::Session::set_footer_hover`]);
     /// a part that is not drawn ignores it.
@@ -876,12 +867,6 @@ impl RemoteSetupFault {
         }
     }
 }
-
-/// The ssh status bar's Sign In… button ([`DockContext::sign_in`]): its
-/// presence is the state; its hover is the context row's one hover slot
-/// ([`DockContext::footer_hover`]).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct SignIn;
 
 /// What the context row says while the connection to a kept terminal's server
 /// is down ([`DockContext::link`]). The text is the row's, the writer decides
@@ -1166,7 +1151,6 @@ impl Clone for DockContext {
         self.reconnect.clone_from(&source.reconnect);
         self.transfer.clone_from(&source.transfer);
         self.stats = source.stats;
-        self.sign_in = source.sign_in;
         self.link = source.link;
         self.server = source.server;
         self.remote_setup = source.remote_setup;
@@ -1342,9 +1326,8 @@ impl DockContext {
         self.remote_setup = None;
         self.remote_mark = HostMark::None;
         self.remote_label.clear();
-        // The load belongs to the host, and so does its login.
+        // The load belongs to the host.
         self.stats = None;
-        self.sign_in = None;
         self.link = None;
         self.server = false;
         self.remote.take().is_some()
@@ -3295,7 +3278,6 @@ impl ShellLog {
         // re-reported keeps its indicator.
         if changed {
             self.context.stats = None;
-            self.context.sign_in = None;
             self.context.link = None;
             self.context.server = false;
             // Another host's prompt is not this one's login.

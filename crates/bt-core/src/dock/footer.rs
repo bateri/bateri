@@ -63,8 +63,6 @@ pub enum FooterControl {
     Ports,
     /// The remote load indicator.
     Stats,
-    /// The ssh status bar's Sign In… button.
-    SignIn,
     /// The upload row's list button ("Show transfers (N)").
     List,
     /// The upload row's cancel button.
@@ -365,8 +363,6 @@ enum Item<'a> {
     Ports(&'a [FooterPort]),
     /// The remote load indicator.
     Gauge(&'a RemoteStats),
-    /// The ssh status bar's Sign In… button.
-    SignIn,
     /// The upload row's buttons.
     Buttons(&'a Transfer),
     /// A guide bar's hint (`⌃D exit`).
@@ -389,7 +385,6 @@ enum PortsRung {
 enum Rung {
     Ports(PortsRung),
     Gauge(GaugeStep),
-    SignIn,
     /// The upload buttons: with the list button, and with the `⌘.` hint.
     Buttons {
         list: bool,
@@ -404,7 +399,6 @@ impl Item<'_> {
         match self {
             Self::Ports(_) => Rung::Ports(PortsRung::All),
             Self::Gauge(stats) => Rung::Gauge(ladder(stats.form)[0]),
-            Self::SignIn => Rung::SignIn,
             Self::Buttons(transfer) => Rung::Buttons {
                 list: transfer.controls.items > 1,
                 hint: true,
@@ -423,7 +417,7 @@ impl Item<'_> {
                 let (metric, value) = worst(stats);
                 (metric.level(value) > StatsLevel::Normal).then_some(Rung::Gauge(GaugeStep::Worst))
             }
-            Self::SignIn | Self::Buttons(_) => Some(self.widest()),
+            Self::Buttons(_) => Some(self.widest()),
             Self::Hint(_) => None,
         }
     }
@@ -433,7 +427,6 @@ impl Item<'_> {
         match (self, rung) {
             (Self::Ports(ports), Rung::Ports(rung)) => ports_width(ports, rung),
             (Self::Gauge(stats), Rung::Gauge(step)) => gauge(stats, step).width(),
-            (Self::SignIn, _) => button_width(ButtonLabel::SignIn, false),
             (Self::Buttons(transfer), Rung::Buttons { list, hint }) => {
                 let list = if list {
                     button_width(list_label(transfer), false) + BUTTON_GAP
@@ -514,16 +507,11 @@ fn parts(context: &DockContext) -> (Lead<'_>, [Option<Item<'_>>; ITEMS]) {
         if let Some(link) = context.link {
             return (Lead::Down { host, link }, [None, None]);
         }
-        // Sign In… takes the indicator's place: there is no sample without a login.
-        let own = if context.sign_in.is_some() {
-            Some(Item::SignIn)
-        } else {
-            context
-                .stats
-                .as_ref()
-                .filter(|stats| !is_quiet(stats))
-                .map(Item::Gauge)
-        };
+        let own = context
+            .stats
+            .as_ref()
+            .filter(|stats| !is_quiet(stats))
+            .map(Item::Gauge);
         let lead = Lead::Remote {
             host,
             cwd: &context.remote_cwd,
@@ -633,7 +621,7 @@ fn reduce_kept(items: &[Option<Item<'_>>; ITEMS], rungs: &mut [Option<Rung>; ITE
         rungs[at] = None;
         return true;
     }
-    if let Some(at) = at(|item| matches!(item, Item::Buttons(_) | Item::SignIn)) {
+    if let Some(at) = at(|item| matches!(item, Item::Buttons(_))) {
         rungs[at] = match rungs[at] {
             Some(Rung::Buttons { list, hint: true }) => Some(Rung::Buttons { list, hint: false }),
             Some(Rung::Buttons {
@@ -701,8 +689,7 @@ fn place<'a>(
 }
 
 /// The dock's **bottom** row ([`plan`]); the return is the buttons' fills
-/// ([`Dock::buttons`]): the upload row's list and cancel, or Sign In… in the
-/// second place.
+/// ([`Dock::buttons`]): the upload row's list and cancel.
 ///
 /// **On overflow the path is shortened from the left, the branch never.**
 /// Two separate reasons: the path's information is in its tail (which folder
@@ -1040,26 +1027,6 @@ fn emit_item(
             });
             emit_context_at(start, cells, available, row, sink);
         }
-        // The label in the foreground, the fill and border in the mark's color.
-        (Item::SignIn, _) => {
-            let color = theme.mark_linear(context.remote_mark);
-            let label = ButtonLabel::SignIn
-                .chars()
-                .map(|ch| (ch, theme.foreground_linear()));
-            emit_context_at(placed.start + BUTTON_PAD, label, available, row, sink);
-            let hover = context.footer_hover == Some(FooterControl::SignIn);
-            buttons[1] = Some(DockButton {
-                // audit: `end ≤ available ≤ cols` and `cols` is `u16`.
-                start: CONTEXT_COL + placed.start as u16,
-                end: CONTEXT_COL + placed.end as u16,
-                color,
-                state: if hover {
-                    ButtonState::Hover
-                } else {
-                    ButtonState::Idle
-                },
-            });
-        }
         // The label is in the **foreground** — the row's only foreground
         // text, so what is to be clicked stands apart from what is to be read;
         // the `⌘.` hint is dim, in the foreground when the mouse is over.
@@ -1272,7 +1239,6 @@ pub fn footer_spans(
             match placed.item {
                 Item::Ports(_) => push(FooterControl::Ports, placed.start, placed.end),
                 Item::Gauge(_) => push(FooterControl::Stats, placed.start, placed.end),
-                Item::SignIn => push(FooterControl::SignIn, placed.start, placed.end),
                 Item::Buttons(transfer) => {
                     for button in button_spans(transfer, placed).into_iter().flatten() {
                         push(button.control, button.start, button.end);
@@ -1662,8 +1628,6 @@ enum ButtonLabel {
     /// open (`Hide files` was dropped, the button is in the pressed tone).
     /// "Transfers", not "files": the list carries both directions.
     ShowFiles(u16),
-    /// The ssh status bar's login: the ellipsis says a sheet opens.
-    SignIn,
 }
 
 impl ButtonLabel {
@@ -1673,7 +1637,6 @@ impl ButtonLabel {
             Self::Cancel => ("Cancel", None, ""),
             Self::CancelAll => ("Cancel all", None, ""),
             Self::ShowFiles(items) => ("Show transfers (", Some(items), ")"),
-            Self::SignIn => ("Sign In\u{2026}", None, ""),
         };
         head.chars()
             .chain(count.into_iter().flat_map(decimal))

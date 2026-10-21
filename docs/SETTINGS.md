@@ -1913,7 +1913,7 @@ integration = true
 **Everything bateri does on a server happens in a terminal the server keeps** (a
 pane that shows one, below) **and in no other**: dropping a Finder file on the
 pane to upload it, downloading and previewing a file, the load indicator, the
-server's ports, the ⌘ check of a path in the output, Sign In…, and the
+server's ports, the ⌘ check of a path in the output, and the
 connection of its own that these ride on. The keys of this section that name
 them (`preview_*`, `download_*`, `stats`, `stats_interval`) apply there. A plain
 `ssh` — `integration` off for the host, a `production` host, a server kablo
@@ -2094,7 +2094,7 @@ pause (1 s, 2 s, up to 30 s), and scrolling through the screen still works.
 bateri also tries again the moment the Mac wakes up. A key or an agent signs in
 by itself, and so does a password saved in the Keychain; a password nobody saved
 (or a second factor) makes the line say `⇄ rasp  Needs your password · ⏎ log in`,
-and nothing is tried until you press ⏎, which opens the same sheet as Sign In…
+and nothing is tried until you press ⏎, which opens a sheet to log in
 — one for the server, whichever of its panes you press ⏎ in; a second pane's ⏎
 brings that sheet's tab forward. Logging in brings every terminal on the server
 back; Cancel leaves them waiting, and ⏎ opens the sheet again. A server whose key
@@ -2143,8 +2143,8 @@ the server's rc files.
   `integration` is off for, a `production` host, a server kablo cannot be kept
   on — gets no kept terminal, no command blocks and no remote dock, and none of
   what bateri does on a server either: no file drop (the pane refuses the file),
-  no download or preview, no load indicator, no ports, no ⌘ check of paths, no
-  Sign In… and no password kept in the Keychain for it; bateri opens no
+  no download or preview, no load indicator, no ports, no ⌘ check of paths
+  and no password kept in the Keychain for it; bateri opens no
   connection of its own to that host. The remote session is still detected, so
   the dock says `⇄ host`, colored by `hosts`, and the tab and the title name
   the server. Turning `integration` on for the host (Shell ▸ Shell Integration

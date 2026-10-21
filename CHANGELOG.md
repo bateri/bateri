@@ -126,8 +126,8 @@ of every installed copy. A version without a section is not released.
 - **`ssh` is a terminal the server keeps or plain ssh, and plain ssh has nothing
   of bateri's on the server.** What bateri did on a server — dropping a Finder
   file on the pane to upload it, downloading and previewing a file, the load
-  indicator, the server's ports, ⌘ over a path to see whether it exists there,
-  Sign In… — it now does in a terminal on a server (an `ssh` to a server kablo is
+  indicator, the server's ports, ⌘ over a path to see whether it exists there
+  — it now does in a terminal on a server (an `ssh` to a server kablo is
   on) and in no other. A plain `ssh` — `integration` off for the host, a
   `production` host, a server kablo cannot be kept on (a router, a machine it is
   not built for), a call that runs a command, mosh — is the ssh you know: no
@@ -138,6 +138,13 @@ of every installed copy. A version without a section is not released.
   “{host}” brings it all back for a host, from the next `ssh`. A shell that was
   already running when bateri was updated has the previous `ssh` function, whose
   next `ssh` is a plain one; a new shell (a new tab) has the new one.
+
+- **Sign In… is gone from a server's terminal.** The button that took the
+  place of the load indicator when the load or a ⌘ check of a path could not
+  log in by itself is no longer drawn. Those jobs ride on the connection the
+  terminal's own `ssh` made, so when that connection has no login the terminal
+  says so once, `Needs your password · ⏎ log in`, and that is the one place to
+  log in; until then the load stays hidden and nothing else is offered.
 
 - **The dock is quiet about a server that is fine, and a server is measured
   once.** The load indicator at the right of a server terminal's status bar now

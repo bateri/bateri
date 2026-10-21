@@ -2555,11 +2555,6 @@ mod tests {
         footer_hit(context, budget, col).is_some_and(|hit| hit.control == FooterControl::Stats)
     }
 
-    /// The Sign In… button's range.
-    fn sign_in_span(context: &DockContext, budget: u16) -> Option<(u16, u16)> {
-        footer_span(context, budget, FooterControl::SignIn)
-    }
-
     /// The server's name, `⇄ host`, as a click finds it.
     fn server_span(context: &DockContext, budget: u16) -> Option<(u16, u16)> {
         footer_span(context, budget, FooterControl::Server)
@@ -3503,7 +3498,6 @@ mod tests {
             reconnect: None,
             transfer: None,
             stats: None,
-            sign_in: None,
             link: None,
             server: false,
             remote_setup: None,
@@ -3929,8 +3923,6 @@ mod tests {
         }
     }
 
-    /// The Sign In… button takes the indicator's place, right-aligned
-    /// in the upload buttons' drawing; the click's range is the drawn fill.
     #[test]
     fn the_server_name_is_the_door_only_of_a_pane_that_shows_a_kept_terminal() {
         let server = |context: DockContext| DockContext {
@@ -3995,64 +3987,33 @@ mod tests {
         assert_eq!(server_span(&sending, 80), None);
     }
 
+    /// A server whose load cannot be read because nobody is logged in for it
+    /// (the background job's `SIGN_IN_NEEDED`) leaves the row as a calm one: the
+    /// name and the folder, no indicator and **no button** — there is no
+    /// Sign In… on a server's pane; a pane that needs a login says so once, in
+    /// the connection row (`RemoteLink::LoginNeeded`).
     #[test]
-    fn the_sign_in_button_is_drawn_where_it_is_hit() {
+    fn a_server_that_cannot_be_read_without_a_login_draws_no_button() {
         let context = DockContext {
-            stats: Some(calm(StatsForm::Sparkline)),
-            sign_in: Some(crate::SignIn),
+            server: true,
+            stats: None,
             ..remote("prod", "/srv/app")
         };
-        let (cells, dock) = draw_with(&live("", "", "", 0), &context, 60);
-        let row = row_text(&cells, 1);
-        assert_eq!(row, format!("{:<51}Sign In\u{2026}", "⇄ prod  /srv/app"));
-        assert!(!row.contains("cpu"), "no indicator without a login: {row}");
-        assert_eq!(
-            dock.buttons,
-            [
-                None,
-                Some(DockButton {
-                    start: 50,
-                    end: 60,
-                    color: THEME.info_linear(),
-                    state: ButtonState::Idle,
-                })
-            ]
-        );
-        assert_eq!(color_at(&cells, 1, 51), Some(THEME.foreground_linear()));
-        assert_eq!(sign_in_span(&context, 60), Some((50, 60)));
-        assert_eq!(stats_span(&context, 60), None);
-        // The hover darkens the fill only.
-        let hovered = DockContext {
-            footer_hover: Some(FooterControl::SignIn),
-            ..context.clone()
-        };
-        let (_, dock) = draw_with(&live("", "", "", 0), &hovered, 60);
-        assert_eq!(dock.buttons[1].map(|b| b.state), Some(ButtonState::Hover));
-        // At every width the hit range is the drawn button, and the path gives
-        // way before it does.
         for cols in 0..=60 {
             let (cells, dock) = draw_with(&live("", "", "", 0), &context, cols);
-            let drawn = dock.buttons[1].map(|b| (b.start, b.end));
-            assert_eq!(sign_in_span(&context, cols), drawn, "{cols} columns");
-            if let Some((start, _)) = drawn {
-                let row = row_text(&cells, 1);
-                assert!(row.starts_with("⇄ prod"), "{cols}: {row:?}");
-                assert!(row.ends_with("Sign In\u{2026}"), "{cols}: {row:?}");
-                assert_eq!(row.chars().nth(usize::from(start) - 1), Some(' '));
-            }
+            assert_eq!(dock.buttons, [None, None], "{cols} columns");
+            let row = row_text(&cells, 1);
+            assert!(!row.contains("Sign"), "{cols}: {row:?}");
+            let spans: Vec<_> = footer_spans(&context, cols).collect();
+            assert!(
+                spans
+                    .iter()
+                    .all(|&(control, ..)| control == FooterControl::Server),
+                "{cols}: {spans:?}"
+            );
         }
-        // The upload row wins; locally and without the flag there is none.
-        let uploading = DockContext {
-            sign_in: Some(crate::SignIn),
-            ..uploading("↑ a.tar", 1, Some(2_500))
-        };
-        assert_eq!(sign_in_span(&uploading, 60), None);
-        assert_eq!(sign_in_span(&remote("prod", "/srv/app"), 60), None);
-        let local = DockContext {
-            remote: None,
-            ..context
-        };
-        assert_eq!(sign_in_span(&local, 60), None);
+        let (cells, _) = draw_with(&live("", "", "", 0), &context, 60);
+        assert_eq!(row_text(&cells, 1).trim_end(), "⇄ prod  /srv/app");
     }
 
     #[test]

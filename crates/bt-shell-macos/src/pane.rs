@@ -3157,7 +3157,7 @@ impl TerminalPane {
     /// `ssh` — an `ssh` the integration is off for, a `production` host, a
     /// server kablo cannot be kept on, a call that runs a command — which gets
     /// nothing of bateri's on the server: no file drop or download, no preview,
-    /// no load indicator, no ports, no ⌘ check of a path, no Sign In…, and no
+    /// no load indicator, no ports, no ⌘ check of a path, and no
     /// connection of bateri's own to the host.
     ///
     /// **The one gate.** Every add-on that works on a server starts from this and
@@ -6319,8 +6319,6 @@ mod tests {
         }
         let sheet = include_str!("password_sheet.rs");
         for signature in [
-            "pub(crate) fn background_failed(",
-            "pub(crate) fn sign_in(",
             "pub(crate) fn can_forget_password(",
             "pub(crate) fn forget_password(",
         ] {

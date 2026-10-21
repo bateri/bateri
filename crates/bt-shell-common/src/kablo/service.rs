@@ -170,8 +170,8 @@ impl Shown {
     /// Whether the terminal this is serves `target`, the remote session the pane's
     /// `ssh` is in: the same server as the user typed it. **The one rule of
     /// what bateri does on a server for a pane**: file drops and downloads,
-    /// previews, the load indicator, the server's ports, the ⌘ check of a path,
-    /// Sign In… and the connection of bateri's own those ride on are offered in
+    /// previews, the load indicator, the server's ports, the ⌘ check of a path
+    /// and the connection of bateri's own those ride on are offered in
     /// a pane that shows a terminal a server keeps and in no other — an `ssh`
     /// that is a plain one (the setting is off for the host, a `production`
     /// host, a server kablo cannot be kept on, a call that runs a command) has

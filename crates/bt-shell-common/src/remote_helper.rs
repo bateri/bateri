@@ -10,7 +10,7 @@
 //!   `BatchMode=yes` (the upload's argv): no password is asked on the stream —
 //!   the route gate opens bateri's own master first when it may, and a
 //!   background job whose server wants a password it does not have fails the
-//!   open with [`crate::ssh_route::SIGN_IN_NEEDED`] (the pane's Sign In…).
+//!   open with [`crate::ssh_route::SIGN_IN_NEEDED`] (nothing asks for it).
 //! - **[`RemoteHelper`]** is the pane's handle: a worker thread born at the
 //!   first question (lazy), owning the session and the answer cache
 //!   ([`RemoteCache`]). A question carries the remote session's generation
@@ -444,9 +444,10 @@ pub struct Dial {
     /// is not a hover's label.
     pub user: bool,
     /// A background job through bateri's masters: a login the server refused
-    /// on today's argv is [`crate::ssh_route::SIGN_IN_NEEDED`] — signing in
-    /// would fix it. `false` without masters (the timed run, the
-    /// tests' fixed argv): there is nothing to sign in with.
+    /// on today's argv is [`crate::ssh_route::SIGN_IN_NEEDED`], the words the gate
+    /// itself gives a background job it refuses — one text whichever of the two
+    /// noticed. `false` without masters (the timed run, the tests' fixed argv):
+    /// there is nothing to sign in with.
     pub sign_in: bool,
     /// The argv without the remote command (`Err`: the open's failure text).
     pub argv: Box<dyn FnOnce() -> Result<Vec<String>, String> + Send>,
@@ -494,7 +495,6 @@ pub struct Request {
 enum Message {
     Ask(Request),
     Close,
-    Retry,
 }
 
 /// The pane's handle on its helper session. The worker thread is born at the
@@ -514,7 +514,7 @@ impl RemoteHelper {
             Some(tx) => match tx.send(Message::Ask(request)) {
                 Ok(()) => return,
                 Err(mpsc::SendError(Message::Ask(request))) => request,
-                Err(mpsc::SendError(Message::Close | Message::Retry)) => return,
+                Err(mpsc::SendError(Message::Close)) => return,
             },
             None => request,
         };
@@ -544,15 +544,6 @@ impl RemoteHelper {
             let _ = tx.send(Message::Close);
         }
     }
-
-    /// Forgets the held failed open ([`RETRY_AFTER`]): the user just signed
-    /// in and the background jobs try again without waiting for a
-    /// new generation.
-    pub fn retry(&mut self) {
-        if let Some(tx) = &self.tx {
-            let _ = tx.send(Message::Retry);
-        }
-    }
 }
 
 /// The worker loop: one session at a time, closed on [`IDLE`], on
@@ -579,7 +570,6 @@ fn run(rx: &Receiver<Message>) {
         };
         match message {
             Message::Close => open = None,
-            Message::Retry => failed = None,
             Message::Ask(request) => {
                 let Request {
                     command,
@@ -1240,7 +1230,7 @@ mod tests {
         // Other questions keep their `Err`.
         assert!(ask(failing(), Query::Count("/etc".to_owned())).is_err());
         let _ = fs::remove_dir_all(&root);
-        // Through bateri's masters a refused login is the Sign In… text — a
+        // Through bateri's masters a refused login is the gate's own text — a
         // background job's only; a user's job keeps ssh's reason.
         let mut helper = RemoteHelper::default();
         let mut gated = |user: bool, command: u64| {

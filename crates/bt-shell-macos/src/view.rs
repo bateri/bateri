@@ -3044,7 +3044,7 @@ impl BateriView {
     }
 
     /// Whether the click landed on a part of the context row — an upload
-    /// button, the load indicator, Sign In…, the listening ports — and did its
+    /// button, the server's name, the load indicator, the listening ports — and did its
     /// work (`TerminalPane::footer_click`; ⌘ opens the port under it); `true`
     /// → the click was consumed. The geometry is [`Self::context_column`]'s.
     fn context_control(&self, event: &NSEvent) -> bool {

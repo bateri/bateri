@@ -7,7 +7,7 @@
 //!   is on screen, that it was touched, and which card is open.
 //! - **The events** come from the pane: the remote edge (a generation started or ended),
 //!   visibility (`SplitView::apply_visibility`), the settings, interaction (the view's keys,
-//!   presses, wheel and mouse moves, the window becoming key), the sign-in and the close.
+//!   presses, wheel and mouse moves, the window becoming key), Forget Password and the close.
 //! - **The door** (`⇄ rasp` is clickable) is not here: the remote edge tells the session
 //!   ([`TerminalPane::sync_server_door`]), from the same gate as everything bateri does on a
 //!   server ([`TerminalPane::server_target`]).
@@ -156,7 +156,7 @@ impl TerminalPane {
         }
     }
 
-    /// The user signed in: a run that ended on a failed open samples again at once.
+    /// The login changed (Forget Password): a run that ended on a failed open samples again at once.
     pub(crate) fn retry_stats(&self) {
         let account = self.stats_seat().borrow().account();
         if let Some(account) = account {
