@@ -494,3 +494,86 @@ fn the_ssh_channel_sends_the_script_as_one_word_for_sh_and_ends_a_step_that_take
     assert_eq!(error.kind(), io::ErrorKind::TimedOut);
     assert!(started.elapsed() < Duration::from_secs(3));
 }
+
+/// A server for the counter: a directory that is the home, and `HOME` said before the script as
+/// the ssh connection's shell has it.
+fn counting_home(root: &TempRoot, name: &str) -> (Home, PathBuf) {
+    let dir = root.0.join(name);
+    std::fs::create_dir_all(&dir).expect("a home");
+    let dir = std::fs::canonicalize(dir).expect("a path");
+    let mut home = Home::new(&dir);
+    home.prefix =
+        Box::leak(format!("HOME={}; export HOME; ", sq(&dir.to_string_lossy())).into_boxed_str());
+    (home, dir)
+}
+
+#[test]
+fn the_servers_counter_gives_each_terminal_the_next_number_and_never_the_same_twice() {
+    let root = TempRoot::new("counter");
+    let (home, dir) = counting_home(&root, "home");
+    for expected in 1..=5 {
+        assert_eq!(next_number(&home), Some(expected));
+    }
+    assert_eq!(
+        std::fs::read_to_string(dir.join(".local/share/bateri/next")).expect("the counter"),
+        "6\n"
+    );
+    // The same counter file as the agent's command draws from (`bin/bateri` runs `next.sh`): a
+    // number the one took is not the other's.
+    let outside = Command::new("sh")
+        .arg("-c")
+        .arg(crate::ssh_wrap::COUNTER)
+        .env("HOME", &dir)
+        .output()
+        .expect("next.sh");
+    assert_eq!(String::from_utf8_lossy(&outside.stdout), "6\n");
+    assert_eq!(next_number(&home), Some(7));
+}
+
+#[test]
+fn a_counter_that_cannot_count_gives_no_number_and_a_made_up_one_is_not_taken() {
+    let root = TempRoot::new("counter-broken");
+    // A home where `.local` is a file: nothing can be written under it.
+    let (home, dir) = counting_home(&root, "file-home");
+    std::fs::write(dir.join(".local"), "not a directory").expect("a file");
+    assert_eq!(next_number(&home), None);
+    // A counter that is not a number is not guessed at.
+    let (home, dir) = counting_home(&root, "bad-counter");
+    std::fs::create_dir_all(dir.join(".local/share/bateri")).expect("state");
+    std::fs::write(dir.join(".local/share/bateri/next"), "banana\n").expect("a counter");
+    assert_eq!(next_number(&home), None);
+    // What a channel says that is no number: a failure, nothing, a zero, a leading zero, words.
+    struct Says(Option<i32>, &'static str);
+    impl Channel for Says {
+        fn run(&self, _: &str, _: &[u8]) -> io::Result<Reply> {
+            Ok(Reply {
+                status: self.0,
+                out: self.1.to_owned(),
+                err: String::new(),
+            })
+        }
+    }
+    for (status, out) in [
+        (Some(1), "7\n"),
+        (None, "7\n"),
+        (Some(0), ""),
+        (Some(0), "0\n"),
+        (Some(0), "07\n"),
+        (Some(0), "seven\n"),
+        (Some(0), "-7\n"),
+        (Some(0), "7 8\n"),
+        (Some(0), "99999999999999999999999\n"),
+    ] {
+        assert_eq!(next_number(&Says(status, out)), None, "{status:?} {out:?}");
+    }
+    // A login shell that says something of its own first does not hide the number.
+    assert_eq!(next_number(&Says(Some(0), "Welcome!\n\n12\n")), Some(12));
+    // A channel that fails (the connection broke) is no number.
+    struct Down;
+    impl Channel for Down {
+        fn run(&self, _: &str, _: &[u8]) -> io::Result<Reply> {
+            Err(io::ErrorKind::TimedOut.into())
+        }
+    }
+    assert_eq!(next_number(&Down), None);
+}

@@ -57,6 +57,46 @@ impl fmt::Display for Terminal {
     }
 }
 
+/// The terminal a pane is placed beside: kablo's name for it. An agent *writes* a terminal as its
+/// number (`t4`, [`Terminal`]); the terminal it runs in is the caller's whatever it is called, and
+/// a request that defaults to it names it so — a terminal the Mac opened before the numbers
+/// existed is `b-` and 32 digits, one a person made with `kablo new` is what they typed. Reading
+/// takes every name kablo allows ([`kablo_proto::SessionId`]'s alphabet and length, so a name is
+/// never a path), which includes every `tN`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Anchor(kablo_proto::SessionId);
+
+impl Anchor {
+    /// The terminal a name stands for, `None` for a name kablo does not allow.
+    pub fn parse(name: &str) -> Option<Anchor> {
+        kablo_proto::SessionId::new(name).ok().map(Anchor)
+    }
+
+    /// An agent's terminal as an anchor.
+    pub fn of(terminal: Terminal) -> Anchor {
+        Anchor(
+            kablo_proto::SessionId::new(&terminal.to_string())
+                .expect("`t` and a number is a name kablo allows"),
+        )
+    }
+
+    /// The name, as kablo has it.
+    pub fn name(&self) -> &str {
+        self.0.as_str()
+    }
+
+    /// The agent's number, when the name is one.
+    pub fn terminal(&self) -> Option<Terminal> {
+        Terminal::parse(self.name())
+    }
+}
+
+impl fmt::Display for Anchor {
+    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
+        out.write_str(self.name())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -85,5 +125,48 @@ mod tests {
         }
         assert_eq!(Terminal::number_of("t3"), Some(3));
         assert_eq!(Terminal::number_of("b-3"), None);
+    }
+
+    #[test]
+    fn an_anchor_is_any_name_kablo_allows_and_an_agents_number_is_one() {
+        let made = format!("b-{}", "0123456789abcdef".repeat(2));
+        for name in [
+            "t4",
+            "t0",
+            "t07",
+            "mine",
+            "b-0a1b",
+            &made,
+            "a.b_c-d",
+            &"x".repeat(64),
+        ] {
+            let anchor = Anchor::parse(name).unwrap_or_else(|| panic!("{name:?}"));
+            assert_eq!(anchor.name(), name);
+            assert_eq!(anchor.to_string(), name);
+        }
+        for name in [
+            "",
+            " t4",
+            "t4 ",
+            "a b",
+            "a/b",
+            "../x",
+            "a\nb",
+            "é",
+            &"x".repeat(65),
+        ] {
+            assert_eq!(Anchor::parse(name), None, "{name:?}");
+        }
+        // The agent's own spelling keeps its number; every other name has none.
+        assert_eq!(
+            Anchor::parse("t9").and_then(|a| a.terminal()),
+            Some(Terminal(9))
+        );
+        assert_eq!(
+            Anchor::of(Terminal(9)),
+            Anchor::parse("t9").expect("a name")
+        );
+        assert_eq!(Anchor::parse("t09").and_then(|a| a.terminal()), None);
+        assert_eq!(Anchor::parse(&made).and_then(|a| a.terminal()), None);
     }
 }

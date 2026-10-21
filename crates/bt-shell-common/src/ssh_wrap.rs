@@ -698,7 +698,10 @@ const BOOT_SCRIPT: &str = include_str!("../../../assets/shell/remote/boot.sh");
 /// files, the command executable. The command carries [`KABLO_PLACEHOLDER`]
 /// where kablo's place goes.
 const AGENT_COMMAND: &str = include_str!("../../../assets/shell/remote/bin/bateri");
-const COUNTER: &str = include_str!("../../../assets/shell/remote/next.sh");
+/// The counter's text: written to the server as `next.sh`, and **the same bytes** run over the
+/// ssh connection for the terminal this computer opens itself
+/// ([`crate::kablo::install::next_number`]) — one rule for both, not the same rule twice.
+pub const COUNTER: &str = include_str!("../../../assets/shell/remote/next.sh");
 
 /// The word in [`AGENT_COMMAND`] that [`payload`] replaces with kablo's place.
 /// Left as it is when the place is not known (or not one [`is_kablo_path`]

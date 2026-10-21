@@ -27,7 +27,9 @@
 //! terminal), the socket is tried again with growing pauses, and a bateri that
 //! answers is asked for the terminal it was showing, from the position after
 //! the last byte this program wrote ([`wire::Target::Resume`]) — the program
-//! keeps that one number and the account's name, nothing of the screen. A
+//! keeps that one number, the account's name and the terminal's own name (the one bateri
+//! started it under, told in [`wire::ToHold::Bound`]: a server's terminals are numbered by
+//! bateri, not by this program), nothing of the screen. A
 //! connection lost **before** the terminal was bound to a server, or a
 //! request that cannot be served, is not retried: the program replaces itself
 //! with the plain `ssh` it stands in for (see [`Outcome::FallBack`]), because
@@ -350,7 +352,8 @@ pub fn execute(action: Action) -> i32 {
 
 /// Everything [`run`] needs.
 pub struct Config {
-    /// The terminal's name.
+    /// The terminal's name: what a new terminal is asked for with, and what a terminal that
+    /// bateri has not renamed ([`ToHold::Bound::terminal`]) is asked for again with.
     pub terminal: SessionId,
     /// What to ask for.
     pub target: Target,
@@ -372,9 +375,13 @@ pub struct Config {
 }
 
 /// What the pipe keeps between connections: the name of the server's account
-/// once there is one, and the position after the last byte it wrote.
+/// once there is one, the name the terminal has when bateri gave it another than
+/// the one asked with, and the position after the last byte it wrote.
 struct State {
     account: Option<String>,
+    /// The terminal's name as bateri told it ([`ToHold::Bound`]); the one in
+    /// [`Config::terminal`] until it does.
+    terminal: Option<SessionId>,
     offset: Option<u64>,
     open: Target,
     size: Size,
@@ -388,6 +395,7 @@ impl State {
         };
         State {
             account,
+            terminal: None,
             offset,
             open: config.target.clone(),
             size: window_size(config.input),
@@ -410,7 +418,10 @@ impl State {
             None => self.open.clone(),
         };
         Open {
-            terminal: config.terminal.clone(),
+            terminal: self
+                .terminal
+                .clone()
+                .unwrap_or_else(|| config.terminal.clone()),
             size: self.size,
             target,
         }
@@ -584,8 +595,11 @@ fn serve(
                     ToHold::Refused { fall_back, text } => {
                         return Served::Done(refused(config, state, fall_back, text));
                     }
-                    ToHold::Bound { account } => {
+                    ToHold::Bound { account, terminal } => {
                         state.account = Some(account);
+                        if terminal.is_some() {
+                            state.terminal = terminal;
+                        }
                         raw_if_needed(config, raw);
                     }
                     ToHold::Run { argv } => {

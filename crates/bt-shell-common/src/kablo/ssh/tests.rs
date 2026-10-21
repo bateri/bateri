@@ -59,7 +59,7 @@ case $mode in
   config) printf 'user u\nhostname h\nport 22\nrequesttty auto\nsessiontype default\nproxyjump none\n'; exit 0;;
   check) if [ -e "$cp" ]; then echo "Master running (pid=1)" >&2; exit 0; fi; echo "Control socket connect($cp): No such file or directory" >&2; exit 255;;
   master) if [ {master_exit} -eq 0 ]; then : > "$cp"; fi; exit {master_exit};;
-  *) cd {home} && exec sh -c "$last";;
+  *) cd {home} && HOME={home} exec sh -c "$last";;
 esac
 "#,
             log = log.display(),
@@ -317,6 +317,41 @@ fn the_install_and_the_bridge_ride_the_master_and_ask_nothing() {
     reader.read_to_end(&mut rest).expect("ended");
     // A bridge that was let go of said nothing: the network, if anything.
     assert_eq!(ended(), Cause::Dropped);
+}
+
+/// The server's counter is run over the connection the user made, as a step of its own: the same
+/// bytes the agent's command there runs, the home the server says (a stand-in that sets it, as an
+/// ssh login does).
+#[test]
+fn the_counter_is_asked_over_the_master_and_a_build_without_the_package_has_none() {
+    let world = stand_in("number", 0);
+    let backend = world.backend(Some(world.package()));
+    let host = backend.route(&["rasp".into()]).expect("kablo");
+    let argv = backend.master(&host).expect("plan").expect("step");
+    assert_eq!(run_argv(&argv), 0);
+    assert_eq!(backend.number(&host), Some(1));
+    assert_eq!(backend.number(&host), Some(2));
+    assert_eq!(
+        std::fs::read_to_string(world.home.join(".local/share/bateri/next")).expect("a counter"),
+        "3\n"
+    );
+    let channels: Vec<String> = world
+        .calls()
+        .into_iter()
+        .filter(|call| call.contains("sh -c") && call.contains("ControlMaster=no"))
+        .collect();
+    assert_eq!(channels.len(), 2);
+    for call in &channels {
+        assert!(
+            call.starts_with("-T -o BatchMode=yes -o ControlMaster=no"),
+            "{call}"
+        );
+    }
+    // Nothing of bateri's is put on a server that has no package to put kablo with.
+    let asked = world.calls().len();
+    let bare = world.backend(None);
+    assert_eq!(bare.number(&host), None);
+    assert_eq!(world.calls().len(), asked, "no call was made");
 }
 
 #[test]

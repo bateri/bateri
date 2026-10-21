@@ -224,6 +224,18 @@ impl Backend for SshBackend {
         }
     }
 
+    fn number(&self, server: &KabloHost) -> Option<u64> {
+        // Only a server kablo is kept on has numbers to give: the connection is the one the
+        // install used.
+        self.bundle.as_ref()?;
+        let target = self.target(server);
+        let channel = SshChannel {
+            argv: ssh_argv_for(&target, &self.route_of(&target)),
+            limit: install::NUMBER_LIMIT,
+        };
+        install::next_number(&channel)
+    }
+
     fn carry(&self, server: &KabloHost, installed: &Installed) -> io::Result<Carried> {
         let target = self.target(server);
         let route = self.route_for_bridge(&target)?;

@@ -52,6 +52,11 @@ use crate::upload::sq;
 /// the long one (a binary of a few megabytes over a slow link).
 pub const STEP_LIMIT: Duration = Duration::from_secs(120);
 
+/// How long the counter may take ([`next_number`]): a step of the pane's own start, which waits
+/// for it, so a server that does not answer is given up on soon (the terminal then keeps the
+/// name its holder made).
+pub const NUMBER_LIMIT: Duration = Duration::from_secs(15);
+
 /// How long the renewal of the server's terminals ([`upgrade_sessions`]) may
 /// take. kablo gives each terminal 20 seconds; a server that is slower than a
 /// few terminals' worth is not waited for, because what waits is a pane that
@@ -410,6 +415,32 @@ pub fn upgrade_sessions(channel: &dyn Channel, installed: &Installed) -> bool {
     channel
         .run(&upgrade_script(&installed.version), &[])
         .is_ok_and(|reply| reply.status == Some(0))
+}
+
+// ─── the number of a terminal ────────────────────────────────────────────
+
+/// The number of the next terminal on the server (`7`: the `t7` an agent there is told), from
+/// the counter the agent's command uses ([`crate::ssh_wrap::COUNTER`], the same bytes): a number
+/// is never given twice, whoever asks, and one that is lost with a caller that died is not given
+/// again. `None` when the server could not count — no home, a directory it cannot write, a
+/// counter that is not a number, a connection that broke — and the terminal then keeps the name
+/// its holder made.
+pub fn next_number(channel: &dyn Channel) -> Option<u64> {
+    let reply = channel.run(crate::ssh_wrap::COUNTER, &[]).ok()?;
+    if reply.status != Some(0) {
+        return None;
+    }
+    // The last line: a login shell that says something of its own comes before it.
+    let line = reply
+        .out
+        .lines()
+        .rev()
+        .find(|line| !line.trim().is_empty())?;
+    let digits = line.trim();
+    if digits.is_empty() || digits.starts_with('0') || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse().ok()
 }
 
 // ─── the channel ─────────────────────────────────────────────────────────

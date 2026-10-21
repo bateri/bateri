@@ -52,6 +52,15 @@
 //! comes up, when a holder goes and when the application is about to show it
 //! ([`Service::refresh_background`]), never on a clock.
 //!
+//! **What a terminal is called.** A holder asks for a new terminal with a name of its own (`b-` and
+//! 128 random bits, so that asking again cannot make a second); the service starts it under the
+//! next number of the server's counter instead (`t7`, [`Backend::number`]: the very file the agent's
+//! command on the server numbers its terminals from), writes that name in the ledger before the
+//! request goes out and tells the holder when the server has made the terminal
+//! ([`crate::hold::wire::ToHold::Bound`]), which asks for the terminal by it from then on. A
+//! holder that cannot be told (wire version 2 and before), a server that cannot count and a
+//! backend with no counter leave the name the holder made.
+//!
 //! **What survives bateri.** A holder asks for a terminal it was shown
 //! ([`wire::Target::Resume`]) by the account's name, and the bateri it asks may be
 //! another process than the one that made the account (an update carried the panes
@@ -95,7 +104,7 @@ use super::ledger::Ledger;
 use super::roster::{Background, Roster, background_note, sort_recent_first};
 use super::{Attach, Cause, Client, ErrorCode, Event, Link, SessionId, Size, Talk};
 use crate::hold::HOLD_SOCKET;
-use crate::hold::wire::{CHUNK, Open, Target};
+use crate::hold::wire::{self, CHUNK, Open, Target};
 use crate::ssh_wrap::{self, KabloHost};
 
 /// The process at the other end of a holder's connection.
@@ -292,6 +301,14 @@ pub trait Backend: Send + Sync + 'static {
     /// Puts kablo on the server (or finds it there).
     fn install(&self, server: &KabloHost) -> Result<Installed, Refusal>;
 
+    /// The number of the next terminal on the server (`7` for the `t7` an agent there is told
+    /// and says), from the server's counter, which the agent's command there draws from too.
+    /// `None`: the server could not count now; the terminal keeps the name its holder made.
+    /// Called on a thread of its own, like the other steps that ask the server.
+    fn number(&self, _server: &KabloHost) -> Option<u64> {
+        None
+    }
+
     /// Starts the bridge to the server.
     fn carry(&self, server: &KabloHost, installed: &Installed) -> io::Result<Carried>;
 
@@ -460,6 +477,14 @@ enum Msg {
         hold: HoldId,
         outcome: Result<Ready, Refusal>,
     },
+    /// The server's counter was asked for the number of a terminal that rides an account that
+    /// is there already ([`Backend::number`]).
+    Numbered {
+        hold: HoldId,
+        account: String,
+        spec: NewSession,
+        number: Option<u64>,
+    },
     Dialed {
         account: String,
         outcome: io::Result<Carried>,
@@ -525,6 +550,9 @@ struct Ready {
     server: KabloHost,
     installed: Installed,
     spec: NewSession,
+    /// The number the server's counter gave the terminal ([`Backend::number`]); none when the
+    /// holder is not one that can be told ([`wire::NAMED`]) or the server could not count.
+    number: Option<u64>,
     /// A line for the user, shown before the terminal.
     note: Option<String>,
 }
@@ -1058,6 +1086,20 @@ impl Core {
             Msg::Prepared { hold, outcome } => {
                 self.refresh = true;
                 self.prepared(hold, outcome, now);
+            }
+            Msg::Numbered {
+                hold,
+                account,
+                spec,
+                number,
+            } => {
+                self.refresh = true;
+                if self
+                    .started(hold, &account, spec, terminal_named(number))
+                    .is_err()
+                {
+                    self.hub.refuse(hold, true, "");
+                }
             }
             Msg::End(pane) => self.end(&pane, now),
             Msg::Leave(pane) => self.leave(&pane),
@@ -1978,9 +2020,18 @@ impl Core {
 
     /// Starts the terminal a holder asked for and writes it in the ledger, with
     /// the pane that shows it: from the moment of the request, since a crash between
-    /// it and the server's answer must not leave a terminal nobody can name.
-    fn started(&mut self, hold: HoldId, account: &str, spec: NewSession) -> Result<(), Declined> {
-        self.hub.start(hold, account, spec)?;
+    /// it and the server's answer must not leave a terminal nobody can name. Its name
+    /// is final by now: the number the server's counter gave it (`name`), or the one
+    /// its holder made when there is none — it is written here before the request goes
+    /// to the server, and the holder is told it when the server has made the terminal.
+    fn started(
+        &mut self,
+        hold: HoldId,
+        account: &str,
+        spec: NewSession,
+        name: Option<SessionId>,
+    ) -> Result<(), Declined> {
+        self.hub.start(hold, account, spec, name)?;
         if let Some((_, terminal)) = self.hub.terminal_of(hold) {
             let terminal = terminal.clone();
             self.shared
@@ -2017,12 +2068,33 @@ impl Core {
     }
 
     /// The first terminal of an account is prepared on a thread of its own;
-    /// one that rides a bridge that is there starts at once.
+    /// one that rides a bridge that is there waits only for the server's counter, which is
+    /// asked on a thread of its own too (a holder that cannot be told the terminal's number
+    /// is not waited for at all: it keeps the name it made).
     fn prepare(&mut self, hold: HoldId, server: KabloHost, pane: PaneInfo) {
+        let numbered = self.hub.version_of(hold) >= wire::NAMED;
         if let Some(entry) = self.accounts.get(&server.key) {
             let spec = new_session(&self.shared, &pane, &entry.installed);
             let account = entry.server.key.clone();
-            if self.started(hold, &account, spec).is_err() {
+            if !numbered {
+                if self.started(hold, &account, spec, None).is_err() {
+                    self.hub.refuse(hold, true, "");
+                }
+                return;
+            }
+            let shared = Arc::clone(&self.shared);
+            let spawned = thread::Builder::new()
+                .name("ssh-hold numbers".into())
+                .spawn(move || {
+                    let number = shared.backend.number(&server);
+                    let _ = shared.tx.send(Msg::Numbered {
+                        hold,
+                        account,
+                        spec,
+                        number,
+                    });
+                });
+            if spawned.is_err() {
                 self.hub.refuse(hold, true, "");
             }
             return;
@@ -2033,7 +2105,7 @@ impl Core {
             .spawn({
                 let shared = Arc::clone(&shared);
                 move || {
-                    let outcome = prepare(&shared, hold, server, &pane);
+                    let outcome = prepare(&shared, hold, server, &pane, numbered);
                     let _ = shared.tx.send(Msg::Prepared { hold, outcome });
                 }
             });
@@ -2059,10 +2131,18 @@ impl Core {
         if let Some(note) = &ready.note {
             self.hub.say(hold, note);
         }
-        if self.started(hold, &account, ready.spec).is_err() {
+        if self
+            .started(hold, &account, ready.spec, terminal_named(ready.number))
+            .is_err()
+        {
             self.hub.refuse(hold, true, "");
         }
     }
+}
+
+/// The name of the terminal the server's counter numbered: `t7` for 7.
+fn terminal_named(number: Option<u64>) -> Option<SessionId> {
+    number.and_then(|number| SessionId::new(&format!("t{number}")).ok())
 }
 
 /// The new terminal's request: the bootstrap as the command (carrying where
@@ -2084,12 +2164,14 @@ fn new_session(shared: &Shared, pane: &PaneInfo, installed: &Installed) -> NewSe
 }
 
 /// The slow steps of a first terminal, on a thread of its own: the master
-/// connection on the holder's terminal, then kablo on the server.
+/// connection on the holder's terminal, then kablo on the server, then its number
+/// (when `numbered`: the holder can be told it).
 fn prepare(
     shared: &Shared,
     hold: HoldId,
     server: KabloHost,
     pane: &PaneInfo,
+    numbered: bool,
 ) -> Result<Ready, Refusal> {
     let backend = &shared.backend;
     if let Some(argv) = backend.master(&server)? {
@@ -2111,10 +2193,17 @@ fn prepare(
         )
     });
     let spec = new_session(shared, pane, &installed);
+    // Last, so that a number is not drawn for a terminal that was never going to start.
+    let number = if numbered {
+        backend.number(&server)
+    } else {
+        None
+    };
     Ok(Ready {
         server,
         installed,
         spec,
+        number,
         note,
     })
 }

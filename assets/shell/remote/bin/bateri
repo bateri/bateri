@@ -20,6 +20,12 @@
 # answers how the pane landed. It runs nothing and types nothing into any
 # shell. When no Mac is connected the same message waits in
 # `~/.local/share/bateri/placing/tN` and the Mac reads it when it connects.
+# The pane goes beside the terminal named (`split t4`) or, with none named,
+# beside the one this runs in, whatever that is called (`kablo here`): a
+# terminal the Mac opened before the numbers existed is `b-` and 32 digits.
+# Run in no terminal (cron) with none named there is nothing to go beside: the
+# terminal starts and waits in the Mac's list of terminals running in the
+# background, and the command says so on one line.
 #
 # THE ANSWERS. Standard output has the terminal's number (`--json`: an object
 # of it and how it landed); a pane that did not land as asked says so on one
@@ -140,14 +146,22 @@ bt_is_terminal() {
   [ "${#1}" -le 19 ]
 }
 
-# The terminal this runs in, `bt_me` (empty outside every terminal).
+# Whether $1 is a name kablo gives a terminal: 1 to 64 of `A-Za-z0-9._-` (the Mac
+# reads exactly this where it takes a terminal that is no agent's number, `agent::Anchor`).
+bt_is_name() {
+  case $1 in
+    '' | *[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+  [ "${#1}" -le 64 ]
+}
+
+# The terminal this runs in, `bt_me` (empty outside every terminal), under whatever name
+# it has: the ones before the numbers (`b-` and 32 digits) and the ones a person made with
+# `kablo new` are as much a terminal as t4.
 bt_here() {
   bt_me=
-  if bt_h=$("$bt_kablo" here 2>/dev/null); then
-    case $bt_h in
-      '' | *[!A-Za-z0-9._-]*) ;;
-      *) bt_me=$bt_h ;;
-    esac
+  if bt_h=$("$bt_kablo" here 2>/dev/null) && bt_is_name "$bt_h"; then
+    bt_me=$bt_h
   fi
 }
 
@@ -291,13 +305,19 @@ bt_open() {
   [ "$bt_mode" != tab ] || bt_side=tab
 
   bt_here
+  bt_orphan=
   if [ "$bt_mode" != new ]; then
     if [ -n "$bt_anchor" ]; then
+      # What the agent writes is a number: a name that is no number is no target.
       bt_need_terminal "$bt_anchor"
-    else
-      [ -n "$bt_me" ] || bt_die 64 "this is run in no terminal; name the one the pane goes beside ($bt_mode t4 ...) or open one with 'bateri new'"
-      bt_is_terminal "$bt_me" || bt_die 64 "this terminal ($bt_me) has no number; name another one ($bt_mode t4 ...) or open one with 'bateri new'"
+    elif [ -n "$bt_me" ]; then
+      # The caller's own terminal, whatever it is called (kablo says it, from the system).
       bt_anchor=$bt_me
+    else
+      # Run in no terminal (cron) and no anchor named: nothing to put a pane beside. The
+      # terminal starts all the same and waits in the Mac's list of terminals running in
+      # the background, which is where a terminal no pane shows goes.
+      bt_orphan=yes
     fi
   fi
 
@@ -352,7 +372,9 @@ bt_open() {
   bt_next=
   bt_squeezed=no
   bt_hidden=no
-  if [ "$bt_mode" != new ]; then
+  if [ -n "$bt_orphan" ]; then
+    bt_landed=waiting
+  elif [ "$bt_mode" != new ]; then
     bt_place
   fi
   bt_open_report
@@ -429,7 +451,7 @@ bt_placed() {
             ;;
         esac
         ;;
-      'next-to '*) bt_is_terminal "$bt_val" && bt_next=$bt_val ;;
+      'next-to '*) bt_is_name "$bt_val" && bt_next=$bt_val ;;
       'squeezed yes') bt_squeezed=yes ;;
       'hidden yes') bt_hidden=yes ;;
     esac
@@ -466,16 +488,24 @@ bt_open_report() {
   else
     printf '%s\n' "$bt_id"
   fi
+  # The anchor as a line says it: its number, or "this terminal" for the caller's own when
+  # that has none.
+  bt_said=$bt_anchor
+  if [ -n "$bt_anchor" ] && ! bt_is_terminal "$bt_anchor" && [ "$bt_anchor" = "$bt_me" ]; then
+    bt_said='this terminal'
+  fi
   case $bt_landed in
     waiting)
-      if [ -n "$bt_mac_waits" ]; then
-        bt_say "$bt_id waits in the Mac's list of terminals running in the background, until $bt_anchor is on screen"
+      if [ -n "$bt_orphan" ]; then
+        bt_say "$bt_id waits in the Mac's list of terminals running in the background: this ran in no terminal, so it has no pane to go beside"
+      elif [ -n "$bt_mac_waits" ]; then
+        bt_say "$bt_id waits in the Mac's list of terminals running in the background, until $bt_said is on screen"
       else
         bt_say "$bt_id will take its place when a Mac connects"
       fi
       ;;
-    new_tab) bt_say "$bt_id is in a tab of its own: there was no room beside $bt_anchor" ;;
-    beside_group) bt_say "$bt_id is beside the group of $bt_anchor: $bt_anchor is too small to split" ;;
+    new_tab) bt_say "$bt_id is in a tab of its own: there was no room beside $bt_said" ;;
+    beside_group) bt_say "$bt_id is beside the group of $bt_said: $bt_said is too small to split" ;;
   esac
   if [ "$bt_hidden" = yes ]; then
     bt_say "$bt_id is behind a pane that fills its tab"

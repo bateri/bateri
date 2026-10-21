@@ -6,7 +6,7 @@ use std::fs::File;
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::fs::DirBuilderExt;
-use std::sync::atomic::AtomicU32;
+use std::sync::atomic::{AtomicU32, AtomicU64};
 use std::thread::JoinHandle;
 
 use kablo_proto::SessionId;
@@ -87,6 +87,8 @@ struct Fake {
     mail: AtomicBool,
     /// What the programs said, not yet answered.
     letters: Mutex<Vec<Letter>>,
+    /// The number the server's counter gives next; 0 is a server that cannot count.
+    next_number: AtomicU64,
 }
 
 impl Fake {
@@ -110,7 +112,13 @@ impl Fake {
             background: Mutex::new(Vec::new()),
             mail: AtomicBool::new(false),
             letters: Mutex::new(Vec::new()),
+            next_number: AtomicU64::new(0),
         })
+    }
+
+    /// The server's counter works and gives `n` next.
+    fn counts_from(&self, n: u64) {
+        self.next_number.store(n, Ordering::SeqCst);
     }
 
     /// The network goes (`Some`) or comes back (`None`).
@@ -331,6 +339,14 @@ impl Backend for Fake {
             .push(account.to_owned());
     }
 
+    fn number(&self, _: &KabloHost) -> Option<u64> {
+        self.note("number");
+        match self.next_number.load(Ordering::SeqCst) {
+            0 => None,
+            _ => Some(self.next_number.fetch_add(1, Ordering::SeqCst)),
+        }
+    }
+
     fn takes_mail(&self) -> bool {
         self.mail.load(Ordering::SeqCst)
     }
@@ -389,6 +405,17 @@ impl Rig {
             found.len() >= n
         });
         found
+    }
+}
+
+impl Rig {
+    /// Whether the server has a terminal of each name, once it has all of them.
+    fn has_terminals(&self, names: &[&str]) {
+        until("the terminals on the server", || {
+            names
+                .iter()
+                .all(|name| SessionId::new(name).is_ok_and(|id| self.world.bridge().has(&id)))
+        });
     }
 }
 
@@ -497,10 +524,10 @@ fn a_first_terminal_is_prepared_in_order_and_its_bytes_and_keys_cross_the_servic
     let mut holder = Holder::new(&rig.socket(), "b-1");
     let terminal = rig.terminals(1).remove(0);
 
-    // Gate, call, master, install, bridge — and nothing a second time.
+    // Gate, call, master, install, number, bridge — and nothing a second time.
     assert_eq!(
         rig.world.log(),
-        ["pane", "route", "master", "install", "carry"]
+        ["pane", "route", "master", "install", "number", "carry"]
     );
 
     let mut output = b"ready\r\n\x1b[31mred\x1b[0m".to_vec();
@@ -528,6 +555,169 @@ fn a_first_terminal_is_prepared_in_order_and_its_bytes_and_keys_cross_the_servic
     assert_eq!(holder.outcome(), Outcome::Exit(7));
 }
 
+/// The server numbers its terminals: a holder asks with a name of its own, the terminal is the
+/// next number the server's counter gives, in the ledger and on the server under it, and the
+/// holder is told. The first terminal of an account (a thread that installs) and the ones that
+/// follow (a thread that only counts) both do it.
+#[test]
+fn a_terminal_is_started_under_the_number_the_servers_counter_gives() {
+    let rig = Rig::new("numbered");
+    rig.world.counts_from(7);
+    let mut first = Holder::new(&rig.socket(), "b-1");
+    rig.has_terminals(&["t7"]);
+    let mut second = Holder::new(&rig.socket(), "b-2");
+    rig.has_terminals(&["t7", "t8"]);
+    for gone in ["b-1", "b-2"] {
+        assert!(
+            !rig.world
+                .bridge()
+                .has(&SessionId::new(gone).expect("a name")),
+            "{gone}"
+        );
+    }
+    // Gate, call, master, install, number — and for the second one only the number.
+    assert_eq!(
+        rig.world.log(),
+        [
+            "pane", "route", "master", "install", "number", "carry", "pane", "route", "number"
+        ]
+    );
+    // Each holder shows its own terminal and types into it.
+    let (one, two) = (
+        SessionId::new("t7").expect("a name"),
+        SessionId::new("t8").expect("a name"),
+    );
+    rig.world.bridge().write(&one, b"one");
+    rig.world.bridge().write(&two, b"two");
+    until("both shown", || {
+        first.shown.bytes() == b"one" && second.shown.bytes() == b"two"
+    });
+    second.typed.write_all(b"x").expect("typed");
+    until("the key at the second", || {
+        rig.world.bridge().typed(&two) == b"x"
+    });
+    rig.world.bridge().exit(&one, Exit::Code(0));
+    rig.world.bridge().exit(&two, Exit::Code(3));
+    assert_eq!(first.outcome(), Outcome::Exit(0));
+    assert_eq!(second.outcome(), Outcome::Exit(3));
+}
+
+/// A server that cannot count (a home it cannot write, a connection that broke) does not keep a
+/// terminal from starting: it keeps the name its holder made, and is asked once per terminal.
+#[test]
+fn a_server_that_cannot_count_leaves_the_terminal_its_holders_name() {
+    let rig = Rig::new("uncounted");
+    let mut holder = Holder::new(&rig.socket(), "b-1");
+    let terminal = rig.terminals(1).remove(0);
+    assert_eq!(terminal.as_str(), "b-1");
+    assert_eq!(rig.world.count("number"), 1);
+    rig.world.bridge().write(&terminal, b"ok");
+    until("shown", || holder.shown.bytes() == b"ok");
+    rig.world.bridge().exit(&terminal, Exit::Code(0));
+    assert_eq!(holder.outcome(), Outcome::Exit(0));
+}
+
+/// The holder is told the number, so the pane that outlives the application asks for the
+/// terminal by it: a restart finds `t7` where the holder first asked for `b-1`.
+#[test]
+fn a_numbered_terminal_is_found_again_by_its_number_after_a_restart() {
+    let ledger = Arc::new(Ledger::memory());
+    let world = Fake::new(Bridge::new(Age::Current));
+    world.counts_from(7);
+    let pane = pane_named(&world);
+    let first = Rig::kept("number-restart", world.clone(), ledger.clone(), END_GRACE);
+    let socket = first.socket();
+    let holder = Holder::new(&socket, "b-1");
+    first.has_terminals(&["t7"]);
+    let terminal = SessionId::new("t7").expect("a name");
+    world.bridge().write(&terminal, b"abc");
+    until("shown", || holder.shown.bytes() == b"abc");
+    until("the pane found", || first.service.shown(&pane).is_some());
+    assert_eq!(
+        first.service.shown(&pane).expect("shown").terminal,
+        terminal
+    );
+    assert!(ledger.keeps("u@rasp:22", &terminal));
+    assert!(!ledger.keeps("u@rasp:22", &SessionId::new("b-1").expect("a name")));
+
+    first.service.stop();
+    world.bridge().write(&terminal, b"def");
+    let second = Service::start_with(&first.dir, world.clone(), ledger.clone(), END_GRACE)
+        .expect("a second service");
+    world.bridge().write(&terminal, b"ghi");
+    until("the rest, once", || holder.shown.bytes() == b"abcdefghi");
+    until("the pane found again", || second.shown(&pane).is_some());
+    assert_eq!(second.shown(&pane).expect("shown").terminal, terminal);
+    second.stop();
+}
+
+/// A holder of version 2 is not told a name, so it is not numbered: the server's counter is not
+/// even asked, and the terminal is the one it made.
+#[test]
+fn a_holder_of_the_version_before_is_not_numbered() {
+    use crate::hold::wire::{HoldReader, Open, ToApp, ToHold};
+    let rig = Rig::new("numbered-old");
+    rig.world.counts_from(7);
+    let mut stream = std::os::unix::net::UnixStream::connect(rig.socket()).expect("connected");
+    let say = |stream: &mut std::os::unix::net::UnixStream, message: &ToApp| {
+        let mut bytes = Vec::new();
+        message.encode(&mut bytes);
+        stream.write_all(&bytes).expect("written");
+    };
+    say(
+        &mut stream,
+        &ToApp::Hello {
+            newest: 2,
+            oldest: 1,
+        },
+    );
+    say(
+        &mut stream,
+        &ToApp::Open(Open {
+            terminal: SessionId::new("b-1").expect("a name"),
+            size: kablo_proto::v1::Size {
+                cols: 80,
+                rows: 24,
+                xpixel: 0,
+                ypixel: 0,
+            },
+            target: Target::New {
+                args: vec![b"rasp".to_vec()],
+            },
+        }),
+    );
+    rig.has_terminals(&["b-1"]);
+    assert_eq!(rig.world.count("number"), 0);
+    assert!(
+        !rig.world
+            .bridge()
+            .has(&SessionId::new("t7").expect("a name"))
+    );
+    // What it is sent is what version 2 always read.
+    stream
+        .set_read_timeout(Some(Duration::from_secs(15)))
+        .expect("a timeout");
+    let mut reader = HoldReader::new();
+    let mut heard = Vec::new();
+    let mut buffer = [0u8; 4096];
+    while !heard.iter().any(|m| matches!(m, ToHold::Bound { .. })) {
+        let n = stream.read(&mut buffer).expect("read");
+        assert!(
+            n > 0,
+            "the connection closed before it was bound: {heard:?}"
+        );
+        reader.push(&buffer[..n]);
+        while let Some(message) = reader.read().expect("whole frames") {
+            heard.push(message);
+        }
+    }
+    assert_eq!(heard[0], ToHold::Welcome { version: 2 });
+    assert!(heard.contains(&ToHold::Bound {
+        account: "u@rasp:22".into(),
+        terminal: None,
+    }));
+}
+
 #[test]
 fn the_master_step_runs_on_the_pane_and_its_ending_decides() {
     // It ends well: the terminal follows.
@@ -544,6 +734,7 @@ fn the_master_step_runs_on_the_pane_and_its_ending_decides() {
             "master",
             "master_made:0",
             "install",
+            "number",
             "carry"
         ]
     );

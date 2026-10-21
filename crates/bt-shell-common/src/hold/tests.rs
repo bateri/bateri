@@ -50,6 +50,9 @@ fn until(message: &str, mut ready: impl FnMut() -> bool) {
 enum Policy {
     /// Start a new one and resume an existing one.
     Serve,
+    /// Start a new one under the number `t{n}` (the holder asked with a name of its own) and
+    /// resume an existing one.
+    Number(u64),
     /// Refuse with a plain `ssh` to fall back to.
     FallBack,
     /// Refuse with a line to show.
@@ -180,9 +183,16 @@ impl App {
         match (self.policy, &open.target) {
             (Policy::Serve, Target::New { .. }) => {
                 let spec = NewSession::default();
-                self.hub.start(hold, ACCOUNT, spec).expect("started");
+                self.hub.start(hold, ACCOUNT, spec, None).expect("started");
             }
-            (Policy::Serve, Target::Resume { .. }) => {
+            (Policy::Number(number), Target::New { .. }) => {
+                let spec = NewSession::default();
+                let name = kablo_proto::SessionId::new(&format!("t{number}")).expect("a name");
+                self.hub
+                    .start(hold, ACCOUNT, spec, Some(name))
+                    .expect("started");
+            }
+            (Policy::Serve | Policy::Number(_), Target::Resume { .. }) => {
                 self.hub.resume(hold, ACCOUNT, false).expect("resumed");
             }
             (Policy::FallBack, _) => self.hub.refuse(hold, true, "no kablo on this server"),
@@ -487,6 +497,35 @@ fn the_pane_survives_the_application_and_picks_up_where_it_stopped() {
         b"abcdefghi",
         "no byte twice, none missing"
     );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The application numbers the terminal: the pipe asked with `b-…` of its own and the server has
+/// `t7`. The pipe is told, and when the application comes back it asks for the terminal by the
+/// number — by its own name it would find nothing.
+#[test]
+fn the_pane_asks_for_the_number_it_was_told_when_the_application_comes_back() {
+    let dir = scratch("numbered");
+    let socket = dir.join("hold");
+    let mut app = App::new(&socket, Bridge::new(Age::Current), Policy::Number(7));
+    let mut hold = run_on_pipes(&socket, new_target(), false);
+    let terminal = app.terminal();
+    assert_eq!(terminal.as_str(), "t7");
+    app.bridge.write(&terminal, b"abc");
+    app.until("abc shown", |_| hold.shown.bytes() == b"abc");
+
+    let mut bridge = app.quit();
+    bridge.write(&terminal, b"def");
+    let mut app = App::new(&socket, bridge, Policy::Serve);
+    app.until("def shown", |_| hold.shown.bytes() == b"abcdef");
+    assert_eq!(app.terminal().as_str(), "t7");
+    app.bridge.write(&terminal, b"ghi");
+    app.until("ghi shown", |_| hold.shown.bytes() == b"abcdefghi");
+    app.bridge.exit(&terminal, Exit::Code(0));
+    app.until("the pipe ended", |_| {
+        hold.handle.as_ref().is_some_and(JoinHandle::is_finished)
+    });
+    assert_eq!(hold.outcome(), Outcome::Exit(0));
     let _ = std::fs::remove_dir_all(&dir);
 }
 

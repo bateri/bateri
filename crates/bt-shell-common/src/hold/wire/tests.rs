@@ -141,6 +141,7 @@ fn fixture_messages() -> (Vec<ToApp>, Vec<ToHold>) {
             },
             ToHold::Bound {
                 account: "rasp".into(),
+                terminal: None,
             },
             ToHold::Output {
                 end: 5,
@@ -197,15 +198,16 @@ fn version_one_is_frozen_byte_for_byte() {
 fn the_versions_read_are_the_shipped_one_and_the_one_before() {
     assert_eq!(
         (OLDEST, VERSION),
-        (1, 2),
-        "version 2 is shipped with version 1 before it"
+        (1, 3),
+        "nothing of version 1 or 2 has been shipped in a release, so both are still read"
     );
     // A holder of the same age, the one before, and one that also speaks later versions.
-    assert_eq!(agree(2, 1), Some(2));
+    assert_eq!(agree(3, 1), Some(3));
+    assert_eq!(agree(2, 1), Some(2), "a pane that outlived an update");
     assert_eq!(agree(1, 1), Some(1), "a pane that outlived an update");
     assert_eq!(agree(7, 1), Some(VERSION), "the newest both speak");
     // A holder that has dropped everything this build speaks.
-    assert_eq!(agree(9, 3), None);
+    assert_eq!(agree(9, 4), None);
     // A holder older than anything read (there is none yet; the rule is the range).
     assert_eq!(agree(0, 0), None);
 }
@@ -270,6 +272,82 @@ fn version_two_is_frozen_byte_for_byte() {
         assert_eq!(&encoded_back(message), bytes, "writes {name}");
         let parsed = ToHold::parse(bytes[0], &bytes[5..]).expect("reads");
         assert_eq!(parsed.as_ref(), Some(message), "reads {name}");
+    }
+}
+
+/// Version 3 of the wire, frozen: what it added to the earlier versions' messages. **Never
+/// edited**; the next change is a version 4 and a fixture of its own.
+const V3_FIXTURE: &[(&str, &[u8])] = &[
+    ("hello of version 3", &[0x01, 0, 0, 0, 2, 3, 1]),
+    ("welcome of version 3", &[0x81, 0, 0, 0, 1, 3]),
+    // The account, then the name the terminal was started under.
+    (
+        "bound with a name",
+        &[
+            0x83, 0, 0, 0, 8, // frame
+            4, b'r', b'a', b's', b'p', // the account
+            2, b't', b'7', // the terminal
+        ],
+    ),
+];
+
+#[test]
+fn version_three_is_frozen_byte_for_byte() {
+    let hello = ToApp::Hello {
+        newest: 3,
+        oldest: 1,
+    };
+    assert_eq!(encoded(&hello), V3_FIXTURE[0].1, "writes hello");
+    let bytes = V3_FIXTURE[0].1;
+    assert_eq!(
+        ToApp::parse(bytes[0], &bytes[5..]).expect("reads"),
+        Some(hello)
+    );
+    let to_hold = [
+        (ToHold::Welcome { version: 3 }, "welcome of version 3"),
+        (
+            ToHold::Bound {
+                account: "rasp".into(),
+                terminal: Some(id("t7")),
+            },
+            "bound with a name",
+        ),
+    ];
+    for (message, name) in &to_hold {
+        let bytes = V3_FIXTURE
+            .iter()
+            .find(|(n, _)| n == name)
+            .expect("a fixture")
+            .1;
+        assert_eq!(&encoded_back(message), bytes, "writes {name}");
+        let parsed = ToHold::parse(bytes[0], &bytes[5..]).expect("reads");
+        assert_eq!(parsed.as_ref(), Some(message), "reads {name}");
+    }
+}
+
+#[test]
+fn a_bound_without_a_name_is_the_bytes_of_the_first_version_and_a_bad_name_is_a_broken_peer() {
+    // What an older holder is sent, and reads, is exactly version 1's.
+    let plain = ToHold::Bound {
+        account: "rasp".into(),
+        terminal: None,
+    };
+    assert_eq!(encoded_back(&plain), fixture("bound"));
+    // A name that is no session id (a path), a name cut short, bytes after the name.
+    let account = [4u8, b'r', b'a', b's', b'p'];
+    for tail in [
+        &[3u8, b'a', b'/', b'b'][..],
+        &[0u8][..],
+        &[5u8, b't', b'7'][..],
+        &[2u8, b't', b'7', 0][..],
+    ] {
+        let mut payload = account.to_vec();
+        payload.extend_from_slice(tail);
+        assert_eq!(
+            ToHold::parse(0x83, &payload),
+            Err(Error::Malformed),
+            "{tail:?}"
+        );
     }
 }
 

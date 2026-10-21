@@ -13,9 +13,9 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use super::Terminal;
 use super::message::{Place, Request};
 use super::place::Side;
+use super::{Anchor, Terminal};
 use crate::settings::TempRoot;
 
 /// The program stood in for kablo: every call is a line of its arguments (the unit separator
@@ -275,7 +275,7 @@ impl Server {
 fn place(terminal: u64, anchor: u64) -> Place {
     Place {
         terminal: Terminal(terminal),
-        anchor: Some(Terminal(anchor)),
+        anchor: Some(Anchor::of(Terminal(anchor))),
         side: None,
         ratio: None,
         keep_open: false,
@@ -398,7 +398,7 @@ fn without_a_mac_the_message_waits_on_the_server_and_the_command_still_answers()
                 Place {
                     side: Some(Side::Tab),
                     focus: true,
-                    anchor: Some(Terminal(7)),
+                    anchor: Some(Anchor::of(Terminal(7))),
                     ..place(2, 4)
                 },
             ),
@@ -474,6 +474,162 @@ fn a_pane_that_did_not_land_as_asked_is_told_on_one_line() {
     let said = server.run(shell, Some("t4"), &["split"]);
     assert_eq!(said.out, "t3\n");
     assert_eq!(said.err, "bateri: t3 is behind a pane that fills its tab\n");
+}
+
+/// A terminal the Mac opened before the numbers existed, and one a person made with kablo.
+const MADE: &str = "b-0123456789abcdef0123456789abcdef";
+
+#[test]
+fn the_callers_own_terminal_is_the_anchor_whatever_it_is_called() {
+    for (name, shell) in shells() {
+        let server = Server::new(&format!("anchor-{name}"));
+        for here in [MADE, "mine", "build.2"] {
+            server.forget_calls();
+            server.mac_says(&format!(
+                "bateri 1\nok placed\nlanded as_asked\nnext-to {here}\nsqueezed no\nhidden no\n"
+            ));
+            let said = server.run(&shell, Some(here), &["split", "--below", "--json"]);
+            assert_eq!(said.status, 0, "{here}: {}", said.err);
+            let id = server
+                .calls_of("new")
+                .first()
+                .map(|call| call[2].clone())
+                .expect("a terminal");
+            // The Mac is told the anchor by the name kablo gave the terminal, in a message it
+            // reads, and says the same name back.
+            let told = server.told();
+            let wanted = Place {
+                terminal: Terminal::parse(&id).expect("a number"),
+                anchor: Anchor::parse(here),
+                side: Some(Side::Below),
+                ..place(1, 1)
+            };
+            assert_eq!(told, [encoded(wanted.clone())], "{here}");
+            assert_eq!(Request::parse(&told[0]), Ok(Request::Place(wanted)));
+            assert_eq!(
+                said.out,
+                format!(
+                    "{{\"terminal\":\"{id}\",\"landed\":\"as_asked\",\"next_to\":\"{here}\",\"squeezed\":false,\"hidden\":false}}\n"
+                ),
+                "{here}"
+            );
+            assert_eq!(said.err, "", "{here}");
+            // Who opened it, so that it can close what it opened.
+            assert_eq!(
+                std::fs::read_to_string(server.state().join("terminals").join(&id))
+                    .expect("a record"),
+                format!("opener {here}\nkeep-open no\n")
+            );
+            let closed = server.run(&shell, Some(here), &["close", &id]);
+            assert_eq!(closed.status, 0, "{here}: {}", closed.err);
+            assert_eq!(
+                server.calls_of("end").last(),
+                Some(&vec!["end".to_owned(), id])
+            );
+        }
+        // A `tab` from such a terminal has the same anchor; one named is still only a number.
+        server.mac_says(PLACED);
+        let said = server.run(&shell, Some(MADE), &["tab"]);
+        assert_eq!(said.status, 0, "{}", said.err);
+        let said = server.run(&shell, Some(MADE), &["split", MADE]);
+        assert_eq!(said.status, 64, "an anchor the agent writes is a number");
+        assert!(said.err.contains("is not a terminal"), "{}", said.err);
+    }
+}
+
+#[test]
+fn a_pane_that_waits_for_the_terminal_that_asked_says_so_without_its_long_name() {
+    let server = Server::new("anchor-waiting");
+    let shell = Path::new("/bin/sh");
+    // The Mac has it, waiting for the anchor to be on screen.
+    server.mac_says("bateri 1\nok placed\nlanded waiting\nsqueezed no\nhidden no\n");
+    let said = server.run(shell, Some(MADE), &["split"]);
+    assert_eq!(
+        said.err,
+        "bateri: t1 waits in the Mac's list of terminals running in the background, until this terminal is on screen\n"
+    );
+    // No Mac: the note is the message, anchor and all, and is read as one.
+    server.no_mac();
+    let said = server.run(shell, Some(MADE), &["split", "--right", "--keep-open"]);
+    assert_eq!(
+        said.err,
+        "bateri: t2 will take its place when a Mac connects\n"
+    );
+    let wanted = Place {
+        terminal: Terminal(2),
+        anchor: Anchor::parse(MADE),
+        side: Some(Side::Right),
+        keep_open: true,
+        ..place(2, 1)
+    };
+    let note = server.note("t2").expect("a note");
+    assert_eq!(note, encoded(wanted.clone()));
+    assert_eq!(Request::parse(&note), Ok(Request::Place(wanted)));
+    // A terminal that has a number is called by it.
+    server.mac_says("bateri 1\nok placed\nlanded new_tab\nnext-to t4\nsqueezed no\nhidden no\n");
+    let said = server.run(shell, Some("t4"), &["tab"]);
+    assert_eq!(
+        said.err,
+        "bateri: t3 is in a tab of its own: there was no room beside t4\n"
+    );
+    let said = server.run(shell, Some(MADE), &["tab"]);
+    assert_eq!(
+        said.err,
+        "bateri: t4 is in a tab of its own: there was no room beside this terminal\n"
+    );
+}
+
+#[test]
+fn run_in_no_terminal_a_pane_with_no_anchor_leaves_the_terminal_in_the_list() {
+    for (name, shell) in shells() {
+        let server = Server::new(&format!("cron-{name}"));
+        server.mac_says(PLACED);
+        for (mode, number) in [("split", 1), ("tab", 2)] {
+            let said = server.run(&shell, None, &[mode, "--keep-open", "--", "sleep", "60"]);
+            assert_eq!(said.status, 0, "{mode}: {}", said.err);
+            assert_eq!(said.out, format!("t{number}\n"));
+            assert_eq!(
+                said.err,
+                format!(
+                    "bateri: t{number} waits in the Mac's list of terminals running in the background: this ran in no terminal, so it has no pane to go beside\n"
+                )
+            );
+            // The terminal runs, nobody is asked where to put a pane and no note waits.
+            assert_eq!(
+                server.calls_of("new").last(),
+                Some(&new_call(&server, &format!("t{number}"), &["sleep", "60"]))
+            );
+            assert_eq!(server.note(&format!("t{number}")), None);
+            assert_eq!(
+                std::fs::read_to_string(server.state().join(format!("terminals/t{number}")))
+                    .expect("a record"),
+                "opener -\nkeep-open yes\n"
+            );
+        }
+        assert!(server.calls_of("app").is_empty());
+        assert!(server.told().is_empty());
+        // The answer as an object says it waits.
+        let said = server.run(&shell, None, &["split", "--json", "--below"]);
+        assert_eq!(said.status, 0);
+        assert_eq!(
+            said.out,
+            "{\"terminal\":\"t3\",\"landed\":\"waiting\",\"next_to\":null,\"squeezed\":false,\"hidden\":false}\n"
+        );
+        // A name the agent wrote is an anchor even from outside every terminal.
+        let said = server.run(&shell, None, &["split", "t4"]);
+        assert_eq!(said.status, 0, "{}", said.err);
+        assert_eq!(
+            server.told(),
+            [encoded(Place {
+                terminal: Terminal(4),
+                ..place(4, 4)
+            })]
+        );
+        // A name that is not a name kablo allows is no terminal either.
+        let said = server.run(&shell, Some("a b/c"), &["split"]);
+        assert_eq!(said.status, 0, "{}", said.err);
+        assert!(said.err.contains("ran in no terminal"), "{}", said.err);
+    }
 }
 
 #[test]
@@ -586,7 +742,7 @@ fn a_mistake_in_the_command_is_64_before_anything_is_started() {
     for (name, shell) in shells() {
         let server = Server::new(&format!("mistakes-{name}"));
         server.mac_says(PLACED);
-        let tries: [(&[&str], Option<&str>); 17] = [
+        let tries: [(&[&str], Option<&str>); 14] = [
             (&["split", "--ratio", "0"], Some("t4")),
             (&["split", "--ratio", "100"], Some("t4")),
             (&["split", "--ratio", "x"], Some("t4")),
@@ -598,9 +754,6 @@ fn a_mistake_in_the_command_is_64_before_anything_is_started() {
             (&["new", "t4"], Some("t4")),
             (&["split", "t4", "t5"], Some("t4")),
             (&["split", "--bogus"], Some("t4")),
-            (&["split"], None),
-            (&["tab"], None),
-            (&["split"], Some("b-00ff")),
             (&["notify"], Some("t4")),
             (&["frobnicate"], Some("t4")),
             (&[], Some("t4")),
@@ -640,6 +793,51 @@ fn a_number_is_never_given_twice_and_one_a_hand_made_terminal_holds_is_skipped()
             std::fs::read_to_string(server.state().join("next")).expect("the counter"),
             "7\n"
         );
+    }
+}
+
+/// The server as the Mac reaches it: `sh -c` in a shell that has the home and nothing else.
+struct MacChannel(PathBuf);
+
+impl crate::kablo::install::Channel for MacChannel {
+    fn run(&self, script: &str, input: &[u8]) -> std::io::Result<crate::kablo::install::Reply> {
+        crate::kablo::install::run_command(
+            &[
+                "env".into(),
+                "-i".into(),
+                format!("HOME={}", self.0.display()),
+                format!("PATH={}", std::env::var("PATH").unwrap_or_default()),
+                "sh".into(),
+                "-c".into(),
+                script.into(),
+            ],
+            input,
+            std::time::Duration::from_secs(20),
+        )
+    }
+}
+
+/// The terminal the Mac opens itself and the ones an agent opens are numbered by one counter: the
+/// Mac runs the very bytes the command runs, over its connection, on the same file.
+#[test]
+fn the_mac_and_the_agents_command_never_give_the_same_number() {
+    for (name, shell) in shells() {
+        let server = Server::new(&format!("mac-counter-{name}"));
+        let mac = MacChannel(server.home.clone());
+        let mut seen = Vec::new();
+        for _ in 0..3 {
+            let said = server.run(&shell, None, &["new", "--", "true"]);
+            assert_eq!(said.status, 0, "{}", said.err);
+            seen.push(said.out.trim().to_owned());
+            seen.push(format!(
+                "t{}",
+                crate::kablo::install::next_number(&mac).expect("a number")
+            ));
+        }
+        assert_eq!(seen, ["t1", "t2", "t3", "t4", "t5", "t6"], "{name}");
+        // The Mac's numbers are no terminal the script knows of: it never recorded them, and the
+        // server's counter does not forget them.
+        assert!(!server.state().join("terminals/t2").exists());
     }
 }
 

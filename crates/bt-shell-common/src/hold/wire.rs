@@ -16,7 +16,7 @@
 //! reads **the version it was shipped with and the one before it**
 //! ([`OLDEST`]..=[`VERSION`]); a version leaves that range only when the
 //! one after it has been shipped for a release. Every version's bytes are
-//! frozen in the tests (`V1_FIXTURE`, `V2_FIXTURE`), so a change to the wire
+//! frozen in the tests (`V1_FIXTURE`, `V2_FIXTURE`, `V3_FIXTURE`), so a change to the wire
 //! adds a version and keeps the fixtures reading.
 //!
 //! **Version 2** lets the application ask the holder to do something on the
@@ -26,6 +26,15 @@
 //! it there) and to tell the user a line ([`ToHold::Note`]). A version 1 holder
 //! is never sent either: it is a pane that outlived an update and only ever
 //! resumes a terminal.
+//!
+//! **Version 3** lets the application name the terminal: the holder makes a name for the terminal
+//! it asks for (so a request repeated after a lost connection cannot make a second one), and the
+//! application, which numbers the terminals of a server (`t7`: what an agent on the server is
+//! told and says), may start the terminal under that number instead. [`ToHold::Bound`] then
+//! carries the name, and the holder asks for the terminal by it from then on — the pipe that
+//! resumes a terminal after an update or a crash must ask for the name the server knows. A
+//! holder of version 2 or 1 is never sent a name: it keeps its own, and the terminal it asked for
+//! is started under it.
 //!
 //! **What the offsets mean.** A terminal's output has a position, the
 //! number of bytes the program wrote before it ([`ToHold::Output::end`] is the position
@@ -40,7 +49,11 @@ use kablo_proto::SessionId;
 use kablo_proto::v1::{Exit, Size};
 
 /// The newest wire version this build speaks.
-pub const VERSION: u8 = 2;
+pub const VERSION: u8 = 3;
+
+/// The first wire version whose holder is told the name its terminal was started under
+/// ([`ToHold::Bound::terminal`]); a holder of an earlier one keeps the name it made.
+pub const NAMED: u8 = 3;
 
 /// The oldest wire version this build still reads (see the module docs).
 pub const OLDEST: u8 = 1;
@@ -111,7 +124,9 @@ pub enum Target {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Open {
     /// The terminal's name, made by the holder, so a request repeated after a
-    /// lost connection names the same terminal and cannot make a second.
+    /// lost connection names the same terminal and cannot make a second. The
+    /// application may start a new terminal under another name (version 3: it
+    /// numbers them); a request for a terminal that exists says the name it has.
     pub terminal: SessionId,
     /// The pane's size now.
     pub size: Size,
@@ -166,6 +181,10 @@ pub enum ToHold {
     Bound {
         /// The server's account.
         account: String,
+        /// The name the terminal was started under when it is not the one the holder
+        /// asked with (version 3; a holder of an older version is sent none). The holder
+        /// asks for the terminal by it from now on.
+        terminal: Option<SessionId>,
     },
     /// Program output, exactly as it was written, in order.
     Output {
@@ -357,8 +376,13 @@ impl ToHold {
                 payload.extend_from_slice(clip(text).as_bytes());
                 frame(out, kind::REFUSED, &payload);
             }
-            ToHold::Bound { account } => {
+            ToHold::Bound { account, terminal } => {
                 put_short(&mut payload, account.as_bytes());
+                // After the account, so the bytes of a bound without a name are the ones
+                // version 1 wrote.
+                if let Some(terminal) = terminal {
+                    put_short(&mut payload, terminal.as_str().as_bytes());
+                }
                 frame(out, kind::BOUND, &payload);
             }
             ToHold::Output { end, data } => {
@@ -414,8 +438,13 @@ impl ToHold {
             },
             kind::BOUND => {
                 let account = at.text()?;
+                let terminal = if at.is_empty() {
+                    None
+                } else {
+                    Some(SessionId::new(&at.text()?).map_err(|_| Error::Malformed)?)
+                };
                 at.done()?;
-                ToHold::Bound { account }
+                ToHold::Bound { account, terminal }
             }
             kind::OUTPUT => ToHold::Output {
                 end: at.u64()?,
@@ -531,6 +560,10 @@ impl<'a> Reader<'a> {
 
     fn rest_text(&mut self) -> String {
         String::from_utf8_lossy(self.rest()).into_owned()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
     }
 
     fn done(&self) -> Result<(), Error> {

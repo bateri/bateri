@@ -287,8 +287,14 @@ impl Hub {
                 if let Some(hold) = hold_of(self, &status.id)
                     && let Some(hold) = self.holds.get_mut(&hold)
                 {
+                    // A holder of version 3 or later is told the name the terminal has, which
+                    // is the one it asked with unless the application numbered it; an
+                    // older one is not (it would take the frame for a broken peer) and
+                    // keeps its own, which is then the terminal's.
+                    let terminal = (hold.version >= wire::NAMED).then(|| status.id.clone());
                     hold.send(&ToHold::Bound {
                         account: account.to_owned(),
+                        terminal,
                     });
                 }
             }
@@ -587,16 +593,32 @@ impl Hub {
 
     /// Starts the terminal a holder asked for ([`Target::New`]) on the server
     /// of `account`, running `spec`, and ties the holder to it. The terminal's
-    /// name is the holder's.
-    pub fn start(&mut self, hold: HoldId, account: &str, spec: NewSession) -> Result<(), Declined> {
-        let open = self.take_pending(hold, |open| matches!(open.target, Target::New { .. }))?;
+    /// name is the holder's, or `name` when the owner numbered it: a holder of
+    /// version 3 or later is told the name when the server has made the terminal
+    /// ([`ToHold::Bound`]), and an older one keeps its own (`name` is not used for it).
+    pub fn start(
+        &mut self,
+        hold: HoldId,
+        account: &str,
+        spec: NewSession,
+        name: Option<SessionId>,
+    ) -> Result<(), Declined> {
+        let mut open = self.take_pending(hold, |open| matches!(open.target, Target::New { .. }))?;
         let Some(client) = self.clients.get_mut(account) else {
             return Err(self.put_back(hold, open, Declined::NoClient));
         };
+        let asked = open.terminal.clone();
+        // A name a holder cannot be told is not used: it would ask for the terminal by the
+        // name it made, which the server does not know.
+        let version = self.holds.get(&hold).map_or(0, |entry| entry.version);
+        if let Some(name) = name.filter(|_| version >= wire::NAMED) {
+            open.terminal = name;
+        }
         if client
             .new_terminal(open.terminal.clone(), spec, Attach::new(open.size))
             .is_err()
         {
+            open.terminal = asked;
             return Err(self.put_back(hold, open, Declined::Refused));
         }
         self.bind(hold, account, open.terminal, 0, false, false);

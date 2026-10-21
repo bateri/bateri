@@ -17,6 +17,10 @@
 //! focus yes
 //! ```
 //!
+//! The `terminal` is the one just started, and an agent's number. The `anchor` is a terminal as
+//! kablo names it: `t4` when the agent wrote one, and the caller's own name, whatever it is, when
+//! it did not (a terminal the Mac opened before the numbers existed is `b-` and 32 digits).
+//!
 //! **A reply** starts with `bateri 1` too and then says `ok` (`ok placed` and the lines that
 //! tell how, `ok text` and the rest of the message as the text to print) or `error KIND TEXT`
 //! on one line. The script turns the kind into an exit code; the Mac builds the text of an `ls`,
@@ -32,8 +36,8 @@
 //! version up to its own and each version's frozen text stays in the tests (`V1_*`): changing the
 //! format adds a version and its fixtures, it never rewrites one.
 
-use super::Terminal;
 use super::place::{Landed, Side};
+use super::{Anchor, Terminal};
 
 /// The version this build writes. Every version from 1 up to it is read.
 pub const VERSION: u32 = 1;
@@ -126,8 +130,10 @@ impl Format {
 pub struct Place {
     /// The terminal to show.
     pub terminal: Terminal,
-    /// The terminal whose pane it goes beside; none is the sender's own.
-    pub anchor: Option<Terminal>,
+    /// The terminal whose pane it goes beside; none is the sender's own. Its name is kablo's, so
+    /// the sender's own terminal can be named whatever it is called (a script writes it out, since a
+    /// message that waits on the server is read when nobody names its sender).
+    pub anchor: Option<Anchor>,
     /// The side, a tab of its own, or none for the palette's rule.
     pub side: Option<Side>,
     /// The share of the anchor the pane asks for, in percent, `1..=99`.
@@ -163,7 +169,7 @@ pub enum Request {
 pub struct Placed {
     pub landed: Landed,
     /// The terminal the pane stands beside.
-    pub next_to: Option<Terminal>,
+    pub next_to: Option<Anchor>,
     pub squeezed: bool,
     pub hidden: bool,
 }
@@ -212,8 +218,8 @@ impl Request {
             Request::Place(place) => {
                 out.push_str("place\n");
                 push(&mut out, "terminal", &place.terminal.to_string())?;
-                if let Some(anchor) = place.anchor {
-                    push(&mut out, "anchor", &anchor.to_string())?;
+                if let Some(anchor) = &place.anchor {
+                    push(&mut out, "anchor", anchor.name())?;
                 }
                 if let Some(side) = place.side {
                     push(&mut out, "side", side.word())?;
@@ -359,6 +365,14 @@ fn terminal_of(key: &str, value: &str) -> Result<Terminal, Failure> {
     })
 }
 
+fn anchor_of(key: &str, value: &str) -> Result<Anchor, Failure> {
+    Anchor::parse(value).ok_or_else(|| {
+        Failure::usage(format!(
+            "`{key}` names a terminal as kablo does (letters, digits, `.`, `_`, `-`; at most 64), not `{value}`"
+        ))
+    })
+}
+
 fn read_v1<'a>(verb: &'a str, lines: impl Iterator<Item = &'a str>) -> Result<Request, Failure> {
     match verb {
         "place" => {
@@ -393,7 +407,7 @@ fn read_v1<'a>(verb: &'a str, lines: impl Iterator<Item = &'a str>) -> Result<Re
                 terminal: fields.terminal("terminal")?,
                 anchor: fields
                     .get("anchor")
-                    .map(|value| terminal_of("anchor", value))
+                    .map(|value| anchor_of("anchor", value))
                     .transpose()?,
                 side,
                 ratio,
@@ -440,7 +454,7 @@ impl Reply {
             Reply::Placed(placed) => {
                 out.push_str("ok placed\n");
                 out.push_str(&format!("landed {}\n", placed.landed.word()));
-                if let Some(next_to) = placed.next_to {
+                if let Some(next_to) = &placed.next_to {
                     out.push_str(&format!("next-to {next_to}\n"));
                 }
                 out.push_str(&format!("squeezed {}\n", yes_no(placed.squeezed)));
@@ -502,7 +516,7 @@ fn read_placed(body: &str) -> Result<Reply, Failure> {
             .ok_or_else(|| Failure::usage(format!("`{landed}` is no way to land")))?,
         next_to: fields
             .get("next-to")
-            .map(|value| terminal_of("next-to", value))
+            .map(|value| anchor_of("next-to", value))
             .transpose()?,
         squeezed: fields.flag("squeezed")?,
         hidden: fields.flag("hidden")?,
@@ -522,6 +536,11 @@ mod tests {
     const V1_LS_JSON: &str = "bateri 1\nls\nformat json\n";
     const V1_CLOSE: &str = "bateri 1\nclose\nterminal t7\n";
     const V1_NOTIFY: &str = "bateri 1\nnotify\ntext The build is done: 3 tests failed\n";
+    // Added to version 1 after it was first written: an anchor that is no agent's number, which
+    // the first spelling of `anchor` did not allow. Reading it changes nothing of the above.
+    const V1_PLACE_MADE: &str =
+        "bateri 1\nplace\nterminal t9\nanchor b-0123456789abcdef0123456789abcdef\nside right\n";
+    const V1_REPLY_PLACED_MADE: &str = "bateri 1\nok placed\nlanded as_asked\nnext-to b-0123456789abcdef0123456789abcdef\nsqueezed no\nhidden no\n";
     const V1_REPLY_DONE: &str = "bateri 1\nok\n";
     const V1_REPLY_PLACED: &str =
         "bateri 1\nok placed\nlanded beside_group\nnext-to t4\nsqueezed no\nhidden yes\n";
@@ -531,7 +550,7 @@ mod tests {
     fn place() -> Place {
         Place {
             terminal: Terminal(9),
-            anchor: Some(Terminal(4)),
+            anchor: Some(Anchor::of(Terminal(4))),
             side: Some(Side::Below),
             ratio: Some(30),
             keep_open: true,
@@ -572,6 +591,50 @@ mod tests {
             // And what this writes is what version 1 wrote.
             assert_eq!(request.encode().as_deref(), Ok(text), "{request:?}");
         }
+    }
+
+    #[test]
+    fn an_anchor_may_be_any_name_kablo_has_and_is_written_as_it_was_read() {
+        let made = Anchor::parse("b-0123456789abcdef0123456789abcdef").expect("a name");
+        let wanted = Place {
+            side: Some(Side::Right),
+            anchor: Some(made.clone()),
+            ..bare()
+        };
+        assert_eq!(
+            Request::parse(V1_PLACE_MADE),
+            Ok(Request::Place(wanted.clone()))
+        );
+        assert_eq!(
+            Request::Place(wanted).encode().as_deref(),
+            Ok(V1_PLACE_MADE)
+        );
+        // A name a person gave a terminal with kablo is as good, and so is an agent's number.
+        for name in ["mine", "build.2", "t04", "t4"] {
+            let text = format!("bateri 1\nplace\nterminal t9\nanchor {name}\n");
+            assert_eq!(
+                Request::parse(&text),
+                Ok(Request::Place(Place {
+                    anchor: Anchor::parse(name),
+                    ..bare()
+                })),
+                "{name}"
+            );
+        }
+        // The reply says the same name back; the terminal being placed stays a plain number.
+        let placed = Reply::Placed(Placed {
+            landed: Landed::AsAsked,
+            next_to: Some(made),
+            squeezed: false,
+            hidden: false,
+        });
+        assert_eq!(Reply::parse(V1_REPLY_PLACED_MADE).as_ref(), Ok(&placed));
+        assert_eq!(placed.encode(), V1_REPLY_PLACED_MADE);
+        assert_eq!(
+            usage("bateri 1\nplace\nterminal b-0123456789abcdef0123456789abcdef\n").kind,
+            Kind::Usage
+        );
+        assert_eq!(usage("bateri 1\nclose\nterminal mine\n").kind, Kind::Usage);
     }
 
     #[test]
@@ -668,9 +731,18 @@ mod tests {
             ("bateri 1\nplace\nterminal b-0a1b\n", "names a terminal"),
             ("bateri 1\nplace\nterminal t09\n", "names a terminal"),
             (
-                "bateri 1\nplace\nterminal t1\nanchor mine\n",
-                "names a terminal",
+                "bateri 1\nplace\nterminal t1\nanchor a/b\n",
+                "names a terminal as kablo does",
             ),
+            (
+                "bateri 1\nplace\nterminal t1\nanchor ../t4\n",
+                "names a terminal as kablo does",
+            ),
+            (
+                "bateri 1\nplace\nterminal t1\nanchor not a name\n",
+                "names a terminal as kablo does",
+            ),
+            ("bateri 1\nplace\nterminal t1\nanchor\n", "no value"),
             ("bateri 1\nplace\nterminal t1\nside top\n", "left, right"),
             ("bateri 1\nplace\nterminal t1\nside Left\n", "left, right"),
             ("bateri 1\nplace\nterminal t1\nratio 0\n", "1 to 99"),
@@ -768,7 +840,7 @@ mod tests {
                 V1_REPLY_PLACED,
                 Reply::Placed(Placed {
                     landed: Landed::BesideGroup,
-                    next_to: Some(Terminal(4)),
+                    next_to: Some(Anchor::of(Terminal(4))),
                     squeezed: false,
                     hidden: true,
                 }),

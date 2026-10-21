@@ -190,7 +190,7 @@ impl Rig {
         let asked = self.requests();
         assert_eq!(asked, vec![(hold, new_request(terminal))]);
         self.hub
-            .start(hold, ACCOUNT, NewSession::default())
+            .start(hold, ACCOUNT, NewSession::default(), None)
             .expect("started");
         self.pump();
         (hold, id(terminal))
@@ -243,8 +243,10 @@ fn a_new_terminal_is_bound_and_its_output_reaches_the_holder_exactly() {
             version: wire::VERSION
         }
     );
+    // A holder of this version is told the name the terminal has.
     assert!(rig.heard_by(hold).contains(&ToHold::Bound {
-        account: ACCOUNT.into()
+        account: ACCOUNT.into(),
+        terminal: Some(terminal.clone()),
     }));
     assert_eq!(rig.hub.terminal_of(hold), Some((ACCOUNT, &terminal)));
     assert_eq!(rig.hub.hold_of(ACCOUNT, &terminal), Some(hold));
@@ -432,6 +434,105 @@ fn a_restarted_application_resumes_from_what_the_holder_wrote() {
     assert_eq!(end, Some(9));
 }
 
+/// The application numbers the terminals of a server: the holder asked with its own name and the
+/// terminal is `t7`. The server has it under the number, the holder is told it, and the terminal
+/// is found by it afterwards — the holder resumes by the name it was told.
+#[test]
+fn a_terminal_started_under_a_number_is_told_to_the_holder_and_found_by_it() {
+    let mut rig = Rig::new();
+    let hold = rig.hold();
+    rig.greet(hold);
+    rig.say(hold, &ToApp::Open(new_request("b-1")));
+    assert_eq!(rig.requests(), vec![(hold, new_request("b-1"))]);
+    rig.hub
+        .start(hold, ACCOUNT, NewSession::default(), Some(id("t7")))
+        .expect("started");
+    rig.pump();
+    assert!(rig.bridge.has(&id("t7")));
+    assert!(
+        !rig.bridge.has(&id("b-1")),
+        "nothing is made under the holder's name"
+    );
+    assert_eq!(rig.hub.terminal_of(hold), Some((ACCOUNT, &id("t7"))));
+    assert_eq!(rig.hub.hold_of(ACCOUNT, &id("t7")), Some(hold));
+    assert_eq!(rig.hub.hold_of(ACCOUNT, &id("b-1")), None);
+    assert!(rig.heard_by(hold).contains(&ToHold::Bound {
+        account: ACCOUNT.into(),
+        terminal: Some(id("t7")),
+    }));
+    rig.bridge.write(&id("t7"), b"abc");
+    rig.pump();
+    let (bytes, end) = rig.output(hold);
+    assert_eq!(bytes, b"abc");
+
+    // The application is gone and comes back: the holder asks for the name it was told.
+    rig.drop_connection();
+    rig.bridge.write(&id("t7"), b"def");
+    let mut second = Rig::with(rig.bridge);
+    let hold = second.hold();
+    second.greet(hold);
+    second.say(hold, &ToApp::Open(resume_request("t7", end)));
+    assert_eq!(second.requests(), vec![(hold, resume_request("t7", end))]);
+    second.hub.resume(hold, ACCOUNT, false).expect("resumed");
+    second.pump();
+    assert_eq!(second.output(hold).0, b"def");
+}
+
+/// A holder of version 2 reads no name in `Bound` (it would take the frame for a broken peer), so
+/// it is sent the bytes it always was, and the terminal keeps the name it made.
+#[test]
+fn a_holder_that_cannot_be_told_a_name_is_sent_the_bound_it_always_was() {
+    for version in [1, 2] {
+        let mut rig = Rig::new();
+        let hold = rig.hold();
+        rig.say(
+            hold,
+            &ToApp::Hello {
+                newest: version,
+                oldest: 1,
+            },
+        );
+        rig.say(hold, &ToApp::Open(new_request("b-1")));
+        rig.requests();
+        assert_eq!(rig.hub.version_of(hold), version);
+        // A name given in spite of that is not used: the holder could not be told it, and a
+        // terminal its holder does not know the name of is one it cannot find again.
+        rig.hub
+            .start(hold, ACCOUNT, NewSession::default(), Some(id("t7")))
+            .expect("started");
+        rig.pump();
+        assert!(rig.bridge.has(&id("b-1")), "version {version}");
+        assert!(!rig.bridge.has(&id("t7")), "version {version}");
+        assert!(rig.heard_by(hold).contains(&ToHold::Bound {
+            account: ACCOUNT.into(),
+            terminal: None,
+        }));
+    }
+}
+
+/// A start that the client refuses leaves the request as it was asked, name included, so the
+/// owner can answer it another way.
+#[test]
+fn a_start_that_is_refused_leaves_the_request_with_the_name_it_came_with() {
+    let mut rig = Rig::new();
+    let (_, terminal) = rig.started("b-1");
+    let hold = rig.hold();
+    rig.greet(hold);
+    rig.say(hold, &ToApp::Open(new_request("b-2")));
+    rig.requests();
+    // `b-1` is in use on this client: the numbered start for b-2 under that name is refused.
+    assert!(
+        rig.hub
+            .start(hold, ACCOUNT, NewSession::default(), Some(terminal))
+            .is_err()
+    );
+    rig.hub
+        .start(hold, ACCOUNT, NewSession::default(), None)
+        .expect("the request is still there, as b-2");
+    rig.pump();
+    assert!(rig.bridge.has(&id("b-2")));
+}
+
 #[test]
 fn a_holder_that_never_saw_the_terminal_is_shown_the_screen() {
     let mut bridge = Bridge::new(Age::Current);
@@ -502,7 +603,7 @@ fn a_holder_that_asks_for_a_terminal_again_counts_as_shown_before_the_server_ans
     rig.say(other, &ToApp::Open(new_request("b-2")));
     rig.requests();
     rig.hub
-        .start(other, ACCOUNT, NewSession::default())
+        .start(other, ACCOUNT, NewSession::default(), None)
         .expect("started");
     assert!(!rig.hub.is_shown(other));
 }
@@ -589,8 +690,9 @@ fn the_versions_are_agreed_or_refused() {
     for (newest, oldest, expected) in [
         (1, 1, Some(1)),
         (2, 1, Some(2)),
-        (7, 1, Some(2)),
-        (9, 3, None),
+        (3, 1, Some(3)),
+        (7, 1, Some(3)),
+        (9, 4, None),
         (0, 0, None),
     ] {
         let hold = rig.hold();
@@ -660,13 +762,13 @@ fn the_owners_answers_that_do_not_fit_are_declined_and_change_nothing() {
     let hold = rig.hold();
     rig.greet(hold);
     assert_eq!(
-        rig.hub.start(hold, ACCOUNT, NewSession::default()),
+        rig.hub.start(hold, ACCOUNT, NewSession::default(), None),
         Err(Declined::NoRequest)
     );
     rig.say(hold, &ToApp::Open(resume_request("b-1", Some(0))));
     rig.requests();
     assert_eq!(
-        rig.hub.start(hold, ACCOUNT, NewSession::default()),
+        rig.hub.start(hold, ACCOUNT, NewSession::default(), None),
         Err(Declined::WrongKind)
     );
     assert_eq!(
@@ -701,7 +803,7 @@ fn a_terminal_the_server_will_not_make_falls_back_before_it_was_shown() {
     rig.say(hold, &ToApp::Open(new_request("b-1")));
     rig.requests();
     rig.hub
-        .start(hold, ACCOUNT, NewSession::default())
+        .start(hold, ACCOUNT, NewSession::default(), None)
         .expect("asked");
     rig.pump();
     assert!(matches!(
@@ -911,7 +1013,7 @@ fn the_owner_can_have_a_program_run_on_the_pane_before_the_terminal_exists() {
 
     // The request waits: no answer while the program runs, and no second one.
     assert_eq!(
-        rig.hub.start(hold, ACCOUNT, NewSession::default()),
+        rig.hub.start(hold, ACCOUNT, NewSession::default(), None),
         Err(Declined::Running)
     );
     assert_eq!(rig.hub.run(hold, &argv), Err(Declined::Running));
@@ -921,7 +1023,7 @@ fn the_owner_can_have_a_program_run_on_the_pane_before_the_terminal_exists() {
     assert!(rig.requests().is_empty());
     assert!(rig.events.contains(&HubEvent::Ran { hold, status: 0 }));
     rig.hub
-        .start(hold, ACCOUNT, NewSession::default())
+        .start(hold, ACCOUNT, NewSession::default(), None)
         .expect("started");
     rig.pump();
     assert_eq!(rig.hub.terminal_of(hold).map(|(_, t)| t), Some(&id("b-1")));
