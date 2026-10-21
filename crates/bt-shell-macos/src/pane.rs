@@ -42,6 +42,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
+use bt_core::pencere::{Action, Grant, Size as ViewSize, ViewOptions, font_stack};
 use bt_core::{
     BlockHandle, BlockInfo, CommandId, CommandPhase, ContentEdge, FontOptions, PaneUuid,
     ProgramBar, RemoteFiles, RemoteTarget, SearchCover, SearchDirection, SearchReport,
@@ -64,7 +65,7 @@ use objc2_app_kit::{
     NSTextFieldDelegate, NSTitlePosition, NSView, NSViewFrameDidChangeNotification,
     NSWindowDidBecomeKeyNotification, NSWindowDidChangeBackingPropertiesNotification,
     NSWindowDidChangeOcclusionStateNotification, NSWindowDidEndSheetNotification,
-    NSWindowDidResignKeyNotification, NSWindowOcclusionState,
+    NSWindowDidResignKeyNotification, NSWindowOcclusionState, NSWindowOrderingMode,
 };
 use objc2_core_foundation::CFRetained;
 use objc2_core_graphics::CGImage;
@@ -90,6 +91,7 @@ use crate::launch::{Adopted, Closing, Identity, Integration, Launch};
 use crate::notices::{Source, font_messages};
 use crate::pacer::MacPacer;
 use crate::password_sheet::PasswordSheet;
+use crate::pencere_view::{self, ViewHost, Waits};
 use crate::ports::Listener;
 use crate::preview::PreviewTicket;
 use crate::program;
@@ -1103,6 +1105,9 @@ struct ShellWake {
     /// Whether the stale-link news is waiting on the main queue —
     /// `search_pending`'s twin: at most one job.
     link_pending: Arc<AtomicBool>,
+    /// Whether the news of a program's view is waiting on the main queue —
+    /// `search_pending`'s twin: at most one job ([`TerminalPane::drain_views`]).
+    views_pending: Arc<AtomicBool>,
     /// Whether the pointer shape's news is waiting on the main queue —
     /// `search_pending`'s twin: at most one job.
     pointer_pending: Arc<AtomicBool>,
@@ -1838,6 +1843,28 @@ impl Wake for ShellWake {
         });
     }
 
+    fn view_changed(&self) {
+        // The reader thread (or the thread of the call the news answers), no
+        // `Term` lock and no desk lock held: a program's view has something for
+        // the pane, or a wait that only the pane has a clock for. The pane takes
+        // everything on the next main-queue turn — no frame; at most one job
+        // (`search_changed`'s pattern). The flag goes down **before** the take,
+        // so news that comes while the pane acts on it is another job.
+        if self.views_pending.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let pending = Arc::clone(&self.views_pending);
+        let (id, lookup) = (self.id, self.lookup);
+        DispatchQueue::main().exec_async(move || {
+            pending.swap(false, Ordering::AcqRel);
+            // audit: a block running on the main queue is on the main thread by definition.
+            let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
+            if let Some(pane) = lookup(mtm, id) {
+                pane.drain_views();
+            }
+        });
+    }
+
     fn pointer_changed(&self) {
         // The reader thread, under the `Term` lock or right after the scan:
         // the shape the program asks for changed. The view redoes its cursor
@@ -2185,6 +2212,16 @@ pub struct PaneIvars {
     /// Whether the pane can be seen — [`TerminalPane::set_visible`]'s last
     /// word; a pane is born seen.
     seen: Cell<bool>,
+    /// The view a program in this pane shows, over the terminal, while it does
+    /// ([`TerminalPane::drain_views`]); the terminal's frames stop for as long as
+    /// it is there.
+    pencere: RefCell<Option<ViewHost>>,
+    /// The deadlines set on the conversation with that program's view
+    /// ([`TerminalPane::wait_for_view`]).
+    view_waits: RefCell<Waits>,
+    /// The size, in points, the conversation was last told the view's container
+    /// is ([`TerminalPane::sync_view_size`]).
+    view_size: Cell<(u32, u32)>,
     /// The shell's exit code once it exited normally; `None` before, and for one killed by a
     /// signal ([`TerminalPane::exit_status`]).
     exit_status: Cell<Option<i32>>,
@@ -2823,6 +2860,7 @@ impl TerminalPane {
                 port_probe: Arc::new(PortProbe::new(ports_on)),
                 environment_pending: Arc::default(),
                 link_pending: Arc::default(),
+                views_pending: Arc::default(),
                 pointer_pending: Arc::default(),
                 blocks_pending: Arc::default(),
                 unseen_pending: Arc::default(),
@@ -2848,6 +2886,9 @@ impl TerminalPane {
             driving: Cell::new(false),
             bar_pointer: Cell::new((false, false)),
             seen: Cell::new(true),
+            pencere: RefCell::new(None),
+            view_waits: RefCell::new(Waits::default()),
+            view_size: Cell::new((0, 0)),
             exit_status: Cell::new(None),
             marks_wanted: Cell::new(false),
             block_paced: Cell::new(None),
@@ -3046,8 +3087,10 @@ impl TerminalPane {
     /// frame and drives no sampling or block index, and one coming back is
     /// drawn again — the compositor may have emptied its layer.
     pub fn set_visibility(&self, visible: bool) {
+        // A program's view over the terminal keeps its frames stopped whatever
+        // the pane's visibility says; they come back with the view's end.
         if let Some(link) = self.link() {
-            link.set_visible(visible);
+            link.set_visible(visible && !self.shows_view());
         }
         self.set_visible(visible);
     }
@@ -3056,8 +3099,18 @@ impl TerminalPane {
     /// first responder, and the pane's host hears [`PaneHost::focused`].
     /// `false` when the pane is in no window or the window refused.
     pub fn focus(&self) -> bool {
-        self.window()
-            .is_some_and(|window| window.makeFirstResponder(Some(self.view())))
+        let Some(window) = self.window() else {
+            return false;
+        };
+        // The keyboard belongs to a program's view while it covers the terminal.
+        match self.view_host() {
+            Some(host) => {
+                let taken = window.makeFirstResponder(Some(host.web()));
+                host.focus_page();
+                taken
+            }
+            None => window.makeFirstResponder(Some(self.view())),
+        }
     }
 
     /// The host hid or showed the pane, or a view above it: the pane reads
@@ -3732,7 +3785,11 @@ impl TerminalPane {
             // A restored pane's scrollback; `None` everywhere else.
             replay,
             journal: self.open_journal(settings.terminal().scrollback),
-            views: None,
+            // A program that writes pencere frames is answered, and its view is
+            // shown, in every pane but a timed run's: there the program is the
+            // gate's own script, the pane's reader hears no frame and nothing is
+            // written to it.
+            views: self.view_options(),
         };
         let wake = Arc::clone(&self.ivars().wake) as Arc<dyn Wake>;
         // The update's handover: the running program is carried
@@ -4152,6 +4209,10 @@ impl TerminalPane {
     /// stored and applied.
     pub(crate) fn set_font(&self, font: &FontOptions) {
         self.ivars().font.replace(font.clone());
+        // The view is given the family too (its colours follow `set_theme`).
+        if let Some(session) = self.session() {
+            session.set_view_font(font.family.as_deref());
+        }
         self.apply_font();
     }
 
@@ -4207,6 +4268,9 @@ impl TerminalPane {
     pub fn set_theme(&self, theme: Theme) {
         if let Some(session) = self.ivars().session.get() {
             session.set_theme(theme);
+        }
+        if let Some(host) = self.view_host() {
+            host.paint(theme.background_srgb());
         }
         if let Some(bar) = self.ivars().search.get() {
             bar.paint(&theme, theme.is_dark());
@@ -5257,7 +5321,7 @@ impl TerminalPane {
         if let Some(link) = self.ivars().link.get() {
             link.set_focused(focused);
         }
-        self.report_focus(focused, self.view().is_first_responder());
+        self.report_focus(focused, self.keyboard_here());
     }
 
     /// The pane's share of the closing sequence — **starts, does not wait**.
@@ -5408,6 +5472,9 @@ impl TerminalPane {
         self.stop_stats();
         // A forward tunnel of ours goes with the pane.
         self.end_remote_ports();
+        // A program's view goes with the pane (no teardown to ask: its program
+        // is hung up on next, or carried over, and meets a pane with no view).
+        self.drop_view();
         self.ivars().closed.set(true);
         // SAFETY: the observer is this object, registered in `observe_frame`;
         // a no-op if it is not registered.
@@ -5428,6 +5495,8 @@ impl TerminalPane {
     /// object. If the pane is not attached to a window there is no scale and
     /// nothing is done ([`TerminalPane::sync_geometry`]).
     pub(crate) fn refresh_geometry(&self) {
+        // The view's container is the pane, not the grid: told on its own.
+        self.sync_view_size();
         let Some(grid) = self.sync_geometry() else {
             return;
         };
@@ -5510,6 +5579,222 @@ impl TerminalPane {
             reserve,
             top,
         ))
+    }
+}
+
+/// A program's view in the pane: the web view over the terminal, and what the pane
+/// does while it is there.
+///
+/// The conversation with the program is in the session (`bt_core::pencere`, read
+/// from the stream); what it asks of the window arrives as news
+/// ([`ShellWake::view_changed`]) and is taken here on the main queue. While a view
+/// is shown the terminal's frames stop, as in a background tab — the session and the
+/// renderer stay, and what the screen holds is what comes back (§6.5). The
+/// keyboard goes to the view if the terminal had it, and comes back to the terminal
+/// if the view had it.
+impl TerminalPane {
+    /// What the session is opened with to host views: the application's name and
+    /// version, the process's shelf of bundle files, the font family and the
+    /// person's language and time zone. `None` in a timed run, whose program is
+    /// the gate's own script.
+    fn view_options(&self) -> Option<ViewOptions> {
+        let ivars = self.ivars();
+        if ivars.run.is_some() {
+            return None;
+        }
+        let mut options = ViewOptions::new(
+            ivars.identity.app_name.clone(),
+            bt_core::TERM_PROGRAM_VERSION,
+        );
+        options.store = pencere_view::shelf();
+        options.font_mono = font_stack(ivars.font.borrow().family.as_deref());
+        options.locale = pencere_view::locale_tag();
+        options.time_zone = pencere_view::time_zone_name();
+        Some(options)
+    }
+
+    /// The program's view, if one is over the terminal: a second hold on it, so
+    /// nothing of the slot stays borrowed while AppKit runs (it calls back into the
+    /// pane for the keyboard and the focus).
+    fn view_host(&self) -> Option<ViewHost> {
+        self.ivars().pencere.borrow().clone()
+    }
+
+    /// Whether a program's view is over the terminal.
+    pub(crate) fn shows_view(&self) -> bool {
+        self.ivars().pencere.borrow().is_some()
+    }
+
+    /// Whether the keyboard is in the pane: in the terminal, or in the view that
+    /// covers it.
+    fn keyboard_here(&self) -> bool {
+        match self.view_host() {
+            Some(host) => host.holds_keyboard(),
+            None => self.view().is_first_responder(),
+        }
+    }
+
+    /// Takes what the program's view has for the pane and does it, in order; then
+    /// sets the deadline the conversation's state calls for. Main queue.
+    ///
+    /// **A question for the person and a link to open are refused for now** — the
+    /// view starts with what no one allowed (nothing: no domain, no permission),
+    /// and a link it asks to open is not opened. The log of the view is dropped.
+    pub(crate) fn drain_views(&self) {
+        if self.is_closed() {
+            return;
+        }
+        let Some(session) = self.session().cloned() else {
+            return;
+        };
+        for action in session.take_view_actions() {
+            match action {
+                Action::StartView(start) => self.start_view(&session, &start),
+                Action::ToView(message) => {
+                    if let Some(host) = self.view_host() {
+                        host.deliver(&message);
+                    }
+                }
+                Action::DestroyView => self.end_view(),
+                Action::Consent(_) => session.view_consent(Grant::none()),
+                Action::OpenLink { link, .. } => session.view_link_decision(link, false),
+                _ => {}
+            }
+        }
+        self.wait_for_view(&session);
+    }
+
+    /// Puts the view over the terminal: above the terminal's small surfaces (the
+    /// link label, the block tip, the jump button) and below the veils, so a pane that
+    /// is not the keyboard's dims over its view as it does over its terminal.
+    fn start_view(&self, session: &Arc<Session>, start: &bt_core::pencere::ViewStart) {
+        // The crate has one view at a time; a stale one goes first.
+        self.end_view();
+        self.sync_view_size();
+        let ivars = self.ivars();
+        let ground = session.theme().background_srgb();
+        let Some(host) = ViewHost::start(self.mtm(), session, start, self.bounds(), ground) else {
+            session.close_view();
+            return;
+        };
+        self.addSubview_positioned_relativeTo(
+            host.web(),
+            NSWindowOrderingMode::Below,
+            Some(&ivars.link_veil),
+        );
+        // The terminal's frames stop while the view covers it: nothing of them
+        // could be seen, and a program that streams under a view would draw them
+        // all the same.
+        if let Some(link) = ivars.link.get() {
+            link.set_visible(false);
+        }
+        let keyboard = ivars.view.is_first_responder();
+        ivars.pencere.replace(Some(host));
+        if keyboard {
+            self.focus();
+        }
+    }
+
+    /// Takes the view down: the keyboard goes back to the terminal if the view
+    /// had it (a first responder that leaves the window leaves the window with no
+    /// keyboard), and the terminal's frames come back — it is drawn again, with
+    /// the screen the program left.
+    fn end_view(&self) {
+        let Some(host) = self.ivars().pencere.take() else {
+            return;
+        };
+        if host.holds_keyboard()
+            && let Some(window) = self.window()
+        {
+            window.makeFirstResponder(Some(self.view()));
+        }
+        host.close();
+        if !self.is_closed()
+            && let Some(link) = self.ivars().link.get()
+        {
+            link.set_visible(self.ivars().seen.get());
+        }
+    }
+
+    /// The program's view goes with the pane, whatever it was doing: no
+    /// teardown is asked of the view and no frame comes back.
+    fn drop_view(&self) {
+        if let Some(host) = self.ivars().pencere.take() {
+            host.close();
+        }
+    }
+
+    /// Sets the deadline the conversation's state calls for: one delayed block on
+    /// the main queue, which asks for no frame ([`pencere_view`]'s `wait`).
+    fn wait_for_view(&self, session: &Arc<Session>) {
+        let plan = self
+            .ivars()
+            .view_waits
+            .borrow_mut()
+            .observe(session.view_state());
+        let Some((number, delay)) = plan else {
+            return;
+        };
+        let Ok(when) = DispatchTime::try_from(delay) else {
+            return;
+        };
+        let (id, lookup) = (self.id(), self.ivars().lookup);
+        let _ = DispatchQueue::main().after(when, move || {
+            // audit: a block running on the main queue is on the main thread by definition.
+            let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
+            if let Some(pane) = lookup(mtm, id) {
+                pane.view_wait_ended(number);
+            }
+        });
+    }
+
+    /// A deadline ran out: if it is still the one that is set, the conversation is
+    /// told the time is up and what follows is taken at once.
+    fn view_wait_ended(&self, number: u64) {
+        let Some(session) = self.session().cloned() else {
+            return;
+        };
+        if !self.ivars().view_waits.borrow_mut().expired(number) {
+            return;
+        }
+        session.view_wait_over();
+        self.drain_views();
+    }
+
+    /// Tells the conversation how big the view's container is: the pane's content
+    /// area in CSS pixels, which are points. The same size is not told twice.
+    fn sync_view_size(&self) {
+        let Some(session) = self.session() else {
+            return;
+        };
+        if !session.hosts_views() {
+            return;
+        }
+        let bounds = self.bounds();
+        let size = (
+            bounds.size.width.max(0.0).floor() as u32,
+            bounds.size.height.max(0.0).floor() as u32,
+        );
+        if size.0 == 0 || size.1 == 0 || size == self.ivars().view_size.get() {
+            return;
+        }
+        self.ivars().view_size.set(size);
+        session.set_view_size(ViewSize {
+            width: size.0,
+            height: size.1,
+        });
+    }
+
+    /// ⌃C in the view: the interrupt reaches the program, under the same rule as the
+    /// terminal's keys ([`TerminalPane::hold_input`]: a pane waiting for its
+    /// connection holds it).
+    pub(crate) fn interrupt_program(&self) {
+        if self.hold_input(false) {
+            return;
+        }
+        if let Some(session) = self.session() {
+            session.write(&[pencere_view::INTERRUPT]);
+        }
     }
 }
 

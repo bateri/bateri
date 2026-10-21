@@ -84,6 +84,21 @@ objc2-user-notifications = { version = "0.3", default-features = false, features
 objc2-security = { version = "0.3.2", default-features = false, features = [
     "std", "SecItem",
 ] }
+# The web view a program's view runs in (`bt-shell-macos::pencere_view`): `WKWebView`
+# with a custom URL scheme served by the application, a script-message bridge to the
+# host's conversation with the program, and navigation and UI delegates that refuse
+# everything else. User-approved dependency decision (2026-10-21): the objc2 family's
+# own generation (0.3.2), the only new crate of the pane's view; `bitflags` is already
+# in the graph and the framework crates it names (`objc2-app-kit`, `objc2-foundation`,
+# `block2`) are the ones the shell already links. The default set turns on every
+# WebKit header; the flags below are the classes the module names.
+objc2-web-kit = { version = "0.3", default-features = false, features = [
+    "std", "block2", "objc2-app-kit", "WKWebView", "WKWebViewConfiguration",
+    "WKUserContentController", "WKScriptMessage", "WKScriptMessageHandler",
+    "WKURLSchemeHandler", "WKURLSchemeTask", "WKNavigationDelegate", "WKNavigationAction",
+    "WKNavigation", "WKUIDelegate", "WKWebsiteDataStore", "WKFrameInfo", "WKSecurityOrigin",
+    "WKWindowFeatures",
+] }
 # The main queue (`bt-shell-macos`) and vnode sources (`bt-shell-common`'s
 # `watch`). User-approved dependency decision.
 dispatch2 = { version = "0.3", features = ["block2"] }

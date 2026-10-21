@@ -351,6 +351,15 @@ pub(crate) fn view_theme(theme: &Theme, font_mono: &str) -> ViewTheme {
     view
 }
 
+/// Whether the conversation is somewhere the shell must put a deadline on: an
+/// `open` that waits for its files, the MCP start-up or the person, and a view
+/// that was told to go and has not answered. The crate has no clock
+/// ([`crate::Session::view_wait_over`] is what the shell calls when the wait it
+/// chose runs out), so it is the shell that has to know a wait has begun.
+fn waits(state: State) -> bool {
+    matches!(state, State::Opening | State::Closing)
+}
+
 /// The slot a pane's conversation is kept in. See the module's documentation.
 ///
 /// Two leaf locks, so that the heavy work is never in the way of the cheap:
@@ -386,6 +395,9 @@ struct Slots {
     /// What the shell is to do, in order: everything the conversation asked
     /// that is not bytes for the program.
     views: Vec<Action>,
+    /// The conversation is in a state the shell sets a deadline for
+    /// ([`waits`]), as the shell was last told: each edge of it is news.
+    waiting: bool,
 }
 
 impl Desk {
@@ -421,6 +433,7 @@ impl Desk {
             slots: Mutex::new(Slots {
                 parked: VecDeque::new(),
                 views: Vec::new(),
+                waiting: false,
             }),
             wake,
             observer,
@@ -540,7 +553,11 @@ impl Desk {
 
     /// Takes the conversation's actions out: the bytes for the program are
     /// returned, the rest is kept for the shell, and whether the shell has to be
-    /// told — only when the slot was empty, so a burst is one news.
+    /// told — only when the slot was empty, so a burst is one news. A wait that
+    /// begins or ends is news as well, though nothing is kept for it: an `open`
+    /// is answered with bytes only, and the shell is the one with a clock to end
+    /// the wait with ([`waits`]) — and to forget it when the conversation left
+    /// the state on its own.
     fn drain(&self, inner: &mut Inner) -> (Vec<Vec<u8>>, bool) {
         self.close_if_unsafe(inner);
         let mut writes = Vec::new();
@@ -551,8 +568,11 @@ impl Desk {
                 other => kept.push(other),
             }
         }
+        let waiting = waits(inner.conversation.state());
         let mut slots = lock(&self.slots);
-        let notify = slots.views.is_empty() && !kept.is_empty();
+        let moved = waiting != slots.waiting;
+        slots.waiting = waiting;
+        let notify = slots.views.is_empty() && (!kept.is_empty() || moved);
         slots.views.extend(kept);
         (writes, notify)
     }

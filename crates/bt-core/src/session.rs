@@ -30543,7 +30543,7 @@ e\\314\\201.'; sleep 5";
     }
 
     #[test]
-    fn a_program_opens_a_view_in_its_pane_and_the_shell_is_told_once() {
+    fn a_program_opens_a_view_in_its_pane_and_the_shell_is_told_of_the_wait_and_the_view() {
         use crate::pencere::tests::{
             bundle_open, hello, initialize_answer, is_request, page_file, token_of, tools_answer,
         };
@@ -30562,13 +30562,18 @@ e\\314\\201.'; sleep 5";
         program.wait_state(crate::pencere::State::Open);
 
         assert!(program.session.hosts_views());
+        // The shell is told after the state is visible (the bytes and the news go out once
+        // the desk's lock is let go), so the second event is waited for, not assumed.
+        wait_until("the view's event", Duration::from_secs(10), || {
+            program.wake.views() >= 2
+        });
         let views = program.session.take_view_actions();
         assert_eq!(views.len(), 1, "{views:?}");
         assert!(matches!(views[0], crate::pencere::Action::StartView(_)));
         assert_eq!(
             program.wake.views(),
-            1,
-            "one event for the view that starts"
+            2,
+            "one event for the wait that began with the open, one for the view that starts"
         );
         assert_eq!(program.session.view_entry().as_deref(), Some("index.html"));
         let served = program.session.serve_view_file("index.html");

@@ -63,6 +63,7 @@ mod palette;
 mod pane;
 mod pane_drag;
 mod password_sheet;
+mod pencere_view;
 mod pointer;
 mod preview;
 mod promise;

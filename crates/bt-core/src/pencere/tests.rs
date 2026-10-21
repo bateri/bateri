@@ -451,14 +451,14 @@ fn a_pane_without_views_hears_nothing_and_answers_nothing() {
 }
 
 #[test]
-fn the_full_opening_ends_with_a_view_for_the_shell_and_one_event() {
+fn the_full_opening_ends_with_a_view_for_the_shell_and_two_events() {
     let (rig, _, wake) = Rig::new(true);
     let mut pane = Pane::new(rig);
     open_a_view(&mut pane);
     assert_eq!(
         wake_count(&wake),
-        1,
-        "one event for the view that is to start"
+        2,
+        "one event for the wait that began with the open, one for the view that is to start"
     );
     let desk = pane.rig.desk.as_ref().expect("a desk");
     let views = desk.take_views();
@@ -492,7 +492,7 @@ fn a_burst_for_the_shell_is_one_event() {
     let (rig, _, wake) = Rig::new(true);
     let mut pane = Pane::new(rig);
     open_a_view(&mut pane);
-    assert_eq!(wake_count(&wake), 1);
+    assert_eq!(wake_count(&wake), 2);
     let desk = pane.rig.desk.as_ref().expect("a desk");
     // Two things for the view in a row, nobody has taken the first yet. (The
     // view has not initialized, so it is told nothing: what is asked of the
@@ -507,12 +507,12 @@ fn a_burst_for_the_shell_is_one_event() {
     desk.set_font(Some("Fira Code"), |_| {});
     assert_eq!(
         wake_count(&wake),
-        1,
+        2,
         "no second event while the slot is full"
     );
     desk.take_views();
     desk.apply(|_| {}, |conversation| conversation.close_view());
-    assert_eq!(wake_count(&wake), 2, "emptied, and there is news again");
+    assert_eq!(wake_count(&wake), 3, "emptied, and there is news again");
 }
 
 #[test]
@@ -621,7 +621,7 @@ fn the_right_token_in_a_bye_ends_the_view_and_the_pane_is_written_nothing_after(
     let rig = Arc::clone(&pane.rig);
     let desk = rig.desk.as_ref().expect("a desk");
     desk.take_views();
-    assert_eq!(wake_count(&wake), 1);
+    assert_eq!(wake_count(&wake), 2);
 
     // Another token, or none: nothing changes.
     for payload in [
@@ -642,7 +642,7 @@ fn the_right_token_in_a_bye_ends_the_view_and_the_pane_is_written_nothing_after(
     let bye = format!(r#"{{"token":"{token}","reason":"signal"}}"#);
     pane.feed(&wire("bye", 7, None, None, &bye));
     assert_eq!(desk.take_views(), [Action::DestroyView]);
-    assert_eq!(wake_count(&wake), 2);
+    assert_eq!(wake_count(&wake), 3);
     assert_eq!(
         desk.apply(|_| {}, |conversation| conversation.state()),
         State::Ended
@@ -664,8 +664,54 @@ fn the_end_of_the_command_closes_the_view_and_writes_nothing() {
     desk.program_ended(pane.rig.write());
 
     assert_eq!(desk.take_views(), [Action::DestroyView]);
-    assert_eq!(wake_count(&wake), 2);
+    assert_eq!(wake_count(&wake), 3);
     assert!(lock(&pane.rig.input).is_empty(), "{:?}", pane.rig.written());
+}
+
+#[test]
+fn a_wait_that_begins_or_ends_is_news_for_the_shell_that_has_the_clock() {
+    let (rig, _, wake) = Rig::new(true);
+    let mut pane = Pane::new(rig);
+    pane.feed(&hello());
+    let token = token_of(&pane.rig.written()[0]);
+    assert_eq!(
+        wake_count(&wake),
+        0,
+        "an offer waits for nothing the shell ends"
+    );
+
+    // An `open` that is answered with a `need` and nothing else: nothing is kept
+    // for the shell, but its files are waited for, and only the shell has a clock.
+    pane.feed(&bundle_open(&token));
+    assert_eq!(pane.rig.written().len(), 1, "the `need`");
+    let desk = pane.rig.desk.as_ref().expect("a desk");
+    assert_eq!(wake_count(&wake), 1, "the wait began");
+    assert!(desk.take_views().is_empty(), "and nothing is kept for it");
+    assert_eq!(
+        desk.apply(|_| {}, |conversation| conversation.state()),
+        State::Opening
+    );
+
+    // The files do not come: the shell's wait ran out and the open ends.
+    desk.apply(pane.rig.write(), |conversation| conversation.timed_out());
+    let written = pane.rig.written();
+    assert_eq!(written.len(), 1, "{written:?}");
+    assert_eq!(written[0].kind, "closed");
+    assert!(
+        written[0].payload.contains("timeout"),
+        "{}",
+        written[0].payload
+    );
+    assert_eq!(
+        desk.apply(|_| {}, |conversation| conversation.state()),
+        State::Idle
+    );
+    assert_eq!(
+        wake_count(&wake),
+        2,
+        "the wait ended: the shell forgets the deadline it set"
+    );
+    assert!(desk.take_views().is_empty());
 }
 
 #[test]

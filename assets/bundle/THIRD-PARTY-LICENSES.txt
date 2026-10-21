@@ -914,6 +914,10 @@ objc2-user-notifications 0.3.2
   Copyright (c) the objc2-user-notifications developers
   https://github.com/madsmtm/objc2
 
+objc2-web-kit 0.3.2
+  Copyright (c) the objc2-web-kit developers
+  https://github.com/madsmtm/objc2
+
 once_cell 1.21.4
   Copyright (c) Aleksey Kladov
   https://github.com/matklad/once_cell

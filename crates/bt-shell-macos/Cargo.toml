@@ -213,6 +213,9 @@ objc2-user-notifications = { workspace = true }
 # its string keys, the password's bytes and the port's number.
 objc2-security = { workspace = true }
 objc2-core-foundation = { workspace = true, features = ["CFData", "CFNumber"] }
+# The web view of a program's view (`pencere_view`): a new crate, user-approved
+# (2026-10-21); the rationale for the flags is in the workspace manifest.
+objc2-web-kit = { workspace = true }
 # A pane's still on a split tab's summary card (`snapshot`): its pixels become
 # a `CGImage` in the sRGB space, laid in a layer as its contents. A direct
 # edge to a crate that is already in the graph (`bt-atlas` uses it); only
@@ -244,4 +247,11 @@ bt-shell-common = { workspace = true, features = ["test-support"] }
 # wants the main thread, which libtest's harness does not run tests on.
 [[test]]
 name = "embed"
+harness = false
+
+# A program's view in a pane, end to end: a program that speaks the pencere protocol
+# through two files, the web view the pane puts over its terminal, and the keys and the
+# `bye` that end it. Its own `main`, for the same reason as `embed`'s.
+[[test]]
+name = "pencere"
 harness = false
