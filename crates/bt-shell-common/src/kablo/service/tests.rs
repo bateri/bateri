@@ -268,8 +268,13 @@ impl Rig {
     }
 
     fn graced(name: &str, world: Arc<Fake>, grace: Duration) -> Rig {
+        Rig::kept(name, world, Arc::new(Ledger::memory()), grace)
+    }
+
+    /// A service whose ledger is the test's.
+    fn kept(name: &str, world: Arc<Fake>, ledger: Arc<Ledger>, grace: Duration) -> Rig {
         let dir = scratch(name);
-        let service = Service::start_with(&dir, world.clone(), grace).expect("a service");
+        let service = Service::start_with(&dir, world.clone(), ledger, grace).expect("a service");
         Rig {
             dir,
             service,
@@ -626,7 +631,14 @@ fn the_socket_is_the_users_and_goes_with_the_service() {
         .mode(0o755)
         .create(&open)
         .expect("dir");
-    assert!(Service::start(&open, Fake::new(Bridge::new(Age::Current))).is_err());
+    assert!(
+        Service::start(
+            &open,
+            Fake::new(Bridge::new(Age::Current)),
+            Arc::new(Ledger::memory())
+        )
+        .is_err()
+    );
     let _ = std::fs::remove_dir_all(&open);
     rig.service.stop();
     assert!(!socket.exists());
@@ -1009,4 +1021,274 @@ fn a_pane_that_goes_while_it_waits_is_not_left_dimmed() {
     if let Some(handle) = handle {
         let _ = handle.join();
     }
+}
+
+// ─── what outlives the process ───────────────────────────────────────────
+
+/// A terminal the first bateri made is shown again by the next one, which has nothing but the
+/// ledger: no route, no master, no install — only the bridge — and the holder's pane is
+/// found by the server's account as it always was.
+#[test]
+fn a_restarted_bateri_shows_the_terminal_the_one_before_made() {
+    let ledger = Arc::new(Ledger::memory());
+    let world = Fake::new(Bridge::new(Age::Current));
+    let pane = pane_named(&world);
+    let first = Rig::kept("again-1", world.clone(), ledger.clone(), END_GRACE);
+    let holder = Holder::new(&first.socket(), "b-1");
+    let terminal = first.terminals(1).remove(0);
+    world.bridge().write(&terminal, b"abc");
+    until("shown", || holder.shown.bytes() == b"abc");
+
+    // Written down from the request: the account with the way to reach it, the terminal
+    // with the pane.
+    let known = ledger
+        .known("u@rasp:22")
+        .expect("the account is remembered");
+    assert_eq!(known.argv, ["ssh", "rasp"]);
+    assert_eq!(known.version, "0.2.0");
+    assert!(ledger.keeps("u@rasp:22", &terminal));
+    let shown = first.service.shown(&pane).expect("the pane shows it");
+    assert_eq!(
+        shown.argv,
+        ["ssh", "rasp"],
+        "what a restored pane's pipe carries"
+    );
+
+    // bateri goes (the holder is kept by its holder process and waits); another one
+    // comes with nothing of the first but the ledger.
+    first.service.stop();
+    drop(first);
+    let before = world.log().len();
+    let second = Rig::kept("again-2", world.clone(), ledger.clone(), END_GRACE);
+    let mut again = Holder::start(
+        &second.socket(),
+        "b-1",
+        Target::Resume {
+            account: "u@rasp:22".into(),
+            offset: Some(3),
+        },
+    );
+    world.bridge().write(&terminal, b"def");
+    until("shown again, from where it was", || {
+        again.shown.bytes() == b"def"
+    });
+    assert_eq!(
+        world.log()[before..],
+        ["pane", "carry"],
+        "no route, no master, no install: the ledger knew the server"
+    );
+    assert!(second.service.shown(&pane).is_some());
+    world.bridge().exit(&terminal, Exit::Code(0));
+    assert_eq!(again.outcome(), Outcome::Exit(0));
+    until("forgotten once it ended", || {
+        ledger.known("u@rasp:22").is_none()
+    });
+}
+
+/// A holder that was shown a terminal bateri has since been told to end is not shown it
+/// again, and an account the ledger never heard of is refused as before.
+#[test]
+fn a_terminal_marked_to_end_is_not_shown_again() {
+    let ledger = Arc::new(Ledger::memory());
+    ledger.remember(
+        &host("u@rasp:22"),
+        &Installed {
+            target: kablo_proto::install::Target::LinuxX86_64,
+            version: "0.2.0".into(),
+            path: ".local/share/kablo/0.2.0/kablo".into(),
+            fresh: false,
+        },
+    );
+    let terminal = SessionId::new("b-1").expect("an id");
+    ledger.shown("u@rasp:22", &terminal, None);
+    ledger.end("u@rasp:22", &terminal);
+    let rig = Rig::kept(
+        "marked",
+        Fake::new(Bridge::new(Age::Current)),
+        ledger,
+        END_GRACE,
+    );
+    let mut holder = Holder::start(
+        &rig.socket(),
+        "b-1",
+        Target::Resume {
+            account: "u@rasp:22".into(),
+            offset: Some(0),
+        },
+    );
+    assert_eq!(holder.outcome(), Outcome::Exit(crate::hold::EXIT_REFUSED));
+    assert!(
+        rig.world.log().iter().all(|entry| entry != "carry"),
+        "nothing was dialed for it"
+    );
+}
+
+/// A quit that ends the terminals: asked, waited for, and gone from the ledger.
+#[test]
+fn a_quit_that_ends_the_terminals_waits_for_them_to_have_ended() {
+    let ledger = Arc::new(Ledger::memory());
+    let rig = Rig::kept(
+        "quit-ends",
+        Fake::new(Bridge::new(Age::Current)),
+        ledger.clone(),
+        END_GRACE,
+    );
+    let pane = pane_named(&rig.world);
+    let _holder = Holder::new(&rig.socket(), "b-1");
+    let terminal = rig.terminals(1).remove(0);
+    until("the pane found", || rig.service.shown(&pane).is_some());
+
+    let started = Instant::now();
+    rig.service
+        .end_all(&[pane.clone()], Duration::from_secs(10));
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "told, not timed out"
+    );
+    assert_eq!(rig.world.bridge().terminated(&terminal), Some(false));
+    assert!(
+        ledger.terminals().is_empty(),
+        "it ended: nothing to remember"
+    );
+    assert!(ledger.known("u@rasp:22").is_none());
+}
+
+/// A server that does not answer does not hold the quit: the wait is bounded, and the
+/// ledger keeps the request for the next connection.
+#[test]
+fn a_quit_does_not_wait_for_a_server_that_does_not_end_the_terminal() {
+    let ledger = Arc::new(Ledger::memory());
+    let rig = Rig::kept(
+        "quit-stubborn",
+        Fake::new(Bridge::new(Age::Current).stubborn()),
+        ledger.clone(),
+        Duration::from_secs(60),
+    );
+    let pane = pane_named(&rig.world);
+    let _holder = Holder::new(&rig.socket(), "b-1");
+    let terminal = rig.terminals(1).remove(0);
+    until("the pane found", || rig.service.shown(&pane).is_some());
+
+    let started = Instant::now();
+    rig.service.end_all(&[pane], Duration::from_millis(300));
+    let waited = started.elapsed();
+    assert!(waited >= Duration::from_millis(250), "{waited:?}");
+    assert!(waited < Duration::from_secs(5), "{waited:?}");
+    assert_eq!(rig.world.bridge().terminated(&terminal), Some(false));
+    assert_eq!(ledger.ending("u@rasp:22"), [terminal]);
+}
+
+/// A pane that shows nothing, and an account whose connection is down, are not waited for.
+#[test]
+fn a_quit_has_nothing_to_wait_for_when_nothing_can_be_asked() {
+    let ledger = Arc::new(Ledger::memory());
+    let rig = Rig::kept(
+        "quit-none",
+        Fake::new(Bridge::new(Age::Current)),
+        ledger.clone(),
+        END_GRACE,
+    );
+    let pane = pane_named(&rig.world);
+    let holder = Holder::new(&rig.socket(), "b-1");
+    let terminal = rig.terminals(1).remove(0);
+    rig.world.bridge().write(&terminal, b"one");
+    until("one shown", || holder.shown.bytes() == b"one");
+    until("the pane found", || rig.service.shown(&pane).is_some());
+
+    // Another pane: nothing.
+    let other = PaneUuid::parse("5a7e9c40-1b2d-4e3f-8a6b-0c9d1e2f3a4b").expect("a uuid");
+    let started = Instant::now();
+    rig.service.end_all(&[other], Duration::from_secs(10));
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert_eq!(rig.world.bridge().terminated(&terminal), None);
+
+    // The connection is down: the request waits in the ledger, and nobody waits for it.
+    rig.world
+        .carry_fails_with(Some(io::ErrorKind::ConnectionRefused));
+    rig.world.break_connection();
+    until("the pane told", || {
+        rig.service
+            .shown(&pane)
+            .is_some_and(|shown| shown.link.is_passive())
+    });
+    let started = Instant::now();
+    rig.service.end_all(&[pane], Duration::from_secs(10));
+    assert!(started.elapsed() < Duration::from_secs(5), "not waited for");
+    assert_eq!(ledger.ending("u@rasp:22"), [terminal.clone()]);
+
+    // The network is back: the first thing the connection does is end the terminal.
+    rig.world.carry_fails_with(None);
+    rig.service.wake();
+    until("the terminal ended at the next connection", || {
+        rig.world.bridge().terminated(&terminal) == Some(false)
+    });
+    until("forgotten once it ended", || ledger.terminals().is_empty());
+}
+
+/// A terminal an earlier bateri asked to end on a server it could not reach is ended the
+/// first time any pane connects to the account, whichever terminal that pane shows.
+#[test]
+fn a_terminal_left_to_end_is_ended_by_the_next_connection_to_its_account() {
+    let ledger = Arc::new(Ledger::memory());
+    let mut bridge = Bridge::new(Age::Current);
+    let left = bridge.add(
+        "b-left",
+        Size {
+            cols: 80,
+            rows: 24,
+            xpixel: 0,
+            ypixel: 0,
+        },
+    );
+    ledger.end("u@rasp:22", &left);
+    let rig = Rig::kept("left", Fake::new(bridge), ledger.clone(), END_GRACE);
+    let _holder = Holder::new(&rig.socket(), "b-1");
+    rig.terminals(1);
+    until("the left terminal ended", || {
+        rig.world.bridge().terminated(&left) == Some(false)
+    });
+    until("forgotten", || ledger.ending("u@rasp:22").is_empty());
+    let kept = SessionId::new("b-1").expect("an id");
+    assert_eq!(
+        rig.world.bridge().terminated(&kept),
+        None,
+        "the pane's own terminal is left alone"
+    );
+    assert!(ledger.keeps("u@rasp:22", &kept));
+}
+
+/// The holder of a pane survives the bateri that served it (an update's holder keeps it; so does
+/// `"quit"`'s) and finds the next one at the same place: it asks again by itself, from the byte
+/// it was at, and the terminal goes on — nothing twice, nothing missing — with nobody having
+/// told the new bateri anything but what the ledger kept.
+#[test]
+fn the_holder_that_waited_through_a_restart_finds_its_terminal_where_it_left_it() {
+    let ledger = Arc::new(Ledger::memory());
+    let world = Fake::new(Bridge::new(Age::Current));
+    let pane = pane_named(&world);
+    let first = Rig::kept("wait-1", world.clone(), ledger.clone(), END_GRACE);
+    let socket = first.socket();
+    let holder = Holder::new(&socket, "b-1");
+    let terminal = first.terminals(1).remove(0);
+    world.bridge().write(&terminal, b"abc");
+    until("shown", || holder.shown.bytes() == b"abc");
+
+    // The bateri goes. The program goes on writing, and the holder waits.
+    first.service.stop();
+    world.bridge().write(&terminal, b"def");
+    thread::sleep(Duration::from_millis(100));
+    assert_eq!(holder.shown.bytes(), b"abc");
+
+    // The next bateri binds the same place (the instance's directory is carried over).
+    let second = Service::start_with(&first.dir, world.clone(), ledger.clone(), END_GRACE)
+        .expect("a second service");
+    world.bridge().write(&terminal, b"ghi");
+    until("the rest, once", || holder.shown.bytes() == b"abcdefghi");
+    until("the pane found again", || second.shown(&pane).is_some());
+    assert_eq!(
+        second.shown(&pane).expect("shown").account,
+        "u@rasp:22",
+        "the account came from the ledger"
+    );
+    second.stop();
 }

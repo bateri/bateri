@@ -55,6 +55,19 @@ of every installed copy. A version without a section is not released.
   pane while the connection is down cannot reach the server, and the terminal
   stays.
 
+- **A terminal on a server follows `keep_running`, and comes back with
+  bateri.** The terminals kept on servers are local terminals that do not die
+  with the connection, so what you chose for the programs here is what they get:
+  ⌘Q ends them after the usual question (the question names “npm on rasp”),
+  except under `"quit"`, where ⌘Q leaves them running and the reminder names them,
+  and ⌥⌘Q ends them; an update never does, and a crash leaves them running unless
+  `keep_running` is `"update"`, which ends them at the next launch. When bateri
+  opens again — after an update, a crash, or the Mac restarting — each pane that
+  showed one shows it again, from where it was, and logs in the way a lost
+  connection is mended. A pane whose terminal is gone comes back as a shell with
+  its `ssh` line ready and a line saying so. A terminal that was to end while the
+  server could not be reached is ended the next time bateri connects to it.
+
 - **Programs can ask to be told the window's size in their output.** An app
   that turns on in-band resize reports (DECSET 2048, as kitty and Ghostty
   offer it) now gets the rows, the columns and the size in pixels in one

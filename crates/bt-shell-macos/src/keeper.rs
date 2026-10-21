@@ -96,6 +96,17 @@ pub(crate) enum QuitKind {
 }
 
 impl QuitKind {
+    /// What this quit is to the terminals the panes show on servers
+    /// ([`bt_shell_common::kablo::quit`]): they end with the programs, by the same table.
+    pub(crate) fn event(self) -> bt_shell_common::kablo::quit::Event {
+        use bt_shell_common::kablo::quit::Event;
+        match self {
+            QuitKind::Quit => Event::Quit,
+            QuitKind::EndPrograms => Event::QuitAndEnd,
+            QuitKind::Relaunch => Event::Update,
+        }
+    }
+
     /// The kind from Sparkle's relaunch flag and the ⌥⌘Q flag.
     pub(crate) fn of(relaunch: bool, end_programs: bool) -> QuitKind {
         match (relaunch, end_programs) {
@@ -529,6 +540,23 @@ mod tests {
     use super::*;
 
     const VALUES: [KeepRunning; 3] = [KeepRunning::Update, KeepRunning::Crash, KeepRunning::Quit];
+
+    /// The two tables are one: with a holder that answered, the quit closes the panes exactly
+    /// when the terminals on servers end with them. A second copy of the rule would let the
+    /// programs end and leave the terminals (or the reverse) without a test saying so.
+    #[test]
+    fn the_quit_closes_the_panes_exactly_when_the_terminals_on_servers_end() {
+        use bt_shell_common::kablo::quit::{Fate, fate};
+        for keep in VALUES {
+            for kind in [QuitKind::Quit, QuitKind::EndPrograms, QuitKind::Relaunch] {
+                assert_eq!(
+                    quit_path(keep, kind, true) == QuitPath::Close,
+                    fate(keep, kind.event()) == Fate::Ends,
+                    "{keep:?} × {kind:?}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn only_an_interactive_bundled_crash_or_quit_keeps_a_holder() {

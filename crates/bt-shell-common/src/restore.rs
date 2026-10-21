@@ -12,14 +12,17 @@
 //! **The format** follows `remote-hosts` (`ssh_wrap`): line based, the first line names the
 //! version ([`HEADER`] + [`VERSION`]), then one `W` line per window, one `T` line per tab under it
 //! and one `P` line per pane under that; the tree is a pre-order token run (`S h|v {ratio} … L
-//! {index}`). **Every version the writer still writes is read**: version 4 gave a window its tab
+//! {index}`). **Every version the writer still writes is read**: version 5 gave a pane the
+//! terminal a server keeps for it (a `P` line's last fields: `-`, or `+{account} {terminal}`
+//! and the `ssh` arguments that name the server), version 4 gave a window its tab
 //! groups (a `G {name} {collapsed} {resident}` line each, right after the `W` line and before any
 //! of its tabs, and a group field on every `T` line: the group's index among them, `-` for an
 //! ungrouped tab), version 3 the width its side column was dragged to (a `W` line's seventh
 //! field), version 2 a tab its own name (a `T` line's third field), version 1 has none of them.
 //! The writer says the oldest version that holds what there is — 1 while no tab is named, no
 //! column was resized and no group exists, 2 while only names are, 3 once a width is, 4 once a
-//! window has a group — so a session that uses nothing new stays readable by the bateri before
+//! window has a group, 5 once a pane shows a terminal a server keeps — so a session that uses
+//! nothing new stays readable by the bateri before
 //! it, whose reader drops any other number and, with it, a holder's programs. A version's frozen
 //! text stays in the tests: its reader must keep reading it. The strip a window saves is the
 //! flat order the groups were kept in (`groups::Groups::check`: the ungrouped tabs, then each
@@ -64,6 +67,7 @@ use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 
 use bt_core::PaneUuid;
+use kablo_proto::SessionId;
 
 use crate::groups::{Groups, Part};
 use crate::split::{Axis, Tree};
@@ -72,10 +76,14 @@ use crate::tabs::Tabs;
 /// The first line's word; the version follows it after one space.
 pub const HEADER: &str = "bateri-session";
 
-/// The format's current version: a window may carry its tab groups. The ones before it
-/// ([`SIDED`], [`NAMED`], [`UNNAMED`]) are read too; any other number is not read (a newer
-/// bateri's file after a downgrade is dropped, not misread).
-pub const VERSION: u32 = 4;
+/// The format's current version: a pane may carry the terminal a server keeps for it. The ones
+/// before it ([`GROUPED`], [`SIDED`], [`NAMED`], [`UNNAMED`]) are read too; any other number is
+/// not read (a newer bateri's file after a downgrade is dropped, not misread).
+pub const VERSION: u32 = 5;
+
+/// The version before kept terminals, which a session with groups and no pane on a server's
+/// terminal is still written in.
+const GROUPED: u32 = 4;
 
 /// The version before groups, which a session with no group and a resized column is still written
 /// in.
@@ -94,6 +102,10 @@ const LAYOUT: &str = "layout";
 /// The lock file's name: the layout cannot carry the lock, every save renames a new inode onto
 /// its path (`ssh_wrap`'s lock precedent).
 const LOCK: &str = "lock";
+/// The ledger of the terminals bateri keeps on servers (`kablo::ledger`): application state that
+/// lives beside the layout without being part of it, so the layout's sweeps and clears leave it
+/// — `restore_windows = "off"` is no reason to forget which terminals are still to be ended.
+const LEDGER: &str = "kablo";
 /// A history file's extension: `{PaneUuid}.vt`.
 const HISTORY_EXT: &str = "vt";
 
@@ -179,8 +191,26 @@ pub struct SavedPane {
     pub zoom_steps: i32,
     /// The remote target's command line (`ssh prod`), restored as a ready, not run, first input.
     pub remote_line: Option<String>,
+    /// The terminal a server keeps that the pane showed: restored, the pane's first program is
+    /// the pipe to it again (`bateri ssh-hold --terminal … --account …`), not the line above.
+    pub kept: Option<SavedKept>,
     /// Whether a history file was written for this pane.
     pub history: bool,
+}
+
+/// A terminal a server keeps (kablo), as far as a restored pane needs to find it again: which
+/// account holds it, its name there, and the `ssh` arguments that name the server (the
+/// program's name left out) — the pane's remote session is read from the command line of the
+/// pipe that shows it, so the arguments go back onto it. Nothing here is a secret: the arguments
+/// are the ones `remote_line` already keeps.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SavedKept {
+    /// The server's account ([`crate::ssh_wrap::host_key`]).
+    pub account: String,
+    /// The terminal's name on the server.
+    pub terminal: SessionId,
+    /// The `ssh` arguments, the program's name left out; never empty.
+    pub args: Vec<String>,
 }
 
 /// The split tree's twin whose leaves are pane **indices** (see the module doc).
@@ -571,7 +601,7 @@ fn valid_ratio(ratio: f64) -> bool {
 
 /// Escapes a text field: `\` → `\\`, space → `\s`, tab → `\t`, line feed → `\n`, carriage
 /// return → `\r`. Everything else passes as is (UTF-8 included).
-fn escape(text: &str) -> String {
+pub(crate) fn escape(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for ch in text.chars() {
         match ch {
@@ -587,7 +617,7 @@ fn escape(text: &str) -> String {
 }
 
 /// [`escape`]'s inverse; an unknown escape or a trailing `\` is `None`.
-fn unescape(text: &str) -> Option<String> {
+pub(crate) fn unescape(text: &str) -> Option<String> {
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars();
     while let Some(ch) = chars.next() {
@@ -644,8 +674,16 @@ impl Saved {
             .flat_map(|window| &window.tabs)
             .any(|tab| tab.name.is_some());
         let grouped = self.windows.iter().any(|window| !window.groups.is_empty());
-        let version = if grouped {
+        let kept = self
+            .windows
+            .iter()
+            .flat_map(|window| &window.tabs)
+            .flat_map(|tab| &tab.panes)
+            .any(|pane| pane.kept.is_some());
+        let version = if kept {
             VERSION
+        } else if grouped {
+            GROUPED
         } else if sided {
             SIDED
         } else if named {
@@ -673,7 +711,7 @@ impl Saved {
                 }
             }
             out.push('\n');
-            if version >= VERSION {
+            if version >= GROUPED {
                 for group in &window.groups {
                     out.push_str(&format!(
                         "G {} {} {}\n",
@@ -693,7 +731,7 @@ impl Saved {
                     out.push_str(&render_optional(tab.name.as_deref()));
                 }
                 // The group sits after the name for the same reason.
-                if version >= VERSION {
+                if version >= GROUPED {
                     out.push(' ');
                     out.push_str(&tab.group.map_or("-".to_owned(), |group| group.to_string()));
                 }
@@ -702,13 +740,32 @@ impl Saved {
                 for pane in &tab.panes {
                     let dir = pane.dir.as_deref().and_then(Path::to_str);
                     out.push_str(&format!(
-                        "P {} {} {} {} {}\n",
+                        "P {} {} {} {} {}",
                         pane.uuid.as_str(),
                         pane.zoom_steps,
                         u8::from(pane.history),
                         render_optional(dir),
                         render_optional(pane.remote_line.as_deref()),
                     ));
+                    // The kept terminal ends the line: its arguments are a run of tokens of
+                    // any length.
+                    if version >= VERSION {
+                        match &pane.kept {
+                            None => out.push_str(" -"),
+                            Some(kept) => {
+                                out.push_str(&format!(
+                                    " +{} {}",
+                                    escape(&kept.account),
+                                    kept.terminal.as_str()
+                                ));
+                                for arg in &kept.args {
+                                    out.push(' ');
+                                    out.push_str(&escape(arg));
+                                }
+                            }
+                        }
+                    }
+                    out.push('\n');
                 }
             }
         }
@@ -723,7 +780,8 @@ impl Saved {
             return None;
         }
         let version = header.next()?.parse::<u32>().ok()?;
-        if ![UNNAMED, NAMED, SIDED, VERSION].contains(&version) || header.next().is_some() {
+        if ![UNNAMED, NAMED, SIDED, GROUPED, VERSION].contains(&version) || header.next().is_some()
+        {
             return None;
         }
         let mut windows: Vec<SavedWindow> = Vec::new();
@@ -743,7 +801,7 @@ impl Saved {
                 // The groups come before the window's first tab, the tabs name them by index.
                 "G" => {
                     let window = windows.last_mut()?;
-                    if version < VERSION || !window.tabs.is_empty() {
+                    if version < GROUPED || !window.tabs.is_empty() {
                         return None;
                     }
                     window.groups.push(parse_group(&mut tokens)?);
@@ -757,7 +815,7 @@ impl Saved {
                     .tabs
                     .last_mut()?
                     .panes
-                    .push(parse_pane(&mut tokens)?),
+                    .push(parse_pane(&mut tokens, version)?),
                 _ => return None,
             }
             if tokens.next().is_some() {
@@ -865,7 +923,7 @@ fn parse_tab<'a>(tokens: &mut impl Iterator<Item = &'a str>, version: u32) -> Op
         None
     };
     // Versions before 4 have no groups: every tab is ungrouped.
-    let group = if version >= VERSION {
+    let group = if version >= GROUPED {
         match tokens.next()? {
             "-" => None,
             index => Some(index.parse().ok()?),
@@ -884,14 +942,44 @@ fn parse_tab<'a>(tokens: &mut impl Iterator<Item = &'a str>, version: u32) -> Op
     })
 }
 
-fn parse_pane<'a>(tokens: &mut impl Iterator<Item = &'a str>) -> Option<SavedPane> {
+fn parse_pane<'a>(tokens: &mut impl Iterator<Item = &'a str>, version: u32) -> Option<SavedPane> {
+    let uuid = PaneUuid::parse(tokens.next()?)?;
+    let zoom_steps = tokens.next()?.parse().ok()?;
+    let history = parse_bit(tokens.next()?)?;
+    let dir = parse_optional(tokens.next()?)?.map(PathBuf::from);
+    let remote_line = parse_optional(tokens.next()?)?;
+    // Versions before 5 have no kept terminal.
+    let kept = if version >= VERSION {
+        parse_kept(tokens)?
+    } else {
+        None
+    };
     Some(SavedPane {
-        uuid: PaneUuid::parse(tokens.next()?)?,
-        zoom_steps: tokens.next()?.parse().ok()?,
-        history: parse_bit(tokens.next()?)?,
-        dir: parse_optional(tokens.next()?)?.map(PathBuf::from),
-        remote_line: parse_optional(tokens.next()?)?,
+        uuid,
+        dir,
+        zoom_steps,
+        remote_line,
+        kept,
+        history,
     })
+}
+
+/// A `P` line's last fields: `-`, or `+{account}`, the terminal's name and the `ssh` arguments
+/// to the end of the line (at least one: a server is named by something). The outer `None` is
+/// a line not understood.
+fn parse_kept<'a>(tokens: &mut impl Iterator<Item = &'a str>) -> Option<Option<SavedKept>> {
+    let first = tokens.next()?;
+    if first == "-" {
+        return Some(None);
+    }
+    let account = unescape(first.strip_prefix('+')?)?;
+    let terminal = SessionId::new(tokens.next()?).ok()?;
+    let args = tokens.map(unescape).collect::<Option<Vec<String>>>()?;
+    (!account.is_empty() && !args.is_empty()).then_some(Some(SavedKept {
+        account,
+        terminal,
+        args,
+    }))
 }
 
 // ─── the directory ───────────────────────────────────────────────────────
@@ -941,13 +1029,26 @@ pub fn lock(dir: &Path) -> Option<Lock> {
     })
 }
 
+/// Where the ledger of the terminals kept on servers lives in the session directory
+/// (`kablo::ledger::Ledger::open`). It is application state, not a layout: [`clear`], [`take`]
+/// and the sweeps leave it, and `restore_windows` does not decide whether it exists.
+pub fn ledger_path(dir: &Path) -> PathBuf {
+    dir.join(LEDGER)
+}
+
+/// The temporary name the ledger is written through ([`write_atomic`]'s rule): a sweep that
+/// found it would delete a write in flight.
+fn ledger_temporary() -> String {
+    format!("{LEDGER}{TEMP_SUFFIX}")
+}
+
 fn history_path(dir: &Path, uuid: &PaneUuid) -> PathBuf {
     dir.join(format!("{}.{HISTORY_EXT}", uuid.as_str()))
 }
 
 /// Writes `bytes` to `path` through a temporary name (`0600`) and a `rename`; the temporary is
 /// removed on failure.
-fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let mut name = path.file_name().unwrap_or_default().to_os_string();
     name.push(TEMP_SUFFIX);
     let temporary = path.with_file_name(name);
@@ -1012,7 +1113,13 @@ fn sweep(lock: &Lock, keep: &HashSet<String>) {
         let Some(name) = name.to_str() else {
             continue;
         };
-        if name == LOCK || name == LAYOUT || name == RECENT || keep.contains(name) {
+        if name == LOCK
+            || name == LAYOUT
+            || name == RECENT
+            || name == LEDGER
+            || name == ledger_temporary()
+            || keep.contains(name)
+        {
             continue;
         }
         if entry.file_type().is_ok_and(|kind| kind.is_file()) {
@@ -1181,6 +1288,7 @@ mod tests {
             dir: None,
             zoom_steps: 0,
             remote_line: None,
+            kept: None,
             history: false,
         }
     }
@@ -1232,6 +1340,7 @@ mod tests {
                     dir: Some(PathBuf::from("/Users/ömer/My Drive/çalışma\\dosya")),
                     zoom_steps: 3,
                     remote_line: None,
+                    kept: None,
                     history: true,
                 },
                 SavedPane {
@@ -1239,6 +1348,7 @@ mod tests {
                     dir: Some(PathBuf::from("/tmp/tab\there\nnew line\rcr -")),
                     zoom_steps: -2,
                     remote_line: Some("ssh -p 2222 prod".to_owned()),
+                    kept: None,
                     history: false,
                 },
                 SavedPane {
@@ -1246,6 +1356,7 @@ mod tests {
                     dir: Some(PathBuf::from("")),
                     zoom_steps: 0,
                     remote_line: Some(String::new()),
+                    kept: None,
                     history: true,
                 },
             ],
@@ -1301,6 +1412,28 @@ mod tests {
                 resident: None,
             },
         ];
+        saved
+    }
+
+    /// [`rich_grouped`] with two panes on terminals a server keeps (one with a space and an
+    /// unusual argument in what names the server): the model of [`V5_FIXTURE`].
+    fn rich_kept() -> Saved {
+        let mut saved = rich_grouped();
+        let kept = |account: &str, terminal: &str, args: &[&str]| SavedKept {
+            account: account.to_owned(),
+            terminal: SessionId::new(terminal).expect("an id"),
+            args: args.iter().map(|arg| (*arg).to_owned()).collect(),
+        };
+        saved.windows[0].tabs[1].panes[1].kept = Some(kept(
+            "ada@prod:2222",
+            "b-0123456789abcdef0123456789abcdef",
+            &["-p", "2222", "ada@prod"],
+        ));
+        saved.windows[1].tabs[0].panes[0].kept = Some(kept(
+            "root@rasp:22 via jump:22",
+            "b-fedcba9876543210fedcba9876543210",
+            &["-J", "my jump", "root@rasp"],
+        ));
         saved
     }
 
@@ -1386,16 +1519,43 @@ mod tests {
         "P AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE 0 0 - -\n",
     );
 
+    /// Version 5 for [`rich_kept`], frozen the same way: every `P` line ends with the kept
+    /// terminal, `-` where the pane shows none, else `+{account}`, the terminal's name and the
+    /// `ssh` arguments to the end of the line.
+    const V5_FIXTURE: &str = concat!(
+        "bateri-session 5\n",
+        "W 120.5 -30 800 600.25 1 1 260.5\n",
+        "G api\\sserver 0 2\n",
+        "G ünï 1 -\n",
+        "T 0 - - - L 0\n",
+        "P 11111111-2222-3333-4444-555555555555 0 0 - - -\n",
+        "T 1 2 - 0 S h 0.3333333333333333 L 2 S v 0.71 L 0 L 1\n",
+        r"P 0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0 3 1 +/Users/ömer/My\sDrive/çalışma\\dosya - -",
+        "\n",
+        r"P 11111111-2222-3333-4444-555555555555 -2 0 +/tmp/tab\there\nnew\sline\rcr\s- +ssh\s-p\s2222\sprod +ada@prod:2222 b-0123456789abcdef0123456789abcdef -p 2222 ada@prod",
+        "\n",
+        "P AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE 0 1 + + -\n",
+        "T 0 - - 0 L 0\n",
+        "P AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE 0 0 - - -\n",
+        "T 0 - - 1 L 0\n",
+        "P 0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0 0 0 - - -\n",
+        "W 120.5 -30 800 600.25 0 0 -\n",
+        "T 0 - - - L 0\n",
+        r"P AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE 0 0 - - +root@rasp:22\svia\sjump:22 b-fedcba9876543210fedcba9876543210 -J my\sjump root@rasp",
+        "\n",
+    );
+
     #[test]
     fn the_previous_version_is_read_byte_for_byte() {
         assert_eq!(Saved::parse(V1_FIXTURE), Some(rich()));
         assert_eq!(Saved::parse(V2_FIXTURE), Some(rich_named()));
         assert_eq!(Saved::parse(V3_FIXTURE), Some(rich_sided()));
+        assert_eq!(Saved::parse(V4_FIXTURE), Some(rich_grouped()));
     }
 
     #[test]
     fn the_current_version_is_read_byte_for_byte() {
-        assert_eq!(Saved::parse(V4_FIXTURE), Some(rich_grouped()));
+        assert_eq!(Saved::parse(V5_FIXTURE), Some(rich_kept()));
     }
 
     /// The writer says the oldest version that holds the session — the one before names while no
@@ -1408,6 +1568,58 @@ mod tests {
         assert_eq!(rich_named().render(), V2_FIXTURE);
         assert_eq!(rich_sided().render(), V3_FIXTURE);
         assert_eq!(rich_grouped().render(), V4_FIXTURE);
+        assert_eq!(rich_kept().render(), V5_FIXTURE);
+    }
+
+    /// A pane on a kept terminal is what makes the file version 5 and nothing else does: take
+    /// it away and the same session is written as the one before, which the bateri before this
+    /// one reads.
+    #[test]
+    fn a_session_with_no_kept_terminal_is_not_written_as_version_five() {
+        let mut saved = rich_kept();
+        for pane in saved
+            .windows
+            .iter_mut()
+            .flat_map(|window| &mut window.tabs)
+            .flat_map(|tab| &mut tab.panes)
+        {
+            pane.kept = None;
+        }
+        assert_eq!(saved.render(), V4_FIXTURE);
+    }
+
+    /// A kept terminal that is not whole is a layout not understood: an account with nothing to
+    /// name the server by, a name no terminal has, a field missing, and the field in a file whose
+    /// version has none.
+    #[test]
+    fn a_kept_terminal_that_is_not_whole_drops_the_layout() {
+        let account = "+ada@prod:2222 b-0123456789abcdef0123456789abcdef -p 2222 ada@prod";
+        for (from, to) in [
+            (account, "+ada@prod:2222 b-0123456789abcdef0123456789abcdef"),
+            (account, "+ada@prod:2222"),
+            (account, "+"),
+            (account, "+ada@prod:2222 not/a/name ada@prod"),
+            (
+                account,
+                "+ada@prod:2222 b-0123456789abcdef0123456789abcdef bad\\x",
+            ),
+            (
+                account,
+                "ada@prod:2222 b-0123456789abcdef0123456789abcdef ada@prod",
+            ),
+        ] {
+            assert!(V5_FIXTURE.contains(from), "{from:?}");
+            let text = V5_FIXTURE.replacen(from, to, 1);
+            assert_eq!(Saved::parse(&text), None, "{to:?}");
+        }
+        assert!(Saved::parse(V5_FIXTURE).is_some(), "the control");
+        // A file of version 4 has no such field: one there is a stray token.
+        let text = V4_FIXTURE.replacen(
+            "P 11111111-2222-3333-4444-555555555555 0 0 - -\n",
+            "P 11111111-2222-3333-4444-555555555555 0 0 - - -\n",
+            1,
+        );
+        assert_eq!(Saved::parse(&text), None);
     }
 
     /// A width is a positive number of points or `-`; anything else is a layout not understood.
@@ -1436,6 +1648,7 @@ mod tests {
             (rich_sided(), "bateri-session 3\n"),
             (both, "bateri-session 3\n"),
             (rich_grouped(), "bateri-session 4\n"),
+            (rich_kept(), "bateri-session 5\n"),
         ] {
             let text = saved.render();
             assert!(text.starts_with(header), "{text}");
@@ -2032,6 +2245,25 @@ mod tests {
             pane.history = false;
         }
         assert_eq!(taken, expected);
+    }
+
+    /// The ledger of kept terminals is not a layout: a clear, a take and the sweeps leave it
+    /// (and the name it is written through), because `restore_windows = "off"` is no reason to
+    /// forget which terminals on servers are still to be ended.
+    #[test]
+    fn the_ledger_of_kept_terminals_outlasts_every_clear_and_sweep() {
+        let root = TempRoot::new("ledger-sweep");
+        let lock = lock(&directory(&root.0, "dev.bateri.test")).expect("the lock");
+        let ledger = ledger_path(lock.dir());
+        let writing = lock.dir().join("kablo.tmp");
+        fs::write(&ledger, "bateri-kablo 1\n").expect("write");
+        fs::write(&writing, "half").expect("write");
+        fs::write(lock.dir().join("stray"), "x").expect("write");
+        clear(&lock).expect("clear");
+        let _ = take(&lock, true);
+        sweep(&lock, &HashSet::new());
+        assert!(ledger.exists() && writing.exists());
+        assert!(!lock.dir().join("stray").exists());
     }
 
     #[test]

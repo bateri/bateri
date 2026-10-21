@@ -458,6 +458,77 @@ fn a_holder_that_never_saw_the_terminal_is_shown_the_screen() {
     assert!(!bytes.windows(4).any(|pair| pair == b"\x1b[3J"));
 }
 
+/// A relay from before pictures cannot make the one a holder with no position asks for: it goes
+/// on with bytes from where the terminal stands. The holder is left with the position of those
+/// bytes, not with the count of what it was given — it asks for the place it keeps after the next
+/// restart, and a place counted from zero is the wrong one.
+#[test]
+fn a_relay_that_cannot_make_a_picture_leaves_the_holder_the_position_of_its_bytes() {
+    let mut bridge = Bridge::new(Age::Old);
+    let terminal = bridge.add("b-1", SIZE);
+    bridge.write(&terminal, b"already there");
+    let mut rig = Rig::with(bridge);
+    let hold = rig.hold();
+    rig.greet(hold);
+    rig.say(hold, &ToApp::Open(resume_request("b-1", None)));
+    rig.requests();
+    rig.hub.resume(hold, ACCOUNT).expect("resumed");
+    rig.pump();
+    rig.bridge.write(&terminal, b"!?");
+    rig.pump();
+    let (bytes, end) = rig.output(hold);
+    assert_eq!(bytes, b"!?", "no picture, and no reset for one");
+    assert_eq!(end, Some(15), "13 bytes were there, two came");
+}
+
+/// The holder asked for a terminal it had shown before (to the bateri that is gone): whatever
+/// the connection to the server is doing, what its pane shows is a screen, and a screen that
+/// cannot be brought up to date is a passive one — not a first connection still being made.
+#[test]
+fn a_holder_that_asks_for_a_terminal_again_counts_as_shown_before_the_server_answers() {
+    let mut bridge = Bridge::new(Age::Current);
+    bridge.add("b-1", SIZE);
+    let mut rig = Rig::with(bridge);
+    rig.drop_connection();
+    let hold = rig.hold();
+    rig.greet(hold);
+    rig.say(hold, &ToApp::Open(resume_request("b-1", Some(0))));
+    rig.requests();
+    rig.hub.resume(hold, ACCOUNT).expect("resumed");
+    assert!(rig.hub.is_shown(hold));
+    // A new terminal is not: its pane shows the user's own `ssh` until the terminal is up.
+    let other = rig.hold();
+    rig.greet(other);
+    rig.say(other, &ToApp::Open(new_request("b-2")));
+    rig.requests();
+    rig.hub
+        .start(other, ACCOUNT, NewSession::default())
+        .expect("started");
+    assert!(!rig.hub.is_shown(other));
+}
+
+/// A terminal asked for again that the server no longer has — it ended while bateri was closed
+/// and the server forgot it — ends the holder with one line that says so, not with the
+/// server's words, and the pane that showed it is left with a shell.
+#[test]
+fn a_terminal_the_server_no_longer_has_ends_the_holder_that_asks_for_it_again_with_a_line() {
+    let mut rig = Rig::new();
+    let hold = rig.hold();
+    rig.greet(hold);
+    rig.say(hold, &ToApp::Open(resume_request("b-gone", Some(5))));
+    rig.requests();
+    rig.hub.resume(hold, ACCOUNT).expect("resumed");
+    rig.pump();
+    assert_eq!(
+        rig.heard_by(hold).last(),
+        Some(&ToHold::End {
+            code: 1,
+            note: Some("bateri: the terminal that ran here is no longer on the server".into()),
+        })
+    );
+    assert!(rig.hub.is_finished(hold));
+}
+
 #[test]
 fn a_holder_that_goes_lets_the_terminal_live_on() {
     let mut rig = Rig::new();

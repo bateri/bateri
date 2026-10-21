@@ -997,6 +997,14 @@ it:
 - With `"quit"`, holding ⌥ turns bateri ▸ Quit bateri into **Quit and End
   Programs** (⌥⌘Q): the quit that ends the programs, after the usual
   question (`confirm_close`), as ⌘Q does under the other values.
+- A terminal on a server (an `ssh` to a server kablo is on, below) is a program
+  like the others for this setting, and the quit's question counts the program
+  in front of it ("“npm on rasp” is still running") only when the quit ends it.
+  A lost connection and an update never end it; `"update"` ends it after a
+  crash, at the next launch; `"crash"` and `"quit"` leave it running through a
+  crash; ⌘Q ends it except under `"quit"`, and ⌥⌘Q always does. A server that
+  cannot be reached when the terminal is to end is asked at the next
+  connection to it.
 - If bateri is not opened again, kept programs run until they finish, or
   until you log out or restart the Mac; the helper exits once none is left.
   While bateri is closed their output is still read, so a server that logs
@@ -2045,8 +2053,25 @@ the pane is in, without asking for anything again. Closing the pane — ⌘W, th
 tab's ×, the window's red button — ends its terminal on the server, and the
 question before it names the program running there (“npm on rasp” is still
 running); `exit` in the terminal ends it too and returns to the local prompt. A
-pane closed while the connection is down cannot reach the server, and its
-terminal keeps running there.
+pane closed while the connection is down cannot reach the server: bateri writes
+the request down and ends the terminal the next time it connects to that
+server, before anything else.
+
+A terminal on a server is a local terminal that does not die with the
+connection, and `keep_running` (above) is what it follows: a lost connection, a
+closed lid and an update never end it, at any value; ⌘Q ends it after the usual
+question — except under `"quit"`, where ⌘Q leaves it running, asks nothing about
+it and names it in the reminder ("“npm on rasp” keeps running in the
+background…"), and ⌥⌘Q ends it; a crash leaves it running under `"crash"` and
+`"quit"` and ends it under `"update"`, at the next launch. When bateri is opened
+again — after an update, a crash, or the Mac restarting — every pane that showed
+such a terminal shows it again, wherever it was kept: the pane connects the
+way a lost connection is mended (a key, an agent or a saved password logs in by
+itself, otherwise the line says `Needs your password · ⏎ log in`). A pane whose
+terminal was ended, or is gone from the server, comes back as a shell with the
+`ssh` line ready and a dim line saying so. bateri remembers which terminals it
+keeps, and where, in `~/Library/Application Support/bateri/session/` beside the
+saved windows; nothing secret is in it (no password, no key).
 
 While the connection is down the pane shows the terminal's last screen under a
 veil (the dock stays clear), without the caret, and the dock's context line says

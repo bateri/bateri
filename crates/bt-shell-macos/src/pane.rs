@@ -97,7 +97,7 @@ use crate::promise::FinderDrops;
 use crate::quote;
 use crate::remote_helper::RemoteHelper;
 use crate::remote_ports::RemotePorts;
-use crate::restore::SavedPane;
+use crate::restore::{SavedKept, SavedPane};
 use crate::search_bar::{SearchBar, selection_query};
 use crate::ssh_route::Masters;
 use crate::stats::StatsDriver;
@@ -3106,9 +3106,29 @@ impl TerminalPane {
             dir: session.working_directory(),
             zoom_steps: self.zoom().steps(),
             remote_line: session.remote_line(),
+            kept: self.saved_kept(),
             history: history.is_some(),
         };
         Some((pane, history))
+    }
+
+    /// The terminal a server keeps that this pane shows, as session restore saves it: the
+    /// account that holds it, its name there and the `ssh` arguments that reach the server
+    /// (the program's name left out). `None` for a pane that shows its own shell, and for
+    /// a terminal whose server has not been named by arguments.
+    pub(crate) fn saved_kept(&self) -> Option<SavedKept> {
+        let shown = self.host().kept_terminal(self.uuid())?;
+        let args = shown.argv.get(1..)?.to_vec();
+        (!args.is_empty()).then_some(SavedKept {
+            account: shown.account,
+            terminal: shown.terminal,
+            args,
+        })
+    }
+
+    /// Whether this pane shows a terminal a server keeps (rather than its own shell).
+    pub(crate) fn shows_kept_terminal(&self) -> bool {
+        self.host().kept_terminal(self.uuid()).is_some()
     }
 
     /// Owner of the events ([`PaneHost`]).
@@ -6182,6 +6202,7 @@ mod tests {
         let shown = |program: Option<&str>| Shown {
             account: "u@rasp:22".into(),
             host: "rasp".into(),
+            argv: vec!["ssh".into(), "rasp".into()],
             terminal: bt_shell_common::kablo::SessionId::new("b-1").expect("an id"),
             program: program.map(str::to_owned),
             link: PaneLink::Live,

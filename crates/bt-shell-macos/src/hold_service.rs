@@ -21,12 +21,57 @@ use crate::app::delegate;
 use crate::pane::{KeptLogin, Login};
 use crate::{child, settings, ssh_route};
 use bt_core::PaneUuid;
+use bt_shell_common::kablo::SessionId;
 use bt_shell_common::kablo::install::Bundle;
-use bt_shell_common::kablo::service::{PaneInfo, PaneLink, Peer, Service, Shown};
+use bt_shell_common::kablo::ledger::Ledger;
+use bt_shell_common::kablo::service::{PaneInfo, PaneLink, Peer, QUIT_END_WAIT, Service, Shown};
 use bt_shell_common::kablo::ssh::SshBackend;
 
 /// The running service: for as long as the process lives.
 static SERVICE: OnceLock<Service> = OnceLock::new();
+
+/// The ledger of the terminals kept on servers ([`Ledger`]). Opened **before** the
+/// service, on the main thread, because the launch asks it things (which terminal a
+/// restored pane may ask for again) while the service is still being started on the
+/// thread that sweeps the sockets.
+static LEDGER: OnceLock<Arc<Ledger>> = OnceLock::new();
+
+/// Opens the ledger at `path` (the session directory's, [`bt_shell_common::restore::ledger_path`]);
+/// `None` — a timed run, a process with no bundle — keeps it in memory, where nothing of the
+/// user's is read or written.
+pub(crate) fn open_ledger(path: Option<std::path::PathBuf>) {
+    let ledger = match path {
+        Some(path) => Ledger::open(path),
+        None => Ledger::memory(),
+    };
+    let _ = LEDGER.set(Arc::new(ledger));
+}
+
+fn ledger() -> Arc<Ledger> {
+    Arc::clone(LEDGER.get_or_init(|| Arc::new(Ledger::memory())))
+}
+
+/// Whether a restored pane may ask for the terminal it showed: the ledger has it as one meant
+/// to live, on an account it knows how to reach.
+pub(crate) fn keeps(account: &str, terminal: &SessionId) -> bool {
+    ledger().keeps(account, terminal)
+}
+
+/// A launch that carried no program over ends the terminals the bateri before it left
+/// behind ([`bt_shell_common::kablo::quit::ends_leftovers`]): marked in the ledger, and
+/// ended by the first connection to their servers, before anything else. How many.
+pub(crate) fn end_leftovers() -> usize {
+    ledger().end_all()
+}
+
+/// A quit that ends the terminals ([`bt_shell_common::kablo::quit`]): the terminals the
+/// panes show are asked to end and waited for, at most [`QUIT_END_WAIT`] — a server that does not
+/// answer is ended at the next connection. **Before** the panes' programs are signalled.
+pub(crate) fn end_all(panes: &[PaneUuid]) {
+    if let Some(service) = SERVICE.get() {
+        service.end_all(panes, QUIT_END_WAIT);
+    }
+}
 
 /// The terminal the pane shows, if it shows one a kablo server keeps (the
 /// program in front of it included, as the server last said). `None` for a pane
@@ -214,7 +259,7 @@ pub(crate) fn serve(
         masters,
         linked: Box::new(link_changed),
     };
-    if let Ok(service) = Service::start(dir, Arc::new(backend)) {
+    if let Ok(service) = Service::start(dir, Arc::new(backend), ledger()) {
         let _ = SERVICE.set(service);
     }
 }

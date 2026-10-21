@@ -21,6 +21,7 @@ use bt_core::{
     ShellIntegration, TabPosition, Teardown, Theme,
 };
 use bt_gpu::{DisplayLink, MIN_SAMPLES, Renderer, ScrollbarMode, Stats};
+use bt_shell_common::kablo::quit;
 use bt_shell_common::shortcuts::{self, Resolved, Tapped};
 use dispatch2::{DispatchQueue, DispatchTime};
 use objc2::rc::Retained;
@@ -49,7 +50,7 @@ use crate::embed;
 use crate::handover::{self, Arrival, HeldPane, PaneState};
 use crate::keeper::{self, Keeper, QuitKind, QuitPath};
 use crate::launch::{
-    self, Adopted, Held, Identity, Integration, Launch, Note, ProcessEnv, fallen_back,
+    self, Adopted, Held, Identity, Integration, Launch, Note, ProcessEnv, Resume, fallen_back,
 };
 use crate::menu::ShellMenuDelegate;
 use crate::moves::{self, Move, Plan, Refusal, Slot, Step};
@@ -58,7 +59,7 @@ use crate::pane::TerminalPane;
 use crate::pane_drag::Session;
 use crate::preview_cache;
 use crate::remote_files::Sweep;
-use crate::restore::{self, Frame, Saved, SavedPane, SavedWindow};
+use crate::restore::{self, Frame, Saved, SavedKept, SavedPane, SavedWindow};
 use crate::settings_window::SettingsWindow;
 use crate::split::{Axis, Direction, Tree};
 use crate::ssh_route::{self, Masters};
@@ -471,12 +472,19 @@ fn held_start(
     }
     let target = target.filter(|target| target.kind == RemoteKind::Ssh)?;
     let (program, args) = target.argv.split_first()?;
-    let installed = ["BATERI_BIN", "BATERI_SSH_INSTANCE"]
-        .iter()
-        .all(|key| integration.iter().any(|(name, _)| name == key));
-    (program == "ssh" && !args.is_empty() && installed).then(|| Held {
+    (program == "ssh" && !args.is_empty() && pipe_installed(integration)).then(|| Held {
         args: args.to_vec(),
+        resume: None,
     })
+}
+
+/// Whether the shell integration's environment names the executable and the instance a pane's
+/// pipe to a terminal on a server needs ([`launch::held_command`]): without them it would find
+/// nobody.
+fn pipe_installed(integration: &[(String, String)]) -> bool {
+    ["BATERI_BIN", "BATERI_SSH_INSTANCE"]
+        .iter()
+        .all(|key| integration.iter().any(|(name, _)| name == key))
 }
 
 /// The remote folder the new pane's terminal starts in: the folder the dock shows
@@ -511,19 +519,50 @@ fn restore_dir(
     ))
 }
 
-/// A saved pane's start: its directory, its identity, its history
-/// and its remote target's line **ready, not run** — the user's ⏎
-/// connects. A directory that no longer exists is the session's to handle
-/// (an unreachable one is inherited, `SessionOptions::working_directory`).
-fn restored_launch(pane: &SavedPane, replay: Option<Vec<u8>>) -> Launch {
+/// A saved pane's start: its directory, its identity, its history and its remote target's
+/// line **ready, not run** — the user's ⏎ connects.
+///
+/// A pane that showed a terminal a server keeps is different: its first program is the pipe to
+/// that terminal again, asked for by name ([`Held::resume`]) — no line is typed and nothing is
+/// written to a shell, the pane reads its remote session from the pipe's marks like any pane
+/// whose first program is one ([`bt_core::first_command_begun`]). `keeps` says whether the
+/// terminal can be asked for ([`crate::hold_service::keeps`]: the ledger has it as one meant to
+/// live, on an account it can reach again). When it cannot — it was ended with the bateri that
+/// showed it (`keep_running = "update"` after a crash), or the record of it is gone — the pane
+/// is today's: a shell with the line ready, and a note under the history that says what
+/// became of the terminal.
+///
+/// A directory that no longer exists is the session's to handle (an unreachable one is
+/// inherited, `SessionOptions::working_directory`).
+fn restored_launch(
+    pane: &SavedPane,
+    replay: Option<Vec<u8>>,
+    keeps: impl Fn(&SavedKept) -> bool,
+) -> Launch {
+    let ready = || pane.remote_line.clone().map(InitialInput::ready);
+    let (held, initial_input, replay) = match &pane.kept {
+        Some(kept) if keeps(kept) => (
+            Some(Held {
+                args: kept.args.clone(),
+                resume: Some(Resume {
+                    account: kept.account.clone(),
+                    terminal: kept.terminal.as_str().to_owned(),
+                }),
+            }),
+            None,
+            replay,
+        ),
+        Some(_) => (None, ready(), Some(fallen_back(replay, Note::Server))),
+        None => (None, ready(), replay),
+    };
     Launch {
         working_directory: pane.dir.clone(),
-        initial_input: pane.remote_line.clone().map(InitialInput::ready),
+        initial_input,
         uuid: Some(pane.uuid.clone()),
         replay,
         adopt: None,
         env: Vec::new(),
-        held: None,
+        held,
     }
 }
 
@@ -1193,6 +1232,11 @@ pub(crate) struct Ivars {
     /// bateri ▸ Quit and End Programs asked for the next quit — consumed by
     /// it ([`AppDelegate::terminate_reply`]), whatever it turns into.
     end_programs: Cell<bool>,
+    /// This quit ends the terminals the panes show on servers
+    /// ([`bt_shell_common::kablo::quit::fate`]): set by [`AppDelegate::terminate_reply`]
+    /// when the quit closes the panes, taken by [`AppDelegate::shutdown`], which says so
+    /// to the service before it signals a pane's program.
+    end_kept: Cell<bool>,
     /// The Mac is logging out, restarting or shutting down
     /// (`NSWorkspaceWillPowerOffNotification`): the programs end with it, so
     /// a quit leaves no reminder that they keep running. Never cleared — a
@@ -2604,6 +2648,20 @@ fn verdict(
 /// again, the focus listener moves into them and the carried shells'
 /// `BATERI_SSH_INSTANCE` still names this instance. `None`: a fresh name.
 fn masters(carried: Option<&str>) -> Option<Arc<Masters>> {
+    // Before anything that could ask it a question (the launch's restore) or start the
+    // service: the terminals kept on servers are written down in the session directory.
+    crate::hold_service::open_ledger(
+        restore_dir(
+            &Inputs::User { config_root: None },
+            || {
+                NSBundle::mainBundle()
+                    .bundleIdentifier()
+                    .map(|id| id.to_string())
+            },
+            child::home,
+        )
+        .map(|dir| restore::ledger_path(&dir)),
+    );
     let askpass = std::env::current_exe().ok()?;
     // SAFETY: `getuid` has no preconditions and cannot fail.
     let uid = unsafe { libc::getuid() };
@@ -2766,6 +2824,7 @@ impl AppDelegate {
             keeper,
             hand_to_bound: Cell::new(false),
             end_programs: Cell::new(false),
+            end_kept: Cell::new(false),
             powering_off: Cell::new(false),
             quit_notice: RefCell::new(None),
             relaunch_after: Cell::new(false),
@@ -3186,6 +3245,7 @@ impl AppDelegate {
         let relaunch = crate::updater::take_relaunch();
         let kind = QuitKind::of(relaunch, self.ivars().end_programs.take());
         self.ivars().hand_to_bound.set(false);
+        self.ivars().end_kept.set(false);
         self.ivars().quit_notice.replace(None);
         let windows = self.windows();
         if windows.is_empty() {
@@ -3225,16 +3285,27 @@ impl AppDelegate {
             QuitPath::ToUpdateHolder | QuitPath::Close => {}
         }
         let confirm = self.settings().confirm_close;
+        // The terminals on servers end with this quit by the one table
+        // ([`quit::fate`]), and the question speaks of them only then: a quit that
+        // leaves them alone has nothing to ask about their jobs.
+        let ends_kept = quit::fate(keep, kind.event()) == quit::Fate::Ends;
         // The question collects the running job from the panes.
         let panes = self.all_panes();
         let unit = window::unit_for(panes.len(), self.tabs().len());
-        let Some(foregrounds) = window::foregrounds_to_ask(timed, confirm, &panes) else {
+        let asked: Vec<_> = panes
+            .iter()
+            .filter(|pane| ends_kept || !pane.shows_kept_terminal())
+            .cloned()
+            .collect();
+        let Some(foregrounds) = window::foregrounds_to_ask(timed, confirm, &asked) else {
+            self.ivars().end_kept.set(ends_kept);
             return NSApplicationTerminateReply::TerminateNow;
         };
         let mtm = self.mtm();
         NSApplication::sharedApplication(mtm).activate();
         let alert = window::alert(mtm, &window::prompt(CloseScope::Quit, unit, &foregrounds));
         if alert.runModal() == NSAlertFirstButtonReturn {
+            self.ivars().end_kept.set(ends_kept);
             NSApplicationTerminateReply::TerminateNow
         } else {
             self.ivars().relaunch_after.set(false);
@@ -4602,6 +4673,15 @@ impl AppDelegate {
     /// quit.
     fn restore_or_open(&self) -> Result<(), String> {
         let arrival = self.ivars().arrival.take();
+        // `keep_running = "update"`: a crash leaves the terminals on the servers behind and
+        // this launch ends them, unless the programs came over (an update's relaunch, or
+        // holders that kept them): those are still shown, not left.
+        let carried = arrival.as_ref().is_some_and(|arrival| {
+            restore::attempt_mode(arrival.attempt) != restore::AttemptMode::GiveUp
+        });
+        if quit::ends_leftovers(self.settings().keep_running, carried) {
+            crate::hold_service::end_leftovers();
+        }
         let mut safe = false;
         if let Some(arrival) = arrival {
             self.ivars().attempt_marks.replace(arrival.marked.clone());
@@ -4906,6 +4986,10 @@ impl AppDelegate {
         arriving: Option<&mut Arriving<'_>>,
     ) -> Option<(embed::Config, Theme)> {
         let setting = self.settings().restore_windows;
+        // The pipe to a terminal on a server needs the shell integration's environment, as ⌘T's
+        // does ([`held_start`]); without it the pane is a shell, and says what became of the
+        // terminal.
+        let piped = pipe_installed(&self.shell_integration().env);
         let saved_history = || {
             if pane.history {
                 self.ivars()
@@ -4928,10 +5012,26 @@ impl AppDelegate {
                     .position(|(_, held)| held.tab == pane.uuid)
                     .map(|index| arriving.arrival.panes.remove(index));
                 let safe = arriving.safe;
+                // A pane whose terminal the server keeps (and the ledger can show again) loses
+                // only the pipe to it when its holder cannot give it: the program did not go
+                // anywhere, so the pane says nothing about a program that did not survive.
+                let on_server = piped
+                    && pane.kept.as_ref().is_some_and(|kept| {
+                        crate::hold_service::keeps(&kept.account, &kept.terminal)
+                    });
                 // A history the setting throws away is not read from disk.
                 let fallen = |note: Note, history: Option<Vec<u8>>| {
                     let wanted = setting == RestoreWindows::All && !safe;
                     let history = history.or_else(|| wanted.then(saved_history).flatten());
+                    if on_server {
+                        return match setting {
+                            RestoreWindows::Off => None,
+                            RestoreWindows::Layout => Some(Vec::new()),
+                            RestoreWindows::All => {
+                                Some(history.filter(|_| !safe).unwrap_or_default())
+                            }
+                        };
+                    }
                     fallen_replay(setting, safe, history, note)
                 };
                 match held {
@@ -4974,7 +5074,9 @@ impl AppDelegate {
             }
         };
         let (launch, theme) = self.pane_launch(tab, None, Opening::Restore, None);
-        let mut launch = launch.with_launch(restored_launch(pane, replay));
+        let mut launch = launch.with_launch(restored_launch(pane, replay, |kept| {
+            piped && crate::hold_service::keeps(&kept.account, &kept.terminal)
+        }));
         launch.adopt = adopt;
         launch.zoom = Zoom::from_steps(pane.zoom_steps, &launch.settings.font);
         Some((launch, theme))
@@ -7250,6 +7352,21 @@ impl AppDelegate {
         // failed handover has saved already and this is a no-op.
         self.save_session();
         let windows = self.windows();
+        // A quit that ends the terminals on servers says so **now**, before a pane's program is
+        // signalled (the holder's going lets the terminal go, and from then on the service no
+        // longer knows which pane it was), and waits for them, bounded: a server that does not
+        // answer is ended at the next connection (the ledger keeps the request).
+        if self.ivars().end_kept.take() {
+            let panes: Vec<_> = self
+                .all_panes()
+                .iter()
+                .filter(|pane| pane.shows_kept_terminal())
+                .map(|pane| pane.uuid().clone())
+                .collect();
+            if !panes.is_empty() {
+                crate::hold_service::end_all(&panes);
+            }
+        }
         // The panes' closes below end their remote sessions; the masters'
         // `exit` is `close_all`'s, under the shared deadline.
         if let Some(masters) = &self.ivars().masters {
@@ -8653,9 +8770,11 @@ mod tests {
             dir: Some(PathBuf::from("/tmp/proje dizini")),
             zoom_steps: 2,
             remote_line: Some("ssh prod".into()),
+            kept: None,
             history: true,
         };
-        let launch = restored_launch(&pane, Some(b"ls\r\n".to_vec()));
+        let nothing_kept = |_: &SavedKept| -> bool { panic!("no terminal is asked about") };
+        let launch = restored_launch(&pane, Some(b"ls\r\n".to_vec()), nothing_kept);
         assert_eq!(launch.uuid, Some(id));
         assert_eq!(launch.working_directory, pane.dir);
         assert_eq!(launch.replay.as_deref(), Some(&b"ls\r\n"[..]));
@@ -8664,11 +8783,76 @@ mod tests {
             Some(InitialInput::ready("ssh prod")),
             "the remote line waits for the user's ⏎"
         );
+        assert_eq!(launch.held, None);
         let local = SavedPane {
             remote_line: None,
             ..pane
         };
-        assert_eq!(restored_launch(&local, None).initial_input, None);
+        assert_eq!(
+            restored_launch(&local, None, nothing_kept).initial_input,
+            None
+        );
+    }
+
+    fn kept_pane() -> SavedPane {
+        SavedPane {
+            uuid: PaneUuid::parse("0A1B2C3D-4E5F-4061-8293-A4B5C6D7E8F9").expect("canonical"),
+            dir: Some(PathBuf::from("/tmp")),
+            zoom_steps: 0,
+            remote_line: Some("ssh -p 2222 prod".into()),
+            kept: Some(SavedKept {
+                account: "ada@prod:2222".into(),
+                terminal: bt_shell_common::kablo::SessionId::new("b-0123").expect("an id"),
+                args: vec!["-p".to_owned(), "2222".to_owned(), "prod".to_owned()],
+            }),
+            history: true,
+        }
+    }
+
+    /// A pane that showed a terminal a server keeps comes back as the pipe to it, asked for by
+    /// name: nothing is typed, the saved history is replayed as it is, and the arguments only
+    /// say which server it is.
+    #[test]
+    fn a_restored_pane_that_showed_a_terminal_on_a_server_shows_it_again() {
+        let pane = kept_pane();
+        let launch = restored_launch(&pane, Some(b"ls\r\n".to_vec()), |kept| {
+            kept.account == "ada@prod:2222" && kept.terminal.as_str() == "b-0123"
+        });
+        assert_eq!(
+            launch.held,
+            Some(Held {
+                args: vec!["-p".to_owned(), "2222".to_owned(), "prod".to_owned()],
+                resume: Some(Resume {
+                    account: "ada@prod:2222".to_owned(),
+                    terminal: "b-0123".to_owned(),
+                }),
+            })
+        );
+        assert_eq!(launch.initial_input, None, "nothing is written to a shell");
+        assert_eq!(launch.replay.as_deref(), Some(&b"ls\r\n"[..]));
+        assert_eq!(launch.uuid, Some(pane.uuid));
+    }
+
+    /// The terminal was ended with the bateri that showed it, or the record of it is gone: the
+    /// pane is a shell again, the line that reaches the server waits for the user's ⏎, and a note
+    /// under the history says what became of the terminal — a pane is never silently a new
+    /// shell.
+    #[test]
+    fn a_restored_pane_whose_terminal_is_no_longer_kept_is_a_shell_with_a_note() {
+        let pane = kept_pane();
+        let launch = restored_launch(&pane, Some(b"ls\r\n".to_vec()), |_| false);
+        assert_eq!(launch.held, None);
+        assert_eq!(
+            launch.initial_input,
+            Some(InitialInput::ready("ssh -p 2222 prod"))
+        );
+        assert_eq!(
+            launch.replay,
+            Some([&b"ls\r\n"[..], &Note::Server.line()].concat())
+        );
+        // The setting that keeps no scrollback keeps the note.
+        let bare = restored_launch(&pane, None, |_| false);
+        assert_eq!(bare.replay, Some(Note::Server.line()));
     }
 
     fn frame(x: f64, y: f64, width: f64, height: f64) -> Frame {
@@ -8891,6 +9075,7 @@ mod tests {
         };
         let expected = Some(Held {
             args: vec!["-p".to_owned(), "2222".to_owned(), "prod".to_owned()],
+            resume: None,
         });
         // ⌘T and ⌘D carry the source's `ssh` arguments (the program's name is the pipe's).
         assert_eq!(

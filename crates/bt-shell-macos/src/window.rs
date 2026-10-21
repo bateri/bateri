@@ -4944,6 +4944,30 @@ mod tests {
         assert_eq!(notice.title, "Programs keep running");
     }
 
+    /// A program that runs on a server is named with the server (`Shown::running`), the
+    /// reminder says so of it as it does of a local one, and a program of the same name here
+    /// and there are two — they are not the same job.
+    #[test]
+    fn the_kept_notice_names_the_programs_on_servers_with_their_hosts() {
+        let body = |tabs: &[Foreground]| kept_notice(tabs, false).map(|notice| notice.body);
+        let tail = "running in the background. Open bateri to return to them; \u{2325}\u{2318}Q ends them.";
+        assert_eq!(
+            body(&[running(&["npm on rasp"]), running(&["npm"])]),
+            Some(format!(
+                "\u{201c}npm on rasp\u{201d} and \u{201c}npm\u{201d} keep {tail}"
+            ))
+        );
+        // The same program on the same server in two panes is one name.
+        assert_eq!(
+            body(&[running(&["npm on rasp"]), running(&["npm on rasp"])]),
+            Some(
+                "\u{201c}npm on rasp\u{201d} keeps running in the background. Open bateri to \
+                 return to it; \u{2325}\u{2318}Q ends it."
+                    .to_owned()
+            )
+        );
+    }
+
     /// No program, no reminder: idle shells come back anyway; and none while
     /// the Mac logs out or restarts — the programs end with it.
     #[test]

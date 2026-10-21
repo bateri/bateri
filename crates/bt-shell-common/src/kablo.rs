@@ -63,6 +63,8 @@ use kablo_proto::{NOISE_LIMIT, WIRE};
 pub mod fake;
 pub mod hub;
 pub mod install;
+pub mod ledger;
+pub mod quit;
 pub mod service;
 pub mod ssh;
 #[cfg(test)]

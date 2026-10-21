@@ -480,6 +480,20 @@ pub(crate) struct Held {
     /// The `ssh` arguments of the terminal to open, as the source pane's session had them
     /// (the program's name left out).
     pub(crate) args: Vec<String>,
+    /// A terminal the server **already keeps** that the pane shows again — a restored pane
+    /// ([`restored_launch`](crate::app)): the pipe asks for it by name instead of making
+    /// one, and the arguments are only what its command line says of the server (the pane
+    /// reads its remote session from it). `None`: a terminal to make.
+    pub(crate) resume: Option<Resume>,
+}
+
+/// A terminal a server keeps that a pane's pipe shows again.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Resume {
+    /// The server's account.
+    pub(crate) account: String,
+    /// The terminal's name on the server.
+    pub(crate) terminal: String,
 }
 
 /// The program a [`Held`] pane starts: bateri's own executable (`BATERI_BIN` of the
@@ -507,6 +521,14 @@ pub(crate) fn held_command(
     for arg in shell_args {
         args.push("--shell-arg".to_owned());
         args.push(arg.clone());
+    }
+    if let Some(resume) = &held.resume {
+        args.extend([
+            "--terminal".to_owned(),
+            resume.terminal.clone(),
+            "--account".to_owned(),
+            resume.account.clone(),
+        ]);
     }
     args.push("--".to_owned());
     args.extend(held.args.iter().cloned());
@@ -557,6 +579,10 @@ pub(crate) enum Note {
     /// The program runs on, but the output of while bateri was closed lost
     /// its oldest part.
     Cut,
+    /// The terminal that ran here on a server is no longer kept: it was ended with the
+    /// bateri that showed it (`keep_running = "update"` after a crash), or the record
+    /// of it is gone.
+    Server,
 }
 
 impl Note {
@@ -578,6 +604,9 @@ impl Note {
                 "bateri: the screen could not be restored; the program kept running"
             }
             Note::Cut => "bateri: output from while bateri was closed was cut short",
+            Note::Server => {
+                "bateri: the terminal that ran here on the server is no longer kept; this is a new shell"
+            }
         }
     }
 
@@ -612,6 +641,7 @@ mod tests {
         ];
         let held = super::Held {
             args: vec!["-p".to_owned(), "2222".to_owned(), "--first".to_owned()],
+            resume: None,
         };
         assert_eq!(
             super::held_command(&held, &environment, &["--posix".to_owned()]),
@@ -638,13 +668,54 @@ mod tests {
         assert_eq!(super::held_command(&held, &[], &[]), None);
     }
 
+    /// A restored pane's pipe asks for the terminal it showed by name, and the arguments after
+    /// the `--` are only what its command line says of the server (the pane's remote session is
+    /// read from it): the account has a space in it, and stays one argument.
+    #[test]
+    fn a_restored_pane_asks_for_its_terminal_by_name() {
+        let environment = vec![
+            ("BATERI_BIN".to_owned(), "/Applications/bateri".to_owned()),
+            ("BATERI_SSH_INSTANCE".to_owned(), "0a1b2c3d".to_owned()),
+        ];
+        let held = super::Held {
+            args: vec!["-p".to_owned(), "2222".to_owned(), "ada@prod".to_owned()],
+            resume: Some(super::Resume {
+                account: "ada@prod:2222 via jump:22".to_owned(),
+                terminal: "b-0123".to_owned(),
+            }),
+        };
+        let (program, args) = super::held_command(&held, &environment, &[]).expect("a command");
+        assert_eq!(program, "/Applications/bateri");
+        assert_eq!(
+            args,
+            [
+                "ssh-hold",
+                "--first",
+                "--terminal",
+                "b-0123",
+                "--account",
+                "ada@prod:2222 via jump:22",
+                "--",
+                "-p",
+                "2222",
+                "ada@prod"
+            ]
+        );
+    }
+
     use super::{Note, fallen_back};
 
     /// The fallback's note sits on a line of its own under the history,
     /// dim, and resets what the history left on.
     #[test]
     fn the_fallback_note_has_a_line_of_its_own() {
-        for kind in [Note::Update, Note::Crash, Note::NotCarried, Note::Ended] {
+        for kind in [
+            Note::Update,
+            Note::Crash,
+            Note::NotCarried,
+            Note::Ended,
+            Note::Server,
+        ] {
             let note = format!("\x1b[0m\x1b[2m{}\x1b[0m\r\n", kind.text());
             assert_eq!(kind.line(), note.as_bytes());
             assert_eq!(fallen_back(None, kind), note.as_bytes());
@@ -670,6 +741,7 @@ mod tests {
             Note::Ended,
             Note::Screenless,
             Note::Cut,
+            Note::Server,
         ]
         .map(Note::text);
         for (index, text) in texts.iter().enumerate() {

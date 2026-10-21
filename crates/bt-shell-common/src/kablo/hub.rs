@@ -41,7 +41,7 @@
 
 use std::collections::{BTreeMap, VecDeque};
 
-use super::{Attach, Client, Event, NewSession, SessionId};
+use super::{Attach, Client, ErrorCode, Event, NewSession, SessionId};
 use crate::hold::wire::{self, AppReader, CHUNK, Open, Target, ToApp, ToHold, exit_status};
 
 /// One holder's connection, as the hub knows it.
@@ -119,6 +119,13 @@ struct Binding {
     /// The first attach asked for a picture of the screen, so the position
     /// the attach names is the picture's and not that of bytes.
     picture_asked: bool,
+    /// Where the output starts, as the server said when it attached a terminal that
+    /// was asked for a picture: the position of the bytes that follow **if no picture
+    /// does**. A server that cannot make one (an older kablo) goes straight on with
+    /// bytes, and a holder that was left with the position of nothing would ask for
+    /// the wrong place after the next restart. A picture sets the position itself when
+    /// it is whole.
+    attached_at: Option<u64>,
 }
 
 struct Hold {
@@ -267,6 +274,9 @@ impl Hub {
                     if !truncated && !asked {
                         binding.end = *offset;
                     }
+                    if asked {
+                        binding.attached_at = Some(*offset);
+                    }
                 }
                 return;
             }
@@ -307,8 +317,8 @@ impl Hub {
             }
             Event::Failed {
                 terminal: Some(terminal),
+                code,
                 text,
-                ..
             } => {
                 if let Some(hold) = hold_of(self, terminal) {
                     // Before anything was shown the holder may still fall back
@@ -321,9 +331,18 @@ impl Hub {
                     self.release(hold, false);
                     if let Some(hold) = self.holds.get_mut(&hold) {
                         if shown {
+                            // A terminal asked for again that the server no longer has
+                            // (it ended while bateri was closed) is a line the user reads
+                            // under the history of the pane that showed it.
+                            let note = if *code == ErrorCode::UNKNOWN_SESSION {
+                                "bateri: the terminal that ran here is no longer on the server"
+                                    .to_owned()
+                            } else {
+                                format!("bateri: {text}")
+                            };
                             hold.finish(&ToHold::End {
                                 code: 1,
-                                note: Some(format!("bateri: {text}")),
+                                note: Some(note),
                             });
                         } else {
                             hold.finish(&ToHold::Refused {
@@ -353,6 +372,10 @@ impl Hub {
             return;
         };
         binding.shown = true;
+        // No picture came first: the bytes start where the server said.
+        if let Some(at) = binding.attached_at.take() {
+            binding.end = at;
+        }
         // The position moves with each frame, so a long write is cut here and
         // not by the codec, which would cut it the same way: one rule for
         // where the stream stands after a frame.
@@ -388,6 +411,7 @@ impl Hub {
             return;
         };
         binding.shown = true;
+        binding.attached_at = None;
         let mut bytes = if first {
             bt_core::reset_keeping_history(cols)
         } else {
@@ -576,7 +600,7 @@ impl Hub {
         {
             return Err(self.put_back(hold, open, Declined::Refused));
         }
-        self.bind(hold, account, open.terminal, 0, false);
+        self.bind(hold, account, open.terminal, 0, false, false);
         Ok(())
     }
 
@@ -596,12 +620,16 @@ impl Hub {
             None => Attach::new(open.size).from_now().with_picture(),
         };
         client.attach(open.terminal.clone(), attach);
+        // The holder has shown this terminal before (to the bateri that is gone, or
+        // before the Mac restarted): its pane is a screen that is no longer live
+        // when the connection is not, not a first connection being made.
         self.bind(
             hold,
             account,
             open.terminal,
             offset.unwrap_or(0),
             offset.is_none(),
+            true,
         );
         Ok(())
     }
@@ -747,6 +775,7 @@ impl Hub {
         terminal: SessionId,
         end: u64,
         picture_asked: bool,
+        shown: bool,
     ) {
         let key = (account.to_owned(), terminal.clone());
         // A terminal is shown by one holder: the newer one wins and the older,
@@ -767,8 +796,9 @@ impl Hub {
                 account: account.to_owned(),
                 terminal,
                 end,
-                shown: false,
+                shown,
                 picture_asked,
+                attached_at: None,
             });
         }
     }
@@ -805,9 +835,10 @@ impl Hub {
     }
 
     /// Whether the holder's terminal has been **shown** — attached, so its
-    /// output or its picture has started to reach the holder — at least once.
-    /// The line between a first connection that is still being made and one
-    /// that was lost.
+    /// output or its picture has started to reach the holder — at least once; a
+    /// holder that asked for a terminal it had shown before ([`Hub::resume`]) counts
+    /// from the start. The line between a first connection that is still being made
+    /// and one that was lost.
     pub fn is_shown(&self, hold: HoldId) -> bool {
         self.holds
             .get(&hold)
