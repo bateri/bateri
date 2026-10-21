@@ -2114,6 +2114,14 @@ the server's rc files.
   `~/.ssh/config` resolves. A server remembered as "shell-less" by mistake is
   forgotten with Shell ▸ Shell Integration on “{host}” (the item deletes this
   record on every click).
+- **When bateri is updated**: the kablo on a server is the one in bateri's package,
+  put beside the one that is there (a version never overwrites another), and
+  the terminals running under the older one are renewed with it without
+  ending a shell or a program — by the first `ssh` to a server that had none of
+  this version, and by the first connection of a pane that comes back after the
+  update. A renewal that cannot be made then (no connection, a password nobody
+  saved) is made the next time the connection is made; until then the terminals
+  keep running under the kablo they have, which the new one understands.
 - **Always plain**: ssh with a remote command or non-interactive ssh (`ssh
   host command`, `-N`, `-T`, `-W`, a pipe), `scp`/`rsync`/`git`, and a host
   whose `~/.ssh/config` entry has `RemoteCommand`, `RequestTTY no` or

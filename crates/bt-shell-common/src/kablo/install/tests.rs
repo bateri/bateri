@@ -307,11 +307,79 @@ fn a_channel_that_cannot_be_used_is_a_bad_moment() {
     ));
 }
 
+/// A kablo that writes down what `upgrade` was asked and where it was run from,
+/// beside itself, and says what the real one says when there is nothing to renew.
+const KABLO_RENEWING: &str = "#!/bin/sh\ncase $1 in version) echo \"version=0.2.0 wire_min=1 wire_max=2\";; \
+     upgrade) echo \"$* from $(pwd)\" >>\"$(dirname \"$0\")/upgrades\"; [ -e \"$(dirname \"$0\")/none\" ] && exit 1; exit 0;; esac\n";
+
+#[test]
+fn the_terminals_of_the_server_are_renewed_with_the_binary_that_was_written() {
+    let root = TempRoot::new("kablo-renew");
+    let bundle = package(&root.0, "0.2.0", KABLO_RENEWING);
+    let home = Home::new(&root.0.join("home"));
+    std::fs::create_dir_all(&home.dir).expect("home");
+    let installed = ensure(&home, &bundle).expect("installed");
+    assert!(installed.fresh);
+
+    // The script is the version's own, run from the home directory the commands
+    // of an ssh start in: kablo makes the relative path absolute from there.
+    assert!(upgrade_sessions(&home, &installed));
+    let log = home
+        .installed("0.2.0")
+        .parent()
+        .expect("dir")
+        .join("upgrades");
+    let said = std::fs::read_to_string(&log).expect("asked");
+    assert_eq!(
+        said.trim(),
+        format!(
+            "upgrade --all .local/share/kablo/0.2.0/kablo from {}",
+            home.dir.display()
+        )
+    );
+    // Nothing else of the server is touched by it.
+    assert_eq!(home.uploads(), 1);
+    assert_eq!(
+        std::fs::read(home.installed("0.2.0")).expect("the file"),
+        KABLO_RENEWING.as_bytes()
+    );
+
+    // A server with no terminals says so with a failure, and that is not a reason
+    // to do anything: the answer is only that nothing was renewed.
+    std::fs::write(log.with_file_name("none"), "").expect("no terminals");
+    assert!(!upgrade_sessions(&home, &installed));
+    assert_eq!(
+        std::fs::read_to_string(&log)
+            .expect("asked")
+            .lines()
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn a_renewal_that_cannot_be_asked_is_nothing_more_than_a_no() {
+    struct Failing;
+    impl Channel for Failing {
+        fn run(&self, _: &str, _: &[u8]) -> io::Result<Reply> {
+            Err(io::Error::new(io::ErrorKind::TimedOut, "slow"))
+        }
+    }
+    let installed = Installed {
+        target: Target::LinuxX86_64,
+        version: "0.2.0".into(),
+        path: ".local/share/kablo/0.2.0/kablo".into(),
+        fresh: true,
+    };
+    assert!(!upgrade_sessions(&Failing, &installed));
+}
+
 #[test]
 fn the_scripts_are_one_line_of_plain_sh_a_login_shell_hands_on_as_it_is() {
     for script in [
         probe_script("0.2.0"),
         upload_script("0.2.0", &sha256_hex(b"x")),
+        upgrade_script("0.2.0"),
     ] {
         // `is_inline`'s alphabet: what fish and csh read inside single quotes
         // as the characters they are.

@@ -68,6 +68,17 @@ of every installed copy. A version without a section is not released.
   its `ssh` line ready and a line saying so. A terminal that was to end while the
   server could not be reached is ended the next time bateri connects to it.
 
+- **A newer bateri brings its kablo to the servers without ending anything.**
+  The kablo that bateri puts on a server is the one that came in its package; an
+  older one that is there stays where it is, and the terminals running under it
+  are renewed with the new one while they run — the shell, the programs in it
+  and the panes showing them go on as they were, so `npm run dev` started last
+  week is still there after the update. The first `ssh` to a server does it, and
+  so does a pane that comes back after bateri was updated. If the server cannot
+  be reached at that moment (no connection, a password nobody saved), the pane
+  comes back as before and the renewal is made the next time the connection is
+  made.
+
 - **Programs can ask to be told the window's size in their output.** An app
   that turns on in-band resize reports (DECSET 2048, as kitty and Ghostty
   offer it) now gets the rows, the columns and the size in pixels in one

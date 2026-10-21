@@ -163,6 +163,18 @@ impl Bridge {
         self
     }
 
+    /// The relay that serves the terminals is replaced by one of another release
+    /// (`kablo upgrade --all`): the terminals, their journals and their programs
+    /// stay, and the next connection is served the way the new relay serves.
+    pub fn replace_relays(&mut self, age: Age) {
+        self.age = age;
+    }
+
+    /// The release of the relay that serves the terminals.
+    pub fn age(&self) -> Age {
+        self.age
+    }
+
     /// A terminal that exists already, as one started earlier.
     pub fn add(&mut self, id: &str, size: Size) -> SessionId {
         let id = SessionId::new(id).expect("a session id");

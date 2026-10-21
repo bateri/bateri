@@ -241,6 +241,26 @@ pub trait Backend: Send + Sync + 'static {
     /// Starts the bridge to the server.
     fn carry(&self, server: &KabloHost, installed: &Installed) -> io::Result<Carried>;
 
+    /// The version of the kablo this computer brings (the package's), or `None`
+    /// when it brings none. An account whose server was last known at another
+    /// version is [`Backend::refresh`]ed before its bridge is made.
+    fn version(&self) -> Option<String> {
+        None
+    }
+
+    /// Puts the version this computer brings on a server that has had another
+    /// (a ledger's account after bateri was updated) and has the terminals it
+    /// runs renewed with it, without ending any; the answer is what is on the
+    /// server now. Called on the thread that makes the bridge, **before** it is
+    /// made: a bridge that runs is not replaced by the renewal. `None`: it could
+    /// not be done now (no connection, a login nobody saved, a server that will
+    /// not take the file) — the bridge is made from the binary the ledger knows,
+    /// which is still there and serves the relays that run, and the next dial of
+    /// the account tries again.
+    fn refresh(&self, _server: &KabloHost) -> Option<Installed> {
+        None
+    }
+
     /// How this computer calls itself in the list of who is attached to a
     /// terminal.
     fn name(&self) -> Option<String> {
@@ -297,6 +317,9 @@ enum Msg {
     Dialed {
         account: String,
         outcome: io::Result<Carried>,
+        /// What the server has after the kablo there was renewed before the
+        /// bridge was made ([`Backend::refresh`]); `None`: nothing was.
+        refreshed: Option<Installed>,
     },
     Bridge {
         account: String,
@@ -367,6 +390,9 @@ impl Drop for Bridge {
 struct Account {
     server: KabloHost,
     installed: Installed,
+    /// The kablo the server was last known to have is not the version this
+    /// computer brings: the next dial renews it first ([`Backend::refresh`]).
+    stale: bool,
     /// Which bridge messages are current.
     generation: u64,
     bridge: Option<Bridge>,
@@ -717,7 +743,11 @@ impl Core {
             }
             Msg::End(pane) => self.end(&pane, now),
             Msg::EndAll { panes, done } => self.end_all(&panes, done, now),
-            Msg::Dialed { account, outcome } => self.dialed(&account, outcome, now),
+            Msg::Dialed {
+                account,
+                outcome,
+                refreshed,
+            } => self.dialed(&account, outcome, refreshed, now),
             Msg::Bridge {
                 account,
                 generation,
@@ -1137,14 +1167,28 @@ impl Core {
             };
             entry.dialing = true;
             let (server, installed) = (entry.server.clone(), entry.installed.clone());
+            let stale = entry.stale;
             let shared = Arc::clone(&self.shared);
             let started = thread::Builder::new()
                 .name("ssh-hold dials".into())
                 .spawn({
                     let account = account.clone();
                     move || {
-                        let outcome = shared.backend.carry(&server, &installed);
-                        let _ = shared.tx.send(Msg::Dialed { account, outcome });
+                        // The terminals are renewed before any bridge exists:
+                        // the renewal does not replace one that runs.
+                        let refreshed = if stale {
+                            shared.backend.refresh(&server)
+                        } else {
+                            None
+                        };
+                        let outcome = shared
+                            .backend
+                            .carry(&server, refreshed.as_ref().unwrap_or(&installed));
+                        let _ = shared.tx.send(Msg::Dialed {
+                            account,
+                            outcome,
+                            refreshed,
+                        });
                     }
                 })
                 .is_ok();
@@ -1154,7 +1198,13 @@ impl Core {
         }
     }
 
-    fn dialed(&mut self, account: &str, outcome: io::Result<Carried>, now: Instant) {
+    fn dialed(
+        &mut self,
+        account: &str,
+        outcome: io::Result<Carried>,
+        refreshed: Option<Installed>,
+        now: Instant,
+    ) {
         let Some(entry) = self.accounts.get_mut(account) else {
             // The account is gone; what was started is ended with it.
             if let Ok(carried) = outcome {
@@ -1163,6 +1213,16 @@ impl Core {
             return;
         };
         entry.dialing = false;
+        // The kablo on the server was renewed, whatever became of the bridge after:
+        // the account is known at the new version from now on, in the ledger too.
+        if let Some(installed) = refreshed {
+            entry.installed = Installed {
+                fresh: false,
+                ..installed
+            };
+            entry.stale = false;
+            self.shared.ledger.remember(&entry.server, &entry.installed);
+        }
         match outcome {
             Ok(carried) => {
                 self.generation += 1;
@@ -1309,12 +1369,18 @@ impl Core {
     fn make_account(&mut self, server: KabloHost, installed: Installed, now: Instant) {
         let key = server.key.clone();
         let name = self.shared.backend.name();
+        let stale = self
+            .shared
+            .backend
+            .version()
+            .is_some_and(|version| version != installed.version);
         self.hub.add_client(&key, Client::new(name.as_deref(), now));
         self.accounts.insert(
             key,
             Account {
                 server,
                 installed,
+                stale,
                 generation: 0,
                 bridge: None,
                 dialing: false,

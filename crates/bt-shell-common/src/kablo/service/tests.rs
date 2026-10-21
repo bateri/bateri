@@ -62,6 +62,8 @@ struct Fake {
     /// The program the master step runs on the pane, if any.
     master: Mutex<Option<Vec<String>>>,
     fresh: AtomicBool,
+    /// The server cannot be renewed now ([`Backend::refresh`] has no answer).
+    refresh_fails: AtomicBool,
     /// Bridges that fail to start before one does.
     carry_fails: AtomicU32,
     /// The bridges started, each with the flag that ends it.
@@ -85,6 +87,7 @@ impl Fake {
             kablo: AtomicBool::new(true),
             master: Mutex::new(None),
             fresh: AtomicBool::new(false),
+            refresh_fails: AtomicBool::new(false),
             carry_fails: AtomicU32::new(0),
             carried: Mutex::new(Vec::new()),
             carry_error: Mutex::new(None),
@@ -207,6 +210,26 @@ impl Backend for Fake {
             version: "0.2.0".into(),
             path: ".local/share/kablo/0.2.0/kablo".into(),
             fresh: self.fresh.load(Ordering::SeqCst),
+        })
+    }
+
+    fn version(&self) -> Option<String> {
+        Some("0.2.0".into())
+    }
+
+    /// What the real one does to a server: its relays are replaced by the ones of the
+    /// release this computer brings.
+    fn refresh(&self, _: &KabloHost) -> Option<Installed> {
+        self.note("refresh");
+        if self.refresh_fails.load(Ordering::SeqCst) {
+            return None;
+        }
+        self.bridge().replace_relays(Age::Current);
+        Some(Installed {
+            target: kablo_proto::install::Target::LinuxX86_64,
+            version: "0.2.0".into(),
+            path: ".local/share/kablo/0.2.0/kablo".into(),
+            fresh: true,
         })
     }
 
@@ -1082,6 +1105,126 @@ fn a_restarted_bateri_shows_the_terminal_the_one_before_made() {
     assert_eq!(again.outcome(), Outcome::Exit(0));
     until("forgotten once it ended", || {
         ledger.known("u@rasp:22").is_none()
+    });
+}
+
+/// An account the ledger remembers at another release of kablo than the one this
+/// computer brings is renewed on the server before its bridge is made, and is known at the
+/// new release from then on, in the ledger too — whatever the bridge then does.
+fn the_old_release(ledger: &Ledger) {
+    ledger.remember(
+        &host("u@rasp:22"),
+        &Installed {
+            target: kablo_proto::install::Target::LinuxX86_64,
+            version: "0.1.0".into(),
+            path: ".local/share/kablo/0.1.0/kablo".into(),
+            fresh: false,
+        },
+    );
+}
+
+#[test]
+fn a_restarted_bateri_renews_the_kablo_its_ledger_remembers_before_it_dials() {
+    let ledger = Arc::new(Ledger::memory());
+    // The terminal runs under the relay of the release before.
+    let world = Fake::new(Bridge::new(Age::Old));
+    let first = Rig::kept("renew-1", world.clone(), ledger.clone(), END_GRACE);
+    let holder = Holder::new(&first.socket(), "b-1");
+    let terminal = first.terminals(1).remove(0);
+    world.bridge().write(&terminal, b"abc");
+    until("shown", || holder.shown.bytes() == b"abc");
+    assert_eq!(
+        world.count("refresh"),
+        0,
+        "an account made now is of today's release"
+    );
+    first.service.stop();
+    drop(first);
+    the_old_release(&ledger);
+
+    let before = world.log().len();
+    let second = Rig::kept("renew-2", world.clone(), ledger.clone(), END_GRACE);
+    let again = Holder::start(
+        &second.socket(),
+        "b-1",
+        Target::Resume {
+            account: "u@rasp:22".into(),
+            offset: Some(3),
+        },
+    );
+    world.bridge().write(&terminal, b"def");
+    until("shown again, from where it was", || {
+        again.shown.bytes() == b"def"
+    });
+    assert_eq!(
+        world.log()[before..],
+        ["pane", "refresh", "carry"],
+        "the server is renewed first and no bridge exists until then"
+    );
+    assert_eq!(world.bridge().age(), Age::Current);
+    assert_eq!(
+        ledger.known("u@rasp:22").expect("known").version,
+        "0.2.0",
+        "known at the release it is at"
+    );
+
+    // And once: a bridge made again does not renew a server that was.
+    world.break_connection();
+    until("the bridge is made again", || world.count("carry") == 3);
+    assert_eq!(world.count("refresh"), 1);
+}
+
+/// A renewal that cannot be made now (no connection, a server that will not take the
+/// file) does not stand in the bridge's way and is made at the next dial.
+#[test]
+fn a_renewal_that_cannot_be_made_leaves_the_account_as_it_was_until_the_next_dial() {
+    let ledger = Arc::new(Ledger::memory());
+    let world = Fake::new(Bridge::new(Age::Old));
+    let first = Rig::kept("renew-fail-1", world.clone(), ledger.clone(), END_GRACE);
+    let holder = Holder::new(&first.socket(), "b-1");
+    let terminal = first.terminals(1).remove(0);
+    world.bridge().write(&terminal, b"abc");
+    until("shown", || holder.shown.bytes() == b"abc");
+    first.service.stop();
+    drop(first);
+    the_old_release(&ledger);
+    world.refresh_fails.store(true, Ordering::SeqCst);
+
+    let before = world.log().len();
+    let second = Rig::kept("renew-fail-2", world.clone(), ledger.clone(), END_GRACE);
+    let again = Holder::start(
+        &second.socket(),
+        "b-1",
+        Target::Resume {
+            account: "u@rasp:22".into(),
+            offset: Some(3),
+        },
+    );
+    world.bridge().write(&terminal, b"def");
+    until("shown, the relay of the release before serving", || {
+        again.shown.bytes() == b"def"
+    });
+    assert_eq!(world.log()[before..], ["pane", "refresh", "carry"]);
+    assert_eq!(world.bridge().age(), Age::Old, "nothing was renewed");
+    assert_eq!(
+        ledger.known("u@rasp:22").expect("known").version,
+        "0.1.0",
+        "and nothing is written down as if it was"
+    );
+
+    // The connection goes and the server can be reached: the dial that follows
+    // renews it first, and the bytes go on with none twice.
+    world.refresh_fails.store(false, Ordering::SeqCst);
+    world.break_connection();
+    until("renewed on the next dial", || world.count("refresh") == 2);
+    until("and the bridge made", || world.count("carry") == 3);
+    world.bridge().write(&terminal, b"ghi");
+    until("the bytes go on", || again.shown.bytes() == b"defghi");
+    assert_eq!(world.bridge().age(), Age::Current);
+    until("known at the new release", || {
+        ledger
+            .known("u@rasp:22")
+            .is_some_and(|known| known.version == "0.2.0")
     });
 }
 

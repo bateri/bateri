@@ -184,6 +184,12 @@ impl Backend for SshBackend {
         match install::ensure(&channel, bundle) {
             Ok(installed) => {
                 self.remember(Fact::Touched, server);
+                if installed.fresh {
+                    // The binary was not there: terminals this user has on the
+                    // server run an earlier one, and are renewed before a bridge
+                    // exists to be left behind.
+                    renew(&channel.argv, &installed);
+                }
                 Ok(installed)
             }
             Err(Failure::Impossible(_)) => {
@@ -243,6 +249,32 @@ impl Backend for SshBackend {
         })
     }
 
+    fn version(&self) -> Option<String> {
+        self.bundle
+            .as_ref()
+            .map(|bundle| bundle.version().to_owned())
+    }
+
+    fn refresh(&self, server: &KabloHost) -> Option<Installed> {
+        let bundle = self.bundle.as_ref()?;
+        let target = self.target(server);
+        // The connection the bridge is about to take, made here when it is not
+        // there: both steps ride one and a login nobody saved is the bridge's to
+        // report. No connection, no renewal; the bridge's turn comes anyway.
+        let route = self.route_for_bridge(&target).ok()?;
+        let argv = bounded(ssh_argv_for(&target, &route));
+        let channel = SshChannel {
+            argv: argv.clone(),
+            limit: install::STEP_LIMIT,
+        };
+        // A server that cannot keep kablo *now* is not recorded as one that never
+        // can: terminals are running there, and what `install` would write down
+        // changes what the next `ssh` is.
+        let installed = install::ensure(&channel, bundle).ok()?;
+        renew(&argv, &installed);
+        Some(installed)
+    }
+
     fn name(&self) -> Option<String> {
         self.name.clone()
     }
@@ -254,6 +286,35 @@ impl Backend for SshBackend {
     fn link_changed(&self, pane: &PaneUuid, link: PaneLink) {
         (self.linked)(pane, link);
     }
+}
+
+/// The server's running terminals are renewed with the binary just checked
+/// ([`install::upgrade_sessions`]), on a channel of its own that is let less
+/// time than the install: what is waiting for it is a pane that shows a
+/// connection being made.
+fn renew(argv: &[String], installed: &Installed) {
+    let channel = SshChannel {
+        argv: argv.to_vec(),
+        limit: install::UPGRADE_LIMIT,
+    };
+    install::upgrade_sessions(&channel, installed);
+}
+
+/// How long a connection that is made again for a renewal may take to be made
+/// (`ConnectTimeout`): a network that is not there is not waited for by the
+/// time of a TCP retry, the bridge that follows finds that out by itself.
+const CONNECT_SECONDS: u32 = 15;
+
+/// The ssh argv with a connect timeout of ours before the user's options (the
+/// first value ssh reads for an option wins).
+fn bounded(mut argv: Vec<String>) -> Vec<String> {
+    if !argv.is_empty() {
+        argv.splice(
+            1..1,
+            ["-o".to_owned(), format!("ConnectTimeout={CONNECT_SECONDS}")],
+        );
+    }
+    argv
 }
 
 /// The most of ssh's standard error that is kept: a refusal is a line or two.

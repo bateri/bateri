@@ -17,6 +17,14 @@
 //! three that is a binary on disk. A file whose sum is not the list's is not
 //! sent.
 //!
+//! **A new binary replaces the old one under running terminals**
+//! ([`upgrade_sessions`]): terminals the server runs from an earlier release are
+//! renewed with the one just written (`kablo upgrade --all`), without ending a
+//! shell or dropping a client. A *running bridge* (`kablo attach`) is not
+//! replaced by it, so a bridge is made only after the renewal; one that was
+//! made before it stays what it was and speaks to the new relay under the
+//! rule that a release reads the one before it.
+//!
 //! **What goes wrong is of two kinds** ([`Failure`]). A server that kablo
 //! *cannot* be kept on — a platform it is not built for, a home that is not
 //! writable, a file that will not run there — is remembered
@@ -43,6 +51,12 @@ use crate::upload::sq;
 /// How long a step may take before the channel is given up on. The upload is
 /// the long one (a binary of a few megabytes over a slow link).
 pub const STEP_LIMIT: Duration = Duration::from_secs(120);
+
+/// How long the renewal of the server's terminals ([`upgrade_sessions`]) may
+/// take. kablo gives each terminal 20 seconds; a server that is slower than a
+/// few terminals' worth is not waited for, because what waits is a pane that
+/// shows a connection being made.
+pub const UPGRADE_LIMIT: Duration = Duration::from_secs(60);
 
 /// A file of the package and the sum it must have.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -359,6 +373,28 @@ pub fn upload_script(version: &str, sha256: &str) -> String {
          $t version >/dev/null 2>&1 || {{ rm -f $t; exit {EXIT_WONT_RUN}; }}; \
          if [ -e $f ]; then rm -f $t; else mv $t $f || {{ rm -f $t; exit {EXIT_UNWRITABLE}; }}; fi"
     )
+}
+
+/// The script that has the terminals the server is running (this user's, all of
+/// them) renewed with the binary of `version`, which is there: the relay of each
+/// is replaced by the one in that binary and the warden follows, with the shell,
+/// its programs and the clients attached to it staying as they are. The path is
+/// the one relative to the home directory the commands start in; kablo makes it
+/// absolute itself. One line of `sh`, like the others.
+pub fn upgrade_script(version: &str) -> String {
+    format!("f=.local/share/kablo/{version}/kablo; $f upgrade --all $f")
+}
+
+/// Renews the server's running terminals with the kablo [`ensure`] found or
+/// wrote ([`upgrade_script`]) — **best effort**: a server with no terminals has
+/// no directory for them and the command says so; a terminal that cannot be
+/// renewed keeps its relay and is served by the bridge's "this release and the
+/// one before" rule. Nothing it says changes what happens next, so the answer
+/// (every terminal renewed, or there were none) is for a test and a log.
+pub fn upgrade_sessions(channel: &dyn Channel, installed: &Installed) -> bool {
+    channel
+        .run(&upgrade_script(&installed.version), &[])
+        .is_ok_and(|reply| reply.status == Some(0))
 }
 
 // ─── the channel ─────────────────────────────────────────────────────────
