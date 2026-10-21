@@ -1409,15 +1409,30 @@ pub(crate) fn notify(mtm: MainThreadMarker, title: &str, body: &str) {
 /// the right channel (an edited preview kept while no window can show a
 /// sheet). Never in an unbundled process.
 pub(crate) fn deliver_notification(title: &str, body: &str) {
+    deliver(None, title, body);
+}
+
+/// [`deliver_notification`] under a name of its own: a notification with the same `identifier`
+/// replaces the one the system still shows (or has queued), so what is said again —
+/// "Claude opened 3 terminals", then 4 — is one notification that grows, not a pile.
+pub(crate) fn deliver_notification_replacing(identifier: &str, title: &str, body: &str) {
+    deliver(Some(identifier), title, body);
+}
+
+fn deliver(identifier: Option<&str>, title: &str, body: &str) {
     if NSBundle::mainBundle().bundleIdentifier().is_none() {
         return;
     }
-    let (title, body) = (title.to_owned(), body.to_owned());
+    let (identifier, title, body) = (
+        identifier.map(str::to_owned),
+        title.to_owned(),
+        body.to_owned(),
+    );
     // The block runs on a background queue: only owned strings are carried,
     // the center is fetched again and AppKit is not touched.
     let deliver = RcBlock::new(move |granted: Bool, _error: *mut NSError| {
         if granted.as_bool() {
-            add_notification(&title, &body, None, None);
+            add_notification(identifier.as_deref(), &title, &body, None, None);
         }
     });
     UNUserNotificationCenter::currentNotificationCenter()
@@ -1463,15 +1478,17 @@ pub(crate) fn schedule_notification(
         false,
     );
     let (done, taken) = mpsc::channel();
-    add_notification(title, body, Some(&trigger), Some(done));
+    add_notification(None, title, body, Some(&trigger), Some(done));
     Some(taken)
 }
 
-/// The one way a notification is added: its content, a unique identifier (the
-/// same identifier would replace the previous one, and results must stack
-/// up), the trigger (`None` — at once) and, if asked, the completion's
-/// message. Any thread: the center is thread-safe and AppKit is not touched.
+/// The one way a notification is added: its content, an identifier (a fresh one unless the
+/// caller names it: the same identifier replaces the previous notification, which is what
+/// [`deliver_notification_replacing`] asks for and what results must not do, so they stack up),
+/// the trigger (`None` — at once) and, if asked, the completion's message. Any thread: the
+/// center is thread-safe and AppKit is not touched.
 fn add_notification(
+    identifier: Option<&str>,
     title: &str,
     body: &str,
     trigger: Option<&UNNotificationTrigger>,
@@ -1480,8 +1497,9 @@ fn add_notification(
     let content = UNMutableNotificationContent::new();
     content.setTitle(&NSString::from_str(title));
     content.setBody(&NSString::from_str(body));
+    let identifier = identifier.map_or_else(|| NSUUID::new().UUIDString(), NSString::from_str);
     let request = UNNotificationRequest::requestWithIdentifier_content_trigger(
-        &NSUUID::new().UUIDString(),
+        &identifier,
         &content,
         trigger,
     );

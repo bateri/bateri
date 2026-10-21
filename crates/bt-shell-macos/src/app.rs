@@ -346,7 +346,7 @@ fn resolve_scrollbar(
 /// How a new window is opened — [`AppDelegate::open_window`]'s two decisions
 /// come from here: tab or window, and whether the shell gets a first input.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Opening {
+pub(crate) enum Opening {
     /// ⌘N, Dock icon, the startup's first window: a separate window, local shell.
     Window,
     /// ⌘T and the tab bar's `+`: a tab in `from`'s window, right of the
@@ -483,6 +483,7 @@ fn held_start(
     let (program, args) = target.argv.split_first()?;
     (program == "ssh" && !args.is_empty() && pipe_installed(integration)).then(|| Held {
         args: args.to_vec(),
+        close_at_end: false,
         resume: None,
     })
 }
@@ -512,7 +513,7 @@ fn server_slot<'a>(
 /// Whether the shell integration's environment names the executable and the instance a pane's
 /// pipe to a terminal on a server needs ([`launch::held_command`]): without them it would find
 /// nobody.
-fn pipe_installed(integration: &[(String, String)]) -> bool {
+pub(crate) fn pipe_installed(integration: &[(String, String)]) -> bool {
     ["BATERI_BIN", "BATERI_SSH_INSTANCE"]
         .iter()
         .all(|key| integration.iter().any(|(name, _)| name == key))
@@ -575,6 +576,7 @@ fn restored_launch(
         Some(kept) if keeps(kept) => (
             Some(Held {
                 args: kept.args.clone(),
+                close_at_end: false,
                 resume: Some(Resume {
                     account: kept.account.clone(),
                     terminal: kept.terminal.as_str().to_owned(),
@@ -1468,6 +1470,13 @@ define_class!(
         #[unsafe(method(applicationShouldTerminateAfterLastWindowClosed:))]
         fn should_terminate_after_last_window(&self, _app: &NSApplication) -> bool {
             self.ivars().run.is_some()
+        }
+
+        /// bateri came to the front: what it told the user while it was behind (the terminals
+        /// a program on a server opened, [`crate::agent`]) has been seen.
+        #[unsafe(method(applicationDidBecomeActive:))]
+        fn did_become_active(&self, _notification: &NSNotification) {
+            crate::agent::seen();
         }
 
         /// The Dock icon was clicked. **If there is no window at all** a new
@@ -4597,6 +4606,19 @@ impl AppDelegate {
         opening: Opening,
         start: Option<&Start>,
     ) -> (embed::Config, Theme) {
+        self.pane_launch_as(tab, from, opening, start, self.next_id())
+    }
+
+    /// [`Self::pane_launch`] for a pane whose id is already chosen: a pane whose place was decided
+    /// before it was born (the tree it joins names it).
+    pub(crate) fn pane_launch_as(
+        &self,
+        tab: u64,
+        from: Option<&TerminalPane>,
+        opening: Opening,
+        start: Option<&Start>,
+        id: u64,
+    ) -> (embed::Config, Theme) {
         let session = from.and_then(|from| from.session());
         let theme = session.map_or_else(|| self.resolve_theme(), |session| session.theme());
         let dir = start
@@ -4604,7 +4626,6 @@ impl AppDelegate {
             .or_else(|| session.and_then(|session| session.working_directory()))
             .or_else(child::working_directory);
         let integration = self.shell_integration();
-        let id = self.next_id();
         // A pane that shows a terminal a server keeps: the new pane's first program is
         // the same `ssh`, and the terminal it asks for starts in the same folder there.
         let served = from.and_then(TerminalPane::server_target);
@@ -5758,6 +5779,7 @@ impl AppDelegate {
             run: false,
             held: Some(Held {
                 args,
+                close_at_end: false,
                 resume: Some(Resume {
                     account: found.account.clone(),
                     terminal: found.terminal.as_str().to_owned(),
@@ -9121,6 +9143,7 @@ mod tests {
             launch.held,
             Some(Held {
                 args: vec!["-p".to_owned(), "2222".to_owned(), "prod".to_owned()],
+                close_at_end: false,
                 resume: Some(Resume {
                     account: "ada@prod:2222".to_owned(),
                     terminal: "b-0123".to_owned(),
@@ -9377,6 +9400,7 @@ mod tests {
         };
         let expected = Some(Held {
             args: vec!["-p".to_owned(), "2222".to_owned(), "prod".to_owned()],
+            close_at_end: false,
             resume: None,
         });
         // ⌘T and ⌘D carry the source's `ssh` arguments (the program's name is the pipe's).
@@ -9450,6 +9474,7 @@ mod tests {
         ];
         let chosen = Held {
             args: vec!["rasp".to_owned()],
+            close_at_end: false,
             resume: Some(Resume {
                 account: "u@rasp:22".to_owned(),
                 terminal: "b-7".to_owned(),

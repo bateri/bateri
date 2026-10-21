@@ -57,6 +57,10 @@ pub const STEP_LIMIT: Duration = Duration::from_secs(120);
 /// name its holder made).
 pub const NUMBER_LIMIT: Duration = Duration::from_secs(15);
 
+/// How long reading what the server's script left for the application may take
+/// ([`crate::agent::notes::READ`]): a few small files, on a connection that is up.
+pub const NOTES_LIMIT: Duration = Duration::from_secs(15);
+
 /// How long the renewal of the server's terminals ([`upgrade_sessions`]) may
 /// take. kablo gives each terminal 20 seconds; a server that is slower than a
 /// few terminals' worth is not waited for, because what waits is a pane that

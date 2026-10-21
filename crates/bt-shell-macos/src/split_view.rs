@@ -552,6 +552,55 @@ impl SplitView {
         true
     }
 
+    /// Where the pane of a terminal a program on a server asked for goes beside `anchor` of this
+    /// tab, as the agent asked (`ask`): the rule is [`bt_shell_common::agent::place::place`],
+    /// in this container's room with the spacing of the tree it becomes. `incoming` is the id
+    /// the pane will have; it does not exist yet, so its smallest size is the anchor's (the
+    /// same font, the same card). `None` if `anchor` is not a pane of this tab.
+    pub(crate) fn plan_agent_pane(
+        &self,
+        anchor: u64,
+        incoming: u64,
+        ask: &bt_shell_common::agent::place::Ask,
+    ) -> Option<bt_shell_common::agent::place::Landing> {
+        let scale = self.scale();
+        let own = self.ivars().panes.borrow().clone();
+        let measured = |id: u64| {
+            own.iter()
+                .find(|pane| pane.id() == id)
+                .and_then(|pane| pane.min_size())
+                .map_or(Size::new(0.0, 0.0), |min| Size::new(min.width, min.height))
+        };
+        let anchor_min = measured(anchor);
+        let min = move |id: u64| {
+            if id == incoming {
+                anchor_min
+            } else {
+                measured(id)
+            }
+        };
+        let tree = self.ivars().tree.borrow();
+        let room = Room {
+            bounds: self.bounds_rect(),
+            scale,
+            spacing: spacing(
+                tree.leaves().len() + 1,
+                scale,
+                self.style(),
+                self.beside_tabs(),
+            ),
+            min: &min,
+        };
+        bt_shell_common::agent::place::place(
+            &tree,
+            anchor,
+            incoming,
+            ask,
+            self.zoomed().is_some(),
+            &room,
+        )
+    }
+
     /// Where `incoming` (the tree of `moving`, panes that may be in another
     /// tab) would land if let go on `side` of `leaf` — the placement the
     /// drop makes ([`Tree::plan_beside`]), in this container's room with the

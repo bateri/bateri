@@ -83,6 +83,11 @@
 //! sends the bytes and ends the conversation; one that is dropped hangs up, so a program
 //! is never left waiting on an application that forgot it. What a letter says and what the
 //! answer means is between the program and the application; the service reads none of it.
+//!
+//! **What they left while the application was away.** A program that asked when no application
+//! was connected left its request on the server. When a connection to the server comes up and the
+//! server has said what it keeps ([`Service::background`], [`Service::exited`]), the backend is
+//! told once ([`Backend::reachable`], on a thread of its own) and reads what was left.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{self, Read, Write};
@@ -392,6 +397,13 @@ pub trait Backend: Send + Sync + 'static {
     /// answers the [`Letter`] when it has the answer. The default does not answer,
     /// which hangs up.
     fn mail(&self, _letter: Letter) {}
+
+    /// The connection to the account's server came up and the server has answered with its
+    /// terminals ([`Service::background`] and [`Service::exited`] are as it said): what a
+    /// program on the server left for the application while no connection was up can be
+    /// read now. Called on a thread of its own, once per connection, so it may take as long as
+    /// the server does.
+    fn reachable(&self, _account: &str, _server: &KabloHost) {}
 }
 
 /// The most a program may say to the application in one conversation, in bytes.
@@ -409,6 +421,12 @@ pub struct Letter {
     /// the other end of the bridge's mailbox says (never what the program says of
     /// itself); `None` when it runs in none (a cron job).
     pub from: Option<SessionId>,
+    /// The server as the user typed it (`rasp`): the word that names it in the lines a person
+    /// reads.
+    pub host: String,
+    /// The `ssh` arguments that reach the server, the program's name first
+    /// ([`Shown::argv`]): what a pane that shows one of its terminals is started with.
+    pub argv: Vec<String>,
     /// What it said, up to its end.
     pub bytes: Vec<u8>,
     tx: Sender<Msg>,
@@ -625,6 +643,9 @@ pub struct Service {
     shown: Arc<Mutex<HashMap<PaneUuid, Shown>>>,
     /// The terminals each account keeps in the background, as the loop last wrote them.
     background: Arc<Mutex<BTreeMap<String, Kept>>>,
+    /// The terminals each account's server lists that are no longer running and that no pane
+    /// shows, as the loop last wrote them ([`Service::exited`]).
+    exited: Arc<Mutex<BTreeMap<String, Vec<SessionId>>>>,
 }
 
 /// How long a terminal that was asked to hang up has before it is killed.
@@ -695,6 +716,7 @@ impl Service {
         };
         let shown = Arc::new(Mutex::new(HashMap::new()));
         let background = Arc::new(Mutex::new(BTreeMap::new()));
+        let exited = Arc::new(Mutex::new(BTreeMap::new()));
         let core = Core {
             shared: Arc::new(Shared {
                 backend,
@@ -710,8 +732,11 @@ impl Service {
             shown: Arc::clone(&shown),
             roster: BTreeMap::new(),
             relist: BTreeSet::new(),
+            fresh: BTreeSet::new(),
+            reached: Vec::new(),
             told: BTreeMap::new(),
             background: Arc::clone(&background),
+            exited: Arc::clone(&exited),
             refresh: false,
             takes: BTreeMap::new(),
             ending: Vec::new(),
@@ -730,6 +755,7 @@ impl Service {
             threads: Mutex::new(vec![accepting, serving]),
             shown,
             background,
+            exited,
         })
     }
 
@@ -761,6 +787,18 @@ impl Service {
     /// [`Service::background`], read from the cache without waiting.
     pub fn elsewhere(&self, account: &str) -> Vec<Background> {
         self.kept_of(account, |kept| &kept.elsewhere)
+    }
+
+    /// The terminals of `account` the server still lists that are not running any more (the
+    /// program ended; nobody has heard of it) and that no pane of this Mac shows. Like
+    /// [`Service::background`], read from the cache without waiting.
+    pub fn exited(&self, account: &str) -> Vec<SessionId> {
+        self.exited
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(account)
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// [`Service::elsewhere`] of every account, the most recently written first.
@@ -983,11 +1021,20 @@ struct Core {
     roster: BTreeMap<String, Roster>,
     /// The accounts to ask for their terminals again before anything else is done.
     relist: BTreeSet<String>,
+    /// The accounts whose connection came up and have not been listed since
+    /// ([`Backend::reachable`]).
+    fresh: BTreeSet<String>,
+    /// The accounts that were just listed after their connection came up: told
+    /// ([`Backend::reachable`]) once the lists are written, so that what the backend reads
+    /// the cache for is what the server said.
+    reached: Vec<String>,
     /// The terminals in the background the last line to a new terminal named, by account
     /// ([`background_note`]): for as long as the service lives, which is the application's.
     told: BTreeMap<String, Vec<SessionId>>,
     /// What [`Service::background`] and [`Service::elsewhere`] read.
     background: Arc<Mutex<BTreeMap<String, Kept>>>,
+    /// What [`Service::exited`] reads.
+    exited: Arc<Mutex<BTreeMap<String, Vec<SessionId>>>>,
     /// Something happened that [`Core::shown`] may say differently.
     refresh: bool,
     /// Terminals the next pane to ask for them takes, and when it was said
@@ -1252,7 +1299,14 @@ impl Core {
                         match *event {
                             // A connection that came up is asked for its terminals.
                             Event::Linked => {
+                                self.fresh.insert(account.clone());
                                 self.relist.insert(account);
+                            }
+                            // The first answer after a connection came up: the roster is as
+                            // the server has it, and what was left for the application can be
+                            // read against it.
+                            Event::Listed(_) if self.fresh.remove(&account) => {
+                                self.reached.push(account);
                             }
                             Event::Ended { terminal, .. } | Event::Taken { terminal, .. } => {
                                 // It went by itself: nothing is left to kill.
@@ -1294,6 +1348,24 @@ impl Core {
             }
         }
         self.write_shown();
+        for account in std::mem::take(&mut self.reached) {
+            self.reach(&account);
+        }
+    }
+
+    /// [`Backend::reachable`] for `account`, on a thread of its own: it may wait on the server.
+    fn reach(&self, account: &str) {
+        let Some(entry) = self.accounts.get(account) else {
+            return;
+        };
+        let (backend, server, account) = (
+            Arc::clone(&self.shared.backend),
+            entry.server.clone(),
+            account.to_owned(),
+        );
+        let _ = thread::Builder::new()
+            .name("ssh-hold reads the server's notes".into())
+            .spawn(move || backend.reachable(&account, &server));
     }
 
     /// A program on the server of `account` wants the application: taken at once
@@ -1339,9 +1411,16 @@ impl Core {
         let Some(draft) = self.drafts.remove(&(account.to_owned(), talk)) else {
             return;
         };
+        let (host, argv) = self
+            .accounts
+            .get(account)
+            .map(|entry| (entry.server.host.clone(), entry.server.argv.clone()))
+            .unwrap_or_default();
         self.shared.backend.mail(Letter {
             account: account.to_owned(),
             from: draft.from,
+            host,
+            argv,
             bytes: draft.bytes,
             tx: self.shared.tx.clone(),
             talk,
@@ -1451,6 +1530,7 @@ impl Core {
     /// background for a moment) and those asked to end.
     fn write_background(&mut self) {
         let mut background: BTreeMap<String, Kept> = BTreeMap::new();
+        let mut exited: BTreeMap<String, Vec<SessionId>> = BTreeMap::new();
         for (account, roster) in &self.roster {
             let Some(entry) = self.accounts.get(account) else {
                 continue;
@@ -1466,6 +1546,10 @@ impl Core {
             };
             let (host, argv) = (&entry.server.host, &entry.server.argv);
             let (waiting, away) = roster.split(account, host, argv, hidden);
+            let gone = roster.exited(hidden);
+            if !gone.is_empty() {
+                exited.insert(account.clone(), gone);
+            }
             let kept = Kept {
                 background: waiting,
                 elsewhere: away,
@@ -1474,6 +1558,7 @@ impl Core {
                 background.insert(account.clone(), kept);
             }
         }
+        *self.exited.lock().unwrap_or_else(|e| e.into_inner()) = exited;
         let before = std::mem::replace(
             &mut *self.background.lock().unwrap_or_else(|e| e.into_inner()),
             background.clone(),

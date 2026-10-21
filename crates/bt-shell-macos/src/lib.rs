@@ -44,6 +44,7 @@
 //! — lives in `bt-shell-common` and is imported at the crate root below,
 //! so `crate::settings` and friends keep resolving.
 
+mod agent;
 pub(crate) mod app;
 mod arrange;
 mod card;

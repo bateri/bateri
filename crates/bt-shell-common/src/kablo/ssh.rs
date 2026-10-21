@@ -34,7 +34,7 @@ use std::thread;
 use bt_core::{PaneUuid, RemoteKind, RemoteTarget, Settings};
 
 use super::Cause;
-use super::install::{self, Bundle, Failure, Installed, SshChannel};
+use super::install::{self, Bundle, Channel, Failure, Installed, SshChannel};
 use super::service::{Backend, Carried, Letter, PaneInfo, PaneLink, Peer, Refusal};
 use crate::ssh_route::{self, Ask, Asker, Denied, Masters, Plan, Route, SshRunner};
 use crate::ssh_wrap::{self, Fact, KabloHost};
@@ -57,6 +57,12 @@ pub type BackgroundNews = Box<dyn Fn(&str) + Send + Sync>;
 /// What the application does with what a program on a server said to it
 /// ([`Backend::mail`]): it hops to its own thread and answers the letter there.
 pub type MailNews = Box<dyn Fn(Letter) + Send + Sync>;
+
+/// What a server left for the application while it was away, read when a connection to it came up
+/// ([`Backend::reachable`]): the server and the notes ([`crate::agent::notes`]). The application
+/// hops to its own thread and places what it can.
+pub type NotesNews =
+    Box<dyn Fn(crate::agent::serve::Server, Vec<crate::agent::notes::Note>) + Send + Sync>;
 
 /// What the service gets from the application, as closures and values.
 pub struct SshBackend {
@@ -97,6 +103,9 @@ pub struct SshBackend {
     /// The application takes what the programs on a server say to it: `Some` makes the
     /// accounts' clients ask for tickets ([`Backend::takes_mail`]). `None`: it takes none.
     pub mail: Option<MailNews>,
+    /// The application places what was left for it on a server ([`Backend::reachable`]): `Some`
+    /// reads the server's notes when a connection to it comes up. `None`: it reads none.
+    pub notes: Option<NotesNews>,
 }
 
 impl SshBackend {
@@ -342,6 +351,39 @@ impl Backend for SshBackend {
         if let Some(mail) = &self.mail {
             mail(letter);
         }
+    }
+
+    fn reachable(&self, account: &str, server: &KabloHost) {
+        let Some(news) = &self.notes else {
+            return;
+        };
+        // Only a server kablo is kept on has been written to by the script.
+        if self.bundle.is_none() {
+            return;
+        }
+        let target = self.target(server);
+        let channel = SshChannel {
+            argv: ssh_argv_for(&target, &self.route_of(&target)),
+            limit: install::NOTES_LIMIT,
+        };
+        let Ok(reply) = channel.run(crate::agent::notes::READ, &[]) else {
+            return;
+        };
+        if reply.status != Some(0) {
+            return;
+        }
+        let notes = crate::agent::notes::parse(reply.out.as_bytes());
+        if notes.is_empty() {
+            return;
+        }
+        news(
+            crate::agent::serve::Server {
+                account: account.to_owned(),
+                host: server.host.clone(),
+                argv: server.argv.clone(),
+            },
+            notes,
+        );
     }
 }
 

@@ -100,6 +100,16 @@ pub(crate) fn background(account: &str) -> Vec<Background> {
         .unwrap_or_default()
 }
 
+/// The terminals of the server of `account` that ended with nobody attached and that no pane
+/// shows ([`Service::exited`]): an agent's terminal that finished while the Mac was away, which
+/// a pane can still show if it was asked to stay open.
+pub(crate) fn exited(account: &str) -> Vec<SessionId> {
+    SERVICE
+        .get()
+        .map(|service| service.exited(account))
+        .unwrap_or_default()
+}
+
 /// The terminals another Mac has open, the last to write first: what the server's card and the
 /// palette's page of a server list under *On other Macs* ([`Service::elsewhere_all`]). Read
 /// without waiting. None in a process without the service.
@@ -294,9 +304,14 @@ fn terminal_changed(pane: &PaneUuid) {
     DispatchQueue::main().exec_async(move || {
         // audit: a block running on the main queue is on the main thread by definition.
         let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
-        if let Some(pane) = delegate(mtm).and_then(|delegate| delegate.pane_with_uuid(&pane)) {
-            pane.remote_edge();
+        let Some(app) = delegate(mtm) else {
+            return;
+        };
+        if let Some(found) = app.pane_with_uuid(&pane) {
+            found.remote_edge();
         }
+        // A terminal some pane was waiting to stand beside may have a pane now.
+        crate::agent::terminal_shown(&app, &pane);
     });
 }
 
@@ -395,7 +410,8 @@ pub(crate) fn serve(
         changed: Box::new(terminal_changed),
         program: Box::new(program_changed),
         listed: Box::new(background_changed),
-        mail: None,
+        mail: Some(Box::new(crate::agent::letter)),
+        notes: Some(Box::new(crate::agent::notes)),
     };
     if let Ok(service) = Service::start(dir, Arc::new(backend), ledger()) {
         let _ = SERVICE.set(service);

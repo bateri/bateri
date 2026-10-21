@@ -287,6 +287,7 @@ fn config(socket: &Path, target: Target, first: bool, input: RawFd, output: RawF
         terminal: SessionId::new("b-test").expect("an id"),
         target,
         first,
+        close_at_end: false,
         sockets: vec![socket.to_path_buf()],
         input,
         output,
@@ -302,15 +303,22 @@ fn new_target() -> Target {
 }
 
 fn run_on_pipes(socket: &Path, target: Target, first: bool) -> Running {
+    run_on_pipes_closing(socket, target, first, false)
+}
+
+fn run_on_pipes_closing(socket: &Path, target: Target, first: bool, close_at_end: bool) -> Running {
     let (stdin_read, stdin_write) = pipe();
     let (stdout_read, stdout_write) = pipe();
-    let config = config(
-        socket,
-        target,
-        first,
-        stdin_read.as_raw_fd(),
-        stdout_write.as_raw_fd(),
-    );
+    let config = Config {
+        close_at_end,
+        ..config(
+            socket,
+            target,
+            first,
+            stdin_read.as_raw_fd(),
+            stdout_write.as_raw_fd(),
+        )
+    };
     let handle = std::thread::spawn(move || {
         let outcome = run(&config);
         drop((stdin_read, stdout_write));
@@ -418,12 +426,40 @@ fn a_terminal_that_is_gone_says_so_and_the_first_program_runs_a_shell() {
     });
 
     // Not as the first program: the shell that started it gets a status.
-    let mut hold = run_on_pipes(&socket, target, false);
+    let mut hold = run_on_pipes(&socket, target.clone(), false);
+    app.until("the pipe ended", |_| {
+        hold.handle.as_ref().is_some_and(JoinHandle::is_finished)
+    });
+    assert_eq!(hold.outcome(), Outcome::Exit(EXIT_REFUSED));
+
+    // A pane that is the terminal's and no more closes with it: no shell for a terminal that is
+    // not there.
+    let mut hold = run_on_pipes_closing(&socket, target, true, true);
     app.until("the pipe ended", |_| {
         hold.handle.as_ref().is_some_and(JoinHandle::is_finished)
     });
     assert_eq!(hold.outcome(), Outcome::Exit(EXIT_REFUSED));
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_pane_that_closes_at_the_end_ends_with_the_terminal_where_a_first_program_runs_a_shell() {
+    // Both are the pane's first program; the one that closes with its terminal leaves no shell.
+    for (close, expected) in [(false, Outcome::Shell(7)), (true, Outcome::Exit(7))] {
+        let dir = scratch(if close { "closes" } else { "stays" });
+        let socket = dir.join("hold");
+        let mut app = App::new(&socket, Bridge::new(Age::Current), Policy::Serve);
+        let mut hold = run_on_pipes_closing(&socket, new_target(), true, close);
+        let terminal = app.terminal();
+        app.bridge.write(&terminal, b"working");
+        app.until("the output shown", |_| hold.shown.bytes() == b"working");
+        app.bridge.exit(&terminal, Exit::Code(7));
+        app.until("the pipe ended", |_| {
+            hold.handle.as_ref().is_some_and(JoinHandle::is_finished)
+        });
+        assert_eq!(hold.outcome(), expected, "close at the end: {close}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 #[test]
@@ -565,6 +601,7 @@ fn the_process_table_reader_walks_the_options_the_parser_walks() {
         &["--", "-p", "2222", "prod"][..],
         &["--first", "--", "prod"],
         &["--first", "--shell-arg", "-l", "--", "prod"],
+        &["--first", "--close-at-end", "--", "prod"],
         // An option's value that reads like the end of the options.
         &["--first", "--shell-arg", "--", "--", "prod"],
         &[
@@ -602,8 +639,10 @@ fn the_command_line() {
     assert_eq!(new.ssh_args, [os("rasp"), os("-p"), os("2222")]);
     assert!(!new.first && new.terminal.is_none());
     let first = ok(&["--first", "--shell-arg", "--posix", "--", "rasp"]).expect("first");
-    assert!(first.first);
+    assert!(first.first && !first.close_at_end);
     assert_eq!(first.shell_args, ["--posix"]);
+    let closing = ok(&["--first", "--close-at-end", "--", "rasp"]).expect("closing");
+    assert!(closing.first && closing.close_at_end);
     let existing = ok(&["--terminal", "b-1", "--account", "rasp", "--offset", "42"]).expect("one");
     assert_eq!(existing.offset, Some(42));
     // The arguments of an existing terminal name its server for whoever reads the process's
@@ -746,6 +785,7 @@ fn ssh_hold_process() {
                 terminal: SessionId::new("b-proc").expect("an id"),
                 target: new_target(),
                 first: false,
+                close_at_end: false,
                 sockets: vec![socket],
                 input: libc::STDIN_FILENO,
                 output: libc::STDOUT_FILENO,

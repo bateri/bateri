@@ -89,7 +89,7 @@ pub const EXIT_USAGE: i32 = 64;
 pub const EXIT_REFUSED: i32 = 255;
 
 /// The command line.
-pub const USAGE: &str = "usage: bateri ssh-hold [--first] [--shell-arg ARG]... \
+pub const USAGE: &str = "usage: bateri ssh-hold [--first] [--close-at-end] [--shell-arg ARG]... \
 [--terminal ID --account ACCOUNT [--offset N]] [-- SSH-ARGUMENT...]";
 
 /// The pauses between attempts to reach bateri again, by how many have
@@ -174,6 +174,7 @@ fn plain_name(name: &str) -> bool {
 #[derive(Debug, PartialEq, Eq)]
 struct Parsed {
     first: bool,
+    close_at_end: bool,
     shell_args: Vec<String>,
     terminal: Option<String>,
     account: Option<String>,
@@ -184,6 +185,7 @@ struct Parsed {
 fn parse(args: &[OsString]) -> Option<Parsed> {
     let mut parsed = Parsed {
         first: false,
+        close_at_end: false,
         shell_args: Vec::new(),
         terminal: None,
         account: None,
@@ -194,6 +196,7 @@ fn parse(args: &[OsString]) -> Option<Parsed> {
     while let Some(arg) = args.next() {
         match arg.to_str()? {
             "--first" => parsed.first = true,
+            "--close-at-end" => parsed.close_at_end = true,
             "--shell-arg" => parsed.shell_args.push(args.next()?.to_str()?.to_owned()),
             "--terminal" => parsed.terminal = Some(args.next()?.to_str()?.to_owned()),
             "--account" => parsed.account = Some(args.next()?.to_str()?.to_owned()),
@@ -231,7 +234,7 @@ pub fn ssh_args_in(args: &[String]) -> Option<&[String]> {
     let mut at = 0;
     while let Some(arg) = args.get(at) {
         match arg.as_str() {
-            "--first" => at += 1,
+            "--first" | "--close-at-end" => at += 1,
             "--shell-arg" | "--terminal" | "--account" | "--offset" => at += 2,
             "--" => return Some(&args[at + 1..]),
             _ => return None,
@@ -299,6 +302,7 @@ pub fn hold_main(args: &[OsString], env: &Env) -> Action {
         terminal,
         target,
         first: parsed.first,
+        close_at_end: parsed.close_at_end,
         sockets: env.sockets(),
         input: libc::STDIN_FILENO,
         output: libc::STDOUT_FILENO,
@@ -359,6 +363,11 @@ pub struct Config {
     pub target: Target,
     /// The pane's first program: when the terminal ends, a shell follows.
     pub first: bool,
+    /// The pane is the terminal's and no more: when the terminal ends, or is gone when asked for,
+    /// this ends with the status and the pane closes with it, even for a first program (a pane a
+    /// program on a server asked for, whose program was the point of it). The user's Ctrl-C
+    /// before the terminal is shown still leaves the shell a first program leaves.
+    pub close_at_end: bool,
     /// The sockets of bateri to try, in order.
     pub sockets: Vec<PathBuf>,
     /// The terminal the user types on.
@@ -620,7 +629,7 @@ fn serve(
                         state.offset = Some(end);
                     }
                     ToHold::End { code, note } => {
-                        let outcome = if config.first {
+                        let outcome = if config.first && !config.close_at_end {
                             Outcome::Shell(code)
                         } else {
                             Outcome::Exit(i32::from(code))
@@ -734,7 +743,7 @@ fn refused(config: &Config, state: &State, fall_back: bool, text: String) -> Fin
         return Finish::quiet(Outcome::FallBack);
     }
     Finish {
-        outcome: if config.first {
+        outcome: if config.first && !config.close_at_end {
             Outcome::Shell(u8::try_from(EXIT_REFUSED).unwrap_or(u8::MAX))
         } else {
             Outcome::Exit(EXIT_REFUSED)

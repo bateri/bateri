@@ -2670,6 +2670,25 @@ impl TerminalWindow {
         self.layout_changed();
     }
 
+    /// **The applier: a tab a program on a server asked for.** It joins right of tab `after`, in
+    /// its group (a closed group stays closed), and **nothing is selected**: the window shows
+    /// what it showed, and the tab is hidden with its panes until the user goes to it. Its
+    /// container goes under the bar at the content's size like any tab's, so its terminal's first
+    /// size is the final one. The caller starts the tab after this ([`TerminalTab::start_hidden`]).
+    /// A layout edge.
+    pub(crate) fn add_tab_behind(&self, tab: &TerminalTab, look: (Theme, ContentEdge), after: u64) {
+        let (theme, edge) = look;
+        self.forget_undo();
+        tab.set_theme(theme);
+        tab.set_content_edge(edge);
+        tab.container().setHidden(true);
+        self.ivars().root.add_container(tab.container());
+        self.ivars().tabs.borrow_mut().push(tab.retain());
+        self.with_strip(|groups, order| groups.open_beside(order, tab.id(), after));
+        self.refresh_bar();
+        self.layout_changed();
+    }
+
     /// **The applier: a tab closes**, without asking (its last pane's shell
     /// exited, a confirmed question). The window's last tab closes the
     /// window. A selected tab hands the screen to its right neighbour (the

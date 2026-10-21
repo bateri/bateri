@@ -83,6 +83,8 @@ struct Fake {
     fronted: Mutex<Vec<PaneUuid>>,
     /// The accounts told their terminals in the background are not what they were, in order.
     background: Mutex<Vec<String>>,
+    /// The accounts told their server could be read, with the host, in order.
+    reached: Mutex<Vec<(String, String)>>,
     /// The application takes what the programs on a server say to it.
     mail: AtomicBool,
     /// What the programs said, not yet answered.
@@ -110,6 +112,7 @@ impl Fake {
             changed: Mutex::new(Vec::new()),
             fronted: Mutex::new(Vec::new()),
             background: Mutex::new(Vec::new()),
+            reached: Mutex::new(Vec::new()),
             mail: AtomicBool::new(false),
             letters: Mutex::new(Vec::new()),
             next_number: AtomicU64::new(0),
@@ -351,6 +354,13 @@ impl Backend for Fake {
         self.mail.load(Ordering::SeqCst)
     }
 
+    fn reachable(&self, account: &str, server: &KabloHost) {
+        self.reached
+            .lock()
+            .expect("lock")
+            .push((account.to_owned(), server.host.clone()));
+    }
+
     fn mail(&self, letter: Letter) {
         self.letters.lock().expect("lock").push(letter);
     }
@@ -477,6 +487,7 @@ impl Holder {
             terminal: SessionId::new(terminal).expect("an id"),
             target,
             first: false,
+            close_at_end: false,
             sockets: vec![socket.to_path_buf()],
             input: stdin_read.as_raw_fd() as RawFd,
             output: stdout_write.as_raw_fd() as RawFd,
@@ -2066,6 +2077,51 @@ fn what_runs_on_the_server_and_no_pane_shows_is_in_the_background_the_last_to_wr
     );
 }
 
+/// A terminal whose program ended while nobody was attached is still on the server's list, and
+/// is neither running nor in the background: the application reads it as one that ended.
+#[test]
+fn a_terminal_that_ended_unseen_is_exited_and_not_in_the_background() {
+    let rig = Rig::new("background-exited");
+    let _holder = Holder::new(&rig.socket(), "b-1");
+    let shown = rig.terminals(1).remove(0);
+    let agent = rig.world.bridge().add("agent", Size::default());
+    let done = rig.world.bridge().add("done", Size::default());
+    rig.world.bridge().exit(&done, Exit::Code(3));
+    rig.service.refresh_background();
+    until("listed", || background_names(&rig) == ["agent"]);
+    assert_eq!(
+        rig.service.exited(ACCOUNT),
+        [done.clone()],
+        "the ended one, and not the one a pane shows"
+    );
+    let _ = (shown, agent);
+    assert_eq!(
+        rig.service.exited("another account"),
+        Vec::<SessionId>::new()
+    );
+}
+
+/// A server is read for what was left for the application once per connection, after it has
+/// said what it keeps: the listings that follow do not ask again.
+#[test]
+fn what_a_server_left_for_the_application_is_read_once_per_connection() {
+    let rig = Rig::new("reachable");
+    let _holder = Holder::new(&rig.socket(), "b-1");
+    rig.terminals(1);
+    until("told the server can be read", || {
+        !rig.world.reached.lock().expect("lock").is_empty()
+    });
+    rig.service.refresh_background();
+    rig.service.refresh_background();
+    rig.world.bridge().add("agent", Size::default());
+    rig.service.refresh_background();
+    until("listed", || background_names(&rig) == ["agent"]);
+    assert_eq!(
+        *rig.world.reached.lock().expect("lock"),
+        [(ACCOUNT.to_owned(), "rasp".to_owned())]
+    );
+}
+
 /// A terminal a pane lets go of without ending it (the pane's program went; a crash does the
 /// same) lives on and is listed; ending it takes it out of the list at once.
 #[test]
@@ -2514,6 +2570,11 @@ fn a_letter_is_handed_over_whole_with_the_terminal_it_is_from_and_the_answer_goe
     assert_eq!(letter.from, Some(terminal));
     assert_eq!(letter.bytes, b"place\nterminal t4\nside below\n");
 
+    assert_eq!(
+        (letter.host.as_str(), letter.argv.as_slice()),
+        ("rasp", ["ssh".to_owned(), "rasp".to_owned()].as_slice()),
+        "the server the letter came from, as a pane that shows one of its terminals is started"
+    );
     letter.answer(b"ok landed as_asked\n".to_vec());
     until("the answer", || {
         rig.world.bridge().said_to_sender(stream) == b"ok landed as_asked\n"

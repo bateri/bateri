@@ -52,7 +52,7 @@ use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_se
 use objc2_app_kit::{NSEvent, NSResponder, NSView, NSWindow, NSWindowOcclusionState};
 use objc2_core_foundation::CFRetained;
 use objc2_core_graphics::CGImage;
-use objc2_foundation::{NSObject, NSObjectProtocol, NSPoint, NSRect};
+use objc2_foundation::{NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize};
 
 use crate::app;
 use crate::arrange::{self, Entry, Raised, Scene, Status, Wants};
@@ -925,6 +925,57 @@ impl TerminalTab {
         true
     }
 
+    /// A pane a program on a server asked for, put in the places `tree` lays out (the plan of
+    /// [`SplitView::plan_agent_pane`]) at the size `landing` says, so that its terminal's first
+    /// size is the final one. **The keyboard stays where it is and so does the zoom**: the user
+    /// did not ask for this pane, and a zoomed tab keeps showing what it showed — the pane is
+    /// born behind it. The order is [`Self::add_pane`]'s; the pane then learns what the tab's
+    /// panes know about being on screen or not, the way a pane that moves in does
+    /// ([`Self::receive`]). `focus` (`--focus`) gives it the keyboard afterwards.
+    pub(crate) fn add_planned_pane(
+        &self,
+        mtm: MainThreadMarker,
+        launch: embed::Config,
+        tree: Tree,
+        landing: crate::split::Rect,
+        focus: bool,
+    ) -> Result<Retained<TerminalPane>, String> {
+        let container = &self.ivars().container;
+        let frame = NSRect::new(
+            NSPoint::new(0.0, 0.0),
+            NSSize::new(landing.width, landing.height),
+        );
+        let pane = embed::open(mtm, frame, launch).map_err(|e| e.to_string())?;
+        if !container.receive(tree, std::slice::from_ref(&pane)) {
+            drop(pane.begin_close());
+            return Err("no room for the pane".to_owned());
+        }
+        pane.observe_frame();
+        if let Err(e) = pane.start(mtm) {
+            drop(pane.begin_close());
+            let _ = container.remove_leaf(pane.id());
+            drop(container.detach(pane.id()));
+            return Err(format!("could not start the shell: {e}"));
+        }
+        // Behind a zoom, or in a tab that is not on screen, its link sleeps with the others.
+        self.apply_visibility(self.window_visible());
+        pane.apply_focus(false);
+        if container.isHiddenOrHasHiddenAncestor() {
+            pane.leave_screen();
+        }
+        pane.refresh_geometry();
+        if focus {
+            self.focus_pane(&pane);
+        } else {
+            self.refresh_look();
+        }
+        self.layout_changed();
+        if let Some(app) = app::delegate(mtm) {
+            app.refresh_dock_tile();
+        }
+        Ok(pane)
+    }
+
     /// Puts the new pane in `target`'s second half on `axis`, opens its
     /// session and gives it the keyboard. The order is required: the pane's
     /// `start` reads the scale from the window, so it is first attached to
@@ -1724,6 +1775,18 @@ impl TerminalTab {
     /// birth package).
     pub(crate) fn start(&self, mtm: MainThreadMarker) -> std::io::Result<()> {
         self.focused_pane().start(mtm)
+    }
+
+    /// [`Self::start`] for a tab that is not on screen and is not going to be (one a program on a
+    /// server asked for, [`TerminalWindow::add_tab_behind`]): its panes' links are told they
+    /// are hidden as soon as they exist, so nothing is drawn for a tab nobody sees.
+    pub(crate) fn start_hidden(&self, mtm: MainThreadMarker) -> std::io::Result<()> {
+        self.start(mtm)?;
+        self.apply_visibility(self.window_visible());
+        for pane in self.panes() {
+            pane.leave_screen();
+        }
+        Ok(())
     }
 
     /// `[remote] hosts` changed — the pattern list goes to every pane's

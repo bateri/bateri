@@ -266,6 +266,16 @@ impl Roster {
         (background, elsewhere)
     }
 
+    /// The terminals the server lists that are not running any more (nobody has attached since
+    /// the program ended) and that are not `hidden`, in the order of their names.
+    pub(super) fn exited(&self, hidden: impl Fn(&SessionId) -> bool) -> Vec<SessionId> {
+        self.terminals
+            .iter()
+            .filter(|(id, entry)| !entry.running && !hidden(id))
+            .map(|(id, _)| id.clone())
+            .collect()
+    }
+
     /// The running terminals no pane of this Mac shows and nobody asked to end, the most recently
     /// written first.
     fn not_shown(

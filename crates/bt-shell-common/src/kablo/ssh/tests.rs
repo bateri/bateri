@@ -94,6 +94,7 @@ impl World {
             program: Box::new(|_| ()),
             listed: Box::new(|_| ()),
             mail: None,
+            notes: None,
         }
     }
 
@@ -352,6 +353,62 @@ fn the_counter_is_asked_over_the_master_and_a_build_without_the_package_has_none
     let bare = world.backend(None);
     assert_eq!(bare.number(&host), None);
     assert_eq!(world.calls().len(), asked, "no call was made");
+}
+
+/// What the server's script left while the Mac was away is read over the master as a step of its
+/// own, handed over with the server it came from and removed on the server; a build without the
+/// package, or one that places nothing, asks nothing.
+#[test]
+fn what_the_script_left_for_the_application_is_read_over_the_master_and_removed() {
+    let world = stand_in("notes", 0);
+    let host = world
+        .backend(Some(world.package()))
+        .route(&["rasp".into()])
+        .expect("kablo");
+    let placing = world.home.join(".local/share/bateri/placing");
+    std::fs::create_dir_all(&placing).expect("dir");
+    std::fs::write(
+        placing.join("t7"),
+        "bateri 1\nplace\nterminal t7\nanchor t4\nside below\n",
+    )
+    .expect("a note");
+
+    let got = Arc::new(Mutex::new(Vec::new()));
+    let backend_got = Arc::clone(&got);
+    let got_len = |got: &Arc<Mutex<Vec<_>>>| got.lock().expect("lock").len();
+    let mut backend = world.backend(Some(world.package()));
+    let sink = Arc::clone(&got);
+    backend.notes = Some(Box::new(move |server, notes| {
+        sink.lock().expect("lock").push((server, notes));
+    }));
+    backend.reachable("u@rasp:22", &host);
+    {
+        let got = got.lock().expect("lock");
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].0.account, "u@rasp:22");
+        assert_eq!(got[0].0.host, "rasp");
+        assert_eq!(got[0].1.len(), 1);
+        assert_eq!(got[0].1[0].terminal, crate::agent::Terminal(7));
+    }
+    assert!(!placing.join("t7").exists(), "read once");
+
+    // Nothing left: one more step on the server, and the application is not told.
+    let steps = |world: &World| {
+        world
+            .calls()
+            .into_iter()
+            .filter(|call| call.contains("sh -c"))
+            .count()
+    };
+    let before = steps(&world);
+    backend.reachable("u@rasp:22", &host);
+    assert_eq!(steps(&world), before + 1);
+    assert_eq!(got_len(&backend_got), 1);
+    // No package: no call at all.
+    let bare = world.backend(None);
+    let before = steps(&world);
+    bare.reachable("u@rasp:22", &host);
+    assert_eq!(steps(&world), before);
 }
 
 #[test]

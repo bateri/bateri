@@ -6422,7 +6422,8 @@ mod tests {
         }
         // ⌘T and ⌘D take a pane for a server's only through the same gate.
         assert!(
-            entry(include_str!("app.rs"), "    fn pane_launch(").contains("server_target"),
+            entry(include_str!("app.rs"), "    pub(crate) fn pane_launch_as(")
+                .contains("server_target"),
             "the new pane's first program is the source's terminal only if the source is a server pane"
         );
         // The terminal appearing or going runs the pane's remote edge again: the probe and

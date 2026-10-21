@@ -14,6 +14,10 @@
 //!   agent asked (a side, a share), where the new pane lands — the drag's own plan
 //!   ([`crate::split::Tree::plan_beside_sharing`]), the palette's choice of a side when none was
 //!   asked ([`crate::palette::beside`]), and a new tab when the tab has no room left.
+//! - [`serve`] is what the Mac does with a letter: the checks, the ask of the windows (`Shell`),
+//!   the answer, and what waits for its anchor ([`wait`]); [`notes`] is what a server keeps for a
+//!   Mac that was away and the record of who opened a terminal; [`summary`] is the one line that
+//!   tells the user what was opened.
 //! - [`listing`] is `ls`: the windows and tabs as they stand with each tab's real split tree,
 //!   then a table of the server's terminals, as text and as JSON.
 //!
@@ -22,7 +26,11 @@
 
 pub mod listing;
 pub mod message;
+pub mod notes;
 pub mod place;
+pub mod serve;
+pub mod summary;
+pub mod wait;
 
 #[cfg(test)]
 mod script;

@@ -487,6 +487,11 @@ pub(crate) struct Held {
     /// one, and the arguments are only what its command line says of the server (the pane
     /// reads its remote session from it). `None`: a terminal to make.
     pub(crate) resume: Option<Resume>,
+    /// The pane is the terminal's and no more: it closes when the terminal ends instead of
+    /// handing over to a shell (`ssh-hold --close-at-end`). A pane a program on a server asked
+    /// for, whose program is the point of it; a pane that was asked to stay (`--keep-open`)
+    /// and every pane the user opened leave the shell.
+    pub(crate) close_at_end: bool,
 }
 
 /// A terminal a server keeps that a pane's pipe shows again.
@@ -531,6 +536,9 @@ pub(crate) fn held_command(
             "--account".to_owned(),
             resume.account.clone(),
         ]);
+    }
+    if held.close_at_end {
+        args.push("--close-at-end".to_owned());
     }
     args.push("--".to_owned());
     args.extend(held.args.iter().cloned());
@@ -643,6 +651,7 @@ mod tests {
         ];
         let held = super::Held {
             args: vec!["-p".to_owned(), "2222".to_owned(), "--first".to_owned()],
+            close_at_end: false,
             resume: None,
         };
         assert_eq!(
@@ -670,6 +679,45 @@ mod tests {
         assert_eq!(super::held_command(&held, &[], &[]), None);
     }
 
+    /// A pane a program on a server asked for closes with its terminal: the flag is on the
+    /// command line before the `--`, and only then.
+    #[test]
+    fn a_pane_that_closes_with_its_terminal_says_so_to_the_pipe() {
+        let environment = vec![
+            ("BATERI_BIN".to_owned(), "/Applications/bateri".to_owned()),
+            ("BATERI_SSH_INSTANCE".to_owned(), "0a1b2c3d".to_owned()),
+        ];
+        let held = super::Held {
+            args: vec!["rasp".to_owned()],
+            resume: Some(super::Resume {
+                account: "ada@rasp:22".to_owned(),
+                terminal: "t9".to_owned(),
+            }),
+            close_at_end: true,
+        };
+        let (_, args) = super::held_command(&held, &environment, &[]).expect("a command");
+        assert_eq!(
+            args,
+            [
+                "ssh-hold",
+                "--first",
+                "--terminal",
+                "t9",
+                "--account",
+                "ada@rasp:22",
+                "--close-at-end",
+                "--",
+                "rasp"
+            ]
+        );
+        let stays = super::Held {
+            close_at_end: false,
+            ..held
+        };
+        let (_, args) = super::held_command(&stays, &environment, &[]).expect("a command");
+        assert!(!args.iter().any(|arg| arg == "--close-at-end"));
+    }
+
     /// A restored pane's pipe asks for the terminal it showed by name, and the arguments after
     /// the `--` are only what its command line says of the server (the pane's remote session is
     /// read from it): the account has a space in it, and stays one argument.
@@ -681,6 +729,7 @@ mod tests {
         ];
         let held = super::Held {
             args: vec!["-p".to_owned(), "2222".to_owned(), "ada@prod".to_owned()],
+            close_at_end: false,
             resume: Some(super::Resume {
                 account: "ada@prod:2222 via jump:22".to_owned(),
                 terminal: "b-0123".to_owned(),

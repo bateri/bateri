@@ -678,6 +678,34 @@ impl<K: Copy + Eq> Groups<K> {
         self.settle(tabs);
     }
 
+    /// Opens a tab right of `after`, in its cluster, and **leaves the selection where it is**: a
+    /// tab a program on a server asked for is not the one the user was looking at. A group that
+    /// is closed stays closed. A tab that is here stays where it is; an `after` that is not here
+    /// is the end of the ungrouped tabs ([`Self::append`]).
+    pub fn open_beside(&mut self, tabs: &mut Tabs<K>, tab: K, after: K) {
+        if tabs.index_of(tab).is_some() {
+            return;
+        }
+        if tabs.index_of(after).is_none() {
+            self.append(tabs, tab);
+            return;
+        }
+        let into = self.group_of(after);
+        // At the far end of the strip for now, in no cluster: `place` puts it where it goes.
+        tabs.append(tab);
+        let cluster = self.cluster(tabs, into);
+        let before = cluster
+            .iter()
+            .position(|&member| member == after)
+            .and_then(|at| cluster.get(at + 1).copied())
+            .filter(|&next| next != tab);
+        let target = match into {
+            Some(group) => Target::Group { group, before },
+            None => Target::Loose { before },
+        };
+        self.place(tabs, &[tab], target);
+    }
+
     /// Opens a tab among the ungrouped ones, after the last of them (Shell ▸ New Ungrouped Tab,
     /// and ⌃⌘0 when there is none: at the top of the list). A tab that is here is moved there.
     pub fn open_loose(&mut self, tabs: &mut Tabs<K>, tab: K) {
@@ -1486,6 +1514,48 @@ mod tests {
         // A tab that is here is selected, not added twice.
         groups.open(&mut tabs, 3);
         assert_eq!((tabs.len(), tabs.selected()), (11, Some(3)));
+    }
+
+    #[test]
+    fn a_tab_a_program_asked_for_opens_beside_its_tab_and_selects_nothing() {
+        let (mut tabs, mut groups, api, web) = scene();
+        // The user is on 1 (api); a program of 4 (web) asks for a tab: in web, right of 4.
+        groups.open_beside(&mut tabs, 9, 4);
+        assert_eq!(tabs.ids(), [6, 7, 8, 1, 2, 3, 4, 9, 5]);
+        assert_eq!(groups.group_of(9), Some(web));
+        assert_eq!(tabs.selected(), Some(1), "the user's tab stays on screen");
+        ok(&groups, &tabs);
+
+        // Beside the last tab of a group: at its end, not in the next group.
+        groups.open_beside(&mut tabs, 10, 3);
+        assert_eq!(tabs.ids(), [6, 7, 8, 1, 2, 3, 10, 4, 9, 5]);
+        assert_eq!(groups.group_of(10), Some(api));
+        ok(&groups, &tabs);
+
+        // Beside an ungrouped tab, the last of them: still before the groups.
+        groups.open_beside(&mut tabs, 11, 8);
+        assert_eq!(&tabs.ids()[..5], [6, 7, 8, 11, 1]);
+        assert_eq!(groups.group_of(11), None);
+        ok(&groups, &tabs);
+
+        // Beside an ungrouped tab in the middle of them.
+        groups.open_beside(&mut tabs, 12, 6);
+        assert_eq!(&tabs.ids()[..3], [6, 12, 7]);
+        assert_eq!(groups.group_of(12), None);
+        assert_eq!(tabs.selected(), Some(1));
+        ok(&groups, &tabs);
+
+        // A closed group stays closed; a tab that is here and a tab beside nothing are handled.
+        groups.set_collapsed(web, true);
+        groups.open_beside(&mut tabs, 13, 5);
+        assert!(groups.group(web).unwrap().collapsed);
+        assert_eq!(groups.group_of(13), Some(web));
+        let before = tabs.ids().to_vec();
+        groups.open_beside(&mut tabs, 13, 1);
+        assert_eq!(tabs.ids(), before, "a tab that is here stays where it is");
+        groups.open_beside(&mut tabs, 14, 99);
+        assert_eq!(groups.group_of(14), None);
+        ok(&groups, &tabs);
     }
 
     #[test]
