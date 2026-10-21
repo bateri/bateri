@@ -3822,6 +3822,32 @@ mod tests {
     // Calibration: names a font or a measured number.
     #[cfg(target_os = "macos")]
     #[test]
+    fn the_connection_row_has_no_box_in_the_small_class() {
+        // The context row says `Reconnecting… · ⏎ try now` while the
+        // connection to a kept terminal's server is down, i.e. in the small
+        // class (the reconnect placeholder asks the large one). A hand copy of
+        // the non-ASCII characters of `bt-core`'s `RemoteLink` texts
+        // (`the_connection_words_are_the_ones_the_atlas_checks` links them). If
+        // a box appears, the words must change there. Menlo, by name.
+        let mut menlo = Atlas::new(Some("Menlo"), POINT_SIZE, 1.0, Spacing::default());
+        assert_eq!(menlo.font_issue(), None, "Menlo did not open");
+        for ch in ['…', '·', '⏎'] {
+            let slot = menlo
+                .slot(
+                    Sprite::Char(ch),
+                    Face::Regular,
+                    SizeClass::Small,
+                    Half::Whole,
+                )
+                .0
+                .slot;
+            assert_ne!(slot, TOFU, "'{ch}' is a box in Menlo's small class");
+        }
+    }
+
+    // Calibration: names a font or a measured number.
+    #[cfg(target_os = "macos")]
+    #[test]
     fn the_program_bar_has_no_box_in_the_small_class() {
         // A program's guide bar stands in the context line, i.e. the small
         // class. A hand copy of `bt-core`'s `PROGRAM_GLYPHS` (this crate

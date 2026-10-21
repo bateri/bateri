@@ -81,7 +81,7 @@ use crate::environment::Wants;
 use crate::clipboard::{self, PendingCopy};
 use crate::focus::Moment;
 use crate::grid::{self, Grid, split_into_grid};
-use bt_shell_common::kablo::service::Shown;
+use bt_shell_common::kablo::service::{PaneLink, Shown};
 
 use crate::jobs::{self, Foreground, Probe, ShellParent, SystemTable};
 use crate::journal::PaneJournal;
@@ -211,6 +211,54 @@ pub trait PaneHost {
     /// pane moving): the terminal it shows ends with it, on the server. Asked
     /// **before** [`TerminalPane::begin_close`], whose signal lets the terminal go.
     fn end_kept_terminal(&self, _pane: &PaneUuid) {}
+    /// ⏎ in a pane that waits for its connection: the account of the terminal it
+    /// shows dials now instead of waiting out its pause. The default is an
+    /// owner that has no such terminals.
+    fn retry_kept_terminal(&self, _pane: &PaneUuid) {}
+    /// The login sheet's arbitration, for a pane whose terminal waits for a
+    /// password ([`KeptLogin`]). The default is an owner that has no such terminals.
+    fn kept_login(&self) -> Arc<dyn KeptLogin> {
+        Arc::new(NoKeptLogin)
+    }
+}
+
+/// What a pane's ⏎ on "Needs your password" does ([`KeptLogin::begin`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Login {
+    /// No sheet is open for the account: this pane's is.
+    Open,
+    /// The account's sheet is open on this pane: that one is brought forward.
+    Raise(PaneUuid),
+}
+
+/// The owner's side of the login that brings the terminals of a server back: one
+/// sheet per account, whichever of its panes asked ([`TerminalPane::log_in_to_reconnect`]).
+/// Shared with the sheet's thread, so `Send + Sync`; [`KeptLogin::raise`] is the
+/// main thread's.
+pub trait KeptLogin: Send + Sync {
+    /// `pane` wants the account's login sheet.
+    fn begin(&self, account: &str, pane: &PaneUuid) -> Login;
+    /// The account's login ended (logged in, cancelled, failed).
+    fn end(&self, account: &str);
+    /// The user logged in: every terminal on the account dials now.
+    fn done(&self, account: &str);
+    /// Brings the tab of `pane` forward, the keyboard to the pane; `false` if it
+    /// is gone. Main thread.
+    fn raise(&self, pane: &PaneUuid) -> bool;
+}
+
+/// A host with no terminals a server keeps: nothing waits for a login.
+struct NoKeptLogin;
+
+impl KeptLogin for NoKeptLogin {
+    fn begin(&self, _: &str, _: &PaneUuid) -> Login {
+        Login::Open
+    }
+    fn end(&self, _: &str) {}
+    fn done(&self, _: &str) {}
+    fn raise(&self, _: &PaneUuid) -> bool {
+        false
+    }
 }
 
 /// A link the user opened, as the pane's owner may take it
@@ -264,6 +312,15 @@ const MIN_PANE_ROWS: u16 = 5;
 /// and the dimmed pane's text is still readable. Tuned by eye.
 const DIM_ALPHA: f64 = 0.3;
 
+/// Opacity of the veil over a grid that is no longer live: a terminal the
+/// server keeps while the connection to it is gone, and the pane shows its last
+/// screen. Stronger than [`DIM_ALPHA`] on purpose and a separate constant: an
+/// unfocused pane is a live one that is merely not the keyboard's, this one
+/// cannot be typed to, and the two must not be read as each other when a
+/// split has both. Not measured, a design constant (the user's choice of the
+/// number: 0.5).
+const LINK_VEIL_ALPHA: f64 = 0.5;
+
 define_class!(
     // SAFETY: NSBox is designed for subclassing; DimOverlay implements no
     // `Drop`, has no ivar and is born with NSBox's constructor (`new`).
@@ -302,10 +359,36 @@ impl DimOverlay {
     /// The theme's background at [`DIM_ALPHA`] opacity. `NSColor` takes sRGB
     /// (the colour-space boundary; like the separator's `separator_srgb`).
     fn paint(&self, theme: &Theme) {
+        self.paint_with(theme, DIM_ALPHA);
+    }
+
+    /// The theme's background at `alpha` opacity.
+    fn paint_with(&self, theme: &Theme, alpha: f64) {
         let [r, g, b] = theme.background_srgb().map(|byte| f64::from(byte) / 255.0);
-        self.setFillColor(&NSColor::colorWithSRGBRed_green_blue_alpha(
-            r, g, b, DIM_ALPHA,
-        ));
+        self.setFillColor(&NSColor::colorWithSRGBRed_green_blue_alpha(r, g, b, alpha));
+    }
+}
+
+/// What a pane does with a key or a paste, by how its terminal's connection
+/// stands.
+#[derive(Debug, PartialEq, Eq)]
+enum Wait {
+    /// The terminal is there: the input goes to it.
+    Pass,
+    /// ⏎ while the bridge tries again: dial now.
+    TryNow,
+    /// ⏎ while the server wants a login nobody saved: the sheet.
+    LogIn,
+    /// Anything else while it waits: nothing goes to the terminal, the system beeps.
+    Beep,
+}
+
+fn on_wait(link: PaneLink, enter: bool) -> Wait {
+    match (link.is_passive(), enter, link) {
+        (false, ..) => Wait::Pass,
+        (true, true, PaneLink::NeedsLogin) => Wait::LogIn,
+        (true, true, _) => Wait::TryNow,
+        (true, false, _) => Wait::Beep,
     }
 }
 
@@ -1967,6 +2050,15 @@ pub struct PaneIvars {
     /// a sibling of the Metal layer — it is not in the frame path, its
     /// composition is CoreAnimation's. The owner determines its visibility.
     dim: Retained<DimOverlay>,
+    /// The veil over the **grid** while the connection to the server of the
+    /// terminal the pane shows is gone ([`TerminalPane::set_connection`]): not
+    /// the dock — its context row says what is happening and stays at full
+    /// clarity. CoreAnimation's, like [`PaneIvars::dim`]: it asks for no frame.
+    link_veil: Retained<DimOverlay>,
+    /// How the connection stands for the terminal the pane shows, as the
+    /// application's bridge last said (`Live` for a pane that shows its own
+    /// shell). Passive states ([`PaneLink::is_passive`]) take the keys.
+    connection: Cell<PaneLink>,
     /// The card's frame: the topmost child, above the veil
     /// ([`crate::card`]). Invisible unless the pane is one of several.
     card_frame: Retained<FrameBox>,
@@ -2631,6 +2723,8 @@ impl TerminalPane {
         };
         let dim = DimOverlay::new(mtm);
         dim.paint(&theme);
+        let link_veil = DimOverlay::new(mtm);
+        link_veil.paint_with(&theme, LINK_VEIL_ALPHA);
         let card_frame = FrameBox::new(mtm, &theme);
         let link_label = LinkLabel::new(mtm);
         link_label.0.paint(&theme);
@@ -2663,6 +2757,8 @@ impl TerminalPane {
             surface,
             view: view.clone(),
             dim: dim.clone(),
+            link_veil: link_veil.clone(),
+            connection: Cell::new(PaneLink::Live),
             card_frame: card_frame.clone(),
             link_label: link_label.clone(),
             link: OnceCell::new(),
@@ -2776,6 +2872,10 @@ impl TerminalPane {
         // The veil is on top: the search panel goes right above `view`
         // (`SearchBar::new`), so it too stays under the veil and the dimmed
         // pane's panel is dimmed too.
+        // The connection's veil lies under the dim one and over the grid only:
+        // [`TerminalPane::place_link_veil`] keeps the dock out of it.
+        link_veil.setFrame(this.bounds());
+        this.addSubview(&link_veil);
         dim.setFrame(this.bounds());
         dim.setAutoresizingMask(
             NSAutoresizingMaskOptions::ViewWidthSizable
@@ -4001,6 +4101,7 @@ impl TerminalPane {
             bar.paint(&theme, theme.is_dark());
         }
         self.ivars().dim.paint(&theme);
+        self.ivars().link_veil.paint_with(&theme, LINK_VEIL_ALPHA);
         self.ivars().card_frame.paint(&theme);
         self.ivars().link_label.0.paint(&theme);
         self.ivars().block_tip.paint(&theme);
@@ -4020,6 +4121,94 @@ impl TerminalPane {
     pub(crate) fn set_focus_look(&self, focused: bool, veiled: bool) {
         self.ivars().card_frame.set_focused(focused);
         self.ivars().dim.setHidden(!veiled);
+    }
+
+    // ─── The connection of a terminal the server keeps ───────────────────
+    //
+    // A pane that shows a terminal kablo keeps on a server outlives the
+    // connection to it: while the application's bridge is gone the pane shows
+    // the terminal's last screen and waits. The word comes from the bridge's
+    // state in the application (`hold_service`, `Backend::link_changed`) and
+    // not from `ssh-hold`, which is never told — the holder lives on and the
+    // pane's PTY with it.
+
+    /// The bridge to the server of the terminal this pane shows went, or is
+    /// back. A **passive** pane ([`PaneLink::is_passive`]) shows its last screen
+    /// under a veil over the grid, with no caret, takes no keys but ⏎ and says
+    /// in the dock's context row what is going on
+    /// ([`bt_core::RemoteLink`]). All of it is CoreAnimation's or one change of
+    /// the dock's text: the wait, the clock that tries again and the wake from
+    /// sleep ask for no frame (zero frames while idle) — the change itself asks
+    /// for one.
+    pub(crate) fn set_connection(&self, link: PaneLink) {
+        if self.ivars().connection.replace(link) == link {
+            return;
+        }
+        self.ivars().link_veil.setHidden(!link.is_passive());
+        self.place_link_veil();
+        self.apply_connection();
+    }
+
+    /// How the connection stands for this pane's terminal.
+    pub(crate) fn connection(&self) -> PaneLink {
+        self.ivars().connection.get()
+    }
+
+    /// Writes the connection's state where the dock and the caret read it. Also
+    /// called when the remote state lands or changes
+    /// ([`TerminalPane::remote_or_title_changed`]): the session drops the word
+    /// with the remote session it belonged to, and a bridge's news may come
+    /// before the probe that knows the session is remote.
+    fn apply_connection(&self) {
+        let Some(session) = self.session() else {
+            return;
+        };
+        session.set_remote_link(match self.ivars().connection.get() {
+            PaneLink::Reconnecting => Some(bt_core::RemoteLink::Reconnecting),
+            PaneLink::NeedsLogin => Some(bt_core::RemoteLink::LoginNeeded),
+            PaneLink::Connecting | PaneLink::Live => None,
+        });
+    }
+
+    /// The veil's frame: the pane without the dock's band, in the pane's own
+    /// (unflipped) points. The band is the grid's reserve for it
+    /// ([`bt_gpu::dock_px`], what "Jump to latest" stands on): the context row
+    /// at the bottom stays clear and keeps saying what is happening.
+    fn place_link_veil(&self) {
+        let ivars = self.ivars();
+        if ivars.link_veil.isHidden() {
+            return;
+        }
+        let Some(window) = self.window() else {
+            return;
+        };
+        let scale = window.backingScaleFactor();
+        let dock = f64::from(bt_gpu::dock_px(
+            ivars.dock_rows.get(),
+            self.cell_metrics(scale),
+        )) / scale;
+        let bounds = self.bounds();
+        let dock = dock.min(bounds.size.height);
+        ivars.link_veil.setFrame(NSRect::new(
+            NSPoint::new(bounds.origin.x, bounds.origin.y + dock),
+            NSSize::new(bounds.size.width, bounds.size.height - dock),
+        ));
+    }
+
+    /// A key, a paste or a press reached a pane: `true` when the pane takes it
+    /// because its terminal is not there to be typed to. Nothing goes to the
+    /// terminal (a line typed into the wait and sent when the connection comes
+    /// back would run where nobody looks) and the system beeps — except ⏎, which
+    /// is the one key the wait has: try now, or log in when the server wants a
+    /// password nobody saved.
+    pub(crate) fn hold_input(&self, enter: bool) -> bool {
+        match on_wait(self.connection(), enter) {
+            Wait::Pass => return false,
+            Wait::LogIn => self.log_in_to_reconnect(),
+            Wait::TryNow => self.host().retry_kept_terminal(self.uuid()),
+            Wait::Beep => crate::preview::beep(),
+        }
+        true
     }
 
     /// Makes the pane one of several cards, or the whole tab again: rounds and
@@ -5085,6 +5274,8 @@ impl TerminalPane {
         }
         // "Jump to latest" stands on the reserves that just moved.
         self.refresh_jump();
+        // So does the veil over a grid that waits for its connection.
+        self.place_link_veil();
     }
 
     /// Matches the layer's drawable size to the view's backing geometry **and**
@@ -5159,6 +5350,7 @@ impl TerminalPane {
     /// re-reads the title and the tab's label ([`PaneHost::title_changed`]).
     pub(crate) fn remote_or_title_changed(&self) {
         self.remote_edge();
+        self.apply_connection();
         // The remote session ended: its helper ssh is not held open until idle.
         if self
             .session()
@@ -5954,14 +6146,31 @@ mod tests {
     }
 
     #[test]
+    fn a_pane_that_waits_for_its_connection_takes_every_key_but_enter() {
+        use super::{Wait, on_wait};
+        use bt_shell_common::kablo::service::PaneLink;
+        for link in [PaneLink::Connecting, PaneLink::Live] {
+            // The first connection and a live one are the terminal's own.
+            assert_eq!(on_wait(link, false), Wait::Pass, "{link:?}");
+            assert_eq!(on_wait(link, true), Wait::Pass, "{link:?}");
+        }
+        assert_eq!(on_wait(PaneLink::Reconnecting, true), Wait::TryNow);
+        assert_eq!(on_wait(PaneLink::NeedsLogin, true), Wait::LogIn);
+        for link in [PaneLink::Reconnecting, PaneLink::NeedsLogin] {
+            assert_eq!(on_wait(link, false), Wait::Beep, "{link:?}");
+        }
+    }
+
+    #[test]
     fn closing_a_pane_on_a_server_asks_about_the_program_there() {
         use crate::jobs::Foreground;
-        use bt_shell_common::kablo::service::Shown;
+        use bt_shell_common::kablo::service::{PaneLink, Shown};
         let shown = |program: Option<&str>| Shown {
             account: "u@rasp:22".into(),
             host: "rasp".into(),
             terminal: bt_shell_common::kablo::SessionId::new("b-1").expect("an id"),
             program: program.map(str::to_owned),
+            link: PaneLink::Live,
         };
         assert_eq!(
             super::kept_foreground(&shown(Some("npm"))),

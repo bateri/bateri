@@ -86,6 +86,8 @@ impl World {
             runner: Box::new(Through(self.ssh.clone())),
             name: Some("MacBook".into()),
             history: Box::new(|| Some(5000)),
+            masters: None,
+            linked: Box::new(|_, _| ()),
         }
     }
 
@@ -282,11 +284,43 @@ fn the_install_and_the_bridge_ride_the_master_and_ask_nothing() {
         mut reader,
         writer,
         close,
+        ended,
     } = carried;
     close();
     drop(writer);
     let mut rest = Vec::new();
     reader.read_to_end(&mut rest).expect("ended");
+    // A bridge that was let go of said nothing: the network, if anything.
+    assert_eq!(ended(), Cause::Dropped);
+}
+
+#[test]
+fn what_ssh_says_when_the_bridge_ends_tells_a_login_from_a_network() {
+    // A password the server would have taken: the user's to give.
+    for said in [
+        "u@rasp: Permission denied (publickey,password).\n",
+        "Permission denied (publickey,keyboard-interactive).",
+    ] {
+        assert_eq!(why_it_ended(said), Cause::LoginNeeded, "{said}");
+    }
+    // A key's refusal is not a password's business, and a network is a network.
+    for said in [
+        "u@rasp: Permission denied (publickey).\n",
+        "ssh: Could not resolve hostname rasp: nodename nor servname provided\n",
+        "ssh: connect to host rasp port 22: Operation timed out\n",
+        "ssh: connect to host rasp port 22: Connection refused\n",
+        "Connection closed by 10.0.0.2 port 22\n",
+        "",
+    ] {
+        assert_eq!(why_it_ended(said), Cause::Dropped, "{said:?}");
+    }
+    // A server whose key is not the trusted one is not asked about anything.
+    for said in [
+        "Host key verification failed.\n",
+        "@@@ WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED! @@@\n",
+    ] {
+        assert_eq!(why_it_ended(said), Cause::Refused, "{said}");
+    }
 }
 
 #[test]

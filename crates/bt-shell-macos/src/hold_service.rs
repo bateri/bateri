@@ -10,6 +10,7 @@
 //! as the package carries them (`Contents/Resources/kablo`; a build without the
 //! package has no kablo calls and every `ssh` is the plain one).
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -17,10 +18,11 @@ use dispatch2::DispatchQueue;
 use objc2::MainThreadMarker;
 
 use crate::app::delegate;
+use crate::pane::{KeptLogin, Login};
 use crate::{child, settings, ssh_route};
 use bt_core::PaneUuid;
 use bt_shell_common::kablo::install::Bundle;
-use bt_shell_common::kablo::service::{PaneInfo, Peer, Service, Shown};
+use bt_shell_common::kablo::service::{PaneInfo, PaneLink, Peer, Service, Shown};
 use bt_shell_common::kablo::ssh::SshBackend;
 
 /// The running service: for as long as the process lives.
@@ -41,6 +43,96 @@ pub(crate) fn end(pane: &PaneUuid) {
     if let Some(service) = SERVICE.get() {
         service.end(pane);
     }
+}
+
+/// ⏎ in a pane that waits for its connection: the account of the terminal it
+/// shows dials now instead of waiting out its pause.
+pub(crate) fn retry(pane: &PaneUuid) {
+    if let Some(service) = SERVICE.get() {
+        service.retry(pane);
+    }
+}
+
+/// The user logged in for `account` (its master connection is up): every
+/// terminal on the server comes back.
+pub(crate) fn retry_account(account: &str) {
+    if let Some(service) = SERVICE.get() {
+        service.retry_account(account);
+    }
+}
+
+/// The computer woke up: the accounts waiting for their pause dial now, and the
+/// ones that look connected are asked whether they are.
+pub(crate) fn wake() {
+    if let Some(service) = SERVICE.get() {
+        service.wake();
+    }
+}
+
+/// The accounts a login sheet is open for, and the pane whose sheet it is: one
+/// sheet per account, whichever of its panes' ⏎ asked for it. The sheet logs in
+/// for the server's every terminal, so a second sheet for the same account
+/// would ask the same question twice.
+static LOGINS: Mutex<Option<HashMap<String, PaneUuid>>> = Mutex::new(None);
+
+/// `pane` wants the login sheet of `account`.
+fn begin_login(account: &str, pane: &PaneUuid) -> Login {
+    let mut logins = LOGINS.lock().unwrap_or_else(|e| e.into_inner());
+    match logins
+        .get_or_insert_with(HashMap::new)
+        .entry(account.to_owned())
+    {
+        std::collections::hash_map::Entry::Occupied(open) => Login::Raise(open.get().clone()),
+        std::collections::hash_map::Entry::Vacant(free) => {
+            free.insert(pane.clone());
+            Login::Open
+        }
+    }
+}
+
+/// The account's login ended (logged in, cancelled, failed): the next ⏎ opens
+/// a sheet again.
+fn end_login(account: &str) {
+    let mut logins = LOGINS.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(logins) = logins.as_mut() {
+        logins.remove(account);
+    }
+}
+
+/// The pane's view of the login arbitration ([`KeptLogin`]).
+pub(crate) struct Gate;
+
+impl KeptLogin for Gate {
+    fn begin(&self, account: &str, pane: &PaneUuid) -> Login {
+        begin_login(account, pane)
+    }
+
+    fn end(&self, account: &str) {
+        end_login(account);
+    }
+
+    fn done(&self, account: &str) {
+        retry_account(account);
+    }
+
+    fn raise(&self, pane: &PaneUuid) -> bool {
+        MainThreadMarker::new()
+            .and_then(delegate)
+            .is_some_and(|delegate| delegate.raise_pane(pane))
+    }
+}
+
+/// The bridge of the terminal `pane` shows went or came back: the pane on the
+/// main queue, where the panes are. A pane that is gone has nothing to show.
+fn link_changed(pane: &PaneUuid, link: PaneLink) {
+    let pane = pane.clone();
+    DispatchQueue::main().exec_async(move || {
+        // audit: a block running on the main queue is on the main thread by definition.
+        let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
+        if let Some(pane) = delegate(mtm).and_then(|delegate| delegate.pane_with_uuid(&pane)) {
+            pane.set_connection(link);
+        }
+    });
 }
 
 /// How long a folder waits for the `ssh` it is for.
@@ -92,7 +184,11 @@ const PANE_WAIT: Duration = Duration::from_secs(2);
 /// Starts the service in `dir`, the instance's directory. Silent when it cannot
 /// (no home, a path too long for a socket): the holders then find nobody and run
 /// the plain `ssh`.
-pub(crate) fn serve(dir: &std::path::Path, bases: Vec<std::path::PathBuf>) {
+pub(crate) fn serve(
+    dir: &std::path::Path,
+    bases: Vec<std::path::PathBuf>,
+    masters: Option<Arc<ssh_route::Masters>>,
+) {
     let Some(home) = child::home() else {
         return;
     };
@@ -115,6 +211,8 @@ pub(crate) fn serve(dir: &std::path::Path, bases: Vec<std::path::PathBuf>) {
         runner: Box::new(ssh_route::SystemSsh),
         name: computer_name(),
         history: Box::new(history),
+        masters,
+        linked: Box::new(link_changed),
     };
     if let Ok(service) = Service::start(dir, Arc::new(backend)) {
         let _ = SERVICE.set(service);
@@ -171,6 +269,25 @@ mod tests {
         assert_eq!(starts.take(7, now).as_deref(), Some("/srv/app"));
         assert_eq!(starts.take(7, now), None, "once");
         assert_eq!(starts.take(8, now).as_deref(), Some("/var/log"));
+    }
+
+    #[test]
+    fn one_login_sheet_is_open_per_account_and_the_next_enter_raises_it() {
+        let first = PaneUuid::parse("0f3c1a52-7d0e-4c1b-9b57-2f7a8c4d6e10").expect("a uuid");
+        let second = PaneUuid::parse("5a7e9c40-1b2d-4e3f-8a6b-0c9d1e2f3a4b").expect("a uuid");
+        assert_eq!(begin_login("test-one@rasp:22", &first), Login::Open);
+        // The same account from another pane: the sheet that is open.
+        assert_eq!(
+            begin_login("test-one@rasp:22", &second),
+            Login::Raise(first.clone())
+        );
+        // Another account (`ssh root@rasp`) is its own login.
+        assert_eq!(begin_login("test-root@rasp:22", &second), Login::Open);
+        // Cancelled or done: ⏎ opens it again, on whichever pane.
+        end_login("test-one@rasp:22");
+        assert_eq!(begin_login("test-one@rasp:22", &second), Login::Open);
+        end_login("test-one@rasp:22");
+        end_login("test-root@rasp:22");
     }
 
     #[test]

@@ -2046,7 +2046,23 @@ tab's ×, the window's red button — ends its terminal on the server, and the
 question before it names the program running there (“npm on rasp” is still
 running); `exit` in the terminal ends it too and returns to the local prompt. A
 pane closed while the connection is down cannot reach the server, and its
-terminal keeps running there. On the server, bateri also
+terminal keeps running there.
+
+While the connection is down the pane shows the terminal's last screen under a
+veil (the dock stays clear), without the caret, and the dock's context line says
+what is going on: `⇄ rasp  Reconnecting… · ⏎ try now`. Keys are not sent — the
+system beeps — except ⏎, which tries again at once instead of waiting out the
+pause (1 s, 2 s, up to 30 s), and scrolling through the screen still works.
+bateri also tries again the moment the Mac wakes up. A key or an agent signs in
+by itself, and so does a password saved in the Keychain; a password nobody saved
+(or a second factor) makes the line say `⇄ rasp  Needs your password · ⏎ log in`,
+and nothing is tried until you press ⏎, which opens the same sheet as Sign In…
+— one for the server, whichever of its panes you press ⏎ in; a second pane's ⏎
+brings that sheet's tab forward. Logging in brings every terminal on the server
+back; Cancel leaves them waiting, and ⏎ opens the sheet again. A server whose key
+is not the one bateri trusted is not reconnected and asks nothing: the pane
+returns to the local prompt and the terminal stays on the server. On the
+server, bateri also
 writes a few small files under `~/.local/share/bateri/shell/`; it does not touch
 the server's rc files.
 

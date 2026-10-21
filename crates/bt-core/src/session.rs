@@ -5764,6 +5764,7 @@ impl Session {
             transfer,
             program,
             shell_ready,
+            link_down,
         ) = {
             let now = Instant::now();
             let mut log = lock(&self.shell);
@@ -5790,6 +5791,11 @@ impl Session {
                 // `Session::shell_state` reads, so the two never disagree, and
                 // no extra lock turn is opened for it.
                 log.local.state.is_some(),
+                // **The connection that is down, from this round too**: the
+                // caret is not drawn while the bridge to a kept terminal's
+                // server is gone, and the decision sits with the context row
+                // that says why.
+                log.context.remote.is_some() && log.context.link.is_some(),
             )
         };
         blocks.anchors.clear();
@@ -5965,7 +5971,10 @@ impl Session {
         // one — the contract of [`Cursor::row`] and the fullness count below.
         let cursor_screen_row = cursor_row.clamp(0, rows.saturating_sub(1)) as u16;
         // While looking at the scrollback the cursor goes off screen.
-        let cursor_visible = cursor.shape != CursorShape::Hidden && (0..rows).contains(&cursor_row);
+        // And while the connection to a kept terminal is down: the grid is the
+        // last picture of it and a caret there would say it is alive.
+        let cursor_visible =
+            cursor.shape != CursorShape::Hidden && (0..rows).contains(&cursor_row) && !link_down;
         // The grid height enters as `u16` (`GridSize::for_spawn` clamps to 1,
         // `Session::resize` eliminates zero), i.e. the truncation is lossless and
         // the value is **at least 1**: `content_rows`'s `1..=rows` contract is from here.
@@ -10616,6 +10625,46 @@ impl Session {
             self.request_frame();
         }
         changed
+    }
+
+    /// Tells the context row, and the caret, that the connection to the server
+    /// a kept terminal runs on is down (`Some`) or back (`None`); `true` if it
+    /// changed. A terminal the server keeps outlives the connection, so the
+    /// pane shows its last screen while the bridge tries again: the row says
+    /// so ([`crate::RemoteLink`]) and the caret is not drawn — the grid is a
+    /// picture of a moment that has passed.
+    ///
+    /// Not gated by a remote generation, unlike [`Self::set_sign_in`]: the
+    /// bridge's news is about the terminal the pane shows, not about the local
+    /// command that started it, and it may arrive a turn before the remote
+    /// state does. It lands in the context all the same and goes with the
+    /// remote state when that ends ([`Self::set_remote`], `C`/`D`/`A`), so a
+    /// word that comes after the session cannot outlive it. The same value asks
+    /// for no frame (zero frames while idle: the wait, the clock that retries
+    /// and the wake from sleep draw nothing — only the **change** does, once);
+    /// only the leaf lock, dropped before `request_frame`.
+    pub fn set_remote_link(&self, link: Option<crate::RemoteLink>) -> bool {
+        let changed = {
+            let mut log = lock(&self.shell);
+            if log.context.link == link {
+                false
+            } else {
+                log.context.link = link;
+                true
+            }
+        };
+        if changed {
+            self.request_frame();
+        }
+        changed
+    }
+
+    /// The connection state shown ([`Self::set_remote_link`]); `None` while the
+    /// connection is there or the session is not a remote one.
+    pub fn remote_link(&self) -> Option<crate::RemoteLink> {
+        let log = lock(&self.shell);
+        log.context.remote.as_ref()?;
+        log.context.link
     }
 
     /// The Sign In… button as drawn and the remote generation it belongs to;
@@ -19431,6 +19480,56 @@ mod tests {
             None,
             "another host's login"
         );
+    }
+
+    /// A connection that is down is a row and a missing caret, asks for one
+    /// frame when it changes and none while it stays, and goes with the remote
+    /// state.
+    #[test]
+    fn a_connection_that_is_down_hides_the_caret_and_goes_with_the_remote_state() {
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_docked_session(
+            &format!(
+                "stty -echo; printf '{}'; read _; printf '\\033]133;C\\007'; sleep 5",
+                anchored_prompt(1),
+            ),
+            Arc::clone(&wake),
+        );
+        session.write(b"\n");
+        assert_eq!(wake.wait_commands(1, Duration::from_secs(5)), 1);
+        let command = session.running_command().expect("running after `C`");
+        assert!(session.set_remote(command, Some(&RemoteTarget::ssh("prod"))));
+        assert!(cursor_now(&session).visible, "the shell's caret is there");
+        // Down.
+        session.take_damage();
+        assert!(session.set_remote_link(Some(crate::RemoteLink::Reconnecting)));
+        assert!(session.take_damage(), "the change asks for its one frame");
+        assert_eq!(session.remote_link(), Some(crate::RemoteLink::Reconnecting));
+        assert!(
+            !cursor_now(&session).visible,
+            "no caret on a moment gone by"
+        );
+        // Waiting, retrying and the same word again draw nothing.
+        session.take_damage();
+        assert!(!session.set_remote_link(Some(crate::RemoteLink::Reconnecting)));
+        assert!(!session.take_damage(), "the same value asks for no frame");
+        // The word changes (a login is needed): one more frame.
+        assert!(session.set_remote_link(Some(crate::RemoteLink::LoginNeeded)));
+        assert!(session.take_damage());
+        // Back.
+        assert!(session.set_remote_link(None));
+        assert!(session.take_damage());
+        assert_eq!(session.remote_link(), None);
+        assert!(cursor_now(&session).visible, "the caret comes back");
+        // The state goes with the remote session: a word that comes after the
+        // session cannot outlive it, and another host's is not this one's.
+        assert!(session.set_remote_link(Some(crate::RemoteLink::Reconnecting)));
+        assert!(session.set_remote(command, Some(&RemoteTarget::ssh("stage"))));
+        assert_eq!(lock(&session.shell).context.link, None, "another host");
+        assert!(session.set_remote_link(Some(crate::RemoteLink::Reconnecting)));
+        assert!(session.set_remote(command, None));
+        assert_eq!(session.remote_link(), None, "not a remote session any more");
+        assert_eq!(lock(&session.shell).context.link, None, "gone with it");
     }
 
     /// The dock's characters as one string (every row, in sink order).

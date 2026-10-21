@@ -789,6 +789,17 @@ impl Hub {
         self.holds.get(&hold).map_or(0, |entry| entry.out.len())
     }
 
+    /// Whether the holder's terminal has been **shown** — attached, so its
+    /// output or its picture has started to reach the holder — at least once.
+    /// The line between a first connection that is still being made and one
+    /// that was lost.
+    pub fn is_shown(&self, hold: HoldId) -> bool {
+        self.holds
+            .get(&hold)
+            .and_then(|entry| entry.bound.as_ref())
+            .is_some_and(|binding| binding.shown)
+    }
+
     /// The terminal a holder shows: the account and its name.
     pub fn terminal_of(&self, hold: HoldId) -> Option<(&str, &SessionId)> {
         self.holds

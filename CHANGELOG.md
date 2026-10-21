@@ -14,6 +14,17 @@ of every installed copy. A version without a section is not released.
 
 ### Added
 
+- **A terminal on a server shows that it is waiting when the connection is
+  gone.** The pane keeps its last screen, veiled, with no caret, and the line at
+  the bottom says `⇄ rasp  Reconnecting… · ⏎ try now`: keys are not sent (a line
+  typed into the wait would run where nobody looks, and the system beeps), ⏎
+  tries again at once instead of waiting out the pause, scrolling still works,
+  and the Mac waking up tries too. A key, an agent or a password saved in the
+  Keychain logs in by itself; a password nobody saved (or a second factor) makes
+  the line say `Needs your password · ⏎ log in`, and ⏎ opens one sheet for the
+  server — whichever of its panes asked — that brings every terminal on it back.
+  When the connection returns the pane goes on from where it was.
+
 - **`ssh` to a server now opens a terminal the server keeps.** Type `ssh rasp`
   as before — the password, the second factor and the question whether to trust
   the server's key are asked in the pane — and the pane shows a terminal that

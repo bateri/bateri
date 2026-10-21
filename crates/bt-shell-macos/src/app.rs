@@ -34,7 +34,7 @@ use objc2_app_kit::{
     NSControlStateValueOn, NSDragOperation, NSEvent, NSEventModifierFlags, NSMenu, NSMenuDelegate,
     NSMenuItem, NSPreferredScrollerStyleDidChangeNotification, NSScreen, NSText, NSWindow,
     NSWindowNumberListOptions, NSWindowStyleMask, NSWindowUserTabbingPreference, NSWorkspace,
-    NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification,
+    NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification, NSWorkspaceDidWakeNotification,
     NSWorkspaceWillPowerOffNotification,
 };
 use objc2_foundation::{
@@ -1348,6 +1348,7 @@ define_class!(
             self.observe_appearance();
             // A quit while the Mac logs out leaves no reminder.
             self.observe_power_off();
+            self.observe_wake();
 
             if let Some(run) = self.ivars().run {
                 match run.workload {
@@ -1620,6 +1621,17 @@ define_class!(
         #[unsafe(method(workspaceWillPowerOff:))]
         fn workspace_will_power_off(&self, _note: Option<&AnyObject>) {
             self.ivars().powering_off.set(true);
+        }
+
+        /// The Mac woke up; the sender is `NSWorkspace`'s own notification
+        /// center ([`AppDelegate::observe_wake`]). The terminals a server keeps
+        /// ask whether their connection survived the sleep, and the ones
+        /// waiting for their pause try now. Hops to a channel and no further —
+        /// the service answers on its own thread, and a pane that changes look
+        /// is told on the main queue ([`crate::hold_service`]).
+        #[unsafe(method(workspaceDidWake:))]
+        fn workspace_did_wake(&self, _note: Option<&AnyObject>) {
+            crate::hold_service::wake();
         }
 
         /// The handover's test item (the defaults key
@@ -2597,7 +2609,11 @@ fn masters(carried: Option<&str>) -> Option<Arc<Masters>> {
             if let Some(dir) = sweeper.bases().first() {
                 let _ = focus::serve(dir, focus_answerer());
                 // The panes' `ssh-hold` programs connect here.
-                crate::hold_service::serve(dir, sweeper.bases().to_vec());
+                crate::hold_service::serve(
+                    dir,
+                    sweeper.bases().to_vec(),
+                    Some(Arc::clone(&sweeper)),
+                );
             }
             sweeper.sweep();
         });
@@ -2930,6 +2946,23 @@ impl AppDelegate {
                 Some((window.clone(), tab, pane))
             })
         })
+    }
+
+    /// The open pane with persistent identity `id` — for the news that comes
+    /// from outside the pane's own tree (the kablo bridge's connection).
+    pub(crate) fn pane_with_uuid(&self, id: &PaneUuid) -> Option<Retained<TerminalPane>> {
+        self.pane_by_tab(id).map(|(_, _, pane)| pane)
+    }
+
+    /// Brings the tab of pane `id` to the front and the keyboard to the pane: a
+    /// question another pane's ⏎ would have asked is already open there. `false`
+    /// if the pane is gone.
+    pub(crate) fn raise_pane(&self, id: &PaneUuid) -> bool {
+        let Some((window, tab, pane)) = self.pane_by_tab(id) else {
+            return false;
+        };
+        window.bring_to_front(&tab, &pane);
+        true
     }
 
     /// The focus query's answer for pane `id`: `pane=none` if no
@@ -6679,6 +6712,30 @@ impl AppDelegate {
                 self,
                 sel!(workspaceWillPowerOff:),
                 Some(NSWorkspaceWillPowerOffNotification),
+                None,
+            );
+        }
+    }
+
+    /// Starts watching for the Mac waking up, so a connection to a server that
+    /// looked open through the sleep is asked about at once and the ones waiting
+    /// for their pause do not wait it out ([`crate::hold_service::wake`]).
+    /// `NSWorkspace`'s own centre, not removed: [`AppDelegate::observe_power_off`]'s
+    /// precedent.
+    fn observe_wake(&self) {
+        let Inputs::User { .. } = self.inputs() else {
+            return;
+        };
+        let center = NSWorkspace::sharedWorkspace().notificationCenter();
+        // SAFETY: `workspaceDidWake:` is defined on this class and takes a single
+        // `Option<&AnyObject>` argument; `self` lives for the process's lifetime,
+        // so the centre's non-owning reference does not dangle. The constant
+        // `NSString` is a name AppKit exposes.
+        unsafe {
+            center.addObserver_selector_name_object(
+                self,
+                sel!(workspaceDidWake:),
+                Some(NSWorkspaceDidWakeNotification),
                 None,
             );
         }

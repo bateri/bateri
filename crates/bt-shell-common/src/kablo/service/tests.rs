@@ -66,6 +66,13 @@ struct Fake {
     carry_fails: AtomicU32,
     /// The bridges started, each with the flag that ends it.
     carried: Mutex<Vec<Arc<AtomicBool>>>,
+    /// While set, no bridge can be started: the network is down (`ConnectionRefused`),
+    /// or the server wants a login nobody has saved (`PermissionDenied`).
+    carry_error: Mutex<Option<io::ErrorKind>>,
+    /// Why a bridge's stream ends by itself, as its process says.
+    eof_cause: Arc<Mutex<Cause>>,
+    /// What the panes were told about their connection, in order.
+    links: Mutex<Vec<(PaneUuid, PaneLink)>>,
 }
 
 impl Fake {
@@ -80,7 +87,19 @@ impl Fake {
             fresh: AtomicBool::new(false),
             carry_fails: AtomicU32::new(0),
             carried: Mutex::new(Vec::new()),
+            carry_error: Mutex::new(None),
+            eof_cause: Arc::new(Mutex::new(Cause::Dropped)),
+            links: Mutex::new(Vec::new()),
         })
+    }
+
+    /// The network goes (`Some`) or comes back (`None`).
+    fn carry_fails_with(&self, kind: Option<io::ErrorKind>) {
+        *self.carry_error.lock().expect("lock") = kind;
+    }
+
+    fn links(&self) -> Vec<(PaneUuid, PaneLink)> {
+        self.links.lock().expect("lock").clone()
     }
 
     fn note(&self, what: &str) {
@@ -193,6 +212,9 @@ impl Backend for Fake {
 
     fn carry(&self, _: &KabloHost, _: &Installed) -> io::Result<Carried> {
         self.note("carry");
+        if let Some(kind) = *self.carry_error.lock().expect("lock") {
+            return Err(io::Error::new(kind, "no bridge"));
+        }
         if self
             .carry_fails
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
@@ -213,11 +235,19 @@ impl Backend for Fake {
             }),
             writer: Box::new(ToBridge(Arc::clone(&self.bridge))),
             close: Box::new(move || ends.store(true, Ordering::SeqCst)),
+            ended: {
+                let cause = Arc::clone(&self.eof_cause);
+                Box::new(move || *cause.lock().expect("lock"))
+            },
         })
     }
 
     fn name(&self) -> Option<String> {
         Some("MacBook".into())
+    }
+
+    fn link_changed(&self, pane: &PaneUuid, link: PaneLink) {
+        self.links.lock().expect("lock").push((pane.clone(), link));
     }
 }
 
@@ -764,4 +794,219 @@ fn a_new_terminal_starts_in_the_folder_the_pane_lookup_names() {
         "the bootstrap that goes to /srv/app"
     );
     assert_ne!(argv[2], ssh_wrap::boot_in(None).as_bytes());
+}
+
+/// The panes' connection: told once per change, from a first connection that
+/// is not a lost one to a lost one that comes back by a clock the user skips.
+#[test]
+fn a_pane_is_told_when_its_connection_goes_and_comes_back_and_not_once_per_attempt() {
+    let rig = Rig::new("passive");
+    let pane = pane_named(&rig.world);
+    // The first connection fails once before it works: the terminal is not
+    // shown yet, the pane is waiting for its first connection and is not passive.
+    rig.world.carry_fails.store(1, Ordering::SeqCst);
+    let mut holder = Holder::new(&rig.socket(), "b-1");
+    let terminal = rig.terminals(1).remove(0);
+    rig.world.bridge().write(&terminal, b"one");
+    until("one shown", || holder.shown.bytes() == b"one");
+    until("the pane found live", || {
+        rig.service
+            .shown(&pane)
+            .is_some_and(|shown| shown.link == PaneLink::Live)
+    });
+    assert_eq!(
+        rig.world.links(),
+        [],
+        "a first connection is not a lost one"
+    );
+    // A wake from sleep and a ⏎ on a connection that is up change nothing about
+    // how the pane looks: the pulse is answered and nobody is told.
+    rig.service.wake();
+    rig.service.retry(&pane);
+
+    // The network goes with the connection.
+    rig.world
+        .carry_fails_with(Some(io::ErrorKind::ConnectionRefused));
+    rig.world.break_connection();
+    until("the pane told", || {
+        rig.world.links() == [(pane.clone(), PaneLink::Reconnecting)]
+    });
+    assert_eq!(
+        rig.service.shown(&pane).map(|shown| shown.link),
+        Some(PaneLink::Reconnecting)
+    );
+    // The pauses (1 s, 2 s) go by with the attempts failing: no news in them.
+    let attempts = rig.world.count("carry");
+    until("two more attempts", || {
+        rig.world.count("carry") >= attempts + 2
+    });
+    assert_eq!(rig.world.links().len(), 1, "an attempt is not news");
+
+    // The network is back, and the user does not wait out the next pause (4 s).
+    rig.world.carry_fails_with(None);
+    let asked = Instant::now();
+    rig.service.retry(&pane);
+    until("the pane told it is back", || {
+        rig.world.links().last() == Some(&(pane.clone(), PaneLink::Live))
+    });
+    assert!(
+        asked.elapsed() < Duration::from_secs(3),
+        "try now skips the pause: {:?}",
+        asked.elapsed()
+    );
+    rig.world.bridge().write(&terminal, b"two");
+    until("the bytes go on", || holder.shown.bytes() == b"onetwo");
+    assert_eq!(rig.world.links().len(), 2);
+
+    rig.world.bridge().exit(&terminal, Exit::Code(0));
+    assert_eq!(holder.outcome(), Outcome::Exit(0));
+}
+
+/// The computer waking up is the same as the user asking, for every account.
+#[test]
+fn waking_dials_the_accounts_that_wait_for_their_pause() {
+    let rig = Rig::new("wake");
+    let pane = pane_named(&rig.world);
+    let holder = Holder::new(&rig.socket(), "b-1");
+    let terminal = rig.terminals(1).remove(0);
+    rig.world.bridge().write(&terminal, b"one");
+    until("one shown", || holder.shown.bytes() == b"one");
+
+    rig.world
+        .carry_fails_with(Some(io::ErrorKind::ConnectionRefused));
+    rig.world.break_connection();
+    until("the pane told", || {
+        rig.world.links() == [(pane.clone(), PaneLink::Reconnecting)]
+    });
+    let attempts = rig.world.count("carry");
+    until("two more attempts", || {
+        rig.world.count("carry") >= attempts + 2
+    });
+
+    rig.world.carry_fails_with(None);
+    let woke = Instant::now();
+    rig.service.wake();
+    until("the pane told it is back", || {
+        rig.world.links().last() == Some(&(pane.clone(), PaneLink::Live))
+    });
+    assert!(
+        woke.elapsed() < Duration::from_secs(3),
+        "{:?}",
+        woke.elapsed()
+    );
+}
+
+/// A login nobody saved: nothing is tried until the user says so, and the user
+/// saying so with the login still missing asks once and waits again.
+#[test]
+fn a_login_nobody_saved_waits_for_the_user_and_tries_nothing_meanwhile() {
+    let rig = Rig::new("login");
+    let pane = pane_named(&rig.world);
+    let holder = Holder::new(&rig.socket(), "b-1");
+    let terminal = rig.terminals(1).remove(0);
+    rig.world.bridge().write(&terminal, b"one");
+    until("one shown", || holder.shown.bytes() == b"one");
+
+    rig.world
+        .carry_fails_with(Some(io::ErrorKind::PermissionDenied));
+    rig.world.break_connection();
+    until("the pane told it needs a login", || {
+        rig.world.links().last() == Some(&(pane.clone(), PaneLink::Reconnecting))
+            || rig.world.links().last() == Some(&(pane.clone(), PaneLink::NeedsLogin))
+    });
+    until("it needs a login", || {
+        rig.service.shown(&pane).map(|shown| shown.link) == Some(PaneLink::NeedsLogin)
+    });
+    let attempts = rig.world.count("carry");
+    // No clock runs: the pauses of a network that is down would have tried again.
+    thread::sleep(Duration::from_millis(2500));
+    assert_eq!(
+        rig.world.count("carry"),
+        attempts,
+        "nothing is tried meanwhile"
+    );
+
+    // ⏎ without the login in place: one try, and the wait again.
+    rig.service.retry(&pane);
+    until("the one try", || rig.world.count("carry") == attempts + 1);
+    until("waiting again", || {
+        rig.service.shown(&pane).map(|shown| shown.link) == Some(PaneLink::NeedsLogin)
+    });
+    thread::sleep(Duration::from_millis(1500));
+    assert_eq!(rig.world.count("carry"), attempts + 1);
+
+    // Logged in (the master is up): the account dials and the pane is live.
+    rig.world.carry_fails_with(None);
+    rig.service.retry_account("u@rasp:22");
+    until("the pane told it is back", || {
+        rig.world.links().last() == Some(&(pane.clone(), PaneLink::Live))
+    });
+    rig.world.bridge().write(&terminal, b"two");
+    until("the bytes go on", || holder.shown.bytes() == b"onetwo");
+}
+
+/// The bridge's process says why it ended: a refused login is a wait for the
+/// user, a key that is not the trusted one ends the terminal's pane for good.
+#[test]
+fn a_bridge_that_ends_for_its_login_or_its_key_says_so() {
+    let rig = Rig::new("cause");
+    let pane = pane_named(&rig.world);
+    let holder = Holder::new(&rig.socket(), "b-1");
+    let terminal = rig.terminals(1).remove(0);
+    rig.world.bridge().write(&terminal, b"one");
+    until("one shown", || holder.shown.bytes() == b"one");
+
+    *rig.world.eof_cause.lock().expect("lock") = Cause::LoginNeeded;
+    rig.world.break_connection();
+    until("it needs a login", || {
+        rig.service.shown(&pane).map(|shown| shown.link) == Some(PaneLink::NeedsLogin)
+    });
+    drop(rig);
+
+    // The key: the pane's terminal is let go of with a line, and a pane that
+    // was waiting is not left waiting.
+    let rig = Rig::new("key");
+    let pane = pane_named(&rig.world);
+    let mut holder = Holder::new(&rig.socket(), "b-1");
+    let terminal = rig.terminals(1).remove(0);
+    rig.world.bridge().write(&terminal, b"one");
+    until("one shown", || holder.shown.bytes() == b"one");
+    *rig.world.eof_cause.lock().expect("lock") = Cause::Refused;
+    rig.world
+        .carry_fails_with(Some(io::ErrorKind::ConnectionRefused));
+    rig.world.break_connection();
+    assert!(matches!(holder.outcome(), Outcome::Exit(_)));
+    until("the pane let go of", || rig.service.shown(&pane).is_none());
+    let links = rig.world.links();
+    assert!(
+        links.last().is_none_or(|(_, link)| *link == PaneLink::Live),
+        "{links:?}"
+    );
+}
+
+/// A pane that goes while it waits is told it waits for nothing.
+#[test]
+fn a_pane_that_goes_while_it_waits_is_not_left_dimmed() {
+    let rig = Rig::new("gone");
+    let pane = pane_named(&rig.world);
+    let holder = Holder::new(&rig.socket(), "b-1");
+    let terminal = rig.terminals(1).remove(0);
+    rig.world.bridge().write(&terminal, b"one");
+    until("one shown", || holder.shown.bytes() == b"one");
+    rig.world
+        .carry_fails_with(Some(io::ErrorKind::ConnectionRefused));
+    rig.world.break_connection();
+    until("the pane told", || {
+        rig.world.links() == [(pane.clone(), PaneLink::Reconnecting)]
+    });
+    // The pane's program goes (its terminal hangs up).
+    let Holder { handle, typed, .. } = holder;
+    drop(typed);
+    until("the pane let go of", || rig.service.shown(&pane).is_none());
+    until("told it waits for nothing", || {
+        rig.world.links().last() == Some(&(pane.clone(), PaneLink::Live))
+    });
+    if let Some(handle) = handle {
+        let _ = handle.join();
+    }
 }

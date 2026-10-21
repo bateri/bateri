@@ -31,6 +31,7 @@
 //!   ([`crate::ssh_route::Masters::forget`]).
 
 use std::cell::RefCell;
+use std::sync::Arc;
 use std::sync::mpsc::{self, Sender};
 use std::thread;
 
@@ -60,16 +61,20 @@ pub(crate) enum Job {
     Finder,
     /// The ssh status bar's Sign In….
     SignIn,
+    /// The terminals the server keeps wait for a login: a pane's ⏎ on
+    /// "Needs your password" ([`TerminalPane::log_in_to_reconnect`]).
+    Reconnect,
 }
 
 impl Job {
-    fn text(self) -> &'static str {
+    fn text(self, host: &str) -> String {
         match self {
-            Self::Upload => "Log in to upload the dropped items.",
-            Self::Download => "Log in to download the file.",
-            Self::Preview => "Log in to preview the file.",
-            Self::Finder => "Log in to copy the file to Finder.",
-            Self::SignIn => "Log in to use remote files.",
+            Self::Upload => "Log in to upload the dropped items.".to_owned(),
+            Self::Download => "Log in to download the file.".to_owned(),
+            Self::Preview => "Log in to preview the file.".to_owned(),
+            Self::Finder => "Log in to copy the file to Finder.".to_owned(),
+            Self::SignIn => "Log in to use remote files.".to_owned(),
+            Self::Reconnect => format!("Log in to reconnect the terminals on {host}."),
         }
     }
 }
@@ -165,8 +170,8 @@ impl TerminalPane {
         let alert = NSAlert::new(mtm);
         alert.setMessageText(&NSString::from_str(host));
         let text = match lead(question) {
-            Some(lead) => format!("{lead}\n{}", job.text()),
-            None => job.text().to_owned(),
+            Some(lead) => format!("{lead}\n{}", job.text(host)),
+            None => job.text(host),
         };
         alert.setInformativeText(&NSString::from_str(&text));
         let (field, remember) = accessory(
@@ -333,6 +338,72 @@ impl TerminalPane {
                     }
                 });
             });
+    }
+
+    // ─── Log in to reconnect ─────────────────────────────────────────────
+
+    /// ⏎ on a pane that says "Needs your password": the sheet that logs the
+    /// whole server back in. One sheet per account — the login is the
+    /// server's, not this pane's: another pane of the account asking while one
+    /// is open brings that pane's tab forward instead of a second sheet
+    /// ([`crate::pane::KeptLogin::begin`]). The master connection is made on
+    /// its own thread with the sheet as its questioner (the saved password
+    /// answers first, the sheet the rest: a second factor is asked here and
+    /// never kept) and the account dials the moment it is up, every terminal
+    /// on it coming back with this one. Cancel leaves the panes as they are,
+    /// waiting; a failure (ssh's own reason) is a sheet; a host key that is
+    /// not the trusted one stops the connection, asks nothing.
+    pub(crate) fn log_in_to_reconnect(&self) {
+        use crate::pane::Login;
+        let Some(shown) = self.host().kept_terminal(self.uuid()) else {
+            return;
+        };
+        let (Some(masters), Some((_, target, _))) = (
+            self.masters(),
+            self.session().and_then(|session| session.remote_target()),
+        ) else {
+            return;
+        };
+        let gate = self.host().kept_login();
+        match gate.begin(&shown.account, self.uuid()) {
+            Login::Open => {}
+            Login::Raise(owner) => {
+                if gate.raise(&owner) {
+                    return;
+                }
+                // The pane that had the sheet is gone: this one's is the sheet.
+                gate.end(&shown.account);
+                if gate.begin(&shown.account, self.uuid()) != Login::Open {
+                    return;
+                }
+            }
+        }
+        let account = shown.account;
+        let asker = self.password_asker(target.host.clone(), Job::Reconnect, false);
+        let (id, lookup) = (self.id(), self.lookup());
+        let started = thread::Builder::new()
+            .name("ssh log in to reconnect".into())
+            .spawn({
+                let (account, gate) = (account.clone(), Arc::clone(&gate));
+                move || {
+                    let outcome = masters.ensure(&target, Ask::Sheet(asker));
+                    let host = target.host;
+                    if outcome.is_ok() {
+                        gate.done(&account);
+                    }
+                    gate.end(&account);
+                    if let Err(denied) = outcome
+                        && denied != Denied::Cancelled
+                    {
+                        on_pane(lookup, id, move |pane| {
+                            pane.failure_sheet(&format!("Can't log in to {host}"), &denied.text());
+                        });
+                    }
+                }
+            });
+        if started.is_err() {
+            gate.end(&account);
+        }
     }
 
     // ─── Forget Password ─────────────────────────────────────────────────

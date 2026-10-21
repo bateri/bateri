@@ -3503,6 +3503,7 @@ mod tests {
             transfer: None,
             stats: None,
             sign_in: None,
+            link: None,
             remote_setup: None,
             program: None,
             program_mark: HostMark::None,
@@ -3806,6 +3807,104 @@ mod tests {
                         "{cols} columns, col {col}"
                     );
                 }
+            }
+        }
+    }
+
+    /// The words the context row says while the connection to a kept terminal
+    /// is down, as the user reads them.
+    #[test]
+    fn a_connection_that_is_down_says_so_in_the_context_row() {
+        let state = live("", "", "", 0);
+        for (link, row) in [
+            (
+                crate::RemoteLink::Reconnecting,
+                "⇄ prod  Reconnecting… · ⏎ try now",
+            ),
+            (
+                crate::RemoteLink::LoginNeeded,
+                "⇄ prod  Needs your password · ⏎ log in",
+            ),
+        ] {
+            let down = DockContext {
+                link: Some(link),
+                // What the connection was doing before it went: none of it is
+                // the connection's now.
+                stats: Some(calm(StatsForm::Sparkline)),
+                ports: vec![crate::FooterPort {
+                    port: 3000,
+                    open: true,
+                }],
+                ..remote("prod", "/srv/app")
+            };
+            let (cells, dock) = draw_with(&state, &down, 80);
+            let drawn = row_text(&cells, 1);
+            assert_eq!(drawn, row, "the path, the load and the ports are gone");
+            // Nothing is clickable: the row is a status, ⏎ is the pane's key.
+            assert_eq!(dock.buttons, [None, None]);
+            assert_eq!(crate::footer_spans(&down, 80).count(), 0);
+            // The host keeps the mark's colour, the words are `dim`.
+            assert_eq!(
+                color_at(&cells, 1, 2),
+                Some(THEME.mark_linear(HostMark::None))
+            );
+            let at = row.chars().position(|ch| ch == 'R' || ch == 'N');
+            assert_eq!(
+                color_at(&cells, 1, at.map_or(0, |at| at as u16)),
+                Some(THEME.dim_linear())
+            );
+            // The connection back: the path again.
+            let (cells, _) = draw_with(&state, &remote("prod", "/srv/app"), 80);
+            assert_eq!(row_text(&cells, 1), "⇄ prod  /srv/app");
+        }
+    }
+
+    /// A narrow row keeps the state and drops the key, then the words, and
+    /// never shows a cut sentence.
+    #[test]
+    fn the_connection_words_give_way_whole() {
+        let state = live("", "", "", 0);
+        let down = DockContext {
+            link: Some(crate::RemoteLink::Reconnecting),
+            ..remote("prod", "/srv/app")
+        };
+        let full = "⇄ prod  Reconnecting… · ⏎ try now";
+        let short = "⇄ prod  Reconnecting…";
+        for cols in 0..=48_u16 {
+            let (cells, _) = draw_with(&state, &down, cols);
+            let row = row_text(&cells, 1);
+            let width = usize::from(cols);
+            let want = if width >= full.chars().count() {
+                full
+            } else if width >= short.chars().count() {
+                short
+            } else if width >= "⇄ prod".chars().count() {
+                "⇄ prod"
+            } else {
+                // `⇄` alone, or nothing at all.
+                assert!(row.chars().count() <= width, "{cols}: {row:?}");
+                continue;
+            };
+            assert_eq!(row, want, "{cols} columns");
+        }
+    }
+
+    #[test]
+    fn the_connection_words_are_the_ones_the_atlas_checks() {
+        // `bt-atlas` asks by hand about the context row's non-ASCII
+        // characters in the small class
+        // (`the_connection_row_has_no_box_in_the_small_class`).
+        for link in [
+            crate::RemoteLink::Reconnecting,
+            crate::RemoteLink::LoginNeeded,
+        ] {
+            for text in [link.text(), link.short()] {
+                assert!(
+                    text.chars()
+                        .filter(|ch| !ch.is_ascii())
+                        .all(|ch| ['…', '·', '⏎'].contains(&ch)),
+                    "{text}"
+                );
             }
         }
     }

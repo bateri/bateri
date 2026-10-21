@@ -25,20 +25,27 @@
 //! server ends the command the way `ssh` would have, because a second `ssh`
 //! would only ask again.
 
-use std::io;
+use std::io::{self, Read};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
+use std::thread;
 
-use bt_core::{RemoteKind, RemoteTarget, Settings};
+use bt_core::{PaneUuid, RemoteKind, RemoteTarget, Settings};
 
+use super::Cause;
 use super::install::{self, Bundle, Failure, Installed, SshChannel};
-use super::service::{Backend, Carried, PaneInfo, Peer, Refusal};
-use crate::ssh_route::{self, Asker, Plan, Route, SshRunner};
+use super::service::{Backend, Carried, PaneInfo, PaneLink, Peer, Refusal};
+use crate::ssh_route::{self, Ask, Asker, Denied, Masters, Plan, Route, SshRunner};
 use crate::ssh_wrap::{self, Fact, KabloHost};
 use crate::upload::ssh_argv_for;
 
 /// How a process is found to be in a pane (see [`SshBackend::panes`]).
 pub type PaneLookup = Box<dyn Fn(&Peer) -> Option<PaneInfo> + Send + Sync>;
+
+/// What the application does with the news that a pane's connection went or
+/// came back ([`Backend::link_changed`]).
+pub type LinkNews = Box<dyn Fn(&PaneUuid, PaneLink) + Send + Sync>;
 
 /// What the service gets from the application, as closures and values.
 pub struct SshBackend {
@@ -60,6 +67,13 @@ pub struct SshBackend {
     pub name: Option<String>,
     /// The scrollback a terminal on a server keeps.
     pub history: Box<dyn Fn() -> Option<u32> + Send + Sync>,
+    /// The application's masters: what makes the connection again, with the
+    /// password the Keychain keeps, when the one the user made is gone. `None`:
+    /// only what `ssh` can do without a person (a key, an agent).
+    pub masters: Option<Arc<Masters>>,
+    /// A pane's terminal lost the connection or got it back
+    /// ([`Backend::link_changed`]).
+    pub linked: LinkNews,
 }
 
 impl SshBackend {
@@ -76,6 +90,26 @@ impl SshBackend {
             kind: RemoteKind::Ssh,
             line: crate::quote::command_line(&argv),
             argv,
+        }
+    }
+
+    /// The route the bridge takes when it is made again. The user's own master
+    /// may be gone with the connection: the one the application keeps for the
+    /// account is opened again with the password the Keychain holds, **once and
+    /// silently** (a stale password must not lock the account), and a login
+    /// nobody saved is the user's to give — `PermissionDenied`, which the
+    /// service reads as "needs a login".
+    fn route_for_bridge(&self, target: &RemoteTarget) -> io::Result<Route> {
+        let Some(masters) = &self.masters else {
+            return Ok(self.route_of(target));
+        };
+        match masters.ensure(target, Ask::Never) {
+            Ok(route) => Ok(route),
+            Err(Denied::SignIn) => Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "the server wants a login",
+            )),
+            Err(denied) => Err(io::Error::other(denied.text())),
         }
     }
 
@@ -163,7 +197,8 @@ impl Backend for SshBackend {
 
     fn carry(&self, server: &KabloHost, installed: &Installed) -> io::Result<Carried> {
         let target = self.target(server);
-        let mut argv = ssh_argv_for(&target, &self.route_of(&target));
+        let route = self.route_for_bridge(&target)?;
+        let mut argv = ssh_argv_for(&target, &route);
         argv.push(format!("{} attach", installed.path));
         let (program, args) = argv
             .split_first()
@@ -172,19 +207,38 @@ impl Backend for SshBackend {
             .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()?;
-        let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
+        let (Some(stdin), Some(stdout), Some(stderr)) =
+            (child.stdin.take(), child.stdout.take(), child.stderr.take())
+        else {
             let _ = child.kill();
             let _ = child.wait();
             return Err(io::Error::other("the bridge has no pipes"));
         };
+        // What ssh says when it is refused is the only way to tell a login that
+        // nobody answered from a network that is down: both end the stream.
+        let said = Arc::new(Mutex::new(String::new()));
+        let reading = thread::Builder::new()
+            .name("kablo bridge's ssh says".into())
+            .spawn({
+                let said = Arc::clone(&said);
+                move || read_said(stderr, &said)
+            })
+            .ok();
         Ok(Carried {
             reader: Box::new(stdout),
             writer: Box::new(stdin),
             close: Box::new(move || {
                 let _ = child.kill();
                 let _ = child.wait();
+            }),
+            ended: Box::new(move || {
+                if let Some(reading) = reading {
+                    let _ = reading.join();
+                }
+                let said = said.lock().unwrap_or_else(|e| e.into_inner());
+                why_it_ended(&said)
             }),
         })
     }
@@ -195,6 +249,44 @@ impl Backend for SshBackend {
 
     fn history(&self) -> Option<u32> {
         (self.history)()
+    }
+
+    fn link_changed(&self, pane: &PaneUuid, link: PaneLink) {
+        (self.linked)(pane, link);
+    }
+}
+
+/// The most of ssh's standard error that is kept: a refusal is a line or two.
+const SAID_LIMIT: usize = 16 * 1024;
+
+/// Reads what the bridge's ssh says on its standard error into `said` until the
+/// process lets go of it.
+fn read_said(mut stderr: impl Read, said: &Mutex<String>) {
+    let mut buffer = [0u8; 1024];
+    while let Ok(n) = stderr.read(&mut buffer) {
+        if n == 0 {
+            break;
+        }
+        let mut said = said.lock().unwrap_or_else(|e| e.into_inner());
+        if said.len() < SAID_LIMIT {
+            said.push_str(&String::from_utf8_lossy(&buffer[..n]));
+        }
+    }
+}
+
+/// Why a bridge whose ssh ended by itself ended, from what ssh said. A key that
+/// is not the trusted one is a connection that stops and asks nothing; a
+/// refused login that a password could have opened is the user's to give; the
+/// rest is the network and is tried again.
+pub fn why_it_ended(said: &str) -> Cause {
+    if said.contains("Host key verification failed")
+        || said.contains("REMOTE HOST IDENTIFICATION HAS CHANGED")
+    {
+        Cause::Refused
+    } else if ssh_route::password_refused(said) {
+        Cause::LoginNeeded
+    } else {
+        Cause::Dropped
     }
 }
 

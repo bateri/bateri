@@ -690,6 +690,18 @@ pub struct DockContext {
     /// it is shown the load indicator is not (there is no sample without a
     /// login) and the upload row wins over both.
     pub sign_in: Option<SignIn>,
+    /// The remote session's connection is down and the terminal waits for it:
+    /// a terminal the server keeps (kablo) outlives the connection, and while it
+    /// is gone the context row says what is happening and what ⏎ does
+    /// ([`RemoteLink`]). `None` while the connection is there — the usual
+    /// state, and the only one a session that is not a kept terminal ever has.
+    ///
+    /// Its writer is `bt-shell`'s pane ([`crate::Session::set_remote_link`]),
+    /// from what the application's bridge to the server reports; it belongs to
+    /// the remote state and goes with it like [`Self::sign_in`]. While it is set
+    /// the caret is not drawn (the grid is a picture of a moment that has
+    /// passed) and the load indicator's numbers are as old as the connection.
+    pub link: Option<RemoteLink>,
     /// Why bateri's remote bootstrap fell back to a plain login shell: the shell integration did not start on the server, so the
     /// remote folder stays unknown and the pane's label says why
     /// ([`crate::Session::remote_setup_fault`]). `None` otherwise. It comes from
@@ -861,6 +873,37 @@ impl RemoteSetupFault {
 /// ([`DockContext::footer_hover`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SignIn;
+
+/// What the context row says while the connection to a kept terminal's server
+/// is down ([`DockContext::link`]). The text is the row's, the writer decides
+/// which: the bridge is trying again by itself, or it waits for the user to
+/// log in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RemoteLink {
+    /// The connection is being made again, on a clock the user can skip: `⏎ try now`.
+    Reconnecting,
+    /// The server wants a password (or a code) nobody has saved: `⏎ log in`.
+    /// Nothing is tried until the user does.
+    LoginNeeded,
+}
+
+impl RemoteLink {
+    /// What the context row says after the host, in full. A UI string.
+    pub const fn text(self) -> &'static str {
+        match self {
+            Self::Reconnecting => "Reconnecting… · ⏎ try now",
+            Self::LoginNeeded => "Needs your password · ⏎ log in",
+        }
+    }
+
+    /// What it says when the full text does not fit: the state alone.
+    pub const fn short(self) -> &'static str {
+        match self {
+            Self::Reconnecting => "Reconnecting…",
+            Self::LoginNeeded => "Needs your password",
+        }
+    }
+}
 
 /// The form of the load indicator that is drawn —
 /// [`RemoteStatsMode`] without `Off`: with `Off` there is no value at all.
@@ -1115,6 +1158,7 @@ impl Clone for DockContext {
         self.transfer.clone_from(&source.transfer);
         self.stats = source.stats;
         self.sign_in = source.sign_in;
+        self.link = source.link;
         self.remote_setup = source.remote_setup;
         self.program.clone_from(&source.program);
         self.program_mark = source.program_mark;
@@ -1291,6 +1335,7 @@ impl DockContext {
         // The load belongs to the host, and so does its login.
         self.stats = None;
         self.sign_in = None;
+        self.link = None;
         self.remote.take().is_some()
     }
 }
@@ -3240,6 +3285,7 @@ impl ShellLog {
         if changed {
             self.context.stats = None;
             self.context.sign_in = None;
+            self.context.link = None;
             // Another host's prompt is not this one's login.
             self.paste_since_remote = false;
         }

@@ -109,6 +109,43 @@ pub struct Shown {
     /// The program in front of the terminal as the server last said, controls
     /// removed; `None` while it has not said.
     pub program: Option<String>,
+    /// How the connection to the server stands for this terminal.
+    pub link: PaneLink,
+}
+
+/// How the connection to the server stands for the terminal a pane shows: what
+/// the pane looks like while it waits for it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PaneLink {
+    /// The terminal is being brought up: nothing of it was shown yet, and what
+    /// the pane shows is the user's own `ssh` still making the connection.
+    /// **Not passive** — the first connection is not one that was lost.
+    Connecting,
+    /// The connection is there.
+    Live,
+    /// The terminal was shown and the connection is gone; the bridge is made
+    /// again on its own clock, which the user can skip.
+    Reconnecting,
+    /// The terminal was shown and the server wants a login nobody has saved
+    /// (a password, a second factor). Nothing is tried until the user logs in.
+    NeedsLogin,
+}
+
+impl PaneLink {
+    /// Whether the pane shows a screen that is no longer live: dimmed, with no
+    /// caret and no keys to the terminal.
+    pub fn is_passive(self) -> bool {
+        matches!(self, Self::Reconnecting | Self::NeedsLogin)
+    }
+
+    /// What the pane is told: [`PaneLink::Connecting`] is the connection being there as far as
+    /// the pane's looks go.
+    fn told(self) -> PaneLink {
+        match self {
+            Self::Connecting => Self::Live,
+            other => other,
+        }
+    }
 }
 
 impl Shown {
@@ -159,6 +196,12 @@ pub struct Carried {
     /// Ends the process that carries them (called once, when the bridge is let
     /// go of).
     pub close: Box<dyn FnOnce() + Send>,
+    /// Why the stream ended, asked once when it has ended by itself:
+    /// [`Cause::Dropped`] when nothing says more, [`Cause::LoginNeeded`] when
+    /// the process was refused a login nobody could answer, [`Cause::Refused`]
+    /// when the server's key is not the one that was trusted. It runs on the
+    /// reader's thread, which may wait for what the process left to say.
+    pub ended: Box<dyn FnOnce() -> Cause + Send>,
 }
 
 /// What the service asks of the world around it. Every method but
@@ -196,6 +239,22 @@ pub trait Backend: Send + Sync + 'static {
     /// How many rows of scrollback the server keeps for a new terminal.
     fn history(&self) -> Option<u32> {
         None
+    }
+
+    /// The connection to the server of the terminal `pane` shows went or came
+    /// back: told once per **change** of what the pane looks like
+    /// ([`PaneLink::is_passive`]), never per attempt — the clock that tries
+    /// again, the wait and the wake from sleep are not news. Called on the
+    /// service's thread; the application hops to its own.
+    fn link_changed(&self, _pane: &PaneUuid, _link: PaneLink) {}
+}
+
+/// Why a bridge could not be started, as far as the error says: a login the
+/// bridge cannot answer is [`io::ErrorKind::PermissionDenied`].
+fn cause_of(error: &io::Error) -> Cause {
+    match error.kind() {
+        io::ErrorKind::PermissionDenied => Cause::LoginNeeded,
+        _ => Cause::Dropped,
     }
 }
 
@@ -238,7 +297,13 @@ enum Msg {
     BridgeEof {
         account: String,
         generation: u64,
+        cause: Cause,
     },
+    /// The user asked to try now (⏎), or logged in: the account dials as soon
+    /// as it can.
+    Retry(String),
+    /// The computer woke up.
+    Wake,
     Stop,
 }
 
@@ -390,6 +455,27 @@ impl Service {
     /// pane that shows nothing, and a connection that is down, do nothing.
     pub fn end(&self, pane: &PaneUuid) {
         let _ = self.tx.send(Msg::End(pane.clone()));
+    }
+
+    /// Try now: the account of the terminal `pane` shows dials at once instead
+    /// of waiting out its pause. What ⏎ does on a pane that waits for the
+    /// connection. A pane that shows nothing does nothing.
+    pub fn retry(&self, pane: &PaneUuid) {
+        if let Some(shown) = self.shown(pane) {
+            self.retry_account(&shown.account);
+        }
+    }
+
+    /// [`Service::retry`] for an account: the user logged in (the master
+    /// connection is there now) and every terminal on the server comes back.
+    pub fn retry_account(&self, account: &str) {
+        let _ = self.tx.send(Msg::Retry(account.to_owned()));
+    }
+
+    /// The computer woke up: a connection that looked open is asked whether it
+    /// is, and the ones waiting for their pause dial now.
+    pub fn wake(&self) {
+        let _ = self.tx.send(Msg::Wake);
     }
 
     /// The socket's path.
@@ -577,6 +663,7 @@ impl Core {
             Msg::BridgeEof {
                 account,
                 generation,
+                cause,
             } => {
                 if let Some(entry) = self.accounts.get_mut(&account)
                     && entry.generation == generation
@@ -584,8 +671,24 @@ impl Core {
                     && let Some(client) = self.hub.client_mut(&account)
                     && matches!(client.link(), Link::Opening { .. } | Link::Live)
                 {
-                    client.lost(now, Cause::Dropped);
+                    client.lost(now, cause);
                 }
+            }
+            Msg::Retry(account) => {
+                if let Some(client) = self.hub.client_mut(&account) {
+                    client.retry_now(now);
+                }
+                // A login that was waited for is a connection being made.
+                self.refresh = true;
+            }
+            Msg::Wake => {
+                let accounts: Vec<String> = self.accounts.keys().cloned().collect();
+                for account in accounts {
+                    if let Some(client) = self.hub.client_mut(&account) {
+                        client.wake(now);
+                    }
+                }
+                self.refresh = true;
             }
             Msg::Stop => {}
         }
@@ -685,6 +788,16 @@ impl Core {
                 .get(account)
                 .map(|entry| entry.server.host.clone())
                 .unwrap_or_default();
+            // Passive is "was shown and is not live any more": until the
+            // terminal was shown the connection being made is the first one.
+            let link = match self.hub.client(account).map(Client::link) {
+                _ if !self.hub.is_shown(*hold) => PaneLink::Connecting,
+                Some(Link::NeedsLogin) => PaneLink::NeedsLogin,
+                Some(Link::Retrying { .. } | Link::Opening { .. }) => PaneLink::Reconnecting,
+                // Live, or over: the holder is about to end and the pane with
+                // the terminal it shows has nothing to wait for.
+                Some(Link::Live | Link::Over(_)) | None => PaneLink::Live,
+            };
             shown.insert(
                 pane.clone(),
                 Shown {
@@ -692,10 +805,27 @@ impl Core {
                     host,
                     terminal: terminal.clone(),
                     program,
+                    link,
                 },
             );
         }
-        *self.shown.lock().unwrap_or_else(|e| e.into_inner()) = shown;
+        let before = std::mem::replace(
+            &mut *self.shown.lock().unwrap_or_else(|e| e.into_inner()),
+            shown.clone(),
+        );
+        // Told once per change of what the pane looks like, after the lock is
+        // let go of. A pane that is gone is a pane that is no longer waiting.
+        let was = |pane: &PaneUuid| before.get(pane).map_or(PaneLink::Live, |s| s.link.told());
+        for (pane, now) in &shown {
+            if was(pane) != now.link.told() {
+                self.shared.backend.link_changed(pane, now.link.told());
+            }
+        }
+        for pane in before.keys().filter(|pane| !shown.contains_key(*pane)) {
+            if was(pane) != PaneLink::Live {
+                self.shared.backend.link_changed(pane, PaneLink::Live);
+            }
+        }
     }
 
     /// The user closed `pane`: the terminal it shows is asked to hang up, and
@@ -882,6 +1012,7 @@ impl Core {
                     reader,
                     writer,
                     close,
+                    ended,
                 } = carried;
                 let (to_bridge, written) = mpsc::channel();
                 let tx = self.shared.tx.clone();
@@ -889,7 +1020,7 @@ impl Core {
                 let name = account.to_owned();
                 let _ = thread::Builder::new()
                     .name("kablo bridge reads".into())
-                    .spawn(move || bridge_reader(name, generation, reader, &tx, &queued));
+                    .spawn(move || bridge_reader(name, generation, reader, &tx, &queued, ended));
                 let _ = thread::Builder::new()
                     .name("kablo bridge writes".into())
                     .spawn(move || bridge_writer(writer, &written));
@@ -901,9 +1032,9 @@ impl Core {
                     client.connected(now);
                 }
             }
-            Err(_) => {
+            Err(error) => {
                 if let Some(client) = self.hub.client_mut(account) {
-                    client.lost(now, Cause::Dropped);
+                    client.lost(now, cause_of(&error));
                 }
             }
         }
@@ -1130,6 +1261,7 @@ fn bridge_reader(
     mut reader: Box<dyn Read + Send>,
     tx: &Sender<Msg>,
     queued: &AtomicUsize,
+    ended: Box<dyn FnOnce() -> Cause + Send>,
 ) {
     let mut buffer = vec![0u8; CHUNK];
     loop {
@@ -1152,9 +1284,11 @@ fn bridge_reader(
             }
         }
     }
+    let cause = ended();
     let _ = tx.send(Msg::BridgeEof {
         account,
         generation,
+        cause,
     });
 }
 

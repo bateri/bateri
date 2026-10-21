@@ -45,7 +45,7 @@
 //! arithmetics diverged a click would land next to what is drawn.
 
 use super::*;
-use crate::shell::{DockEnvironment, FooterPort};
+use crate::shell::{DockEnvironment, FooterPort, RemoteLink};
 
 /// The gap between the lead and the trailing zone, and between two of its
 /// items, in columns — the remote form's own gap (`⇄ prod  /srv`).
@@ -87,6 +87,10 @@ enum Lead<'a> {
     },
     /// `⇄ {host}  {remote path}` (`host` as shown, with a port the user named).
     Remote { host: &'a str, cwd: &'a str },
+    /// `⇄ {host}  {what the connection is doing}`: the remote form while the
+    /// connection to a kept terminal's server is down ([`RemoteLink`]). The
+    /// path is not shown — it is as old as the connection.
+    Down { host: &'a str, link: RemoteLink },
     /// `{title} · {detail}  {path}`.
     Program(&'a ProgramBar),
     /// `⇄ {host}  {text}`.
@@ -103,6 +107,7 @@ impl Lead<'_> {
                 environment,
             } => LocalWidths::of(cwd, branch, environment).full(),
             Self::Remote { host, cwd } => remote_head(host) + tail(cwd),
+            Self::Down { host, link } => remote_head(host) + tail(link.text()),
             Self::Program(bar) => program_head(bar) + tail(&bar.path),
             Self::Transfer(transfer) => remote_head(&transfer.host) + tail(&transfer.body),
         }
@@ -118,7 +123,7 @@ impl Lead<'_> {
                 branch,
                 environment,
             } => LocalWidths::of(cwd, branch, environment).core(),
-            Self::Remote { host, .. } => remote_head(host),
+            Self::Remote { host, .. } | Self::Down { host, .. } => remote_head(host),
             Self::Program(bar) => program_head(bar),
             Self::Transfer(transfer) => remote_head(&transfer.host),
         }
@@ -492,6 +497,12 @@ fn parts(context: &DockContext) -> (Lead<'_>, [Option<Item<'_>>; ITEMS]) {
         return (Lead::Transfer(transfer), [ports, buttons]);
     }
     if let Some(host) = context.remote_label() {
+        // The connection is down: the row says so and nothing trails it — the
+        // ports and the load were the connection's and the numbers are as old
+        // as it is.
+        if let Some(link) = context.link {
+            return (Lead::Down { host, link }, [None, None]);
+        }
         // Sign In… takes the indicator's place: there is no sample without a login.
         let own = if context.sign_in.is_some() {
             Some(Item::SignIn)
@@ -773,6 +784,16 @@ fn emit_lead(
                 path_cells(cwd, rest, dim, quiet).1
             });
         }
+        // `⇄ {host}` as above, then what the connection is doing in the dim
+        // tone — the full text, or the state alone when that is what fits, or
+        // nothing: a half sentence (`Reconnecting… · ⏎ t`) would promise a key
+        // that is not named.
+        Lead::Down { host, link } => {
+            let color = theme.mark_linear(context.remote_mark);
+            emit_remote_head(host, color, budget, row, sink, |rest| {
+                link_cells(link, rest, dim)
+            });
+        }
         // The title in the bar's tone ([`program_color`]: its host's mark,
         // `info` unmarked — the remote host's colors, both bars are the same
         // kind of guide), the separator quiet, the detail dim, the path quiet
@@ -947,6 +968,23 @@ fn emit_remote_head<I: Iterator<Item = (char, LinearRgba)>>(
         .chain(REMOTE_GAP.chars().map(|ch| (ch, color)))
         .chain(tail(rest));
     emit_context(line, budget, row, sink);
+}
+
+/// What the connection is doing, in `budget` columns: whole, the state alone,
+/// or nothing.
+fn link_cells(
+    link: RemoteLink,
+    budget: usize,
+    tone: LinearRgba,
+) -> impl Iterator<Item = (char, LinearRgba)> {
+    let text = if link.text().chars().count() <= budget {
+        link.text()
+    } else if link.short().chars().count() <= budget {
+        link.short()
+    } else {
+        ""
+    };
+    text.chars().map(move |ch| (ch, tone))
 }
 
 /// Draws a placed item; a button's fill goes to `buttons`.

@@ -526,6 +526,18 @@ fn reaches_terminal(flags: NSEventModifierFlags, chars: Option<&str>) -> bool {
     )
 }
 
+/// Whether a key is ⏎ with nothing held beside it — the Return key and the
+/// numpad's Enter (whose `characters` is U+0003). The one key a pane that waits
+/// for its connection has ([`TerminalPane::hold_input`]): ⇧⏎, ⌃⏎ and the like
+/// are keys for the program, which is not there to be typed to.
+fn is_plain_enter(flags: NSEventModifierFlags, chars: Option<&str>) -> bool {
+    let held = NSEventModifierFlags::Command
+        | NSEventModifierFlags::Shift
+        | NSEventModifierFlags::Control
+        | NSEventModifierFlags::Option;
+    !flags.intersects(held) && matches!(chars, Some("\r" | "\u{3}"))
+}
+
 /// Whether `keyDown:` stops after the text stack: `consumed` is
 /// [`ViewIvars::consumed`], `committed` [`ViewIvars::committed`] and
 /// `commanded` [`ViewIvars::commanded`], all read after `interpretKeyEvents:`
@@ -868,6 +880,9 @@ define_class!(
             let Some(session) = self.ivars().session.get() else {
                 return;
             };
+            if self.pane().is_some_and(|pane| pane.hold_input(false)) {
+                return;
+            }
             let board = NSPasteboard::generalPasteboard();
             if let Some(text) = clipboard::read(&board).filter(|text| !text.is_empty()) {
                 session.paste(text.into_bytes());
@@ -896,6 +911,9 @@ define_class!(
             let Some(session) = self.ivars().session.get() else {
                 return;
             };
+            if self.pane().is_some_and(|pane| pane.hold_input(false)) {
+                return;
+            }
             if let Some(text) = clipboard::read(&NSPasteboard::generalPasteboard()) {
                 session.paste(paste_quote(&text).into_bytes());
             }
@@ -1336,6 +1354,17 @@ define_class!(
             }
             let ctrl = flags.contains(NSEventModifierFlags::Control);
             let option = flags.contains(NSEventModifierFlags::Option);
+            // **A pane whose terminal waits for its connection takes the key**
+            // (after the scrolling above, which is the pane's own and works on
+            // the last screen): nothing of it goes to the terminal, the system
+            // beeps, and ⏎ — plain, numpad Enter too — is the wait's one key:
+            // try now, or log in. Before the stack and the dock's keys: an
+            // accent composed into the wait is a line nobody will read.
+            if let Some(pane) = self.pane() {
+                if pane.hold_input(is_plain_enter(flags, chars.as_deref())) {
+                    return;
+                }
+            }
             // The key with no modifier applied: `c` for ⌃⇧C, `[` for ⌃[ whose
             // `characters` is Esc's. A program that asked for the kitty
             // protocol is told the key by it (`KeyPress::bare`).
@@ -3188,6 +3217,29 @@ mod tests {
     use super::*;
 
     use objc2_foundation::ns_string;
+
+    #[test]
+    fn only_a_bare_return_is_the_waits_key() {
+        let none = NSEventModifierFlags::empty();
+        assert!(is_plain_enter(none, Some("\r")));
+        assert!(is_plain_enter(none, Some("\u{3}")), "the numpad's Enter");
+        // CapsLock, the numpad and Fn flags are not modifiers of the key.
+        assert!(is_plain_enter(
+            NSEventModifierFlags::CapsLock | NSEventModifierFlags::NumericPad,
+            Some("\r")
+        ));
+        for held in [
+            NSEventModifierFlags::Shift,
+            NSEventModifierFlags::Control,
+            NSEventModifierFlags::Option,
+            NSEventModifierFlags::Command,
+        ] {
+            assert!(!is_plain_enter(held, Some("\r")), "{held:?}");
+        }
+        assert!(!is_plain_enter(none, Some("a")));
+        assert!(!is_plain_enter(none, Some("\r\r")));
+        assert!(!is_plain_enter(none, None));
+    }
 
     /// The cell [`point_to_pointer`] puts a point in; the pixel has its own tests.
     fn point_to_cell(

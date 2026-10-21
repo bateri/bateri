@@ -142,6 +142,14 @@ impl PaneHost for TabHost {
         crate::hold_service::end(pane);
     }
 
+    fn retry_kept_terminal(&self, pane: &bt_core::PaneUuid) {
+        crate::hold_service::retry(pane);
+    }
+
+    fn kept_login(&self) -> std::sync::Arc<dyn crate::pane::KeptLogin> {
+        std::sync::Arc::new(crate::hold_service::Gate)
+    }
+
     fn focused(&self, pane: u64) {
         if let Some(tab) = self.tab() {
             tab.pane_focused(pane);
