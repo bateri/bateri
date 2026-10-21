@@ -36,13 +36,23 @@
 //! needs again is not asked for: it keeps trying with what `ssh` can do
 //! without a person.
 //!
+//! **What a pane shows, and ending it.** The application asks the service which
+//! terminal a pane shows ([`Service::shown`]: the account, the server, the
+//! program in front as the server last said) for the questions it has about a
+//! pane that is not the local shell's — the one before closing it, the folder a
+//! new pane opens in — and tells it that the user closed the pane
+//! ([`Service::end`]), which ends the terminal on the server: `SIGHUP` at once,
+//! and when the terminal is still there after a grace, the kill. A pane that goes
+//! with the application (a quit, a crash, an update) never says it, because the
+//! pane's closing alone lets go of the terminal and it lives on.
+//!
 //! **What does not survive bateri.** A holder asks for a terminal it was
 //! shown ([`wire::Target::Resume`]) by the account's name; an account bateri
 //! has no client for (it was restarted) cannot be served, because the server's
 //! address was never written down: the holder ends with a line. Writing it down
 //! is the update's and the crash's work.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -58,7 +68,7 @@ use kablo_proto::v1::NewSession;
 
 use super::hub::{HoldId, Hub, HubEvent};
 use super::install::Installed;
-use super::{Cause, Client, Link};
+use super::{Cause, Client, Event, Link, SessionId};
 use crate::hold::HOLD_SOCKET;
 use crate::hold::wire::{CHUNK, Open, Target};
 use crate::ssh_wrap::{self, KabloHost};
@@ -84,6 +94,32 @@ pub struct PaneInfo {
     /// The folder the terminal's shell starts in on the server: the one a pane
     /// opened from a remote pane inherits. Used once.
     pub directory: Option<String>,
+}
+
+/// The terminal a pane shows, as far as the application's questions go.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Shown {
+    /// The server's account ([`ssh_wrap::host_key`]).
+    pub account: String,
+    /// The server as the user typed it (`rasp`): the word that names it in the
+    /// lines the user reads.
+    pub host: String,
+    /// The terminal's name on the server.
+    pub terminal: SessionId,
+    /// The program in front of the terminal as the server last said, controls
+    /// removed; `None` while it has not said.
+    pub program: Option<String>,
+}
+
+impl Shown {
+    /// What a question about closing the pane calls the program that would
+    /// end: the program in front with the server it runs on (`npm on rasp`), or
+    /// `None` when the shell is in front (waiting for a command) or the server
+    /// has not said what is.
+    pub fn running(&self) -> Option<String> {
+        let program = self.program.as_deref().filter(|name| !name.is_empty())?;
+        (!crate::program::is_shell_name(program)).then(|| format!("{program} on {}", self.host))
+    }
 }
 
 /// Why no terminal is shown, and what the pane does instead.
@@ -197,6 +233,8 @@ enum Msg {
         generation: u64,
         bytes: Vec<u8>,
     },
+    /// The user closed the pane: the terminal it shows ends.
+    End(PaneUuid),
     BridgeEof {
         account: String,
         generation: u64,
@@ -262,12 +300,27 @@ pub struct Service {
     tx: Sender<Msg>,
     stop: Arc<AtomicBool>,
     threads: Mutex<Vec<thread::JoinHandle<()>>>,
+    /// What each pane shows, as the loop last wrote it.
+    shown: Arc<Mutex<HashMap<PaneUuid, Shown>>>,
 }
+
+/// How long a terminal that was asked to hang up has before it is killed.
+pub const END_GRACE: Duration = Duration::from_secs(3);
 
 impl Service {
     /// Binds `<dir>/hold` (a stale file is removed first) and starts serving.
     /// `dir` is the instance's directory, which must be a private one.
     pub fn start(dir: &Path, backend: Arc<dyn Backend>) -> io::Result<Service> {
+        Service::start_with(dir, backend, END_GRACE)
+    }
+
+    /// [`Service::start`] with the time a terminal that was asked to end has
+    /// before it is killed.
+    pub fn start_with(
+        dir: &Path,
+        backend: Arc<dyn Backend>,
+        grace: Duration,
+    ) -> io::Result<Service> {
         if !crate::ssh_route::private_dir(dir) {
             return Err(io::ErrorKind::PermissionDenied.into());
         }
@@ -290,6 +343,7 @@ impl Service {
                 .name("ssh-hold accept".into())
                 .spawn(move || accept_loop(&listener, &tx, &stop))?
         };
+        let shown = Arc::new(Mutex::new(HashMap::new()));
         let core = Core {
             shared: Arc::new(Shared {
                 backend,
@@ -299,6 +353,11 @@ impl Service {
             conns: BTreeMap::new(),
             accounts: BTreeMap::new(),
             waiting: BTreeMap::new(),
+            panes: BTreeMap::new(),
+            shown: Arc::clone(&shown),
+            refresh: false,
+            ending: Vec::new(),
+            grace,
             rx,
             generation: 0,
         };
@@ -310,7 +369,27 @@ impl Service {
             tx,
             stop,
             threads: Mutex::new(vec![accepting, serving]),
+            shown,
         })
+    }
+
+    /// The terminal the pane shows, if it shows one: written by the loop after
+    /// anything that could change it, so it is what was true a moment ago.
+    pub fn shown(&self, pane: &PaneUuid) -> Option<Shown> {
+        self.shown
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(pane)
+            .cloned()
+    }
+
+    /// The user closed the pane: the terminal it shows ends on the server
+    /// (hung up now, killed after [`END_GRACE`] if it is still there). Say it
+    /// **before** the pane's program is signalled — the holder's going is the
+    /// terminal being let go of, and from then on the pane is not found. A
+    /// pane that shows nothing, and a connection that is down, do nothing.
+    pub fn end(&self, pane: &PaneUuid) {
+        let _ = self.tx.send(Msg::End(pane.clone()));
     }
 
     /// The socket's path.
@@ -394,8 +473,24 @@ struct Core {
     accounts: BTreeMap<String, Account>,
     /// A preparation waits for the holder to run a program.
     waiting: BTreeMap<HoldId, Sender<u8>>,
+    /// The pane each holder runs in, once it was admitted.
+    panes: BTreeMap<HoldId, PaneUuid>,
+    /// What [`Service::shown`] reads.
+    shown: Arc<Mutex<HashMap<PaneUuid, Shown>>>,
+    /// Something happened that [`Core::shown`] may say differently.
+    refresh: bool,
+    /// Terminals asked to hang up that are killed if they are still there.
+    ending: Vec<Ending>,
+    grace: Duration,
     rx: Receiver<Msg>,
     generation: u64,
+}
+
+/// A terminal asked to end: killed at `at` unless it has by then.
+struct Ending {
+    account: String,
+    terminal: SessionId,
+    at: Instant,
 }
 
 impl Core {
@@ -407,6 +502,7 @@ impl Core {
                 .keys()
                 .filter_map(|account| self.hub.client(account))
                 .filter_map(Client::next_deadline)
+                .chain(self.ending.iter().map(|ending| ending.at))
                 .min()
                 .map_or(Duration::from_secs(3600), |at| {
                     at.saturating_duration_since(now)
@@ -454,8 +550,15 @@ impl Core {
                 open,
                 pane,
                 server,
-            } => self.admitted(hold, &open, pane, server),
-            Msg::Prepared { hold, outcome } => self.prepared(hold, outcome, now),
+            } => {
+                self.refresh = true;
+                self.admitted(hold, &open, pane, server);
+            }
+            Msg::Prepared { hold, outcome } => {
+                self.refresh = true;
+                self.prepared(hold, outcome, now);
+            }
+            Msg::End(pane) => self.end(&pane, now),
             Msg::Dialed { account, outcome } => self.dialed(&account, outcome, now),
             Msg::Bridge {
                 account,
@@ -508,6 +611,7 @@ impl Core {
     /// the hub's events are answered, bytes go out, bridges are started or
     /// let go of — until nothing changes.
     fn settle(&mut self) {
+        self.kill_due(Instant::now());
         for _ in 0..64 {
             let now = Instant::now();
             let accounts: Vec<String> = self.accounts.keys().cloned().collect();
@@ -530,9 +634,17 @@ impl Core {
                     HubEvent::Gone { hold } => {
                         self.waiting.remove(&hold);
                         self.conns.remove(&hold);
+                        self.panes.remove(&hold);
                     }
-                    HubEvent::Client { .. } => {}
+                    HubEvent::Client { account, event } => {
+                        if let Event::Ended { terminal, .. } = *event {
+                            // It went by itself: nothing is left to kill.
+                            self.ending
+                                .retain(|e| !(e.account == account && e.terminal == terminal));
+                        }
+                    }
                 }
+                self.refresh = true;
             }
             self.over(&accounts);
             // A holder the hub has said its last word to is let go of, which the
@@ -540,7 +652,103 @@ impl Core {
             moved |= self.flush();
             self.dial(now);
             if !moved {
-                return;
+                break;
+            }
+        }
+        self.write_shown();
+    }
+
+    /// What each pane shows, written where [`Service::shown`] reads it. Only
+    /// when something happened that could change it.
+    fn write_shown(&mut self) {
+        if !std::mem::take(&mut self.refresh) {
+            return;
+        }
+        let mut shown = HashMap::new();
+        for (hold, pane) in &self.panes {
+            let Some((account, terminal)) = self.hub.terminal_of(*hold) else {
+                continue;
+            };
+            let program = self
+                .hub
+                .client(account)
+                .and_then(|client| client.state_of(terminal))
+                .and_then(|state| state.program.as_deref())
+                .map(|name| {
+                    String::from_utf8_lossy(name)
+                        .chars()
+                        .filter(|c| !c.is_control())
+                        .collect()
+                });
+            let host = self
+                .accounts
+                .get(account)
+                .map(|entry| entry.server.host.clone())
+                .unwrap_or_default();
+            shown.insert(
+                pane.clone(),
+                Shown {
+                    account: account.to_owned(),
+                    host,
+                    terminal: terminal.clone(),
+                    program,
+                },
+            );
+        }
+        *self.shown.lock().unwrap_or_else(|e| e.into_inner()) = shown;
+    }
+
+    /// The user closed `pane`: the terminal it shows is asked to hang up, and
+    /// killed after the grace if it is still there. A connection that is down
+    /// cannot ask, and the terminal stays where it is.
+    fn end(&mut self, pane: &PaneUuid, now: Instant) {
+        let holds: Vec<HoldId> = self
+            .panes
+            .iter()
+            .filter(|(_, owner)| *owner == pane)
+            .map(|(hold, _)| *hold)
+            .collect();
+        for hold in holds {
+            let Some((account, terminal)) = self
+                .hub
+                .terminal_of(hold)
+                .map(|(account, terminal)| (account.to_owned(), terminal.clone()))
+            else {
+                continue;
+            };
+            if self
+                .ending
+                .iter()
+                .any(|e| e.account == account && e.terminal == terminal)
+            {
+                continue;
+            }
+            let asked = self
+                .hub
+                .client_mut(&account)
+                .is_some_and(|client| client.terminate(&terminal, false));
+            if asked {
+                self.ending.push(Ending {
+                    account,
+                    terminal,
+                    at: now + self.grace,
+                });
+            }
+        }
+    }
+
+    /// The terminals that were asked to hang up and are still there are killed.
+    fn kill_due(&mut self, now: Instant) {
+        if self.ending.is_empty() {
+            return;
+        }
+        let (due, waiting): (Vec<Ending>, Vec<Ending>) = std::mem::take(&mut self.ending)
+            .into_iter()
+            .partition(|ending| ending.at <= now);
+        self.ending = waiting;
+        for ending in due {
+            if let Some(client) = self.hub.client_mut(&ending.account) {
+                client.terminate(&ending.terminal, true);
             }
         }
     }
@@ -749,6 +957,9 @@ impl Core {
             self.hub.refuse(hold, true, "");
             return;
         };
+        if let Some(tab) = &pane.tab {
+            self.panes.insert(hold, tab.clone());
+        }
         match &open.target {
             Target::Resume { account, .. } => {
                 if self.accounts.contains_key(account) && self.hub.resume(hold, account).is_ok() {

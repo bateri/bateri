@@ -66,6 +66,8 @@ pub struct Session {
     unavailable: u32,
     /// `terminate` was asked (`Some(force)`).
     terminated: Option<bool>,
+    /// The command the terminal was made with.
+    argv: Vec<Vec<u8>>,
 }
 
 impl Session {
@@ -85,6 +87,7 @@ impl Session {
             views: Vec::new(),
             unavailable: 0,
             terminated: None,
+            argv: Vec::new(),
         }
     }
 
@@ -112,6 +115,9 @@ pub struct Bridge {
     decoder: PacketDecoder,
     out: Vec<u8>,
     made: u32,
+    /// A terminal's program takes a hang-up for no reason to end (only the
+    /// kill does).
+    stubborn: bool,
     /// How many connections have been greeted.
     pub connections: u32,
     /// Every packet the client sent, in order, over every connection.
@@ -132,9 +138,16 @@ impl Bridge {
             decoder: PacketDecoder::new(),
             out: Vec::new(),
             made: 0,
+            stubborn: false,
             connections: 0,
             received: Vec::new(),
         }
+    }
+
+    /// The programs of its terminals do not end on a hang-up.
+    pub fn stubborn(mut self) -> Bridge {
+        self.stubborn = true;
+        self
     }
 
     /// Speaks these wire versions (the client picks the highest both speak).
@@ -342,6 +355,11 @@ impl Bridge {
         self.sessions.contains_key(id)
     }
 
+    /// The command the terminal was made with.
+    pub fn argv_of(&self, id: &SessionId) -> Option<&[Vec<u8>]> {
+        self.sessions.get(id).map(|s| s.argv.as_slice())
+    }
+
     /// How `terminate` was asked for the terminal (`Some(force)`).
     pub fn terminated(&self, id: &SessionId) -> Option<bool> {
         self.sessions.get(id).and_then(|s| s.terminated)
@@ -454,8 +472,9 @@ impl Bridge {
             self.error(Some(&id), ErrorCode::SESSION_EXISTS, "it exists");
             return;
         }
-        self.sessions
-            .insert(id.clone(), Session::new(spec.size.unwrap_or_default()));
+        let mut session = Session::new(spec.size.unwrap_or_default());
+        session.argv = spec.argv.clone();
+        self.sessions.insert(id.clone(), session);
         if let Some(status) = self.status(&id) {
             self.send(&Packet::about(id, Message::Created(status)));
         }
@@ -493,7 +512,9 @@ impl Bridge {
                 if let Some(session) = self.sessions.get_mut(&id) {
                     session.terminated = Some(force);
                 }
-                self.exit(&id, Exit::Signal(if force { 9 } else { 1 }));
+                if force || !self.stubborn {
+                    self.exit(&id, Exit::Signal(if force { 9 } else { 1 }));
+                }
             }
             Message::Status => {
                 if let Some(status) = self.status(&id) {

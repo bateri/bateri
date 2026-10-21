@@ -26,6 +26,16 @@ of every installed copy. A version without a section is not released.
   line shown twice. Servers kablo cannot be kept on, hosts you turned
   integration off for, and `production` hosts get the plain `ssh` as before.
 
+- **⌘T and ⌘D in a pane that shows a terminal on a server open another one
+  there, and closing the pane ends it.** The new tab or split starts in the
+  folder you were in and asks for no password again. ⌘W, a tab's ×, closing the
+  window or a split pane ends the terminal on the server (and the question
+  before it says what is running there: “npm on rasp” is still running), where
+  closing used to leave it running with nobody to see it; a terminal that is
+  still there a few seconds after it was asked to hang up is killed. Closing a
+  pane while the connection is down cannot reach the server, and the terminal
+  stays.
+
 - **Programs can ask to be told the window's size in their output.** An app
   that turns on in-band resize reports (DECSET 2048, as kitty and Ghostty
   offer it) now gets the rows, the columns and the size in pixels in one

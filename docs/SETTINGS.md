@@ -2039,7 +2039,14 @@ whether to trust the server's key are asked in the pane), the dock shows
 Where the connection drops — a Wi-Fi that goes, a laptop that sleeps — the
 terminal and what runs in it stay on the server, and the pane goes on from where
 it was when the connection is back. A second `ssh` to the same account rides
-the connection the first made and asks nothing. On the server, bateri also
+the connection the first made and asks nothing. So do ⌘T and ⌘D in such a pane:
+the new tab or split opens another terminal on the same server, in the folder
+the pane is in, without asking for anything again. Closing the pane — ⌘W, the
+tab's ×, the window's red button — ends its terminal on the server, and the
+question before it names the program running there (“npm on rasp” is still
+running); `exit` in the terminal ends it too and returns to the local prompt. A
+pane closed while the connection is down cannot reach the server, and its
+terminal keeps running there. On the server, bateri also
 writes a few small files under `~/.local/share/bateri/shell/`; it does not touch
 the server's rc files.
 

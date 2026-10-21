@@ -10,20 +10,80 @@
 //! as the package carries them (`Contents/Resources/kablo`; a build without the
 //! package has no kablo calls and every `ssh` is the plain one).
 
-use std::sync::{Arc, OnceLock};
-use std::time::Duration;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use dispatch2::DispatchQueue;
 use objc2::MainThreadMarker;
 
 use crate::app::delegate;
 use crate::{child, settings, ssh_route};
+use bt_core::PaneUuid;
 use bt_shell_common::kablo::install::Bundle;
-use bt_shell_common::kablo::service::{PaneInfo, Peer, Service};
+use bt_shell_common::kablo::service::{PaneInfo, Peer, Service, Shown};
 use bt_shell_common::kablo::ssh::SshBackend;
 
 /// The running service: for as long as the process lives.
 static SERVICE: OnceLock<Service> = OnceLock::new();
+
+/// The terminal the pane shows, if it shows one a kablo server keeps (the
+/// program in front of it included, as the server last said). `None` for a pane
+/// that shows its own shell and, in a process without the service, for every pane.
+pub(crate) fn shown(pane: &PaneUuid) -> Option<Shown> {
+    SERVICE.get()?.shown(pane)
+}
+
+/// The user closed the pane: the terminal it shows ends on the server. Called
+/// **before** the pane's program is signalled (the service reads the pane from
+/// the holder, which the signal ends); a pane that shows nothing is nothing to
+/// do. A quit, a crash and an update do not say it.
+pub(crate) fn end(pane: &PaneUuid) {
+    if let Some(service) = SERVICE.get() {
+        service.end(pane);
+    }
+}
+
+/// How long a folder waits for the `ssh` it is for.
+const START_WAIT: Duration = Duration::from_secs(30);
+
+/// The folders new panes ask their first terminal to start in: a pane opened
+/// from a pane that shows a terminal on a server (⌘T, ⌘D) types the `ssh` line
+/// and the terminal it asks for starts where the source was. Kept here and not
+/// in the pane's environment because the one who asks (`ssh-hold`) never sees
+/// what the shell function did with it; asked of by the pane, once, within
+/// [`START_WAIT`] — a later `ssh` in the same pane is not the one it was for.
+#[derive(Default)]
+struct Starts(Vec<(u64, String, Instant)>);
+
+impl Starts {
+    fn note(&mut self, pane: u64, directory: String, now: Instant) {
+        self.0.retain(|(owner, _, at)| {
+            *owner != pane && now.saturating_duration_since(*at) < START_WAIT
+        });
+        self.0.push((pane, directory, now));
+    }
+
+    fn take(&mut self, pane: u64, now: Instant) -> Option<String> {
+        self.0
+            .retain(|(_, _, at)| now.saturating_duration_since(*at) < START_WAIT);
+        let at = self.0.iter().position(|(owner, ..)| *owner == pane)?;
+        Some(self.0.remove(at).1)
+    }
+}
+
+static STARTS: Mutex<Starts> = Mutex::new(Starts(Vec::new()));
+
+/// The new pane `pane`'s first terminal starts in `directory` on the server.
+pub(crate) fn expect_directory(pane: u64, directory: String) {
+    let mut starts = STARTS.lock().unwrap_or_else(|e| e.into_inner());
+    starts.note(pane, directory, Instant::now());
+}
+
+/// The folder the pane's first terminal starts in, once.
+pub(crate) fn take_directory(pane: u64) -> Option<String> {
+    let mut starts = STARTS.lock().unwrap_or_else(|e| e.into_inner());
+    starts.take(pane, Instant::now())
+}
 
 /// How long the main queue is waited for when a process asks which pane it is in:
 /// a busy main thread is a request that is not served (the plain `ssh`).
@@ -95,4 +155,34 @@ fn pane_of(peer: &Peer) -> Option<PaneInfo> {
         let _ = sender.send(delegate(mtm).and_then(|delegate| delegate.pane_of_process(pid)));
     });
     receiver.recv_timeout(PANE_WAIT).ok().flatten()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_start_folder_is_taken_once_by_the_pane_it_is_for() {
+        let now = Instant::now();
+        let mut starts = Starts::default();
+        starts.note(7, "/srv/app".into(), now);
+        starts.note(8, "/var/log".into(), now);
+        assert_eq!(starts.take(9, now), None, "another pane's");
+        assert_eq!(starts.take(7, now).as_deref(), Some("/srv/app"));
+        assert_eq!(starts.take(7, now), None, "once");
+        assert_eq!(starts.take(8, now).as_deref(), Some("/var/log"));
+    }
+
+    #[test]
+    fn a_start_folder_that_waited_too_long_is_not_for_the_next_ssh() {
+        let now = Instant::now();
+        let mut starts = Starts::default();
+        starts.note(7, "/srv/app".into(), now);
+        assert_eq!(starts.take(7, now + START_WAIT), None);
+        // A newer note for the pane replaces the older.
+        starts.note(7, "/a".into(), now);
+        starts.note(7, "/b".into(), now);
+        assert_eq!(starts.take(7, now).as_deref(), Some("/b"));
+        assert_eq!(starts.take(7, now), None);
+    }
 }

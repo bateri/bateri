@@ -56,6 +56,8 @@ struct Fake {
     /// What was asked, in order.
     log: Mutex<Vec<String>>,
     pane: AtomicBool,
+    /// What the pane lookup says of the pane when there is one.
+    info: Mutex<PaneInfo>,
     kablo: AtomicBool,
     /// The program the master step runs on the pane, if any.
     master: Mutex<Option<Vec<String>>>,
@@ -72,6 +74,7 @@ impl Fake {
             bridge: Arc::new(Mutex::new(bridge)),
             log: Mutex::new(Vec::new()),
             pane: AtomicBool::new(true),
+            info: Mutex::new(PaneInfo::default()),
             kablo: AtomicBool::new(true),
             master: Mutex::new(None),
             fresh: AtomicBool::new(false),
@@ -149,7 +152,9 @@ impl Write for ToBridge {
 impl Backend for Fake {
     fn pane(&self, _: &Peer) -> Option<PaneInfo> {
         self.note("pane");
-        self.pane.load(Ordering::SeqCst).then(PaneInfo::default)
+        self.pane
+            .load(Ordering::SeqCst)
+            .then(|| self.info.lock().expect("lock").clone())
     }
 
     fn route(&self, _: &[String]) -> Option<KabloHost> {
@@ -229,8 +234,12 @@ impl Rig {
     }
 
     fn over(name: &str, world: Arc<Fake>) -> Rig {
+        Rig::graced(name, world, END_GRACE)
+    }
+
+    fn graced(name: &str, world: Arc<Fake>, grace: Duration) -> Rig {
         let dir = scratch(name);
-        let service = Service::start(&dir, world.clone()).expect("a service");
+        let service = Service::start_with(&dir, world.clone(), grace).expect("a service");
         Rig {
             dir,
             service,
@@ -591,4 +600,168 @@ fn the_socket_is_the_users_and_goes_with_the_service() {
     let _ = std::fs::remove_dir_all(&open);
     rig.service.stop();
     assert!(!socket.exists());
+}
+
+/// A pane's identity for the lookup to answer with.
+fn pane_named(world: &Fake) -> PaneUuid {
+    let pane = PaneUuid::parse("0f3c1a52-7d0e-4c1b-9b57-2f7a8c4d6e10").expect("a canonical uuid");
+    world.info.lock().expect("lock").tab = Some(pane.clone());
+    pane
+}
+
+fn saying(program: &str) -> kablo_proto::v1::TerminalState {
+    let mut state = kablo_proto::v1::TerminalState::default();
+    state.program = Some(program.as_bytes().to_vec());
+    state
+}
+
+#[test]
+fn a_pane_is_found_by_the_terminal_it_shows_with_the_program_in_front() {
+    let rig = Rig::new("shown");
+    let pane = pane_named(&rig.world);
+    assert_eq!(rig.service.shown(&pane), None, "nothing is shown yet");
+    let mut holder = Holder::new(&rig.socket(), "b-1");
+    let terminal = rig.terminals(1).remove(0);
+    until("the pane found", || rig.service.shown(&pane).is_some());
+    let shown = rig.service.shown(&pane).expect("shown");
+    assert_eq!(shown.account, "u@rasp:22");
+    assert_eq!(shown.host, "rasp");
+    assert_eq!(shown.terminal, terminal);
+    assert_eq!(shown.running(), None, "no word from the server yet");
+
+    // A program in front, named with the server it runs on.
+    rig.world.bridge().set_state(&terminal, saying("npm"));
+    until("the program in front", || {
+        rig.service
+            .shown(&pane)
+            .is_some_and(|shown| shown.running().as_deref() == Some("npm on rasp"))
+    });
+    // The shell back in front (a login shell is named with a dash).
+    rig.world.bridge().set_state(&terminal, saying("-zsh"));
+    until("the shell in front", || {
+        rig.service.shown(&pane).is_some_and(|shown| {
+            shown.program.as_deref() == Some("-zsh") && shown.running().is_none()
+        })
+    });
+    // A pane the service never heard of shows nothing.
+    let other = PaneUuid::parse("5a7e9c40-1b2d-4e3f-8a6b-0c9d1e2f3a4b").expect("a uuid");
+    assert_eq!(rig.service.shown(&other), None);
+
+    // The terminal ending lets go of the pane.
+    rig.world.bridge().exit(&terminal, Exit::Code(0));
+    assert_eq!(holder.outcome(), Outcome::Exit(0));
+    until("the pane let go of", || rig.service.shown(&pane).is_none());
+}
+
+#[test]
+fn a_program_name_is_shown_without_the_controls_the_server_sent() {
+    let rig = Rig::new("clean");
+    let pane = pane_named(&rig.world);
+    let _holder = Holder::new(&rig.socket(), "b-1");
+    let terminal = rig.terminals(1).remove(0);
+    rig.world
+        .bridge()
+        .set_state(&terminal, saying("vim\x1b[2J\n"));
+    until("the name", || {
+        rig.service
+            .shown(&pane)
+            .is_some_and(|shown| shown.program.is_some())
+    });
+    let shown = rig.service.shown(&pane).expect("shown");
+    assert_eq!(shown.program.as_deref(), Some("vim[2J"));
+}
+
+#[test]
+fn closing_a_pane_hangs_its_terminal_up_and_kills_it_when_it_stays() {
+    let rig = Rig::graced(
+        "end",
+        Fake::new(Bridge::new(Age::Current).stubborn()),
+        Duration::from_millis(300),
+    );
+    let pane = pane_named(&rig.world);
+    let _holder = Holder::new(&rig.socket(), "b-1");
+    let terminal = rig.terminals(1).remove(0);
+    until("the pane found", || rig.service.shown(&pane).is_some());
+
+    rig.service.end(&pane);
+    until("the hang-up", || {
+        rig.world.bridge().terminated(&terminal) == Some(false)
+    });
+    // Still there after the grace: the kill follows.
+    until("the kill", || {
+        rig.world.bridge().terminated(&terminal) == Some(true)
+    });
+}
+
+#[test]
+fn a_terminal_that_goes_by_itself_after_the_hang_up_is_not_killed() {
+    let rig = Rig::graced(
+        "end-went",
+        Fake::new(Bridge::new(Age::Current)),
+        Duration::from_millis(300),
+    );
+    let pane = pane_named(&rig.world);
+    let mut holder = Holder::new(&rig.socket(), "b-1");
+    let terminal = rig.terminals(1).remove(0);
+    until("the pane found", || rig.service.shown(&pane).is_some());
+
+    rig.service.end(&pane);
+    until("the hang-up", || {
+        rig.world.bridge().terminated(&terminal) == Some(false)
+    });
+    // The shell took the hang-up and went.
+    rig.world.bridge().exit(&terminal, Exit::Code(129));
+    assert_eq!(holder.outcome(), Outcome::Exit(129));
+    thread::sleep(Duration::from_millis(900));
+    assert_eq!(
+        rig.world.bridge().terminated(&terminal),
+        Some(false),
+        "nothing was left to kill"
+    );
+}
+
+#[test]
+fn a_pane_that_shows_nothing_ends_nothing_and_a_pane_is_ended_once() {
+    let rig = Rig::graced(
+        "end-none",
+        Fake::new(Bridge::new(Age::Current)),
+        Duration::from_secs(60),
+    );
+    let pane = pane_named(&rig.world);
+    let _holder = Holder::new(&rig.socket(), "b-1");
+    let terminal = rig.terminals(1).remove(0);
+    until("the pane found", || rig.service.shown(&pane).is_some());
+
+    let other = PaneUuid::parse("5a7e9c40-1b2d-4e3f-8a6b-0c9d1e2f3a4b").expect("a uuid");
+    rig.service.end(&other);
+    // The loop has seen the first request before the second, and the fake
+    // records only the last word about a terminal: ask twice, see one.
+    rig.service.end(&pane);
+    rig.service.end(&pane);
+    until("the hang-up", || {
+        rig.world.bridge().terminated(&terminal) == Some(false)
+    });
+    thread::sleep(Duration::from_millis(200));
+    assert_eq!(rig.world.bridge().terminated(&terminal), Some(false));
+}
+
+#[test]
+fn a_new_terminal_starts_in_the_folder_the_pane_lookup_names() {
+    let rig = Rig::new("folder");
+    pane_named(&rig.world);
+    rig.world.info.lock().expect("lock").directory = Some("/srv/app".into());
+    let _holder = Holder::new(&rig.socket(), "b-1");
+    let terminal = rig.terminals(1).remove(0);
+    let argv = rig
+        .world
+        .bridge()
+        .argv_of(&terminal)
+        .expect("started")
+        .to_vec();
+    assert_eq!(
+        argv[2],
+        ssh_wrap::boot_in(Some("/srv/app")).as_bytes(),
+        "the bootstrap that goes to /srv/app"
+    );
+    assert_ne!(argv[2], ssh_wrap::boot_in(None).as_bytes());
 }

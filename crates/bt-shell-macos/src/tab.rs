@@ -131,6 +131,17 @@ impl PaneHost for TabHost {
         }
     }
 
+    fn kept_terminal(
+        &self,
+        pane: &bt_core::PaneUuid,
+    ) -> Option<bt_shell_common::kablo::service::Shown> {
+        crate::hold_service::shown(pane)
+    }
+
+    fn end_kept_terminal(&self, pane: &bt_core::PaneUuid) {
+        crate::hold_service::end(pane);
+    }
+
     fn focused(&self, pane: u64) {
         if let Some(tab) = self.tab() {
             tab.pane_focused(pane);
@@ -897,6 +908,9 @@ impl TerminalTab {
             Removal::Removed { focus } => {
                 self.set_zoom(None);
                 self.hand_over(handover, container.pane(focus));
+                // Closed by the user (or by its program's end, which leaves
+                // nothing to end): a terminal a server keeps for it goes with it.
+                pane.end_kept_terminal();
                 drop(pane.begin_close());
                 drop(container.detach(id));
                 self.refresh_title();

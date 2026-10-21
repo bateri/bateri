@@ -806,7 +806,12 @@ define_class!(
         fn window_will_close(&self, _n: &NSNotification) {
             // Closing the panes also removes the frame observers and drops the
             // panes from `AppDelegate::pane`'s lookup
-            // (`TerminalPane::begin_close`).
+            // (`TerminalPane::begin_close`). The window closes because the user
+            // closed it (a quit does not come through here): the terminals servers
+            // keep for its panes end first, while the panes can still be found.
+            for pane in self.panes() {
+                pane.end_kept_terminal();
+            }
             drop(self.begin_close());
             // Let go of the delegate now: AppKit must not send the closing
             // window notifications from here on (focus, occlusion), not even
@@ -2583,6 +2588,11 @@ impl TerminalWindow {
             return;
         }
         self.leave_order(&tab);
+        // The tab is closed because the user asked: the terminals servers keep
+        // for its panes end with it.
+        for pane in tab.panes() {
+            pane.end_kept_terminal();
+        }
         drop(tab.begin_close());
         tab.container().removeFromSuperview();
         self.ivars()
@@ -5214,6 +5224,25 @@ mod tests {
         assert_eq!(
             prompt(CloseScope::Pane, Unit::Pane, &[Foreground::Idle]).message,
             "Closing this pane ends its shell session."
+        );
+    }
+
+    #[test]
+    fn a_program_on_a_server_is_asked_about_with_the_server_it_runs_on() {
+        // What `TerminalPane::foreground` says of a pane that shows a terminal a
+        // server keeps: the program there, named with the server.
+        assert_eq!(
+            prompt(CloseScope::Pane, Unit::Pane, &[running(&["npm on rasp"])]).message,
+            "“npm on rasp” is still running. Closing ends it."
+        );
+        assert_eq!(
+            prompt(
+                CloseScope::Window,
+                Unit::Pane,
+                &[running(&["npm on rasp"]), running(&["vim"])]
+            )
+            .message,
+            "Processes are running in 2 panes: “npm on rasp”, “vim”. Closing ends them."
         );
     }
 }

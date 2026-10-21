@@ -81,6 +81,8 @@ use crate::environment::Wants;
 use crate::clipboard::{self, PendingCopy};
 use crate::focus::Moment;
 use crate::grid::{self, Grid, split_into_grid};
+use bt_shell_common::kablo::service::Shown;
+
 use crate::jobs::{self, Foreground, Probe, ShellParent, SystemTable};
 use crate::journal::PaneJournal;
 use crate::launch::{Adopted, Closing, Identity, Integration, Launch};
@@ -198,6 +200,17 @@ pub trait PaneHost {
     /// `None` puts them on the pane's window, blocking all of it. Asked
     /// from where the pane stands, even while it closes.
     fn cover(&self, pane: &TerminalPane) -> Option<Rc<dyn crate::sheets::Cover>>;
+    /// The terminal a server keeps that the pane shows, if it shows one: the pane's
+    /// local shell is waiting behind a program that only carries that terminal's
+    /// bytes, so what is running in front is the server's to say. The default
+    /// is an owner that has no such terminals.
+    fn kept_terminal(&self, _pane: &PaneUuid) -> Option<Shown> {
+        None
+    }
+    /// The user is closing the pane (not the application quitting, not the
+    /// pane moving): the terminal it shows ends with it, on the server. Asked
+    /// **before** [`TerminalPane::begin_close`], whose signal lets the terminal go.
+    fn end_kept_terminal(&self, _pane: &PaneUuid) {}
 }
 
 /// A link the user opened, as the pane's owner may take it
@@ -4382,10 +4395,23 @@ impl TerminalPane {
             .is_some_and(|min| size.width >= min.width && size.height >= min.height)
     }
 
+    /// The user is closing this pane: the terminal a server keeps for it ends
+    /// with it ([`PaneHost::end_kept_terminal`]). Called by the paths that close
+    /// a pane because the user asked to — and not by [`Self::begin_close`], which
+    /// a quit uses too, where the terminals' fate is `keep_running`'s.
+    pub(crate) fn end_kept_terminal(&self) {
+        self.host().end_kept_terminal(self.uuid());
+    }
+
     /// The job running in the foreground outside the shell.
     /// Idle if there is no session or the reader thread has finished: the
     /// shell is gone and `child_pid` may be stale, a stale pid is not asked.
     pub fn foreground(&self) -> Foreground {
+        // A pane that shows a terminal a server keeps: the job in front is the
+        // server's, which the process table here cannot see (it shows the pipe).
+        if let Some(kept) = self.host().kept_terminal(self.uuid()) {
+            return kept_foreground(&kept);
+        }
         let (Some(session), Some(&parent)) =
             (self.ivars().session.get(), self.ivars().shell_parent.get())
         else {
@@ -5890,6 +5916,16 @@ fn nudge_program(session: &Arc<Session>) {
     }
 }
 
+/// What closing a pane that shows a terminal on a server would end: the program
+/// in front there with the server's name (`npm on rasp`), or nothing when the
+/// shell is waiting for a command (or the server has not said).
+fn kept_foreground(kept: &Shown) -> Foreground {
+    match kept.running() {
+        Some(running) => Foreground::Running(vec![running]),
+        None => Foreground::Idle,
+    }
+}
+
 /// A new pane identity, from `NSUUID`.
 fn new_pane_uuid() -> PaneUuid {
     // `UUIDString` gives the canonical 8-4-4-4-12 form; if `parse` rejects it
@@ -5915,6 +5951,31 @@ mod tests {
         assert!(body("    fn command_started(&self) {").contains("self.remember_soon()"));
         assert!(body("    fn remote_command_edge(&self) {").contains("self.remember_soon()"));
         assert!(body("    fn remember_soon(&self) {").contains("pane.remember_commands()"));
+    }
+
+    #[test]
+    fn closing_a_pane_on_a_server_asks_about_the_program_there() {
+        use crate::jobs::Foreground;
+        use bt_shell_common::kablo::service::Shown;
+        let shown = |program: Option<&str>| Shown {
+            account: "u@rasp:22".into(),
+            host: "rasp".into(),
+            terminal: bt_shell_common::kablo::SessionId::new("b-1").expect("an id"),
+            program: program.map(str::to_owned),
+        };
+        assert_eq!(
+            super::kept_foreground(&shown(Some("npm"))),
+            Foreground::Running(vec!["npm on rasp".to_owned()])
+        );
+        // The shell waiting for a command is not a job, nor is a server that
+        // has said nothing yet; a login shell is named with a dash.
+        for program in [Some("zsh"), Some("-bash"), Some("fish"), Some(""), None] {
+            assert_eq!(
+                super::kept_foreground(&shown(program)),
+                Foreground::Idle,
+                "{program:?}"
+            );
+        }
     }
 
     #[test]

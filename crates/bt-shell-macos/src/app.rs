@@ -448,26 +448,27 @@ fn first_input(
     }
 }
 
-/// The remote folder the new shell's first `ssh` starts in, as the
-/// environment pair the wrapper's `ssh` takes once (`BATERI_SSH_CWD` →
-/// `bateri ssh-argv --cwd`): only beside ⌘T's first input ([`initial_line`])
-/// and only when that input is an `ssh` — mosh is not wrapped, and the
-/// folder would wait for the next, unrelated `ssh`. Only where the wrapper's
-/// `ssh` asks the helper (`BATERI_BIN` in `integration`): elsewhere nothing
-/// takes the variable out of the environment. `dir` is the folder the dock
-/// shows ([`bt_core::Session::remote_link_directory`]); one the server could
-/// not be sent is no folder ([`bt_shell_common::ssh_wrap::is_start_dir`]).
+/// The remote folder the new shell's first `ssh` starts in: only beside ⌘T's
+/// first input ([`initial_line`]) and only when that input is an `ssh` — mosh
+/// is not a terminal a server keeps, and the folder would wait for the next,
+/// unrelated `ssh`. Only where the shell integration is installed
+/// (`BATERI_BIN` in `integration`): elsewhere the line is not the integration's
+/// `ssh`. `dir` is the folder the dock shows
+/// ([`bt_core::Session::remote_link_directory`]); one the server could not be
+/// sent is no folder ([`bt_shell_common::ssh_wrap::is_start_dir`]). The folder
+/// goes to the service, not into the shell's environment
+/// ([`crate::hold_service::expect_directory`]).
 fn ssh_start_dir(
     initial: Option<&str>,
     kind: Option<RemoteKind>,
     dir: String,
     integration: &[(String, String)],
-) -> Option<(String, String)> {
+) -> Option<String> {
     (initial.is_some()
         && kind == Some(RemoteKind::Ssh)
         && bt_shell_common::ssh_wrap::is_start_dir(&dir)
         && integration.iter().any(|(key, _)| key == "BATERI_BIN"))
-    .then(|| ("BATERI_SSH_CWD".to_owned(), dir))
+    .then_some(dir)
 }
 
 /// The session directory ([`restore::directory`]) — `None` in a timed run and
@@ -2959,7 +2960,9 @@ impl AppDelegate {
             block: pane
                 .session()
                 .and_then(|session| session.last_local_block()),
-            directory: None,
+            // The folder a pane opened from a pane on a server asks to start in,
+            // once ([`crate::hold_service::expect_directory`]).
+            directory: crate::hold_service::take_directory(pane.id()),
         })
     }
 
@@ -4431,19 +4434,22 @@ impl AppDelegate {
             start,
         );
         let integration = self.shell_integration();
-        let env = session
-            .and_then(|session| {
-                ssh_start_dir(
-                    inherited.as_deref(),
-                    session.remote_target().map(|(_, target, _)| target.kind),
-                    session.remote_link_directory(),
-                    &integration.env,
-                )
-            })
-            .into_iter()
-            .collect();
+        let id = self.next_id();
+        // A pane that shows a terminal a server keeps: the one the new pane asks
+        // for with the line it types starts in the same folder there.
+        if let (Some(from), Some(session)) = (from, session)
+            && crate::hold_service::shown(from.uuid()).is_some()
+            && let Some(dir) = ssh_start_dir(
+                inherited.as_deref(),
+                session.remote_target().map(|(_, target, _)| target.kind),
+                session.remote_link_directory(),
+                &integration.env,
+            )
+        {
+            crate::hold_service::expect_directory(id, dir);
+        }
         let config = embed::Config {
-            id: self.next_id(),
+            id,
             host: Rc::new(TabHost::new(tab)),
             identity: self.ivars().identity.clone(),
             settings: self.settings().clone(),
@@ -4467,7 +4473,7 @@ impl AppDelegate {
                 .clone()
                 .map(|keeper| keeper as Rc<dyn crate::pane::Holder>),
             adopt: None,
-            env,
+            env: Vec::new(),
         };
         (config, theme)
     }
@@ -8653,6 +8659,63 @@ mod tests {
     }
 
     #[test]
+    fn the_paths_that_close_a_pane_for_the_user_end_the_terminal_a_server_keeps() {
+        // The three ways the user's closing reaches a pane (a pane of a split, a tab, a
+        // window) say so before the pane's program is signalled; the pane's own closing
+        // does not, because a quit runs it too and a quit's terminals are `keep_running`'s.
+        let tab = include_str!("tab.rs");
+        let close_pane = &tab[tab.find("pub(crate) fn close_pane(").expect("close_pane")..];
+        let close_pane = &close_pane[..close_pane.find("\n    }\n").expect("its end")];
+        let ended = close_pane
+            .find("end_kept_terminal()")
+            .expect("close_pane ends it");
+        assert!(ended < close_pane.find("begin_close()").expect("and closes"));
+
+        let window = include_str!("window.rs");
+        let close_tab = &window[window
+            .find("pub(crate) fn close_tab_now(")
+            .expect("close_tab_now")..];
+        let close_tab = &close_tab[..close_tab.find("\n    }\n").expect("its end")];
+        let ended = close_tab
+            .find("end_kept_terminal()")
+            .expect("close_tab_now ends it");
+        assert!(ended < close_tab.find("begin_close()").expect("and closes"));
+        let will_close = &window[window
+            .find("fn window_will_close(")
+            .expect("windowWillClose")..];
+        let will_close = &will_close[..will_close.find("\n        }\n").expect("its end")];
+        let ended = will_close
+            .find("end_kept_terminal()")
+            .expect("the window ends it");
+        assert!(ended < will_close.find("begin_close()").expect("and closes"));
+
+        // A pane or a tab that moves is not closed: the terminal it shows goes with it.
+        for (source, mover) in [
+            (window, "pub(crate) fn release_tab("),
+            (window, "pub(crate) fn adopt_tab("),
+            (window, "pub(crate) fn release_pane("),
+            (window, "pub(crate) fn adopt_pane("),
+            (window, "pub(crate) fn fold_tab("),
+            (tab, "pub(crate) fn release_pane("),
+            (tab, "pub(crate) fn drain("),
+        ] {
+            let body = &source[source.find(mover).expect(mover)..];
+            let body = &body[..body.find("\n    }\n").expect("its end")];
+            assert!(!body.contains("end_kept_terminal"), "{mover}");
+        }
+
+        let pane = include_str!("pane.rs");
+        let begin_close = &pane[pane
+            .find("pub(crate) fn begin_close(")
+            .expect("begin_close")..];
+        let begin_close = &begin_close[..begin_close.find("\n    }\n").expect("its end")];
+        assert!(
+            !begin_close.contains("end_kept_terminal"),
+            "a quit closes panes through this, and does not end what servers keep"
+        );
+    }
+
+    #[test]
     fn a_panes_news_is_where_the_palettes_folders_and_servers_are_learned() {
         // The title news is the one edge that also says a directory moved or a session began;
         // without this call ⌘O would list only what is open when it opens.
@@ -8724,11 +8787,11 @@ mod tests {
         let ssh = Some(RemoteKind::Ssh);
         assert_eq!(
             ssh_start_dir(line, ssh, "/srv/app".to_owned(), &wrapper),
-            Some(("BATERI_SSH_CWD".to_owned(), "/srv/app".to_owned()))
+            Some("/srv/app".to_owned())
         );
         // The title's folder, as the dock shows it.
         assert_eq!(
-            ssh_start_dir(line, ssh, "~/src".to_owned(), &wrapper).map(|(_, dir)| dir),
+            ssh_start_dir(line, ssh, "~/src".to_owned(), &wrapper),
             Some("~/src".to_owned())
         );
         // No first input (⌥⌘T, ⌘N, a local tab), mosh, no folder, a folder the

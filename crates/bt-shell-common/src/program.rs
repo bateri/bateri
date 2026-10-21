@@ -66,6 +66,14 @@ mod shell;
 pub use container::Kube;
 pub use database::{Client, Target};
 
+/// Whether `name` is a shell's, as a process table or a server says it (a login
+/// shell is named with a leading `-`: `-zsh`). For a caller outside this module
+/// that has a name and no process, such as the program a kablo server reports
+/// in front of a terminal.
+pub fn is_shell_name(name: &str) -> bool {
+    shell::is_shell(name.strip_prefix('-').unwrap_or(name))
+}
+
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
