@@ -91,7 +91,7 @@ bateri send-key t9 enter
 bateri capture t9                                # what is on its screen
 bateri wait t9 [--for TIME]                      # until its program ends; exits with its status
 bateri close [t9]                                # asks you first about a terminal the caller did not open
-bateri notify "tests failed"                     # a notification when bateri is behind
+bateri notify "tests failed"                     # a notification when bateri is behind or has no tab of it
 ```
 
 `split` takes `--left`, `--right`, `--above` or `--below`, `--ratio PERCENT`,

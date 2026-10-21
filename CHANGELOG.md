@@ -32,8 +32,9 @@ of every installed copy. A version without a section is not released.
   terminals with what each is doing and who opened it; `bateri close` closes
   what the program opened (or the terminal it runs in) at once and asks you
   before closing any other, and a no is a refusal it can read; `bateri notify
-  "tests failed"` shows a notification when bateri is behind and marks the
-  program's tab with a tick unless you are on it. The terminals bateri itself
+  "tests failed"` shows a notification when bateri is behind, or when no tab
+  shows the program, and marks the program's tab with a tick unless you are on
+  it. The terminals bateri itself
   opens on a server (⌘T, ⌘D) are numbered the same way, so the program sees them
   in `bateri ls` and can use `capture` and `send` on them; terminals opened
   before this update keep the names they had.

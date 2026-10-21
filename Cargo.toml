@@ -70,10 +70,13 @@ objc2-core-foundation = { version = "0.3", default-features = false, features = 
 # `UNUserNotificationCenter` instead of the deprecated `NSUserNotification`.
 # Same objc2 generation (0.3.2). The default set pulled in `objc2-core-location`; trimming
 # keeps it out of the graph. `UNNotificationTrigger` is not decoration:
-# `requestWithIdentifier:content:trigger:` is behind that flag.
+# `requestWithIdentifier:content:trigger:` is behind that flag. Nor is
+# `UNNotification`: the center's delegate is asked about a notification in front
+# by that type (`uploader::Presenter`); it needs only `objc2-foundation`'s
+# `NSDate` and `NSObject`, no new crate.
 objc2-user-notifications = { version = "0.3", default-features = false, features = [
     "std", "block2", "UNUserNotificationCenter", "UNNotificationContent",
-    "UNNotificationRequest", "UNNotificationTrigger",
+    "UNNotificationRequest", "UNNotificationTrigger", "UNNotification",
 ] }
 # The Keychain of bateri's ssh masters (`bt-shell-macos::keychain`):
 # `SecItem*` over an internet password. User-approved dependency decision

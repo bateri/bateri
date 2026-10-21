@@ -21,7 +21,7 @@
 //! queue ends the result line stays for [`upload::LINGER`] and is then removed
 //! with `None`, and no further frame is requested - that is the stopping condition.
 
-use std::cell::RefCell;
+use std::cell::{OnceCell, RefCell};
 use std::path::Path;
 use std::ptr::NonNull;
 use std::sync::atomic::Ordering;
@@ -29,12 +29,12 @@ use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use block2::RcBlock;
+use block2::{DynBlock, RcBlock};
 use bt_core::{HostMark, Transfer};
 use dispatch2::{DispatchQueue, DispatchTime};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Bool, ProtocolObject};
-use objc2::{MainThreadMarker, MainThreadOnly, sel};
+use objc2::{AllocAnyThread, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSAlert, NSAlertFirstButtonReturn, NSAlertSecondButtonReturn, NSApplication, NSBox, NSBoxType,
     NSButton, NSColor, NSControlSize, NSEvent, NSEventMask, NSFont, NSFontWeightRegular,
@@ -43,12 +43,14 @@ use objc2_app_kit::{
     NSViewController, NSWorkspace,
 };
 use objc2_foundation::{
-    NSArray, NSBundle, NSDictionary, NSError, NSPoint, NSRect, NSRectEdge, NSSize, NSString, NSURL,
-    NSURLQuarantinePropertiesKey, NSUUID, ns_string,
+    NSArray, NSBundle, NSDictionary, NSError, NSObject, NSObjectProtocol, NSPoint, NSRect,
+    NSRectEdge, NSSize, NSString, NSURL, NSURLQuarantinePropertiesKey, NSUUID, ns_string,
 };
 use objc2_user_notifications::{
-    UNAuthorizationOptions, UNMutableNotificationContent, UNNotificationRequest,
+    UNAuthorizationOptions, UNMutableNotificationContent, UNNotification,
+    UNNotificationPresentationOptionNone, UNNotificationPresentationOptions, UNNotificationRequest,
     UNNotificationTrigger, UNTimeIntervalNotificationTrigger, UNUserNotificationCenter,
+    UNUserNotificationCenterDelegate,
 };
 
 use crate::child;
@@ -1391,11 +1393,16 @@ pub(crate) fn remove_monitor(monitor: Option<Retained<AnyObject>>) {
 ///   the system returns the stored answer without asking. The notification is
 ///   built in the answer's completion block, so the first notification is not
 ///   lost; if denied only the notification is missing, the upload never waits.
-/// - **No foreground presentation and no delegate is set:** a center that
-///   does not implement `willPresentNotification` silences a notification
-///   arriving in the foreground (the default Apple documents), so a
-///   notification queued in the background and delivered after the user
-///   returns also obeys the "none while in the foreground" rule.
+/// - **Nothing is presented in the foreground but the one kind that asks to be:**
+///   the center's delegate ([`Presenter`]) answers `willPresentNotification`
+///   with nothing — what a center with no delegate does, the default Apple
+///   documents — so a notification queued in the background and delivered after
+///   the user returns also obeys the "none while in the foreground" rule. The
+///   exception is a notification whose identifier says so
+///   ([`deliver_notification_in_front`]): a program on a server telling the user
+///   something while bateri is in front and no tab here shows that program, where
+///   the notification is the only thing that can show it. The delegate is set the
+///   first time one of those is delivered.
 /// - **Never called without a bundle identifier:** `currentNotificationCenter`
 ///   throws an exception in a bundle-less process (`cargo run`, tests, timed run).
 pub(crate) fn notify(mtm: MainThreadMarker, title: &str, body: &str) {
@@ -1417,6 +1424,78 @@ pub(crate) fn deliver_notification(title: &str, body: &str) {
 /// "Claude opened 3 terminals", then 4 — is one notification that grows, not a pile.
 pub(crate) fn deliver_notification_replacing(identifier: &str, title: &str, body: &str) {
     deliver(Some(identifier), title, body);
+}
+
+/// [`deliver_notification`] that is shown even while bateri is in front: the one notification the
+/// center's delegate presents there ([`Presenter`]). For words that nothing else in bateri can
+/// show — a program on a server whose terminal no tab of this Mac shows. Each is a notification
+/// of its own. Never in an unbundled process; the main thread, where the delegate is kept.
+pub(crate) fn deliver_notification_in_front(_mtm: MainThreadMarker, title: &str, body: &str) {
+    if NSBundle::mainBundle().bundleIdentifier().is_none() {
+        return;
+    }
+    // The delegate before the request: the center asks it as the notification arrives.
+    PRESENTER.with(|presenter| {
+        let presenter = presenter.get_or_init(Presenter::new);
+        UNUserNotificationCenter::currentNotificationCenter()
+            .setDelegate(Some(ProtocolObject::from_ref(&**presenter)));
+    });
+    let identifier = format!("{IN_FRONT}{}", NSUUID::new().UUIDString());
+    deliver(Some(&identifier), title, body);
+}
+
+/// The identifier's beginning of a notification shown while bateri is in front
+/// ([`deliver_notification_in_front`]).
+const IN_FRONT: &str = "bateri.in-front.";
+
+/// Whether the notification named `identifier` is shown while bateri is in front: only the kind
+/// that asks to be; every other one is silent there.
+fn presented_in_front(identifier: &str) -> bool {
+    identifier.starts_with(IN_FRONT)
+}
+
+define_class!(
+    // SAFETY: NSObject subclassing has no requirements; `Presenter` has no ivars and does not
+    // implement `Drop`. Not `MainThreadOnly`: the center may ask from any thread, and the answer
+    // reads only the notification's identifier.
+    #[unsafe(super(NSObject))]
+    #[name = "BateriNotificationPresenter"]
+    struct Presenter;
+
+    unsafe impl NSObjectProtocol for Presenter {}
+
+    unsafe impl UNUserNotificationCenterDelegate for Presenter {
+        /// A notification arrives while bateri is in front: a banner and the list for the kind
+        /// that asks to be shown ([`presented_in_front`]), nothing for any other.
+        #[unsafe(method(userNotificationCenter:willPresentNotification:withCompletionHandler:))]
+        fn will_present(
+            &self,
+            _center: &UNUserNotificationCenter,
+            notification: &UNNotification,
+            completion_handler: &DynBlock<dyn Fn(UNNotificationPresentationOptions)>,
+        ) {
+            let identifier = notification.request().identifier().to_string();
+            let options = if presented_in_front(&identifier) {
+                UNNotificationPresentationOptions::Banner | UNNotificationPresentationOptions::List
+            } else {
+                UNNotificationPresentationOptionNone
+            };
+            completion_handler.call((options,));
+        }
+    }
+);
+
+impl Presenter {
+    fn new() -> Retained<Self> {
+        let this = Self::alloc().set_ivars(());
+        // SAFETY: NSObject's init takes no arguments and the (empty) ivars are set.
+        unsafe { msg_send![super(this), init] }
+    }
+}
+
+thread_local! {
+    /// The center's delegate: the center holds it weakly, the main thread for good.
+    static PRESENTER: OnceCell<Retained<Presenter>> = const { OnceCell::new() };
 }
 
 fn deliver(identifier: Option<&str>, title: &str, body: &str) {
@@ -1454,9 +1533,9 @@ pub(crate) fn request_notification_permission() {
 }
 
 /// A notification shown `after` from now — after bateri has quit: a
-/// notification delivered while the app is in front is silenced (no
-/// delegate, [`notify`]), and one that waits on a timer is delivered by the
-/// system once the process is gone.
+/// notification delivered while the app is in front is silenced (the
+/// delegate presents only its own kind, [`notify`]), and one that waits on a
+/// timer is delivered by the system once the process is gone.
 ///
 /// **No permission call**: this runs while quitting, where a question must not
 /// appear; the request is only added, and without permission the system
@@ -1668,4 +1747,27 @@ fn dock_tile_view(mtm: MainThreadMarker) -> Retained<NSView> {
     bar.setMaxValue(1.0);
     view.addSubview(&bar);
     view
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{IN_FRONT, presented_in_front};
+
+    /// Only the kind that asks to be is shown while bateri is in front: an upload's result, the
+    /// count of a program's new terminals (a name of its own) and a reminder have identifiers that
+    /// do not begin with the mark, and stay silent there.
+    #[test]
+    fn only_the_notification_that_asks_to_be_is_shown_in_front() {
+        assert!(presented_in_front(&format!(
+            "{IN_FRONT}0A1B2C3D-4E5F-4061-8293-A4B5C6D7E8F9"
+        )));
+        for silent in [
+            "0A1B2C3D-4E5F-4061-8293-A4B5C6D7E8F9",
+            "bateri.agent.ada@rasp:22",
+            "",
+            "x.bateri.in-front.",
+        ] {
+            assert!(!presented_in_front(silent), "{silent:?}");
+        }
+    }
 }

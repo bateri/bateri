@@ -37,8 +37,9 @@
 //!   allow, in a sheet on the pane that shows it (or the asker's, or a window), and a "no" is
 //!   the script's 77. Closing is what the user closing the pane does — the pane goes and the
 //!   server's terminal ends with it — or, for a terminal with no pane, the card's End.
-//! - **`notify` is one notification and a tick.** The notification only when bateri is behind;
-//!   the tab the program runs in is marked as having news unless it is the one on screen.
+//! - **`notify` is one notification and a tick.** The notification when bateri is behind, or in
+//!   front with no tab of this Mac showing the program (then nothing else could show it); the tab
+//!   the program runs in is marked as having news unless it is the one on screen.
 //!
 //! Everything here runs on the main thread: the service's thread hands a letter over by hopping
 //! to the main queue ([`letter`], [`notes`]), and the state that outlives a request ([`STATE`])
@@ -802,35 +803,31 @@ fn ask_to_close(
 const NOTICE_LIMIT: usize = 1000;
 
 /// `bateri notify`: a notification when bateri is behind, and the tab the program runs in is
-/// marked as having news unless the user is looking at it. Answered at once: the words are
-/// delivered, what the system does with them is its own — except that a program no tab of this
-/// Mac shows, asking while bateri is in front, is told nothing could be shown.
+/// marked as having news unless the user is looking at it. In front, the tab is what shows it —
+/// and when no tab of this Mac shows the program, the notification is shown in front instead, the
+/// one kind of notification that is ([`uploader::deliver_notification_in_front`]). Answered at
+/// once: the words are delivered, what the system does with them is its own.
 fn notify(app: &AppDelegate, letter: Letter, server: &Server, from: Option<&str>, text: &str) {
+    let mtm = app.mtm();
     let found = from.and_then(|name| find_pane(app, &server.account, name));
     if let Some((tab, pane, _)) = &found {
         tab.news_from(pane.id());
     }
-    if NSApplication::sharedApplication(app.mtm()).isActive() {
-        // The system silences a notification delivered while bateri is in front, so the tab is
-        // what shows it; with no tab of the asker here, nothing was shown and the program is told.
-        if found.is_none() {
-            refuse(
-                letter,
-                Kind::Failed,
-                "bateri is in front and has no tab of this terminal to mark, so nothing was shown",
-            );
-            return;
-        }
-    } else {
-        let program = found
-            .as_ref()
-            .and_then(|(_, _, shown)| shown.program.as_deref());
-        let body: String = text
-            .chars()
-            .filter(|c| !c.is_control())
-            .take(NOTICE_LIMIT)
-            .collect();
-        uploader::deliver_notification(&summary::notified(program, &server.host), &body);
+    let program = found
+        .as_ref()
+        .and_then(|(_, _, shown)| shown.program.as_deref());
+    let title = summary::notified(program, &server.host);
+    let body: String = text
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(NOTICE_LIMIT)
+        .collect();
+    if !NSApplication::sharedApplication(mtm).isActive() {
+        uploader::deliver_notification(&title, &body);
+    } else if found.is_none() {
+        // The system silences a notification delivered while bateri is in front and the tab is
+        // what shows it there; with no tab of the asker here this one is shown in front.
+        uploader::deliver_notification_in_front(mtm, &title, &body);
     }
     letter.answer(Reply::Done.encode().into_bytes());
 }
