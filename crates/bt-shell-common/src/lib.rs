@@ -24,8 +24,11 @@
 //! process table (`jobs`), which program reads the keyboard and its guide
 //! bar (`program`), the active Python environment and Node version the dock
 //! shows (`environment`), the drawing that stands for a program in a tab (`icon`),
-//! the shell's birth (`child`), file watching (`watch`) and the command palette's rules —
-//! its rows, matching, pages, preview and the settings it can change (`palette`).
+//! the shell's birth (`child`), file watching (`watch`), the client of a kablo
+//! server's bridge — terminals that keep running on the server when the connection
+//! drops, as a state machine with no transport of its own (`kablo`) — and the command
+//! palette's rules — its rows, matching, pages, preview and the settings it can change
+//! (`palette`).
 //!
 //! **The boundary:** no AppKit, Foundation, Quartz or notification centre —
 //! whatever needs the toolkit stays in the platform shell (`bt-shell-macos` on
@@ -49,6 +52,7 @@ pub mod handover;
 pub mod icon;
 pub mod jobs;
 pub mod journal;
+pub mod kablo;
 pub mod keys;
 pub mod links;
 pub mod moves;

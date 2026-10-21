@@ -80,6 +80,12 @@ fmt:
 #   moves to a vte version the fork is not, or to a release the other fork is
 #   not), cargo falls back to the registry's crate with nothing but a warning in
 #   its output and the fork's changes silently vanish.
+# - `kablo-proto` (the wire format `bt-shell-common::kablo` speaks) is the third
+#   crate taken from that repository and is pinned by the same commit as the two
+#   forks: the three `rev`s in Cargo.toml are one hash and all three resolve to it.
+#   Two commits would put two kablo versions in one build — the parser bateri
+#   decodes the stream with and the format it speaks to the relay would no longer
+#   come from the same source — and nothing but this line would say so.
 # - It does NOT fail on a dependency change, it warns: a deliberate dependency
 #   decision also changes Cargo.lock; review looks for the decision's record.
 audit:
@@ -91,11 +97,14 @@ audit:
 	if $(CARGO) tree -p bt-shell-common -e normal --depth 1 | grep -E "(^|[ ─])objc2 v|objc2-app-kit|objc2-quartz-core|objc2-foundation|objc2-user-notifications|block2|bt-shell-(macos|linux)"; then echo "audit: bt-shell-common links to a platform shell or the AppKit family"; fail=1; fi; \
 	if grep -rnE "objc2|dispatch2|block2" crates/bt-shell-common/src | grep -v "^crates/bt-shell-common/src/watch/dispatch.rs:" | grep -v ":[[:space:]]*//"; then echo "audit: platform call in bt-shell-common outside watch's macOS body (watch/dispatch.rs)"; fail=1; fi; \
 	if grep -rn "objc2\|core_text\|core_graphics" crates/bt-core/src | grep -v ":[[:space:]]*//"; then echo "audit: platform call in bt-core source"; fail=1; fi; \
-	for fork in vte alacritty_terminal; do \
+	kablo_tree=$$($(CARGO) tree --workspace -e normal); kablo_revs=""; \
+	for fork in vte alacritty_terminal kablo-proto; do \
 		fork_rev=$$(sed -n 's/^'"$$fork"' = { git = "https:\/\/github.com\/bateri\/kablo", rev = "\([0-9a-f]\{40\}\)" }$$/\1/p' Cargo.toml); \
-		if [ -z "$$fork_rev" ]; then echo "audit: Cargo.toml does not patch $$fork with a full commit hash (rev) of github.com/bateri/kablo"; fail=1; \
-		elif ! $(CARGO) tree -p bt-core -e normal | grep -qE "$$fork v[0-9.]+ \(https://github.com/bateri/kablo\?rev=$$fork_rev#"; then echo "audit: $$fork does not resolve to the fork in github.com/bateri/kablo at rev $$fork_rev — is [patch.crates-io] in Cargo.toml still used?"; fail=1; fi; \
+		kablo_revs="$$kablo_revs $$fork_rev"; \
+		if [ -z "$$fork_rev" ]; then echo "audit: Cargo.toml does not pin $$fork with a full commit hash (rev) of github.com/bateri/kablo"; fail=1; \
+		elif ! echo "$$kablo_tree" | grep -qE "$$fork v[0-9.]+ \(https://github.com/bateri/kablo\?rev=$$fork_rev#"; then echo "audit: $$fork does not resolve to github.com/bateri/kablo at rev $$fork_rev — for a fork, is [patch.crates-io] in Cargo.toml still used?"; fail=1; fi; \
 	done; \
+	if [ "$$(echo $$kablo_revs | tr ' ' '\n' | sort -u | wc -l | tr -d ' ')" != "1" ]; then echo "audit: vte, alacritty_terminal and kablo-proto are not pinned by one kablo commit (rev):$$kablo_revs"; fail=1; fi; \
 	if $(CARGO) tree -p bt-gpu -e normal,dev --depth 1 | grep -E "objc2|dispatch2|block2|metal"; then echo "audit: bt-gpu links directly to a platform library"; fail=1; fi; \
 	if grep -rnE "objc2|dispatch2|block2|metal" crates/bt-gpu/src | grep -v ":[[:space:]]*//"; then echo "audit: platform call in bt-gpu source"; fail=1; fi; \
 	for f in crates/bt-core/src/*.rs; do \

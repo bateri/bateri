@@ -192,6 +192,16 @@ yeslogic-fontconfig-sys = { version = "6", default-features = false }
 # bitflags, once_cell, already in the graph).
 harfrust = { version = "0.13", default-features = false, features = ["std"] }
 
+# The kablo protocol: the wire format `bt-shell-common::kablo` speaks to a server's relay
+# (frames, handshake, messages, and the rules for installing the binary there). Taken from
+# kablo's repository by the same pinned commit as the two forks below, so that one `rev`
+# is the only place bateri names a kablo version — and moving it is the one way a change in
+# kablo reaches bateri. User-approved dependency decision (2026-10-19): the protocol is
+# written once, in kablo, and bateri is a client of it; rewriting it here would be a second
+# copy that drifts. The crate has no dependencies of its own and the same license as
+# bateri (GPL-3.0-or-later); `make audit` fails if the three do not resolve to one commit.
+kablo-proto = { git = "https://github.com/bateri/kablo", rev = "74ac4a4d4800ffa0a370bac98dd6558b817608d9" }
+
 bt-core = { path = "crates/bt-core" }
 bt-atlas = { path = "crates/bt-atlas" }
 bt-gpu = { path = "crates/bt-gpu" }
@@ -220,5 +230,5 @@ bt-shell-macos = { path = "crates/bt-shell-macos" }
 # dependency decision (2026-10-17, the command palette): the same care as vte's — `make audit`
 # fails if the patch stops applying, and a newer upstream release is merged by hand.
 [patch.crates-io]
-vte = { git = "https://github.com/bateri/kablo", rev = "c277a02cfa02e47ba1560a2fcd5182dbcd0eaff8" }
-alacritty_terminal = { git = "https://github.com/bateri/kablo", rev = "c277a02cfa02e47ba1560a2fcd5182dbcd0eaff8" }
+vte = { git = "https://github.com/bateri/kablo", rev = "74ac4a4d4800ffa0a370bac98dd6558b817608d9" }
+alacritty_terminal = { git = "https://github.com/bateri/kablo", rev = "74ac4a4d4800ffa0a370bac98dd6558b817608d9" }

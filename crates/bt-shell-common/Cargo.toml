@@ -23,6 +23,9 @@ bt-gpu = { workspace = true }
 # and `poll` on Linux). Already in the graph; the
 # rationale is in the workspace manifest.
 libc = { workspace = true }
+# The kablo wire format (`kablo`): the client of a server's relay is written here, on a byte
+# pipe, and the protocol's codecs are kablo's own. See the workspace manifest.
+kablo-proto = { workspace = true }
 
 # `watch`'s macOS body: vnode sources on a dispatch queue. The crate's only
 # macOS-specific dependency — no AppKit, Foundation, Quartz or

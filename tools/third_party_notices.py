@@ -24,6 +24,11 @@ Choices:
   not in the file. A crate whose license neither offers MIT nor is on the
   allow list stops the script: that is a dependency decision, it is not
   silently added to the list (never GPL-2.0-only — bateri is GPL-3.0-or-later).
+- A crate that carries bateri's own license and comes from our own organisation's
+  repository (`kablo-proto`, from kablo — the relay bateri speaks to — under
+  GPL-3.0-or-later like bateri) is covered by bateri's `LICENSE`, which ships in
+  the package: it gets no entry here. The check is both halves, so a GPL crate
+  from anywhere else still stops the script.
 - Sparkle's LICENSE (MIT + external notices such as bsdiff/sais/ed25519) as is.
 - The color schemes bateri adapts (`tools/import_themes.py`, the one list a
   theme is added to): the collection the values are read from and each
@@ -50,6 +55,10 @@ TARGET = "aarch64-apple-darwin"
 OWN_LICENSES = {"Apache-2.0", "Zlib", "ISC"}
 # For crates whose license file carries no copyright line, the project's own
 # attribution instead of the author list (alacritty's repo and `Credits.html` use it).
+# bateri's own license (`Cargo.toml`, `workspace.package.license`) and the place its
+# sister crates are taken from.
+OWN_PROJECT_LICENSE = "GPL-3.0-or-later"
+OWN_PROJECT_SOURCE = "git+https://github.com/bateri/"
 COPYRIGHT = {"alacritty_terminal": ["Copyright 2020 The Alacritty Project"]}
 MIT_TEXT = """Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -118,6 +127,12 @@ def copyright_lines(pkg):
     return [f"Copyright (c) {', '.join(authors) or 'the ' + pkg['name'] + ' developers'}"]
 
 
+def is_ours(pkg):
+    """Whether `pkg` is under bateri's own license, from bateri's own organisation."""
+    return (pkg.get("license") == OWN_PROJECT_LICENSE
+            and (pkg.get("source") or "").startswith(OWN_PROJECT_SOURCE))
+
+
 def offers_mit(pkg):
     expr = pkg.get("license") or ""
     # `/` is the old SPDX-less "or" (`Apache-2.0/MIT`, rustc-hash 1.1).
@@ -149,7 +164,7 @@ def main():
         sys.exit("usage: third_party_notices.py <sparkle directory>")
     sparkle_license = os.path.join(sys.argv[1], "LICENSE")
     pkgs = packages()
-    crates = sorted(product_crates())
+    crates = sorted(c for c in product_crates() if not is_ours(pkgs[c]))
 
     out = ["bateri includes, among others, the following third-party software.", ""]
 
