@@ -69,7 +69,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use bt_core::PaneUuid;
+use bt_core::{PaneUuid, RemoteTarget};
 use kablo_proto::v1::NewSession;
 
 use super::hub::{Declined, HoldId, Hub, HubEvent};
@@ -160,6 +160,20 @@ impl PaneLink {
 }
 
 impl Shown {
+    /// Whether the terminal this is serves `target`, the remote session the pane's
+    /// `ssh` is in: the same server as the user typed it. **The one rule of
+    /// what bateri does on a server for a pane**: file drops and downloads,
+    /// previews, the load indicator, the server's ports, the ⌘ check of a path,
+    /// Sign In… and the connection of bateri's own those ride on are offered in
+    /// a pane that shows a terminal a server keeps and in no other — an `ssh`
+    /// that is a plain one (the setting is off for the host, a `production`
+    /// host, a server kablo cannot be kept on, a call that runs a command) has
+    /// none of them and costs the host no connection of bateri's. Every add-on
+    /// asks it through `TerminalPane::server_target`, and nobody else decides.
+    pub fn serves(&self, target: &RemoteTarget) -> bool {
+        self.host == target.host
+    }
+
     /// What a question about closing the pane calls the program that would
     /// end: the program in front with the server it runs on (`npm on rasp`), or
     /// `None` when the shell is in front (waiting for a command) or the server
@@ -278,6 +292,19 @@ pub trait Backend: Send + Sync + 'static {
     /// again, the wait and the wake from sleep are not news. Called on the
     /// service's thread; the application hops to its own.
     fn link_changed(&self, _pane: &PaneUuid, _link: PaneLink) {}
+
+    /// The terminal `pane` shows appeared or went: the pane is a server pane
+    /// from now on, or is no longer ([`Shown::serves`]), and what works on a
+    /// server (file drops, the load indicator, the ports…) is to be offered in
+    /// it or taken away. Told once per change, **before** the terminal is shown
+    /// and whatever the link is — the probe that finds the pane's `ssh` in the
+    /// process table and the holder that connects to the service race, and
+    /// whichever is second must make the pane ask again; and a holder that is
+    /// refused after it was admitted (the pane then runs the plain `ssh`, which
+    /// the process table shows exactly as before) must not leave the server's
+    /// work open in a pane that is a plain one. Called on the service's
+    /// thread; the application hops to its own.
+    fn terminal_changed(&self, _pane: &PaneUuid) {}
 }
 
 /// Why a bridge could not be started, as far as the error says: a login the
@@ -946,6 +973,11 @@ impl Core {
                 self.shared.backend.link_changed(pane, PaneLink::Live);
             }
         }
+        let came = shown.keys().filter(|pane| !before.contains_key(*pane));
+        let went = before.keys().filter(|pane| !shown.contains_key(*pane));
+        for pane in came.chain(went) {
+            self.shared.backend.terminal_changed(pane);
+        }
     }
 
     /// The terminals the panes `pane` owns show: the account and the name.
@@ -1319,6 +1351,22 @@ impl Core {
                         hold,
                         false,
                         "bateri: this terminal was ended with the bateri that showed it",
+                    );
+                    return;
+                }
+                // A terminal is taken up again by the pane it was shown in and by no
+                // other: the names that ask for it (`--terminal`, `--account`) are in
+                // every process list, and a process of another pane that said them would
+                // be shown another pane's server screen.
+                if let (Some(owner), Some(tab)) = (
+                    self.shared.ledger.pane_of(account, &open.terminal),
+                    pane.tab.as_ref(),
+                ) && &owner != tab
+                {
+                    self.hub.refuse(
+                        hold,
+                        false,
+                        "bateri: this terminal is shown by another pane",
                     );
                     return;
                 }

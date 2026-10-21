@@ -90,6 +90,7 @@ impl World {
             history: Box::new(|| Some(5000)),
             masters: None,
             linked: Box::new(|_, _| ()),
+            changed: Box::new(|_| ()),
         }
     }
 

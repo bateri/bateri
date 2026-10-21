@@ -345,8 +345,9 @@ unsafe fn with_config<T: Copy>(
     })
 }
 
-/// The program that answers the shell integration's helper calls (bateri's executable answers
-/// `ssh-argv` and `ssh-fell-back`). NULL or empty: none — the integration's `ssh` runs plain ssh.
+/// The program that answers the shell integration's helper calls (bateri's executable). NULL or
+/// empty: none. In an embedded pane the integration's `ssh` is a plain ssh either way: the
+/// terminal a server keeps needs the bateri application's own service.
 ///
 /// # Safety
 /// `config` as in [`bt_pane_config_free`]; `path` is NULL or a NUL-terminated string.

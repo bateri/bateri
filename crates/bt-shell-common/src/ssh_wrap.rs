@@ -1,27 +1,28 @@
-//! Remote shell integration's wrapping decision: whether the user's
-//! `ssh` gets bateri's bootstrap, and the argv round trip.
+//! Remote shell integration's decision: whether the user's `ssh` shows a
+//! terminal the server keeps (kablo) or is the plain `ssh`, the bootstrap that
+//! terminal runs, and the readers of the wrapped form an older bateri's shell
+//! functions produced.
 //!
-//! **One owner.** The local zsh's `ssh` function asks
-//! `bateri ssh-argv` ([`ssh_argv_main`]); the answer is either the wrapped
-//! argv or nothing, and nothing means plain `ssh` — today's path. Every
-//! wrapping condition is in [`decide`]: the call is interactive (the same walk as
-//! the remote probe's, `jobs::ssh_call`), stdin and stdout are terminals (the
-//! caller's bit — under `$(…)` our stdout is a pipe), the setting allows it
-//! for the host as typed ([`Settings::integration_for`]), `ssh -G` does not
-//! say the session runs something else ([`Session`]) and the server is not
-//! recorded as one without a shell ([`Fact::Plain`]; always wrap otherwise).
-//! A server bateri knows nothing about **is** wrapped: the bootstrap's
-//! nonce'd `up` proves the wrap ran ([`Fact::Posix`], the pane's), and a
-//! wrapped connection that ends without it falls back to a plain rerun
-//! ([`ssh_fell_back_main`]).
+//! **One owner.** The local shells' `ssh` function runs `bateri ssh-hold`, and
+//! the running bateri decides there ([`kablo_path`]): the call is interactive
+//! (the same walk as the remote probe's, `jobs::ssh_call`) and runs no remote
+//! command, the setting allows the host as typed
+//! ([`Settings::integration_for`]), `ssh -G` does not say the session runs
+//! something else ([`Session`]) and the server is neither [`Fact::Plain`] (no
+//! shell to boot) nor [`Fact::NoKablo`] (kablo cannot be kept on it). What
+//! fails any of them is the plain `ssh`, with nothing of bateri's on the
+//! server and no connection of bateri's to it. [`kablo_argv`] is the
+//! bootstrap the terminal runs there.
 //!
-//! **The kablo way** ([`kablo_path`]): the local shells' `ssh` function no longer
-//! asks `bateri ssh-argv`; it runs `bateri ssh-hold`, and the running bateri
-//! decides with the same conditions ([`eligible`], shared with [`decide`]) whether
-//! the call is a terminal the server keeps ([`kablo_argv`] is the bootstrap it
-//! runs there) or the plain `ssh`. The wrapped form below, `ssh-argv` and
-//! `ssh-fell-back` stay for one purpose: a shell started before an update still
-//! has the previous `ssh` function, and asks them.
+//! **What stays of the wrapped form**, for one purpose: a shell started before
+//! an update still has the previous `ssh` function, which asks `bateri
+//! ssh-argv` and `bateri ssh-fell-back`. `ssh-argv` answers nothing (the
+//! subcommand is in the shell crate: it prints no wrapped argv whatever the
+//! call, and nothing is the plain `ssh`), so that shell's next `ssh` is a plain
+//! one; [`ssh_fell_back_main`] answers an attempt that function wrapped before
+//! the update and that ended after it. [`unwrap`] and [`nonce`] read the wrapped
+//! argv of such an `ssh` that is still running, which the remote probe sees in
+//! the process table.
 //!
 //! **The wrapped form is positional**: `-t` first,
 //! the user's arguments unchanged, the bootstrap command last — one argument
@@ -30,13 +31,12 @@
 //! would be sent to the remote shell). [`unwrap`] checks those positions, it
 //! does not search for the command.
 //!
-//! **The session is a master**: when the user shares no
+//! **The session was a master**: when the user shared no
 //! connections themselves (`ssh -G`, [`SshConfig::shares_connections`]) and
-//! bateri's instance directory is there, the wrapped call also carries
+//! bateri's instance directory was there, the wrapped call also carried
 //! `ControlMaster=auto` at [`session_socket`] with a short
-//! [`SESSION_PERSIST`] ([`Control`]) — bateri's file jobs ride the connection
-//! the user signed in to. Those three options sit right after `-t`, again by
-//! position.
+//! [`SESSION_PERSIST`] ([`Control`]). Those three options sit right after `-t`,
+//! again by position; the fallback gives its plain rerun the same ones.
 //!
 //! The state file's rows are `{fact}\t{key}\t{unix time}`; the key is the
 //! server as `ssh -G` resolves it ([`host_key`]). Bodies with side effects (the
@@ -68,7 +68,9 @@ pub const BOOT_NAME: &str = "bateri-boot";
 /// upload rule).
 const COMMAND_HEAD: &str = "exec sh -c '";
 
-/// The remote command for a bootstrap script:
+/// The remote command of the wrapped form, for a bootstrap script — what an
+/// older bateri's shell function ran, kept as the tests' maker of the argv
+/// [`unwrap`] and [`nonce`] read:
 /// `exec sh -c '<boot>' bateri-boot <P> <nonce> <version> <tab>` — `sh`'s `$1` is the local
 /// block of the `ssh` command, the `P` of the remote blocks'
 /// `bt_remote=<P>.<S>.<n>`, or [`NO_PARENT`] without one; `$2` is the
@@ -82,7 +84,8 @@ const COMMAND_HEAD: &str = "exec sh -c '";
 /// outside the quotes and are read by any login shell, so only
 /// [`is_version`]'s alphabet and [`PaneUuid::url`]'s form go there; visible in
 /// `ps`, which is harmless — the tab's address only focuses.
-/// `boot` must not contain `'` ([`decide`] refuses one that does).
+/// `boot` must not contain `'`.
+#[cfg(test)]
 pub fn remote_command(
     boot: &str,
     parent: Option<u32>,
@@ -136,11 +139,11 @@ pub fn new_nonce() -> Option<String> {
     Some(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
-/// The connection sharing a wrapped session gets: the session is a
+/// The connection sharing a wrapped session got: the session is a
 /// master at `socket` (`ControlMaster=auto` — a second `ssh` to the host from
 /// this bateri joins it), detached after [`SESSION_PERSIST`]. Ours come
 /// **before** the user's arguments: ssh keeps a key's first value. Only for a
-/// user who shares no connections themselves ([`decide`]).
+/// user who shares no connections themselves ([`control`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Control {
     pub socket: PathBuf,
@@ -170,10 +173,12 @@ impl Control {
     }
 }
 
-/// The user's ssh arguments (without the program) → the wrapped arguments:
-/// `-t`, [`Control`]'s options when there are any, then `args` as they are,
-/// then [`remote_command`]. The user's own `-t` stays (`-t -t` still asks for
-/// a terminal).
+/// The user's ssh arguments (without the program) → the wrapped arguments an
+/// older bateri's shell function ran: `-t`, [`Control`]'s options when there
+/// are any, then `args` as they are, then [`remote_command`]. The user's own
+/// `-t` stays (`-t -t` still asks for a terminal). Nothing makes this form any
+/// more; the tests do, to prove [`unwrap`] and the fallback read it.
+#[cfg(test)]
 pub fn wrap(
     args: &[String],
     boot: &str,
@@ -431,9 +436,7 @@ impl HostState {
 }
 
 /// Reads the state file; a missing or unreadable file knows nothing: every
-/// server is wrapped and none counts as `posix` — and [`ssh_argv_main`]
-/// prints nothing when the `touched` row cannot be written, so an unwritable
-/// file still means plain `ssh`.
+/// server is tried for kablo and none counts as `posix`.
 pub fn load(path: &Path) -> HostState {
     fs::read_to_string(path)
         .map(|text| HostState::parse(&text))
@@ -520,16 +523,7 @@ pub fn unix_now() -> u64 {
 
 // ─── the decision ────────────────────────────────────────────────────────
 
-/// A wrapped connection: the arguments to run and the server's key (the
-/// caller records [`Fact::Touched`] for it before running them).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Wrapped {
-    pub args: Vec<String>,
-    pub key: String,
-}
-
-/// A call the integration may take: what the conditions both ways to take
-/// it share ([`decide`] and [`kablo_path`]) and what they learned on the way.
+/// A call the integration may take: what the conditions learned on the way.
 struct Eligible {
     call: crate::jobs::SshCall,
     /// `ssh -G`'s answer for the arguments.
@@ -538,19 +532,17 @@ struct Eligible {
     key: String,
 }
 
-/// The questions both ways of taking a call ask, **in this order** (the cheap
-/// ones first, `ssh -G` only for a call that would be taken): the call is
-/// interactive and runs no remote command, the setting allows the host as typed
+/// The questions that decide a call, **in this order** (the cheap ones first,
+/// `ssh -G` only for a call that would be taken): the call is interactive and
+/// runs no remote command, the setting allows the host as typed
 /// ([`Settings::integration_for`]), `ssh -G` does not say the session runs
 /// something else ([`Session::allows_wrap`]) and the server is none of the
-/// `refusing` facts. One copy: a call one way takes and the other does not is
-/// a pane that behaves like neither.
+/// facts that make `ssh` a plain one ([`Fact::Plain`], [`Fact::NoKablo`]).
 fn eligible(
     args: &[String],
     settings: &Settings,
     runner: &dyn SshRunner,
     state: &HostState,
-    refusing: &[Fact],
 ) -> Option<Eligible> {
     let call = ssh_call("ssh", args).filter(|call| !call.command)?;
     if !settings.integration_for(&call.host) {
@@ -561,7 +553,10 @@ fn eligible(
         return None;
     }
     let key = host_key(&config)?;
-    if refusing.iter().any(|fact| state.knows(*fact, &key)) {
+    if [Fact::Plain, Fact::NoKablo]
+        .iter()
+        .any(|fact| state.knows(*fact, &key))
+    {
         return None;
     }
     Some(Eligible { call, config, key })
@@ -583,22 +578,24 @@ pub struct KabloHost {
 }
 
 /// Whether the user's `ssh` shows a terminal kept on the server (kablo) and
-/// not a plain connection, and to whom. **The rule is [`decide`]'s, minus the
-/// wrapping**: an interactive call without a remote command, the setting
-/// allowing the host as typed, `ssh -G` saying the session is the ordinary
-/// one, and a server that is neither [`Fact::Plain`] (it has no shell to boot)
-/// nor [`Fact::NoKablo`] (kablo cannot be kept on it). A `production` host
-/// the setting refuses is plain, and so is a `ssh` whose terminals are not
-/// both ends of a terminal — the caller's bit, which the shell function
-/// checks before it runs this at all. `None` → the plain `ssh`.
+/// not a plain connection, and to whom: an interactive call without a remote
+/// command, the setting allowing the host as typed, `ssh -G` saying the
+/// session is the ordinary one, and a server that is neither [`Fact::Plain`]
+/// (it has no shell to boot) nor [`Fact::NoKablo`] (kablo cannot be kept on
+/// it). A `production` host the setting refuses is plain, and so is a `ssh`
+/// whose terminals are not both ends of a terminal — the caller's bit, which
+/// the shell function checks before it runs this at all. `None` → the plain
+/// `ssh`, and from then on **nothing of bateri's is on that connection**: it
+/// is not a server pane, so the add-ons that work on a server (file drops,
+/// previews, the load indicator, the ports, the ⌘ path check, Sign In…) are
+/// not offered and bateri opens no connection of its own to the host.
 pub fn kablo_path(
     args: &[String],
     settings: &Settings,
     runner: &dyn SshRunner,
     state: &HostState,
 ) -> Option<KabloHost> {
-    let Eligible { call, config, key } =
-        eligible(args, settings, runner, state, &[Fact::Plain, Fact::NoKablo])?;
+    let Eligible { call, config, key } = eligible(args, settings, runner, state)?;
     Some(KabloHost {
         host: call.host,
         port: call.port,
@@ -637,44 +634,6 @@ pub fn kablo_argv(
     .iter()
     .map(|word| word.as_bytes().to_vec())
     .collect()
-}
-
-/// Every wrapping condition in one place; `None` → plain `ssh`.
-///
-/// The cheap questions come first, so `ssh -G` (a process, and it runs the
-/// config's `Match exec`) is asked only for a call that would be wrapped:
-/// a usable bootstrap and nonce, terminals on both ends, an interactive call without a
-/// remote command, the setting for the host as typed; then `ssh -G` and the
-/// state of the server it resolves to — only a [`Fact::Plain`] server is not
-/// wrapped, an unknown one is. `sockets` are this bateri's
-/// instance directories ([`crate::ssh_route::instance_dirs`]): with one, the
-/// session also becomes a master there ([`Control`]). `tab` is the pane's
-/// identity the bootstrap exports ([`remote_command`]); it decides
-/// nothing.
-#[allow(clippy::too_many_arguments)] // The conditions' inputs, each a different source; a struct would only rename them
-pub fn decide(
-    args: &[String],
-    tty: bool,
-    settings: &Settings,
-    runner: &dyn SshRunner,
-    state: &HostState,
-    boot: &str,
-    parent: Option<u32>,
-    nonce: &str,
-    tab: Option<&PaneUuid>,
-    sockets: &[PathBuf],
-) -> Option<Wrapped> {
-    if boot.is_empty() || !is_inline(boot) || !is_nonce(nonce) || !tty {
-        return None;
-    }
-    let Eligible {
-        config: out, key, ..
-    } = eligible(args, settings, runner, state, &[Fact::Plain])?;
-    let control = control(&out, sockets).filter(|_| !names_sharing(args));
-    Some(Wrapped {
-        args: wrap(args, boot, parent, nonce, tab, control.as_ref()),
-        key,
-    })
 }
 
 /// Whether the user's arguments choose connection sharing themselves — `-S`,
@@ -857,9 +816,9 @@ pub fn boot() -> &'static str {
 }
 
 /// [`boot`], starting the login shell in `cwd` when it is one
-/// ([`is_start_dir`]) — the remote folder ⌘T's tab was in, passed once by
-/// the new tab's `ssh` (`--cwd`, [`ssh_argv_main`]). Still [`is_inline`]:
-/// the directory is inside the base64 payload ([`payload`]).
+/// ([`is_start_dir`]) — the remote folder ⌘T's tab was in, which the new
+/// terminal asks for ([`kablo_argv`]). Still [`is_inline`]: the directory is
+/// inside the base64 payload ([`payload`]).
 pub fn boot_in(cwd: Option<&str>) -> std::borrow::Cow<'static, str> {
     match cwd.filter(|cwd| is_start_dir(cwd)) {
         Some(cwd) => std::borrow::Cow::Owned(one_liner(&payload(Some(cwd)))),
@@ -1054,97 +1013,6 @@ fn take_up(state_path: &Path, nonce: &str) -> bool {
     up || used
 }
 
-/// `bateri ssh-argv [--tty] [--block N] [--instance I] [--cwd D] -- <ssh arguments…>`: the subcommand's body
-/// (`argv` is what follows `ssh-argv`). Writes the wrapped arguments to `out`,
-/// each followed by a NUL, or nothing; the exit code is always zero and every
-/// failure is "nothing" — the caller runs plain `ssh`.
-///
-/// `--tty` says stdin and stdout are terminals: the caller asks, because our
-/// own stdout is the caller's pipe. `--block N` is the local block running the
-/// `ssh` (`$__bateri_block`), carried to the server as the remote blocks'
-/// parent ([`remote_command`]); without it the server prints no block marks.
-/// `--instance I` is the running bateri's instance directory name
-/// (`BATERI_SSH_INSTANCE`), looked for under `roots`
-/// ([`crate::ssh_route::socket_bases`]); without it, or without the
-/// directory, the session is no master ([`Control`]). `--cwd D` is the
-/// remote folder the session starts in: a tab opened by ⌘T from a remote
-/// tab passes its source's folder to its first `ssh`, once; `boot` builds the
-/// bootstrap for it ([`boot_in`]), and a `D` that is not [`is_start_dir`]
-/// starts at home. Each flag is optional and they come in this order, so an
-/// older shell's call (no `--cwd`) still wraps. `settings` is the settings file's launch
-/// reading (an unusable file turns the integration off); `state_path` is the
-/// platform's state file. A wrapped connection is recorded as
-/// [`Fact::Touched`] **before** it is printed: if the record fails nothing is
-/// printed, because the touched list is the user's account of where bateri
-/// wrote. `nonce` is this attempt's ([`new_nonce`]); without one nothing is
-/// printed either. `tab` is the calling pane's identity (`BATERI_TAB_URL`,
-/// carried to the server ([`remote_command`]).
-#[allow(clippy::too_many_arguments)] // the platform's inputs, each a different source
-pub fn ssh_argv_main(
-    argv: &[String],
-    settings: &Settings,
-    runner: &dyn SshRunner,
-    state_path: &Path,
-    roots: &[PathBuf],
-    boot: &dyn Fn(Option<&str>) -> std::borrow::Cow<'static, str>,
-    nonce: Option<&str>,
-    tab: Option<&PaneUuid>,
-    out: &mut impl Write,
-) -> i32 {
-    let Some(nonce) = nonce else {
-        return 0;
-    };
-    let (tty, rest) = match argv {
-        [flag, rest @ ..] if flag == "--tty" => (true, rest),
-        rest => (false, rest),
-    };
-    // `--block N`: the local block of the `ssh` command, the
-    // remote blocks' parent. A malformed one (an empty `__bateri_block`) costs
-    // only the blocks: the connection is still wrapped, without a parent.
-    let (parent, rest) = match rest {
-        [flag, number, rest @ ..] if flag == "--block" => (number.parse().ok(), rest),
-        rest => (None, rest),
-    };
-    let (sockets, rest) = match rest {
-        [flag, instance, rest @ ..] if flag == "--instance" => {
-            (crate::ssh_route::instance_dirs(roots, instance), rest)
-        }
-        rest => (Vec::new(), rest),
-    };
-    let (cwd, rest) = match rest {
-        [flag, cwd, rest @ ..] if flag == "--cwd" => (Some(cwd.as_str()), rest),
-        rest => (None, rest),
-    };
-    let Some(("--", args)) = rest.split_first().map(|(head, tail)| (head.as_str(), tail)) else {
-        return 0;
-    };
-    let state = load(state_path);
-    let boot = boot(cwd);
-    let Some(wrapped) = decide(
-        args, tty, settings, runner, &state, &boot, parent, nonce, tab, &sockets,
-    ) else {
-        return 0;
-    };
-    if record(
-        state_path,
-        Fact::Touched,
-        &wrapped.key,
-        unix_now(),
-        LOCK_PATIENCE,
-    )
-    .is_err()
-    {
-        return 0;
-    }
-    let mut bytes = Vec::new();
-    for arg in &wrapped.args {
-        bytes.extend_from_slice(arg.as_bytes());
-        bytes.push(0);
-    }
-    let _ = out.write_all(&bytes).and_then(|()| out.flush());
-    0
-}
-
 // ─── the fallback ────────────────────────────────────────────────────────
 
 /// ssh's own exit code for a connection or authentication error (`ssh(1)`):
@@ -1185,8 +1053,8 @@ pub struct FellBack {
 /// - The server is [`Fact::Posix`]: `None` — the bootstrap's `up` arrived, the
 ///   session was the user's and its code is theirs.
 /// - The server is [`Fact::Touched`] and not `posix`: the plain rerun — the
-///   user's `args` with the **same** [`Control`] options [`decide`] gave the
-///   wrapped call (one producer), so the rerun rides the wrapped session's
+///   user's `args` with the **same** [`Control`] options the wrapped call got
+///   ([`control`], one producer), so the rerun rides the wrapped session's
 ///   master while its [`SESSION_PERSIST`] lasts and asks no second password.
 /// - Anything else (never wrapped, an unreadable configuration): `None`.
 pub fn fell_back(
@@ -1229,14 +1097,14 @@ const FELL_BACK_POLL: Duration = Duration::from_millis(25);
 
 /// `bateri ssh-fell-back --rc N [--instance I] -- <wrapped ssh arguments…>`
 /// The subcommand's body (`argv` is what follows
-/// `ssh-fell-back`), asked by the local zsh's `ssh` function after a wrapped
-/// `ssh` ended with `N`. The arguments are the **wrapped** ones, as
-/// `ssh-argv` printed them: [`unwrap`] gives back the user's and [`nonce`]
-/// the attempt's — one parser, the shell does not take our command apart.
-/// Writes the plain rerun's arguments to `out` ([`fell_back`]), each followed
-/// by a NUL, or nothing — `ssh-argv`'s wire; the exit code is always zero.
-/// `--instance` is `ssh-argv`'s, so the rerun's sharing options are the
-/// wrapped call's.
+/// `ssh-fell-back`), asked by the previous `ssh` function of a shell started
+/// before an update, after a wrapped `ssh` ended with `N` — an `ssh` that
+/// function wrapped before the update (`ssh-argv` wraps nothing any more). The arguments are the **wrapped** ones, as `ssh-argv` printed
+/// them: [`unwrap`] gives back the user's and [`nonce`] the attempt's — one
+/// parser, the shell does not take our command apart. Writes the plain
+/// rerun's arguments to `out` ([`fell_back`]), each followed by a NUL, or
+/// nothing — `ssh-argv`'s wire; the exit code is always zero. `--instance` is
+/// `ssh-argv`'s, so the rerun's sharing options are the wrapped call's.
 ///
 /// **The wrong direction is a rerun**: a
 /// server with a shell branded `plain` loses its integration, and a user who
@@ -1367,10 +1235,11 @@ mod tests {
     /// script that made the calls. Today's script does not make them: its `ssh`
     /// function runs `bateri ssh-hold` and the plain `ssh` (the wrapped
     /// session is gone, `ssh_wrap::kablo_path`), so the subcommands answer
-    /// the shells that were started before the update and nobody else. The
-    /// previous script's `ssh-argv` call is the last one's without `"${cwd[@]}"`
-    /// (an optional flag, [`ssh_argv_main`]); the subcommand without `--cwd`
-    /// is `the_subcommand_prints_nul_separated_args_or_nothing`.
+    /// the shells that were started before the update and nobody else: `ssh-argv`
+    /// with nothing, whatever the call (the shell crate's
+    /// `the_previous_functions_ssh_argv_calls_get_the_plain_ssh`), and
+    /// `ssh-fell-back` for an `ssh` that was wrapped before the update, which
+    /// reads the older wrapped argv below.
     #[test]
     fn the_previous_functions_calls_still_parse() {
         let script = include_str!("../../../assets/shell/zsh/bateri.zsh");
@@ -1387,38 +1256,6 @@ mod tests {
             script.contains("ssh-hold -- \"$@\""),
             "today's function runs the pane's program in the `ssh`'s place"
         );
-        let dir = scratch("previous-call");
-        let path = dir.join("remote-hosts");
-        record(&path, Fact::Posix, "u@h:22", 1, LOCK_PATIENCE).unwrap();
-        let mut out = Vec::new();
-        ssh_argv_main(
-            &words(&[
-                "--tty",
-                "--block",
-                "7",
-                "--instance",
-                "0a1b2c3d",
-                "--",
-                "prod",
-            ]),
-            &Settings::default(),
-            &Gconfig::new(PLAIN),
-            &path,
-            &[],
-            &|cwd| {
-                assert_eq!(cwd, None);
-                BOOT_STUB.into()
-            },
-            Some(NONCE),
-            None,
-            &mut out,
-        );
-        let expected: Vec<u8> = wrap(&words(&["prod"]), BOOT_STUB, Some(7), NONCE, None, None)
-            .iter()
-            .flat_map(|arg| arg.bytes().chain([0]))
-            .collect();
-        assert_eq!(out, expected, "the previous call still wraps");
-        fs::remove_dir_all(&dir).unwrap();
         let older = words(&[
             "-t",
             "-o",
@@ -1758,195 +1595,9 @@ mod tests {
 
     const PLAIN: &str = "user u\nhostname h\nport 22\nrequesttty auto\nsessiontype default\n";
 
-    fn learned() -> HostState {
-        let mut state = HostState::default();
-        state.note(Fact::Posix, "u@h:22", 1);
-        state
-    }
-
     #[test]
-    fn decide_wraps_only_when_every_condition_holds() {
-        let settings = Settings::default();
-        let runner = Gconfig::new(PLAIN);
-        let args = words(&["prod"]);
-        assert_eq!(
-            decide(
-                &args,
-                true,
-                &settings,
-                &runner,
-                &learned(),
-                BOOT_STUB,
-                None,
-                NONCE,
-                None,
-                &[]
-            ),
-            Some(Wrapped {
-                args: wrap(&args, BOOT_STUB, None, NONCE, None, None),
-                key: "u@h:22".to_owned(),
-            })
-        );
-        assert_eq!(
-            runner.calls.borrow().last(),
-            Some(&words(&["ssh", "-G", "prod"])),
-            "ssh -G sees the user's arguments"
-        );
-
-        // No terminal, a remote command (forced tty too), a non-interactive flag.
-        let none = |args: &[&str], tty: bool| {
-            let runner = Gconfig::new(PLAIN);
-            let wrapped = decide(
-                &words(args),
-                tty,
-                &settings,
-                &runner,
-                &learned(),
-                BOOT_STUB,
-                None,
-                NONCE,
-                None,
-                &[],
-            );
-            (wrapped, runner.calls.borrow().len())
-        };
-        assert_eq!(none(&["prod"], false), (None, 0));
-        for args in [
-            &["prod", "uptime"][..],
-            &["-t", "prod", "tmux", "attach"],
-            &["-N", "prod"],
-            &["-T", "prod"],
-            &["-W", "x:22", "prod"],
-            &["-O", "check", "prod"],
-            &["-o", "RequestTTY=no", "prod"],
-            &["-V"],
-        ] {
-            assert_eq!(none(args, true), (None, 0), "{args:?}: no ssh -G either");
-        }
-        // A bootstrap that is empty or would not survive a login shell's
-        // quoting is never sent.
-        for boot in ["", "it's", "a\\b", "hi!", "two\nlines"] {
-            assert_eq!(
-                decide(
-                    &args,
-                    true,
-                    &settings,
-                    &runner,
-                    &learned(),
-                    boot,
-                    None,
-                    NONCE,
-                    None,
-                    &[]
-                ),
-                None,
-                "{boot:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn decide_asks_the_config_the_setting_and_the_state() {
-        let args = words(&["prod"]);
-        let on = Settings::default();
-        // The config runs something else.
-        for out in [
-            "user u\nhostname h\nport 22\nremotecommand tmux\n",
-            "user u\nhostname h\nport 22\nrequesttty false\n",
-            "user u\nhostname h\nport 22\nsessiontype none\n",
-        ] {
-            let runner = Gconfig::new(out);
-            assert_eq!(
-                decide(
-                    &args,
-                    true,
-                    &on,
-                    &runner,
-                    &learned(),
-                    BOOT_STUB,
-                    None,
-                    NONCE,
-                    None,
-                    &[]
-                ),
-                None,
-                "{out}"
-            );
-        }
-        // An unknown server is wrapped, one recorded `plain` is not
-        // — `posix` or not.
-        let runner = Gconfig::new(PLAIN);
-        let with = |state: &HostState| {
-            decide(
-                &args,
-                true,
-                &on,
-                &runner,
-                state,
-                BOOT_STUB,
-                None,
-                NONCE,
-                None,
-                &[],
-            )
-            .map(|wrapped| wrapped.key)
-        };
-        assert_eq!(with(&HostState::default()), Some("u@h:22".to_owned()));
-        let mut plain = learned();
-        plain.note(Fact::Plain, "u@h:22", 2);
-        assert_eq!(with(&plain), None);
-        let mut other = HostState::default();
-        other.note(Fact::Plain, "v@h:22", 2);
-        assert_eq!(with(&other), Some("u@h:22".to_owned()));
-        // The setting is asked before `ssh -G`.
-        let off = Settings {
-            remote_integration: false,
-            ..Settings::default()
-        };
-        let runner = Gconfig::new(PLAIN);
-        assert_eq!(
-            decide(
-                &args,
-                true,
-                &off,
-                &runner,
-                &learned(),
-                BOOT_STUB,
-                None,
-                NONCE,
-                None,
-                &[]
-            ),
-            None
-        );
-        assert!(runner.calls.borrow().is_empty());
-        let production = Settings {
-            remote_hosts: vec![HostRule {
-                pattern: "prod".to_owned(),
-                mark: Some(HostMark::Production),
-                integration: None,
-            }],
-            ..Settings::default()
-        };
-        assert_eq!(
-            decide(
-                &args,
-                true,
-                &production,
-                &runner,
-                &learned(),
-                BOOT_STUB,
-                None,
-                NONCE,
-                None,
-                &[],
-            ),
-            None
-        );
-    }
-
-    #[test]
-    fn kablo_path_takes_what_decide_takes_and_a_server_kablo_cannot_be_kept_on_is_plain() {
+    fn kablo_path_takes_an_interactive_call_the_setting_and_the_server_allow_and_everything_else_is_the_plain_ssh()
+     {
         let settings = Settings::default();
         let args = words(&["-p", "2222", "prod"]);
         let runner = Gconfig::new(PLAIN);
@@ -1963,9 +1614,9 @@ mod tests {
             "ssh -G sees the user's arguments"
         );
 
-        // Everything `decide` refuses is refused here, and it asks nothing it
-        // need not: no process for a call that runs a command, a flag that
-        // is not a session, or a host the setting refuses.
+        // Everything else is the plain `ssh`, and nothing is asked that need
+        // not be: no process for a call that runs a command, a flag that is not
+        // a session, or a host the setting refuses.
         let off = Settings {
             remote_integration: false,
             ..Settings::default()
@@ -1980,9 +1631,13 @@ mod tests {
         };
         for (settings, args) in [
             (&settings, &["prod", "uptime"][..]),
+            (&settings, &["-t", "prod", "tmux", "attach"]),
             (&settings, &["-N", "prod"]),
+            (&settings, &["-T", "prod"]),
+            (&settings, &["-W", "x:22", "prod"]),
             (&settings, &["-O", "check", "prod"]),
             (&settings, &["-o", "RequestTTY=no", "prod"]),
+            (&settings, &["-V"]),
             (&off, &["prod"]),
             (&production, &["prod"]),
         ] {
@@ -2083,108 +1738,6 @@ mod tests {
     }
 
     #[test]
-    fn the_subcommand_prints_nul_separated_args_or_nothing() {
-        let dir = scratch("main");
-        let path = dir.join("remote-hosts");
-        record(&path, Fact::Posix, "u@h:22", 1, LOCK_PATIENCE).unwrap();
-        let runner = Gconfig::new(PLAIN);
-        let run = |argv: &[&str], boot: &'static str| {
-            let mut out = Vec::new();
-            let code = ssh_argv_main(
-                &words(argv),
-                &Settings::default(),
-                &runner,
-                &path,
-                &[],
-                &|_| boot.into(),
-                Some(NONCE),
-                None,
-                &mut out,
-            );
-            assert_eq!(code, 0);
-            out
-        };
-        // `--block` carries the parent; a malformed one wraps without it.
-        for (block, parent) in [("7", Some(7)), ("", None), ("x", None)] {
-            assert_eq!(
-                run(&["--tty", "--block", block, "--", "prod"], BOOT_STUB),
-                wrap(&words(&["prod"]), BOOT_STUB, parent, NONCE, None, None)
-                    .iter()
-                    .flat_map(|arg| arg.bytes().chain([0]))
-                    .collect::<Vec<u8>>(),
-                "{block:?}"
-            );
-        }
-        let printed = run(&["--tty", "--", "-p", "2", "prod"], BOOT_STUB);
-        let expected: Vec<u8> = wrap(
-            &words(&["-p", "2", "prod"]),
-            BOOT_STUB,
-            None,
-            NONCE,
-            None,
-            None,
-        )
-        .iter()
-        .flat_map(|arg| arg.bytes().chain([0]))
-        .collect();
-        assert_eq!(printed, expected);
-        assert!(load(&path).knows(Fact::Touched, "u@h:22"));
-        // Without the terminal bit, without `--`, without a bootstrap: nothing.
-        assert!(run(&["--", "prod"], BOOT_STUB).is_empty());
-        assert!(run(&["--tty", "prod"], BOOT_STUB).is_empty());
-        assert!(run(&["--tty", "--", "prod"], "").is_empty());
-        // The touched row cannot be written (another writer holds the lock past
-        // the patience): nothing either.
-        let held = lock(&path, LOCK_PATIENCE).unwrap();
-        assert!(run(&["--tty", "--", "prod"], BOOT_STUB).is_empty());
-        drop(held);
-        fs::remove_dir_all(&dir).unwrap();
-    }
-
-    /// `--cwd` (after `--instance`, before `--`) is handed to the bootstrap's
-    /// builder and only there; without it the builder is asked for none, so
-    /// the previous script's call wraps as it did.
-    #[test]
-    fn the_subcommand_hands_the_starting_directory_to_the_bootstrap() {
-        let dir = scratch("main-cwd");
-        let path = dir.join("remote-hosts");
-        record(&path, Fact::Posix, "u@h:22", 1, LOCK_PATIENCE).unwrap();
-        let runner = Gconfig::new(PLAIN);
-        let run = |argv: &[&str]| {
-            let mut out = Vec::new();
-            ssh_argv_main(
-                &words(argv),
-                &Settings::default(),
-                &runner,
-                &path,
-                &[],
-                &|cwd| cwd.map_or(BOOT_STUB.into(), |cwd| format!("cd {cwd}").into()),
-                Some(NONCE),
-                None,
-                &mut out,
-            );
-            out
-        };
-        let printed = |boot: &str| -> Vec<u8> {
-            wrap(&words(&["prod"]), boot, Some(7), NONCE, None, None)
-                .iter()
-                .flat_map(|arg| arg.bytes().chain([0]))
-                .collect()
-        };
-        assert_eq!(
-            run(&["--tty", "--block", "7", "--cwd", "/srv/app", "--", "prod"]),
-            printed("cd /srv/app")
-        );
-        assert_eq!(
-            run(&["--tty", "--block", "7", "--", "prod"]),
-            printed(BOOT_STUB)
-        );
-        // Out of order it is not a flag: nothing, plain `ssh`.
-        assert!(run(&["--tty", "--cwd", "/srv", "--block", "7", "--", "prod"]).is_empty());
-        fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
     fn a_starting_directory_is_absolute_or_home_rooted() {
         for dir in ["/", "/srv/my app", "/home/ömer/proje", "~", "~/src", "/a'b"] {
             assert!(is_start_dir(dir), "{dir:?}");
@@ -2202,52 +1755,31 @@ mod tests {
         assert!(is_inline(&boot_in(Some("/a'b \"c\" $d !e \\f"))));
     }
 
-    /// With bateri's instance directory, the session becomes a
-    /// master there — unless the user shares connections themselves.
+    /// With bateri's instance directory, the wrapped session became a
+    /// master there — unless the user shared connections themselves. The
+    /// fallback gives its plain rerun the same options, from the same
+    /// producer ([`control`], [`names_sharing`]).
     #[test]
-    fn the_session_becomes_a_master_in_the_instance_directory() {
+    fn the_wrapped_sessions_sharing_is_the_instance_directorys_unless_the_user_shares() {
         let root = PathBuf::from(format!("/tmp/bt-wrap-ctl-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         let roots = vec![root.join("r")];
         let dir = crate::ssh_route::prepare_instance(&roots[0], "0a1b2c3d").unwrap();
-        let path = root.join("remote-hosts");
-        record(&path, Fact::Posix, "u@h:22", 1, LOCK_PATIENCE).unwrap();
-        let run = |config: &'static str, argv: &[&str]| {
-            let runner = Gconfig::new(config);
-            let mut out = Vec::new();
-            ssh_argv_main(
-                &words(argv),
-                &Settings::default(),
-                &runner,
-                &path,
-                &roots,
-                &|_| BOOT_STUB.into(),
-                Some(NONCE),
-                None,
-                &mut out,
-            );
-            let mut args: Vec<String> = out
-                .split(|&byte| byte == 0)
-                .map(|arg| String::from_utf8(arg.to_vec()).unwrap())
-                .collect();
-            args.pop();
-            args
+        let sockets = crate::ssh_route::instance_dirs(&roots, "0a1b2c3d");
+        let shared = |config: &str, typed: &[&str], sockets: &[PathBuf]| {
+            control(config, sockets).filter(|_| !names_sharing(&words(typed)))
         };
         let key = crate::ssh_route::host_key(&parse_config(PLAIN).unwrap());
         let control = Control {
             socket: dir.join(format!("u-{key}")),
         };
-        let wrapped = run(PLAIN, &["--tty", "--instance", "0a1b2c3d", "--", "prod"]);
-        assert_eq!(
-            wrapped,
-            wrap(
-                &words(&["prod"]),
-                BOOT_STUB,
-                None,
-                NONCE,
-                None,
-                Some(&control)
-            )
+        let wrapped = wrap(
+            &words(&["prod"]),
+            BOOT_STUB,
+            None,
+            NONCE,
+            None,
+            shared(PLAIN, &["prod"], &sockets).as_ref(),
         );
         assert_eq!(
             wrapped[1..7],
@@ -2261,49 +1793,19 @@ mod tests {
             ])
         );
         assert_eq!(unwrap(&wrapped), &words(&["prod"])[..]);
-        // The block and the instance together, in the function's order.
-        assert_eq!(
-            run(
-                PLAIN,
-                &[
-                    "--tty",
-                    "--block",
-                    "4",
-                    "--instance",
-                    "0a1b2c3d",
-                    "--",
-                    "prod"
-                ]
-            ),
-            wrap(
-                &words(&["prod"]),
-                BOOT_STUB,
-                Some(4),
-                NONCE,
-                None,
-                Some(&control)
-            )
-        );
-        // The user's own sharing, an unknown or a missing instance: no sharing,
-        // still wrapped.
-        let plain = wrap(&words(&["prod"]), BOOT_STUB, None, NONCE, None, None);
+        assert_eq!(master_socket(&wrapped), control.socket.to_str());
+        // The user's own sharing, an unknown or a missing instance: no sharing.
         for config in [
             "user u\nhostname h\nport 22\ncontrolmaster auto\n",
             "user u\nhostname h\nport 22\ncontrolpath /u/cm-%C\n",
         ] {
-            assert_eq!(
-                run(config, &["--tty", "--instance", "0a1b2c3d", "--", "prod"]),
-                plain,
-                "{config}"
-            );
+            assert_eq!(shared(config, &["prod"], &sockets), None, "{config}");
         }
         for instance in ["ffffffff", "../r", "x"] {
-            assert_eq!(
-                run(PLAIN, &["--tty", "--instance", instance, "--", "prod"]),
-                plain,
-                "{instance}"
-            );
+            let sockets = crate::ssh_route::instance_dirs(&roots, instance);
+            assert_eq!(shared(PLAIN, &["prod"], &sockets), None, "{instance}");
         }
+        assert_eq!(shared(PLAIN, &["prod"], &[]), None);
         // The user's own choice on the command line, an opt-out included
         // (`ssh -G` prints that as the default): no sharing of ours.
         for typed in [
@@ -2314,13 +1816,7 @@ mod tests {
             &["-Snone", "prod"],
             &["prod", "-o", "ControlPersist=no"],
         ] {
-            let mut argv = vec!["--tty", "--instance", "0a1b2c3d", "--"];
-            argv.extend_from_slice(typed);
-            assert_eq!(
-                run(PLAIN, &argv),
-                wrap(&words(typed), BOOT_STUB, None, NONCE, None, None),
-                "{typed:?}"
-            );
+            assert_eq!(shared(PLAIN, typed, &sockets), None, "{typed:?}");
         }
         fs::remove_dir_all(&root).unwrap();
     }
@@ -2395,28 +1891,19 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
         let dir = crate::ssh_route::prepare_instance(&root, "0a1b2c3d").unwrap();
         let sockets = vec![dir.clone()];
-        let wrapped = decide(
+        let wrapped = wrap(
             &args,
-            true,
-            &Settings::default(),
-            &Gconfig::new(PLAIN),
-            &learned(),
             BOOT_STUB,
             None,
             NONCE,
             None,
-            &sockets,
-        )
-        .expect("wrapped");
-        let rerun = fell_back(&args, 1, false, PLAIN, &touched(false), &sockets).expect("rerun");
-        assert_eq!(
-            rerun.args[..6],
-            wrapped.args[1..7],
-            "the wrapped call's options"
+            control(PLAIN, &sockets).as_ref(),
         );
+        let rerun = fell_back(&args, 1, false, PLAIN, &touched(false), &sockets).expect("rerun");
+        assert_eq!(rerun.args[..6], wrapped[1..7], "the wrapped call's options");
         assert_eq!(rerun.args[6..], args[..]);
         assert_eq!(unwrap(&rerun.args), &rerun.args[..], "not wrapped");
-        // The user's own sharing choice: none of ours, as in `decide`.
+        // The user's own sharing choice: none of ours, as in the wrapped call.
         let typed = words(&["-S", "none", "prod"]);
         assert_eq!(
             fell_back(&typed, 1, false, PLAIN, &touched(false), &sockets).map(|fb| fb.args),
@@ -2626,7 +2113,8 @@ mod tests {
     }
 
     /// The real bootstrap (not a stub) survives every login shell's quoting,
-    /// is wrapped by `decide`, round-trips through `unwrap` and stays far
+    /// round-trips through the wrapped form (`unwrap` reads what an older
+    /// bateri ran) and stays far
     /// below Linux's one-argument limit (`MAX_ARG_STRLEN`, 128 KiB) — the
     /// remote command is one argument on the server.
     #[test]
@@ -2644,21 +2132,11 @@ mod tests {
         let command = remote_command(&boot_in(Some(&deepest)), Some(u32::MAX), NONCE, None);
         assert!(command.len() < 64 * 1024, "{} bytes", command.len());
         let args = words(&["-p", "2222", "prod"]);
-        let runner = Gconfig::new(PLAIN);
-        let wrapped = decide(
-            &args,
-            true,
-            &Settings::default(),
-            &runner,
-            &learned(),
-            boot,
-            None,
-            NONCE,
-            None,
-            &[],
-        )
-        .expect("the real bootstrap wraps");
-        assert_eq!(unwrap(&wrapped.args), &args[..]);
+        let wrapped = wrap(&args, boot, None, NONCE, None, None);
+        assert_eq!(unwrap(&wrapped), &args[..]);
+        // And as the argument vector a new terminal runs (nothing is quoted).
+        let argv = kablo_argv(Some(&deepest), Some(u32::MAX), NONCE, None);
+        assert_eq!(argv[2], boot_in(Some(&deepest)).as_bytes());
         // Every file the bootstrap writes is embedded, and the shared swap is
         // the local wrapper's own.
         assert!(REMOTE_FILES.iter().all(|(_, content)| !content.is_empty()));

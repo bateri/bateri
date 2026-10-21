@@ -1,10 +1,11 @@
 # bateri's remote bootstrap — POSIX sh, run on the SERVER.
 #
-# HOW IT GETS THERE: the local `ssh` function asks `bateri ssh-argv`, which
-# wraps the user's `ssh` as `ssh -t <their arguments> "exec sh -c '<one-liner>'
-# bateri-boot <P> <nonce> <version> <tab>"` (`bt-shell-common::ssh_wrap`).
-# sshd runs that through the user's login shell (`$SHELL -c`, which may be
-# fish or csh), `exec` replaces it with `sh`, and the one-liner decodes this file (base64, with the
+# HOW IT GETS THERE: the local `ssh` function runs `bateri ssh-hold`, and a
+# new terminal kablo keeps on the server runs `sh -c '<one-liner>' bateri-boot
+# <P> <nonce> <version> <tab>` as its program (`bt-shell-common::ssh_wrap`;
+# before kablo the same words were the remote command of a wrapped `ssh -t`, run
+# through the user's login shell — `$SHELL -c`, which may be fish or csh — and
+# `exec`ed into `sh`). The one-liner decodes this file (base64, with the
 # decoders' fallback chain) and `eval`s it. This file is therefore free of the
 # one-liner's quoting limits; the one-liner is built in Rust, next to the rule
 # that keeps it readable by every login shell.

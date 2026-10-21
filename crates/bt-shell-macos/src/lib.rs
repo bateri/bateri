@@ -114,47 +114,21 @@ pub(crate) fn remote_hosts_path(home: &std::path::Path) -> std::path::PathBuf {
 
 /// `bateri ssh-argv [--tty] [--block N] [--instance I] [--cwd D] -- <ssh arguments…>`: `Some(exit code)` when
 /// the process was started as the subcommand, `None` otherwise. `main` calls
-/// it before the window-server check — the local zsh's `ssh` function calls
-/// it on every `ssh`, in any session. The body is
-/// [`bt_shell_common::ssh_wrap::ssh_argv_main`]; here only the platform's
-/// inputs: the settings file's launch reading (an unusable file, or no home,
-/// turns the integration off), the state file's path, the socket roots the
-/// instance directory is looked for under and the pane's tab
-/// (`BATERI_TAB_URL`). Every failure prints
-/// nothing, and nothing means plain `ssh`.
+/// it before the window-server check — a shell started before an update has
+/// the previous `ssh` function, which asks it on every `ssh`, in any session.
+/// **It prints nothing, whatever the call, and exits with zero**: nothing is
+/// the plain `ssh` to that function, and there is no wrapped form to hand out
+/// any more (today's function runs `bateri ssh-hold`, whose running bateri
+/// decides what the call is). The call is not read — every form the function
+/// ever made (the flags are optional and ordered) gets the same answer, and a
+/// call of a form nobody made yet cannot fail it.
 pub fn ssh_argv() -> Option<i32> {
-    let mut args = std::env::args_os().skip(1);
-    if args.next()? != "ssh-argv" {
-        return None;
-    }
-    let Some(argv) = args
-        .map(|arg| arg.into_string().ok())
-        .collect::<Option<Vec<String>>>()
-    else {
-        return Some(0);
-    };
-    let Some(home) = child::home() else {
-        return Some(0);
-    };
-    let settings = settings::load(&settings::config_root(&home)).at_launch().0;
-    // The calling pane's identity: its shell's `BATERI_TAB_URL`, in
-    // the one form `PaneUuid` reads — anything else carries no tab.
-    let tab = std::env::var("BATERI_TAB_URL")
-        .ok()
-        .and_then(|url| bt_core::PaneUuid::from_url(&url));
-    // SAFETY: `getuid` has no preconditions and cannot fail.
-    let uid = unsafe { libc::getuid() };
-    Some(bt_shell_common::ssh_wrap::ssh_argv_main(
-        &argv,
-        &settings,
-        &ssh_route::SystemSsh,
-        &remote_hosts_path(&home),
-        &ssh_route::socket_bases(Some(&home), uid),
-        &bt_shell_common::ssh_wrap::boot_in,
-        bt_shell_common::ssh_wrap::new_nonce().as_deref(),
-        tab.as_ref(),
-        &mut std::io::stdout().lock(),
-    ))
+    ssh_argv_of(std::env::args_os().skip(1))
+}
+
+/// [`ssh_argv`] on the arguments that follow the program's name.
+fn ssh_argv_of(mut args: impl Iterator<Item = std::ffi::OsString>) -> Option<i32> {
+    (args.next()? == "ssh-argv").then_some(0)
 }
 
 /// `bateri ssh-fell-back --rc N [--instance I] -- <ssh arguments…>`:
@@ -497,5 +471,81 @@ pub(crate) fn watchdog() {
         });
     if let Err(err) = spawned {
         eprintln!("bateri: watchdog thread not created ({err}), nothing cuts a hung teardown");
+    }
+}
+
+#[cfg(test)]
+mod subcommand_tests {
+    use super::ssh_argv_of;
+    use std::ffi::OsString;
+
+    fn call(words: &[&str]) -> Option<i32> {
+        ssh_argv_of(words.iter().map(OsString::from))
+    }
+
+    /// **The previous `ssh` function → this binary.** A shell started before an
+    /// update asks `ssh-argv` on every `ssh`, in the forms the scripts made it
+    /// (the flags optional, in this order: terminal bit, block, instance,
+    /// folder) — and gets the answer that is a plain `ssh`: the subcommand is
+    /// taken (`Some`, so `main` ends there and opens no window) with exit code
+    /// zero, and it has no way to print a wrapped argv. Another subcommand's
+    /// name is not taken.
+    #[test]
+    fn the_previous_functions_ssh_argv_calls_get_the_plain_ssh() {
+        for words in [
+            &[
+                "ssh-argv",
+                "--tty",
+                "--block",
+                "7",
+                "--instance",
+                "0a1b2c3d",
+                "--cwd",
+                "/srv/my app",
+                "--",
+                "-p",
+                "2222",
+                "prod",
+            ][..],
+            &[
+                "ssh-argv",
+                "--tty",
+                "--block",
+                "7",
+                "--instance",
+                "0a1b2c3d",
+                "--",
+                "prod",
+            ],
+            &["ssh-argv", "--tty", "--", "prod"],
+            &["ssh-argv", "--", "prod", "uptime"],
+            &["ssh-argv"],
+            &["ssh-argv", "--cwd", "/srv", "--block", "7", "--", "prod"],
+        ] {
+            assert_eq!(call(words), Some(0), "{words:?}");
+        }
+        for words in [
+            &[][..],
+            &["ssh-fell-back", "--rc", "1", "--", "prod"],
+            &["ssh-hold", "--", "prod"],
+            &["focus"],
+            &["ssh"],
+        ] {
+            assert_eq!(call(words), None, "{words:?}");
+        }
+    }
+
+    /// The subcommands that answer without a window are dispatched before the
+    /// unknown-subcommand rule and the window-server check, or the previous
+    /// function's `ssh` would start the GUI (or be refused with 64) from inside
+    /// a shell.
+    #[test]
+    fn the_subcommands_are_dispatched_before_the_unknown_subcommand_rule() {
+        let main = include_str!("../../bateri/src/main.rs");
+        let rule = main.find("is_unknown_subcommand(&arg)").expect("the rule");
+        for call in ["ssh_argv()", "ssh_fell_back()", "ssh_hold()"] {
+            let at = main.find(call).unwrap_or_else(|| panic!("{call}"));
+            assert!(at < rule, "{call} is dispatched before the rule");
+        }
     }
 }

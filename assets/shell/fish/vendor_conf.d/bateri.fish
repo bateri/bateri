@@ -21,7 +21,8 @@
 #                     contract below. `off` leaves the user's prompt in place
 #                     and adds the marks around it (the `"blocks"` setting).
 #   BATERI_BIN, BATERI_SSH_INSTANCE, BATERI_SSH_CWD
-#                     the `ssh` function's inputs, as in the zsh wrapper.
+#                     the `ssh` function's inputs, as in the zsh wrapper (the last one is no
+#                     input any more; it is only taken out of the environment).
 #
 # The three of them are ours, so they are taken out of the environment too
 # (children have no use for them).
@@ -44,10 +45,8 @@ end
 # them on.
 set -g __bateri_bin ""
 set -g __bateri_ssh_instance ""
-set -g __bateri_ssh_cwd ""
 set -q BATERI_BIN; and set __bateri_bin $BATERI_BIN
 set -q BATERI_SSH_INSTANCE; and set __bateri_ssh_instance $BATERI_SSH_INSTANCE
-set -q BATERI_SSH_CWD; and set __bateri_ssh_cwd $BATERI_SSH_CWD
 set -e BATERI_BIN BATERI_SSH_INSTANCE BATERI_SSH_CWD
 if test "$BATERI_DOCK" = off
     set -g __bateri_dock 0
@@ -297,10 +296,8 @@ end
 # without asking when it could not work: stdin and stdout must be terminals,
 # there is the binary and the directory of bateri's sockets, and no local
 # multiplexer. `BATERI_SSH_INSTANCE` is set for the one command only (`env`):
-# the shell erased it at startup. The folder of a tab opened from a remote one
-# is the pane's to pass on, not this function's; it is used up all the same.
+# the shell erased it at startup.
 function __bateri_ssh
-    set -g __bateri_ssh_cwd ""
     if set -q TMUX; or set -q STY; or not isatty stdin; or not isatty stdout
         command ssh $argv
         return

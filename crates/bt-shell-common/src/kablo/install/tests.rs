@@ -32,6 +32,8 @@ struct Home {
     damage: bool,
     /// What `uname` says instead of the machine's own.
     uname: Option<&'static str>,
+    /// Said before every script: a limit on the size of a file makes the write fail.
+    prefix: &'static str,
 }
 
 impl Home {
@@ -41,6 +43,7 @@ impl Home {
             calls: RefCell::new(Vec::new()),
             damage: false,
             uname: None,
+            prefix: "",
         }
     }
 
@@ -76,7 +79,7 @@ impl Channel for Home {
             *first ^= 1;
         }
         // The server's side: `sh -c <script>` in the home directory.
-        let command = format!("sh -c {}", sq(script));
+        let command = format!("sh -c {}", sq(&format!("{}{script}", self.prefix)));
         let reply = run_command(
             &[
                 "sh".into(),
@@ -207,7 +210,9 @@ fn the_first_connection_writes_kablo_and_the_next_finds_it() {
 fn a_binary_that_is_there_and_is_not_the_packages_is_left_alone() {
     let root = TempRoot::new("kablo-differs");
     let bundle = package(&root.0, "0.2.0", KABLO);
-    let home = Home::new(&root.0.join("home"));
+    let mut home = Home::new(&root.0.join("home"));
+    // A Linux binary is not signed: its sum is its identity.
+    home.uname = Some("Linux x86_64");
     let file = home.installed("0.2.0");
     std::fs::create_dir_all(file.parent().expect("dir")).expect("dir");
     std::fs::write(&file, "#!/bin/sh\necho \"version=0.2.0\"\necho other\n").expect("other");
@@ -219,6 +224,59 @@ fn a_binary_that_is_there_and_is_not_the_packages_is_left_alone() {
     );
     assert_eq!(std::fs::read(&file).expect("read"), before, "untouched");
     assert_eq!(home.uploads(), 0);
+}
+
+#[test]
+fn a_macos_binary_another_package_signed_is_the_same_kablo() {
+    // Two packages of one kablo release sign the macOS binary each its own way,
+    // so the sums differ though the file is the same kablo: the version it says
+    // is the identity there, or the server would be a plain `ssh` for good.
+    let root = TempRoot::new("kablo-resigned");
+    let bundle = package(&root.0, "0.2.0", KABLO);
+    let mut home = Home::new(&root.0.join("home"));
+    home.uname = Some("Darwin arm64");
+    let file = home.installed("0.2.0");
+    std::fs::create_dir_all(file.parent().expect("dir")).expect("dir");
+    std::fs::write(&file, format!("{KABLO}# another signature\n")).expect("other");
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    let found = ensure(&home, &bundle).expect("the same kablo");
+    assert!(!found.fresh);
+    assert_eq!(home.uploads(), 0, "left as it is");
+    // A file that names another version is not it, signed or not.
+    std::fs::write(&file, "#!/bin/sh\necho \"version=0.1.0\"\n").expect("older");
+    assert!(matches!(ensure(&home, &bundle), Err(Failure::Transient(_))));
+}
+
+#[test]
+fn a_file_that_cannot_run_is_replaced_and_a_write_that_fails_halfway_is_a_bad_moment() {
+    let root = TempRoot::new("kablo-halfway");
+    let bundle = package(&root.0, "0.2.0", KABLO);
+    // What an earlier, interrupted install left: the file is there and is not
+    // runnable, so the probe saw nothing and the upload writes over it.
+    let home = Home::new(&root.0.join("home-a"));
+    let file = home.installed("0.2.0");
+    std::fs::create_dir_all(file.parent().expect("dir")).expect("dir");
+    std::fs::write(&file, "half").expect("half");
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+    let installed = ensure(&home, &bundle).expect("written");
+    assert!(installed.fresh);
+    assert_eq!(std::fs::read(&file).expect("the file"), KABLO.as_bytes());
+    assert_eq!(
+        std::fs::metadata(&file).expect("meta").permissions().mode() & 0o111,
+        0o111
+    );
+    // A write that fails once the file is made (here: a limit on file size, as
+    // a full disk would) is not a server kablo cannot be kept on, and nothing
+    // is left of it.
+    let mut home = Home::new(&root.0.join("home-b"));
+    home.prefix = "ulimit -f 0; ";
+    std::fs::create_dir_all(&home.dir).expect("home");
+    assert!(matches!(ensure(&home, &bundle), Err(Failure::Transient(_))));
+    let left: Vec<_> = std::fs::read_dir(home.installed("0.2.0").parent().expect("dir"))
+        .expect("dir")
+        .map(|entry| entry.expect("entry").file_name())
+        .collect();
+    assert!(left.is_empty(), "{left:?}");
 }
 
 #[test]

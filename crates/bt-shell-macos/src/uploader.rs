@@ -135,7 +135,7 @@ impl TerminalPane {
         let Some(session) = self.session() else {
             return false;
         };
-        let Some((command, target, _)) = session.remote_target() else {
+        let Some((command, target, _)) = self.server_target() else {
             return false;
         };
         // OSC 7's directory, or the title's when the server sends none.
@@ -185,17 +185,21 @@ impl TerminalPane {
     }
 
     /// Whether a drop can be released on this pane - `draggingEntered:`'s
-    /// question: no while an upload sheet (probe included) is in progress.
+    /// question: no while an upload sheet (probe included) is in progress, and
+    /// no on a plain `ssh` ([`TerminalPane::server_target`]).
     pub(crate) fn accepts_drop(&self) -> bool {
-        self.uploads().borrow().can_accept() && self.upload_stop().borrow().is_none()
+        // A plain `ssh` takes no drop: nothing is uploaded (bateri does nothing
+        // on that server) and no local path is written to the remote shell.
+        !self.is_plain_ssh()
+            && self.uploads().borrow().can_accept()
+            && self.upload_stop().borrow().is_none()
     }
 
     /// The probe returned: the confirmation or error sheet.
     fn upload_asked(&self, asked: Asked) {
         // If the session ended in the meantime (ssh closed) there is nothing to ask.
         let alive = self
-            .session()
-            .and_then(|session| session.remote_target())
+            .server_target()
             .is_some_and(|(command, ..)| command == asked.command);
         // The sheet's seat is the pane's ([`sheets`]); if the pane was
         // detached from the window there is nowhere to ask either.
@@ -282,8 +286,7 @@ impl TerminalPane {
     /// silence.
     pub(crate) fn upload_confirmed(&self, confirmed: Confirmed) -> bool {
         let alive = self
-            .session()
-            .and_then(|session| session.remote_target())
+            .server_target()
             .is_some_and(|(command, ..)| command == confirmed.command);
         if !alive {
             return false;
@@ -314,7 +317,7 @@ impl TerminalPane {
             beep();
             return;
         };
-        let Some((command, target, _)) = session.remote_target() else {
+        let Some((command, target, _)) = self.server_target() else {
             beep();
             return;
         };
@@ -369,8 +372,7 @@ impl TerminalPane {
     /// sheet.
     fn download_prepared(&self, prepared: Prepared) {
         let alive = self
-            .session()
-            .and_then(|session| session.remote_target())
+            .server_target()
             .is_some_and(|(command, ..)| command == prepared.command);
         let Some(seat) = alive.then(|| sheets::seat(Asker::Pane(self))).flatten() else {
             self.uploads().borrow_mut().set_asking(false);
@@ -904,10 +906,7 @@ impl TerminalPane {
         let Some(command) = self.uploads().borrow().command() else {
             return;
         };
-        let current = self
-            .session()
-            .and_then(|session| session.remote_target())
-            .map(|(command, ..)| command);
+        let current = self.server_target().map(|(command, ..)| command);
         if current == Some(command) {
             return;
         }

@@ -14,15 +14,17 @@ fn main() -> ExitCode {
     if let Some(code) = bt_shell_macos::askpass() {
         return ExitCode::from(u8::try_from(code).unwrap_or(1));
     }
-    // The remote shell integration's decision: `bateri ssh-argv -- …`,
-    // asked by the local zsh's `ssh` function. Before the window-server check
-    // for the same reason as askpass: only the wrapped argv may reach standard
-    // output, and the caller may be any session.
+    // The previous `ssh` function's question: `bateri ssh-argv -- …`, asked
+    // by a shell started before an update, which has it. Answered with nothing
+    // (a plain `ssh`). Before the window-server check for the same reason as
+    // askpass: the caller may be any session, and nothing may reach standard
+    // output.
     if let Some(code) = bt_shell_macos::ssh_argv() {
         return ExitCode::from(u8::try_from(code).unwrap_or(1));
     }
-    // Its sibling: `bateri ssh-fell-back --rc N -- …`, asked after a
-    // wrapped `ssh` ended — the same function, the same wire, the same reason.
+    // Its sibling: `bateri ssh-fell-back --rc N -- …`, asked after an `ssh`
+    // that function wrapped before the update ended — the same function, the
+    // same wire, the same reason.
     if let Some(code) = bt_shell_macos::ssh_fell_back() {
         return ExitCode::from(u8::try_from(code).unwrap_or(1));
     }

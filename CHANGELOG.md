@@ -88,6 +88,24 @@ of every installed copy. A version without a section is not released.
   command ends, so a program that dies with it on cannot type size reports
   into your prompt.
 
+### Changed
+
+- **`ssh` is a terminal the server keeps or plain ssh, and plain ssh has nothing
+  of bateri's on the server.** What bateri did on a server — dropping a Finder
+  file on the pane to upload it, downloading and previewing a file, the load
+  indicator, the server's ports, ⌘ over a path to see whether it exists there,
+  Sign In… — it now does in a terminal on a server (an `ssh` to a server kablo is
+  on) and in no other. A plain `ssh` — `integration` off for the host, a
+  `production` host, a server kablo cannot be kept on (a router, a machine it is
+  not built for), a call that runs a command, mosh — is the ssh you know: no
+  command blocks and no remote dock line on the server, none of the above, and
+  bateri opens no connection of its own to the host. The dock and the tab still
+  say `⇄ host`, and a file dropped on such a pane is refused instead of its
+  path being typed into the server's shell. Shell ▸ Shell Integration on
+  “{host}” brings it all back for a host, from the next `ssh`. A shell that was
+  already running when bateri was updated has the previous `ssh` function, whose
+  next `ssh` is a plain one; a new shell (a new tab) has the new one.
+
 ### Fixed
 
 - **An app that draws its whole screen as one picture now fills the pane to

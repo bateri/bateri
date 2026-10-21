@@ -22,9 +22,11 @@
 //!   helper (the same `bateri` binary) and the application. The wire's single
 //!   owner is this module.
 //! - **The user's terminal session** ([`session_socket`]): a
-//!   wrapped interactive `ssh` is a master at `u-<key>` in this instance's
-//!   directory ([`crate::ssh_wrap`] adds the options) and a job rides it
-//!   ([`Route::Ours`]) before ours is opened. Its lifetime is the user's: a
+//!   wrapped interactive `ssh` was a master at `u-<key>` in this instance's
+//!   directory ([`crate::ssh_wrap`] added the options) and a job rides it
+//!   ([`Route::Ours`]) before ours is opened. Only the `ssh` of a shell started
+//!   before an update is wrapped now; the route still joins such a master while
+//!   it lives. (A terminal on a server has its own, [`socket_path`]'s.) Its lifetime is the user's: a
 //!   short [`SESSION_PERSIST`] detaches it (the user's `exit` does not wait for
 //!   our jobs) and ends it once the user's session and our jobs are gone —
 //!   bateri never sends it `-O exit`, so neither a session end nor ⌘Q can cut

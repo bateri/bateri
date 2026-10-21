@@ -49,7 +49,10 @@
 //! then the shell is started), and the pane is, to everything that reads the
 //! stream, a pane whose user typed `ssh`. When no terminal can be shown the
 //! plain `ssh` runs as a command of that block and the shell follows it; it is
-//! never `exec`ed, since nothing would be left to return to.
+//! never `exec`ed, since nothing would be left to return to. A Ctrl-C before the
+//! terminal is shown does not end it either (the pane would close with its first
+//! program): it gives up waiting ([`Config::cancel`]) and the shell follows, the
+//! block ending with the status 130 of an interrupted command.
 //!
 //! The socket's wire is [`wire`]; the arguments are [`USAGE`].
 
@@ -62,7 +65,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::time::Duration;
 
 use kablo_proto::SessionId;
@@ -216,6 +219,25 @@ fn parse(args: &[OsString]) -> Option<Parsed> {
     Some(parsed)
 }
 
+/// The `ssh` arguments a pipe's command line carries, read from the argument
+/// vector a process table shows (`args`: what follows the subcommand's word): the
+/// words after the options [`parse`] knows, with the same walk — an option's value
+/// is skipped whatever it is, so a value that reads like the `--` that ends the
+/// options is not taken for it. `None`: no arguments (a pipe that resumes a terminal
+/// it was shown has none) or a word that is not an option.
+pub fn ssh_args_in(args: &[String]) -> Option<&[String]> {
+    let mut at = 0;
+    while let Some(arg) = args.get(at) {
+        match arg.as_str() {
+            "--first" => at += 1,
+            "--shell-arg" | "--terminal" | "--account" | "--offset" => at += 2,
+            "--" => return Some(&args[at + 1..]),
+            _ => return None,
+        }
+    }
+    None
+}
+
 /// A name for a new terminal: `b-` and 128 random bits as hex. Made here, not
 /// by the application, so that asking again after a lost connection names the
 /// same terminal.
@@ -279,6 +301,7 @@ pub fn hold_main(args: &[OsString], env: &Env) -> Action {
         input: libc::STDIN_FILENO,
         output: libc::STDOUT_FILENO,
         backoff: BACKOFF.to_vec(),
+        cancel: parsed.first.then(catch_interrupts),
     };
     // A first program stands in for the command the shell never ran: the pane
     // reads its session from the marks of that command (module docs).
@@ -341,6 +364,11 @@ pub struct Config {
     pub output: RawFd,
     /// The pauses between attempts to reach bateri again.
     pub backoff: Vec<Duration>,
+    /// Set when the user gave up waiting for the terminal (Ctrl-C before it is shown): the
+    /// pipe stops asking and ends. Only the pane's first program has one — it is the whole
+    /// pane, and a Ctrl-C that killed it would close the pane — while a typed `ssh`'s
+    /// pipe is killed by the signal as `ssh` would be.
+    pub cancel: Option<&'static AtomicBool>,
 }
 
 /// What the pipe keeps between connections: the name of the server's account
@@ -487,6 +515,16 @@ fn serve(
     let mut buffer = vec![0u8; CHUNK];
     let mut welcomed = false;
     loop {
+        if cancelled(config, raw) {
+            // The user gave up: what was asked of bateri is let go of with the
+            // connection, and the pane gets its shell with the status of an
+            // interrupted command.
+            return Served::Done(Finish::quiet(if config.first {
+                Outcome::Shell(STATUS_INTERRUPTED)
+            } else {
+                Outcome::Exit(i32::from(STATUS_INTERRUPTED))
+            }));
+        }
         let mut fds = [
             poll_in(stream.as_raw_fd()),
             poll_in(winch.map_or(-1, |winch| winch.read)),
@@ -497,7 +535,14 @@ fn serve(
                 -1
             }),
         ];
-        if poll(&mut fds, -1).is_err() {
+        // A signal wakes the wait by itself; while the user can still cancel, it
+        // is also looked at now and then (the flag is a plain one).
+        let patience = if config.cancel.is_some() && raw.is_none() {
+            CANCEL_LOOK
+        } else {
+            -1
+        };
+        if poll(&mut fds, patience).is_err() {
             return lost(welcomed);
         }
         if ready(&fds[1]) {
@@ -587,6 +632,48 @@ fn serve(
             }
         }
     }
+}
+
+/// The status of a command the user interrupted, as a shell reads it.
+const STATUS_INTERRUPTED: u8 = 130;
+
+/// How often, in milliseconds, the wait for the terminal looks at [`Config::cancel`].
+const CANCEL_LOOK: i32 = 250;
+
+/// Whether the user gave up before the terminal was shown. Once the pipe has the
+/// terminal raw an interrupt is the terminal's own byte (`^C` goes to the
+/// server), so a flag set by a stray signal then means nothing and is cleared.
+fn cancelled(config: &Config, raw: &Option<Raw>) -> bool {
+    let Some(flag) = config.cancel else {
+        return false;
+    };
+    flag.swap(false, Ordering::AcqRel) && raw.is_none()
+}
+
+/// Set by `SIGINT`'s handler.
+static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn on_interrupt(_: libc::c_int) {
+    INTERRUPTED.store(true, Ordering::Release);
+}
+
+/// Has `SIGINT` set [`INTERRUPTED`] instead of ending the process, and gives the
+/// flag. The handler is not restarted, so a wait is woken by it; a program run
+/// for bateri (the `ssh` that makes the connection) gets the default again at
+/// its `exec`, and the signal reaches it as it reaches this process: both are in
+/// the terminal's foreground group.
+fn catch_interrupts() -> &'static AtomicBool {
+    // SAFETY: the handler is an `extern "C"` function that only stores to an
+    // atomic; `sigaction` is given a zeroed struct with the fields set.
+    unsafe {
+        let mut action: libc::sigaction = std::mem::zeroed();
+        let handler: extern "C" fn(libc::c_int) = on_interrupt;
+        action.sa_sigaction = handler as usize;
+        action.sa_flags = 0;
+        libc::sigemptyset(&mut action.sa_mask);
+        libc::sigaction(libc::SIGINT, &action, std::ptr::null_mut());
+    }
+    &INTERRUPTED
 }
 
 /// The terminal raw, if it is not already (and is one).

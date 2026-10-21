@@ -362,7 +362,7 @@ pub(crate) fn begin_drag(view: &BateriView, event: &NSEvent, remote: String, ent
     let Some(pane) = view.pane() else {
         return;
     };
-    let Some((command, ..)) = pane.session().and_then(|session| session.remote_target()) else {
+    let Some((command, ..)) = pane.server_target() else {
         return;
     };
     let Some(name) = remote_files::split_remote(&remote).map(|(_, name)| name.to_owned()) else {
@@ -447,8 +447,7 @@ impl TerminalPane {
             asked
         };
         drop(asked);
-        let Some((now, target, _)) = self.session().and_then(|session| session.remote_target())
-        else {
+        let Some((now, target, _)) = self.server_target() else {
             promised.finish(Err("The remote session ended.".into()));
             return;
         };

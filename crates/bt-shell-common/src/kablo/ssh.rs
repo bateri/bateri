@@ -47,6 +47,10 @@ pub type PaneLookup = Box<dyn Fn(&Peer) -> Option<PaneInfo> + Send + Sync>;
 /// came back ([`Backend::link_changed`]).
 pub type LinkNews = Box<dyn Fn(&PaneUuid, PaneLink) + Send + Sync>;
 
+/// What the application does with the news that a pane shows a terminal a
+/// server keeps from now on, or no longer ([`Backend::terminal_changed`]).
+pub type ChangeNews = Box<dyn Fn(&PaneUuid) + Send + Sync>;
+
 /// What the service gets from the application, as closures and values.
 pub struct SshBackend {
     /// The ssh program (`ssh`).
@@ -74,6 +78,9 @@ pub struct SshBackend {
     /// A pane's terminal lost the connection or got it back
     /// ([`Backend::link_changed`]).
     pub linked: LinkNews,
+    /// A pane began to show a terminal a server keeps, or stopped
+    /// ([`Backend::terminal_changed`]).
+    pub changed: ChangeNews,
 }
 
 impl SshBackend {
@@ -281,6 +288,10 @@ impl Backend for SshBackend {
 
     fn history(&self) -> Option<u32> {
         (self.history)()
+    }
+
+    fn terminal_changed(&self, pane: &PaneUuid) {
+        (self.changed)(pane);
     }
 
     fn link_changed(&self, pane: &PaneUuid, link: PaneLink) {

@@ -140,14 +140,14 @@ fi
 if (( ! ${+__bateri_bin} )); then
   __bateri_bin=${BATERI_BIN-}
   unset BATERI_BIN
-  # The running bateri's ssh instance directory: a wrapped
-  # session becomes a master there. Same rule: ours, out of the environment.
+  # The running bateri's ssh instance directory: `bateri ssh-hold` finds the
+  # running bateri's socket there. Same rule: ours, out of the environment.
   __bateri_ssh_instance=${BATERI_SSH_INSTANCE-}
   unset BATERI_SSH_INSTANCE
-  # The remote folder a tab opened by ⌘T from a remote tab starts in: its
-  # first `ssh` takes it (`__bateri_ssh`), once. Same rule: ours, out of the
-  # environment.
-  __bateri_ssh_cwd=${BATERI_SSH_CWD-}
+  # A bateri before this one handed the remote folder of a tab opened by ⌘T
+  # from a remote tab down in this variable; nothing reads it any more
+  # (the new terminal asks the running bateri for the folder). Out of the
+  # environment all the same.
   unset BATERI_SSH_CWD
 fi
 
@@ -310,9 +310,6 @@ __bateri_hooks() {
 # here do not carry it.
 __bateri_ssh() {
   emulate -L zsh
-  # The folder a tab opened by ⌘T from a remote tab inherits is the pane's, not
-  # this function's to pass on; it is used up all the same, once.
-  __bateri_ssh_cwd=
   if [[ -n ${TMUX-} || -n ${STY-} || ! -t 0 || ! -t 1 \
         || ! -x $__bateri_bin || -z $__bateri_ssh_instance ]]; then
     command ssh "$@"

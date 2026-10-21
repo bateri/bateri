@@ -253,7 +253,11 @@ pub fn ensure(channel: &dyn Channel, bundle: &Bundle) -> Result<Installed, Failu
     let probe = channel
         .run(&probe_script(bundle.version()), &[])
         .map_err(|error| Failure::transient(format!("looking for kablo: {error}")))?;
-    match look(&probe, &artifact.sha256, bundle.version()) {
+    // A macOS binary is code-signed when the package is made, and a signature
+    // is part of the file: two packages of the same kablo have two sums. What
+    // such a file says its version is has to do.
+    let resigned = matches!(target, Target::MacosAarch64 | Target::MacosX86_64);
+    match look(&probe, &artifact.sha256, bundle.version(), resigned) {
         Look::Absent => {}
         Look::Matches => return Ok(installed),
         Look::Differs => {
@@ -279,6 +283,7 @@ pub fn ensure(channel: &dyn Channel, bundle: &Bundle) -> Result<Installed, Failu
         Some(EXIT_UNWRITABLE) => Err(Failure::Impossible(Why::Unwritable)),
         Some(EXIT_WONT_RUN) => Err(Failure::Impossible(Why::WontRun)),
         Some(EXIT_DAMAGED) => Err(Failure::transient("kablo arrived damaged")),
+        Some(EXIT_INCOMPLETE) => Err(Failure::transient("kablo could not be written in full")),
         other => Err(Failure::transient(format!(
             "writing kablo ended with {other:?}: {}",
             reply.err.trim()
@@ -313,6 +318,9 @@ fn server_target(channel: &dyn Channel) -> Result<Target, Failure> {
 
 /// The exit statuses of [`upload_script`].
 const EXIT_DAMAGED: i32 = 7;
+/// The file could be made but not filled or made runnable (a disk that filled
+/// up, a pipe that broke): a bad moment, not a server that cannot keep kablo.
+const EXIT_INCOMPLETE: i32 = 8;
 const EXIT_UNWRITABLE: i32 = 9;
 const EXIT_WONT_RUN: i32 = 10;
 
@@ -334,10 +342,19 @@ enum Look {
     Differs,
 }
 
-fn look(reply: &Reply, sha256: &str, version: &str) -> Look {
+/// `resigned`: the file's sum says nothing against it when it names the
+/// package's version (it may be the same kablo, signed by another package).
+fn look(reply: &Reply, sha256: &str, version: &str, resigned: bool) -> Look {
     if reply.status != Some(0) || !reply.out.lines().any(|line| line.trim() == "present") {
         return Look::Absent;
     }
+    let says = format!("version={version}");
+    let named = || {
+        reply
+            .out
+            .lines()
+            .any(|line| line.split_whitespace().any(|word| word == says))
+    };
     let sum = reply.out.lines().find_map(|line| {
         let first = line.split_whitespace().next()?;
         (first.len() == 64 && first.bytes().all(|b| b.is_ascii_hexdigit()))
@@ -345,16 +362,11 @@ fn look(reply: &Reply, sha256: &str, version: &str) -> Look {
     });
     match sum {
         Some(sum) if sum == sha256 => Look::Matches,
+        Some(_) if resigned && named() => Look::Matches,
         Some(_) => Look::Differs,
         // The server has no tool to sum with: the file's own word has to do.
-        None => {
-            let says = format!("version={version}");
-            let named = reply
-                .out
-                .lines()
-                .any(|line| line.split_whitespace().any(|word| word == says));
-            if named { Look::Matches } else { Look::Differs }
-        }
+        None if named() => Look::Matches,
+        None => Look::Differs,
     }
 }
 
@@ -362,16 +374,19 @@ fn look(reply: &Reply, sha256: &str, version: &str) -> Look {
 /// the version: beside it under a name of its own, made runnable, checked
 /// against the sum (when the server has a tool to sum with), run once to see
 /// that it runs there, and only then renamed into place — and not over a file
-/// that came to be meanwhile. The exit statuses say what went wrong:
-/// [`EXIT_UNWRITABLE`], [`EXIT_DAMAGED`], [`EXIT_WONT_RUN`].
+/// that runs, which came to be meanwhile ([`probe_script`] looks for the same:
+/// a file that cannot run is replaced). The exit statuses say what went wrong:
+/// [`EXIT_UNWRITABLE`] (the directory or the file cannot be made),
+/// [`EXIT_INCOMPLETE`], [`EXIT_DAMAGED`], [`EXIT_WONT_RUN`].
 pub fn upload_script(version: &str, sha256: &str) -> String {
     format!(
         "d=.local/share/kablo/{version}; f=$d/kablo; t=$d/.new-$$; \
-         mkdir -p $d && cat >$t && chmod 755 $t || {{ rm -f $t; exit {EXIT_UNWRITABLE}; }}; \
+         mkdir -p $d && : >$t || {{ rm -f $t; exit {EXIT_UNWRITABLE}; }}; \
+         cat >$t && chmod 755 $t || {{ rm -f $t; exit {EXIT_INCOMPLETE}; }}; \
          s=$(sha256sum $t 2>/dev/null || shasum -a 256 $t 2>/dev/null); \
          case $s in {sha256}*) ;; ?*) rm -f $t; exit {EXIT_DAMAGED};; esac; \
          $t version >/dev/null 2>&1 || {{ rm -f $t; exit {EXIT_WONT_RUN}; }}; \
-         if [ -e $f ]; then rm -f $t; else mv $t $f || {{ rm -f $t; exit {EXIT_UNWRITABLE}; }}; fi"
+         if [ -x $f ]; then rm -f $t; else mv $t $f || {{ rm -f $t; exit {EXIT_UNWRITABLE}; }}; fi"
     )
 }
 

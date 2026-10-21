@@ -252,8 +252,7 @@ impl TerminalPane {
     /// The ⌘-click (or "Open Preview") on the remote file `remote`: asks
     /// the helper what it is now, then [`TerminalPane::preview_decided`].
     pub(crate) fn preview_remote(&self, remote: String) {
-        let Some((command, target, _)) = self.session().and_then(|session| session.remote_target())
-        else {
+        let Some((command, target, _)) = self.server_target() else {
             beep();
             return;
         };
@@ -326,8 +325,7 @@ impl TerminalPane {
     /// error sheet.
     fn preview_decided(&self, asked: Asked) {
         let alive = self
-            .session()
-            .and_then(|session| session.remote_target())
+            .server_target()
             .is_some_and(|(command, ..)| command == asked.command);
         if !alive {
             beep();

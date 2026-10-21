@@ -289,8 +289,7 @@ impl TerminalPane {
             .cloned()
             .collect();
         let host = self
-            .session()
-            .and_then(|session| session.remote_target())
+            .server_target()
             // The host without `user@`: `db1:8080` reads as an address,
             // `root@db1:8080` as an scp path.
             .map(|(_, target, _)| bt_core::bare_host(&target.host).to_owned())

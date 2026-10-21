@@ -1730,7 +1730,10 @@ define_class!(
         /// written to the input line; **in a remote session** a local path is
         /// not written to the remote shell - the drop is uploaded to the remote
         /// directory (the confirmation sheet and the queue are in
-        /// `crate::uploader`) and no path is pasted on its own.
+        /// `crate::uploader`) and no path is pasted on its own. **On a plain
+        /// `ssh`** (not a terminal a server keeps, [`TerminalPane::server_target`])
+        /// the drop is refused: bateri does nothing on that server, and the local
+        /// path is no more written to its shell.
         ///
         /// The output is [`Session::paste`] - **not** `session.write`: the
         /// bracketed paste wrapping and the dock exception come free from there.

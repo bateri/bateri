@@ -22,7 +22,8 @@
 #                    prompt is the user's, with the marks around it. Absent: the terminal draws
 #                    the prompt and shows the line in its dock (`__bateri_prompt`).
 #   BATERI_BIN, BATERI_SSH_INSTANCE, BATERI_SSH_CWD
-#                    the `ssh` function's inputs, as in the zsh wrapper.
+#                    the `ssh` function's inputs, as in the zsh wrapper (the last one is no
+#                    input any more; it is only taken out of the environment).
 # The last four are ours, so they are taken out of the environment too (children have no use
 # for them).
 
@@ -38,7 +39,6 @@ fi
 # Read once, before the user's files can see them.
 __bateri_bin=${BATERI_BIN-}
 __bateri_ssh_instance=${BATERI_SSH_INSTANCE-}
-__bateri_ssh_cwd=${BATERI_SSH_CWD-}
 if [ "${BATERI_DOCK-}" = off ]; then
   __bateri_dock=0
 else
@@ -390,10 +390,8 @@ fi
 # `ssh` with the arguments as typed. Plain without asking when it could not work: stdin and stdout
 # must be terminals, there is the binary and the directory of bateri's sockets, and no local
 # multiplexer (`$TMUX`, `$STY`). `BATERI_SSH_INSTANCE` is exported for the one command only: the
-# shell unset it at startup. The folder of a tab opened from a remote one is the pane's to pass on,
-# not this function's; it is used up all the same, once.
+# shell unset it at startup.
 __bateri_ssh() {
-  __bateri_ssh_cwd=
   if [[ -n ${TMUX-} || -n ${STY-} || ! -t 0 || ! -t 1 \
         || ! -x $__bateri_bin || -z $__bateri_ssh_instance ]]; then
     command ssh "$@"

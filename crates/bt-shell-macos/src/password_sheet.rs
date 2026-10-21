@@ -258,7 +258,7 @@ impl TerminalPane {
         let Some(session) = self.session() else {
             return;
         };
-        let current = session.remote_target().map(|(now, ..)| now);
+        let current = self.server_target().map(|(now, ..)| now);
         if current != Some(command) || session.sign_in().is_some() {
             return;
         }
@@ -316,10 +316,7 @@ impl TerminalPane {
     /// cancel says nothing more; a failure (ssh's reason, an unknown host key)
     /// is a sheet.
     pub(crate) fn sign_in(&self) {
-        let (Some(masters), Some((_, target, _))) = (
-            self.masters(),
-            self.session().and_then(|session| session.remote_target()),
-        ) else {
+        let (Some(masters), Some((_, target, _))) = (self.masters(), self.server_target()) else {
             return;
         };
         let asker = self.password_asker(target.host.clone(), Job::SignIn, false);
@@ -358,10 +355,7 @@ impl TerminalPane {
         let Some(shown) = self.host().kept_terminal(self.uuid()) else {
             return;
         };
-        let (Some(masters), Some((_, target, _))) = (
-            self.masters(),
-            self.session().and_then(|session| session.remote_target()),
-        ) else {
+        let (Some(masters), Some((_, target, _))) = (self.masters(), self.server_target()) else {
             return;
         };
         let gate = self.host().kept_login();
@@ -413,10 +407,7 @@ impl TerminalPane {
     /// main thread starts no `ssh -G` — so it is grey until the first remote
     /// job; the Keychain is asked attributes only (no consent prompt).
     pub(crate) fn can_forget_password(&self) -> bool {
-        let (Some(masters), Some((_, target, _))) = (
-            self.masters(),
-            self.session().and_then(|session| session.remote_target()),
-        ) else {
+        let (Some(masters), Some((_, target, _))) = (self.masters(), self.server_target()) else {
             return false;
         };
         masters.has_saved(&target)
@@ -427,10 +418,7 @@ impl TerminalPane {
     /// next background job asks the gate afresh and finds no login — the
     /// status bar's Sign In….
     pub(crate) fn forget_password(&self) {
-        let (Some(masters), Some((_, target, _))) = (
-            self.masters(),
-            self.session().and_then(|session| session.remote_target()),
-        ) else {
+        let (Some(masters), Some((_, target, _))) = (self.masters(), self.server_target()) else {
             return;
         };
         let (id, lookup) = (self.id(), self.lookup());

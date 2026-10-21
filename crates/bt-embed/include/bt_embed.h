@@ -184,7 +184,8 @@ BtPaneConfig *bt_pane_config_new(uint64_t id, const char *app_name);
 void bt_pane_config_free(BtPaneConfig *config);
 
 /* The program that answers the shell integration's helper calls (bateri's
- * executable). NULL or empty: none. */
+ * executable). NULL or empty: none. An embedded pane's `ssh` is a plain ssh
+ * either way: a terminal a server keeps needs the bateri application. */
 bool bt_pane_config_set_helper(BtPaneConfig *config, const char *path);
 /* The shell integration's zsh scripts (bateri's Resources/shell/zsh). NULL or
  * empty: no integration — a plain terminal, without the dock and the command

@@ -203,7 +203,7 @@ impl TerminalPane {
             return;
         };
         let theme = session.theme();
-        let host = session.remote_target().map(|(_, target, _)| target.host);
+        let host = self.server_target().map(|(_, target, _)| target.host);
         let driver = self.stats_driver().borrow();
         fill(&open.rows, host.as_deref(), driver.detail(), &theme);
     }

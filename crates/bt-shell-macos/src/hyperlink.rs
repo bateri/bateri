@@ -735,7 +735,8 @@ impl BateriView {
             // Before the user's ssh has logged in nothing is asked:
             // the check would connect in the background. No link, nothing
             // remembered as missing — the next hover after the login asks.
-            if session.remote_target().is_none() || crate::jobs::remote_login(session).is_none() {
+            let served = self.pane().and_then(|pane| pane.server_target());
+            if served.is_none() || crate::jobs::remote_login(session).is_none() {
                 Check::Gone
             } else if remote_helper::cwd_unknown(&candidates, &session.remote_link_directory()) {
                 Check::CwdUnknown
@@ -764,7 +765,7 @@ impl BateriView {
         let (Some(pane), Some(session)) = (self.pane(), self.session()) else {
             return;
         };
-        let Some((command, target, _)) = session.remote_target() else {
+        let Some((command, target, _)) = pane.server_target() else {
             return;
         };
         let cwd = session.remote_link_directory();
@@ -804,8 +805,8 @@ impl BateriView {
         then: Then,
     ) {
         let current = self
-            .session()
-            .and_then(|session| session.remote_target())
+            .pane()
+            .and_then(|pane| pane.server_target())
             .is_some_and(|(now, ..)| now == command);
         let (found, note) = match found {
             Ok(found) if current => {
@@ -1286,8 +1287,8 @@ impl BateriView {
     pub(crate) fn menu_copy_scp_path(&self) {
         let link = self.link_state().borrow_mut().menu.take();
         let target = self
-            .session()
-            .and_then(|session| session.remote_target())
+            .pane()
+            .and_then(|pane| pane.server_target())
             .map(|(_, target, _)| target);
         let text = match (link.and_then(|link| link.remote), target) {
             (Some((path, _)), Some(target)) => Some(remote_files::scp_path(&target, &path)),

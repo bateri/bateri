@@ -5234,7 +5234,17 @@ pub const FIRST_BLOCK: u32 = 0;
 /// What a command leaves on that its shell turns off once it is over (the
 /// wrapper scripts print the same after `D`): mouse reports, focus reports, size
 /// reports and the kitty keyboard forms.
-const LEFT_ON_BY_A_COMMAND: &[u8] = b"\x1b[?1000;1002;1003;1004;1005;1006;1016;2048l\x1b[<4096u";
+const LEFT_ON_MODES: &str = "1000;1002;1003;1004;1005;1006;1016;2048";
+
+/// The bytes that turn [`LEFT_ON_MODES`] off and empty the kitty keyboard stack
+/// (the depth is the one `reset` pops by).
+fn left_on_by_a_command() -> Vec<u8> {
+    format!(
+        "\x1b[?{LEFT_ON_MODES}l\x1b[<{}u",
+        crate::reset::KEYBOARD_STACK_DEPTH
+    )
+    .into_bytes()
+}
 
 /// The marks of a first program that begins: the prompt of [`FIRST_BLOCK`], the
 /// command running (`C`) and the title pushed as a shell pushes it as a command
@@ -5251,7 +5261,7 @@ pub fn first_command_begun() -> Vec<u8> {
 pub fn first_command_ended(code: u8) -> Vec<u8> {
     let mut bytes = b"\x1b[23t".to_vec();
     bytes.extend_from_slice(format!("\x1b]133;D;{code};bt_block={FIRST_BLOCK}\x07").as_bytes());
-    bytes.extend_from_slice(LEFT_ON_BY_A_COMMAND);
+    bytes.extend_from_slice(&left_on_by_a_command());
     bytes
 }
 
@@ -11417,6 +11427,50 @@ mod tests {
             outcome.status |= one.status;
         });
         outcome
+    }
+
+    /// The modes a command leaves on and the shell turns off after it are named in
+    /// seven places: this one, the five scripts that print them after `D` and the
+    /// reset of a picture. A mode added to one and not to the others is left on
+    /// by a command that dies without its exit path, with nothing failing.
+    #[test]
+    fn what_a_command_leaves_on_is_turned_off_the_same_way_everywhere() {
+        let modes = format!("?{LEFT_ON_MODES}l");
+        let pop = format!("<{}u", crate::reset::KEYBOARD_STACK_DEPTH);
+        for (name, script) in [
+            ("zsh", include_str!("../../../assets/shell/zsh/bateri.zsh")),
+            (
+                "bash",
+                include_str!("../../../assets/shell/bash/bateri.bash"),
+            ),
+            (
+                "fish",
+                include_str!("../../../assets/shell/fish/vendor_conf.d/bateri.fish"),
+            ),
+            (
+                "remote zsh",
+                include_str!("../../../assets/shell/remote/zsh/bateri.zsh"),
+            ),
+            (
+                "remote bash",
+                include_str!("../../../assets/shell/remote/bash/bateri.bash"),
+            ),
+            (
+                "remote fish",
+                include_str!("../../../assets/shell/remote/fish/vendor_conf.d/bateri.fish"),
+            ),
+        ] {
+            assert!(script.contains(&modes), "{name}: the modes");
+            assert!(script.contains(&pop), "{name}: the keyboard stack");
+        }
+        let ended = String::from_utf8(first_command_ended(0)).expect("text");
+        assert!(ended.contains(&modes) && ended.contains(&pop));
+        // The reset of a picture turns each of them off too.
+        let reset = String::from_utf8(crate::reset::keeping_history(80)).expect("text");
+        for mode in LEFT_ON_MODES.split(';') {
+            assert!(reset.contains(&format!("?{mode}l")), "reset: {mode}");
+        }
+        assert!(reset.contains(&pop));
     }
 
     #[test]

@@ -38,7 +38,7 @@ use std::fmt::Write;
 
 /// How deep the kitty keyboard stack can get (alacritty's
 /// `KEYBOARD_MODE_STACK_MAX_DEPTH`): a pop of this many empties any stack.
-const KEYBOARD_STACK_DEPTH: u16 = 4096;
+pub(crate) const KEYBOARD_STACK_DEPTH: u16 = 4096;
 
 /// The tab stop spacing of a new terminal (alacritty's `INITIAL_TABSTOPS`).
 const TAB_STOP_EVERY: u16 = 8;

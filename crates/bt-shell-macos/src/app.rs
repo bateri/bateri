@@ -4560,14 +4560,12 @@ impl AppDelegate {
         let id = self.next_id();
         // A pane that shows a terminal a server keeps: the new pane's first program is
         // the same `ssh`, and the terminal it asks for starts in the same folder there.
+        let served = from.and_then(TerminalPane::server_target);
         let held = held_start(
             opening,
             start,
-            from.is_some_and(|from| crate::hold_service::shown(from.uuid()).is_some()),
-            session
-                .and_then(|session| session.remote_target())
-                .map(|(_, target, _)| target)
-                .as_ref(),
+            served.is_some(),
+            served.as_ref().map(|(_, target, _)| target),
             &integration.env,
         );
         let initial = if held.is_some() {

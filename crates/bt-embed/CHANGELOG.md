@@ -57,6 +57,18 @@ commit. Pushing is a separate step.
   as the text, would launch or run it. bateri judges and opens the target
   itself, and a handler that leaves the link to the pane gets that.
 
+### Changed
+
+- A pane in a remote `ssh` session is a plain `ssh` as far as bateri's work on
+  the server goes: `BT_EVENT_PORTS` carries no server ports, `BT_EVENT_OPEN_LINK`
+  does not name a path that exists on the server (the ⌘ check needs a
+  connection of bateri's own), and a Finder drop on the pane is refused —
+  those work in a terminal a server keeps, which only the bateri application
+  has. `bt_pane_remote_host`, `bt_pane_remote_directory` and the `ssh` session's
+  dock line are unchanged. `bt_pane_config_set_helper` no longer makes an
+  embedded pane's `ssh` a wrapped one (the subcommands it names answer a plain
+  `ssh`); the function stays and does nothing a plain `ssh` does not.
+
 ## [0.1.0] - 2026-10-11
 
 ### Added

@@ -3131,6 +3131,39 @@ impl TerminalPane {
         self.host().kept_terminal(self.uuid()).is_some()
     }
 
+    /// The remote session bateri does things on a server for, if the pane has
+    /// one: [`Session::remote_target`] (the running command's generation, the
+    /// server, the folder it reported) **when the pane shows a terminal that
+    /// server keeps** ([`Shown::serves`]). `None` for a local pane and for a plain
+    /// `ssh` — an `ssh` the integration is off for, a `production` host, a
+    /// server kablo cannot be kept on, a call that runs a command — which gets
+    /// nothing of bateri's on the server: no file drop or download, no preview,
+    /// no load indicator, no ports, no ⌘ check of a path, no Sign In…, and no
+    /// connection of bateri's own to the host.
+    ///
+    /// **The one gate.** Every add-on that works on a server starts from this and
+    /// not from `remote_target` (which says only that an `ssh` is running, and
+    /// is for what the pane *shows*: the line under it, the tab's mark). The
+    /// pane learns it is a server pane when the terminal appears
+    /// ([`Self::remote_edge`] is run again by `hold_service`), so whichever of the
+    /// process-table probe and the terminal comes second still opens the gate.
+    pub(crate) fn server_target(&self) -> Option<(u64, RemoteTarget, String)> {
+        let target = self.session()?.remote_target()?;
+        let shown = self.host().kept_terminal(self.uuid())?;
+        shown.serves(&target.1).then_some(target)
+    }
+
+    /// Whether the pane is in a remote session that is a plain `ssh`: an `ssh`
+    /// runs and the pane is not a server pane ([`Self::server_target`]). What
+    /// the pane *does* with a thing the user hands it (a Finder drop) differs
+    /// from a local pane's: a local path means nothing to the remote shell, so
+    /// nothing is written to it either.
+    pub(crate) fn is_plain_ssh(&self) -> bool {
+        self.session()
+            .is_some_and(|session| session.remote_target().is_some())
+            && self.server_target().is_none()
+    }
+
     /// Owner of the events ([`PaneHost`]).
     pub(crate) fn host(&self) -> &dyn PaneHost {
         &*self.ivars().host
@@ -5385,13 +5418,6 @@ impl TerminalPane {
     pub(crate) fn remote_or_title_changed(&self) {
         self.remote_edge();
         self.apply_connection();
-        // The remote session ended: its helper ssh is not held open until idle.
-        if self
-            .session()
-            .is_some_and(|session| session.remote_target().is_none())
-        {
-            self.remote_helper().borrow_mut().close();
-        }
         // The remote edge moves the alternate screen's share too (a remote vim
         // keeps the status bar); a no-op unless the answer changed.
         self.alt_screen_did_change();
@@ -5406,6 +5432,11 @@ impl TerminalPane {
         self.check_upload_connection();
         self.sync_ssh_session();
         self.sync_stats_generation();
+        // The server session ended, or the pane is not a server pane any more: its
+        // helper ssh is not held open until idle.
+        if self.server_target().is_none() {
+            self.remote_helper().borrow_mut().close();
+        }
     }
 
     /// The remote edge's half for the masters: an ended
@@ -5414,7 +5445,7 @@ impl TerminalPane {
     /// while the user's ssh still asks (a host key, a password), the login
     /// probe is armed.
     fn sync_ssh_session(&self) {
-        let current = self.session().and_then(|session| session.remote_target());
+        let current = self.server_target();
         let previous = self.ivars().ssh_session.get();
         if previous == current.as_ref().map(|(command, ..)| *command) {
             return;
@@ -5450,7 +5481,7 @@ impl TerminalPane {
         let Some(session) = self.session() else {
             return false;
         };
-        let Some((command, ..)) = session.remote_target() else {
+        let Some((command, ..)) = self.server_target() else {
             return false;
         };
         if jobs::remote_login(session) == Some(command) {
@@ -6177,6 +6208,108 @@ mod tests {
         assert!(body("    fn command_started(&self) {").contains("self.remember_soon()"));
         assert!(body("    fn remote_command_edge(&self) {").contains("self.remember_soon()"));
         assert!(body("    fn remember_soon(&self) {").contains("pane.remember_commands()"));
+    }
+
+    /// The add-ons that work on a server are offered in a pane that shows a terminal a server
+    /// keeps and in no other, and the rule is one predicate, `server_target`: an add-on that
+    /// starts from `remote_target` (which only says an `ssh` is running) would be offered on a
+    /// plain `ssh` and open a connection of bateri's own to the host, and nothing else would say
+    /// so. A source scan, because the panes need a window server.
+    #[test]
+    fn every_add_on_on_a_server_asks_the_one_gate() {
+        let add_ons = [
+            ("uploader.rs", include_str!("uploader.rs")),
+            ("preview.rs", include_str!("preview.rs")),
+            ("promise.rs", include_str!("promise.rs")),
+            ("stats.rs", include_str!("stats.rs")),
+            ("stats_popover.rs", include_str!("stats_popover.rs")),
+            ("hyperlink.rs", include_str!("hyperlink.rs")),
+            ("remote_ports.rs", include_str!("remote_ports.rs")),
+            ("footer.rs", include_str!("footer.rs")),
+            ("password_sheet.rs", include_str!("password_sheet.rs")),
+        ];
+        for (name, source) in add_ons {
+            let code = &source[..source.find("#[cfg(test)]").unwrap_or(source.len())];
+            assert!(
+                !code.contains("remote_target()"),
+                "{name}: an add-on asks `server_target`, not `remote_target`"
+            );
+            assert!(code.contains("server_target()"), "{name} asks the gate");
+        }
+        // The entries each add-on is started from, one by one.
+        let entry = |source: &str, signature: &str| {
+            let at = source
+                .find(signature)
+                .unwrap_or_else(|| panic!("{signature}"));
+            let rest = &source[at..];
+            let end = rest.find("\n    }\n").expect("its end");
+            rest[..end].to_owned()
+        };
+        let uploader = include_str!("uploader.rs");
+        for signature in [
+            "pub(crate) fn upload_drop(",
+            "pub(crate) fn download_remote(",
+            "pub(crate) fn check_upload_connection(",
+        ] {
+            assert!(
+                entry(uploader, signature).contains("server_target()"),
+                "{signature}"
+            );
+        }
+        assert!(entry(uploader, "pub(crate) fn accepts_drop(").contains("is_plain_ssh()"));
+        assert!(
+            entry(include_str!("preview.rs"), "fn preview_remote(").contains("server_target()")
+        );
+        assert!(
+            entry(
+                include_str!("stats.rs"),
+                "pub(crate) fn sync_stats_generation("
+            )
+            .contains("server_target()")
+        );
+        assert!(
+            entry(
+                include_str!("remote_ports.rs"),
+                "pub(crate) fn request_remote_ports("
+            )
+            .contains("server_target()")
+        );
+        let hyperlink = include_str!("hyperlink.rs");
+        for signature in ["fn check(&self, hit: &LinkHit)", "fn verify_remote("] {
+            assert!(
+                entry(hyperlink, signature).contains("server_target()"),
+                "{signature}"
+            );
+        }
+        let sheet = include_str!("password_sheet.rs");
+        for signature in [
+            "pub(crate) fn background_failed(",
+            "pub(crate) fn sign_in(",
+            "pub(crate) fn can_forget_password(",
+            "pub(crate) fn forget_password(",
+        ] {
+            assert!(
+                entry(sheet, signature).contains("server_target()"),
+                "{signature}"
+            );
+        }
+        // And the pane's half of the connection bateri keeps for them: it is registered
+        // and its login is probed for a server pane only.
+        let pane = include_str!("pane.rs");
+        for signature in ["fn sync_ssh_session(", "pub(crate) fn login_check("] {
+            let body = entry(pane, signature);
+            assert!(body.contains("server_target()"), "{signature}");
+            assert!(!body.contains("remote_target()"), "{signature}");
+        }
+        // ⌘T and ⌘D take a pane for a server's only through the same gate.
+        assert!(
+            entry(include_str!("app.rs"), "    fn pane_launch(").contains("server_target"),
+            "the new pane's first program is the source's terminal only if the source is a server pane"
+        );
+        // The terminal appearing or going runs the pane's remote edge again: the probe and
+        // the holder race, and the second to arrive is the one that opens the gate.
+        let changed = entry(include_str!("hold_service.rs"), "fn terminal_changed(");
+        assert!(changed.contains("remote_edge()"));
     }
 
     #[test]

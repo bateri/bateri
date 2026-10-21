@@ -282,8 +282,8 @@ impl TerminalPane {
         let Some(session) = self.session() else {
             return;
         };
-        let current = session
-            .remote_target()
+        let current = self
+            .server_target()
             .filter(|(command, ..)| crate::jobs::remote_login(session) == Some(*command))
             .and_then(|(command, target, _)| {
                 let (generation, shell) = session.remote_shell()?;
@@ -434,10 +434,7 @@ impl TerminalPane {
         };
         let (id, lookup) = (self.id(), self.lookup());
         if ask_host {
-            let target = self
-                .session()
-                .and_then(|session| session.remote_target())
-                .map(|(_, target, _)| target);
+            let target = self.server_target().map(|(_, target, _)| target);
             let spawned = target.and_then(|target| {
                 std::thread::Builder::new()
                     .name("remote port host".into())

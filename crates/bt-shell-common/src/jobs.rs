@@ -429,10 +429,7 @@ fn remote_target(name: &str, args: &[String]) -> Option<Option<Target>> {
         }
         // A holder that was not started with ssh arguments (it resumes a
         // terminal it was shown) is recognized and names no target here.
-        let ssh_args = rest
-            .iter()
-            .position(|arg| arg == "--")
-            .map(|at| &rest[at + 1..]);
+        let ssh_args = crate::hold::ssh_args_in(&rest[1..]);
         return Some(ssh_args.and_then(|args| ssh_target("ssh", args)));
     }
     if name == "ssh" {

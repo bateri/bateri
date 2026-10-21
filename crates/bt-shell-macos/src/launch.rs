@@ -29,10 +29,11 @@ pub struct Identity {
     /// The application's name where a pane names whose it is: a downloaded
     /// file's quarantine record, which Gatekeeper shows.
     pub app_name: String,
-    /// The program that answers the shell integration's helper calls
-    /// (`ssh-argv`, `ssh-fell-back`, which the wrapper's `ssh` function asks
-    /// through `BATERI_BIN`) — bateri's own executable. `None`: the wrapper's
-    /// `ssh` runs plain `ssh`.
+    /// The program the shell integration's `ssh` function runs through
+    /// `BATERI_BIN` (`bateri ssh-hold`, which the running bateri answers; the
+    /// previous function asked `ssh-argv` and `ssh-fell-back`, which a shell
+    /// started before an update still does) — bateri's own executable. `None`:
+    /// the wrapper's `ssh` runs plain `ssh`.
     pub helper: Option<PathBuf>,
     /// The shell integration's zsh scripts (bateri's `Resources/shell/zsh`).
     /// `None`: no integration — the pane is a plain terminal, without the
@@ -310,14 +311,15 @@ fn fish_env(dir: &str, data_dirs: Option<OsString>) -> Vec<(String, String)> {
 }
 
 /// Adds `BATERI_BIN` to a session's shell integration: the path of the
-/// helper program ([`Identity::helper`], bateri's own executable in bateri), which the wrapper's `ssh` function asks for the wrapping
-/// decision (`bateri ssh-argv`). Only where the wrapper is installed — an
+/// helper program ([`Identity::helper`], bateri's own executable in bateri), which the wrapper's `ssh` function runs
+/// (`bateri ssh-hold`, where the running bateri decides what the call is). Only where the wrapper is installed — an
 /// empty `env` stays empty, so neither the timed run nor a shell without a script nor
 /// `[shell] integration = "off"` gets it — and only a UTF-8 path
 /// (`SessionOptions.env` wants a `String`; without it the function falls back
 /// to plain `ssh`). With it, `BATERI_SSH_INSTANCE`: the masters' instance
-/// directory name, where a wrapped session becomes a master
-/// (`ssh_route::session_socket`) — none without masters (the timed run).
+/// directory name, which names the running bateri the pane was born under
+/// (`ssh-hold` finds its socket there and nowhere else) — none without masters
+/// (the timed run), and then `ssh` is a plain one.
 pub(crate) fn with_helper(
     mut env: Vec<(String, String)>,
     bin: Option<PathBuf>,

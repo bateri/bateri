@@ -421,6 +421,14 @@ impl Ledger {
         })
     }
 
+    /// The pane the ledger says shows `terminal`; none when it records no pane.
+    pub fn pane_of(&self, account: &str, terminal: &SessionId) -> Option<PaneUuid> {
+        self.read(|rows| {
+            let at = rows.position(account, terminal)?;
+            rows.terminals[at].pane.clone()
+        })
+    }
+
     /// The terminals of an account that are to be ended.
     pub fn ending(&self, account: &str) -> Vec<SessionId> {
         self.read(|rows| {

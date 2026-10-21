@@ -180,6 +180,27 @@ fn link_changed(pane: &PaneUuid, link: PaneLink) {
     });
 }
 
+/// The pane shows a terminal a server keeps from now on, or no longer: the
+/// pane on the main queue asks its remote edge again ([`TerminalPane::remote_edge`]).
+/// The probe that finds the pane's `ssh-hold` in the process table and the holder
+/// that connects to the service race, and what bateri does on a server for a
+/// pane starts only when both are in ([`TerminalPane::server_target`]) — the
+/// one that comes second has to open the gate, or the load indicator and the
+/// connection's login probe of that session would never start. A terminal that
+/// goes (the holder was refused after it was admitted and the pane runs the
+/// plain `ssh`, whose process-table target is the same) closes it: the work that
+/// was started for the pane is taken down at the same edge.
+fn terminal_changed(pane: &PaneUuid) {
+    let pane = pane.clone();
+    DispatchQueue::main().exec_async(move || {
+        // audit: a block running on the main queue is on the main thread by definition.
+        let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
+        if let Some(pane) = delegate(mtm).and_then(|delegate| delegate.pane_with_uuid(&pane)) {
+            pane.remote_edge();
+        }
+    });
+}
+
 /// How long a folder waits for the `ssh` it is for.
 const START_WAIT: Duration = Duration::from_secs(30);
 
@@ -258,6 +279,7 @@ pub(crate) fn serve(
         history: Box::new(history),
         masters,
         linked: Box::new(link_changed),
+        changed: Box::new(terminal_changed),
     };
     if let Ok(service) = Service::start(dir, Arc::new(backend), ledger()) {
         let _ = SERVICE.set(service);

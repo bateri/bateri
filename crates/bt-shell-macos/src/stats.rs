@@ -128,7 +128,7 @@ impl TerminalPane {
     /// this again ([`TerminalPane::login_check`]).
     pub(crate) fn sync_stats_generation(&self) {
         let generation = self.session().and_then(|session| {
-            let (command, ..) = session.remote_target()?;
+            let (command, ..) = self.server_target()?;
             (crate::jobs::remote_login(session) == Some(command)).then_some(command)
         });
         let actions = {
@@ -302,8 +302,7 @@ impl TerminalPane {
             });
         });
         let target = self
-            .session()
-            .and_then(|session| session.remote_target())
+            .server_target()
             .filter(|(command, ..)| *command == generation);
         let Some((command, target, _)) = target else {
             reply(Err("The remote session ended".to_owned()), &[]);

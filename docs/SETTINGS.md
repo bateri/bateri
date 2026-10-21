@@ -1823,8 +1823,8 @@ port belongs to Docker, not to the tab), a program started with `sudo` (its
 sockets are another user's) and a service that detaches itself into the
 background (`brew services`, `pm2`).
 
-**Over ssh the server's ports show too**, beside the ones on this Mac: the
-ports the programs you start in that ssh session listen on. A port shows
+**In a terminal on a server the server's ports show too**, beside the ones on
+this Mac: the ports the programs you start there listen on. A port shows
 **green** when it opens from this Mac as it is — it listens on all of the
 server's interfaces and this Mac reaches it (bateri tries one connection when
 the port first shows). It shows **dim** when it does not: it listens only on
@@ -1832,10 +1832,10 @@ the server itself (`127.0.0.1`, a dev server's usual default), a firewall
 keeps this Mac out, or the server sits behind a jump host. Opening a dim port
 forwards it through your ssh connection first — to the same port number on
 this Mac when that is free — then opens `http://localhost:<port>`, and the
-port turns green. The forward ends when the ssh session does. This needs the
-shell integration on the server (`[remote] integration`, below) and a Linux
-server; a port of a program started with `sudo` or in a container on the
-server does not show.
+port turns green. The forward ends when the ssh session does. This needs a
+terminal on the server (`[remote] integration`, below; a plain `ssh` has none)
+and a Linux server; a port of a program started with `sudo` or in a container
+on the server does not show.
 
 Ports are looked up only when something happens in the tab — a command
 starts or ends, or a program prints — never on a timer, so an idle tab costs
@@ -1908,6 +1908,18 @@ integration = true
 | `stats` | `"sparkline"` \| `"numbers"` \| `"alerts"` \| `"off"` | `"sparkline"` | the style of the remote load indicator at the right of the ssh status bar; `off` turns the indicator and the sampling off |
 | `stats_interval` | integer, seconds, `2`–`60` | `3` | time between two samples of the load indicator |
 | `integration` | `true` \| `false` | `true` | a plain `ssh` sets up shell integration on the server (remote shell integration, below) |
+
+**Everything bateri does on a server happens in a terminal the server keeps** (a
+pane that shows one, below) **and in no other**: dropping a Finder file on the
+pane to upload it, downloading and previewing a file, the load indicator, the
+server's ports, the ⌘ check of a path in the output, Sign In…, and the
+connection of its own that these ride on. The keys of this section that name
+them (`preview_*`, `download_*`, `stats`, `stats_interval`) apply there. A plain
+`ssh` — `integration` off for the host, a `production` host, a server kablo
+cannot be kept on, a call that runs a command, mosh — is the `ssh` you know and
+nothing more: bateri puts nothing on that server and opens no connection to it,
+the pane does not take a dropped file (a path from this Mac would mean nothing
+to the server's shell), and the dock below keeps saying where you are.
 
 While you are on a remote machine over ssh or mosh, the dock's context line
 shows `⇄ host` and its top line is colored. `hosts` picks that color by host,
@@ -2123,10 +2135,19 @@ the server's rc files.
   saved) is made the next time the connection is made; until then the terminals
   keep running under the kablo they have, which the new one understands.
 - **Always plain**: ssh with a remote command or non-interactive ssh (`ssh
-  host command`, `-N`, `-T`, `-W`, a pipe), `scp`/`rsync`/`git`, and a host
+  host command`, `-N`, `-T`, `-W`, a pipe), `scp`/`rsync`/`git`, mosh, and a host
   whose `~/.ssh/config` entry has `RemoteCommand`, `RequestTTY no` or
-  `SessionType`. These stay without a kept terminal and without integration as
-  before; the remote session is still detected.
+  `SessionType`.
+- **A plain `ssh` is just ssh.** Whatever is plain — the lines above, a host
+  `integration` is off for, a `production` host, a server kablo cannot be kept
+  on — gets no kept terminal, no command blocks and no remote dock, and none of
+  what bateri does on a server either: no file drop (the pane refuses the file),
+  no download or preview, no load indicator, no ports, no ⌘ check of paths, no
+  Sign In… and no password kept in the Keychain for it; bateri opens no
+  connection of its own to that host. The remote session is still detected, so
+  the dock says `⇄ host`, colored by `hosts`, and the tab and the title name
+  the server. Turning `integration` on for the host (Shell ▸ Shell Integration
+  on “{host}”) is the way to get all of it back, from the next `ssh`.
 - A value that is not accepted and a settings file that cannot be read **turn
   integration off** (like `osc52`): a wrong guess would mean writing to the
   server silently.
@@ -2152,9 +2173,9 @@ the server's rc files.
 
 #### Remote load indicator
 
-While you are on a Linux server over ssh or mosh, the right side of the status
-bar shows that machine's load; the data comes from the helper ssh session that
-file names use, and no new connection is opened.
+While you are in a terminal on a Linux server (a plain `ssh` has none, above),
+the right side of the status bar shows that machine's load; the data comes from
+the helper ssh session that file names use, and no new connection is opened.
 
 - **`stats`**: `"sparkline"` (the default) `cpu ▂▃▅▇▅▃▂▁ 23%  mem 61%` — the
   last eight CPU samples and the numbers; `"numbers"` `cpu 23%  mem 61%`;
@@ -2183,9 +2204,10 @@ file names use, and no new connection is opened.
 
 #### Remote files: preview and download
 
-The eight preview and download keys are the settings for file names in an
-ssh or mosh session: ⌘-click **previews** a file with a temporary, read-only
-copy, and downloading puts a permanent copy in `download_dir`.
+The eight preview and download keys are the settings for file names in a
+terminal on a server (a plain `ssh` has none): ⌘-click **previews** a file with
+a temporary, read-only copy, and downloading puts a permanent copy in
+`download_dir`.
 
 - **A size** is written like `"100MB"`: an integer and one of the units `B`,
   `KB`, `MB`, `GB`, `TB` (decimal, Finder's units; there may be a space in

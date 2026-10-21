@@ -56,6 +56,8 @@ enum Policy {
     Refuse,
     /// Say nothing, and close the connection at once.
     Hang,
+    /// Say nothing and keep the connection: the request is being worked on.
+    Silent,
 }
 
 /// The application, as far as the pipe can tell: a listener, the hub and the
@@ -189,6 +191,7 @@ impl App {
                 self.holds.retain(|(h, _)| *h != hold);
                 self.hub.closed(hold);
             }
+            (Policy::Silent, _) => {}
         }
     }
 
@@ -278,6 +281,7 @@ fn config(socket: &Path, target: Target, first: bool, input: RawFd, output: RawF
         input,
         output,
         backoff: vec![Duration::from_millis(20)],
+        cancel: None,
     }
 }
 
@@ -413,6 +417,39 @@ fn a_terminal_that_is_gone_says_so_and_the_first_program_runs_a_shell() {
 }
 
 #[test]
+fn a_ctrl_c_before_the_terminal_is_shown_gives_the_first_program_its_shell() {
+    // The signal handler sets this flag and the pipe looks at it while it waits;
+    // the pane's first program must not die of the interrupt (the pane would
+    // close), it ends as an interrupted command and the shell follows.
+    static CANCEL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    let dir = scratch("cancel");
+    let socket = dir.join("hold");
+    let mut app = App::new(&socket, Bridge::new(Age::Current), Policy::Silent);
+    let (stdin_read, stdin_write) = pipe();
+    let (stdout_read, stdout_write) = pipe();
+    let mut config = config(
+        &socket,
+        new_target(),
+        true,
+        stdin_read.as_raw_fd(),
+        stdout_write.as_raw_fd(),
+    );
+    config.cancel = Some(&CANCEL);
+    let handle = std::thread::spawn(move || {
+        let outcome = run(&config);
+        drop((stdin_read, stdout_write));
+        outcome
+    });
+    app.until("the request waits", |app| !app.asked.is_empty());
+    assert!(!handle.is_finished(), "the pipe waits for the terminal");
+    CANCEL.store(true, std::sync::atomic::Ordering::Release);
+    app.until("the pipe ended", |_| handle.is_finished());
+    assert_eq!(handle.join().expect("no panic"), Outcome::Shell(130));
+    drop((stdin_write, stdout_read));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn the_pane_survives_the_application_and_picks_up_where_it_stopped() {
     let dir = scratch("survive");
     let socket = dir.join("hold");
@@ -478,6 +515,45 @@ fn the_pipe_ends_when_the_pane_goes() {
     assert!(app.bridge.has(&terminal));
     assert!(!app.bridge.is_attached(&terminal));
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_process_table_reader_walks_the_options_the_parser_walks() {
+    let words = |list: &[&str]| list.iter().map(|&w| w.to_owned()).collect::<Vec<_>>();
+    // Same words, same answer: what `parse` takes as the arguments is what the
+    // pane's remote session is read from.
+    for list in [
+        &["--", "-p", "2222", "prod"][..],
+        &["--first", "--", "prod"],
+        &["--first", "--shell-arg", "-l", "--", "prod"],
+        // An option's value that reads like the end of the options.
+        &["--first", "--shell-arg", "--", "--", "prod"],
+        &[
+            "--terminal",
+            "b-1",
+            "--account",
+            "u@h:22",
+            "--offset",
+            "5",
+            "--",
+            "prod",
+        ],
+    ] {
+        let parsed = parse(&list.iter().map(|&w| os(w)).collect::<Vec<_>>()).expect("parses");
+        let owned = words(list);
+        let read = ssh_args_in(&owned).expect("arguments");
+        assert_eq!(
+            read.iter().map(OsString::from).collect::<Vec<_>>(),
+            parsed.ssh_args,
+            "{list:?}"
+        );
+    }
+    // A pipe that resumes a terminal and names nothing, and a word that is no option.
+    assert_eq!(
+        ssh_args_in(&words(&["--first", "--terminal", "b-1", "--account", "a"])),
+        None
+    );
+    assert_eq!(ssh_args_in(&words(&["--bogus", "--", "prod"])), None);
 }
 
 #[test]
@@ -635,6 +711,7 @@ fn ssh_hold_process() {
                 input: libc::STDIN_FILENO,
                 output: libc::STDOUT_FILENO,
                 backoff: vec![Duration::from_millis(20)],
+                cancel: None,
             };
             let before = modes(libc::STDIN_FILENO);
             let outcome = run(&config);

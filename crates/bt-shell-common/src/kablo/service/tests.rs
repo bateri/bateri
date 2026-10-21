@@ -75,6 +75,8 @@ struct Fake {
     eof_cause: Arc<Mutex<Cause>>,
     /// What the panes were told about their connection, in order.
     links: Mutex<Vec<(PaneUuid, PaneLink)>>,
+    /// The panes that were told the terminal they show came or went, in order.
+    changed: Mutex<Vec<PaneUuid>>,
 }
 
 impl Fake {
@@ -93,6 +95,7 @@ impl Fake {
             carry_error: Mutex::new(None),
             eof_cause: Arc::new(Mutex::new(Cause::Dropped)),
             links: Mutex::new(Vec::new()),
+            changed: Mutex::new(Vec::new()),
         })
     }
 
@@ -103,6 +106,10 @@ impl Fake {
 
     fn links(&self) -> Vec<(PaneUuid, PaneLink)> {
         self.links.lock().expect("lock").clone()
+    }
+
+    fn changed(&self) -> Vec<PaneUuid> {
+        self.changed.lock().expect("lock").clone()
     }
 
     fn note(&self, what: &str) {
@@ -272,6 +279,10 @@ impl Backend for Fake {
     fn link_changed(&self, pane: &PaneUuid, link: PaneLink) {
         self.links.lock().expect("lock").push((pane.clone(), link));
     }
+
+    fn terminal_changed(&self, pane: &PaneUuid) {
+        self.changed.lock().expect("lock").push(pane.clone());
+    }
 }
 
 /// A started service over a fake world.
@@ -388,6 +399,7 @@ impl Holder {
             input: stdin_read.as_raw_fd() as RawFd,
             output: stdout_write.as_raw_fd() as RawFd,
             backoff: vec![Duration::from_millis(20)],
+            cancel: None,
         };
         let handle = thread::spawn(move || {
             let outcome = run(&config);
@@ -636,6 +648,54 @@ fn a_holder_asking_for_a_terminal_again_gets_it_and_an_unknown_account_is_refuse
         },
     );
     assert_eq!(lost.outcome(), Outcome::Exit(crate::hold::EXIT_REFUSED));
+    rig.world.bridge().exit(&terminal, Exit::Code(0));
+    assert_eq!(again.outcome(), Outcome::Exit(0));
+}
+
+#[test]
+fn a_terminal_is_taken_up_again_only_by_the_pane_that_showed_it() {
+    let rig = Rig::new("owner");
+    let pane = pane_named(&rig.world);
+    let first = Holder::new(&rig.socket(), "b-1");
+    let terminal = rig.terminals(1).remove(0);
+    rig.world.bridge().write(&terminal, b"abc");
+    until("shown", || first.shown.bytes() == b"abc");
+
+    // A process of another pane says the names of this terminal and its account
+    // (they are in the process list): it is refused, and the pane that has the
+    // terminal still has it.
+    let other = PaneUuid::parse("1a2b3c4d-5e6f-4a1b-8c9d-0e1f2a3b4c5d").expect("a canonical uuid");
+    rig.world.info.lock().expect("lock").tab = Some(other.clone());
+    let mut taker = Holder::start(
+        &rig.socket(),
+        "b-1",
+        Target::Resume {
+            account: "u@rasp:22".into(),
+            offset: Some(3),
+        },
+    );
+    assert_eq!(taker.outcome(), Outcome::Exit(crate::hold::EXIT_REFUSED));
+    assert!(rig.service.shown(&other).is_none());
+    assert_eq!(
+        rig.service.shown(&pane).map(|shown| shown.terminal),
+        Some(terminal.clone())
+    );
+    rig.world.bridge().write(&terminal, b"def");
+    until("the pane goes on", || first.shown.bytes() == b"abcdef");
+
+    // The pane itself asking again (its connection to the application was made
+    // again) is served.
+    rig.world.info.lock().expect("lock").tab = Some(pane.clone());
+    let mut again = Holder::start(
+        &rig.socket(),
+        "b-1",
+        Target::Resume {
+            account: "u@rasp:22".into(),
+            offset: Some(6),
+        },
+    );
+    rig.world.bridge().write(&terminal, b"ghi");
+    until("shown again", || again.shown.bytes() == b"ghi");
     rig.world.bridge().exit(&terminal, Exit::Code(0));
     assert_eq!(again.outcome(), Outcome::Exit(0));
 }
@@ -1434,4 +1494,71 @@ fn the_holder_that_waited_through_a_restart_finds_its_terminal_where_it_left_it(
         "the account came from the ledger"
     );
     second.stop();
+}
+
+/// The pane is told its terminal appeared once, when the holder is admitted —
+/// before anything is shown and while its link still reads as live — so the
+/// add-ons that wait for "this is a server pane" ask again whichever of the
+/// process-table probe and the holder came second; and told again when the
+/// terminal goes, so what was started on the server for the pane is taken down
+/// even when the pane goes on as a plain `ssh` whose process-table target is the
+/// same. A lost connection and a return are not changes.
+#[test]
+fn a_pane_is_told_when_the_terminal_it_shows_appears_and_when_it_goes() {
+    let rig = Rig::new("changed");
+    let pane = pane_named(&rig.world);
+    // The first connection is slow: the terminal is not shown yet.
+    rig.world.carry_fails.store(1, Ordering::SeqCst);
+    let mut holder = Holder::new(&rig.socket(), "b-1");
+    let terminal = rig.terminals(1).remove(0);
+    until("the pane told", || rig.world.changed() == [pane.clone()]);
+    assert_eq!(
+        rig.service.shown(&pane).map(|shown| shown.host),
+        Some("rasp".to_owned()),
+        "it is shown by the time it is told"
+    );
+    rig.world.bridge().write(&terminal, b"one");
+    until("one shown", || holder.shown.bytes() == b"one");
+    rig.world
+        .carry_fails_with(Some(io::ErrorKind::ConnectionRefused));
+    rig.world.break_connection();
+    until("the pane told it is waiting", || {
+        rig.world.links() == [(pane.clone(), PaneLink::Reconnecting)]
+    });
+    rig.world.carry_fails_with(None);
+    rig.service.retry(&pane);
+    until("it is back", || {
+        rig.world.links().last() == Some(&(pane.clone(), PaneLink::Live))
+    });
+    assert_eq!(rig.world.changed(), [pane.clone()], "once");
+    rig.world.bridge().exit(&terminal, Exit::Code(0));
+    assert_eq!(holder.outcome(), Outcome::Exit(0));
+    until("the pane told it went", || {
+        rig.world.changed() == [pane.clone(), pane.clone()]
+    });
+    assert!(rig.service.shown(&pane).is_none(), "and it is gone by then");
+}
+
+/// A terminal serves the remote session of its own server and of no other:
+/// the rule every add-on that works on a server asks.
+#[test]
+fn a_terminal_serves_the_session_to_its_own_server_only() {
+    let shown = Shown {
+        account: "u@h:22".into(),
+        host: "rasp".into(),
+        argv: vec!["ssh".into(), "rasp".into()],
+        terminal: SessionId::new("b-1").expect("an id"),
+        program: None,
+        link: PaneLink::Live,
+    };
+    let target = |host: &str| RemoteTarget {
+        host: host.into(),
+        port: None,
+        kind: bt_core::RemoteKind::Ssh,
+        argv: vec!["ssh".into(), host.into()],
+        line: format!("ssh {host}"),
+    };
+    assert!(shown.serves(&target("rasp")));
+    assert!(!shown.serves(&target("prod")));
+    assert!(!shown.serves(&target("root@rasp")));
 }
