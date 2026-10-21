@@ -472,9 +472,12 @@ THIS SOFTWARE.
 ================================================================================
 pencere
 https://github.com/bateri/pencere
-Copyright (c) the pencere developers
+Copyright 2026 The pencere Authors
 Licensed under the Apache License, Version 2.0; full text below.
 ================================================================================
+
+pencere
+Copyright 2026 The pencere Authors
 
 
                                  Apache License

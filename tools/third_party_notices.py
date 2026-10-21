@@ -60,12 +60,11 @@ OWN_LICENSES = {"Apache-2.0", "Zlib", "ISC"}
 OWN_PROJECT_LICENSE = "GPL-3.0-or-later"
 OWN_PROJECT_SOURCE = "git+https://github.com/bateri/"
 # pencere's LICENSE is the Apache text as it is published and names no holder (the
-# lines in it that begin with "copyright" are the license's own sentences), so
-# the line is the one this script falls back to when a crate gives none: the
-# project, not a person's name made up here.
+# lines in it that begin with "copyright" are the license's own sentences); its
+# NOTICE does, and this is that line.
 COPYRIGHT = {
     "alacritty_terminal": ["Copyright 2020 The Alacritty Project"],
-    "pencere": ["Copyright (c) the pencere developers"],
+    "pencere": ["Copyright 2026 The pencere Authors"],
 }
 MIT_TEXT = """Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
