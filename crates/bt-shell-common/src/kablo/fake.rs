@@ -21,8 +21,8 @@ use std::collections::BTreeMap;
 
 use kablo_proto::hello::{Protocol, negotiate};
 use kablo_proto::v1::{
-    ErrorCode, Exit, Message, NewSession, OFFSET_END, Packet, PacketDecoder, Size, State, Status,
-    TerminalState, View,
+    ClientName, ErrorCode, Exit, Message, NewSession, OFFSET_END, Packet, PacketDecoder, Size,
+    State, Status, TerminalState, View,
 };
 use kablo_proto::{Error, SIGNATURE, SessionId};
 
@@ -70,6 +70,12 @@ pub struct Session {
     /// This connection's client is attached; `sent` is the next offset it is owed.
     attached: bool,
     sent: u64,
+    /// The clients attached on other connections (another computer's bateri, an agent's
+    /// `kablo wait`), by the name each gave itself. They are only counted and named: nothing is
+    /// sent to them, and an `attach` that takes the terminal lets them all go.
+    others: Vec<Option<String>>,
+    /// What this connection's client called itself in its last `attach` (a relay of today).
+    name: Option<ClientName>,
     size: Size,
     state: TerminalState,
     activity: Activity,
@@ -98,6 +104,8 @@ impl Session {
             keep: false,
             attached: false,
             sent: 0,
+            others: Vec::new(),
+            name: None,
             size,
             state: TerminalState::default(),
             activity: Activity::default(),
@@ -296,6 +304,26 @@ impl Bridge {
         }
     }
 
+    /// The clients attached to the terminal on other connections, each by the name it gave
+    /// itself (`None`: it gave none): who `status` lists beside this connection's client. The
+    /// fake is one connection's far end, so another client is only what the server knows of it —
+    /// its name and that it counts as attached — and what happens to it is observed with
+    /// [`Bridge::others_of`].
+    pub fn set_others(&mut self, id: &SessionId, others: &[Option<&str>]) {
+        if let Some(session) = self.sessions.get_mut(id) {
+            session.others = others.iter().map(|name| name.map(str::to_owned)).collect();
+        }
+    }
+
+    /// The clients attached on other connections that are still attached: an `attach` that takes
+    /// the terminal lets them go.
+    pub fn others_of(&self, id: &SessionId) -> Vec<Option<String>> {
+        self.sessions
+            .get(id)
+            .map(|s| s.others.clone())
+            .unwrap_or_default()
+    }
+
     /// Refuses the next `n` attaches to the terminal with `UNAVAILABLE`, as a
     /// bridge does for a session whose process does not answer.
     pub fn refuse_attaches(&mut self, id: &SessionId, n: u32) {
@@ -447,7 +475,18 @@ impl Bridge {
         let session = self.sessions.get(id)?;
         let mut status = Status::new(id.clone());
         status.size = session.size;
-        status.clients = u32::from(session.attached);
+        status.clients =
+            u32::from(session.attached) + u32::try_from(session.others.len()).unwrap_or(u32::MAX);
+        if self.age == Age::Current {
+            // One entry per attached client, in the order they attached: the others were
+            // attached before this connection's client came to take its turn.
+            status.clients_named = session
+                .others
+                .iter()
+                .map(|name| name.as_deref().and_then(ClientName::new))
+                .chain(session.attached.then_some(session.name))
+                .collect();
+        }
         status.offset = session.end();
         status.retained_from = session.retained_from;
         status.state = if session.exit.is_some() {
@@ -603,6 +642,12 @@ impl Bridge {
                 session.size = view.size;
             }
             session.keep |= view.keep_after_end;
+            session.name = view.name;
+            // Taking: whoever else is attached is let go (a relay from before the bit ignores it
+            // and attaches this client beside them).
+            if view.take {
+                session.others.clear();
+            }
         }
         let gone = from < session.retained_from;
         let question = view.is_some_and(|v| v.picture_if_answered) && session.answered > from;

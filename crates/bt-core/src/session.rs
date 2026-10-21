@@ -10629,7 +10629,8 @@ impl Session {
     }
 
     /// Tells the context row, and the caret, that the connection to the server
-    /// a kept terminal runs on is down (`Some`) or back (`None`); `true` if it
+    /// a kept terminal runs on is down, or that another computer took the terminal
+    /// (`Some`; `by` is that computer's name), or that it is live (`None`); `true` if it
     /// changed. A terminal the server keeps outlives the connection, so the
     /// pane shows its last screen while the bridge tries again: the row says
     /// so ([`crate::RemoteLink`]) and the caret is not drawn — the grid is a
@@ -10644,13 +10645,22 @@ impl Session {
     /// for no frame (zero frames while idle: the wait, the clock that retries
     /// and the wake from sleep draw nothing — only the **change** does, once);
     /// only the leaf lock, dropped before `request_frame`.
-    pub fn set_remote_link(&self, link: Option<crate::RemoteLink>) -> bool {
+    pub fn set_remote_link(&self, link: Option<crate::RemoteLink>, by: Option<&str>) -> bool {
+        // The name belongs to the word it goes with.
+        let by = if link == Some(crate::RemoteLink::Taken) {
+            crate::shell::computer_label(by.unwrap_or_default())
+        } else {
+            String::new()
+        };
+        let by = by.as_str();
         let changed = {
             let mut log = lock(&self.shell);
-            if log.context.link == link {
+            if log.context.link == link && log.context.link_by == by {
                 false
             } else {
                 log.context.link = link;
+                log.context.link_by.clear();
+                log.context.link_by.push_str(by);
                 true
             }
         };
@@ -19482,7 +19492,7 @@ mod tests {
         assert!(cursor_now(&session).visible, "the shell's caret is there");
         // Down.
         session.take_damage();
-        assert!(session.set_remote_link(Some(crate::RemoteLink::Reconnecting)));
+        assert!(session.set_remote_link(Some(crate::RemoteLink::Reconnecting), None));
         assert!(session.take_damage(), "the change asks for its one frame");
         assert_eq!(session.remote_link(), Some(crate::RemoteLink::Reconnecting));
         assert!(
@@ -19491,22 +19501,36 @@ mod tests {
         );
         // Waiting, retrying and the same word again draw nothing.
         session.take_damage();
-        assert!(!session.set_remote_link(Some(crate::RemoteLink::Reconnecting)));
+        assert!(!session.set_remote_link(Some(crate::RemoteLink::Reconnecting), None));
         assert!(!session.take_damage(), "the same value asks for no frame");
         // The word changes (a login is needed): one more frame.
-        assert!(session.set_remote_link(Some(crate::RemoteLink::LoginNeeded)));
+        assert!(session.set_remote_link(Some(crate::RemoteLink::LoginNeeded), None));
         assert!(session.take_damage());
+        // Another computer took the terminal: the same dimmed pane, with the name it goes by; a
+        // different name is one more frame, the same again none, and the name goes with the word.
+        assert!(session.set_remote_link(Some(crate::RemoteLink::Taken), Some("iMac")));
+        assert!(session.take_damage());
+        assert!(!session.set_remote_link(Some(crate::RemoteLink::Taken), Some("iMac")));
+        assert!(session.set_remote_link(Some(crate::RemoteLink::Taken), Some("Studio")));
+        assert_eq!(lock(&session.shell).context.link_by, "Studio");
+        assert!(session.set_remote_link(Some(crate::RemoteLink::Reconnecting), Some("Studio")));
+        assert_eq!(
+            lock(&session.shell).context.link_by,
+            "",
+            "only a taken terminal has one"
+        );
+        session.take_damage();
         // Back.
-        assert!(session.set_remote_link(None));
+        assert!(session.set_remote_link(None, None));
         assert!(session.take_damage());
         assert_eq!(session.remote_link(), None);
         assert!(cursor_now(&session).visible, "the caret comes back");
         // The state goes with the remote session: a word that comes after the
         // session cannot outlive it, and another host's is not this one's.
-        assert!(session.set_remote_link(Some(crate::RemoteLink::Reconnecting)));
+        assert!(session.set_remote_link(Some(crate::RemoteLink::Reconnecting), None));
         assert!(session.set_remote(command, Some(&RemoteTarget::ssh("stage"))));
         assert_eq!(lock(&session.shell).context.link, None, "another host");
-        assert!(session.set_remote_link(Some(crate::RemoteLink::Reconnecting)));
+        assert!(session.set_remote_link(Some(crate::RemoteLink::Reconnecting), None));
         assert!(session.set_remote(command, None));
         assert_eq!(session.remote_link(), None, "not a remote session any more");
         assert_eq!(lock(&session.shell).context.link, None, "gone with it");

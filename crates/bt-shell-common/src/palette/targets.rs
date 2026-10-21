@@ -419,6 +419,10 @@ pub enum Go {
     /// together in new tabs ([`crate::split::arrange`]). What is opened is what the list holds
     /// when this is done, not when the row was listed.
     OpenAllBackground(String),
+    /// ⏎ on a terminal another Mac has open: a new tab that is that terminal, taken from the other
+    /// Mac, whose pane goes dim. The account's key and the terminal's name; what is taken is the
+    /// terminal as it stands when this is done.
+    MoveHere { account: String, terminal: String },
     /// ⏎ on a pane of the server's page: its tab comes forward and the pane has the keyboard.
     FocusPane { tab: u64, pane: u64 },
 }

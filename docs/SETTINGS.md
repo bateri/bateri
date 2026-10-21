@@ -1014,8 +1014,8 @@ it:
   comes back).
 - Under every value, closing a pane, a tab or a window (⌘W, the red button)
   and typing `exit` end the programs as before — except a program on a server
-  that you answer *Leave Running* to — and restarting the Mac or logging out
-  ends them.
+  that you answer *Leave Running* to, and a terminal on a server that another
+  of your Macs took — and restarting the Mac or logging out ends them.
 - With `"crash"` and `"quit"` a small helper process (`bateri hold`) runs
   beside bateri and keeps a copy of each terminal, so the programs have
   somewhere to stay when bateri goes. While bateri runs it reads nothing and
@@ -2073,8 +2073,10 @@ closes and the terminal stays, with the program in it, in the server's card and
 in ⌘P under *Running in the background*. (Closing several tabs or the window
 offers it too, for every terminal on a server among them; the local panes close
 as under *Close*.) A terminal left running is not ended by any later quit,
-whatever `keep_running` says, or by a crash. `exit` in the terminal ends it too
-and returns to the local prompt. A
+whatever `keep_running` says, or by a crash. A pane whose terminal another of your
+Macs took (the paragraphs on *On other Macs*, below) is not asking anything:
+closing it, or quitting bateri, ends nothing on the server. `exit` in the
+terminal ends it too and returns to the local prompt. A
 pane closed while the connection is down cannot reach the server: bateri writes
 the request down and ends the terminal the next time it connects to that
 server, before anything else.
@@ -2211,7 +2213,7 @@ and touched (a covered tab, a window nobody uses for two minutes).
   operating system, the CPU (with the number of cores) and the memory as a bar
   each, and the processes using the most CPU; while open, it refreshes on every
   sample. Under them are the terminals the server keeps that no pane of this Mac
-  shows (the next paragraphs). A second click, a click outside or Esc closes it
+  shows, and the ones another Mac has open (the next paragraphs). A second click, a click outside or Esc closes it
   (Esc does not go to the server).
 - **`stats_interval`** is the number of seconds between two samples, an
   integer between `2` and `60`.
@@ -2241,6 +2243,28 @@ shows. Terminals that are open in a tab are not listed; they are on screen.
   bateri does not end it, at any `keep_running`.
 - The card lists six rows and says "and 3 more" for the rest; when nothing runs
   in the background it says so. ⌘P finds the same terminals.
+
+A terminal that **another of your Macs has open** is not in that list. It is under
+*On other Macs · N* in the card, below it, and on the server's page in ⌘P (→ on the
+server's row), with the name of that Mac at the right of its row — the name you
+gave the Mac in System Settings. A server tells who has a terminal open only if
+its kablo is a recent one; with an older one every terminal stays under *Running in
+the background* and opens beside whoever has it.
+
+- **A click on a row, or ⏎ on it in ⌘P, moves the terminal here** (*Move Here*; the
+  card writes under the section what that does): it opens in a new tab on this Mac,
+  from where it was, and the pane on the other Mac goes dim. A terminal is live on
+  one Mac at a time. ⌘P does not find these terminals from its root — only on the
+  server's page — so a terminal in use on another Mac is never taken by accident.
+- **The dimmed pane** keeps its last screen, takes no keys, and the line at its
+  bottom says `⇄ rasp  Opened on MacBook · ⏎ bring back`: ⏎ takes the terminal back,
+  from where the pane was, and the pane on the other Mac goes dim in turn. If the
+  Mac that was using the terminal was asleep or offline when it was taken, it finds
+  out when it connects again, and its pane comes back dimmed too instead of joining
+  in. Closing a dimmed pane, or quitting bateri, ends nothing on the server.
+- When the other Mac lets go of the terminal — it closed the pane with *Leave
+  Running*, went to sleep, or quit bateri without ending it — the terminal is
+  under *Running in the background* again.
 
 #### Remote files: preview and download
 

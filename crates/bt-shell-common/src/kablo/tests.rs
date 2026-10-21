@@ -861,6 +861,124 @@ fn a_terminal_taken_by_another_client_is_let_go_and_not_attached_again_unless_as
     assert!(rig.client.is_attached(&terminal));
 }
 
+/// A taken terminal is taken back from the byte owed, at the size it had: attached once more with
+/// the take bit, the bytes the program wrote meanwhile arrive, and a connection that breaks before
+/// the answer asks for the take again. A terminal nobody took is nothing to take back.
+#[test]
+fn a_taken_terminal_is_taken_back_from_the_byte_owed_and_asked_again_only_if_it_did_not_happen() {
+    let mut rig = Rig::new(Age::Current);
+    let terminal = rig.bridge.add("shared", SIZE);
+    rig.connect();
+    rig.client.attach(terminal.clone(), Attach::new(SIZE));
+    rig.pump();
+    rig.bridge.write(&terminal, b"abc");
+    rig.pump();
+    assert!(!rig.client.take_back(&terminal), "nobody took it");
+
+    rig.bridge.take_by(&terminal, "iMac");
+    rig.pump();
+    assert_eq!(rig.client.taken_by(&terminal), Some("iMac"));
+    rig.bridge.write(&terminal, b"def");
+    rig.client.resize(&terminal, WIDE);
+
+    // The connection is down when ⏎ is pressed: the take goes out with the next attach.
+    rig.drop_connection();
+    assert!(rig.client.take_back(&terminal));
+    assert_eq!(rig.client.taken_by(&terminal), None);
+    rig.redial();
+    let asked = attaches(&rig.bridge, &terminal);
+    let last = asked.last().expect("an attach");
+    assert_eq!(last.0, 3, "from the byte owed");
+    assert!(last.1.take);
+    assert_eq!(last.1.size, WIDE, "at the size it has now");
+    assert!(rig.client.is_attached(&terminal));
+    assert_eq!(rig.output(&terminal), b"abcdef");
+
+    // It happened: a connection that breaks now does not take a second time.
+    rig.drop_connection();
+    rig.redial();
+    let asked = attaches(&rig.bridge, &terminal);
+    assert!(!asked.last().expect("an attach").1.take);
+}
+
+/// Another computer takes a terminal while this one is away (asleep, offline): the server tells a
+/// connection that is gone, and nobody here ever hears. Attaching again as if nothing happened
+/// would put this computer live beside the one that has it, and the two would fight over the size.
+/// So the client asks who has the terminal first, and finds out it was taken.
+#[test]
+fn a_terminal_taken_while_the_connection_was_down_is_found_out_before_it_is_attached_again() {
+    let mut rig = Rig::new(Age::Current);
+    let terminal = rig.bridge.add("shared", SIZE);
+    rig.connect();
+    rig.client.attach(terminal.clone(), Attach::new(SIZE));
+    rig.pump();
+    rig.take();
+    let attached = attaches(&rig.bridge, &terminal).len();
+
+    rig.drop_connection();
+    rig.bridge.set_others(&terminal, &[Some("iMac")]);
+    rig.redial();
+    assert_eq!(
+        rig.take(),
+        vec![
+            Event::Lost {
+                cause: Cause::Dropped
+            },
+            Event::Linked,
+            Event::Taken {
+                terminal: terminal.clone(),
+                by: Some("iMac".to_owned())
+            }
+        ]
+    );
+    assert_eq!(
+        attaches(&rig.bridge, &terminal).len(),
+        attached,
+        "not attached beside the computer that has it"
+    );
+    assert!(rig.client.is_taken(&terminal));
+    assert_eq!(rig.client.taken_by(&terminal), Some("iMac"));
+    assert!(!rig.client.input(&terminal, b"x"));
+
+    // ⏎ takes it back, and the other computer is let go.
+    assert!(rig.client.take_back(&terminal));
+    rig.pump();
+    assert!(rig.client.is_attached(&terminal));
+    assert!(rig.bridge.others_of(&terminal).is_empty());
+}
+
+/// Nobody has it, or only what the server still counts of this client's own dead connection, or
+/// something that cannot be told (a relay that names nobody, a client with no name): the terminal
+/// is attached again as it always was.
+#[test]
+fn a_terminal_nobody_else_has_is_attached_again_after_the_connection_was_down() {
+    for (age, others) in [
+        (Age::Current, vec![]),
+        // The server has not noticed this client's old connection is gone.
+        (Age::Current, vec![Some("MacBook")]),
+        // An agent's `kablo wait` is attached too, and is no computer.
+        (Age::Current, vec![None]),
+        // A relay from before the names counts its clients and says none of them.
+        (Age::Old, vec![Some("iMac")]),
+    ] {
+        let mut rig = Rig::new(age);
+        let terminal = rig.bridge.add("shared", SIZE);
+        rig.connect();
+        rig.client.attach(terminal.clone(), Attach::new(SIZE));
+        rig.pump();
+        rig.drop_connection();
+        rig.bridge.set_others(&terminal, &others);
+        rig.redial();
+        assert!(rig.client.is_attached(&terminal), "{age:?} {others:?}");
+        assert!(!rig.client.is_taken(&terminal), "{age:?} {others:?}");
+        assert_eq!(
+            attaches(&rig.bridge, &terminal).len(),
+            2,
+            "{age:?} {others:?}"
+        );
+    }
+}
+
 #[test]
 fn a_take_is_asked_once_and_asked_again_only_if_it_did_not_happen() {
     let mut rig = Rig::new(Age::Current);

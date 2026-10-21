@@ -222,6 +222,7 @@ fn ending_asks_in_the_words_closing_a_pane_does() {
         place: None,
         activity: Some("running 12m 00s".to_owned()),
         running: true,
+        by: None,
     };
     let (title, message) = end_text("rasp", &running);
     assert_eq!(title, "End this terminal?");
@@ -267,4 +268,28 @@ fn a_day_is_counted_on_the_calendar_so_a_new_year_is_one_day_on() {
     // The same second, read by `utc`, agrees with the civil date.
     let seconds = 20_382 * DAY + 5 * 3_600 + 7 * 60;
     assert_eq!(utc(seconds), Local::civil(2025, 10, 21, 5, 7));
+}
+
+/// A row of the list of terminals another Mac has open names the Macs (each once) where the others
+/// say nothing; the words of the heading and of what moving does are the card's and the palette's.
+#[test]
+fn a_terminal_on_other_macs_names_them_and_one_nobody_has_does_not() {
+    let mut open = terminal("b-1", "claude", NOON, true);
+    open.clients = 3;
+    open.clients_named = vec![Some("iMac".into()), None, Some("Studio".into())];
+    let found = listing(&[open, terminal("b-2", "zsh", NOON, false)], NOON, &utc);
+    assert_eq!(found.entries[0].by.as_deref(), Some("iMac, Studio"));
+    assert_eq!(found.entries[1].by, None);
+
+    assert_eq!(others_heading(2), "On other Macs · 2");
+    assert_eq!(MOVE, "Move Here");
+    assert_eq!(
+        move_note("iMac"),
+        "Opens it here; the pane on iMac goes dim."
+    );
+    assert_eq!(
+        move_note("iMac, Studio"),
+        "Opens it here; the panes on iMac, Studio go dim."
+    );
+    assert_eq!(move_hint("iMac"), "Move Here · the pane on iMac goes dim");
 }

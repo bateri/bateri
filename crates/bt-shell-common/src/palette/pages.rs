@@ -425,7 +425,9 @@ mod tests {
                     title: "claude".to_owned(),
                     place: None,
                     running: None,
+                    by: String::new(),
                 }],
+                elsewhere: Vec::new(),
                 panes: vec![ServerPane {
                     tab: 7,
                     pane: 70,

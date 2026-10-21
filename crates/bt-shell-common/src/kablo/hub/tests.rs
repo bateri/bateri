@@ -420,7 +420,7 @@ fn a_restarted_application_resumes_from_what_the_holder_wrote() {
     second.greet(hold);
     second.say(hold, &ToApp::Open(resume_request("b-1", end)));
     assert_eq!(second.requests(), vec![(hold, resume_request("b-1", end))]);
-    second.hub.resume(hold, ACCOUNT).expect("resumed");
+    second.hub.resume(hold, ACCOUNT, false).expect("resumed");
     second.pump();
     second.bridge.write(&terminal, b"ghi");
     second.pump();
@@ -442,7 +442,7 @@ fn a_holder_that_never_saw_the_terminal_is_shown_the_screen() {
     rig.greet(hold);
     rig.say(hold, &ToApp::Open(resume_request("b-1", None)));
     rig.requests();
-    rig.hub.resume(hold, ACCOUNT).expect("resumed");
+    rig.hub.resume(hold, ACCOUNT, false).expect("resumed");
     rig.pump();
     rig.bridge.write(&terminal, b"!");
     rig.pump();
@@ -472,7 +472,7 @@ fn a_relay_that_cannot_make_a_picture_leaves_the_holder_the_position_of_its_byte
     rig.greet(hold);
     rig.say(hold, &ToApp::Open(resume_request("b-1", None)));
     rig.requests();
-    rig.hub.resume(hold, ACCOUNT).expect("resumed");
+    rig.hub.resume(hold, ACCOUNT, false).expect("resumed");
     rig.pump();
     rig.bridge.write(&terminal, b"!?");
     rig.pump();
@@ -494,7 +494,7 @@ fn a_holder_that_asks_for_a_terminal_again_counts_as_shown_before_the_server_ans
     rig.greet(hold);
     rig.say(hold, &ToApp::Open(resume_request("b-1", Some(0))));
     rig.requests();
-    rig.hub.resume(hold, ACCOUNT).expect("resumed");
+    rig.hub.resume(hold, ACCOUNT, false).expect("resumed");
     assert!(rig.hub.is_shown(hold));
     // A new terminal is not: its pane shows the user's own `ssh` until the terminal is up.
     let other = rig.hold();
@@ -517,7 +517,7 @@ fn a_terminal_the_server_no_longer_has_ends_the_holder_that_asks_for_it_again_wi
     rig.greet(hold);
     rig.say(hold, &ToApp::Open(resume_request("b-gone", Some(5))));
     rig.requests();
-    rig.hub.resume(hold, ACCOUNT).expect("resumed");
+    rig.hub.resume(hold, ACCOUNT, false).expect("resumed");
     rig.pump();
     assert_eq!(
         rig.heard_by(hold).last(),
@@ -540,11 +540,13 @@ fn a_holder_that_goes_lets_the_terminal_live_on() {
     assert!(rig.bridge.has(&terminal), "the terminal does not");
     assert_eq!(rig.hub.hold_of(ACCOUNT, &terminal), None);
     assert!(rig.requests().is_empty());
-    assert!(
-        rig.events
-            .iter()
-            .any(|e| matches!(e, HubEvent::Gone { hold: h } if *h == hold))
-    );
+    // The owner is told which terminal the holder showed: this Mac was attached to it a moment
+    // ago, and what the server counted of who is attached has it in.
+    assert!(rig.events.iter().any(|e| matches!(
+        e,
+        HubEvent::Gone { hold: h, showed: Some((account, shown)) }
+            if *h == hold && account == ACCOUNT && *shown == terminal
+    )));
     // A later write finds nobody to give it to.
     rig.bridge.write(&terminal, b"nobody");
     rig.pump();
@@ -561,7 +563,7 @@ fn the_newer_holder_of_a_terminal_wins() {
     rig.greet(new);
     rig.say(new, &ToApp::Open(resume_request("b-1", Some(3))));
     rig.requests();
-    rig.hub.resume(new, ACCOUNT).expect("resumed");
+    rig.hub.resume(new, ACCOUNT, false).expect("resumed");
     rig.pump();
     assert!(matches!(
         rig.heard_by(old).last(),
@@ -667,7 +669,10 @@ fn the_owners_answers_that_do_not_fit_are_declined_and_change_nothing() {
         rig.hub.start(hold, ACCOUNT, NewSession::default()),
         Err(Declined::WrongKind)
     );
-    assert_eq!(rig.hub.resume(hold, "nowhere"), Err(Declined::NoClient));
+    assert_eq!(
+        rig.hub.resume(hold, "nowhere", false),
+        Err(Declined::NoClient)
+    );
     // The request is still there to be answered.
     rig.hub.refuse(hold, true, "no kablo here");
     rig.pump();
@@ -679,7 +684,10 @@ fn the_owners_answers_that_do_not_fit_are_declined_and_change_nothing() {
         })
     );
     assert!(rig.hub.is_finished(hold));
-    assert_eq!(rig.hub.resume(hold, ACCOUNT), Err(Declined::NoRequest));
+    assert_eq!(
+        rig.hub.resume(hold, ACCOUNT, false),
+        Err(Declined::NoRequest)
+    );
 }
 
 #[test]
@@ -706,18 +714,155 @@ fn a_terminal_the_server_will_not_make_falls_back_before_it_was_shown() {
     assert_eq!(rig.hub.terminal_of(hold), None);
 }
 
+/// What the holder's pane shows after another computer took the terminal is the pane's: its last
+/// screen, dimmed, until ⏎ takes the terminal back. The holder is not ended (it used to be, with a
+/// line, and the prompt came back under the screen).
 #[test]
-fn a_terminal_taken_by_another_computer_ends_the_holder_with_a_line() {
+fn a_terminal_taken_by_another_computer_leaves_the_holder_bound_and_says_by_whom() {
     let mut rig = Rig::new();
     let (hold, terminal) = rig.started("b-1");
+    rig.bridge.write(&terminal, b"abc");
+    rig.pump();
+    let heard = rig.heard_by(hold).len();
     rig.bridge.take_by(&terminal, "iMac");
     rig.pump();
     assert_eq!(
-        rig.heard_by(hold).last(),
-        Some(&ToHold::End {
-            code: 1,
-            note: Some("bateri: this terminal was taken by iMac".into())
-        })
+        rig.heard_by(hold).len(),
+        heard,
+        "the holder is told nothing"
+    );
+    assert!(
+        !rig.heard_by(hold)
+            .iter()
+            .any(|message| matches!(message, ToHold::End { .. })),
+        "and is not ended"
+    );
+    assert_eq!(rig.hub.terminal_of(hold), Some((ACCOUNT, &terminal)));
+    assert!(rig.client().is_taken(&terminal));
+    assert_eq!(rig.client().taken_by(&terminal), Some("iMac"));
+    // The owner hears of it, once.
+    rig.requests();
+    assert!(rig.events.iter().any(|event| matches!(
+        event,
+        HubEvent::Client { account, event }
+            if account == ACCOUNT
+                && matches!(&**event, Event::Taken { by: Some(by), .. } if by == "iMac")
+    )));
+    // What is typed into the dimmed pane goes nowhere.
+    assert!(!rig.client().input(&terminal, b"x"));
+}
+
+/// ⏎ in the dimmed pane takes the terminal back: attached again with the take bit, from the byte
+/// the pane was owed, under the same name, and what the program wrote meanwhile arrives.
+#[test]
+fn a_terminal_taken_back_is_attached_taking_from_where_the_pane_left_off() {
+    let mut rig = Rig::new();
+    let (hold, terminal) = rig.started("b-1");
+    rig.bridge.write(&terminal, b"abc");
+    rig.pump();
+    rig.bridge.take_by(&terminal, "iMac");
+    rig.pump();
+    // The program writes while the other computer has it.
+    rig.bridge.write(&terminal, b"def");
+    assert!(rig.client().take_back(&terminal));
+    rig.pump();
+    let attaches = rig.bridge.attaches(&terminal);
+    let (offset, view) = attaches.last().expect("an attach");
+    assert_eq!(*offset, 3, "from the byte owed");
+    let view = view.expect("a view");
+    assert!(view.take, "taking");
+    assert_eq!(
+        view.name.map(|name| name.to_string()),
+        Some("MacBook".into())
+    );
+    assert!(!rig.client().is_taken(&terminal));
+    let (bytes, end) = rig.output(hold);
+    assert_eq!(bytes, b"abcdef");
+    assert_eq!(end, Some(6));
+    // A terminal that was not taken is nothing to take back.
+    assert!(!rig.client().take_back(&terminal));
+}
+
+/// A pane that comes back to a terminal it showed (an application that was restarted) while
+/// another computer has the terminal by now is not attached beside it: it keeps its place, bound
+/// and dimmed, and ⏎ takes the terminal back. A holder that never saw the terminal opens it as
+/// before.
+#[test]
+fn a_pane_that_comes_back_to_a_terminal_another_computer_has_is_dimmed_and_not_attached() {
+    let mut bridge = Bridge::new(Age::Current);
+    let terminal = bridge.add("b-1", SIZE);
+    bridge.set_others(&terminal, &[Some("iMac")]);
+    let mut rig = Rig::with(bridge);
+    let hold = rig.hold();
+    rig.greet(hold);
+    rig.say(hold, &ToApp::Open(resume_request("b-1", Some(0))));
+    rig.requests();
+    rig.hub.resume(hold, ACCOUNT, false).expect("resumed");
+    rig.pump();
+    assert!(rig.client().is_taken(&terminal));
+    assert_eq!(rig.client().taken_by(&terminal), Some("iMac"));
+    assert!(
+        rig.bridge.attaches(&terminal).is_empty(),
+        "nothing attached beside it"
+    );
+    assert_eq!(rig.hub.terminal_of(hold), Some((ACCOUNT, &terminal)));
+    assert!(
+        !rig.heard_by(hold)
+            .iter()
+            .any(|message| matches!(message, ToHold::End { .. })),
+        "the pane is not ended"
+    );
+    // ⏎: taken back from where the pane was.
+    assert!(rig.client().take_back(&terminal));
+    rig.pump();
+    assert!(rig.client().is_attached(&terminal));
+    assert!(rig.bridge.others_of(&terminal).is_empty());
+}
+
+/// A terminal moved here from another computer: the pane's first attach takes it, and the clients
+/// the server had attached are let go; opened the usual way it takes nothing.
+#[test]
+fn a_resumed_terminal_is_taken_only_when_the_owner_says_so() {
+    let mut bridge = Bridge::new(Age::Current);
+    let terminal = bridge.add("b-1", SIZE);
+    bridge.set_others(&terminal, &[Some("iMac")]);
+    let mut rig = Rig::with(bridge);
+    let hold = rig.hold();
+    rig.greet(hold);
+    rig.say(hold, &ToApp::Open(resume_request("b-1", None)));
+    rig.requests();
+    rig.hub.resume(hold, ACCOUNT, false).expect("resumed");
+    rig.pump();
+    let attaches = rig.bridge.attaches(&terminal);
+    assert!(
+        !attaches
+            .last()
+            .and_then(|(_, view)| *view)
+            .expect("a view")
+            .take
+    );
+    assert_eq!(
+        rig.bridge.others_of(&terminal),
+        vec![Some("iMac".to_owned())]
+    );
+
+    let second = rig.hold();
+    rig.greet(second);
+    rig.say(second, &ToApp::Open(resume_request("b-1", None)));
+    rig.requests();
+    rig.hub.resume(second, ACCOUNT, true).expect("resumed");
+    rig.pump();
+    let attaches = rig.bridge.attaches(&terminal);
+    assert!(
+        attaches
+            .last()
+            .and_then(|(_, view)| *view)
+            .expect("a view")
+            .take
+    );
+    assert!(
+        rig.bridge.others_of(&terminal).is_empty(),
+        "the other client was let go"
     );
 }
 

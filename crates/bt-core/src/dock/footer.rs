@@ -92,7 +92,12 @@ enum Lead<'a> {
     /// `⇄ {host}  {what the connection is doing}`: the remote form while the
     /// connection to a kept terminal's server is down ([`RemoteLink`]). The
     /// path is not shown — it is as old as the connection.
-    Down { host: &'a str, link: RemoteLink },
+    Down {
+        host: &'a str,
+        link: RemoteLink,
+        /// The computer that took the terminal ([`RemoteLink::Taken`]).
+        by: &'a str,
+    },
     /// `{title} · {detail}  {path}`.
     Program(&'a ProgramBar),
     /// `⇄ {host}  {text}`.
@@ -109,7 +114,7 @@ impl Lead<'_> {
                 environment,
             } => LocalWidths::of(cwd, branch, environment).full(),
             Self::Remote { host, cwd } => remote_head(host) + tail(cwd),
-            Self::Down { host, link } => remote_head(host) + tail(link.text()),
+            Self::Down { host, link, by } => remote_head(host) + tail_of(link.width(by, true)),
             Self::Program(bar) => program_head(bar) + tail(&bar.path),
             Self::Transfer(transfer) => remote_head(&transfer.host) + tail(&transfer.body),
         }
@@ -350,7 +355,12 @@ fn program_head(bar: &ProgramBar) -> usize {
 /// The width of a lead's shortenable tail after its head: the gap and the
 /// text, nothing when there is no text.
 fn tail(text: &str) -> usize {
-    match text.chars().count() {
+    tail_of(text.chars().count())
+}
+
+/// [`tail`] of a text of `chars` characters.
+fn tail_of(chars: usize) -> usize {
+    match chars {
         0 => 0,
         chars => REMOTE_GAP.chars().count() + chars,
     }
@@ -505,7 +515,8 @@ fn parts(context: &DockContext) -> (Lead<'_>, [Option<Item<'_>>; ITEMS]) {
         // ports and the load were the connection's and the numbers are as old
         // as it is.
         if let Some(link) = context.link {
-            return (Lead::Down { host, link }, [None, None]);
+            let by = context.link_by.as_str();
+            return (Lead::Down { host, link, by }, [None, None]);
         }
         let own = context
             .stats
@@ -790,10 +801,10 @@ fn emit_lead(
         // tone — the full text, or the state alone when that is what fits, or
         // nothing: a half sentence (`Reconnecting… · ⏎ t`) would promise a key
         // that is not named.
-        Lead::Down { host, link } => {
+        Lead::Down { host, link, by } => {
             let color = theme.mark_linear(context.remote_mark);
             emit_remote_head(host, color, budget, row, sink, |rest| {
-                link_cells(link, rest, dim)
+                link_cells(link, by, rest, dim)
             });
         }
         // The title in the bar's tone ([`program_color`]: its host's mark,
@@ -974,21 +985,26 @@ fn emit_remote_head<I: Iterator<Item = (char, LinearRgba)>>(
     emit_context(line, budget, row, sink);
 }
 
-/// What the connection is doing, in `budget` columns: whole, the state alone,
-/// or nothing.
-fn link_cells(
+/// What the connection is doing (or where the terminal went, `by`), in `budget` columns: whole,
+/// the state alone, or nothing. Written piece by piece from the words themselves, so a frame of a
+/// pane that waits allocates nothing for them.
+fn link_cells<'a>(
     link: RemoteLink,
+    by: &'a str,
     budget: usize,
     tone: LinearRgba,
-) -> impl Iterator<Item = (char, LinearRgba)> {
-    let text = if link.text().chars().count() <= budget {
-        link.text()
-    } else if link.short().chars().count() <= budget {
-        link.short()
+) -> impl Iterator<Item = (char, LinearRgba)> + 'a {
+    let parts = if link.width(by, true) <= budget {
+        link.parts(by, true)
+    } else if link.width(by, false) <= budget {
+        link.parts(by, false)
     } else {
-        ""
+        [""; 3]
     };
-    text.chars().map(move |ch| (ch, tone))
+    parts
+        .into_iter()
+        .flat_map(str::chars)
+        .map(move |ch| (ch, tone))
 }
 
 /// Draws a placed item; a button's fill goes to `buttons`.

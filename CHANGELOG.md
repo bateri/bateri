@@ -114,6 +114,26 @@ of every installed copy. A version without a section is not released.
   closing it with *Close*. A shell waiting at its prompt closes without a
   question, as before.
 
+- **Move a terminal from one Mac to another.** A terminal on a server that is open
+  on another of your Macs is no longer under *Running in the background* — it is
+  under *On other Macs · 1* in the server's card and under *On other Macs* on its
+  page in ⌘P, with that Mac's name at the right (the name you gave it in System
+  Settings). A click on its row, or ⏎ on it in ⌘P, says *Move Here*: it opens in a
+  new tab on this Mac, from where it was, and the pane on the other Mac goes dim,
+  with the line at its bottom saying `⇄ rasp  Opened on MacBook · ⏎ bring back`.
+  ⏎ in that dimmed pane takes the terminal back, from where the pane was, and the
+  other Mac's pane goes dim in turn; a terminal is live on one Mac at a time, so
+  the two never fight over the window's size. A Mac that was asleep or offline
+  when the terminal was taken finds out when it connects again, and its pane
+  comes back dimmed instead of joining in. Closing the dimmed pane ends nothing on
+  the server — the terminal is the other Mac's now — and neither does quitting
+  bateri. The terminals on other Macs are on the server's page and in its card
+  only: typing `claude` in ⌘P never takes a terminal from the Mac that is using
+  it. When the other Mac lets go of the terminal (*Leave Running*, sleep, quitting
+  bateri) it goes back under *Running in the background*. A server whose kablo is
+  older cannot say who has a terminal open, so its terminals stay under *Running
+  in the background* and open beside whoever has them, until bateri has renewed it.
+
 - **A tab shows the program running in a terminal on a server.** In a pane that
   shows a terminal the server keeps, the tab's icon follows the program the
   server says is in front, the way it does for a program on this Mac: Claude

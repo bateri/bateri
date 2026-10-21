@@ -4,8 +4,9 @@
 //!
 //! The card has two parts, and what is in them is **the server's, not the pane's**: the load (one
 //! measuring for the server however many panes show it, [`super::remote_stats::Account`]) and the
-//! terminals the server keeps that no pane of this Mac shows ([`super::kablo::roster`]). Terminals a
-//! tab of this Mac has open are not listed — they are on screen already.
+//! terminals the server keeps that no pane of this Mac shows ([`super::kablo::roster`]) — nobody's,
+//! under *Running in the background*, and the ones another Mac has open under *On other Macs*.
+//! Terminals a tab of this Mac has open are not listed — they are on screen already.
 //!
 //! - **The load is small**: the CPU and the memory as a bar each and a line naming the busiest
 //!   processes ([`load`]). The context row's own thresholds colour the bars
@@ -16,6 +17,8 @@
 //!   carry no verb; the one verb a row has is the one a click does, written at its right while the
 //!   pointer is on it ([`OPEN`]). The row's time is the palette's own text: how long a program has
 //!   been in front is [`bt_core::running_counter`], and a shell waiting says since when.
+//! - **On other Macs** is the same rows with the Mac's name at the right, and the one verb of a
+//!   click is [`MOVE`]: it opens the terminal here and the pane on that Mac goes dim ([`move_note`]).
 //! - **Ending a terminal** asks in the words closing a pane does ([`end_text`]).
 
 use std::time::Duration;
@@ -35,6 +38,11 @@ pub const OPEN_ALL: &str = "Open All in New Tab";
 pub const OPEN: &str = "Open in New Tab";
 /// The row menu's one item.
 pub const END: &str = "End Terminal";
+/// The heading over the terminals another Mac has open; the number follows it
+/// ([`others_heading`]).
+pub const OTHERS_HEADING: &str = "On other Macs";
+/// What a click on a row of that list does, written at its right while the pointer is on it.
+pub const MOVE: &str = "Move Here";
 /// The list when nothing runs in the background.
 pub const EMPTY: &str = "Nothing is running in the background.";
 /// What the load shows for a value not known yet: an empty one would read as "nothing", not
@@ -90,6 +98,9 @@ pub struct Entry {
     pub activity: Option<String>,
     /// A program other than the shell is in front.
     pub running: bool,
+    /// The Macs that have the terminal open, by the names they gave themselves, joined: `None`
+    /// for a terminal nobody has open.
+    pub by: Option<String>,
 }
 
 /// The list as the card shows it.
@@ -119,6 +130,7 @@ pub fn listing(backgrounds: &[Background], now: u64, local: &dyn Fn(u64) -> Loca
                 place: facts.place,
                 activity: activity_text(activity, now, local),
                 running: matches!(activity, Activity::Running(_)),
+                by: Some(background.elsewhere().join(", ")).filter(|by| !by.is_empty()),
             }
         })
         .collect();
@@ -132,6 +144,31 @@ pub fn listing(backgrounds: &[Background], now: u64, local: &dyn Fn(u64) -> Loca
 /// `Running in the background · 3`.
 pub fn heading(total: usize) -> String {
     format!("{HEADING} · {total}")
+}
+
+/// `On other Macs · 2`.
+pub fn others_heading(total: usize) -> String {
+    format!("{OTHERS_HEADING} · {total}")
+}
+
+/// What moving a terminal here does, under the verb: `Opens it here; the pane on iMac goes dim.`
+pub fn move_note(by: &str) -> String {
+    format!("Opens it here; {}.", goes_dim(by))
+}
+
+/// The palette's band for the same row: `Move Here · the pane on iMac goes dim`.
+pub fn move_hint(by: &str) -> String {
+    format!("{MOVE} · {}", goes_dim(by))
+}
+
+/// `the pane on iMac goes dim`: one pane for each Mac that has the terminal open (`by` is their
+/// names joined with `, `).
+fn goes_dim(by: &str) -> String {
+    if by.contains(", ") {
+        format!("the panes on {by} go dim")
+    } else {
+        format!("the pane on {by} goes dim")
+    }
 }
 
 /// `and 3 more`.

@@ -501,6 +501,7 @@ fn server_slot<'a>(
             servers.push(bt_shell_common::palette::ServerFacts {
                 name: name.to_owned(),
                 background: Vec::new(),
+                elsewhere: Vec::new(),
                 panes: Vec::new(),
             });
             servers.len() - 1
@@ -5577,6 +5578,11 @@ impl AppDelegate {
                 .background
                 .push(BackgroundFacts::of(&background, now));
         }
+        for elsewhere in crate::hold_service::elsewhere_all() {
+            server_slot(&mut servers, &elsewhere.host)
+                .elsewhere
+                .push(BackgroundFacts::of(&elsewhere, now));
+        }
         servers
     }
 
@@ -5699,6 +5705,25 @@ impl AppDelegate {
                 if !split {
                     self.new_tab_started(window.id(), Seat::Beside, Some(&start));
                 }
+            }
+            // A terminal another Mac has open: a new tab that is that terminal, taken from that
+            // Mac, whose pane goes dim. As above it is the terminal as it stands when this runs
+            // — one the other Mac let go of since is in the background by now, and is taken from
+            // nobody (it is not on this list any more, so it is beeped at, not moved).
+            Go::MoveHere { account, terminal } => {
+                let found = crate::hold_service::elsewhere_all()
+                    .into_iter()
+                    .find(|found| found.account == account && found.terminal.as_str() == terminal);
+                let Some(start) = found.as_ref().and_then(|found| self.held_background(found))
+                else {
+                    crate::preview::beep();
+                    return;
+                };
+                if let Some(found) = &found {
+                    crate::hold_service::claim(&found.account, &found.terminal);
+                    crate::hold_service::take_over(&found.account, &found.terminal);
+                }
+                self.new_tab_started(window.id(), Seat::Beside, Some(&start));
             }
             Go::OpenAllBackground(host) => self.open_all_background(&window, &host),
             // A pane of the server's page: its tab comes forward and the pane has the keyboard;

@@ -31,6 +31,9 @@ pub enum Kind {
     /// A pane of this Mac that shows a terminal of a server (`pane.<tab>.<pane>`): a row of the
     /// server's page, never searched from the root.
     Pane,
+    /// A terminal a server keeps that another Mac has open (`mv.<terminal>@<account>`): a row of
+    /// the server's page, never searched from the root; ⏎ moves it here.
+    Elsewhere,
     /// A listening port (`port.<number>`).
     Port,
     /// A page of the palette that lists something (`scope.<name>`).
@@ -57,6 +60,7 @@ impl Kind {
             Kind::Host => "host.",
             Kind::Background => "bg.",
             Kind::Pane => "pane.",
+            Kind::Elsewhere => "mv.",
             Kind::Port => "port.",
             Kind::Scope => "scope.",
             Kind::Search => "search.",
@@ -80,7 +84,7 @@ impl Kind {
             Kind::Port => "Ports",
             Kind::Scope => "Go to",
             Kind::Search => "Search",
-            Kind::Pane | Kind::Choice | Kind::Action => "",
+            Kind::Pane | Kind::Elsewhere | Kind::Choice | Kind::Action => "",
         }
     }
 

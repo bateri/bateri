@@ -1,4 +1,4 @@
-use kablo_proto::v1::{State, TerminalState};
+use kablo_proto::v1::{ClientName, State, TerminalState};
 
 use super::*;
 
@@ -25,6 +25,46 @@ fn listed(statuses: Vec<Status>) -> Roster {
 
 fn shown_nowhere(_: &SessionId) -> bool {
     false
+}
+
+/// The two halves of the list, one at a time.
+trait Halves {
+    fn background(
+        &self,
+        account: &str,
+        host: &str,
+        argv: &[String],
+        hidden: impl Fn(&SessionId) -> bool,
+    ) -> Vec<Background>;
+    fn elsewhere(
+        &self,
+        account: &str,
+        host: &str,
+        argv: &[String],
+        hidden: impl Fn(&SessionId) -> bool,
+    ) -> Vec<Background>;
+}
+
+impl Halves for Roster {
+    fn background(
+        &self,
+        account: &str,
+        host: &str,
+        argv: &[String],
+        hidden: impl Fn(&SessionId) -> bool,
+    ) -> Vec<Background> {
+        self.split(account, host, argv, hidden).0
+    }
+
+    fn elsewhere(
+        &self,
+        account: &str,
+        host: &str,
+        argv: &[String],
+        hidden: impl Fn(&SessionId) -> bool,
+    ) -> Vec<Background> {
+        self.split(account, host, argv, hidden).1
+    }
 }
 
 #[test]
@@ -267,4 +307,77 @@ fn a_new_terminal_is_told_of_the_others_only_when_they_are_not_the_ones_it_last_
         text,
         "bateri: 1 more terminal is running on rasp; click \u{21c4} rasp below to see it"
     );
+}
+
+/// A status that says who is attached, as a relay that names its clients does.
+fn attached_by(name: &str, who: &[Option<&str>]) -> Status {
+    let mut status = status(name, Some(1));
+    status.clients = u32::try_from(who.len()).expect("a few");
+    status.clients_named = who
+        .iter()
+        .map(|name| name.and_then(ClientName::new))
+        .collect();
+    status
+}
+
+/// The two halves of the one list: what another Mac has open is not in the background, and what
+/// nobody has open is not on another Mac. A client with no name (an agent's `kablo wait`) is not a
+/// computer; one name is said once however many of its connections there are.
+#[test]
+fn a_terminal_a_named_client_has_open_is_on_another_mac_and_not_in_the_background() {
+    let roster = listed(vec![
+        attached_by("imac", &[Some("iMac")]),
+        attached_by("both", &[Some("iMac"), Some("Studio"), Some("iMac")]),
+        attached_by("watched", &[None]),
+        attached_by("free", &[]),
+    ]);
+    let background = roster.background("a", "rasp", &[], shown_nowhere);
+    let elsewhere = roster.elsewhere("a", "rasp", &[], shown_nowhere);
+    assert_eq!(names(&background), ["free", "watched"]);
+    assert_eq!(names(&elsewhere), ["both", "imac"]);
+    assert_eq!(elsewhere[0].elsewhere(), ["iMac", "Studio"]);
+    assert_eq!(elsewhere[1].elsewhere(), ["iMac"]);
+    assert!(background[1].elsewhere().is_empty());
+}
+
+/// A relay from before the names counts its clients and lists none (or fewer): who has the
+/// terminal is not known, so it stays in the background and nothing can be moved.
+#[test]
+fn a_relay_that_does_not_name_its_clients_cannot_say_a_terminal_is_on_another_mac() {
+    let mut old = status("old", Some(1));
+    old.clients = 1;
+    let mut short = attached_by("short", &[Some("iMac")]);
+    short.clients = 2;
+    let roster = listed(vec![old, short]);
+    assert_eq!(
+        names(&roster.background("a", "rasp", &[], shown_nowhere)),
+        ["old", "short"]
+    );
+    assert!(roster.elsewhere("a", "rasp", &[], shown_nowhere).is_empty());
+}
+
+/// What the server counted may have this Mac in it (it was attached when the server answered): from
+/// the moment this Mac attaches or is let go until the server answers again, nothing is said to be
+/// on another Mac on that count.
+#[test]
+fn a_count_taken_while_this_mac_was_attached_is_not_believed_until_the_server_answers() {
+    let mut roster = listed(vec![attached_by("imac", &[Some("iMac")])]);
+    roster.attached(&id("imac"));
+    assert!(roster.elsewhere("a", "rasp", &[], shown_nowhere).is_empty());
+    assert_eq!(
+        names(&roster.background("a", "rasp", &[], shown_nowhere)),
+        ["imac"]
+    );
+    roster.apply(&Event::Status(attached_by("imac", &[Some("iMac")])));
+    assert_eq!(
+        names(&roster.elsewhere("a", "rasp", &[], shown_nowhere)),
+        ["imac"]
+    );
+
+    // Being let go does the same.
+    roster.apply(&Event::Taken {
+        terminal: id("imac"),
+        by: Some("iMac".into()),
+    });
+    assert!(roster.elsewhere("a", "rasp", &[], shown_nowhere).is_empty());
 }

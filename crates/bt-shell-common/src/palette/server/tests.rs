@@ -15,6 +15,15 @@ fn waiting(terminal: &str, title: &str, running: Option<u64>) -> BackgroundFacts
         title: title.to_owned(),
         place: Some("~/app".to_owned()),
         running: running.map(Duration::from_secs),
+        by: String::new(),
+    }
+}
+
+/// A terminal another Mac has open.
+fn moved(terminal: &str, title: &str, by: &str) -> BackgroundFacts {
+    BackgroundFacts {
+        by: by.to_owned(),
+        ..waiting(terminal, title, None)
     }
 }
 
@@ -32,6 +41,7 @@ fn server(background: Vec<BackgroundFacts>, panes: Vec<ServerPane>) -> ServerFac
     ServerFacts {
         name: "rasp".to_owned(),
         background,
+        elsewhere: Vec::new(),
         panes,
     }
 }
@@ -284,6 +294,17 @@ fn choosing_a_row_of_the_server_comes_to_what_the_row_says() {
         Some(Go::FocusPane { tab: 7, pane: 70 })
     );
     assert_eq!(go("pane.7", Modifier::None), None);
+    // A terminal another Mac has open is moved here by ⏎ and by nothing else.
+    assert_eq!(
+        go("mv.b-2@u@rasp:22", Modifier::None),
+        Some(Go::MoveHere {
+            account: ACCOUNT.to_owned(),
+            terminal: "b-2".to_owned()
+        })
+    );
+    assert_eq!(go("mv.b-2@u@rasp:22", Modifier::Option), None);
+    assert_eq!(go("mv.b-2@u@rasp:22", Modifier::Command), None);
+    assert_eq!(go("mv.nonsense", Modifier::None), None, "no account in it");
     assert_eq!(go("pane.x.1", Modifier::None), None);
     // The new tab of the page is the server's own row: ⏎ and ⌥⏎ are what they always were.
     assert_eq!(
@@ -294,4 +315,62 @@ fn choosing_a_row_of_the_server_comes_to_what_the_row_says() {
         go("host.rasp", Modifier::Option),
         Some(Go::SplitHost("rasp".to_owned()))
     );
+}
+
+/// The terminals another Mac has open are rows of the server's page, after the tabs: that Mac's
+/// name at the right, and the band says what ⏎ does to the pane there. A search from the root does
+/// not find them — ⏎ on a row found by chance must not take a terminal from the Mac using it.
+#[test]
+fn the_terminals_on_other_macs_are_on_the_servers_page_and_in_no_search_from_the_root() {
+    let row = elsewhere_row(&moved("b-5", "claude", "iMac"));
+    assert_eq!(row.id, "mv.b-5@u@rasp:22");
+    assert_eq!(row.kind, Kind::Elsewhere);
+    assert_eq!(row.title, "claude");
+    assert_eq!(row.subtitle, "rasp · ~/app");
+    assert_eq!(row.value.as_deref(), Some("iMac"));
+    assert_eq!(
+        row.hints,
+        [("↵", "Move Here · the pane on iMac goes dim".to_owned())]
+    );
+
+    let mut kept = server(two_waiting(), vec![pane(7, 70, "~/app", "web", Some("⌘1"))]);
+    kept.elsewhere = vec![moved("b-5", "claude", "iMac")];
+    let all = targets(vec![kept]);
+    let list = server_list("rasp", &all, "");
+    let titles: Vec<&str> = list
+        .headings
+        .iter()
+        .map(|(_, text)| text.as_str())
+        .collect();
+    assert_eq!(
+        titles,
+        [BACKGROUND_HEADING, PANES_HEADING, ELSEWHERE_HEADING, "rasp"]
+    );
+    let ids: Vec<&str> = list.hits.iter().map(|hit| hit.row.id.as_str()).collect();
+    assert_eq!(
+        ids,
+        [
+            "act.openAll.rasp",
+            "bg.b-2@u@rasp:22",
+            "bg.b-1@u@rasp:22",
+            "pane.7.70",
+            "mv.b-5@u@rasp:22",
+            "host.rasp"
+        ]
+    );
+    // A query on the page keeps it when it finds it, by the Mac's name too.
+    let found = server_list("rasp", &all, "imac");
+    assert_eq!(found.hits.len(), 1);
+    assert_eq!(found.hits[0].row.id, "mv.b-5@u@rasp:22");
+
+    // Nothing at the root finds it: the root's rows are the background's.
+    let mut pool = host_rows(&all);
+    pool.extend(background_rows(&all));
+    let found = root(&pool, "claude", &[], &[], Fallbacks::ALL);
+    let root_ids: Vec<&str> = found.hits.iter().map(|hit| hit.row.id.as_str()).collect();
+    assert!(
+        root_ids.iter().all(|id| !id.starts_with("mv.")),
+        "{root_ids:?}"
+    );
+    assert!(root_ids.iter().any(|id| id.starts_with("bg.")));
 }

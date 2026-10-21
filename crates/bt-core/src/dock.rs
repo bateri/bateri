@@ -3499,6 +3499,7 @@ mod tests {
             transfer: None,
             stats: None,
             link: None,
+            link_by: String::new(),
             server: false,
             remote_setup: None,
             program: None,
@@ -3825,6 +3826,48 @@ mod tests {
         }
     }
 
+    /// A terminal another computer took says where it went and what ⏎ does, in the words of the
+    /// connection that is down: the full text, the state alone when that is what fits, and the
+    /// name as one cell a character.
+    #[test]
+    fn a_terminal_another_computer_took_says_where_it_went_in_the_context_row() {
+        let state = live("", "", "", 0);
+        let taken = |by: &str| DockContext {
+            link: Some(crate::RemoteLink::Taken),
+            link_by: by.into(),
+            // What the terminal showed is not the connection's to show now.
+            stats: Some(calm(StatsForm::Sparkline)),
+            ports: vec![crate::FooterPort {
+                port: 3000,
+                open: true,
+            }],
+            ..remote("rasp", "/srv/app")
+        };
+        let drawn = |context: &DockContext, cols: u16| {
+            let (cells, dock) = draw_with(&state, context, cols);
+            assert_eq!(dock.buttons, [None, None], "a status, not a control");
+            row_text(&cells, 1)
+        };
+        assert_eq!(
+            drawn(&taken("MacBook"), 80),
+            "⇄ rasp  Opened on MacBook · ⏎ bring back"
+        );
+        // Too narrow for the key: the state alone, never half a sentence.
+        assert_eq!(drawn(&taken("MacBook"), 28), "⇄ rasp  Opened on MacBook");
+        assert_eq!(drawn(&taken("MacBook"), 20), "⇄ rasp");
+        // A computer that gave no name; one with a wide character or a control in it.
+        assert_eq!(
+            drawn(&taken(""), 80),
+            "⇄ rasp  Opened on another computer · ⏎ bring back"
+        );
+        assert_eq!(
+            drawn(&taken(&crate::shell::computer_label("Mac\u{7}書")), 80),
+            "⇄ rasp  Opened on Mac? · ⏎ bring back"
+        );
+        // Nothing of it clickable: the server's card is a live connection's.
+        assert_eq!(crate::footer_spans(&taken("MacBook"), 80).count(), 0);
+    }
+
     /// The words the context row says while the connection to a kept terminal
     /// is down, as the user reads them.
     #[test]
@@ -3911,8 +3954,9 @@ mod tests {
         for link in [
             crate::RemoteLink::Reconnecting,
             crate::RemoteLink::LoginNeeded,
+            crate::RemoteLink::Taken,
         ] {
-            for text in [link.text(), link.short()] {
+            for text in [link.text("MacBook"), link.short("MacBook")] {
                 assert!(
                     text.chars()
                         .filter(|ch| !ch.is_ascii())

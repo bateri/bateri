@@ -81,8 +81,8 @@ pub(crate) fn shown(pane: &PaneUuid) -> Option<Shown> {
     SERVICE.get()?.shown(pane)
 }
 
-/// The terminals the servers keep for the user that no pane of this Mac shows, the last to write
-/// first: what the service last heard, read without waiting for a server
+/// The terminals the servers keep for the user that no pane of this Mac shows and no other Mac has
+/// open ([`elsewhere_all`]), the last to write first: what the service last heard, read without waiting for a server
 /// ([`Service::background_all`]). None in a process without the service.
 pub(crate) fn background_all() -> Vec<Background> {
     SERVICE
@@ -91,13 +91,46 @@ pub(crate) fn background_all() -> Vec<Background> {
         .unwrap_or_default()
 }
 
-/// The terminals the server of `account` keeps that no pane of this Mac shows, the last to write
-/// first: the server's card lists them ([`Service::background`]). Read without waiting.
+/// The terminals the server of `account` keeps that no pane of this Mac shows and no other Mac has
+/// open, the last to write first: the server's card lists them ([`Service::background`]). Read without waiting.
 pub(crate) fn background(account: &str) -> Vec<Background> {
     SERVICE
         .get()
         .map(|service| service.background(account))
         .unwrap_or_default()
+}
+
+/// The terminals another Mac has open, the last to write first: what the server's card and the
+/// palette's page of a server list under *On other Macs* ([`Service::elsewhere_all`]). Read
+/// without waiting. None in a process without the service.
+pub(crate) fn elsewhere_all() -> Vec<Background> {
+    SERVICE
+        .get()
+        .map(Service::elsewhere_all)
+        .unwrap_or_default()
+}
+
+/// [`elsewhere_all`] of the server of `account`: the server's card lists them.
+pub(crate) fn elsewhere(account: &str) -> Vec<Background> {
+    SERVICE
+        .get()
+        .map(|service| service.elsewhere(account))
+        .unwrap_or_default()
+}
+
+/// The pane about to be opened for the terminal `terminal` of `account` takes it from the Mac
+/// that has it open ([`Service::take_over`]). Said just before the pane starts, like [`claim`].
+pub(crate) fn take_over(account: &str, terminal: &SessionId) {
+    if let Some(service) = SERVICE.get() {
+        service.take_over(account, terminal);
+    }
+}
+
+/// ⏎ in a pane whose terminal another Mac took: it is taken back ([`Service::bring_back`]).
+pub(crate) fn bring_back(pane: &PaneUuid) {
+    if let Some(service) = SERVICE.get() {
+        service.bring_back(pane);
+    }
 }
 
 /// Asks every server again for its terminals: for the moments somebody is about to look at
@@ -375,9 +408,24 @@ fn bundle() -> Option<Bundle> {
     Bundle::open(&contents.join("Resources/kablo")).ok()
 }
 
-/// What this computer calls itself, as the servers list who is attached to a
-/// terminal.
+/// What this computer calls itself, as the servers list who is attached to a terminal and as the
+/// other Mac's pane says where its terminal went (`Opened on proAlfred`): the name its owner gave
+/// it in System Settings, else the first label of its host name (`MacBookPro.lan` is `MacBookPro`).
 fn computer_name() -> Option<String> {
+    // `localizedName` is the computer's name and asks no network; the class is deprecated for
+    // resolving names, which is not what it is used for here. The crate's default features
+    // include it, so no flag opens and the lock does not move.
+    #[allow(deprecated)]
+    let given = objc2_foundation::NSHost::currentHost()
+        .localizedName()
+        .map(|name| name.to_string());
+    given
+        .filter(|name| !name.trim().is_empty())
+        .or_else(host_label)
+}
+
+/// The first label of the host name the system gives the process.
+fn host_label() -> Option<String> {
     let mut buffer = [0u8; 256];
     // SAFETY: the buffer is ours and its size goes to the call as is.
     let status = unsafe { libc::gethostname(buffer.as_mut_ptr().cast(), buffer.len()) };
@@ -385,9 +433,13 @@ fn computer_name() -> Option<String> {
         return None;
     }
     let end = buffer.iter().position(|&b| b == 0)?;
-    let name = String::from_utf8_lossy(&buffer[..end]).into_owned();
-    let name = name.strip_suffix(".local").unwrap_or(&name).to_owned();
-    (!name.is_empty()).then_some(name)
+    first_label(&String::from_utf8_lossy(&buffer[..end]))
+}
+
+/// `MacBookPro.lan` and `MacBookPro.local` are `MacBookPro`; nothing is no name.
+fn first_label(host: &str) -> Option<String> {
+    let label = host.split('.').next().unwrap_or_default();
+    (!label.is_empty()).then(|| label.to_owned())
 }
 
 /// The pane a process is in: one hop to the main queue, where the panes are.
@@ -407,6 +459,21 @@ fn pane_of(peer: &Peer) -> Option<PaneInfo> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_computer_is_named_by_its_owner_and_a_host_name_gives_its_first_label() {
+        assert_eq!(first_label("MacBookPro.lan").as_deref(), Some("MacBookPro"));
+        assert_eq!(first_label("iMac.local").as_deref(), Some("iMac"));
+        assert_eq!(first_label("iMac").as_deref(), Some("iMac"));
+        assert_eq!(first_label(""), None);
+        assert_eq!(first_label(".lan"), None);
+        // This computer has a name (the test is on the Mac that has one).
+        let name = computer_name().expect("a name");
+        assert!(
+            !name.trim().is_empty() && !name.chars().any(char::is_control),
+            "{name:?}"
+        );
+    }
 
     #[test]
     fn a_start_folder_is_taken_once_by_the_pane_it_is_for() {

@@ -208,10 +208,16 @@ pub trait PaneHost {
     fn kept_terminal(&self, _pane: &PaneUuid) -> Option<Shown> {
         None
     }
-    /// The terminals the server of `account` keeps that no pane of this Mac shows, the last
-    /// to write first: what the server's card lists. The default is an owner that has no such
-    /// terminals.
+    /// The terminals the server of `account` keeps that no pane of this Mac shows and no other
+    /// Mac has open, the last to write first: what the server's card lists. The default is an
+    /// owner that has no such terminals.
     fn background(&self, _account: &str) -> Vec<Background> {
+        Vec::new()
+    }
+    /// The terminals the server of `account` keeps that another Mac has open and no pane of this
+    /// Mac shows, the last to write first: the card's *On other Macs*. The default is an owner
+    /// that has no such terminals.
+    fn elsewhere(&self, _account: &str) -> Vec<Background> {
         Vec::new()
     }
     /// The server's card is about to list them: the servers are asked for their terminals
@@ -220,6 +226,9 @@ pub trait PaneHost {
     /// The card's row: the terminal `terminal` of `account` opens in a new tab of the pane's
     /// window.
     fn open_background(&self, _pane: u64, _account: &str, _terminal: &str) {}
+    /// The card's row of a terminal another Mac has open: the terminal `terminal` of `account`
+    /// is taken from that Mac and opens in a new tab of the pane's window.
+    fn move_here(&self, _pane: u64, _account: &str, _terminal: &str) {}
     /// The card's *Open All in New Tab*: every terminal the server `host` keeps that no pane
     /// shows, together in a new tab of the pane's window.
     fn open_all_background(&self, _pane: u64, _host: &str) {}
@@ -238,6 +247,9 @@ pub trait PaneHost {
     /// shows dials now instead of waiting out its pause. The default is an
     /// owner that has no such terminals.
     fn retry_kept_terminal(&self, _pane: &PaneUuid) {}
+    /// ⏎ in a pane whose terminal another computer took: the terminal is taken back, and the
+    /// pane goes on from where it was. The default is an owner that has no such terminals.
+    fn bring_back_kept_terminal(&self, _pane: &PaneUuid) {}
     /// The login sheet's arbitration, for a pane whose terminal waits for a
     /// password ([`KeptLogin`]). The default is an owner that has no such terminals.
     fn kept_login(&self) -> Arc<dyn KeptLogin> {
@@ -402,6 +414,8 @@ enum Wait {
     TryNow,
     /// ⏎ while the server wants a login nobody saved: the sheet.
     LogIn,
+    /// ⏎ while another computer has the terminal: take it back.
+    BringBack,
     /// Anything else while it waits: nothing goes to the terminal, the system beeps.
     Beep,
 }
@@ -410,6 +424,7 @@ fn on_wait(link: PaneLink, enter: bool) -> Wait {
     match (link.is_passive(), enter, link) {
         (false, ..) => Wait::Pass,
         (true, true, PaneLink::NeedsLogin) => Wait::LogIn,
+        (true, true, PaneLink::Taken) => Wait::BringBack,
         (true, true, _) => Wait::TryNow,
         (true, false, _) => Wait::Beep,
     }
@@ -4258,11 +4273,21 @@ impl TerminalPane {
         let Some(session) = self.session() else {
             return;
         };
-        session.set_remote_link(match self.ivars().connection.get() {
-            PaneLink::Reconnecting => Some(bt_core::RemoteLink::Reconnecting),
-            PaneLink::NeedsLogin => Some(bt_core::RemoteLink::LoginNeeded),
-            PaneLink::Connecting | PaneLink::Live => None,
-        });
+        let link = self.ivars().connection.get();
+        // Who took the terminal is the service's to say; the word and the name land together.
+        let by = (link == PaneLink::Taken)
+            .then(|| self.host().kept_terminal(self.uuid()))
+            .flatten()
+            .and_then(|shown| shown.taken_by);
+        session.set_remote_link(
+            match link {
+                PaneLink::Reconnecting => Some(bt_core::RemoteLink::Reconnecting),
+                PaneLink::NeedsLogin => Some(bt_core::RemoteLink::LoginNeeded),
+                PaneLink::Taken => Some(bt_core::RemoteLink::Taken),
+                PaneLink::Connecting | PaneLink::Live => None,
+            },
+            by.as_deref(),
+        );
     }
 
     /// The veil's frame: the pane without the dock's band, in the pane's own
@@ -4301,6 +4326,7 @@ impl TerminalPane {
             Wait::Pass => return false,
             Wait::LogIn => self.log_in_to_reconnect(),
             Wait::TryNow => self.host().retry_kept_terminal(self.uuid()),
+            Wait::BringBack => self.host().bring_back_kept_terminal(self.uuid()),
             Wait::Beep => crate::preview::beep(),
         }
         true
@@ -6438,7 +6464,14 @@ mod tests {
         }
         assert_eq!(on_wait(PaneLink::Reconnecting, true), Wait::TryNow);
         assert_eq!(on_wait(PaneLink::NeedsLogin, true), Wait::LogIn);
-        for link in [PaneLink::Reconnecting, PaneLink::NeedsLogin] {
+        // A terminal another computer took is taken back by ⏎ — not dialed for, which would
+        // try a connection that is there.
+        assert_eq!(on_wait(PaneLink::Taken, true), Wait::BringBack);
+        for link in [
+            PaneLink::Reconnecting,
+            PaneLink::NeedsLogin,
+            PaneLink::Taken,
+        ] {
             assert_eq!(on_wait(link, false), Wait::Beep, "{link:?}");
         }
     }
@@ -6454,11 +6487,19 @@ mod tests {
             terminal: bt_shell_common::kablo::SessionId::new("b-1").expect("an id"),
             program: program.map(str::to_owned),
             link: PaneLink::Live,
+            taken_by: None,
         };
         assert_eq!(
             super::kept_foreground(&shown(Some("npm"))),
             Foreground::Running(vec!["npm on rasp".to_owned()])
         );
+        // What another computer took is not running here: closing the dimmed pane asks nothing.
+        let taken = Shown {
+            link: PaneLink::Taken,
+            taken_by: Some("iMac".into()),
+            ..shown(Some("npm"))
+        };
+        assert_eq!(super::kept_foreground(&taken), Foreground::Idle);
         // The shell waiting for a command is not a job, nor is a server that
         // has said nothing yet; a login shell is named with a dash.
         for program in [Some("zsh"), Some("-bash"), Some("fish"), Some(""), None] {

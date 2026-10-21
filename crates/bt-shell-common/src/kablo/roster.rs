@@ -15,6 +15,11 @@
 //! someone to hear of it and are not running; the ones the relay cannot serve cannot be attached.
 //! The most recently written come first — what a person remembers having been busy with.
 //!
+//! A terminal that another Mac has open is not in the background: it is **on another Mac**
+//! ([`Background::elsewhere`], the server's list of who is attached — kablo names its clients).
+//! [`Roster::split`] gives the two halves of the one list, so no reader can take both for one; a server too old to name its clients cannot tell, and its
+//! terminals stay in the background.
+//!
 //! Everything a person is shown is cleaned of control characters here, once, the way
 //! [`super::service::Shown`] is. The times are the server's: seconds of **its** clock
 //! ([`Background::activity`] takes the moment to measure them against from the caller, and a
@@ -72,6 +77,31 @@ pub enum Activity {
 }
 
 impl Background {
+    /// The names of the other computers this terminal is open on, in the order they attached,
+    /// each once: empty for a terminal nobody has open. Only a relay that names its clients is
+    /// believed (it says one entry per client it counts; an older one leaves the list short, and
+    /// then nothing is known of who is attached) and only a client that gave a name is a computer
+    /// — an agent's `kablo wait` is attached too, with none, and the terminal is still nobody's.
+    pub fn elsewhere(&self) -> Vec<&str> {
+        let counted = usize::try_from(self.clients).unwrap_or(usize::MAX);
+        if self.clients_named.len() < counted {
+            return Vec::new();
+        }
+        let mut names: Vec<&str> = Vec::new();
+        for name in self
+            .clients_named
+            .iter()
+            .flatten()
+            .map(String::as_str)
+            .filter(|name| !name.trim().is_empty())
+        {
+            if !names.contains(&name) {
+                names.push(name);
+            }
+        }
+        names
+    }
+
     /// What the terminal is doing at `now`, in seconds of the clock the caller measures against
     /// (the Unix epoch of this computer; the server's own is not known).
     pub fn activity(&self, now: u64) -> Activity {
@@ -101,6 +131,10 @@ struct Entry {
     output_at: Option<u64>,
     clients: u32,
     clients_named: Vec<Option<String>>,
+    /// The counts above were taken after this Mac last attached to the terminal or was let go of
+    /// it. Until then they may count this Mac itself (it was attached when the server answered),
+    /// and the terminal is not said to be on another computer on their word.
+    counted_since: bool,
 }
 
 /// Text from the server for a person to read: lossy, and with no control character in it.
@@ -139,6 +173,7 @@ impl Entry {
                 .iter()
                 .map(|name| name.as_ref().map(|name| tidy(name.as_str().as_bytes())))
                 .collect(),
+            counted_since: true,
         }
     }
 }
@@ -162,6 +197,9 @@ impl Roster {
             Event::Status(status) | Event::Created(status) => {
                 self.terminals.insert(status.id.clone(), Entry::of(status));
             }
+            // This Mac was let go of the terminal: who is attached changed, and what the server
+            // counted before is not about the terminal as it is now.
+            Event::Taken { terminal, .. } => self.attached(terminal),
             Event::State { terminal, state } => {
                 if let Some(entry) = self.terminals.get_mut(terminal) {
                     entry.program = tidy_some(&state.program);
@@ -183,10 +221,36 @@ impl Roster {
         }
     }
 
-    /// The terminals of `account` (the server `host`) in the background: running, and not
-    /// `hidden` — a pane of this Mac shows it, or it was asked to end. The most recently written
-    /// first, then those that never wrote or whose time is not known, by their start, newest first.
-    pub(super) fn background(
+    /// This Mac attached to the terminal: what the server counted of who is attached before is not
+    /// believed until it answers again (the count may have this Mac in it). The hub does not pass
+    /// the attach on, so the service says it.
+    pub(super) fn attached(&mut self, terminal: &SessionId) {
+        if let Some(entry) = self.terminals.get_mut(terminal) {
+            entry.counted_since = false;
+        }
+    }
+
+    /// The terminals of `account` (the server `host`) that run and are not `hidden` — a pane of
+    /// this Mac shows it, or it was asked to end — in two halves: those in the background (nobody
+    /// has them open) and those open on another Mac. Each the most recently written first, then
+    /// those that never wrote or whose time is not known, by their start, newest first.
+    pub(super) fn split(
+        &self,
+        account: &str,
+        host: &str,
+        argv: &[String],
+        hidden: impl Fn(&SessionId) -> bool,
+    ) -> (Vec<Background>, Vec<Background>) {
+        let (elsewhere, background) = self
+            .not_shown(account, host, argv, hidden)
+            .into_iter()
+            .partition(|background| !background.elsewhere().is_empty());
+        (background, elsewhere)
+    }
+
+    /// The running terminals no pane of this Mac shows and nobody asked to end, the most recently
+    /// written first.
+    fn not_shown(
         &self,
         account: &str,
         host: &str,
@@ -209,8 +273,17 @@ impl Roster {
                 front_started: entry.front_started,
                 front_is_own: entry.front_is_own,
                 output_at: entry.output_at,
-                clients: entry.clients,
-                clients_named: entry.clients_named.clone(),
+                // Who is attached is not known between this Mac's attaching and the next answer.
+                clients: if entry.counted_since {
+                    entry.clients
+                } else {
+                    0
+                },
+                clients_named: if entry.counted_since {
+                    entry.clients_named.clone()
+                } else {
+                    Vec::new()
+                },
             })
             .collect();
         sort_recent_first(&mut found);

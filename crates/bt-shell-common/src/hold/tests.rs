@@ -183,7 +183,7 @@ impl App {
                 self.hub.start(hold, ACCOUNT, spec).expect("started");
             }
             (Policy::Serve, Target::Resume { .. }) => {
-                self.hub.resume(hold, ACCOUNT).expect("resumed");
+                self.hub.resume(hold, ACCOUNT, false).expect("resumed");
             }
             (Policy::FallBack, _) => self.hub.refuse(hold, true, "no kablo on this server"),
             (Policy::Refuse, _) => self.hub.refuse(hold, false, "the terminal is gone"),

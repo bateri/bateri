@@ -11,12 +11,17 @@
 //! on (a plain `ssh` has none of this, and its row has no page and no count): *Open All in New
 //! Tab* when something runs in the background; *Running in the background*, the last to write
 //! first; *Tabs*, every pane of this Mac on the server on a row of its own, with its tab and the
-//! tab's ⌘ digit at the right (⏎ brings the tab and the pane forward, nothing moves); and, last,
-//! *New Tab on rasp*, which is what ⏎ on the server's row does. A heading is a noun, never a verb.
+//! tab's ⌘ digit at the right (⏎ brings the tab and the pane forward, nothing moves); *On other
+//! Macs*, the terminals another Mac has open, each with that Mac's name at the right (⏎ moves it
+//! here: the pane there goes dim); and, last, *New Tab on rasp*, which is what ⏎ on the server's
+//! row does. A heading is a noun, never a verb. The terminals on other Macs are on this page only:
+//! a search from the root does not find them, so ⏎ on a row found by chance never takes a terminal
+//! from the Mac that is using it.
 //!
 //! **Identity.** A terminal in the background is `bg.<terminal>@<account>` (a terminal's name has
-//! no `@`, the account's key has one in it), a pane `pane.<tab>.<pane>`, Open All
-//! `act.openAll.<server>`; the new tab of the page is the server's own `host.<name>`.
+//! no `@`, the account's key has one in it), one on another Mac `mv.<terminal>@<account>`, a pane
+//! `pane.<tab>.<pane>`, Open All `act.openAll.<server>`; the new tab of the page is the server's
+//! own `host.<name>`.
 
 use std::time::Duration;
 
@@ -35,6 +40,8 @@ use super::targets::{Go, Targets};
 pub const BACKGROUND_HEADING: &str = "Running in the background";
 /// The heading over the panes of this Mac on a server's page.
 pub const PANES_HEADING: &str = "Tabs";
+/// The heading over the terminals another Mac has open on a server's page.
+pub const ELSEWHERE_HEADING: &str = crate::server_card::OTHERS_HEADING;
 /// The identity prefix of Open All: `act.openAll.<server>`.
 const OPEN_ALL: &str = "act.openAll.";
 
@@ -53,6 +60,9 @@ pub struct BackgroundFacts {
     pub place: Option<String>,
     /// For how long a program other than the shell has been in front.
     pub running: Option<Duration>,
+    /// The Macs that have the terminal open, by the names they gave themselves, joined with
+    /// `, `; empty for a terminal nobody has open.
+    pub by: String,
 }
 
 impl BackgroundFacts {
@@ -72,6 +82,7 @@ impl BackgroundFacts {
                 Activity::Running(time) => time,
                 _ => None,
             },
+            by: background.elsewhere().join(", "),
         }
     }
 }
@@ -96,6 +107,8 @@ pub struct ServerFacts {
     pub name: String,
     /// The terminals in the background, the last to write first.
     pub background: Vec<BackgroundFacts>,
+    /// The terminals another Mac has open, the last to write first.
+    pub elsewhere: Vec<BackgroundFacts>,
     /// The panes of this Mac on the server, in the order the tabs are listed.
     pub panes: Vec<ServerPane>,
 }
@@ -138,6 +151,23 @@ pub fn background_row(facts: &BackgroundFacts) -> Row {
         row = row.status(format!("Running · {time}"), Tone::Dim);
     }
     row
+}
+
+/// The row of a terminal another Mac has open: the same, with that Mac's name at the right. ⏎
+/// moves it here; nothing else is done to it from here (⌥⏎ is not a use of this row).
+pub fn elsewhere_row(facts: &BackgroundFacts) -> Row {
+    Row::new(
+        Kind::Elsewhere,
+        &background_key(&facts.account, &facts.terminal),
+        facts.title.clone(),
+    )
+    .keywords(format!(
+        "terminal session server remote kablo mac computer {}",
+        facts.by
+    ))
+    .subtitle(joined([Some(facts.host.clone()), facts.place.clone()]))
+    .value(facts.by.clone())
+    .hint("↵", crate::server_card::move_hint(&facts.by))
 }
 
 /// The rows of every terminal in the background, for a search at the root.
@@ -209,6 +239,12 @@ fn sections(host: &str, targets: &Targets) -> Vec<(Option<String>, Vec<Row>)> {
                     .collect(),
             ));
         }
+        if !server.elsewhere.is_empty() {
+            sections.push((
+                Some(ELSEWHERE_HEADING.to_owned()),
+                server.elsewhere.iter().map(elsewhere_row).collect(),
+            ));
+        }
     }
     // What ⏎ on the server's own row does: its id is the server's, so choosing it is that.
     sections.push((
@@ -267,6 +303,11 @@ pub(super) fn go(id: &str, modifier: Modifier) -> Option<Go> {
             Modifier::Option => Some(Go::SplitBackground { account, terminal }),
             Modifier::Command => None,
         };
+    }
+    if let Some(key) = id.strip_prefix(Kind::Elsewhere.prefix()) {
+        let (terminal, account) = key.split_once('@')?;
+        let (terminal, account) = (terminal.to_owned(), account.to_owned());
+        return (modifier == Modifier::None).then_some(Go::MoveHere { account, terminal });
     }
     if let Some(host) = id.strip_prefix(OPEN_ALL) {
         return (modifier == Modifier::None).then(|| Go::OpenAllBackground(host.to_owned()));

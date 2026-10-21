@@ -129,6 +129,9 @@ pub struct Shown {
     pub program: Option<String>,
     /// How the connection to the server stands for this terminal.
     pub link: PaneLink,
+    /// While the link is [`PaneLink::Taken`], the name the computer that took the terminal gave
+    /// itself; `None` when it gave none.
+    pub taken_by: Option<String>,
 }
 
 /// How the connection to the server stands for the terminal a pane shows: what
@@ -147,13 +150,17 @@ pub enum PaneLink {
     /// The terminal was shown and the server wants a login nobody has saved
     /// (a password, a second factor). Nothing is tried until the user logs in.
     NeedsLogin,
+    /// The terminal was shown and another computer took it ([`Shown::taken_by`]): the pane keeps
+    /// its last screen, dimmed, and ⏎ takes the terminal back. Whatever the connection does, this
+    /// stays — the terminal is not this Mac's to wait for.
+    Taken,
 }
 
 impl PaneLink {
     /// Whether the pane shows a screen that is no longer live: dimmed, with no
     /// caret and no keys to the terminal.
     pub fn is_passive(self) -> bool {
-        matches!(self, Self::Reconnecting | Self::NeedsLogin)
+        matches!(self, Self::Reconnecting | Self::NeedsLogin | Self::Taken)
     }
 
     /// What the pane is told: [`PaneLink::Connecting`] is the connection being there as far as
@@ -197,6 +204,10 @@ impl Shown {
     /// `None` when the shell is in front (waiting for a command) or the server
     /// has not said what is.
     pub fn running(&self) -> Option<String> {
+        // A terminal another computer took is not running here: closing the pane ends nothing.
+        if self.link == PaneLink::Taken {
+            return None;
+        }
         let program = self.program.as_deref().filter(|name| !name.is_empty())?;
         (!crate::program::is_shell_name(program)).then(|| format!("{program} on {}", self.host))
     }
@@ -390,6 +401,13 @@ enum Msg {
     End(PaneUuid),
     /// The user closed the pane and chose to leave the terminal it shows running.
     Leave(PaneUuid),
+    /// The next pane to ask for the terminal takes it ([`Service::take_over`]).
+    TakeOver {
+        account: String,
+        terminal: SessionId,
+    },
+    /// ⏎ in a pane whose terminal was taken ([`Service::bring_back`]).
+    BringBack(PaneUuid),
     /// The user ended a terminal that no pane shows (the server's card).
     EndTerminal {
         account: String,
@@ -474,6 +492,15 @@ struct Account {
     purged: bool,
 }
 
+/// What one account's server keeps that no pane of this Mac shows, in the roster's two halves.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct Kept {
+    /// Nobody has it open ([`Service::background`]).
+    background: Vec<Background>,
+    /// Another computer has it open ([`Service::elsewhere`]).
+    elsewhere: Vec<Background>,
+}
+
 /// The running service. Dropping it stops it.
 pub struct Service {
     socket: PathBuf,
@@ -483,7 +510,7 @@ pub struct Service {
     /// What each pane shows, as the loop last wrote it.
     shown: Arc<Mutex<HashMap<PaneUuid, Shown>>>,
     /// The terminals each account keeps in the background, as the loop last wrote them.
-    background: Arc<Mutex<BTreeMap<String, Vec<Background>>>>,
+    background: Arc<Mutex<BTreeMap<String, Kept>>>,
 }
 
 /// How long a terminal that was asked to hang up has before it is killed.
@@ -503,6 +530,11 @@ const END_SIZE: Size = Size {
     xpixel: 0,
     ypixel: 0,
 };
+
+/// How long a terminal said to be taken ([`Service::take_over`]) waits for the pane that was
+/// opened to show it: a pane that never asks leaves nothing behind that would take the terminal
+/// from somebody the next time it is opened the usual way.
+const TAKE_WAIT: Duration = Duration::from_secs(60);
 
 impl Service {
     /// Binds `<dir>/hold` (a stale file is removed first) and starts serving.
@@ -567,6 +599,7 @@ impl Service {
             told: BTreeMap::new(),
             background: Arc::clone(&background),
             refresh: false,
+            takes: BTreeMap::new(),
             ending: Vec::new(),
             grace,
             rx,
@@ -595,31 +628,73 @@ impl Service {
             .cloned()
     }
 
-    /// The terminals the server of `account` keeps for the user that no pane of this Mac shows,
-    /// the most recently written first: running, not asked to end, and as the server last said —
-    /// a cache that events and [`Service::refresh_background`] keep, read here without waiting
-    /// for the server. An account the service has no bridge for has none.
+    /// The terminals the server of `account` keeps for the user that no pane of this Mac shows and
+    /// no other computer has open, the most recently written first: running, not asked to end, and
+    /// as the server last said — a cache that events and [`Service::refresh_background`] keep, read
+    /// here without waiting for the server. An account the service has no bridge for has none.
     pub fn background(&self, account: &str) -> Vec<Background> {
-        self.background
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(account)
-            .cloned()
-            .unwrap_or_default()
+        self.kept_of(account, |kept| &kept.background)
     }
 
     /// [`Service::background`] of every account, the most recently written first.
     pub fn background_all(&self) -> Vec<Background> {
+        self.kept_all(|kept| &kept.background)
+    }
+
+    /// The terminals of `account` another computer has open ([`Background::elsewhere`] names
+    /// them) and no pane of this Mac shows, the most recently written first. Like
+    /// [`Service::background`], read from the cache without waiting.
+    pub fn elsewhere(&self, account: &str) -> Vec<Background> {
+        self.kept_of(account, |kept| &kept.elsewhere)
+    }
+
+    /// [`Service::elsewhere`] of every account, the most recently written first.
+    pub fn elsewhere_all(&self) -> Vec<Background> {
+        self.kept_all(|kept| &kept.elsewhere)
+    }
+
+    /// One half of the cache for `account`. The two halves are read by the one pair of functions,
+    /// so that they cannot drift apart.
+    fn kept_of(&self, account: &str, half: fn(&Kept) -> &Vec<Background>) -> Vec<Background> {
+        self.background
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(account)
+            .map(|kept| half(kept).clone())
+            .unwrap_or_default()
+    }
+
+    /// One half of the cache for every account, the most recently written first.
+    fn kept_all(&self, half: fn(&Kept) -> &Vec<Background>) -> Vec<Background> {
         let mut all: Vec<Background> = self
             .background
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .values()
-            .flatten()
+            .flat_map(|kept| half(kept).iter())
             .cloned()
             .collect();
         sort_recent_first(&mut all);
         all
+    }
+
+    /// The pane about to show `terminal` of `account` is to **take** it from whichever computer
+    /// has it open (a terminal moved here, [`Service::elsewhere`]): the next time a pane asks to
+    /// see it, within [`TAKE_WAIT`], it attaches taking, and the other computer's pane is told by
+    /// whom. Said before the pane is opened, as [`Service::background`]'s terminals are claimed;
+    /// asking for nothing else changes: a terminal opened the usual way is never taken from anyone.
+    pub fn take_over(&self, account: &str, terminal: &SessionId) {
+        let _ = self.tx.send(Msg::TakeOver {
+            account: account.to_owned(),
+            terminal: terminal.clone(),
+        });
+    }
+
+    /// ⏎ in a pane whose terminal another computer took: it is taken back, from where the pane
+    /// left off, and the other computer's pane is told by whom. A pane that shows nothing, or a
+    /// terminal nobody took, does nothing.
+    pub fn bring_back(&self, pane: &PaneUuid) {
+        let _ = self.tx.send(Msg::BringBack(pane.clone()));
     }
 
     /// Asks every account whose bridge is up for its terminals again; the answer renews
@@ -796,10 +871,13 @@ struct Core {
     /// The terminals in the background the last line to a new terminal named, by account
     /// ([`background_note`]): for as long as the service lives, which is the application's.
     told: BTreeMap<String, Vec<SessionId>>,
-    /// What [`Service::background`] reads.
-    background: Arc<Mutex<BTreeMap<String, Vec<Background>>>>,
+    /// What [`Service::background`] and [`Service::elsewhere`] read.
+    background: Arc<Mutex<BTreeMap<String, Kept>>>,
     /// Something happened that [`Core::shown`] may say differently.
     refresh: bool,
+    /// Terminals the next pane to ask for them takes, and when it was said
+    /// ([`Service::take_over`]).
+    takes: BTreeMap<(String, SessionId), Instant>,
     /// Terminals asked to hang up that are killed if they are still there.
     ending: Vec<Ending>,
     grace: Duration,
@@ -887,6 +965,13 @@ impl Core {
             }
             Msg::End(pane) => self.end(&pane, now),
             Msg::Leave(pane) => self.leave(&pane),
+            Msg::TakeOver { account, terminal } => {
+                let now = Instant::now();
+                self.takes
+                    .retain(|_, at| now.saturating_duration_since(*at) < TAKE_WAIT);
+                self.takes.insert((account, terminal), now);
+            }
+            Msg::BringBack(pane) => self.bring_back(&pane),
             Msg::EndTerminal { account, terminal } => self.end_terminal(&account, &terminal, now),
             Msg::EndAll { panes, done } => self.end_all(&panes, done, now),
             Msg::Dialed {
@@ -992,10 +1077,16 @@ impl Core {
                             let _ = reply.send(status);
                         }
                     }
-                    HubEvent::Gone { hold } => {
+                    HubEvent::Gone { hold, showed } => {
                         self.waiting.remove(&hold);
                         self.conns.remove(&hold);
                         self.panes.remove(&hold);
+                        // This Mac was attached to the terminal until now, and what the server
+                        // counted of who is attached has it in: not believed until the server
+                        // answers again (the question is asked just below).
+                        if let Some((account, terminal)) = showed {
+                            self.roster.entry(account).or_default().attached(&terminal);
+                        }
                         // A holder that goes lets go of its terminal, which lives on unless
                         // it was asked to end: the server is asked what it has now.
                         self.relist.extend(self.accounts.keys().cloned());
@@ -1074,7 +1165,13 @@ impl Core {
                 .unwrap_or_default();
             // Passive is "was shown and is not live any more": until the
             // terminal was shown the connection being made is the first one.
-            let link = match self.hub.client(account).map(Client::link) {
+            let client = self.hub.client(account);
+            let taken = client.is_some_and(|client| client.is_taken(terminal));
+            let link = match client.map(Client::link) {
+                // Whatever the connection does, and even before the terminal was shown (a
+                // pane that came back to a terminal another computer has by now), the terminal
+                // is another computer's.
+                _ if taken => PaneLink::Taken,
                 _ if !self.hub.is_shown(*hold) => PaneLink::Connecting,
                 Some(Link::NeedsLogin) => PaneLink::NeedsLogin,
                 Some(Link::Retrying { .. } | Link::Opening { .. }) => PaneLink::Reconnecting,
@@ -1091,6 +1188,9 @@ impl Core {
                     terminal: terminal.clone(),
                     program,
                     link,
+                    taken_by: client
+                        .and_then(|client| client.taken_by(terminal))
+                        .map(str::to_owned),
                 },
             );
         }
@@ -1137,7 +1237,7 @@ impl Core {
     /// that shows it, or is about to — a terminal still being brought up is not in the
     /// background for a moment) and those asked to end.
     fn write_background(&mut self) {
-        let mut background: BTreeMap<String, Vec<Background>> = BTreeMap::new();
+        let mut background: BTreeMap<String, Kept> = BTreeMap::new();
         for (account, roster) in &self.roster {
             let Some(entry) = self.accounts.get(account) else {
                 continue;
@@ -1151,16 +1251,21 @@ impl Core {
                         .iter()
                         .any(|e| e.account == *account && e.terminal == *terminal)
             };
-            let found = roster.background(account, &entry.server.host, &entry.server.argv, hidden);
-            if !found.is_empty() {
-                background.insert(account.clone(), found);
+            let (host, argv) = (&entry.server.host, &entry.server.argv);
+            let (waiting, away) = roster.split(account, host, argv, hidden);
+            let kept = Kept {
+                background: waiting,
+                elsewhere: away,
+            };
+            if kept != Kept::default() {
+                background.insert(account.clone(), kept);
             }
         }
         let before = std::mem::replace(
             &mut *self.background.lock().unwrap_or_else(|e| e.into_inner()),
             background.clone(),
         );
-        // Told after the lock is let go of, once per account whose list is not what it was.
+        // Told after the lock is let go of, once per account whose lists are not what they were.
         let accounts: BTreeSet<&String> = before.keys().chain(background.keys()).collect();
         for account in accounts {
             if before.get(account) != background.get(account) {
@@ -1185,8 +1290,49 @@ impl Core {
     /// account carries it out.
     fn end(&mut self, pane: &PaneUuid, now: Instant) {
         for (account, terminal) in self.terminals_of(pane) {
+            // A terminal another computer took is that computer's: closing the dimmed pane that
+            // showed it hangs up nothing.
+            if self.is_taken(&account, &terminal) {
+                self.shared.ledger.gone(&account, &terminal);
+                continue;
+            }
             self.shared.ledger.end(&account, &terminal);
             self.finish_off(&account, &terminal, now);
+        }
+    }
+
+    /// An account made in this process before the ledger had it (the file was lost, or its last
+    /// row went) is written down again, so that the next restart can show its terminals.
+    fn remember_account(&self, account: &str) {
+        if self.shared.ledger.known(account).is_none()
+            && let Some(entry) = self.accounts.get(account)
+        {
+            self.shared.ledger.remember(&entry.server, &entry.installed);
+        }
+    }
+
+    /// Whether another computer took the terminal from the pane that showed it.
+    fn is_taken(&self, account: &str, terminal: &SessionId) -> bool {
+        self.hub
+            .client(account)
+            .is_some_and(|client| client.is_taken(terminal))
+    }
+
+    /// ⏎ in a pane whose terminal was taken ([`Service::bring_back`]): taken back from where the
+    /// pane left off. The ledger writes the terminal down again — it is this Mac's to end once
+    /// more — and the pane is no longer dimmed once the next pass writes what it shows.
+    fn bring_back(&mut self, pane: &PaneUuid) {
+        for (account, terminal) in self.terminals_of(pane) {
+            let Some(client) = self.hub.client_mut(&account) else {
+                continue;
+            };
+            if client.take_back(&terminal) {
+                // The ledger forgot the account with its last row when the terminal was taken.
+                self.remember_account(&account);
+                self.shared.ledger.shown(&account, &terminal, Some(pane));
+                self.roster.entry(account).or_default().attached(&terminal);
+                self.refresh = true;
+            }
         }
     }
 
@@ -1212,6 +1358,10 @@ impl Core {
         let mut pending = BTreeSet::new();
         for pane in panes {
             for (account, terminal) in self.terminals_of(pane) {
+                if self.is_taken(&account, &terminal) {
+                    self.shared.ledger.gone(&account, &terminal);
+                    continue;
+                }
                 self.shared.ledger.end(&account, &terminal);
                 if self.finish_off(&account, &terminal, now) {
                     pending.insert((account, terminal));
@@ -1584,14 +1734,20 @@ impl Core {
                 if !self.accounts.contains_key(account) {
                     self.recall(account);
                 }
-                if self.accounts.contains_key(account) && self.hub.resume(hold, account).is_ok() {
-                    // An account made in this process before the ledger had it (the file
-                    // was lost) is written down again, so that the next restart can show it.
-                    if self.shared.ledger.known(account).is_none()
-                        && let Some(entry) = self.accounts.get(account)
-                    {
-                        self.shared.ledger.remember(&entry.server, &entry.installed);
-                    }
+                let now = Instant::now();
+                let take = self
+                    .takes
+                    .remove(&(account.clone(), open.terminal.clone()))
+                    .is_some_and(|at| now.saturating_duration_since(at) < TAKE_WAIT);
+                if self.accounts.contains_key(account)
+                    && self.hub.resume(hold, account, take).is_ok()
+                {
+                    // Who is attached is not known until the server says again.
+                    self.roster
+                        .entry(account.clone())
+                        .or_default()
+                        .attached(&open.terminal);
+                    self.remember_account(account);
                     self.shared
                         .ledger
                         .shown(account, &open.terminal, pane.tab.as_ref());
@@ -1673,7 +1829,7 @@ impl Core {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .get(account)
-            .cloned()
+            .map(|kept| kept.background.clone())
             .unwrap_or_default();
         let Some((text, named)) =
             background_note(&host, &waiting, self.told.get(account).map(Vec::as_slice))

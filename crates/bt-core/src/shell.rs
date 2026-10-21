@@ -702,6 +702,9 @@ pub struct DockContext {
     /// the caret is not drawn (the grid is a picture of a moment that has
     /// passed) and the load indicator's numbers are as old as the connection.
     pub link: Option<RemoteLink>,
+    /// The name of the computer that took the terminal, while [`Self::link`] is
+    /// [`RemoteLink::Taken`]: what the row says it was opened on. Empty when it gave none.
+    pub link_by: String,
     /// Why bateri's remote bootstrap fell back to a plain login shell: the shell integration did not start on the server, so the
     /// remote folder stays unknown and the pane's label says why
     /// ([`crate::Session::remote_setup_fault`]). `None` otherwise. It comes from
@@ -868,10 +871,10 @@ impl RemoteSetupFault {
     }
 }
 
-/// What the context row says while the connection to a kept terminal's server
-/// is down ([`DockContext::link`]). The text is the row's, the writer decides
-/// which: the bridge is trying again by itself, or it waits for the user to
-/// log in.
+/// What the context row says about a kept terminal that is not live
+/// ([`DockContext::link`]): its server's connection is down, or another computer took the
+/// terminal. The text is the row's, the writer decides which: the bridge is trying again by
+/// itself, it waits for the user to log in, or the terminal went to another Mac.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RemoteLink {
     /// The connection is being made again, on a clock the user can skip: `⏎ try now`.
@@ -879,23 +882,66 @@ pub enum RemoteLink {
     /// The server wants a password (or a code) nobody has saved: `⏎ log in`.
     /// Nothing is tried until the user does.
     LoginNeeded,
+    /// Another computer took the terminal: `Opened on MacBook · ⏎ bring back`. The name is the
+    /// computer's own ([`DockContext::link_by`]); ⏎ takes the terminal back.
+    Taken,
 }
 
 impl RemoteLink {
-    /// What the context row says after the host, in full. A UI string.
-    pub const fn text(self) -> &'static str {
-        match self {
-            Self::Reconnecting => "Reconnecting… · ⏎ try now",
-            Self::LoginNeeded => "Needs your password · ⏎ log in",
+    /// What the context row says after the host, as three pieces to be written one after the
+    /// other (so that drawing it costs no allocation): in full, or — when the full text does not
+    /// fit — the state alone. A UI string. `by` is the name of the computer that took the terminal
+    /// as [`computer_label`] made it, for [`RemoteLink::Taken`] only.
+    pub fn parts(self, by: &str, full: bool) -> [&str; 3] {
+        match (self, full) {
+            (Self::Reconnecting, true) => ["Reconnecting…", " · ⏎ try now", ""],
+            (Self::Reconnecting, false) => ["Reconnecting…", "", ""],
+            (Self::LoginNeeded, true) => ["Needs your password", " · ⏎ log in", ""],
+            (Self::LoginNeeded, false) => ["Needs your password", "", ""],
+            (Self::Taken, full) => [
+                "Opened on ",
+                if by.is_empty() { ANOTHER_COMPUTER } else { by },
+                if full { " · ⏎ bring back" } else { "" },
+            ],
         }
     }
 
+    /// What the context row says after the host, in full.
+    pub fn text(self, by: &str) -> String {
+        self.parts(by, true).concat()
+    }
+
     /// What it says when the full text does not fit: the state alone.
-    pub const fn short(self) -> &'static str {
-        match self {
-            Self::Reconnecting => "Reconnecting…",
-            Self::LoginNeeded => "Needs your password",
-        }
+    pub fn short(self, by: &str) -> String {
+        self.parts(by, false).concat()
+    }
+
+    /// How many cells [`Self::parts`] takes, one a character.
+    pub fn width(self, by: &str, full: bool) -> usize {
+        self.parts(by, full)
+            .iter()
+            .map(|part| part.chars().count())
+            .sum()
+    }
+}
+
+/// What the row calls a computer that gave no name.
+const ANOTHER_COMPUTER: &str = "another computer";
+
+/// A computer's name as the context row writes it ([`DockContext::link_by`]): one cell a
+/// character, like the host beside it — a name is whatever its owner typed, so a control character
+/// goes and a character that is not one cell wide is a `?`. Empty for a name that is nothing; the
+/// row then says `another computer`.
+pub(crate) fn computer_label(name: &str) -> String {
+    let label: String = name
+        .chars()
+        .filter(|ch| !ch.is_control())
+        .map(|ch| if ch.width() == Some(1) { ch } else { '?' })
+        .collect();
+    if label.trim().is_empty() {
+        String::new()
+    } else {
+        label
     }
 }
 
@@ -1152,6 +1198,7 @@ impl Clone for DockContext {
         self.transfer.clone_from(&source.transfer);
         self.stats = source.stats;
         self.link = source.link;
+        self.link_by.clone_from(&source.link_by);
         self.server = source.server;
         self.remote_setup = source.remote_setup;
         self.program.clone_from(&source.program);
@@ -1329,6 +1376,7 @@ impl DockContext {
         // The load belongs to the host.
         self.stats = None;
         self.link = None;
+        self.link_by.clear();
         self.server = false;
         self.remote.take().is_some()
     }
@@ -3279,6 +3327,7 @@ impl ShellLog {
         if changed {
             self.context.stats = None;
             self.context.link = None;
+            self.context.link_by.clear();
             self.context.server = false;
             // Another host's prompt is not this one's login.
             self.paste_since_remote = false;

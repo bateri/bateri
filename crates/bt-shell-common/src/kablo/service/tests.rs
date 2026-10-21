@@ -1755,6 +1755,7 @@ fn a_terminal_serves_the_session_to_its_own_server_only() {
         terminal: SessionId::new("b-1").expect("an id"),
         program: None,
         link: PaneLink::Live,
+        taken_by: None,
     };
     let target = |host: &str| RemoteTarget {
         host: host.into(),
@@ -2012,5 +2013,215 @@ fn a_new_terminal_is_told_of_those_waiting_in_the_background_once() {
     assert!(
         !String::from_utf8_lossy(&first.shown.bytes()).contains("more terminal"),
         "nothing was known when the first was made"
+    );
+}
+
+// ─── terminals that move between Macs ────────────────────────────────────
+
+fn elsewhere_names(rig: &Rig) -> Vec<String> {
+    rig.service
+        .elsewhere(ACCOUNT)
+        .iter()
+        .map(|found| found.terminal.as_str().to_owned())
+        .collect()
+}
+
+/// A terminal another Mac has open is *on another Mac*, named by it, and is no longer in the
+/// background — which is the terminals nobody has. An agent's `kablo wait` is attached too, with
+/// no name, and the terminal is still nobody's.
+#[test]
+fn a_terminal_another_mac_has_open_is_on_that_mac_and_not_in_the_background() {
+    let rig = Rig::new("elsewhere");
+    let _holder = Holder::new(&rig.socket(), "b-1");
+    rig.terminals(1);
+    {
+        let mut bridge = rig.world.bridge();
+        let open = bridge.add("agent-open", Size::default());
+        bridge.set_others(&open, &[Some("iMac"), None]);
+        let watched = bridge.add("agent-watched", Size::default());
+        bridge.set_others(&watched, &[None]);
+        bridge.add("agent-free", Size::default());
+    }
+    rig.service.refresh_background();
+    until("listed", || elsewhere_names(&rig) == ["agent-open"]);
+    assert_eq!(
+        background_names(&rig).len(),
+        2,
+        "the one an agent watches and the free one"
+    );
+    assert!(!background_names(&rig).contains(&"agent-open".to_owned()));
+    let found = rig.service.elsewhere(ACCOUNT);
+    assert_eq!(found[0].elsewhere(), ["iMac"]);
+    assert_eq!(rig.service.elsewhere_all().len(), 1);
+    assert!(
+        rig.world.background_told().iter().any(|a| a == ACCOUNT),
+        "the application is told when either list changes"
+    );
+
+    // The Mac lets go of it: the next answer puts it in the background.
+    rig.world
+        .bridge()
+        .set_others(&SessionId::new("agent-open").expect("an id"), &[]);
+    rig.service.refresh_background();
+    until("in the background", || elsewhere_names(&rig).is_empty());
+    assert!(background_names(&rig).contains(&"agent-open".to_owned()));
+}
+
+/// A relay from before the names counts its clients and says none: it cannot be told who has the
+/// terminal, so nothing is offered to be moved and the terminal stays in the background.
+#[test]
+fn a_relay_that_names_no_clients_keeps_every_terminal_in_the_background() {
+    let rig = Rig::over("elsewhere-old", Fake::new(Bridge::new(Age::Old)));
+    let _holder = Holder::new(&rig.socket(), "b-1");
+    rig.terminals(1);
+    {
+        let mut bridge = rig.world.bridge();
+        let open = bridge.add("agent-open", Size::default());
+        bridge.set_others(&open, &[Some("iMac")]);
+    }
+    rig.service.refresh_background();
+    until("listed", || background_names(&rig) == ["agent-open"]);
+    assert!(rig.service.elsewhere(ACCOUNT).is_empty());
+}
+
+/// Another Mac takes the terminal a pane shows: the pane keeps its terminal and is told it was
+/// taken, and by whom; closing it ends nothing on the server and the ledger does not name the
+/// terminal (a quit that ends terminals must not end the other Mac's); ⏎ takes it back.
+#[test]
+fn a_terminal_another_mac_took_dims_the_pane_and_closing_it_ends_nothing() {
+    let ledger = Arc::new(Ledger::memory());
+    let rig = Rig::kept(
+        "taken",
+        Fake::new(Bridge::new(Age::Current)),
+        ledger.clone(),
+        Duration::from_millis(300),
+    );
+    let pane = pane_named(&rig.world);
+    let _holder = Holder::new(&rig.socket(), "b-1");
+    let terminal = rig.terminals(1).remove(0);
+    until("the pane found", || rig.service.shown(&pane).is_some());
+    rig.world.bridge().set_state(&terminal, saying("npm"));
+    until("the program known", || {
+        rig.service
+            .shown(&pane)
+            .is_some_and(|shown| shown.running().is_some())
+    });
+    assert!(ledger.keeps(ACCOUNT, &terminal));
+
+    rig.world.bridge().take_by(&terminal, "iMac");
+    until("the pane told", || {
+        rig.world.links().last() == Some(&(pane.clone(), PaneLink::Taken))
+    });
+    let shown = rig.service.shown(&pane).expect("still shown");
+    assert_eq!(shown.link, PaneLink::Taken);
+    assert_eq!(shown.taken_by.as_deref(), Some("iMac"));
+    assert_eq!(shown.running(), None, "nothing runs here to ask about");
+    until("the ledger lets go", || !ledger.keeps(ACCOUNT, &terminal));
+    assert!(
+        rig.service.background(ACCOUNT).is_empty() && rig.service.elsewhere(ACCOUNT).is_empty(),
+        "a pane still names it: it is on screen"
+    );
+
+    // Closing the dimmed pane hangs up nothing, now or after the grace.
+    rig.service.end(&pane);
+    thread::sleep(Duration::from_millis(700));
+    assert_eq!(rig.world.bridge().terminated(&terminal), None);
+    assert!(rig.world.bridge().has(&terminal));
+}
+
+#[test]
+fn bringing_a_taken_terminal_back_attaches_taking_and_writes_the_ledger_again() {
+    let ledger = Arc::new(Ledger::memory());
+    let rig = Rig::kept(
+        "taken-back",
+        Fake::new(Bridge::new(Age::Current)),
+        ledger.clone(),
+        END_GRACE,
+    );
+    let pane = pane_named(&rig.world);
+    let _holder = Holder::new(&rig.socket(), "b-1");
+    let terminal = rig.terminals(1).remove(0);
+    until("the pane found", || rig.service.shown(&pane).is_some());
+    // The other Mac can only take what is attached.
+    until("attached", || rig.world.bridge().is_attached(&terminal));
+    rig.world.bridge().take_by(&terminal, "iMac");
+    until("the pane told", || {
+        rig.service
+            .shown(&pane)
+            .is_some_and(|shown| shown.link == PaneLink::Taken)
+    });
+
+    rig.service.bring_back(&pane);
+    until("the pane live again", || {
+        rig.service
+            .shown(&pane)
+            .is_some_and(|shown| shown.link == PaneLink::Live && shown.taken_by.is_none())
+    });
+    until("the ledger names it again", || {
+        ledger.keeps(ACCOUNT, &terminal)
+    });
+    let attaches = rig.world.bridge().attaches(&terminal);
+    let (_, view) = attaches.last().expect("an attach");
+    let view = view.expect("a view");
+    assert!(view.take, "taking it back");
+    assert!(view.name.is_some(), "under this Mac's name");
+    assert_eq!(
+        rig.world.links().last(),
+        Some(&(pane.clone(), PaneLink::Live))
+    );
+}
+
+/// A terminal moved here from another Mac: said before the pane opens, the pane's first attach
+/// takes it and the other Mac is let go; a terminal opened the usual way takes nothing.
+#[test]
+fn a_terminal_moved_here_is_taken_and_one_opened_the_usual_way_is_not() {
+    let rig = Rig::new("move-here");
+    let _first = Holder::new(&rig.socket(), "b-1");
+    rig.terminals(1);
+    let (open, usual) = {
+        let mut bridge = rig.world.bridge();
+        let open = bridge.add("agent-open", Size::default());
+        bridge.set_others(&open, &[Some("iMac")]);
+        let usual = bridge.add("agent-usual", Size::default());
+        bridge.set_others(&usual, &[Some("iMac")]);
+        (open, usual)
+    };
+    rig.service.refresh_background();
+    until("both are on the other Mac", || {
+        elsewhere_names(&rig).len() == 2
+    });
+
+    rig.service.take_over(ACCOUNT, &open);
+    let resume = || Target::Resume {
+        account: ACCOUNT.to_owned(),
+        offset: None,
+    };
+    let _moved = Holder::start(&rig.socket(), open.as_str(), resume());
+    until("the move took it", || {
+        rig.world.bridge().others_of(&open).is_empty()
+    });
+    let attaches = rig.world.bridge().attaches(&open);
+    assert!(
+        attaches
+            .last()
+            .and_then(|(_, view)| *view)
+            .expect("a view")
+            .take
+    );
+
+    let _usual = Holder::start(&rig.socket(), usual.as_str(), resume());
+    until("the other attached", || {
+        !rig.world.bridge().attaches(&usual).is_empty()
+    });
+    assert!(
+        !rig.world.bridge().attaches(&usual)[0]
+            .1
+            .expect("a view")
+            .take
+    );
+    assert_eq!(
+        rig.world.bridge().others_of(&usual),
+        [Some("iMac".to_owned())],
+        "opened beside, taking nothing"
     );
 }

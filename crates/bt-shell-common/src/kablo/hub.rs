@@ -73,6 +73,9 @@ pub enum HubEvent {
     Gone {
         /// The holder.
         hold: HoldId,
+        /// The account and the terminal it showed, if it showed one: the owner no longer knows
+        /// who has the terminal (this Mac was among those attached a moment ago).
+        showed: Option<(String, SessionId)>,
     },
     /// Something a client reported that the hub does not act on itself: the
     /// connection's life, a terminal's state, the answer to a question. Output
@@ -300,21 +303,12 @@ impl Hub {
                     }
                 }
             }
-            Event::Taken { terminal, by } => {
-                if let Some(hold) = hold_of(self, terminal) {
-                    self.release(hold, false);
-                    let note = match by {
-                        Some(by) => format!("bateri: this terminal was taken by {by}"),
-                        None => "bateri: this terminal was taken by another computer".to_owned(),
-                    };
-                    if let Some(hold) = self.holds.get_mut(&hold) {
-                        hold.finish(&ToHold::End {
-                            code: 1,
-                            note: Some(note),
-                        });
-                    }
-                }
-            }
+            // Another computer took the terminal. The holder is not ended: its pane keeps the last
+            // screen, dimmed, and says where the terminal went; the client remembers who took it
+            // ([`Client::taken_by`]) and the owner is told below. ⏎ in the pane takes it back
+            // ([`Client::take_back`]), and the holder is bound the whole time, so the terminal is
+            // not offered to be shown again meanwhile.
+            Event::Taken { .. } => {}
             Event::Failed {
                 terminal: Some(terminal),
                 code,
@@ -447,9 +441,14 @@ impl Hub {
     /// and the terminal lives on, on the server.
     pub fn closed(&mut self, hold: HoldId) {
         if self.holds.contains_key(&hold) {
+            let showed = self
+                .holds
+                .get(&hold)
+                .and_then(|entry| entry.bound.as_ref())
+                .map(|binding| (binding.account.clone(), binding.terminal.clone()));
             self.release(hold, true);
             self.holds.remove(&hold);
-            self.events.push_back(HubEvent::Gone { hold });
+            self.events.push_back(HubEvent::Gone { hold, showed });
         }
     }
 
@@ -606,8 +605,9 @@ impl Hub {
 
     /// Ties the holder to the terminal it asked to see again ([`Target::Resume`])
     /// on the server of `account`, from the position it said (or a picture of
-    /// the screen when it said none).
-    pub fn resume(&mut self, hold: HoldId, account: &str) -> Result<(), Declined> {
+    /// the screen when it said none). With `take` the terminal is taken from every other client
+    /// attached to it (a terminal moved here from another computer), each told by whom.
+    pub fn resume(&mut self, hold: HoldId, account: &str, take: bool) -> Result<(), Declined> {
         let open = self.take_pending(hold, |open| matches!(open.target, Target::Resume { .. }))?;
         let Target::Resume { offset, .. } = open.target.clone() else {
             return Err(Declined::WrongKind);
@@ -615,11 +615,17 @@ impl Hub {
         let Some(client) = self.clients.get_mut(account) else {
             return Err(self.put_back(hold, open, Declined::NoClient));
         };
+        // A pane that comes back to a terminal it showed (`offset`: an application that was
+        // restarted) finds out first whether another computer has it by now, and is dimmed
+        // instead of attached beside that computer.
         let attach = match offset {
-            Some(offset) => Attach::new(open.size).from(offset),
+            Some(offset) => Attach::new(open.size).from(offset).checking(),
             None => Attach::new(open.size).from_now().with_picture(),
         };
-        client.attach(open.terminal.clone(), attach);
+        client.attach(
+            open.terminal.clone(),
+            if take { attach.taking() } else { attach },
+        );
         // The holder has shown this terminal before (to the bateri that is gone, or
         // before the Mac restarted): its pane is a screen that is no longer live
         // when the connection is not, not a first connection being made.

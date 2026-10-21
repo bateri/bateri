@@ -161,8 +161,16 @@ impl PaneHost for TabHost {
         crate::hold_service::retry(pane);
     }
 
+    fn bring_back_kept_terminal(&self, pane: &bt_core::PaneUuid) {
+        crate::hold_service::bring_back(pane);
+    }
+
     fn background(&self, account: &str) -> Vec<bt_shell_common::kablo::roster::Background> {
         crate::hold_service::background(account)
+    }
+
+    fn elsewhere(&self, account: &str) -> Vec<bt_shell_common::kablo::roster::Background> {
+        crate::hold_service::elsewhere(account)
     }
 
     fn refresh_background(&self) {
@@ -173,6 +181,13 @@ impl PaneHost for TabHost {
 
     fn open_background(&self, _pane: u64, account: &str, terminal: &str) {
         self.go(bt_shell_common::palette::Go::OpenBackground {
+            account: account.to_owned(),
+            terminal: terminal.to_owned(),
+        });
+    }
+
+    fn move_here(&self, _pane: u64, account: &str, terminal: &str) {
+        self.go(bt_shell_common::palette::Go::MoveHere {
             account: account.to_owned(),
             terminal: terminal.to_owned(),
         });

@@ -1,8 +1,9 @@
 //! **The server's card**: a click on `⇄ rasp` in the dock of a pane that shows a terminal the
 //! server keeps opens it. Above, the server's load (small: the CPU and the memory as a bar each
 //! and the busiest processes); below, the terminals the server keeps that no pane of this Mac
-//! shows — *Running in the background · N*, with *Open All in New Tab* in the heading. A second
-//! click, a click outside or Esc closes it.
+//! shows — *Running in the background · N*, with *Open All in New Tab* in the heading — and the
+//! ones another Mac has open, *On other Macs · N*. A second click, a click outside or Esc closes
+//! it.
 //!
 //! - **What it says is in `bt-shell-common::server_card`**: the words, the numbers, the rows
 //!   (at most six, "and 3 more"), the time at a row's right. Here only the views and the
@@ -12,6 +13,9 @@
 //!   Terminal*, which asks in the words closing a pane does, through the sheet gate
 //!   (`sheets`), and only then reaches the server. Nothing that is open in a tab is listed, and
 //!   nothing here moves a pane that is.
+//! - **A row of *On other Macs*** says the Mac's name at its right and, selected, *Move Here*; a
+//!   line under the section says what that does (the pane there goes dim). It has no *End
+//!   Terminal*: a terminal somebody is using is not ended from here.
 //! - **Keys** are the upload list's pattern: `transient`, anchored to the control that was
 //!   clicked (`Session::footer_span` → `BateriView::context_span_rect`, the drawing's own
 //!   layout), and a local key monitor in the pane's window swallows Esc, ↑, ↓ and ⏎ — the
@@ -73,12 +77,55 @@ const KEYPAD_ENTER: u16 = 76;
 const DOWN: u16 = 125;
 const UP: u16 = 126;
 
-/// What a navigable part of the card is: the heading's *Open All in New Tab* or the terminal on
-/// the list's `n`th row.
+/// What a navigable part of the card is: the heading's *Open All in New Tab*, the terminal on
+/// the list's `n`th row, or the terminal on the `n`th row of *On other Macs*.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Item {
     OpenAll,
     Terminal(usize),
+    Move(usize),
+}
+
+/// A part of the card as it is named: the terminal's own name (and the list it is on), not its
+/// row, which a new list may give another terminal.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Picked {
+    OpenAll,
+    Terminal(String),
+    Move(String),
+}
+
+impl Picked {
+    /// What `item` of the card as `model` drew it names.
+    fn of(model: &Model, item: Item) -> Picked {
+        let name = |listing: &Listing, index: usize| {
+            listing
+                .entries
+                .get(index)
+                .map(|entry| entry.terminal.clone())
+                .unwrap_or_default()
+        };
+        match item {
+            Item::OpenAll => Picked::OpenAll,
+            Item::Terminal(index) => Picked::Terminal(name(&model.listing, index)),
+            Item::Move(index) => Picked::Move(name(&model.others, index)),
+        }
+    }
+
+    /// The part of the card as `model` draws it that this names; `None` when it is not there.
+    fn item_in(&self, model: &Model) -> Option<Item> {
+        let find = |listing: &Listing, terminal: &str| {
+            listing
+                .entries
+                .iter()
+                .position(|entry| entry.terminal == terminal)
+        };
+        match self {
+            Picked::OpenAll => Some(Item::OpenAll),
+            Picked::Terminal(terminal) => find(&model.listing, terminal).map(Item::Terminal),
+            Picked::Move(terminal) => find(&model.others, terminal).map(Item::Move),
+        }
+    }
 }
 
 /// What the card shows: when this differs from what is drawn, the views are rebuilt.
@@ -89,14 +136,19 @@ struct Model {
     /// `None` when `[remote] stats` is `off`: the card is the list alone.
     load: Option<Load>,
     listing: Listing,
+    /// The terminals another Mac has open.
+    others: Listing,
 }
 
 /// One row's views, the ones that change with the selection.
 struct RowViews {
     view: Retained<CardRow>,
     status: Retained<NSTextField>,
-    /// The time the server's list gave it: what the status shows while the row is not selected.
-    activity: String,
+    /// What the status shows while the row is not selected: the time the server's list gave it,
+    /// or the name of the Mac that has the terminal open.
+    resting: String,
+    /// What a click does, written in the status while the row is selected.
+    verb: &'static str,
 }
 
 /// The open card and what it holds for refreshing.
@@ -113,6 +165,13 @@ pub(crate) struct ServerCard {
     items: Vec<Item>,
     /// The terminals' rows, by the list's index.
     rows: Vec<RowViews>,
+    /// The rows of *On other Macs*, by their list's index.
+    moved: Vec<RowViews>,
+    /// The line under that section: what moving a terminal does, written while a row of it is
+    /// selected (the space is kept the whole time, so the card does not grow under the pointer).
+    note: Option<Retained<NSTextField>>,
+    /// What the line says for each of those rows.
+    notes: Vec<String>,
     /// The heading's *Open All in New Tab*.
     open_all: Option<Retained<CardRow>>,
     /// The selected part: the pointer's or the keys'.
@@ -363,6 +422,9 @@ impl TerminalPane {
             drawn: None,
             items: Vec::new(),
             rows: Vec::new(),
+            moved: Vec::new(),
+            note: None,
+            notes: Vec::new(),
             open_all: None,
             selected: None,
         }));
@@ -426,10 +488,12 @@ impl TerminalPane {
             .duration_since(UNIX_EPOCH)
             .map_or(0, |since| since.as_secs());
         let listing = server_card::listing(&self.host().background(&shown.account), now, &local);
+        let others = server_card::listing(&self.host().elsewhere(&shown.account), now, &local);
         Some(Model {
             host: shown.host,
             load,
             listing,
+            others,
         })
     }
 
@@ -456,12 +520,89 @@ impl TerminalPane {
         if open.drawn.as_ref() == Some(&model) {
             return;
         }
-        let kept = open.items.get(open.selected.unwrap_or(usize::MAX)).copied();
+        // The selection is what it names, not where it stands: a list that dropped or reordered
+        // a row must not leave it on another terminal (⏎ on a row of *On other Macs* takes the
+        // terminal from the Mac that is using it).
+        let kept = open
+            .drawn
+            .as_ref()
+            .zip(open.items.get(open.selected.unwrap_or(usize::MAX)))
+            .map(|(drawn, item)| Picked::of(drawn, *item));
         self.build_card(mtm, open, &model, &theme);
-        // The selection stays on the same part when it is still there.
-        open.selected = kept.and_then(|kept| open.items.iter().position(|item| *item == kept));
+        // It stays on the same part when that is still there, and goes when it is not.
+        open.selected = kept
+            .and_then(|kept| kept.item_in(&model))
+            .and_then(|kept| open.items.iter().position(|item| *item == kept));
         open.apply_selection();
         open.drawn = Some(model);
+    }
+
+    /// One terminal's row, at `top` in the canvas: its title, the directory it runs in and, at
+    /// the right, `resting` until the row is selected and `verb` takes its place. The right-hand
+    /// text is as wide as the wider of the two; the title as it is, up to a limit; the directory
+    /// has the rest.
+    #[allow(clippy::too_many_arguments)]
+    fn card_row(
+        &self,
+        mtm: MainThreadMarker,
+        canvas: &CardCanvas,
+        entry: &server_card::Entry,
+        item: Item,
+        verb: &'static str,
+        resting: String,
+        top: f64,
+    ) -> RowViews {
+        let secondary = NSColor::secondaryLabelColor();
+        let primary = NSColor::labelColor();
+        let inner = WIDTH - 2.0 * PAD;
+        let frame = rect(PAD - 4.0, top, inner + 8.0, ROW);
+        let row = CardRow::new(mtm, self, item, frame);
+        let title = label(mtm, &entry.title, 12.0, &primary);
+        title.setFont(Some(&NSFont::systemFontOfSize_weight(12.0, 0.2)));
+        title.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
+        let status = label(mtm, &resting, 11.0, &secondary);
+        status.setAlignment(NSTextAlignment::Right);
+        status.setLineBreakMode(NSLineBreakMode::ByTruncatingHead);
+        let hint = label(mtm, verb, 11.0, &secondary);
+        let status_width = fitted(&status)
+            .max(fitted(&hint))
+            .ceil()
+            .clamp(80.0, STATUS_MOST);
+        let title_width = fitted(&title).ceil().clamp(30.0, TITLE_MOST);
+        let row_width = inner + 8.0;
+        let place_left = 4.0 + title_width + 4.0;
+        let place_width = (row_width - place_left - 6.0 - status_width - 4.0).max(30.0);
+        place(&row, &title, 4.0, 5.0, title_width, LINE);
+        if let Some(directory) = &entry.place {
+            let directory = label(mtm, directory, 11.0, &secondary);
+            directory.setLineBreakMode(NSLineBreakMode::ByTruncatingHead);
+            place(&row, &directory, place_left, 5.0, place_width, LINE);
+        }
+        place(
+            &row,
+            &status,
+            row_width - 4.0 - status_width,
+            5.0,
+            status_width,
+            LINE,
+        );
+        let spoken = [
+            Some(entry.title.as_str()),
+            entry.place.as_deref(),
+            Some(resting.as_str()).filter(|text| !text.is_empty()),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(", ");
+        row.setAccessibilityLabel(Some(&NSString::from_str(&spoken)));
+        canvas.addSubview(&row);
+        RowViews {
+            view: row,
+            status,
+            resting,
+            verb,
+        }
     }
 
     /// Lays the card out, top-down, into its canvas and sizes the popover to it.
@@ -478,9 +619,11 @@ impl TerminalPane {
         }
         open.items.clear();
         open.rows.clear();
+        open.moved.clear();
+        open.note = None;
+        open.notes.clear();
         open.open_all = None;
         let secondary = NSColor::secondaryLabelColor();
-        let primary = NSColor::labelColor();
         let inner = WIDTH - 2.0 * PAD;
         let mut top = PAD;
 
@@ -533,61 +676,18 @@ impl TerminalPane {
             top += LINE;
         }
         for (index, entry) in model.listing.entries.iter().enumerate() {
-            let frame = rect(PAD - 4.0, top, inner + 8.0, ROW);
-            let row = CardRow::new(mtm, self, Item::Terminal(index), frame);
-            let title = label(mtm, &entry.title, 12.0, &primary);
-            title.setFont(Some(&NSFont::systemFontOfSize_weight(12.0, 0.2)));
-            title.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
-            let status = label(
+            let resting = entry.activity.clone().unwrap_or_default();
+            let views = self.card_row(
                 mtm,
-                &entry.activity.clone().unwrap_or_default(),
-                11.0,
-                &secondary,
+                canvas,
+                entry,
+                Item::Terminal(index),
+                server_card::OPEN,
+                resting,
+                top,
             );
-            status.setAlignment(NSTextAlignment::Right);
-            status.setLineBreakMode(NSLineBreakMode::ByTruncatingHead);
-            // The right-hand text is as wide as the wider of what it says and what it says
-            // when selected; the title as it is, up to a limit; the directory has the rest.
-            let hint = label(mtm, server_card::OPEN, 11.0, &secondary);
-            let status_width = fitted(&status)
-                .max(fitted(&hint))
-                .ceil()
-                .clamp(80.0, STATUS_MOST);
-            let title_width = fitted(&title).ceil().clamp(30.0, TITLE_MOST);
-            let row_width = inner + 8.0;
-            let place_left = 4.0 + title_width + 4.0;
-            let place_width = (row_width - place_left - 6.0 - status_width - 4.0).max(30.0);
-            place(&row, &title, 4.0, 5.0, title_width, LINE);
-            if let Some(directory) = &entry.place {
-                let directory = label(mtm, directory, 11.0, &secondary);
-                directory.setLineBreakMode(NSLineBreakMode::ByTruncatingHead);
-                place(&row, &directory, place_left, 5.0, place_width, LINE);
-            }
-            place(
-                &row,
-                &status,
-                row_width - 4.0 - status_width,
-                5.0,
-                status_width,
-                LINE,
-            );
-            let spoken = [
-                Some(entry.title.as_str()),
-                entry.place.as_deref(),
-                entry.activity.as_deref(),
-            ]
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>()
-            .join(", ");
-            row.setAccessibilityLabel(Some(&NSString::from_str(&spoken)));
-            canvas.addSubview(&row);
             open.items.push(Item::Terminal(index));
-            open.rows.push(RowViews {
-                view: row,
-                status,
-                activity: entry.activity.clone().unwrap_or_default(),
-            });
+            open.rows.push(views);
             top += ROW;
         }
         if model.listing.more > 0 {
@@ -598,6 +698,53 @@ impl TerminalPane {
                 &secondary,
             );
             place(canvas, &more, PAD, top + 2.0, inner, LINE);
+            top += LINE + 2.0;
+        }
+
+        if model.others.total > 0 {
+            top += GAP;
+            let heading = label(
+                mtm,
+                &server_card::others_heading(model.others.total),
+                11.0,
+                &secondary,
+            );
+            heading.setFont(Some(&NSFont::boldSystemFontOfSize(11.0)));
+            place(canvas, &heading, PAD, top, inner, LINE);
+            top += LINE + 2.0;
+            for (index, entry) in model.others.entries.iter().enumerate() {
+                // The Mac's name where the time is, until the row is selected and says its verb.
+                let by = entry.by.clone().unwrap_or_default();
+                let views = self.card_row(
+                    mtm,
+                    canvas,
+                    entry,
+                    Item::Move(index),
+                    server_card::MOVE,
+                    by.clone(),
+                    top,
+                );
+                open.items.push(Item::Move(index));
+                open.notes.push(server_card::move_note(&by));
+                open.moved.push(views);
+                top += ROW;
+            }
+            if model.others.more > 0 {
+                let more = label(
+                    mtm,
+                    &server_card::more_text(model.others.more),
+                    11.0,
+                    &secondary,
+                );
+                place(canvas, &more, PAD, top + 2.0, inner, LINE);
+                top += LINE + 2.0;
+            }
+            // What moving does: written under the section while a row of it is selected, in the
+            // room that is kept for it the whole time.
+            let note = label(mtm, "", 11.0, &secondary);
+            note.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
+            place(canvas, &note, PAD, top + 2.0, inner, LINE);
+            open.note = Some(note);
             top += LINE + 2.0;
         }
         top += PAD - 2.0;
@@ -651,6 +798,14 @@ impl TerminalPane {
                 self.close_server_card();
                 self.host()
                     .open_background(self.id(), &entry.account, &entry.terminal);
+            }
+            Item::Move(index) => {
+                let Some(entry) = model.others.entries.get(index) else {
+                    return;
+                };
+                self.close_server_card();
+                self.host()
+                    .move_here(self.id(), &entry.account, &entry.terminal);
             }
         }
     }
@@ -780,20 +935,34 @@ impl TerminalPane {
 }
 
 impl ServerCard {
-    /// Draws the selection: the part's fill, and at the selected row's right what a click does.
+    /// Draws the selection: the part's fill, and at the selected row's right what a click does;
+    /// under *On other Macs*, what moving a terminal does to the pane on the other Mac.
     fn apply_selection(&mut self) {
         let selected = self.selected.and_then(|at| self.items.get(at)).copied();
         if let Some(row) = &self.open_all {
             row.set_selected(selected == Some(Item::OpenAll));
         }
         for (index, row) in self.rows.iter().enumerate() {
-            let on = selected == Some(Item::Terminal(index));
-            row.view.set_selected(on);
-            set_text(
-                &row.status,
-                if on { server_card::OPEN } else { &row.activity },
-            );
+            row.draw(selected == Some(Item::Terminal(index)));
         }
+        for (index, row) in self.moved.iter().enumerate() {
+            row.draw(selected == Some(Item::Move(index)));
+        }
+        if let Some(note) = &self.note {
+            let text = match selected {
+                Some(Item::Move(index)) => self.notes.get(index).map_or("", String::as_str),
+                _ => "",
+            };
+            set_text(note, text);
+        }
+    }
+}
+
+impl RowViews {
+    /// The row selected, or not: its fill, and its verb or what it says at rest.
+    fn draw(&self, on: bool) {
+        self.view.set_selected(on);
+        set_text(&self.status, if on { self.verb } else { &self.resting });
     }
 }
 
@@ -912,6 +1081,59 @@ fn local(seconds: u64) -> Local {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn entry(terminal: &str) -> server_card::Entry {
+        server_card::Entry {
+            account: "u@rasp:22".to_owned(),
+            terminal: terminal.to_owned(),
+            title: terminal.to_owned(),
+            place: None,
+            activity: None,
+            running: false,
+            by: None,
+        }
+    }
+
+    fn model(background: &[&str], elsewhere: &[&str]) -> Model {
+        let listing = |names: &[&str]| Listing {
+            total: names.len(),
+            entries: names.iter().map(|name| entry(name)).collect(),
+            more: 0,
+        };
+        Model {
+            host: "rasp".to_owned(),
+            load: None,
+            listing: listing(background),
+            others: listing(elsewhere),
+        }
+    }
+
+    /// The selection is the terminal it names: a list that reordered or dropped rows does not leave
+    /// it on another one, and ⏎ on it moves a terminal from the Mac that is using it.
+    #[test]
+    fn the_selection_follows_the_terminal_it_names_through_a_new_list() {
+        let drawn = model(&["a", "b"], &["x", "y"]);
+        let picked = Picked::of(&drawn, Item::Move(1));
+        assert_eq!(picked, Picked::Move("y".to_owned()));
+        // The list reordered: the same terminal, on another row.
+        assert_eq!(
+            picked.item_in(&model(&["a", "b"], &["y", "x"])),
+            Some(Item::Move(0))
+        );
+        // The terminal is gone from that list (the Mac let go of it): nothing is selected, not
+        // the row that took its place.
+        assert_eq!(picked.item_in(&model(&["a", "b"], &["x"])), None);
+        // The same name in the other list is another part.
+        assert_eq!(picked.item_in(&model(&["y"], &["x"])), None);
+        assert_eq!(
+            Picked::of(&drawn, Item::Terminal(1)).item_in(&model(&["b"], &[])),
+            Some(Item::Terminal(0))
+        );
+        assert_eq!(
+            Picked::of(&drawn, Item::OpenAll).item_in(&model(&[], &[])),
+            Some(Item::OpenAll)
+        );
+    }
 
     #[test]
     fn this_macs_calendar_reads_a_second_as_a_date_and_a_time() {

@@ -184,6 +184,11 @@ pub struct Attach {
     /// Asked of the first attach only; a connection that breaks and attaches
     /// again does not take a second time (it would let go whoever came after).
     pub take: bool,
+    /// Ask who has the terminal before attaching, and do not attach beside another
+    /// computer: if one with a name is attached, the terminal is [`Event::Taken`] by it
+    /// instead. For a terminal this client had and lost sight of (an application that was
+    /// restarted); a connection that breaks does it by itself.
+    pub check: bool,
 }
 
 impl Attach {
@@ -194,6 +199,7 @@ impl Attach {
             offset: 0,
             picture: false,
             take: false,
+            check: false,
         }
     }
 
@@ -218,6 +224,14 @@ impl Attach {
     /// Taking the terminal from whoever has it.
     pub fn taking(self) -> Attach {
         Attach { take: true, ..self }
+    }
+
+    /// Asking who has the terminal first, and not attaching beside another computer.
+    pub fn checking(self) -> Attach {
+        Attach {
+            check: true,
+            ..self
+        }
     }
 }
 
@@ -328,6 +342,9 @@ enum Phase {
     Wanted,
     /// `attach` is sent, `attached` has not come.
     Asked,
+    /// `status` is sent to find out who has the terminal before attaching to it
+    /// ([`Attach::check`]); the attach follows the answer, unless another computer has it.
+    Checking,
     /// Attached: output flows.
     Attached,
     /// The program ended.
@@ -350,6 +367,10 @@ struct Terminal {
     /// A take was asked for and `attached` has not come yet (so it did not
     /// happen, and is asked again).
     take_wanted: bool,
+    /// Who has the terminal is asked before the next attach ([`Attach::check`]).
+    check_wanted: bool,
+    /// Who took the terminal, while it is `Taken` (`None`: nobody said, or it is not taken).
+    taken_by: Option<String>,
     /// A picture has begun and its last piece has not come.
     picture_open: bool,
     state: Option<TerminalState>,
@@ -375,6 +396,8 @@ impl Terminal {
             size: attach.size,
             picture_wanted: attach.picture,
             take_wanted: attach.take,
+            check_wanted: attach.check && !attach.take,
+            taken_by: None,
             picture_open: false,
             state: None,
             spec: None,
@@ -489,8 +512,15 @@ impl Client {
         }
         self.reset_connection();
         for terminal in self.terminals.values_mut() {
-            if matches!(terminal.phase, Phase::Asked | Phase::Attached) {
-                terminal.phase = Phase::Wanted;
+            match terminal.phase {
+                // A terminal this client had is asked about before it is attached again: a
+                // computer that took it while the connection was down could not tell this one.
+                Phase::Asked | Phase::Attached => {
+                    terminal.phase = Phase::Wanted;
+                    terminal.check_wanted |= !terminal.take_wanted;
+                }
+                Phase::Checking => terminal.phase = Phase::Wanted,
+                _ => {}
             }
         }
         self.link = match cause {
@@ -661,6 +691,42 @@ impl Client {
         if self.link.is_live() {
             self.send_attach(&id);
         }
+    }
+
+    /// Takes a terminal back that another client took: attached again from the byte owed, at the
+    /// size it had, taking it from whoever has it now (the other client is told by whom). `false`
+    /// when the terminal was not taken. Like a first attach, the take is asked once: a connection
+    /// that breaks before the server answers asks again, one that breaks after does not.
+    pub fn take_back(&mut self, id: &SessionId) -> bool {
+        let Some(terminal) = self.terminals.get_mut(id) else {
+            return false;
+        };
+        if terminal.phase != Phase::Taken {
+            return false;
+        }
+        terminal.phase = Phase::Wanted;
+        terminal.take_wanted = true;
+        terminal.taken_by = None;
+        if self.link.is_live() {
+            self.send_attach(id);
+        }
+        true
+    }
+
+    /// Whether another client took the terminal and it has not been taken back.
+    pub fn is_taken(&self, id: &SessionId) -> bool {
+        self.terminals
+            .get(id)
+            .is_some_and(|t| t.phase == Phase::Taken)
+    }
+
+    /// The name the client that took the terminal gave itself, controls removed; `None` when it
+    /// gave none or the terminal is not taken.
+    pub fn taken_by(&self, id: &SessionId) -> Option<&str> {
+        self.terminals
+            .get(id)
+            .filter(|t| t.phase == Phase::Taken)
+            .and_then(|t| t.taken_by.as_deref())
     }
 
     /// Stops the stream of a terminal; it lives on, on the server.
@@ -900,6 +966,12 @@ impl Client {
         let Some(terminal) = self.terminals.get_mut(id) else {
             return;
         };
+        if terminal.check_wanted && !terminal.take_wanted {
+            terminal.phase = Phase::Checking;
+            terminal.retry = None;
+            self.queue(Packet::about(id.clone(), Message::Status));
+            return;
+        }
         let mut view = View::new(terminal.size);
         view.picture = terminal.picture_wanted;
         view.picture_if_answered = true;
@@ -1041,7 +1113,13 @@ impl Client {
                 }
             }
             Message::StatusReply(status) => {
-                if let Some(terminal) = self.terminals.get_mut(&status.id)
+                if self
+                    .terminals
+                    .get(&status.id)
+                    .is_some_and(|t| t.phase == Phase::Checking)
+                {
+                    self.checked(&status);
+                } else if let Some(terminal) = self.terminals.get_mut(&status.id)
                     && terminal.phase == Phase::Creating
                     && terminal.adopting
                 {
@@ -1080,14 +1158,13 @@ impl Client {
         let phase = self.terminals.get(&id).map(|t| t.phase);
         match (code, phase) {
             (ErrorCode::TAKEN, Some(Phase::Asked | Phase::Attached | Phase::Wanted)) => {
+                let by = Some(text).filter(|by| !by.is_empty());
                 if let Some(terminal) = self.terminals.get_mut(&id) {
                     terminal.phase = Phase::Taken;
+                    terminal.taken_by = by.clone();
                     terminal.picture_open = false;
                 }
-                self.events.push_back(Event::Taken {
-                    terminal: id,
-                    by: Some(text).filter(|by| !by.is_empty()),
-                });
+                self.events.push_back(Event::Taken { terminal: id, by });
             }
             (ErrorCode::SESSION_EXISTS, Some(Phase::Creating)) => {
                 let resent = self.terminals.get(&id).is_some_and(|t| t.resent);
@@ -1116,7 +1193,13 @@ impl Client {
             | (ErrorCode::BAD_REQUEST, Some(Phase::Asked))
             | (
                 ErrorCode::UNKNOWN_SESSION,
-                Some(Phase::Wanted | Phase::Asked | Phase::Attached | Phase::Detached),
+                Some(
+                    Phase::Wanted
+                    | Phase::Checking
+                    | Phase::Asked
+                    | Phase::Attached
+                    | Phase::Detached,
+                ),
             ) => self.give_up(id, code, text),
             _ => self.events.push_back(Event::Failed {
                 terminal: Some(id),
@@ -1124,6 +1207,55 @@ impl Client {
                 text,
             }),
         }
+    }
+
+    /// The answer to the question that comes before an attach ([`Attach::check`]): another
+    /// computer that has the terminal makes it taken (the owner shows it dimmed and ⏎ takes it
+    /// back); nobody does, and it is attached as it would have been.
+    fn checked(&mut self, status: &Status) {
+        let id = status.id.clone();
+        let by = self.held_by(status);
+        let Some(terminal) = self.terminals.get_mut(&id) else {
+            return;
+        };
+        terminal.check_wanted = false;
+        match by {
+            Some(by) => {
+                terminal.phase = Phase::Taken;
+                terminal.taken_by = by.clone();
+                self.events.push_back(Event::Taken { terminal: id, by });
+            }
+            None => {
+                terminal.phase = Phase::Wanted;
+                self.send_attach(&id);
+            }
+        }
+    }
+
+    /// The computer that has the terminal besides this client, by the name it gave itself
+    /// (`Some(None)`: a name that is nothing once the controls are taken out; a client that gave
+    /// none is not a computer and is never this). `None` when nobody does — or when the server cannot say (a relay that does not name its clients
+    /// lists fewer than it counts): then nothing is known and the client attaches as before.
+    /// This client's own name is left out once, because the server may not have noticed that
+    /// the connection it had is gone.
+    fn held_by(&self, status: &Status) -> Option<Option<String>> {
+        let counted = usize::try_from(status.clients).unwrap_or(usize::MAX);
+        if status.clients_named.len() < counted {
+            return None;
+        }
+        let mut own = self.name;
+        status
+            .clients_named
+            .iter()
+            .filter_map(|name| name.as_ref())
+            .find(|name| {
+                if own.as_ref() == Some(*name) {
+                    own = None;
+                    return false;
+                }
+                true
+            })
+            .map(|name| Some(clean(name.as_str())).filter(|name| !name.is_empty()))
     }
 
     /// The server will not have this terminal: say so and stop asking.
