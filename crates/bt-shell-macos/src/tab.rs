@@ -965,9 +965,13 @@ impl TerminalTab {
         }
         // Behind a zoom, or in a tab that is not on screen, its link sleeps with the others.
         self.apply_visibility(self.window_visible());
-        pane.apply_focus(false);
+        // On screen it is told the window's key state, as the tab's other panes were: the
+        // keyboard is a separate question, and a pane told "not key" in a key window draws a
+        // hollow caret after the user clicks into it, until the window next becomes key.
         if container.isHiddenOrHasHiddenAncestor() {
             pane.leave_screen();
+        } else {
+            pane.apply_focus(self.ns_window().is_some_and(|window| window.isKeyWindow()));
         }
         pane.refresh_geometry();
         if focus {
@@ -1983,6 +1987,19 @@ fn handover(leaving: u64, remembered: u64, holder: Holder, shown: bool) -> Hando
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_pane_a_server_program_opens_is_told_the_windows_key_state() {
+        // The pane is born without the keyboard, but in a key window: told "not key", its caret
+        // stays hollow after the user clicks into it, until the window next becomes key.
+        let source = include_str!("tab.rs");
+        let at = source
+            .find("pub(crate) fn add_planned_pane(")
+            .expect("add_planned_pane");
+        let body = &source[at..at + source[at..].find("\n    }\n").expect("its end")];
+        assert!(!body.contains("apply_focus(false)"), "{body}");
+        assert!(body.contains("window.isKeyWindow()"), "{body}");
+    }
 
     #[test]
     fn a_pane_leaving_a_background_tab_leaves_the_keyboard_in_the_tab_on_screen() {
