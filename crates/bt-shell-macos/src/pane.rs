@@ -2285,6 +2285,10 @@ pub struct PaneIvars {
     /// its registration ([`TerminalPane::register_with_holder`]): the new
     /// holder must not drain the master while that one still does.
     taken_from: RefCell<Option<PathBuf>>,
+    /// What made the pane a program's, from its start ([`crate::launch::Held`]): it closes when
+    /// its terminal ends, and who asked for it. Session restore saves both, so a pane born again
+    /// after a restart is still that program's.
+    asked_for: RefCell<AskedFor>,
     /// The session's journal in shared memory, for a pane born while a
     /// bound holder kept the programs: after a crash the holder rebuilds the
     /// screen from it. `None` for every other pane.
@@ -2933,6 +2937,7 @@ impl TerminalPane {
             keeper,
             identity,
             taken_from: RefCell::new(None),
+            asked_for: RefCell::new(AskedFor::default()),
             journal: RefCell::new(None),
             ssh_session: Cell::new(None),
             wrap_proof: RefCell::new(WrapProof::default()),
@@ -3243,11 +3248,21 @@ impl TerminalPane {
     pub(crate) fn saved_kept(&self) -> Option<SavedKept> {
         let shown = self.host().kept_terminal(self.uuid())?;
         let args = shown.argv.get(1..)?.to_vec();
+        let asked_for = self.ivars().asked_for.borrow().clone();
         (!args.is_empty()).then_some(SavedKept {
             account: shown.account,
             terminal: shown.terminal,
             args,
+            close_at_end: asked_for.close_at_end,
+            opener: asked_for.opener,
         })
+    }
+
+    /// Who asked for this pane, when a program on a server did ("Claude (t4)"), while the pane
+    /// shows the terminal it was asked for: what its tab's card says.
+    pub(crate) fn opener(&self) -> Option<String> {
+        self.host().kept_terminal(self.uuid())?;
+        self.ivars().asked_for.borrow().opener.clone()
     }
 
     /// Whether this pane shows a terminal a server keeps (rather than its own shell).
@@ -3721,6 +3736,15 @@ impl TerminalPane {
             env: extra_env,
             held,
         } = launch;
+        // Whether the pipe is started or a carried-on one goes on, the pane is the program's it
+        // was asked for by: the carried pipe has the flag on its own command line, and the
+        // pane's next save says it again.
+        if let Some(held) = &held {
+            self.ivars().asked_for.replace(AskedFor {
+                close_at_end: held.close_at_end,
+                opener: held.opener.clone(),
+            });
+        }
         // In smoke and measurement runs the shell is fixed: the result must not
         // depend on the user's `$SHELL` and rc file. The owner of the scripts
         // is `bt-core`; that `smoke_shell` gives eight cells and six glyphs is
@@ -6730,6 +6754,16 @@ impl TerminalPane {
             .flowing_name()
             .map(str::to_owned)
     }
+}
+
+/// What made a pane a program's (the pane's `asked_for`); the default is a pane the user
+/// opened.
+#[derive(Clone, Debug, Default)]
+struct AskedFor {
+    /// The pane closes when its terminal ends.
+    close_at_end: bool,
+    /// Who asked for it, as its tab's card says.
+    opener: Option<String>,
 }
 
 /// [`adopt_session`]'s failure: why, and the carried history for the

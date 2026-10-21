@@ -14,7 +14,9 @@
 //!   user was looking at moves, and the tab strip shows the new one running.
 //! - **The program is the point of the pane.** Its pipe closes with its terminal
 //!   (`ssh-hold --close-at-end`, [`Held::close_at_end`]) so the pane goes when the program does —
-//!   unless `--keep-open` was asked, when the shell follows as it does for any pane.
+//!   unless `--keep-open` was asked, when the shell follows as it does for any pane. The pane
+//!   keeps that, and who asked for it ([`Held::opener`], its card's "Opened by"), across a
+//!   restart: session restore saves both with the terminal it shows.
 //! - **A pane that cannot be placed waits, it is never refused.** The terminal runs on the
 //!   server and is in the list of what runs in the background; a request whose anchor is on
 //!   no tab of this Mac is kept here ([`Queue`]) until a pane shows the anchor — a pane opened
@@ -90,14 +92,7 @@ struct State {
     /// terminal until the pane's pipe has reached it, and a second request for the same
     /// terminal in between must not make a second pane.
     made: Vec<(String, Terminal, Instant)>,
-    /// Who asked for the pane of each terminal that was made for a program (`account`, the
-    /// terminal's name, the words that name the asker), the oldest first: the summary card
-    /// says it. In memory — a restart forgets it, and `ls` has it from the server's records.
-    opened: Vec<(String, String, String)>,
 }
-
-/// How many askers are remembered.
-const OPENED_KEPT: usize = 128;
 
 /// How long a pane just made stands in for the service's word that it shows its terminal.
 const MADE_FOR: Duration = Duration::from_secs(30);
@@ -206,19 +201,6 @@ fn settle_due(app: &AppDelegate, due: Vec<Waiting>, survey: Survey) {
         }
     }
     world.finish();
-}
-
-/// Who asked for the pane that shows `terminal` of the server `account` ("Claude (t4)"), when a
-/// program did: what the summary card of its tab says.
-pub(crate) fn opened_by(account: &str, terminal: &str) -> Option<String> {
-    state(|state| {
-        state
-            .opened
-            .iter()
-            .rev()
-            .find(|(found, name, _)| found == account && name == terminal)
-            .map(|(_, _, who)| who.clone())
-    })
 }
 
 /// bateri came to the front: what it said while it was behind has been seen.
@@ -333,7 +315,8 @@ impl<'a> World<'a> {
         }
     }
 
-    /// Makes the pane. `Err` is "not now": the terminal stays in the list.
+    /// Makes the pane; `opener` is who asked for it, in the words its tab's card says them. `Err`
+    /// is "not now": the terminal stays in the list.
     fn put(
         &self,
         server: &Server,
@@ -341,6 +324,7 @@ impl<'a> World<'a> {
         anchor: &TerminalPane,
         anchor_name: &Anchor,
         place: &Place,
+        opener: String,
     ) -> Result<Placed, String> {
         let app = self.app;
         let mtm = app.mtm();
@@ -367,6 +351,7 @@ impl<'a> World<'a> {
                     terminal: name,
                 }),
                 close_at_end: !place.keep_open,
+                opener: Some(opener),
             }),
         };
         let incoming = app.next_id();
@@ -463,25 +448,19 @@ impl Shell for World<'_> {
         let Some((tab, pane, shown)) = find_pane(self.app, &server.account, anchor.name()) else {
             return Placing::NoAnchor;
         };
-        match self.put(server, &tab, &pane, anchor, place) {
+        // The terminal that asked; a note that was read later does not say, and the pane is said
+        // to come from the terminal it stands beside.
+        let asker = opener.unwrap_or(anchor.name());
+        let program = find_pane(self.app, &server.account, asker)
+            .and_then(|(_, _, found)| found.program)
+            .or_else(|| shown.program.clone());
+        let who = summary::opener(program.as_deref(), asker);
+        match self.put(server, &tab, &pane, anchor, place, who) {
             Ok(placed) => {
-                // The terminal that asked; a note that was read later does not say, and the pane
-                // is said to come from the terminal it stands beside.
-                let asker = opener.unwrap_or(anchor.name());
-                let program = find_pane(self.app, &server.account, asker)
-                    .and_then(|(_, _, found)| found.program)
-                    .or_else(|| shown.program.clone());
-                let who = summary::opener(program.as_deref(), asker);
                 state(|state| {
                     state
                         .made
                         .push((server.account.clone(), place.terminal, Instant::now()));
-                    state
-                        .opened
-                        .push((server.account.clone(), place.terminal.to_string(), who));
-                    if state.opened.len() > OPENED_KEPT {
-                        state.opened.remove(0);
-                    }
                 });
                 self.opened.push(Opened {
                     account: server.account.clone(),

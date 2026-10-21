@@ -322,6 +322,10 @@ fn terminal_changed(pane: &PaneUuid) {
         if let Some(found) = app.pane_with_uuid(&pane) {
             found.remote_edge();
         }
+        // The terminal a pane shows is part of the layout (session restore asks for it again by
+        // name): the copies on disk and in the bound holder are written again, or a crash before
+        // the next edge would bring the pane back without it.
+        app.layout_changed();
         // A terminal some pane was waiting to stand beside may have a pane now.
         crate::agent::terminal_shown(&pane);
     });

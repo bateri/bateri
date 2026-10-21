@@ -493,6 +493,7 @@ fn held_start(
         args: args.to_vec(),
         close_at_end: false,
         resume: None,
+        opener: None,
     })
 }
 
@@ -565,7 +566,9 @@ fn restore_dir(
 /// A pane that showed a terminal a server keeps is different: its first program is the pipe to
 /// that terminal again, asked for by name ([`Held::resume`]) — no line is typed and nothing is
 /// written to a shell, the pane reads its remote session from the pipe's marks like any pane
-/// whose first program is one ([`bt_core::first_command_begun`]). `keeps` says whether the
+/// whose first program is one ([`bt_core::first_command_begun`]). A pane a program on the server
+/// asked for is that program's again: it closes when its terminal ends and its card says who
+/// asked ([`Held::close_at_end`], [`Held::opener`]). `keeps` says whether the
 /// terminal can be asked for ([`crate::hold_service::keeps`]: the ledger has it as one meant to
 /// live, on an account it can reach again). When it cannot — it was ended with the bateri that
 /// showed it (`keep_running = "update"` after a crash), or the record of it is gone — the pane
@@ -584,11 +587,12 @@ fn restored_launch(
         Some(kept) if keeps(kept) => (
             Some(Held {
                 args: kept.args.clone(),
-                close_at_end: false,
+                close_at_end: kept.close_at_end,
                 resume: Some(Resume {
                     account: kept.account.clone(),
                     terminal: kept.terminal.as_str().to_owned(),
                 }),
+                opener: kept.opener.clone(),
             }),
             None,
             replay,
@@ -605,6 +609,15 @@ fn restored_launch(
         env: Vec::new(),
         held,
     }
+}
+
+/// Whether a saved pane does not come back: a pane a program on a server asked for, which closes
+/// when its terminal ends, whose terminal is no longer there to show (`start` has no pipe to it and
+/// no program was carried over) — the terminal ended with the quit, or after a crash. Had bateri
+/// been running, the pane would have closed with it; a pane asked to stay open, and every pane the
+/// user opened, comes back as a shell with the note of what became of the terminal.
+fn gone_with_its_terminal(pane: &SavedPane, start: &Launch, carried: bool) -> bool {
+    !carried && start.held.is_none() && pane.kept.as_ref().is_some_and(|kept| kept.close_at_end)
 }
 
 /// Where a deliberate handover goes ([`AppDelegate::hand_over`]).
@@ -5159,10 +5172,14 @@ impl AppDelegate {
                 }
             }
         };
-        let (launch, theme) = self.pane_launch(tab, None, Opening::Restore, None);
-        let mut launch = launch.with_launch(restored_launch(pane, replay, |kept| {
+        let start = restored_launch(pane, replay, |kept| {
             piped && crate::hold_service::keeps(&kept.account, &kept.terminal)
-        }));
+        });
+        if gone_with_its_terminal(pane, &start, adopt.is_some()) {
+            return None;
+        }
+        let (launch, theme) = self.pane_launch(tab, None, Opening::Restore, None);
+        let mut launch = launch.with_launch(start);
         launch.adopt = adopt;
         launch.zoom = Zoom::from_steps(pane.zoom_steps, &launch.settings.font);
         Some((launch, theme))
@@ -5795,6 +5812,7 @@ impl AppDelegate {
             directory: None,
             line: None,
             run: false,
+            // The user opens it: the pane is the user's, and the shell follows the terminal.
             held: Some(Held {
                 args,
                 close_at_end: false,
@@ -5802,6 +5820,7 @@ impl AppDelegate {
                     account: found.account.clone(),
                     terminal: found.terminal.as_str().to_owned(),
                 }),
+                opener: None,
             }),
         })
     }
@@ -9159,9 +9178,61 @@ mod tests {
                 account: "ada@prod:2222".into(),
                 terminal: bt_shell_common::kablo::SessionId::new("b-0123").expect("an id"),
                 args: vec!["-p".to_owned(), "2222".to_owned(), "prod".to_owned()],
+                close_at_end: false,
+                opener: None,
             }),
             history: true,
         }
+    }
+
+    /// [`kept_pane`] as a program on the server asked for it: it closes with its terminal and
+    /// says who asked.
+    fn asked_pane() -> SavedPane {
+        let mut pane = kept_pane();
+        if let Some(kept) = &mut pane.kept {
+            kept.close_at_end = true;
+            kept.opener = Some("Claude (t4)".to_owned());
+        }
+        pane
+    }
+
+    /// A pane a program on a server asked for is that program's again after a restart: its pipe
+    /// closes with the terminal and its card says who asked. A pane asked to stay open comes back
+    /// with the shell to follow.
+    #[test]
+    fn a_restored_pane_a_program_asked_for_is_the_program_s_again() {
+        let pane = asked_pane();
+        let launch = restored_launch(&pane, None, |_| true);
+        let held = launch.held.as_ref().expect("the pipe again");
+        assert!(held.close_at_end);
+        assert_eq!(held.opener.as_deref(), Some("Claude (t4)"));
+        assert!(!gone_with_its_terminal(&pane, &launch, false));
+        let mut stays = asked_pane();
+        if let Some(kept) = &mut stays.kept {
+            kept.close_at_end = false;
+        }
+        let held = restored_launch(&stays, None, |_| true)
+            .held
+            .expect("the pipe again");
+        assert!(!held.close_at_end);
+        assert_eq!(held.opener.as_deref(), Some("Claude (t4)"));
+    }
+
+    /// A pane that closes with its terminal does not come back without it — it would have closed
+    /// had bateri been running when the terminal ended — unless its program was carried over. The
+    /// user's pane, and one asked to stay open, comes back as a shell with the note.
+    #[test]
+    fn a_pane_that_closes_with_its_terminal_does_not_come_back_without_it() {
+        let pane = asked_pane();
+        let launch = restored_launch(&pane, None, |_| false);
+        assert!(gone_with_its_terminal(&pane, &launch, false));
+        assert!(
+            !gone_with_its_terminal(&pane, &launch, true),
+            "carried over"
+        );
+        let users = kept_pane();
+        let launch = restored_launch(&users, None, |_| false);
+        assert!(!gone_with_its_terminal(&users, &launch, false));
     }
 
     /// A pane that showed a terminal a server keeps comes back as the pipe to it, asked for by
@@ -9182,6 +9253,7 @@ mod tests {
                     account: "ada@prod:2222".to_owned(),
                     terminal: "b-0123".to_owned(),
                 }),
+                opener: None,
             })
         );
         assert_eq!(launch.initial_input, None, "nothing is written to a shell");
@@ -9436,6 +9508,7 @@ mod tests {
             args: vec!["-p".to_owned(), "2222".to_owned(), "prod".to_owned()],
             close_at_end: false,
             resume: None,
+            opener: None,
         });
         // ⌘T and ⌘D carry the source's `ssh` arguments (the program's name is the pipe's).
         assert_eq!(
@@ -9513,6 +9586,7 @@ mod tests {
                 account: "u@rasp:22".to_owned(),
                 terminal: "b-7".to_owned(),
             }),
+            opener: None,
         };
         let start = Start {
             held: Some(chosen.clone()),

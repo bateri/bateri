@@ -1578,10 +1578,7 @@ impl TerminalTab {
             // The focused pane's asker, else the first pane a program asked for.
             opened_by: std::iter::once(pane.clone())
                 .chain(self.panes())
-                .find_map(|pane| {
-                    let shown = crate::hold_service::shown(pane.uuid())?;
-                    crate::agent::opened_by(&shown.account, shown.terminal.as_str())
-                }),
+                .find_map(|pane| pane.opener()),
             panes: self.card_panes(),
             aspect: {
                 let area = self.container().bounds().size;

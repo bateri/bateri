@@ -490,8 +490,13 @@ pub(crate) struct Held {
     /// The pane is the terminal's and no more: it closes when the terminal ends instead of
     /// handing over to a shell (`ssh-hold --close-at-end`). A pane a program on a server asked
     /// for, whose program is the point of it; a pane that was asked to stay (`--keep-open`)
-    /// and every pane the user opened leave the shell.
+    /// and every pane the user opened leave the shell. The pane keeps it for session restore,
+    /// which starts the pipe again with it.
     pub(crate) close_at_end: bool,
+    /// Who asked for the pane, in the words its tab's card says them ("Claude (t4)"): a pane a
+    /// program on a server asked for. Kept by the pane for its card and session restore; never
+    /// on the pipe's command line, which only says what the pipe does.
+    pub(crate) opener: Option<String>,
 }
 
 /// A terminal a server keeps that a pane's pipe shows again.
@@ -653,6 +658,7 @@ mod tests {
             args: vec!["-p".to_owned(), "2222".to_owned(), "--first".to_owned()],
             close_at_end: false,
             resume: None,
+            opener: None,
         };
         assert_eq!(
             super::held_command(&held, &environment, &["--posix".to_owned()]),
@@ -680,7 +686,7 @@ mod tests {
     }
 
     /// A pane a program on a server asked for closes with its terminal: the flag is on the
-    /// command line before the `--`, and only then.
+    /// command line before the `--`, and only then. Who asked is the pane's, not the pipe's.
     #[test]
     fn a_pane_that_closes_with_its_terminal_says_so_to_the_pipe() {
         let environment = vec![
@@ -694,6 +700,7 @@ mod tests {
                 terminal: "t9".to_owned(),
             }),
             close_at_end: true,
+            opener: Some("Claude (t4)".to_owned()),
         };
         let (_, args) = super::held_command(&held, &environment, &[]).expect("a command");
         assert_eq!(
@@ -734,6 +741,7 @@ mod tests {
                 account: "ada@prod:2222 via jump:22".to_owned(),
                 terminal: "b-0123".to_owned(),
             }),
+            opener: None,
         };
         let (program, args) = super::held_command(&held, &environment, &[]).expect("a command");
         assert_eq!(program, "/Applications/bateri");

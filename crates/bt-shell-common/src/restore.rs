@@ -12,7 +12,9 @@
 //! **The format** follows `remote-hosts` (`ssh_wrap`): line based, the first line names the
 //! version ([`HEADER`] + [`VERSION`]), then one `W` line per window, one `T` line per tab under it
 //! and one `P` line per pane under that; the tree is a pre-order token run (`S h|v {ratio} … L
-//! {index}`). **Every version the writer still writes is read**: version 5 gave a pane the
+//! {index}`). **Every version the writer still writes is read**: version 6 gave a kept terminal
+//! whether its pane closes when the terminal ends and who asked for the pane (two fields after
+//! the terminal's name: `0`/`1`, and `-` or `+{words}`), version 5 gave a pane the
 //! terminal a server keeps for it (a `P` line's last fields: `-`, or `+{account} {terminal}`
 //! and the `ssh` arguments that name the server), version 4 gave a window its tab
 //! groups (a `G {name} {collapsed} {resident}` line each, right after the `W` line and before any
@@ -21,7 +23,9 @@
 //! field), version 2 a tab its own name (a `T` line's third field), version 1 has none of them.
 //! The writer says the oldest version that holds what there is — 1 while no tab is named, no
 //! column was resized and no group exists, 2 while only names are, 3 once a width is, 4 once a
-//! window has a group, 5 once a pane shows a terminal a server keeps — so a session that uses
+//! window has a group, 5 once a pane shows a terminal a server keeps, 6 once such a pane was
+//! asked for by a program on the server (it closes with its terminal, or says who asked) — so a
+//! session that uses
 //! nothing new stays readable by the bateri before
 //! it, whose reader drops any other number and, with it, a holder's programs. A version's frozen
 //! text stays in the tests: its reader must keep reading it. The strip a window saves is the
@@ -76,10 +80,15 @@ use crate::tabs::Tabs;
 /// The first line's word; the version follows it after one space.
 pub const HEADER: &str = "bateri-session";
 
-/// The format's current version: a pane may carry the terminal a server keeps for it. The ones
-/// before it ([`GROUPED`], [`SIDED`], [`NAMED`], [`UNNAMED`]) are read too; any other number is
-/// not read (a newer bateri's file after a downgrade is dropped, not misread).
-pub const VERSION: u32 = 5;
+/// The format's current version: a kept terminal may say that its pane closes when it ends and
+/// who asked for the pane. The ones before it ([`KEPT`], [`GROUPED`], [`SIDED`], [`NAMED`],
+/// [`UNNAMED`]) are read too; any other number is not read (a newer bateri's file after a
+/// downgrade is dropped, not misread).
+pub const VERSION: u32 = 6;
+
+/// The version before a program's panes, which a session whose kept terminals were all opened by
+/// the user is still written in.
+const KEPT: u32 = 5;
 
 /// The version before kept terminals, which a session with groups and no pane on a server's
 /// terminal is still written in.
@@ -203,6 +212,11 @@ pub struct SavedPane {
 /// program's name left out) — the pane's remote session is read from the command line of the
 /// pipe that shows it, so the arguments go back onto it. Nothing here is a secret: the arguments
 /// are the ones `remote_line` already keeps.
+///
+/// A pane a program on the server asked for also keeps what made it that program's: that it
+/// closes when its terminal ends, and who asked for it. Both were the pane's alone — the pipe's
+/// command line and the app's memory — so a pane born again after a restart would otherwise come
+/// back as one the user opened.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SavedKept {
     /// The server's account ([`crate::ssh_wrap::host_key`]).
@@ -211,6 +225,11 @@ pub struct SavedKept {
     pub terminal: SessionId,
     /// The `ssh` arguments, the program's name left out; never empty.
     pub args: Vec<String>,
+    /// The pane closes when the terminal ends instead of handing over to a shell.
+    pub close_at_end: bool,
+    /// Who asked for the pane, in the words its tab's card says them ("Claude (t4)"); `None` for
+    /// a pane the user opened.
+    pub opener: Option<String>,
 }
 
 /// The split tree's twin whose leaves are pane **indices** (see the module doc).
@@ -674,14 +693,19 @@ impl Saved {
             .flat_map(|window| &window.tabs)
             .any(|tab| tab.name.is_some());
         let grouped = self.windows.iter().any(|window| !window.groups.is_empty());
-        let kept = self
-            .windows
-            .iter()
-            .flat_map(|window| &window.tabs)
-            .flat_map(|tab| &tab.panes)
-            .any(|pane| pane.kept.is_some());
-        let version = if kept {
+        let kept_terminals = || {
+            self.windows
+                .iter()
+                .flat_map(|window| &window.tabs)
+                .flat_map(|tab| &tab.panes)
+                .filter_map(|pane| pane.kept.as_ref())
+        };
+        let asked_for = kept_terminals().any(|kept| kept.close_at_end || kept.opener.is_some());
+        let kept = kept_terminals().next().is_some();
+        let version = if asked_for {
             VERSION
+        } else if kept {
+            KEPT
         } else if grouped {
             GROUPED
         } else if sided {
@@ -749,7 +773,7 @@ impl Saved {
                     ));
                     // The kept terminal ends the line: its arguments are a run of tokens of
                     // any length.
-                    if version >= VERSION {
+                    if version >= KEPT {
                         match &pane.kept {
                             None => out.push_str(" -"),
                             Some(kept) => {
@@ -758,6 +782,14 @@ impl Saved {
                                     escape(&kept.account),
                                     kept.terminal.as_str()
                                 ));
+                                // Fields of fixed place, before the arguments' run.
+                                if version >= VERSION {
+                                    out.push_str(&format!(
+                                        " {} {}",
+                                        u8::from(kept.close_at_end),
+                                        render_optional(kept.opener.as_deref())
+                                    ));
+                                }
                                 for arg in &kept.args {
                                     out.push(' ');
                                     out.push_str(&escape(arg));
@@ -780,7 +812,8 @@ impl Saved {
             return None;
         }
         let version = header.next()?.parse::<u32>().ok()?;
-        if ![UNNAMED, NAMED, SIDED, GROUPED, VERSION].contains(&version) || header.next().is_some()
+        if ![UNNAMED, NAMED, SIDED, GROUPED, KEPT, VERSION].contains(&version)
+            || header.next().is_some()
         {
             return None;
         }
@@ -949,8 +982,8 @@ fn parse_pane<'a>(tokens: &mut impl Iterator<Item = &'a str>, version: u32) -> O
     let dir = parse_optional(tokens.next()?)?.map(PathBuf::from);
     let remote_line = parse_optional(tokens.next()?)?;
     // Versions before 5 have no kept terminal.
-    let kept = if version >= VERSION {
-        parse_kept(tokens)?
+    let kept = if version >= KEPT {
+        parse_kept(tokens, version)?
     } else {
         None
     };
@@ -964,21 +997,34 @@ fn parse_pane<'a>(tokens: &mut impl Iterator<Item = &'a str>, version: u32) -> O
     })
 }
 
-/// A `P` line's last fields: `-`, or `+{account}`, the terminal's name and the `ssh` arguments
-/// to the end of the line (at least one: a server is named by something). The outer `None` is
-/// a line not understood.
-fn parse_kept<'a>(tokens: &mut impl Iterator<Item = &'a str>) -> Option<Option<SavedKept>> {
+/// A `P` line's last fields: `-`, or `+{account}`, the terminal's name, from version 6 whether
+/// the pane closes with it and who asked for it, and the `ssh` arguments to the end of the line
+/// (at least one: a server is named by something). The outer `None` is a line not understood.
+fn parse_kept<'a>(
+    tokens: &mut impl Iterator<Item = &'a str>,
+    version: u32,
+) -> Option<Option<SavedKept>> {
     let first = tokens.next()?;
     if first == "-" {
         return Some(None);
     }
     let account = unescape(first.strip_prefix('+')?)?;
     let terminal = SessionId::new(tokens.next()?).ok()?;
+    let (close_at_end, opener) = if version >= VERSION {
+        let close_at_end = parse_bit(tokens.next()?)?;
+        // An empty name says nobody: the card would say "Opened by" and nothing.
+        let opener = parse_optional(tokens.next()?)?.filter(|opener| !opener.is_empty());
+        (close_at_end, opener)
+    } else {
+        (false, None)
+    };
     let args = tokens.map(unescape).collect::<Option<Vec<String>>>()?;
     (!account.is_empty() && !args.is_empty()).then_some(Some(SavedKept {
         account,
         terminal,
         args,
+        close_at_end,
+        opener,
     }))
 }
 
@@ -1423,6 +1469,8 @@ mod tests {
             account: account.to_owned(),
             terminal: SessionId::new(terminal).expect("an id"),
             args: args.iter().map(|arg| (*arg).to_owned()).collect(),
+            close_at_end: false,
+            opener: None,
         };
         saved.windows[0].tabs[1].panes[1].kept = Some(kept(
             "ada@prod:2222",
@@ -1434,6 +1482,21 @@ mod tests {
             "b-fedcba9876543210fedcba9876543210",
             &["-J", "my jump", "root@rasp"],
         ));
+        saved
+    }
+
+    /// [`rich_kept`] with its panes asked for by a program on the server: one closes with its
+    /// terminal and says who asked (a space in the words), the other was asked to stay open and
+    /// says it too. The model of [`V6_FIXTURE`].
+    fn rich_asked() -> Saved {
+        let mut saved = rich_kept();
+        if let Some(kept) = &mut saved.windows[0].tabs[1].panes[1].kept {
+            kept.close_at_end = true;
+            kept.opener = Some("Claude (t4)".to_owned());
+        }
+        if let Some(kept) = &mut saved.windows[1].tabs[0].panes[0].kept {
+            kept.opener = Some("t12".to_owned());
+        }
         saved
     }
 
@@ -1545,17 +1608,43 @@ mod tests {
         "\n",
     );
 
+    /// Version 6 for [`rich_asked`], frozen the same way: a kept terminal's name is followed by
+    /// whether its pane closes with it and who asked for the pane, then the `ssh` arguments.
+    const V6_FIXTURE: &str = concat!(
+        "bateri-session 6\n",
+        "W 120.5 -30 800 600.25 1 1 260.5\n",
+        "G api\\sserver 0 2\n",
+        "G ünï 1 -\n",
+        "T 0 - - - L 0\n",
+        "P 11111111-2222-3333-4444-555555555555 0 0 - - -\n",
+        "T 1 2 - 0 S h 0.3333333333333333 L 2 S v 0.71 L 0 L 1\n",
+        r"P 0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0 3 1 +/Users/ömer/My\sDrive/çalışma\\dosya - -",
+        "\n",
+        r"P 11111111-2222-3333-4444-555555555555 -2 0 +/tmp/tab\there\nnew\sline\rcr\s- +ssh\s-p\s2222\sprod +ada@prod:2222 b-0123456789abcdef0123456789abcdef 1 +Claude\s(t4) -p 2222 ada@prod",
+        "\n",
+        "P AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE 0 1 + + -\n",
+        "T 0 - - 0 L 0\n",
+        "P AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE 0 0 - - -\n",
+        "T 0 - - 1 L 0\n",
+        "P 0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0 0 0 - - -\n",
+        "W 120.5 -30 800 600.25 0 0 -\n",
+        "T 0 - - - L 0\n",
+        r"P AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE 0 0 - - +root@rasp:22\svia\sjump:22 b-fedcba9876543210fedcba9876543210 0 +t12 -J my\sjump root@rasp",
+        "\n",
+    );
+
     #[test]
     fn the_previous_version_is_read_byte_for_byte() {
         assert_eq!(Saved::parse(V1_FIXTURE), Some(rich()));
         assert_eq!(Saved::parse(V2_FIXTURE), Some(rich_named()));
         assert_eq!(Saved::parse(V3_FIXTURE), Some(rich_sided()));
         assert_eq!(Saved::parse(V4_FIXTURE), Some(rich_grouped()));
+        assert_eq!(Saved::parse(V5_FIXTURE), Some(rich_kept()));
     }
 
     #[test]
     fn the_current_version_is_read_byte_for_byte() {
-        assert_eq!(Saved::parse(V5_FIXTURE), Some(rich_kept()));
+        assert_eq!(Saved::parse(V6_FIXTURE), Some(rich_asked()));
     }
 
     /// The writer says the oldest version that holds the session — the one before names while no
@@ -1569,6 +1658,25 @@ mod tests {
         assert_eq!(rich_sided().render(), V3_FIXTURE);
         assert_eq!(rich_grouped().render(), V4_FIXTURE);
         assert_eq!(rich_kept().render(), V5_FIXTURE);
+        assert_eq!(rich_asked().render(), V6_FIXTURE);
+    }
+
+    /// A pane a program asked for is what makes the file version 6, either half of it alone: a
+    /// pane that closes with its terminal, a pane that says who asked. Without both the same
+    /// session is written as version 5, which the bateri before this one reads.
+    #[test]
+    fn a_session_with_no_pane_a_program_asked_for_is_written_as_version_five() {
+        let only = |close_at_end: bool, opener: Option<&str>| {
+            let mut saved = rich_kept();
+            if let Some(kept) = &mut saved.windows[1].tabs[0].panes[0].kept {
+                kept.close_at_end = close_at_end;
+                kept.opener = opener.map(str::to_owned);
+            }
+            saved.render()
+        };
+        assert!(only(true, None).starts_with("bateri-session 6\n"));
+        assert!(only(false, Some("t4")).starts_with("bateri-session 6\n"));
+        assert_eq!(only(false, None), V5_FIXTURE);
     }
 
     /// A pane on a kept terminal is what makes the file version 5 and nothing else does: take
@@ -1622,6 +1730,43 @@ mod tests {
         assert_eq!(Saved::parse(&text), None);
     }
 
+    /// Version 6's two fields are whole or the layout is not understood: a bit that is no bit, the
+    /// words without their mark, a field missing. An empty name is nobody.
+    #[test]
+    fn a_program_s_pane_that_is_not_whole_drops_the_layout() {
+        let fields = "b-0123456789abcdef0123456789abcdef 1 +Claude\\s(t4) -p";
+        for to in [
+            "b-0123456789abcdef0123456789abcdef 2 +Claude\\s(t4) -p",
+            "b-0123456789abcdef0123456789abcdef 1 Claude\\s(t4) -p",
+            "b-0123456789abcdef0123456789abcdef +Claude\\s(t4) -p",
+            "b-0123456789abcdef0123456789abcdef 1",
+        ] {
+            assert!(V6_FIXTURE.contains(fields), "{fields:?}");
+            let text = V6_FIXTURE.replacen(fields, to, 1);
+            assert_eq!(Saved::parse(&text), None, "{to:?}");
+        }
+        let nobody = V6_FIXTURE.replacen(" 0 +t12 ", " 0 + ", 1);
+        let read = Saved::parse(&nobody).expect("an empty name is a layout understood");
+        let kept = read.windows[1].tabs[0].panes[0]
+            .kept
+            .as_ref()
+            .expect("kept");
+        assert_eq!(kept.opener, None);
+        // Version 5 has no such fields: there the words read as the first argument.
+        let text = V5_FIXTURE.replacen(
+            "b-fedcba9876543210fedcba9876543210 -J",
+            "b-fedcba9876543210fedcba9876543210 0 +t12 -J",
+            1,
+        );
+        let read = Saved::parse(&text).expect("arguments");
+        let kept = read.windows[1].tabs[0].panes[0]
+            .kept
+            .as_ref()
+            .expect("kept");
+        assert_eq!(kept.args[..2], ["0", "+t12"]);
+        assert!(!kept.close_at_end);
+    }
+
     /// A width is a positive number of points or `-`; anything else is a layout not understood.
     #[test]
     fn a_side_width_that_is_no_width_drops_the_layout() {
@@ -1649,6 +1794,7 @@ mod tests {
             (both, "bateri-session 3\n"),
             (rich_grouped(), "bateri-session 4\n"),
             (rich_kept(), "bateri-session 5\n"),
+            (rich_asked(), "bateri-session 6\n"),
         ] {
             let text = saved.render();
             assert!(text.starts_with(header), "{text}");
