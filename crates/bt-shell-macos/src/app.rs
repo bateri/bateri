@@ -10096,6 +10096,7 @@ mod tests {
             input: Vec::new(),
             history: history.to_vec(),
             program: None,
+            view: false,
         }
     }
 

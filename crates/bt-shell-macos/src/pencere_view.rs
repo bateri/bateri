@@ -54,6 +54,7 @@
 
 pub(crate) mod ask;
 mod serve;
+mod still;
 mod strip;
 mod wait;
 
@@ -61,9 +62,11 @@ mod wait;
 mod tests;
 
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
+use std::time::Instant;
 
-use block2::DynBlock;
+use block2::{DynBlock, RcBlock};
 use bt_core::pencere::{Shelf, ViewSource, ViewStart};
 use bt_core::{Session, Theme};
 use bt_shell_common::palette::{Modifiers, menu_item_id};
@@ -77,17 +80,19 @@ use objc2::{
 };
 use objc2_app_kit::{
     NSApplication, NSAutoresizingMaskOptions, NSColor, NSEvent, NSEventModifierFlags, NSEventType,
-    NSMenu, NSMenuItem, NSView,
+    NSImage, NSMenu, NSMenuItem, NSView,
 };
+use objc2_core_foundation::CFRetained;
+use objc2_core_graphics::CGImage;
 use objc2_foundation::{
-    NSBundle, NSData, NSDictionary, NSError, NSHTTPURLResponse, NSLocale, NSObject,
+    NSBundle, NSData, NSDictionary, NSError, NSHTTPURLResponse, NSLocale, NSNumber, NSObject,
     NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSTimeZone, NSURL, NSURLRequest,
 };
 use objc2_web_kit::{
     WKFrameInfo, WKNavigationAction, WKNavigationActionPolicy, WKNavigationDelegate,
-    WKScriptMessage, WKScriptMessageHandler, WKSecurityOrigin, WKUIDelegate, WKURLSchemeHandler,
-    WKURLSchemeTask, WKUserContentController, WKWebView, WKWebViewConfiguration,
-    WKWebsiteDataStore,
+    WKScriptMessage, WKScriptMessageHandler, WKSecurityOrigin, WKSnapshotConfiguration,
+    WKUIDelegate, WKURLSchemeHandler, WKURLSchemeTask, WKUserContentController, WKWebView,
+    WKWebViewConfiguration, WKWebsiteDataStore,
 };
 use objc2_web_kit::{WKMediaCaptureType, WKPermissionDecision};
 
@@ -539,6 +544,8 @@ pub(crate) struct ViewHost {
     strip: Retained<strip::StripView>,
     /// The delegate and the handlers (the web view holds its delegates weakly).
     bridge: Retained<Bridge>,
+    /// The picture the tab's card has of the view ([`still`]).
+    shot: still::Shared,
 }
 
 impl ViewHost {
@@ -616,7 +623,12 @@ impl ViewHost {
             web.setInspectable(false);
         }
         let strip = strip::StripView::new(mtm, strip_area(frame), text, theme);
-        let host = Self { web, strip, bridge };
+        let host = Self {
+            web,
+            strip,
+            bridge,
+            shot: still::Shared::default(),
+        };
         host.paint(theme);
         // SAFETY: a request for the shell's own URL.
         let loaded = unsafe {
@@ -681,6 +693,56 @@ impl ViewHost {
     /// web view or something inside it.
     pub(crate) fn holds_keyboard(&self) -> bool {
         self.web.holds_keyboard()
+    }
+
+    /// The picture of the view for a card's tile of `tile` pixels at `scale` pixels to the
+    /// point: the last one the web view gave, and a request for the next
+    /// ([`still`]). `None` until the first has come.
+    pub(crate) fn still(&self, tile: (u32, u32), scale: f64) -> Option<CFRetained<CGImage>> {
+        let (image, ask) = still::Still::call(&self.shot, Instant::now());
+        if let Some(generation) = ask {
+            self.shoot(tile, scale, generation);
+        }
+        image
+    }
+
+    /// The card is done with the pictures: the last one is let go.
+    pub(crate) fn release_still(&self) {
+        still::Still::release(&self.shot);
+    }
+
+    /// Asks the web view for its page as a picture of the tile's size, cropped to the
+    /// tile's shape ([`still::capture`]). The answer comes later, on the main queue.
+    fn shoot(&self, tile: (u32, u32), scale: f64, generation: u64) {
+        let bounds = self.web.bounds().size;
+        let Some(capture) = still::capture((bounds.width, bounds.height), scale, tile) else {
+            still::Still::answered(&self.shot, generation, None);
+            return;
+        };
+        let [x, y, width, height] = capture.rect;
+        // SAFETY: main thread (`MainThreadOnly`); a fresh configuration set before it is
+        // used, with values that are plain numbers.
+        let configuration = unsafe {
+            let configuration = WKSnapshotConfiguration::new(self.web.mtm());
+            configuration.setRect(NSRect::new(NSPoint::new(x, y), NSSize::new(width, height)));
+            configuration.setSnapshotWidth(Some(&NSNumber::new_f64(capture.width)));
+            // A view that is not on screen (the card is for tabs that are not shown) has
+            // no screen update to wait for.
+            configuration.setAfterScreenUpdates(false);
+            configuration
+        };
+        let shared = Rc::clone(&self.shot);
+        let answer = RcBlock::new(move |image: *mut NSImage, _error: *mut NSError| {
+            // SAFETY: the web view's image, or null; it lives through this call.
+            let image = unsafe { image.as_ref() }.and_then(still::cg_image);
+            still::Still::answered(&shared, generation, image);
+        });
+        // SAFETY: main thread; the web view copies the block, which holds only the shared
+        // cell and not the host, so a view that is gone before the answer costs nothing.
+        unsafe {
+            self.web
+                .takeSnapshotWithConfiguration_completionHandler(Some(&configuration), &answer);
+        }
     }
 
     /// Takes the web view down: stops it loading, takes it out of the pane and

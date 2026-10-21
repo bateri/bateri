@@ -30615,6 +30615,33 @@ e\\314\\201.'; sleep 5";
         program.session.shutdown();
     }
 
+    /// What a pane that came through a handover does for the program that had a view: the new
+    /// process has none of the conversation, and offers the program a restart — an unsolicited
+    /// `welcome` with a fresh token and `restart` — that the program answers by opening its view
+    /// again. Nothing is written before it is asked: a pane that had no view gets nothing.
+    #[test]
+    fn a_restart_is_offered_to_the_program_and_its_open_is_taken() {
+        use crate::pencere::State;
+        use crate::pencere::tests::{bundle_open, token_of};
+        let mut program = Playing::new("view-restart");
+        assert!(program.written().is_empty(), "nothing before it is asked");
+
+        program.session.restart_view();
+        let offer = program.wait_written(1).remove(0);
+        assert_eq!(offer.kind, "welcome");
+        assert_eq!(offer.re(), None, "unsolicited: it answers no message");
+        assert!(
+            offer.payload.contains("\"restart\":true"),
+            "{}",
+            offer.payload
+        );
+        // The program opens its view again with the token it was just given.
+        program.write(&bundle_open(&token_of(&offer)));
+        assert_eq!(program.wait_written(2)[1].kind, "need");
+        program.wait_state(State::Opening);
+        program.session.shutdown();
+    }
+
     #[test]
     fn a_pane_opened_without_views_has_no_conversation() {
         let wake = Arc::new(TestWake::default());

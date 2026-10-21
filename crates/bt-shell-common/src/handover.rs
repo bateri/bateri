@@ -1089,14 +1089,20 @@ fn layout_bundle(blob: &[u8]) -> Option<&str> {
 /// "BTPS" | version u32 | cols u16 | rows u16 | flags u32 (bit 0: login)
 /// vt | core | input | history: each len u64, bytes
 /// version 2: program: len u64, its kind's word (`Kind::word`)
+/// version 3: version 2's fields; flags bit 1: a program's view was open
 /// ```
 ///
 /// Version 2 carries what the pane showed it ran: the next bateri can no
 /// longer read the command's line once it has scrolled away, and the table
-/// does not see past `ssh`. **A pane with no program is written as version
-/// 1**, byte for byte: a bateri rolled back to the version before cannot
-/// read version 2 and lets that pane's program go, so only a pane that has
-/// something to carry pays for it.
+/// does not see past `ssh`. Version 3 carries that a program's view was over
+/// the pane: the program keeps running through the handover but the new
+/// process has none of the conversation, so it offers the program a restart
+/// ([`PaneState::view`]). **A pane carries only what it has**: with no view
+/// it is written as version 2, with no program either as version 1, byte for
+/// byte — a bateri rolled back to the version before cannot read the newer
+/// one and lets that pane's program go, so only a pane that has something to
+/// carry pays for it. A version 3 blob always has the program's field, empty
+/// when there is no program.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PaneState {
     /// The grid's size the VT is laid out for (`bt_core::Frozen::cols`).
@@ -1118,14 +1124,24 @@ pub struct PaneState {
     /// `None` for the shell and the server, which the next bateri tells by
     /// itself — and which then cost no version 2.
     pub program: Option<Kind>,
+    /// A program's view was over the pane (`TerminalPane::shows_view`): the
+    /// adopting pane tells the program to open it again
+    /// (`Session::restart_view`), because what the view needs of the
+    /// conversation — the token, the files, the messages — went with the
+    /// process that is gone. `false` for a crash bundle, which has no view to
+    /// carry.
+    pub view: bool,
 }
 
 const PANE_MAGIC: [u8; 4] = *b"BTPS";
 
 /// The pane blob's version.
-pub const PANE_VERSION: u32 = 2;
+pub const PANE_VERSION: u32 = 3;
 
-/// The version a pane without a program is written as ([`PaneState`]).
+/// The version a pane with a program and no view is written as ([`PaneState`]).
+const PANE_UNVIEWED: u32 = 2;
+
+/// The version a pane without a program or a view is written as ([`PaneState`]).
 const PANE_PROGRAMLESS: u32 = 1;
 
 /// The longest program word the bound connection carries; [`Kind::word`]'s
@@ -1134,6 +1150,9 @@ const WORD_LIMIT: u64 = 64;
 
 /// The `login` bit of a pane blob's flags.
 const LOGIN: u32 = 1;
+
+/// The `view` bit of a pane blob's flags (version 3 and after).
+const VIEW: u32 = 2;
 
 impl PaneState {
     pub fn encode(&self) -> Vec<u8> {
@@ -1146,8 +1165,10 @@ impl PaneState {
                 + word.map_or(0, str::len),
         );
         out.extend_from_slice(&PANE_MAGIC);
-        let version = if word.is_some() {
+        let version = if self.view {
             PANE_VERSION
+        } else if word.is_some() {
+            PANE_UNVIEWED
         } else {
             PANE_PROGRAMLESS
         };
@@ -1157,9 +1178,14 @@ impl PaneState {
         let flags = match self.parent {
             ShellParent::Login => LOGIN,
             ShellParent::Direct => 0,
-        };
+        } | if self.view { VIEW } else { 0 };
         out.extend_from_slice(&flags.to_le_bytes());
-        let word = word.map(str::as_bytes);
+        // The program's field: with the program, and in version 3 empty without.
+        let word = match word {
+            Some(word) => Some(word.as_bytes()),
+            None if self.view => Some(&[][..]),
+            None => None,
+        };
         for field in [&self.vt, &self.core, &self.input, &self.history]
             .into_iter()
             .map(Vec::as_slice)
@@ -1172,7 +1198,7 @@ impl PaneState {
     }
 
     /// `None` for anything that is not exactly one blob of [`PANE_VERSION`]
-    /// or the one before it: an unknown flag bit, a field past the end, a
+    /// or one of the two before it: an unknown flag bit, a field past the end, a
     /// byte past the last field. A program word this build does not know (a
     /// newer bateri's kind) is no program, not damage.
     pub fn decode(bytes: &[u8]) -> Option<PaneState> {
@@ -1186,15 +1212,25 @@ impl PaneState {
             return None;
         }
         let version = u32::from_le_bytes(take(4)?.try_into().ok()?);
-        if version != PANE_VERSION && version != PANE_PROGRAMLESS {
+        if !matches!(version, PANE_VERSION | PANE_UNVIEWED | PANE_PROGRAMLESS) {
             return None;
         }
+        // The view's bit exists from version 3: in an older blob it is damage.
+        let known = if version == PANE_VERSION {
+            LOGIN | VIEW
+        } else {
+            LOGIN
+        };
         let cols = u16::from_le_bytes(take(2)?.try_into().ok()?);
         let rows = u16::from_le_bytes(take(2)?.try_into().ok()?);
-        let parent = match u32::from_le_bytes(take(4)?.try_into().ok()?) {
-            LOGIN => ShellParent::Login,
-            0 => ShellParent::Direct,
-            _ => return None,
+        let flags = u32::from_le_bytes(take(4)?.try_into().ok()?);
+        if flags & !known != 0 {
+            return None;
+        }
+        let parent = if flags & LOGIN != 0 {
+            ShellParent::Login
+        } else {
+            ShellParent::Direct
         };
         let mut field = || -> Option<Vec<u8>> {
             let len = u64::from_le_bytes(take(8)?.try_into().ok()?);
@@ -1209,8 +1245,9 @@ impl PaneState {
             input: field()?,
             history: field()?,
             program: None,
+            view: flags & VIEW != 0,
         };
-        if version == PANE_VERSION {
+        if version != PANE_PROGRAMLESS {
             let word = field()?;
             state.program = std::str::from_utf8(&word).ok().and_then(Kind::from_word);
         }
@@ -3269,6 +3306,8 @@ fn hold_after_crash(
                 input: Vec::new(),
                 history,
                 program: pane.program,
+                // A crash carries no view: the conversation is not in the bundle.
+                view: false,
             };
             (state, tail)
         })
@@ -3317,7 +3356,12 @@ fn blob_len(state: &PaneState) -> u64 {
     [&state.vt, &state.core, &state.input, &state.history]
         .iter()
         .fold(48u64, |len, field| len.saturating_add(field.len() as u64))
-        .saturating_add(state.program.map_or(0, |kind| 8 + kind.word().len() as u64))
+        .saturating_add(match state.program {
+            Some(kind) => 8 + kind.word().len() as u64,
+            // A version 3 blob has the field even with no program.
+            None if state.view => 8,
+            None => 0,
+        })
 }
 
 /// Keeps a crash bundle readable: the next bateri refuses a whole frame with
@@ -4883,6 +4927,7 @@ mod tests {
             input: b"ls\r".to_vec(),
             history: b"history".to_vec(),
             program: None,
+            view: false,
         }
     }
 
@@ -4895,7 +4940,15 @@ mod tests {
             program: Some(Kind::Agent(crate::program::identity::Agent::ClaudeCode)),
             ..state()
         };
-        for state in [state(), programmed] {
+        let viewed = PaneState {
+            view: true,
+            ..state()
+        };
+        let both = PaneState {
+            view: true,
+            ..programmed.clone()
+        };
+        for state in [state(), programmed, viewed, both] {
             let bytes = state.encode();
             assert_eq!(PaneState::decode(&bytes), Some(state.clone()));
             let direct = PaneState {
@@ -4911,10 +4964,10 @@ mod tests {
             longer.push(0);
             assert_eq!(PaneState::decode(&longer), None);
             let mut version = bytes.clone();
-            version[4] = 3;
+            version[4] = 4;
             assert_eq!(PaneState::decode(&version), None);
             let mut flags = bytes.clone();
-            flags[12] = 2;
+            flags[12] |= 4;
             assert_eq!(PaneState::decode(&flags), None);
         }
     }
@@ -4936,6 +4989,24 @@ mod tests {
         \x01\x00\x00\x00\x00\x00\x00\x00h\
         \x06\x00\x00\x00\x00\x00\x00\x00editor";
 
+    /// Version 3, byte for byte: version 2's fields with the view's bit (2) in the
+    /// flags — a program's view was open.
+    const PANE_V3_FIXTURE: &[u8] = b"BTPS\x03\x00\x00\x00\x50\x00\x18\x00\x03\x00\x00\x00\
+        \x01\x00\x00\x00\x00\x00\x00\x00v\
+        \x01\x00\x00\x00\x00\x00\x00\x00c\
+        \x01\x00\x00\x00\x00\x00\x00\x00i\
+        \x01\x00\x00\x00\x00\x00\x00\x00h\
+        \x06\x00\x00\x00\x00\x00\x00\x00editor";
+
+    /// Version 3 of a pane that has a view and no program: the program's field is
+    /// there, empty.
+    const PANE_V3_BARE_FIXTURE: &[u8] = b"BTPS\x03\x00\x00\x00\x50\x00\x18\x00\x03\x00\x00\x00\
+        \x01\x00\x00\x00\x00\x00\x00\x00v\
+        \x01\x00\x00\x00\x00\x00\x00\x00c\
+        \x01\x00\x00\x00\x00\x00\x00\x00i\
+        \x01\x00\x00\x00\x00\x00\x00\x00h\
+        \x00\x00\x00\x00\x00\x00\x00\x00";
+
     fn fixture_state(program: Option<Kind>) -> PaneState {
         PaneState {
             cols: 80,
@@ -4946,6 +5017,14 @@ mod tests {
             input: b"i".to_vec(),
             history: b"h".to_vec(),
             program,
+            view: false,
+        }
+    }
+
+    fn viewed(program: Option<Kind>) -> PaneState {
+        PaneState {
+            view: true,
+            ..fixture_state(program)
         }
     }
 
@@ -4962,6 +5041,55 @@ mod tests {
         assert_eq!(fixture_state(Some(Kind::Editor)).encode(), PANE_V2_FIXTURE);
     }
 
+    /// Version 3 reads and writes byte for byte, with and without a program, and
+    /// the two before it keep reading as they did.
+    #[test]
+    fn a_pane_state_with_a_view_is_version_three() {
+        assert_eq!(
+            PaneState::decode(PANE_V3_FIXTURE),
+            Some(viewed(Some(Kind::Editor)))
+        );
+        assert_eq!(viewed(Some(Kind::Editor)).encode(), PANE_V3_FIXTURE);
+        assert_eq!(PaneState::decode(PANE_V3_BARE_FIXTURE), Some(viewed(None)));
+        assert_eq!(viewed(None).encode(), PANE_V3_BARE_FIXTURE);
+        // The older blobs carry no view.
+        for older in [PANE_V1_FIXTURE, PANE_V2_FIXTURE] {
+            assert_eq!(
+                PaneState::decode(older).map(|state| state.view),
+                Some(false)
+            );
+        }
+        assert_eq!(PANE_V3_FIXTURE[4], 3, "the fixture is the version it says");
+    }
+
+    /// The view's bit is version 3's: in a blob that is older it is damage, and a
+    /// version 3 blob with only a login or only a view reads.
+    #[test]
+    fn the_views_bit_belongs_to_version_three() {
+        for older in [PANE_V1_FIXTURE, PANE_V2_FIXTURE] {
+            let mut blob = older.to_vec();
+            blob[12] |= 2;
+            assert_eq!(PaneState::decode(&blob), None);
+        }
+        let mut direct = PANE_V3_FIXTURE.to_vec();
+        direct[12] = 2;
+        let state = PaneState::decode(&direct).expect("a direct pane with a view");
+        assert_eq!(state.parent, ShellParent::Direct);
+        assert!(state.view);
+        let mut plain = PANE_V3_FIXTURE.to_vec();
+        plain[12] = 1;
+        let state = PaneState::decode(&plain).expect("a version 3 blob without the bit");
+        assert!(!state.view, "the bit is what says a view was open");
+    }
+
+    /// A pane without a view is written as before whatever else it carries, so a
+    /// bateri rolled back keeps reading every pane that had no view.
+    #[test]
+    fn a_pane_without_a_view_is_written_as_the_version_before() {
+        assert_eq!(fixture_state(Some(Kind::Editor)).encode(), PANE_V2_FIXTURE);
+        assert_eq!(fixture_state(None).encode(), PANE_V1_FIXTURE);
+    }
+
     /// Only a pane with something to carry pays for version 2: a bateri
     /// rolled back to version 1 lets go of a pane it cannot read.
     #[test]
@@ -4976,6 +5104,10 @@ mod tests {
         let at = newer.len() - b"editor".len();
         newer[at..].copy_from_slice(b"future");
         assert_eq!(PaneState::decode(&newer), Some(fixture_state(None)));
+        // The view it had stays: the word is the program's, the view is not.
+        let mut newer = PANE_V3_FIXTURE.to_vec();
+        newer[at..].copy_from_slice(b"future");
+        assert_eq!(PaneState::decode(&newer), Some(viewed(None)));
     }
 
     /// The layout blob names the bundle that wrote it: a dev package's
@@ -5576,6 +5708,7 @@ mod tests {
                 input: Vec::new(),
                 history: Vec::new(),
                 program: Some(Kind::Editor),
+                view: false,
             }
         );
         assert!(

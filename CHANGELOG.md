@@ -37,6 +37,22 @@ of every installed copy. A version without a section is not released.
   opens on a server (⌘T, ⌘D) are numbered the same way, so the program sees them
   in `bateri ls` and can use `capture` and `send` on them; terminals opened
   before this update keep the names they had.
+- **A program can open its own window in the pane it runs in.** A program that
+  speaks the [pencere](https://github.com/bateri/pencere) protocol — a tool for an
+  agent, a dashboard for a server — asks, and the pane shows a web view of its own
+  where the terminal was, the way vim takes the screen; when the program ends the
+  terminal is back as it was. The program may run here, behind a plain `ssh`, or in
+  a terminal a server keeps. A strip of bateri's own stays above the view and says
+  what it is and where the program runs (“docker-ui · rasp · in this pane”), with
+  **Quit {program}**, which is ⌃C. The view has the keyboard but for your shortcuts —
+  ⌘T, ⌘D, ⌘W, ⌘P and the rest, as you set them in `[keys]` — and the commands that
+  work on the terminal's text, which are grey meanwhile; ⌘C, ⌘V and ⌘F are the
+  view's. The view reaches nothing on its own: a program that wants other sites,
+  the camera or the clipboard is asked about in a sheet on the pane (the answer is
+  kept until bateri quits, per program and tool), and a link the view opens is
+  asked about and opens in this Mac's browser. The tab's card shows what the view
+  shows. After an update, or when the connection to a server's terminal comes back,
+  the program is told to open its view again and it comes back in the same pane.
 
 - **A terminal on a server shows that it is waiting when the connection is
   gone.** The pane keeps its last screen, veiled, with no caret, and the line at

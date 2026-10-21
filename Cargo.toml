@@ -98,6 +98,10 @@ objc2-web-kit = { version = "0.3", default-features = false, features = [
     "WKURLSchemeHandler", "WKURLSchemeTask", "WKNavigationDelegate", "WKNavigationAction",
     "WKNavigation", "WKUIDelegate", "WKWebsiteDataStore", "WKFrameInfo", "WKSecurityOrigin",
     "WKWindowFeatures",
+# `WKSnapshotConfiguration`: the web view's own picture for the tab card's tile
+# (`pencere_view::still`) — the rectangle and the width of what it gives back;
+# its rectangle is a `CGRect`, behind the `objc2-core-foundation` flag.
+    "WKSnapshotConfiguration", "objc2-core-foundation",
 ] }
 # The main queue (`bt-shell-macos`) and vnode sources (`bt-shell-common`'s
 # `watch`). User-approved dependency decision.

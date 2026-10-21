@@ -1449,9 +1449,38 @@ fn a_pane_is_told_when_its_connection_goes_and_comes_back_and_not_once_per_attem
     rig.world.bridge().write(&terminal, b"two");
     until("the bytes go on", || holder.shown.bytes() == b"onetwo");
     assert_eq!(rig.world.links().len(), 2);
+    // What a program's view over the pane waits for: one return in all that, not
+    // one for every attempt that failed on the way (the pane starts the view
+    // again at each told return and at no other word).
+    let mut stood = PaneLink::Live;
+    let mut returns = 0;
+    for (_, told) in rig.world.links() {
+        returns += usize::from(stood.comes_back(told));
+        stood = told;
+    }
+    assert_eq!(returns, 1, "the connection came back once");
 
     rig.world.bridge().exit(&terminal, Exit::Code(0));
     assert_eq!(holder.outcome(), Outcome::Exit(0));
+}
+
+/// A screen that is back is the one edge a program's view is started again at: from
+/// every passive state to live, and from nothing else.
+#[test]
+fn a_screen_is_back_only_when_a_passive_one_goes_live() {
+    use PaneLink::{Connecting, Live, NeedsLogin, Reconnecting, Taken};
+    for passive in [Reconnecting, NeedsLogin, Taken] {
+        assert!(passive.comes_back(Live), "{passive:?} to live");
+        for other in [Reconnecting, NeedsLogin, Taken, Connecting] {
+            assert!(!passive.comes_back(other), "{passive:?} to {other:?}");
+        }
+    }
+    // The first connection was never lost, and live to live is no change.
+    assert!(!Connecting.comes_back(Live));
+    assert!(!Live.comes_back(Live));
+    for to in [Reconnecting, NeedsLogin, Taken, Connecting] {
+        assert!(!Live.comes_back(to), "live to {to:?}");
+    }
 }
 
 /// The computer waking up is the same as the user asking, for every account.

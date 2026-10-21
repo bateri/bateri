@@ -3323,9 +3323,16 @@ impl TerminalPane {
     ///
     /// The textures stay between two calls (the card asks every half second) until
     /// [`TerminalPane::release_snapshot`].
+    ///
+    /// **A pane that shows a program's view is the view's picture**, not the terminal's under it:
+    /// the web view's own, asked for and kept (`pencere_view::still`) — the first call has none.
+    /// The terminal's still path is not called for it, as it was not before.
     pub fn snapshot(&self, size: (f64, f64), scale: f64) -> Option<CFRetained<CGImage>> {
-        let link = self.link()?;
         let tile = |points: f64| (points * scale).round().max(1.0) as u32;
+        if let Some(host) = self.view_host() {
+            return host.still((tile(size.0), tile(size.1)), scale);
+        }
+        let link = self.link()?;
         // A still asked for from inside a still (the session's notices run on this thread) gets
         // none rather than a second borrow.
         let mut shot = self.ivars().shot.try_borrow_mut().ok()?;
@@ -3340,6 +3347,9 @@ impl TerminalPane {
     /// snapshot makes them again.
     pub fn release_snapshot(&self) {
         self.ivars().shot.replace(None);
+        if let Some(host) = self.view_host() {
+            host.release_still();
+        }
     }
 
     /// Scrolling **input** reached this pane's grid — the wheel, a page
@@ -3824,6 +3834,8 @@ impl TerminalPane {
         let adopting = adopt.is_some();
         let mut nudge = false;
         let mut carried_on = false;
+        // The process this one took the pane from had a program's view over it.
+        let mut view_was_open = false;
         let mut carried = None;
         let (session, shell_parent) = match adopt {
             Some(adopted) => {
@@ -3831,11 +3843,13 @@ impl TerminalPane {
                 let note = adopted.note;
                 nudge = adopted.nudge;
                 let program = adopted.state.program;
+                let viewed = adopted.state.view;
                 match adopt_session(options.clone(), adopted, grid, &wake) {
                     Ok((session, parent)) => {
                         self.ivars().taken_from.replace(taken_from);
                         carried = program;
                         carried_on = true;
+                        view_was_open = viewed;
                         (session, parent)
                     }
                     Err((error, history)) => {
@@ -3855,6 +3869,14 @@ impl TerminalPane {
             None => (Session::spawn(options, wake)?, shell_parent),
         };
         let session = Arc::new(session);
+        // The program kept running through the handover and its view did not: what the view
+        // lived on (the token, the files, the messages) went with the old process, so the
+        // program is offered a restart and opens the view again. Offered, not forced: the
+        // conversation answers only where a program is in front of the pane (§6.2), and a pane
+        // that had no view gets nothing written.
+        if carried_on && view_was_open {
+            session.restart_view();
+        }
         if nudge {
             nudge_program(&session);
         } else if carried_on {
@@ -4341,12 +4363,22 @@ impl TerminalPane {
     /// sleep ask for no frame (zero frames while idle) — the change itself asks
     /// for one.
     pub(crate) fn set_connection(&self, link: PaneLink) {
-        if self.ivars().connection.replace(link) == link {
+        let before = self.ivars().connection.replace(link);
+        if before == link {
             return;
         }
         self.ivars().link_veil.setHidden(!link.is_passive());
         self.place_link_veil();
         self.apply_connection();
+        // The screen came back, not the messages a program's view lives on: a view that
+        // is open is offered to the program again. Once per change, like everything above
+        // (`PaneLink::comes_back`): a reconnection's failed attempts are no news.
+        if before.comes_back(link)
+            && self.shows_view()
+            && let Some(session) = self.session()
+        {
+            session.restart_view();
+        }
     }
 
     /// How the connection stands for this pane's terminal.
@@ -5433,6 +5465,8 @@ impl TerminalPane {
         let pid = session.child_pid();
         let start = jobs::start_time(pid)?;
         let program = self.carried_program();
+        // Before the quiet-down: what the pane shows is what the next process starts again.
+        let view = self.shows_view();
         self.quiesce(false);
         let frozen = match session.freeze() {
             Ok(frozen) => frozen,
@@ -5454,6 +5488,7 @@ impl TerminalPane {
             input: frozen.input,
             history: history.clone(),
             program,
+            view,
         };
         let held = crate::handover::HeldPane::new(
             self.ivars().uuid.clone(),
@@ -6830,6 +6865,45 @@ mod tests {
         let at = hold.find("fn program_changed(").expect("program_changed");
         let body = &hold[at..at + hold[at..].find("\n}\n").expect("its end")];
         assert!(body.contains("server_program_changed()"));
+    }
+
+    /// A program's view is started again at the two places the screen is restored without the
+    /// messages it lives on: the pane that took its program over from an earlier process, and the
+    /// pane whose server terminal's connection came back. The handover's record of the view is
+    /// the one the pane reads (`shows_view`, in front of the quiet-down), and the reconnection's
+    /// one rule is [`PaneLink::comes_back`]. A source scan, because the panes need a window
+    /// server and the first needs a process to hand over from.
+    #[test]
+    fn a_view_is_restarted_where_the_screen_comes_back_without_its_messages() {
+        let pane = include_str!("pane.rs");
+        let pane = &pane[..pane.find("#[cfg(test)]").unwrap_or(pane.len())];
+        let at = pane.find("fn freeze_for_handover(").expect("the freeze");
+        let body = &pane[at..at + pane[at..].find("\n    }\n").expect("its end")];
+        let seen = body
+            .find("self.shows_view()")
+            .expect("the view is recorded");
+        let quiet = body.find("self.quiesce(false)").expect("the quiet-down");
+        assert!(seen < quiet, "recorded before the quiet-down");
+        assert!(
+            body.contains("            view,\n"),
+            "and written into the state"
+        );
+        let at = pane
+            .find("let viewed = adopted.state.view;")
+            .expect("the adoption reads it");
+        let body = &pane[at..at + pane[at..].find("nudge_program(&session);").expect("nudge")];
+        assert!(body.contains("view_was_open = viewed;"));
+        assert!(body.contains("carried_on && view_was_open"));
+        assert!(body.contains("session.restart_view();"));
+        let at = pane
+            .find("pub(crate) fn set_connection(")
+            .expect("set_connection");
+        let body = &pane[at..at + pane[at..].find("\n    }\n").expect("its end")];
+        assert!(body.contains("before.comes_back(link)"));
+        assert!(body.contains("self.shows_view()"));
+        assert!(body.contains("restart_view()"));
+        // After the early return, so a retry that changes nothing restarts nothing.
+        assert!(body.find("return;").expect("the return") < body.find("restart_view()").unwrap());
     }
 
     #[test]

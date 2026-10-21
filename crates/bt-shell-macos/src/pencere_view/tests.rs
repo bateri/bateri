@@ -13,6 +13,7 @@ use super::serve::{
     self, DOCUMENT_PATH, Document, Page, Route, SANDBOX, Served, css_color, deliver_script,
     ground_script, js_string, route,
 };
+use super::still::{self, Capture, PATIENCE, Shared, Still};
 use super::wait::{OPENING, TEARDOWN, Waits};
 use super::{is_interrupt, modifiers_of, strip_area, view_area};
 
@@ -542,4 +543,138 @@ fn the_keys_modifiers_are_the_four_a_shortcut_uses() {
     assert!(held.command && !held.shift && !held.control && !held.option);
     let held = modifiers_of(NSEventModifierFlags::Control | NSEventModifierFlags::Option);
     assert!(held.control && held.option && !held.command);
+}
+
+// ---- the card's picture of a view ---------------------------------------------
+
+/// A page of 800×450 points, a tile of the same shape: all of the page, at the tile's
+/// pixels (a tile of 400 pixels at two to the point is 200 points wide).
+#[test]
+fn a_tile_of_the_pages_shape_takes_the_whole_page() {
+    assert_eq!(
+        still::capture((800.0, 450.0), 2.0, (400, 225)),
+        Some(Capture {
+            rect: [0.0, 0.0, 800.0, 450.0],
+            width: 200.0
+        })
+    );
+}
+
+/// The terminal's rule, and not another: the picture fills the tile and what spills over is cut
+/// off the right and the top, so the left edge and the bottom stay (`bt_gpu::tile_crop`).
+#[test]
+fn a_tile_of_another_shape_keeps_the_left_edge_and_the_bottom() {
+    // A wide page, a tall tile: the right is cut.
+    let wide = still::capture((800.0, 400.0), 2.0, (100, 200)).expect("a capture");
+    assert_eq!(wide.rect, [0.0, 0.0, 200.0, 400.0]);
+    assert_eq!(wide.width, 50.0);
+    // A tall page, a wide tile: the top is cut, and the rectangle stands on the bottom.
+    let tall = still::capture((400.0, 800.0), 2.0, (200, 100)).expect("a capture");
+    assert_eq!(tall.rect, [0.0, 600.0, 400.0, 200.0]);
+    assert_eq!(
+        tall.rect[1] + tall.rect[3],
+        800.0,
+        "down to the page's bottom"
+    );
+    assert_eq!(tall.width, 100.0);
+    // Whatever the shapes, the rectangle is the crop of the one rule over the page's pixels.
+    for (view, scale, tile) in [
+        ((640.0_f64, 368.0_f64), 2.0_f64, (300_u32, 120_u32)),
+        ((1000.0, 700.0), 1.0, (120, 300)),
+        ((333.0, 777.0), 2.0, (101, 99)),
+    ] {
+        let [u0, v0, u1, v1] = bt_gpu::tile_crop(
+            (
+                (view.0 * scale).round() as u32,
+                (view.1 * scale).round() as u32,
+            ),
+            tile,
+        );
+        let got = still::capture(view, scale, tile).expect("a capture");
+        let want = [
+            f64::from(u0) * view.0,
+            f64::from(v0) * view.1,
+            f64::from(u1 - u0) * view.0,
+            f64::from(v1 - v0) * view.1,
+        ];
+        for (got, want) in got.rect.iter().zip(want) {
+            assert!(
+                (got - want).abs() < 1e-3,
+                "{view:?} {tile:?}: {got} vs {want}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_page_or_a_tile_with_nothing_in_it_has_no_picture() {
+    assert_eq!(still::capture((0.0, 450.0), 2.0, (400, 225)), None);
+    assert_eq!(still::capture((800.0, 0.0), 2.0, (400, 225)), None);
+    assert_eq!(still::capture((800.0, 450.0), 2.0, (0, 225)), None);
+    assert_eq!(still::capture((800.0, 450.0), 2.0, (400, 0)), None);
+    assert_eq!(still::capture((800.0, 450.0), 0.0, (400, 225)), None);
+}
+
+fn picture() -> objc2_core_foundation::CFRetained<objc2_core_graphics::CGImage> {
+    crate::snapshot::image(&bt_gpu::Snapshot {
+        width: 2,
+        height: 2,
+        rgba: vec![255; 16],
+    })
+    .expect("a picture")
+}
+
+/// The card asks every half second: a call asks for the next picture and gives the last one
+/// that came, a request still on its way is not asked twice, and one that never comes back is
+/// asked again.
+#[test]
+fn the_card_is_given_the_last_picture_and_one_request_is_in_flight() {
+    use std::time::Instant;
+    let shared = Shared::default();
+    let start = Instant::now();
+    let (image, ask) = Still::call(&shared, start);
+    assert!(image.is_none(), "nothing has come yet");
+    let generation = ask.expect("the first call asks");
+    // The next turns of the card find it on its way.
+    for later in [100, 500, 1900] {
+        let (image, ask) = Still::call(&shared, start + std::time::Duration::from_millis(later));
+        assert!(image.is_none() && ask.is_none(), "after {later} ms");
+    }
+    // It comes: the next call has it, and asks for the next.
+    Still::answered(&shared, generation, Some(picture()));
+    let (image, ask) = Still::call(&shared, start + std::time::Duration::from_millis(500));
+    assert!(image.is_some(), "the picture that came");
+    let generation = ask.expect("and asks again");
+    // An answer with nothing (a view that could not be shot) leaves the last picture.
+    Still::answered(&shared, generation, None);
+    let (image, ask) = Still::call(&shared, start + std::time::Duration::from_millis(1000));
+    assert!(image.is_some() && ask.is_some());
+    // A request that does not come back is asked again after the patience, not before.
+    let late = start + std::time::Duration::from_millis(1000);
+    let (_, ask) = Still::call(&shared, late + PATIENCE / 2);
+    assert!(ask.is_none());
+    let (_, ask) = Still::call(&shared, late + PATIENCE);
+    assert!(ask.is_some());
+}
+
+/// The card letting go of its pictures lets go of the last one, and an answer to a request
+/// made before is not kept: the picture of a card that is gone would otherwise stay as long
+/// as the view.
+#[test]
+fn a_picture_that_comes_after_the_card_let_go_is_not_kept() {
+    use std::time::Instant;
+    let shared = Shared::default();
+    let now = Instant::now();
+    let (_, ask) = Still::call(&shared, now);
+    let before = ask.expect("a request");
+    Still::answered(&shared, before, Some(picture()));
+    assert!(Still::call(&shared, now).0.is_some());
+    Still::release(&shared);
+    assert!(Still::call(&shared, now).0.is_none(), "the last one went");
+    // The old request comes back after the release.
+    Still::answered(&shared, before, Some(picture()));
+    assert!(
+        Still::call(&shared, now).0.is_none(),
+        "and the late one is not kept"
+    );
 }

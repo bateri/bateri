@@ -87,6 +87,16 @@ pub(crate) fn plan(source: (u32, u32), tile: (u32, u32)) -> Plan {
     Plan { halvings, crop }
 }
 
+/// The part of a `source`-sized picture that fills a `tile`, as [`plan`] cuts
+/// it: u0, v0, u1, v1, normalised, top left first. For a picture that does not
+/// come out of this renderer but must fill the same tile the same way — a web
+/// view's, which the shell has taken and shrinks itself: the rule is one, so a
+/// card's tiles do not keep the left edge and the bottom of some pictures and
+/// the middle of others.
+pub fn tile_crop(source: (u32, u32), tile: (u32, u32)) -> [f32; 4] {
+    plan(source, tile).crop
+}
+
 /// The immediates of one pass that reads `crop` of a `from`-sized texture into
 /// a `to`-sized one: where its four taps stand (`shrink.wgsl`'s `tap`).
 ///
@@ -449,6 +459,18 @@ mod tests {
         assert!(plan((100, 100), (200, 200)).halvings.is_empty());
         // Odd sizes round up, so no row of the picture is lost.
         assert_eq!(plan((9, 5), (1, 1)).halvings, vec![(5, 3), (3, 2)]);
+    }
+
+    #[test]
+    fn the_crop_other_pictures_are_cut_by_is_the_plans() {
+        for (source, tile) in [
+            ((400, 800), (200, 100)),
+            ((800, 400), (100, 200)),
+            ((1400, 1800), (280, 360)),
+            ((9, 5), (1, 1)),
+        ] {
+            assert_eq!(tile_crop(source, tile), plan(source, tile).crop);
+        }
     }
 
     #[test]

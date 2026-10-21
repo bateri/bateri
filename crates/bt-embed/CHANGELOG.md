@@ -22,6 +22,18 @@ commit. Pushing is a separate step.
 
 ### Added
 
+- **A pane answers a program's view and shows it.** No new function: a program in
+  the pane that speaks the pencere protocol is welcomed and, when it opens a view, a
+  web view covers the pane under a 32-point strip of the pane's own (what it is,
+  where the program runs, **Quit**, which is ⌃C), and the terminal comes back
+  when the program ends the view or exits. This changes what `bt_pane_open`
+  does for such a program, which before got no answer and fell back to text. What
+  the host sees: the questions the view asks (other addresses, the camera, the
+  clipboard, opening a link) are sheets on the pane's window, so the pane must be in
+  a window to be asked; the view gets every key except ⌃C, and a key it does not use
+  reaches the host's menu as before; the pane's frames stop while a view covers it,
+  and the program is offered a view again after the pane's terminal came back from
+  a lost connection.
 - `bt_pane_config_set_bash_scripts(config, dir)`: the shell integration's
   bash scripts (bateri's `Resources/shell/bash`, the directory that holds
   `bateri.bash`), beside `bt_pane_config_set_zsh_scripts`. A pane whose shell

@@ -190,6 +190,17 @@ impl PaneLink {
         matches!(self, Self::Reconnecting | Self::NeedsLogin | Self::Taken)
     }
 
+    /// Whether a pane that stood at `self` and is told `now` has its terminal's screen **back**:
+    /// it was a screen that was no longer live and is live again (the connection came back, or
+    /// the user took the terminal back). The one edge at which a program's view over the pane is
+    /// started again: what came back was the screen, from a picture or from a replay, and not
+    /// the messages the view lives on (`Session::restart_view`). A first connection is not one
+    /// ([`PaneLink::Connecting`] was never passive), and neither is any change between two
+    /// passive states.
+    pub fn comes_back(self, now: PaneLink) -> bool {
+        self.is_passive() && now == Self::Live
+    }
+
     /// What the pane is told: [`PaneLink::Connecting`] is the connection being there as far as
     /// the pane's looks go.
     fn told(self) -> PaneLink {

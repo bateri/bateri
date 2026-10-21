@@ -85,6 +85,7 @@ pub use frame::{
 pub use link::{DisplayLink, Layout, Origin, Pacer, Shot, Snapshot, TickTarget, Ticker, Waker};
 pub use metrics::{CellMetrics, FontNotice, GridInset, family_notice};
 pub use renderer::Renderer;
+pub use renderer::shrink::tile_crop;
 pub use scrollbar::{Mode as ScrollbarMode, ScrollbarLayout, strip_px as scrollbar_strip_px};
 pub use stats::{MIN_SAMPLES, Samples, Stats};
 pub use surface::Surface;

@@ -49,6 +49,7 @@ use objc2_app_kit::{
     NSEventModifierFlags, NSEventType, NSMenu, NSMenuItem, NSTextField, NSView, NSWindow,
     NSWindowStyleMask,
 };
+use objc2_core_graphics::CGImage;
 use objc2_foundation::{
     NSDate, NSDefaultRunLoopMode, NSObject, NSObjectProtocol, NSPoint, NSRect, NSRunLoop, NSSize,
     NSString,
@@ -581,6 +582,30 @@ fn run(dir: &Path) {
     assert_eq!(area.origin.y, 0.0);
     assert_eq!(area.size.height, bounds.size.height - view_strip::HEIGHT);
     assert_eq!(area.size.width, bounds.size.width);
+
+    // The picture a tab's card shows of this pane is the view's own (the terminal's still
+    // path is not what a pane under a view gives): asked for by the first call and given by
+    // one a turn of the run loop later, in the tile's shape — the page fills the tile and
+    // what spills over is cut.
+    let tile = (200.0, 120.0);
+    assert!(
+        pane.snapshot(tile, 2.0).is_none(),
+        "the first call asks, there is nothing yet"
+    );
+    let mut card = None;
+    until("the web view's picture for the card", || {
+        card = pane.snapshot(tile, 2.0);
+        card.is_some()
+    });
+    let card = card.expect("a picture");
+    let (width, height) = (CGImage::width(Some(&card)), CGImage::height(Some(&card)));
+    assert!(width > 0 && height > 0, "a picture with something in it");
+    let (shape, wanted) = (width as f64 / height as f64, tile.0 / tile.1);
+    assert!(
+        (shape - wanted).abs() < 0.05,
+        "the tile's shape: {width}x{height}"
+    );
+    pane.release_snapshot();
 
     // A key that is the application's own — ⌘T here — goes to the main menu while the view
     // has the keyboard, and the menu runs its item once: the view is asked about it and
