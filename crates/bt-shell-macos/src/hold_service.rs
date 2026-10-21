@@ -126,6 +126,15 @@ pub(crate) fn end(pane: &PaneUuid) {
     }
 }
 
+/// The user closed the pane and chose *Leave Running*: the terminal it shows is not ended, and
+/// the ledger lets go of it — no quit and no launch after a crash ends what the user left
+/// running. Called, like [`end`], **before** the pane's program is signalled.
+pub(crate) fn leave(pane: &PaneUuid) {
+    if let Some(service) = SERVICE.get() {
+        service.leave(pane);
+    }
+}
+
 /// The user ended a terminal that no pane shows (the server's card, after its question): it
 /// is hung up on the server and killed after the grace if it is still there. It is not a pane's
 /// terminal, so the ledger has no pane to forget — the request is the ledger's own.

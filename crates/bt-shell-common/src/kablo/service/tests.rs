@@ -923,6 +923,85 @@ fn a_pane_that_shows_nothing_ends_nothing_and_a_pane_is_ended_once() {
     assert_eq!(rig.world.bridge().terminated(&terminal), Some(false));
 }
 
+/// Leave Running: the pane closes and the terminal is not asked to end — not at once, not after the
+/// grace — and the ledger lets go of it, so that no quit and no launch after a crash ends it; with
+/// the pane's holder gone it is in the background, and a pane that shows it again writes it back.
+#[test]
+fn a_terminal_left_running_is_not_ended_and_the_ledger_forgets_it() {
+    let ledger = Arc::new(Ledger::memory());
+    let rig = Rig::kept(
+        "leave",
+        Fake::new(Bridge::new(Age::Current)),
+        ledger.clone(),
+        Duration::from_millis(300),
+    );
+    let pane = pane_named(&rig.world);
+    let holder = Holder::new(&rig.socket(), "b-1");
+    let terminal = rig.terminals(1).remove(0);
+    until("the pane found", || rig.service.shown(&pane).is_some());
+    assert!(
+        ledger.keeps(ACCOUNT, &terminal),
+        "a shown terminal is in the ledger"
+    );
+
+    // Said before the pane's program is signalled; then the holder goes with the pane.
+    rig.service.leave(&pane);
+    until("the ledger lets go", || ledger.terminals().is_empty());
+    let Holder { handle, typed, .. } = holder;
+    drop(typed);
+    until("in the background", || {
+        background_names(&rig) == [terminal.as_str().to_owned()]
+    });
+    if let Some(handle) = handle {
+        let _ = handle.join();
+    }
+
+    // Past the grace a hang-up would have been followed by a kill: nothing was asked at all.
+    thread::sleep(Duration::from_millis(900));
+    assert_eq!(rig.world.bridge().terminated(&terminal), None);
+    assert!(rig.world.bridge().has(&terminal), "it runs on");
+    assert!(ledger.terminals().is_empty(), "and no row names it");
+
+    // Shown by a pane again, it is written back and leaves the background.
+    let _again = Holder::start(
+        &rig.socket(),
+        terminal.as_str(),
+        Target::Resume {
+            account: ACCOUNT.to_owned(),
+            offset: Some(0),
+        },
+    );
+    until("written back", || ledger.keeps(ACCOUNT, &terminal));
+    until("out of the background", || {
+        rig.service.background(ACCOUNT).is_empty()
+    });
+}
+
+/// Only the pane that was asked about: another pane's terminal keeps its row, and a pane that
+/// shows nothing leaves nothing.
+#[test]
+fn leaving_a_pane_running_touches_no_other_terminal() {
+    let ledger = Arc::new(Ledger::memory());
+    let rig = Rig::kept(
+        "leave-other",
+        Fake::new(Bridge::new(Age::Current)),
+        ledger.clone(),
+        END_GRACE,
+    );
+    let pane = pane_named(&rig.world);
+    let _holder = Holder::new(&rig.socket(), "b-1");
+    let terminal = rig.terminals(1).remove(0);
+    until("the pane found", || rig.service.shown(&pane).is_some());
+
+    let other = PaneUuid::parse("5a7e9c40-1b2d-4e3f-8a6b-0c9d1e2f3a4b").expect("a uuid");
+    rig.service.leave(&other);
+    // The loop has seen the first request before this probe round trip.
+    rig.service.refresh_background();
+    thread::sleep(Duration::from_millis(200));
+    assert!(ledger.keeps(ACCOUNT, &terminal));
+    assert!(rig.service.shown(&pane).is_some());
+}
+
 #[test]
 fn a_new_terminal_starts_in_the_folder_the_pane_lookup_names() {
     let rig = Rig::new("folder");

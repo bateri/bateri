@@ -230,6 +230,10 @@ pub trait PaneHost {
     /// pane moving): the terminal it shows ends with it, on the server. Asked
     /// **before** [`TerminalPane::begin_close`], whose signal lets the terminal go.
     fn end_kept_terminal(&self, _pane: &PaneUuid) {}
+    /// The user is closing the pane and chose to leave the terminal it shows running: it
+    /// is not ended, and nothing keeps a record that a quit or a crash would end it by.
+    /// Asked **before** [`TerminalPane::begin_close`], as [`PaneHost::end_kept_terminal`].
+    fn leave_kept_terminal(&self, _pane: &PaneUuid) {}
     /// ⏎ in a pane that waits for its connection: the account of the terminal it
     /// shows dials now instead of waiting out its pause. The default is an
     /// owner that has no such terminals.
@@ -2143,6 +2147,10 @@ pub struct PaneIvars {
     /// reader thread does not act on a closed session and `bateri://tab/`
     /// does not bring a sessionless window to the screen.
     closed: Cell<bool>,
+    /// The user chose **Leave Running** for this pane ([`TerminalPane::leave_running`]):
+    /// the close that follows lets the terminal a server keeps for it run on instead of
+    /// ending it. Spent by that close ([`TerminalPane::end_kept_terminal`]).
+    leaving: Cell<bool>,
     /// The scrollback search's panel — born on the first ⌘F: a pane
     /// that never searches carries no views. The query and keys are in the
     /// panel, i.e. **per pane**, and are not forgotten on close.
@@ -2819,6 +2827,7 @@ impl TerminalPane {
             dock_rows_at_birth: Cell::new(0),
             uuid,
             closed: Cell::new(false),
+            leaving: Cell::new(false),
             search: OnceCell::new(),
             search_status: Cell::new(SearchStatus::Empty),
             driving: Cell::new(false),
@@ -4674,8 +4683,22 @@ impl TerminalPane {
     /// with it ([`PaneHost::end_kept_terminal`]). Called by the paths that close
     /// a pane because the user asked to — and not by [`Self::begin_close`], which
     /// a quit uses too, where the terminals' fate is `keep_running`'s.
+    ///
+    /// A pane the user chose to leave running ([`TerminalPane::leave_running`]) lets its
+    /// terminal run on instead: this close is the one the choice was for, and spends it.
     pub(crate) fn end_kept_terminal(&self) {
-        self.host().end_kept_terminal(self.uuid());
+        if self.ivars().leaving.take() {
+            self.host().leave_kept_terminal(self.uuid());
+        } else {
+            self.host().end_kept_terminal(self.uuid());
+        }
+    }
+
+    /// The user answered *Leave Running* to the question that closes this pane: the close
+    /// that follows lets the terminal a server keeps for it run on. Only a pane that shows
+    /// such a terminal takes the choice — a local shell closes as it does under *Close*.
+    pub(crate) fn leave_running(&self) {
+        self.ivars().leaving.set(self.shows_kept_terminal());
     }
 
     /// The job running in the foreground outside the shell.

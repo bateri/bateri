@@ -369,6 +369,8 @@ enum Msg {
     },
     /// The user closed the pane: the terminal it shows ends.
     End(PaneUuid),
+    /// The user closed the pane and chose to leave the terminal it shows running.
+    Leave(PaneUuid),
     /// The user ended a terminal that no pane shows (the server's card).
     EndTerminal {
         account: String,
@@ -618,6 +620,17 @@ impl Service {
         let _ = self.tx.send(Msg::End(pane.clone()));
     }
 
+    /// The user closed the pane and chose **Leave Running**: the terminal it shows is not
+    /// asked to end, and the ledger lets go of it — a row left would be a terminal the next
+    /// quit that ends ([`crate::kablo::quit::fate`]) or the launch after a crash ends, which
+    /// is the opposite of what was chosen. Once the pane's holder goes the terminal is a
+    /// server's to keep, listed in [`Service::background`] with the ones nobody ever showed;
+    /// shown by a pane again, it is written back. Say it **before** the pane's program is
+    /// signalled, as [`Service::end`] must be said: the holder's going is what loses the pane.
+    pub fn leave(&self, pane: &PaneUuid) {
+        let _ = self.tx.send(Msg::Leave(pane.clone()));
+    }
+
     /// The user ended a terminal no pane shows — one of the server's card: it is
     /// asked to hang up now and killed after [`END_GRACE`] if it is still there,
     /// as the one a closed pane showed is, and the list takes it out at once.
@@ -854,6 +867,7 @@ impl Core {
                 self.prepared(hold, outcome, now);
             }
             Msg::End(pane) => self.end(&pane, now),
+            Msg::Leave(pane) => self.leave(&pane),
             Msg::EndTerminal { account, terminal } => self.end_terminal(&account, &terminal, now),
             Msg::EndAll { panes, done } => self.end_all(&panes, done, now),
             Msg::Dialed {
@@ -1141,6 +1155,14 @@ impl Core {
         for (account, terminal) in self.terminals_of(pane) {
             self.shared.ledger.end(&account, &terminal);
             self.finish_off(&account, &terminal, now);
+        }
+    }
+
+    /// The user closed `pane` and left its terminal running ([`Service::leave`]): nothing is
+    /// asked of the server, and the ledger forgets the terminal.
+    fn leave(&mut self, pane: &PaneUuid) {
+        for (account, terminal) in self.terminals_of(pane) {
+            self.shared.ledger.gone(&account, &terminal);
         }
     }
 

@@ -101,6 +101,19 @@ of every installed copy. A version without a section is not released.
   terminals when you open a new one now has something to click. A plain `ssh`
   has no card and its name is only a name.
 
+- **Close a pane and leave what runs on the server running.** When ⌘W (or a
+  tab's ×, or the window's red button) closes a terminal on a server with a
+  program in front, the question has a third button between *Cancel* and
+  *Close*: *Leave Running*. The pane goes, the terminal and the program in it
+  stay on the server, and they wait under *Running in the background* in the
+  server's card and in ⌘P, where a click opens them again from where they were.
+  Closing several tabs or the window offers it for every terminal on a server
+  among them; local panes close as they do under *Close*. Quitting bateri does
+  not end a terminal you left running, whatever `keep_running` is, and neither
+  does a crash — ending it is *End Terminal* on the card or opening it and
+  closing it with *Close*. A shell waiting at its prompt closes without a
+  question, as before.
+
 - **A newer bateri brings its kablo to the servers without ending anything.**
   The kablo that bateri puts on a server is the one that came in its package; an
   older one that is there stays where it is, and the terminals running under it

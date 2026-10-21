@@ -1013,8 +1013,9 @@ it:
   past a limit the oldest output is dropped (the pane marks the cut when it
   comes back).
 - Under every value, closing a pane, a tab or a window (⌘W, the red button)
-  and typing `exit` end the programs as before, and restarting the Mac or
-  logging out ends them.
+  and typing `exit` end the programs as before — except a program on a server
+  that you answer *Leave Running* to — and restarting the Mac or logging out
+  ends them.
 - With `"crash"` and `"quit"` a small helper process (`bateri hold`) runs
   beside bateri and keeps a copy of each terminal, so the programs have
   somewhere to stay when bateri goes. While bateri runs it reads nothing and
@@ -2065,7 +2066,13 @@ the new tab or split opens another terminal on the same server, in the folder
 the pane is in, without asking for anything again. Closing the pane — ⌘W, the
 tab's ×, the window's red button — ends its terminal on the server, and the
 question before it names the program running there (“npm on rasp” is still
-running); `exit` in the terminal ends it too and returns to the local prompt. A
+running) and offers *Leave Running* between *Cancel* and *Close*: the pane
+closes and the terminal stays, with the program in it, in the server's card and
+in ⌘P under *Running in the background*. (Closing several tabs or the window
+offers it too, for every terminal on a server among them; the local panes close
+as under *Close*.) A terminal left running is not ended by any later quit,
+whatever `keep_running` says, or by a crash. `exit` in the terminal ends it too
+and returns to the local prompt. A
 pane closed while the connection is down cannot reach the server: bateri writes
 the request down and ends the terminal the next time it connects to that
 server, before anything else.
@@ -2227,7 +2234,9 @@ shows. Terminals that are open in a tab are not listed; they are on screen.
   together in one tab (two side by side, three with one tall, four as a grid,
   up to six; the rest in the next tab).
 - **A right click offers *End Terminal***, which asks before it stops the
-  program there.
+  program there. A terminal you left running (*Leave Running* in the question
+  that closes a pane) waits here until you end it or open it again: quitting
+  bateri does not end it, at any `keep_running`.
 - The card lists six rows and says "and 3 more" for the rest; when nothing runs
   in the background it says so. ⌘P finds the same terminals.
 

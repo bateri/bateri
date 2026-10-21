@@ -153,6 +153,10 @@ impl PaneHost for TabHost {
         crate::hold_service::end(pane);
     }
 
+    fn leave_kept_terminal(&self, pane: &bt_core::PaneUuid) {
+        crate::hold_service::leave(pane);
+    }
+
     fn retry_kept_terminal(&self, pane: &bt_core::PaneUuid) {
         crate::hold_service::retry(pane);
     }

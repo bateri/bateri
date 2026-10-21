@@ -101,13 +101,13 @@ use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_clas
 use objc2_app_kit::{
     NSAccessibility, NSAccessibilityAnnouncementKey,
     NSAccessibilityAnnouncementRequestedNotification, NSAccessibilityNotificationUserInfoKey,
-    NSAccessibilityPostNotificationWithUserInfo, NSAlert, NSAlertFirstButtonReturn, NSAppearance,
-    NSAppearanceCustomization, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication,
-    NSBackingStoreType, NSColor, NSControlStateValueOff, NSControlStateValueOn, NSCursor, NSEvent,
-    NSFloatingWindowLevel, NSFont, NSFontAttributeName, NSMenuItem, NSModalResponse,
-    NSModalResponseCancel, NSStringDrawing, NSTitlebarSeparatorStyle, NSToolbar, NSView, NSWindow,
-    NSWindowDelegate, NSWindowOcclusionState, NSWindowOrderingMode, NSWindowStyleMask,
-    NSWindowTabbingMode, NSWindowTitleVisibility, NSWindowToolbarStyle,
+    NSAccessibilityPostNotificationWithUserInfo, NSAlert, NSAlertFirstButtonReturn,
+    NSAlertSecondButtonReturn, NSAppearance, NSAppearanceCustomization, NSAppearanceNameAqua,
+    NSAppearanceNameDarkAqua, NSApplication, NSBackingStoreType, NSColor, NSControlStateValueOff,
+    NSControlStateValueOn, NSCursor, NSEvent, NSFloatingWindowLevel, NSFont, NSFontAttributeName,
+    NSMenuItem, NSModalResponse, NSModalResponseCancel, NSStringDrawing, NSTitlebarSeparatorStyle,
+    NSToolbar, NSView, NSWindow, NSWindowDelegate, NSWindowOcclusionState, NSWindowOrderingMode,
+    NSWindowStyleMask, NSWindowTabbingMode, NSWindowTitleVisibility, NSWindowToolbarStyle,
 };
 use objc2_core_foundation::CFRetained;
 use objc2_core_graphics::CGImage;
@@ -338,6 +338,69 @@ pub(crate) struct Prompt {
     pub(crate) title: String,
     pub(crate) message: String,
     pub(crate) confirm: &'static str,
+    /// The question also offers [`Prompt::LEAVE`] ([`Prompt::offering_leave`]).
+    pub(crate) leave: bool,
+}
+
+impl Prompt {
+    /// The button between *Close* and *Cancel* of a question that closes a terminal a server
+    /// keeps with a program running in it: the pane goes and the terminal stays.
+    pub(crate) const LEAVE: &'static str = "Leave Running";
+
+    /// The same question with [`Prompt::LEAVE`] when `offered` ([`offers_leave`]); it says
+    /// what the button keeps, since the text before it names every program that closing ends
+    /// and a local one is among them in a window of many panes.
+    pub(crate) fn offering_leave(mut self, offered: bool) -> Prompt {
+        if offered {
+            self.leave = true;
+            self.message
+                .push_str(" Leave Running keeps what runs on a server going.");
+        }
+        self
+    }
+}
+
+/// Whether the question offers *Leave Running*: a pane it closes shows a terminal a server
+/// keeps and a program is in front there (`kept[i]` and `foregrounds[i]` are one pane's).
+/// A shell waiting for a command asks nothing under `running` — and with `always` it is a
+/// question about a shell, which has nothing to leave running.
+pub(crate) fn offers_leave(kept: &[bool], foregrounds: &[Foreground]) -> bool {
+    kept.iter()
+        .zip(foregrounds)
+        .any(|(&kept, foreground)| kept && matches!(foreground, Foreground::Running(_)))
+}
+
+/// [`offers_leave`] over the panes whose foregrounds the question was built from.
+fn leave_offered(panes: &[Retained<TerminalPane>], foregrounds: &[Foreground]) -> bool {
+    let kept: Vec<bool> = panes
+        .iter()
+        .map(|pane| pane.shows_kept_terminal())
+        .collect();
+    offers_leave(&kept, foregrounds)
+}
+
+/// How the user answered a close question: [`alert`] adds *Close* first, *Leave Running*
+/// second when [`Prompt::leave`], and *Cancel* last — so the second button is *Cancel*
+/// in a question without the third.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Answer {
+    Close,
+    Leave,
+    Cancel,
+}
+
+impl Answer {
+    /// The answer from the sheet's response. Anything that is not a button (the sheet
+    /// dropped when the window closed) is a cancel.
+    pub(crate) fn of(leave: bool, response: NSModalResponse) -> Answer {
+        if response == NSAlertFirstButtonReturn {
+            Answer::Close
+        } else if leave && response == NSAlertSecondButtonReturn {
+            Answer::Leave
+        } else {
+            Answer::Cancel
+        }
+    }
 }
 
 /// The question's text from the closing panes' foregrounds. Pure;
@@ -398,6 +461,7 @@ pub(crate) fn prompt(scope: CloseScope, unit: Unit, tabs: &[Foreground]) -> Prom
         title,
         message,
         confirm,
+        leave: false,
     }
 }
 
@@ -500,8 +564,9 @@ pub(crate) struct Notice {
     pub(crate) body: String,
 }
 
-/// `NSAlert` from a [`Prompt`]: confirm is the first button (Return),
-/// "Cancel" the second (Esc).
+/// `NSAlert` from a [`Prompt`]: confirm is the first button (Return), "Cancel" the last
+/// (Esc) and, when the question offers it, [`Prompt::LEAVE`] between them (so the row reads
+/// *Cancel*, *Leave Running*, *Close*).
 ///
 /// Esc is bound **by hand**: the documentation says it binds Esc to a button
 /// titled "Cancel" itself, but in a real window Esc did not close the sheet
@@ -511,6 +576,9 @@ pub(crate) fn alert(mtm: MainThreadMarker, prompt: &Prompt) -> Retained<NSAlert>
     alert.setMessageText(&NSString::from_str(&prompt.title));
     alert.setInformativeText(&NSString::from_str(&prompt.message));
     alert.addButtonWithTitle(&NSString::from_str(prompt.confirm));
+    if prompt.leave {
+        alert.addButtonWithTitle(&NSString::from_str(Prompt::LEAVE));
+    }
     let cancel = alert.addButtonWithTitle(ns_string!("Cancel"));
     cancel.setKeyEquivalent(ns_string!("\u{1b}"));
     alert
@@ -3718,7 +3786,9 @@ impl TerminalWindow {
         };
         let scope = close_scope(ids.len(), self.tab_count());
         let unit = unit_for(panes.len(), ids.len());
-        self.ask(&prompt(scope, unit, &foregrounds), CloseTarget::Tabs(ids));
+        let prompt =
+            prompt(scope, unit, &foregrounds).offering_leave(leave_offered(&panes, &foregrounds));
+        self.ask(&prompt, CloseTarget::Tabs(ids));
     }
 
     /// Move Split to Previous / Next Tab: the focused pane goes to the
@@ -3925,10 +3995,9 @@ impl TerminalWindow {
             return true;
         };
         let unit = unit_for(panes.len(), self.tab_count());
-        self.ask(
-            &prompt(CloseScope::Window, unit, &foregrounds),
-            CloseTarget::Window,
-        );
+        let prompt = prompt(CloseScope::Window, unit, &foregrounds)
+            .offering_leave(leave_offered(&panes, &foregrounds));
+        self.ask(&prompt, CloseTarget::Window);
         false
     }
 
@@ -3949,10 +4018,9 @@ impl TerminalWindow {
             return;
         };
         let unit = unit_for(panes.len(), self.tab_count());
-        self.ask(
-            &prompt(CloseScope::Window, unit, &foregrounds),
-            CloseTarget::Window,
-        );
+        let prompt = prompt(CloseScope::Window, unit, &foregrounds)
+            .offering_leave(leave_offered(&panes, &foregrounds));
+        self.ask(&prompt, CloseTarget::Window);
     }
 
     /// Tab `id` closes, asking if needed: ⌘W in a single-pane tab, the tab's
@@ -3985,7 +4053,9 @@ impl TerminalWindow {
             _ => CloseTarget::Tabs(vec![id]),
         };
         let unit = unit_for(panes.len(), 1);
-        self.ask(&prompt(scope, unit, &foregrounds), target);
+        let prompt =
+            prompt(scope, unit, &foregrounds).offering_leave(leave_offered(&panes, &foregrounds));
+        self.ask(&prompt, target);
     }
 
     /// ⌘W in a multi-pane tab: only the focused pane, asking only about the
@@ -4007,8 +4077,10 @@ impl TerminalWindow {
             tab.close_pane(pane.id());
             return;
         };
+        let prompt = prompt(CloseScope::Pane, Unit::Pane, &foregrounds)
+            .offering_leave(leave_offered(std::slice::from_ref(&pane), &foregrounds));
         self.ask(
-            &prompt(CloseScope::Pane, Unit::Pane, &foregrounds),
+            &prompt,
             CloseTarget::Pane {
                 tab: tab.id(),
                 pane: pane.id(),
@@ -4021,7 +4093,9 @@ impl TerminalWindow {
     ///
     /// **The block captures only ids** (the alternate-screen notifier's
     /// pattern): it looks the window and tabs up at answer time and skips
-    /// what it cannot find. Only `NSAlertFirstButtonReturn` closes — if the
+    /// what it cannot find. Only the first button closes, and the second —
+    /// *Leave Running*, when the prompt offers it ([`Answer`]) — closes and lets the
+    /// terminals servers keep for the panes it closes run on. If the
     /// window closes while the sheet is open [`TerminalWindow::close`] drops
     /// the sheet with `Cancel`, and since `forget_window` is deferred by one
     /// turn the window can still be found in the list in the meantime.
@@ -4044,13 +4118,15 @@ impl TerminalWindow {
         }
         let alert = alert(self.mtm(), prompt);
         let host = self.id();
+        let leave = prompt.leave;
         let answered = RcBlock::new(move |response: NSModalResponse| {
             // audit: the sheet's completion block runs on AppKit's main thread.
             let mtm = MainThreadMarker::new().expect("the sheet block is on the main thread");
             if let Some(window) = app::delegate(mtm).and_then(|app| app.window(host)) {
                 drop(window.ivars().alert.take());
             }
-            if response != NSAlertFirstButtonReturn {
+            let answer = Answer::of(leave, response);
+            if answer == Answer::Cancel {
                 return;
             }
             let targets = targets.clone();
@@ -4060,15 +4136,28 @@ impl TerminalWindow {
                 let Some(app) = app::delegate(mtm) else {
                     return;
                 };
+                // Said to the panes before they close: the close that follows is the one
+                // that lets a terminal a server keeps run on instead of ending it.
+                let leaving = |panes: Vec<Retained<TerminalPane>>| {
+                    if answer == Answer::Leave {
+                        for pane in panes {
+                            pane.leave_running();
+                        }
+                    }
+                };
                 match &targets {
                     CloseTarget::Window => {
                         if let Some(window) = app.window(host) {
+                            leaving(window.panes());
                             window.close();
                         }
                     }
                     CloseTarget::Tabs(ids) => {
                         if let Some(window) = app.window(host) {
                             for &id in ids {
+                                if let Some(tab) = window.tab(id) {
+                                    leaving(tab.panes());
+                                }
                                 window.close_tab_now(id);
                             }
                         }
@@ -4076,6 +4165,12 @@ impl TerminalWindow {
                     // If the pane closed in the meantime (its shell exited) a no-op.
                     CloseTarget::Pane { tab, pane } => {
                         if let Some(tab) = app.tab(*tab) {
+                            leaving(
+                                tab.panes()
+                                    .into_iter()
+                                    .filter(|candidate| candidate.id() == *pane)
+                                    .collect(),
+                            );
                             tab.close_pane(*pane);
                         }
                     }
@@ -5311,5 +5406,70 @@ mod tests {
             .message,
             "Processes are running in 2 panes: “npm on rasp”, “vim”. Closing ends them."
         );
+    }
+
+    /// *Leave Running* is for a program on a server: a local program has no terminal to
+    /// leave, and a shell waiting for a command (a question `always` asks) has nothing running.
+    #[test]
+    fn leave_running_is_offered_for_a_program_on_a_server_only() {
+        let npm = running(&["npm on rasp"]);
+        let vim = running(&["vim"]);
+        assert!(offers_leave(&[true], std::slice::from_ref(&npm)));
+        assert!(!offers_leave(&[true], &[Foreground::Idle]));
+        assert!(!offers_leave(&[false], std::slice::from_ref(&vim)));
+        assert!(!offers_leave(&[], &[]));
+        // Many panes: one program on a server is enough, a local one beside it closes as under
+        // *Close*; a server's shell next to a local program is not.
+        assert!(offers_leave(&[false, true], &[vim.clone(), npm.clone()]));
+        assert!(!offers_leave(&[true, false], &[Foreground::Idle, vim]));
+    }
+
+    #[test]
+    fn the_question_that_offers_it_says_what_it_keeps() {
+        let plain = prompt(CloseScope::Pane, Unit::Pane, &[running(&["npm on rasp"])]);
+        assert!(!plain.leave);
+        assert_eq!(plain.clone().offering_leave(false), plain);
+        let offered = plain.offering_leave(true);
+        assert!(offered.leave);
+        assert_eq!(offered.title, "Close this pane?");
+        assert_eq!(offered.confirm, "Close");
+        assert_eq!(
+            offered.message,
+            "“npm on rasp” is still running. Closing ends it. \
+             Leave Running keeps what runs on a server going."
+        );
+        assert_eq!(Prompt::LEAVE, "Leave Running");
+        // The quit's question is the application's own: `keep_running` decides there.
+        assert!(!prompt(CloseScope::Quit, Unit::Pane, &[running(&["npm on rasp"])]).leave);
+    }
+
+    /// The buttons are *Close*, *Leave Running* when offered, then *Cancel* (the row reads
+    /// *Cancel*, *Leave Running*, *Close*): the second is *Cancel* when nothing is left between.
+    #[test]
+    fn the_answer_follows_the_buttons() {
+        let third = NSAlertFirstButtonReturn + 2;
+        assert_eq!(Answer::of(false, NSAlertFirstButtonReturn), Answer::Close);
+        assert_eq!(Answer::of(false, NSAlertSecondButtonReturn), Answer::Cancel);
+        assert_eq!(Answer::of(true, NSAlertFirstButtonReturn), Answer::Close);
+        assert_eq!(Answer::of(true, NSAlertSecondButtonReturn), Answer::Leave);
+        assert_eq!(Answer::of(true, third), Answer::Cancel);
+        // The sheet dropped with the window closing answers nothing.
+        assert_eq!(Answer::of(true, NSModalResponseCancel), Answer::Cancel);
+        assert_eq!(Answer::of(false, NSModalResponseCancel), Answer::Cancel);
+    }
+
+    /// Every path that asks to close builds its question through `offering_leave`: a path
+    /// that forgets it asks the old two-button question about a program on a server and
+    /// nothing says so.
+    #[test]
+    fn every_close_question_offers_to_leave() {
+        let source = include_str!("window.rs");
+        let (code, _) = source
+            .split_once("#[cfg(test)]")
+            .expect("the tests are at the end");
+        let asks = code.matches("self.ask(").count();
+        let offers = code.matches(".offering_leave(").count();
+        assert_eq!(asks, offers, "{asks} questions are asked, {offers} offer");
+        assert!(asks >= 5, "the window, tab, tabs and pane paths ask");
     }
 }
