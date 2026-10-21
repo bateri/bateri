@@ -14,6 +14,18 @@ of every installed copy. A version without a section is not released.
 
 ### Added
 
+- **`ssh` to a server now opens a terminal the server keeps.** Type `ssh rasp`
+  as before — the password, the second factor and the question whether to trust
+  the server's key are asked in the pane — and the pane shows a terminal that
+  runs on the server under kablo, bateri's companion program. The first `ssh`
+  to a server puts kablo there (one file under `~/.local/share/kablo/`, a line
+  above the prompt says so once); after that a second `ssh` to the same account
+  asks for nothing and the connection is shared. Where the connection drops,
+  the program you left running (`npm run dev`, a build) is still running, and
+  the pane goes on from the byte it was at when the connection is back, with no
+  line shown twice. Servers kablo cannot be kept on, hosts you turned
+  integration off for, and `production` hosts get the plain `ssh` as before.
+
 - **Programs can ask to be told the window's size in their output.** An app
   that turns on in-band resize reports (DECSET 2048, as kitty and Ghostty
   offer it) now gets the rows, the columns and the size in pixels in one

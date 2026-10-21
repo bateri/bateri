@@ -1,0 +1,594 @@
+//! The service against holders that are the real `ssh-hold` pipe (on pipes, in
+//! threads) and a server that is the fake bridge, over a unix socket in a
+//! directory of the test's.
+
+use std::fs::File;
+use std::io::{Read, Write};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::unix::fs::DirBuilderExt;
+use std::sync::atomic::AtomicU32;
+use std::thread::JoinHandle;
+
+use kablo_proto::SessionId;
+use kablo_proto::v1::Exit;
+
+use super::*;
+use crate::hold::wire::Target;
+use crate::hold::{Config, Outcome, run};
+use crate::kablo::fake::{Age, Bridge};
+use crate::kablo::install::Installed;
+
+/// A private directory with a path short enough for a socket.
+fn scratch(name: &str) -> PathBuf {
+    let dir = PathBuf::from(format!("/tmp/bt-svc-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&dir)
+        .expect("a private directory");
+    dir
+}
+
+fn until(message: &str, mut ready: impl FnMut() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while Instant::now() < deadline {
+        if ready() {
+            return;
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    panic!("{message}");
+}
+
+fn host(key: &str) -> KabloHost {
+    KabloHost {
+        host: "rasp".into(),
+        port: None,
+        argv: vec!["ssh".into(), "rasp".into()],
+        config: String::new(),
+        key: key.into(),
+    }
+}
+
+/// The world around the service, as a test sets it.
+struct Fake {
+    bridge: Arc<Mutex<Bridge>>,
+    /// What was asked, in order.
+    log: Mutex<Vec<String>>,
+    pane: AtomicBool,
+    kablo: AtomicBool,
+    /// The program the master step runs on the pane, if any.
+    master: Mutex<Option<Vec<String>>>,
+    fresh: AtomicBool,
+    /// Bridges that fail to start before one does.
+    carry_fails: AtomicU32,
+    /// The bridges started, each with the flag that ends it.
+    carried: Mutex<Vec<Arc<AtomicBool>>>,
+}
+
+impl Fake {
+    fn new(bridge: Bridge) -> Arc<Fake> {
+        Arc::new(Fake {
+            bridge: Arc::new(Mutex::new(bridge)),
+            log: Mutex::new(Vec::new()),
+            pane: AtomicBool::new(true),
+            kablo: AtomicBool::new(true),
+            master: Mutex::new(None),
+            fresh: AtomicBool::new(false),
+            carry_fails: AtomicU32::new(0),
+            carried: Mutex::new(Vec::new()),
+        })
+    }
+
+    fn note(&self, what: &str) {
+        self.log.lock().expect("lock").push(what.to_owned());
+    }
+
+    fn log(&self) -> Vec<String> {
+        self.log.lock().expect("lock").clone()
+    }
+
+    fn count(&self, what: &str) -> usize {
+        self.log()
+            .iter()
+            .filter(|entry| entry.as_str() == what)
+            .count()
+    }
+
+    /// The connection to the server breaks: the bridge's stream ends.
+    fn break_connection(&self) {
+        if let Some(closed) = self.carried.lock().expect("lock").last() {
+            closed.store(true, Ordering::SeqCst);
+        }
+    }
+
+    fn bridge(&self) -> std::sync::MutexGuard<'_, Bridge> {
+        self.bridge.lock().expect("lock")
+    }
+}
+
+struct FromBridge {
+    bridge: Arc<Mutex<Bridge>>,
+    closed: Arc<AtomicBool>,
+    pending: Vec<u8>,
+}
+
+impl Read for FromBridge {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        loop {
+            if self.closed.load(Ordering::SeqCst) {
+                return Ok(0);
+            }
+            if self.pending.is_empty() {
+                self.pending = self.bridge.lock().expect("lock").take_output();
+            }
+            if !self.pending.is_empty() {
+                let n = self.pending.len().min(buffer.len());
+                buffer[..n].copy_from_slice(&self.pending[..n]);
+                self.pending.drain(..n);
+                return Ok(n);
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+    }
+}
+
+struct ToBridge(Arc<Mutex<Bridge>>);
+
+impl Write for ToBridge {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0.lock().expect("lock").feed(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Backend for Fake {
+    fn pane(&self, _: &Peer) -> Option<PaneInfo> {
+        self.note("pane");
+        self.pane.load(Ordering::SeqCst).then(PaneInfo::default)
+    }
+
+    fn route(&self, _: &[String]) -> Option<KabloHost> {
+        self.note("route");
+        self.kablo.load(Ordering::SeqCst).then(|| host("u@rasp:22"))
+    }
+
+    fn master(&self, _: &KabloHost) -> Result<Option<Vec<Vec<u8>>>, Refusal> {
+        self.note("master");
+        Ok(self
+            .master
+            .lock()
+            .expect("lock")
+            .clone()
+            .map(|argv| argv.into_iter().map(String::into_bytes).collect()))
+    }
+
+    fn master_made(&self, _: &KabloHost, status: u8) -> Result<(), Refusal> {
+        self.note(&format!("master_made:{status}"));
+        match status {
+            0 => Ok(()),
+            255 => Err(Refusal::ended("")),
+            _ => Err(Refusal::plain()),
+        }
+    }
+
+    fn install(&self, _: &KabloHost) -> Result<Installed, Refusal> {
+        self.note("install");
+        Ok(Installed {
+            target: kablo_proto::install::Target::LinuxX86_64,
+            version: "0.2.0".into(),
+            path: ".local/share/kablo/0.2.0/kablo".into(),
+            fresh: self.fresh.load(Ordering::SeqCst),
+        })
+    }
+
+    fn carry(&self, _: &KabloHost, _: &Installed) -> io::Result<Carried> {
+        self.note("carry");
+        if self
+            .carry_fails
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+            .is_ok()
+        {
+            return Err(io::Error::new(io::ErrorKind::ConnectionRefused, "down"));
+        }
+        let closed = Arc::new(AtomicBool::new(false));
+        // A new connection to the server: what the old one had in flight is lost.
+        self.bridge().disconnect();
+        self.carried.lock().expect("lock").push(Arc::clone(&closed));
+        let ends = Arc::clone(&closed);
+        Ok(Carried {
+            reader: Box::new(FromBridge {
+                bridge: Arc::clone(&self.bridge),
+                closed,
+                pending: Vec::new(),
+            }),
+            writer: Box::new(ToBridge(Arc::clone(&self.bridge))),
+            close: Box::new(move || ends.store(true, Ordering::SeqCst)),
+        })
+    }
+
+    fn name(&self) -> Option<String> {
+        Some("MacBook".into())
+    }
+}
+
+/// A started service over a fake world.
+struct Rig {
+    dir: PathBuf,
+    service: Service,
+    world: Arc<Fake>,
+}
+
+impl Rig {
+    fn new(name: &str) -> Rig {
+        Rig::over(name, Fake::new(Bridge::new(Age::Current)))
+    }
+
+    fn over(name: &str, world: Arc<Fake>) -> Rig {
+        let dir = scratch(name);
+        let service = Service::start(&dir, world.clone()).expect("a service");
+        Rig {
+            dir,
+            service,
+            world,
+        }
+    }
+
+    fn socket(&self) -> PathBuf {
+        self.service.socket().to_owned()
+    }
+
+    /// The ids of the terminals the server has, once there are `n`.
+    fn terminals(&self, n: usize) -> Vec<SessionId> {
+        let mut found = Vec::new();
+        until("the terminals on the server", || {
+            found = ["b-1", "b-2", "b-3"]
+                .iter()
+                .filter_map(|name| {
+                    let id = SessionId::new(name).ok()?;
+                    self.world.bridge().has(&id).then_some(id)
+                })
+                .collect();
+            found.len() >= n
+        });
+        found
+    }
+}
+
+impl Drop for Rig {
+    fn drop(&mut self) {
+        self.service.stop();
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+fn pipe() -> (OwnedFd, OwnedFd) {
+    let mut fds = [0 as libc::c_int; 2];
+    // SAFETY: `pipe` fills two descriptors that are ours from now on.
+    unsafe {
+        assert_eq!(libc::pipe(fds.as_mut_ptr()), 0);
+        for fd in fds {
+            libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
+        }
+        (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1]))
+    }
+}
+
+struct Capture(Arc<Mutex<Vec<u8>>>);
+
+impl Capture {
+    fn of(read: OwnedFd) -> Capture {
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&bytes);
+        thread::spawn(move || {
+            let mut file = File::from(read);
+            let mut buffer = [0u8; 65536];
+            while let Ok(n) = file.read(&mut buffer) {
+                if n == 0 {
+                    break;
+                }
+                sink.lock().expect("lock").extend_from_slice(&buffer[..n]);
+            }
+        });
+        Capture(bytes)
+    }
+
+    fn bytes(&self) -> Vec<u8> {
+        self.0.lock().expect("lock").clone()
+    }
+}
+
+/// A pane's `ssh-hold`: the pipe on pipes, in a thread.
+struct Holder {
+    handle: Option<JoinHandle<Outcome>>,
+    typed: File,
+    shown: Capture,
+}
+
+impl Holder {
+    fn start(socket: &Path, terminal: &str, target: Target) -> Holder {
+        let (stdin_read, stdin_write) = pipe();
+        let (stdout_read, stdout_write) = pipe();
+        let config = Config {
+            terminal: SessionId::new(terminal).expect("an id"),
+            target,
+            first: false,
+            sockets: vec![socket.to_path_buf()],
+            input: stdin_read.as_raw_fd() as RawFd,
+            output: stdout_write.as_raw_fd() as RawFd,
+            backoff: vec![Duration::from_millis(20)],
+        };
+        let handle = thread::spawn(move || {
+            let outcome = run(&config);
+            drop((stdin_read, stdout_write));
+            outcome
+        });
+        Holder {
+            handle: Some(handle),
+            typed: File::from(stdin_write),
+            shown: Capture::of(stdout_read),
+        }
+    }
+
+    fn new(socket: &Path, terminal: &str) -> Holder {
+        Holder::start(
+            socket,
+            terminal,
+            Target::New {
+                args: vec![b"rasp".to_vec()],
+            },
+        )
+    }
+
+    fn outcome(&mut self) -> Outcome {
+        until("the holder ends", || {
+            self.handle.as_ref().is_some_and(JoinHandle::is_finished)
+        });
+        self.handle
+            .take()
+            .expect("running")
+            .join()
+            .expect("the pipe did not panic")
+    }
+}
+
+#[test]
+fn a_first_terminal_is_prepared_in_order_and_its_bytes_and_keys_cross_the_service() {
+    let rig = Rig::new("first");
+    rig.world.fresh.store(true, Ordering::SeqCst);
+    let mut holder = Holder::new(&rig.socket(), "b-1");
+    let terminal = rig.terminals(1).remove(0);
+
+    // Gate, call, master, install, bridge — and nothing a second time.
+    assert_eq!(
+        rig.world.log(),
+        ["pane", "route", "master", "install", "carry"]
+    );
+
+    let mut output = b"ready\r\n\x1b[31mred\x1b[0m".to_vec();
+    output.extend(0..=255u8);
+    rig.world.bridge().write(&terminal, &output);
+    until("the output shown", || {
+        holder.shown.bytes().ends_with(&output)
+    });
+    // The note, once, before anything the terminal said.
+    let shown = String::from_utf8_lossy(&holder.shown.bytes()).into_owned();
+    let note =
+        "bateri: kablo is set up on rasp; if the connection drops, this terminal keeps running";
+    assert!(
+        shown.starts_with(&format!("\x1b[0m\x1b[2m{note}\x1b[0m\r\n")),
+        "{shown:?}"
+    );
+    assert_eq!(shown.matches(note).count(), 1);
+
+    holder.typed.write_all(b"ls -la\r").expect("typed");
+    until("the keys typed", || {
+        rig.world.bridge().typed(&terminal) == b"ls -la\r"
+    });
+
+    rig.world.bridge().exit(&terminal, Exit::Code(7));
+    assert_eq!(holder.outcome(), Outcome::Exit(7));
+}
+
+#[test]
+fn the_master_step_runs_on_the_pane_and_its_ending_decides() {
+    // It ends well: the terminal follows.
+    let rig = Rig::new("master-ok");
+    *rig.world.master.lock().expect("lock") =
+        Some(vec!["/bin/sh".into(), "-c".into(), "exit 0".into()]);
+    let mut holder = Holder::new(&rig.socket(), "b-1");
+    rig.terminals(1);
+    assert_eq!(
+        rig.world.log(),
+        [
+            "pane",
+            "route",
+            "master",
+            "master_made:0",
+            "install",
+            "carry"
+        ]
+    );
+    rig.world
+        .bridge()
+        .exit(&SessionId::new("b-1").expect("id"), Exit::Code(0));
+    assert_eq!(holder.outcome(), Outcome::Exit(0));
+    drop(rig);
+
+    // ssh's own failure (a refused password, an unreachable host) ends the
+    // pane's command the way ssh would have, with no second ssh behind it.
+    let rig = Rig::new("master-255");
+    *rig.world.master.lock().expect("lock") =
+        Some(vec!["/bin/sh".into(), "-c".into(), "exit 255".into()]);
+    let mut holder = Holder::new(&rig.socket(), "b-1");
+    assert_eq!(holder.outcome(), Outcome::Exit(crate::hold::EXIT_REFUSED));
+    assert_eq!(rig.world.count("install"), 0);
+    assert_eq!(rig.world.count("carry"), 0);
+    drop(rig);
+
+    // Any other ending is the plain ssh's to try.
+    let rig = Rig::new("master-1");
+    *rig.world.master.lock().expect("lock") =
+        Some(vec!["/bin/sh".into(), "-c".into(), "exit 1".into()]);
+    let mut holder = Holder::new(&rig.socket(), "b-1");
+    assert_eq!(holder.outcome(), Outcome::FallBack);
+    assert_eq!(rig.world.count("install"), 0);
+}
+
+#[test]
+fn what_is_not_in_a_pane_or_not_a_kablo_call_is_the_plain_ssh() {
+    let rig = Rig::new("plain");
+    rig.world.pane.store(false, Ordering::SeqCst);
+    let mut holder = Holder::new(&rig.socket(), "b-1");
+    assert_eq!(holder.outcome(), Outcome::FallBack);
+    assert_eq!(
+        rig.world.log(),
+        ["pane"],
+        "nothing else is asked of a stranger"
+    );
+
+    rig.world.pane.store(true, Ordering::SeqCst);
+    rig.world.kablo.store(false, Ordering::SeqCst);
+    let mut holder = Holder::new(&rig.socket(), "b-2");
+    assert_eq!(holder.outcome(), Outcome::FallBack);
+    assert_eq!(rig.world.count("master"), 0);
+    assert_eq!(rig.world.count("carry"), 0);
+
+    // The service is not there at all: the same.
+    let socket = rig.socket();
+    drop(rig);
+    let mut holder = Holder::new(&socket, "b-3");
+    assert_eq!(holder.outcome(), Outcome::FallBack);
+}
+
+#[test]
+fn the_next_terminal_of_an_account_rides_the_bridge_that_is_there() {
+    let rig = Rig::new("second");
+    let mut first = Holder::new(&rig.socket(), "b-1");
+    rig.terminals(1);
+    let mut second = Holder::new(&rig.socket(), "b-2");
+    let terminals = rig.terminals(2);
+    assert_eq!(rig.world.count("master"), 1, "no second question");
+    assert_eq!(rig.world.count("install"), 1);
+    assert_eq!(rig.world.count("carry"), 1, "one bridge for the account");
+    assert_eq!(rig.world.count("route"), 2, "each call is still decided");
+
+    // Each holder shows its own terminal and types into it.
+    rig.world.bridge().write(&terminals[0], b"one");
+    rig.world.bridge().write(&terminals[1], b"two");
+    until("both shown", || {
+        first.shown.bytes() == b"one" && second.shown.bytes() == b"two"
+    });
+    second.typed.write_all(b"x").expect("typed");
+    until("the key at the second", || {
+        rig.world.bridge().typed(&terminals[1]) == b"x"
+    });
+    assert!(rig.world.bridge().typed(&terminals[0]).is_empty());
+
+    rig.world.bridge().exit(&terminals[0], Exit::Code(0));
+    rig.world.bridge().exit(&terminals[1], Exit::Code(3));
+    assert_eq!(first.outcome(), Outcome::Exit(0));
+    assert_eq!(second.outcome(), Outcome::Exit(3));
+}
+
+#[test]
+fn a_broken_bridge_is_made_again_and_the_terminal_goes_on_with_no_byte_twice() {
+    let rig = Rig::new("broken");
+    let mut holder = Holder::new(&rig.socket(), "b-1");
+    let terminal = rig.terminals(1).remove(0);
+    rig.world.bridge().write(&terminal, b"one");
+    until("one shown", || holder.shown.bytes() == b"one");
+
+    rig.world.break_connection();
+    // Written while nobody is attached, kept by the server.
+    rig.world.bridge().write(&terminal, b"two");
+    until("the bridge is made again", || rig.world.count("carry") == 2);
+    until("the missed bytes", || holder.shown.bytes() == b"onetwo");
+    rig.world.bridge().write(&terminal, b"three");
+    until("the rest", || holder.shown.bytes() == b"onetwothree");
+
+    rig.world.bridge().exit(&terminal, Exit::Code(0));
+    assert_eq!(holder.outcome(), Outcome::Exit(0));
+}
+
+#[test]
+fn a_bridge_that_cannot_be_started_is_tried_again_and_a_server_that_speaks_no_version_is_given_up()
+{
+    // The first attempts fail: the terminal waits for the one that works.
+    let rig = Rig::new("retry");
+    rig.world.carry_fails.store(1, Ordering::SeqCst);
+    let mut holder = Holder::new(&rig.socket(), "b-1");
+    let terminal = rig.terminals(1).remove(0);
+    assert_eq!(rig.world.count("carry"), 2);
+    rig.world.bridge().exit(&terminal, Exit::Code(0));
+    assert_eq!(holder.outcome(), Outcome::Exit(0));
+    drop(rig);
+
+    // A server whose kablo speaks no version this build speaks: before anything
+    // was shown, the plain ssh.
+    let world = Fake::new(Bridge::new(Age::Current).speaking(8, 9));
+    let rig = Rig::over("incompatible", world);
+    let mut holder = Holder::new(&rig.socket(), "b-1");
+    assert_eq!(holder.outcome(), Outcome::FallBack);
+}
+
+#[test]
+fn a_holder_asking_for_a_terminal_again_gets_it_and_an_unknown_account_is_refused() {
+    let rig = Rig::new("resume");
+    let mut first = Holder::new(&rig.socket(), "b-1");
+    let terminal = rig.terminals(1).remove(0);
+    rig.world.bridge().write(&terminal, b"abc");
+    until("shown", || first.shown.bytes() == b"abc");
+
+    // The pane's program asks again, from where it was (its connection to the
+    // application was lost and made again): the newer holder shows the terminal
+    // and the older one is ended.
+    let mut again = Holder::start(
+        &rig.socket(),
+        "b-1",
+        Target::Resume {
+            account: "u@rasp:22".into(),
+            offset: Some(3),
+        },
+    );
+    rig.world.bridge().write(&terminal, b"def");
+    until("shown again", || again.shown.bytes() == b"def");
+    assert_eq!(first.outcome(), Outcome::Exit(1));
+
+    // An account bateri has no client for (it was restarted) cannot be served.
+    let mut lost = Holder::start(
+        &rig.socket(),
+        "b-9",
+        Target::Resume {
+            account: "u@elsewhere:22".into(),
+            offset: Some(0),
+        },
+    );
+    assert_eq!(lost.outcome(), Outcome::Exit(crate::hold::EXIT_REFUSED));
+    rig.world.bridge().exit(&terminal, Exit::Code(0));
+    assert_eq!(again.outcome(), Outcome::Exit(0));
+}
+
+#[test]
+fn the_socket_is_the_users_and_goes_with_the_service() {
+    let rig = Rig::new("socket");
+    let socket = rig.socket();
+    let mode = std::fs::metadata(&socket).expect("the socket");
+    assert!(std::os::unix::fs::FileTypeExt::is_socket(&mode.file_type()));
+    assert!(UnixStream::connect(&socket).is_ok());
+    // A directory that is not private is not bound in.
+    let open = PathBuf::from(format!("/tmp/bt-svc-open-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&open);
+    std::fs::DirBuilder::new()
+        .mode(0o755)
+        .create(&open)
+        .expect("dir");
+    assert!(Service::start(&open, Fake::new(Bridge::new(Age::Current))).is_err());
+    let _ = std::fs::remove_dir_all(&open);
+    rig.service.stop();
+    assert!(!socket.exists());
+}

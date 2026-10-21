@@ -861,7 +861,11 @@ fn on_a_real_terminal_the_pipe_is_raw_follows_the_size_and_gives_the_terminal_ba
         while matches!(master.read(&mut buffer), Ok(n) if n > 0) {}
     }
 
-    // The terminal is raw while the terminal is shown.
+    // The terminal is raw while the terminal is shown: from the moment the
+    // pane is told the terminal exists (before that it is the command line it was).
+    until("the terminal is raw", || {
+        modes(master.as_raw_fd()).c_lflag & libc::ICANON == 0
+    });
     let raw = modes(master.as_raw_fd());
     assert_eq!(raw.c_lflag & (libc::ECHO | libc::ICANON | libc::ISIG), 0);
     assert_eq!(raw.c_oflag & libc::OPOST, 0);

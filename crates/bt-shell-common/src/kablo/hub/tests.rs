@@ -231,7 +231,12 @@ impl Rig {
 fn a_new_terminal_is_bound_and_its_output_reaches_the_holder_exactly() {
     let mut rig = Rig::new();
     let (hold, terminal) = rig.started("b-1");
-    assert_eq!(rig.heard_by(hold)[0], ToHold::Welcome { version: 1 });
+    assert_eq!(
+        rig.heard_by(hold)[0],
+        ToHold::Welcome {
+            version: wire::VERSION
+        }
+    );
     assert!(rig.heard_by(hold).contains(&ToHold::Bound {
         account: ACCOUNT.into()
     }));
@@ -498,8 +503,13 @@ fn the_newer_holder_of_a_terminal_wins() {
 #[test]
 fn the_versions_are_agreed_or_refused() {
     let mut rig = Rig::new();
-    for (newest, oldest, expected) in [(1, 1, Some(1)), (7, 1, Some(1)), (9, 2, None), (0, 0, None)]
-    {
+    for (newest, oldest, expected) in [
+        (1, 1, Some(1)),
+        (2, 1, Some(2)),
+        (7, 1, Some(2)),
+        (9, 3, None),
+        (0, 0, None),
+    ] {
         let hold = rig.hold();
         rig.say(hold, &ToApp::Hello { newest, oldest });
         let reply = &rig.heard_by(hold)[0];
@@ -650,5 +660,88 @@ fn what_a_client_says_that_is_not_the_holders_goes_to_the_owner() {
             HubEvent::Client { event, .. } if matches!(**event, Event::Output { .. })
         )),
         "output went to the holder, not the owner"
+    );
+}
+
+#[test]
+fn the_owner_can_have_a_program_run_on_the_pane_before_the_terminal_exists() {
+    let mut rig = Rig::new();
+    let hold = rig.hold();
+    rig.greet(hold);
+    rig.say(hold, &ToApp::Open(new_request("b-1")));
+    assert_eq!(rig.requests(), vec![(hold, new_request("b-1"))]);
+
+    rig.hub.say(hold, "bateri: set up");
+    let argv = vec![b"ssh".to_vec(), b"-M".to_vec(), b"rasp".to_vec()];
+    rig.hub.run(hold, &argv).expect("asked");
+    rig.pump();
+    assert!(rig.heard_by(hold).contains(&ToHold::Note {
+        text: "bateri: set up".into()
+    }));
+    assert!(
+        rig.heard_by(hold)
+            .contains(&ToHold::Run { argv: argv.clone() })
+    );
+
+    // The request waits: no answer while the program runs, and no second one.
+    assert_eq!(
+        rig.hub.start(hold, ACCOUNT, NewSession::default()),
+        Err(Declined::Running)
+    );
+    assert_eq!(rig.hub.run(hold, &argv), Err(Declined::Running));
+
+    // Its end is told, with the status, and the owner answers as before.
+    rig.say(hold, &ToApp::Ran { status: 0 });
+    assert!(rig.requests().is_empty());
+    assert!(rig.events.contains(&HubEvent::Ran { hold, status: 0 }));
+    rig.hub
+        .start(hold, ACCOUNT, NewSession::default())
+        .expect("started");
+    rig.pump();
+    assert_eq!(rig.hub.terminal_of(hold).map(|(_, t)| t), Some(&id("b-1")));
+}
+
+#[test]
+fn a_holder_of_version_one_is_asked_nothing_and_told_nothing() {
+    let mut rig = Rig::new();
+    let hold = rig.hold();
+    rig.say(
+        hold,
+        &ToApp::Hello {
+            newest: 1,
+            oldest: 1,
+        },
+    );
+    assert_eq!(rig.hub.version_of(hold), 1);
+    rig.say(hold, &ToApp::Open(new_request("b-1")));
+    assert_eq!(rig.requests().len(), 1);
+    assert_eq!(
+        rig.hub.run(hold, &[b"ssh".to_vec()]),
+        Err(Declined::Unsupported)
+    );
+    assert!(!rig.hub.say(hold, "a line"));
+    rig.pump();
+    assert!(
+        !rig.heard_by(hold)
+            .iter()
+            .any(|m| matches!(m, ToHold::Run { .. } | ToHold::Note { .. }))
+    );
+}
+
+#[test]
+fn an_answer_nobody_asked_for_is_a_holder_out_of_turn_and_a_resume_is_not_run() {
+    let mut rig = Rig::new();
+    let hold = rig.hold();
+    rig.greet(hold);
+    rig.say(hold, &ToApp::Ran { status: 0 });
+    assert!(rig.hub.is_finished(hold), "a Ran nobody asked for");
+
+    let hold = rig.hold();
+    rig.greet(hold);
+    rig.say(hold, &ToApp::Open(resume_request("b-2", Some(0))));
+    assert_eq!(rig.requests().len(), 1);
+    assert_eq!(
+        rig.hub.run(hold, &[b"ssh".to_vec()]),
+        Err(Declined::WrongKind)
     );
 }

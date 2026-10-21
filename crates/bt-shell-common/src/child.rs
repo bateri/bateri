@@ -1647,18 +1647,17 @@ pub(crate) mod tests {
         assert!(!locale_installed("../../../usr"));
     }
 
-    /// The wrapper's `ssh` function in a real zsh: it asks `$BATERI_BIN
-    /// ssh-argv` (`--tty` only when stdin and stdout are terminals), runs
-    /// `command ssh` with the NUL-separated answer, takes `BATERI_BIN` out of the
-    /// environment — and a user's own `ssh` function is left alone. The
-    /// fallback: after a wrapped `ssh` that did not end with 255 it
-    /// asks `ssh-fell-back` with the **wrapped** arguments and reruns a
-    /// non-empty answer, returning the last `ssh`'s code — 255 asks too
-    /// (the binary decides); inside tmux or screen nothing is wrapped. The
-    /// inherited remote folder (`BATERI_SSH_CWD`) goes to the first `ssh`
-    /// only, and out of the environment.
+    /// The wrapper's `ssh` function in a real zsh: with stdin and stdout
+    /// terminals it runs `$BATERI_BIN ssh-hold -- <the arguments>` with
+    /// `BATERI_SSH_INSTANCE` for that command alone — the pane's program
+    /// stands in the `ssh`'s place and its status is the function's —; without
+    /// a terminal (a pipe), inside tmux or screen, or without the directory of
+    /// bateri's sockets it runs `command ssh` and asks the binary nothing. It
+    /// takes `BATERI_BIN` and the instance out of the environment, uses the
+    /// inherited remote folder (`BATERI_SSH_CWD`) up without passing it on — and a user's own
+    /// `ssh` function is left alone.
     #[test]
-    fn the_wrappers_ssh_function_asks_the_binary() {
+    fn the_wrappers_ssh_function_runs_the_hold_or_the_plain_ssh() {
         let root = TempRoot::new("ssh-function");
         let home = root.0.join("home");
         let bin = root.0.join("bin");
@@ -1666,30 +1665,22 @@ pub(crate) mod tests {
         std::fs::create_dir_all(&bin).expect("bin");
         let log = root.0.join("asked");
         let script = |path: PathBuf, body: String| write_program(&path, &body);
-        // The stand-in binary records how it was asked; `ssh-argv --tty`
-        // answers a wrapped argv, `ssh-fell-back` a plain rerun while `fall`
-        // exists.
-        let fall = root.0.join("fall");
+        // The stand-in binary records how it was asked and with what instance,
+        // prints that it ran and exits with the code in `code` (zero without it).
+        let code = root.0.join("code");
         script(
             bin.join("bateri"),
             format!(
-                "#!/bin/sh\necho \"$*\" >> '{}'\ncase \"$1 $2\" in\n\
-                 'ssh-argv --tty') printf -- '-t\\0x\\0y z\\0BOOT\\0' ;;\n\
-                 ssh-fell-back*) [ -f '{}' ] && printf -- 'PLAIN\\0x\\0' ;;\nesac\nexit 0\n",
+                "#!/bin/sh\necho \"$* instance=$BATERI_SSH_INSTANCE\" >> '{}'\necho '[HOLD]'\n\
+                 [ -f '{1}' ] && exit \"$(cat '{1}')\"\nexit 0\n",
                 log.display(),
-                fall.display()
-            ),
-        );
-        // The stand-in ssh prints its arguments, one bracket each, and exits
-        // with the code in `code` (zero without it).
-        let code = root.0.join("code");
-        script(
-            bin.join("ssh"),
-            format!(
-                "#!/bin/sh\nfor a in \"$@\"; do printf '[%s]' \"$a\"; done; echo\n\
-                 [ -f '{0}' ] && exit \"$(cat '{0}')\"\nexit 0\n",
                 code.display()
             ),
+        );
+        // The stand-in ssh prints its arguments, one bracket each.
+        script(
+            bin.join("ssh"),
+            "#!/bin/sh\nfor a in \"$@\"; do printf '[%s]' \"$a\"; done; echo\nexit 0\n".to_owned(),
         );
         let wrapper = copy_wrapper(&root.0);
         // The stand-ins first on `PATH`, after the system's login files
@@ -1752,46 +1743,28 @@ pub(crate) mod tests {
         session.write(
             b"ssh x 'y z'; ssh x | cat; echo \"[${BATERI_BIN-unset}${BATERI_SSH_INSTANCE-unset}${BATERI_SSH_CWD-unset}]\"\n",
         );
-        wait_until("the wrapped call did not run", || {
-            shown(&session, "[-t][x][y z][BOOT]") && shown(&session, "[unsetunsetunset]")
+        wait_until("the calls did not run", || {
+            shown(&session, "[HOLD]")
+                && shown(&session, "[x]")
+                && shown(&session, "[unsetunsetunset]")
         });
-        let asked = std::fs::read_to_string(&log).expect("the binary was asked");
-        // `--block` is the command's own block: the first prompt's; the
-        // instance is the masters' directory, out of the environment.
-        // The wrapped call that ended with 0 asked the fallback with the
-        // wrapped arguments (nothing came back: no rerun). The folder went
-        // with the first call and not the second.
+        // The terminal call went to the binary with the arguments as typed and the
+        // instance; the piped one never asked it.
         assert_eq!(
-            asked,
-            "ssh-argv --tty --block 1 --instance 0a1b2c3d --cwd /srv/my app -- x y z\n\
-             ssh-fell-back --rc 0 --instance 0a1b2c3d -- -t x y z BOOT\n\
-             ssh-argv --block 1 --instance 0a1b2c3d -- x\n"
+            std::fs::read_to_string(&log).expect("the binary was asked"),
+            "ssh-hold -- x y z instance=0a1b2c3d\n"
         );
         std::fs::remove_file(&log).expect("log");
 
-        // A fallback answer is rerun plain; the code is the rerun's.
-        std::fs::write(&fall, "").expect("fall");
+        // The status is the pane's program's; tmux and screen run the plain ssh.
         std::fs::write(&code, "7").expect("code");
-        session.write(b"ssh x; echo \"rc=$?\"\n");
-        wait_until("the plain rerun did not run", || {
-            shown(&session, "[PLAIN][x]") && shown(&session, "rc=7")
+        session.write(b"ssh x; echo \"rc=$?\"; TMUX=t ssh y; echo \"r2=$?\"\n");
+        wait_until("the hold's status and the tmux call did not show", || {
+            shown(&session, "rc=7") && shown(&session, "[y]") && shown(&session, "r2=0")
         });
-        // 255 asks too (the binary tells ssh's own error from a
-        // refusal after the login) — here it answers nothing, so no rerun;
-        // inside tmux nothing is wrapped.
-        std::fs::remove_file(&fall).expect("fall");
-        std::fs::write(&code, "255").expect("code");
-        session.write(b"ssh x; echo \"r1=$?\"; TMUX=t ssh x; echo \"r2=$?\"\n");
-        wait_until("the 255 and tmux calls did not run", || {
-            shown(&session, "r1=255") && shown(&session, "r2=255")
-        });
-        let asked = std::fs::read_to_string(&log).expect("the binary was asked");
         assert_eq!(
-            asked,
-            "ssh-argv --tty --block 2 --instance 0a1b2c3d -- x\n\
-             ssh-fell-back --rc 7 --instance 0a1b2c3d -- -t x y z BOOT\n\
-             ssh-argv --tty --block 3 --instance 0a1b2c3d -- x\n\
-             ssh-fell-back --rc 255 --instance 0a1b2c3d -- -t x y z BOOT\n"
+            std::fs::read_to_string(&log).expect("the binary was asked"),
+            "ssh-hold -- x instance=0a1b2c3d\n"
         );
         session.shutdown();
 
@@ -1800,436 +1773,6 @@ pub(crate) mod tests {
         session.write(b"ssh x\n");
         wait_until("the user's ssh did not run", || shown(&session, "USER-SSH"));
         session.shutdown();
-    }
-
-    /// The acceptance scenario end to end: the real wrapper, the real `bateri`
-    /// binary (`ssh-argv`, `ssh-fell-back`; `target/debug/bateri`, built
-    /// first) and a real password sshd in Docker on `127.0.0.1:2249` (the
-    /// set's own container; skipped when it does not answer) with three users:
-    /// `deneme` (oh-my-zsh), `kapi` (a login shell that runs no `-c`, Windows
-    /// cmd's answer) and `router` (`ForceCommand` of an interactive CLI). The
-    /// pane's half — the bootstrap's `up` → `mark_up` + `record_posix` — is
-    /// played by the test thread polling `Session::remote_up` (the app's wake →
-    /// main queue → thread latency is not covered here). `HOME` is a
-    /// temporary directory, so the state file is too; every `ssh` carries
-    /// `-F /dev/null`, no agent, no keys and a temporary `known_hosts`:
-    /// `~/.ssh` is never read. Prints what it measured (`--nocapture`).
-    #[test]
-    #[ignore = "needs bateri's Docker sshd on 127.0.0.1:2249 and target/debug/bateri: cargo test -p bt-shell-common e2e_ -- --ignored --nocapture"]
-    fn e2e_first_connection_and_the_silent_fallback() {
-        use crate::ssh_wrap::{Fact, load};
-        use std::time::{Duration, Instant};
-        if std::net::TcpStream::connect(("127.0.0.1", 2249)).is_err() {
-            eprintln!("SKIPPED: no sshd on 127.0.0.1:2249");
-            return;
-        }
-        let binary = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/debug/bateri");
-        assert!(
-            binary.is_file(),
-            "build bateri first: cargo build -p bateri"
-        );
-        // A short root: the session socket must fit `sun_path`.
-        let root = PathBuf::from(format!("/tmp/bt049-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        let home = root.join("home");
-        std::fs::create_dir_all(&home).expect("home");
-        let state = home.join("Library/Application Support/bateri/remote-hosts");
-        let instance = format!("{:08x}", std::process::id());
-        // SAFETY: `getuid` has no preconditions and cannot fail.
-        let uid = unsafe { libc::getuid() };
-        let bases = crate::ssh_route::socket_bases(Some(&home), uid);
-        crate::ssh_route::prepare_instance(&bases[0], &instance).expect("instance");
-        let wrapper = copy_wrapper(&root);
-        std::fs::write(home.join(".zshrc"), "PS1='$ '\n").expect(".zshrc");
-        let tab = bt_core::PaneUuid::parse("0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0").expect("tab");
-        let session = Session::spawn(
-            SessionOptions {
-                command: Some((
-                    "/bin/zsh".to_owned(),
-                    vec!["-l".to_owned(), "-i".to_owned()],
-                )),
-                working_directory: Some(home.clone()),
-                home: Some(home.clone()),
-                env: HashMap::from([
-                    ("HOME".to_owned(), home.display().to_string()),
-                    ("ZDOTDIR".to_owned(), wrapper.display().to_string()),
-                    ("BATERI_DOCK".to_owned(), "off".to_owned()),
-                    ("BATERI_BIN".to_owned(), binary.display().to_string()),
-                    ("BATERI_SSH_INSTANCE".to_owned(), instance.clone()),
-                ]),
-                cols: 250,
-                rows: 50,
-                cell_px: (9, 18),
-                terminal: TerminalOptions {
-                    scrollback: 2000,
-                    osc52: Osc52::Off,
-                    cursor: CaretShape::default(),
-                    blink: CursorBlink::default(),
-                },
-                theme: Theme::BATERI,
-                dock: false,
-                cluster: false,
-                initial_input: None,
-                shell_marks: false,
-                // The pane's identity: `BATERI_TAB_URL` and the `LC_` trio.
-                pane_uuid: Some(tab.clone()),
-                hostname: None,
-                replay: None,
-                journal: None,
-            },
-            Arc::new(SilentWake),
-        )
-        .expect("could not open the session");
-        let known = root.join("known_hosts").display().to_string();
-        let ssh_args = |user: &str, port: u16| -> Vec<String> {
-            [
-                "-F",
-                "/dev/null",
-                "-o",
-                &format!("UserKnownHostsFile={known}"),
-                "-o",
-                "StrictHostKeyChecking=accept-new",
-                "-o",
-                "IdentityAgent=none",
-                "-o",
-                "PubkeyAuthentication=no",
-                "-p",
-                &port.to_string(),
-                &format!("{user}@127.0.0.1"),
-            ]
-            .map(str::to_owned)
-            .to_vec()
-        };
-        let line = |args: &[String]| format!("ssh {}\r", args.join(" "));
-        let key = |args: &[String]| {
-            let mut argv = vec!["ssh".to_owned(), "-G".to_owned()];
-            argv.extend(args.iter().cloned());
-            let out = std::process::Command::new(&argv[0])
-                .args(&argv[1..])
-                .output()
-                .expect("ssh -G");
-            crate::ssh_wrap::host_key(&String::from_utf8_lossy(&out.stdout)).expect("key")
-        };
-        // The pane's half: the remote probe (`set_remote`, the wrapped call's
-        // nonce), the login probe and the first input after it
-        // (`mark_used`), the `up` marked at once, then `posix`.
-        let seen = std::cell::RefCell::new(None::<(u64, String)>);
-        let probed = std::cell::RefCell::new(None::<(u64, Option<String>)>);
-        let used = std::cell::RefCell::new(None::<u64>);
-        let logged = std::cell::RefCell::new(None::<u64>);
-        let pane = |user_args: &[String]| {
-            if let Some(command) = session.running_command()
-                && probed.borrow().as_ref().map(|(probed, _)| *probed) != Some(command)
-                && let crate::jobs::Probe::Remote(target) = crate::jobs::remote(
-                    ShellParent::Direct,
-                    session.child_pid(),
-                    &crate::jobs::SystemTable,
-                )
-            {
-                let remote = bt_core::RemoteTarget {
-                    host: target.host.clone(),
-                    port: target.port,
-                    kind: target.kind,
-                    argv: target.argv.clone(),
-                    line: target.argv.join(" "),
-                };
-                session.set_remote(command, Some(&remote));
-                *probed.borrow_mut() = Some((command, target.nonce.clone()));
-            }
-            if let Some((command, nonce)) = probed.borrow().clone() {
-                if crate::jobs::remote_login(&session) == Some(command)
-                    && *logged.borrow() != Some(command)
-                    && let Some(nonce) = &nonce
-                {
-                    crate::ssh_wrap::mark_login(&state, nonce).expect("login");
-                    *logged.borrow_mut() = Some(command);
-                }
-                if session.remote_typed() == Some(command)
-                    && *used.borrow() != Some(command)
-                    && let Some(nonce) = nonce
-                {
-                    crate::ssh_wrap::mark_used(&state, &nonce).expect("used");
-                    *used.borrow_mut() = Some(command);
-                }
-            }
-            let up = session.remote_up();
-            if up.is_some() && *seen.borrow() != up {
-                let (_, nonce) = up.clone().unwrap();
-                crate::ssh_wrap::mark_up(&state, &nonce).expect("mark");
-                let mut argv = vec!["ssh".to_owned()];
-                argv.extend(user_args.iter().cloned());
-                crate::ssh_wrap::record_posix(&crate::ssh_route::SystemSsh, &argv, &state)
-                    .expect("posix");
-                *seen.borrow_mut() = up;
-            }
-        };
-        let text = || screen(&session, &mut Blocks::default()).join("\n");
-        let count = |needle: &str| text().matches(needle).count();
-        let wait = |what: &str, secs: u64, args: &[String], ready: &dyn Fn() -> bool| {
-            let deadline = Instant::now() + Duration::from_secs(secs);
-            while Instant::now() < deadline {
-                pane(args);
-                if ready() {
-                    return;
-                }
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            panic!("{what}\n{}", text());
-        };
-        let stripes = || -> Vec<bt_core::LinearRgba> {
-            let mut blocks = Blocks::default();
-            screen(&session, &mut blocks);
-            blocks.as_slice().iter().map(|block| block.stripe).collect()
-        };
-        wait("no local prompt", 10, &[], &|| text().contains("$"));
-
-        // (a) oh-my-zsh, clean state: the first connection is integrated.
-        let deneme = ssh_args("deneme", 2249);
-        let prompts = count("(deneme@127.0.0.1) Password:");
-        session.write(line(&deneme).as_bytes());
-        wait("no password prompt", 15, &deneme, &|| {
-            count("(deneme@127.0.0.1) Password:") > prompts
-        });
-        session.write(b"parola123\r");
-        wait("no remote directory", 20, &deneme, &|| {
-            session.remote_link_directory() == "/home/deneme"
-        });
-        assert!(load(&state).knows(Fact::Posix, &key(&deneme)));
-        session.write(b"false\r");
-        wait("no remote error stripe", 15, &deneme, &|| {
-            stripes().contains(&Theme::BATERI.error_linear())
-        });
-        eprintln!("(a) first connection: remote dir /home/deneme, remote block stripe, posix row");
-        // The wrapped session carries the identity (no `SendEnv`
-        // here — `-F /dev/null` — so it is the bootstrap's export).
-        let identity = format!("lc=bateri|{}|{}.", bt_core::TERM_PROGRAM_VERSION, tab.url());
-        let show_lc = b"printf 'lc=%s|%s|%s.\\n' \"${LC_TERMINAL-unset}\" \
-                        \"${LC_TERMINAL_VERSION-unset}\" \"${LC_BATERI_TAB_URL-unset}\"\r";
-        let seen_lc = count(&identity);
-        session.write(show_lc);
-        wait("no identity (wrapped)", 10, &deneme, &|| {
-            count(&identity) > seen_lc
-        });
-        eprintln!("(identity) wrapped, AcceptEnv LANG LC_*: {identity}");
-        session.write(b"exit\r");
-        std::thread::sleep(Duration::from_secs(3));
-        session.write(b"echo done-a\r");
-        wait("exit did not return", 10, &deneme, &|| {
-            text().contains("\ndone-a")
-        });
-        std::thread::sleep(Duration::from_secs(3));
-        assert_eq!(
-            count("(deneme@127.0.0.1) Password:"),
-            prompts + 1,
-            "reconnected after exit\n{}",
-            text()
-        );
-        assert!(!load(&state).knows(Fact::Plain, &key(&deneme)));
-        eprintln!("(a) exit: no reconnection, no plain row");
-
-        // (a') inside a local multiplexer (`$TMUX` set — what tmux exports to
-        // its panes): never wrapped, no fallback.
-        let before = std::fs::read_to_string(&state).unwrap_or_default();
-        session.write(format!("TMUX=x ssh {} ; echo done-t\r", deneme.join(" ")).as_bytes());
-        wait("no password prompt (tmux)", 15, &[], &|| {
-            count("(deneme@127.0.0.1) Password:") > prompts + 1
-        });
-        session.write(b"parola123\r");
-        std::thread::sleep(Duration::from_secs(3));
-        session.write(b"exit\r");
-        wait("tmux ssh did not end", 10, &[], &|| {
-            text().contains("\ndone-t")
-        });
-        assert_eq!(std::fs::read_to_string(&state).unwrap_or_default(), before);
-        eprintln!("(a') TMUX set: not wrapped, state untouched, no rerun");
-
-        // The identity across the carriers: a plain ssh (`TMUX` set — never wrapped)
-        // with the stock `SendEnv LC_*` shows the identity on a server with
-        // `AcceptEnv LANG LC_*`; on a server with `AcceptEnv LANG` only
-        // (127.0.0.1:2251) the wrapped session still shows it, the plain one
-        // does not (the known limit).
-        let unset = "lc=unset|unset|unset.";
-        let remote_lc = |port: u16, wrapped: bool, expect: &str| {
-            let mut args = ssh_args("deneme", port);
-            args.splice(2..2, ["-o".to_owned(), "'SendEnv=LC_*'".to_owned()]);
-            let asked = count("(deneme@127.0.0.1) Password:");
-            let prefix = if wrapped { "" } else { "TMUX=x " };
-            session.write(format!("{prefix}ssh {}\r", args.join(" ")).as_bytes());
-            wait("no password prompt (identity)", 15, &args, &|| {
-                count("(deneme@127.0.0.1) Password:") > asked
-            });
-            session.write(b"parola123\r");
-            std::thread::sleep(Duration::from_secs(3));
-            let before = count(expect);
-            session.write(show_lc);
-            wait("no identity line", 10, &args, &|| count(expect) > before);
-            session.write(b"exit\r");
-            std::thread::sleep(Duration::from_secs(3));
-            session.write(b"echo done-lc\r");
-            let done = count("\ndone-lc");
-            wait("identity session did not end", 10, &args, &|| {
-                count("\ndone-lc") > done
-            });
-        };
-        remote_lc(2249, false, &identity);
-        eprintln!("(identity) plain, SendEnv LC_* + AcceptEnv LANG LC_*: {identity}");
-        if std::net::TcpStream::connect(("127.0.0.1", 2251)).is_ok() {
-            remote_lc(2251, true, &identity);
-            eprintln!("(identity) wrapped, AcceptEnv LANG only: {identity}");
-            remote_lc(2251, false, unset);
-            eprintln!("(identity) plain, AcceptEnv LANG only: {unset} (known limit)");
-        } else {
-            eprintln!("SKIPPED: no AcceptEnv-restricted sshd on 127.0.0.1:2251");
-        }
-
-        // (b) the shell-less endpoint: plain rerun, and is a second password asked?
-        let kapi = ssh_args("kapi", 2249);
-        let asked = count("(kapi@127.0.0.1) Password:");
-        session.write(line(&kapi).as_bytes());
-        wait("no password prompt (kapi)", 15, &kapi, &|| {
-            count("(kapi@127.0.0.1) Password:") > asked
-        });
-        session.write(b"parola123\r");
-        wait("no error line", 15, &kapi, &|| {
-            text().contains("'exec' is not recognized")
-        });
-        let ended = Instant::now();
-        wait("no rerun", 15, &kapi, &|| {
-            text().contains("C:\\>") || count("(kapi@127.0.0.1) Password:") > asked + 1
-        });
-        let second = count("(kapi@127.0.0.1) Password:") > asked + 1;
-        eprintln!(
-            "(b) rerun after {:?}; second password asked: {second}",
-            ended.elapsed()
-        );
-        if second {
-            session.write(b"parola123\r");
-            wait("no plain shell", 15, &kapi, &|| text().contains("C:\\>"));
-        }
-        assert!(load(&state).knows(Fact::Plain, &key(&kapi)));
-        session.write(b"exit\r");
-        std::thread::sleep(Duration::from_secs(3));
-        session.write(b"echo done-b\r");
-        wait("plain exit did not return", 10, &kapi, &|| {
-            text().contains("\ndone-b")
-        });
-        // The next connection is plain from the start: no error line again.
-        let errors = count("'exec' is not recognized");
-        let asked = count("(kapi@127.0.0.1) Password:");
-        session.write(line(&kapi).as_bytes());
-        wait("no password prompt (kapi again)", 15, &kapi, &|| {
-            count("(kapi@127.0.0.1) Password:") > asked
-        });
-        session.write(b"parola123\r");
-        wait("no plain shell (again)", 15, &kapi, &|| {
-            text().matches("C:\\>").count() >= 2
-        });
-        assert_eq!(count("'exec' is not recognized"), errors);
-        session.write(b"exit\r");
-        std::thread::sleep(Duration::from_secs(3));
-        session.write(b"echo done-b2\r");
-        wait("second plain exit", 10, &kapi, &|| {
-            text().contains("\ndone-b2")
-        });
-        eprintln!("(b) second connection plain from the start");
-
-        // 255: ssh's own error records nothing and reruns nothing.
-        let nowhere = ssh_args("nobody", 2250);
-        session.write(format!("ssh {}; echo rc=$?\r", nowhere.join(" ")).as_bytes());
-        wait("no 255", 15, &nowhere, &|| text().contains("rc=255"));
-        assert!(!load(&state).knows(Fact::Plain, &key(&nowhere)));
-        eprintln!("(255) no plain row, no rerun");
-
-        // (c) ForceCommand of an interactive CLI: the user works, then exits.
-        let router = ssh_args("router", 2249);
-        let asked = count("(router@127.0.0.1) Password:");
-        session.write(line(&router).as_bytes());
-        wait("no password prompt (router)", 15, &router, &|| {
-            count("(router@127.0.0.1) Password:") > asked
-        });
-        session.write(b"parola123\r");
-        wait("no cli", 15, &router, &|| text().contains("router>"));
-        session.write(b"show\r");
-        wait("cli did not answer", 10, &router, &|| {
-            text().contains("cli: show")
-        });
-        // The pane noticed the input after the login.
-        wait(
-            "the input after the login was not marked",
-            10,
-            &router,
-            &|| {
-                used.borrow()
-                    .is_some_and(|command| Some(command) == session.running_command())
-            },
-        );
-        session.write(b"exit\r");
-        std::thread::sleep(Duration::from_secs(4));
-        let rerun = count("(router@127.0.0.1) Password:") > asked + 1
-            || text().matches("router>").count() > 2;
-        let plain = load(&state).knows(Fact::Plain, &key(&router));
-        eprintln!("(c) ForceCommand CLI: reconnected after exit: {rerun}; plain row: {plain}");
-        assert!(
-            !rerun && !plain,
-            "a session the user worked in does not fall back"
-        );
-        // (d) Ctrl-C at a fresh server's password prompt (rc 130): no rerun,
-        // no `plain` row (found in code review; an interactive zsh aborts
-        // the function on the child's SIGINT anyway, `says_nothing` is the
-        // binary's half for the other signals).
-        let cancelled = ssh_args("root", 2249);
-        let asked = count("(root@127.0.0.1) Password:");
-        session.write(format!("ssh {}\r", cancelled.join(" ")).as_bytes());
-        wait("no password prompt (root)", 15, &cancelled, &|| {
-            count("(root@127.0.0.1) Password:") > asked
-        });
-        session.write(b"\x03");
-        std::thread::sleep(Duration::from_secs(2));
-        session.write(b"echo rc=$?\r");
-        wait("no 130", 15, &cancelled, &|| text().contains("\nrc=130"));
-        assert_eq!(count("(root@127.0.0.1) Password:"), asked + 1);
-        assert!(!load(&state).knows(Fact::Plain, &key(&cancelled)));
-        eprintln!("(d) Ctrl-C at the password prompt: rc=130, no rerun, no plain row");
-
-        // (e) an endpoint that refuses our command with 255 after the login
-        // (found in code review; `refuse`'s login shell answers `-c` with
-        // "exec request failed" and 255, a shell request with a prompt): the
-        // pane's login proof turns the 255 into a fallback — plain rerun,
-        // `plain` row, the next connection plain from the start.
-        let refuse = ssh_args("refuse", 2249);
-        let asked = count("(refuse@127.0.0.1) Password:");
-        session.write(line(&refuse).as_bytes());
-        wait("no password prompt (refuse)", 15, &refuse, &|| {
-            count("(refuse@127.0.0.1) Password:") > asked
-        });
-        session.write(b"parola123\r");
-        wait("no refusal", 15, &refuse, &|| {
-            text().contains("exec request failed on channel 0")
-        });
-        let ended = Instant::now();
-        wait("no rerun (refuse)", 15, &refuse, &|| {
-            text().contains("sw>") || count("(refuse@127.0.0.1) Password:") > asked + 1
-        });
-        let second = count("(refuse@127.0.0.1) Password:") > asked + 1;
-        if second {
-            session.write(b"parola123\r");
-            wait("no plain prompt (refuse)", 15, &refuse, &|| {
-                text().contains("sw>")
-            });
-        }
-        assert!(load(&state).knows(Fact::Plain, &key(&refuse)));
-        eprintln!(
-            "(e) 255 after the login: rerun after {:?}; second password asked: {second}; plain row",
-            ended.elapsed()
-        );
-        session.write(b"exit\r");
-        std::thread::sleep(Duration::from_secs(3));
-        session.write(b"echo done-e\r");
-        wait("refuse exit did not return", 10, &refuse, &|| {
-            text().contains("\ndone-e")
-        });
-        session.shutdown();
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// **Does the command's duration reach the screen in real zsh**.
@@ -3120,10 +2663,11 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_fish_wrappers_ssh_function_asks_the_binary() {
+    fn the_fish_wrappers_ssh_function_runs_the_hold_or_the_plain_ssh() {
         // `ssh` is the user's until the first prompt: a function of their own wins, and
-        // otherwise ours asks the binary (`bateri ssh-argv`, one parser) for the wrapped
-        // arguments, NUL-separated, an empty one included.
+        // otherwise ours runs `bateri ssh-hold -- <the arguments>` (for that command
+        // alone with the instance) when stdin and stdout are terminals, and the plain `ssh`
+        // when they are not or a multiplexer is local.
         let Some(fish) = fish() else { return };
         let root = TempRoot::new("fish-ssh");
         let home = root.0.join("home");
@@ -3131,25 +2675,21 @@ pub(crate) mod tests {
         std::fs::create_dir_all(&bin).expect("bin");
         let log = root.0.join("asked");
         let script = |path: PathBuf, body: String| write_program(&path, &body);
-        let fall = root.0.join("fall");
+        // The stand-in binary records how it was asked and with what instance,
+        // prints that it ran and exits with the code in `code` (zero without it).
+        let code = root.0.join("code");
         script(
             bin.join("bateri"),
             format!(
-                "#!/bin/sh\necho \"$*\" >> '{}'\ncase \"$1 $2\" in\n\
-                 'ssh-argv --tty') printf -- '-t\\0x\\0y z\\0\\0BOOT\\0' ;;\n\
-                 ssh-fell-back*) [ -f '{}' ] && printf -- 'PLAIN\\0x\\0' ;;\nesac\nexit 0\n",
+                "#!/bin/sh\necho \"$* instance=$BATERI_SSH_INSTANCE\" >> '{}'\necho '[HOLD]'\n\
+                 [ -f '{1}' ] && exit \"$(cat '{1}')\"\nexit 0\n",
                 log.display(),
-                fall.display()
-            ),
-        );
-        let code = root.0.join("code");
-        script(
-            bin.join("ssh"),
-            format!(
-                "#!/bin/sh\nfor a in \"$@\"; do printf '[%s]' \"$a\"; done; echo\n\
-                 [ -f '{0}' ] && exit \"$(cat '{0}')\"\nexit 0\n",
                 code.display()
             ),
+        );
+        script(
+            bin.join("ssh"),
+            "#!/bin/sh\nfor a in \"$@\"; do printf '[%s]' \"$a\"; done; echo\nexit 0\n".to_owned(),
         );
         let spawn = |rc: &str| {
             // The stand-ins first on `PATH`, after the system's login files (macOS's
@@ -3183,32 +2723,27 @@ pub(crate) mod tests {
         session.write(
             b"ssh x 'y z'; ssh x | cat; echo \"[\"(set -q BATERI_BIN BATERI_SSH_INSTANCE BATERI_SSH_CWD; echo $status)\"]\"\n",
         );
-        wait_until("the wrapped call did not run", || {
-            shown(&session, "[-t][x][y z][][BOOT]") && shown(&session, "[3]")
+        wait_until("the calls did not run", || {
+            shown(&session, "[HOLD]") && shown(&session, "[x]") && shown(&session, "[3]")
         });
-        let asked = std::fs::read_to_string(&log).expect("the binary was asked");
-        // `--block` is the command's own block: the first prompt's; the folder went with the
-        // first call and not the second; the wrapped call asked the fallback with its arguments.
+        // The terminal call went to the binary with the arguments as typed and the
+        // instance; the piped one never asked it.
         assert_eq!(
-            asked,
-            "ssh-argv --tty --block 1 --instance 0a1b2c3d --cwd /srv/my app -- x y z\n\
-             ssh-fell-back --rc 0 --instance 0a1b2c3d -- -t x y z  BOOT\n\
-             ssh-argv --block 1 --instance 0a1b2c3d -- x\n"
+            std::fs::read_to_string(&log).expect("the binary was asked"),
+            "ssh-hold -- x y z instance=0a1b2c3d\n"
         );
         std::fs::remove_file(&log).expect("log");
 
-        // A fallback answer is rerun plain; the code is the rerun's.
-        std::fs::write(&fall, "").expect("fall");
+        // The status is the pane's program's; a local multiplexer runs the plain ssh.
         std::fs::write(&code, "7").expect("code");
-        session.write(b"ssh x; echo \"rc=$status\"\n");
-        wait_until("the plain rerun did not run", || {
-            shown(&session, "[PLAIN][x]") && shown(&session, "rc=7")
+        session.write(b"ssh x; echo \"rc=$status\"; set -x TMUX t; ssh y; echo \"r2=$status\"\n");
+        wait_until("the hold's status and the tmux call did not show", || {
+            shown(&session, "rc=7") && shown(&session, "[y]") && shown(&session, "r2=0")
         });
-        // Inside a multiplexer nothing is wrapped.
-        std::fs::remove_file(&fall).expect("fall");
-        std::fs::write(&code, "255").expect("code");
-        session.write(b"env TMUX=t fish -c 'true'; set -x TMUX t; ssh x; echo \"r2=$status\"\n");
-        wait_until("the tmux call did not run", || shown(&session, "r2=255"));
+        assert_eq!(
+            std::fs::read_to_string(&log).expect("the binary was asked"),
+            "ssh-hold -- x instance=0a1b2c3d\n"
+        );
         session.shutdown();
 
         // A user's own `ssh` function wins: ours is not defined over it.
@@ -3762,37 +3297,34 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_bash_wrappers_ssh_function_asks_the_binary() {
+    fn the_bash_wrappers_ssh_function_runs_the_hold_or_the_plain_ssh() {
         // `ssh` is the user's until the wrapper is read: a function or an alias of their own
-        // wins, and otherwise ours asks the binary (`bateri ssh-argv`, one parser) for the
-        // wrapped arguments, NUL-separated, an empty one included.
+        // wins, and otherwise ours runs `bateri ssh-hold -- <the arguments>` (for that command
+        // alone with the instance) when stdin and stdout are terminals, and the plain `ssh`
+        // when they are not or a multiplexer is local.
         let Some(bash) = bash() else { return };
         let root = TempRoot::new("bash-ssh");
         let home = root.0.join("home");
         let bin = root.0.join("bin");
         std::fs::create_dir_all(&bin).expect("bin");
         let log = root.0.join("asked");
-        let fall = root.0.join("fall");
+        // The stand-in binary records how it was asked and with what instance,
+        // prints that it ran and exits with the code in `code` (zero without it).
+        let code = root.0.join("code");
         stand_in(
             &bin,
             "bateri",
             &format!(
-                "echo \"$*\" >> '{}'\ncase \"$1 $2\" in\n\
-                 'ssh-argv --tty') printf -- '-t\\0x\\0y z\\0\\0BOOT\\0' ;;\n\
-                 ssh-fell-back*) [ -f '{}' ] && printf -- 'PLAIN\\0x\\0' ;;\nesac\nexit 0\n",
+                "echo \"$* instance=$BATERI_SSH_INSTANCE\" >> '{}'\necho '[HOLD]'\n\
+                 [ -f '{1}' ] && exit \"$(cat '{1}')\"\nexit 0\n",
                 log.display(),
-                fall.display()
+                code.display()
             ),
         );
-        let code = root.0.join("code");
         stand_in(
             &bin,
             "ssh",
-            &format!(
-                "for a in \"$@\"; do printf '[%s]' \"$a\"; done; echo\n\
-                 [ -f '{0}' ] && exit \"$(cat '{0}')\"\nexit 0\n",
-                code.display()
-            ),
+            "for a in \"$@\"; do printf '[%s]' \"$a\"; done; echo\nexit 0\n",
         );
         let spawn = |rc: &str| {
             // The stand-ins first on `PATH`, after the system's login files (macOS's
@@ -3818,32 +3350,27 @@ pub(crate) mod tests {
         session.write(
             b"ssh x 'y z'; ssh x | cat; echo \"leak<${BATERI_BIN-}${BATERI_SSH_INSTANCE-}${BATERI_SSH_CWD-}>\"\n",
         );
-        wait_until("the wrapped call did not run", || {
-            shown(&session, "[-t][x][y z][][BOOT]") && shown(&session, "leak<>")
+        wait_until("the calls did not run", || {
+            shown(&session, "[HOLD]") && shown(&session, "[x]") && shown(&session, "leak<>")
         });
-        let asked = std::fs::read_to_string(&log).expect("the binary was asked");
-        // `--block` is the command's own block: the first prompt's; the folder went with the
-        // first call and not the second; the wrapped call asked the fallback with its arguments.
+        // The terminal call went to the binary with the arguments as typed and the
+        // instance; the piped one never asked it.
         assert_eq!(
-            asked,
-            "ssh-argv --tty --block 1 --instance 0a1b2c3d --cwd /srv/my app -- x y z\n\
-             ssh-fell-back --rc 0 --instance 0a1b2c3d -- -t x y z  BOOT\n\
-             ssh-argv --block 1 --instance 0a1b2c3d -- x\n"
+            std::fs::read_to_string(&log).expect("the binary was asked"),
+            "ssh-hold -- x y z instance=0a1b2c3d\n"
         );
         std::fs::remove_file(&log).expect("log");
 
-        // A fallback answer is rerun plain; the code is the rerun's.
-        std::fs::write(&fall, "").expect("fall");
+        // The status is the pane's program's; a local multiplexer runs the plain ssh.
         std::fs::write(&code, "7").expect("code");
-        session.write(b"ssh x; echo \"rc=$?\"\n");
-        wait_until("the plain rerun did not run", || {
-            shown(&session, "[PLAIN][x]") && shown(&session, "rc=7")
+        session.write(b"ssh x; echo \"rc=$?\"; export TMUX=t; ssh y; echo \"r2=$?\"\n");
+        wait_until("the hold's status and the tmux call did not show", || {
+            shown(&session, "rc=7") && shown(&session, "[y]") && shown(&session, "r2=0")
         });
-        // Inside a multiplexer nothing is wrapped.
-        std::fs::remove_file(&fall).expect("fall");
-        std::fs::write(&code, "255").expect("code");
-        session.write(b"export TMUX=t; ssh x; echo \"r2=$?\"\n");
-        wait_until("the tmux call did not run", || shown(&session, "r2=255"));
+        assert_eq!(
+            std::fs::read_to_string(&log).expect("the binary was asked"),
+            "ssh-hold -- x instance=0a1b2c3d\n"
+        );
         session.shutdown();
 
         // A user's own function or alias wins: ours is not defined over it.

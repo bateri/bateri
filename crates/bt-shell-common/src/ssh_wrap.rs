@@ -15,6 +15,14 @@
 //! wrapped connection that ends without it falls back to a plain rerun
 //! ([`ssh_fell_back_main`]).
 //!
+//! **The kablo way** ([`kablo_path`]): the local shells' `ssh` function no longer
+//! asks `bateri ssh-argv`; it runs `bateri ssh-hold`, and the running bateri
+//! decides with the same conditions ([`eligible`], shared with [`decide`]) whether
+//! the call is a terminal the server keeps ([`kablo_argv`] is the bootstrap it
+//! runs there) or the plain `ssh`. The wrapped form below, `ssh-argv` and
+//! `ssh-fell-back` stay for one purpose: a shell started before an update still
+//! has the previous `ssh` function, and asks them.
+//!
 //! **The wrapped form is positional**: `-t` first,
 //! the user's arguments unchanged, the bootstrap command last — one argument
 //! that starts with a letter, so it is the remote command whether or not the
@@ -339,6 +347,13 @@ pub enum Fact {
     /// ssh's own error ([`fell_back`]): the login shell does not run
     /// our command (a router, Windows) — the server is not wrapped again.
     Plain,
+    /// kablo cannot be kept on the server: a platform it is not built for, a
+    /// home directory that cannot be written, a file that will not run
+    /// ([`crate::kablo::install`]). The server's `ssh` is a plain one from then
+    /// on and kablo is not tried again. A reading build that does not know the
+    /// name skips the row ([`HostState::parse`]), so an older bateri
+    /// is unaffected by it.
+    NoKablo,
 }
 
 impl Fact {
@@ -347,6 +362,7 @@ impl Fact {
             Self::Posix => "posix",
             Self::Touched => "touched",
             Self::Plain => "plain",
+            Self::NoKablo => "nokablo",
         }
     }
 
@@ -355,6 +371,7 @@ impl Fact {
             "posix" => Some(Self::Posix),
             "touched" => Some(Self::Touched),
             "plain" => Some(Self::Plain),
+            "nokablo" => Some(Self::NoKablo),
             _ => None,
         }
     }
@@ -511,6 +528,117 @@ pub struct Wrapped {
     pub key: String,
 }
 
+/// A call the integration may take: what the conditions both ways to take
+/// it share ([`decide`] and [`kablo_path`]) and what they learned on the way.
+struct Eligible {
+    call: crate::jobs::SshCall,
+    /// `ssh -G`'s answer for the arguments.
+    config: String,
+    /// The server's key ([`host_key`]).
+    key: String,
+}
+
+/// The questions both ways of taking a call ask, **in this order** (the cheap
+/// ones first, `ssh -G` only for a call that would be taken): the call is
+/// interactive and runs no remote command, the setting allows the host as typed
+/// ([`Settings::integration_for`]), `ssh -G` does not say the session runs
+/// something else ([`Session::allows_wrap`]) and the server is none of the
+/// `refusing` facts. One copy: a call one way takes and the other does not is
+/// a pane that behaves like neither.
+fn eligible(
+    args: &[String],
+    settings: &Settings,
+    runner: &dyn SshRunner,
+    state: &HostState,
+    refusing: &[Fact],
+) -> Option<Eligible> {
+    let call = ssh_call("ssh", args).filter(|call| !call.command)?;
+    if !settings.integration_for(&call.host) {
+        return None;
+    }
+    let config = config(runner, args)?;
+    if !Session::parse(&config).allows_wrap() {
+        return None;
+    }
+    let key = host_key(&config)?;
+    if refusing.iter().any(|fact| state.knows(*fact, &key)) {
+        return None;
+    }
+    Some(Eligible { call, config, key })
+}
+
+/// The server a call goes to as a kablo terminal ([`kablo_path`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KabloHost {
+    /// As typed ([`crate::jobs::Target::host`]).
+    pub host: String,
+    /// The port the arguments name.
+    pub port: Option<u16>,
+    /// The arguments to run again ([`crate::jobs::Target::argv`]).
+    pub argv: Vec<String>,
+    /// `ssh -G`'s answer, for the account and the master's socket.
+    pub config: String,
+    /// The server's key ([`host_key`]): the account's name on the wire.
+    pub key: String,
+}
+
+/// Whether the user's `ssh` shows a terminal kept on the server (kablo) and
+/// not a plain connection, and to whom. **The rule is [`decide`]'s, minus the
+/// wrapping**: an interactive call without a remote command, the setting
+/// allowing the host as typed, `ssh -G` saying the session is the ordinary
+/// one, and a server that is neither [`Fact::Plain`] (it has no shell to boot)
+/// nor [`Fact::NoKablo`] (kablo cannot be kept on it). A `production` host
+/// the setting refuses is plain, and so is a `ssh` whose terminals are not
+/// both ends of a terminal — the caller's bit, which the shell function
+/// checks before it runs this at all. `None` → the plain `ssh`.
+pub fn kablo_path(
+    args: &[String],
+    settings: &Settings,
+    runner: &dyn SshRunner,
+    state: &HostState,
+) -> Option<KabloHost> {
+    let Eligible { call, config, key } =
+        eligible(args, settings, runner, state, &[Fact::Plain, Fact::NoKablo])?;
+    Some(KabloHost {
+        host: call.host,
+        port: call.port,
+        argv: call.argv,
+        config,
+        key,
+    })
+}
+
+/// The command a new kablo terminal runs: the bootstrap
+/// ([`remote_command`]'s, as an argument vector — `new` takes no shell string),
+/// so the terminal's shell is the integrated one and the dock, the blocks, `⇄`
+/// and `LC_BATERI_TAB_URL` work as in a wrapped session. `cwd` is the
+/// starting directory ([`boot_in`]), `parent` the local block of the `ssh`
+/// command, `tab` the pane's identity; the nonce is the attempt's
+/// ([`new_nonce`]), which here proves nothing (a terminal the server keeps is
+/// not rerun) but is the bootstrap's `$2`.
+pub fn kablo_argv(
+    cwd: Option<&str>,
+    parent: Option<u32>,
+    nonce: &str,
+    tab: Option<&PaneUuid>,
+) -> Vec<Vec<u8>> {
+    let parent = parent.map_or_else(|| NO_PARENT.to_owned(), |parent| parent.to_string());
+    let tab = tab.map_or_else(|| NO_TAB.to_owned(), PaneUuid::url);
+    [
+        "sh",
+        "-c",
+        &boot_in(cwd),
+        BOOT_NAME,
+        &parent,
+        nonce,
+        TERM_PROGRAM_VERSION,
+        &tab,
+    ]
+    .iter()
+    .map(|word| word.as_bytes().to_vec())
+    .collect()
+}
+
 /// Every wrapping condition in one place; `None` → plain `ssh`.
 ///
 /// The cheap questions come first, so `ssh -G` (a process, and it runs the
@@ -539,18 +667,9 @@ pub fn decide(
     if boot.is_empty() || !is_inline(boot) || !is_nonce(nonce) || !tty {
         return None;
     }
-    let call = ssh_call("ssh", args).filter(|call| !call.command)?;
-    if !settings.integration_for(&call.host) {
-        return None;
-    }
-    let out = config(runner, args)?;
-    if !Session::parse(&out).allows_wrap() {
-        return None;
-    }
-    let key = host_key(&out)?;
-    if state.knows(Fact::Plain, &key) {
-        return None;
-    }
+    let Eligible {
+        config: out, key, ..
+    } = eligible(args, settings, runner, state, &[Fact::Plain])?;
     let control = control(&out, sockets).filter(|_| !names_sharing(args));
     Some(Wrapped {
         args: wrap(args, boot, parent, nonce, tab, control.as_ref()),
@@ -1241,11 +1360,15 @@ mod tests {
     /// after an update the carried zsh still has the **previous** version's
     /// `ssh` function, which asks the binary at the same path — now the new
     /// one — with its own flags, and hands `ssh-fell-back` the argv the old
-    /// binary wrapped. Frozen here: the function's two calls as today's
-    /// script makes them and a wrapped argv of an older version (another
+    /// binary wrapped. Frozen here: the function's two calls as the last script
+    /// that made them did and a wrapped argv of an older version (another
     /// version word). **The rule:** a flag or a tail form is added beside
-    /// these, never changed; this fixture goes two versions later. The
-    /// previous script's `ssh-argv` call is today's without `"${cwd[@]}"`
+    /// these, never changed; this fixture goes two versions after the last
+    /// script that made the calls. Today's script does not make them: its `ssh`
+    /// function runs `bateri ssh-hold` and the plain `ssh` (the wrapped
+    /// session is gone, `ssh_wrap::kablo_path`), so the subcommands answer
+    /// the shells that were started before the update and nobody else. The
+    /// previous script's `ssh-argv` call is the last one's without `"${cwd[@]}"`
     /// (an optional flag, [`ssh_argv_main`]); the subcommand without `--cwd`
     /// is `the_subcommand_prints_nul_separated_args_or_nothing`.
     #[test]
@@ -1255,13 +1378,14 @@ mod tests {
             r#"ssh-argv $tty --block "$__bateri_block" "${instance[@]}" "${cwd[@]}" -- "$@""#,
             r#"ssh-fell-back --rc $rc "${instance[@]}" -- "${wrapped[@]}""#,
         ] {
-            assert!(script.contains(call), "the function's call moved: {call}");
+            assert!(
+                !script.contains(call),
+                "today's script makes a call the wrapped session's: {call}"
+            );
         }
-        // The previous script's `ssh-argv` call, frozen: no `--cwd`.
-        let previous = r#"ssh-argv $tty --block "$__bateri_block" "${instance[@]}" -- "$@""#;
         assert!(
-            !script.contains(previous),
-            "today's call is not the previous one"
+            script.contains("ssh-hold -- \"$@\""),
+            "today's function runs the pane's program in the `ssh`'s place"
         );
         let dir = scratch("previous-call");
         let path = dir.join("remote-hosts");
@@ -1819,6 +1943,143 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn kablo_path_takes_what_decide_takes_and_a_server_kablo_cannot_be_kept_on_is_plain() {
+        let settings = Settings::default();
+        let args = words(&["-p", "2222", "prod"]);
+        let runner = Gconfig::new(PLAIN);
+        let host = kablo_path(&args, &settings, &runner, &HostState::default()).expect("kablo");
+        assert_eq!(
+            (host.host.as_str(), host.port, host.key.as_str()),
+            ("prod", Some(2222), "u@h:22")
+        );
+        assert_eq!(host.argv, words(&["ssh", "-p", "2222", "prod"]));
+        assert_eq!(host.config, PLAIN);
+        assert_eq!(
+            runner.calls.borrow().last(),
+            Some(&words(&["ssh", "-G", "-p", "2222", "prod"])),
+            "ssh -G sees the user's arguments"
+        );
+
+        // Everything `decide` refuses is refused here, and it asks nothing it
+        // need not: no process for a call that runs a command, a flag that
+        // is not a session, or a host the setting refuses.
+        let off = Settings {
+            remote_integration: false,
+            ..Settings::default()
+        };
+        let production = Settings {
+            remote_hosts: vec![HostRule {
+                pattern: "prod".to_owned(),
+                mark: Some(HostMark::Production),
+                integration: None,
+            }],
+            ..Settings::default()
+        };
+        for (settings, args) in [
+            (&settings, &["prod", "uptime"][..]),
+            (&settings, &["-N", "prod"]),
+            (&settings, &["-O", "check", "prod"]),
+            (&settings, &["-o", "RequestTTY=no", "prod"]),
+            (&off, &["prod"]),
+            (&production, &["prod"]),
+        ] {
+            let runner = Gconfig::new(PLAIN);
+            assert_eq!(
+                kablo_path(&words(args), settings, &runner, &HostState::default()),
+                None,
+                "{args:?}"
+            );
+            assert!(runner.calls.borrow().is_empty(), "{args:?}: no ssh -G");
+        }
+        for out in [
+            "user u\nhostname h\nport 22\nremotecommand tmux\n",
+            "user u\nhostname h\nport 22\nrequesttty false\n",
+            "user u\nhostname h\nport 22\nsessiontype none\n",
+        ] {
+            let runner = Gconfig::new(out);
+            assert_eq!(
+                kablo_path(&words(&["prod"]), &settings, &runner, &HostState::default()),
+                None,
+                "{out}"
+            );
+        }
+
+        // The state file: a server without a shell and one kablo cannot be kept
+        // on are plain; a row for another account is not this one's.
+        let runner = Gconfig::new(PLAIN);
+        let with = |fact: Fact, key: &str| {
+            let mut state = HostState::default();
+            state.note(fact, key, 1);
+            kablo_path(&words(&["prod"]), &settings, &runner, &state).map(|host| host.key)
+        };
+        assert_eq!(with(Fact::Plain, "u@h:22"), None);
+        assert_eq!(with(Fact::NoKablo, "u@h:22"), None);
+        assert_eq!(with(Fact::NoKablo, "v@h:22"), Some("u@h:22".to_owned()));
+        assert_eq!(with(Fact::Posix, "u@h:22"), Some("u@h:22".to_owned()));
+        assert_eq!(with(Fact::Touched, "u@h:22"), Some("u@h:22".to_owned()));
+    }
+
+    #[test]
+    fn the_no_kablo_row_is_a_row_an_older_reader_skips() {
+        let mut state = HostState::default();
+        state.note(Fact::NoKablo, "u@h:22", 7);
+        state.note(Fact::Posix, "u@h:22", 8);
+        let text = state.render();
+        assert_eq!(text, "nokablo\tu@h:22\t7\nposix\tu@h:22\t8\n");
+        assert_eq!(HostState::parse(&text), state);
+        // What an older build reads of the same file: the rows it knows.
+        let older = text
+            .lines()
+            .filter(|line| !line.starts_with("nokablo"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut known = HostState::default();
+        known.note(Fact::Posix, "u@h:22", 8);
+        assert_eq!(HostState::parse(&older), known);
+        state.forget(Fact::NoKablo, "u@h:22");
+        assert!(!state.knows(Fact::NoKablo, "u@h:22"));
+    }
+
+    #[test]
+    fn a_new_terminal_runs_the_bootstrap_as_an_argument_vector() {
+        let tab =
+            PaneUuid::from_url("bateri://tab/00000000-0000-4000-8000-000000000001").expect("a tab");
+        let argv = kablo_argv(None, Some(7), NONCE, Some(&tab));
+        let text: Vec<String> = argv
+            .iter()
+            .map(|word| String::from_utf8(word.clone()).expect("text"))
+            .collect();
+        assert_eq!(&text[..2], ["sh", "-c"]);
+        assert!(
+            text[2].starts_with("b="),
+            "the one-liner around the payload"
+        );
+        assert!(!text[2].contains('\''), "{}", text[2]);
+        assert_eq!(
+            &text[3..],
+            [
+                BOOT_NAME,
+                "7",
+                NONCE,
+                TERM_PROGRAM_VERSION,
+                "bateri://tab/00000000-0000-4000-8000-000000000001"
+            ]
+        );
+        // The same words in the remote command a login shell would run.
+        let command = remote_command(&text[2], Some(7), NONCE, Some(&tab));
+        assert!(command.ends_with(&format!(
+            "' {BOOT_NAME} 7 {NONCE} {TERM_PROGRAM_VERSION} bateri://tab/00000000-0000-4000-8000-000000000001"
+        )));
+        // Without a block or a tab the placeholders the bootstrap reads.
+        let bare = kablo_argv(None, None, NONCE, None);
+        assert_eq!(bare[4], b"-");
+        assert_eq!(bare[7], b"-");
+        // A starting directory rides in the payload.
+        let in_dir = kablo_argv(Some("/srv/app"), None, NONCE, None);
+        assert_ne!(in_dir[2], bare[2]);
     }
 
     #[test]

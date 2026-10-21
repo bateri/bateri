@@ -2028,24 +2028,37 @@ command line of a program running as root, so a script run with `sudo`
 
 #### Remote shell integration
 
-While `integration = true`, a plain `ssh` typed in the local zsh, fish or bash also
-sets up shell integration on the server: the directory (OSC 7) and then
-command blocks work remotely too. On the server, bateri only writes a few
-small files under `~/.local/share/bateri/shell/`; it does not touch the
-server's rc files.
+While `integration = true`, a plain `ssh` typed in the local zsh, fish or bash
+opens a terminal that **the server keeps**: it runs under kablo, bateri's
+companion program, which the first `ssh` to a server puts there (one file under
+`~/.local/share/kablo/`; nothing is installed system-wide and nothing needs
+root). The pane shows that terminal as if `ssh` had run in it, so you log in
+the way you always did (the password, the second factor and the question
+whether to trust the server's key are asked in the pane), the dock shows
+`⇄ host`, and the directory (OSC 7) and then command blocks work remotely too.
+Where the connection drops — a Wi-Fi that goes, a laptop that sleeps — the
+terminal and what runs in it stay on the server, and the pane goes on from where
+it was when the connection is back. A second `ssh` to the same account rides
+the connection the first made and asks nothing. On the server, bateri also
+writes a few small files under `~/.local/share/bateri/shell/`; it does not touch
+the server's rc files.
 
 - **On which host**: the value of the first matching entry in `hosts` that
   carries `integration`; if there is no such entry and the host's mark is
   `"production"`, **off**; in every other case, this key.
   So to turn it on for a host marked prod, write `integration = true` in its
   entry.
-- **From the first connection**: the directory and command blocks arrive with
-  the first `ssh`. If the server has a login shell that does not run commands
-  (a router, Windows), the server's own error line shows on the first
-  connection and the connection opens plain by itself; bateri remembers that
-  server as "shell-less" and later connections open plain from the start.
-  Leaving a server that has a shell with `exit` does not reopen the
-  connection. An `ssh` opened inside a local tmux or screen is not wrapped.
+- **From the first connection**: kablo is put on the server by the first
+  `ssh` (a line above the prompt says so, once: "kablo is set up on …"), and
+  the directory and command blocks arrive with it. A server kablo cannot be kept
+  on — a platform it is not built for (kablo runs on Linux and macOS, x86-64
+  and ARM), a home directory that cannot be written, a login shell that does not
+  run commands (a router, Windows) — gets a plain `ssh`: the pane shows the
+  connection the way it always did, and bateri remembers the server and does not
+  try again. A failure that may pass (the network went while kablo was being
+  put there) is a plain `ssh` that one time and nothing is remembered. Leaving a
+  server with `exit` returns to the local prompt and does not reopen the
+  connection. An `ssh` opened inside a local tmux or screen is a plain one.
   The remembered servers and the servers bateri has written files to are kept
   in bateri's own file
   (`~/Library/Application Support/bateri/remote-hosts`), not in
@@ -2053,11 +2066,11 @@ server's rc files.
   `~/.ssh/config` resolves. A server remembered as "shell-less" by mistake is
   forgotten with Shell ▸ Shell Integration on “{host}” (the item deletes this
   record on every click).
-- **Never wrapped**: ssh with a remote command or non-interactive ssh (`ssh
+- **Always plain**: ssh with a remote command or non-interactive ssh (`ssh
   host command`, `-N`, `-T`, `-W`, a pipe), `scp`/`rsync`/`git`, and a host
   whose `~/.ssh/config` entry has `RemoteCommand`, `RequestTTY no` or
-  `SessionType`. These stay without integration as before; the remote session
-  is still detected.
+  `SessionType`. These stay without a kept terminal and without integration as
+  before; the remote session is still detected.
 - A value that is not accepted and a settings file that cannot be read **turn
   integration off** (like `osc52`): a wrong guess would mean writing to the
   server silently.

@@ -746,7 +746,7 @@ fn set_cloexec(fd: RawFd) {
 
 /// The uid and pid of the process at the other end of `stream`.
 #[cfg(target_os = "macos")]
-fn peer(stream: &UnixStream) -> io::Result<(u32, u32)> {
+pub(crate) fn peer(stream: &UnixStream) -> io::Result<(u32, u32)> {
     // SAFETY: an all-zero `xucred` is valid; the kernel fills it.
     let mut cred: libc::xucred = unsafe { std::mem::zeroed() };
     let mut len = size_of::<libc::xucred>() as libc::socklen_t;
@@ -786,7 +786,7 @@ fn peer(stream: &UnixStream) -> io::Result<(u32, u32)> {
 
 /// The uid and pid of the process at the other end of `stream`.
 #[cfg(target_os = "linux")]
-fn peer(stream: &UnixStream) -> io::Result<(u32, u32)> {
+pub(crate) fn peer(stream: &UnixStream) -> io::Result<(u32, u32)> {
     // SAFETY: an all-zero `ucred` is valid; the kernel fills it.
     let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
     let mut len = size_of::<libc::ucred>() as libc::socklen_t;

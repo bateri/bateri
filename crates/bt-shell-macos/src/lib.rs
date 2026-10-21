@@ -50,6 +50,7 @@ mod card;
 mod clipboard;
 pub mod embed;
 mod footer;
+mod hold_service;
 mod hyperlink;
 mod keeper;
 mod keychain;

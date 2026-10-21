@@ -338,3 +338,54 @@ fn credits_markup_is_ascii() {
         );
     }
 }
+
+/// The package carries kablo's files where the application looks for them, for
+/// all four targets, and takes them from a release directory it checks.
+///
+/// The files themselves are not in this repository (a kablo release is the
+/// sibling repository's `dist`), so this reads the recipe and the code that opens
+/// the package: if one moves the directory, or drops a target, the other is wrong
+/// and no run notices — a server would get no kablo, and every `ssh` would be the
+/// plain one without a word.
+#[test]
+fn the_package_carries_kablo_where_the_application_looks_for_it() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let makefile = std::fs::read_to_string(root.join("Makefile")).expect("Makefile");
+    assert!(
+        makefile.contains("KABLO_DIST ?= ../kablo/dist"),
+        "the development source of kablo's release moved"
+    );
+    assert!(
+        makefile.contains("$(STAGE)/Contents/Resources/kablo"),
+        "the package no longer puts kablo's files in Resources/kablo"
+    );
+    let service = std::fs::read_to_string(root.join("crates/bt-shell-macos/src/hold_service.rs"))
+        .expect("hold_service.rs");
+    assert!(
+        service.contains("Resources/kablo"),
+        "the application no longer opens kablo's files in Resources/kablo"
+    );
+    let targets = makefile
+        .lines()
+        .find_map(|line| line.strip_prefix("KABLO_TARGETS = "))
+        .expect("the targets the recipe requires");
+    let mut found: Vec<&str> = targets.split_whitespace().collect();
+    found.sort_unstable();
+    assert_eq!(
+        found,
+        [
+            "aarch64-apple-darwin",
+            "aarch64-unknown-linux-musl",
+            "x86_64-apple-darwin",
+            "x86_64-unknown-linux-musl"
+        ],
+        "kablo's targets are the four `kablo_proto::install::Target::ALL` names"
+    );
+    // The recipe never names a kablo version: the release's names say it.
+    assert!(
+        !makefile
+            .lines()
+            .any(|line| line.contains("kablo-0.") || line.contains("kablo_version")),
+        "a kablo version is written in the Makefile"
+    );
+}

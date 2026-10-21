@@ -286,41 +286,28 @@ function __bateri_ssh_arm
     end
 end
 
-# Runs the user's `ssh`, wrapped when bateri says so. The rules are the zsh
-# wrapper's, and the binary's (`ssh_wrap::decide`): which call is interactive,
-# the settings, `ssh -G`. `bateri ssh-argv` prints the wrapped arguments, each
-# followed by a NUL, or nothing — and nothing (also a missing binary or any
-# failure) means plain `command ssh $argv`. `--tty` only when stdin and stdout
-# are terminals. Inside a local multiplexer nothing is wrapped: the pane sees
-# tmux or screen, not the ssh, so the session could never prove it ran.
-# After a wrapped session ends `bateri ssh-fell-back` says whether to rerun it
-# plain (a router, a server that refused our command).
+# Runs the user's `ssh`: as a terminal kept on the server when bateri says so,
+# else plain `command ssh $argv`. The zsh wrapper's, in what it does:
+# `bateri ssh-hold -- <args…>` stands in the `ssh`'s place, asks the running
+# bateri for the terminal and only carries bytes; every decision (which call is
+# interactive, the settings, `ssh -G`, whether the server can keep a terminal,
+# the password and the server's key — asked on this terminal by ssh itself) is
+# the binary's, and whatever it cannot do before a terminal is shown, it
+# replaces itself with the plain `ssh` with the arguments as typed. Plain
+# without asking when it could not work: stdin and stdout must be terminals,
+# there is the binary and the directory of bateri's sockets, and no local
+# multiplexer. `BATERI_SSH_INSTANCE` is set for the one command only (`env`):
+# the shell erased it at startup. The folder of a tab opened from a remote one
+# is the pane's to pass on, not this function's; it is used up all the same.
 function __bateri_ssh
-    set -l cwd
-    test -n "$__bateri_ssh_cwd"; and set cwd --cwd $__bateri_ssh_cwd
     set -g __bateri_ssh_cwd ""
-    if set -q TMUX; or set -q STY
+    if set -q TMUX; or set -q STY; or not isatty stdin; or not isatty stdout
         command ssh $argv
         return
     end
-    set -l tty
-    isatty stdin; and isatty stdout; and set tty --tty
-    set -l instance
-    test -n "$__bateri_ssh_instance"; and set instance --instance $__bateri_ssh_instance
-    set -l wrapped
-    if test -x "$__bateri_bin"
-        set wrapped (command $__bateri_bin ssh-argv $tty --block $__bateri_block $instance $cwd -- $argv 2>/dev/null | string split0)
-    end
-    if not set -q wrapped[1]
+    if not test -x "$__bateri_bin"; or test -z "$__bateri_ssh_instance"
         command ssh $argv
         return
     end
-    command ssh $wrapped
-    set -l code $status
-    set -l plain (command $__bateri_bin ssh-fell-back --rc $code $instance -- $wrapped 2>/dev/null | string split0)
-    if set -q plain[1]
-        command ssh $plain
-        return
-    end
-    return $code
+    env BATERI_SSH_INSTANCE=$__bateri_ssh_instance $__bateri_bin ssh-hold -- $argv
 end

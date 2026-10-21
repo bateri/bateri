@@ -15,10 +15,17 @@
 //! `ssh-hold` it was started with across a bateri update, so the application
 //! reads **the version it was shipped with and the one before it**
 //! ([`OLDEST`]..=[`VERSION`]); a version leaves that range only when the
-//! one after it has been shipped for a release. Today the range is one wide:
-//! version 1 has no predecessor, and its bytes are frozen in the tests
-//! (`V1_FIXTURE`), so the first change to the wire adds a version and keeps
-//! that fixture reading.
+//! one after it has been shipped for a release. Every version's bytes are
+//! frozen in the tests (`V1_FIXTURE`, `V2_FIXTURE`), so a change to the wire
+//! adds a version and keeps the fixtures reading.
+//!
+//! **Version 2** lets the application ask the holder to do something on the
+//! pane's terminal before the terminal is shown ([`ToHold::Run`], answered by
+//! [`ToApp::Ran`]: the first connection to a server asks for a password, or
+//! whether to trust its key, and only the program in front of the pane can ask
+//! it there) and to tell the user a line ([`ToHold::Note`]). A version 1 holder
+//! is never sent either: it is a pane that outlived an update and only ever
+//! resumes a terminal.
 //!
 //! **What the offsets mean.** A terminal's output has a position, the
 //! number of bytes the program wrote before it ([`ToHold::Output::end`] is the position
@@ -33,7 +40,7 @@ use kablo_proto::SessionId;
 use kablo_proto::v1::{Exit, Size};
 
 /// The newest wire version this build speaks.
-pub const VERSION: u8 = 1;
+pub const VERSION: u8 = 2;
 
 /// The oldest wire version this build still reads (see the module docs).
 pub const OLDEST: u8 = 1;
@@ -60,6 +67,7 @@ mod kind {
     pub const OPEN: u8 = 0x02;
     pub const INPUT: u8 = 0x03;
     pub const RESIZE: u8 = 0x04;
+    pub const RAN: u8 = 0x05;
 
     pub const WELCOME: u8 = 0x81;
     pub const REFUSED: u8 = 0x82;
@@ -67,6 +75,8 @@ mod kind {
     pub const OUTPUT: u8 = 0x84;
     pub const END: u8 = 0x85;
     pub const BELL: u8 = 0x86;
+    pub const RUN: u8 = 0x87;
+    pub const NOTE: u8 = 0x88;
 }
 
 /// Why bytes are not a conversation this build can have.
@@ -129,6 +139,13 @@ pub enum ToApp {
     Input(Vec<u8>),
     /// The pane changed size.
     Resize(Size),
+    /// The program asked for by [`ToHold::Run`] has ended (version 2): its
+    /// exit status, or 128 plus the signal that ended it, or 255 when it
+    /// could not be started.
+    Ran {
+        /// The status.
+        status: u8,
+    },
 }
 
 /// What the application says to the holder.
@@ -172,6 +189,19 @@ pub enum ToHold {
     /// What was typed could not be sent (the connection to the server is
     /// down): ring the bell.
     Bell,
+    /// Run this program on the pane's terminal, which is given back as it was
+    /// for the time (version 2); the answer is [`ToApp::Ran`]. The holder
+    /// takes standard input, output and error as they are, so what the program
+    /// asks the user it asks on the pane.
+    Run {
+        /// The program and its arguments, each as the bytes to run.
+        argv: Vec<Vec<u8>>,
+    },
+    /// A line for the user, shown before the terminal is (version 2).
+    Note {
+        /// The text, one line, without a line break.
+        text: String,
+    },
 }
 
 /// The version both sides speak, or none.
@@ -257,6 +287,7 @@ impl ToApp {
                 put_size(&mut payload, *size);
                 frame(out, kind::RESIZE, &payload);
             }
+            ToApp::Ran { status } => frame(out, kind::RAN, &[*status]),
         }
     }
 
@@ -308,6 +339,11 @@ impl ToApp {
                 at.done()?;
                 ToApp::Resize(size)
             }
+            kind::RAN => {
+                let status = at.u8()?;
+                at.done()?;
+                ToApp::Ran { status }
+            }
             _ => return Ok(None),
         };
         Ok(Some(message))
@@ -348,6 +384,17 @@ impl ToHold {
                 frame(out, kind::END, &payload);
             }
             ToHold::Bell => frame(out, kind::BELL, &[]),
+            ToHold::Run { argv } => {
+                let count = u16::try_from(argv.len()).unwrap_or(u16::MAX);
+                payload.extend_from_slice(&count.to_be_bytes());
+                for arg in argv.iter().take(usize::from(count)) {
+                    let length = u32::try_from(arg.len()).unwrap_or(u32::MAX);
+                    payload.extend_from_slice(&length.to_be_bytes());
+                    payload.extend_from_slice(arg);
+                }
+                frame(out, kind::RUN, &payload);
+            }
+            ToHold::Note { text } => frame(out, kind::NOTE, clip(text).as_bytes()),
         }
     }
 
@@ -385,6 +432,22 @@ impl ToHold {
                 at.done()?;
                 ToHold::Bell
             }
+            kind::RUN => {
+                let count = usize::from(at.u16()?);
+                if count > ARGS_LIMIT {
+                    return Err(Error::Malformed);
+                }
+                let mut argv = Vec::with_capacity(count);
+                for _ in 0..count {
+                    let length = at.u32()? as usize;
+                    argv.push(at.take(length)?.to_vec());
+                }
+                at.done()?;
+                ToHold::Run { argv }
+            }
+            kind::NOTE => ToHold::Note {
+                text: at.rest_text(),
+            },
             _ => return Ok(None),
         };
         Ok(Some(message))

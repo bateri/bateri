@@ -2595,6 +2595,8 @@ fn masters(carried: Option<&str>) -> Option<Arc<Masters>> {
             // listener — silently; the client then reads `unknown`.
             if let Some(dir) = sweeper.bases().first() {
                 let _ = focus::serve(dir, focus_answerer());
+                // The panes' `ssh-hold` programs connect here.
+                crate::hold_service::serve(dir, sweeper.bases().to_vec());
             }
             sweeper.sweep();
         });
@@ -2936,6 +2938,31 @@ impl AppDelegate {
     /// the tab's focused pane this one (the search field included,
     /// [`TerminalTab::focused_pane`]) — and the whole seconds since its last
     /// input. Main thread, at the moment of the question.
+    /// The pane a process is in — the one whose pseudo-terminal is the process's
+    /// controlling terminal, the kernel's record and nothing the process says —
+    /// for the `ssh-hold` service: the pane's identity and the local block of the
+    /// command that is running in it (the `ssh`). `None` for a process in no pane.
+    pub(crate) fn pane_of_process(
+        &self,
+        pid: u32,
+    ) -> Option<bt_shell_common::kablo::service::PaneInfo> {
+        let device = jobs::controlling_terminal(pid)?;
+        let pane = find_open(self.all_panes(), |pane| {
+            let in_it = pane
+                .session()
+                .and_then(|session| session.with_pty_fd(jobs::pty_device))
+                == Some(device);
+            (in_it, pane.is_closed())
+        })?;
+        Some(bt_shell_common::kablo::service::PaneInfo {
+            tab: Some(pane.uuid().clone()),
+            block: pane
+                .session()
+                .and_then(|session| session.last_local_block()),
+            directory: None,
+        })
+    }
+
     fn focus_answer(&self, id: &PaneUuid) -> focus::Answer {
         let Some((_, tab, pane)) = self.pane_by_tab(id) else {
             return focus::Answer::None;

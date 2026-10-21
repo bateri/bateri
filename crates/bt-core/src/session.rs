@@ -9647,6 +9647,15 @@ impl Session {
         self.ledger_info(key, command, depth)
     }
 
+    /// The identity of the local shell's newest block, which is the running
+    /// command's while one runs (`bt_block=` of its prompt): the parent a program the
+    /// command starts names its own blocks by (`bt_remote=<parent>.…`). `None` before any block.
+    ///
+    /// **Journal-neutral:** reads only.
+    pub fn last_local_block(&self) -> Option<u32> {
+        lock(&self.shell).last_local_block()
+    }
+
     /// Reads the text of the commands that started since the last look and keeps it
     /// ([`crate::history`]): the palette's command history is made of it. The main queue asks
     /// after a command starts ([`Wake::command_started`], [`Wake::remote_command_edge`]) and

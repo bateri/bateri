@@ -41,6 +41,11 @@
 //! (`crate::hold`): it ties each such program to one terminal of a client and
 //! carries bytes both ways, also without a transport.
 //!
+//! `service` is that end running: the socket, the one loop that drives the hub and the
+//! clients, and the threads that carry bytes; `ssh` is the service's steps over
+//! ssh (the master connection on the pane's terminal, the install, the bridge) and
+//! `install` the rules for putting kablo on a server from the package's files.
+//!
 //! `fake` (under `cfg(test)` and the `test-support` feature) is the server side of
 //! the same pipe for tests: the bridge with a few terminals, a journal of a chosen
 //! size and an old version of itself.
@@ -57,6 +62,9 @@ use kablo_proto::{NOISE_LIMIT, WIRE};
 #[cfg(any(test, feature = "test-support"))]
 pub mod fake;
 pub mod hub;
+pub mod install;
+pub mod service;
+pub mod ssh;
 #[cfg(test)]
 mod tests;
 

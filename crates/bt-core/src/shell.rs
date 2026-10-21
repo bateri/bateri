@@ -3604,6 +3604,12 @@ impl ShellLog {
         self.local.blocks.last().map(|(id, _)| BlockKey::Local(id))
     }
 
+    /// The identity of the newest block of the local shell: while a command runs, the
+    /// command's own (the shell numbers a block at its prompt, before the command).
+    pub(crate) fn last_local_block(&self) -> Option<u32> {
+        self.local.blocks.last().map(|(id, _)| id)
+    }
+
     /// The trail and the identity a key points to; `None` for a remote key
     /// of a shell the remote trail no longer holds.
     fn track(&self, key: BlockKey) -> Option<(&BlockTrack, u32)> {

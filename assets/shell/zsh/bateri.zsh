@@ -285,79 +285,40 @@ __bateri_hooks() {
   fi
 }
 
-# Runs the user's `ssh`, wrapped when bateri says so.
+# Runs the user's `ssh`: as a terminal kept on the server when bateri says so,
+# else plain `command ssh "$@"`.
 #
-# `bateri ssh-argv [--tty] --block N [--instance I] [--cwd D] -- <args…>` prints the wrapped arguments, each
-# followed by a NUL, or nothing — and nothing (also a missing binary or any
-# failure) means plain `command ssh "$@"`, today's path. `--tty` only when stdin
-# AND stdout are terminals: under `$(…)` the binary's own stdout is our pipe, so
-# it cannot ask itself (`ssh host | grep` is not wrapped). The rules —
-# which call is interactive, the settings, `ssh -G`, whether the server is
-# known to have no shell — are all in the binary (`ssh_wrap::decide`), not
-# here: one parser.
-# `--block` is this command's block (`__bateri_block`): the server's blocks are
-# marked as its children (`bt_remote=<P>.<S>.<n>`). `--instance`
-# is bateri's socket directory (`__bateri_ssh_instance`): the session becomes a
-# master there and bateri's file jobs ride it. `--cwd` is the remote folder
-# a tab opened by ⌘T from a remote tab inherits (`__bateri_ssh_cwd`): the
-# server's shell starts there. Only the tab's FIRST `ssh` gets it — the one
-# ⌘T typed —, so an `exit` and a new `ssh`, to this host or another, starts
-# at home as a plain one does.
+# `bateri ssh-hold -- <args…>` stands in the `ssh`'s place and is the pane's
+# program for as long as the terminal is shown: it asks the running bateri for
+# the terminal and then only carries bytes (what the terminal's program writes
+# to the screen, what is typed to it, the pane's size). Everything it would
+# have to decide — which call is interactive, the settings, `ssh -G`, whether the
+# server can keep a terminal, the password and the server's key (asked on this
+# terminal, by ssh itself) — is bateri's, in the binary; whatever it cannot do,
+# before a terminal is shown, it replaces itself with the plain `ssh` with the
+# arguments as they were typed, so the worst case is today's `ssh`. Its exit
+# status is the terminal's program's (`ssh` reports the remote command's the
+# same way). The function does not look at it.
 #
-# THE SILENT FALLBACK: every wrapped `ssh` that ended asks `bateri
-# ssh-fell-back --rc N [--instance I] -- <the wrapped arguments>` — 255 too:
-# ssh's own error (a password, the network, a host key) is the binary's to
-# tell from an endpoint that refused our command after the login (the pane's
-# login proof). The binary takes the attempt's nonce out
-# of them and answers nothing when the bootstrap said `up` or the user typed
-# after the login — the user's session ran and its code is theirs, so an
-# `exit` is never followed by a new connection —, or the plain rerun's
-# arguments when it did not (a router, Windows: our command never ran); the
-# rerun shares the wrapped call's `--instance`, so it
-# rides the wrapped session's master while it lingers. The function returns
-# the code of the last `ssh` it ran.
-#
-# INSIDE A LOCAL MULTIPLEXER NOTHING IS WRAPPED (`$TMUX`, `$STY`): the pane
-# sees tmux or screen, not the ssh, and the bootstrap's `up` does not reach it
-# — a wrapped session there could never prove it ran, and a fallback would
-# reconnect the user after their `exit`.
-#
-# `$(…)` keeps NUL bytes in zsh and `"${(@0)…}"` splits on them keeping empty
-# arguments; the last NUL leaves one empty element behind, which is dropped.
-# An answer that does not end with a NUL is not ours: plain `ssh`.
+# Plain without asking when it could not work: stdin AND stdout must be
+# terminals (`ssh host | grep` is the user's own pipe), there is the binary and
+# the directory of bateri's sockets (`__bateri_ssh_instance`, which names the
+# running bateri the pane was born under: the binary finds the socket there
+# and nowhere else), and no local multiplexer (`$TMUX`, `$STY`): the pane sees
+# tmux or screen, not the ssh. `BATERI_SSH_INSTANCE` is exported for the one
+# command only — the shell unset it at startup so that programs started from
+# here do not carry it.
 __bateri_ssh() {
   emulate -L zsh
-  local out tty= rc
-  local -a instance cwd
-  [[ -n $__bateri_ssh_cwd ]] && cwd=( --cwd "$__bateri_ssh_cwd" )
+  # The folder a tab opened by ⌘T from a remote tab inherits is the pane's, not
+  # this function's to pass on; it is used up all the same, once.
   __bateri_ssh_cwd=
-  if [[ -n ${TMUX-} || -n ${STY-} ]]; then
+  if [[ -n ${TMUX-} || -n ${STY-} || ! -t 0 || ! -t 1 \
+        || ! -x $__bateri_bin || -z $__bateri_ssh_instance ]]; then
     command ssh "$@"
     return
   fi
-  [[ -t 0 && -t 1 ]] && tty=--tty
-  [[ -n $__bateri_ssh_instance ]] && instance=( --instance "$__bateri_ssh_instance" )
-  if [[ -x $__bateri_bin ]]; then
-    out=$(command $__bateri_bin ssh-argv $tty --block "$__bateri_block" "${instance[@]}" "${cwd[@]}" -- "$@" 2>/dev/null)
-  fi
-  if [[ -n $out && $out == *$'\0' ]]; then
-    local -a wrapped
-    wrapped=( "${(@0)out}" )
-    wrapped[-1]=()
-    command ssh "${wrapped[@]}"
-    rc=$?
-    out=$(command $__bateri_bin ssh-fell-back --rc $rc "${instance[@]}" -- "${wrapped[@]}" 2>/dev/null)
-    if [[ -n $out && $out == *$'\0' ]]; then
-      local -a plain
-      plain=( "${(@0)out}" )
-      plain[-1]=()
-      command ssh "${plain[@]}"
-      return
-    fi
-    return rc
-  else
-    command ssh "$@"
-  fi
+  BATERI_SSH_INSTANCE=$__bateri_ssh_instance command $__bateri_bin ssh-hold -- "$@"
 }
 
 # The window title a command set goes with it: `__bateri_preexec` pushes the

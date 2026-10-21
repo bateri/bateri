@@ -13,7 +13,12 @@
 //! **The terminal's mode.** Standard input is a terminal; for as long as the
 //! terminal is shown it is **raw** (every key reaches the program as the byte
 //! it is, nothing echoed, nothing translated on the way out) and the mode it had
-//! comes back on every way out, the `exec` of another program included.
+//! comes back on every way out, the `exec` of another program included. A
+//! terminal that does not exist yet is made raw only once bateri has tied the
+//! pane to one ([`ToHold::Bound`]): until then the pane is an ordinary command
+//! line, so Ctrl-C ends the wait and a password typed to a program bateri asked
+//! for ([`ToHold::Run`]) is read the way a terminal reads it, and what is typed
+//! meanwhile waits for the terminal.
 //!
 //! **Surviving the application.** The pane outlives bateri when the
 //! update or a crash is bridged by the holder (`handover`): this program is
@@ -377,14 +382,21 @@ enum Served {
 /// follows bateri across restarts, and gives the terminal back before it
 /// returns (and before the note, which is printed cooked).
 pub fn run(config: &Config) -> Outcome {
-    let raw = Raw::enter(config.input);
-    let winch = raw.as_ref().and_then(|_| Winch::install().ok());
+    // SAFETY: `isatty` has no preconditions.
+    let terminal = unsafe { libc::isatty(config.input) } != 0;
+    let winch = terminal.then(|| Winch::install().ok()).flatten();
     let mut state = State::new(config);
+    // A terminal tied to a server already is shown at once; a new one is
+    // shown raw when bateri says it exists.
+    let mut raw = state
+        .committed()
+        .then(|| Raw::enter(config.input))
+        .flatten();
     let mut failures = 0usize;
     let finish = loop {
         let mut welcomed = false;
         if let Ok(mut stream) = connect(&config.sockets) {
-            match serve(config, &mut state, &mut stream, winch.as_ref()) {
+            match serve(config, &mut state, &mut stream, winch.as_ref(), &mut raw) {
                 Served::Done(finish) => break finish,
                 Served::Lost { welcomed: yes } => welcomed = yes,
             }
@@ -427,6 +439,7 @@ fn serve(
     state: &mut State,
     stream: &mut UnixStream,
     winch: Option<&Winch>,
+    raw: &mut Option<Raw>,
 ) -> Served {
     let lost = |welcomed| Served::Lost { welcomed };
     let hello = ToApp::Hello {
@@ -443,7 +456,12 @@ fn serve(
         let mut fds = [
             poll_in(stream.as_raw_fd()),
             poll_in(winch.map_or(-1, |winch| winch.read)),
-            poll_in(if welcomed { config.input } else { -1 }),
+            // What is typed before the terminal exists waits for it.
+            poll_in(if welcomed && state.committed() {
+                config.input
+            } else {
+                -1
+            }),
         ];
         if poll(&mut fds, -1).is_err() {
             return lost(welcomed);
@@ -487,8 +505,22 @@ fn serve(
                     ToHold::Refused { fall_back, text } => {
                         return Served::Done(refused(config, state, fall_back, text));
                     }
-                    ToHold::Bound { account } => state.account = Some(account),
+                    ToHold::Bound { account } => {
+                        state.account = Some(account);
+                        raw_if_needed(config, raw);
+                    }
+                    ToHold::Run { argv } => {
+                        let status = run_program(config, &argv, raw);
+                        if send(stream, &ToApp::Ran { status }).is_err() {
+                            return lost(welcomed);
+                        }
+                    }
+                    ToHold::Note { text } => {
+                        let line = format!("\x1b[0m\x1b[2m{text}\x1b[0m\r\n");
+                        let _ = write_all(config.output, line.as_bytes());
+                    }
                     ToHold::Output { end, data } => {
+                        raw_if_needed(config, raw);
                         if write_all(config.output, &data).is_err() {
                             return Served::Done(Finish::quiet(Outcome::Exit(1)));
                         }
@@ -508,7 +540,7 @@ fn serve(
                 }
             }
         }
-        if welcomed && ready(&fds[2]) {
+        if welcomed && state.committed() && ready(&fds[2]) {
             match read_fd(config.input, &mut buffer) {
                 // The pane's terminal is gone (hung up): there is nobody to show
                 // the terminal to. The connection closing lets bateri go of it.
@@ -521,6 +553,40 @@ fn serve(
             }
         }
     }
+}
+
+/// The terminal raw, if it is not already (and is one).
+fn raw_if_needed(config: &Config, raw: &mut Option<Raw>) {
+    if raw.is_none() {
+        *raw = Raw::enter(config.input);
+    }
+}
+
+/// Runs the program bateri asked for on the pane's terminal and says how it
+/// ended: its status, 128 plus the signal that ended it, or 255 when it could
+/// not be started. The terminal has the mode it had when this started for the
+/// time (a terminal that was raw is raw again after).
+fn run_program(config: &Config, argv: &[Vec<u8>], raw: &mut Option<Raw>) -> u8 {
+    let was_raw = raw.take().is_some();
+    let status = match argv.split_first() {
+        Some((program, args)) => std::process::Command::new(std::ffi::OsStr::from_bytes(program))
+            .args(args.iter().map(|arg| std::ffi::OsStr::from_bytes(arg)))
+            .status()
+            .ok()
+            .map(|status| {
+                use std::os::unix::process::ExitStatusExt;
+                match (status.code(), status.signal()) {
+                    (Some(code), _) => u8::try_from(code).unwrap_or(1),
+                    (None, Some(signal)) => u8::try_from(128 + signal).unwrap_or(255),
+                    (None, None) => 255,
+                }
+            }),
+        None => None,
+    };
+    if was_raw {
+        *raw = Raw::enter(config.input);
+    }
+    status.unwrap_or(255)
 }
 
 /// bateri will not show a terminal.

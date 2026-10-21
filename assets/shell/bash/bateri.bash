@@ -381,54 +381,25 @@ else
   unset __bateri_nl
 fi
 
-# Runs the user's `ssh`, wrapped when bateri says so. The rules are the zsh wrapper's and the
-# binary's (`ssh_wrap::decide`): which call is interactive, the settings, `ssh -G`.
-# `bateri ssh-argv` prints the wrapped arguments, each followed by a NUL, or nothing — and
-# nothing (also a missing binary or any failure) means plain `command ssh "$@"`. `--tty` only
-# when stdin and stdout are terminals. Inside a local multiplexer nothing is wrapped: the pane
-# sees tmux or screen, not the ssh, so the session could never prove it ran. After a wrapped
-# session ends `bateri ssh-fell-back` says whether to rerun it plain (a router, a server that
-# refused our command). `--block` is this command's block; `--cwd` is only for the first `ssh`
-# of a tab opened from a remote one.
-#
-# An answer is read NUL by NUL; one that does not end with a NUL is not ours: plain `ssh`.
+# Runs the user's `ssh`: as a terminal kept on the server when bateri says so, else plain
+# `command ssh "$@"`. The zsh wrapper's, word for word in what it does: `bateri ssh-hold -- <args…>`
+# stands in the `ssh`'s place, asks the running bateri for the terminal and only carries bytes;
+# every decision (which call is interactive, the settings, `ssh -G`, whether the server can keep a
+# terminal, the password and the server's key — asked on this terminal by ssh itself) is the
+# binary's, and whatever it cannot do before a terminal is shown, it replaces itself with the plain
+# `ssh` with the arguments as typed. Plain without asking when it could not work: stdin and stdout
+# must be terminals, there is the binary and the directory of bateri's sockets, and no local
+# multiplexer (`$TMUX`, `$STY`). `BATERI_SSH_INSTANCE` is exported for the one command only: the
+# shell unset it at startup. The folder of a tab opened from a remote one is the pane's to pass on,
+# not this function's; it is used up all the same, once.
 __bateri_ssh() {
-  local arg rc
-  local -a tty=() instance=() cwd=() wrapped=() plain=()
-  if [[ -n $__bateri_ssh_cwd ]]; then
-    cwd=(--cwd "$__bateri_ssh_cwd")
-  fi
   __bateri_ssh_cwd=
-  if [[ -n ${TMUX-} || -n ${STY-} ]]; then
+  if [[ -n ${TMUX-} || -n ${STY-} || ! -t 0 || ! -t 1 \
+        || ! -x $__bateri_bin || -z $__bateri_ssh_instance ]]; then
     command ssh "$@"
     return
   fi
-  [[ -t 0 && -t 1 ]] && tty=(--tty)
-  [[ -n $__bateri_ssh_instance ]] && instance=(--instance "$__bateri_ssh_instance")
-  if [[ -x $__bateri_bin ]]; then
-    arg=
-    while IFS= read -r -d '' arg; do
-      wrapped+=("$arg")
-    done < <(command "$__bateri_bin" ssh-argv "${tty[@]}" --block "$__bateri_block" \
-      "${instance[@]}" "${cwd[@]}" -- "$@" 2>/dev/null)
-    [[ -n $arg ]] && wrapped=()
-  fi
-  if (( ${#wrapped[@]} )); then
-    command ssh "${wrapped[@]}"
-    rc=$?
-    arg=
-    while IFS= read -r -d '' arg; do
-      plain+=("$arg")
-    done < <(command "$__bateri_bin" ssh-fell-back --rc "$rc" "${instance[@]}" \
-      -- "${wrapped[@]}" 2>/dev/null)
-    [[ -n $arg ]] && plain=()
-    if (( ${#plain[@]} )); then
-      command ssh "${plain[@]}"
-      return
-    fi
-    return $rc
-  fi
-  command ssh "$@"
+  BATERI_SSH_INSTANCE=$__bateri_ssh_instance command "$__bateri_bin" ssh-hold -- "$@"
 }
 
 # The `ssh` function, defined AFTER the user's files, so a function or alias of theirs is seen

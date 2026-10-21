@@ -46,6 +46,8 @@
 #[cfg(target_os = "macos")]
 use std::ffi::{c_int, c_void};
 
+use std::os::unix::ffi::OsStrExt as _;
+
 use bt_core::RemoteKind;
 
 use crate::ssh_wrap;
@@ -381,13 +383,35 @@ pub fn remote(parent: ShellParent, child: u32, table: &impl ProcessTable) -> Pro
 /// A name whose argv is worth reading: ssh, mosh's client and the Perl running
 /// the mosh script (`/usr/bin/perl` `exec`s into `perl5.NN`, so match by prefix).
 fn is_candidate(name: &str) -> bool {
-    name == "ssh" || name == "mosh-client" || name.starts_with("perl")
+    name == "ssh" || name == "mosh-client" || name.starts_with("perl") || is_bateri(name)
+}
+
+/// Whether a process name is the application's binary, which is what a pane's
+/// `ssh-hold` is (`bateri` and a renamed development copy that keeps the prefix).
+fn is_bateri(name: &str) -> bool {
+    name.starts_with("bateri")
 }
 
 /// The target of a recognized process: the outer `None` means "not recognized",
 /// the inner `None` "recognized but not an interactive remote session".
 fn remote_target(name: &str, args: &[String]) -> Option<Option<Target>> {
     let rest = args.get(1..).unwrap_or_default();
+    if is_bateri(name) {
+        // `bateri ssh-hold … -- <the ssh arguments>`: a pane showing a terminal
+        // kept on a server is a remote session, to the server the arguments
+        // name, as the `ssh` it stands in for would have been. Any other
+        // subcommand of the binary is not recognized.
+        if rest.first().map(String::as_str) != Some(crate::hold::SUBCOMMAND) {
+            return None;
+        }
+        // A holder that was not started with ssh arguments (it resumes a
+        // terminal it was shown) is recognized and names no target here.
+        let ssh_args = rest
+            .iter()
+            .position(|arg| arg == "--")
+            .map(|at| &rest[at + 1..]);
+        return Some(ssh_args.and_then(|args| ssh_target("ssh", args)));
+    }
     if name == "ssh" {
         // argv[0] as the process gives it (`ssh`, `/usr/bin/ssh`): a command
         // typed through an alias (`alias s=ssh`) is also `ssh` in the process.
@@ -1141,6 +1165,80 @@ fn parse_stat(line: &str) -> Option<Stat> {
     })
 }
 
+// ─── terminals ───────────────────────────────────────────────────────────
+
+/// The terminal a process is attached to — its controlling terminal — as a
+/// number [`pty_device`] gives the same way for the pseudo-terminal it is on:
+/// the two are equal exactly when the process is in that terminal. `None` for a
+/// process with no terminal, or one that cannot be read (gone, another user's
+/// on Linux).
+///
+/// This is how bateri finds out **which pane** a process is in, from the
+/// kernel's record and not from anything the process says (an environment
+/// variable, an argument): a program in another terminal cannot make itself
+/// the pane's.
+#[cfg(target_os = "macos")]
+pub fn controlling_terminal(pid: u32) -> Option<u64> {
+    // SAFETY: `proc_bsdinfo` is a plain C struct holding only integers and
+    // `c_char` arrays; all zero bytes is a valid value of it.
+    let info: libc::proc_bsdinfo = unsafe { pid_info(pid, libc::PROC_PIDTBSDINFO)? };
+    // No terminal is `NODEV`, all ones (and zero is no device either).
+    (info.e_tdev != 0 && info.e_tdev != u32::MAX).then_some(u64::from(info.e_tdev))
+}
+
+/// [`controlling_terminal`] on Linux: `tty_nr`, the fourth field after the
+/// command of `/proc/<pid>/stat`.
+#[cfg(target_os = "linux")]
+pub fn controlling_terminal(pid: u32) -> Option<u64> {
+    let line = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let rest = &line[line.rfind(')')? + 1..];
+    let tty: u64 = rest.split_whitespace().nth(4)?.parse().ok()?;
+    (tty != 0).then_some(tty)
+}
+
+/// The terminal device the pseudo-terminal whose master is `master` is, in
+/// [`controlling_terminal`]'s number: the slave's device. `None` if `master`
+/// is not a pseudo-terminal master.
+pub fn pty_device(master: std::os::fd::BorrowedFd<'_>) -> Option<u64> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::MetadataExt;
+    // `ptsname` answers in a buffer of its own: one caller at a time, and the
+    // name copied before the next.
+    static ONE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let name = {
+        let _one = ONE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // SAFETY: `ptsname` reads the descriptor and returns null or a
+        // NUL-terminated name that stays valid until the next call, copied here.
+        let name = unsafe { libc::ptsname(master.as_raw_fd()) };
+        if name.is_null() {
+            return None;
+        }
+        // SAFETY: not null, NUL-terminated, copied while the lock is held.
+        unsafe { std::ffi::CStr::from_ptr(name) }.to_owned()
+    };
+    let rdev = std::fs::metadata(std::ffi::OsStr::from_bytes(name.to_bytes()))
+        .ok()?
+        .rdev();
+    Some(device_number(rdev))
+}
+
+/// A device number in the form [`controlling_terminal`] reports it.
+#[cfg(target_os = "macos")]
+fn device_number(rdev: u64) -> u64 {
+    // `dev_t` is 32 bits wide here; `stat` widens it.
+    u64::from(rdev as u32)
+}
+
+/// A device number in the form Linux's `/proc/<pid>/stat` reports it: the
+/// major number in bits 8 to 15, the minor in 0 to 7 and 20 to 31.
+#[cfg(target_os = "linux")]
+fn device_number(rdev: u64) -> u64 {
+    let (major, minor) = (libc::major(rdev) as u64, libc::minor(rdev) as u64);
+    (major << 8) | (minor & 0xff) | ((minor & !0xff) << 12)
+}
+
 /// A process's start time, comparable only for equality: what
 /// tells a live pid from a reused one. macOS: `p_starttime` in microseconds
 /// (`sysctl(KERN_PROC_PID)`, readable on root-owned `login(1)` too, where
@@ -1875,6 +1973,61 @@ pub(crate) mod tests {
                 (201, 200, &["ssh", "-W", "[prod]:22", "jump"]),
             ]),
             remote_host("prod")
+        );
+    }
+
+    #[test]
+    fn a_pane_that_shows_a_kept_terminal_is_a_remote_session_to_the_server_it_names() {
+        let target = target_of(&["bateri", "ssh-hold", "--", "-p", "2222", "deploy@prod"]);
+        assert_eq!(target.host, "deploy@prod");
+        assert_eq!(target.port, Some(2222));
+        assert_eq!(target.kind, RemoteKind::Ssh);
+        assert_eq!(target.argv, words(&["ssh", "-p", "2222", "deploy@prod"]));
+        assert_eq!(target.nonce, None);
+        // The path the binary was started by does not matter; its name does.
+        assert_eq!(
+            remote_of(&[(
+                200,
+                101,
+                &[
+                    "/Applications/bateri.app/Contents/MacOS/bateri",
+                    "ssh-hold",
+                    "--",
+                    "prod"
+                ]
+            )]),
+            remote_host("prod")
+        );
+        // The options of the holder itself come before the `--`.
+        assert_eq!(
+            remote_of(&[(200, 101, &["bateri", "ssh-hold", "--first", "--", "prod"])]),
+            remote_host("prod")
+        );
+        // A holder with no arguments (it resumes a terminal) names no server here;
+        // another subcommand, and another program, are nothing.
+        assert_eq!(
+            remote_of(&[(
+                200,
+                101,
+                &[
+                    "bateri",
+                    "ssh-hold",
+                    "--terminal",
+                    "b-1",
+                    "--account",
+                    "u@h:22"
+                ]
+            )]),
+            Probe::Local
+        );
+        assert_eq!(
+            remote_of(&[(200, 101, &["bateri", "focus", "--", "prod"])]),
+            Probe::Local
+        );
+        // A call that is not a session (the options say so) is not one here either.
+        assert_eq!(
+            remote_of(&[(200, 101, &["bateri", "ssh-hold", "--", "prod", "uptime"])]),
+            Probe::Local
         );
     }
 
@@ -2728,6 +2881,33 @@ pub(crate) mod tests {
             began.elapsed() < bt_core::SHUTDOWN_GRACE,
             "the shutdown waited on a flooded reader"
         );
+    }
+
+    #[test]
+    fn a_process_is_in_a_pane_when_its_controlling_terminal_is_the_panes_pty() {
+        let session = stty_session("-echo");
+        let child = session.child_pid();
+        let pane = session.with_pty_fd(pty_device).expect("the pty's device");
+        wait_until("the shell has its terminal", || {
+            controlling_terminal(child).is_some()
+        });
+        assert_eq!(controlling_terminal(child), Some(pane));
+        // A second pane's PTY is another device, and a process that is in
+        // neither (this test, run with no terminal or with another) is not in this one.
+        let other = stty_session("-echo");
+        let elsewhere = other
+            .with_pty_fd(pty_device)
+            .expect("the other pty's device");
+        assert_ne!(pane, elsewhere);
+        assert_ne!(controlling_terminal(other.child_pid()), Some(pane));
+        assert_ne!(controlling_terminal(std::process::id()), Some(pane));
+        // A pid that is not there has no terminal.
+        assert_eq!(controlling_terminal(u32::MAX - 1), None);
+        // Nor does a descriptor that is not a pseudo-terminal master have a device.
+        let file = std::fs::File::open("/dev/null").expect("null");
+        assert_eq!(pty_device(std::os::fd::AsFd::as_fd(&file)), None);
+        session.shutdown();
+        other.shutdown();
     }
 
     /// A real PTY whose program sets `stty`'s modes and then sleeps.

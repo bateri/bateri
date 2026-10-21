@@ -197,16 +197,91 @@ fn version_one_is_frozen_byte_for_byte() {
 fn the_versions_read_are_the_shipped_one_and_the_one_before() {
     assert_eq!(
         (OLDEST, VERSION),
-        (1, 1),
-        "version 1 has no predecessor yet"
+        (1, 2),
+        "version 2 is shipped with version 1 before it"
     );
-    // A holder of the same age, and one that also speaks later versions.
-    assert_eq!(agree(1, 1), Some(1));
+    // A holder of the same age, the one before, and one that also speaks later versions.
+    assert_eq!(agree(2, 1), Some(2));
+    assert_eq!(agree(1, 1), Some(1), "a pane that outlived an update");
     assert_eq!(agree(7, 1), Some(VERSION), "the newest both speak");
     // A holder that has dropped everything this build speaks.
-    assert_eq!(agree(9, 2), None);
+    assert_eq!(agree(9, 3), None);
     // A holder older than anything read (there is none yet; the rule is the range).
     assert_eq!(agree(0, 0), None);
+}
+
+/// Version 2 of the wire, frozen: what it added to version 1's messages.
+/// **Never edited**; the next change is a version 3 and a fixture of its own.
+const V2_FIXTURE: &[(&str, &[u8])] = &[
+    ("hello of version 2", &[0x01, 0, 0, 0, 2, 2, 1]),
+    ("welcome of version 2", &[0x81, 0, 0, 0, 1, 2]),
+    (
+        "run",
+        &[
+            0x87, 0, 0, 0, 23, //
+            0, 3, // three arguments
+            0, 0, 0, 3, b's', b's', b'h', //
+            0, 0, 0, 2, b'-', b'M', //
+            0, 0, 0, 4, b'r', b'a', b's', b'p',
+        ],
+    ),
+    ("ran", &[0x05, 0, 0, 0, 1, 255]),
+    ("note", &[0x88, 0, 0, 0, 3, b'h', b'i', b'!']),
+];
+
+#[test]
+fn version_two_is_frozen_byte_for_byte() {
+    let to_app = [
+        (
+            ToApp::Hello {
+                newest: 2,
+                oldest: 1,
+            },
+            "hello of version 2",
+        ),
+        (ToApp::Ran { status: 255 }, "ran"),
+    ];
+    for (message, name) in &to_app {
+        let bytes = V2_FIXTURE
+            .iter()
+            .find(|(n, _)| n == name)
+            .expect("a fixture")
+            .1;
+        assert_eq!(&encoded(message), bytes, "writes {name}");
+        let parsed = ToApp::parse(bytes[0], &bytes[5..]).expect("reads");
+        assert_eq!(parsed.as_ref(), Some(message), "reads {name}");
+    }
+    let to_hold = [
+        (ToHold::Welcome { version: 2 }, "welcome of version 2"),
+        (
+            ToHold::Run {
+                argv: vec![b"ssh".to_vec(), b"-M".to_vec(), b"rasp".to_vec()],
+            },
+            "run",
+        ),
+        (ToHold::Note { text: "hi!".into() }, "note"),
+    ];
+    for (message, name) in &to_hold {
+        let bytes = V2_FIXTURE
+            .iter()
+            .find(|(n, _)| n == name)
+            .expect("a fixture")
+            .1;
+        assert_eq!(&encoded_back(message), bytes, "writes {name}");
+        let parsed = ToHold::parse(bytes[0], &bytes[5..]).expect("reads");
+        assert_eq!(parsed.as_ref(), Some(message), "reads {name}");
+    }
+}
+
+#[test]
+fn a_run_with_too_many_arguments_or_a_cut_one_is_a_broken_peer() {
+    // Two arguments announced, one given.
+    let cut = [0u8, 2, 0, 0, 0, 1, b'x'];
+    assert_eq!(ToHold::parse(0x87, &cut), Err(Error::Malformed));
+    // Bytes after the last argument.
+    let long = [0u8, 1, 0, 0, 0, 1, b'x', b'y'];
+    assert_eq!(ToHold::parse(0x87, &long), Err(Error::Malformed));
+    assert_eq!(ToApp::parse(0x05, &[]), Err(Error::Malformed));
 }
 
 #[test]

@@ -112,7 +112,7 @@ audit:
 			|| { echo "audit: unjustified panic path in bt-core ($$f)"; fail=1; }; \
 	done; \
 	if grep -rnE "beginSheet|endSheet|attachedSheet" crates/bt-shell-macos/src --include='*.rs' | grep -v "^crates/bt-shell-macos/src/sheets.rs:" | grep -v "^crates/bt-shell-macos/src/settings_window" | grep -v ":[[:space:]]*//"; then echo "audit: a sheet begun, ended or asked about outside the sheet gate (bt-shell-macos sheets.rs)"; fail=1; fi; \
-	app_mods="app|arrange|keeper|menu|palette|pane_drag|settings_window|split_view|tab|tab_bar|tab_drag|tab_group|tab_merge|tab_side|tab_switch|tab_title|updater|window"; \
+	app_mods="app|arrange|hold_service|keeper|menu|palette|pane_drag|settings_window|split_view|tab|tab_bar|tab_drag|tab_group|tab_merge|tab_side|tab_switch|tab_title|updater|window"; \
 	for f in crates/bt-shell-macos/src/*.rs; do \
 		m=$$(basename "$$f" .rs); \
 		if echo "$$m" | grep -qxE "lib|$$app_mods"; then continue; fi; \
@@ -339,6 +339,21 @@ ICONSET = $(TARGET_DIR)/release/bateri.iconset
 SPARKLE_VERSION = 2.10.0
 SPARKLE_SHA256 = c2bf58aa8387266ac179357b1415d6f2635f044da8be41042af32425dae6da0c
 SPARKLE_DIR = $(TARGET_DIR)/sparkle-$(SPARKLE_VERSION)
+# kablo, the program a server keeps a terminal's program alive with: the package
+# carries one binary per target (the servers `ssh` reaches may be Linux or macOS,
+# either architecture) and puts the one a server needs there on the first `ssh`
+# (`bt-shell-common::kablo::install`). The files are a kablo release's — what
+# kablo's `make dist` writes: the binaries, `SHA256SUMS`, `LICENSE` and
+# `THIRD-PARTY-LICENSES.txt` —, taken from `$(KABLO_DIST)`, which is the
+# development path (the sibling checkout's `dist`) until kablo's release is
+# published, and checked against **its** `SHA256SUMS` before a byte is copied:
+# the version is whatever the release's names say, nothing here (or in the
+# application) names one. Mach-O files in the package are code to the signing
+# and the notarization, so the macOS binaries are signed with the package's
+# identity, and the list the application checks a file against before it sends
+# it is written afterwards from the files as they are.
+KABLO_DIST ?= ../kablo/dist
+KABLO_TARGETS = x86_64-unknown-linux-musl aarch64-unknown-linux-musl aarch64-apple-darwin x86_64-apple-darwin
 # The feed Sparkle reads; written into `Info.plist` at `bundle` time.
 # GitHub's `releases/latest/download/` address always serves the same-named
 # file of the newest release, so publishing a version is publishing the update
@@ -402,6 +417,15 @@ bundle: sparkle
 	cp assets/shell/fish/vendor_conf.d/bateri.fish $(STAGE)/Contents/Resources/shell/fish/vendor_conf.d/
 	mkdir -p $(STAGE)/Contents/Resources/shell/bash
 	cp assets/shell/bash/bateri.bash $(STAGE)/Contents/Resources/shell/bash/
+	@# kablo's files: the release is checked against its own list, then exactly the
+	@# files the list names are copied (no glob: a second version in the directory
+	@# would be a package with two).
+	@test -f $(KABLO_DIST)/SHA256SUMS || { echo "bundle: there is no kablo release in $(KABLO_DIST) (KABLO_DIST names the directory of one — kablo's \`make dist\` writes it)"; exit 1; }
+	@(cd $(KABLO_DIST) && shasum -a 256 -c SHA256SUMS >/dev/null 2>&1) || { echo "bundle: $(KABLO_DIST) is not what its SHA256SUMS says"; exit 1; }
+	mkdir -p $(STAGE)/Contents/Resources/kablo
+	@listed=$$(awk '{print $$2}' $(KABLO_DIST)/SHA256SUMS | grep '^kablo-'); \
+	for t in $(KABLO_TARGETS); do echo "$$listed" | grep -q -- "-$$t\$$" || { echo "bundle: the kablo release lists no binary for $$t"; exit 1; }; done; \
+	for f in $$listed LICENSE THIRD-PARTY-LICENSES.txt; do cp $(KABLO_DIST)/$$f $(STAGE)/Contents/Resources/kablo/ || exit 1; done
 	mkdir -p $(STAGE)/Contents/Frameworks
 	ditto --arch arm64 $(SPARKLE_DIR)/Sparkle.framework $(STAGE)/Contents/Frameworks/Sparkle.framework
 	rm -rf $(STAGE)/Contents/Frameworks/Sparkle.framework/XPCServices \
@@ -413,6 +437,10 @@ bundle: sparkle
 	$(SIGN) $(STAGE)/Contents/Frameworks/Sparkle.framework/Versions/B/Autoupdate
 	$(SIGN) $(STAGE)/Contents/Frameworks/Sparkle.framework/Versions/B/Updater.app
 	$(SIGN) $(STAGE)/Contents/Frameworks/Sparkle.framework
+	@# kablo's macOS binaries are code in Resources; the list the application
+	@# checks them against is written now, from the files as they are.
+	for f in $(STAGE)/Contents/Resources/kablo/kablo-*-apple-darwin; do $(SIGN) $$f || exit 1; done
+	cd $(STAGE)/Contents/Resources/kablo && shasum -a 256 kablo-* LICENSE THIRD-PARTY-LICENSES.txt > SHA256SUMS
 	$(SIGN) $(STAGE)
 	codesign --verify --deep --strict $(STAGE)
 	@c=$(STAGE)/Contents; fail() { echo "bundle: content check failed — $$1"; exit 1; }; \
@@ -441,6 +469,16 @@ bundle: sparkle
 	done; \
 	for f in zsh/.zshenv zsh/.zprofile zsh/.zshrc zsh/.zlogin zsh/bateri.zsh zsh/zdotdir.zsh fish/vendor_conf.d/bateri.fish bash/bateri.bash; do \
 		cmp -s assets/shell/$$f $$c/Resources/shell/$$f || fail "shell/$$f is not in the package or differs from the input"; \
+	done; \
+	kd=$$c/Resources/kablo; \
+	test -s $$kd/SHA256SUMS || fail "kablo's list of sums is not in the package"; \
+	(cd $$kd && shasum -a 256 -c SHA256SUMS >/dev/null 2>&1) || fail "kablo's files are not what the package's list says"; \
+	for t in $(KABLO_TARGETS); do ls $$kd/kablo-*-$$t >/dev/null 2>&1 || fail "kablo has no binary for $$t in the package"; done; \
+	for f in LICENSE THIRD-PARTY-LICENSES.txt; do cmp -s $(KABLO_DIST)/$$f $$kd/$$f || fail "kablo's $$f is not in the package or differs from the release's"; done; \
+	for f in $$kd/kablo-*; do \
+		sum=$$(awk -v n="$$(basename $$f)" '$$2==n{print $$1}' $(KABLO_DIST)/SHA256SUMS); \
+		case $$f in *-apple-darwin) codesign --verify --strict $$f 2>/dev/null || fail "$$f is not signed";; \
+		*) test "$$(shasum -a 256 < $$f | awk '{print $$1}')" = "$$sum" || fail "$$f differs from the kablo release";; esac; \
 	done; \
 	rm -rf $(APP) && mv $(STAGE) $(APP) && \
 	echo "bundle: $(APP) (version $(VERSION), macOS floor $$minos, signature $(if $(filter -,$(SIGN_ID)),ad-hoc,'$(SIGN_ID)'))"

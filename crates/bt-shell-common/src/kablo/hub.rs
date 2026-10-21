@@ -56,6 +56,15 @@ pub enum HubEvent {
         /// What it asked for.
         open: Open,
     },
+    /// The program the owner asked a holder to run ([`Hub::run`]) has ended;
+    /// the request is still waiting for the owner's answer.
+    Ran {
+        /// The holder.
+        hold: HoldId,
+        /// How it ended: its status, 128 plus the signal that ended it, 255 if
+        /// it could not be started.
+        status: u8,
+    },
     /// The holder's connection is over (it closed, or the hub is done with it);
     /// its terminal is let go of and lives on, on the server.
     Gone {
@@ -86,6 +95,12 @@ pub enum Declined {
     /// The client would not take the request (a terminal name already in use
     /// here, an argument the protocol refuses).
     Refused,
+    /// The holder speaks a wire version that has no such thing ([`Hub::run`],
+    /// [`Hub::say`] need version 2).
+    Unsupported,
+    /// A program the holder was asked to run is still running: the answer
+    /// waits for [`HubEvent::Ran`].
+    Running,
 }
 
 /// A holder tied to a terminal.
@@ -110,6 +125,8 @@ struct Hold {
     version: u8,
     /// The request waiting for the owner.
     pending: Option<Open>,
+    /// The holder was asked to run a program and has not said it ended.
+    running: bool,
     bound: Option<Binding>,
     /// Nothing is read from this holder any more and, once `out` is written,
     /// its connection is to be closed.
@@ -123,6 +140,7 @@ impl Hold {
             out: Vec::new(),
             version: 0,
             pending: None,
+            running: false,
             bound: None,
             finished: false,
         }
@@ -489,6 +507,16 @@ impl Hub {
                 entry.pending = Some(open.clone());
                 self.events.push_back(HubEvent::Wants { hold, open });
             }
+            ToApp::Ran { status } => {
+                if !entry.running {
+                    return self.fail(
+                        hold,
+                        "bateri: the terminal's connection answered out of turn",
+                    );
+                }
+                entry.running = false;
+                self.events.push_back(HubEvent::Ran { hold, status });
+            }
             ToApp::Input(bytes) => {
                 let sent = match entry.bound.as_ref() {
                     Some(binding) => {
@@ -563,6 +591,89 @@ impl Hub {
         Ok(())
     }
 
+    /// Asks the holder to run `argv` on the pane's terminal before anything is
+    /// shown (the first connection to a server asks for a password or the
+    /// server's key there); [`HubEvent::Ran`] says how it ended, and the
+    /// request still waits for the answer. Only for a request for a new
+    /// terminal, and only to a holder of wire version 2.
+    pub fn run(&mut self, hold: HoldId, argv: &[Vec<u8>]) -> Result<(), Declined> {
+        let entry = self.holds.get_mut(&hold).ok_or(Declined::NoRequest)?;
+        match &entry.pending {
+            None => return Err(Declined::NoRequest),
+            Some(open) if !matches!(open.target, Target::New { .. }) => {
+                return Err(Declined::WrongKind);
+            }
+            Some(_) => {}
+        }
+        if entry.running {
+            return Err(Declined::Running);
+        }
+        if entry.version < 2 {
+            return Err(Declined::Unsupported);
+        }
+        entry.running = true;
+        entry.send(&ToHold::Run {
+            argv: argv.to_vec(),
+        });
+        Ok(())
+    }
+
+    /// Tells the user a line, in front of the terminal (the holder shows it
+    /// where it stands). A holder of wire version 1 has nothing to show it
+    /// with: `false`.
+    pub fn say(&mut self, hold: HoldId, text: &str) -> bool {
+        match self.holds.get_mut(&hold) {
+            Some(entry) if entry.version >= 2 && !entry.finished => {
+                entry.send(&ToHold::Note {
+                    text: text.to_owned(),
+                });
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// The account's connection is over for good (the server speaks no version
+    /// this build does, or kablo cannot be kept on it): its client is dropped
+    /// and the holders tied to its terminals are ended — a holder that was shown
+    /// nothing may fall back to a plain `ssh` (`fall_back`), one that was shown a
+    /// terminal is told `text` and ends.
+    pub fn drop_account(&mut self, account: &str, text: &str) {
+        self.clients.remove(account);
+        let tied: Vec<HoldId> = self
+            .bound
+            .iter()
+            .filter(|((owner, _), _)| owner == account)
+            .map(|(_, hold)| *hold)
+            .collect();
+        for hold in tied {
+            let shown = self
+                .holds
+                .get(&hold)
+                .and_then(|h| h.bound.as_ref())
+                .is_some_and(|b| b.shown);
+            self.release(hold, false);
+            if let Some(entry) = self.holds.get_mut(&hold) {
+                if shown {
+                    entry.finish(&ToHold::End {
+                        code: 1,
+                        note: Some(text.to_owned()),
+                    });
+                } else {
+                    entry.finish(&ToHold::Refused {
+                        fall_back: true,
+                        text: text.to_owned(),
+                    });
+                }
+            }
+        }
+    }
+
+    /// The wire version a holder speaks (0 before its greeting).
+    pub fn version_of(&self, hold: HoldId) -> u8 {
+        self.holds.get(&hold).map_or(0, |entry| entry.version)
+    }
+
     /// Answers the request with no terminal. `fall_back`: the holder runs the
     /// plain `ssh` it replaced (it has not shown anything yet).
     pub fn refuse(&mut self, hold: HoldId, fall_back: bool, text: &str) {
@@ -594,6 +705,9 @@ impl Hub {
         fits: impl FnOnce(&Open) -> bool,
     ) -> Result<Open, Declined> {
         let entry = self.holds.get_mut(&hold).ok_or(Declined::NoRequest)?;
+        if entry.running {
+            return Err(Declined::Running);
+        }
         match entry.pending.take() {
             None => Err(Declined::NoRequest),
             Some(open) if !fits(&open) => {

@@ -582,6 +582,11 @@ pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 pub enum Asker {
     User,
     Background,
+    /// The user's own terminal: the pane that typed `ssh` (a kablo terminal's
+    /// first connection, [`crate::kablo::service`]). Nothing goes through
+    /// askpass and no host-key policy is ours — the pane shows ssh's questions and
+    /// the user's configuration decides what is asked.
+    Terminal,
 }
 
 /// The master connection's argv: `-M -N -f` and our options **first** (ssh
@@ -590,7 +595,8 @@ pub enum Asker {
 /// as the stream ([`crate::upload::ssh_argv_for`]), then the destination.
 ///
 /// `BatchMode=no`: the password goes through askpass. `StrictHostKeyChecking=yes`:
-/// an unknown host key is refused, never asked. A background master
+/// an unknown host key is refused, never asked — except for [`Asker::Terminal`],
+/// whose questions are answered on the pane and whose policy is the user's. A background master
 /// gets **one** password prompt — a stale Keychain password must not lock the
 /// account out.
 pub fn master_argv(target: &RemoteTarget, socket: &Path, asker: Asker) -> Vec<String> {
@@ -600,12 +606,10 @@ pub fn master_argv(target: &RemoteTarget, socket: &Path, asker: Asker) -> Vec<St
     ours.push(format!("ControlPersist={}", CONTROL_PERSIST.as_secs()));
     ours.push("-o".to_owned());
     ours.push(format!("ConnectTimeout={}", CONNECT_TIMEOUT.as_secs()));
-    ours.extend(words(&[
-        "-o",
-        "BatchMode=no",
-        "-o",
-        "StrictHostKeyChecking=yes",
-    ]));
+    ours.extend(words(&["-o", "BatchMode=no"]));
+    if asker != Asker::Terminal {
+        ours.extend(words(&["-o", "StrictHostKeyChecking=yes"]));
+    }
     if asker == Asker::Background {
         ours.extend(words(&["-o", "NumberOfPasswordPrompts=1"]));
     }
@@ -2370,6 +2374,21 @@ mod tests {
         assert_eq!(
             master_argv(&target, socket, Asker::Background),
             expected(&["-o", "NumberOfPasswordPrompts=1"])
+        );
+        // The user's own terminal answers the questions itself: no host-key
+        // policy of ours, so the configuration decides what is asked.
+        let terminal = master_argv(&target, socket, Asker::Terminal);
+        assert!(
+            !terminal
+                .iter()
+                .any(|word| word.starts_with("StrictHostKeyChecking")),
+            "{terminal:?}"
+        );
+        assert!(terminal.contains(&"BatchMode=no".to_owned()));
+        assert_eq!(&terminal[..4], ["ssh", "-M", "-N", "-f"]);
+        assert_eq!(
+            &terminal[terminal.len() - 3..],
+            ["-p", "2222", "deploy@prod"]
         );
     }
 
