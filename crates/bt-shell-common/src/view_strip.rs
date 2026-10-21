@@ -46,18 +46,30 @@ pub struct Strip {
     pub quit: String,
 }
 
-/// The strip's text for a view of `tool` (the name of the tool whose result the view shows)
-/// that the program called `title` in its list of tools, if it did. `place` is the server the
-/// program runs on, `None` on this Mac; `program` is the program's own name, `None` when
-/// nothing here knows it (a plain `ssh`, a server that has not said).
+/// The strip's text for a view of a tool (the one whose result the view shows) that the
+/// program called `title` in its list of tools, if it did. `tool_label` is the tool's name as
+/// the protocol's host library gives it for drawing (`None` when nothing is left of the name
+/// once it is cleaned): the name the view calls the tool by, as the program wrote it, is not
+/// for drawing and is not taken here. `place` is the server the program runs on, `None` on
+/// this Mac; `program` is the program's own name, `None` when nothing here knows it (a plain
+/// `ssh`, a server that has not said).
 ///
-/// A title the program did not give is the tool's name; a title or a name with nothing left
+/// A title the program did not give is the tool's label; a title or a label with nothing left
 /// after cleaning is as if there were none.
-pub fn strip(title: Option<&str>, tool: &str, place: Option<&str>, program: Option<&str>) -> Strip {
+pub fn strip(
+    title: Option<&str>,
+    tool_label: Option<&str>,
+    place: Option<&str>,
+    program: Option<&str>,
+) -> Strip {
     let title = title
         .map(|text| clean(text, TITLE_LIMIT))
         .filter(|text| !text.is_empty())
-        .or_else(|| Some(clean(tool, TITLE_LIMIT)).filter(|text| !text.is_empty()))
+        .or_else(|| {
+            tool_label
+                .map(|text| clean(text, TITLE_LIMIT))
+                .filter(|text| !text.is_empty())
+        })
         .unwrap_or_default();
     let place = place
         .map(|text| clean(text, NAME_LIMIT))
@@ -234,7 +246,7 @@ mod tests {
     fn a_view_on_a_server_says_where_the_program_runs() {
         let strip = strip(
             Some("Containers"),
-            "list_containers",
+            Some("list_containers"),
             Some("prod"),
             Some("docker-ui"),
         );
@@ -248,7 +260,7 @@ mod tests {
     fn a_view_on_this_mac_names_no_place() {
         let strip = strip(
             Some("Containers"),
-            "list_containers",
+            Some("list_containers"),
             None,
             Some("docker-ui"),
         );
@@ -257,14 +269,18 @@ mod tests {
     }
 
     #[test]
-    fn a_tool_with_no_title_is_named_by_the_tool() {
-        let strip = strip(None, "list_containers", None, Some("docker-ui"));
+    fn a_tool_with_no_title_is_named_by_the_tools_label() {
+        let strip = strip(None, Some("list_containers"), None, Some("docker-ui"));
         assert_eq!(strip.title, "list_containers");
         // A title of nothing is none.
         assert_eq!(
-            super::strip(Some("  \n "), "list", None, None).title,
+            super::strip(Some("  \n "), Some("list"), None, None).title,
             "list"
         );
+        // A tool with nothing left of its name once it is cleaned has no label, and the strip
+        // has no title: the name the view calls the tool by is not drawn in its place.
+        assert_eq!(super::strip(None, None, None, None).title, "");
+        assert_eq!(super::strip(None, Some(" \u{200b}"), None, None).title, "");
     }
 
     #[test]
@@ -272,14 +288,14 @@ mod tests {
         // `node` is the process; “Docker UI” is what the program says it is, and “Containers” is
         // what it calls the tool whose result the view shows.
         let program = program_name(Some("Docker UI"), Some("node"));
-        let strip = strip(Some("Containers"), "list_containers", None, program);
+        let strip = strip(Some("Containers"), Some("list_containers"), None, program);
         assert_eq!(strip.title, "Containers");
         assert_eq!(strip.context, "Docker UI · in this pane");
         assert_eq!(strip.quit, "Quit Docker UI");
         // On a server's terminal the place is still first.
         let strip = super::strip(
             Some("Containers"),
-            "list_containers",
+            Some("list_containers"),
             Some("prod"),
             program_name(Some("Docker UI"), None),
         );
@@ -293,18 +309,18 @@ mod tests {
         );
         assert_eq!(program_name(None, None), None);
         assert_eq!(program_name(Some("\u{202e}"), None), None);
-        // A title the program did not give is the tool's name, whatever the program is called.
-        let strip = super::strip(None, "list_containers", None, program);
+        // A title the program did not give is the tool's label, whatever the program is called.
+        let strip = super::strip(None, Some("list_containers"), None, program);
         assert_eq!(strip.title, "list_containers");
     }
 
     #[test]
     fn a_program_nobody_here_can_name_is_still_the_one_the_button_quits() {
         // A plain `ssh`: the place is known, the program is not.
-        let strip = strip(None, "list", Some("prod"), None);
+        let strip = strip(None, Some("list"), Some("prod"), None);
         assert_eq!(strip.context, "prod · in this pane");
         assert_eq!(strip.quit, "Quit program");
-        let strip = super::strip(None, "list", None, None);
+        let strip = super::strip(None, Some("list"), None, None);
         assert_eq!(strip.context, "in this pane");
         assert_eq!(strip.quit, "Quit program");
     }
@@ -312,7 +328,7 @@ mod tests {
     #[test]
     fn a_long_name_is_cut_and_a_title_that_imitates_the_application_is_cleaned() {
         let long = "x".repeat(200);
-        let strip = strip(Some(&long), "t", Some(&long), Some(&long));
+        let strip = strip(Some(&long), Some("t"), Some(&long), Some(&long));
         assert_eq!(strip.title.chars().count(), TITLE_LIMIT);
         assert!(strip.title.ends_with('…'));
         let name = format!("{}…", "x".repeat(NAME_LIMIT - 1));
@@ -324,7 +340,7 @@ mod tests {
         // order of what follows it or fill the strip with what does not show.
         let strip = super::strip(
             Some("\u{202e}Quit\n\tbateri\u{200b}   now\u{7}"),
-            "t",
+            Some("t"),
             Some("pro\u{0}d"),
             Some("a\u{2066}b"),
         );

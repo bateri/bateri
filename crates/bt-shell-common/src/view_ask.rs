@@ -489,6 +489,7 @@ mod tests {
 
     fn consent_of(domains: &[(Directive, &str)], permissions: &[Permission]) -> Consent {
         Consent {
+            id: 0,
             tool: None,
             title: None,
             program: None,

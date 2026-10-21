@@ -5741,6 +5741,7 @@ impl TerminalPane {
                     let origin = self.view_origin();
                     pencere_view::ask::consent(self, &session, consent, &origin, &app);
                 }
+                Action::WithdrawConsent(id) => pencere_view::ask::withdraw(self, id),
                 Action::OpenLink { link, url } => {
                     let origin = self.view_origin();
                     pencere_view::ask::link(self, &session, link, &url, &origin);
@@ -5748,7 +5749,6 @@ impl TerminalPane {
                 _ => {}
             }
         }
-        pencere_view::ask::settle(self, session.view_state());
         self.wait_for_view(&session);
     }
 
@@ -5908,12 +5908,13 @@ impl TerminalPane {
     /// What the strip over the view of `start` says: where the program runs
     /// ([`TerminalPane::view_whereabouts`]) and what it is called — what the program calls
     /// itself, else what the pane read —, with the view's title: what the program calls the
-    /// tool, else the tool's name (`view_strip::strip`). Both words are the crate's, cleaned.
+    /// tool, else the tool's label (`view_strip::strip`). Both words are the crate's, cleaned;
+    /// the tool's own name (`ViewStart::tool`) is what the view calls it by and is not drawn.
     fn view_strip(&self, start: &bt_core::pencere::ViewStart) -> view_strip::Strip {
         let (place, program) = self.view_whereabouts();
         view_strip::strip(
             start.title.as_deref(),
-            &start.tool,
+            start.tool_label.as_deref(),
             place.as_deref(),
             view_strip::program_name(pencere_view::said_program(start), program.as_deref()),
         )

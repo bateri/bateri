@@ -14,10 +14,13 @@
 //! * the deadline of an opening is not running while the person is asked (the pane leaves
 //!   the state out of what it sets deadlines for while [`Asking::is_up`]), because a person
 //!   who has gone for coffee has not made the program's open late;
-//! * an answer applies only to **the open it was asked for** ([`Asking::finish`]): a program
+//! * an answer applies only to **the question it was given to** ([`Asking::finish`]): a program
 //!   that gave up and opened again while the first sheet was up has a new question, and the
-//!   first is taken away ([`withdraw`]) — its answer must not allow what the second
-//!   declared;
+//!   conversation takes the first back ([`withdraw`], on its `WithdrawConsent`: the sheet goes
+//!   without an answer, and nothing is remembered) — its answer must not allow what the second
+//!   declared. The questions are numbered by the conversation ([`Consent::id`]) and an answer
+//!   carries the number, so an answer already on its way when the question is taken back is
+//!   ignored there as well as here;
 //! * an answer the person did not give — Escape, a pane that closed under the sheet, a sheet
 //!   lowered for good — is a refusal and is not remembered: Escape is "not now", and a stray
 //!   key must not leave a view without its access for as long as the application runs, with
@@ -68,33 +71,32 @@ thread_local! {
     static WAITING: RefCell<Waiting<Up>> = const { RefCell::new(Waiting::new()) };
 }
 
-/// A question about access that is up: whose it is (the pane, and the number it gave the
-/// question), and what the pane's view declared, so that another's answer can be applied to it.
+/// A question about access that is up: whose it is (the pane) and what it asks, which has the
+/// conversation's number for it ([`Consent::id`]) and what the pane's view declared, so that
+/// another's answer can be applied to it.
 struct Up {
     pane: u64,
-    number: u64,
     consent: Consent,
 }
 
 impl Up {
-    /// Whether this is question `number` of `pane`.
-    fn is(&self, pane: u64, number: u64) -> bool {
-        self.pane == pane && self.number == number
+    /// Whether this is question `id` of `pane`.
+    fn is(&self, pane: u64, id: u32) -> bool {
+        self.pane == pane && self.consent.id == id
     }
 }
 
-/// The question `number` of `pane` is not up any more, however it ended.
-fn gone(pane: u64, number: u64) {
-    WAITING.with(|waiting| waiting.borrow_mut().gone(|up| up.is(pane, number)));
+/// The question `id` of `pane` is not up any more, however it ended.
+fn gone(pane: u64, id: u32) {
+    WAITING.with(|waiting| waiting.borrow_mut().gone(|up| up.is(pane, id)));
 }
 
 /// The questions a pane has up for its program's view.
 #[derive(Default)]
 pub(crate) struct Asking {
-    /// The number of the question about access that is up; `0` for none.
-    consent: Cell<u64>,
-    /// The number of the last question about access.
-    issued: Cell<u64>,
+    /// The id of the question about access that is up ([`Consent::id`], which the conversation
+    /// numbers from 1); `0` for none.
+    consent: Cell<u32>,
     /// The window of the sheet of that question, to take it away.
     sheet: RefCell<Option<Retained<NSWindow>>>,
     /// A question about a link is up.
@@ -115,16 +117,22 @@ impl Asking {
         state.filter(|_| !self.is_up())
     }
 
-    /// The question numbered `number` was answered or gone: whether it is still the one
-    /// that is up, and so whether its answer is for the open that is. Either way nothing
-    /// is up after.
-    fn finish(&self, number: u64) -> bool {
-        let current = self.consent.get() == number;
-        if current {
-            self.consent.set(0);
-            self.sheet.borrow_mut().take();
+    /// The question `id` was answered or gone: whether it is still the one that is up, and so
+    /// whether its answer is for the question that is. Either way nothing of it is up after.
+    fn finish(&self, id: u32) -> bool {
+        self.take_back(id).is_some()
+    }
+
+    /// The question `id` is not asked any more, however it ended: `None` when it was not the
+    /// one that is up (an answer to it is for nobody), else its sheet's window if it had one,
+    /// to take away. Nothing is up after, and the sheet's own block, which taking the sheet
+    /// away runs, finds nothing to do.
+    fn take_back(&self, id: u32) -> Option<Option<Retained<NSWindow>>> {
+        if id == 0 || self.consent.get() != id {
+            return None;
         }
-        current
+        self.consent.set(0);
+        Some(self.sheet.borrow_mut().take())
     }
 }
 
@@ -178,6 +186,9 @@ fn put(
 
 /// The question about the access a view declared. `origin` is who asks and `app` the
 /// application's name. Answered at once when the person has answered the same before.
+///
+/// An earlier question of the pane is not taken away here: the conversation takes it back
+/// ([`withdraw`]) before it asks another.
 pub(crate) fn consent(
     pane: &TerminalPane,
     session: &Arc<Session>,
@@ -185,8 +196,6 @@ pub(crate) fn consent(
     origin: &Origin,
     app: &str,
 ) {
-    // A question still up is about an open that has been replaced.
-    withdraw(pane);
     if session.view_state() != Some(State::Opening) {
         // The program has gone on without waiting: nobody is waiting for the answer.
         return;
@@ -196,17 +205,19 @@ pub(crate) fn consent(
         .as_ref()
         .and_then(|key| MEMORY.with(|memory| memory.borrow().recall(key)))
     {
-        session.view_consent(if allowed {
-            consent.grant_all()
-        } else {
-            Grant::none()
-        });
+        session.view_consent(
+            consent.id,
+            if allowed {
+                consent.grant_all()
+            } else {
+                Grant::none()
+            },
+        );
         return;
     }
     let question = view_ask::consent(origin, &consent, app);
     let asking = pane.view_asking();
-    let number = asking.issued.get() + 1;
-    asking.issued.set(number);
+    let number = consent.id;
     asking.consent.set(number);
     let (id, lookup) = (pane.id(), pane.lookup());
     let answering = Arc::clone(session);
@@ -236,11 +247,14 @@ pub(crate) fn consent(
             // is ended, which runs their blocks.
             same = WAITING.with(|waiting| waiting.borrow_mut().answered(&key));
         }
-        answering.view_consent(if allowed {
-            consent.grant_all()
-        } else {
-            Grant::none()
-        });
+        answering.view_consent(
+            number,
+            if allowed {
+                consent.grant_all()
+            } else {
+                Grant::none()
+            },
+        );
         for other in same {
             answer_same(mtm, lookup, &other, allowed);
         }
@@ -254,7 +268,6 @@ pub(crate) fn consent(
                         key,
                         Up {
                             pane: id,
-                            number,
                             consent: waits,
                         },
                     );
@@ -265,7 +278,7 @@ pub(crate) fn consent(
             // The pane is in no window: nobody can be asked, and the view starts with
             // nothing allowed.
             asking.consent.set(0);
-            session.view_consent(Grant::none());
+            session.view_consent(number, Grant::none());
         }
     }
 }
@@ -277,12 +290,10 @@ fn answer_same(mtm: MainThreadMarker, lookup: PaneLookup, other: &Up, allowed: b
     let Some(pane) = lookup(mtm, other.pane) else {
         return;
     };
-    let asking = pane.view_asking();
-    let sheet = asking.sheet.borrow().clone();
-    // Finished first, so that the sheet's own block, which ending it runs, finds nothing to do.
-    if !asking.finish(other.number) {
+    // Taken back first, so that the sheet's own block, which ending it runs, finds nothing to do.
+    let Some(sheet) = pane.view_asking().take_back(other.consent.id) else {
         return;
-    }
+    };
     if let Some(sheet) = sheet
         && let Some(seat) = sheets::seat(Asker::Pane(&pane))
     {
@@ -292,36 +303,30 @@ fn answer_same(mtm: MainThreadMarker, lookup: PaneLookup, other: &Up, allowed: b
         return;
     };
     if session.view_state() == Some(State::Opening) {
-        session.view_consent(if allowed {
-            other.consent.grant_all()
-        } else {
-            Grant::none()
-        });
+        session.view_consent(
+            other.consent.id,
+            if allowed {
+                other.consent.grant_all()
+            } else {
+                Grant::none()
+            },
+        );
     }
 }
 
-/// Takes away the question about access that is up, without an answer: the open it was
-/// for is over, or another has come.
-pub(crate) fn withdraw(pane: &TerminalPane) {
-    let asking = pane.view_asking();
-    let number = asking.consent.replace(0);
-    if number == 0 {
+/// The conversation takes question `id` back (`WithdrawConsent`): the open it was for ended
+/// before the person answered. Its sheet goes, and a parked one is dropped, without an answer:
+/// nothing is remembered, and nobody that asks the same is answered by it. A question that is
+/// not the one up (answered already, or never put up) is nothing to do.
+pub(crate) fn withdraw(pane: &TerminalPane, id: u32) {
+    let Some(sheet) = pane.view_asking().take_back(id) else {
         return;
-    }
-    gone(pane.id(), number);
-    let sheet = asking.sheet.borrow_mut().take();
+    };
+    gone(pane.id(), id);
     if let Some(sheet) = sheet
         && let Some(seat) = sheets::seat(Asker::Pane(pane))
     {
         seat.end(&sheet, NSModalResponseCancel);
-    }
-}
-
-/// The conversation is in `state`: a question about access that is up is for an open
-/// that is `Opening`, and goes when it is not.
-pub(crate) fn settle(pane: &TerminalPane, state: Option<State>) {
-    if pane.view_asking().is_up() && state != Some(State::Opening) {
-        withdraw(pane);
     }
 }
 
@@ -374,20 +379,86 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_question_answers_only_the_open_it_was_asked_for() {
+    fn a_question_answers_only_the_question_it_was_given_to() {
         let asking = Asking::default();
         assert!(!asking.is_up());
         asking.consent.set(1);
         assert!(asking.is_up());
-        // A newer question took its place: the first one's answer is for an open that is
+        // A newer question took its place: the first one's answer is for a question that is
         // gone, and the newer one is still up.
         asking.consent.set(2);
         assert!(!asking.finish(1));
         assert!(asking.is_up());
         assert!(asking.finish(2));
         assert!(!asking.is_up());
-        // Nothing is up, so nothing is anyone's answer.
+        // Nothing is up, so nothing is anyone's answer, and nothing is "question 0".
         assert!(!asking.finish(2));
+        assert!(!asking.finish(0));
+    }
+
+    #[test]
+    fn a_question_the_conversation_takes_back_is_gone_and_its_answer_is_for_nobody() {
+        let asking = Asking::default();
+        // Nothing is up: there is nothing to take back, and no sheet to take away.
+        assert!(asking.take_back(1).is_none());
+        asking.consent.set(3);
+        // Another question's withdrawal is not this one's.
+        assert!(asking.take_back(2).is_none());
+        assert!(asking.is_up());
+        // This one's: it is out, and the deadline of the open waits again.
+        assert!(asking.take_back(3).is_some());
+        assert!(!asking.is_up());
+        assert_eq!(
+            asking.deadline_state(Some(State::Opening)),
+            Some(State::Opening)
+        );
+        // The program opened again and the person is asked a second question. The sheet of the
+        // first, whose block runs when it is taken away (or late), finds the first gone and
+        // leaves the second up: the first's answer is not the second's.
+        asking.consent.set(4);
+        assert!(!asking.finish(3));
+        assert!(asking.is_up());
+        assert!(asking.take_back(3).is_none());
+        assert!(asking.finish(4));
+    }
+
+    /// A question about `tool` that asks for nothing in particular, numbered `id`.
+    fn question(id: u32, tool: &str) -> Consent {
+        Consent {
+            id,
+            tool: Some(tool.to_owned()),
+            title: None,
+            program: None,
+            domains: Vec::new(),
+            permissions: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_question_taken_back_is_not_among_those_a_person_answers_for_others() {
+        let origin = Origin::default();
+        let first = question(1, "show");
+        let key = view_ask::key(&origin, &first).expect("a tool is named");
+        let ask = |pane: u64, consent: Consent| {
+            WAITING.with(|waiting| waiting.borrow_mut().up(key.clone(), Up { pane, consent }));
+        };
+        // Two panes ask the same, each of its own conversation's numbers, and the first pane's
+        // question is taken back: the person's answer to the other is for it alone.
+        ask(10, first);
+        ask(20, question(1, "show"));
+        gone(10, 1);
+        let answered = WAITING.with(|waiting| waiting.borrow_mut().answered(&key));
+        assert_eq!(answered.len(), 1);
+        assert!(answered[0].is(20, 1));
+        // A number is the question's within its own pane: taking back the pane 10's question 2
+        // leaves the pane 20's question 2 where it is, and so does a number nobody asked.
+        ask(10, question(2, "show"));
+        ask(20, question(2, "show"));
+        gone(10, 2);
+        gone(20, 9);
+        let answered = WAITING.with(|waiting| waiting.borrow_mut().answered(&key));
+        assert_eq!(answered.len(), 1);
+        assert!(answered[0].is(20, 2));
     }
 
     #[test]

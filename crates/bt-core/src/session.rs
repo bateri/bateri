@@ -11854,8 +11854,8 @@ impl Session {
 
     /// What the shell is to do for the view, in order; empties the slot
     /// ([`Wake::view_changed`] says when there is something): a view to start,
-    /// a message for it, a question for the person, a link to open, a view to
-    /// tear down. The bytes the program is answered with are not here — they
+    /// a message for it, a question for the person (and the taking back of one
+    /// that is no longer asked), a link to open, a view to tear down. The bytes the program is answered with are not here — they
     /// have gone into the pane's input already.
     pub fn take_view_actions(&self) -> Vec<pencere::Action> {
         self.adapter
@@ -11873,11 +11873,13 @@ impl Session {
             .view(|conversation| conversation.view_message(text));
     }
 
-    /// The person's answer to a [`pencere::Action::Consent`]; it is cut down to
-    /// what the view declared, whatever it says.
-    pub fn view_consent(&self, grant: pencere::Grant) {
+    /// The person's answer to the question a [`pencere::Action::Consent`] asked, whose
+    /// [`id`](pencere::Consent::id) is `id`; it is cut down to what the view declared,
+    /// whatever it says. An answer to a question the conversation no longer asks (its
+    /// open ended: [`pencere::Action::WithdrawConsent`]) changes nothing.
+    pub fn view_consent(&self, id: u32, grant: pencere::Grant) {
         self.adapter
-            .view(|conversation| conversation.consent(grant));
+            .view(|conversation| conversation.consent(id, grant));
     }
 
     /// The person's answer to a [`pencere::Action::OpenLink`].
@@ -30579,6 +30581,100 @@ e\\314\\201.'; sleep 5";
         let served = program.session.serve_view_file("index.html");
         assert_eq!(served.map(|(media, _)| media).as_deref(), Some("text/html"));
         assert!(program.session.take_view_actions().is_empty());
+        program.session.shutdown();
+    }
+
+    /// A question about access is answered by its number. The program leaves before the person
+    /// answers: the conversation takes the question back, and the answer that was on its way
+    /// settles nothing — not that open, not the next one's question, which has a number of its own.
+    #[test]
+    fn an_answer_to_a_question_taken_back_settles_no_other() {
+        use crate::pencere::tests::{
+            bundle_open_declaring, hello, initialize_answer, is_request, page_file, token_of,
+            tools_answer, wire,
+        };
+        use crate::pencere::{Action, Consent, State};
+        use ::pencere::frame::Message;
+
+        /// The first frame from `from` on that `wanted` takes.
+        fn next(program: &Playing, from: usize, wanted: impl Fn(&Message) -> bool) -> Message {
+            let mut found = None;
+            wait_until("the program's frame", Duration::from_secs(10), || {
+                found = program.written().into_iter().skip(from).find(&wanted);
+                found.is_some()
+            });
+            found.expect("waited for")
+        }
+
+        /// The program says hello, opens a view that declares an address and answers the host's
+        /// start-up; returns its token and the question the person is asked.
+        fn open_asking(program: &mut Playing) -> (String, Consent) {
+            let from = program.written().len();
+            program.write(&hello());
+            let token = token_of(&next(program, from, |frame| frame.kind == "welcome"));
+            program.write(&bundle_open_declaring(&token, "https://api.example.com"));
+            let need = next(program, from, |frame| frame.kind == "need");
+            // The host has the page already on the second open: it asks for nothing.
+            if !need.payload.contains("\"missing\":[]") {
+                program.write(&page_file());
+            }
+            let initialize = next(program, from, |frame| is_request(frame, "initialize"));
+            program.write(&initialize_answer(&initialize));
+            let tools = next(program, from, |frame| is_request(frame, "tools/list"));
+            program.write(&tools_answer(&tools));
+            let mut asked = None;
+            wait_until("the question", Duration::from_secs(10), || {
+                for action in program.session.take_view_actions() {
+                    if let Action::Consent(consent) = action {
+                        asked = Some(consent);
+                    }
+                }
+                asked.is_some()
+            });
+            (token, asked.expect("waited for"))
+        }
+
+        let mut program = Playing::new("view-consent-id");
+        let (token, first) = open_asking(&mut program);
+        assert_ne!(first.id, 0, "the conversation numbers its questions");
+        assert_eq!(program.state(), Some(State::Opening));
+
+        let bye = format!(r#"{{"token":"{token}","reason":"signal"}}"#);
+        program.write(&wire("bye", 6, None, None, &bye));
+        let mut taken = Vec::new();
+        wait_until("the question taken back", Duration::from_secs(10), || {
+            taken.extend(program.session.take_view_actions());
+            taken.contains(&Action::WithdrawConsent(first.id))
+        });
+        // The person's click was already on its way: it changes nothing.
+        program.session.view_consent(first.id, first.grant_all());
+        assert_ne!(program.state(), Some(State::Open));
+        assert!(
+            !program
+                .session
+                .take_view_actions()
+                .iter()
+                .any(|action| matches!(action, Action::StartView(_)))
+        );
+
+        // The program opens again and the person is asked a new question, with a number of its
+        // own: the first one's answer, late, is not its answer.
+        let (_, second) = open_asking(&mut program);
+        assert_ne!(second.id, first.id);
+        program.session.view_consent(first.id, first.grant_all());
+        assert_eq!(program.state(), Some(State::Opening));
+        assert!(program.session.take_view_actions().is_empty());
+        program.session.view_consent(second.id, second.grant_all());
+        let mut started = false;
+        wait_until("the view", Duration::from_secs(10), || {
+            started = started
+                || program
+                    .session
+                    .take_view_actions()
+                    .iter()
+                    .any(|action| matches!(action, Action::StartView(_)));
+            started
+        });
         program.session.shutdown();
     }
 

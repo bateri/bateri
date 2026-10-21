@@ -305,16 +305,31 @@ pub(crate) const ALTERNATE_SCREEN: &[u8] = b"\x1b[?1049h";
 /// are written on the alternate screen, as a program that shows a view has taken
 /// the pane's, as vim does.
 pub(crate) fn bundle_open(token: &str) -> Vec<u8> {
+    open_of_bundle(token, "")
+}
+
+/// The same, for a bundle whose manifest declares `domain` as an address the view connects to:
+/// the person is asked before the view starts.
+pub(crate) fn bundle_open_declaring(token: &str, domain: &str) -> Vec<u8> {
+    open_of_bundle(
+        token,
+        &format!(r#","meta":{{"csp":{{"connectDomains":["{domain}"]}}}}"#),
+    )
+}
+
+/// The `open` of the one-file bundle with `meta` (the manifest's own member, or nothing).
+fn open_of_bundle(token: &str, meta: &str) -> Vec<u8> {
     let digest = Digest::of(PAGE).to_string();
     let open = format!(
         concat!(
             r#"{{"token":"{token}","tool":{{"name":"list_containers","arguments":{{}}}},"#,
             r#""bundle":{{"entry":"index.html","files":[{{"path":"index.html","sha256":"{digest}","#,
-            r#""size":{size},"type":"text/html"}}]}}}}"#
+            r#""size":{size},"type":"text/html"}}]{meta}}}}}"#
         ),
         token = token,
         digest = digest,
-        size = PAGE.len()
+        size = PAGE.len(),
+        meta = meta
     );
     [ALTERNATE_SCREEN, &wire("open", 2, None, None, &open)].concat()
 }
