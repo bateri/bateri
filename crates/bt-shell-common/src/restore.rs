@@ -2325,9 +2325,17 @@ mod tests {
         clear(&lock).expect("clear");
         assert_eq!(names(&dir), vec!["lock".to_owned()]);
 
-        // The lock is released when it drops.
+        // The lock is released when it drops. A test that forks in the same moment shares the
+        // lock's open file until its child execs, so the lock may come free a moment later.
         drop(lock);
-        assert!(super::lock(&dir).is_some());
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while super::lock(&dir).is_none() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the lock is released when it drops"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     }
 
     #[test]
