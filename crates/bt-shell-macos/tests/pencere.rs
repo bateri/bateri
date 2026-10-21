@@ -621,19 +621,18 @@ fn run(dir: &Path) {
     let (area, bounds) = (web.frame(), pane.bounds());
     assert_eq!(strip.frame().size.height, view_strip::HEIGHT);
     // It says what the program calls the tool and itself, in the words the program gave
-    // (`tools/list`'s title, `serverInfo`'s), and not the tool's name and the process's.
-    let words: Vec<String> = descendants(strip.clone())
+    // (`tools/list`'s title, `serverInfo`'s), and not the tool's name and the process's; on
+    // this Mac it names no place. (The strip's own fields: the button's label is AppKit's.)
+    let words: Vec<String> = strip
+        .subviews()
         .iter()
         .filter_map(|view| {
             view.downcast_ref::<NSTextField>()
+                .filter(|field| !field.isHidden())
                 .map(|field| field.stringValue().to_string())
         })
         .collect();
-    assert!(words.contains(&"Show things".to_owned()), "{words:?}");
-    assert!(
-        words.contains(&"Pencere Test · in this pane".to_owned()),
-        "{words:?}"
-    );
+    assert_eq!(words, ["Pencere Test", "Show things"], "{words:?}");
     assert_eq!(
         strip.frame().origin.y + strip.frame().size.height,
         bounds.size.height

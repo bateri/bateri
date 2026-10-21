@@ -2,9 +2,10 @@
 //!
 //! A program's view covers the whole pane, and a view that covers the pane could imitate the
 //! terminal under it. So the application keeps a strip of its own at the top of the pane,
-//! outside the view's area, that says three things the view cannot say for itself: that what is
-//! shown is a program's view, where that program runs (the server's name; nothing on this Mac),
-//! and how the person leaves it (⌃C, or the button that writes the same byte).
+//! outside the view's area, that says what the view cannot say for itself, each thing once:
+//! where the program runs (`⇄ prod`, the dock's mark for a server; nothing on this Mac), which
+//! program it is, what the view is (its title, when it says more than the program's name), and
+//! the way out — one button, **Quit ⌃C**, the verb and the key it is.
 //!
 //! Every name in it comes from the program or from the machine it runs on, so it is **cleaned
 //! and bounded** here ([`strip`]) before a toolkit draws it: a name with a line break, a
@@ -18,12 +19,21 @@
 /// The strip's height, points: the height of the view's area is the pane's less this.
 pub const HEIGHT: f64 = 32.0;
 
-/// What the strip tells about leaving a view. The person's one way out of a view that has
-/// stopped answering is ⌃C (the keys: the protocol's section on the keyboard).
-pub const HINT: &str = "⌃C quits it, the shell comes back";
+/// The mark before the server a program runs on: the dock's mark for a remote session
+/// (`bt_core::dock::REMOTE_MARK`), so the strip names a server the way the dock does.
+pub const REMOTE_MARK: char = '⇄';
 
-/// The words that say the view is the pane's own and not a window beside it.
-const IN_THIS_PANE: &str = "in this pane";
+/// The button's verb. The program is named once, left of it, not again in it.
+pub const QUIT: &str = "Quit";
+
+/// The key the button is, shown in it the way a menu shows a shortcut. The person's one way
+/// out of a view that has stopped answering is ⌃C (the keys: the protocol's section on the
+/// keyboard), and the button writes the same byte.
+pub const QUIT_KEY: &str = "⌃C";
+
+/// What the strip says when nothing names the view: no title, no program, on this Mac. A strip
+/// with no words would not say that what is under it is a program's.
+const UNNAMED: &str = "A program's view";
 
 /// The most characters of a title the strip keeps. A design constant, not measured: a
 /// sentence-long title would push the rest off the strip before the width could cut it.
@@ -32,18 +42,20 @@ pub const TITLE_LIMIT: usize = 48;
 /// The most characters of a place or a program's name the strip keeps (the same reason).
 pub const NAME_LIMIT: usize = 32;
 
-/// What the strip says, each part ready to be drawn.
+/// What the strip says, each part ready to be drawn; a part that is `None` is not drawn.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Strip {
-    /// The view's title, in the strong colour.
-    pub title: String,
-    /// Where the program runs, the program and that the view is in this pane, in the quiet one:
-    /// `prod · docker-ui · in this pane`, `docker-ui · in this pane` on this Mac.
-    pub context: String,
-    /// How the person leaves ([`HINT`]).
-    pub hint: &'static str,
-    /// The button that writes ⌃C: `Quit docker-ui`, a verb and what it ends.
-    pub quit: String,
+    /// Where the program runs, `⇄ prod`, in the colour the dock gives a server; `None` on this
+    /// Mac.
+    pub place: Option<String>,
+    /// The program, in the strong colour: what the person trusts and what the button quits.
+    /// `None` when nothing here knows it (a plain `ssh`, a server that has not said).
+    pub program: Option<String>,
+    /// The view's title, in the quiet colour. `None` when there is none or it only says the
+    /// program's name again.
+    pub title: Option<String>,
+    /// What the button does, for its tooltip: `Sends ⌃C to docker-ui. The shell comes back.`
+    pub quit_tip: String,
 }
 
 /// The strip's text for a view of a tool (the one whose result the view shows) that the
@@ -55,42 +67,38 @@ pub struct Strip {
 /// `ssh`, a server that has not said).
 ///
 /// A title the program did not give is the tool's label; a title or a label with nothing left
-/// after cleaning is as if there were none.
+/// after cleaning is as if there were none, and so is one that is the program's name in other
+/// letters (`Containers` from `containers`).
 pub fn strip(
     title: Option<&str>,
     tool_label: Option<&str>,
     place: Option<&str>,
     program: Option<&str>,
 ) -> Strip {
+    let named = |text: &str, limit: usize| Some(clean(text, limit)).filter(|text| !text.is_empty());
+    let place = place.and_then(|text| named(text, NAME_LIMIT));
+    let program = program.and_then(|text| named(text, NAME_LIMIT));
     let title = title
-        .map(|text| clean(text, TITLE_LIMIT))
-        .filter(|text| !text.is_empty())
-        .or_else(|| {
-            tool_label
-                .map(|text| clean(text, TITLE_LIMIT))
-                .filter(|text| !text.is_empty())
-        })
-        .unwrap_or_default();
-    let place = place
-        .map(|text| clean(text, NAME_LIMIT))
-        .filter(|text| !text.is_empty());
-    let program = program
-        .map(|text| clean(text, NAME_LIMIT))
-        .filter(|text| !text.is_empty());
-    let parts: Vec<&str> = place
-        .iter()
-        .chain(program.iter())
-        .map(String::as_str)
-        .chain(std::iter::once(IN_THIS_PANE))
-        .collect();
+        .and_then(|text| named(text, TITLE_LIMIT))
+        .or_else(|| tool_label.and_then(|text| named(text, TITLE_LIMIT)))
+        .filter(|title| {
+            program
+                .as_ref()
+                .is_none_or(|program| title.to_lowercase() != program.to_lowercase())
+        });
+    let title = match (&place, &program, title) {
+        (None, None, None) => Some(UNNAMED.to_owned()),
+        (_, _, title) => title,
+    };
+    let quit_tip = format!(
+        "Sends {QUIT_KEY} to {}. The shell comes back.",
+        program.as_deref().unwrap_or("the program")
+    );
     Strip {
+        place: place.map(|place| format!("{REMOTE_MARK} {place}")),
+        program,
         title,
-        context: parts.join(" · "),
-        hint: HINT,
-        quit: match &program {
-            Some(name) => format!("Quit {name}"),
-            None => "Quit program".to_owned(),
-        },
+        quit_tip,
     }
 }
 
@@ -151,17 +159,16 @@ fn hides_or_reverses(c: char) -> bool {
     )
 }
 
-/// The gap left of the icon, points.
+/// The gap left of the first part, points.
 pub const LEFT: f64 = 14.0;
-/// The icon's side, points.
-pub const ICON: f64 = 14.0;
-/// The gap between the parts, points.
+/// The gap between the parts, points: the parts are told apart by their colours and this, with
+/// no separator between them.
 pub const GAP: f64 = 8.0;
 /// The gap right of the button, points.
 pub const RIGHT: f64 = 8.0;
-/// The narrowest the title is cut to before the place and the program give way, points: a few
-/// characters and the ellipsis. A design constant.
-pub const MIN_TITLE: f64 = 40.0;
+/// The narrowest a name is cut to before the next part gives way, points: a few characters and
+/// the ellipsis. A design constant.
+pub const MIN_PART: f64 = 40.0;
 
 /// A part's place along the strip: where it starts and how wide it is, points.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -170,72 +177,92 @@ pub struct Span {
     pub width: f64,
 }
 
-/// Where the parts stand, left to right; the icon is at [`LEFT`] and [`ICON`] wide.
+/// Where the parts stand, left to right; a part that is `None` is not drawn (it has no text, or
+/// the strip is too narrow for it).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Layout {
-    pub title: Span,
-    pub context: Span,
-    /// `None` when the strip is too narrow for it: it is the first thing to go.
-    pub hint: Option<Span>,
+    pub place: Option<Span>,
+    pub program: Option<Span>,
+    pub title: Option<Span>,
     /// The button, at the right edge; it never gives way.
     pub button: Span,
 }
 
-/// The natural widths of the parts, as the toolkit measured them.
+/// The natural widths of the parts, as the toolkit measured them; a part with no text is 0.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Widths {
+    pub place: f64,
+    pub program: f64,
     pub title: f64,
-    pub context: f64,
-    pub hint: f64,
     pub button: f64,
 }
 
-/// Where the parts of a strip `width` points wide stand. The button is at the right edge and
-/// the hint left of it; what is left between the icon and the hint is the title's and the
-/// context's. When they do not fit, the hint goes first, then the title is cut (to no less than
-/// [`MIN_TITLE`]), and only then the context — where the program runs is what a view must not
-/// lose to a long title.
+/// Where the parts of a strip `width` points wide stand. The button is at the right edge; the
+/// place, the program and the title stand in that order from the left, in what is left. When
+/// they do not fit, the title is cut (to no less than [`MIN_PART`]) and then goes, then the
+/// program is cut, and the place last — where the program runs is what a view must not lose to
+/// a long title or a long name.
 pub fn arrange(width: f64, natural: Widths) -> Layout {
-    let start = LEFT + ICON + GAP;
     let button_width = natural.button.max(0.0).min((width - LEFT - RIGHT).max(0.0));
     let button = Span {
         x: width - RIGHT - button_width,
         width: button_width,
     };
     // Up to the button, less the gap before it.
-    let room = (button.x - GAP - start).max(0.0);
-    let (title, context) = (natural.title.max(0.0), natural.context.max(0.0));
-
-    let with_hint = title + GAP + context + GAP + natural.hint;
-    let without_hint = title + GAP + context;
-    let (title_width, context_width, hint) = if room >= with_hint {
-        (title, context, Some(natural.hint))
-    } else if room >= without_hint {
-        (title, context, None)
-    } else {
-        let title_least = MIN_TITLE.min(title);
-        let cut_title = (room - GAP - context).max(title_least);
-        if cut_title + GAP + context <= room {
-            (cut_title, context, None)
-        } else {
-            (title_least, (room - GAP - title_least).max(0.0), None)
-        }
+    let room = (button.x - GAP - LEFT).max(0.0);
+    let [place, program, title] = fit(
+        room,
+        [natural.place, natural.program, natural.title].map(|width| width.max(0.0)),
+    );
+    let mut x = LEFT;
+    let mut put = |width: f64| {
+        (width > 0.0).then(|| {
+            let span = Span { x, width };
+            x += width + GAP;
+            span
+        })
     };
     Layout {
-        title: Span {
-            x: start,
-            width: title_width,
-        },
-        context: Span {
-            x: start + title_width + GAP,
-            width: context_width,
-        },
-        hint: hint.map(|hint_width| Span {
-            x: button.x - GAP - hint_width,
-            width: hint_width,
-        }),
+        place: put(place),
+        program: put(program),
+        title: put(title),
         button,
     }
+}
+
+/// The widths of the place, the program and the title in `room` ([`arrange`]'s order of giving
+/// way). A part of width 0 is not there and takes no gap.
+fn fit(room: f64, [place, program, title]: [f64; 3]) -> [f64; 3] {
+    let row = |parts: [f64; 3]| {
+        let shown = parts.iter().filter(|width| **width > 0.0);
+        shown.clone().sum::<f64>() + GAP * (shown.count().saturating_sub(1) as f64)
+    };
+    // What the parts before one leave for it, less the gap before it.
+    let after = |before: [f64; 3]| {
+        let used = row(before);
+        room - used - if used > 0.0 { GAP } else { 0.0 }
+    };
+    if row([place, program, title]) <= room {
+        return [place, program, title];
+    }
+    if title > 0.0 {
+        let free = after([place, program, 0.0]);
+        if free >= MIN_PART.min(title) || (place == 0.0 && program == 0.0) {
+            return [place, program, free.clamp(0.0, title)];
+        }
+    }
+    if program > 0.0 {
+        let least = MIN_PART.min(program);
+        let free = after([place, 0.0, 0.0]);
+        if free >= least || place == 0.0 {
+            return [place, free.clamp(0.0, program), 0.0];
+        }
+        let free = room - least - GAP;
+        if free >= MIN_PART.min(place) {
+            return [free, least, 0.0];
+        }
+    }
+    [place.min(room), 0.0, 0.0]
 }
 
 #[cfg(test)]
@@ -243,44 +270,77 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_view_on_a_server_says_where_the_program_runs() {
+    fn a_view_on_this_mac_names_the_program_once_and_its_title_beside_it() {
+        let strip = strip(Some("Table"), Some("show_table"), None, Some("tablepen"));
+        assert_eq!(strip.place, None);
+        assert_eq!(strip.program.as_deref(), Some("tablepen"));
+        assert_eq!(strip.title.as_deref(), Some("Table"));
+        assert_eq!(
+            strip.quit_tip,
+            "Sends ⌃C to tablepen. The shell comes back."
+        );
+    }
+
+    #[test]
+    fn a_view_on_a_server_says_where_the_program_runs_with_the_docks_mark() {
         let strip = strip(
             Some("Containers"),
             Some("list_containers"),
             Some("prod"),
-            Some("docker-ui"),
+            Some("Docker UI"),
         );
-        assert_eq!(strip.title, "Containers");
-        assert_eq!(strip.context, "prod · docker-ui · in this pane");
-        assert_eq!(strip.hint, "⌃C quits it, the shell comes back");
-        assert_eq!(strip.quit, "Quit docker-ui");
+        assert_eq!(strip.place.as_deref(), Some("⇄ prod"));
+        assert_eq!(strip.program.as_deref(), Some("Docker UI"));
+        assert_eq!(strip.title.as_deref(), Some("Containers"));
     }
 
     #[test]
-    fn a_view_on_this_mac_names_no_place() {
-        let strip = strip(
-            Some("Containers"),
-            Some("list_containers"),
-            None,
-            Some("docker-ui"),
-        );
-        assert_eq!(strip.context, "docker-ui · in this pane");
-        assert_eq!(strip.quit, "Quit docker-ui");
+    fn a_title_that_only_says_the_programs_name_again_is_left_out() {
+        let strip = strip(Some("Containers"), Some("list"), None, Some("containers"));
+        assert_eq!(strip.program.as_deref(), Some("containers"));
+        assert_eq!(strip.title, None);
+        // The tool's label stands in for a title the program did not give, and is left out the
+        // same way.
+        let strip = super::strip(None, Some("TablePen"), None, Some("tablepen"));
+        assert_eq!(strip.title, None);
     }
 
     #[test]
-    fn a_tool_with_no_title_is_named_by_the_tools_label() {
+    fn a_program_nobody_here_can_name_is_not_given_a_name() {
+        // A plain `ssh`: the place is known, the program is not.
+        let strip = strip(None, Some("list"), Some("prod"), None);
+        assert_eq!(strip.place.as_deref(), Some("⇄ prod"));
+        assert_eq!(strip.program, None);
+        assert_eq!(strip.title.as_deref(), Some("list"));
+        assert_eq!(
+            strip.quit_tip,
+            "Sends ⌃C to the program. The shell comes back."
+        );
+    }
+
+    #[test]
+    fn a_view_with_no_title_is_named_by_the_tools_label_and_a_strip_is_never_blank() {
         let strip = strip(None, Some("list_containers"), None, Some("docker-ui"));
-        assert_eq!(strip.title, "list_containers");
+        assert_eq!(strip.title.as_deref(), Some("list_containers"));
         // A title of nothing is none.
         assert_eq!(
-            super::strip(Some("  \n "), Some("list"), None, None).title,
-            "list"
+            super::strip(Some("  \n "), Some("list"), None, None)
+                .title
+                .as_deref(),
+            Some("list")
         );
-        // A tool with nothing left of its name once it is cleaned has no label, and the strip
-        // has no title: the name the view calls the tool by is not drawn in its place.
-        assert_eq!(super::strip(None, None, None, None).title, "");
-        assert_eq!(super::strip(None, Some(" \u{200b}"), None, None).title, "");
+        // No title and no label: the program alone.
+        let strip = super::strip(None, None, None, Some("tablepen"));
+        assert_eq!(strip.title, None);
+        assert_eq!(strip.program.as_deref(), Some("tablepen"));
+        // Nothing at all names it, on this Mac: the strip still says what is under it. The name
+        // the view calls the tool by is not drawn in its place.
+        for label in [None, Some(" \u{200b}")] {
+            let strip = super::strip(None, label, None, None);
+            assert_eq!(strip.title.as_deref(), Some("A program's view"));
+        }
+        // On a server the place says it.
+        assert_eq!(super::strip(None, None, Some("prod"), None).title, None);
     }
 
     #[test]
@@ -289,17 +349,12 @@ mod tests {
         // what it calls the tool whose result the view shows.
         let program = program_name(Some("Docker UI"), Some("node"));
         let strip = strip(Some("Containers"), Some("list_containers"), None, program);
-        assert_eq!(strip.title, "Containers");
-        assert_eq!(strip.context, "Docker UI · in this pane");
-        assert_eq!(strip.quit, "Quit Docker UI");
-        // On a server's terminal the place is still first.
-        let strip = super::strip(
-            Some("Containers"),
-            Some("list_containers"),
-            Some("prod"),
-            program_name(Some("Docker UI"), None),
+        assert_eq!(strip.program.as_deref(), Some("Docker UI"));
+        assert_eq!(strip.title.as_deref(), Some("Containers"));
+        assert_eq!(
+            strip.quit_tip,
+            "Sends ⌃C to Docker UI. The shell comes back."
         );
-        assert_eq!(strip.context, "prod · Docker UI · in this pane");
         // A program that gave no name is the process, or the server's word for it; one that gave
         // nothing that shows is as if it gave none.
         assert_eq!(program_name(None, Some("node")), Some("node"));
@@ -309,31 +364,23 @@ mod tests {
         );
         assert_eq!(program_name(None, None), None);
         assert_eq!(program_name(Some("\u{202e}"), None), None);
-        // A title the program did not give is the tool's label, whatever the program is called.
-        let strip = super::strip(None, Some("list_containers"), None, program);
-        assert_eq!(strip.title, "list_containers");
-    }
-
-    #[test]
-    fn a_program_nobody_here_can_name_is_still_the_one_the_button_quits() {
-        // A plain `ssh`: the place is known, the program is not.
-        let strip = strip(None, Some("list"), Some("prod"), None);
-        assert_eq!(strip.context, "prod · in this pane");
-        assert_eq!(strip.quit, "Quit program");
-        let strip = super::strip(None, Some("list"), None, None);
-        assert_eq!(strip.context, "in this pane");
-        assert_eq!(strip.quit, "Quit program");
     }
 
     #[test]
     fn a_long_name_is_cut_and_a_title_that_imitates_the_application_is_cleaned() {
         let long = "x".repeat(200);
-        let strip = strip(Some(&long), Some("t"), Some(&long), Some(&long));
-        assert_eq!(strip.title.chars().count(), TITLE_LIMIT);
-        assert!(strip.title.ends_with('…'));
+        let strip = strip(
+            Some(&format!("t{long}")),
+            Some("t"),
+            Some(&long),
+            Some(&long),
+        );
+        let title = strip.title.expect("a title");
+        assert_eq!(title.chars().count(), TITLE_LIMIT);
+        assert!(title.ends_with('…'));
         let name = format!("{}…", "x".repeat(NAME_LIMIT - 1));
-        assert_eq!(strip.context, format!("{name} · {name} · in this pane"));
-        assert_eq!(strip.quit, format!("Quit {name}"));
+        assert_eq!(strip.place, Some(format!("⇄ {name}")));
+        assert_eq!(strip.program, Some(name));
 
         // Line breaks, tabs and runs of spaces are one space; controls and the characters that
         // reverse or hide text are gone, so nothing in a name can start a second line, flip the
@@ -344,8 +391,9 @@ mod tests {
             Some("pro\u{0}d"),
             Some("a\u{2066}b"),
         );
-        assert_eq!(strip.title, "Quit bateri now");
-        assert_eq!(strip.context, "prod · ab · in this pane");
+        assert_eq!(strip.title.as_deref(), Some("Quit bateri now"));
+        assert_eq!(strip.place.as_deref(), Some("⇄ prod"));
+        assert_eq!(strip.program.as_deref(), Some("ab"));
     }
 
     #[test]
@@ -365,94 +413,102 @@ mod tests {
 
     fn widths() -> Widths {
         Widths {
-            title: 80.0,
-            context: 200.0,
-            hint: 220.0,
-            button: 100.0,
+            place: 60.0,
+            program: 100.0,
+            title: 120.0,
+            button: 70.0,
         }
     }
 
+    fn span(x: f64, width: f64) -> Option<Span> {
+        Some(Span { x, width })
+    }
+
     #[test]
-    fn a_wide_strip_holds_everything_at_its_natural_width() {
+    fn a_wide_strip_holds_every_part_at_its_natural_width_in_order() {
         let layout = arrange(900.0, widths());
         assert_eq!(
             layout.button,
             Span {
-                x: 792.0,
-                width: 100.0
+                x: 822.0,
+                width: 70.0
             }
         );
-        let hint = layout.hint.expect("room for the hint");
-        assert_eq!(
-            hint,
-            Span {
-                x: 564.0,
-                width: 220.0
-            }
-        );
-        assert_eq!(
-            layout.title,
-            Span {
-                x: 36.0,
-                width: 80.0
-            }
-        );
-        assert_eq!(
-            layout.context,
-            Span {
-                x: 124.0,
-                width: 200.0
-            }
-        );
-        // Nothing overlaps.
-        assert!(layout.context.x + layout.context.width <= hint.x);
+        assert_eq!(layout.place, span(14.0, 60.0));
+        assert_eq!(layout.program, span(82.0, 100.0));
+        assert_eq!(layout.title, span(190.0, 120.0));
     }
 
     #[test]
-    fn the_hint_is_the_first_to_go() {
-        // 36 + 80 + 8 + 200 = 324 left of the gap before the button: the hint no longer fits.
-        let layout = arrange(480.0, widths());
-        assert_eq!(layout.hint, None);
-        assert_eq!(layout.title.width, 80.0);
-        assert_eq!(layout.context.width, 200.0);
-    }
-
-    #[test]
-    fn the_title_is_cut_before_the_place_and_the_program() {
-        let layout = arrange(400.0, widths());
-        assert_eq!(layout.hint, None);
-        assert_eq!(layout.context.width, 200.0);
-        assert!(layout.title.width < 80.0 && layout.title.width >= MIN_TITLE);
-        // The parts fill what is left and no more.
-        let room = layout.button.x - GAP - 36.0;
-        assert_eq!(layout.title.width + GAP + layout.context.width, room);
-    }
-
-    #[test]
-    fn the_context_is_cut_last_and_nothing_goes_negative() {
-        let layout = arrange(300.0, widths());
-        assert_eq!(layout.title.width, MIN_TITLE);
-        assert!(layout.context.width < 200.0 && layout.context.width > 0.0);
-        let room = layout.button.x - GAP - 36.0;
-        assert_eq!(layout.title.width + GAP + layout.context.width, room);
-        for width in [0.0, 10.0, 50.0, 130.0, 160.0] {
-            let layout = arrange(width, widths());
-            for span in [layout.title, layout.context, layout.button] {
-                assert!(span.width >= 0.0, "{width}: {span:?}");
-            }
-            assert!(layout.hint.is_none());
-        }
-    }
-
-    #[test]
-    fn a_short_title_is_never_widened() {
+    fn a_part_with_no_text_takes_no_room() {
         let layout = arrange(
-            300.0,
+            900.0,
             Widths {
-                title: 20.0,
+                place: 0.0,
                 ..widths()
             },
         );
-        assert_eq!(layout.title.width, 20.0);
+        assert_eq!(layout.place, None);
+        assert_eq!(layout.program, span(14.0, 100.0));
+        assert_eq!(layout.title, span(122.0, 120.0));
+    }
+
+    #[test]
+    fn the_title_is_cut_first_and_then_goes() {
+        // Room is 390 − 8 − 70 − 8 − 14 = 290: place and program take 168, and a gap 8.
+        let layout = arrange(390.0, widths());
+        assert_eq!(layout.place, span(14.0, 60.0));
+        assert_eq!(layout.program, span(82.0, 100.0));
+        assert_eq!(layout.title, span(190.0, 114.0));
+        // Room 200: 24 would be left for the title, less than the least it is cut to.
+        let layout = arrange(300.0, widths());
+        assert_eq!(layout.title, None);
+        assert_eq!(layout.program, span(82.0, 100.0));
+    }
+
+    #[test]
+    fn the_program_is_cut_before_the_place_and_the_place_goes_last() {
+        // Room 150: the place keeps 60, the program has 82.
+        let layout = arrange(250.0, widths());
+        assert_eq!(layout.title, None);
+        assert_eq!(layout.place, span(14.0, 60.0));
+        assert_eq!(layout.program, span(82.0, 82.0));
+        // Room 90: the program keeps the least, the place what is left of it.
+        let layout = arrange(190.0, widths());
+        assert_eq!(
+            layout.program,
+            Some(Span {
+                x: 64.0,
+                width: MIN_PART
+            })
+        );
+        assert_eq!(layout.place, span(14.0, 42.0));
+        // Room 80: not both — the place stays, the program goes.
+        let layout = arrange(180.0, widths());
+        assert_eq!(layout.program, None);
+        assert_eq!(layout.place, span(14.0, 60.0));
+    }
+
+    #[test]
+    fn a_lone_part_is_cut_rather_than_dropped_and_nothing_goes_negative() {
+        let lone = Widths {
+            place: 0.0,
+            program: 0.0,
+            title: 300.0,
+            button: 70.0,
+        };
+        assert_eq!(arrange(200.0, lone).title, span(14.0, 100.0));
+        for width in [0.0, 10.0, 50.0, 100.0, 130.0, 160.0] {
+            for natural in [widths(), lone] {
+                let layout = arrange(width, natural);
+                for part in [layout.place, layout.program, layout.title]
+                    .into_iter()
+                    .flatten()
+                    .chain([layout.button])
+                {
+                    assert!(part.width >= 0.0, "{width}: {part:?}");
+                }
+            }
+        }
     }
 }

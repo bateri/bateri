@@ -2752,7 +2752,7 @@ define_class!(
             self.jump_to_latest();
         }
 
-        /// The strip's "Quit {program}" over a program's view: ⌃C, as the key.
+        /// The strip's "Quit ⌃C" over a program's view: ⌃C, as the key.
         #[unsafe(method(quitProgram:))]
         fn quit_program_sent(&self, _sender: Option<&AnyObject>) {
             self.interrupt_program();

@@ -43,9 +43,10 @@ of every installed copy. A version without a section is not released.
   agent, a dashboard for a server — asks, and the pane shows a web view of its own
   where the terminal was, the way vim takes the screen; when the program ends the
   terminal is back as it was. The program may run here, behind a plain `ssh`, or in
-  a terminal a server keeps. A strip of bateri's own stays above the view and says
-  what it is and where the program runs (“Docker UI · rasp · in this pane”, in the
-  words the program gives its tool and itself), with **Quit {program}**, which is ⌃C.
+  a terminal a server keeps. A strip of bateri's own stays above the view and says,
+  once each, where the program runs, which program it is and what the view shows
+  (“⇄ rasp  Docker UI  Containers”, in the words the program gives itself and its tool),
+  with one button, **Quit ⌃C**.
   The program can also close its view and keep running. The view has the keyboard but
   for your shortcuts —
   ⌘T, ⌘D, ⌘W, ⌘P and the rest, as you set them in `[keys]` — and the commands that
