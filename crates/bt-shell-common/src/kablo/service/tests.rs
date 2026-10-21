@@ -1088,12 +1088,14 @@ fn a_new_terminal_starts_in_the_folder_the_pane_lookup_names() {
         .argv_of(&terminal)
         .expect("started")
         .to_vec();
+    // The bootstrap carries where kablo is on that server, for the agent's command.
+    let kablo = Some(".local/share/kablo/0.2.0/kablo");
     assert_eq!(
         argv[2],
-        ssh_wrap::boot_in(Some("/srv/app")).as_bytes(),
+        ssh_wrap::boot_in(Some("/srv/app"), kablo).as_bytes(),
         "the bootstrap that goes to /srv/app"
     );
-    assert_ne!(argv[2], ssh_wrap::boot_in(None).as_bytes());
+    assert_ne!(argv[2], ssh_wrap::boot_in(None, kablo).as_bytes());
 }
 
 /// The panes' connection: told once per change, from a first connection that

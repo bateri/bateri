@@ -11,6 +11,7 @@
 # report is harmless, so ours is always printed.
 
 if set -q BATERI_FISH_DIR
+    set -g __bateri_bin $BATERI_FISH_DIR/bin
     set -l __bateri_dirs (string split : -- "$XDG_DATA_DIRS")
     if set -l __bateri_at (contains -i -- $BATERI_FISH_DIR $__bateri_dirs)
         set -e __bateri_dirs[$__bateri_at]
@@ -34,6 +35,20 @@ if set -q BATERI_RBLOCK
 end
 
 status is-interactive; or exit
+
+# `bateri`, the agent's command (`bin/bateri`), on `PATH` once. This file is
+# read before the user's `config.fish`, so it is done at the first prompt, after
+# it; and with `set -g`, for this session only (`fish_add_path` would write a
+# universal variable to the user's configuration).
+if set -q __bateri_bin
+    function __bateri_path --on-event fish_prompt
+        functions -e __bateri_path
+        if test -x $__bateri_bin/bateri; and not contains -- $__bateri_bin $PATH
+            set -gx PATH $__bateri_bin $PATH
+        end
+        set -e __bateri_bin
+    end
+end
 
 # Reports the working directory with OSC 7, per prompt. The authority is the
 # server's name (the zsh wrapper's reason).

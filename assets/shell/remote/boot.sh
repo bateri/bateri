@@ -50,6 +50,13 @@
 #      `XDG_DATA_DIRS` → `vendor_conf.d`. Each one reads the user's own login
 #      files, unchanged; no rc file on the server is written.
 #
+# TWO CALLERS, ONE FILE. Besides the one-liner above, `bin/bateri` starts the
+# integrated shell of a terminal an agent opened without a program by running
+# THIS FILE, which step 3 has written to `$bt_dir/boot.sh`: `sh boot.sh '' ''
+# <version> -`. It then runs where the files are (`$0`), finds them in place
+# (`bt_files` is not defined, so it writes nothing), prints no motd and no
+# proof — an empty nonce is no login attempt — and execs the same login shell.
+#
 # EVERY FAILURE IS A PLAIN LOGIN SHELL, never a broken connection: the reason
 # goes to bateri as `ESC ] 8133 ; f ; {code} BEL` (`write`, `shell`; the
 # one-liner says `decode`) and the pane's label shows it. The code is a fixed
@@ -120,8 +127,9 @@ bt_login() {
 }
 
 # 1. The motd: Ubuntu's PAM writes the dynamic one at every login (also this
-# one) and prints it before the static file; the two can be one file.
-if [ ! -e "$HOME/.hushlogin" ]; then
+# one) and prints it before the static file; the two can be one file. Not for
+# a terminal `bin/bateri` starts (no nonce): that is no login.
+if [ -n "${2-}" ] && [ ! -e "$HOME/.hushlogin" ]; then
   if [ -r /run/motd.dynamic ]; then
     cat /run/motd.dynamic
   fi
@@ -147,6 +155,13 @@ case $bt_data in
   *) bt_data=$HOME/.local/share ;;
 esac
 bt_dir=$bt_data/bateri/shell
+# Run from its own file, it is where the files are, whatever the environment.
+case $0 in
+  /*/boot.sh) bt_dir=${0%/boot.sh} ;;
+esac
+
+# Run from the file there is nothing to write: the one-liner defines `bt_files`.
+command -v bt_files >/dev/null 2>&1 || bt_files() { :; }
 
 # Writes `$2` to `$bt_dir/$1` under a temporary name, then renames it; a file
 # that is already the same is left as it is (no rename on every connection).
@@ -166,7 +181,8 @@ bt_put() {
 }
 
 # In a subshell: the owner-only `umask` must not reach the user's shell.
-if ! (umask 077 && mkdir -p "$bt_dir/zsh" "$bt_dir/bash" "$bt_dir/fish/vendor_conf.d" && bt_files) 2>/dev/null; then
+# `bt_put` writes a file nobody may execute; `bin/bateri` is run by name.
+if ! (umask 077 && mkdir -p "$bt_dir/zsh" "$bt_dir/bash" "$bt_dir/fish/vendor_conf.d" "$bt_dir/bin" && bt_files && { chmod u+x "$bt_dir/bin/bateri" || :; }) 2>/dev/null; then
   bt_fault write
   bt_login
 fi

@@ -24,6 +24,9 @@ pub mod listing;
 pub mod message;
 pub mod place;
 
+#[cfg(test)]
+mod script;
+
 use std::fmt;
 
 /// A terminal's number on its server: the `t9` an agent is told when it opens one and names when it

@@ -47,6 +47,17 @@ for __bateri_login in "$HOME/.bash_profile" "$HOME/.bash_login" "$HOME/.profile"
 done
 unset __bateri_login
 
+# `bateri`, the agent's command (`bin/bateri`, beside the `bash` directory this
+# file is in), on `PATH` once and after the user's login files have set theirs.
+__bateri_bin=${BASH_SOURCE[0]%/bash/bateri.bash}/bin
+if [ -x "$__bateri_bin/bateri" ]; then
+  case ":$PATH:" in
+    *":$__bateri_bin:"*) ;;
+    *) PATH=$__bateri_bin:$PATH ;;
+  esac
+fi
+unset __bateri_bin
+
 # Reports the working directory with OSC 7, per prompt (from `__bateri_precmd`).
 #
 # THE AUTHORITY IS THE SERVER'S NAME (the zsh wrapper's reason): a foreign

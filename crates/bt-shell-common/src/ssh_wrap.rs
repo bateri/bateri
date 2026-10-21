@@ -612,19 +612,22 @@ pub fn kablo_path(
 /// starting directory ([`boot_in`]), `parent` the local block of the `ssh`
 /// command, `tab` the pane's identity; the nonce is the attempt's
 /// ([`new_nonce`]), which here proves nothing (a terminal the server keeps is
-/// not rerun) but is the bootstrap's `$2`.
+/// not rerun) but is the bootstrap's `$2`. `kablo` is where kablo is on that
+/// server, relative to home (`kablo::install::Installed::path`): the command
+/// an agent runs there (`bateri`) takes it from the file the bootstrap writes.
 pub fn kablo_argv(
     cwd: Option<&str>,
     parent: Option<u32>,
     nonce: &str,
     tab: Option<&PaneUuid>,
+    kablo: Option<&str>,
 ) -> Vec<Vec<u8>> {
     let parent = parent.map_or_else(|| NO_PARENT.to_owned(), |parent| parent.to_string());
     let tab = tab.map_or_else(|| NO_TAB.to_owned(), PaneUuid::url);
     [
         "sh",
         "-c",
-        &boot_in(cwd),
+        &boot_in(cwd, kablo),
         BOOT_NAME,
         &parent,
         nonce,
@@ -690,6 +693,18 @@ pub fn is_inline(boot: &str) -> bool {
 /// `eval`ed on the server.
 const BOOT_SCRIPT: &str = include_str!("../../../assets/shell/remote/boot.sh");
 
+/// The agent's command (`assets/shell/remote/bin/bateri`) and the counter it
+/// and the Mac number terminals with (`next.sh`): written beside the shells'
+/// files, the command executable. The command carries [`KABLO_PLACEHOLDER`]
+/// where kablo's place goes.
+const AGENT_COMMAND: &str = include_str!("../../../assets/shell/remote/bin/bateri");
+const COUNTER: &str = include_str!("../../../assets/shell/remote/next.sh");
+
+/// The word in [`AGENT_COMMAND`] that [`payload`] replaces with kablo's place.
+/// Left as it is when the place is not known (or not one [`is_kablo_path`]
+/// takes): the command then looks for `kablo` on `PATH`.
+const KABLO_PLACEHOLDER: &str = "__BATERI_KABLO__";
+
 /// The payload's first line: the one-liner runs only a decoded text that
 /// starts with it (a decoder that ignored `-d` prints base64, not this).
 const MAGIC: &str = "bateri_boot=1";
@@ -698,8 +713,9 @@ const MAGIC: &str = "bateri_boot=1";
 /// embedded at build time (the subcommand runs
 /// on every `ssh`, so it reads no package file): the local zsh wrapper's four
 /// `ZDOTDIR` files and its swap **verbatim**, the remote zsh body beside them,
-/// bash's `ENV` file and fish's `vendor_conf.d` file.
-const REMOTE_FILES: [(&str, &str); 8] = [
+/// bash's `ENV` file, fish's `vendor_conf.d` file, the agent's command with its
+/// counter, and the bootstrap.
+const REMOTE_FILES: [(&str, &str); 11] = [
     (
         "zsh/.zshenv",
         include_str!("../../../assets/shell/zsh/.zshenv"),
@@ -732,30 +748,54 @@ const REMOTE_FILES: [(&str, &str); 8] = [
         "fish/vendor_conf.d/bateri.fish",
         include_str!("../../../assets/shell/remote/fish/vendor_conf.d/bateri.fish"),
     ),
+    ("bin/bateri", AGENT_COMMAND),
+    ("next.sh", COUNTER),
+    // The bootstrap itself, for the terminals an agent opens without a
+    // program: `bin/bateri` runs this file where the one-liner's text ran.
+    ("boot.sh", BOOT_SCRIPT),
 ];
 
-/// The payload: [`MAGIC`], `bt_files` (one `bt_put` per [`REMOTE_FILES`]
-/// entry, its content a single-quoted literal (`upload::sq`, the crate's one
-/// quoting rule) — no here-document: bash as
-/// `sh` would write one to `/tmp`), the starting directory `bt_cwd` when
-/// there is one ([`is_start_dir`]; the same quoting), then [`BOOT_SCRIPT`].
+/// The payload: [`MAGIC`], [`BOOT_SCRIPT`] as the variable `bt_boot`,
+/// `bt_files` (one `bt_put` per [`REMOTE_FILES`] entry, its content a
+/// single-quoted literal (`upload::sq`, the crate's one quoting rule) — no
+/// here-document: bash as `sh` would write one to `/tmp`; `boot.sh` itself is
+/// written from the variable, so the text carries it once), the starting
+/// directory `bt_cwd` when there is one ([`is_start_dir`]; the same quoting),
+/// then `eval "$bt_boot"`. `kablo` is where kablo is on the server, relative
+/// to home, for the agent's command ([`KABLO_PLACEHOLDER`]).
 /// The directory rides here rather than as a word of [`remote_command`]: the
 /// payload is base64 and `eval`ed by `sh`, so any path is one literal, and
 /// the command's positional form ([`unwrap`]) stays as older builds read it.
-fn payload(cwd: Option<&str>) -> String {
-    let mut text = format!("{MAGIC}\nbt_files() {{\n");
+fn payload(cwd: Option<&str>, kablo: Option<&str>) -> String {
+    let kablo = kablo.filter(|kablo| is_kablo_path(kablo));
+    // The bootstrap is in the text once: a variable `bt_files` writes to
+    // `boot.sh` from and the end of the text `eval`s.
+    let mut text = format!(
+        "{MAGIC}\nbt_boot={}\nbt_files() {{\n",
+        crate::upload::sq(BOOT_SCRIPT)
+    );
     for (path, content) in REMOTE_FILES {
+        if path == "boot.sh" {
+            text.push_str("  bt_put 'boot.sh' \"$bt_boot\" || return 1\n");
+            continue;
+        }
+        let content = match kablo {
+            Some(kablo) if content.contains(KABLO_PLACEHOLDER) => {
+                std::borrow::Cow::Owned(content.replace(KABLO_PLACEHOLDER, kablo))
+            }
+            _ => std::borrow::Cow::Borrowed(content),
+        };
         text.push_str(&format!(
             "  bt_put {} {} || return 1\n",
             crate::upload::sq(path),
-            crate::upload::sq(content)
+            crate::upload::sq(&content)
         ));
     }
     text.push_str("}\n");
     if let Some(cwd) = cwd.filter(|cwd| is_start_dir(cwd)) {
         text.push_str(&format!("bt_cwd={}\n", crate::upload::sq(cwd)));
     }
-    text.push_str(BOOT_SCRIPT);
+    text.push_str("eval \"$bt_boot\"\n");
     text
 }
 
@@ -812,18 +852,35 @@ fn one_liner(payload: &str) -> String {
 /// one-liner carrying the base64 payload. Always [`is_inline`].
 pub fn boot() -> &'static str {
     static BOOT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    BOOT.get_or_init(|| one_liner(&payload(None)))
+    BOOT.get_or_init(|| one_liner(&payload(None, None)))
 }
 
 /// [`boot`], starting the login shell in `cwd` when it is one
 /// ([`is_start_dir`]) — the remote folder ⌘T's tab was in, which the new
 /// terminal asks for ([`kablo_argv`]). Still [`is_inline`]: the directory is
 /// inside the base64 payload ([`payload`]).
-pub fn boot_in(cwd: Option<&str>) -> std::borrow::Cow<'static, str> {
-    match cwd.filter(|cwd| is_start_dir(cwd)) {
-        Some(cwd) => std::borrow::Cow::Owned(one_liner(&payload(Some(cwd)))),
-        None => std::borrow::Cow::Borrowed(boot()),
+pub fn boot_in(cwd: Option<&str>, kablo: Option<&str>) -> std::borrow::Cow<'static, str> {
+    let cwd = cwd.filter(|cwd| is_start_dir(cwd));
+    let kablo = kablo.filter(|kablo| is_kablo_path(kablo));
+    if cwd.is_none() && kablo.is_none() {
+        return std::borrow::Cow::Borrowed(boot());
     }
+    std::borrow::Cow::Owned(one_liner(&payload(cwd, kablo)))
+}
+
+/// Whether `path` can be kablo's place in the agent's command: relative to
+/// home (`.local/share/kablo/0.2.0/kablo`), made of the characters a version
+/// and the directories around it are made of, and nothing that steps out of
+/// the directory. It goes into a script on the server, so nothing else does.
+pub fn is_kablo_path(path: &str) -> bool {
+    path.len() <= 256
+        && !path.starts_with('/')
+        && path
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'+' | b'-' | b'_' | b'/'))
+        && path
+            .split('/')
+            .all(|part| !part.is_empty() && part != "." && part != "..")
 }
 
 /// The longest starting directory carried: Linux's `PATH_MAX`. A longer one
@@ -1702,7 +1759,7 @@ mod tests {
     fn a_new_terminal_runs_the_bootstrap_as_an_argument_vector() {
         let tab =
             PaneUuid::from_url("bateri://tab/00000000-0000-4000-8000-000000000001").expect("a tab");
-        let argv = kablo_argv(None, Some(7), NONCE, Some(&tab));
+        let argv = kablo_argv(None, Some(7), NONCE, Some(&tab), None);
         let text: Vec<String> = argv
             .iter()
             .map(|word| String::from_utf8(word.clone()).expect("text"))
@@ -1729,11 +1786,11 @@ mod tests {
             "' {BOOT_NAME} 7 {NONCE} {TERM_PROGRAM_VERSION} bateri://tab/00000000-0000-4000-8000-000000000001"
         )));
         // Without a block or a tab the placeholders the bootstrap reads.
-        let bare = kablo_argv(None, None, NONCE, None);
+        let bare = kablo_argv(None, None, NONCE, None, None);
         assert_eq!(bare[4], b"-");
         assert_eq!(bare[7], b"-");
         // A starting directory rides in the payload.
-        let in_dir = kablo_argv(Some("/srv/app"), None, NONCE, None);
+        let in_dir = kablo_argv(Some("/srv/app"), None, NONCE, None, None);
         assert_ne!(in_dir[2], bare[2]);
     }
 
@@ -1749,10 +1806,10 @@ mod tests {
             assert!(!is_start_dir(dir), "{dir:?}");
         }
         // One the server could not be sent builds no other bootstrap.
-        assert_eq!(boot_in(Some("src")), boot());
-        assert_eq!(boot_in(None), boot());
-        assert_ne!(boot_in(Some("/srv")), boot());
-        assert!(is_inline(&boot_in(Some("/a'b \"c\" $d !e \\f"))));
+        assert_eq!(boot_in(Some("src"), None), boot());
+        assert_eq!(boot_in(None, None), boot());
+        assert_ne!(boot_in(Some("/srv"), None), boot());
+        assert!(is_inline(&boot_in(Some("/a'b \"c\" $d !e \\f"), None)));
     }
 
     /// With bateri's instance directory, the wrapped session became a
@@ -2112,11 +2169,18 @@ mod tests {
         }
     }
 
+    /// The most one argument of the command a new terminal runs may be: Linux's
+    /// `MAX_ARG_STRLEN` is 128 KiB for one word, and the bootstrap is one word
+    /// (`sh -c <it>`). It carries every file the integration writes (84 KiB with
+    /// the agent's command, and the shells' files); the room under the limit is
+    /// what a file added later has, and a test that fails here means a file
+    /// has to be smaller, not the number larger.
+    const ONE_ARGUMENT: usize = 108 * 1024;
+
     /// The real bootstrap (not a stub) survives every login shell's quoting,
     /// round-trips through the wrapped form (`unwrap` reads what an older
-    /// bateri ran) and stays far
-    /// below Linux's one-argument limit (`MAX_ARG_STRLEN`, 128 KiB) — the
-    /// remote command is one argument on the server.
+    /// bateri ran) and stays below Linux's one-argument limit
+    /// ([`ONE_ARGUMENT`]) — the remote command is one argument on the server.
     #[test]
     fn the_real_bootstrap_is_one_quotable_line() {
         let boot = boot();
@@ -2124,19 +2188,24 @@ mod tests {
             is_inline(boot),
             "the one-liner breaks a login shell's quoting"
         );
-        assert!(payload(None).starts_with(&format!("{MAGIC}\n")));
+        assert!(payload(None, None).starts_with(&format!("{MAGIC}\n")));
         let command = remote_command(boot, Some(u32::MAX), NONCE, None);
-        assert!(command.len() < 64 * 1024, "{} bytes", command.len());
-        // The longest starting directory it carries, too.
+        assert!(command.len() < ONE_ARGUMENT, "{} bytes", command.len());
+        // The longest starting directory it carries, too, and the place of
+        // kablo that makes the agent's command whole.
         let deepest = format!("/{}", "a".repeat(START_DIR_MAX - 1));
-        let command = remote_command(&boot_in(Some(&deepest)), Some(u32::MAX), NONCE, None);
-        assert!(command.len() < 64 * 1024, "{} bytes", command.len());
+        let command = remote_command(&boot_in(Some(&deepest), None), Some(u32::MAX), NONCE, None);
+        assert!(command.len() < ONE_ARGUMENT, "{} bytes", command.len());
+        let place = ".local/share/kablo/0.4.0-rc.1+b2/kablo";
+        let whole = boot_in(Some(&deepest), Some(place));
+        assert!(is_inline(&whole));
+        assert!(whole.len() < ONE_ARGUMENT, "{} bytes", whole.len());
         let args = words(&["-p", "2222", "prod"]);
         let wrapped = wrap(&args, boot, None, NONCE, None, None);
         assert_eq!(unwrap(&wrapped), &args[..]);
         // And as the argument vector a new terminal runs (nothing is quoted).
-        let argv = kablo_argv(Some(&deepest), Some(u32::MAX), NONCE, None);
-        assert_eq!(argv[2], boot_in(Some(&deepest)).as_bytes());
+        let argv = kablo_argv(Some(&deepest), Some(u32::MAX), NONCE, None, None);
+        assert_eq!(argv[2], boot_in(Some(&deepest), None).as_bytes());
         // Every file the bootstrap writes is embedded, and the shared swap is
         // the local wrapper's own.
         assert!(REMOTE_FILES.iter().all(|(_, content)| !content.is_empty()));
@@ -2439,11 +2508,26 @@ mod remote_shells {
     /// printed and no fault was reported. The open session and its root go
     /// back for the shell's own claims; `None` if the shell is not installed.
     fn integrates(name: &str, login: &str, rc: &[(&str, &str)]) -> Option<(Session, TempRoot)> {
+        integrates_with(name, login, rc, false)
+    }
+
+    /// [`integrates`], and the agent's command (`bin/bateri`) on `PATH`: once,
+    /// also when the environment the shell starts with has the directory
+    /// already (`preseed`).
+    fn integrates_with(
+        name: &str,
+        login: &str,
+        rc: &[(&str, &str)],
+        preseed: bool,
+    ) -> Option<(Session, TempRoot)> {
         let Some(shell) = which(name) else {
             println!("SKIPPED: {name} is not installed");
             return None;
         };
-        let root = TempRoot::new(&format!("remote-{name}"));
+        let root = TempRoot::new(&format!(
+            "remote-{name}{}",
+            if preseed { "-seeded" } else { "" }
+        ));
         let home = root.0.join("home");
         let spaced = home.join("a ğ");
         std::fs::create_dir_all(&spaced).expect("home");
@@ -2463,7 +2547,19 @@ mod remote_shells {
         }
         let before = snapshot(&home, &files);
 
-        let session = sshd(&shell, &home, &[]);
+        let agent_bin = home.join(".local/share/bateri/shell/bin");
+        let mut extra = Vec::new();
+        if preseed {
+            extra.push((
+                "PATH",
+                format!(
+                    "{}:{}",
+                    agent_bin.display(),
+                    std::env::var("PATH").unwrap_or_default()
+                ),
+            ));
+        }
+        let session = sshd(&shell, &home, &extra);
         wait_until(&format!("{name}: no OSC 7 for the home"), || {
             remote_folder(&session).as_deref() == Some(home.as_path())
         });
@@ -2479,6 +2575,24 @@ mod remote_shells {
             assert!(screen_has(&session, &line), "{name}: no motd ({line})");
         }
         assert_eq!(session.remote_setup_fault(), None, "{name}");
+        // The agent's command: found where the bootstrap wrote it, and the
+        // directory is in `PATH` once.
+        let found = agent_bin.join("bateri");
+        let (test, once) = if name == "fish" {
+            (
+                format!("test (command -v bateri) = '{}'; and ", found.display()),
+                "echo \"[agent-on-path-\"(printf '%s\\n' $PATH | grep -c '/bateri/shell/bin$')\"]\"",
+            )
+        } else {
+            (
+                format!("test \"$(command -v bateri)\" = '{}' && ", found.display()),
+                "echo \"[agent-on-path-$(echo \"$PATH\" | tr : '\\n' | grep -c '/bateri/shell/bin$')]\"",
+            )
+        };
+        session.write(format!("{test}{once}\n").as_bytes());
+        wait_until(&format!("{name}: bateri not on PATH once"), || {
+            screen_has(&session, "[agent-on-path-1]")
+        });
         assert_eq!(
             snapshot(&home, &files),
             before,
@@ -2581,6 +2695,47 @@ mod remote_shells {
             });
             draws_remote_blocks(&session, "fish");
             close(&session);
+        }
+    }
+
+    /// The directory of the agent's command is added once: a shell that
+    /// starts with it in `PATH` already does not get it twice.
+    #[test]
+    fn the_agents_command_is_on_the_path_once_also_when_it_was_there() {
+        let zsh = [
+            (".zshenv", "export ZDOTDIR=$HOME/cfg\n"),
+            ("cfg/.zshrc", "PS1='zsh> '\n"),
+        ];
+        let bash = [(".bashrc", "PS1='bash> '\n")];
+        for (name, login, rc) in [
+            ("zsh", "cfg/.zprofile", &zsh[..]),
+            ("bash", ".bash_profile", &bash[..]),
+            ("fish", ".config/fish/config.fish", &[][..]),
+        ] {
+            if let Some((session, _root)) = integrates_with(name, login, rc, true) {
+                close(&session);
+            }
+        }
+    }
+
+    /// The local wrappers are the ones that put nothing on `PATH`: the
+    /// agent's command exists on a server only.
+    #[test]
+    fn only_the_remote_wrappers_know_the_agents_command() {
+        const WORDS: &str = "agent's command";
+        for local in [
+            include_str!("../../../assets/shell/zsh/bateri.zsh"),
+            include_str!("../../../assets/shell/bash/bateri.bash"),
+            include_str!("../../../assets/shell/fish/vendor_conf.d/bateri.fish"),
+        ] {
+            assert!(!local.contains(WORDS) && !local.contains("bin/bateri"));
+        }
+        for remote in [
+            include_str!("../../../assets/shell/remote/zsh/bateri.zsh"),
+            include_str!("../../../assets/shell/remote/bash/bateri.bash"),
+            include_str!("../../../assets/shell/remote/fish/vendor_conf.d/bateri.fish"),
+        ] {
+            assert!(remote.contains(WORDS));
         }
     }
 
@@ -2795,7 +2950,12 @@ mod remote_shells {
             let run = |cwd: Option<&str>| {
                 let out = std::process::Command::new(&sh)
                     .arg("-c")
-                    .arg(remote_command(&boot_in(cwd), Some(PARENT), NONCE, None))
+                    .arg(remote_command(
+                        &boot_in(cwd, None),
+                        Some(PARENT),
+                        NONCE,
+                        None,
+                    ))
                     .env_clear()
                     .env("HOME", &home)
                     .env("SHELL", &shell)

@@ -25,6 +25,12 @@ fi
 # after the user's hooks.
 __bateri_hooks() {
   autoload -Uz add-zsh-hook
+  # `bateri`, the agent's command (`bin/bateri`, beside the `zsh` directory
+  # this runs from), on `PATH` once and after the user's files have set theirs.
+  local bt_bin=${__bateri_dir:h}/bin
+  if [[ -x $bt_bin/bateri ]] && (( ! ${path[(Ie)$bt_bin]} )); then
+    path=($bt_bin $path)
+  fi
   add-zsh-hook precmd __bateri_cwd
   if [[ $__bateri_rblock == <-> ]]; then
     # `<P>.<S>`: the parent and this shell's pid — two shells under one `ssh`

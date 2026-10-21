@@ -1845,7 +1845,7 @@ impl Core {
     /// one that rides a bridge that is there starts at once.
     fn prepare(&mut self, hold: HoldId, server: KabloHost, pane: PaneInfo) {
         if let Some(entry) = self.accounts.get(&server.key) {
-            let spec = new_session(&self.shared, &pane);
+            let spec = new_session(&self.shared, &pane, &entry.installed);
             let account = entry.server.key.clone();
             if self.started(hold, &account, spec).is_err() {
                 self.hub.refuse(hold, true, "");
@@ -1890,9 +1890,10 @@ impl Core {
     }
 }
 
-/// The new terminal's request: the bootstrap as the command, bateri's
+/// The new terminal's request: the bootstrap as the command (carrying where
+/// kablo is on that server, for the agent's command there), bateri's
 /// scrollback as the history.
-fn new_session(shared: &Shared, pane: &PaneInfo) -> NewSession {
+fn new_session(shared: &Shared, pane: &PaneInfo, installed: &Installed) -> NewSession {
     let nonce = ssh_wrap::new_nonce().unwrap_or_else(|| "0".repeat(ssh_wrap::NONCE_LEN));
     // `NewSession` is not exhaustive: it is started from its default.
     let mut spec = NewSession::default();
@@ -1901,6 +1902,7 @@ fn new_session(shared: &Shared, pane: &PaneInfo) -> NewSession {
         pane.block,
         &nonce,
         pane.tab.as_ref(),
+        Some(&installed.path),
     );
     spec.history = shared.backend.history();
     spec
@@ -1933,7 +1935,7 @@ fn prepare(
             server.host
         )
     });
-    let spec = new_session(shared, pane);
+    let spec = new_session(shared, pane, &installed);
     Ok(Ready {
         server,
         installed,

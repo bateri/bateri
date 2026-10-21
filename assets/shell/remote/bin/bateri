@@ -1,0 +1,677 @@
+#!/bin/sh
+# bateri on a server — what an agent (Claude Code, Codex) asks of the bateri
+# that shows this server's terminals. POSIX sh; written by the bootstrap
+# (`boot.sh`) to `~/.local/share/bateri/shell/bin/bateri` and put on `PATH` by
+# the integration of zsh, bash and fish.
+#
+#   bateri split [TERMINAL] [--left|--right|--above|--below] [--ratio PERCENT]
+#          [--cwd DIR] [--keep-open] [--wait] [--focus] [--json] [-- PROGRAM...]
+#   bateri tab   [TERMINAL] [--cwd DIR] [--keep-open] [--wait] [--focus] [--json] [-- PROGRAM...]
+#   bateri new   [--cwd DIR] [--wait] [--json] [-- PROGRAM...]
+#   bateri close [TERMINAL] [--force]       bateri ls [--json]       bateri notify TEXT...
+#   bateri send [TERMINAL] [TEXT | -]       bateri send-key [TERMINAL] KEY...
+#   bateri capture [TERMINAL] [OPTIONS]     bateri wait TERMINAL [--for TIME]
+#
+# WHO DOES WHAT. The terminal is the server's: `kablo new` starts it here, it
+# gets a number (`t9`, `next.sh`) and `send`, `capture` and `wait` are kablo's
+# own, with no Mac anywhere. The Mac only decides where a pane that shows the
+# terminal goes: `split` and `tab` tell it so over kablo's app channel
+# (`kablo app`, one `bateri 1` message, `agent::message` in bateri) and it
+# answers how the pane landed. It runs nothing and types nothing into any
+# shell. When no Mac is connected the same message waits in
+# `~/.local/share/bateri/placing/tN` and the Mac reads it when it connects.
+#
+# THE ANSWERS. Standard output has the terminal's number (`--json`: an object
+# of it and how it landed); a pane that did not land as asked says so on one
+# line of standard error. Exit codes: 0, 1, 64 (a mistake in the command), 69
+# (what needs a Mac, with none connected), 77 (refused), 128+n, and for `wait`
+# the program's own, 124 when the time ran out, 255 for kablo's trouble.
+#
+# WHO OPENED WHAT. `~/.local/share/bateri/terminals/tN` says which terminal
+# opened tN (`kablo here` — what the system says of the process, never a
+# variable) and whether it stays open. `close` ends what the caller opened
+# itself and asks the Mac about the rest. The state is under `$HOME`, not
+# `XDG_DATA_HOME`: the Mac and a cron job do not have a login shell's
+# environment (the counter's reason, `next.sh`).
+#
+# The quoted word below is filled in when the bootstrap writes this file
+# (`ssh_wrap`): kablo's place relative to home.
+
+unset CDPATH
+umask 077
+
+bt_kablo_rel='__BATERI_KABLO__'
+nl='
+'
+
+bt_say() {
+  printf 'bateri: %s\n' "$*" >&2
+}
+
+bt_die() {
+  bt_code=$1
+  shift
+  bt_say "$*"
+  exit "$bt_code"
+}
+
+bt_usage() {
+  printf '%s\n' \
+    'usage: bateri split [TERMINAL] [--left|--right|--above|--below] [--ratio PERCENT] [--cwd DIR]' \
+    '                    [--keep-open] [--wait] [--focus] [--json] [-- PROGRAM [ARG]...]' \
+    '       bateri tab [TERMINAL] [--cwd DIR] [--keep-open] [--wait] [--focus] [--json] [-- PROGRAM [ARG]...]' \
+    '       bateri new [--cwd DIR] [--wait] [--json] [-- PROGRAM [ARG]...]' \
+    '       bateri close [TERMINAL] [--force]' \
+    '       bateri ls [--json]' \
+    '       bateri notify TEXT...' \
+    '       bateri send [TERMINAL] [TEXT | -]' \
+    '       bateri send-key [TERMINAL] KEY...' \
+    '       bateri capture [TERMINAL] [--history ROWS] [--unwrap] [--trim] [--vt]' \
+    '       bateri wait TERMINAL [--for TIME]' \
+    'A terminal is t and its number (t7); with none named it is the one this runs in.' \
+    'Without a program, split, tab and new open a shell. bateri ls lists the terminals.'
+}
+
+case ${HOME-} in
+  /*) ;;
+  *) bt_die 1 'HOME is not set' ;;
+esac
+bt_state=$HOME/.local/share/bateri
+
+# kablo: the place the bootstrap filled in, else one on PATH.
+bt_kablo=
+case $bt_kablo_rel in
+  __BATERI_*) ;;
+  *)
+    if [ -x "$HOME/$bt_kablo_rel" ]; then
+      bt_kablo=$HOME/$bt_kablo_rel
+    fi
+    ;;
+esac
+if [ -z "$bt_kablo" ]; then
+  bt_kablo=$(command -v kablo 2>/dev/null) || bt_kablo=
+fi
+[ -n "$bt_kablo" ] || bt_die 1 'kablo is not installed on this server; open a terminal in bateri again'
+
+# The directory this file's bootstrap wrote its siblings to (`shell/`): the
+# one `bin/` sits in. `boot.sh` and `next.sh` are beside it.
+bt_self=$0
+case $bt_self in
+  */*) ;;
+  *) bt_self=$(command -v "$bt_self" 2>/dev/null) || bt_self=/ ;;
+esac
+bt_bin=${bt_self%/*}
+case $bt_bin in
+  /*) ;;
+  *) bt_bin=$(cd "$bt_bin" 2>/dev/null && pwd) || bt_bin= ;;
+esac
+case $bt_bin in
+  */shell/bin) bt_shelldir=${bt_bin%/bin} ;;
+  *) bt_shelldir=$HOME/.local/share/bateri/shell ;;
+esac
+
+# ─── small pieces ────────────────────────────────────────────────────────
+
+# `bt_split TEXT`: the first line in `bt_l1`, the rest in `bt_rest`.
+bt_split() {
+  case $1 in
+    *"$nl"*)
+      bt_l1=${1%%"$nl"*}
+      bt_rest=${1#*"$nl"}
+      ;;
+    *)
+      bt_l1=$1
+      bt_rest=
+      ;;
+  esac
+}
+
+# Whether $1 names an agent's terminal: t and a number written plainly (the
+# Mac reads exactly this, `agent::Terminal::parse`).
+bt_is_terminal() {
+  case $1 in
+    t0) return 0 ;;
+    t[1-9]*) ;;
+    *) return 1 ;;
+  esac
+  case ${1#t} in
+    *[!0-9]*) return 1 ;;
+  esac
+  [ "${#1}" -le 19 ]
+}
+
+# The terminal this runs in, `bt_me` (empty outside every terminal).
+bt_here() {
+  bt_me=
+  if bt_h=$("$bt_kablo" here 2>/dev/null); then
+    case $bt_h in
+      '' | *[!A-Za-z0-9._-]*) ;;
+      *) bt_me=$bt_h ;;
+    esac
+  fi
+}
+
+# Text from outside, safe to print on a terminal: no control character but
+# the line break and the tab.
+bt_clean() {
+  tr -d '\000-\010\013-\037\177'
+}
+
+bt_not_a_terminal() {
+  bt_say "'$(printf '%s' "$1" | bt_clean)' is not a terminal: name one as t and its number (t7); 'bateri ls' lists them"
+  "$bt_kablo" list 2>/dev/null | head -n 30 >&2
+  exit 64
+}
+
+bt_need_terminal() {
+  bt_is_terminal "$1" || bt_not_a_terminal "$1"
+}
+
+# `bt_ask MESSAGE`: one conversation with the Mac. `bt_status` is kablo's
+# status (69: no Mac connected) and `bt_reply` what it said, byte for byte (the
+# trailing `x` keeps the substitution from eating the last line breaks).
+bt_ask() {
+  bt_out=$(printf '%s' "$1" | "$bt_kablo" app 2>/dev/null; printf 'x%s' "$?")
+  bt_status=${bt_out##*x}
+  bt_reply=${bt_out%x*}
+}
+
+# The reply read as `bt_kind` (`ok`, `ok placed`, `ok text` or `error KIND`),
+# `bt_text` (the words of an error) and `bt_body` (what follows); `bt_kind`
+# is empty for a reply that is not `bateri 1`'s.
+bt_read_reply() {
+  bt_kind=
+  bt_text=
+  bt_body=
+  bt_split "$bt_reply"
+  [ "$bt_l1" = 'bateri 1' ] || return 0
+  bt_split "$bt_rest"
+  bt_body=$bt_rest
+  case $bt_l1 in
+    'ok' | 'ok placed' | 'ok text') bt_kind=$bt_l1 ;;
+    'error '*)
+      bt_words=${bt_l1#error }
+      case $bt_words in
+        *' '*)
+          bt_kind="error ${bt_words%% *}"
+          bt_text=${bt_words#* }
+          ;;
+        *) bt_kind="error $bt_words" ;;
+      esac
+      ;;
+  esac
+}
+
+# The exit code of an error reply.
+bt_error_code() {
+  case $bt_kind in
+    'error usage') return 64 ;;
+    'error refused') return 77 ;;
+    *) return 1 ;;
+  esac
+}
+
+bt_fail_reply() {
+  bt_error_code
+  bt_code=$?
+  bt_die "$bt_code" "$(printf '%s' "$bt_text" | bt_clean)"
+}
+
+# ─── split, tab, new ─────────────────────────────────────────────────────
+
+# `bt_open MODE ARGS...`: starts a terminal here and, for `split` and `tab`,
+# tells the Mac where its pane goes.
+bt_open() {
+  bt_mode=$1
+  shift
+  bt_anchor=
+  bt_side=
+  bt_ratio=
+  bt_cwd=
+  bt_keep=
+  bt_wait=
+  bt_focus=
+  bt_json=
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --)
+        shift
+        break
+        ;;
+      --left | --right | --above | --below)
+        [ "$bt_mode" = split ] || bt_die 64 "$bt_mode takes no side"
+        [ -z "$bt_side" ] || bt_die 64 'name one side'
+        bt_side=${1#--}
+        ;;
+      --ratio | --ratio=*)
+        [ "$bt_mode" = split ] || bt_die 64 "$bt_mode takes no ratio"
+        case $1 in
+          --ratio=*) bt_ratio=${1#--ratio=} ;;
+          *)
+            [ $# -ge 2 ] || bt_die 64 '--ratio takes a percent'
+            shift
+            bt_ratio=$1
+            ;;
+        esac
+        case $bt_ratio in
+          [1-9] | [1-9][0-9]) ;;
+          *) bt_die 64 '--ratio is a percent from 1 to 99' ;;
+        esac
+        ;;
+      --cwd | --cwd=*)
+        case $1 in
+          --cwd=*) bt_cwd=${1#--cwd=} ;;
+          *)
+            [ $# -ge 2 ] || bt_die 64 '--cwd takes a directory'
+            shift
+            bt_cwd=$1
+            ;;
+        esac
+        [ -n "$bt_cwd" ] || bt_die 64 '--cwd takes a directory'
+        ;;
+      --keep-open)
+        [ "$bt_mode" != new ] || bt_die 64 'new has no pane to keep open'
+        bt_keep=yes
+        ;;
+      --focus)
+        [ "$bt_mode" != new ] || bt_die 64 'new has no pane to focus'
+        bt_focus=yes
+        ;;
+      --wait) bt_wait=yes ;;
+      --json) bt_json=yes ;;
+      -*) bt_die 64 "$bt_mode takes no option '$(printf '%s' "$1" | bt_clean)'" ;;
+      *)
+        [ "$bt_mode" != new ] || bt_die 64 'new has no pane to put beside another; the program goes after --'
+        [ -z "$bt_anchor" ] || bt_die 64 'the program goes after --'
+        bt_anchor=$1
+        ;;
+    esac
+    shift
+  done
+  [ "$bt_mode" != tab ] || bt_side=tab
+
+  bt_here
+  if [ "$bt_mode" != new ]; then
+    if [ -n "$bt_anchor" ]; then
+      bt_need_terminal "$bt_anchor"
+    else
+      [ -n "$bt_me" ] || bt_die 64 "this is run in no terminal; name the one the pane goes beside ($bt_mode t4 ...) or open one with 'bateri new'"
+      bt_is_terminal "$bt_me" || bt_die 64 "this terminal ($bt_me) has no number; name another one ($bt_mode t4 ...) or open one with 'bateri new'"
+      bt_anchor=$bt_me
+    fi
+  fi
+
+  # Where it starts: the caller's directory.
+  case $bt_cwd in
+    '~') bt_cwd=$HOME ;;
+    '~/'*) bt_cwd=$HOME/${bt_cwd#'~/'} ;;
+    '')
+      bt_cwd=$PWD
+      [ -d "$bt_cwd" ] || bt_cwd=$HOME
+      ;;
+  esac
+  [ -d "$bt_cwd" ] || bt_die 1 "'$(printf '%s' "$bt_cwd" | bt_clean)' is not a directory"
+
+  # The program, or bateri's shell: the bootstrap's file, run from the file
+  # (`boot.sh`), with no parent block, nonce or tab.
+  if [ $# -eq 0 ]; then
+    if [ -r "$bt_shelldir/boot.sh" ]; then
+      bt_version=${LC_TERMINAL_VERSION-}
+      case $bt_version in
+        *[!0-9A-Za-z.+-]*) bt_version= ;;
+      esac
+      set -- sh "$bt_shelldir/boot.sh" '' '' "$bt_version" -
+    else
+      set -- "${SHELL:-/bin/sh}" -l
+    fi
+  fi
+
+  # The number, and the terminal. A hand-made terminal can hold the number
+  # (`kablo new --id t5`): the next is tried.
+  bt_tries=0
+  while :; do
+    bt_n=$(sh "$bt_shelldir/next.sh" 2>/dev/null) || bt_n=
+    case $bt_n in
+      '' | *[!0-9]* | 0*) bt_die 1 "cannot number a terminal: $bt_state is not writable, or bateri's files are not in $bt_shelldir" ;;
+    esac
+    bt_id=t$bt_n
+    if bt_err=$("$bt_kablo" new --id "$bt_id" --cwd "$bt_cwd" --env "PATH=$PATH" -- "$@" 2>&1 >/dev/null); then
+      break
+    fi
+    bt_tries=$((bt_tries + 1))
+    case $bt_err in
+      *'exists already'*) [ "$bt_tries" -lt 5 ] && continue ;;
+    esac
+    bt_die 1 "kablo could not start $bt_id: $(printf '%s' "$bt_err" | bt_clean)"
+  done
+
+  bt_record "$bt_id"
+
+  bt_landed=
+  bt_mac_waits=
+  bt_next=
+  bt_squeezed=no
+  bt_hidden=no
+  if [ "$bt_mode" != new ]; then
+    bt_place
+  fi
+  bt_open_report
+
+  if [ -n "$bt_wait" ]; then
+    # Not `new --wait`: kablo keeps what a Mac shows for ten minutes after the
+    # program ends, and `new --wait` would come back that much later; `wait`
+    # does not.
+    exec "$bt_kablo" wait "$bt_id"
+  fi
+  exit 0
+}
+
+# Who opened $1, and whether it stays: `~/.local/share/bateri/terminals/tN`,
+# plain `key value` lines.
+bt_record() {
+  mkdir -p "$bt_state/terminals" 2>/dev/null || return 0
+  bt_file=$bt_state/terminals/$1
+  {
+    printf 'opener %s\n' "${bt_me:--}"
+    printf 'keep-open %s\n' "${bt_keep:-no}"
+  } > "$bt_file.tmp.$$" 2>/dev/null && mv -f "$bt_file.tmp.$$" "$bt_file" 2>/dev/null
+  rm -f "$bt_file.tmp.$$"
+}
+
+# The `place` message (`agent::message`, version 1: its text is frozen) and the
+# conversation. The anchor is always written out: a message that waits is read
+# when no conversation names its sender.
+bt_place() {
+  bt_msg="bateri 1${nl}place${nl}terminal $bt_id${nl}anchor $bt_anchor${nl}"
+  [ -z "$bt_side" ] || bt_msg="${bt_msg}side $bt_side${nl}"
+  [ -z "$bt_ratio" ] || bt_msg="${bt_msg}ratio $bt_ratio${nl}"
+  [ -z "$bt_keep" ] || bt_msg="${bt_msg}keep-open yes${nl}"
+  [ -z "$bt_focus" ] || bt_msg="${bt_msg}focus yes${nl}"
+  bt_ask "$bt_msg"
+  if [ "$bt_status" = 0 ]; then
+    bt_read_reply
+    case $bt_kind in
+      'ok placed')
+        bt_placed
+        return 0
+        ;;
+      'error '*)
+        # The Mac refused: nothing is left running for a request that failed.
+        "$bt_kablo" end "$bt_id" --force >/dev/null 2>&1
+        rm -f "$bt_state/terminals/$bt_id"
+        bt_fail_reply
+        ;;
+    esac
+    bt_say 'the Mac answered with something this does not read; its pane will be placed when it next connects'
+  elif [ "$bt_status" != 69 ]; then
+    bt_say 'the Mac did not answer; its pane will be placed when it next connects'
+  fi
+  bt_wait_note
+}
+
+# What the Mac said of a pane that was placed.
+bt_placed() {
+  bt_landed=as_asked
+  bt_mac_waits=
+  bt_lines=$bt_body
+  while [ -n "$bt_lines" ]; do
+    bt_split "$bt_lines"
+    bt_lines=$bt_rest
+    bt_val=${bt_l1#* }
+    case $bt_l1 in
+      'landed '*)
+        case $bt_val in
+          as_asked | beside_group | new_tab) bt_landed=$bt_val ;;
+          waiting)
+            # The Mac has it: it waits for its anchor to be on screen.
+            bt_landed=waiting
+            bt_mac_waits=yes
+            ;;
+        esac
+        ;;
+      'next-to '*) bt_is_terminal "$bt_val" && bt_next=$bt_val ;;
+      'squeezed yes') bt_squeezed=yes ;;
+      'hidden yes') bt_hidden=yes ;;
+    esac
+  done
+}
+
+# No Mac to place it: the message waits on the server.
+bt_wait_note() {
+  bt_landed=waiting
+  if mkdir -p "$bt_state/placing" 2>/dev/null &&
+    printf '%s' "$bt_msg" > "$bt_state/placing/$bt_id.tmp.$$" 2>/dev/null &&
+    mv -f "$bt_state/placing/$bt_id.tmp.$$" "$bt_state/placing/$bt_id" 2>/dev/null; then
+    :
+  else
+    rm -f "$bt_state/placing/$bt_id.tmp.$$"
+    bt_say "$bt_id could not be put in the line for a Mac ($bt_state is not writable); it runs, and the Mac lists it"
+  fi
+}
+
+# The answer: the number, or the object; and one line when the pane is not
+# where it was asked to be.
+bt_open_report() {
+  if [ -n "$bt_json" ]; then
+    if [ "$bt_mode" = new ]; then
+      printf '{"terminal":"%s"}\n' "$bt_id"
+    else
+      bt_json_next=null
+      [ -z "$bt_next" ] || bt_json_next=\"$bt_next\"
+      printf '{"terminal":"%s","landed":"%s","next_to":%s,"squeezed":%s,"hidden":%s}\n' \
+        "$bt_id" "$bt_landed" "$bt_json_next" \
+        "$([ "$bt_squeezed" = yes ] && echo true || echo false)" \
+        "$([ "$bt_hidden" = yes ] && echo true || echo false)"
+    fi
+  else
+    printf '%s\n' "$bt_id"
+  fi
+  case $bt_landed in
+    waiting)
+      if [ -n "$bt_mac_waits" ]; then
+        bt_say "$bt_id waits in the Mac's list of terminals running in the background, until $bt_anchor is on screen"
+      else
+        bt_say "$bt_id will take its place when a Mac connects"
+      fi
+      ;;
+    new_tab) bt_say "$bt_id is in a tab of its own: there was no room beside $bt_anchor" ;;
+    beside_group) bt_say "$bt_id is beside the group of $bt_anchor: $bt_anchor is too small to split" ;;
+  esac
+  if [ "$bt_hidden" = yes ]; then
+    bt_say "$bt_id is behind a pane that fills its tab"
+  fi
+}
+
+# ─── close, ls, notify ───────────────────────────────────────────────────
+
+bt_close() {
+  bt_force=
+  bt_target=
+  for bt_a in "$@"; do
+    case $bt_a in
+      --force) bt_force=--force ;;
+      -*) bt_die 64 "close takes no option '$(printf '%s' "$bt_a" | bt_clean)'" ;;
+      *)
+        [ -z "$bt_target" ] || bt_die 64 'close names one terminal'
+        bt_target=$bt_a
+        ;;
+    esac
+  done
+  bt_here
+  if [ -z "$bt_target" ]; then
+    [ -n "$bt_me" ] || bt_die 64 'this is run in no terminal; name the one to close (close t4)'
+    bt_target=$bt_me
+  fi
+  bt_need_terminal "$bt_target"
+
+  bt_opener=
+  if [ -r "$bt_state/terminals/$bt_target" ]; then
+    while IFS=' ' read -r bt_k bt_v; do
+      [ "$bt_k" = opener ] && bt_opener=$bt_v
+    done < "$bt_state/terminals/$bt_target"
+  fi
+  if [ -n "$bt_me" ] && [ "$bt_opener" = "$bt_me" ]; then
+    if [ -n "$bt_force" ]; then
+      "$bt_kablo" end "$bt_target" --force
+    else
+      "$bt_kablo" end "$bt_target"
+    fi
+    bt_code=$?
+    if [ "$bt_code" = 0 ]; then
+      rm -f "$bt_state/terminals/$bt_target" "$bt_state/placing/$bt_target"
+    fi
+    exit "$bt_code"
+  fi
+
+  # Not the caller's to close: the user is asked on the Mac.
+  bt_ask "bateri 1${nl}close${nl}terminal $bt_target${nl}"
+  if [ "$bt_status" = 0 ]; then
+    bt_read_reply
+    case $bt_kind in
+      ok) exit 0 ;;
+      'error '*) bt_fail_reply ;;
+    esac
+    bt_die 1 'the Mac answered with something this does not read'
+  fi
+  bt_die 77 "$bt_target was not opened by this terminal, and no Mac is connected to ask"
+}
+
+bt_ls() {
+  bt_format=
+  for bt_a in "$@"; do
+    case $bt_a in
+      --json) bt_format="format json${nl}" ;;
+      *) bt_die 64 "ls takes no '$(printf '%s' "$bt_a" | bt_clean)'" ;;
+    esac
+  done
+  bt_ask "bateri 1${nl}ls${nl}$bt_format"
+  if [ "$bt_status" = 0 ]; then
+    bt_read_reply
+    case $bt_kind in
+      'ok text')
+        printf '%s' "$bt_body" | bt_clean
+        exit 0
+        ;;
+      'error '*) bt_fail_reply ;;
+    esac
+  fi
+  # No Mac: what the server has, and what waits to be placed.
+  bt_say 'no Mac is connected: these are the terminals on this server, and none says where its pane is'
+  if [ -n "$bt_format" ]; then
+    exec "$bt_kablo" list --json
+  fi
+  "$bt_kablo" list
+  bt_code=$?
+  bt_header=
+  for bt_f in "$bt_state"/placing/t*; do
+    [ -r "$bt_f" ] || continue
+    bt_id=${bt_f##*/}
+    bt_is_terminal "$bt_id" || continue
+    bt_side=
+    bt_anchor=
+    bt_ratio=
+    while IFS=' ' read -r bt_k bt_v; do
+      case $bt_k in
+        anchor) bt_anchor=$bt_v ;;
+        side) bt_side=$bt_v ;;
+        ratio) bt_ratio=$bt_v ;;
+      esac
+    done < "$bt_f"
+    if [ -z "$bt_header" ]; then
+      printf '\nWaiting for a Mac to place:\n'
+      bt_header=1
+    fi
+    bt_share=
+    [ -z "$bt_ratio" ] || bt_share=" ($bt_ratio%)"
+    printf '  %s  %s %s%s\n' "$bt_id" "${bt_side:-beside}" "$bt_anchor" "$bt_share"
+  done
+  exit "$bt_code"
+}
+
+bt_notify() {
+  [ $# -gt 0 ] || bt_die 64 'notify takes the words to show'
+  bt_words=$(printf '%s' "$*" | tr '\n\t\r' '   ' | bt_clean)
+  [ -n "$bt_words" ] || bt_die 64 'notify takes the words to show'
+  [ "$(printf '%s' "$bt_words" | wc -c | tr -d ' ')" -le 1000 ] || bt_die 64 'notify shows at most 1000 bytes'
+  bt_ask "bateri 1${nl}notify${nl}text $bt_words${nl}"
+  if [ "$bt_status" = 0 ]; then
+    bt_read_reply
+    case $bt_kind in
+      ok) exit 0 ;;
+      'error '*) bt_fail_reply ;;
+    esac
+    bt_die 1 'the Mac answered with something this does not read'
+  fi
+  bt_die 69 'no Mac is connected to show it'
+}
+
+# ─── what is kablo's own ─────────────────────────────────────────────────
+
+# The word of a command that names a terminal as an ID (never a label), which
+# kablo would take for the session of any name.
+bt_first_target() {
+  bt_skip=
+  for bt_a in "$@"; do
+    if [ -n "$bt_skip" ]; then
+      bt_skip=
+      continue
+    fi
+    case $bt_a in
+      --history | --for) bt_skip=1 ;;
+      -*) ;;
+      *)
+        bt_need_terminal "$bt_a"
+        return 0
+        ;;
+    esac
+  done
+  return 1
+}
+
+# Whether $1 is the name of a key (`send-key` takes a session before the keys).
+bt_is_key() {
+  case $(printf '%s' "$1" | tr 'A-Z' 'a-z') in
+    enter | tab | escape | backspace | space | up | down | left | right | home | end | pageup | pagedown | insert | delete | f[1-9] | f1[0-2] | *+*) return 0 ;;
+  esac
+  return 1
+}
+
+[ $# -gt 0 ] || {
+  bt_usage >&2
+  exit 64
+}
+bt_cmd=$1
+shift
+case $bt_cmd in
+  split | tab | new) bt_open "$bt_cmd" "$@" ;;
+  close) bt_close "$@" ;;
+  ls) bt_ls "$@" ;;
+  notify) bt_notify "$@" ;;
+  send)
+    if [ $# -ge 2 ]; then
+      bt_need_terminal "$1"
+    fi
+    exec "$bt_kablo" send "$@"
+    ;;
+  send-key)
+    [ $# -ge 1 ] || bt_die 64 'send-key takes keys to press'
+    bt_is_key "$1" || bt_need_terminal "$1"
+    exec "$bt_kablo" send-key "$@"
+    ;;
+  capture)
+    bt_first_target "$@"
+    exec "$bt_kablo" capture "$@"
+    ;;
+  wait)
+    bt_first_target "$@" || bt_die 64 'wait takes the terminal to wait for (wait t4)'
+    exec "$bt_kablo" wait "$@"
+    ;;
+  help | -h | --help)
+    bt_usage
+    exit 0
+    ;;
+  *)
+    bt_usage >&2
+    exit 64
+    ;;
+esac
