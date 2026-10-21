@@ -3372,6 +3372,21 @@ impl Chip {
         self.ivars().tab.get()
     }
 
+    /// The parts that fill the whole chip: the faces, the transfer's fill and the lines. They are
+    /// given the chip's size wherever it gets a new one ([`Self::set`]): at once with it, or along
+    /// its slide.
+    fn parts(&self) -> [Retained<NSView>; 6] {
+        let iv = self.ivars();
+        [
+            Retained::into_super(iv.hover.clone()),
+            Retained::into_super(iv.pick.clone()),
+            Retained::into_super(iv.face.clone()),
+            Retained::into_super(iv.lift.clone()),
+            Retained::into_super(iv.fill.clone()),
+            Retained::into_super(iv.lines.clone()),
+        ]
+    }
+
     /// The tab's transfer ended as `finish` says: the fill plays its end. The seconds it stays
     /// the tab's ground, the bar's cue to lay out again (`0` when it plays none, or has none).
     fn fill_end(&self, finish: Finish, reduce: bool) -> f64 {
@@ -3538,10 +3553,8 @@ impl Chip {
         // a layout that asks for the same place (a clock tick, a hover, a
         // hint) leaves it to arrive rather than snapping it.
         let moved = iv.target.replace(frame) != frame;
-        // Whether the chip was put at `frame` at once in this call: only then
-        // are the faces and lines sized here. Otherwise they fill the chip
-        // by their autoresizing — a sliding chip carries them, and sizing
-        // them to the end of a slide in flight would add its rest twice.
+        // Whether the chip was put at `frame` at once in this call: then its
+        // parts (faces, fill, lines) are sized to it here, at once too.
         let placed = match slide {
             Some(secs) if fresh => {
                 self.setFrame(frame);
@@ -3550,8 +3563,22 @@ impl Chip {
                 true
             }
             Some(secs) if moved => {
+                // The parts slide to the new size in the same animation, by name, and are not
+                // left to their autoresizing: AppKit's autoresizing of a sliding view adds up the
+                // steps of a slide that another one cuts short (a tab that opens and closes
+                // within a slide), and the parts kept a wrong size for good — every layout after
+                // asks for the same frame and leaves the chip alone. The lone tab's title hides
+                // its face, so the error showed when it became a chip again and stayed selected
+                // (a tab opened behind it): its face ran wider than itself, over the next tab.
                 let this = self.retain();
-                animate(secs, move || this.animator().setFrame(frame));
+                let parts = self.parts();
+                let whole = NSRect::new(NSPoint::ZERO, frame.size);
+                animate(secs, move || {
+                    this.animator().setFrame(frame);
+                    for part in &parts {
+                        part.animator().setFrame(whole);
+                    }
+                });
                 false
             }
             Some(_) => false,
@@ -3569,12 +3596,9 @@ impl Chip {
         let size = frame.size;
         if placed {
             let whole = NSRect::new(NSPoint::ZERO, size);
-            iv.hover.setFrame(whole);
-            iv.pick.setFrame(whole);
-            iv.face.setFrame(whole);
-            iv.lift.setFrame(whole);
-            iv.fill.setFrame(whole);
-            iv.lines.setFrame(whole);
+            for part in self.parts() {
+                part.setFrame(whole);
+            }
         }
         iv.hover.set(palette);
         fade(
@@ -9146,6 +9170,60 @@ mod tests {
             assert!(
                 body(name).contains("self.aim("),
                 "{name} reads the carry's place from `aim`, as its other half does"
+            );
+        }
+    }
+
+    /// A sliding chip takes its faces, fill and lines to its new size in the same animation, and
+    /// a chip put at once sizes them at once: the parts are never left to AppKit's autoresizing,
+    /// which a slide cut short by another one (a tab opened and closed within it) leaves at a
+    /// wrong size that no later layout corrects — the selected face then ran over the next tab.
+    /// Only the source can tell: the arithmetic is AppKit's, and it needs a window server.
+    #[test]
+    fn a_sliding_chip_takes_its_parts_to_its_new_size() {
+        let source = include_str!("tab_bar.rs");
+        let set = {
+            let at = source
+                .find(
+                    "    fn set(\n        &self,\n        frame: NSRect,\n        look: &Look<'_>,",
+                )
+                .expect("the chip's set is in this file");
+            let rest = &source[at..];
+            &rest[..rest.find("\n    }\n").expect("the method ends")]
+        };
+        let slide = {
+            let at = set
+                .find("Some(secs) if moved => {")
+                .expect("a moved chip slides");
+            let rest = &set[at..];
+            &rest[..rest.find("Some(_) => false,").expect("the arm ends")]
+        };
+        assert!(
+            slide.contains("this.animator().setFrame(frame)"),
+            "the chip slides to its frame"
+        );
+        assert!(
+            slide.contains("self.parts()") && slide.contains("part.animator().setFrame(whole)"),
+            "the parts slide to the chip's new size in the same animation"
+        );
+        let placed = &set[set
+            .find("if placed {")
+            .expect("a placed chip sizes its parts")..];
+        assert!(
+            placed.contains("for part in self.parts()"),
+            "a chip put at once sizes every part at once"
+        );
+        let parts = {
+            let at = source
+                .find("    fn parts(&self)")
+                .expect("the parts are named once");
+            let rest = &source[at..];
+            &rest[..rest.find("\n    }\n").expect("the method ends")]
+        };
+        for part in ["hover", "pick", "face", "lift", "fill", "lines"] {
+            assert!(
+                parts.contains(&format!("iv.{part}.clone()")),
+                "{part} fills the chip and is one of its parts"
             );
         }
     }

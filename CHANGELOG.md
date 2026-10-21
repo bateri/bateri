@@ -279,6 +279,12 @@ of every installed copy. A version without a section is not released.
   wrote another. The shell integration now puts back the name the tab had when
   the command started, before your own prompt hooks run, so a prompt that names
   the window itself still has the last word.
+- **The selected tab no longer spreads over the tab beside it.** After a tab
+  opened and closed in quick succession (a tab a server program asked for whose
+  program ended at once, or ⌘T then ⌘W), the next tab to open beside the
+  selected one without being selected — the one `bateri tab` opens — showed the
+  selected tab's background running across the new tab. A tab's background and
+  lines now slide with the tab, however its slide is interrupted.
 
 ## [0.21.0] - 2026-10-21
 
