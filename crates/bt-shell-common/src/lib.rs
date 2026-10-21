@@ -26,7 +26,8 @@
 //! shows (`environment`), the drawing that stands for a program in a tab (`icon`),
 //! the shell's birth (`child`), file watching (`watch`), the client of a kablo
 //! server's bridge — terminals that keep running on the server when the connection
-//! drops, as a state machine with no transport of its own (`kablo`) — and the command
+//! drops, as a state machine with no transport of its own (`kablo`) — the pipe that
+//! shows one in a pane (`hold`) and the command
 //! palette's rules — its rows, matching, pages, preview and the settings it can change
 //! (`palette`).
 //!
@@ -49,6 +50,7 @@ pub mod gesture;
 pub mod grid;
 pub mod groups;
 pub mod handover;
+pub mod hold;
 pub mod icon;
 pub mod jobs;
 pub mod journal;

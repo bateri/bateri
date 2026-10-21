@@ -189,6 +189,36 @@ pub fn ssh_fell_back() -> Option<i32> {
     ))
 }
 
+/// `bateri ssh-hold [--first] … [-- <ssh arguments…>]`: a pane's program that
+/// shows a terminal kept on a kablo server. `Some(exit code)` when the process
+/// was started as the subcommand (and none if it replaces itself with another
+/// program), `None` otherwise. `main` calls it before the window-server check:
+/// the pane's own session runs it and it has no window. The body is
+/// [`bt_shell_common::hold::hold_main`]; here only the platform's inputs: the
+/// instance directory the pane was born under (`BATERI_SSH_INSTANCE`, which
+/// an update keeps), the socket roots by the expression the application's
+/// listener uses, and the shell a first program ends in. Every failure before
+/// a terminal is shown runs the plain `ssh` in its place, so nothing here can
+/// open a window or stand in the way of a connection.
+pub fn ssh_hold() -> Option<i32> {
+    let mut args = std::env::args_os().skip(1);
+    if args.next()? != bt_shell_common::hold::SUBCOMMAND {
+        return None;
+    }
+    let argv: Vec<std::ffi::OsString> = args.collect();
+    // SAFETY: `getuid` has no preconditions and cannot fail.
+    let uid = unsafe { libc::getuid() };
+    let env = bt_shell_common::hold::Env {
+        instance: std::env::var("BATERI_SSH_INSTANCE").ok(),
+        roots: ssh_route::socket_bases(child::home().as_deref(), uid),
+        ssh: "ssh".into(),
+        shell: |shell_args| child::shell_command(shell_args).0,
+    };
+    Some(bt_shell_common::hold::execute(
+        bt_shell_common::hold::hold_main(&argv, &env),
+    ))
+}
+
 /// `bateri focus [--pid P] bateri://tab/<UUID>`: `Some(exit code)`
 /// when the process was started as the subcommand, `None` otherwise. `main`
 /// calls it before the window-server check — the outside process may ask from

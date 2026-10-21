@@ -1,0 +1,795 @@
+//! `bateri ssh-hold`: a pane's program that shows a terminal kept on a kablo
+//! server.
+//!
+//! The pane is an ordinary one — its own pseudo-terminal, its own screen, its
+//! scrollback, search and command blocks — and the program in front is this
+//! pipe. It connects to the running bateri over a local socket (the
+//! instance directory's `hold`, [`HOLD_SOCKET`]), asks for a terminal and then
+//! only carries bytes: what the terminal's program wrote goes to standard
+//! output, what the user types goes to the terminal, and the pane's size
+//! follows it. It parses nothing and decides nothing; the application's end of
+//! the pipe (`kablo::hub`) is the client of the server.
+//!
+//! **The terminal's mode.** Standard input is a terminal; for as long as the
+//! terminal is shown it is **raw** (every key reaches the program as the byte
+//! it is, nothing echoed, nothing translated on the way out) and the mode it had
+//! comes back on every way out, the `exec` of another program included.
+//!
+//! **Surviving the application.** The pane outlives bateri when the
+//! update or a crash is bridged by the holder (`handover`): this program is
+//! one of the processes it keeps. When the connection to bateri is lost,
+//! standard input is no longer read (what the user types waits in the
+//! terminal), the socket is tried again with growing pauses, and a bateri that
+//! answers is asked for the terminal it was showing, from the position after
+//! the last byte this program wrote ([`wire::Target::Resume`]) — the program
+//! keeps that one number and the account's name, nothing of the screen. A
+//! connection lost **before** the terminal was bound to a server, or a
+//! request that cannot be served, is not retried: the program replaces itself
+//! with the plain `ssh` it stands in for (see [`Outcome::FallBack`]), because
+//! nothing has been shown yet.
+//!
+//! **Ending.** When the terminal's program ends this exits with its status
+//! (a signal is 128 plus its number), so the shell that started it sees what
+//! `ssh` would have shown. A pane that started with this program as its **first**
+//! program (`--first`: a pane opened on the same server, or restored) has no
+//! shell to return to, so it runs the shell it would have started
+//! ([`Outcome::Shell`]).
+//!
+//! The socket's wire is [`wire`]; the arguments are [`USAGE`].
+
+pub mod wire;
+
+use std::ffi::OsString;
+use std::io::{self, Read, Write};
+use std::os::fd::{AsRawFd, RawFd};
+use std::os::unix::ffi::OsStrExt;
+use std::os::unix::net::UnixStream;
+use std::os::unix::process::CommandExt;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicI32, Ordering};
+use std::time::Duration;
+
+use kablo_proto::SessionId;
+use kablo_proto::v1::Size;
+
+use wire::{CHUNK, HoldReader, OLDEST, Open, Target, ToApp, ToHold, VERSION};
+
+/// The subcommand's word, the first argument.
+pub const SUBCOMMAND: &str = "ssh-hold";
+
+/// The listener's name in the instance directory.
+pub const HOLD_SOCKET: &str = "hold";
+
+/// The exit status of a bad command line (`EX_USAGE`).
+pub const EXIT_USAGE: i32 = 64;
+
+/// The exit status when the terminal could not be shown and there was no
+/// plain `ssh` to fall back to (what `ssh` itself says when it cannot connect).
+pub const EXIT_REFUSED: i32 = 255;
+
+/// The command line.
+pub const USAGE: &str = "usage: bateri ssh-hold [--first] [--shell-arg ARG]... \
+[--terminal ID --account ACCOUNT [--offset N]] [-- SSH-ARGUMENT...]";
+
+/// The pauses between attempts to reach bateri again, by how many have
+/// failed in a row; the last repeats.
+pub const BACKOFF: [Duration; 6] = [
+    Duration::from_millis(100),
+    Duration::from_millis(200),
+    Duration::from_millis(400),
+    Duration::from_millis(800),
+    Duration::from_millis(1600),
+    Duration::from_millis(2000),
+];
+
+/// What to do when the pipe is done, for the process to carry out.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Action {
+    /// Exit with this status.
+    Exit(i32),
+    /// Replace this process with another program.
+    Exec {
+        /// The program, looked up on `PATH` when it has no `/`.
+        program: OsString,
+        /// Its arguments.
+        args: Vec<OsString>,
+    },
+}
+
+/// How the pipe ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Outcome {
+    /// Exit with this status.
+    Exit(i32),
+    /// Nothing was shown and the terminal cannot be: run the plain `ssh` with
+    /// the arguments this was started with.
+    FallBack,
+    /// Run the shell the pane would have started.
+    Shell,
+}
+
+/// A program and its arguments.
+pub type ShellCommand = (String, Vec<String>);
+
+/// What the process needs from its surroundings, so a test brings its own.
+pub struct Env {
+    /// The name of the bateri instance directory this pane was born under
+    /// (`BATERI_SSH_INSTANCE`); it stays the same across an update.
+    pub instance: Option<String>,
+    /// The roots instance directories are looked for under.
+    pub roots: Vec<PathBuf>,
+    /// The plain `ssh`.
+    pub ssh: OsString,
+    /// The shell a pane starts, from the extra arguments it takes
+    /// (`child::shell_command`).
+    pub shell: fn(&[String]) -> Option<ShellCommand>,
+}
+
+impl Env {
+    /// The sockets to try, in order: the instance's, under each root.
+    pub fn sockets(&self) -> Vec<PathBuf> {
+        let Some(instance) = self.instance.as_deref().filter(|name| plain_name(name)) else {
+            return Vec::new();
+        };
+        self.roots
+            .iter()
+            .map(|root| root.join(instance).join(HOLD_SOCKET))
+            .collect()
+    }
+}
+
+/// A directory name that names no other directory.
+fn plain_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        && !name.starts_with('.')
+}
+
+/// What the command line asks.
+#[derive(Debug, PartialEq, Eq)]
+struct Parsed {
+    first: bool,
+    shell_args: Vec<String>,
+    terminal: Option<String>,
+    account: Option<String>,
+    offset: Option<u64>,
+    ssh_args: Vec<OsString>,
+}
+
+fn parse(args: &[OsString]) -> Option<Parsed> {
+    let mut parsed = Parsed {
+        first: false,
+        shell_args: Vec::new(),
+        terminal: None,
+        account: None,
+        offset: None,
+        ssh_args: Vec::new(),
+    };
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        match arg.to_str()? {
+            "--first" => parsed.first = true,
+            "--shell-arg" => parsed.shell_args.push(args.next()?.to_str()?.to_owned()),
+            "--terminal" => parsed.terminal = Some(args.next()?.to_str()?.to_owned()),
+            "--account" => parsed.account = Some(args.next()?.to_str()?.to_owned()),
+            "--offset" => parsed.offset = Some(args.next()?.to_str()?.parse().ok()?),
+            "--" => {
+                parsed.ssh_args = args.cloned().collect();
+                break;
+            }
+            _ => return None,
+        }
+    }
+    // An existing terminal is named and has an account and no command line; a
+    // new one has a command line and none of the first two.
+    let existing = parsed.terminal.is_some() || parsed.account.is_some();
+    if existing {
+        if parsed.terminal.is_none() || parsed.account.is_none() || !parsed.ssh_args.is_empty() {
+            return None;
+        }
+    } else if parsed.offset.is_some() {
+        return None;
+    }
+    Some(parsed)
+}
+
+/// A name for a new terminal: `b-` and 128 random bits as hex. Made here, not
+/// by the application, so that asking again after a lost connection names the
+/// same terminal.
+fn new_terminal_name() -> io::Result<SessionId> {
+    let mut bytes = [0u8; 16];
+    std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+    let mut name = String::from("b-");
+    for byte in bytes {
+        name.push_str(&format!("{byte:02x}"));
+    }
+    SessionId::new(&name).map_err(|_| io::ErrorKind::InvalidData.into())
+}
+
+/// `bateri ssh-hold …`'s body, up to the point where the process replaces
+/// itself or exits: parses the command line, shows the terminal and says what
+/// comes next ([`execute`] does it).
+pub fn hold_main(args: &[OsString], env: &Env) -> Action {
+    let Some(parsed) = parse(args) else {
+        eprintln!("{USAGE}");
+        return Action::Exit(EXIT_USAGE);
+    };
+    let plain_ssh = || Action::Exec {
+        program: env.ssh.clone(),
+        args: parsed.ssh_args.clone(),
+    };
+    let (terminal, target) = match (&parsed.terminal, &parsed.account) {
+        (Some(terminal), Some(account)) => {
+            let Ok(terminal) = SessionId::new(terminal) else {
+                eprintln!("{USAGE}");
+                return Action::Exit(EXIT_USAGE);
+            };
+            (
+                terminal,
+                Target::Resume {
+                    account: account.clone(),
+                    offset: parsed.offset,
+                },
+            )
+        }
+        _ => {
+            let Ok(terminal) = new_terminal_name() else {
+                return plain_ssh();
+            };
+            (
+                terminal,
+                Target::New {
+                    args: parsed
+                        .ssh_args
+                        .iter()
+                        .map(|arg| arg.as_bytes().to_vec())
+                        .collect(),
+                },
+            )
+        }
+    };
+    let config = Config {
+        terminal,
+        target,
+        first: parsed.first,
+        sockets: env.sockets(),
+        input: libc::STDIN_FILENO,
+        output: libc::STDOUT_FILENO,
+        backoff: BACKOFF.to_vec(),
+    };
+    match run(&config) {
+        Outcome::Exit(code) => Action::Exit(code),
+        Outcome::FallBack => plain_ssh(),
+        Outcome::Shell => match (env.shell)(&parsed.shell_args) {
+            Some((program, args)) => Action::Exec {
+                program: program.into(),
+                args: args.into_iter().map(OsString::from).collect(),
+            },
+            None => Action::Exit(1),
+        },
+    }
+}
+
+/// Carries out an [`Action`]: the exit status, or the program that takes the
+/// process over (and the status 127 if it cannot start).
+pub fn execute(action: Action) -> i32 {
+    match action {
+        Action::Exit(code) => code,
+        Action::Exec { program, args } => {
+            let error = std::process::Command::new(&program).args(&args).exec();
+            eprintln!("bateri: cannot run {}: {error}", program.to_string_lossy());
+            127
+        }
+    }
+}
+
+/// Everything [`run`] needs.
+pub struct Config {
+    /// The terminal's name.
+    pub terminal: SessionId,
+    /// What to ask for.
+    pub target: Target,
+    /// The pane's first program: when the terminal ends, a shell follows.
+    pub first: bool,
+    /// The sockets of bateri to try, in order.
+    pub sockets: Vec<PathBuf>,
+    /// The terminal the user types on.
+    pub input: RawFd,
+    /// The terminal the program's bytes are written to.
+    pub output: RawFd,
+    /// The pauses between attempts to reach bateri again.
+    pub backoff: Vec<Duration>,
+}
+
+/// What the pipe keeps between connections: the name of the server's account
+/// once there is one, and the position after the last byte it wrote.
+struct State {
+    account: Option<String>,
+    offset: Option<u64>,
+    open: Target,
+    size: Size,
+}
+
+impl State {
+    fn new(config: &Config) -> State {
+        let (account, offset) = match &config.target {
+            Target::New { .. } => (None, Some(0)),
+            Target::Resume { account, offset } => (Some(account.clone()), *offset),
+        };
+        State {
+            account,
+            offset,
+            open: config.target.clone(),
+            size: window_size(config.input),
+        }
+    }
+
+    /// Whether the terminal is tied to a server, so that bateri can be asked
+    /// for it again.
+    fn committed(&self) -> bool {
+        self.account.is_some()
+    }
+
+    /// What to ask bateri for now.
+    fn request(&self, config: &Config) -> Open {
+        let target = match &self.account {
+            Some(account) => Target::Resume {
+                account: account.clone(),
+                offset: self.offset,
+            },
+            None => self.open.clone(),
+        };
+        Open {
+            terminal: config.terminal.clone(),
+            size: self.size,
+            target,
+        }
+    }
+}
+
+/// How the pipe ended and what to say to the user before the process goes on.
+struct Finish {
+    outcome: Outcome,
+    note: Option<String>,
+}
+
+impl Finish {
+    fn quiet(outcome: Outcome) -> Finish {
+        Finish {
+            outcome,
+            note: None,
+        }
+    }
+}
+
+enum Served {
+    /// The pipe is over.
+    Done(Finish),
+    /// The connection to bateri was lost; `welcomed`: after it had agreed to
+    /// serve (so the pauses start over).
+    Lost { welcomed: bool },
+}
+
+/// Shows the terminal until it ends. Puts the terminal raw for the time,
+/// follows bateri across restarts, and gives the terminal back before it
+/// returns (and before the note, which is printed cooked).
+pub fn run(config: &Config) -> Outcome {
+    let raw = Raw::enter(config.input);
+    let winch = raw.as_ref().and_then(|_| Winch::install().ok());
+    let mut state = State::new(config);
+    let mut failures = 0usize;
+    let finish = loop {
+        let mut welcomed = false;
+        if let Ok(mut stream) = connect(&config.sockets) {
+            match serve(config, &mut state, &mut stream, winch.as_ref()) {
+                Served::Done(finish) => break finish,
+                Served::Lost { welcomed: yes } => welcomed = yes,
+            }
+        }
+        if !state.committed() {
+            // Nothing has been shown: the plain `ssh` is still possible.
+            break Finish::quiet(Outcome::FallBack);
+        }
+        failures = if welcomed { 0 } else { failures + 1 };
+        let pause = config
+            .backoff
+            .get(failures.saturating_sub(1))
+            .or(config.backoff.last())
+            .copied()
+            .unwrap_or(Duration::from_secs(1));
+        wait(winch.as_ref(), pause);
+    };
+    drop(winch);
+    drop(raw);
+    if let Some(note) = finish.note.filter(|note| !note.is_empty()) {
+        let _ = write_all(config.output, format!("{note}\n").as_bytes());
+    }
+    finish.outcome
+}
+
+fn connect(sockets: &[PathBuf]) -> io::Result<UnixStream> {
+    let mut last = io::Error::from(io::ErrorKind::NotFound);
+    for socket in sockets {
+        match UnixStream::connect(socket) {
+            Ok(stream) => return Ok(stream),
+            Err(error) => last = error,
+        }
+    }
+    Err(last)
+}
+
+/// One connection's conversation.
+fn serve(
+    config: &Config,
+    state: &mut State,
+    stream: &mut UnixStream,
+    winch: Option<&Winch>,
+) -> Served {
+    let lost = |welcomed| Served::Lost { welcomed };
+    let hello = ToApp::Hello {
+        newest: VERSION,
+        oldest: OLDEST,
+    };
+    if send(stream, &hello).is_err() {
+        return lost(false);
+    }
+    let mut reader = HoldReader::new();
+    let mut buffer = vec![0u8; CHUNK];
+    let mut welcomed = false;
+    loop {
+        let mut fds = [
+            poll_in(stream.as_raw_fd()),
+            poll_in(winch.map_or(-1, |winch| winch.read)),
+            poll_in(if welcomed { config.input } else { -1 }),
+        ];
+        if poll(&mut fds, -1).is_err() {
+            return lost(welcomed);
+        }
+        if ready(&fds[1]) {
+            winch.inspect(|winch| winch.drain());
+            let size = window_size(config.input);
+            if size != state.size {
+                state.size = size;
+                if welcomed && send(stream, &ToApp::Resize(size)).is_err() {
+                    return lost(welcomed);
+                }
+            }
+        }
+        if ready(&fds[0]) {
+            match stream.read(&mut buffer) {
+                Ok(0) => return lost(welcomed),
+                Ok(n) => reader.push(&buffer[..n]),
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(_) => return lost(welcomed),
+            }
+            loop {
+                let message = match reader.read() {
+                    Ok(Some(message)) => message,
+                    Ok(None) => break,
+                    Err(_) => return lost(welcomed),
+                };
+                match message {
+                    ToHold::Welcome { version } => {
+                        if welcomed || !(OLDEST..=VERSION).contains(&version) {
+                            return lost(welcomed);
+                        }
+                        welcomed = true;
+                        state.size = window_size(config.input);
+                        let open = ToApp::Open(state.request(config));
+                        if send(stream, &open).is_err() {
+                            return lost(welcomed);
+                        }
+                    }
+                    _ if !welcomed => return lost(welcomed),
+                    ToHold::Refused { fall_back, text } => {
+                        return Served::Done(refused(config, state, fall_back, text));
+                    }
+                    ToHold::Bound { account } => state.account = Some(account),
+                    ToHold::Output { end, data } => {
+                        if write_all(config.output, &data).is_err() {
+                            return Served::Done(Finish::quiet(Outcome::Exit(1)));
+                        }
+                        state.offset = Some(end);
+                    }
+                    ToHold::End { code, note } => {
+                        let outcome = if config.first {
+                            Outcome::Shell
+                        } else {
+                            Outcome::Exit(i32::from(code))
+                        };
+                        return Served::Done(Finish { outcome, note });
+                    }
+                    ToHold::Bell => {
+                        let _ = write_all(config.output, b"\x07");
+                    }
+                }
+            }
+        }
+        if welcomed && ready(&fds[2]) {
+            match read_fd(config.input, &mut buffer) {
+                // The pane's terminal is gone (hung up): there is nobody to show
+                // the terminal to. The connection closing lets bateri go of it.
+                Ok(0) | Err(_) => return Served::Done(Finish::quiet(Outcome::Exit(1))),
+                Ok(n) => {
+                    if send(stream, &ToApp::Input(buffer[..n].to_vec())).is_err() {
+                        return lost(welcomed);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// bateri will not show a terminal.
+fn refused(config: &Config, state: &State, fall_back: bool, text: String) -> Finish {
+    if fall_back && !state.committed() {
+        return Finish::quiet(Outcome::FallBack);
+    }
+    Finish {
+        outcome: if config.first {
+            Outcome::Shell
+        } else {
+            Outcome::Exit(EXIT_REFUSED)
+        },
+        note: Some(text),
+    }
+}
+
+fn send(stream: &mut UnixStream, message: &ToApp) -> io::Result<()> {
+    let mut bytes = Vec::new();
+    message.encode(&mut bytes);
+    stream.write_all(&bytes)
+}
+
+// The terminal
+
+/// The terminal's size, zeros when `fd` is not a terminal.
+fn window_size(fd: RawFd) -> Size {
+    let mut size = libc::winsize {
+        ws_row: 0,
+        ws_col: 0,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    // SAFETY: `size` is a valid out-parameter for this request; a failure
+    // leaves the zeros.
+    unsafe { libc::ioctl(fd, libc::TIOCGWINSZ as _, &mut size) };
+    Size {
+        cols: size.ws_col,
+        rows: size.ws_row,
+        xpixel: size.ws_xpixel,
+        ypixel: size.ws_ypixel,
+    }
+}
+
+/// The terminal in raw mode, until it is dropped.
+struct Raw {
+    fd: RawFd,
+    saved: libc::termios,
+}
+
+impl Raw {
+    /// `None` when `fd` is not a terminal.
+    fn enter(fd: RawFd) -> Option<Raw> {
+        // SAFETY: `tcgetattr` fills the struct or fails; `isatty` has no
+        // preconditions.
+        unsafe {
+            if libc::isatty(fd) == 0 {
+                return None;
+            }
+            let mut saved: libc::termios = std::mem::zeroed();
+            if libc::tcgetattr(fd, &mut saved) != 0 {
+                return None;
+            }
+            let mut raw = saved;
+            libc::cfmakeraw(&mut raw);
+            if libc::tcsetattr(fd, libc::TCSANOW, &raw) != 0 {
+                return None;
+            }
+            Some(Raw { fd, saved })
+        }
+    }
+}
+
+impl Drop for Raw {
+    fn drop(&mut self) {
+        // SAFETY: restores what `tcgetattr` returned; waits for the output
+        // already written, and keeps what was typed ahead for whoever reads next.
+        unsafe { libc::tcsetattr(self.fd, libc::TCSADRAIN, &self.saved) };
+    }
+}
+
+/// The write end `SIGWINCH`'s handler tells; one program has one terminal.
+static WINCH_WRITE: AtomicI32 = AtomicI32::new(-1);
+
+/// A pipe the window-size signal writes a byte to, so that `poll` wakes on it.
+struct Winch {
+    read: RawFd,
+    write: RawFd,
+    previous: libc::sigaction,
+}
+
+extern "C" fn on_winch(_: libc::c_int) {
+    let fd = WINCH_WRITE.load(Ordering::Relaxed);
+    if fd >= 0 {
+        // SAFETY: `write` is async-signal-safe; the descriptor is open while
+        // it is stored here; the error number is put back for the code the
+        // signal interrupted.
+        unsafe {
+            let errno = errno_location();
+            let saved = *errno;
+            libc::write(fd, [1u8].as_ptr().cast(), 1);
+            *errno = saved;
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+unsafe fn errno_location() -> *mut libc::c_int {
+    unsafe { libc::__error() }
+}
+
+#[cfg(not(target_os = "macos"))]
+unsafe fn errno_location() -> *mut libc::c_int {
+    unsafe { libc::__errno_location() }
+}
+
+impl Winch {
+    fn install() -> io::Result<Winch> {
+        let mut fds = [0 as libc::c_int; 2];
+        // SAFETY: `pipe` fills two descriptors; the flags change only them; the
+        // handler is an `extern "C"` function that does only what is allowed
+        // in a handler.
+        unsafe {
+            if libc::pipe(fds.as_mut_ptr()) != 0 {
+                return Err(io::Error::last_os_error());
+            }
+            for fd in fds {
+                libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
+                let flags = libc::fcntl(fd, libc::F_GETFL);
+                libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+            }
+            WINCH_WRITE.store(fds[1], Ordering::Relaxed);
+            let mut action: libc::sigaction = std::mem::zeroed();
+            let handler: extern "C" fn(libc::c_int) = on_winch;
+            action.sa_sigaction = handler as usize;
+            action.sa_flags = libc::SA_RESTART;
+            libc::sigemptyset(&mut action.sa_mask);
+            let mut previous: libc::sigaction = std::mem::zeroed();
+            if libc::sigaction(libc::SIGWINCH, &action, &mut previous) != 0 {
+                WINCH_WRITE.store(-1, Ordering::Relaxed);
+                let error = io::Error::last_os_error();
+                libc::close(fds[0]);
+                libc::close(fds[1]);
+                return Err(error);
+            }
+            Ok(Winch {
+                read: fds[0],
+                write: fds[1],
+                previous,
+            })
+        }
+    }
+
+    /// Empties the pipe.
+    fn drain(&self) {
+        let mut sink = [0u8; 64];
+        while matches!(read_fd(self.read, &mut sink), Ok(n) if n > 0) {}
+    }
+}
+
+impl Drop for Winch {
+    fn drop(&mut self) {
+        // SAFETY: puts back the action that was there, and only then closes
+        // what the handler writes to.
+        unsafe {
+            libc::sigaction(libc::SIGWINCH, &self.previous, std::ptr::null_mut());
+            WINCH_WRITE.store(-1, Ordering::Relaxed);
+            libc::close(self.read);
+            libc::close(self.write);
+        }
+    }
+}
+
+/// Waits `pause`, answering the window-size signal meanwhile (the next
+/// connection says the size it has then).
+fn wait(winch: Option<&Winch>, pause: Duration) {
+    let until = std::time::Instant::now() + pause;
+    while let Some(left) = until.checked_duration_since(std::time::Instant::now()) {
+        let mut fds = [poll_in(winch.map_or(-1, |winch| winch.read))];
+        let millis = i32::try_from(left.as_millis()).unwrap_or(i32::MAX).max(1);
+        if poll(&mut fds, millis).is_err() {
+            return;
+        }
+        if ready(&fds[0]) {
+            winch.inspect(|winch| winch.drain());
+        }
+    }
+}
+
+// Descriptors
+
+fn poll_in(fd: RawFd) -> libc::pollfd {
+    libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    }
+}
+
+/// Whether something happened on the descriptor that a `read` would find out
+/// about: data, end of file, an error or a descriptor that is not open (which
+/// `poll` would otherwise report at once, for ever).
+fn ready(fd: &libc::pollfd) -> bool {
+    fd.revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0
+}
+
+/// `poll` that a signal does not fail: an interrupted wait reports nothing
+/// ready and the caller waits again.
+fn poll(fds: &mut [libc::pollfd], timeout: i32) -> io::Result<usize> {
+    // SAFETY: the pointer and length are of the slice.
+    let n = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, timeout) };
+    if n >= 0 {
+        return Ok(n as usize);
+    }
+    let error = io::Error::last_os_error();
+    if error.kind() == io::ErrorKind::Interrupted {
+        for fd in fds.iter_mut() {
+            fd.revents = 0;
+        }
+        return Ok(0);
+    }
+    Err(error)
+}
+
+fn read_fd(fd: RawFd, buffer: &mut [u8]) -> io::Result<usize> {
+    loop {
+        // SAFETY: the pointer and length are of the buffer.
+        let n = unsafe { libc::read(fd, buffer.as_mut_ptr().cast(), buffer.len()) };
+        if n >= 0 {
+            return Ok(n as usize);
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
+        }
+    }
+}
+
+/// Writes every byte, waiting out a full pipe.
+fn write_all(fd: RawFd, mut bytes: &[u8]) -> io::Result<()> {
+    while !bytes.is_empty() {
+        // SAFETY: the pointer and length are of the slice.
+        let n = unsafe { libc::write(fd, bytes.as_ptr().cast(), bytes.len()) };
+        if n < 0 {
+            let error = io::Error::last_os_error();
+            match error.kind() {
+                io::ErrorKind::Interrupted => continue,
+                io::ErrorKind::WouldBlock => {
+                    let mut fds = [libc::pollfd {
+                        fd,
+                        events: libc::POLLOUT,
+                        revents: 0,
+                    }];
+                    poll(&mut fds, -1)?;
+                    continue;
+                }
+                _ => return Err(error),
+            }
+        }
+        bytes = &bytes[n as usize..];
+    }
+    Ok(())
+}
+
+/// `OsStr` for the arguments the tests build.
+#[cfg(test)]
+fn os(text: &str) -> OsString {
+    OsString::from(text)
+}
+
+#[cfg(test)]
+mod tests;

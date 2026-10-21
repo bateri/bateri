@@ -1,0 +1,700 @@
+//! The application's side of `ssh-hold`: the holders that are connected to the
+//! running bateri, each tied to the one terminal its pane shows.
+//!
+//! A pane that shows a terminal of a kablo server runs `bateri ssh-hold` as its
+//! program (`crate::hold`): a pipe between the pane's own pseudo-terminal and
+//! bateri. This is the other end of that pipe, written like [`Client`] and
+//! beside it **without a transport**: the owner feeds the bytes a holder's
+//! connection delivers ([`Hub::push`]), writes the bytes the hub has for it
+//! ([`Hub::take_outgoing`]), and reads what happened ([`Hub::next_event`]). A
+//! holder's connection is whatever ordered byte stream the owner has accepted
+//! (a unix socket in the application); which holder may speak for which pane
+//! is the owner's to decide before it answers a request.
+//!
+//! **Who decides what.** The hub holds the mechanics, the owner the policy. A
+//! holder's request arrives as [`HubEvent::Wants`]; the owner finds or makes the
+//! [`Client`] of the server it is for ([`Hub::add_client`]) and answers with
+//! [`Hub::start`] (a terminal that does not exist yet), [`Hub::resume`] (one
+//! that does) or [`Hub::refuse`]. From then on the hub carries the terminal's
+//! output to the holder and what the holder types and the pane's size back to
+//! the client, and ends the holder when the terminal ends. The hub owns the
+//! clients, one per account ([`Hub::client_mut`] reaches them for the transport),
+//! and [`Hub::pump`] moves what a client has to say.
+//!
+//! **What a holder is told.** The terminal's bytes exactly, in order, each frame saying
+//! where the stream stands after it (`crate::hold::wire`); a picture of the
+//! screen as a reset followed by the picture's bytes, and the stream's position
+//! moves only when the picture is whole, so a connection that breaks half a
+//! picture later asks for the position before it and gets a picture again. A
+//! connection to the server that is down is **not** told to the holder: the
+//! client retries and attaches again by itself, the holder sees the output go on
+//! when it does, and what it types meanwhile is answered with a bell
+//! ([`ToHold::Bell`]) and dropped — a line typed minutes ago and sent when the
+//! connection came back would run where nobody looks.
+//!
+//! A holder that is slow to write what it is given grows [`Hub::backlog`]; the
+//! owner stops reading the server's stream while it is large, which is the
+//! server's own flow control reaching the program.
+
+use std::collections::{BTreeMap, VecDeque};
+
+use super::{Attach, Client, Event, NewSession, SessionId};
+use crate::hold::wire::{self, AppReader, CHUNK, Open, RESET, Target, ToApp, ToHold, exit_status};
+
+/// One holder's connection, as the hub knows it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct HoldId(u64);
+
+/// What the hub tells its owner.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HubEvent {
+    /// A holder asked for a terminal. The owner answers with [`Hub::start`],
+    /// [`Hub::resume`] or [`Hub::refuse`].
+    Wants {
+        /// The holder.
+        hold: HoldId,
+        /// What it asked for.
+        open: Open,
+    },
+    /// The holder's connection is over (it closed, or the hub is done with it);
+    /// its terminal is let go of and lives on, on the server.
+    Gone {
+        /// The holder.
+        hold: HoldId,
+    },
+    /// Something a client reported that the hub does not act on itself: the
+    /// connection's life, a terminal's state, the answer to a question. Output
+    /// and pictures are not passed on; they went to the holder.
+    Client {
+        /// The account of the client.
+        account: String,
+        /// What it reported.
+        event: Box<Event>,
+    },
+}
+
+/// Why the owner's answer to a request could not be carried out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Declined {
+    /// The holder is not waiting for an answer (gone, or already answered).
+    NoRequest,
+    /// The answer does not suit the request (a new terminal for a request to
+    /// resume one, or the other way).
+    WrongKind,
+    /// No client for the account: the owner adds one first.
+    NoClient,
+    /// The client would not take the request (a terminal name already in use
+    /// here, an argument the protocol refuses).
+    Refused,
+}
+
+/// A holder tied to a terminal.
+struct Binding {
+    account: String,
+    terminal: SessionId,
+    /// The position of the terminal's output after what has been given to the
+    /// holder.
+    end: u64,
+    /// The terminal has been attached or has written: the holder has been
+    /// shown, or is about to be shown, something.
+    shown: bool,
+    /// The first attach asked for a picture of the screen, so the position
+    /// the attach names is the picture's and not that of bytes.
+    picture_asked: bool,
+}
+
+struct Hold {
+    reader: AppReader,
+    out: Vec<u8>,
+    /// The wire version agreed, 0 before the greeting.
+    version: u8,
+    /// The request waiting for the owner.
+    pending: Option<Open>,
+    bound: Option<Binding>,
+    /// Nothing is read from this holder any more and, once `out` is written,
+    /// its connection is to be closed.
+    finished: bool,
+}
+
+impl Hold {
+    fn new() -> Hold {
+        Hold {
+            reader: AppReader::new(),
+            out: Vec::new(),
+            version: 0,
+            pending: None,
+            bound: None,
+            finished: false,
+        }
+    }
+
+    fn send(&mut self, message: &ToHold) {
+        message.encode(&mut self.out);
+    }
+
+    fn finish(&mut self, message: &ToHold) {
+        self.send(message);
+        self.finished = true;
+    }
+}
+
+/// The holders of one application and the clients they ride on. See the
+/// module documentation.
+pub struct Hub {
+    holds: BTreeMap<HoldId, Hold>,
+    clients: BTreeMap<String, Client>,
+    /// Which holder shows which terminal.
+    bound: BTreeMap<(String, SessionId), HoldId>,
+    events: VecDeque<HubEvent>,
+    next: u64,
+}
+
+impl Default for Hub {
+    fn default() -> Hub {
+        Hub::new()
+    }
+}
+
+impl Hub {
+    /// A hub with no holders and no clients.
+    pub fn new() -> Hub {
+        Hub {
+            holds: BTreeMap::new(),
+            clients: BTreeMap::new(),
+            bound: BTreeMap::new(),
+            events: VecDeque::new(),
+            next: 1,
+        }
+    }
+
+    // The clients
+
+    /// The client of the server `account` names; replaces one already there.
+    pub fn add_client(&mut self, account: &str, client: Client) {
+        self.clients.insert(account.to_owned(), client);
+    }
+
+    /// The client of an account, for the transport to drive.
+    pub fn client_mut(&mut self, account: &str) -> Option<&mut Client> {
+        self.clients.get_mut(account)
+    }
+
+    /// The client of an account.
+    pub fn client(&self, account: &str) -> Option<&Client> {
+        self.clients.get(account)
+    }
+
+    /// The accounts that have a client.
+    pub fn accounts(&self) -> impl Iterator<Item = &str> {
+        self.clients.keys().map(String::as_str)
+    }
+
+    /// Takes what an account's client has to say: the terminals' output and
+    /// the end of their programs go to the holders showing them, the rest to
+    /// the owner as [`HubEvent::Client`]. Call it after bytes were pushed to the
+    /// client or time was.
+    pub fn pump(&mut self, account: &str) {
+        let Some(client) = self.clients.get_mut(account) else {
+            return;
+        };
+        let events: Vec<Event> = std::iter::from_fn(|| client.next_event()).collect();
+        for event in events {
+            self.route(account, event);
+        }
+    }
+
+    fn route(&mut self, account: &str, event: Event) {
+        let hold_of = |hub: &Hub, terminal: &SessionId| {
+            hub.bound
+                .get(&(account.to_owned(), terminal.clone()))
+                .copied()
+        };
+        match &event {
+            Event::Output { terminal, data } => {
+                if let Some(hold) = hold_of(self, terminal) {
+                    self.give(hold, data);
+                }
+                return;
+            }
+            Event::Picture {
+                terminal,
+                offset,
+                first,
+                last,
+                data,
+                ..
+            } => {
+                if let Some(hold) = hold_of(self, terminal) {
+                    self.give_picture(hold, *offset, *first, *last, data);
+                }
+                return;
+            }
+            Event::Attached {
+                terminal,
+                offset,
+                truncated,
+                ..
+            } => {
+                if let Some(hold) = hold_of(self, terminal)
+                    && let Some(binding) = self.holds.get_mut(&hold).and_then(|h| h.bound.as_mut())
+                {
+                    binding.shown = true;
+                    // Output from here on starts at `offset`, unless a picture
+                    // comes first: it sets the position when it is whole.
+                    let asked = std::mem::take(&mut binding.picture_asked);
+                    if !truncated && !asked {
+                        binding.end = *offset;
+                    }
+                }
+                return;
+            }
+            Event::Created(status) => {
+                if let Some(hold) = hold_of(self, &status.id)
+                    && let Some(hold) = self.holds.get_mut(&hold)
+                {
+                    hold.send(&ToHold::Bound {
+                        account: account.to_owned(),
+                    });
+                }
+            }
+            Event::Ended { terminal, exit } => {
+                if let Some(hold) = hold_of(self, terminal) {
+                    self.release(hold, false);
+                    if let Some(hold) = self.holds.get_mut(&hold) {
+                        hold.finish(&ToHold::End {
+                            code: exit_status(*exit),
+                            note: None,
+                        });
+                    }
+                }
+            }
+            Event::Taken { terminal, by } => {
+                if let Some(hold) = hold_of(self, terminal) {
+                    self.release(hold, false);
+                    let note = match by {
+                        Some(by) => format!("bateri: this terminal was taken by {by}"),
+                        None => "bateri: this terminal was taken by another computer".to_owned(),
+                    };
+                    if let Some(hold) = self.holds.get_mut(&hold) {
+                        hold.finish(&ToHold::End {
+                            code: 1,
+                            note: Some(note),
+                        });
+                    }
+                }
+            }
+            Event::Failed {
+                terminal: Some(terminal),
+                text,
+                ..
+            } => {
+                if let Some(hold) = hold_of(self, terminal) {
+                    // Before anything was shown the holder may still fall back
+                    // to a plain `ssh`; afterwards there is only an end.
+                    let shown = self
+                        .holds
+                        .get(&hold)
+                        .and_then(|h| h.bound.as_ref())
+                        .is_some_and(|b| b.shown);
+                    self.release(hold, false);
+                    if let Some(hold) = self.holds.get_mut(&hold) {
+                        if shown {
+                            hold.finish(&ToHold::End {
+                                code: 1,
+                                note: Some(format!("bateri: {text}")),
+                            });
+                        } else {
+                            hold.finish(&ToHold::Refused {
+                                fall_back: true,
+                                text: text.clone(),
+                            });
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        self.events.push_back(HubEvent::Client {
+            account: account.to_owned(),
+            event: Box::new(event),
+        });
+    }
+
+    /// Program output for a holder.
+    fn give(&mut self, hold: HoldId, data: &[u8]) {
+        let Some(Hold {
+            out,
+            bound: Some(binding),
+            ..
+        }) = self.holds.get_mut(&hold)
+        else {
+            return;
+        };
+        binding.shown = true;
+        // The position moves with each frame, so a long write is cut here and
+        // not by the codec, which would cut it the same way: one rule for
+        // where the stream stands after a frame.
+        for chunk in data.chunks(CHUNK) {
+            binding.end += chunk.len() as u64;
+            ToHold::Output {
+                end: binding.end,
+                data: chunk.to_vec(),
+            }
+            .encode(out);
+        }
+    }
+
+    /// One piece of a picture for a holder: a reset before the first, and the
+    /// stream's position moves to the picture's only with the last byte of the
+    /// last piece.
+    fn give_picture(&mut self, hold: HoldId, offset: u64, first: bool, last: bool, data: &[u8]) {
+        let Some(Hold {
+            out,
+            bound: Some(binding),
+            ..
+        }) = self.holds.get_mut(&hold)
+        else {
+            return;
+        };
+        binding.shown = true;
+        let mut bytes = Vec::with_capacity(data.len() + RESET.len());
+        if first {
+            bytes.extend_from_slice(RESET);
+        }
+        bytes.extend_from_slice(data);
+        let pieces: Vec<&[u8]> = bytes.chunks(CHUNK).collect();
+        for (at, piece) in pieces.iter().enumerate() {
+            let whole = last && at + 1 == pieces.len();
+            ToHold::Output {
+                end: if whole { offset } else { binding.end },
+                data: piece.to_vec(),
+            }
+            .encode(out);
+        }
+        if last {
+            binding.end = offset;
+        }
+    }
+
+    // The holders
+
+    /// A holder's connection was accepted.
+    pub fn open(&mut self) -> HoldId {
+        let id = HoldId(self.next);
+        self.next += 1;
+        self.holds.insert(id, Hold::new());
+        id
+    }
+
+    /// A holder's connection ended. Its terminal is let go of: the stream stops
+    /// and the terminal lives on, on the server.
+    pub fn closed(&mut self, hold: HoldId) {
+        if self.holds.contains_key(&hold) {
+            self.release(hold, true);
+            self.holds.remove(&hold);
+            self.events.push_back(HubEvent::Gone { hold });
+        }
+    }
+
+    /// Lets go of the holder's terminal: it is no longer routed, and when
+    /// `detach` the client stops the stream.
+    fn release(&mut self, hold: HoldId, detach: bool) {
+        let Some(binding) = self.holds.get_mut(&hold).and_then(|h| h.bound.take()) else {
+            return;
+        };
+        let key = (binding.account, binding.terminal);
+        if self.bound.get(&key) == Some(&hold) {
+            self.bound.remove(&key);
+            if detach && let Some(client) = self.clients.get_mut(&key.0) {
+                client.detach(&key.1);
+            }
+        }
+    }
+
+    /// Bytes the holder sent.
+    pub fn push(&mut self, hold: HoldId, bytes: &[u8]) {
+        let Some(entry) = self.holds.get_mut(&hold) else {
+            return;
+        };
+        if entry.finished {
+            return;
+        }
+        entry.reader.push(bytes);
+        loop {
+            let message = match self.holds.get_mut(&hold) {
+                Some(entry) if !entry.finished => entry.reader.read(),
+                _ => return,
+            };
+            match message {
+                Ok(Some(message)) => self.on_message(hold, message),
+                Ok(None) => return,
+                Err(_) => {
+                    self.fail(hold, "bateri: the terminal's connection broke the protocol");
+                    return;
+                }
+            }
+        }
+    }
+
+    /// A holder that speaks out of turn or garbles the wire is told so and
+    /// ended: before anything was shown it may fall back to a plain `ssh`.
+    fn fail(&mut self, hold: HoldId, text: &str) {
+        let shown = self
+            .holds
+            .get(&hold)
+            .and_then(|h| h.bound.as_ref())
+            .is_some_and(|b| b.shown);
+        self.release(hold, true);
+        if let Some(entry) = self.holds.get_mut(&hold) {
+            entry.pending = None;
+            if shown {
+                entry.finish(&ToHold::End {
+                    code: 1,
+                    note: Some(text.to_owned()),
+                });
+            } else {
+                entry.finish(&ToHold::Refused {
+                    fall_back: true,
+                    text: text.to_owned(),
+                });
+            }
+        }
+    }
+
+    fn on_message(&mut self, hold: HoldId, message: ToApp) {
+        let Some(entry) = self.holds.get_mut(&hold) else {
+            return;
+        };
+        match message {
+            ToApp::Hello { newest, oldest } => {
+                if entry.version != 0 {
+                    return self.fail(hold, "bateri: the terminal's connection greeted twice");
+                }
+                match wire::agree(newest, oldest) {
+                    Some(version) => {
+                        entry.version = version;
+                        entry.send(&ToHold::Welcome { version });
+                    }
+                    None => entry.finish(&ToHold::Refused {
+                        fall_back: true,
+                        text: "bateri: this terminal speaks a protocol this bateri does not"
+                            .to_owned(),
+                    }),
+                }
+            }
+            ToApp::Open(open) => {
+                if entry.version == 0 || entry.pending.is_some() || entry.bound.is_some() {
+                    return self.fail(hold, "bateri: the terminal's connection asked out of turn");
+                }
+                entry.pending = Some(open.clone());
+                self.events.push_back(HubEvent::Wants { hold, open });
+            }
+            ToApp::Input(bytes) => {
+                let sent = match entry.bound.as_ref() {
+                    Some(binding) => {
+                        let (account, terminal) =
+                            (binding.account.clone(), binding.terminal.clone());
+                        self.clients
+                            .get_mut(&account)
+                            .is_some_and(|client| client.input(&terminal, &bytes))
+                    }
+                    None => false,
+                };
+                if !sent && let Some(entry) = self.holds.get_mut(&hold) {
+                    entry.send(&ToHold::Bell);
+                }
+            }
+            ToApp::Resize(size) => {
+                if let Some(binding) = entry.bound.as_ref() {
+                    let (account, terminal) = (binding.account.clone(), binding.terminal.clone());
+                    if let Some(client) = self.clients.get_mut(&account) {
+                        client.resize(&terminal, size);
+                    }
+                } else if let Some(open) = entry.pending.as_mut() {
+                    open.size = size;
+                }
+            }
+        }
+    }
+
+    // The owner's answers
+
+    /// Starts the terminal a holder asked for ([`Target::New`]) on the server
+    /// of `account`, running `spec`, and ties the holder to it. The terminal's
+    /// name is the holder's.
+    pub fn start(&mut self, hold: HoldId, account: &str, spec: NewSession) -> Result<(), Declined> {
+        let open = self.take_pending(hold, |open| matches!(open.target, Target::New { .. }))?;
+        let Some(client) = self.clients.get_mut(account) else {
+            return Err(self.put_back(hold, open, Declined::NoClient));
+        };
+        if client
+            .new_terminal(open.terminal.clone(), spec, Attach::new(open.size))
+            .is_err()
+        {
+            return Err(self.put_back(hold, open, Declined::Refused));
+        }
+        self.bind(hold, account, open.terminal, 0, false);
+        Ok(())
+    }
+
+    /// Ties the holder to the terminal it asked to see again ([`Target::Resume`])
+    /// on the server of `account`, from the position it said (or a picture of
+    /// the screen when it said none).
+    pub fn resume(&mut self, hold: HoldId, account: &str) -> Result<(), Declined> {
+        let open = self.take_pending(hold, |open| matches!(open.target, Target::Resume { .. }))?;
+        let Target::Resume { offset, .. } = open.target.clone() else {
+            return Err(Declined::WrongKind);
+        };
+        let Some(client) = self.clients.get_mut(account) else {
+            return Err(self.put_back(hold, open, Declined::NoClient));
+        };
+        let attach = match offset {
+            Some(offset) => Attach::new(open.size).from(offset),
+            None => Attach::new(open.size).from_now().with_picture(),
+        };
+        client.attach(open.terminal.clone(), attach);
+        self.bind(
+            hold,
+            account,
+            open.terminal,
+            offset.unwrap_or(0),
+            offset.is_none(),
+        );
+        Ok(())
+    }
+
+    /// Answers the request with no terminal. `fall_back`: the holder runs the
+    /// plain `ssh` it replaced (it has not shown anything yet).
+    pub fn refuse(&mut self, hold: HoldId, fall_back: bool, text: &str) {
+        if let Some(entry) = self.holds.get_mut(&hold) {
+            entry.pending = None;
+            entry.finish(&ToHold::Refused {
+                fall_back,
+                text: text.to_owned(),
+            });
+        }
+    }
+
+    /// Ends a holder: it says `note` if there is one and exits with `code`.
+    /// Its terminal is let go of and lives on, on the server.
+    pub fn end(&mut self, hold: HoldId, code: u8, note: Option<&str>) {
+        self.release(hold, true);
+        if let Some(entry) = self.holds.get_mut(&hold) {
+            entry.pending = None;
+            entry.finish(&ToHold::End {
+                code,
+                note: note.map(str::to_owned),
+            });
+        }
+    }
+
+    fn take_pending(
+        &mut self,
+        hold: HoldId,
+        fits: impl FnOnce(&Open) -> bool,
+    ) -> Result<Open, Declined> {
+        let entry = self.holds.get_mut(&hold).ok_or(Declined::NoRequest)?;
+        match entry.pending.take() {
+            None => Err(Declined::NoRequest),
+            Some(open) if !fits(&open) => {
+                entry.pending = Some(open);
+                Err(Declined::WrongKind)
+            }
+            Some(open) => Ok(open),
+        }
+    }
+
+    fn put_back(&mut self, hold: HoldId, open: Open, why: Declined) -> Declined {
+        if let Some(entry) = self.holds.get_mut(&hold) {
+            entry.pending = Some(open);
+        }
+        why
+    }
+
+    fn bind(
+        &mut self,
+        hold: HoldId,
+        account: &str,
+        terminal: SessionId,
+        end: u64,
+        picture_asked: bool,
+    ) {
+        let key = (account.to_owned(), terminal.clone());
+        // A terminal is shown by one holder: the newer one wins and the older,
+        // a pane that outlived the application it was asked of, is ended.
+        if let Some(older) = self.bound.insert(key, hold)
+            && older != hold
+        {
+            if let Some(entry) = self.holds.get_mut(&older) {
+                entry.bound = None;
+                entry.finish(&ToHold::End {
+                    code: 1,
+                    note: Some("bateri: this terminal is shown somewhere else".to_owned()),
+                });
+            }
+        }
+        if let Some(entry) = self.holds.get_mut(&hold) {
+            entry.bound = Some(Binding {
+                account: account.to_owned(),
+                terminal,
+                end,
+                shown: false,
+                picture_asked,
+            });
+        }
+    }
+
+    // What the owner writes and asks
+
+    /// Takes the bytes to write to a holder's connection.
+    pub fn take_outgoing(&mut self, hold: HoldId) -> Vec<u8> {
+        self.holds
+            .get_mut(&hold)
+            .map(|entry| std::mem::take(&mut entry.out))
+            .unwrap_or_default()
+    }
+
+    /// Whether there are bytes to write to a holder.
+    pub fn has_outgoing(&self, hold: HoldId) -> bool {
+        self.holds
+            .get(&hold)
+            .is_some_and(|entry| !entry.out.is_empty())
+    }
+
+    /// Whether the connection is to be closed once its bytes are written: the
+    /// hub has said its last word to this holder.
+    pub fn is_finished(&self, hold: HoldId) -> bool {
+        self.holds
+            .get(&hold)
+            .is_some_and(|entry| entry.finished && entry.out.is_empty())
+    }
+
+    /// How many bytes are waiting to be written to a holder. A large number
+    /// means the pane is not taking its output as fast as the server sends it.
+    pub fn backlog(&self, hold: HoldId) -> usize {
+        self.holds.get(&hold).map_or(0, |entry| entry.out.len())
+    }
+
+    /// The terminal a holder shows: the account and its name.
+    pub fn terminal_of(&self, hold: HoldId) -> Option<(&str, &SessionId)> {
+        self.holds
+            .get(&hold)
+            .and_then(|entry| entry.bound.as_ref())
+            .map(|binding| (binding.account.as_str(), &binding.terminal))
+    }
+
+    /// The holder that shows a terminal.
+    pub fn hold_of(&self, account: &str, terminal: &SessionId) -> Option<HoldId> {
+        self.bound
+            .get(&(account.to_owned(), terminal.clone()))
+            .copied()
+    }
+
+    /// The next thing that happened, if anything did.
+    pub fn next_event(&mut self) -> Option<HubEvent> {
+        self.events.pop_front()
+    }
+}
+
+#[cfg(test)]
+mod tests;

@@ -37,6 +37,10 @@
 //! new connection is up. [`Client::retry_now`] and [`Client::wake`] are the
 //! hooks for "try now" and "the computer woke".
 //!
+//! `hub` is the application's end of the pipe a pane's program makes to its terminal
+//! (`crate::hold`): it ties each such program to one terminal of a client and
+//! carries bytes both ways, also without a transport.
+//!
 //! `fake` (under `cfg(test)` and the `test-support` feature) is the server side of
 //! the same pipe for tests: the bridge with a few terminals, a journal of a chosen
 //! size and an old version of itself.
@@ -52,6 +56,7 @@ use kablo_proto::{NOISE_LIMIT, WIRE};
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod fake;
+pub mod hub;
 #[cfg(test)]
 mod tests;
 

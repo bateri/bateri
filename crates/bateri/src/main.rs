@@ -26,6 +26,13 @@ fn main() -> ExitCode {
     if let Some(code) = bt_shell_macos::ssh_fell_back() {
         return ExitCode::from(u8::try_from(code).unwrap_or(1));
     }
+    // A pane's program that shows a terminal kept on a server: `bateri
+    // ssh-hold …`, started by the pane's shell in place of `ssh` (or as the
+    // pane's first program). No GUI and any session, and it never reaches the
+    // window below: whatever goes wrong it replaces itself with the plain `ssh`.
+    if let Some(code) = bt_shell_macos::ssh_hold() {
+        return ExitCode::from(u8::try_from(code).unwrap_or(1));
+    }
     // The focus query: `bateri focus [--pid P] bateri://tab/<UUID>`,
     // asked by an outside process at the moment of an event — the same
     // reasons: only the token line reaches standard output, any session.
