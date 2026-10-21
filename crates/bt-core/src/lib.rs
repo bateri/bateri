@@ -19,7 +19,8 @@
 //! `KeepRunning`, `Scrollbar` and the tables
 //! of valid values (`NAMES`, `*_RANGE`), the journal's `Journal`,
 //! `JournalStore`, `JournalStream`, `JournalRecords` and `JournalCut` (the full
-//! list is the `pub use` block below). `Osc52` is the counterpart of
+//! list is the `pub use` block below) and, in `pencere`, a pane's desk for the view
+//! protocol — the types of the protocol crate it hands the shell. `Osc52` is the counterpart of
 //! alacritty's type of the same name, not that type itself. The move to our
 //! own grid (00X) is done behind this boundary and does not know the renderer.
 //! `toml_edit` likewise stays inside: there is no TOML type on the `pub`
@@ -64,6 +65,7 @@ mod input;
 mod journal;
 mod link;
 mod notify;
+pub mod pencere;
 mod pointer;
 mod program_status;
 mod reader;

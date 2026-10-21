@@ -86,6 +86,11 @@ fmt:
 #   Two commits would put two kablo versions in one build — the parser bateri
 #   decodes the stream with and the format it speaks to the relay would no longer
 #   come from the same source — and nothing but this line would say so.
+# - `pencere` (the protocol a program speaks to show a web view in its pane) is a crate
+#   of its own repository, not kablo's: Cargo.toml pins it by a full commit hash and it
+#   resolves to github.com/bateri/pencere at that hash. It stays out of the kablo rule
+#   above, because it is another repository with its own commits — one hash for the two
+#   would be a coincidence, not a rule.
 # - It does NOT fail on a dependency change, it warns: a deliberate dependency
 #   decision also changes Cargo.lock; review looks for the decision's record.
 audit:
@@ -105,6 +110,9 @@ audit:
 		elif ! echo "$$kablo_tree" | grep -qE "$$fork v[0-9.]+ \(https://github.com/bateri/kablo\?rev=$$fork_rev#"; then echo "audit: $$fork does not resolve to github.com/bateri/kablo at rev $$fork_rev — for a fork, is [patch.crates-io] in Cargo.toml still used?"; fail=1; fi; \
 	done; \
 	if [ "$$(echo $$kablo_revs | tr ' ' '\n' | sort -u | wc -l | tr -d ' ')" != "1" ]; then echo "audit: vte, alacritty_terminal and kablo-proto are not pinned by one kablo commit (rev):$$kablo_revs"; fail=1; fi; \
+	pencere_rev=$$(sed -n 's/^pencere = { git = "https:\/\/github.com\/bateri\/pencere", rev = "\([0-9a-f]\{40\}\)" }$$/\1/p' Cargo.toml); \
+	if [ -z "$$pencere_rev" ]; then echo "audit: Cargo.toml does not pin pencere with a full commit hash (rev) of github.com/bateri/pencere"; fail=1; \
+	elif ! echo "$$kablo_tree" | grep -qE "pencere v[0-9.]+ \(https://github.com/bateri/pencere\?rev=$$pencere_rev#"; then echo "audit: pencere does not resolve to github.com/bateri/pencere at rev $$pencere_rev"; fail=1; fi; \
 	if $(CARGO) tree -p bt-gpu -e normal,dev --depth 1 | grep -E "objc2|dispatch2|block2|metal"; then echo "audit: bt-gpu links directly to a platform library"; fail=1; fi; \
 	if grep -rnE "objc2|dispatch2|block2|metal" crates/bt-gpu/src | grep -v ":[[:space:]]*//"; then echo "audit: platform call in bt-gpu source"; fail=1; fi; \
 	for f in crates/bt-core/src/*.rs; do \

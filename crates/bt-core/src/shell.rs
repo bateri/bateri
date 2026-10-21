@@ -3139,6 +3139,7 @@ impl ShellLog {
                 // reported, as the local one does.
                 outcome.status =
                     matches!(remote.mark, Mark::PromptStart { .. }) && self.program.prompt();
+                outcome.remote_ended = matches!(remote.mark, Mark::CommandEnd { .. });
                 outcome.remote_edge = self.apply_remote(remote);
             }
             // The question was answered by the reader before this lock; the
@@ -3261,6 +3262,28 @@ impl ShellLog {
             return self.remote_shell.is_some() && idle(self.remote.state);
         }
         self.local.state.is_some() && self.running_command().is_none()
+    }
+
+    /// Whether a prompt is being edited: the shell has printed the end of its
+    /// prompt and has not yet started a command (OSC 133 `B` to `C`). In a remote
+    /// session the local shell is behind ssh and the remote shell's own trail
+    /// answers, as in [`Self::at_prompt`]. The protocol that lets a program show
+    /// a view in its pane is ignored while this is so: what arrives then is not a
+    /// program's writing but something the shell is echoing (the pencere
+    /// specification's hardening, §6.2).
+    pub(crate) fn prompt_editing(&self) -> bool {
+        let editing =
+            |state: Option<ShellState>| state.is_some_and(|state| state.phase == ShellPhase::Input);
+        if self.context.remote.is_some() {
+            return self.remote_shell.is_some() && editing(self.remote.state);
+        }
+        editing(self.local.state)
+    }
+
+    /// Whether the pane is in a remote session now: the program that writes to
+    /// it runs on another machine, and the local tty is `ssh`'s, not its.
+    pub(crate) fn in_remote_session(&self) -> bool {
+        self.context.remote.is_some()
     }
 
     /// The user sent input ([`crate::Session::send_input`], the single funnel):
@@ -4555,6 +4578,10 @@ pub(crate) struct ScanOutcome {
     /// also sends the state to a bound holder, and every remote command would
     /// add that traffic for a trail the next local edge carries anyway.
     pub(crate) remote_edge: bool,
+    /// Our remote shell's command **ended**: a `D` with `bt_remote=`. The part
+    /// of [`Self::remote_edge`] that says a program on the server is over, which
+    /// the view protocol needs apart from the starts.
+    pub(crate) remote_ended: bool,
     /// A program status record changed or went (`OSC 7501`, or the prompt that
     /// ended what it reported) → [`crate::Wake::program_status_changed`].
     pub(crate) status: bool,
@@ -11803,6 +11830,73 @@ mod tests {
         );
         assert!(outcome.started && outcome.ended && outcome.prompt);
         assert!(!outcome.remote_edge);
+    }
+
+    /// What says a program is over, for the view protocol: the local `D` (an
+    /// `ssh` is a local command, so its own `D` counts) and our remote shell's
+    /// `D` — and no start, no prompt mark.
+    #[test]
+    fn the_ends_of_commands_are_told_apart_from_their_other_edges() {
+        let ended = |log: &mut ShellLog, bytes: &[u8]| {
+            let mut scanner = Scanner::new();
+            let (mut local, mut remote) = (false, false);
+            scanner.feed(bytes, |event| {
+                let outcome = log.apply_scan_answering(event, 0);
+                local |= outcome.ended;
+                remote |= outcome.remote_ended;
+            });
+            (local, remote)
+        };
+        let mut log = ssh_log();
+        for mark in [
+            &b"\x1b]133;A;bt_remote=1.9.1\x07"[..],
+            b"\x1b]133;B;bt_remote=1.9.1\x07",
+            b"\x1b]133;C;bt_remote=1.9.1\x07",
+        ] {
+            assert_eq!(ended(&mut log, mark), (false, false), "{mark:?}");
+        }
+        assert_eq!(
+            ended(&mut log, b"\x1b]133;D;0;bt_remote=1.9.1\x07"),
+            (false, true),
+            "our remote shell's D"
+        );
+        let mut local = ShellLog::new(BLOCK_LOG_FLOOR);
+        assert_eq!(ended(&mut local, b"\x1b]133;C\x07"), (false, false));
+        assert_eq!(
+            ended(&mut local, b"\x1b]133;D;0;bt_block=1\x07"),
+            (true, false),
+            "the local D"
+        );
+    }
+
+    /// A prompt is being edited between its end (`B`) and the command's start
+    /// (`C`); in a remote session it is the remote shell's prompt that counts.
+    #[test]
+    fn a_prompt_is_edited_between_its_end_and_the_commands_start() {
+        let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
+        assert!(!log.prompt_editing(), "no marks, no prompt");
+        let steps: [(&[u8], bool); 5] = [
+            (b"\x1b]133;A;bt_block=1\x07", false),
+            (b"\x1b]133;B\x07", true),
+            (b"\x1b]133;C\x07", false),
+            (b"\x1b]133;D;0;bt_block=1\x07", false),
+            (b"\x1b]133;B\x07", true),
+        ];
+        for (bytes, editing) in steps {
+            feed(&mut log, bytes);
+            assert_eq!(log.prompt_editing(), editing, "{bytes:?}");
+        }
+
+        // `ssh` runs locally and the local shell is not at a prompt: the remote
+        // shell's own marks say.
+        let mut log = ssh_log();
+        assert!(log.in_remote_session());
+        assert!(!log.prompt_editing(), "the remote shell has not spoken");
+        feed(&mut log, b"\x1b]133;B;bt_remote=1.9.1\x07");
+        assert!(log.prompt_editing());
+        feed(&mut log, b"\x1b]133;C;bt_remote=1.9.1\x07");
+        assert!(!log.prompt_editing());
+        assert!(!ShellLog::new(BLOCK_LOG_FLOOR).in_remote_session());
     }
 
     /// The ended commands' tallies: our identified `D` and our remote

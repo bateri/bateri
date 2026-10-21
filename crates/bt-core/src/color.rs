@@ -1333,6 +1333,15 @@ const fn rgb(hex: u32) -> Rgb {
     }
 }
 
+/// A role's `0xRRGGBB` as sRGB bytes, for a surface that is not the GPU's: the
+/// one rule that unpacks the bytes ([`rgb`]), which
+/// [`Theme::background_srgb`] and [`Theme::separator_srgb`] already use. A
+/// second unpacking would be a place where a role and its drawn colour can part.
+pub(crate) const fn srgb_bytes(hex: u32) -> [u8; 3] {
+    let Rgb { r, g, b } = rgb(hex);
+    [r, g, b]
+}
+
 /// The two ends of the light, for the derived values that lean toward one
 /// rather than toward a role (the dock's ground, rim and shadow).
 const WHITE: Rgb = rgb(0xffffff);

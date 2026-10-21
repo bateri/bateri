@@ -66,7 +66,7 @@ use alacritty_terminal::vte::ansi::{self, Handler as _};
 use alacritty_terminal::{thread, tty};
 use polling::{Event as PollingEvent, Events, PollMode, Poller};
 
-use crate::graphics::{Commands, Hub, Sink};
+use crate::graphics::{Commands, Sink};
 use crate::handler::ClusterHandler;
 use crate::journal::{Journal, Side};
 
@@ -459,7 +459,7 @@ where
             let Some(graphics) = self.graphics.as_deref() else {
                 break;
             };
-            settle_halt(graphics.hub(), &mut lease, &mut terminal, || {
+            settle_halt(graphics, &mut lease, &mut terminal, || {
                 let lease = fair.lease();
                 (lease, fair.lock_unfair())
             });
@@ -611,7 +611,7 @@ where
                     break;
                 }
                 if let Some(graphics) = self.graphics.as_deref() {
-                    settle_halt(graphics.hub(), &mut lease, &mut terminal, || {
+                    settle_halt(graphics, &mut lease, &mut terminal, || {
                         let lease = fair.lease();
                         (lease, fair.lock_unfair())
                     });
@@ -865,22 +865,25 @@ where
 }
 
 /// What a halted parser waits for: the terminal and its lease let go, the
-/// parked transmission decoded (and its file read) with neither held, both
-/// taken back. The caller then lets the wrapper apply the record
-/// ([`ClusterHandler::resume`]).
+/// parked transmission decoded (and its file read) and the parked message of
+/// the view protocol heard, with neither held, both taken back. The caller
+/// then lets the wrapper apply the record ([`ClusterHandler::resume`]).
 ///
 /// The guards are the caller's and `relock` makes new ones, in the order the
 /// lock order asks (the lease, then the terminal — by waiting: the stream is
 /// in the middle, and nothing else is to be read before it goes on).
 fn settle_halt<L, G>(
-    hub: &Hub,
+    graphics: &dyn Sink,
     lease: &mut Option<L>,
     terminal: &mut Option<G>,
     relock: impl FnOnce() -> (L, G),
 ) {
     *terminal = None;
     drop(lease.take());
-    hub.decode_pending();
+    graphics.hub().decode_pending();
+    // A frame of the view protocol is parked **instead of** an image, never with
+    // one: an `ESC _` is one or the other.
+    graphics.settle_views();
     let (new_lease, new_terminal) = relock();
     *lease = Some(new_lease);
     *terminal = Some(new_terminal);
@@ -1591,5 +1594,157 @@ mod tests {
         thread.join().expect("the loop");
 
         assert!(seen, "the end of the prefix was left unread");
+    }
+
+    /// The loop over a script, with the view protocol's rig as its sink and the
+    /// terminal's own answers going to the same input as the desk's.
+    fn pane_loop(
+        pty: ScriptedPty,
+        rig: &Arc<crate::pencere::tests::Rig>,
+    ) -> (
+        EventLoop<ScriptedPty, crate::pencere::tests::Answers>,
+        Arc<FairMutex<Term<crate::pencere::tests::Answers>>>,
+    ) {
+        use crate::pencere::tests::Answers;
+        let terminal = Arc::new(FairMutex::new(Term::new(
+            Config::default(),
+            &TermSize::new(20, 4),
+            Answers(Arc::clone(&rig.input)),
+        )));
+        let mut event_loop = EventLoop::new(
+            Arc::clone(&terminal),
+            Answers(Arc::clone(&rig.input)),
+            pty,
+            false,
+            false,
+        )
+        .expect("loop");
+        event_loop.graphics(Arc::clone(rig) as Arc<dyn Sink>);
+        (event_loop, terminal)
+    }
+
+    /// What the pane's input has in it after the script was read.
+    fn input_after(pty: ScriptedPty, rig: &Arc<crate::pencere::tests::Rig>) -> Vec<u8> {
+        let (mut event_loop, _terminal) = pane_loop(pty, rig);
+        let mut state = State::default();
+        let mut buf = vec![0; 4096];
+        event_loop
+            .pty_read(&mut state, &mut buf, true)
+            .expect("read");
+        rig.input.lock().expect("the input is plain data").clone()
+    }
+
+    fn position(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+        haystack
+            .windows(needle.len())
+            .position(|window| window == needle)
+    }
+
+    /// The `hello` and the `CSI c` its SDK writes behind it arrive in one read:
+    /// the `welcome` is in the pane's input **before** the reply to the `CSI c`
+    /// (§5.2) — however the read is cut.
+    #[test]
+    fn a_welcome_goes_into_the_input_before_the_reply_to_the_csi_c_behind_the_hello() {
+        use crate::pencere::tests::{Rig, hello};
+        let stream = [hello(), b"\x1b[c".to_vec()].concat();
+        for chunk in [usize::MAX, 64, 7, 1] {
+            let (rig, _, _) = Rig::new(true);
+            let pty = ScriptedPty::new([Step::Wire(stream.clone())]).chunked(chunk);
+            let input = input_after(pty, &rig);
+            let welcome = position(&input, b"\x1b_pencere;welcome;").expect("a welcome");
+            let reply = position(&input, b"\x1b[?6c").expect("the reply to CSI c");
+            assert!(welcome < reply, "reads of {chunk}: {input:?}");
+            assert_eq!(
+                position(&input[reply..], b"pencere;welcome"),
+                None,
+                "one welcome"
+            );
+        }
+    }
+
+    /// A pane that was not opened with view options answers the `CSI c` and
+    /// nothing else: the program's SDK falls back to text.
+    #[test]
+    fn a_pane_without_views_answers_the_csi_c_and_nothing_else() {
+        use crate::pencere::tests::{Rig, hello};
+        let (rig, _, _) = Rig::new(false);
+        let stream = [hello(), b"\x1b[c".to_vec()].concat();
+        let input = input_after(ScriptedPty::new([Step::Wire(stream)]), &rig);
+        assert_eq!(input, b"\x1b[?6c");
+    }
+
+    /// The text on both sides of a frame reaches the grid in order, and the
+    /// frame is no text.
+    #[test]
+    fn the_text_around_a_frame_keeps_its_order() {
+        use crate::pencere::tests::{Rig, hello};
+        let (rig, _, _) = Rig::new(true);
+        let steps = [
+            Step::Text("hello"),
+            Step::Wire(hello()),
+            Step::Text("world"),
+        ];
+        let (mut event_loop, terminal) = pane_loop(ScriptedPty::new(steps), &rig);
+        let mut state = State::default();
+        let mut buf = vec![0; 4096];
+        event_loop
+            .pty_read(&mut state, &mut buf, true)
+            .expect("read");
+        let term = terminal.lock();
+        let row: String = (0..term.columns())
+            .map(|column| term.grid()[Line(0)][Column(column)].c)
+            .collect();
+        assert!(row.starts_with("helloworld"), "{row:?}");
+    }
+
+    /// What a frame makes the crate do is done with neither the terminal's lock
+    /// nor the lease a frame also waits for: a bundle's file is up to 8 MiB whose
+    /// digest is checked there.
+    #[test]
+    fn a_frame_is_heard_with_neither_the_terminal_lease_nor_its_lock_held() {
+        use crate::pencere::tests::{Rig, hello};
+        type Held = Arc<FairMutex<Term<crate::pencere::tests::Answers>>>;
+        let terminal: Arc<Mutex<Option<Held>>> = Arc::default();
+        let free = Arc::new(AtomicBool::new(false));
+        let observer: crate::pencere::Observer = {
+            let (terminal, free) = (Arc::clone(&terminal), Arc::clone(&free));
+            Box::new(move || {
+                // A frame wanting the terminal as the observer is asked: it needs the
+                // lease and the lock, and must get both while this call is made.
+                let held = terminal.lock().expect("plain data").clone();
+                if let Some(held) = held {
+                    let (got, got_rx) = mpsc::channel::<()>();
+                    let frame = std::thread::spawn(move || {
+                        drop(held.lock());
+                        let _ = got.send(());
+                    });
+                    free.store(
+                        got_rx.recv_timeout(Duration::from_secs(5)).is_ok(),
+                        Ordering::Release,
+                    );
+                    let _ = frame.join();
+                }
+                Default::default()
+            })
+        };
+        let (rig, _) = Rig::with_observer(observer);
+        let (mut event_loop, term) = pane_loop(ScriptedPty::new([Step::Wire(hello())]), &rig);
+        *terminal.lock().expect("plain data") = Some(Arc::clone(&term));
+        let mut state = State::default();
+        let mut buf = vec![0; 4096];
+        event_loop
+            .pty_read(&mut state, &mut buf, true)
+            .expect("read");
+        assert!(
+            free.load(Ordering::Acquire),
+            "a frame could not take the terminal while a message was heard"
+        );
+        assert!(
+            rig.input
+                .lock()
+                .expect("plain data")
+                .starts_with(b"\x1b_pencere;welcome;"),
+            "and it was answered all the same"
+        );
     }
 }

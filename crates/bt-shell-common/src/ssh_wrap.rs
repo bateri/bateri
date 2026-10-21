@@ -2444,6 +2444,7 @@ mod remote_shells {
                 hostname: None,
                 replay: None,
                 journal: None,
+                views: None,
             },
             Arc::new(SilentWake),
         )

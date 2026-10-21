@@ -69,10 +69,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
+use ::pencere::frame::{BodyDecoder, Direction, Event, Message};
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::term::Term;
 
 use crate::handler::KeptModes;
+use crate::pencere::Desk;
 use crate::pointer::PointerShapes;
 use crate::shell::BlockKey;
 
@@ -367,6 +369,19 @@ pub(crate) struct Commands {
     remote: bool,
     /// A cell's size in pixels, for a stream that has no session to ask.
     cell: (u16, u16),
+    /// The frames of the view protocol (an application program command that
+    /// begins `pencere;`), put together as the kitty commands are: the body
+    /// comes in slices and a message is several frames, so what is half-read
+    /// belongs to the stream and not to the parser's wrapper. Idle — taking
+    /// nothing — unless [`Commands::start_frames`] was called for the command
+    /// being received.
+    frames: BodyDecoder,
+    /// What `frames` delivered and nobody has taken, reused so that a frame
+    /// costs no allocation.
+    events: Vec<Event>,
+    /// The message the last frame ended, waiting to be taken
+    /// ([`Commands::take_message`]).
+    message: Option<Message>,
 }
 
 impl Default for Commands {
@@ -384,6 +399,9 @@ impl Commands {
             halt: false,
             remote: false,
             cell: (0, 0),
+            frames: BodyDecoder::new(Direction::ToHost),
+            events: Vec::new(),
+            message: None,
         }
     }
 
@@ -403,9 +421,36 @@ impl Commands {
         self.remote = remote;
     }
 
+    /// The command being received is also read as a frame of the view
+    /// protocol: only a pane that has a desk to hear it asks. A body that does
+    /// not begin `pencere;` is let go at its first byte that differs, so the
+    /// kitty commands pay nothing for it.
+    pub(crate) fn start_frames(&mut self) {
+        self.frames.start();
+    }
+
     /// A slice of the body.
     pub(crate) fn put(&mut self, data: &[u8]) {
         self.collector.put(data);
+        self.frames.put(data, &mut self.events);
+        self.keep_message();
+    }
+
+    /// The message a frame ended, once: the parser parks it with the desk and
+    /// halts behind it ([`Desk::park`]).
+    pub(crate) fn take_message(&mut self) -> Option<Message> {
+        self.message.take()
+    }
+
+    /// Keeps the message in `events`, if the last frame ended one. What the
+    /// decoder dropped (a malformed frame, one too long) is nobody's: the
+    /// stream is anyone's to write.
+    fn keep_message(&mut self) {
+        for event in self.events.drain(..) {
+            if let Event::Message(message) = event {
+                self.message = Some(message);
+            }
+        }
     }
 
     /// The body ended. What it comes to if it is a whole graphics command, in
@@ -423,6 +468,8 @@ impl Commands {
         stored: &dyn Fn(Echo) -> Option<(u32, u32)>,
         (seen, remote): (bool, &dyn Fn() -> bool),
     ) -> Vec<Outcome> {
+        self.frames.end(cancelled, &mut self.events);
+        self.keep_message();
         let Some(apc) = self.collector.end(cancelled) else {
             return Vec::new();
         };
@@ -838,6 +885,23 @@ pub(crate) trait Sink: Send + Sync {
     /// memory ([`crate::history`]) keeps it, because once the screen is taken the rows are out of
     /// reach. A stream with no memory to keep it in lets it go.
     fn leaving_primary_screen(&self, _newest: Option<(BlockKey, String)>) {}
+
+    /// The pane's desk for the view protocol ([`crate::pencere`]), if it has
+    /// one and may answer now. A stream without one — a pane opened with no
+    /// [`crate::pencere::ViewOptions`], an adopted pane's carried prefix whose
+    /// answers are dropped — lets the frames go.
+    fn desk(&self) -> Option<&Desk> {
+        None
+    }
+
+    /// The parser is halted behind a frame the desk parked: hears it, with
+    /// the terminal's lock and lease let go ([`Desk::settle`]). The bytes the
+    /// protocol answers with go where the terminal's other answers go.
+    fn settle_views(&self) {
+        if let Some(desk) = self.desk() {
+            desk.settle(|bytes| self.reply(bytes));
+        }
+    }
 }
 
 #[cfg(test)]

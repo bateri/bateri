@@ -4306,6 +4306,7 @@ exit $code
                 hostname: None,
                 replay: None,
                 journal: None,
+                views: None,
             },
             Arc::clone(&wake) as Arc<dyn bt_core::Wake>,
         )
@@ -4446,6 +4447,7 @@ exit $code
                 hostname: None,
                 replay: None,
                 journal: None,
+                views: None,
             },
             Arc::new(crate::child::SilentWake),
         )

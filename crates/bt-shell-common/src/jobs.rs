@@ -2709,6 +2709,7 @@ pub(crate) mod tests {
             hostname: None,
             replay: None,
             journal: None,
+            views: None,
         }
     }
 
@@ -3034,6 +3035,7 @@ pub(crate) mod tests {
                 hostname: None,
                 replay: None,
                 journal: None,
+                views: None,
             },
             Arc::new(SilentWake),
         )
@@ -3104,6 +3106,7 @@ pub(crate) mod tests {
                 hostname: None,
                 replay: None,
                 journal: None,
+                views: None,
             },
             Arc::new(SilentWake),
         )

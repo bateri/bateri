@@ -1089,6 +1089,7 @@ mod tests {
                 hostname: None,
                 replay: None,
                 journal: Some(Arc::clone(journal.journal())),
+                views: None,
             },
             Arc::new(crate::child::SilentWake),
         )

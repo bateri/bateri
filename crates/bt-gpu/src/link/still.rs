@@ -283,6 +283,7 @@ mod tests {
                 hostname: None,
                 replay: None,
                 journal: None,
+                views: None,
             },
             Arc::new(QuietWake),
         )

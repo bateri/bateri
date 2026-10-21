@@ -3732,6 +3732,7 @@ impl TerminalPane {
             // A restored pane's scrollback; `None` everywhere else.
             replay,
             journal: self.open_journal(settings.terminal().scrollback),
+            views: None,
         };
         let wake = Arc::clone(&self.ivars().wake) as Arc<dyn Wake>;
         // The update's handover: the running program is carried

@@ -202,6 +202,17 @@ harfrust = { version = "0.13", default-features = false, features = ["std"] }
 # bateri (GPL-3.0-or-later); `make audit` fails if the three do not resolve to one commit.
 kablo-proto = { git = "https://github.com/bateri/kablo", rev = "74ac4a4d4800ffa0a370bac98dd6558b817608d9" }
 
+# pencere: the protocol a program in a pane speaks to show its web view there (frames,
+# messages, the session's rules, bundles, the content security policy and the theme as
+# styling), as a crate with no I/O. Taken from its own repository by a pinned commit, like
+# `kablo-proto`: the rules are written once, in the protocol's repository, and bateri is a
+# host of it; rewriting them here would be a second copy that drifts. `rev` must be a commit
+# at or after the relicensing to Apache-2.0 (`75a78e3`): the commit before it is GPL-3.0 and
+# the protocol is meant to be embedded by closed products too. User-approved dependency
+# decision (2026-10-21); it brings `serde`, `serde_json` and `sha2` into the graph, all
+# MIT/Apache-2.0. `make audit` fails if `rev` is not a full hash or does not resolve.
+pencere = { git = "https://github.com/bateri/pencere", rev = "75a78e317fac30962c4e24be2a180390e3053201" }
+
 bt-core = { path = "crates/bt-core" }
 bt-atlas = { path = "crates/bt-atlas" }
 bt-gpu = { path = "crates/bt-gpu" }

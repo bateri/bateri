@@ -34,7 +34,8 @@
 /// the `Waker` is **detached** on the main thread when the window closes and
 /// `ShellWake` does not carry it, whichever thread it drops on.
 ///
-/// None of the calls has a default body: when a new call is added, the
+/// None of the calls has a default body but one ([`Wake::view_changed`], which
+/// only a shell that can show a view reads): when a new call is added, the
 /// implementor cannot forget it — the compiler says so.
 pub trait Wake: Send + Sync + 'static {
     /// The grid changed; a frame may be needed.
@@ -289,4 +290,24 @@ pub trait Wake: Send + Sync + 'static {
     /// and the three prohibitions above apply. The implementor posts **at most
     /// one** job to its queue.
     fn notification(&self);
+
+    /// A program in the pane is showing, or has stopped showing, a view
+    /// ([`crate::pencere`]): the desk has something for the shell to take
+    /// ([`crate::Session::take_view_actions`]) — a view to start, a message for
+    /// it, a question for the person, a view to tear down.
+    ///
+    /// **Edge-triggered and payload-free** (the precedent is
+    /// [`Wake::notification`]): it comes when the slot goes from empty to
+    /// filled, so a burst of actions is one call, and the receiver takes
+    /// everything that is there. It arrives on the reader thread after the
+    /// desk's leaf lock has been released: with no `Term` lock held when it comes
+    /// from a frame (the parser is halted and the lock let go for the desk), and
+    /// possibly under it when a command's end or the child's exit tore the view
+    /// down; or on the thread that called the [`crate::Session`] method it answers.
+    /// The three prohibitions above apply. The implementor posts **at most one**
+    /// job to its queue, and draws no frame for it: a view is not the renderer's.
+    ///
+    /// **Has a default body, empty**: a shell that cannot show a view has no
+    /// view to start, and a pane opened without view options never calls it.
+    fn view_changed(&self) {}
 }

@@ -5712,6 +5712,7 @@ mod tests {
             hostname: None,
             replay: None,
             journal,
+            views: None,
         }
     }
 

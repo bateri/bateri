@@ -100,6 +100,7 @@ use crate::input::{
 };
 use crate::journal::{Base, Journal, Side as JournalSide};
 use crate::link;
+use crate::pencere::{self, Desk, ViewOptions};
 use crate::pointer::{PointerShape, PointerShapes};
 use crate::program_status::{self, ProgramActivity};
 use crate::reader::{
@@ -1532,6 +1533,13 @@ pub struct SessionOptions {
     /// replays (`replay`, or an adopted pane's VT). One session per journal.
     /// `None` → nothing is recorded and every path is as it was without it.
     pub journal: Option<Arc<Journal>>,
+    /// What lets a program in this pane show a view in it ([`crate::pencere`]):
+    /// the application's name and version, where bundle files are kept. The
+    /// session then hears the view protocol in the stream and answers it; the
+    /// shell takes what is for it ([`Session::take_view_actions`]). `None` →
+    /// the frames are let go and nothing is written, so the program falls back
+    /// to what it does when nothing answers its `hello`.
+    pub views: Option<ViewOptions>,
 }
 
 /// The session's first input ([`SessionOptions::initial_input`]): a line and
@@ -2056,6 +2064,15 @@ struct AdapterInner {
     /// and its exit carries no status, so the loop sends no `ChildExit` —
     /// the `Exit` that follows every child exit sends the news then.
     child_exited: AtomicBool,
+    /// The pane's desk for the view protocol ([`crate::pencere`]): the crate's
+    /// conversation with the program, and what it asks of the shell. `None` for
+    /// a pane opened without [`SessionOptions::views`].
+    ///
+    /// **Leaf lock under `Term`** (`term` → the desk's slot): the parser parks a
+    /// message there while it holds `Term`; the message is heard with no lock
+    /// held. The desk's observer takes the shell's log and the master's copy,
+    /// each with the slot not held.
+    desk: Option<Desk>,
     /// Whether the application's questions go unanswered ([`Adapter::reply`])
     /// and its clipboard writes are dropped: set while an adopted pane's
     /// carried prefix is parsed under [`AdoptMode::Bound`] — that output was
@@ -2085,7 +2102,13 @@ struct AdapterInner {
 }
 
 impl Adapter {
-    fn new(wake: Arc<dyn Wake>, size: WindowSize, theme: Theme, blink: CursorBlink) -> Self {
+    fn new(
+        wake: Arc<dyn Wake>,
+        size: WindowSize,
+        theme: Theme,
+        blink: CursorBlink,
+        desk: Option<Desk>,
+    ) -> Self {
         Self(Arc::new(AdapterInner {
             wake,
             sender: OnceLock::new(),
@@ -2104,6 +2127,7 @@ impl Adapter {
             search_active: AtomicBool::new(false),
             search_pending: AtomicBool::new(false),
             child_exited: AtomicBool::new(false),
+            desk,
             muted: AtomicBool::new(false),
             graphics: Hub::new(),
             modes: KeptModes::default(),
@@ -2163,6 +2187,16 @@ impl graphics::Sink for Adapter {
         &self.0.pointer
     }
 
+    /// Not while the carried prefix of an adopted pane is parsed
+    /// ([`AdapterInner::muted`]): a frame written then was written while no
+    /// bateri read, and an answer now would land in the shell as typed input.
+    fn desk(&self) -> Option<&Desk> {
+        self.0
+            .desk
+            .as_ref()
+            .filter(|_| !self.0.muted.load(Ordering::Acquire))
+    }
+
     fn leaving_primary_screen(&self, newest: Option<(BlockKey, String)>) {
         let Some(newest) = newest else {
             return;
@@ -2203,6 +2237,23 @@ impl Adapter {
         }
     }
 
+    /// Runs `act` on the pane's conversation with the program and does what it
+    /// asks: bytes into the pane's input, the rest left for the shell
+    /// ([`Wake::view_changed`]). `None` for a pane with no desk. Never takes
+    /// the `Term` lock.
+    fn view<R>(&self, act: impl FnOnce(&mut pencere::Conversing) -> R) -> Option<R> {
+        let desk = self.0.desk.as_ref()?;
+        Some(desk.apply(|bytes| self.input(bytes), act))
+    }
+
+    /// The program in the pane ended (§10.3 of the protocol): the command's `D`
+    /// or the child's exit.
+    fn view_program_ended(&self) {
+        if let Some(desk) = &self.0.desk {
+            desk.program_ended(|bytes| self.input(bytes));
+        }
+    }
+
     /// Writes the title slot; **if it changed**, [`Wake::title_changed`] after
     /// the leaf lock is released. Called while the `Term` lock is held.
     fn store_title(&self, title: Option<String>) {
@@ -2235,6 +2286,7 @@ impl EventListener for Adapter {
             }
             Event::ChildExit(status) => {
                 self.0.child_exited.store(true, Ordering::Release);
+                self.view_program_ended();
                 self.0.wake.child_exit(status.code());
             }
             // `Term::exit`'s event: the reader loop sends it right after a
@@ -2243,6 +2295,7 @@ impl EventListener for Adapter {
             // its news, without a code.
             Event::Exit => {
                 if !self.0.child_exited.swap(true, Ordering::AcqRel) {
+                    self.view_program_ended();
                     self.0.wake.child_exit(None);
                 }
             }
@@ -2561,6 +2614,12 @@ impl io::Read for TappedPty {
             }
             if outcome.prompt || outcome.ended {
                 wake.phase_edge();
+            }
+            // A command ended — the local one's `D` (an `ssh` is a local command
+            // too) or our remote shell's: a program that had a view has none
+            // now. The shell's log is unlocked: the guard above was a temporary.
+            if outcome.ended || outcome.remote_ended {
+                adapter.view_program_ended();
             }
             // The shell is back: no program's pointer stays over its prompt.
             if outcome.prompt && adapter.0.pointer.clear() {
@@ -5157,7 +5216,11 @@ pub struct Session {
     /// [`Session::begin_shutdown`], which closes it **before** the `Pty`'s
     /// own `Drop`: the slave's hangup comes when it always did. Read-only use.
     /// [`Session::freeze`] takes it: it is the handover's master.
-    master: Mutex<Option<File>>,
+    ///
+    /// Shared with the view desk's observer, which reads the tty's modes from
+    /// it ([`pencere::pane_observer`]); it finds `None` once this slot is
+    /// taken, so the copy is not kept open by it.
+    master: Arc<Mutex<Option<File>>>,
     /// Whether the PTY was adopted ([`Session::adopt`]): its shutdown is a
     /// hangup without `wait` ([`Teardown::HungUp`]).
     adopted: bool,
@@ -5375,7 +5438,7 @@ impl Session {
     /// started — the caller does, after its own steps — and the first input
     /// written at birth comes back for the caller to send.
     fn assemble(
-        options: SessionOptions,
+        mut options: SessionOptions,
         wake: Arc<dyn Wake>,
         birth: Birth,
     ) -> io::Result<(Self, EventLoop<TappedPty, Adapter>, Option<InitialInput>)> {
@@ -5393,7 +5456,7 @@ impl Session {
         } = birth;
         let adopted = matches!(pty, PtyKind::Adopted(_));
         let home = options.home;
-        let master = Mutex::new(master);
+        let master = Arc::new(Mutex::new(master));
         let journal = options.journal;
         // The slot is born **before** the `EventLoop`: one end goes to the
         // wrapper and the reader thread, the other stays in `Session`.
@@ -5413,11 +5476,28 @@ impl Session {
         // after a save inside a session and silently ignored in a fresh window.
         //
         // **Before** `TappedPty`: the first input goes through its channel.
+        let desk = options.views.take().map(|views| {
+            // The content area before the shell says what it is: the grid's, in
+            // the units the PTY was told (the shell sets the real one before a
+            // view starts).
+            let area = pencere::Size {
+                width: u32::from(options.cols) * u32::from(options.cell_px.0),
+                height: u32::from(options.rows) * u32::from(options.cell_px.1),
+            };
+            Desk::new(
+                views,
+                options.theme,
+                area,
+                Arc::clone(&wake),
+                pencere::pane_observer(Arc::clone(&shell), Arc::clone(&master), child_pid),
+            )
+        });
         let adapter = Adapter::new(
             Arc::clone(&wake),
             size,
             options.theme,
             options.terminal.blink,
+            desk,
         );
         // The first input's two delivery paths: in a session with a
         // wrapper, on the reader thread at our first identified `A`; without a
@@ -11754,7 +11834,124 @@ impl Session {
         };
         if changed {
             self.request_frame();
+            // The view a program shows in this pane follows the terminal's look.
+            if let Some(desk) = &self.adapter.0.desk {
+                desk.set_theme(theme, |bytes| self.adapter.input(bytes));
+            }
         }
+    }
+
+    // ---- views: what a program in the pane shows (`crate::pencere`) ----
+    //
+    // None of these touches `Term`, and none is a side record — **Journal-neutral**:
+    // a view is not the screen, and what the journal rebuilds is the screen.
+
+    /// Whether this pane hears the view protocol: it was opened with
+    /// [`SessionOptions::views`].
+    pub fn hosts_views(&self) -> bool {
+        self.adapter.0.desk.is_some()
+    }
+
+    /// What the shell is to do for the view, in order; empties the slot
+    /// ([`Wake::view_changed`] says when there is something): a view to start,
+    /// a message for it, a question for the person, a link to open, a view to
+    /// tear down. The bytes the program is answered with are not here — they
+    /// have gone into the pane's input already.
+    pub fn take_view_actions(&self) -> Vec<pencere::Action> {
+        self.adapter
+            .0
+            .desk
+            .as_ref()
+            .map(Desk::take_views)
+            .unwrap_or_default()
+    }
+
+    /// A message from the view, as JSON text ([`pencere::Action::StartView`]'s
+    /// bridge). The crate drops what is not JSON-RPC or is over its limit.
+    pub fn view_message(&self, text: &str) {
+        self.adapter
+            .view(|conversation| conversation.view_message(text));
+    }
+
+    /// The person's answer to a [`pencere::Action::Consent`]; it is cut down to
+    /// what the view declared, whatever it says.
+    pub fn view_consent(&self, grant: pencere::Grant) {
+        self.adapter
+            .view(|conversation| conversation.consent(grant));
+    }
+
+    /// The person's answer to a [`pencere::Action::OpenLink`].
+    pub fn view_link_decision(&self, link: u32, allow: bool) {
+        self.adapter
+            .view(|conversation| conversation.link_decision(link, allow));
+    }
+
+    /// The person closes the view; the program is told once it is gone.
+    pub fn close_view(&self) {
+        self.adapter.view(pencere::Conversing::close_view);
+    }
+
+    /// A wait the shell chose has run out: the files of an open, the program's
+    /// start-up or the person's answer (the open ends in `timeout`), the view's
+    /// answer to its teardown, or the program's `open` after a restart.
+    pub fn view_wait_over(&self) {
+        self.adapter.view(pencere::Conversing::timed_out);
+    }
+
+    /// The wait for the program's answers to the view's requests ran out: they
+    /// fail the way MCP defines.
+    pub fn view_requests_overdue(&self) {
+        self.adapter.view(pencere::Conversing::requests_timed_out);
+    }
+
+    /// The pane's content area, in CSS pixels, changed: the view is told if it
+    /// runs.
+    pub fn set_view_size(&self, size: pencere::Size) {
+        self.adapter
+            .view(|conversation| conversation.set_size(size));
+    }
+
+    /// The font family changed (`[font] family`; `None` is the system's): the
+    /// view is told if it runs. The terminal's colours reach it through
+    /// [`Session::set_theme`].
+    pub fn set_view_font(&self, family: Option<&str>) {
+        if let Some(desk) = &self.adapter.0.desk {
+            desk.set_font(family, |bytes| self.adapter.input(bytes));
+        }
+    }
+
+    /// Starts the view again after something that restored the screen without
+    /// the messages (a handover, a reconnection): the program is offered a
+    /// restart and opens its view again if it had one.
+    pub fn restart_view(&self) {
+        if let Some(desk) = &self.adapter.0.desk {
+            desk.restart(|bytes| self.adapter.input(bytes));
+        }
+    }
+
+    /// The bytes and media type of the file at `path` of the open view's
+    /// bundle: all the shell serves, and nothing outside the manifest answers.
+    pub fn serve_view_file(&self, path: &str) -> Option<(String, Arc<[u8]>)> {
+        self.adapter
+            .view(|conversation| conversation.serve(path))
+            .flatten()
+    }
+
+    /// The entry document of the bundle of the view that is opening or open.
+    pub fn view_entry(&self) -> Option<String> {
+        self.adapter
+            .view(|conversation| {
+                conversation
+                    .bundle()
+                    .map(|bundle| bundle.entry().to_owned())
+            })
+            .flatten()
+    }
+
+    /// Where the pane's conversation with its program stands; `None` for a
+    /// pane that hosts no views.
+    pub fn view_state(&self) -> Option<pencere::State> {
+        self.adapter.view(|conversation| conversation.state())
     }
 
     /// Sets the least contrast ratio a program's text keeps against its own
@@ -13283,6 +13480,8 @@ mod tests {
         bells: u32,
         /// How many times [`Wake::notification`] came.
         notes: u32,
+        /// How many times [`Wake::view_changed`] came.
+        views: u32,
     }
 
     impl TestWake {
@@ -13304,6 +13503,11 @@ mod tests {
                 .wait_timeout_while(state, timeout, |state| state.exit.is_none())
                 .unwrap();
             state.exit
+        }
+
+        /// How many times the shell was told a view has something for it.
+        fn views(&self) -> u32 {
+            self.state.lock().unwrap().views
         }
 
         /// The clipboard texts that have come so far.
@@ -13426,6 +13630,11 @@ mod tests {
             self.cond.notify_all();
         }
 
+        fn view_changed(&self) {
+            self.state.lock().unwrap().views += 1;
+            self.cond.notify_all();
+        }
+
         fn blocks_changed(&self) {
             self.state.lock().unwrap().blocks += 1;
             self.cond.notify_all();
@@ -13517,6 +13726,7 @@ mod tests {
             hostname: None,
             replay: None,
             journal: None,
+            views: None,
         }
     }
 
@@ -30210,6 +30420,198 @@ e\\314\\201.'; sleep 5";
             );
         }
         draw(&session);
+        session.shutdown();
+    }
+
+    /// A program in a pane that hosts views, played by the test: the child is
+    /// two `cat`s on a raw tty — one copies a FIFO to the screen (the test's
+    /// writing is the program's output), the other copies the pane's input to a
+    /// file (what the session answered). `set -m` makes the second the tty's
+    /// foreground group, as a program a shell started would be: the shell is not
+    /// in the foreground, and the tty is raw, so a `hello` is heard.
+    struct Playing {
+        session: Session,
+        wake: Arc<TestWake>,
+        fifo: File,
+        captured: PathBuf,
+        _dir: TempDir,
+    }
+
+    impl Playing {
+        fn new(name: &str) -> Self {
+            let dir = TempDir::new(name);
+            let fifo_path = dir.0.join("out");
+            let captured = dir.0.join("in");
+            let made = std::process::Command::new("mkfifo")
+                .arg(&fifo_path)
+                .status()
+                .expect("mkfifo");
+            assert!(made.success());
+            std::fs::write(&captured, b"").expect("the capture file");
+            let mut options = test_options(
+                (
+                    "/bin/sh".into(),
+                    vec![
+                        "-c".into(),
+                        "set -m; stty -opost -icanon -echo; cat \"$1\" & cat > \"$2\"".into(),
+                        "sh".into(),
+                        fifo_path.display().to_string(),
+                        captured.display().to_string(),
+                    ],
+                ),
+                40,
+            );
+            options.views = Some(ViewOptions::new("bateri-test", "0.0.0"));
+            let wake = Arc::new(TestWake::default());
+            let session = Session::spawn(options, Arc::clone(&wake) as Arc<dyn Wake>).unwrap();
+            let (opened, open) = mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = opened.send(std::fs::OpenOptions::new().write(true).open(fifo_path));
+            });
+            let fifo = open
+                .recv_timeout(Duration::from_secs(10))
+                .expect("cat did not open the fifo")
+                .expect("the fifo opens");
+            Self {
+                session,
+                wake,
+                fifo,
+                captured,
+                _dir: dir,
+            }
+        }
+
+        /// The program writes.
+        fn write(&mut self, bytes: &[u8]) {
+            use std::io::Write as _;
+            self.fifo
+                .write_all(bytes)
+                .expect("the fifo takes the bytes");
+        }
+
+        /// What the session has written into the pane's input so far.
+        fn input(&self) -> Vec<u8> {
+            std::fs::read(&self.captured).unwrap_or_default()
+        }
+
+        /// The frames among it.
+        fn written(&self) -> Vec<::pencere::frame::Message> {
+            crate::pencere::tests::decoded(&self.input())
+        }
+
+        /// Waits until the session has written `count` frames; returns them.
+        fn wait_written(&self, count: usize) -> Vec<::pencere::frame::Message> {
+            let mut frames = Vec::new();
+            wait_until("the session's frames", Duration::from_secs(10), || {
+                frames = self.written();
+                frames.len() >= count
+            });
+            frames
+        }
+
+        fn state(&self) -> Option<crate::pencere::State> {
+            self.session.view_state()
+        }
+
+        fn wait_state(&self, state: crate::pencere::State) {
+            wait_until("the conversation's state", Duration::from_secs(10), || {
+                self.state() == Some(state)
+            });
+        }
+    }
+
+    #[test]
+    fn a_welcome_is_in_the_panes_input_before_the_reply_to_the_csi_c_behind_the_hello() {
+        use crate::pencere::tests::{hello, token_of};
+        let mut program = Playing::new("view-order");
+        program.write(&[hello(), b"\x1b[c".to_vec()].concat());
+        let frames = program.wait_written(1);
+        wait_until("the reply to CSI c", Duration::from_secs(10), || {
+            program
+                .input()
+                .windows(5)
+                .any(|window| window == b"\x1b[?6c")
+        });
+        let input = program.input();
+        let at = |needle: &[u8]| input.windows(needle.len()).position(|w| w == needle);
+        let welcome = at(b"\x1b_pencere;welcome;").expect("a welcome");
+        let reply = at(b"\x1b[?6c").expect("the reply");
+        assert!(welcome < reply, "{input:?}");
+        assert_eq!(token_of(&frames[0]).len(), 22);
+        assert_eq!(program.state(), Some(crate::pencere::State::Offered));
+        program.session.shutdown();
+    }
+
+    #[test]
+    fn a_program_opens_a_view_in_its_pane_and_the_shell_is_told_once() {
+        use crate::pencere::tests::{
+            bundle_open, hello, initialize_answer, is_request, page_file, token_of, tools_answer,
+        };
+        let mut program = Playing::new("view-open");
+        program.write(&hello());
+        let token = token_of(&program.wait_written(1)[0]);
+        program.write(&bundle_open(&token));
+        assert_eq!(program.wait_written(2)[1].kind, "need");
+        program.write(&page_file());
+        let initialize = program.wait_written(3);
+        assert!(is_request(&initialize[2], "initialize"), "{initialize:?}");
+        program.write(&initialize_answer(&initialize[2]));
+        let tools = program.wait_written(5);
+        assert!(is_request(&tools[4], "tools/list"), "{tools:?}");
+        program.write(&tools_answer(&tools[4]));
+        program.wait_state(crate::pencere::State::Open);
+
+        assert!(program.session.hosts_views());
+        let views = program.session.take_view_actions();
+        assert_eq!(views.len(), 1, "{views:?}");
+        assert!(matches!(views[0], crate::pencere::Action::StartView(_)));
+        assert_eq!(
+            program.wake.views(),
+            1,
+            "one event for the view that starts"
+        );
+        assert_eq!(program.session.view_entry().as_deref(), Some("index.html"));
+        let served = program.session.serve_view_file("index.html");
+        assert_eq!(served.map(|(media, _)| media).as_deref(), Some("text/html"));
+        assert!(program.session.take_view_actions().is_empty());
+        program.session.shutdown();
+    }
+
+    /// The command's `D` ends the program: a local one, an `ssh` being the local
+    /// command of a remote session, and our remote shell's own.
+    #[test]
+    fn the_end_of_a_command_ends_the_program_that_said_hello() {
+        use crate::pencere::State;
+        use crate::pencere::tests::hello;
+        let mut program = Playing::new("view-end");
+        for (end, what) in [
+            (&b"\x1b]133;D;0\x07"[..], "a local D"),
+            (&b"\x1b]133;D;0;bt_remote=1.2.3\x07"[..], "a remote D"),
+        ] {
+            let before = program.written().len();
+            program.write(&hello());
+            program.wait_written(before + 1);
+            program.wait_state(State::Offered);
+            program.write(end);
+            wait_until(what, Duration::from_secs(10), || {
+                program.state() == Some(State::Ended)
+            });
+            // Nothing is written to a program that has ended.
+            assert_eq!(program.written().len(), before + 1, "{what}");
+        }
+        program.session.shutdown();
+    }
+
+    #[test]
+    fn a_pane_opened_without_views_has_no_conversation() {
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_session("sleep 5", wake);
+        assert!(!session.hosts_views());
+        assert_eq!(session.view_state(), None);
+        assert!(session.take_view_actions().is_empty());
+        assert!(session.view_entry().is_none());
+        session.close_view();
+        session.restart_view();
         session.shutdown();
     }
 

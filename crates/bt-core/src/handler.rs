@@ -235,6 +235,21 @@ impl<'a, U: EventListener> ClusterHandler<'a, U> {
         }
     }
 
+    /// A message of the view protocol ended: the desk takes it, with whether
+    /// the pane is on the alternate screen **here**, where the program wrote
+    /// it — not where the frame path's atomic says, which is the last drawn
+    /// frame's — and the parser stops right behind it, for the answer is not
+    /// for the terminal's lock ([`ClusterHandler::resume`]).
+    fn park_message(&mut self, message: ::pencere::frame::Message) {
+        let Some(desk) = self.graphics.and_then(|graphics| graphics.desk()) else {
+            return;
+        };
+        desk.park(message, self.on_alternate_screen());
+        if let Some(commands) = self.commands.as_deref_mut() {
+            commands.halt();
+        }
+    }
+
     /// What a command that ended comes to, in the order it came.
     fn dispatch(&mut self, outcome: Outcome) {
         match outcome {
@@ -655,8 +670,14 @@ impl<U: EventListener> Handler for ClusterHandler<'_, U> {
         let seen = self
             .graphics
             .is_some_and(|graphics| graphics.hub().remote_seen());
+        let hears_frames = self
+            .graphics
+            .is_some_and(|graphics| graphics.desk().is_some());
         if let Some(commands) = self.commands.as_deref_mut() {
             commands.start(seen);
+            if hears_frames {
+                commands.start_frames();
+            }
         }
     }
 
@@ -687,9 +708,13 @@ impl<U: EventListener> Handler for ClusterHandler<'_, U> {
         let remote = || hub.is_some_and(Hub::in_remote_session);
         let seen = hub.is_some_and(Hub::remote_seen);
         let outcomes = commands.end(cancelled, Instant::now(), env, &stored, (seen, &remote));
+        let message = commands.take_message();
         self.publish_open();
         for outcome in outcomes {
             self.dispatch(outcome);
+        }
+        if let Some(message) = message {
+            self.park_message(message);
         }
     }
 

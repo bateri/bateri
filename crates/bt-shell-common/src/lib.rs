@@ -29,8 +29,9 @@
 //! drops, as a state machine with no transport of its own (`kablo`) — the pipe that
 //! shows one in a pane (`hold`) and the command
 //! palette's rules — its rows, matching, pages, preview and the settings it can change
-//! (`palette`) — and what an agent on a server asks of bateri: the message, where the pane it
-//! opened lands and what `ls` tells (`agent`).
+//! (`palette`), what an agent on a server asks of bateri: the message, where the pane it
+//! opened lands and what `ls` tells (`agent`), and the files a program's views are made of,
+//! kept on disk by their digest (`view_store`).
 //!
 //! **The boundary:** no AppKit, Foundation, Quartz or notification centre —
 //! whatever needs the toolkit stays in the platform shell (`bt-shell-macos` on
@@ -84,6 +85,7 @@ pub mod tabs;
 pub mod tree_text;
 pub mod undo;
 pub mod upload;
+pub mod view_store;
 // Bodies exist for macOS and Linux only; elsewhere the module is absent
 // rather than half-present (a `Notify` without a `Watch`).
 #[cfg(any(target_os = "macos", target_os = "linux"))]
