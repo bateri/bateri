@@ -44,7 +44,7 @@ use std::time::{Duration, Instant};
 
 use bt_core::pencere::{Action, Grant, Size as ViewSize, ViewOptions, font_stack};
 use bt_core::{
-    BlockHandle, BlockInfo, CommandId, CommandPhase, ContentEdge, FontOptions, PaneUuid,
+    BlockHandle, BlockInfo, Chord, CommandId, CommandPhase, ContentEdge, FontOptions, PaneUuid,
     ProgramBar, RemoteFiles, RemoteTarget, SearchCover, SearchDirection, SearchReport,
     SearchStatus, Session, SessionOptions, Settings, Theme, TtyModes, Wake,
 };
@@ -84,6 +84,7 @@ use crate::focus::Moment;
 use crate::grid::{self, Grid, split_into_grid};
 use bt_shell_common::kablo::roster::Background;
 use bt_shell_common::kablo::service::{PaneLink, Shown};
+use bt_shell_common::view_strip;
 
 use crate::jobs::{self, Foreground, Probe, ShellParent, SystemTable};
 use crate::journal::PaneJournal;
@@ -190,6 +191,15 @@ pub trait PaneHost {
     /// document in its default application, the rest revealed, an uncommon
     /// scheme asked about first).
     fn open_link(&self, _pane: u64, _link: &LinkRequest) -> bool {
+        false
+    }
+    /// Whether `chord`, pressed while a program's view has the keyboard, is the owner's own
+    /// shortcut — a tab, a window, a split, the palette — and not the view's: the view never
+    /// sees it and the owner's main menu runs it (`pencere_view`). The owner answers from its
+    /// shortcut table (`shortcuts::Resolved::kept_from_view`: the commands that work on the
+    /// pane's content are the view's). The default is an owner with no shortcuts of its own,
+    /// whose menu still gets the keys the view leaves unhandled.
+    fn keeps_key(&self, _chord: &Chord) -> bool {
         false
     }
     /// The terminal's bell rang (`BEL`), at most once per main-queue turn.
@@ -2600,7 +2610,12 @@ define_class!(
         fn validate_menu_item(&self, item: &NSMenuItem) -> bool {
             let action = item.action();
             // No `return`: `define_class!` converts the `bool` at the end of the body.
-            if action.is_some_and(is_scrollback_action) {
+            if self.shows_view() && pencere_view::is_content_item(item) {
+                // A program's view is the pane's content: Edit, scrolling and the text size
+                // are the view's while it is shown (the shortcut table's mark), so these
+                // items are grey and a key the view did not handle does not run them here.
+                false
+            } else if action.is_some_and(is_scrollback_action) {
                 self.session()
                     .is_some_and(|session| !session.alt_screen())
             } else if action == Some(sel!(findNextMatch:)) || action == Some(sel!(findPreviousMatch:)) {
@@ -2725,6 +2740,12 @@ define_class!(
         #[unsafe(method(jumpToLatest:))]
         fn jump_to_latest_sent(&self, _sender: Option<&AnyObject>) {
             self.jump_to_latest();
+        }
+
+        /// The strip's "Quit {program}" over a program's view: ⌃C, as the key.
+        #[unsafe(method(quitProgram:))]
+        fn quit_program_sent(&self, _sender: Option<&AnyObject>) {
+            self.interrupt_program();
         }
 
         /// The popover row's button (`Cancel`/`Remove`): `tag` is the item's
@@ -4270,7 +4291,7 @@ impl TerminalPane {
             session.set_theme(theme);
         }
         if let Some(host) = self.view_host() {
-            host.paint(theme.background_srgb());
+            host.paint(&theme);
         }
         if let Some(bar) = self.ivars().search.get() {
             bar.paint(&theme, theme.is_dark());
@@ -5664,21 +5685,30 @@ impl TerminalPane {
         self.wait_for_view(&session);
     }
 
-    /// Puts the view over the terminal: above the terminal's small surfaces (the
-    /// link label, the block tip, the jump button) and below the veils, so a pane that
-    /// is not the keyboard's dims over its view as it does over its terminal.
+    /// Puts the view over the terminal, with the application's strip above it: over the
+    /// terminal's small surfaces (the link label, the block tip, the jump button) and under
+    /// the veils, so a pane that is not the keyboard's dims over its view and its strip as it
+    /// does over its terminal.
     fn start_view(&self, session: &Arc<Session>, start: &bt_core::pencere::ViewStart) {
         // The crate has one view at a time; a stale one goes first.
         self.end_view();
         self.sync_view_size();
         let ivars = self.ivars();
-        let ground = session.theme().background_srgb();
-        let Some(host) = ViewHost::start(self.mtm(), session, start, self.bounds(), ground) else {
+        let theme = session.theme();
+        let text = self.view_strip(start);
+        let Some(host) = ViewHost::start(self.mtm(), session, start, self.bounds(), &theme, &text)
+        else {
             session.close_view();
             return;
         };
+        host.aim(self);
         self.addSubview_positioned_relativeTo(
             host.web(),
+            NSWindowOrderingMode::Below,
+            Some(&ivars.link_veil),
+        );
+        self.addSubview_positioned_relativeTo(
+            host.strip(),
             NSWindowOrderingMode::Below,
             Some(&ivars.link_veil),
         );
@@ -5761,8 +5791,8 @@ impl TerminalPane {
         self.drain_views();
     }
 
-    /// Tells the conversation how big the view's container is: the pane's content
-    /// area in CSS pixels, which are points. The same size is not told twice.
+    /// Tells the conversation how big the view's container is: the pane's area below
+    /// the strip, in CSS pixels, which are points. The same size is not told twice.
     fn sync_view_size(&self) {
         let Some(session) = self.session() else {
             return;
@@ -5770,10 +5800,11 @@ impl TerminalPane {
         if !session.hosts_views() {
             return;
         }
-        let bounds = self.bounds();
+        // The view's area is the pane's less the application's strip.
+        let area = pencere_view::view_area(self.bounds());
         let size = (
-            bounds.size.width.max(0.0).floor() as u32,
-            bounds.size.height.max(0.0).floor() as u32,
+            area.size.width.max(0.0).floor() as u32,
+            area.size.height.max(0.0).floor() as u32,
         );
         if size.0 == 0 || size.1 == 0 || size == self.ivars().view_size.get() {
             return;
@@ -5783,6 +5814,36 @@ impl TerminalPane {
             width: size.0,
             height: size.1,
         });
+    }
+
+    /// What the strip over the view of `start` says: where the program runs and what it is
+    /// called ([`TerminalPane::view_whereabouts`]), with the view's title — the tool's name
+    /// for now, as the program's list of tools has its title to give (`view_strip::strip`).
+    fn view_strip(&self, start: &bt_core::pencere::ViewStart) -> view_strip::Strip {
+        let (place, program) = self.view_whereabouts();
+        view_strip::strip(None, &start.tool, place.as_deref(), program.as_deref())
+    }
+
+    /// Where the program that showed the view runs (the server's name; `None` on this Mac)
+    /// and what it is called (`None` when nothing here knows). A pane that shows a terminal
+    /// a server keeps has both from the server's own word; a plain `ssh` knows the place
+    /// and not the program (the process table shows `ssh`); a local pane's program is the
+    /// first of the jobs in front of its shell.
+    fn view_whereabouts(&self) -> (Option<String>, Option<String>) {
+        if let Some(kept) = self.host().kept_terminal(self.uuid()) {
+            let program = kept
+                .program
+                .clone()
+                .filter(|name| !name.is_empty() && !program::is_shell_name(name));
+            return (Some(kept.host), program);
+        }
+        if let Some((_, target, _)) = self.session().and_then(|session| session.remote_target()) {
+            return (Some(target.label().into_owned()), None);
+        }
+        match self.foreground() {
+            Foreground::Running(names) => (None, names.into_iter().next()),
+            Foreground::Idle => (None, None),
+        }
     }
 
     /// ⌃C in the view: the interrupt reaches the program, under the same rule as the
@@ -6859,6 +6920,16 @@ mod tests {
         ) -> Option<std::rc::Rc<dyn crate::sheets::Cover>> {
             None
         }
+    }
+
+    #[test]
+    fn an_owner_with_no_shortcuts_of_its_own_keeps_none_from_a_view() {
+        use bt_core::{Chord, Key, Mods};
+        // Its menu still gets what the view leaves unhandled; the view just is not stopped
+        // from seeing ⌘T first.
+        let host = FakeHost::default();
+        let chord = Chord::plain(Mods::CMD, Key::Char('t'));
+        assert!(!super::PaneHost::keeps_key(&host, &chord));
     }
 
     #[test]

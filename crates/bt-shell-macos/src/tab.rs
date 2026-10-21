@@ -149,6 +149,12 @@ impl PaneHost for TabHost {
         crate::hold_service::shown(pane)
     }
 
+    /// The shortcuts the application keeps from a program's view are the table's, as the
+    /// file has moved them (`Resolved::kept_from_view`).
+    fn keeps_key(&self, chord: &bt_core::Chord) -> bool {
+        app::delegate(Self::mtm()).is_some_and(|app| app.keys().kept_from_view(chord))
+    }
+
     fn end_kept_terminal(&self, pane: &bt_core::PaneUuid) {
         crate::hold_service::end(pane);
     }

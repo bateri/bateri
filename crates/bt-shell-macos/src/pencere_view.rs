@@ -25,10 +25,21 @@
 //! A view's web content process that dies closes the view: nothing is left to
 //! answer its teardown.
 //!
-//! **The keyboard is the view's**, with one key the application keeps: ⌃C goes to
-//! the program as the byte 0x03, wherever the focus is in the view (the
-//! protocol's §11.3 — the person's one way out of a view that has stopped
-//! answering).
+//! **The keyboard is the view's**, with two things the application keeps (the
+//! protocol's §11.3). ⌃C goes to the program as the byte 0x03, wherever the focus
+//! is in the view — the person's one way out of a view that has stopped answering.
+//! And the application's own shortcuts — a tab, a window, a split, the palette,
+//! settings, quitting — never reach the view: `performKeyEquivalent:` asks the pane's
+//! owner whether the key is one ([`bt_shell_common::shortcuts::Resolved::kept_from_view`],
+//! read from the shortcut table and the person's `[keys]`, so there is no second list of
+//! them here) and hands it to the main menu. Every other key is the view's, ⌘F included.
+//! The commands that work on the pane's **content** (Edit, scrolling, text size) are
+//! the view's while it is shown: their keys go to it and their menu items are grey
+//! for the pane ([`is_content_item`]).
+//!
+//! **A strip of the application's own** stands at the top of the pane, outside the
+//! view's area ([`strip`]): that a view is shown, where its program runs and how to
+//! leave. The view's area is the pane's less the strip ([`view_area`]).
 //!
 //! Pane module: it names no application module (`make audit`); the pane it sits in
 //! is found from the view tree, the way [`crate::view::BateriView`] finds it, and
@@ -36,6 +47,7 @@
 //! deadlines) is `pane`'s.
 
 mod serve;
+mod strip;
 mod wait;
 
 #[cfg(test)]
@@ -45,20 +57,24 @@ use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
 use block2::DynBlock;
-use bt_core::Session;
 use bt_core::pencere::{Shelf, ViewSource, ViewStart};
+use bt_core::{Session, Theme};
+use bt_shell_common::palette::{Modifiers, menu_item_id};
+use bt_shell_common::shortcuts::{by_id, chord_of};
 use bt_shell_common::view_store::DiskStore;
+use bt_shell_common::view_strip::{self, Strip};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2::{
-    AllocAnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send,
+    AllocAnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send,
 };
 use objc2_app_kit::{
-    NSAutoresizingMaskOptions, NSColor, NSEvent, NSEventModifierFlags, NSMenu, NSView,
+    NSApplication, NSAutoresizingMaskOptions, NSColor, NSEvent, NSEventModifierFlags, NSEventType,
+    NSMenu, NSMenuItem, NSView,
 };
 use objc2_foundation::{
     NSBundle, NSData, NSDictionary, NSError, NSHTTPURLResponse, NSLocale, NSObject,
-    NSObjectProtocol, NSRect, NSString, NSTimeZone, NSURL, NSURLRequest,
+    NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSTimeZone, NSURL, NSURLRequest,
 };
 use objc2_web_kit::{
     WKFrameInfo, WKNavigationAction, WKNavigationActionPolicy, WKNavigationDelegate,
@@ -128,6 +144,48 @@ fn is_interrupt(flags: NSEventModifierFlags, characters: Option<&str>) -> bool {
     held == NSEventModifierFlags::Control && characters == Some("\u{3}")
 }
 
+/// The modifiers of `flags` among the four a shortcut uses.
+fn modifiers_of(flags: NSEventModifierFlags) -> Modifiers {
+    Modifiers {
+        control: flags.contains(NSEventModifierFlags::Control),
+        option: flags.contains(NSEventModifierFlags::Option),
+        shift: flags.contains(NSEventModifierFlags::Shift),
+        command: flags.contains(NSEventModifierFlags::Command),
+    }
+}
+
+/// Whether a menu item is a content command's ([`bt_shell_common::shortcuts::Command::content`]):
+/// the table finds the command by the item's id, its selector without the colon and `:tag`
+/// when the tag is not 0 — the palette's own `menu_item_id`, so the item, the palette's row and
+/// the table speak about one command.
+pub(crate) fn is_content_item(item: &NSMenuItem) -> bool {
+    let Some(action) = item.action() else {
+        return false;
+    };
+    let id = menu_item_id(&action.name().to_string_lossy(), item.tag());
+    by_id(&id).is_some_and(|command| command.content)
+}
+
+/// The view's area in a pane of `bounds` (the pane's unflipped points): all of it under the
+/// strip. A pane shorter than the strip has none.
+pub(crate) fn view_area(bounds: NSRect) -> NSRect {
+    let height = (bounds.size.height - view_strip::HEIGHT).max(0.0);
+    NSRect::new(bounds.origin, NSSize::new(bounds.size.width, height))
+}
+
+/// The strip's place in a pane of `bounds`: the top [`view_strip::HEIGHT`] points, or all of a
+/// pane that is shorter. With [`view_area`] it is the pane exactly.
+fn strip_area(bounds: NSRect) -> NSRect {
+    let height = bounds.size.height.clamp(0.0, view_strip::HEIGHT);
+    NSRect::new(
+        NSPoint::new(
+            bounds.origin.x,
+            bounds.origin.y + bounds.size.height - height,
+        ),
+        NSSize::new(bounds.size.width, height),
+    )
+}
+
 define_class!(
     // SAFETY: `WKWebView` is designed for subclassing; this class has no ivar,
     // implements no `Drop` and is born with `initWithFrame:configuration:`.
@@ -152,6 +210,34 @@ define_class!(
             }
             // SAFETY: `NSResponder`'s `keyDown:`, the web view's own.
             let _: () = unsafe { msg_send![super(self), keyDown: event] };
+        }
+
+        /// Before the web view's own handling and before the menu: a key that is the
+        /// application's goes to its main menu and the view never sees it; every other
+        /// key is the web view's. Asked of every view in the window, so a view the
+        /// keyboard is not in answers nothing.
+        #[unsafe(method(performKeyEquivalent:))]
+        fn perform_key_equivalent(&self, event: &NSEvent) -> bool {
+            // No `return`: `define_class!` converts the `bool` at the end of the body.
+            if !self.holds_keyboard() {
+                false
+            } else if event.r#type() == NSEventType::KeyDown && self.application_keeps(event) {
+                // What the menu does with the key is the menu's (a grey item does nothing);
+                // the key is not the view's either way, as the terminal's view swallows
+                // what the menu did not catch.
+                //
+                // The menu may close the pane this view is in (⌘W), which lets go of the
+                // view while this method is still running: hold it until it returns.
+                let _held = self.retain();
+                if let Some(menu) = NSApplication::sharedApplication(self.mtm()).mainMenu() {
+                    menu.performKeyEquivalent(event);
+                }
+                true
+            } else {
+                // SAFETY: `NSView`'s `performKeyEquivalent:`, the web view's own.
+                let handled: bool = unsafe { msg_send![super(self), performKeyEquivalent: event] };
+                handled
+            }
         }
 
         /// The keyboard came to the view: the pane's owner hears it as it does
@@ -187,6 +273,37 @@ define_class!(
 );
 
 impl PencereView {
+    /// Whether the window's keyboard is in this view or something inside it.
+    fn holds_keyboard(&self) -> bool {
+        let Some(window) = self.window() else {
+            return false;
+        };
+        window
+            .firstResponder()
+            .and_then(|responder| responder.downcast::<NSView>().ok())
+            .is_some_and(|view| view.isDescendantOf(self))
+    }
+
+    /// Whether the key of `event` is one of the application's shortcuts, which the view does
+    /// not get: the pane's owner reads it from the shortcut table. A key with none of ⌘, ⌃ and
+    /// ⌥ is nobody's shortcut. Read as the menu reads a key, the character it makes without
+    /// the modifiers (`shortcuts::chord_of`, the recorder's rule too).
+    fn application_keeps(&self, event: &NSEvent) -> bool {
+        let modifiers = modifiers_of(event.modifierFlags());
+        if !(modifiers.command || modifiers.control || modifiers.option) {
+            return false;
+        }
+        let characters = event
+            .charactersIgnoringModifiers()
+            .map(|text| text.to_string())
+            .unwrap_or_default();
+        let Some(chord) = chord_of(&characters, modifiers) else {
+            return false;
+        };
+        self.pane()
+            .is_some_and(|pane| pane.host().keeps_key(&chord))
+    }
+
     /// The pane this view covers: its superview, as for the terminal's view.
     fn pane(&self) -> Option<Retained<TerminalPane>> {
         // SAFETY: reading the superview; the `Retained` keeps it alive for the
@@ -411,23 +528,26 @@ fn fail(task: &ProtocolObject<dyn WKURLSchemeTask>) {
 #[derive(Clone)]
 pub(crate) struct ViewHost {
     web: Retained<PencereView>,
+    /// The application's strip over the view's area ([`strip`]).
+    strip: Retained<strip::StripView>,
     /// The delegate and the handlers (the web view holds its delegates weakly).
     bridge: Retained<Bridge>,
 }
 
 impl ViewHost {
-    /// Starts the web view of `start` over `frame`, the pane's content area, and
-    /// has it load the shell. `ground` is the pane's background, for what shows
-    /// before the view paints. `None` if the view cannot be started: a bundle with
-    /// no entry, or no unpredictable bytes for the view's origin — the caller then
-    /// closes the view.
+    /// Starts the web view of `start` in the pane's area `frame` below a strip that says
+    /// `text`, and has it load the shell. The pane's background (`theme`) shows before the
+    /// view paints. `None` if the view cannot be started: a bundle with no entry, or no
+    /// unpredictable bytes for the view's origin — the caller then closes the view.
     pub(crate) fn start(
         mtm: MainThreadMarker,
         session: &Arc<Session>,
         start: &ViewStart,
         frame: NSRect,
-        ground: [u8; 3],
+        theme: &Theme,
+        text: &Strip,
     ) -> Option<Self> {
+        let ground = theme.background_srgb();
         let document = match &start.source {
             ViewSource::Bundle => serve::Document::Bundle(session.view_entry()?),
             ViewSource::Document(html) => {
@@ -470,8 +590,9 @@ impl ViewHost {
 
         let this = PencereView::alloc(mtm).set_ivars(());
         // SAFETY: `WKWebView`'s designated initializer.
-        let web: Retained<PencereView> =
-            unsafe { msg_send![super(this), initWithFrame: frame, configuration: &*configuration] };
+        let web: Retained<PencereView> = unsafe {
+            msg_send![super(this), initWithFrame: view_area(frame), configuration: &*configuration]
+        };
         web.setAutoresizingMask(
             NSAutoresizingMaskOptions::ViewWidthSizable
                 | NSAutoresizingMaskOptions::ViewHeightSizable,
@@ -487,8 +608,9 @@ impl ViewHost {
             web.setAllowsMagnification(false);
             web.setInspectable(false);
         }
-        let host = Self { web, bridge };
-        host.paint(ground);
+        let strip = strip::StripView::new(mtm, strip_area(frame), text, theme);
+        let host = Self { web, strip, bridge };
+        host.paint(theme);
         // SAFETY: a request for the shell's own URL.
         let loaded = unsafe {
             NSURL::URLWithString(&NSString::from_str(&serve::Page::shell_url()))
@@ -500,6 +622,16 @@ impl ViewHost {
     /// The web view, to put in the pane.
     pub(crate) fn web(&self) -> &NSView {
         &self.web
+    }
+
+    /// The strip over it, to put in the pane beside it.
+    pub(crate) fn strip(&self) -> &NSView {
+        &self.strip
+    }
+
+    /// Points the strip's button at the pane (`quitProgram:`).
+    pub(crate) fn aim(&self, pane: &TerminalPane) {
+        self.strip.aim(pane);
     }
 
     /// Runs a call of the shell page's script.
@@ -523,9 +655,11 @@ impl ViewHost {
         self.run(serve::FOCUS_SCRIPT);
     }
 
-    /// The ground behind the view is the pane's background `ground` (sRGB bytes):
-    /// the web view's own under-page colour and the shell page's.
-    pub(crate) fn paint(&self, ground: [u8; 3]) {
+    /// The ground behind the view is the pane's background (`theme`): the web view's own
+    /// under-page colour and the shell page's. The strip is painted with the theme too.
+    pub(crate) fn paint(&self, theme: &Theme) {
+        self.strip.paint(theme);
+        let ground = theme.background_srgb();
         let [r, g, b] = ground.map(|byte| f64::from(byte) / 255.0);
         // SAFETY: setting a colour on a web view this thread owns.
         unsafe {
@@ -539,13 +673,7 @@ impl ViewHost {
     /// Whether the keyboard is in the view: the window's first responder is the
     /// web view or something inside it.
     pub(crate) fn holds_keyboard(&self) -> bool {
-        let Some(window) = self.web.window() else {
-            return false;
-        };
-        window
-            .firstResponder()
-            .and_then(|responder| responder.downcast::<NSView>().ok())
-            .is_some_and(|view| view.isDescendantOf(&self.web))
+        self.web.holds_keyboard()
     }
 
     /// Takes the web view down: stops it loading, takes it out of the pane and
@@ -562,6 +690,7 @@ impl ViewHost {
                 .removeScriptMessageHandlerForName(&NSString::from_str(HANDLER));
         }
         self.web.removeFromSuperview();
+        self.strip.removeFromSuperview();
         // The bridge is held until here on purpose: the web view held its
         // delegates weakly.
         let _ = &self.bridge;

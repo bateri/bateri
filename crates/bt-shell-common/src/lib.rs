@@ -30,8 +30,9 @@
 //! shows one in a pane (`hold`) and the command
 //! palette's rules — its rows, matching, pages, preview and the settings it can change
 //! (`palette`), what an agent on a server asks of bateri: the message, where the pane it
-//! opened lands and what `ls` tells (`agent`), and the files a program's views are made of,
-//! kept on disk by their digest (`view_store`).
+//! opened lands and what `ls` tells (`agent`), the files a program's views are made of,
+//! kept on disk by their digest (`view_store`), and the strip the application keeps over
+//! such a view (`view_strip`).
 //!
 //! **The boundary:** no AppKit, Foundation, Quartz or notification centre —
 //! whatever needs the toolkit stays in the platform shell (`bt-shell-macos` on
@@ -86,6 +87,7 @@ pub mod tree_text;
 pub mod undo;
 pub mod upload;
 pub mod view_store;
+pub mod view_strip;
 // Bodies exist for macOS and Linux only; elsewhere the module is absent
 // rather than half-present (a `Notify` without a `Watch`).
 #[cfg(any(target_os = "macos", target_os = "linux"))]

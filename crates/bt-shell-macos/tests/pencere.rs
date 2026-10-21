@@ -14,14 +14,15 @@
 //! is the host calling the tool the view is for (`tools/call`), which the host does when the
 //! view says it is initialised.
 //!
-//! Then ⌃C typed in the view arrives at the program as the byte 0x03, and the program's `bye`
-//! takes the view down.
+//! Then ⌃C typed in the view arrives at the program as the byte 0x03, a key that is the
+//! application's shortcut (⌘T) goes to the main menu and not to the view, the application's
+//! strip stands over the view's area, and the program's `bye` takes the view down.
 //!
 //! Its own `main` (`harness = false`): AppKit, the main queue and `WKWebView` want the main
 //! thread. Without a window server session (an ssh login) it says so and passes, as the embed
 //! test does.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -29,15 +30,19 @@ use std::process::Command;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use bt_core::{Settings, Theme};
+use bt_core::{Chord, Key, Mods, Settings, Theme};
+use bt_shell_common::view_strip;
 use bt_shell_macos::embed::{self, Cover, Host, Identity, Source, TerminalPane};
-use objc2::{MainThreadMarker, MainThreadOnly};
+use objc2::rc::Retained;
+use objc2::runtime::AnyObject;
+use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSEvent,
-    NSEventModifierFlags, NSEventType, NSWindow, NSWindowStyleMask,
+    NSEventModifierFlags, NSEventType, NSMenu, NSMenuItem, NSView, NSWindow, NSWindowStyleMask,
 };
 use objc2_foundation::{
-    NSDate, NSDefaultRunLoopMode, NSPoint, NSRect, NSRunLoop, NSSize, NSString,
+    NSDate, NSDefaultRunLoopMode, NSObject, NSObjectProtocol, NSPoint, NSRect, NSRunLoop, NSSize,
+    NSString,
 };
 
 /// What a host heard: nothing this test is about, but the trait wants an answer to each.
@@ -45,6 +50,10 @@ use objc2_foundation::{
 struct Quiet(RefCell<Vec<String>>);
 
 impl Host for Quiet {
+    /// ⌘T is this host's own shortcut (a new tab, in an application that has tabs).
+    fn keeps_key(&self, chord: &Chord) -> bool {
+        *chord == Chord::plain(Mods::CMD, Key::Char('t'))
+    }
     fn title_changed(&self, _: u64) {}
     fn shell_exited(&self, _: u64) {
         self.0.borrow_mut().push("exit".to_owned());
@@ -64,6 +73,25 @@ impl Host for Quiet {
         None
     }
 }
+
+define_class!(
+    // SAFETY: `NSObject` has no subclassing condition; no `Drop`.
+    #[unsafe(super(NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "PencereTestMenuTarget"]
+    #[ivars = Cell<u32>]
+    struct MenuTarget;
+
+    unsafe impl NSObjectProtocol for MenuTarget {}
+
+    impl MenuTarget {
+        /// The action of the menu item with ⌘T: counts how many times the menu ran it.
+        #[unsafe(method(newTab:))]
+        fn new_tab(&self, _sender: Option<&AnyObject>) {
+            self.ivars().set(self.ivars().get() + 1);
+        }
+    }
+);
 
 /// The pane's id: any number the host picks, unique in the process.
 const PANE: u64 = 77;
@@ -302,6 +330,16 @@ fn covered(pane: &TerminalPane) -> bool {
     web_view(pane).is_some()
 }
 
+/// The strip the application keeps over a view: a subview of the pane of its own class.
+fn strip_view(pane: &TerminalPane) -> Option<Retained<NSView>> {
+    pane.subviews().iter().find(|view| {
+        view.class()
+            .name()
+            .to_string_lossy()
+            .contains("BateriPencereStrip")
+    })
+}
+
 fn scratch() -> PathBuf {
     let dir = std::env::temp_dir().join(format!("bateri-pencere-test-{}", std::process::id()));
     fs::create_dir_all(dir.join("zdot")).expect("the scratch folder");
@@ -430,6 +468,67 @@ fn run(dir: &Path) {
             .get(before..)
             .is_some_and(|new| new.contains(&3))
     });
+
+    // The strip is the application's own and stands over the view's area: the view is the
+    // pane less the strip's height, below it.
+    let strip = strip_view(&pane).expect("the strip is a subview of the pane");
+    let (area, bounds) = (web.frame(), pane.bounds());
+    assert_eq!(strip.frame().size.height, view_strip::HEIGHT);
+    assert_eq!(
+        strip.frame().origin.y + strip.frame().size.height,
+        bounds.size.height
+    );
+    assert_eq!(area.origin.y, 0.0);
+    assert_eq!(area.size.height, bounds.size.height - view_strip::HEIGHT);
+    assert_eq!(area.size.width, bounds.size.width);
+
+    // A key that is the application's own — ⌘T here — goes to the main menu while the view
+    // has the keyboard, and the menu runs its item once: the view is asked about it and
+    // leaves it alone. The menu is this test's: one item with ⌘T.
+    let target = MenuTarget::alloc(mtm).set_ivars(Cell::new(0));
+    // SAFETY: `NSObject`'s `init`.
+    let target: Retained<MenuTarget> = unsafe { msg_send![super(target), init] };
+    let bar = NSMenu::new(mtm);
+    let holder = NSMenuItem::new(mtm);
+    let submenu = NSMenu::new(mtm);
+    // SAFETY: `newTab:` is the target's, one optional argument.
+    let item = unsafe {
+        NSMenuItem::initWithTitle_action_keyEquivalent(
+            NSMenuItem::alloc(mtm),
+            &NSString::from_str("New Tab"),
+            Some(sel!(newTab:)),
+            &NSString::from_str("t"),
+        )
+    };
+    // SAFETY: the target outlives the menu; the item holds it weakly.
+    unsafe { item.setTarget(Some(&target)) };
+    submenu.addItem(&item);
+    holder.setSubmenu(Some(&submenu));
+    bar.addItem(&holder);
+    app.setMainMenu(Some(&bar));
+    assert!(
+        window.makeFirstResponder(Some(&web)),
+        "the view takes the keyboard"
+    );
+    let command_t = NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
+        NSEventType::KeyDown,
+        NSPoint::new(0.0, 0.0),
+        NSEventModifierFlags::Command,
+        0.0,
+        window.windowNumber(),
+        None,
+        &NSString::from_str("t"),
+        &NSString::from_str("t"),
+        false,
+        17,
+    )
+    .expect("a key event");
+    assert!(
+        window.performKeyEquivalent(&command_t),
+        "the key is handled: it is the application's"
+    );
+    assert_eq!(target.ivars().get(), 1, "the menu ran ⌘T's item once");
+    app.setMainMenu(None);
 
     // The program ends its view: `bye` with the token. The pane is the terminal's again.
     program.bye(&token);

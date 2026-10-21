@@ -4320,12 +4320,13 @@ impl AppDelegate {
             return false;
         };
         // A field being edited (the search panel, a tab's name) has ⌘Z to
-        // itself: typing never moves a split.
+        // itself: typing never moves a split. So has a program's view in the
+        // pane that has the keyboard: Undo is Edit's, and Edit is the content's.
         let editing = key
             .ns_window()
             .firstResponder()
             .is_some_and(|responder| responder.isKindOfClass(NSText::class()));
-        if editing {
+        if editing || key.selected_tab().focused_pane().shows_view() {
             return false;
         }
         let stale = match self.ivars().undo.borrow().as_ref() {

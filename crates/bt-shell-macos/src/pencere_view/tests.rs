@@ -5,14 +5,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bt_core::pencere::State;
+use bt_shell_common::view_strip;
 use objc2_app_kit::NSEventModifierFlags;
+use objc2_foundation::{NSPoint, NSRect, NSSize};
 
-use super::is_interrupt;
 use super::serve::{
     self, DOCUMENT_PATH, Document, Page, Route, SANDBOX, Served, css_color, deliver_script,
     ground_script, js_string, route,
 };
 use super::wait::{OPENING, TEARDOWN, Waits};
+use super::{is_interrupt, modifiers_of, strip_area, view_area};
 
 const INSTANCE: &str = "v-0123456789abcdef0123456789abcdef";
 const POLICY: &str = "default-src 'none'; script-src 'self' 'unsafe-inline'; connect-src 'self' https://api.example;";
@@ -488,4 +490,56 @@ fn the_deadlines_are_policy_values_in_the_order_their_reasons_give() {
         "files cross a link; a view that answers does not"
     );
     assert!(TEARDOWN >= Duration::from_secs(1));
+}
+
+// ---- the strip and the view's area ------------------------------------------
+
+fn pane(x: f64, y: f64, width: f64, height: f64) -> NSRect {
+    NSRect::new(NSPoint::new(x, y), NSSize::new(width, height))
+}
+
+#[test]
+fn the_strip_and_the_views_area_are_the_pane_exactly() {
+    // The strip is the pane's top (the pane is unflipped: the top is the larger y) and the
+    // view's area is what is under it, whatever the pane's origin.
+    for bounds in [pane(0.0, 0.0, 800.0, 600.0), pane(10.0, 20.0, 333.5, 250.0)] {
+        let (strip, area) = (strip_area(bounds), view_area(bounds));
+        assert_eq!(strip.size.height, view_strip::HEIGHT);
+        assert_eq!(strip.size.width, bounds.size.width);
+        assert_eq!(area.size.width, bounds.size.width);
+        assert_eq!(area.origin, bounds.origin);
+        assert_eq!(area.origin.y + area.size.height, strip.origin.y);
+        assert_eq!(
+            strip.origin.y + strip.size.height,
+            bounds.origin.y + bounds.size.height
+        );
+        assert_eq!(area.size.height + strip.size.height, bounds.size.height);
+    }
+}
+
+#[test]
+fn a_pane_shorter_than_the_strip_is_all_strip_and_no_view() {
+    let bounds = pane(0.0, 0.0, 300.0, view_strip::HEIGHT - 10.0);
+    assert_eq!(view_area(bounds).size.height, 0.0);
+    assert_eq!(strip_area(bounds).size.height, bounds.size.height);
+    assert_eq!(strip_area(bounds).origin.y, 0.0);
+    // And nothing is negative for a pane with no size.
+    let none = pane(0.0, 0.0, 0.0, 0.0);
+    assert_eq!(view_area(none).size.height, 0.0);
+    assert_eq!(strip_area(none).size.height, 0.0);
+}
+
+#[test]
+fn the_keys_modifiers_are_the_four_a_shortcut_uses() {
+    let held = modifiers_of(NSEventModifierFlags::Command | NSEventModifierFlags::Shift);
+    assert!(held.command && held.shift && !held.control && !held.option);
+    // Caps Lock and the function key change nothing about which shortcut a key is.
+    let held = modifiers_of(
+        NSEventModifierFlags::Command
+            | NSEventModifierFlags::CapsLock
+            | NSEventModifierFlags::Function,
+    );
+    assert!(held.command && !held.shift && !held.control && !held.option);
+    let held = modifiers_of(NSEventModifierFlags::Control | NSEventModifierFlags::Option);
+    assert!(held.control && held.option && !held.command);
 }

@@ -403,6 +403,17 @@ impl Resolved {
             .map(|binding| binding.command)
     }
 
+    /// Whether `chord`, pressed while a program's view has the keyboard, is the application's
+    /// and not the view's: the command that has it — the first in the menu's order, the one the
+    /// menu runs — is not a content command ([`Command::content`]). A key no command has is the
+    /// view's, and so is one that a content command has. Read from the shortcuts as they stand
+    /// (the file's `[keys]` over the table), so a key the user moved is the application's at its
+    /// new place and the view's at the old one.
+    pub fn kept_from_view(&self, chord: &Chord) -> bool {
+        self.owner_of(chord, "")
+            .is_some_and(|command| !command.content)
+    }
+
     /// The command that has `modifier` pressed twice, other than `except` (a name; `""` for
     /// none). The first in the menu's order: the one a double press runs, as the menu runs the
     /// first of two commands that share a chord.
@@ -488,6 +499,94 @@ mod tests {
             .iter()
             .map(|command| command.name)
             .collect()
+    }
+
+    /// The chord a shortcut's text is.
+    fn chord(text: &str) -> Chord {
+        match Shortcut::parse(text) {
+            Ok(Shortcut::Chord(chord)) => chord,
+            other => panic!("`{text}` is no chord: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_keys_of_the_application_stay_with_it_while_a_view_has_the_keyboard() {
+        let resolved = resolve(&Settings::default());
+        // The keys of tabs, windows, splits, the palette, settings and quitting.
+        let mut kept = vec![
+            "cmd+t",
+            "cmd+w",
+            "cmd+n",
+            "cmd+p",
+            "shift+cmd+p",
+            "cmd+d",
+            "shift+cmd+d",
+            "cmd+[",
+            "cmd+]",
+            "option+cmd+left",
+            "option+cmd+right",
+            "option+cmd+up",
+            "option+cmd+down",
+            "cmd+,",
+            "cmd+q",
+        ];
+        let digits: Vec<String> = (1..=9).map(|n| format!("cmd+{n}")).collect();
+        kept.extend(digits.iter().map(String::as_str));
+        for key in kept {
+            assert!(resolved.kept_from_view(&chord(key)), "{key}");
+        }
+        // The content's: copy, paste, find, clearing, size and scrolling are the view's.
+        for key in [
+            "cmd+z",
+            "cmd+x",
+            "cmd+c",
+            "cmd+v",
+            "ctrl+cmd+v",
+            "cmd+a",
+            "cmd+f",
+            "cmd+g",
+            "shift+cmd+g",
+            "cmd+e",
+            "cmd+k",
+            "option+cmd+k",
+            "cmd+plus",
+            "cmd+-",
+            "cmd+0",
+            "cmd+home",
+            "cmd+end",
+            "cmd+pageup",
+            "cmd+pagedown",
+        ] {
+            assert!(!resolved.kept_from_view(&chord(key)), "{key}");
+        }
+        // And a key no command has.
+        for key in ["cmd+j", "ctrl+c", "cmd+left", "option+cmd+j"] {
+            assert!(!resolved.kept_from_view(&chord(key)), "{key}");
+        }
+    }
+
+    #[test]
+    fn a_key_that_moved_is_read_from_its_new_place() {
+        // New Tab gives ⌘T away and takes ⌘J; Find (content) takes ⌘Y.
+        let resolved = read("new_tab = \"cmd+j\"\nfind = \"cmd+y\"\n");
+        assert!(resolved.kept_from_view(&chord("cmd+j")));
+        assert!(!resolved.kept_from_view(&chord("cmd+t")));
+        assert!(!resolved.kept_from_view(&chord("cmd+y")));
+        assert!(!resolved.kept_from_view(&chord("cmd+f")));
+        // A family has the modifiers the file gives it.
+        let resolved = read("select_tab = \"option\"\n");
+        assert!(resolved.kept_from_view(&chord("option+3")));
+        assert!(!resolved.kept_from_view(&chord("cmd+3")));
+    }
+
+    #[test]
+    fn a_key_two_commands_share_is_the_one_the_menu_runs() {
+        // Shell's New Tab is before Edit's Find in the menu: ⌘F is the application's.
+        let resolved = read("new_tab = \"cmd+f\"\n");
+        assert!(resolved.kept_from_view(&chord("cmd+f")));
+        // And Find's is the view's when it comes first: Edit is before Window's Go to Tab.
+        let resolved = read("go_to_tab = \"cmd+f\"\n");
+        assert!(!resolved.kept_from_view(&chord("cmd+f")));
     }
 
     #[test]

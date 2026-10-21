@@ -85,6 +85,13 @@ pub struct Command {
     /// none, one, or two. A family has the one of only modifiers.
     pub defaults: &'static [&'static str],
     pub family: Option<Family>,
+    /// Whether the command works on the **content** of the pane that has the keyboard — the text
+    /// it shows, the way it is scrolled or sized — and not on the pane, the tab or the window.
+    /// While a program's view covers the pane the content is the view's, so its keys are the
+    /// view's and its menu items are not the pane's to run ([`super::Resolved::kept_from_view`]); every
+    /// other command stays the application's whatever has the keyboard. The one place that says which
+    /// commands are which: a second list of "the view's keys" would drift from the table.
+    pub content: bool,
 }
 
 /// One item of a command: the id of the menu item and the chord it is bound to.
@@ -156,6 +163,7 @@ const fn command(
         id,
         defaults,
         family: None,
+        content: false,
     }
 }
 
@@ -170,6 +178,15 @@ const fn family(
         id,
         defaults: modifiers,
         family: Some(family),
+        content: false,
+    }
+}
+
+/// `command` marked as working on the pane's content ([`Command::content`]).
+const fn content(command: Command) -> Command {
+    Command {
+        content: true,
+        ..command
     }
 }
 
@@ -216,34 +233,46 @@ pub const COMMANDS: &[Command] = &[
     command("close_tab", "closeTab", &["cmd+w"]),
     command("close_window", "closeWindow", &["shift+cmd+w"]),
     // Edit
-    command("undo", "undoMove", &["cmd+z"]),
-    command("cut", "cut", &["cmd+x"]),
-    command("copy", "copy", &["cmd+c"]),
-    command("paste", "paste", &["cmd+v"]),
-    command("paste_escaped", "pasteEscaped", &["ctrl+cmd+v"]),
-    command("select_all", "selectAll", &["cmd+a"]),
-    command("copy_last_command", "copyLastCommand", &[]),
-    command("copy_last_output", "copyLastOutput", &[]),
-    command("command_history", "showCommandHistory", &[]),
-    command("clear_to_start", "clearToStart", &["cmd+k"]),
-    command("clear_scrollback", "clearScrollback", &["option+cmd+k"]),
-    command("find", "findInScrollback", &["cmd+f"]),
-    command("find_next", "findNextMatch", &["cmd+g"]),
-    command("find_previous", "findPreviousMatch", &["shift+cmd+g"]),
-    command("use_selection_for_find", "useSelectionForFind", &["cmd+e"]),
+    content(command("undo", "undoMove", &["cmd+z"])),
+    content(command("cut", "cut", &["cmd+x"])),
+    content(command("copy", "copy", &["cmd+c"])),
+    content(command("paste", "paste", &["cmd+v"])),
+    content(command("paste_escaped", "pasteEscaped", &["ctrl+cmd+v"])),
+    content(command("select_all", "selectAll", &["cmd+a"])),
+    content(command("copy_last_command", "copyLastCommand", &[])),
+    content(command("copy_last_output", "copyLastOutput", &[])),
+    content(command("command_history", "showCommandHistory", &[])),
+    content(command("clear_to_start", "clearToStart", &["cmd+k"])),
+    content(command(
+        "clear_scrollback",
+        "clearScrollback",
+        &["option+cmd+k"],
+    )),
+    content(command("find", "findInScrollback", &["cmd+f"])),
+    content(command("find_next", "findNextMatch", &["cmd+g"])),
+    content(command(
+        "find_previous",
+        "findPreviousMatch",
+        &["shift+cmd+g"],
+    )),
+    content(command(
+        "use_selection_for_find",
+        "useSelectionForFind",
+        &["cmd+e"],
+    )),
     // View
     command("command_palette", "toggleCommandPalette", &["shift+cmd+p"]),
     command("themes", "showThemes", &[]),
     command("open_themes_folder", "openThemesFolder", &[]),
     command("tabs_top", "tabsAtTop", &[]),
     command("tabs_side", "tabsAtSide", &[]),
-    command("bigger", "makeFontBigger", &["cmd+plus"]),
-    command("smaller", "makeFontSmaller", &["cmd+-"]),
-    command("actual_size", "resetFontSize", &["cmd+0"]),
-    command("scroll_to_top", "scrollToTop", &["cmd+home"]),
-    command("scroll_to_bottom", "scrollToBottom", &["cmd+end"]),
-    command("page_up", "scrollPageUp", &["cmd+pageup"]),
-    command("page_down", "scrollPageDown", &["cmd+pagedown"]),
+    content(command("bigger", "makeFontBigger", &["cmd+plus"])),
+    content(command("smaller", "makeFontSmaller", &["cmd+-"])),
+    content(command("actual_size", "resetFontSize", &["cmd+0"])),
+    content(command("scroll_to_top", "scrollToTop", &["cmd+home"])),
+    content(command("scroll_to_bottom", "scrollToBottom", &["cmd+end"])),
+    content(command("page_up", "scrollPageUp", &["cmd+pageup"])),
+    content(command("page_down", "scrollPageDown", &["cmd+pagedown"])),
     // Window
     command("minimize", "performMiniaturize", &["cmd+m"]),
     command("zoom", "performZoom", &[]),
@@ -563,6 +592,42 @@ mod tests {
         ] {
             assert!(none.contains(&new), "{new}");
         }
+    }
+
+    /// The commands that work on a pane's content are the Edit menu — it is one run of the
+    /// table — and the View items that scroll the content or size it. A command added to either
+    /// without the mark would give a program's view a key the application keeps, and the view
+    /// would never see it.
+    #[test]
+    fn the_content_commands_are_the_edit_menu_and_the_views_scrolling_and_size() {
+        const SCROLLING_AND_SIZE: &[&str] = &[
+            "bigger",
+            "smaller",
+            "actual_size",
+            "scroll_to_top",
+            "scroll_to_bottom",
+            "page_up",
+            "page_down",
+        ];
+        let at = |name: &str| {
+            COMMANDS
+                .iter()
+                .position(|command| command.name == name)
+                .expect("a command")
+        };
+        let (first, last) = (at("undo"), at("use_selection_for_find"));
+        // Undo to Use Selection for Find: the fifteen rows of the Edit menu.
+        assert_eq!(last - first + 1, 15);
+        for (place, command) in COMMANDS.iter().enumerate() {
+            let content =
+                (first..=last).contains(&place) || SCROLLING_AND_SIZE.contains(&command.name);
+            assert_eq!(command.content, content, "{}", command.name);
+        }
+        // The palette and the menu name them by these ids.
+        assert!(by_id("undoMove").expect("a command").content);
+        assert!(by_id("findInScrollback").expect("a command").content);
+        assert!(!by_id("newTab").expect("a command").content);
+        assert!(!by_id("selectTab:3").expect("a family").content);
     }
 
     #[test]
