@@ -327,18 +327,14 @@ pub const PROGRAM_GLYPHS: [char; 3] = ['⌃', '·', '…'];
 const PROGRAM_DETAIL: &str = " · ";
 
 /// The load indicator's non-ASCII characters drawn from the **font**: the
-/// critical mark and the alerts form's calm dot. The sparkline's `▁…█` are not
-/// here — they are procedural in the small class too. `bt-atlas` checks a hand
-/// copy of this list in Menlo's small class
-/// (`the_stats_glyphs_have_no_box_in_the_small_class`); the two are tied by
-/// `the_stats_glyphs_are_the_ones_the_atlas_checks`.
-pub const STATS_GLYPHS: [char; 2] = [STATS_CRITICAL, STATS_CALM];
+/// critical mark. The sparkline's `▁…█` are not here — they are procedural in
+/// the small class too. `bt-atlas` checks a hand copy of this list in Menlo's
+/// small class (`the_stats_glyphs_have_no_box_in_the_small_class`); the two are
+/// tied by `the_stats_glyphs_are_the_ones_the_atlas_checks`.
+pub const STATS_GLYPHS: [char; 1] = [STATS_CRITICAL];
 
 /// The mark in front of a number past its second threshold.
 const STATS_CRITICAL: char = '▲';
-
-/// The alerts form while nothing is past its threshold.
-const STATS_CALM: char = '●';
 
 /// The lowest sparkline block (U+2581); level `n` is this plus `n`.
 const SPARK_BASE: u32 = 0x2581;
@@ -2564,6 +2560,11 @@ mod tests {
         footer_span(context, budget, FooterControl::SignIn)
     }
 
+    /// The server's name, `⇄ host`, as a click finds it.
+    fn server_span(context: &DockContext, budget: u16) -> Option<(u16, u16)> {
+        footer_span(context, budget, FooterControl::Server)
+    }
+
     /// The upload row of `transfer` alone, the way the mouse asks about it.
     fn transfer_context(transfer: &Transfer) -> DockContext {
         DockContext {
@@ -3504,6 +3505,7 @@ mod tests {
             stats: None,
             sign_in: None,
             link: None,
+            server: false,
             remote_setup: None,
             program: None,
             program_mark: HostMark::None,
@@ -3569,12 +3571,30 @@ mod tests {
         }
         let (row, _) = load_row(&loaded(calm(StatsForm::Numbers)), 80);
         assert_eq!(row, format!("{:<64}cpu 23%  mem 61%", "⇄ prod  /srv/app"));
-        // Alerts with nothing past a threshold: only the calm dot, `success`.
-        let (row, cells) = load_row(&loaded(calm(StatsForm::Alerts)), 80);
-        assert_eq!(row, format!("{:<79}●", "⇄ prod  /srv/app"));
-        assert_eq!(color_at(&cells, 1, 79), Some(THEME.success_linear()));
         // The host keeps the mark's color.
         assert_eq!(color_at(&cells, 1, 2), Some(THEME.info_linear()));
+    }
+
+    #[test]
+    fn the_alerts_form_draws_nothing_while_nothing_is_past_a_threshold() {
+        // The dock stays quiet about a server that is fine: no dot, no gauge,
+        // and no gap or span left where it would have stood.
+        let calm_alerts = loaded(calm(StatsForm::Alerts));
+        let (row, _) = load_row(&calm_alerts, 80);
+        assert_eq!(row.trim_end(), "⇄ prod  /srv/app");
+        assert_eq!(stats_span(&calm_alerts, 80), None);
+        // The moment a value passes its threshold it appears, and goes again
+        // when it is back under.
+        let hot = loaded(load(StatsForm::Alerts, Some(75), 40, 0, &[]));
+        let (row, _) = load_row(&hot, 80);
+        assert!(row.ends_with("cpu 75%"), "{row}");
+        assert!(stats_span(&hot, 80).is_some());
+        let (row, _) = load_row(&loaded(load(StatsForm::Alerts, Some(69), 79, 84, &[])), 80);
+        assert_eq!(row.trim_end(), "⇄ prod  /srv/app");
+        // A server that is calm in the alerts form is not mistaken for one that
+        // is not sampled: the numbers form shows the same sample.
+        let (row, _) = load_row(&loaded(load(StatsForm::Numbers, Some(69), 79, 84, &[])), 80);
+        assert!(row.ends_with("cpu 69%  mem 79%"), "{row}");
     }
 
     #[test]
@@ -3912,6 +3932,70 @@ mod tests {
     /// The Sign In… button takes the indicator's place, right-aligned
     /// in the upload buttons' drawing; the click's range is the drawn fill.
     #[test]
+    fn the_server_name_is_the_door_only_of_a_pane_that_shows_a_kept_terminal() {
+        let server = |context: DockContext| DockContext {
+            server: true,
+            ..context
+        };
+        // A plain `ssh`: the name is a name, nothing is clickable.
+        let plain = loaded(calm(StatsForm::Numbers));
+        assert_eq!(server_span(&plain, 80), None);
+        assert!(footer_hit(&plain, 80, 2).is_none());
+        // A kept terminal: `⇄ prod` is the span, as many columns as are drawn.
+        let kept = server(plain);
+        assert_eq!(server_span(&kept, 80), Some((0, 6)));
+        assert_eq!(
+            footer_hit(&kept, 80, 5).map(|hit| hit.control),
+            Some(FooterControl::Server)
+        );
+        assert!(
+            footer_hit(&kept, 80, 6).is_none(),
+            "the gap is not the name"
+        );
+        // The indicator is its own control beside it, and the spans do not overlap.
+        let spans: Vec<_> = footer_spans(&kept, 80).collect();
+        assert_eq!(spans[0], (FooterControl::Server, 0, 6));
+        assert!(
+            spans
+                .iter()
+                .any(|&(control, ..)| control == FooterControl::Stats)
+        );
+        assert!(spans.windows(2).all(|pair| pair[0].2 <= pair[1].1));
+        // The name is never shortened: where the host does not fit, the span is
+        // the mark alone — what `emit_remote_head` draws.
+        let (_, cells) = load_row(&server(remote("a-very-long-host-name", "/srv")), 8);
+        assert_eq!(row_text(&cells, 1).trim_end(), "⇄");
+        assert_eq!(
+            server_span(&server(remote("a-very-long-host-name", "/srv")), 8),
+            Some((0, 1))
+        );
+        // Every width: the span is exactly the name's drawn columns.
+        for cols in 1..40_u16 {
+            let context = server(remote("prod", "/srv/app"));
+            let (_, cells) = load_row(&context, cols);
+            let drawn = row_text(&cells, 1);
+            let expect = if drawn.starts_with("⇄ prod") { 6 } else { 1 };
+            assert_eq!(
+                server_span(&context, cols),
+                Some((0, expect)),
+                "{cols} columns: {drawn:?}"
+            );
+        }
+        // The connection down and the upload row show the host too, but their
+        // names are not the door.
+        let down = DockContext {
+            link: Some(crate::RemoteLink::Reconnecting),
+            ..server(remote("prod", "/srv/app"))
+        };
+        assert_eq!(server_span(&down, 80), None);
+        let sending = DockContext {
+            transfer: uploading("backup.tar.gz", 1, Some(40)).transfer,
+            ..server(remote("prod", "/srv/app"))
+        };
+        assert_eq!(server_span(&sending, 80), None);
+    }
+
+    #[test]
     fn the_sign_in_button_is_drawn_where_it_is_hit() {
         let context = DockContext {
             stats: Some(calm(StatsForm::Sparkline)),
@@ -4194,7 +4278,7 @@ mod tests {
         // class (`the_stats_glyphs_have_no_box_in_the_small_class`); every
         // non-ASCII character any rung can draw is either there or a
         // procedural sparkline block.
-        assert_eq!(STATS_GLYPHS, ['▲', '●']);
+        assert_eq!(STATS_GLYPHS, ['▲']);
         let samples = [
             calm(StatsForm::Sparkline),
             load(

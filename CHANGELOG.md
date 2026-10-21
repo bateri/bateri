@@ -86,6 +86,21 @@ of every installed copy. A version without a section is not released.
   server that keeps others running in the background, a dim line above the prompt
   says how many, once for the same ones.
 
+- **Click `⇄ rasp` for the server's card.** In a terminal on a server, the
+  server's name at the left of the status bar is a click (the hand cursor says
+  so) that opens a small card: the server's CPU and memory as a bar each and the
+  processes using the most, and under them *Running in the background · 3* — the
+  terminals the server keeps that no tab of this Mac shows, each with its
+  directory and how long a program has been in front (`running 12m 00s`) or
+  since when the shell waits (`idle since 09:40`). A click on a row opens that
+  terminal in a new tab, from where it was (the pointer on a row says *Open in
+  New Tab*; ↑, ↓ and ⏎ do the same), *Open All in New Tab* in the heading opens
+  them together, and a right click offers *End Terminal*, which asks first, in
+  the words closing a pane does. Six rows show and “and 3 more” says the rest;
+  an empty list says so. The dim line that tells you about the waiting
+  terminals when you open a new one now has something to click. A plain `ssh`
+  has no card and its name is only a name.
+
 - **A newer bateri brings its kablo to the servers without ending anything.**
   The kablo that bateri puts on a server is the one that came in its package; an
   older one that is there stays where it is, and the terminals running under it
@@ -123,6 +138,19 @@ of every installed copy. A version without a section is not released.
   “{host}” brings it all back for a host, from the next `ssh`. A shell that was
   already running when bateri was updated has the previous `ssh` function, whose
   next `ssh` is a plain one; a new shell (a new tab) has the new one.
+
+- **The dock is quiet about a server that is fine, and a server is measured
+  once.** The load indicator at the right of a server terminal's status bar now
+  appears only when a value is past its threshold (CPU 70 %, memory 80 %, disk
+  85 %), in every terminal on that server at the same moment, and goes when the
+  server is back under it; the little green dot of `stats = "alerts"` is gone,
+  and `alerts` is the default. `stats = "sparkline"` or `"numbers"` keeps the
+  permanent gauge for whoever wants it. The load used to be measured once per
+  pane; it is measured once per server, so four panes on `rasp` cost it what
+  one did, and a pane that opens on a server already being measured shows the
+  numbers at once. The details moved to the server's card (above): it shows the
+  CPU and the memory and the busiest processes, and no longer the swap, the disk,
+  the load averages and the uptime.
 
 - **The command palette finds a tab by any of its server panes.** Typing a
   server's name in ⌘P found a tab only when the pane in focus was on that

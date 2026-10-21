@@ -10627,6 +10627,29 @@ impl Session {
         changed
     }
 
+    /// Tells the context row that the pane shows a terminal a server keeps
+    /// (`true`), which makes the remote form's `⇄ host` the door to the
+    /// server's card, or that it does not; `true` if it changed. Gated like
+    /// [`Self::set_sign_in`]: `command` is the generation of the remote target
+    /// ([`Self::remote_target`]), another one's or a finished ssh's late word is a
+    /// no-op, and the same value asks for no frame.
+    pub fn set_server(&self, command: u64, server: bool) -> bool {
+        let changed = {
+            let mut log = lock(&self.shell);
+            let current = log.running_command() == Some(command) && log.context.remote.is_some();
+            if !current || log.context.server == server {
+                false
+            } else {
+                log.context.server = server;
+                true
+            }
+        };
+        if changed {
+            self.request_frame();
+        }
+        changed
+    }
+
     /// Tells the context row, and the caret, that the connection to the server
     /// a kept terminal runs on is down (`Some`) or back (`None`); `true` if it
     /// changed. A terminal the server keeps outlives the connection, so the
@@ -19479,6 +19502,31 @@ mod tests {
             lock(&session.shell).context.sign_in,
             None,
             "another host's login"
+        );
+        // The server's name is a door only after the pane said it shows a kept
+        // terminal, with the same gates and the same fate.
+        assert!(!session.set_server(command + 1, true), "another generation");
+        assert_eq!(session.footer_span(80, crate::FooterControl::Server), None);
+        assert!(session.set_server(command, true));
+        assert!(!session.set_server(command, true), "the same value");
+        assert_eq!(
+            session.footer_span(80, crate::FooterControl::Server),
+            crate::footer_span(
+                &lock(&session.shell).context,
+                80,
+                crate::FooterControl::Server
+            ),
+            "the hit test reads the drawing's layout"
+        );
+        assert!(
+            session
+                .footer_span(80, crate::FooterControl::Server)
+                .is_some()
+        );
+        assert!(session.set_remote(command, Some(&RemoteTarget::ssh("stage"))));
+        assert!(
+            !lock(&session.shell).context.server,
+            "another host is not this one's terminal"
         );
     }
 

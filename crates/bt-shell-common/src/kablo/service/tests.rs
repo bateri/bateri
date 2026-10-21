@@ -1778,6 +1778,32 @@ fn a_terminal_asked_to_end_is_not_in_the_background() {
     }
 }
 
+/// The card's End Terminal: a terminal no pane shows is hung up on the server and is out of the
+/// list at once, without a pane in between.
+#[test]
+fn a_terminal_nobody_shows_is_ended_from_the_list() {
+    let rig = Rig::new("background-end-terminal");
+    let _holder = Holder::new(&rig.socket(), "b-1");
+    rig.terminals(1);
+    let agent = rig.world.bridge().add("agent", Size::default());
+    let other = rig.world.bridge().add("other", Size::default());
+    rig.service.refresh_background();
+    until("both listed", || background_names(&rig).len() == 2);
+
+    rig.service.end_terminal(ACCOUNT, &agent);
+    until("the hang-up", || {
+        rig.world.bridge().terminated(&agent).is_some()
+    });
+    until("out of the list", || {
+        background_names(&rig) == [other.as_str().to_owned()]
+    });
+    assert_eq!(
+        rig.world.bridge().terminated(&other),
+        None,
+        "only the one that was asked"
+    );
+}
+
 /// What the server lists is not kept for ever: a terminal that ended while nobody watched is
 /// gone from the list at the next answer, and one a connection that is down knew of stays as
 /// the last answer said.

@@ -81,6 +81,7 @@ use crate::environment::Wants;
 use crate::clipboard::{self, PendingCopy};
 use crate::focus::Moment;
 use crate::grid::{self, Grid, split_into_grid};
+use bt_shell_common::kablo::roster::Background;
 use bt_shell_common::kablo::service::{PaneLink, Shown};
 
 use crate::jobs::{self, Foreground, Probe, ShellParent, SystemTable};
@@ -99,9 +100,9 @@ use crate::remote_helper::RemoteHelper;
 use crate::remote_ports::RemotePorts;
 use crate::restore::{SavedKept, SavedPane};
 use crate::search_bar::{SearchBar, selection_query};
+use crate::server_card::ServerCard;
 use crate::ssh_route::Masters;
-use crate::stats::StatsDriver;
-use crate::stats_popover::StatsPopover;
+use crate::stats::StatsSeat;
 use crate::upload::Transfers;
 use crate::uploader::{StopSheet, UploadPopover};
 use crate::view::BateriView;
@@ -207,6 +208,24 @@ pub trait PaneHost {
     fn kept_terminal(&self, _pane: &PaneUuid) -> Option<Shown> {
         None
     }
+    /// The terminals the server of `account` keeps that no pane of this Mac shows, the last
+    /// to write first: what the server's card lists. The default is an owner that has no such
+    /// terminals.
+    fn background(&self, _account: &str) -> Vec<Background> {
+        Vec::new()
+    }
+    /// The server's card is about to list them: the servers are asked for their terminals
+    /// again, and the answer reaches the card (`TerminalPane::refresh_server_card`).
+    fn refresh_background(&self) {}
+    /// The card's row: the terminal `terminal` of `account` opens in a new tab of the pane's
+    /// window.
+    fn open_background(&self, _pane: u64, _account: &str, _terminal: &str) {}
+    /// The card's *Open All in New Tab*: every terminal the server `host` keeps that no pane
+    /// shows, together in a new tab of the pane's window.
+    fn open_all_background(&self, _pane: u64, _host: &str) {}
+    /// The card's *End Terminal*: the terminal `terminal` of `account`, which no pane shows,
+    /// ends on the server (asked **after** the user said so).
+    fn end_background(&self, _account: &str, _terminal: &str) {}
     /// The user is closing the pane (not the application quitting, not the
     /// pane moving): the terminal it shows ends with it, on the server. Asked
     /// **before** [`TerminalPane::begin_close`], whose signal lets the terminal go.
@@ -2207,8 +2226,8 @@ pub struct PaneIvars {
     /// Time of the event that closed the popover (`popoverWillClose:`): so that
     /// pressing the button again does not reopen the popover.
     list_closed_at: Cell<Option<f64>>,
-    /// The open load indicator popover ([`crate::stats_popover`]).
-    stats_popover: RefCell<Option<StatsPopover>>,
+    /// The open server card ([`crate::server_card`]).
+    server_card: RefCell<Option<ServerCard>>,
     /// The ports the pane's programs listen on, as the last scan found them
     /// ([`crate::footer`]): the dock shows their numbers, the ports menu
     /// these records.
@@ -2221,18 +2240,18 @@ pub struct PaneIvars {
     watched: RefCell<HashSet<(u32, u64)>>,
     /// The server's listening ports in a remote session ([`crate::remote_ports`]).
     remote_ports: RefCell<RemotePorts>,
-    /// Time of the event that closed the load popover — its own slot, so a
+    /// Time of the event that closed the server card — its own slot, so a
     /// press on one control never swallows the other's.
-    stats_closed_at: Cell<Option<f64>>,
+    card_closed_at: Cell<Option<f64>>,
     /// The helper ssh session that verifies remote links and counts a download:
     /// its worker is born at the first question, its session
     /// closes on another generation, when idle and with the pane — while the
     /// load indicator samples it is never idle.
     remote_helper: RefCell<RemoteHelper>,
-    /// The remote load indicator's sampling ([`crate::stats`]):
-    /// its schedule and sampler; the settings' value from the birth package,
-    /// refreshed live ([`TerminalPane::set_stats_settings`]).
-    stats: RefCell<StatsDriver>,
+    /// The pane's seat in its server's load sampling ([`crate::stats`]): the
+    /// load is measured once for the server, not per pane. The settings' value
+    /// from the birth package, refreshed live ([`TerminalPane::set_stats_settings`]).
+    stats: RefCell<StatsSeat>,
     /// The pane's last input: a key, a press, the wheel, a mouse move or
     /// its window becoming key — set at birth, then only by
     /// [`TerminalPane::note_interaction`]. On the sleep-counting clock, so the
@@ -2335,15 +2354,15 @@ define_class!(
         }
     }
 
-    /// Closing of the "Show files (N)" popover and of the load
-    /// indicator's popover, told apart by the notification's
-    /// object: AppKit also closes a `transient` popover (click outside) and
-    /// its Esc monitor (and the list button's pressed tone) must go away then too.
+    /// Closing of the "Show files (N)" popover and of the server card, told
+    /// apart by the notification's object: AppKit also closes a `transient`
+    /// popover (click outside) and its Esc monitor (and the list button's
+    /// pressed tone) must go away then too.
     unsafe impl NSPopoverDelegate for TerminalPane {
         #[unsafe(method(popoverWillClose:))]
         fn popover_will_close(&self, n: &NSNotification) {
-            if self.is_stats_popover(n) {
-                self.stats_popover_will_close();
+            if self.is_server_card(n) {
+                self.server_card_will_close();
             } else {
                 self.upload_list_will_close();
             }
@@ -2351,8 +2370,8 @@ define_class!(
 
         #[unsafe(method(popoverDidClose:))]
         fn popover_did_close(&self, n: &NSNotification) {
-            if self.is_stats_popover(n) {
-                self.close_stats_popover();
+            if self.is_server_card(n) {
+                self.close_server_card();
             } else {
                 self.close_upload_list();
             }
@@ -2714,7 +2733,7 @@ impl TerminalPane {
         let font = settings.font.clone();
         let content_edge = settings.content_edge;
         let remote_files = settings.remote_files.clone();
-        let stats_driver = StatsDriver::new(&settings.remote_stats);
+        let stats_seat = StatsSeat::new(settings.remote_stats);
         let ports_on = run.is_none() && settings.shell_ports;
         // A timed run reads no file for the row, like it scans no port.
         let environment_wants = Wants {
@@ -2827,14 +2846,14 @@ impl TerminalPane {
             program_memo: Cell::new(ProgramMemo::default()),
             upload_list: RefCell::new(None),
             list_closed_at: Cell::new(None),
-            stats_popover: RefCell::new(None),
-            stats_closed_at: Cell::new(None),
+            server_card: RefCell::new(None),
+            card_closed_at: Cell::new(None),
             listeners: RefCell::new(Vec::new()),
             environment_wants: Cell::new(environment_wants),
             watched: RefCell::new(HashSet::new()),
             remote_ports: RefCell::new(RemotePorts::default()),
             remote_helper: RefCell::new(RemoteHelper::default()),
-            stats: RefCell::new(stats_driver),
+            stats: RefCell::new(stats_seat),
             last_input: Cell::new(Moment::now()),
             remote_files: RefCell::new(remote_files),
             previews: RefCell::new(HashMap::new()),
@@ -5120,7 +5139,7 @@ impl TerminalPane {
     /// moves into a tab that is not shown both come here.
     pub fn leave_screen(&self) {
         self.apply_focus(false);
-        self.close_stats_popover();
+        self.close_server_card();
         self.close_upload_list();
         self.unhover_footer();
         self.view().clear_link();
@@ -5297,9 +5316,9 @@ impl TerminalPane {
         {
             masters.session_ended(self.id());
         }
-        // The load popover and its Esc monitor go with the pane (the upload
+        // The server card and its Esc monitor go with the pane (the upload
         // list's goes in `abandon_uploads`).
-        self.close_stats_popover();
+        self.close_server_card();
         self.stop_stats();
         // A forward tunnel of ours goes with the pane.
         self.end_remote_ports();
@@ -5430,6 +5449,7 @@ impl TerminalPane {
     /// load indicator's generation.
     pub(crate) fn remote_edge(&self) {
         self.check_upload_connection();
+        self.sync_server_door();
         self.sync_ssh_session();
         self.sync_stats_generation();
         // The server session ended, or the pane is not a server pane any more: its
@@ -5437,6 +5457,22 @@ impl TerminalPane {
         if self.server_target().is_none() {
             self.remote_helper().borrow_mut().close();
         }
+    }
+
+    /// The remote edge's half for the dock: `⇄ rasp` is the door to the server's card exactly
+    /// while the pane is a server pane ([`Self::server_target`]) — written both ways, so a
+    /// terminal that goes (the holder was refused after it was admitted and the pane runs the
+    /// plain `ssh`, whose process-table target is the same) closes it again. The ssh's
+    /// generation is only the session's own gate for the write, which is why this asks the
+    /// session for its target: the *rule* is `server_target`'s.
+    fn sync_server_door(&self) {
+        let Some(session) = self.session() else {
+            return;
+        };
+        let Some((command, ..)) = session.remote_target() else {
+            return;
+        };
+        session.set_server(command, self.server_target().is_some());
     }
 
     /// The remote edge's half for the masters: an ended
@@ -5954,8 +5990,8 @@ impl TerminalPane {
         &self.ivars().remote_helper
     }
 
-    /// The load indicator's sampling state ([`crate::stats`]).
-    pub(crate) fn stats_driver(&self) -> &RefCell<StatsDriver> {
+    /// The pane's seat in its server's load sampling ([`crate::stats`]).
+    pub(crate) fn stats_seat(&self) -> &RefCell<StatsSeat> {
         &self.ivars().stats
     }
 
@@ -6022,9 +6058,9 @@ impl TerminalPane {
         &self.ivars().list_closed_at
     }
 
-    /// The open load indicator popover.
-    pub(crate) fn stats_popover(&self) -> &RefCell<Option<StatsPopover>> {
-        &self.ivars().stats_popover
+    /// The open server card.
+    pub(crate) fn server_card(&self) -> &RefCell<Option<ServerCard>> {
+        &self.ivars().server_card
     }
 
     pub(crate) fn listeners(&self) -> &RefCell<Vec<Listener>> {
@@ -6058,9 +6094,9 @@ impl TerminalPane {
         self.ivars().shell_parent.get().copied()
     }
 
-    /// The time of the event that closed the load popover.
-    pub(crate) fn stats_closed_at(&self) -> &Cell<Option<f64>> {
-        &self.ivars().stats_closed_at
+    /// The time of the event that closed the server card.
+    pub(crate) fn card_closed_at(&self) -> &Cell<Option<f64>> {
+        &self.ivars().card_closed_at
     }
 
     /// The queue's sent and total bytes; `None` if there is no queue — the
@@ -6222,7 +6258,7 @@ mod tests {
             ("preview.rs", include_str!("preview.rs")),
             ("promise.rs", include_str!("promise.rs")),
             ("stats.rs", include_str!("stats.rs")),
-            ("stats_popover.rs", include_str!("stats_popover.rs")),
+            ("server_card.rs", include_str!("server_card.rs")),
             ("hyperlink.rs", include_str!("hyperlink.rs")),
             ("remote_ports.rs", include_str!("remote_ports.rs")),
             ("footer.rs", include_str!("footer.rs")),

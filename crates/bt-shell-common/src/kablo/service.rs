@@ -369,6 +369,11 @@ enum Msg {
     },
     /// The user closed the pane: the terminal it shows ends.
     End(PaneUuid),
+    /// The user ended a terminal that no pane shows (the server's card).
+    EndTerminal {
+        account: String,
+        terminal: SessionId,
+    },
     /// A quit that ends the terminals: those the panes show are asked to end, and
     /// `done` is told when they have, or when none could be asked.
     EndAll {
@@ -613,6 +618,18 @@ impl Service {
         let _ = self.tx.send(Msg::End(pane.clone()));
     }
 
+    /// The user ended a terminal no pane shows — one of the server's card: it is
+    /// asked to hang up now and killed after [`END_GRACE`] if it is still there,
+    /// as the one a closed pane showed is, and the list takes it out at once.
+    /// A connection that is down cannot ask; the ledger keeps the request and the
+    /// next connection to the account carries it out.
+    pub fn end_terminal(&self, account: &str, terminal: &SessionId) {
+        let _ = self.tx.send(Msg::EndTerminal {
+            account: account.to_owned(),
+            terminal: terminal.clone(),
+        });
+    }
+
     /// A quit that ends the terminals: every terminal the panes show is asked to
     /// end (a hang-up; the ledger remembers the request until it is seen to have
     /// been carried out, so a server that cannot be reached ends it at the next
@@ -837,6 +854,7 @@ impl Core {
                 self.prepared(hold, outcome, now);
             }
             Msg::End(pane) => self.end(&pane, now),
+            Msg::EndTerminal { account, terminal } => self.end_terminal(&account, &terminal, now),
             Msg::EndAll { panes, done } => self.end_all(&panes, done, now),
             Msg::Dialed {
                 account,
@@ -1124,6 +1142,15 @@ impl Core {
             self.shared.ledger.end(&account, &terminal);
             self.finish_off(&account, &terminal, now);
         }
+    }
+
+    /// A terminal no pane shows is ended ([`Service::end_terminal`]): the ledger
+    /// keeps the request until it is seen to be carried out, and the list stops
+    /// offering it at once — an ending terminal is not in the background.
+    fn end_terminal(&mut self, account: &str, terminal: &SessionId, now: Instant) {
+        self.shared.ledger.end(account, terminal);
+        self.finish_off(account, terminal, now);
+        self.write_background();
     }
 
     /// A quit that ends the terminals ([`Service::end_all`]).

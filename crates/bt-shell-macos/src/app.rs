@@ -5835,10 +5835,14 @@ impl AppDelegate {
     }
 
     /// What a server keeps in the background is not what it was (the service heard it): an
-    /// open palette lists it afresh.
+    /// open palette and an open server card list it afresh.
     pub(crate) fn background_changed(&self) {
         for window in self.windows() {
             crate::palette::retarget(&window, self.palette_targets());
+        }
+        // An open server card lists the same terminals.
+        for pane in self.all_panes() {
+            pane.refresh_server_card();
         }
     }
 

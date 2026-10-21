@@ -55,6 +55,10 @@ const GAP: usize = 2;
 /// [`footer_span`] anchors.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum FooterControl {
+    /// The server's name, `⇄ rasp`: the door to the server's card. Only in the
+    /// context row of a pane that shows a terminal the server keeps
+    /// ([`DockContext::server`]); a plain `ssh` has nothing behind its name.
+    Server,
     /// The listening ports.
     Ports,
     /// The remote load indicator.
@@ -327,6 +331,13 @@ fn remote_head(host: &str) -> usize {
     2 + host.chars().count()
 }
 
+/// How many columns of `⇄ host` are drawn in `budget`: all of it, or the mark
+/// alone when the host does not fit (the host is never shortened).
+fn remote_head_drawn(host: &str, budget: usize) -> usize {
+    let head = remote_head(host);
+    if head > budget { budget.min(1) } else { head }
+}
+
 /// A guide bar's `{title} · {detail}` width.
 fn program_head(bar: &ProgramBar) -> usize {
     let detail = bar.detail.chars().count();
@@ -507,7 +518,11 @@ fn parts(context: &DockContext) -> (Lead<'_>, [Option<Item<'_>>; ITEMS]) {
         let own = if context.sign_in.is_some() {
             Some(Item::SignIn)
         } else {
-            context.stats.as_ref().map(Item::Gauge)
+            context
+                .stats
+                .as_ref()
+                .filter(|stats| !is_quiet(stats))
+                .map(Item::Gauge)
         };
         let lead = Lead::Remote {
             host,
@@ -957,7 +972,9 @@ fn emit_remote_head<I: Iterator<Item = (char, LinearRgba)>>(
 ) {
     let mark = std::iter::once((REMOTE_MARK, color));
     let head = remote_head(host);
-    if head > budget {
+    // The mark alone when the head is cut: [`remote_head_drawn`], which the
+    // server name's clickable span reads too.
+    if remote_head_drawn(host, budget) < head {
         emit_context(mark, budget, row, sink);
         return;
     }
@@ -1018,7 +1035,6 @@ fn emit_item(
                     Tone::Quiet | Tone::Level(StatsLevel::Normal) => dim,
                     Tone::Level(StatsLevel::Warning) => theme.warning_linear(),
                     Tone::Level(StatsLevel::Critical) => theme.error_linear(),
-                    Tone::Calm => theme.success_linear(),
                 };
                 (ch, color)
             });
@@ -1234,22 +1250,25 @@ pub fn footer_spans(
     budget: u16,
 ) -> impl Iterator<Item = (FooterControl, u16, u16)> {
     let available = usize::from(budget.saturating_sub(CONTEXT_COL));
-    let mut spans = [None; 4];
+    let mut spans = [None; 5];
     if available > 0 {
         let plan = plan(context, available);
         let mut at = 0;
+        let mut push = |control, start: usize, end: usize| {
+            if let Some(slot) = spans.get_mut(at) {
+                // audit: `end ≤ available ≤ budget` and `budget` is `u16`.
+                *slot = Some((
+                    control,
+                    CONTEXT_COL + start as u16,
+                    CONTEXT_COL + end as u16,
+                ));
+                at += 1;
+            }
+        };
+        if let Some(end) = server_name_end(context, &plan) {
+            push(FooterControl::Server, 0, end);
+        }
         for placed in plan.items.into_iter().flatten() {
-            let mut push = |control, start: usize, end: usize| {
-                if let Some(slot) = spans.get_mut(at) {
-                    // audit: `end ≤ available ≤ budget` and `budget` is `u16`.
-                    *slot = Some((
-                        control,
-                        CONTEXT_COL + start as u16,
-                        CONTEXT_COL + end as u16,
-                    ));
-                    at += 1;
-                }
-            };
             match placed.item {
                 Item::Ports(_) => push(FooterControl::Ports, placed.start, placed.end),
                 Item::Gauge(_) => push(FooterControl::Stats, placed.start, placed.end),
@@ -1264,6 +1283,22 @@ pub fn footer_spans(
         }
     }
     spans.into_iter().flatten()
+}
+
+/// The context-local column the server's name ends at, `[0, end)` being what a
+/// click on `⇄ rasp` hits: only in the remote form of a pane that shows a terminal
+/// the server keeps ([`DockContext::server`]) — a plain `ssh` has nothing behind
+/// its name, and the upload row's host is the transfer's. The width is what
+/// [`emit_remote_head`] draws, from the same [`remote_head_drawn`]; had the two
+/// diverged a click would land next to the name.
+fn server_name_end(context: &DockContext, plan: &Plan<'_>) -> Option<usize> {
+    if !context.server {
+        return None;
+    }
+    let Lead::Remote { host, .. } = plan.lead else {
+        return None;
+    };
+    Some(remote_head_drawn(host, plan.lead_budget)).filter(|&end| end > 0)
 }
 
 /// The dock-local column the context row's trailing zone starts at on a
@@ -1410,7 +1445,7 @@ pub(super) enum GaugeStep {
     Spark,
     /// `cpu 23%  mem 61%`.
     Numbers,
-    /// `●`, or only the values past their threshold.
+    /// Only the values past their threshold.
     Alerts,
     /// The worst single value: severity first, then the number.
     Worst,
@@ -1433,8 +1468,6 @@ pub(super) enum Tone {
     Quiet,
     /// A number and its `▲`: dim below the threshold, then `warning`/`error`.
     Level(StatsLevel),
-    /// The alerts form's `●`: `success`.
-    Calm,
 }
 
 /// The widest gauge: `cpu ▁▁▁▁▁▁▁▁ ▲100%  mem ▲100%  disk ▲100%` is 41
@@ -1554,6 +1587,15 @@ fn shown_values(stats: &RemoteStats) -> impl Iterator<Item = (StatsMetric, u8)> 
         .chain(disk.map(|disk| (StatsMetric::Disk, disk)))
 }
 
+/// Whether the indicator has nothing to say and is not drawn: the alerts form
+/// while no shown value is past its threshold. The dock stays quiet about a
+/// server that is fine and speaks only when something is not; the other forms
+/// are the ones that ask for a permanent gauge.
+pub(super) fn is_quiet(stats: &RemoteStats) -> bool {
+    stats.form == StatsForm::Alerts
+        && shown_values(stats).all(|(metric, value)| metric.level(value) == StatsLevel::Normal)
+}
+
 /// The worst shown value: severity first, then the number; on a tie the
 /// first in `cpu, mem, disk` order.
 fn worst(stats: &RemoteStats) -> (StatsMetric, u8) {
@@ -1599,9 +1641,6 @@ pub(super) fn gauge(stats: &RemoteStats, step: GaugeStep) -> Gauge {
                     gauge.gap();
                     gauge.value(metric, value, true);
                 }
-            }
-            if gauge.width() == 0 {
-                gauge.push(STATS_CALM, Tone::Calm);
             }
         }
         GaugeStep::Worst => {

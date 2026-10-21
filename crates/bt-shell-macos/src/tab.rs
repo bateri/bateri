@@ -105,6 +105,17 @@ impl TabHost {
     fn tab(&self) -> Option<Retained<TerminalTab>> {
         app::delegate(Self::mtm())?.tab(self.tab.get())
     }
+
+    /// What a server card's choice comes to in the window the pane's tab is in: the palette's
+    /// own executors (`AppDelegate::palette_go`), so the card and ⌘P open a terminal in one way.
+    fn go(&self, go: bt_shell_common::palette::Go) {
+        let Some(app) = app::delegate(Self::mtm()) else {
+            return;
+        };
+        if let Some(window) = self.tab().and_then(|tab| tab.window()) {
+            app.palette_go(window.id(), go);
+        }
+    }
 }
 
 impl PaneHost for TabHost {
@@ -144,6 +155,35 @@ impl PaneHost for TabHost {
 
     fn retry_kept_terminal(&self, pane: &bt_core::PaneUuid) {
         crate::hold_service::retry(pane);
+    }
+
+    fn background(&self, account: &str) -> Vec<bt_shell_common::kablo::roster::Background> {
+        crate::hold_service::background(account)
+    }
+
+    fn refresh_background(&self) {
+        if let Some(app) = app::delegate(Self::mtm()) {
+            app.refresh_background();
+        }
+    }
+
+    fn open_background(&self, _pane: u64, account: &str, terminal: &str) {
+        self.go(bt_shell_common::palette::Go::OpenBackground {
+            account: account.to_owned(),
+            terminal: terminal.to_owned(),
+        });
+    }
+
+    fn open_all_background(&self, _pane: u64, host: &str) {
+        self.go(bt_shell_common::palette::Go::OpenAllBackground(
+            host.to_owned(),
+        ));
+    }
+
+    fn end_background(&self, account: &str, terminal: &str) {
+        if let Ok(terminal) = bt_shell_common::kablo::SessionId::new(terminal) {
+            crate::hold_service::end_terminal(account, &terminal);
+        }
     }
 
     fn kept_login(&self) -> std::sync::Arc<dyn crate::pane::KeptLogin> {

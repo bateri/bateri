@@ -690,6 +690,15 @@ pub struct DockContext {
     /// it is shown the load indicator is not (there is no sample without a
     /// login) and the upload row wins over both.
     pub sign_in: Option<SignIn>,
+    /// The pane shows a terminal a server keeps, and the remote form's `⇄ host`
+    /// is the door to that server's card ([`crate::FooterControl::Server`]). A
+    /// plain `ssh` — an `ssh` the application sets nothing up on — has none, and its
+    /// name is only a name.
+    ///
+    /// Its writer is `bt-shell`'s pane ([`crate::Session::set_server`]), generation
+    /// gated like [`Self::sign_in`]; it belongs to the remote state and goes with
+    /// it ([`Self::clear_remote`], [`ShellLog::set_remote`]).
+    pub server: bool,
     /// The remote session's connection is down and the terminal waits for it:
     /// a terminal the server keeps (kablo) outlives the connection, and while it
     /// is gone the context row says what is happening and what ⏎ does
@@ -1159,6 +1168,7 @@ impl Clone for DockContext {
         self.stats = source.stats;
         self.sign_in = source.sign_in;
         self.link = source.link;
+        self.server = source.server;
         self.remote_setup = source.remote_setup;
         self.program.clone_from(&source.program);
         self.program_mark = source.program_mark;
@@ -1336,6 +1346,7 @@ impl DockContext {
         self.stats = None;
         self.sign_in = None;
         self.link = None;
+        self.server = false;
         self.remote.take().is_some()
     }
 }
@@ -3286,6 +3297,7 @@ impl ShellLog {
             self.context.stats = None;
             self.context.sign_in = None;
             self.context.link = None;
+            self.context.server = false;
             // Another host's prompt is not this one's login.
             self.paste_since_remote = false;
         }

@@ -451,10 +451,11 @@ download_conflict = "ask"
 # true | false. Notify when a transfer ends while bateri is in the background.
 download_notify = true
 # "sparkline" | "numbers" | "alerts" | "off". The remote machine's load at
-# the right of the ssh status bar (Linux servers): sparkline shows the last
-# CPU samples and the numbers, numbers only the numbers, alerts a small dot
-# until a value passes its threshold, off nothing. Disk joins past 85%.
-stats = "sparkline"
+# the right of the ssh status bar (Linux servers): alerts nothing until a
+# value passes its threshold, sparkline shows the last CPU samples and the
+# numbers, numbers only the numbers, off nothing and no sampling. Disk joins
+# past 85%.
+stats = "alerts"
 # Seconds between two samples, 2 to 60.
 stats_interval = 3
 
@@ -1905,7 +1906,7 @@ integration = true
 | `download_dir` | folder | `"~/Downloads"` | the target of "Download to Downloads" |
 | `download_conflict` | `"ask"` \| `"keep_both"` \| `"replace"` | `"ask"` | if the same name exists at the target: ask, keep both (the new one gets a number) or overwrite |
 | `download_notify` | `true` \| `false` | `true` | a transfer that ends while bateri is in the background sends a notification |
-| `stats` | `"sparkline"` \| `"numbers"` \| `"alerts"` \| `"off"` | `"sparkline"` | the style of the remote load indicator at the right of the ssh status bar; `off` turns the indicator and the sampling off |
+| `stats` | `"sparkline"` \| `"numbers"` \| `"alerts"` \| `"off"` | `"alerts"` | the style of the remote load indicator at the right of the ssh status bar; `alerts` draws nothing until a value passes its threshold; `off` turns the indicator and the sampling off |
 | `stats_interval` | integer, seconds, `2`–`60` | `3` | time between two samples of the load indicator |
 | `integration` | `true` \| `false` | `true` | a plain `ssh` sets up shell integration on the server (remote shell integration, below) |
 
@@ -2174,14 +2175,19 @@ the server's rc files.
 #### Remote load indicator
 
 While you are in a terminal on a Linux server (a plain `ssh` has none, above),
-the right side of the status bar shows that machine's load; the data comes from
-the helper ssh session that file names use, and no new connection is opened.
+bateri measures that machine's load; the data comes from the helper ssh session
+that file names use, and no new connection is opened. **The server is measured
+once**, however many of its terminals are open: every pane that shows one is
+drawn the same numbers, and the measuring stops when none of them is on screen
+and touched (a covered tab, a window nobody uses for two minutes).
 
-- **`stats`**: `"sparkline"` (the default) `cpu ▂▃▅▇▅▃▂▁ 23%  mem 61%` — the
-  last eight CPU samples and the numbers; `"numbers"` `cpu 23%  mem 61%`;
-  `"alerts"` a small green `●` as long as no threshold is passed, and once one
-  is passed only the values over it; `"off"` no indicator and no sampling
-  either. Disk (`/`) is added to every style only once it passes 85%.
+- **`stats`**: `"alerts"` (the default) draws nothing while the server is fine,
+  and once a value is past its threshold only the values over it, at the right
+  of the status bar, in every pane of that server; they go again when the
+  server is back under. `"sparkline"` `cpu ▂▃▅▇▅▃▂▁ 23%  mem 61%` is the
+  permanent gauge — the last eight CPU samples and the numbers; `"numbers"`
+  `cpu 23%  mem 61%`; `"off"` no indicator and no sampling either. Disk (`/`)
+  is added to every style only once it passes 85%.
 - **Thresholds** are fixed: cpu 70%/90%, memory 80%/92%, disk 85%/95%. The
   labels, the graph and the numbers under the threshold are dim; a number over
   the threshold is the theme's `warning`, one over the second threshold its
@@ -2191,16 +2197,39 @@ the helper ssh session that file names use, and no new connection is opened.
   takes priority over the path, and the path is shortened from the left with
   `…`. The host is never shortened. While a transfer is in progress, the
   indicator is hidden.
-- **Clicking the indicator** opens the details: host and operating system, CPU
-  (with the number of cores), load 1/5/15, memory, swap, disk `/`, uptime and
-  the three processes using the most CPU; while open, it refreshes on every
-  sample. A second click, a click outside or Esc closes it (Esc does not go to
-  the server).
+- **Clicking the server's name** — `⇄ rasp` at the left of the status bar,
+  or the warning when there is one — opens the server's card: the host and its
+  operating system, the CPU (with the number of cores) and the memory as a bar
+  each, and the processes using the most CPU; while open, it refreshes on every
+  sample. Under them are the terminals the server keeps that no pane of this Mac
+  shows (the next paragraphs). A second click, a click outside or Esc closes it
+  (Esc does not go to the server).
 - **`stats_interval`** is the number of seconds between two samples, an
   integer between `2` and `60`.
 - It takes effect the moment you save. A value that is not accepted leaves
   that key at its default at launch and at the value on screen when saving,
   and a warning appears.
+
+##### The terminals a server keeps
+
+The card's second part is *Running in the background · N*: the terminals the
+server keeps for you — one an agent started, one you started there with
+`kablo new`, one a bateri that quit left running — that no tab of this Mac
+shows. Terminals that are open in a tab are not listed; they are on screen.
+
+- A row names the terminal (its label, else the program in front), the
+  directory it is in and, at the right, how long a program has been in front
+  (`running 12m 00s`) or since when the shell waits (`idle since 09:40`).
+- **A click on a row opens the terminal in a new tab**, from where it was;
+  the pointer on a row says so at its right (*Open in New Tab*), and ↑, ↓ and
+  ⏎ do the same from the keyboard. Nothing that is open in a tab moves.
+- ***Open All in New Tab***, in the heading, opens every terminal in the list
+  together in one tab (two side by side, three with one tall, four as a grid,
+  up to six; the rest in the next tab).
+- **A right click offers *End Terminal***, which asks before it stops the
+  program there.
+- The card lists six rows and says "and 3 more" for the rest; when nothing runs
+  in the background it says so. ⌘P finds the same terminals.
 
 #### Remote files: preview and download
 

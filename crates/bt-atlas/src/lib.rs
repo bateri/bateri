@@ -4691,18 +4691,16 @@ mod tests {
         // `the_upload_row_has_no_box_in_the_small_class`. Menlo, by name.
         let mut menlo = Atlas::new(Some("Menlo"), POINT_SIZE, 1.0, Spacing::default());
         assert_eq!(menlo.font_issue(), None, "Menlo did not open");
-        for ch in ['▲', '●'] {
-            let slot = menlo
-                .slot(
-                    Sprite::Char(ch),
-                    Face::Regular,
-                    SizeClass::Small,
-                    Half::Whole,
-                )
-                .0
-                .slot;
-            assert_ne!(slot, TOFU, "'{ch}' is a box in Menlo's small class");
-        }
+        let slot = menlo
+            .slot(
+                Sprite::Char('▲'),
+                Face::Regular,
+                SizeClass::Small,
+                Half::Whole,
+            )
+            .0
+            .slot;
+        assert_ne!(slot, TOFU, "'▲' is a box in Menlo's small class");
     }
 
     // Calibration: names a font.

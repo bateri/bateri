@@ -87,9 +87,12 @@ impl TerminalPane {
         let Some(session) = self.session() else {
             return;
         };
+        // The server's name has no hover tone (the hand cursor says it is a door): writing it
+        // would buy a frame on each edge that paints nothing.
         let hover = at
             .and_then(|(col, context)| session.footer_hit(context, col))
-            .map(|hit| hit.control);
+            .map(|hit| hit.control)
+            .filter(|control| *control != FooterControl::Server);
         session.set_footer_hover(hover);
         if at.is_some() {
             self.view().sync_cursor_rects();
@@ -129,9 +132,10 @@ impl TerminalPane {
                     }
                 }
             },
-            FooterControl::Stats => {
+            // The server's name and the load warning are two doors to the one card.
+            FooterControl::Server | FooterControl::Stats => {
                 if let Some(span) = span {
-                    self.toggle_stats_popover(span);
+                    self.toggle_server_card(hit.control, span);
                 }
             }
             FooterControl::SignIn => self.sign_in(),

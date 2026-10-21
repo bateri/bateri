@@ -1330,12 +1330,13 @@ impl Default for RemoteFiles {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum RemoteStatsMode {
     /// `cpu ▂▃▅▇▅▃▂▁ 23%  mem 61%` — the last eight CPU samples and the numbers.
-    #[default]
     Sparkline,
     /// `cpu 23%  mem 61%`.
     Numbers,
-    /// A small `●` while nothing is past its threshold, otherwise only the
-    /// values that are.
+    /// Nothing while nothing is past its threshold, then only the values that
+    /// are: the dock stays quiet about a server that is fine, and the server's
+    /// card (the click on `⇄ host`) has the numbers.
+    #[default]
     Alerts,
     /// No indicator and no sampling.
     Off,
@@ -2183,10 +2184,11 @@ download_conflict = "ask"
 # true | false. Notify when a transfer ends while bateri is in the background.
 download_notify = true
 # "sparkline" | "numbers" | "alerts" | "off". The remote machine's load at
-# the right of the ssh status bar (Linux servers): sparkline shows the last
-# CPU samples and the numbers, numbers only the numbers, alerts a small dot
-# until a value passes its threshold, off nothing. Disk joins past 85%.
-stats = "sparkline"
+# the right of the ssh status bar (Linux servers): alerts nothing until a
+# value passes its threshold, sparkline shows the last CPU samples and the
+# numbers, numbers only the numbers, off nothing and no sampling. Disk joins
+# past 85%.
+stats = "alerts"
 # Seconds between two samples, 2 to 60.
 stats_interval = 3
 
@@ -7378,7 +7380,7 @@ cursor = \"spring\"
             SettingsEdit::DownloadDir("~/Desktop".to_owned()),
             SettingsEdit::DownloadConflict(DownloadConflict::KeepBoth),
             SettingsEdit::DownloadNotify(false),
-            SettingsEdit::RemoteStats(RemoteStatsMode::Alerts),
+            SettingsEdit::RemoteStats(RemoteStatsMode::Numbers),
             SettingsEdit::StatsInterval(10),
             // The removing edits are not here: they delete a line, and this list's
             // consumers ask for one line changed or added.
@@ -8145,7 +8147,7 @@ cursor = \"spring\"
         assert_eq!(
             clean("[remote]\n").remote_stats,
             RemoteStatsSettings {
-                mode: RemoteStatsMode::Sparkline,
+                mode: RemoteStatsMode::Alerts,
                 interval: 3,
             }
         );
@@ -8201,7 +8203,7 @@ cursor = \"spring\"
                 assert_eq!(stats.interval, 3, "{text}");
             } else {
                 assert_eq!(stats.interval, 7, "{text}");
-                assert_eq!(stats.mode, RemoteStatsMode::Sparkline, "{text}");
+                assert_eq!(stats.mode, RemoteStatsMode::Alerts, "{text}");
             }
         }
         // A `[remote]` of the wrong type keeps both.

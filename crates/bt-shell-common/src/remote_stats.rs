@@ -11,6 +11,13 @@
 //!   popover), actions out (arm a tick with a token, send a request, hide the
 //!   indicator). The clock is an argument; the platform shell runs the actions
 //!   (`dispatch`'s `after` cannot be cancelled, hence the token).
+//! - **[`Account`]** is the load of **one server**, measured **once** however many
+//!   panes show it: the load is the server's, not a pane's, so a second pane
+//!   on the same account asks nothing more of it. One schedule, one sampler,
+//!   the panes as members whose visibility and interaction add up to the
+//!   schedule's (a server is sampled while any pane that shows it is on
+//!   screen and has been touched within [`STATS_IDLE`] — the stop conditions are
+//!   the schedule's own), and one sample goes to every member.
 
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
@@ -547,10 +554,327 @@ impl Schedule {
     }
 }
 
+// ─── account ─────────────────────────────────────────────────────────────
+
+/// A value taken as a sparkline (history included), drawn in `form`: the other
+/// forms carry no history (`RemoteStats`'s rule — an invisible history change
+/// must not ask for a frame).
+pub fn shaped(full: RemoteStats, form: StatsForm) -> RemoteStats {
+    let mut stats = full;
+    stats.form = form;
+    if form != StatsForm::Sparkline {
+        stats.history = [0; STATS_HISTORY];
+        stats.len = 0;
+    }
+    stats
+}
+
+/// A pane that shows a terminal of the account and whose ssh has logged in:
+/// one of the panes the account's load is drawn on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Member {
+    pub pane: u64,
+    /// The generation of the pane's ssh ([`bt_core::Session::remote_target`]):
+    /// what the pane's session gates the value by.
+    pub command: u64,
+    /// The pane is on screen (not a background tab, a minimised window, behind
+    /// a zoomed split).
+    pub visible: bool,
+}
+
+/// How a load request ended, as the account needs it.
+#[derive(Clone, Copy, Debug)]
+pub enum Reply<'a> {
+    Sample(&'a LoadSample),
+    /// `BT-NOPROC`: no Linux `/proc` on this server.
+    NoProc,
+    /// The helper session could not be opened.
+    Unreachable,
+    /// The open session failed.
+    Failed,
+}
+
+/// What a reply asks of the platform shell.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Answered {
+    pub actions: Vec<Action>,
+    /// The sample to draw on **every** member, in the form; `None` when the
+    /// reply carried none (or belonged to another generation).
+    pub shown: Option<RemoteStats>,
+}
+
+/// What a change of the settings asks of the platform shell.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Update {
+    pub actions: Vec<Action>,
+    /// The last value in the new form, drawn at once rather than an interval
+    /// later.
+    pub redraw: Option<RemoteStats>,
+}
+
+/// One server's load: one schedule, one sampler and the panes it is drawn on.
+#[derive(Debug)]
+pub struct Account {
+    schedule: Schedule,
+    sampler: Sampler,
+    /// The drawn form; `None` → `stats = "off"`.
+    form: Option<StatsForm>,
+    members: Vec<Member>,
+    /// The panes whose card is open: while any is, every request asks for the
+    /// details.
+    cards: Vec<u64>,
+    /// Counts the times the account went from no pane to some: the schedule's
+    /// generation. A server's counters are the server's, so a pane that
+    /// comes while others are there joins the run and restarts nothing.
+    epoch: u64,
+    /// The last sample's value, as a sparkline (history included); only the
+    /// current epoch's — another run's numbers must not show.
+    last: Option<RemoteStats>,
+    /// The last sample's details — the card's content. The OS and the core
+    /// count come only with a `detail` request and do not change within a run:
+    /// a plain sample keeps the previous ones.
+    detail: Option<Detail>,
+}
+
+impl Account {
+    /// With the settings' form (`None` for `off`) and interval; nothing runs
+    /// until a pane joins.
+    pub fn new(form: Option<StatsForm>, interval: Duration) -> Self {
+        Self {
+            schedule: Schedule::new(form.is_some(), interval),
+            sampler: Sampler::default(),
+            form,
+            members: Vec::new(),
+            cards: Vec::new(),
+            epoch: 0,
+            last: None,
+            detail: None,
+        }
+    }
+
+    /// The run the samples belong to; `None` while no pane shows the server.
+    pub fn generation(&self) -> Option<u64> {
+        self.schedule.generation()
+    }
+
+    /// The panes the load is drawn on.
+    pub fn members(&self) -> &[Member] {
+        &self.members
+    }
+
+    /// The last sample's details, if any.
+    pub fn detail(&self) -> Option<&Detail> {
+        self.detail.as_ref()
+    }
+
+    /// The value every member draws now, in the form; what a pane that joins
+    /// is given at once.
+    pub fn shown(&self) -> Option<RemoteStats> {
+        Some(shaped(self.last?, self.form?))
+    }
+
+    /// Whether the load is measured at `now`.
+    pub fn sampling(&self, now: Instant) -> bool {
+        self.schedule.running(now)
+    }
+
+    /// The member whose helper session the next request rides: one that is on
+    /// screen if there is one.
+    pub fn carrier(&self) -> Option<Member> {
+        self.members
+            .iter()
+            .find(|member| member.visible)
+            .or_else(|| self.members.first())
+            .copied()
+    }
+
+    /// A pane shows a terminal of the account and its ssh has logged in (or,
+    /// again, with another `command`). The first pane starts the run and takes
+    /// the first sample at once; a later one joins it and asks nothing.
+    pub fn join(&mut self, now: Instant, member: Member) -> Vec<Action> {
+        match self.members.iter_mut().find(|m| m.pane == member.pane) {
+            Some(known) => *known = member,
+            None => self.members.push(member),
+        }
+        self.resync(now)
+    }
+
+    /// The pane no longer shows the server (closed, its terminal went, its ssh
+    /// ended). The last one ends the run.
+    pub fn leave(&mut self, now: Instant, pane: u64) -> Vec<Action> {
+        self.members.retain(|member| member.pane != pane);
+        let was = self.cards.len();
+        self.cards.retain(|card| *card != pane);
+        let mut actions = Vec::new();
+        if self.cards.is_empty() && was > 0 {
+            actions.extend(self.schedule.set_detail(now, false));
+        }
+        actions.extend(self.resync(now));
+        actions
+    }
+
+    /// The pane became visible or covered.
+    pub fn set_visible(&mut self, now: Instant, pane: u64, visible: bool) -> Vec<Action> {
+        if let Some(member) = self.members.iter_mut().find(|m| m.pane == pane) {
+            member.visible = visible;
+        }
+        self.resync(now)
+    }
+
+    /// A key, a press, the wheel or a mouse move in **any** pane of the
+    /// account. Called at mouse-move rate: while sampling runs it only stamps
+    /// the time.
+    pub fn interaction(&mut self, now: Instant) -> Vec<Action> {
+        let actions = self.schedule.interaction(now);
+        self.settle(actions)
+    }
+
+    /// `[remote] stats`/`stats_interval` changed.
+    pub fn set_form(
+        &mut self,
+        now: Instant,
+        form: Option<StatsForm>,
+        interval: Duration,
+    ) -> Update {
+        let changed = self.form != form;
+        self.form = form;
+        let actions = self.schedule.set_form(now, form.is_some(), interval);
+        let redraw = match (changed, form, self.last, self.schedule.generation()) {
+            (true, Some(form), Some(last), Some(_)) => Some(shaped(last, form)),
+            _ => None,
+        };
+        Update {
+            actions: self.settle(actions),
+            redraw,
+        }
+    }
+
+    /// The card of `pane` opened or closed. While one is open every request
+    /// asks for the details, and opening asks at once.
+    pub fn set_card(&mut self, now: Instant, pane: u64, open: bool) -> Vec<Action> {
+        let was = !self.cards.is_empty();
+        self.cards.retain(|card| *card != pane);
+        if open {
+            self.cards.push(pane);
+        }
+        let is = !self.cards.is_empty();
+        if was == is {
+            return Vec::new();
+        }
+        let actions = self.schedule.set_detail(now, is);
+        self.settle(actions)
+    }
+
+    /// The user signed in: a run that ended on a failed open samples again at
+    /// once.
+    pub fn retry(&mut self, now: Instant) -> Vec<Action> {
+        let actions = self.schedule.retry(now);
+        self.settle(actions)
+    }
+
+    /// An armed tick fired.
+    pub fn tick(&mut self, now: Instant, token: u64) -> Vec<Action> {
+        let actions = self.schedule.tick(now, token);
+        self.settle(actions)
+    }
+
+    /// A request of run `epoch` answered. A sample of the current run feeds the
+    /// sampler — another run's counters would be the next CPU difference's
+    /// base — and is what every member draws.
+    pub fn answered(&mut self, now: Instant, epoch: u64, reply: Reply<'_>) -> Answered {
+        let mut outcome = match reply {
+            Reply::Sample(_) => Outcome::Sample { cpu: false },
+            Reply::NoProc => Outcome::NoProc,
+            Reply::Unreachable => Outcome::Unreachable,
+            Reply::Failed => Outcome::Failed,
+        };
+        let mut shown = None;
+        if let (Reply::Sample(sample), Some(form), true) =
+            (reply, self.form, self.schedule.generation() == Some(epoch))
+        {
+            let reading = self.sampler.take(sample, StatsForm::Sparkline);
+            self.last = Some(reading.stats);
+            // A first process scan is "Measuring…" like a first CPU reading:
+            // the next sample follows as soon.
+            let measuring = sample.scan.is_some() && reading.detail.processes.is_none();
+            outcome = Outcome::Sample {
+                cpu: reading.stats.cpu.is_some() && !measuring,
+            };
+            shown = Some(shaped(reading.stats, form));
+            self.keep_detail(reading.detail);
+        }
+        let actions = self.schedule.answered(now, epoch, outcome);
+        Answered {
+            actions: self.settle(actions),
+            shown,
+        }
+    }
+
+    /// The members' presence and visibility → the schedule's run and
+    /// visibility: a run while any pane shows the server, sampled while any of
+    /// them is on screen.
+    fn resync(&mut self, now: Instant) -> Vec<Action> {
+        let visible = self.members.iter().any(|member| member.visible);
+        let mut actions = Vec::new();
+        match (!self.members.is_empty(), self.schedule.generation()) {
+            (true, None) => {
+                self.epoch += 1;
+                // The visibility first, so that the first request is decided with it.
+                actions.extend(self.schedule.set_visible(now, visible));
+                actions.extend(self.schedule.set_generation(now, Some(self.epoch)));
+            }
+            (false, Some(_)) => {
+                actions.extend(self.schedule.set_generation(now, None));
+                self.forget();
+            }
+            _ => actions.extend(self.schedule.set_visible(now, visible)),
+        }
+        self.settle(actions)
+    }
+
+    /// What the account itself does with its schedule's actions: a restart
+    /// forgets the counters and the values, a hide the values. The platform
+    /// shell does the rest.
+    fn settle(&mut self, actions: Vec<Action>) -> Vec<Action> {
+        for action in &actions {
+            match action {
+                Action::Request { restart: true, .. } => {
+                    self.sampler.reset();
+                    self.forget();
+                }
+                Action::Hide => self.forget(),
+                Action::Request { .. } | Action::Arm { .. } => {}
+            }
+        }
+        actions
+    }
+
+    /// Forgets the last sample: a new run, a restart, a hide.
+    fn forget(&mut self) {
+        self.last = None;
+        self.detail = None;
+    }
+
+    /// Takes a sample's details; a plain sample keeps the OS and the cores of
+    /// the previous `detail` one (they do not change within a run).
+    fn keep_detail(&mut self, mut detail: Detail) {
+        if let Some(previous) = self.detail.take() {
+            if detail.os.is_none() {
+                detail.os = previous.os;
+            }
+            if detail.cores.is_none() {
+                detail.cores = previous.cores;
+            }
+        }
+        self.detail = Some(detail);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::remote_files::Task;
+    use bt_core::{StatsLevel, StatsMetric};
 
     fn sample(total: u64, idle: u64) -> LoadSample {
         LoadSample {
@@ -1059,5 +1383,291 @@ mod tests {
         assert_eq!(schedule.tick(t0 + INTERVAL, token), [request(false)]);
         let (_, after) = armed(&schedule.answered(t0, 7, Outcome::Sample { cpu: true }));
         assert_eq!(after, Duration::from_secs(10));
+    }
+
+    // ─── account ───
+
+    fn member(pane: u64, visible: bool) -> Member {
+        Member {
+            pane,
+            command: 100 + pane,
+            visible,
+        }
+    }
+
+    /// An account with the first pane joined at `t0`: the first request is out.
+    fn account_started(t0: Instant) -> Account {
+        let mut account = Account::new(Some(StatsForm::Alerts), INTERVAL);
+        assert_eq!(account.join(t0, member(1, true)), [request(true)]);
+        account
+    }
+
+    fn requests(actions: &[Action]) -> usize {
+        actions
+            .iter()
+            .filter(|action| matches!(action, Action::Request { .. }))
+            .count()
+    }
+
+    #[test]
+    fn three_panes_on_one_server_are_one_measuring() {
+        let t0 = Instant::now();
+        let mut account = account_started(t0);
+        // The second and the third join the run: nothing more is asked.
+        assert!(account.join(t0, member(2, true)).is_empty());
+        assert!(account.join(t0, member(3, false)).is_empty());
+        assert_eq!(account.members().len(), 3);
+        // One reply, one tick, one request — whatever the number of panes.
+        let epoch = account.generation().expect("a run");
+        let answered = account.answered(t0, epoch, Reply::Sample(&sample(1000, 800)));
+        let (token, after) = armed(&answered.actions);
+        assert_eq!(after, FIRST_FOLLOW);
+        let t1 = t0 + after;
+        assert_eq!(account.tick(t1, token), [request(false)]);
+        // One value for every member to draw.
+        let answered = account.answered(t1, epoch, Reply::Sample(&sample(1200, 847)));
+        assert_eq!(answered.shown.expect("a value").cpu, Some(77));
+        let (token, after) = armed(&answered.actions);
+        assert_eq!(after, INTERVAL);
+        assert_eq!(account.tick(t1 + after, token), [request(false)]);
+    }
+
+    #[test]
+    fn the_run_goes_on_while_any_pane_shows_the_server_and_ends_with_the_last() {
+        let t0 = Instant::now();
+        let mut account = account_started(t0);
+        let epoch = account.generation().expect("a run");
+        account.join(t0, member(2, true));
+        let (token, _) = armed(
+            &account
+                .answered(t0, epoch, Reply::Sample(&sample(1000, 800)))
+                .actions,
+        );
+        // The first pane goes: the second still shows the server.
+        assert!(account.leave(t0, 1).is_empty());
+        assert_eq!(account.generation(), Some(epoch));
+        assert_eq!(account.tick(t0 + FIRST_FOLLOW, token), [request(false)]);
+        // The last goes: the run is over and the values with it.
+        account.answered(t0, epoch, Reply::Sample(&sample(1200, 847)));
+        assert!(account.shown().is_some());
+        account.leave(t0, 2);
+        assert_eq!(account.generation(), None);
+        assert_eq!(account.shown(), None);
+        assert_eq!(account.detail(), None);
+        assert!(!account.sampling(t0));
+        // A pane that comes later starts a new run and takes its first sample at once.
+        assert_eq!(account.join(t0, member(3, true)), [request(true)]);
+        assert_eq!(account.generation(), Some(epoch + 1));
+    }
+
+    #[test]
+    fn a_pane_that_joins_is_given_the_value_already_there() {
+        let t0 = Instant::now();
+        let mut account = account_started(t0);
+        let epoch = account.generation().expect("a run");
+        account.answered(t0, epoch, Reply::Sample(&sample(1000, 800)));
+        assert_eq!(account.shown().expect("a value").cpu, None, "no CPU yet");
+        account.answered(t0, epoch, Reply::Sample(&sample(1200, 847)));
+        let shown = account.shown().expect("a value");
+        assert_eq!(shown.cpu, Some(77));
+        assert_eq!(shown.form, StatsForm::Alerts);
+        // Joining takes nothing from the run.
+        assert!(account.join(t0, member(2, true)).is_empty());
+        assert_eq!(account.shown(), Some(shown));
+    }
+
+    #[test]
+    fn a_value_enters_and_leaves_its_threshold_for_every_pane_at_once() {
+        let t0 = Instant::now();
+        let mut account = account_started(t0);
+        account.join(t0, member(2, true));
+        let epoch = account.generation().expect("a run");
+        account.answered(t0, epoch, Reply::Sample(&sample(1000, 800)));
+        // 200 jiffies, 5 idle: 98 % busy, past the critical threshold.
+        let busy = account
+            .answered(t0, epoch, Reply::Sample(&sample(1200, 805)))
+            .shown
+            .expect("a value");
+        assert_eq!(
+            StatsMetric::Cpu.level(busy.cpu.expect("CPU")),
+            StatsLevel::Critical
+        );
+        // 200 jiffies, all idle: back under it.
+        let calm = account
+            .answered(t0, epoch, Reply::Sample(&sample(1400, 1005)))
+            .shown
+            .expect("a value");
+        assert_eq!(
+            StatsMetric::Cpu.level(calm.cpu.expect("CPU")),
+            StatsLevel::Normal
+        );
+        // It is one value for the account: the members' own gauge differs by
+        // nothing.
+        assert_eq!(account.shown(), Some(calm));
+    }
+
+    #[test]
+    fn the_server_is_sampled_while_any_pane_is_on_screen_and_touched() {
+        let t0 = Instant::now();
+        let mut account = Account::new(Some(StatsForm::Numbers), INTERVAL);
+        // Both panes start covered: nothing is measured.
+        assert!(account.join(t0, member(1, false)).is_empty());
+        assert!(account.join(t0, member(2, false)).is_empty());
+        assert!(!account.sampling(t0));
+        // One comes to the front: the first sample is at once.
+        assert_eq!(account.set_visible(t0, 2, true), [request(true)]);
+        assert!(account.sampling(t0));
+        let epoch = account.generation().expect("a run");
+        let (token, after) = armed(
+            &account
+                .answered(t0, epoch, Reply::Sample(&sample(1000, 800)))
+                .actions,
+        );
+        // The other one being covered or not changes nothing.
+        assert!(account.set_visible(t0, 1, true).is_empty());
+        assert!(account.set_visible(t0, 1, false).is_empty());
+        // An interaction in any pane renews the idle clock: the tick finds the
+        // run going, and with no interaction for STATS_IDLE it pauses.
+        let later = t0 + STATS_IDLE - Duration::from_secs(1);
+        assert!(account.interaction(later).is_empty());
+        assert_eq!(account.tick(t0 + after, token), [request(false)]);
+        let idle = later + STATS_IDLE;
+        let epoch_reply = account.answered(t0 + after, epoch, Reply::Sample(&sample(1100, 850)));
+        let (token, after) = armed(&epoch_reply.actions);
+        assert!(account.tick(idle + after, token).is_empty(), "paused");
+        assert!(!account.sampling(idle + after));
+        // Both covered: it stops at once and comes back with the first one shown.
+        let mut again = account_started(t0);
+        let run = again.generation().expect("a run");
+        again.answered(t0, run, Reply::Sample(&sample(1000, 800)));
+        again.join(t0, member(2, true));
+        assert!(again.set_visible(t0, 1, false).is_empty());
+        assert!(again.sampling(t0), "the second is still on screen");
+        again.set_visible(t0, 2, false);
+        assert!(!again.sampling(t0));
+        assert_eq!(again.set_visible(t0, 1, true), [request(true)]);
+    }
+
+    #[test]
+    fn the_card_asks_for_details_once_however_many_are_open() {
+        let t0 = Instant::now();
+        let mut account = account_started(t0);
+        account.join(t0, member(2, true));
+        let epoch = account.generation().expect("a run");
+        account.answered(t0, epoch, Reply::Sample(&sample(1000, 800)));
+        // Opening asks at once, for the details.
+        let first = account.set_card(t0, 1, true);
+        assert_eq!(requests(&first), 1);
+        // A second card on the same server asks nothing more.
+        assert!(account.set_card(t0, 2, true).is_empty());
+        // The details stay on until the last card closes.
+        assert!(account.set_card(t0, 1, false).is_empty());
+        let closed = account.set_card(t0, 2, false);
+        assert!(closed.is_empty());
+        // A pane that goes with its card open lets go of it: the next request
+        // is a plain one again.
+        let answered = account.answered(t0, epoch, Reply::Sample(&sample(1100, 850)));
+        let (token, after) = armed(&answered.actions);
+        assert_eq!(account.tick(t0 + after, token), [request(false)]);
+        let answered = account.answered(t0 + after, epoch, Reply::Sample(&sample(1200, 900)));
+        let (token, after) = armed(&answered.actions);
+        let opened = account.set_card(t0 + after, 2, true);
+        assert_eq!(
+            opened,
+            [Action::Request {
+                detail: true,
+                restart: false
+            }]
+        );
+        account.leave(t0 + after, 2);
+        let answered = account.answered(t0 + after, epoch, Reply::Sample(&sample(1300, 950)));
+        let (token_after, delay) = armed(&answered.actions);
+        assert_ne!(token, token_after);
+        assert_eq!(
+            account.tick(t0 + after + delay, token_after),
+            [request(false)]
+        );
+    }
+
+    #[test]
+    fn an_unreachable_server_hides_the_value_of_every_pane_and_signing_in_retries() {
+        let t0 = Instant::now();
+        let mut account = account_started(t0);
+        account.join(t0, member(2, true));
+        let epoch = account.generation().expect("a run");
+        let answered = account.answered(t0, epoch, Reply::Unreachable);
+        assert_eq!(answered.actions, [Action::Hide]);
+        assert_eq!(answered.shown, None);
+        assert!(!account.sampling(t0), "the run has ended sampling");
+        // Signing in in any pane samples again at once.
+        assert_eq!(account.retry(t0), [request(true)]);
+    }
+
+    #[test]
+    fn a_reply_of_an_old_run_only_frees_the_worker() {
+        let t0 = Instant::now();
+        let mut account = account_started(t0);
+        let old = account.generation().expect("a run");
+        account.leave(t0, 1);
+        account.join(t0, member(2, true));
+        assert_ne!(account.generation(), Some(old));
+        // The old run's sample is not the new run's value or base.
+        let answered = account.answered(t0, old, Reply::Sample(&sample(1000, 800)));
+        assert_eq!(answered.shown, None);
+        assert_eq!(account.shown(), None);
+    }
+
+    #[test]
+    fn a_new_form_redraws_the_last_value_at_once_and_off_stops_the_run() {
+        let t0 = Instant::now();
+        let mut account = Account::new(Some(StatsForm::Sparkline), INTERVAL);
+        account.join(t0, member(1, true));
+        let epoch = account.generation().expect("a run");
+        account.answered(t0, epoch, Reply::Sample(&sample(1000, 800)));
+        account.answered(t0, epoch, Reply::Sample(&sample(1200, 847)));
+        let update = account.set_form(t0, Some(StatsForm::Numbers), INTERVAL);
+        let redraw = update.redraw.expect("the last value");
+        assert_eq!((redraw.form, redraw.len), (StatsForm::Numbers, 0));
+        assert_eq!(redraw.cpu, Some(77));
+        // Off hides and forgets: no value comes back until it is on again.
+        let update = account.set_form(t0, None, INTERVAL);
+        assert_eq!(update.redraw, None);
+        assert!(update.actions.contains(&Action::Hide));
+        assert_eq!(account.shown(), None);
+        // The same form again: nothing to redraw.
+        let update = account.set_form(t0, None, INTERVAL);
+        assert_eq!(update.redraw, None);
+    }
+
+    #[test]
+    fn the_carrier_is_a_pane_that_is_on_screen() {
+        let t0 = Instant::now();
+        let mut account = Account::new(Some(StatsForm::Alerts), INTERVAL);
+        assert_eq!(account.carrier(), None);
+        account.join(t0, member(1, false));
+        assert_eq!(account.carrier().map(|m| m.pane), Some(1), "the only one");
+        account.join(t0, member(2, true));
+        assert_eq!(account.carrier().map(|m| m.pane), Some(2));
+        account.leave(t0, 2);
+        assert_eq!(account.carrier().map(|m| m.pane), Some(1));
+    }
+
+    #[test]
+    fn a_form_is_shaped_for_the_pane_only_as_a_sparkline_carries_history() {
+        let mut full = RemoteStats {
+            form: StatsForm::Sparkline,
+            cpu: Some(40),
+            mem: 50,
+            ..RemoteStats::default()
+        };
+        full.history[..3].copy_from_slice(&[1, 2, 3]);
+        full.len = 3;
+        assert_eq!(shaped(full, StatsForm::Sparkline).history(), &[1, 2, 3]);
+        let numbers = shaped(full, StatsForm::Numbers);
+        assert_eq!(
+            (numbers.form, numbers.len, numbers.cpu),
+            (StatsForm::Numbers, 0, Some(40))
+        );
+        assert_eq!(shaped(full, StatsForm::Alerts).history(), &[] as &[u8]);
     }
 }

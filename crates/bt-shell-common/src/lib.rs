@@ -71,6 +71,7 @@ pub mod remote_files;
 pub mod remote_helper;
 pub mod remote_stats;
 pub mod restore;
+pub mod server_card;
 pub mod settings;
 pub mod shortcuts;
 pub mod split;

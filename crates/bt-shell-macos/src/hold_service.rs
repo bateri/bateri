@@ -91,6 +91,15 @@ pub(crate) fn background_all() -> Vec<Background> {
         .unwrap_or_default()
 }
 
+/// The terminals the server of `account` keeps that no pane of this Mac shows, the last to write
+/// first: the server's card lists them ([`Service::background`]). Read without waiting.
+pub(crate) fn background(account: &str) -> Vec<Background> {
+    SERVICE
+        .get()
+        .map(|service| service.background(account))
+        .unwrap_or_default()
+}
+
 /// Asks every server again for its terminals: for the moments somebody is about to look at
 /// the list (the palette opening). The answer renews [`background_all`] and, when it differs,
 /// reaches [`crate::app::AppDelegate::background_changed`].
@@ -114,6 +123,15 @@ pub(crate) fn claim(account: &str, terminal: &SessionId) {
 pub(crate) fn end(pane: &PaneUuid) {
     if let Some(service) = SERVICE.get() {
         service.end(pane);
+    }
+}
+
+/// The user ended a terminal that no pane shows (the server's card, after its question): it
+/// is hung up on the server and killed after the grace if it is still there. It is not a pane's
+/// terminal, so the ledger has no pane to forget — the request is the ledger's own.
+pub(crate) fn end_terminal(account: &str, terminal: &SessionId) {
+    if let Some(service) = SERVICE.get() {
+        service.end_terminal(account, terminal);
     }
 }
 

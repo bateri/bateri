@@ -1,144 +1,110 @@
-//! The pane's **sampling driver** for the remote load indicator:
-//! it runs [`Schedule`]'s actions on the main queue and turns the helper's
-//! replies into the context row's value.
+//! The pane's half of the **server's load**: the seat it holds in its server's measuring
+//! ([`crate::server_stats`]) and the events that move it.
 //!
-//! - **The decision is pure and elsewhere** (`bt-shell-common::remote_stats`):
-//!   when to sample, what a sample means. Here only the binding — a tick is a
-//!   `dispatch` `after` carrying a **token** (`after` cannot be cancelled, a
-//!   stale token is ignored by the schedule), a request is a
-//!   [`Query::Load`] to the pane's helper session, the reply
-//!   comes back to the main queue **with the pane id and the generation**
-//!   (`hyperlink::verify_remote`'s pattern): a closed pane drops it, another
-//!   generation's sample only frees the worker.
-//! - **The events** come from the pane: the remote edge (a generation started
-//!   or ended), visibility (`SplitView::apply_visibility`), the settings,
-//!   interaction (the view's keys, presses, wheel and mouse moves, the window
-//!   becoming key) and the close.
-//! - **Zero frames when idle**:
-//!   the timer never wakes the link; a frame is asked only by
-//!   `Session::set_remote_stats`'s equality gate when the shown value changes.
+//! - **The load is the server's, not the pane's.** However many panes show terminals of one
+//!   server, it is measured once ([`bt_shell_common::remote_stats::Account`]) and drawn on all
+//!   of them; a pane here only says when it joins (its ssh logged in), when it leaves, whether it
+//!   is on screen, that it was touched, and which card is open.
+//! - **The events** come from the pane: the remote edge (a generation started or ended),
+//!   visibility (`SplitView::apply_visibility`), the settings, interaction (the view's keys,
+//!   presses, wheel and mouse moves, the window becoming key), the sign-in and the close.
+//! - **The door** (`⇄ rasp` is clickable) is not here: the remote edge tells the session
+//!   ([`TerminalPane::sync_server_door`]), from the same gate as everything bateri does on a
+//!   server ([`TerminalPane::server_target`]).
+//! - **Zero frames when idle**: no timer wakes the link; a frame is asked only by a value that
+//!   changed ([`crate::server_stats`]).
 
-use std::time::{Duration, Instant};
+use std::rc::Rc;
 
-use bt_core::{RemoteStats, RemoteStatsSettings, STATS_HISTORY, StatsForm};
-use bt_shell_common::remote_stats::{Action, Detail, Outcome, Sampler, Schedule};
-use dispatch2::{DispatchQueue, DispatchTime};
-use objc2::MainThreadMarker;
+use bt_core::RemoteStatsSettings;
+use bt_shell_common::remote_helper::Reply;
 
 use crate::focus::Moment;
 use crate::pane::TerminalPane;
-use crate::remote_helper::{Answer, LoadReply, Query, Request};
+use crate::remote_helper::{Query, Request};
+use crate::server_stats;
 
-/// The pane's sampling state: the schedule, the sampler and the form.
+/// The pane's seat in its server's measuring.
 #[derive(Debug)]
-pub(crate) struct StatsDriver {
-    schedule: Schedule,
-    sampler: Sampler,
-    /// The drawn form; `None` → `stats = "off"`.
-    form: Option<StatsForm>,
-    /// The last sample's value, taken as a sparkline (history included): a
-    /// form change redraws from it at once rather than a whole interval later
-    /// ([`shaped`]). Only ever the schedule's current generation's
-    /// and only while shown: a new generation, a restart and a hide clear it —
-    /// otherwise a form change would bring back another host's numbers or a
-    /// hidden value.
-    last: Option<RemoteStats>,
-    /// The last sample's details — the popover's content ([`crate::stats_popover`]);
-    /// cleared with [`Self::last`] for the same reason (another host's
-    /// processes must not show). The OS and the core count come only with a
-    /// `detail` request and do not change within a generation: a plain sample
-    /// keeps the previous ones.
-    detail: Option<Detail>,
+pub(crate) struct StatsSeat {
+    /// The server's account and the generation of the pane's ssh while the pane is a member of
+    /// that server's measuring; `None` before its ssh has logged in and after it ended.
+    joined: Option<(Rc<str>, u64)>,
+    /// The pane is on screen (not a background tab, a minimised window, behind a zoomed split).
+    visible: bool,
+    /// The settings' value: from the birth package, refreshed live
+    /// ([`TerminalPane::set_stats_settings`]).
+    settings: RemoteStatsSettings,
 }
 
-impl StatsDriver {
+impl StatsSeat {
     /// From the settings' snapshot at the pane's birth (`PaneLaunch`).
-    pub(crate) fn new(settings: &RemoteStatsSettings) -> Self {
-        let form = settings.mode.form();
+    pub(crate) fn new(settings: RemoteStatsSettings) -> Self {
         Self {
-            schedule: Schedule::new(form.is_some(), interval(settings)),
-            sampler: Sampler::default(),
-            form,
-            last: None,
-            detail: None,
+            joined: None,
+            visible: true,
+            settings,
         }
     }
 
-    /// The last sample's details (the popover's content), if any.
-    pub(crate) fn detail(&self) -> Option<&Detail> {
-        self.detail.as_ref()
+    /// The server the pane is a member of.
+    pub(crate) fn account(&self) -> Option<Rc<str>> {
+        self.joined.as_ref().map(|(account, _)| Rc::clone(account))
     }
 
-    /// Forgets the last sample: a new generation, a restart, a hide.
-    fn forget(&mut self) {
-        self.last = None;
-        self.detail = None;
-    }
-
-    /// Takes a sample's details; a plain sample keeps the OS and the cores of
-    /// the previous `detail` one (they do not change within a generation).
-    fn keep_detail(&mut self, mut detail: Detail) {
-        if let Some(previous) = self.detail.take() {
-            if detail.os.is_none() {
-                detail.os = previous.os;
-            }
-            if detail.cores.is_none() {
-                detail.cores = previous.cores;
-            }
-        }
-        self.detail = Some(detail);
-    }
-}
-
-/// `stats_interval` as a duration.
-fn interval(settings: &RemoteStatsSettings) -> Duration {
-    Duration::from_secs(u64::from(settings.interval))
-}
-
-/// A value taken as a sparkline, in `form`: the other forms carry no history
-/// (`RemoteStats`'s rule — an invisible history change must not ask for a frame).
-fn shaped(full: RemoteStats, form: StatsForm) -> RemoteStats {
-    let mut stats = full;
-    stats.form = form;
-    if form != StatsForm::Sparkline {
-        stats.history = [0; STATS_HISTORY];
-        stats.len = 0;
-    }
-    stats
-}
-
-/// A load reply → what the schedule needs.
-fn outcome(reply: &Result<Answer, String>) -> Outcome {
-    match reply {
-        Ok(Answer::Load(LoadReply::Sample(_))) => Outcome::Sample { cpu: false },
-        Ok(Answer::Load(LoadReply::NoProc)) => Outcome::NoProc,
-        Ok(Answer::Load(LoadReply::Unreachable(_))) => Outcome::Unreachable,
-        // Another answer cannot come for a load request; it counts as a failure.
-        Ok(_) | Err(_) => Outcome::Failed,
+    /// The settings' value.
+    pub(crate) fn settings(&self) -> RemoteStatsSettings {
+        self.settings
     }
 }
 
 /// The sampling half of the pane.
 impl TerminalPane {
-    /// The remote edge and the user's login: the session's remote
-    /// generation goes to the schedule **once the user's ssh has logged in**
-    /// (or none). A new generation takes its first sample at once; an ended one
-    /// stops arming (the value itself `Session` already dropped on `C`/`D`/`A`).
-    /// Before the login the indicator does not connect — the login probe calls
-    /// this again ([`TerminalPane::login_check`]).
+    /// The remote edge and the user's login: the pane is a member of its server's measuring
+    /// **once the user's ssh has logged in** (or not at all). The first pane of a server takes
+    /// the first sample at once; a later one joins and is given the value already there; the
+    /// last to leave ends it (the value itself `Session` already dropped on `C`/`D`/`A`).
+    /// Before the login the load does not connect — the login probe calls this again
+    /// ([`TerminalPane::login_check`]).
     pub(crate) fn sync_stats_generation(&self) {
-        let generation = self.session().and_then(|session| {
-            let (command, ..) = self.server_target()?;
-            (crate::jobs::remote_login(session) == Some(command)).then_some(command)
-        });
-        let actions = {
-            let mut driver = self.stats_driver().borrow_mut();
-            if driver.schedule.generation() != generation {
-                driver.forget();
+        let wanted = self
+            .session()
+            .and_then(|session| {
+                let (command, ..) = self.server_target()?;
+                (crate::jobs::remote_login(session) == Some(command)).then_some(command)
+            })
+            .zip(
+                self.host()
+                    .kept_terminal(self.uuid())
+                    .map(|shown| Rc::<str>::from(shown.account)),
+            );
+        let (leaving, joining, visible, settings) = {
+            let mut seat = self.stats_seat().borrow_mut();
+            let before = seat.joined.clone();
+            let after = wanted.map(|(command, account)| (account, command));
+            if before == after {
+                (None, None, seat.visible, seat.settings)
+            } else {
+                seat.joined = after.clone();
+                let left = before.filter(|(account, _)| {
+                    after
+                        .as_ref()
+                        .is_none_or(|(account_after, _)| account_after != account)
+                });
+                (
+                    left.map(|(account, _)| account),
+                    after,
+                    seat.visible,
+                    seat.settings,
+                )
             }
-            driver.schedule.set_generation(Instant::now(), generation)
         };
-        self.run_stats(actions);
+        if let Some(account) = leaving {
+            server_stats::leave(&account, self.id());
+        }
+        if let Some((account, command)) = joining {
+            server_stats::join(self, &account, command, visible, &settings);
+        }
         self.stats_gauge_changed();
         // The server's ports start with the login and end with the session.
         self.request_remote_ports();
@@ -147,12 +113,14 @@ impl TerminalPane {
     /// The pane became visible or covered (a background tab, a minimised
     /// window, behind a zoomed split — `SplitView::apply_visibility`).
     pub(crate) fn set_visible(&self, visible: bool) {
-        let actions = self
-            .stats_driver()
-            .borrow_mut()
-            .schedule
-            .set_visible(Instant::now(), visible);
-        self.run_stats(actions);
+        let account = {
+            let mut seat = self.stats_seat().borrow_mut();
+            seat.visible = visible;
+            seat.account()
+        };
+        if let Some(account) = account {
+            server_stats::set_visible(&account, self.id(), visible);
+        }
         // The same answer stops the scroll bar's block index.
         self.set_seen(visible);
     }
@@ -163,147 +131,55 @@ impl TerminalPane {
     pub(crate) fn note_interaction(&self) {
         // The focus query's `idle`: the same moments, its own clock.
         self.input_stamp().set(Moment::now());
-        let actions = self
-            .stats_driver()
-            .borrow_mut()
-            .schedule
-            .interaction(Instant::now());
-        self.run_stats(actions);
+        let account = self.stats_seat().borrow().account();
+        if let Some(account) = account {
+            server_stats::interaction(&account);
+        }
     }
 
-    /// `[remote] stats`/`stats_interval` changed (`AppDelegate::reload_settings`).
-    /// `off` hides the indicator and stops sampling; another form redraws the
-    /// last value at once; a new interval holds from the next tick.
+    /// `[remote] stats`/`stats_interval` changed (`AppDelegate::reload_settings`, once per
+    /// pane). `off` hides the indicator and stops the measuring; another form redraws the last
+    /// value at once; a new interval holds from the next tick.
     pub(crate) fn set_stats_settings(&self, settings: &RemoteStatsSettings) {
-        let form = settings.mode.form();
-        let (actions, redraw) = {
-            let mut driver = self.stats_driver().borrow_mut();
-            let changed = driver.form != form;
-            driver.form = form;
-            let actions =
-                driver
-                    .schedule
-                    .set_form(Instant::now(), form.is_some(), interval(settings));
-            let redraw = match (changed, form, driver.last, driver.schedule.generation()) {
-                (true, Some(form), Some(last), Some(generation)) => {
-                    Some((generation, shaped(last, form)))
-                }
-                _ => None,
-            };
-            (actions, redraw)
-        };
-        if let (Some((generation, stats)), Some(session)) = (redraw, self.session()) {
-            session.set_remote_stats(generation, Some(&stats));
-        }
-        self.run_stats(actions);
+        self.stats_seat().borrow_mut().settings = *settings;
+        server_stats::set_settings(settings);
         self.stats_gauge_changed();
+        self.refresh_server_card();
     }
 
-    /// The popover opened or closed ([`crate::stats_popover`]): while it is
-    /// open every request asks for the details, and opening asks at once.
+    /// The server card opened or closed ([`crate::server_card`]): while it is open every
+    /// request asks for the details, and opening asks at once.
     pub(crate) fn set_stats_detail(&self, open: bool) {
-        let actions = self
-            .stats_driver()
-            .borrow_mut()
-            .schedule
-            .set_detail(Instant::now(), open);
-        self.run_stats(actions);
-    }
-
-    /// The user signed in: a generation that ended on a failed
-    /// open samples again at once.
-    pub(crate) fn retry_stats(&self) {
-        let actions = self
-            .stats_driver()
-            .borrow_mut()
-            .schedule
-            .retry(Instant::now());
-        self.run_stats(actions);
-    }
-
-    /// The pane closes: sampling stops. The armed tick goes stale and the pane
-    /// lookup would not find a closed pane anyway.
-    pub(crate) fn stop_stats(&self) {
-        let _ = self
-            .stats_driver()
-            .borrow_mut()
-            .schedule
-            .set_generation(Instant::now(), None);
-    }
-
-    /// Runs the schedule's actions. Called with the driver's borrow released:
-    /// a request reaches the helper and a hide reaches the session.
-    fn run_stats(&self, actions: Vec<Action>) {
-        for action in actions {
-            match action {
-                Action::Arm { token, after } => self.arm_stats(token, after),
-                Action::Request { detail, restart } => self.request_stats(detail, restart),
-                Action::Hide => {
-                    let generation = {
-                        let mut driver = self.stats_driver().borrow_mut();
-                        driver.forget();
-                        driver.schedule.generation()
-                    };
-                    if let (Some(generation), Some(session)) = (generation, self.session()) {
-                        session.set_remote_stats(generation, None);
-                    }
-                    self.stats_gauge_changed();
-                }
-            }
+        let account = self.stats_seat().borrow().account();
+        if let Some(account) = account {
+            server_stats::set_card(&account, self.id(), open);
         }
     }
 
-    /// A tick after `after`, by pane id; the schedule ignores a stale token.
-    fn arm_stats(&self, token: u64, after: Duration) {
-        let Ok(when) = DispatchTime::try_from(after) else {
-            return;
-        };
-        let (id, lookup) = (self.id(), self.lookup());
-        // The error arm is not represented today (the link clock's rationale);
-        // if it dropped, sampling would resume at the next interaction.
-        let _ = DispatchQueue::main().after(when, move || {
-            // audit: a block running on the main queue is on the main thread by definition.
-            let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
-            if let Some(pane) = lookup(mtm, id) {
-                let actions = pane
-                    .stats_driver()
-                    .borrow_mut()
-                    .schedule
-                    .tick(Instant::now(), token);
-                pane.run_stats(actions);
-            }
-        });
+    /// The user signed in: a run that ended on a failed open samples again at once.
+    pub(crate) fn retry_stats(&self) {
+        let account = self.stats_seat().borrow().account();
+        if let Some(account) = account {
+            server_stats::retry(&account);
+        }
     }
 
-    /// A load request to the helper session. The reply always comes back on
-    /// the main queue — also when there is no remote target to ask (the edge
-    /// has not reached the schedule yet): the schedule's one request in flight
-    /// must be answered, otherwise it would wait forever.
-    fn request_stats(&self, detail: bool, restart: bool) {
-        let generation = {
-            let mut driver = self.stats_driver().borrow_mut();
-            if restart {
-                driver.sampler.reset();
-                driver.forget();
-            }
-            driver.schedule.generation()
-        };
-        let Some(generation) = generation else {
-            return;
-        };
-        let (id, lookup) = (self.id(), self.lookup());
-        let reply = Box::new(move |answer: Result<Answer, String>, _: &[String]| {
-            DispatchQueue::main().exec_async(move || {
-                // audit: a block running on the main queue is on the main thread by definition.
-                let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
-                if let Some(pane) = lookup(mtm, id) {
-                    pane.stats_answered(generation, answer);
-                }
-            });
-        });
+    /// The pane closes: it leaves its server's measuring. The armed tick goes stale and the
+    /// pane lookup would not find a closed pane anyway.
+    pub(crate) fn stop_stats(&self) {
+        let account = self.stats_seat().borrow_mut().joined.take();
+        if let Some((account, _)) = account {
+            server_stats::leave(&account, self.id());
+        }
+    }
+
+    /// A load request on this pane's helper session, as the server's carrier. `command` is the
+    /// generation of the ssh the member was registered with: the pane answers an error when its
+    /// session has moved on, which the schedule counts as a failure of the run.
+    pub(crate) fn ask_load(&self, command: u64, detail: bool, reply: Reply) {
         let target = self
             .server_target()
-            .filter(|(command, ..)| *command == generation);
+            .filter(|(current, ..)| *current == command);
         let Some((command, target, _)) = target else {
             reply(Err("The remote session ended".to_owned()), &[]);
             return;
@@ -316,115 +192,5 @@ impl TerminalPane {
             query: Query::Load { detail },
             reply,
         });
-    }
-
-    /// A load reply of `generation`, on the main queue. A sample feeds the
-    /// sampler only for the schedule's generation — another one's counters
-    /// would be the next CPU difference's base; the session gates the value by
-    /// generation and equality (one frame only when the shown value changed).
-    fn stats_answered(&self, generation: u64, answer: Result<Answer, String>) {
-        if let Ok(Answer::Load(LoadReply::Unreachable(text))) = &answer {
-            self.background_failed(generation, text);
-        }
-        let mut outcome = outcome(&answer);
-        let reading = {
-            let mut driver = self.stats_driver().borrow_mut();
-            match (&answer, driver.form) {
-                (Ok(Answer::Load(LoadReply::Sample(sample))), Some(form))
-                    if driver.schedule.generation() == Some(generation) =>
-                {
-                    let reading = driver.sampler.take(sample, StatsForm::Sparkline);
-                    driver.last = Some(reading.stats);
-                    // A first process scan is "Measuring…" like a first CPU
-                    // reading: the next sample follows as soon.
-                    let measuring = sample.scan.is_some() && reading.detail.processes.is_none();
-                    outcome = Outcome::Sample {
-                        cpu: reading.stats.cpu.is_some() && !measuring,
-                    };
-                    Some((shaped(reading.stats, form), reading.detail))
-                }
-                _ => None,
-            }
-        };
-        if let Some((stats, detail)) = reading {
-            // A sample is a login: a Sign In… left from before goes.
-            self.hide_sign_in();
-            if let Some(session) = self.session() {
-                session.set_remote_stats(generation, Some(&stats));
-            }
-            self.stats_driver().borrow_mut().keep_detail(detail);
-            self.refresh_stats_popover();
-            // Every sample, not only a changed one: the indicator's rectangle
-            // also moves with the window and the hand cursor must follow.
-            self.stats_gauge_changed();
-        }
-        let actions =
-            self.stats_driver()
-                .borrow_mut()
-                .schedule
-                .answered(Instant::now(), generation, outcome);
-        self.run_stats(actions);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use bt_shell_common::remote_files::Process;
-
-    use super::*;
-
-    #[test]
-    fn a_form_change_keeps_the_values_and_carries_history_only_as_a_sparkline() {
-        let mut full = RemoteStats {
-            form: StatsForm::Sparkline,
-            cpu: Some(23),
-            mem: 61,
-            disk: 40,
-            ..RemoteStats::default()
-        };
-        full.history[..3].copy_from_slice(&[1, 2, 3]);
-        full.len = 3;
-        assert_eq!(shaped(full, StatsForm::Sparkline), full);
-        let numbers = shaped(full, StatsForm::Numbers);
-        assert_eq!(numbers.form, StatsForm::Numbers);
-        assert_eq!((numbers.cpu, numbers.mem, numbers.disk), (Some(23), 61, 40));
-        assert_eq!((numbers.len, numbers.history), (0, [0; STATS_HISTORY]));
-    }
-
-    #[test]
-    fn a_plain_sample_keeps_the_os_and_cores_but_not_the_processes() {
-        let mut driver = StatsDriver::new(&RemoteStatsSettings::default());
-        driver.keep_detail(Detail {
-            os: Some("Ubuntu 24.04".to_owned()),
-            cores: Some(8),
-            cpu: Some(12),
-            processes: Some(vec![Process {
-                name: "postgres".to_owned(),
-                cpu: 123,
-            }]),
-            ..Detail::default()
-        });
-        driver.keep_detail(Detail {
-            cpu: Some(40),
-            ..Detail::default()
-        });
-        let detail = driver.detail().expect("a sample arrived");
-        assert_eq!(detail.os.as_deref(), Some("Ubuntu 24.04"));
-        assert_eq!((detail.cores, detail.cpu), (Some(8), Some(40)));
-        assert_eq!(detail.processes, None, "processes are live, not kept");
-        driver.forget();
-        assert_eq!(driver.detail(), None, "another host's details do not stay");
-    }
-
-    #[test]
-    fn every_failure_of_a_load_request_is_named_for_the_schedule() {
-        let unreachable = Ok(Answer::Load(LoadReply::Unreachable("no".to_owned())));
-        assert_eq!(outcome(&unreachable), Outcome::Unreachable);
-        assert_eq!(
-            outcome(&Ok(Answer::Load(LoadReply::NoProc))),
-            Outcome::NoProc
-        );
-        assert_eq!(outcome(&Err("closed".to_owned())), Outcome::Failed);
-        assert_eq!(outcome(&Ok(Answer::Counted(None))), Outcome::Failed);
     }
 }

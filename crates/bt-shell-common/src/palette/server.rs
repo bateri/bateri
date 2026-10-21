@@ -132,7 +132,7 @@ pub fn background_row(facts: &BackgroundFacts) -> Row {
     )
     .keywords("terminal session server remote kablo")
     .subtitle(joined([Some(facts.host.clone()), facts.place.clone()]))
-    .hint("↵", "Open in New Tab")
+    .hint("↵", crate::server_card::OPEN)
     .hint("⌥↵", "Open Beside");
     if let Some(time) = facts.running.and_then(running_counter) {
         row = row.status(format!("Running · {time}"), Tone::Dim);
@@ -172,7 +172,7 @@ pub fn open_all_row(host: &str, count: usize) -> Row {
     Row::new(
         Kind::Action,
         &format!("openAll.{host}"),
-        "Open All in New Tab",
+        crate::server_card::OPEN_ALL,
     )
     .keywords("open all background terminals")
     .subtitle(if count == 1 {
