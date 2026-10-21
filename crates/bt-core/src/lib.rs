@@ -67,6 +67,7 @@ mod notify;
 mod pointer;
 mod program_status;
 mod reader;
+mod reset;
 mod search;
 mod session;
 mod settings;
@@ -96,6 +97,7 @@ pub use journal::{
 pub use notify::Notification;
 pub use pointer::PointerShape;
 pub use program_status::{ProgramActivity, ProgramRecord, State as ProgramState};
+pub use reset::keeping_history as reset_keeping_history;
 pub use search::{
     SearchCover, SearchDirection, SearchQuery, SearchReport, SearchRun, SearchRuns, SearchStatus,
     escape as escape_search,

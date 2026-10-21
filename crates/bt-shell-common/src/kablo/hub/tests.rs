@@ -7,7 +7,7 @@ use std::time::Instant;
 use kablo_proto::v1::Exit;
 
 use super::*;
-use crate::hold::wire::{HoldReader, RESET, Target};
+use crate::hold::wire::{HoldReader, Target};
 use crate::kablo::fake::{Age, Bridge};
 use crate::kablo::{Cause, Link, Size};
 
@@ -17,6 +17,12 @@ const SIZE: Size = Size {
     xpixel: 0,
     ypixel: 0,
 };
+
+/// What a picture is written after: not `RIS`, which would take the pane's
+/// history with it, but the reset that keeps it, for the width of the terminal.
+fn reset() -> Vec<u8> {
+    bt_core::reset_keeping_history(SIZE.cols)
+}
 
 const WIDE: Size = Size {
     cols: 120,
@@ -333,7 +339,7 @@ fn a_picture_replaces_the_bytes_the_server_no_longer_holds() {
     let (bytes, end) = rig.output(hold);
     let picture = Bridge::picture_of(20);
     let mut expected = b"0123456789".to_vec();
-    expected.extend_from_slice(RESET);
+    expected.extend_from_slice(&reset());
     expected.extend_from_slice(&picture);
     expected.push(b'!');
     assert_eq!(
@@ -441,11 +447,15 @@ fn a_holder_that_never_saw_the_terminal_is_shown_the_screen() {
     rig.bridge.write(&terminal, b"!");
     rig.pump();
     let (bytes, end) = rig.output(hold);
-    let mut expected = RESET.to_vec();
+    let mut expected = reset();
     expected.extend_from_slice(&Bridge::picture_of(13));
     expected.push(b'!');
     assert_eq!(bytes, expected);
     assert_eq!(end, Some(14));
+    // The pane's scrollback is more than this terminal's: nothing that wipes
+    // it (`RIS`, `ED 3`) comes before a picture.
+    assert!(!bytes.windows(2).any(|pair| pair == b"\x1bc"));
+    assert!(!bytes.windows(4).any(|pair| pair == b"\x1b[3J"));
 }
 
 #[test]

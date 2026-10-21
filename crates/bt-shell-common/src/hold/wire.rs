@@ -52,10 +52,6 @@ pub const MAX_PAYLOAD: usize = 1 << 20;
 /// carries; more are sent as several frames in order.
 pub const CHUNK: usize = 64 * 1024;
 
-/// The bytes that reset a terminal before a picture of the screen is written
-/// to it (`RIS`), as kablo's own client writes them.
-pub const RESET: &[u8] = b"\x1bc";
-
 /// The longest account name the wire carries.
 const ACCOUNT_LIMIT: usize = 255;
 
@@ -367,11 +363,16 @@ impl ToHold {
             }
             ToHold::Output { end, data } => {
                 // Each frame says where the stream stands after its own bytes.
+                // A write that is not cut says `end` as it is: a piece of a
+                // picture carries more bytes than the position it stands at, and
+                // working the position back from the length would move it.
+                let whole = data.len() <= CHUNK;
                 let mut stands = end.saturating_sub(data.len() as u64);
                 for chunk in data.chunks(CHUNK) {
                     stands += chunk.len() as u64;
                     payload.clear();
-                    payload.extend_from_slice(&stands.to_be_bytes());
+                    let at = if whole { *end } else { stands };
+                    payload.extend_from_slice(&at.to_be_bytes());
                     payload.extend_from_slice(chunk);
                     frame(out, kind::OUTPUT, &payload);
                 }

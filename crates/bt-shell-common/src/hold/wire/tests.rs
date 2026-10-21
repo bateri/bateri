@@ -378,6 +378,23 @@ fn a_long_stream_goes_as_several_frames_each_saying_where_it_stands() {
 }
 
 #[test]
+fn a_frame_that_is_not_cut_says_the_position_it_was_given() {
+    // A piece of a picture: more bytes than the position it stands at.
+    let mut out = Vec::new();
+    ToHold::Output {
+        end: 10,
+        data: vec![b'p'; 300],
+    }
+    .encode(&mut out);
+    let mut reader = HoldReader::new();
+    reader.push(&out);
+    let Some(ToHold::Output { end, data }) = reader.read().expect("whole") else {
+        panic!("output");
+    };
+    assert_eq!((end, data.len()), (10, 300));
+}
+
+#[test]
 fn how_a_program_ended_is_the_status_a_shell_reports() {
     assert_eq!(exit_status(Exit::Code(0)), 0);
     assert_eq!(exit_status(Exit::Code(7)), 7);

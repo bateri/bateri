@@ -34,8 +34,12 @@ of every installed copy. A version without a section is not released.
   asks for nothing and the connection is shared. Where the connection drops,
   the program you left running (`npm run dev`, a build) is still running, and
   the pane goes on from the byte it was at when the connection is back, with no
-  line shown twice. Servers kablo cannot be kept on, hosts you turned
-  integration off for, and `production` hosts get the plain `ssh` as before.
+  line shown twice. If the connection was gone so long that the server cannot
+  replay all you missed, the pane redraws from the server's picture of the screen
+  and keeps its scrollback: what you could scroll back to stays (a few lines may
+  show twice there) and only the screen is redrawn. Servers kablo cannot be
+  kept on, hosts you turned integration off for, and `production` hosts get the
+  plain `ssh` as before.
 
 - **⌘T and ⌘D in a pane that shows a terminal on a server open another one
   there, and closing the pane ends it.** The new tab or split starts in the

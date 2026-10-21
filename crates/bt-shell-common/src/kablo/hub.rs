@@ -25,7 +25,10 @@
 //! where the stream stands after it (`crate::hold::wire`); a picture of the
 //! screen as a reset followed by the picture's bytes, and the stream's position
 //! moves only when the picture is whole, so a connection that breaks half a
-//! picture later asks for the position before it and gets a picture again. A
+//! picture later asks for the position before it and gets a picture again. The
+//! reset is not `RIS`: it leaves the pane's history, the screen that was showing
+//! included, where it is ([`bt_core::reset_keeping_history`]) — the pane's
+//! history is not only the terminal's, it holds what ran in the pane before. A
 //! connection to the server that is down is **not** told to the holder: the
 //! client retries and attaches again by itself, the holder sees the output go on
 //! when it does, and what it types meanwhile is answered with a bell
@@ -39,7 +42,7 @@
 use std::collections::{BTreeMap, VecDeque};
 
 use super::{Attach, Client, Event, NewSession, SessionId};
-use crate::hold::wire::{self, AppReader, CHUNK, Open, RESET, Target, ToApp, ToHold, exit_status};
+use crate::hold::wire::{self, AppReader, CHUNK, Open, Target, ToApp, ToHold, exit_status};
 
 /// One holder's connection, as the hub knows it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -237,13 +240,14 @@ impl Hub {
             Event::Picture {
                 terminal,
                 offset,
+                cols,
                 first,
                 last,
                 data,
                 ..
             } => {
                 if let Some(hold) = hold_of(self, terminal) {
-                    self.give_picture(hold, *offset, *first, *last, data);
+                    self.give_picture(hold, *offset, *cols, *first, *last, data);
                 }
                 return;
             }
@@ -364,8 +368,17 @@ impl Hub {
 
     /// One piece of a picture for a holder: a reset before the first, and the
     /// stream's position moves to the picture's only with the last byte of the
-    /// last piece.
-    fn give_picture(&mut self, hold: HoldId, offset: u64, first: bool, last: bool, data: &[u8]) {
+    /// last piece. `cols` is the width the picture was made for, which the
+    /// reset needs for the tab stops a new terminal of that width has.
+    fn give_picture(
+        &mut self,
+        hold: HoldId,
+        offset: u64,
+        cols: u16,
+        first: bool,
+        last: bool,
+        data: &[u8],
+    ) {
         let Some(Hold {
             out,
             bound: Some(binding),
@@ -375,10 +388,12 @@ impl Hub {
             return;
         };
         binding.shown = true;
-        let mut bytes = Vec::with_capacity(data.len() + RESET.len());
-        if first {
-            bytes.extend_from_slice(RESET);
-        }
+        let mut bytes = if first {
+            bt_core::reset_keeping_history(cols)
+        } else {
+            Vec::new()
+        };
+        bytes.reserve(data.len());
         bytes.extend_from_slice(data);
         let pieces: Vec<&[u8]> = bytes.chunks(CHUNK).collect();
         for (at, piece) in pieces.iter().enumerate() {

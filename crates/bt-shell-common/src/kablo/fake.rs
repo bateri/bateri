@@ -368,7 +368,7 @@ impl Bridge {
     /// The bytes of the picture of a terminal whose program has written up to
     /// `end`: what a client writes to a freshly reset terminal to see the screen.
     pub fn picture_of(end: u64) -> Vec<u8> {
-        format!("\x1bc<screen at {end}>").into_bytes()
+        format!("<screen at {end}>").into_bytes()
     }
 
     // Serving
