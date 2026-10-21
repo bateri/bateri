@@ -948,8 +948,12 @@ pub struct Placement {
     /// The plain split was not what happened: the dropped subtree took more than its preferred
     /// share, the neighbour was squeezed to its minimum, or the drop moved up to a group above the
     /// pane because the pane itself was too small. The preview can tell the user that neighbours
-    /// will shrink.
+    /// will shrink. It is [`Placement::squeezed`] or [`Placement::climbed`].
     pub made_room: bool,
+    /// The neighbour (or the dropped subtree) was held to a minimum: the plain share did not fit.
+    pub squeezed: bool,
+    /// The drop moved up to a group above the pane because the pane itself was too small.
+    pub climbed: bool,
 }
 
 /// How a length is shared between a subtree being added and the one it is added beside
@@ -1252,8 +1256,23 @@ impl Tree {
         incoming: &Tree,
         room: &Room<'_>,
     ) -> Option<Placement> {
+        self.plan_beside_sharing(leaf, side, incoming, PANE_EDGE_SHARE, room)
+    }
+
+    /// [`Tree::plan_beside`] asking for `share` of the pane (of the group, once the drop has
+    /// climbed to one) instead of half: the plan an agent's `--ratio 30` is. The minimums move it
+    /// the way they move half, so any `share` ends in a plan that keeps every pane at or above
+    /// its minimum, or in `None`.
+    pub fn plan_beside_sharing(
+        &self,
+        leaf: u64,
+        side: Direction,
+        incoming: &Tree,
+        share: f64,
+        room: &Room<'_>,
+    ) -> Option<Placement> {
         let path = self.path_to(leaf)?;
-        self.plan_climbing(&path, side, incoming, PANE_EDGE_SHARE, room)
+        self.plan_climbing(&path, side, incoming, share, room)
     }
 
     /// Where `incoming` would land if let go along one edge of the area ([`WINDOW_EDGE_SHARE`] of
@@ -1395,7 +1414,8 @@ impl Tree {
         }
         (0..=path.len()).rev().find_map(|depth| {
             let mut placement = self.plan_at(&path[..depth], side, incoming, preferred, room)?;
-            placement.made_room |= depth != path.len();
+            placement.climbed = depth != path.len();
+            placement.made_room |= placement.climbed;
             Some(placement)
         })
     }
@@ -1439,6 +1459,8 @@ impl Tree {
             tree,
             landing: landing.scaled(1.0 / room.scale),
             made_room: share.squeezed,
+            squeezed: share.squeezed,
+            climbed: false,
         })
     }
 
@@ -2528,6 +2550,70 @@ mod tests {
         assert_eq!(plan.landing, union_of(&layout, &[10, 11, 12]));
         assert_eq!(plan.landing.width, 403.0);
         assert_at_minimum(&layout, 1.0);
+    }
+
+    #[test]
+    fn a_pane_may_ask_for_a_share_other_than_half_and_says_how_the_plan_went() {
+        let min = min_100_by_60;
+        let room = room_in(1001.0, 600.0, Spacing::DIVIDED, &min);
+        let one = Tree::Leaf(1);
+        let incoming = Tree::Leaf(2);
+        // Half is the plain plan's share, to the pixel.
+        assert_eq!(
+            one.plan_beside_sharing(1, Direction::Right, &incoming, PANE_EDGE_SHARE, &room),
+            one.plan_beside(1, Direction::Right, &incoming, &room)
+        );
+        // A third of the pane goes to the newcomer, and nothing else changed.
+        let plan = one
+            .plan_beside_sharing(1, Direction::Right, &incoming, 0.3, &room)
+            .expect("there is room");
+        assert_eq!(plan.landing.width, 300.0);
+        assert_eq!(
+            (plan.made_room, plan.squeezed, plan.climbed),
+            (false, false, false)
+        );
+        let layout = plan.tree.layout(room.bounds, 1.0);
+        assert_eq!(
+            plan.landing,
+            frame_of(&layout, 2),
+            "the preview is the drop"
+        );
+        // More than the old pane can give: it keeps its minimum and the newcomer has the rest.
+        let plan = one
+            .plan_beside_sharing(1, Direction::Right, &incoming, 0.95, &room)
+            .expect("there is room");
+        assert_eq!(
+            (plan.made_room, plan.squeezed, plan.climbed),
+            (true, true, false)
+        );
+        let layout = plan.tree.layout(room.bounds, 1.0);
+        assert_eq!(frame_of(&layout, 1).width, 100.0);
+        assert_eq!(plan.landing.width, 900.0);
+        // A pane too small to give even its minimum hands the drop to its group, and the share
+        // is then of the group.
+        let narrow = pair(Axis::Horizontal, 0.15, 1, 2);
+        let third = Tree::Leaf(3);
+        let plan = narrow
+            .plan_beside_sharing(1, Direction::Right, &third, 0.3, &room)
+            .expect("the group has room");
+        assert_eq!(
+            (plan.made_room, plan.squeezed, plan.climbed),
+            (true, false, true)
+        );
+        assert_eq!(
+            plan.landing.width, 300.0,
+            "of the whole area, where the group is"
+        );
+        // And the plan the drag makes says the same.
+        let plan = narrow
+            .plan_beside(1, Direction::Right, &third, &room)
+            .expect("the group has room");
+        assert!(plan.climbed && plan.made_room);
+        // No pane, no plan.
+        assert_eq!(
+            one.plan_beside_sharing(7, Direction::Right, &incoming, 0.3, &room),
+            None
+        );
     }
 
     #[test]

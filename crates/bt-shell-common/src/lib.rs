@@ -29,7 +29,8 @@
 //! drops, as a state machine with no transport of its own (`kablo`) — the pipe that
 //! shows one in a pane (`hold`) and the command
 //! palette's rules — its rows, matching, pages, preview and the settings it can change
-//! (`palette`).
+//! (`palette`) — and what an agent on a server asks of bateri: the message, where the pane it
+//! opened lands and what `ls` tells (`agent`).
 //!
 //! **The boundary:** no AppKit, Foundation, Quartz or notification centre —
 //! whatever needs the toolkit stays in the platform shell (`bt-shell-macos` on
@@ -42,6 +43,7 @@
 //! **Layer:** `bateri → bt-shell-{macos,linux} → bt-shell-common → bt-gpu →
 //! {bt-atlas, bt-core}`; nothing here depends upward (`make audit` checks it).
 
+pub mod agent;
 pub mod child;
 pub mod download;
 pub mod environment;

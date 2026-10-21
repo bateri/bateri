@@ -176,19 +176,23 @@ pub fn more_text(more: usize) -> String {
     format!("and {more} more")
 }
 
+/// `running 12m 00s`, or `running` when the time is not known or not yet a second: how a program
+/// in front is told wherever a person is told it (the card's rows, an agent's `ls`).
+pub fn running_text(time: Option<Duration>) -> String {
+    match time
+        .filter(|time| *time > Duration::ZERO)
+        .and_then(running_counter)
+    {
+        Some(time) => format!("running {time}"),
+        None => "running".to_owned(),
+    }
+}
+
 /// What a row says at its right: how long a program has been in front, or since when the shell has
 /// been waiting.
 pub fn activity_text(activity: Activity, now: u64, local: &dyn Fn(u64) -> Local) -> Option<String> {
     match activity {
-        Activity::Running(time) => Some(
-            match time
-                .filter(|time| *time > Duration::ZERO)
-                .and_then(running_counter)
-            {
-                Some(time) => format!("running {time}"),
-                None => "running".to_owned(),
-            },
-        ),
+        Activity::Running(time) => Some(running_text(time)),
         Activity::Idle { since: Some(since) } => {
             let (today, then) = (local(now), local(since));
             Some(match today.day - then.day {

@@ -1583,6 +1583,8 @@ mod tests {
             tree: Tree::Leaf(1),
             landing: Rect::new(10.0, 20.0, 300.0, 200.0),
             made_room: false,
+            squeezed: false,
+            climbed: false,
         }
     }
 

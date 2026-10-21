@@ -105,16 +105,34 @@ impl Background {
     /// What the terminal is doing at `now`, in seconds of the clock the caller measures against
     /// (the Unix epoch of this computer; the server's own is not known).
     pub fn activity(&self, now: u64) -> Activity {
-        match self.front_is_own {
-            Some(false) => Activity::Running(
-                self.front_started
-                    .map(|since| Duration::from_secs(now.saturating_sub(since))),
-            ),
-            Some(true) => Activity::Idle {
-                since: self.output_at.or(self.started),
-            },
-            None => Activity::Unknown,
-        }
+        activity_at(
+            self.front_is_own,
+            self.front_started,
+            self.started,
+            self.output_at,
+            now,
+        )
+    }
+}
+
+/// What a terminal is doing at `now` by the times its server states (a status' `front_is_own`,
+/// `front_started`, `started` and `output_at`): the one reading of them, for the card's rows
+/// ([`Background::activity`]) and for what an agent's `ls` says of any terminal.
+pub fn activity_at(
+    front_is_own: Option<bool>,
+    front_started: Option<u64>,
+    started: Option<u64>,
+    output_at: Option<u64>,
+    now: u64,
+) -> Activity {
+    match front_is_own {
+        Some(false) => Activity::Running(
+            front_started.map(|since| Duration::from_secs(now.saturating_sub(since))),
+        ),
+        Some(true) => Activity::Idle {
+            since: output_at.or(started),
+        },
+        None => Activity::Unknown,
     }
 }
 
