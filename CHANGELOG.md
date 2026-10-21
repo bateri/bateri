@@ -60,7 +60,9 @@ of every installed copy. A version without a section is not released.
   tool), and a link the view opens is
   asked about and opens in this Mac's browser; the question goes when its view does. A
   request the view passes on to the program that goes unanswered for a minute fails for
-  the view. The tab's card shows what the view
+  the view. The view can ask the program what tools, resources and prompts it offers and
+  is told when they change, follows a long request's progress, and can give up a request
+  it no longer waits for (the program is told). The tab's card shows what the view
   shows. After an update, or when the connection to a server's terminal comes back,
   the program is told to open its view again and it comes back in the same pane; one that
   does not within half a minute loses the token it was offered. Words that reach

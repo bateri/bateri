@@ -941,7 +941,7 @@ dependencies = [
 [[package]]
 name = "pencere"
 version = "0.0.0"
-source = "git+https://github.com/bateri/pencere?rev=4e7a3928dfead615cc1bfa93ee98bb9b81e49399#4e7a3928dfead615cc1bfa93ee98bb9b81e49399"
+source = "git+https://github.com/bateri/pencere?rev=067361093b84230ee27bce8aed8793d420fe3620#067361093b84230ee27bce8aed8793d420fe3620"
 dependencies = [
  "serde",
  "serde_json",
