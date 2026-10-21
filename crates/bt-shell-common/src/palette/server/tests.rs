@@ -88,6 +88,7 @@ fn the_facts_of_a_terminal_come_from_what_the_server_said_of_it() {
     let background = Background {
         account: ACCOUNT.to_owned(),
         host: "rasp".to_owned(),
+        argv: Vec::new(),
         terminal: crate::kablo::SessionId::new("b-3").expect("an id"),
         program: Some("claude".to_owned()),
         cwd: Some("/srv/app".to_owned()),

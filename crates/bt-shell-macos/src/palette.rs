@@ -979,6 +979,10 @@ impl Open {
         if matches!(scope, Scope::Tabs) {
             return rules::tab_list(&self.places, query);
         }
+        // A server's page has its own sections and headings, too.
+        if let Scope::Server(host) = scope {
+            return rules::server_list(host, &self.targets, query);
+        }
         if let Scope::History { jump, .. } = scope {
             return rules::history_list(&self.commands, query, *jump);
         }
@@ -2049,6 +2053,8 @@ fn open(window: &TerminalWindow, start: Option<Scope>) {
     let (commands, origins) = app.palette_commands();
     // The file is read as the palette opens; the answer, if it differs, reaches the open card.
     app.refresh_ssh_hosts();
+    // The same for what the servers keep running: the list shown now is what was last heard.
+    app.refresh_background();
     let mut state = Open {
         machine: Palette::new(),
         root: Vec::new(),

@@ -267,14 +267,26 @@ pub(crate) fn restored_panes(
     let ids: Vec<u64> = launches.iter().map(|launch| launch.id).collect();
     let tree = shape
         .to_tree(&ids)
-        .filter(|tree| {
-            let mut leaves = tree.leaves();
-            leaves.sort_unstable();
-            let mut wanted = ids.clone();
-            wanted.sort_unstable();
-            leaves == wanted
-        })
         .ok_or_else(|| "the saved split tree does not match its panes".to_owned())?;
+    born_panes(mtm, tree, launches)
+}
+
+/// Every pane of `launches` born, in their order, for the tree that lays them out: the
+/// second half of [`restored_panes`], and what a tab opened with several panes at once starts
+/// from ([`TerminalWindow::open_arranged_tab`]). The tree's leaves must be the launches' ids.
+pub(crate) fn born_panes(
+    mtm: MainThreadMarker,
+    tree: Tree,
+    launches: Vec<embed::Config>,
+) -> Result<(Tree, Vec<Retained<TerminalPane>>), String> {
+    let ids: Vec<u64> = launches.iter().map(|launch| launch.id).collect();
+    let mut leaves = tree.leaves();
+    leaves.sort_unstable();
+    let mut wanted = ids;
+    wanted.sort_unstable();
+    if leaves != wanted {
+        return Err("the saved split tree does not match its panes".to_owned());
+    }
     let rect = initial_rect();
     let panes = launches
         .into_iter()
@@ -1574,6 +1586,11 @@ impl TerminalTab {
             group: None,
         };
         Some((tab, histories))
+    }
+
+    /// The tabs that hold `ids` opened together in this tab's room ([`SplitView::arranged`]).
+    pub(crate) fn arranged(&self, ids: &[u64], min: crate::split::Size) -> Vec<Tree> {
+        self.ivars().container.arranged(ids, min)
     }
 
     /// Session restore's second tab half, once the window exists: the saved

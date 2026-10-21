@@ -2147,6 +2147,37 @@ impl TerminalWindow {
         Ok(tab)
     }
 
+    /// A new tab with several panes born together, laid out in `tree` with its ratios at once
+    /// and started the way a restored tab is — each pane sees its final size in its first
+    /// `TIOCSWINSZ`: Open All in New Tab. It joins right of the selected tab and is selected,
+    /// the first pane (the tree's top left) with the keyboard. `launches` are in the tree's
+    /// leaf order; the error returns, and the tab leaves again, when no shell starts.
+    pub(crate) fn open_arranged_tab(
+        &self,
+        mtm: MainThreadMarker,
+        tab: u64,
+        tree: Tree,
+        launches: Vec<embed::Config>,
+        look: (Theme, ContentEdge),
+    ) -> Result<Retained<TerminalTab>, String> {
+        let (tree, panes) = tab::born_panes(mtm, tree, launches)?;
+        let ids: Vec<u64> = panes.iter().map(|pane| pane.id()).collect();
+        let (first, extra) = panes
+            .split_first()
+            .ok_or_else(|| "a tab without panes".to_owned())?;
+        let tab = TerminalTab::new(mtm, tab, self.id(), first);
+        self.add_tab(&tab, look);
+        first.observe_frame();
+        tab.adopt(tree, extra);
+        if let Err(e) = tab.start_restored(mtm, &ids, 0, None) {
+            self.close_tab_now(tab.id());
+            return Err(e);
+        }
+        self.refresh_title();
+        tab.refresh_look();
+        Ok(tab)
+    }
+
     /// The `NSWindow` — session restore reads its frame.
     pub(crate) fn ns_window(&self) -> &NSWindow {
         &self.ivars().window

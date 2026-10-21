@@ -81,7 +81,7 @@ use kablo_proto::v1::NewSession;
 use super::hub::{Declined, HoldId, Hub, HubEvent};
 use super::install::Installed;
 use super::ledger::Ledger;
-use super::roster::{Background, Roster, sort_recent_first};
+use super::roster::{Background, Roster, background_note, sort_recent_first};
 use super::{Attach, Cause, Client, ErrorCode, Event, Link, SessionId, Size};
 use crate::hold::HOLD_SOCKET;
 use crate::hold::wire::{CHUNK, Open, Target};
@@ -538,6 +538,7 @@ impl Service {
             shown: Arc::clone(&shown),
             roster: BTreeMap::new(),
             relist: BTreeSet::new(),
+            told: BTreeMap::new(),
             background: Arc::clone(&background),
             refresh: false,
             ending: Vec::new(),
@@ -743,6 +744,9 @@ struct Core {
     roster: BTreeMap<String, Roster>,
     /// The accounts to ask for their terminals again before anything else is done.
     relist: BTreeSet<String>,
+    /// The terminals in the background the last line to a new terminal named, by account
+    /// ([`background_note`]): for as long as the service lives, which is the application's.
+    told: BTreeMap<String, Vec<SessionId>>,
     /// What [`Service::background`] reads.
     background: Arc<Mutex<BTreeMap<String, Vec<Background>>>>,
     /// Something happened that [`Core::shown`] may say differently.
@@ -1083,7 +1087,7 @@ impl Core {
                         .iter()
                         .any(|e| e.account == *account && e.terminal == *terminal)
             };
-            let found = roster.background(account, &entry.server.host, hidden);
+            let found = roster.background(account, &entry.server.host, &entry.server.argv, hidden);
             if !found.is_empty() {
                 background.insert(account.clone(), found);
             }
@@ -1571,7 +1575,33 @@ impl Core {
                 .ledger
                 .shown(account, &terminal, self.panes.get(&hold));
         }
+        self.tell_background(hold, account);
         Ok(())
+    }
+
+    /// A new terminal on a server that keeps others nobody looks at says so, once for these
+    /// terminals ([`background_note`]): in front of what the terminal writes, where the pane
+    /// reads it. The list is what is known now — an account that was made a moment ago has not
+    /// heard of its terminals yet and says nothing, which is the quiet side.
+    fn tell_background(&mut self, hold: HoldId, account: &str) {
+        let Some(host) = self.accounts.get(account).map(|a| a.server.host.clone()) else {
+            return;
+        };
+        let waiting = self
+            .background
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(account)
+            .cloned()
+            .unwrap_or_default();
+        let Some((text, named)) =
+            background_note(&host, &waiting, self.told.get(account).map(Vec::as_slice))
+        else {
+            return;
+        };
+        if self.hub.say(hold, &text) {
+            self.told.insert(account.to_owned(), named);
+        }
     }
 
     /// The first terminal of an account is prepared on a thread of its own;

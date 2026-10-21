@@ -39,7 +39,8 @@
 //! file to write, both in the app delegate's `validateMenuItem:`), `markHost:`,
 //! `toggleHostIntegration:`
 //! (its title, checkmark and grey state in the app delegate's
-//! `validateMenuItem:`, from [`integration_menu`]) and
+//! `validateMenuItem:`, from [`integration_menu`]), `openAllBackground:` (grey unless the
+//! focused pane's server has terminals waiting that no pane shows) and
 //! `toggleCommandPalette:`, `goToTab:`, `goToFolder:`, `jumpToCommand:`, `showCommandHistory:` and
 //! `showThemes:` (View ▸ Command Palette… ⇧⌘P, Window ▸ Go to Tab… ⌘P, Shell ▸ Go to Folder… ⌘O,
 //! Window ▸ Jump to Command…, Edit ▸ Command History…, View ▸ Themes…: the key window's palette;
@@ -562,6 +563,10 @@ pub(crate) fn install(
                 &integration_menu(None).title,
                 sel!(toggleHostIntegration:),
             ),
+            // The terminals the focused pane's server keeps that no pane shows, together in a
+            // new tab: handled by the app delegate (`openAllBackground:`), grey unless the
+            // pane is on a server with some waiting (its `validateMenuItem:`).
+            item(mtm, "Open All in New Tab", sel!(openAllBackground:)),
             // The tab's saved ssh password: the handler is the focused
             // pane (`forgetPassword:`), grey without one (`validateMenuItem:`).
             {

@@ -24,6 +24,7 @@ use bt_core::PaneUuid;
 use bt_shell_common::kablo::SessionId;
 use bt_shell_common::kablo::install::Bundle;
 use bt_shell_common::kablo::ledger::Ledger;
+use bt_shell_common::kablo::roster::Background;
 use bt_shell_common::kablo::service::{PaneInfo, PaneLink, Peer, QUIT_END_WAIT, Service, Shown};
 use bt_shell_common::kablo::ssh::SshBackend;
 
@@ -78,6 +79,32 @@ pub(crate) fn end_all(panes: &[PaneUuid]) {
 /// that shows its own shell and, in a process without the service, for every pane.
 pub(crate) fn shown(pane: &PaneUuid) -> Option<Shown> {
     SERVICE.get()?.shown(pane)
+}
+
+/// The terminals the servers keep for the user that no pane of this Mac shows, the last to write
+/// first: what the service last heard, read without waiting for a server
+/// ([`Service::background_all`]). None in a process without the service.
+pub(crate) fn background_all() -> Vec<Background> {
+    SERVICE
+        .get()
+        .map(Service::background_all)
+        .unwrap_or_default()
+}
+
+/// Asks every server again for its terminals: for the moments somebody is about to look at
+/// the list (the palette opening). The answer renews [`background_all`] and, when it differs,
+/// reaches [`crate::app::AppDelegate::background_changed`].
+pub(crate) fn refresh_background() {
+    if let Some(service) = SERVICE.get() {
+        service.refresh_background();
+    }
+}
+
+/// A pane is about to show the terminal `terminal` of `account` that nobody did: the ledger
+/// forgets the pane it still names for it (one that is gone — a crash left it — would make the
+/// new pane's request be refused as "shown by another pane"). The terminal itself goes on.
+pub(crate) fn claim(account: &str, terminal: &SessionId) {
+    ledger().gone(account, terminal);
 }
 
 /// The user closed the pane: the terminal it shows ends on the server. Called
@@ -176,6 +203,18 @@ fn link_changed(pane: &PaneUuid, link: PaneLink) {
         let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
         if let Some(pane) = delegate(mtm).and_then(|delegate| delegate.pane_with_uuid(&pane)) {
             pane.set_connection(link);
+        }
+    });
+}
+
+/// What a server keeps in the background is not what it was: the application on the main
+/// queue, where the palette is, lists it afresh.
+fn background_changed(_account: &str) {
+    DispatchQueue::main().exec_async(move || {
+        // audit: a block running on the main queue is on the main thread by definition.
+        let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
+        if let Some(app) = delegate(mtm) {
+            app.background_changed();
         }
     });
 }
@@ -280,6 +319,7 @@ pub(crate) fn serve(
         masters,
         linked: Box::new(link_changed),
         changed: Box::new(terminal_changed),
+        listed: Box::new(background_changed),
     };
     if let Ok(service) = Service::start(dir, Arc::new(backend), ledger()) {
         let _ = SERVICE.set(service);

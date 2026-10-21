@@ -82,6 +82,10 @@ const WORDS: &[(&str, &str)] = &[
     ("movePaneToNextTab", "pane"),
     ("moveTabToNewGroup", "folder collect"),
     ("markHost", "production staging development color host ssh"),
+    (
+        "openAllBackground",
+        "background terminals server remote running",
+    ),
     ("forgetPassword", "keychain ssh login"),
     ("cancelUpload", "stop transfer"),
     ("matchSystemTheme", "auto macos appearance"),

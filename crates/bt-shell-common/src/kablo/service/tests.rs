@@ -714,6 +714,45 @@ fn a_terminal_is_taken_up_again_only_by_the_pane_that_showed_it() {
     assert_eq!(again.outcome(), Outcome::Exit(0));
 }
 
+/// A terminal the ledger names a pane for is that pane's alone; once the ledger lets go of it
+/// (the application does when a person picks it from the list of those nobody shows — the pane
+/// the row names may be one that is gone) another pane takes it up.
+#[test]
+fn a_terminal_the_ledger_let_go_of_is_taken_up_by_another_pane() {
+    let ledger = Arc::new(Ledger::memory());
+    let rig = Rig::kept(
+        "released",
+        Fake::new(Bridge::new(Age::Current)),
+        Arc::clone(&ledger),
+        END_GRACE,
+    );
+    let _first = Holder::new(&rig.socket(), "b-1");
+    rig.terminals(1);
+    let agent = rig.world.bridge().add("agent-1", Size::default());
+    let gone = PaneUuid::parse("1a2b3c4d-5e6f-4a1b-8c9d-0e1f2a3b4c5d").expect("a canonical uuid");
+    ledger.shown(ACCOUNT, &agent, Some(&gone));
+    let wants = || Target::Resume {
+        account: ACCOUNT.into(),
+        offset: Some(0),
+    };
+
+    // A pane of another identity is refused while the ledger names the first.
+    rig.world.info.lock().expect("lock").tab = Some(pane_named(&rig.world));
+    let mut refused = Holder::start(&rig.socket(), "agent-1", wants());
+    assert_eq!(refused.outcome(), Outcome::Exit(crate::hold::EXIT_REFUSED));
+
+    ledger.gone(ACCOUNT, &agent);
+    let taker = Holder::start(&rig.socket(), "agent-1", wants());
+    rig.world.bridge().write(&agent, b"mine");
+    until("the pane that took it is shown it", || {
+        String::from_utf8_lossy(&taker.shown.bytes()).contains("mine")
+    });
+    assert!(
+        ledger.pane_of(ACCOUNT, &agent).is_some(),
+        "and the ledger names the pane that shows it now"
+    );
+}
+
 #[test]
 fn the_socket_is_the_users_and_goes_with_the_service() {
     let rig = Rig::new("socket");
@@ -1624,6 +1663,11 @@ fn what_runs_on_the_server_and_no_pane_shows_is_in_the_background_the_last_to_wr
     let found = rig.service.background(ACCOUNT);
     assert_eq!(found[0].host, "rasp");
     assert_eq!(found[0].account, ACCOUNT);
+    assert_eq!(
+        found[0].argv,
+        ["ssh", "rasp"],
+        "what a pane that shows it is started with"
+    );
     assert_eq!(found[0].program.as_deref(), Some("claude"));
     assert_eq!(found[0].label.as_deref(), Some("review"));
     assert_eq!(
@@ -1749,4 +1793,46 @@ fn the_next_answer_takes_a_terminal_that_ended_out_of_the_list() {
     rig.world.bridge().exit(&agent, Exit::Code(0));
     rig.service.refresh_background();
     until("gone", || rig.service.background(ACCOUNT).is_empty());
+}
+
+/// A new terminal on a server that keeps others nobody looks at is told so before the terminal
+/// writes, once for these terminals: the next one while the same wait is silent, and the first of
+/// an account, made before the server was heard from, says nothing.
+#[test]
+fn a_new_terminal_is_told_of_those_waiting_in_the_background_once() {
+    let rig = Rig::new("background-note");
+    let first = Holder::new(&rig.socket(), "b-1");
+    rig.terminals(1);
+    rig.world.bridge().add("agent-busy", Size::default());
+    rig.service.refresh_background();
+    until("listed", || background_names(&rig) == ["agent-busy"]);
+
+    let line = "bateri: 1 more terminal is running on rasp; click \u{21c4} rasp below to see it";
+    let second = Holder::new(&rig.socket(), "b-2");
+    rig.terminals(2);
+    until("the second is told", || {
+        String::from_utf8_lossy(&second.shown.bytes()).contains(line)
+    });
+    let shown = String::from_utf8_lossy(&second.shown.bytes()).into_owned();
+    assert!(
+        shown.starts_with("\x1b[0m\x1b[2m"),
+        "dim, before any output"
+    );
+
+    // The same wait again: said once. A byte from the third terminal is the point after which
+    // a note, had one been sent, would have arrived.
+    let third = Holder::new(&rig.socket(), "b-3");
+    let terminals_after = rig.terminals(3);
+    rig.world.bridge().write(&terminals_after[2], b"hello");
+    until("the third shows its terminal", || {
+        third.shown.bytes().ends_with(b"hello")
+    });
+    assert!(
+        !String::from_utf8_lossy(&third.shown.bytes()).contains("more terminal"),
+        "told once for these"
+    );
+    assert!(
+        !String::from_utf8_lossy(&first.shown.bytes()).contains("more terminal"),
+        "nothing was known when the first was made"
+    );
 }

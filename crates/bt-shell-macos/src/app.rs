@@ -406,6 +406,10 @@ pub(crate) struct Start {
     /// Whether `line` runs as the shell's first command: a server the user chose to connect to,
     /// in the tab or split the choice opened. A command from the history never does.
     pub(crate) run: bool,
+    /// A terminal a server keeps that nobody shows, which the new pane's first program is the
+    /// pipe to ([`Held::resume`]): a terminal from the palette's list of those running in the
+    /// background. No line is typed and nothing is inherited — the terminal is the pane's.
+    pub(crate) held: Option<Held>,
 }
 
 /// Where a command the palette lists ran, in the same order as the list the palette was handed
@@ -467,6 +471,11 @@ fn held_start(
     target: Option<&bt_core::RemoteTarget>,
     integration: &[(String, String)],
 ) -> Option<Held> {
+    // A terminal chosen from the list of those nobody shows: the pipe asks for it by name,
+    // whatever pane the new one grows from.
+    if let Some(held) = start.and_then(|start| start.held.as_ref()) {
+        return pipe_installed(integration).then(|| held.clone());
+    }
     if !matches!(opening, Opening::Tab | Opening::Split) || start.is_some() || !kept {
         return None;
     }
@@ -476,6 +485,27 @@ fn held_start(
         args: args.to_vec(),
         resume: None,
     })
+}
+
+/// The entry of `servers` for the server `name` (`deploy@db-1` and `db-1` are one), made when
+/// there is none.
+fn server_slot<'a>(
+    servers: &'a mut Vec<bt_shell_common::palette::ServerFacts>,
+    name: &str,
+) -> &'a mut bt_shell_common::palette::ServerFacts {
+    let bare = bt_core::bare_host(name);
+    let at = servers
+        .iter()
+        .position(|server| bt_core::bare_host(&server.name) == bare)
+        .unwrap_or_else(|| {
+            servers.push(bt_shell_common::palette::ServerFacts {
+                name: name.to_owned(),
+                background: Vec::new(),
+                panes: Vec::new(),
+            });
+            servers.len() - 1
+        });
+    &mut servers[at]
 }
 
 /// Whether the shell integration's environment names the executable and the instance a pane's
@@ -1775,6 +1805,11 @@ define_class!(
                         config_root: Some(_)
                     }
                 )
+            } else if item.action() == Some(sel!(openAllBackground:)) {
+                // Shell ▸ Open All in New Tab: the pane that has the keyboard is on a server
+                // kablo keeps terminals on, and some of them run with no pane showing them.
+                self.key_server_background()
+                    .is_some_and(|(_, waiting)| waiting > 0)
             } else if item.action() == Some(sel!(openSettingsFile:))
                 || item.action() == Some(sel!(openThemesFolder:))
             {
@@ -2004,6 +2039,17 @@ define_class!(
                     self.save_edit(&SettingsEdit::RemoteHostIntegration { host, on: true });
                     self.forget_plain(None);
                 }
+            }
+        }
+
+        /// Shell ▸ Open All in New Tab: the terminals the server of the pane with the keyboard
+        /// keeps and no pane shows, together in a new tab of the key window.
+        #[unsafe(method(openAllBackground:))]
+        fn open_all_background_item(&self, _sender: Option<&AnyObject>) {
+            if let Some((host, _)) = self.key_server_background()
+                && let Some(window) = self.key_window()
+            {
+                self.open_all_background(&window, &host);
             }
         }
 
@@ -4568,9 +4614,11 @@ impl AppDelegate {
             served.as_ref().map(|(_, target, _)| target),
             &integration.env,
         );
-        let initial = if held.is_some() {
-            if let Some(dir) =
-                session.and_then(|session| start_directory(session.remote_link_directory()))
+        let initial = if let Some(held) = &held {
+            // A terminal that exists starts where it is; only a new one is asked for a folder.
+            if held.resume.is_none()
+                && let Some(dir) =
+                    session.and_then(|session| start_directory(session.remote_link_directory()))
             {
                 crate::hold_service::expect_directory(id, dir);
             }
@@ -5481,10 +5529,55 @@ impl AppDelegate {
             folders,
             hosts,
             ports,
-            // The servers kablo keeps terminals on are not told to the palette yet: none has a
-            // page or a count.
-            servers: Vec::new(),
+            servers: self.palette_servers(),
         }
+    }
+
+    /// The servers kablo keeps terminals on, as the palette lists them: the panes of this Mac on
+    /// each (in the order the tabs are listed) and the terminals it keeps that no pane shows (the
+    /// service's cache — [`crate::hold_service::background_all`] — which is read, not waited for).
+    /// A server nobody here shows a terminal of and that keeps none is not among them, and a
+    /// plain `ssh` never is.
+    fn palette_servers(&self) -> Vec<bt_shell_common::palette::ServerFacts> {
+        use bt_shell_common::palette::{BackgroundFacts, ServerPane};
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_secs());
+        let mut servers: Vec<bt_shell_common::palette::ServerFacts> = Vec::new();
+        for facts in self.palette_places().tabs {
+            let Some(tab) = self.tab(facts.tab) else {
+                continue;
+            };
+            for pane in tab.panes() {
+                // A server the service cannot name (its account was dropped) has no page.
+                let Some(shown) =
+                    crate::hold_service::shown(pane.uuid()).filter(|shown| !shown.host.is_empty())
+                else {
+                    continue;
+                };
+                let directory = pane
+                    .session()
+                    .map(|session| session.remote_link_directory())
+                    .filter(|directory| !directory.is_empty());
+                server_slot(&mut servers, &shown.host)
+                    .panes
+                    .push(ServerPane {
+                        tab: facts.tab,
+                        pane: pane.id(),
+                        title: directory
+                            .or(shown.program)
+                            .unwrap_or_else(|| "terminal".to_owned()),
+                        tab_title: facts.title.clone(),
+                        key: facts.key.clone(),
+                    });
+            }
+        }
+        for background in crate::hold_service::background_all() {
+            server_slot(&mut servers, &background.host)
+                .background
+                .push(BackgroundFacts::of(&background, now));
+        }
+        servers
     }
 
     /// Reads `~/.ssh/config` (and what it includes) off the main thread; when the answer differs
@@ -5535,13 +5628,14 @@ impl AppDelegate {
         let Some(window) = self.window(window) else {
             return;
         };
-        let beside = matches!(go, Go::SplitHost(_));
+        let beside = matches!(go, Go::SplitHost(_) | Go::SplitBackground { .. });
         match go {
             Go::OpenFolder(path) => {
                 let start = Start {
                     directory: Some(PathBuf::from(path)),
                     line: None,
                     run: false,
+                    held: None,
                 };
                 self.new_tab_started(window.id(), Seat::Beside, Some(&start));
             }
@@ -5554,6 +5648,7 @@ impl AppDelegate {
                     directory: None,
                     line: Some(line),
                     run: true,
+                    held: None,
                 };
                 let split = beside
                     && window
@@ -5580,13 +5675,180 @@ impl AppDelegate {
             Go::ShowFolder(path) => crate::hyperlink::show_folder(std::path::Path::new(&path)),
             // A port runs where the palette's card chose it (it holds the address).
             Go::OpenPort(_) | Go::CopyPort(_) => {}
-            // The rows of a server's page exist only once the palette is told of the servers
-            // ([`Self::palette_targets`]).
-            Go::OpenBackground { .. }
-            | Go::SplitBackground { .. }
-            | Go::OpenAllBackground(_)
-            | Go::FocusPane { .. } => {}
+            // A terminal a server keeps that no pane shows: a new tab that is that terminal
+            // (⌥⏎: beside the pane on screen, by the rule of a server's own ⌥⏎). It is taken
+            // as it is when this runs, not as the row was listed: one that ended meanwhile, or
+            // that a pane shows by now, is beeped at.
+            Go::OpenBackground { account, terminal }
+            | Go::SplitBackground { account, terminal } => {
+                let found = crate::hold_service::background_all()
+                    .into_iter()
+                    .find(|found| found.account == account && found.terminal.as_str() == terminal);
+                let Some(start) = found.as_ref().and_then(|found| self.held_background(found))
+                else {
+                    crate::preview::beep();
+                    return;
+                };
+                if let Some(found) = &found {
+                    crate::hold_service::claim(&found.account, &found.terminal);
+                }
+                let split = beside
+                    && window
+                        .try_selected_tab()
+                        .is_some_and(|tab| tab.split_with_line(&start));
+                if !split {
+                    self.new_tab_started(window.id(), Seat::Beside, Some(&start));
+                }
+            }
+            Go::OpenAllBackground(host) => self.open_all_background(&window, &host),
+            // A pane of the server's page: its tab comes forward and the pane has the keyboard;
+            // nothing moves.
+            Go::FocusPane { tab, pane } => {
+                if let Some(tab) = self.tab(tab)
+                    && let Some(window) = tab.window()
+                    && let Some(pane) = tab.panes().into_iter().find(|p| p.id() == pane)
+                {
+                    window.bring_to_front(&tab, &pane);
+                }
+            }
         }
+    }
+
+    /// The start of a pane that shows the terminal `found`, which the server keeps and no pane
+    /// shows: the pipe to it, asked for by name, as a restored pane's is. `None` when this
+    /// process has no pipe to start (no package, a timed run) or the terminal's server is not
+    /// named by arguments — a pane that could not show it must not be opened as a plain shell.
+    fn held_background(&self, found: &bt_shell_common::kablo::roster::Background) -> Option<Start> {
+        if !pipe_installed(&self.shell_integration().env) {
+            return None;
+        }
+        let args = found
+            .argv
+            .get(1..)
+            .filter(|args| !args.is_empty())?
+            .to_vec();
+        Some(Start {
+            directory: None,
+            line: None,
+            run: false,
+            held: Some(Held {
+                args,
+                resume: Some(Resume {
+                    account: found.account.clone(),
+                    terminal: found.terminal.as_str().to_owned(),
+                }),
+            }),
+        })
+    }
+
+    /// Open All in New Tab: every terminal the server `host` keeps that no pane shows, together
+    /// in a new tab of `window` ([`bt_shell_common::split::arrange`]: two side by side, three
+    /// with one tall, four as a grid, six at most; the rest in the next tab), the one that wrote
+    /// last at the top left with the keyboard. What is opened is what the service knows now.
+    pub(crate) fn open_all_background(&self, window: &TerminalWindow, host: &str) {
+        let wanted = bt_core::bare_host(host);
+        let found: Vec<_> = crate::hold_service::background_all()
+            .into_iter()
+            .filter(|found| bt_core::bare_host(&found.host) == wanted)
+            .collect();
+        // Only what a pane could show: the claim below lets go of nothing else.
+        let (found, starts): (Vec<_>, Vec<Start>) = found
+            .into_iter()
+            .filter_map(|found| self.held_background(&found).map(|start| (found, start)))
+            .unzip();
+        if starts.is_empty() || !window.selection_free() {
+            crate::preview::beep();
+            return;
+        }
+        for found in &found {
+            crate::hold_service::claim(&found.account, &found.terminal);
+        }
+        if let Err(e) = self.open_background_tabs(window, &starts) {
+            eprintln!("bateri: {e}");
+        }
+    }
+
+    /// The tabs [`Self::open_all_background`] opens: `starts` laid out in tabs that hold as
+    /// many as fit with every pane at its smallest size or above. The tab with the first start
+    /// is on screen when it is done, its first pane focused.
+    fn open_background_tabs(
+        &self,
+        window: &TerminalWindow,
+        starts: &[Start],
+    ) -> Result<(), String> {
+        use bt_shell_common::restore::Shape;
+        let mtm = self.mtm();
+        let tab_on_screen = window.selected_tab();
+        let source = tab_on_screen.focused_pane();
+        let min = source
+            .min_size()
+            .map_or(crate::split::Size::new(0.0, 0.0), |min| {
+                crate::split::Size::new(min.width, min.height)
+            });
+        // The panes are not born yet: the arrangement is of their places in `starts`.
+        let places: Vec<u64> = (0..starts.len() as u64).collect();
+        let edge = self.settings().content_edge;
+        let mut on_screen = None;
+        for tree in tab_on_screen.arranged(&places, min) {
+            let order = tree.leaves();
+            let tab = self.next_id();
+            let mut launches = Vec::new();
+            let mut theme = None;
+            for place in &order {
+                let (launch, look) = self.pane_launch(
+                    tab,
+                    Some(&source),
+                    Opening::Tab,
+                    starts.get(usize::try_from(*place).unwrap_or(usize::MAX)),
+                );
+                theme.get_or_insert(look);
+                launches.push(launch);
+            }
+            let ids: Vec<u64> = launches.iter().map(|launch| launch.id).collect();
+            let (Some(tree), Some(theme)) = (
+                Shape::from_tree(&tree, &order).and_then(|shape| shape.to_tree(&ids)),
+                theme,
+            ) else {
+                return Err("the arranged panes do not match their tree".to_owned());
+            };
+            let opened = window.open_arranged_tab(mtm, tab, tree, launches, (theme, edge))?;
+            on_screen.get_or_insert(opened.id());
+        }
+        if let Some(first) = on_screen {
+            window.select_tab(first);
+        }
+        window.refresh_title();
+        Ok(())
+    }
+
+    /// The server of the pane that has the keyboard, when kablo keeps its terminals, and how
+    /// many it keeps that no pane shows: Shell ▸ Open All in New Tab's target.
+    fn key_server_background(&self) -> Option<(String, usize)> {
+        let pane = self.key_tab()?.focused_pane();
+        let host = crate::hold_service::shown(pane.uuid())?.host;
+        let wanted = bt_core::bare_host(&host).to_owned();
+        let count = crate::hold_service::background_all()
+            .iter()
+            .filter(|found| bt_core::bare_host(&found.host) == wanted)
+            .count();
+        Some((host, count))
+    }
+
+    /// What a server keeps in the background is not what it was (the service heard it): an
+    /// open palette lists it afresh.
+    pub(crate) fn background_changed(&self) {
+        for window in self.windows() {
+            crate::palette::retarget(&window, self.palette_targets());
+        }
+    }
+
+    /// The palette is about to show the list: every server is asked for its terminals again, and
+    /// the answer reaches [`Self::background_changed`].
+    pub(crate) fn refresh_background(&self) {
+        if matches!(self.inputs(), Inputs::Hermetic) {
+            return;
+        }
+        crate::hold_service::refresh_background();
     }
 
     /// What choosing a tab's or a group's row, or an action of its menu, comes to
@@ -5858,6 +6120,7 @@ impl AppDelegate {
                 directory: origin.directory.clone().filter(|dir| dir.is_dir()),
                 line: Some(line),
                 run: false,
+                held: None,
             })
         };
         match how {
@@ -9024,6 +9287,7 @@ mod tests {
             directory: Some(PathBuf::from("/Users/a/api")),
             line: None,
             run: false,
+            held: None,
         };
         assert_eq!(
             first_input(Opening::Tab, remote(), Some(&folder)),
@@ -9033,6 +9297,7 @@ mod tests {
             directory: None,
             line: Some("make test".to_owned()),
             run: false,
+            held: None,
         };
         let (input, inherited) = first_input(Opening::Tab, remote(), Some(&history));
         assert_eq!(input, Some(InitialInput::ready("make test")));
@@ -9047,6 +9312,7 @@ mod tests {
             directory: None,
             line: Some("ssh db-1".to_owned()),
             run: true,
+            held: None,
         };
         assert_eq!(
             first_input(Opening::Tab, remote(), Some(&server)),
@@ -9106,6 +9372,7 @@ mod tests {
             directory: Some(PathBuf::from("/Users/a/api")),
             line: None,
             run: false,
+            held: None,
         };
         assert_eq!(
             held(Opening::Tab, Some(&folder), true, Some(&target), &installed),
@@ -9144,6 +9411,60 @@ mod tests {
             None
         );
         assert_eq!(held(Opening::Tab, None, true, Some(&target), &[]), None);
+    }
+
+    #[test]
+    fn a_terminal_chosen_from_the_list_is_the_new_panes_first_program_whatever_it_grows_from() {
+        let installed = [
+            ("BATERI_BIN".to_owned(), "/b".to_owned()),
+            ("BATERI_SSH_INSTANCE".to_owned(), "0a1b2c3d".to_owned()),
+        ];
+        let chosen = Held {
+            args: vec!["rasp".to_owned()],
+            resume: Some(Resume {
+                account: "u@rasp:22".to_owned(),
+                terminal: "b-7".to_owned(),
+            }),
+        };
+        let start = Start {
+            held: Some(chosen.clone()),
+            ..Start::default()
+        };
+        // From a local pane, a pane on another server, a window or a restore: the terminal
+        // is the pane's, asked for by name, not made.
+        let other = ssh_target(&["ssh", "-p", "2222", "prod"]);
+        for opening in [Opening::Tab, Opening::Split, Opening::LocalTab] {
+            assert_eq!(
+                held_start(opening, Some(&start), false, None, &installed),
+                Some(chosen.clone()),
+                "{opening:?}"
+            );
+            assert_eq!(
+                held_start(opening, Some(&start), true, Some(&other), &installed),
+                Some(chosen.clone()),
+                "{opening:?}"
+            );
+        }
+        // Without the pipe's binary there is no pane that could show it (and never a plain
+        // shell in its place): the caller beeps.
+        assert_eq!(
+            held_start(Opening::Tab, Some(&start), false, None, &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn the_servers_the_palette_is_told_of_are_one_per_host_whoever_the_user_typed() {
+        let mut servers = Vec::new();
+        server_slot(&mut servers, "deploy@db-1");
+        server_slot(&mut servers, "rasp");
+        server_slot(&mut servers, "db-1").panes.clear();
+        let names: Vec<&str> = servers.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["deploy@db-1", "rasp"],
+            "the first name stands for both"
+        );
     }
 
     #[test]

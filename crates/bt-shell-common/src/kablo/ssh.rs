@@ -51,6 +51,9 @@ pub type LinkNews = Box<dyn Fn(&PaneUuid, PaneLink) + Send + Sync>;
 /// server keeps from now on, or no longer ([`Backend::terminal_changed`]).
 pub type ChangeNews = Box<dyn Fn(&PaneUuid) + Send + Sync>;
 
+/// Told the account whose terminals in the background are not what they were.
+pub type BackgroundNews = Box<dyn Fn(&str) + Send + Sync>;
+
 /// What the service gets from the application, as closures and values.
 pub struct SshBackend {
     /// The ssh program (`ssh`).
@@ -81,6 +84,9 @@ pub struct SshBackend {
     /// A pane began to show a terminal a server keeps, or stopped
     /// ([`Backend::terminal_changed`]).
     pub changed: ChangeNews,
+    /// The terminals an account keeps in the background are not what they were
+    /// ([`Backend::background_changed`]).
+    pub listed: BackgroundNews,
 }
 
 impl SshBackend {
@@ -296,6 +302,10 @@ impl Backend for SshBackend {
 
     fn link_changed(&self, pane: &PaneUuid, link: PaneLink) {
         (self.linked)(pane, link);
+    }
+
+    fn background_changed(&self, account: &str) {
+        (self.listed)(account);
     }
 }
 

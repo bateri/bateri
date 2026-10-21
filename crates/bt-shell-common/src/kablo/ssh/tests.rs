@@ -91,6 +91,7 @@ impl World {
             masters: None,
             linked: Box::new(|_, _| ()),
             changed: Box::new(|_| ()),
+            listed: Box::new(|_| ()),
         }
     }
 

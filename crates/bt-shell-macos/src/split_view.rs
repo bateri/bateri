@@ -723,6 +723,22 @@ impl SplitView {
         self.ivars().tree.borrow().clone()
     }
 
+    /// The tabs that hold `ids` opened together, as [`split::arrange`] lays them out in this
+    /// container's room — a new tab of the window is the same size — with every pane held to
+    /// `min` ([`TerminalPane::min_size`], measured on a pane of this window). `ids` are the
+    /// panes' places, not yet their identities: the caller maps them once the panes are born.
+    pub(crate) fn arranged(&self, ids: &[u64], min: Size) -> Vec<Tree> {
+        let scale = self.scale();
+        let smallest = move |_: u64| min;
+        let room = Room {
+            bounds: self.bounds_rect(),
+            scale,
+            spacing: spacing(ids.len(), scale, self.style(), self.beside_tabs()),
+            min: &smallest,
+        };
+        split::arrange(ids, &room)
+    }
+
     /// Whether every pane's plain (unzoomed) frame passes its smallest-pane
     /// limit ([`TerminalPane::min_size`]) — a restored tree from a larger
     /// screen or a smaller font may not.

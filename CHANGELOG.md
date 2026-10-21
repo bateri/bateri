@@ -68,6 +68,24 @@ of every installed copy. A version without a section is not released.
   its `ssh` line ready and a line saying so. A terminal that was to end while the
   server could not be reached is ended the next time bateri connects to it.
 
+- **⌘P finds the terminals a server keeps that no pane shows, and opens them.**
+  A terminal an agent started on `rasp`, one you started there with `kablo new`,
+  or one a crashed bateri left running keeps running with nobody looking at it;
+  typing `claude` or `rasp` now lists it under *Running in the background*, with the
+  directory it is in and, when a program is running in it, for how long. ⏎ opens
+  it in a new tab, ⌥⏎ beside the pane you are in (below it, or in a new tab, when
+  there is no room), from where it was — nothing is typed and nothing starts again.
+  A server's row says how many are waiting (“ssh config · 3 tabs · 2 in the
+  background”) and → opens its page: *Open All in New Tab* (two side by side,
+  three with one tall, four as a grid, up to six in a tab and the rest in the
+  next, the one that wrote last at the top left with the keyboard), the ones
+  running in the background, your own panes on that server with their tabs (⏎
+  goes there, nothing moves), and *New Tab on rasp*. The same *Open All in New
+  Tab* is in the Shell menu, grey unless the pane you are in is on a server that
+  keeps some. A plain `ssh` has none of this. When you open a new terminal on a
+  server that keeps others running in the background, a dim line above the prompt
+  says how many, once for the same ones.
+
 - **A newer bateri brings its kablo to the servers without ending anything.**
   The kablo that bateri puts on a server is the one that came in its package; an
   older one that is there stays where it is, and the terminals running under it

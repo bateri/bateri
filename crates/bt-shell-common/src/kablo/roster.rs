@@ -34,6 +34,9 @@ pub struct Background {
     pub account: String,
     /// The server as the user typed it (`rasp`): the word that names it in the lines they read.
     pub host: String,
+    /// The `ssh` arguments that reach the server, the program's name first
+    /// ([`super::service::Shown::argv`]): what a pane that shows the terminal is started with.
+    pub argv: Vec<String>,
     /// The terminal's name on the server.
     pub terminal: SessionId,
     /// The program in front of the terminal, as the server last said.
@@ -187,6 +190,7 @@ impl Roster {
         &self,
         account: &str,
         host: &str,
+        argv: &[String],
         hidden: impl Fn(&SessionId) -> bool,
     ) -> Vec<Background> {
         let mut found: Vec<Background> = self
@@ -196,6 +200,7 @@ impl Roster {
             .map(|(id, entry)| Background {
                 account: account.to_owned(),
                 host: host.to_owned(),
+                argv: argv.to_vec(),
                 terminal: id.clone(),
                 program: entry.program.clone(),
                 cwd: entry.cwd.clone(),
@@ -224,6 +229,35 @@ pub fn sort_recent_first(terminals: &mut [Background]) {
             .then(b.started.cmp(&a.started))
             .then_with(|| a.terminal.cmp(&b.terminal))
     });
+}
+
+/// What a person opening a new terminal on a server is told when others wait there in the
+/// background, in one dim line: how many, and where the card that lists them is. `last` is the
+/// terminals the previous line named for this server (sorted, as returned here in `told`); the
+/// line comes only when `waiting` is not what it named, so the same news is not told at every
+/// `ssh`. `None` when nothing waits or when the line was said for exactly these.
+pub fn background_note(
+    host: &str,
+    waiting: &[Background],
+    last: Option<&[SessionId]>,
+) -> Option<(String, Vec<SessionId>)> {
+    if waiting.is_empty() {
+        return None;
+    }
+    let mut named: Vec<SessionId> = waiting.iter().map(|b| b.terminal.clone()).collect();
+    named.sort();
+    if last == Some(&named[..]) {
+        return None;
+    }
+    // The name is what the user typed; the line is one line whatever it holds.
+    let host: String = host.chars().filter(|c| !c.is_control()).collect();
+    let (subject, object) = match named.len() {
+        1 => ("1 more terminal is".to_owned(), "it"),
+        n => (format!("{n} more terminals are"), "them"),
+    };
+    let text =
+        format!("bateri: {subject} running on {host}; click \u{21c4} {host} below to see {object}");
+    Some((text, named))
 }
 
 #[cfg(test)]

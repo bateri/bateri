@@ -203,6 +203,8 @@ pub const COMMANDS: &[Command] = &[
     command("mark_development", "markHost:2", &[]),
     command("mark_none", "markHost:3", &[]),
     command("shell_integration", "toggleHostIntegration", &[]),
+    // The terminals the focused pane's server keeps that no pane shows, together in a new tab.
+    command("open_all_background", "openAllBackground", &[]),
     // The id's tag is the menu item's marker (its title changes with the host).
     command("forget_password", "forgetPassword:47", &[]),
     command("cancel_upload", "cancelUpload", &["cmd+."]),
@@ -543,17 +545,22 @@ mod tests {
     }
 
     #[test]
-    fn the_commands_with_no_shortcut_are_the_menus_twenty_eight_and_three_new() {
+    fn the_commands_with_no_shortcut_are_the_menus_twenty_eight_and_four_new() {
         let none: Vec<&str> = COMMANDS
             .iter()
             .filter(|command| command.defaults.is_empty())
             .map(|command| command.name)
             .collect();
-        // The twenty-eight items of the menu that have no key today, and the three that
+        // The twenty-eight items of the menu that have no key today, and the four that
         // join the menu: Command History…, Themes… and Open Themes Folder (which the theme
-        // list builds every time it opens).
-        assert_eq!(none.len(), 28 + 3, "{none:?}");
-        for new in ["command_history", "themes", "open_themes_folder"] {
+        // list builds every time it opens), and Open All in New Tab.
+        assert_eq!(none.len(), 28 + 4, "{none:?}");
+        for new in [
+            "command_history",
+            "themes",
+            "open_themes_folder",
+            "open_all_background",
+        ] {
             assert!(none.contains(&new), "{new}");
         }
     }
