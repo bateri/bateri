@@ -23,6 +23,8 @@
 //!   [`suggested`] — what the empty root suggests.
 //! - [`Targets`], [`go`] and [`path_list`] — the folders, servers and ports ⌘O lists, a typed
 //!   path's entries, and what choosing each does ([`Go`]).
+//! - [`ServerFacts`], [`server_list`] — what a server keeps in the background and the panes of
+//!   this Mac on it: the terminals ⌘P finds by searching and the page under a server's row.
 //!
 //! The palette's commands are the **menu's own** (the shell reads the menu, so a command exists
 //! in the palette exactly when it exists in the menu); the rows of the menu are built by the
@@ -39,6 +41,7 @@ mod path;
 mod rank;
 mod recent;
 mod row;
+mod server;
 mod state;
 mod switch;
 mod synonyms;
@@ -73,6 +76,10 @@ pub use rank::{
 };
 pub use recent::{HEADER as RECENT_HEADER, LIMIT as RECENT_LIMIT, Recent};
 pub use row::{Kind, Preview, Row, Scope, Slot, Status, Swatch, Tone, command_id};
+pub use server::{
+    BACKGROUND_HEADING, BackgroundFacts, PANES_HEADING, ServerFacts, ServerPane, background_key,
+    background_row, background_rows, open_all_row, pane_row, server_list, server_of, server_rows,
+};
 pub use state::{Effect, Key, Modifier, Palette, REST};
 pub use switch::{
     Act, EARLIER_HEADING, GROUPS_HEADING, GroupFacts, Places, RECENT_TABS, Report, TabFacts, act,

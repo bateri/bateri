@@ -106,6 +106,10 @@ of every installed copy. A version without a section is not released.
   already running when bateri was updated has the previous `ssh` function, whose
   next `ssh` is a plain one; a new shell (a new tab) has the new one.
 
+- **The command palette finds a tab by any of its server panes.** Typing a
+  server's name in ⌘P found a tab only when the pane in focus was on that
+  server; a split tab whose other pane is on `rasp` is found by `rasp` too.
+
 ### Fixed
 
 - **An app that draws its whole screen as one picture now fills the pane to

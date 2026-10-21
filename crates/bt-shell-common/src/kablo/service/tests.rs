@@ -15,7 +15,7 @@ use kablo_proto::v1::Exit;
 use super::*;
 use crate::hold::wire::Target;
 use crate::hold::{Config, Outcome, run};
-use crate::kablo::fake::{Age, Bridge};
+use crate::kablo::fake::{Activity, Age, Bridge};
 use crate::kablo::install::Installed;
 
 /// A private directory with a path short enough for a socket.
@@ -77,6 +77,8 @@ struct Fake {
     links: Mutex<Vec<(PaneUuid, PaneLink)>>,
     /// The panes that were told the terminal they show came or went, in order.
     changed: Mutex<Vec<PaneUuid>>,
+    /// The accounts told their terminals in the background are not what they were, in order.
+    background: Mutex<Vec<String>>,
 }
 
 impl Fake {
@@ -96,6 +98,7 @@ impl Fake {
             eof_cause: Arc::new(Mutex::new(Cause::Dropped)),
             links: Mutex::new(Vec::new()),
             changed: Mutex::new(Vec::new()),
+            background: Mutex::new(Vec::new()),
         })
     }
 
@@ -110,6 +113,10 @@ impl Fake {
 
     fn changed(&self) -> Vec<PaneUuid> {
         self.changed.lock().expect("lock").clone()
+    }
+
+    fn background_told(&self) -> Vec<String> {
+        self.background.lock().expect("lock").clone()
     }
 
     fn note(&self, what: &str) {
@@ -282,6 +289,13 @@ impl Backend for Fake {
 
     fn terminal_changed(&self, pane: &PaneUuid) {
         self.changed.lock().expect("lock").push(pane.clone());
+    }
+
+    fn background_changed(&self, account: &str) {
+        self.background
+            .lock()
+            .expect("lock")
+            .push(account.to_owned());
     }
 }
 
@@ -1561,4 +1575,178 @@ fn a_terminal_serves_the_session_to_its_own_server_only() {
     assert!(shown.serves(&target("rasp")));
     assert!(!shown.serves(&target("prod")));
     assert!(!shown.serves(&target("root@rasp")));
+}
+
+// ─── what runs in the background ─────────────────────────────────────────
+
+const ACCOUNT: &str = "u@rasp:22";
+
+fn activity(started: u64, front_started: u64, own: bool, output_at: u64) -> Activity {
+    Activity {
+        started: Some(started),
+        front_started: Some(front_started),
+        front_is_own: Some(own),
+        output_at: Some(output_at),
+    }
+}
+
+fn background_names(rig: &Rig) -> Vec<String> {
+    rig.service
+        .background(ACCOUNT)
+        .iter()
+        .map(|found| found.terminal.as_str().to_owned())
+        .collect()
+}
+
+/// The terminals an agent started on the server while the Mac was connected are listed once
+/// somebody is about to look, the last to write first, with what the server says of them; the
+/// one a pane shows is not among them.
+#[test]
+fn what_runs_on_the_server_and_no_pane_shows_is_in_the_background_the_last_to_write_first() {
+    let rig = Rig::new("background");
+    let _holder = Holder::new(&rig.socket(), "b-1");
+    let shown = rig.terminals(1).remove(0);
+    {
+        let mut bridge = rig.world.bridge();
+        let quiet = bridge.add("agent-quiet", Size::default());
+        let busy = bridge.add("agent-busy", Size::default());
+        bridge.set_activity(&quiet, activity(100, 100, true, 200));
+        bridge.set_activity(&busy, activity(100, 900, false, 1_000));
+        bridge.set_state(&busy, saying("claude"));
+        bridge.set_label(&busy, "review");
+        bridge.set_activity(&shown, activity(50, 50, true, 5_000));
+    }
+    rig.service.refresh_background();
+    until("both listed", || {
+        background_names(&rig) == ["agent-busy", "agent-quiet"]
+    });
+
+    let found = rig.service.background(ACCOUNT);
+    assert_eq!(found[0].host, "rasp");
+    assert_eq!(found[0].account, ACCOUNT);
+    assert_eq!(found[0].program.as_deref(), Some("claude"));
+    assert_eq!(found[0].label.as_deref(), Some("review"));
+    assert_eq!(
+        (
+            found[0].started,
+            found[0].front_started,
+            found[0].front_is_own,
+            found[0].output_at
+        ),
+        (Some(100), Some(900), Some(false), Some(1_000)),
+        "the times of kablo 010 are read"
+    );
+    assert_eq!(found[1].front_is_own, Some(true));
+    assert_eq!(
+        rig.service.background_all().len(),
+        2,
+        "every account's, the same two"
+    );
+    assert!(
+        rig.world.background_told().iter().any(|a| a == ACCOUNT),
+        "the application is told the list is not what it was"
+    );
+}
+
+/// A terminal a pane lets go of without ending it (the pane's program went; a crash does the
+/// same) lives on and is listed; ending it takes it out of the list at once.
+#[test]
+fn a_terminal_a_pane_lets_go_of_is_in_the_background_until_it_is_ended() {
+    let rig = Rig::new("background-let-go");
+    let pane = pane_named(&rig.world);
+    let holder = Holder::new(&rig.socket(), "b-1");
+    let terminal = rig.terminals(1).remove(0);
+    until("the pane found", || rig.service.shown(&pane).is_some());
+    assert!(
+        rig.service.background(ACCOUNT).is_empty(),
+        "the terminal on screen is not in the background"
+    );
+
+    let Holder { handle, typed, .. } = holder;
+    drop(typed);
+    until("the pane let go of", || rig.service.shown(&pane).is_none());
+    // No refresh asked: the pane going is what makes the service ask.
+    until("in the background", || {
+        background_names(&rig) == [terminal.as_str().to_owned()]
+    });
+    if let Some(handle) = handle {
+        let _ = handle.join();
+    }
+    assert!(rig.world.bridge().has(&terminal), "nothing ended it");
+
+    // Shown again, it leaves the background.
+    let _again = Holder::start(
+        &rig.socket(),
+        terminal.as_str(),
+        Target::Resume {
+            account: ACCOUNT.to_owned(),
+            offset: Some(0),
+        },
+    );
+    until("shown again", || rig.service.shown(&pane).is_some());
+    until("out of the background", || {
+        rig.service.background(ACCOUNT).is_empty()
+    });
+}
+
+/// The terminal a user closed is on its way out: the list must not show it for the moment
+/// between the hang-up and the server's answer.
+#[test]
+fn a_terminal_asked_to_end_is_not_in_the_background() {
+    let rig = Rig::graced(
+        "background-ending",
+        Fake::new(Bridge::new(Age::Current).stubborn()),
+        Duration::from_millis(300),
+    );
+    let pane = pane_named(&rig.world);
+    let holder = Holder::new(&rig.socket(), "b-1");
+    let terminal = rig.terminals(1).remove(0);
+    until("the pane found", || rig.service.shown(&pane).is_some());
+
+    rig.service.end(&pane);
+    let Holder { handle, typed, .. } = holder;
+    drop(typed);
+    until("the hang-up", || {
+        rig.world.bridge().terminated(&terminal) == Some(false)
+    });
+    let lists = |rig: &Rig| {
+        rig.world
+            .bridge()
+            .received
+            .iter()
+            .filter(|packet| matches!(packet.message, kablo_proto::v1::Message::List))
+            .count()
+    };
+    let before = lists(&rig);
+    rig.service.refresh_background();
+    until("the server asked again", || lists(&rig) > before);
+    // The stubborn program stays on the server and is listed as running; the list hides it
+    // until the kill.
+    for _ in 0..20 {
+        assert!(
+            rig.service.background(ACCOUNT).is_empty(),
+            "an ending terminal is not offered"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+    if let Some(handle) = handle {
+        let _ = handle.join();
+    }
+}
+
+/// What the server lists is not kept for ever: a terminal that ended while nobody watched is
+/// gone from the list at the next answer, and one a connection that is down knew of stays as
+/// the last answer said.
+#[test]
+fn the_next_answer_takes_a_terminal_that_ended_out_of_the_list() {
+    let rig = Rig::new("background-ended");
+    let _holder = Holder::new(&rig.socket(), "b-1");
+    rig.terminals(1);
+    let agent = rig.world.bridge().add("agent", Size::default());
+    rig.service.refresh_background();
+    until("listed", || background_names(&rig) == ["agent"]);
+
+    rig.world.bridge().exit(&agent, Exit::Code(0));
+    rig.service.refresh_background();
+    until("gone", || rig.service.background(ACCOUNT).is_empty());
 }

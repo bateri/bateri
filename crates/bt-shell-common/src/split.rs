@@ -19,6 +19,10 @@
 //! [`Layout::zone_at`] which of those a pointer is asking for. A drag, a menu command and a drop
 //! on a tab all call the same plan, so what the preview shows is what the drop does.
 //!
+//! **Many panes at once** ([`arrange`]): the tabs that hold a handful of panes opened together —
+//! the shape of two, three, four, five and six, and what goes to the next tab when a pane would be
+//! smaller than its minimum.
+//!
 //! **Spacing** ([`Spacing`]): the space between panes and around them is a parameter of the
 //! frame computation, in device pixels. [`Spacing::DIVIDED`] is the one-pixel divider with no
 //! margin and gives exactly the frames the ungapped functions always gave.
@@ -1525,12 +1529,95 @@ fn wrap(node: &mut Tree, side: Direction, incoming: Tree, ratio: f64) {
     };
 }
 
+// ─── Many panes at once ───────────────────────────────────────────────────
+
+/// The most panes [`arrange`] puts in one tab: more would be a wall of terminals none of which
+/// can be read, and the rest wait in the next tab.
+pub const MOST_PER_TAB: usize = 6;
+
+/// How many panes stand in each column of the tab that holds `count` panes, left to right: two
+/// side by side, three as one tall pane with two stacked beside it, four as two columns of two,
+/// five as the tall one and two columns of two, six as three columns of two. The odd one out is
+/// always the first, so the pane that matters most (the first id) is the biggest and stands at the
+/// top left.
+fn columns_for(count: usize) -> &'static [usize] {
+    match count {
+        0 | 1 => &[1],
+        2 => &[1, 1],
+        3 => &[1, 2],
+        4 => &[2, 2],
+        5 => &[1, 2, 2],
+        _ => &[2, 2, 2],
+    }
+}
+
+/// Panes stacked top to bottom (two at most in the shapes above).
+fn stacked(ids: &[u64]) -> Tree {
+    match ids {
+        [] => Tree::Leaf(0),
+        [only] => Tree::Leaf(*only),
+        [first, rest @ ..] => Tree::Split {
+            axis: Axis::Vertical,
+            ratio: 0.5,
+            first: Box::new(Tree::Leaf(*first)),
+            second: Box::new(stacked(rest)),
+        },
+    }
+}
+
+/// The shape [`columns_for`] gives `ids` (at most [`MOST_PER_TAB`]; the first is at the top left),
+/// with every pane of a row or a column the same size.
+fn arranged(ids: &[u64]) -> Tree {
+    let mut at = 0;
+    let mut columns = Vec::new();
+    for count in columns_for(ids.len()) {
+        let end = (at + count).min(ids.len());
+        columns.push(stacked(&ids[at..end]));
+        at = end;
+    }
+    let Some(mut tree) = columns.pop() else {
+        return Tree::Leaf(0);
+    };
+    while let Some(left) = columns.pop() {
+        tree = Tree::Split {
+            axis: Axis::Horizontal,
+            ratio: 0.5,
+            first: Box::new(left),
+            second: Box::new(tree),
+        };
+    }
+    tree.equalize();
+    tree
+}
+
+/// The tabs that hold `ids` opened together (the ones a server keeps for the user, opened by one
+/// command): each tab a tree of up to [`MOST_PER_TAB`] panes in the shape [`columns_for`] gives its
+/// number, in order — the first id of each tree at its top left, which is the pane that has the
+/// keyboard. A tab takes as many of the ids as **fit** in `room` with every pane at or above its
+/// minimum ([`Tree::fits`]): what does not fit goes to the next tab, which is arranged the same
+/// way, and a pane that cannot fit even alone still gets a tab of its own — nothing is dropped.
+/// No ids, no tabs.
+pub fn arrange(ids: &[u64], room: &Room<'_>) -> Vec<Tree> {
+    let mut trees = Vec::new();
+    let mut rest = ids;
+    while !rest.is_empty() {
+        let most = rest.len().min(MOST_PER_TAB);
+        let take = (1..=most)
+            .rev()
+            .find(|&count| count == 1 || arranged(&rest[..count]).fits(room))
+            .unwrap_or(1);
+        trees.push(arranged(&rest[..take]));
+        rest = &rest[take..];
+    }
+    trees
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        Axis, Direction, Divider, Layout, PANE_EDGE_SHARE, Placement, Rect, Removal, Room,
-        SWAP_CORE, Share, Size, Slide, Spacing, Tree, Verdict, WINDOW_EDGE_SHARE,
-        WINDOW_EDGE_STRIP, Zone, slide, sliver, solve_share,
+        Axis, Direction, Divider, Layout, MOST_PER_TAB, PANE_EDGE_SHARE, Placement, Rect, Removal,
+        Room, SWAP_CORE, Share, Size, Slide, Spacing, Tree, Verdict, WINDOW_EDGE_SHARE,
+        WINDOW_EDGE_STRIP, Zone, arrange, slide, sliver, solve_share,
     };
 
     fn area(rect: &Rect) -> f64 {
@@ -3059,5 +3146,146 @@ mod tests {
         let tree = stacked(4);
         let verdict = tree.verdict(&Tree::Leaf(5), &room, (500.0, 100.0));
         assert_eq!(verdict, Verdict::NoRoom);
+    }
+
+    /// The ids `10, 20, 30…`, `n` of them: the first is the most recently written.
+    fn ids(n: u64) -> Vec<u64> {
+        (1..=n).map(|at| at * 10).collect()
+    }
+
+    /// The frames of a tree in a roomy area, by id.
+    fn arranged_frames(tree: &Tree) -> Layout {
+        tree.layout(Rect::new(0.0, 0.0, 1201.0, 601.0), 1.0)
+    }
+
+    fn near(a: f64, b: f64) -> bool {
+        (a - b).abs() <= 1.0
+    }
+
+    #[test]
+    fn two_terminals_stand_side_by_side_the_first_on_the_left() {
+        let min = min_100_by_60;
+        let room = room_in(1201.0, 601.0, Spacing::DIVIDED, &min);
+        let trees = arrange(&ids(2), &room);
+        assert_eq!(trees.len(), 1);
+        assert_eq!(trees[0].leaves(), [10, 20]);
+        let layout = arranged_frames(&trees[0]);
+        let (left, right) = (frame_of(&layout, 10), frame_of(&layout, 20));
+        assert_eq!((left.x, left.y), (0.0, 0.0), "the first is at the top left");
+        assert!(left.x < right.x && near(left.y, right.y));
+        assert!(near(left.width, right.width) && near(left.height, 601.0));
+    }
+
+    #[test]
+    fn three_terminals_are_one_tall_on_the_left_and_two_stacked_beside_it() {
+        let min = min_100_by_60;
+        let room = room_in(1201.0, 601.0, Spacing::DIVIDED, &min);
+        let trees = arrange(&ids(3), &room);
+        assert_eq!(trees.len(), 1);
+        let layout = arranged_frames(&trees[0]);
+        let (tall, above, below) = (
+            frame_of(&layout, 10),
+            frame_of(&layout, 20),
+            frame_of(&layout, 30),
+        );
+        assert_eq!((tall.x, tall.y), (0.0, 0.0));
+        assert!(
+            near(tall.height, 601.0),
+            "the first is full height: {tall:?}"
+        );
+        assert!(above.x > tall.x && near(above.x, below.x));
+        assert!(above.y < below.y);
+        assert!(near(above.height, below.height) && near(tall.width, above.width));
+    }
+
+    #[test]
+    fn four_terminals_are_two_by_two_and_six_are_three_by_two() {
+        let min = min_100_by_60;
+        let room = room_in(1201.0, 601.0, Spacing::DIVIDED, &min);
+        for (count, columns) in [(4, 2.0), (6, 3.0)] {
+            let trees = arrange(&ids(count), &room);
+            assert_eq!(trees.len(), 1, "{count} fit in one tab");
+            assert_eq!(trees[0].leaves().len(), count as usize);
+            let layout = arranged_frames(&trees[0]);
+            let first = frame_of(&layout, 10);
+            assert_eq!((first.x, first.y), (0.0, 0.0));
+            for (id, frame) in &layout.panes {
+                assert!(
+                    near(frame.width, first.width) && near(frame.height, first.height),
+                    "{count} terminals, pane {id}: every pane is one size: {frame:?} / {first:?}"
+                );
+            }
+            assert!(
+                near(first.width * columns, 1201.0) && near(first.height * 2.0, 601.0),
+                "{columns} columns of two: {first:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn five_terminals_are_the_tall_one_and_two_columns_of_two() {
+        let min = min_100_by_60;
+        let room = room_in(1201.0, 601.0, Spacing::DIVIDED, &min);
+        let trees = arrange(&ids(5), &room);
+        assert_eq!(trees.len(), 1);
+        assert_eq!(trees[0].leaves(), [10, 20, 30, 40, 50]);
+        let layout = arranged_frames(&trees[0]);
+        assert!(near(frame_of(&layout, 10).height, 601.0));
+        for id in [20, 30, 40, 50] {
+            assert!(near(frame_of(&layout, id).height * 2.0, 601.0), "pane {id}");
+        }
+        assert!(near(frame_of(&layout, 20).x, frame_of(&layout, 30).x));
+        assert!(frame_of(&layout, 40).x > frame_of(&layout, 20).x);
+    }
+
+    #[test]
+    fn a_seventh_terminal_waits_in_the_next_tab() {
+        let min = min_100_by_60;
+        let room = room_in(1201.0, 601.0, Spacing::DIVIDED, &min);
+        let trees = arrange(&ids(7), &room);
+        let tabs: Vec<Vec<u64>> = trees.iter().map(Tree::leaves).collect();
+        assert_eq!(MOST_PER_TAB, 6);
+        assert_eq!(tabs, [vec![10, 20, 30, 40, 50, 60], vec![70]]);
+        let many = arrange(&ids(13), &room);
+        let sizes: Vec<usize> = many.iter().map(|tree| tree.leaves().len()).collect();
+        assert_eq!(sizes, [6, 6, 1]);
+    }
+
+    #[test]
+    fn no_pane_goes_below_its_minimum_so_the_rest_go_to_the_next_tab() {
+        let min = min_100_by_60;
+        // Two columns and two rows of the minimum, and one pixel of divider each way.
+        let room = room_in(201.0, 121.0, Spacing::DIVIDED, &min);
+        let sizes: Vec<usize> = arrange(&ids(8), &room)
+            .iter()
+            .map(|tree| tree.leaves().len())
+            .collect();
+        assert_eq!(sizes, [4, 4], "six would need three columns");
+        let sizes: Vec<usize> = arrange(&ids(6), &room)
+            .iter()
+            .map(|tree| tree.leaves().len())
+            .collect();
+        assert_eq!(sizes, [4, 2]);
+        for tree in arrange(&ids(6), &room) {
+            assert!(tree.fits(&room), "{tree:?}");
+        }
+        // One column and two rows: a pair no longer fits side by side.
+        let narrow = room_in(120.0, 121.0, Spacing::DIVIDED, &min);
+        let sizes: Vec<usize> = arrange(&ids(3), &narrow)
+            .iter()
+            .map(|tree| tree.leaves().len())
+            .collect();
+        assert_eq!(sizes, [1, 1, 1]);
+    }
+
+    #[test]
+    fn a_pane_that_fits_nowhere_still_gets_a_tab_and_none_is_dropped() {
+        let min = min_100_by_60;
+        let room = room_in(50.0, 30.0, Spacing::DIVIDED, &min);
+        let trees = arrange(&ids(3), &room);
+        let leaves: Vec<u64> = trees.iter().flat_map(Tree::leaves).collect();
+        assert_eq!(leaves, [10, 20, 30]);
+        assert_eq!(trees.len(), 3);
+        assert!(arrange(&[], &room).is_empty(), "no terminals, no tabs");
     }
 }

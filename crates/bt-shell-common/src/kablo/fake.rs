@@ -40,6 +40,20 @@ pub enum Age {
     Old,
 }
 
+/// What a relay of today says of a terminal's times (`status`'s `started`, `front_started`,
+/// `front_is_own` and `output_at`, in seconds of the server's clock).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Activity {
+    /// When the terminal's own program started.
+    pub started: Option<u64>,
+    /// When the program in front started.
+    pub front_started: Option<u64>,
+    /// The program in front is the terminal's own (a shell waiting for a command).
+    pub front_is_own: Option<bool>,
+    /// When the relay last read output.
+    pub output_at: Option<u64>,
+}
+
 /// A terminal on the bridge.
 pub struct Session {
     /// The bytes the program wrote that the journal still holds; the first is at
@@ -58,6 +72,9 @@ pub struct Session {
     sent: u64,
     size: Size,
     state: TerminalState,
+    activity: Activity,
+    /// The label the terminal was given (`kablo new --label`).
+    label: Option<String>,
     /// What the client typed.
     typed: Vec<u8>,
     /// The view of every `attach` the client sent, in order.
@@ -83,6 +100,8 @@ impl Session {
             sent: 0,
             size,
             state: TerminalState::default(),
+            activity: Activity::default(),
+            label: None,
             typed: Vec::new(),
             views: Vec::new(),
             unavailable: 0,
@@ -230,6 +249,21 @@ impl Bridge {
         session.state = state.clone();
         if session.attached && self.age == Age::Current {
             self.send(&Packet::about(id.clone(), Message::TerminalState(state)));
+        }
+    }
+
+    /// What the relay says of the terminal's times from now on (a relay from before
+    /// them, [`Age::Old`], says none).
+    pub fn set_activity(&mut self, id: &SessionId, activity: Activity) {
+        if let Some(session) = self.sessions.get_mut(id) {
+            session.activity = activity;
+        }
+    }
+
+    /// The terminal is given a label from now on.
+    pub fn set_label(&mut self, id: &SessionId, label: &str) {
+        if let Some(session) = self.sessions.get_mut(id) {
+            session.label = Some(label.to_owned());
         }
     }
 
@@ -424,6 +458,14 @@ impl Bridge {
         status.exit = session.exit;
         status.version = self.version().to_owned();
         status.program = session.state.program.clone();
+        status.cwd = session.state.cwd.clone();
+        if self.age == Age::Current {
+            status.label = session.label.clone();
+            status.started = session.activity.started;
+            status.front_started = session.activity.front_started;
+            status.front_is_own = session.activity.front_is_own;
+            status.output_at = session.activity.output_at;
+        }
         Some(status)
     }
 

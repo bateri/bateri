@@ -27,6 +27,7 @@ use super::list::List;
 use super::path::PathQuery;
 use super::rank::Hit;
 use super::row::{Kind, Row, Scope, Status, Tone};
+use super::server::{self, ServerFacts};
 use super::state::Modifier;
 
 /// How many folders the session remembers.
@@ -235,6 +236,9 @@ pub struct Targets {
     pub folders: Vec<FolderFacts>,
     pub hosts: Vec<HostFacts>,
     pub ports: Vec<PortFacts>,
+    /// What the servers kablo keeps terminals on keep and show ([`ServerFacts`]); a server that
+    /// is not among them is a plain `ssh` and has neither a count nor a page.
+    pub servers: Vec<ServerFacts>,
 }
 
 // ─── Rows ─────────────────────────────────────────────────────────────────
@@ -268,8 +272,10 @@ pub fn mark_status(mark: HostMark) -> Option<Status> {
     })
 }
 
-/// The row of a server: its name, where it comes from, how many tabs are on it, and its mark.
-pub fn host_row(facts: &HostFacts) -> Row {
+/// The row of a server: its name, where it comes from, how many tabs are on it, how many terminals
+/// it keeps in the background and its mark. A server kablo keeps terminals on (`server`) opens its
+/// page on →; ⏎ is still the new tab.
+pub fn host_row(facts: &HostFacts, server: Option<&ServerFacts>) -> Row {
     let mut row = Row::new(Kind::Host, &facts.name, facts.name.clone())
         .keywords("ssh server remote connect machine")
         .subtitle(joined([
@@ -282,8 +288,12 @@ pub fn host_row(facts: &HostFacts) -> Row {
                 .to_owned(),
             ),
             count_note(facts.tabs, if facts.tabs == 1 { "tab" } else { "tabs" }),
+            server.and_then(|server| count_note(server.background.len(), "in the background")),
         ]));
     row.status = mark_status(facts.mark);
+    if server.is_some() {
+        row = row.opens(Scope::Server(facts.name.clone()), false);
+    }
     row
 }
 
@@ -303,7 +313,11 @@ pub fn folder_rows(targets: &Targets) -> Vec<Row> {
 }
 
 pub fn host_rows(targets: &Targets) -> Vec<Row> {
-    targets.hosts.iter().map(host_row).collect()
+    targets
+        .hosts
+        .iter()
+        .map(|facts| host_row(facts, server::server_of(targets, &facts.name)))
+        .collect()
 }
 
 pub fn port_rows(targets: &Targets) -> Vec<Row> {
@@ -396,11 +410,25 @@ pub enum Go {
     OpenPort(String),
     /// ⌘⏎ on a port: its address to the pasteboard (the port's key).
     CopyPort(String),
+    /// ⏎ on a terminal a server keeps in the background: a new tab that is that terminal, its
+    /// only pane. The account's key and the terminal's name.
+    OpenBackground { account: String, terminal: String },
+    /// ⌥⏎ on a terminal in the background: the same beside the pane on screen ([`beside`]).
+    SplitBackground { account: String, terminal: String },
+    /// ⏎ on Open All: every terminal the server (the name after `ssh`) keeps in the background,
+    /// together in new tabs ([`crate::split::arrange`]). What is opened is what the list holds
+    /// when this is done, not when the row was listed.
+    OpenAllBackground(String),
+    /// ⏎ on a pane of the server's page: its tab comes forward and the pane has the keyboard.
+    FocusPane { tab: u64, pane: u64 },
 }
 
 /// What the row `id` chosen with `modifier` comes to; `None` for a row that is not one of these
 /// or a use the row does not have.
 pub fn go(id: &str, modifier: Modifier) -> Option<Go> {
+    if let Some(go) = server::go(id, modifier) {
+        return Some(go);
+    }
     if let Some(path) = id.strip_prefix(Kind::Folder.prefix()) {
         let path = path.to_owned();
         return Some(match modifier {
@@ -594,11 +622,11 @@ mod tests {
         assert_eq!(listed, ["deploy@web", "db-1", "cache"]);
         assert!(hosts[0].configured && hosts[0].tabs == 1);
         assert!(hosts[2].tabs == 0 && hosts[2].configured);
-        let row = host_row(&hosts[2]);
+        let row = host_row(&hosts[2], None);
         assert_eq!(row.id, "host.cache");
         assert_eq!(row.subtitle, "ssh config");
         assert_eq!(row.status.as_ref().map(|s| s.tone), Some(Tone::Warning));
-        assert_eq!(host_row(&hosts[0]).subtitle, "ssh config · 1 tab");
+        assert_eq!(host_row(&hosts[0], None).subtitle, "ssh config · 1 tab");
     }
 
     #[test]

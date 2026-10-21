@@ -46,6 +46,12 @@
 //! ([`Service::end_all`], `keep_running`'s table); a crash and an update never do,
 //! because the pane's closing alone lets go of the terminal and it lives on.
 //!
+//! **What runs in the background.** The terminals the account keeps that no pane of this Mac shows
+//! ([`Service::background`]) are the server's own list less the ones a holder is bound to
+//! ([`crate::kablo::roster`]): a cache the events and a `list` renew, asked again when a connection
+//! comes up, when a holder goes and when the application is about to show it
+//! ([`Service::refresh_background`]), never on a clock.
+//!
 //! **What survives bateri.** A holder asks for a terminal it was shown
 //! ([`wire::Target::Resume`]) by the account's name, and the bateri it asks may be
 //! another process than the one that made the account (an update carried the panes
@@ -75,6 +81,7 @@ use kablo_proto::v1::NewSession;
 use super::hub::{Declined, HoldId, Hub, HubEvent};
 use super::install::Installed;
 use super::ledger::Ledger;
+use super::roster::{Background, Roster, sort_recent_first};
 use super::{Attach, Cause, Client, ErrorCode, Event, Link, SessionId, Size};
 use crate::hold::HOLD_SOCKET;
 use crate::hold::wire::{CHUNK, Open, Target};
@@ -305,6 +312,13 @@ pub trait Backend: Send + Sync + 'static {
     /// work open in a pane that is a plain one. Called on the service's
     /// thread; the application hops to its own.
     fn terminal_changed(&self, _pane: &PaneUuid) {}
+
+    /// The terminals the account's server keeps in the background
+    /// ([`Service::background`]) are not the ones they were: one came, went, or says something
+    /// else of itself. Told once per change of what [`Service::background`] returns for the
+    /// account, which is not a change of the server's list — a terminal a pane starts to show leaves
+    /// the background. Called on the service's thread; the application hops to its own.
+    fn background_changed(&self, _account: &str) {}
 }
 
 /// Why a bridge could not be started, as far as the error says: a login the
@@ -371,6 +385,8 @@ enum Msg {
     Retry(String),
     /// The computer woke up.
     Wake,
+    /// Ask every account for its terminals ([`Service::refresh_background`]).
+    Relist,
     Stop,
 }
 
@@ -440,6 +456,8 @@ pub struct Service {
     threads: Mutex<Vec<thread::JoinHandle<()>>>,
     /// What each pane shows, as the loop last wrote it.
     shown: Arc<Mutex<HashMap<PaneUuid, Shown>>>,
+    /// The terminals each account keeps in the background, as the loop last wrote them.
+    background: Arc<Mutex<BTreeMap<String, Vec<Background>>>>,
 }
 
 /// How long a terminal that was asked to hang up has before it is killed.
@@ -504,6 +522,7 @@ impl Service {
                 .spawn(move || accept_loop(&listener, &tx, &stop))?
         };
         let shown = Arc::new(Mutex::new(HashMap::new()));
+        let background = Arc::new(Mutex::new(BTreeMap::new()));
         let core = Core {
             shared: Arc::new(Shared {
                 backend,
@@ -517,6 +536,9 @@ impl Service {
             waiters: Vec::new(),
             panes: BTreeMap::new(),
             shown: Arc::clone(&shown),
+            roster: BTreeMap::new(),
+            relist: BTreeSet::new(),
+            background: Arc::clone(&background),
             refresh: false,
             ending: Vec::new(),
             grace,
@@ -532,6 +554,7 @@ impl Service {
             stop,
             threads: Mutex::new(vec![accepting, serving]),
             shown,
+            background,
         })
     }
 
@@ -543,6 +566,41 @@ impl Service {
             .unwrap_or_else(|e| e.into_inner())
             .get(pane)
             .cloned()
+    }
+
+    /// The terminals the server of `account` keeps for the user that no pane of this Mac shows,
+    /// the most recently written first: running, not asked to end, and as the server last said —
+    /// a cache that events and [`Service::refresh_background`] keep, read here without waiting
+    /// for the server. An account the service has no bridge for has none.
+    pub fn background(&self, account: &str) -> Vec<Background> {
+        self.background
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(account)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// [`Service::background`] of every account, the most recently written first.
+    pub fn background_all(&self) -> Vec<Background> {
+        let mut all: Vec<Background> = self
+            .background
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .flatten()
+            .cloned()
+            .collect();
+        sort_recent_first(&mut all);
+        all
+    }
+
+    /// Asks every account whose bridge is up for its terminals again; the answer renews
+    /// [`Service::background`] ([`Backend::background_changed`] says when it differs). For the
+    /// moments somebody is about to look at the list (the palette, the card opening): the cache they
+    /// read is what the last answers said, and nothing asks on a clock.
+    pub fn refresh_background(&self) {
+        let _ = self.tx.send(Msg::Relist);
     }
 
     /// The user closed the pane: the terminal it shows ends on the server
@@ -681,6 +739,12 @@ struct Core {
     panes: BTreeMap<HoldId, PaneUuid>,
     /// What [`Service::shown`] reads.
     shown: Arc<Mutex<HashMap<PaneUuid, Shown>>>,
+    /// What each account's server last said of its terminals.
+    roster: BTreeMap<String, Roster>,
+    /// The accounts to ask for their terminals again before anything else is done.
+    relist: BTreeSet<String>,
+    /// What [`Service::background`] reads.
+    background: Arc<Mutex<BTreeMap<String, Vec<Background>>>>,
     /// Something happened that [`Core::shown`] may say differently.
     refresh: bool,
     /// Terminals asked to hang up that are killed if they are still there.
@@ -823,6 +887,7 @@ impl Core {
                 }
                 self.refresh = true;
             }
+            Msg::Relist => self.relist.extend(self.accounts.keys().cloned()),
             Msg::Stop => {}
         }
     }
@@ -850,6 +915,11 @@ impl Core {
         self.kill_due(Instant::now());
         for _ in 0..64 {
             let now = Instant::now();
+            for account in std::mem::take(&mut self.relist) {
+                if let Some(client) = self.hub.client_mut(&account) {
+                    client.list();
+                }
+            }
             let accounts: Vec<String> = self.accounts.keys().cloned().collect();
             for account in &accounts {
                 if let Some(client) = self.hub.client_mut(account) {
@@ -871,26 +941,39 @@ impl Core {
                         self.waiting.remove(&hold);
                         self.conns.remove(&hold);
                         self.panes.remove(&hold);
+                        // A holder that goes lets go of its terminal, which lives on unless
+                        // it was asked to end: the server is asked what it has now.
+                        self.relist.extend(self.accounts.keys().cloned());
                     }
-                    HubEvent::Client { account, event } => match *event {
-                        Event::Ended { terminal, .. } | Event::Taken { terminal, .. } => {
-                            // It went by itself: nothing is left to kill.
-                            self.ending
-                                .retain(|e| !(e.account == account && e.terminal == terminal));
-                            self.finished(&account, &terminal);
+                    HubEvent::Client { account, event } => {
+                        self.roster
+                            .entry(account.clone())
+                            .or_default()
+                            .apply(&event);
+                        match *event {
+                            // A connection that came up is asked for its terminals.
+                            Event::Linked => {
+                                self.relist.insert(account);
+                            }
+                            Event::Ended { terminal, .. } | Event::Taken { terminal, .. } => {
+                                // It went by itself: nothing is left to kill.
+                                self.ending
+                                    .retain(|e| !(e.account == account && e.terminal == terminal));
+                                self.finished(&account, &terminal);
+                            }
+                            // The server does not have it: nothing is left to end either.
+                            Event::Failed {
+                                terminal: Some(terminal),
+                                code: ErrorCode::UNKNOWN_SESSION,
+                                ..
+                            } => {
+                                self.ending
+                                    .retain(|e| !(e.account == account && e.terminal == terminal));
+                                self.finished(&account, &terminal);
+                            }
+                            _ => {}
                         }
-                        // The server does not have it: nothing is left to end either.
-                        Event::Failed {
-                            terminal: Some(terminal),
-                            code: ErrorCode::UNKNOWN_SESSION,
-                            ..
-                        } => {
-                            self.ending
-                                .retain(|e| !(e.account == account && e.terminal == terminal));
-                            self.finished(&account, &terminal);
-                        }
-                        _ => {}
-                    },
+                    }
                 }
                 self.refresh = true;
             }
@@ -977,6 +1060,44 @@ impl Core {
         let went = before.keys().filter(|pane| !shown.contains_key(*pane));
         for pane in came.chain(went) {
             self.shared.backend.terminal_changed(pane);
+        }
+        self.write_background();
+    }
+
+    /// What the accounts keep in the background, written where [`Service::background`] reads
+    /// it: what each server last said of its terminals, less those a holder is bound to (a pane
+    /// that shows it, or is about to — a terminal still being brought up is not in the
+    /// background for a moment) and those asked to end.
+    fn write_background(&mut self) {
+        let mut background: BTreeMap<String, Vec<Background>> = BTreeMap::new();
+        for (account, roster) in &self.roster {
+            let Some(entry) = self.accounts.get(account) else {
+                continue;
+            };
+            let ending = self.shared.ledger.ending(account);
+            let hidden = |terminal: &SessionId| {
+                self.hub.hold_of(account, terminal).is_some()
+                    || ending.contains(terminal)
+                    || self
+                        .ending
+                        .iter()
+                        .any(|e| e.account == *account && e.terminal == *terminal)
+            };
+            let found = roster.background(account, &entry.server.host, hidden);
+            if !found.is_empty() {
+                background.insert(account.clone(), found);
+            }
+        }
+        let before = std::mem::replace(
+            &mut *self.background.lock().unwrap_or_else(|e| e.into_inner()),
+            background.clone(),
+        );
+        // Told after the lock is let go of, once per account whose list is not what it was.
+        let accounts: BTreeSet<&String> = before.keys().chain(background.keys()).collect();
+        for account in accounts {
+            if before.get(account) != background.get(account) {
+                self.shared.backend.background_changed(account);
+            }
         }
     }
 
@@ -1128,6 +1249,7 @@ impl Core {
             };
             self.hub.drop_account(account, text);
             self.accounts.remove(account);
+            self.roster.remove(account);
         }
     }
 

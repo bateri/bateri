@@ -4365,6 +4365,18 @@ impl TerminalWindow {
                             .filter(|_| indicator == tabs::Indicator::Running),
                     }),
                     place: tab.place(),
+                    hosts: {
+                        let mut hosts: Vec<String> = Vec::new();
+                        for pane in tab.panes() {
+                            if let Some((host, _)) =
+                                pane.session().and_then(|session| session.remote_mark())
+                                && !hosts.contains(&host)
+                            {
+                                hosts.push(host);
+                            }
+                        }
+                        hosts
+                    },
                     group,
                     other_window,
                     key: keys

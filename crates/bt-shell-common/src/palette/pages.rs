@@ -15,6 +15,7 @@ use super::catalog::{self, Control};
 use super::history::{self, Commands};
 use super::menu::MenuRows;
 use super::row::{Kind, Row, Scope, Slot};
+use super::server;
 use super::state::Modifier;
 use super::switch::{self, Places};
 use super::targets::{self, Targets};
@@ -100,6 +101,7 @@ pub fn root_rows(src: &Sources<'_>) -> Vec<Row> {
     rows.extend(switch::group_rows(src.places));
     rows.extend(targets::folder_rows(src.targets));
     rows.extend(targets::host_rows(src.targets));
+    rows.extend(server::background_rows(src.targets));
     rows.extend(targets::port_rows(src.targets));
     rows.extend(history::command_rows(src.commands, false));
     // The menu's own Command History… and Themes… stand for their pages: a page is listed once.
@@ -144,6 +146,7 @@ pub fn page_rows(scope: &Scope, src: &Sources<'_>) -> Vec<Row> {
         Scope::TabActions(_) | Scope::GroupActions(_) => switch::actions(scope, src.places),
         Scope::Folders => targets::folder_rows(src.targets),
         Scope::Hosts => targets::host_rows(src.targets),
+        Scope::Server(host) => server::server_rows(host, src.targets),
         Scope::Ports => targets::port_rows(src.targets),
         Scope::History { jump, .. } => history::command_rows(src.commands, *jump),
         Scope::HistoryActions(_) => history::actions(scope, src.commands),
@@ -374,6 +377,7 @@ mod tests {
                 subtitle: "node".to_owned(),
                 url: "http://localhost:3000".to_owned(),
             }],
+            servers: Vec::new(),
         };
         let src = Sources {
             menu: &menu,
@@ -398,6 +402,70 @@ mod tests {
         assert_eq!(ids(&page_rows(&Scope::Folders, &src)), ["dir./Users/a/api"]);
         assert_eq!(ids(&page_rows(&Scope::Hosts, &src)), ["host.db-1"]);
         assert_eq!(ids(&page_rows(&Scope::Ports, &src)), ["port.3000"]);
+    }
+
+    #[test]
+    fn the_terminals_a_server_keeps_are_rows_at_the_root_and_the_server_has_a_page() {
+        use super::super::server::{BackgroundFacts, ServerFacts, ServerPane};
+        use super::super::targets::HostFacts;
+        let (menu, settings, themes) = (menu(), Settings::default(), entries());
+        let targets = Targets {
+            hosts: vec![HostFacts {
+                name: "rasp".to_owned(),
+                mark: bt_core::HostMark::None,
+                configured: true,
+                tabs: 1,
+            }],
+            servers: vec![ServerFacts {
+                name: "rasp".to_owned(),
+                background: vec![BackgroundFacts {
+                    account: "u@rasp:22".to_owned(),
+                    host: "rasp".to_owned(),
+                    terminal: "b-2".to_owned(),
+                    title: "claude".to_owned(),
+                    place: None,
+                    running: None,
+                }],
+                panes: vec![ServerPane {
+                    tab: 7,
+                    pane: 70,
+                    title: "~/app".to_owned(),
+                    tab_title: "web".to_owned(),
+                    key: None,
+                }],
+            }],
+            ..Targets::default()
+        };
+        let src = Sources {
+            menu: &menu,
+            settings: &settings,
+            themes: &themes,
+            places: &Places::default(),
+            targets: &targets,
+            commands: &Commands::default(),
+            fresh_ports: &[],
+        };
+        let root = root_rows(&src);
+        let listed = ids(&root);
+        assert!(listed.contains(&"bg.b-2@u@rasp:22") && listed.contains(&"host.rasp"));
+        let host = root
+            .iter()
+            .find(|row| row.id == "host.rasp")
+            .expect("the row");
+        assert_eq!(host.opens, Some(Scope::Server("rasp".to_owned())));
+        let page = page_rows(&Scope::Server("rasp".to_owned()), &src);
+        assert_eq!(
+            ids(&page),
+            [
+                "act.openAll.rasp",
+                "bg.b-2@u@rasp:22",
+                "pane.7.70",
+                "host.rasp"
+            ]
+        );
+        // The page of a server nobody told the palette of is just the new tab.
+        let other = page_rows(&Scope::Server("lab".to_owned()), &src);
+        assert_eq!(ids(&other), ["host.lab"]);
     }
 
     #[test]

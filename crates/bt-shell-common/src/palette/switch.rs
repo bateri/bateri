@@ -56,6 +56,10 @@ pub struct TabFacts {
     pub report: Option<Report>,
     /// The directory, or `host:directory` in a remote session ([`tabs::place`]).
     pub place: Option<String>,
+    /// The servers any pane of the tab is connected to, as the panes show them: a tab is found
+    /// by the name of a server one of its panes is on, not only the pane in focus (whose server
+    /// is `place`'s).
+    pub hosts: Vec<String>,
     /// The group it is in: its identity in the window, and its name.
     pub group: Option<(u64, String)>,
     /// Which window it is in, counted from 1, when it is not the key window's.
@@ -207,6 +211,20 @@ fn joined(parts: impl IntoIterator<Item = Option<String>>) -> String {
         .join(" · ")
 }
 
+/// The words the servers of a tab are found by: each as it is shown and without the user in front
+/// of it (`deploy@db-1` is also `db-1`).
+fn host_words(hosts: &[String]) -> String {
+    let mut words: Vec<&str> = Vec::new();
+    for host in hosts {
+        for word in [host.as_str(), bt_core::bare_host(host)] {
+            if !words.contains(&word) {
+                words.push(word);
+            }
+        }
+    }
+    words.join(" ")
+}
+
 /// The row of a tab: its title, then the window (when it is another's), its group and where its
 /// shell is; the ⌘ digit, what it reports, and the ✓ for the one on screen. → opens its menu.
 pub fn tab_row(facts: &TabFacts) -> Row {
@@ -217,6 +235,7 @@ pub fn tab_row(facts: &TabFacts) -> Row {
             facts.group.as_ref().map(|(_, name)| name.clone()),
             facts.place.clone(),
         ]))
+        .keywords(host_words(&facts.hosts))
         .checked(facts.here)
         .opens(Scope::TabActions(id), false);
     if let Some(key) = &facts.key {
@@ -512,6 +531,7 @@ mod tests {
             title: title.to_owned(),
             report: None,
             place: Some("~/src".to_owned()),
+            hosts: Vec::new(),
             group: None,
             other_window: None,
             key: None,
@@ -857,5 +877,23 @@ mod tests {
         assert_eq!(act("act.nonsense", Some(&tab), none), None);
         assert_eq!(act("tab.7", None, Modifier::Command), None);
         assert_eq!(act("cmd.newTab", None, none), None);
+    }
+
+    #[test]
+    fn a_tab_is_found_by_the_server_of_any_of_its_panes_not_only_the_one_in_focus() {
+        use super::super::matching::score;
+        let mut split = tab(4, "web");
+        // The pane in focus is local; another pane is on a server.
+        split.place = Some("~/src".to_owned());
+        assert!(score(&tab_row(&split), "rasp").is_none());
+        split.hosts = vec!["rasp".to_owned(), "pi@lab".to_owned()];
+        let row = tab_row(&split);
+        assert!(score(&row, "rasp").is_some());
+        assert!(
+            score(&row, "lab").is_some(),
+            "the user in front is not the name"
+        );
+        assert!(score(&row, "pi@lab").is_some());
+        assert!(score(&tab_row(&tab(5, "api")), "rasp").is_none());
     }
 }

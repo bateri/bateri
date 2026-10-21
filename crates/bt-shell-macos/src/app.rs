@@ -5481,6 +5481,9 @@ impl AppDelegate {
             folders,
             hosts,
             ports,
+            // The servers kablo keeps terminals on are not told to the palette yet: none has a
+            // page or a count.
+            servers: Vec::new(),
         }
     }
 
@@ -5577,6 +5580,12 @@ impl AppDelegate {
             Go::ShowFolder(path) => crate::hyperlink::show_folder(std::path::Path::new(&path)),
             // A port runs where the palette's card chose it (it holds the address).
             Go::OpenPort(_) | Go::CopyPort(_) => {}
+            // The rows of a server's page exist only once the palette is told of the servers
+            // ([`Self::palette_targets`]).
+            Go::OpenBackground { .. }
+            | Go::SplitBackground { .. }
+            | Go::OpenAllBackground(_)
+            | Go::FocusPane { .. } => {}
         }
     }
 

@@ -25,6 +25,12 @@ pub enum Kind {
     Folder,
     /// A server (`host.<name>`).
     Host,
+    /// A terminal a server keeps for the user that no pane of this Mac shows
+    /// (`bg.<terminal>@<account>`).
+    Background,
+    /// A pane of this Mac that shows a terminal of a server (`pane.<tab>.<pane>`): a row of the
+    /// server's page, never searched from the root.
+    Pane,
     /// A listening port (`port.<number>`).
     Port,
     /// A page of the palette that lists something (`scope.<name>`).
@@ -49,6 +55,8 @@ impl Kind {
             Kind::History => "hist.",
             Kind::Folder => "dir.",
             Kind::Host => "host.",
+            Kind::Background => "bg.",
+            Kind::Pane => "pane.",
             Kind::Port => "port.",
             Kind::Scope => "scope.",
             Kind::Search => "search.",
@@ -68,10 +76,11 @@ impl Kind {
             Kind::History => "Command History",
             Kind::Folder => "Folders",
             Kind::Host => "Hosts",
+            Kind::Background => "Running in the background",
             Kind::Port => "Ports",
             Kind::Scope => "Go to",
             Kind::Search => "Search",
-            Kind::Choice | Kind::Action => "",
+            Kind::Pane | Kind::Choice | Kind::Action => "",
         }
     }
 
@@ -156,6 +165,9 @@ pub enum Scope {
     /// with the command besides running it (Change Shortcut…).
     CommandActions(String),
     Mark(String),
+    /// One server (the name that goes after `ssh`): what it keeps for the user in the background
+    /// and the panes of this Mac that are on it ([`super::server`]).
+    Server(String),
 }
 
 impl Scope {

@@ -841,6 +841,7 @@ mod tests {
                 running: None,
             }),
             place: None,
+            hosts: Vec::new(),
             group: None,
             other_window: None,
             key: None,

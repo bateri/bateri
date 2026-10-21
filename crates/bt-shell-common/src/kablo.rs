@@ -65,6 +65,7 @@ pub mod hub;
 pub mod install;
 pub mod ledger;
 pub mod quit;
+pub mod roster;
 pub mod service;
 pub mod ssh;
 #[cfg(test)]
