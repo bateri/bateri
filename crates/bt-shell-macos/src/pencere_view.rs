@@ -41,11 +41,18 @@
 //! view's area ([`strip`]): that a view is shown, where its program runs and how to
 //! leave. The view's area is the pane's less the strip ([`view_area`]).
 //!
+//! **What the view asks of the person** is asked in the pane's own sheet ([`ask`]): the
+//! addresses and browser features it declared are allowed or refused before it starts, and
+//! the answer is remembered until the application quits; a link it asks to open opens in the
+//! person's browser on this Mac only after a yes. The words are
+//! `bt_shell_common::view_ask`'s.
+//!
 //! Pane module: it names no application module (`make audit`); the pane it sits in
 //! is found from the view tree, the way [`crate::view::BateriView`] finds it, and
 //! what the pane does with a view (the actions, the frames that stop, the
 //! deadlines) is `pane`'s.
 
+pub(crate) mod ask;
 mod serve;
 mod strip;
 mod wait;

@@ -523,7 +523,7 @@ fn folder_action(path: &Path) -> Option<LinkAction> {
 }
 
 /// Hands a URL string to its default application; a string `NSURL` rejects does nothing.
-fn open_url(url: &str) {
+pub(crate) fn open_url(url: &str) {
     if let Some(url) = NSURL::URLWithString(&NSString::from_str(url)) {
         NSWorkspace::sharedWorkspace().openURL(&url);
     }

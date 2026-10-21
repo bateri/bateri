@@ -42,7 +42,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
-use bt_core::pencere::{Action, Grant, Size as ViewSize, ViewOptions, font_stack};
+use bt_core::pencere::{Action, Size as ViewSize, ViewOptions, font_stack};
 use bt_core::{
     BlockHandle, BlockInfo, Chord, CommandId, CommandPhase, ContentEdge, FontOptions, PaneUuid,
     ProgramBar, RemoteFiles, RemoteTarget, SearchCover, SearchDirection, SearchReport,
@@ -2229,6 +2229,9 @@ pub struct PaneIvars {
     /// The deadlines set on the conversation with that program's view
     /// ([`TerminalPane::wait_for_view`]).
     view_waits: RefCell<Waits>,
+    /// The questions the program's view has put to the person and that are up
+    /// ([`pencere_view::ask`]).
+    view_asking: pencere_view::ask::Asking,
     /// The size, in points, the conversation was last told the view's container
     /// is ([`TerminalPane::sync_view_size`]).
     view_size: Cell<(u32, u32)>,
@@ -2909,6 +2912,7 @@ impl TerminalPane {
             seen: Cell::new(true),
             pencere: RefCell::new(None),
             view_waits: RefCell::new(Waits::default()),
+            view_asking: pencere_view::ask::Asking::default(),
             view_size: Cell::new((0, 0)),
             exit_status: Cell::new(None),
             marks_wanted: Cell::new(false),
@@ -5658,9 +5662,10 @@ impl TerminalPane {
     /// Takes what the program's view has for the pane and does it, in order; then
     /// sets the deadline the conversation's state calls for. Main queue.
     ///
-    /// **A question for the person and a link to open are refused for now** — the
-    /// view starts with what no one allowed (nothing: no domain, no permission),
-    /// and a link it asks to open is not opened. The log of the view is dropped.
+    /// **A question for the person and a link to open are asked** ([`pencere_view::ask`]),
+    /// each on the pane's seat in the sheet gate, and the answer goes back to the
+    /// conversation: what the person allowed is what the view starts with, and a link
+    /// opens only if they agree. The log of the view is dropped.
     pub(crate) fn drain_views(&self) {
         if self.is_closed() {
             return;
@@ -5677,12 +5682,36 @@ impl TerminalPane {
                     }
                 }
                 Action::DestroyView => self.end_view(),
-                Action::Consent(_) => session.view_consent(Grant::none()),
-                Action::OpenLink { link, .. } => session.view_link_decision(link, false),
+                Action::Consent(consent) => {
+                    let app = self.ivars().identity.app_name.clone();
+                    let origin = self.view_origin(&session);
+                    pencere_view::ask::consent(self, &session, consent, &origin, &app);
+                }
+                Action::OpenLink { link, url } => {
+                    let origin = self.view_origin(&session);
+                    pencere_view::ask::link(self, &session, link, &url, &origin);
+                }
                 _ => {}
             }
         }
+        pencere_view::ask::settle(self, session.view_state());
         self.wait_for_view(&session);
+    }
+
+    /// The questions of the program's view that are up.
+    pub(crate) fn view_asking(&self) -> &pencere_view::ask::Asking {
+        &self.ivars().view_asking
+    }
+
+    /// Who a program's view is asking for: where its program runs, what it is called and the
+    /// tool the view is of ([`TerminalPane::view_whereabouts`]).
+    fn view_origin(&self, session: &Session) -> bt_shell_common::view_ask::Origin {
+        let (place, program) = self.view_whereabouts();
+        bt_shell_common::view_ask::Origin {
+            place,
+            program,
+            tool: session.view_tool(),
+        }
     }
 
     /// Puts the view over the terminal, with the application's strip above it: over the
@@ -5757,11 +5786,13 @@ impl TerminalPane {
     /// Sets the deadline the conversation's state calls for: one delayed block on
     /// the main queue, which asks for no frame ([`pencere_view`]'s `wait`).
     fn wait_for_view(&self, session: &Arc<Session>) {
-        let plan = self
+        // While the person is asked about access the open waits for them, however
+        // long: no deadline of ours runs, and one that was set is cancelled.
+        let state = self
             .ivars()
-            .view_waits
-            .borrow_mut()
-            .observe(session.view_state());
+            .view_asking
+            .deadline_state(session.view_state());
+        let plan = self.ivars().view_waits.borrow_mut().observe(state);
         let Some((number, delay)) = plan else {
             return;
         };

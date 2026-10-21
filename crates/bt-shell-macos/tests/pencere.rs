@@ -18,6 +18,14 @@
 //! application's shortcut (⌘T) goes to the main menu and not to the view, the application's
 //! strip stands over the view's area, and the program's `bye` takes the view down.
 //!
+//! A bundle that declares an address makes the pane ask the person, with a sheet on the
+//! window: the test reads the sheet's words and presses its buttons the way a person's
+//! click would (`performClick` on the button, in this process; the one button it never
+//! presses is the one that opens a link in the user's browser). The view does not start
+//! before the answer, an answer is not asked for again by the same program, tool and set, and
+//! another set asks. A link the view asks to open is asked about and, refused, is refused to
+//! the view.
+//!
 //! Its own `main` (`harness = false`): AppKit, the main queue and `WKWebView` want the main
 //! thread. Without a window server session (an ssh login) it says so and passes, as the embed
 //! test does.
@@ -35,10 +43,11 @@ use bt_shell_common::view_strip;
 use bt_shell_macos::embed::{self, Cover, Host, Identity, Source, TerminalPane};
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
-use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
+use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSEvent,
-    NSEventModifierFlags, NSEventType, NSMenu, NSMenuItem, NSView, NSWindow, NSWindowStyleMask,
+    NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSButton, NSEvent,
+    NSEventModifierFlags, NSEventType, NSMenu, NSMenuItem, NSTextField, NSView, NSWindow,
+    NSWindowStyleMask,
 };
 use objc2_foundation::{
     NSDate, NSDefaultRunLoopMode, NSObject, NSObjectProtocol, NSPoint, NSRect, NSRunLoop, NSSize,
@@ -180,6 +189,11 @@ impl Program {
     /// The open of a view of the tool `show`: with a bundle of `files` (path, type, bytes),
     /// or with none.
     fn open(&mut self, token: &str, files: Option<&[(&str, &str, &[u8])]>) {
+        self.open_declaring(token, files, "https://api.example.com");
+    }
+
+    /// The same, for a bundle whose manifest declares `domain` as one it connects to.
+    fn open_declaring(&mut self, token: &str, files: Option<&[(&str, &str, &[u8])]>, domain: &str) {
         let bundle = files.map_or_else(String::new, |files| {
             let list: Vec<String> = files
                 .iter()
@@ -193,7 +207,7 @@ impl Program {
                 .collect();
             format!(
                 ",\"bundle\":{{\"entry\":\"index.html\",\"files\":[{}],\"meta\":{{\"csp\":\
-{{\"connectDomains\":[\"https://api.example.com\"]}}}}}}",
+{{\"connectDomains\":[\"{domain}\"]}}}}}}",
                 list.join(",")
             )
         });
@@ -301,6 +315,22 @@ send({id:1,method:'ui/initialize',params:{protocolVersion:'2026-01-26',\
 appInfo:{name:'t',version:'0'},appCapabilities:{experimental:{'pencere/pane':{}}}}});\
 </script></body></html>";
 
+/// A document that, once the host has answered `ui/initialize`, asks to open a link and tells
+/// the program how that went by calling its tool with the answer (a view's one way to reach the
+/// program, and so the test's way to see what the view was told).
+const LINK_VIEW: &str = "<!doctype html><html><head><meta charset=utf-8><title>t</title></head>\
+<body><p id=p>view</p><script>\
+var send=function(m){window.parent.postMessage(Object.assign({jsonrpc:'2.0'},m),'*')};\
+window.addEventListener('message',function(e){\
+if(e.source!==window.parent)return;var m=e.data;\
+if(m&&m.id===1&&m.result){send({method:'ui/notifications/initialized'});\
+send({id:2,method:'ui/open-link',params:{url:'https://example.com/docs'}})}\
+else if(m&&m.id===2){send({id:3,method:'tools/call',params:{name:'show',\
+arguments:{link:m.error?'denied':'opened'}}})}});\
+send({id:1,method:'ui/initialize',params:{protocolVersion:'2026-01-26',\
+appInfo:{name:'t',version:'0'},appCapabilities:{experimental:{'pencere/pane':{}}}}});\
+</script></body></html>";
+
 /// The same handshake as [`VIEW`]'s, as a bundle's two files: a page that loads a script.
 const BUNDLE_PAGE: &str = "<!doctype html><html><head><meta charset=utf-8></head>\
 <body><p>bundle</p><script src=app.js></script></body></html>";
@@ -338,6 +368,76 @@ fn strip_view(pane: &TerminalPane) -> Option<Retained<NSView>> {
             .to_string_lossy()
             .contains("BateriPencereStrip")
     })
+}
+
+/// Every view under `view`, `view` first.
+fn descendants(view: Retained<NSView>) -> Vec<Retained<NSView>> {
+    let mut found = vec![view];
+    let mut at = 0;
+    while at < found.len() {
+        let subviews = found[at].subviews();
+        found.extend(subviews.iter());
+        at += 1;
+    }
+    found
+}
+
+/// The sheet the window shows, once it shows one: the pane's question.
+fn sheet_of(window: &NSWindow) -> Retained<NSWindow> {
+    let mut sheet = None;
+    until("the pane's question to open as a sheet", || {
+        sheet = window.attachedSheet();
+        sheet.is_some()
+    });
+    sheet.expect("a sheet")
+}
+
+/// What the sheet says: the title and the text, one after the other.
+fn sheet_text(sheet: &NSWindow) -> String {
+    let content = sheet.contentView().expect("a sheet has a content view");
+    descendants(content)
+        .iter()
+        .filter_map(|view| {
+            view.downcast_ref::<NSTextField>()
+                .map(|field| field.stringValue().to_string())
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The titles of the sheet's buttons, sorted (the views stand in the order AppKit made them,
+/// which says nothing of which button Return presses).
+fn sheet_buttons(sheet: &NSWindow) -> Vec<String> {
+    let content = sheet.contentView().expect("a sheet has a content view");
+    let mut titles: Vec<String> = descendants(content)
+        .iter()
+        .filter_map(|view| {
+            view.downcast_ref::<NSButton>()
+                .map(|button| button.title().to_string())
+        })
+        .collect();
+    titles.sort();
+    titles
+}
+
+/// Presses the sheet's button titled `title`, as a click on it does, and waits for the sheet
+/// to go. Never the button that opens a link.
+fn press(window: &NSWindow, sheet: &NSWindow, title: &str) {
+    assert_ne!(
+        title, "Open",
+        "a test does not open a page in the user's browser"
+    );
+    let content = sheet.contentView().expect("a sheet has a content view");
+    let button = descendants(content)
+        .into_iter()
+        .find_map(|view| {
+            let button = view.downcast_ref::<NSButton>()?;
+            (button.title().to_string() == title).then(|| button.retain())
+        })
+        .unwrap_or_else(|| panic!("the sheet has no {title:?} button"));
+    // SAFETY: a button of the sheet, clicked on the main thread; no sender is named.
+    unsafe { button.performClick(None) };
+    until("the sheet to end", || window.attachedSheet().is_none());
 }
 
 fn scratch() -> PathBuf {
@@ -561,11 +661,28 @@ fn run(dir: &Path) {
         ));
     }
     program.start_up(None);
+    // The manifest declares an address, so the person is asked before the view starts: the
+    // question says who asks, what and where the program runs, and no view stands while it is up.
+    let sheet = sheet_of(&window);
+    let text = sheet_text(&sheet);
+    for needle in [
+        "Allow this view to reach other sites?",
+        "Connect to\n• https://api.example.com",
+        "of its tool “show”",
+        "on this Mac opened a view",
+        "pencere-test keeps your answer until it quits.",
+    ] {
+        assert!(text.contains(needle), "{needle:?} is not in:\n{text}");
+    }
+    assert_eq!(sheet_buttons(&sheet), ["Allow", "Don't Allow"]);
+    assert!(!covered(&pane), "the view waits for the answer");
+    press(&window, &sheet, "Allow");
     watch_it_start(&pane, &mut program);
     program.bye(&token);
     until("the bundle's view to go", || !covered(&pane));
 
-    // The same bundle again: the host has every file, and says so.
+    // The same bundle again: the host has every file, and says so; the person has answered
+    // this program's tool for this set, and is not asked again.
     let token = program.hello();
     program.open(&token, Some(&files));
     let missing = program.wait_for("pencere;need");
@@ -575,8 +692,88 @@ fn run(dir: &Path) {
     );
     program.start_up(None);
     watch_it_start(&pane, &mut program);
+    assert!(
+        window.attachedSheet().is_none(),
+        "the same answer is not asked for twice"
+    );
     program.bye(&token);
     until("the second view to go", || !covered(&pane));
+
+    // Another set is another question, and a place on this Mac is marked as one. "Don't Allow"
+    // is an answer: the view starts all the same, with nothing allowed, and the question is
+    // not asked again for that set either.
+    let token = program.hello();
+    program.open_declaring(&token, Some(&files), "http://localhost:8080");
+    program.wait_for("pencere;need");
+    program.start_up(None);
+    let sheet = sheet_of(&window);
+    let text = sheet_text(&sheet);
+    assert!(
+        text.contains("• http://localhost:8080 (this Mac)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("A place marked above is on this Mac"),
+        "{text}"
+    );
+    press(&window, &sheet, "Don't Allow");
+    watch_it_start(&pane, &mut program);
+    program.bye(&token);
+    until("the refused view to go", || !covered(&pane));
+    let token = program.hello();
+    program.open_declaring(&token, Some(&files), "http://localhost:8080");
+    program.wait_for("pencere;need");
+    program.start_up(None);
+    watch_it_start(&pane, &mut program);
+    assert!(
+        window.attachedSheet().is_none(),
+        "a refusal is remembered as well"
+    );
+    program.bye(&token);
+    until("the remembered view to go", || !covered(&pane));
+
+    // A program that gives up while the person is being asked takes the question with it, and
+    // since nobody answered it, the same set is asked again the next time.
+    let token = program.hello();
+    program.open_declaring(&token, Some(&files), "https://late.example.com");
+    program.wait_for("pencere;need");
+    program.start_up(None);
+    let sheet = sheet_of(&window);
+    assert!(sheet_text(&sheet).contains("https://late.example.com"));
+    program.bye(&token);
+    until("the question of a program that left to go", || {
+        window.attachedSheet().is_none()
+    });
+    let token = program.hello();
+    program.open_declaring(&token, Some(&files), "https://late.example.com");
+    program.wait_for("pencere;need");
+    program.start_up(None);
+    let sheet = sheet_of(&window);
+    press(&window, &sheet, "Allow");
+    watch_it_start(&pane, &mut program);
+    program.bye(&token);
+    until("the view of the second try to go", || !covered(&pane));
+
+    // A link the view asks to open: asked about, with where the program runs, and a refusal
+    // reaches the view as the error the protocol defines.
+    let token = program.hello();
+    program.open(&token, None);
+    program.start_up(Some(LINK_VIEW));
+    watch_it_start(&pane, &mut program);
+    let sheet = sheet_of(&window);
+    let text = sheet_text(&sheet);
+    for needle in [
+        "Open this link?",
+        "on this Mac opened a view that asks to open this link in your browser on this Mac:",
+        "https://example.com/docs",
+    ] {
+        assert!(text.contains(needle), "{needle:?} is not in:\n{text}");
+    }
+    assert_eq!(sheet_buttons(&sheet), ["Cancel", "Open"]);
+    press(&window, &sheet, "Cancel");
+    program.wait_for("\"link\":\"denied\"");
+    program.bye(&token);
+    until("the link view to go", || !covered(&pane));
 
     pane.close();
     println!("pencere: ok");

@@ -11954,6 +11954,14 @@ impl Session {
         self.adapter.view(|conversation| conversation.state())
     }
 
+    /// The tool the program's `open` that is being answered names, for the
+    /// question to the person ([`pencere::Action::Consent`]): the crate tells
+    /// the tool only when the view starts, and an answer is remembered by it.
+    /// `None` when the open's text gave none, or the pane hosts no views.
+    pub fn view_tool(&self) -> Option<String> {
+        self.adapter.0.desk.as_ref()?.opening_tool()
+    }
+
     /// Sets the least contrast ratio a program's text keeps against its own
     /// ground (`[appearance] minimum_contrast`; `1` = off) and requests a
     /// frame — the next frame's grid, fill band and dock are drawn with it.

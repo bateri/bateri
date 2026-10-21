@@ -31,8 +31,9 @@
 //! palette's rules — its rows, matching, pages, preview and the settings it can change
 //! (`palette`), what an agent on a server asks of bateri: the message, where the pane it
 //! opened lands and what `ls` tells (`agent`), the files a program's views are made of,
-//! kept on disk by their digest (`view_store`), and the strip the application keeps over
-//! such a view (`view_strip`).
+//! kept on disk by their digest (`view_store`), the strip the application keeps over
+//! such a view (`view_strip`) and what the view asks of the person — the access it
+//! declared and the links it opens — with what is remembered of the answer (`view_ask`).
 //!
 //! **The boundary:** no AppKit, Foundation, Quartz or notification centre —
 //! whatever needs the toolkit stays in the platform shell (`bt-shell-macos` on
@@ -86,6 +87,7 @@ pub mod tabs;
 pub mod tree_text;
 pub mod undo;
 pub mod upload;
+pub mod view_ask;
 pub mod view_store;
 pub mod view_strip;
 // Bodies exist for macOS and Linux only; elsewhere the module is absent

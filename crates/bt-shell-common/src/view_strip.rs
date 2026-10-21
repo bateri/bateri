@@ -85,7 +85,7 @@ pub fn strip(title: Option<&str>, tool: &str, place: Option<&str>, program: Opti
 /// `text` as the strip may show it: control characters gone, line breaks and runs of spaces one
 /// space, the characters that hide or reverse text gone, and at most `limit` characters with a
 /// trailing "…" when it was cut.
-fn clean(text: &str, limit: usize) -> String {
+pub(crate) fn clean(text: &str, limit: usize) -> String {
     let mut out = String::new();
     let mut gap = false;
     for c in text.chars() {

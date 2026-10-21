@@ -488,6 +488,36 @@ fn the_full_opening_ends_with_a_view_for_the_shell_and_two_events() {
 }
 
 #[test]
+fn the_tool_an_open_names_is_known_before_the_crate_says_it_and_a_refused_open_leaves_it() {
+    let (rig, _, _) = Rig::new(true);
+    let mut pane = Pane::new(rig);
+    pane.feed(&hello());
+    let token = token_of(&pane.rig.written()[0]);
+    let desk = pane.rig.desk.as_ref().expect("a desk");
+    assert_eq!(desk.opening_tool(), None, "nothing is being opened");
+
+    pane.feed(&[ALTERNATE_SCREEN, &bare_open(&token)].concat());
+    let desk = pane.rig.desk.as_ref().expect("a desk");
+    assert_eq!(desk.opening_tool().as_deref(), Some("t"));
+    assert_eq!(
+        desk.apply(|_| {}, |conversation| conversation.state()),
+        State::Opening
+    );
+
+    // An `open` that comes while this one is open is refused, with the token spent or
+    // not, and it does not become the one the question is about.
+    pane.feed(&wire(
+        "open",
+        9,
+        None,
+        None,
+        &format!(r#"{{"token":"{token}","tool":{{"name":"other"}}}}"#),
+    ));
+    let desk = pane.rig.desk.as_ref().expect("a desk");
+    assert_eq!(desk.opening_tool().as_deref(), Some("t"));
+}
+
+#[test]
 fn a_burst_for_the_shell_is_one_event() {
     let (rig, _, wake) = Rig::new(true);
     let mut pane = Pane::new(rig);
