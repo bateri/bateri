@@ -464,6 +464,53 @@ pub(crate) struct Launch {
     /// the shell integration's own win over them on a clash, and `TERM` and
     /// the identity family are never overridden (`Session::spawn`).
     pub(crate) env: Vec<(String, String)>,
+    /// A terminal a server keeps that the pane's first program shows instead of a shell
+    /// starting first ([`Held`]); `None` → the shell is the first program.
+    pub(crate) held: Option<Held>,
+}
+
+/// A pane whose **first program** is the pipe to a terminal a server keeps
+/// (`bateri ssh-hold --first`), opened on the same server as the pane it grows from. The
+/// `ssh` line is not typed into a shell that is there first: the program is the `ssh` and
+/// the shell follows it when the terminal ends, as it follows a typed one — so nothing is
+/// written to a shell, the server's login is the one the source pane has, and the pane
+/// reads its remote session from the program's own marks ([`bt_core::first_command_begun`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Held {
+    /// The `ssh` arguments of the terminal to open, as the source pane's session had them
+    /// (the program's name left out).
+    pub(crate) args: Vec<String>,
+}
+
+/// The program a [`Held`] pane starts: bateri's own executable (`BATERI_BIN` of the
+/// integration's environment, which also names the instance the program finds bateri by)
+/// running `ssh-hold --first`, with the arguments the shell it hands over to is started
+/// with. `None` without the integration: the program would find nobody, and a pane that
+/// does not have the wrapper has no `ssh` that is kept anywhere.
+pub(crate) fn held_command(
+    held: &Held,
+    environment: &[(String, String)],
+    shell_args: &[String],
+) -> Option<(String, Vec<String>)> {
+    let value = |key: &str| {
+        environment
+            .iter()
+            .find(|(name, _)| name == key)
+            .map(|(_, value)| value.clone())
+    };
+    value("BATERI_SSH_INSTANCE")?;
+    let program = value("BATERI_BIN")?;
+    let mut args = vec![
+        bt_shell_common::hold::SUBCOMMAND.to_owned(),
+        "--first".to_owned(),
+    ];
+    for arg in shell_args {
+        args.push("--shell-arg".to_owned());
+        args.push(arg.clone());
+    }
+    args.push("--".to_owned());
+    args.extend(held.args.iter().cloned());
+    Some((program, args))
 }
 
 /// A pane the previous bateri froze and its holder gave, checked to be
@@ -556,6 +603,41 @@ pub(crate) fn fallen_back(history: Option<Vec<u8>>, note: Note) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_held_pane_starts_the_pipe_with_the_shell_it_hands_over_to() {
+        let environment = vec![
+            ("ZDOTDIR".to_owned(), "/w".to_owned()),
+            ("BATERI_BIN".to_owned(), "/Applications/bateri".to_owned()),
+            ("BATERI_SSH_INSTANCE".to_owned(), "0a1b2c3d".to_owned()),
+        ];
+        let held = super::Held {
+            args: vec!["-p".to_owned(), "2222".to_owned(), "--first".to_owned()],
+        };
+        assert_eq!(
+            super::held_command(&held, &environment, &["--posix".to_owned()]),
+            Some((
+                "/Applications/bateri".to_owned(),
+                [
+                    "ssh-hold",
+                    "--first",
+                    "--shell-arg",
+                    "--posix",
+                    "--",
+                    "-p",
+                    "2222",
+                    "--first"
+                ]
+                .map(str::to_owned)
+                .to_vec()
+            )),
+            "the arguments of `ssh` follow the `--`, whatever they look like"
+        );
+        // Without the binary or the instance the pipe would find nobody.
+        assert_eq!(super::held_command(&held, &environment[..1], &[]), None);
+        assert_eq!(super::held_command(&held, &environment[..2], &[]), None);
+        assert_eq!(super::held_command(&held, &[], &[]), None);
+    }
+
     use super::{Note, fallen_back};
 
     /// The fallback's note sits on a line of its own under the history,

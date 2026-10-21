@@ -42,8 +42,12 @@ of every installed copy. A version without a section is not released.
   plain `ssh` as before.
 
 - **⌘T and ⌘D in a pane that shows a terminal on a server open another one
-  there, and closing the pane ends it.** The new tab or split starts in the
-  folder you were in and asks for no password again. ⌘W, a tab's ×, closing the
+  there, and closing the pane ends it.** The new tab or split opens straight on
+  the server — no local prompt flashes and no `ssh` line is typed — in the
+  folder you were in, asks for no password again, and is a server pane like
+  the one you typed `ssh` in (the line under it names the server, the commands
+  are blocks, the tab shows it); when its terminal ends, the pane's own shell
+  starts. ⌘W, a tab's ×, closing the
   window or a split pane ends the terminal on the server (and the question
   before it says what is running there: “npm on rasp” is still running), where
   closing used to leave it running with nobody to see it; a terminal that is

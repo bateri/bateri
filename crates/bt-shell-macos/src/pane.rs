@@ -3528,6 +3528,7 @@ impl TerminalPane {
             replay,
             adopt,
             env: extra_env,
+            held,
         } = launch;
         // In smoke and measurement runs the shell is fixed: the result must not
         // depend on the user's `$SHELL` and rc file. The owner of the scripts
@@ -3547,7 +3548,20 @@ impl TerminalPane {
         // they are `Direct`; deciding the parent in the same branch as the
         // command is what keeps the two from disagreeing.
         let (command, shell_parent) = match self.ivars().run {
-            None => child::shell_command(&shell_args),
+            None => {
+                let shell = child::shell_command(&shell_args);
+                // A terminal a server keeps shown first: the program in front is the
+                // pipe to it, and `shell_parent` is the shell's, since that is what the
+                // process is once the terminal ends and the pipe has taken its place.
+                match held
+                    .as_ref()
+                    .filter(|_| shell.0.is_some())
+                    .and_then(|held| crate::launch::held_command(held, &integration, &shell_args))
+                {
+                    Some(pipe) => (Some(pipe), shell.1),
+                    None => shell,
+                }
+            }
             Some(run) => (
                 Some(match run.workload {
                     Workload::Smoke => smoke_shell(),

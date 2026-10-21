@@ -5213,6 +5213,48 @@ fn block_id(field: &[u8]) -> Option<u32> {
     number(field.strip_prefix(BLOCK_ID_FIELD)?)
 }
 
+/// The block a pane's **first program** stands in as. A pane whose first program
+/// is not the shell but a pipe to a terminal a server keeps (`bateri ssh-hold
+/// --first`) has no shell to print the marks of the `ssh` the user would have
+/// typed, and everything about a remote session hangs on that command: the probe
+/// that names the server is armed by its `C`, the remote shell's blocks are
+/// named by its block (`bt_remote=<P>.<S>.<n>`, `P` here), the dock and the
+/// title read the session from it, and its `D` is what ends the session. The
+/// program prints those marks itself ([`first_command_begun`],
+/// [`first_command_ended`]) as the shell's wrapper would, so the stream is the
+/// one a typed `ssh` makes and the ledger, the journal and a handover need to
+/// know nothing of it.
+///
+/// `0`, the one number the shell's own counter never prints first: it counts
+/// from 1 (its first prompt is block 1), so the shell that takes the pane over
+/// when the program ends opens block 1 right after this one and the ledger stays
+/// contiguous ([`BlockLog::start`]).
+pub const FIRST_BLOCK: u32 = 0;
+
+/// What a command leaves on that its shell turns off once it is over (the
+/// wrapper scripts print the same after `D`): mouse reports, focus reports, size
+/// reports and the kitty keyboard forms.
+const LEFT_ON_BY_A_COMMAND: &[u8] = b"\x1b[?1000;1002;1003;1004;1005;1006;1016;2048l\x1b[<4096u";
+
+/// The marks of a first program that begins: the prompt of [`FIRST_BLOCK`], the
+/// command running (`C`) and the title pushed as a shell pushes it as a command
+/// starts (`CSI 22 t`; [`first_command_ended`] pops it).
+pub fn first_command_begun() -> Vec<u8> {
+    let mut bytes = format!("\x1b]133;A;bt_block={FIRST_BLOCK}\x07").into_bytes();
+    bytes.extend_from_slice(b"\x1b]133;C\x07\x1b[22t");
+    bytes
+}
+
+/// The marks of a first program that is over with `code`: the title popped, the
+/// block closed (`D`) and the modes the program may have left on turned off.
+/// What follows is the shell's own: its first prompt is block 1.
+pub fn first_command_ended(code: u8) -> Vec<u8> {
+    let mut bytes = b"\x1b[23t".to_vec();
+    bytes.extend_from_slice(format!("\x1b]133;D;{code};bt_block={FIRST_BLOCK}\x07").as_bytes());
+    bytes.extend_from_slice(LEFT_ON_BY_A_COMMAND);
+    bytes
+}
+
 /// fish's announcement on its own `A` that it reads a mouse click as an SGR
 /// report and moves its caret to it (fish 4.1 and later).
 const CLICK_EVENTS_FIELD: &[u8] = b"click_events=1";
@@ -11375,6 +11417,78 @@ mod tests {
             outcome.status |= one.status;
         });
         outcome
+    }
+
+    #[test]
+    fn a_first_program_stands_in_for_the_ssh_the_shell_would_have_run() {
+        // The bytes are the wrapper's marks of a command: block 0, `C`, the title pushed.
+        assert_eq!(
+            marks(&first_command_begun()),
+            vec![
+                Mark::PromptStart {
+                    id: Some(FIRST_BLOCK),
+                    click_events: false
+                },
+                Mark::CommandStart,
+            ]
+        );
+        assert_eq!(
+            marks(&first_command_ended(3)),
+            vec![Mark::CommandEnd {
+                exit: Some(3),
+                id: Some(FIRST_BLOCK)
+            }]
+        );
+        let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
+        let began = feed(&mut log, &first_command_begun());
+        assert!(began.started, "`C` is the edge that arms the probe");
+        assert!(log.running_command().is_some());
+        assert_eq!(log.last_local_block(), Some(FIRST_BLOCK));
+        // The probe's answer is taken for the command that runs.
+        assert!(log.set_remote(Some(&RemoteTarget::ssh("prod"))));
+        // The server's shell is told the block as its parent: its marks are the remote
+        // trail of this session and the open command is their parent.
+        let under = format!("{FIRST_BLOCK}.9");
+        feed(
+            &mut log,
+            format!("\x1b]133;A;bt_remote={under}.1\x07\x1b]133;C;bt_remote={under}.1\x07")
+                .as_bytes(),
+        );
+        assert_eq!(log.remote_shell_pid(), Some(9));
+        assert!(log.running_blocks().remote.is_some());
+        assert!(matches!(log.last_block(), Some(BlockKey::Remote { .. })));
+        // A foreign shell's bare `A` (fish 4 on the server) does not end the session: the
+        // first program's own mark carried our identity.
+        feed(&mut log, b"\x1b]133;A\x07");
+        assert!(log.context.remote.is_some());
+        // The terminal ends: the session goes with the block, as with a typed `ssh`.
+        let ended = feed(&mut log, &first_command_ended(0));
+        assert!(ended.ended);
+        assert_eq!(log.context.remote, None);
+        assert_eq!(log.running_command(), None);
+        assert_eq!(log.remote_shell_pid(), None);
+        // The shell that takes the pane over counts from 1: the ledger goes on, block 0 is
+        // finished and block 1 is the open prompt.
+        feed(&mut log, b"\x1b]133;A;bt_block=1\x07\x1b]133;B\x07");
+        assert!(matches!(
+            log.local.blocks.get(FIRST_BLOCK),
+            Some(Outcome::Finished { exit: Some(0), .. })
+        ));
+        assert!(matches!(
+            log.local.blocks.get(1),
+            Some(Outcome::Pending { .. })
+        ));
+        assert_eq!(log.last_local_block(), Some(1));
+        assert_eq!(log.running_command(), None);
+    }
+
+    #[test]
+    fn a_first_program_that_ends_with_255_offers_the_reconnect_like_an_ssh_that_lost_its_line() {
+        let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
+        feed(&mut log, &first_command_begun());
+        assert!(log.set_remote(Some(&RemoteTarget::ssh("prod"))));
+        feed(&mut log, &first_command_ended(255));
+        assert!(log.context.reconnect.is_some());
     }
 
     #[test]

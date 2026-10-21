@@ -40,7 +40,7 @@ use objc2_foundation::NSRect;
 
 use crate::Run;
 use crate::child;
-use crate::launch::{self, Adopted, Launch};
+use crate::launch::{self, Adopted, Held, Launch};
 use crate::pane::{Holder, PaneLaunch};
 
 pub use crate::footer::ListeningPort;
@@ -102,6 +102,9 @@ pub struct Config {
     pub(crate) keeper: Option<Rc<dyn Holder>>,
     /// A program a previous bateri handed over, carried on instead of a new shell.
     pub(crate) adopt: Option<Adopted>,
+    /// A terminal a server keeps shown as the pane's first program, the shell following it
+    /// ([`Held`]); `None` → the shell is the first program.
+    pub(crate) held: Option<Held>,
 }
 
 impl Config {
@@ -141,6 +144,7 @@ impl Config {
             stats: None,
             keeper: None,
             adopt: None,
+            held: None,
         }
     }
 }
@@ -156,6 +160,7 @@ impl Config {
             replay,
             adopt,
             env,
+            held,
         } = launch;
         Self {
             working_directory,
@@ -164,6 +169,7 @@ impl Config {
             replay,
             adopt,
             env,
+            held,
             ..self
         }
     }
@@ -217,6 +223,7 @@ pub fn open(
         stats,
         keeper,
         adopt,
+        held,
     } = config;
     let pane = TerminalPane::new(
         mtm,
@@ -236,6 +243,7 @@ pub fn open(
                 replay,
                 adopt,
                 env,
+                held,
             },
             integration,
             reduce_motion,

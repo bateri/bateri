@@ -48,7 +48,9 @@ use crate::arrange::{self, HOLD_DELAY, Hold, Tool};
 use crate::embed;
 use crate::handover::{self, Arrival, HeldPane, PaneState};
 use crate::keeper::{self, Keeper, QuitKind, QuitPath};
-use crate::launch::{self, Adopted, Identity, Integration, Launch, Note, ProcessEnv, fallen_back};
+use crate::launch::{
+    self, Adopted, Held, Identity, Integration, Launch, Note, ProcessEnv, fallen_back,
+};
 use crate::menu::ShellMenuDelegate;
 use crate::moves::{self, Move, Plan, Refusal, Slot, Step};
 use crate::notices::{Notices, Source};
@@ -448,27 +450,41 @@ fn first_input(
     }
 }
 
-/// The remote folder the new shell's first `ssh` starts in: only beside ⌘T's
-/// first input ([`initial_line`]) and only when that input is an `ssh` — mosh
-/// is not a terminal a server keeps, and the folder would wait for the next,
-/// unrelated `ssh`. Only where the shell integration is installed
-/// (`BATERI_BIN` in `integration`): elsewhere the line is not the integration's
-/// `ssh`. `dir` is the folder the dock shows
-/// ([`bt_core::Session::remote_link_directory`]); one the server could not be
-/// sent is no folder ([`bt_shell_common::ssh_wrap::is_start_dir`]). The folder
-/// goes to the service, not into the shell's environment
-/// ([`crate::hold_service::expect_directory`]).
-fn ssh_start_dir(
-    initial: Option<&str>,
-    kind: Option<RemoteKind>,
-    dir: String,
+/// The terminal a new pane shows first when it grows from a pane that shows one a server keeps
+/// (⌘T, ⌘D): the same `ssh` the source's session has, as the new pane's **first program**
+/// ([`Held`]) instead of a line typed into a shell — nothing is written to a shell, the source's
+/// connection is the one it rides, and the pane is a remote session from its first byte. Only
+/// beside ⌘T's rule ([`initial_line`]) and without a palette `Start` (the pane is local then, as
+/// [`first_input`] has it); only for `ssh` — mosh is not a terminal a server keeps; and only
+/// where the shell integration is installed (`BATERI_BIN` and the masters' instance in
+/// `integration`): elsewhere the program would find nobody. `None`: ⌘T's other rule, the
+/// source's line typed to a shell, which a plain `ssh` source still takes.
+fn held_start(
+    opening: Opening,
+    start: Option<&Start>,
+    kept: bool,
+    target: Option<&bt_core::RemoteTarget>,
     integration: &[(String, String)],
-) -> Option<String> {
-    (initial.is_some()
-        && kind == Some(RemoteKind::Ssh)
-        && bt_shell_common::ssh_wrap::is_start_dir(&dir)
-        && integration.iter().any(|(key, _)| key == "BATERI_BIN"))
-    .then_some(dir)
+) -> Option<Held> {
+    if !matches!(opening, Opening::Tab | Opening::Split) || start.is_some() || !kept {
+        return None;
+    }
+    let target = target.filter(|target| target.kind == RemoteKind::Ssh)?;
+    let (program, args) = target.argv.split_first()?;
+    let installed = ["BATERI_BIN", "BATERI_SSH_INSTANCE"]
+        .iter()
+        .all(|key| integration.iter().any(|(name, _)| name == key));
+    (program == "ssh" && !args.is_empty() && installed).then(|| Held {
+        args: args.to_vec(),
+    })
+}
+
+/// The remote folder the new pane's terminal starts in: the folder the dock shows
+/// ([`bt_core::Session::remote_link_directory`]), when the server could be sent it
+/// ([`bt_shell_common::ssh_wrap::is_start_dir`]). It goes to the service, not into the shell's
+/// environment ([`crate::hold_service::expect_directory`]).
+fn start_directory(dir: String) -> Option<String> {
+    bt_shell_common::ssh_wrap::is_start_dir(&dir).then_some(dir)
 }
 
 /// The session directory ([`restore::directory`]) — `None` in a timed run and
@@ -507,6 +523,7 @@ fn restored_launch(pane: &SavedPane, replay: Option<Vec<u8>>) -> Launch {
         replay,
         adopt: None,
         env: Vec::new(),
+        held: None,
     }
 }
 
@@ -2990,9 +3007,16 @@ impl AppDelegate {
         })?;
         Some(bt_shell_common::kablo::service::PaneInfo {
             tab: Some(pane.uuid().clone()),
-            block: pane
-                .session()
-                .and_then(|session| session.last_local_block()),
+            // A pane's own first program is the `ssh` that stood in for the command the shell
+            // never ran: the block it printed is the parent of the remote blocks, there
+            // being no shell block to read ([`bt_core::FIRST_BLOCK`]).
+            block: pane.session().and_then(|session| {
+                if session.child_pid() == pid {
+                    Some(bt_core::FIRST_BLOCK)
+                } else {
+                    session.last_local_block()
+                }
+            }),
             // The folder a pane opened from a pane on a server asks to start in,
             // once ([`crate::hold_service::expect_directory`]).
             directory: crate::hold_service::take_directory(pane.id()),
@@ -4461,26 +4485,35 @@ impl AppDelegate {
             .and_then(|start| start.directory.clone())
             .or_else(|| session.and_then(|session| session.working_directory()))
             .or_else(child::working_directory);
-        let (initial, inherited) = first_input(
-            opening,
-            session.and_then(|session| session.remote_line()),
-            start,
-        );
         let integration = self.shell_integration();
         let id = self.next_id();
-        // A pane that shows a terminal a server keeps: the one the new pane asks
-        // for with the line it types starts in the same folder there.
-        if let (Some(from), Some(session)) = (from, session)
-            && crate::hold_service::shown(from.uuid()).is_some()
-            && let Some(dir) = ssh_start_dir(
-                inherited.as_deref(),
-                session.remote_target().map(|(_, target, _)| target.kind),
-                session.remote_link_directory(),
-                &integration.env,
+        // A pane that shows a terminal a server keeps: the new pane's first program is
+        // the same `ssh`, and the terminal it asks for starts in the same folder there.
+        let held = held_start(
+            opening,
+            start,
+            from.is_some_and(|from| crate::hold_service::shown(from.uuid()).is_some()),
+            session
+                .and_then(|session| session.remote_target())
+                .map(|(_, target, _)| target)
+                .as_ref(),
+            &integration.env,
+        );
+        let initial = if held.is_some() {
+            if let Some(dir) =
+                session.and_then(|session| start_directory(session.remote_link_directory()))
+            {
+                crate::hold_service::expect_directory(id, dir);
+            }
+            None
+        } else {
+            first_input(
+                opening,
+                session.and_then(|session| session.remote_line()),
+                start,
             )
-        {
-            crate::hold_service::expect_directory(id, dir);
-        }
+            .0
+        };
         let config = embed::Config {
             id,
             host: Rc::new(TabHost::new(tab)),
@@ -4506,6 +4539,7 @@ impl AppDelegate {
                 .clone()
                 .map(|keeper| keeper as Rc<dyn crate::pane::Holder>),
             adopt: None,
+            held,
             env: Vec::new(),
         };
         (config, theme)
@@ -8834,38 +8868,106 @@ mod tests {
         );
     }
 
+    fn ssh_target(argv: &[&str]) -> bt_core::RemoteTarget {
+        bt_core::RemoteTarget {
+            host: "prod".to_owned(),
+            port: None,
+            kind: RemoteKind::Ssh,
+            argv: argv.iter().map(|arg| (*arg).to_owned()).collect(),
+            line: argv.join(" "),
+        }
+    }
+
     #[test]
-    fn a_new_tab_follows_a_remote_tab_into_its_folder() {
-        let wrapper = [
+    fn a_new_tab_or_split_from_a_pane_on_a_server_starts_with_the_same_terminal_not_a_typed_line() {
+        let installed = [
             ("ZDOTDIR".to_owned(), "/w".to_owned()),
             ("BATERI_BIN".to_owned(), "/b".to_owned()),
+            ("BATERI_SSH_INSTANCE".to_owned(), "0a1b2c3d".to_owned()),
         ];
-        let line = Some("ssh -p 2222 prod");
-        let ssh = Some(RemoteKind::Ssh);
+        let target = ssh_target(&["ssh", "-p", "2222", "prod"]);
+        let held = |opening, start: Option<&Start>, kept, target: Option<&_>, env: &[_]| {
+            held_start(opening, start, kept, target, env)
+        };
+        let expected = Some(Held {
+            args: vec!["-p".to_owned(), "2222".to_owned(), "prod".to_owned()],
+        });
+        // ⌘T and ⌘D carry the source's `ssh` arguments (the program's name is the pipe's).
         assert_eq!(
-            ssh_start_dir(line, ssh, "/srv/app".to_owned(), &wrapper),
+            held(Opening::Tab, None, true, Some(&target), &installed),
+            expected
+        );
+        assert_eq!(
+            held(Opening::Split, None, true, Some(&target), &installed),
+            expected
+        );
+        // ⌥⌘T and ⌘N are local, a restored pane's terminal is the save's, and a pane the
+        // palette started is local.
+        for opening in [Opening::LocalTab, Opening::Window, Opening::Restore] {
+            assert_eq!(
+                held(opening, None, true, Some(&target), &installed),
+                None,
+                "{opening:?}"
+            );
+        }
+        let folder = Start {
+            directory: Some(PathBuf::from("/Users/a/api")),
+            line: None,
+            run: false,
+        };
+        assert_eq!(
+            held(Opening::Tab, Some(&folder), true, Some(&target), &installed),
+            None
+        );
+        // A source that is a plain `ssh` (no terminal a server keeps) keeps ⌘T's line.
+        assert_eq!(
+            held(Opening::Tab, None, false, Some(&target), &installed),
+            None
+        );
+        // Mosh is not a terminal a server keeps, and a session with no target names no server.
+        let mosh = bt_core::RemoteTarget {
+            kind: RemoteKind::Mosh,
+            argv: vec!["mosh".to_owned(), "prod".to_owned()],
+            ..ssh_target(&["mosh", "prod"])
+        };
+        assert_eq!(
+            held(Opening::Tab, None, true, Some(&mosh), &installed),
+            None
+        );
+        assert_eq!(held(Opening::Tab, None, true, None, &installed), None);
+        assert_eq!(
+            held(
+                Opening::Tab,
+                None,
+                true,
+                Some(&ssh_target(&["ssh"])),
+                &installed
+            ),
+            None,
+            "no server in the arguments"
+        );
+        // Without the wrapper's binary or the masters' instance the program would find nobody.
+        assert_eq!(
+            held(Opening::Tab, None, true, Some(&target), &installed[..2]),
+            None
+        );
+        assert_eq!(held(Opening::Tab, None, true, Some(&target), &[]), None);
+    }
+
+    #[test]
+    fn a_new_pane_follows_a_pane_on_a_server_into_its_folder() {
+        assert_eq!(
+            start_directory("/srv/app".to_owned()),
             Some("/srv/app".to_owned())
         );
         // The title's folder, as the dock shows it.
         assert_eq!(
-            ssh_start_dir(line, ssh, "~/src".to_owned(), &wrapper),
+            start_directory("~/src".to_owned()),
             Some("~/src".to_owned())
         );
-        // No first input (⌥⌘T, ⌘N, a local tab), mosh, no folder, a folder the
-        // server could not be sent, no wrapper to take the variable back: none.
-        assert_eq!(ssh_start_dir(None, ssh, "/srv".to_owned(), &wrapper), None);
-        assert_eq!(
-            ssh_start_dir(line, Some(RemoteKind::Mosh), "/srv".to_owned(), &wrapper),
-            None
-        );
-        assert_eq!(ssh_start_dir(line, None, "/srv".to_owned(), &wrapper), None);
-        assert_eq!(ssh_start_dir(line, ssh, String::new(), &wrapper), None);
-        assert_eq!(ssh_start_dir(line, ssh, "/a\0b".to_owned(), &wrapper), None);
-        assert_eq!(
-            ssh_start_dir(line, ssh, "/srv".to_owned(), &wrapper[..1]),
-            None
-        );
-        assert_eq!(ssh_start_dir(line, ssh, "/srv".to_owned(), &[]), None);
+        // No folder, or one the server could not be sent: none.
+        assert_eq!(start_directory(String::new()), None);
+        assert_eq!(start_directory("/a\0b".to_owned()), None);
     }
 
     #[test]

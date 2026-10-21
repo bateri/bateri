@@ -139,11 +139,11 @@ fn link_changed(pane: &PaneUuid, link: PaneLink) {
 const START_WAIT: Duration = Duration::from_secs(30);
 
 /// The folders new panes ask their first terminal to start in: a pane opened
-/// from a pane that shows a terminal on a server (⌘T, ⌘D) types the `ssh` line
-/// and the terminal it asks for starts where the source was. Kept here and not
-/// in the pane's environment because the one who asks (`ssh-hold`) never sees
-/// what the shell function did with it; asked of by the pane, once, within
-/// [`START_WAIT`] — a later `ssh` in the same pane is not the one it was for.
+/// from a pane that shows a terminal on a server (⌘T, ⌘D) has the same terminal
+/// as its first program and what it asks for starts where the source was. Kept
+/// here and not in the pane's environment because the one who asks (`ssh-hold`)
+/// has no way to be told; asked of by the pane, once, within [`START_WAIT`] — a
+/// later `ssh` typed in the same pane is not the one it was for.
 #[derive(Default)]
 struct Starts(Vec<(u64, String, Instant)>);
 

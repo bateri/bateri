@@ -40,6 +40,17 @@
 //! shell to return to, so it runs the shell it would have started
 //! ([`Outcome::Shell`]).
 //!
+//! **As the first program it is also the `ssh` the shell never ran.** The
+//! command a typed `ssh` is, for the pane, is the shell's marks around it: the
+//! probe that names the server, the remote shell's blocks, the dock and the
+//! title all start from them. A first program has no shell to print them, so it
+//! prints them itself ([`bt_core::first_command_begun`] before it connects,
+//! [`bt_core::first_command_ended`] with the terminal's status when it is over,
+//! then the shell is started), and the pane is, to everything that reads the
+//! stream, a pane whose user typed `ssh`. When no terminal can be shown the
+//! plain `ssh` runs as a command of that block and the shell follows it; it is
+//! never `exec`ed, since nothing would be left to return to.
+//!
 //! The socket's wire is [`wire`]; the arguments are [`USAGE`].
 
 pub mod wire;
@@ -109,8 +120,9 @@ pub enum Outcome {
     /// Nothing was shown and the terminal cannot be: run the plain `ssh` with
     /// the arguments this was started with.
     FallBack,
-    /// Run the shell the pane would have started.
-    Shell,
+    /// Run the shell the pane would have started; the terminal's status is
+    /// what the block the first program stood in as ends with.
+    Shell(u8),
 }
 
 /// A program and its arguments.
@@ -188,11 +200,14 @@ fn parse(args: &[OsString]) -> Option<Parsed> {
             _ => return None,
         }
     }
-    // An existing terminal is named and has an account and no command line; a
-    // new one has a command line and none of the first two.
+    // An existing terminal is named and has an account; a new one has none of
+    // the first two. The arguments of an existing terminal name the server for
+    // whoever reads this process's command line (the pane's remote session is
+    // read from it, [`crate::jobs`]): they are not asked for anything, the
+    // account is the terminal's place.
     let existing = parsed.terminal.is_some() || parsed.account.is_some();
     if existing {
-        if parsed.terminal.is_none() || parsed.account.is_none() || !parsed.ssh_args.is_empty() {
+        if parsed.terminal.is_none() || parsed.account.is_none() {
             return None;
         }
     } else if parsed.offset.is_some() {
@@ -265,16 +280,35 @@ pub fn hold_main(args: &[OsString], env: &Env) -> Action {
         output: libc::STDOUT_FILENO,
         backoff: BACKOFF.to_vec(),
     };
-    match run(&config) {
-        Outcome::Exit(code) => Action::Exit(code),
-        Outcome::FallBack => plain_ssh(),
-        Outcome::Shell => match (env.shell)(&parsed.shell_args) {
+    // A first program stands in for the command the shell never ran: the pane
+    // reads its session from the marks of that command (module docs).
+    if parsed.first {
+        let _ = write_all(libc::STDOUT_FILENO, &bt_core::first_command_begun());
+    }
+    let shell = |code: u8| {
+        let _ = write_all(libc::STDOUT_FILENO, &bt_core::first_command_ended(code));
+        match (env.shell)(&parsed.shell_args) {
             Some((program, args)) => Action::Exec {
                 program: program.into(),
                 args: args.into_iter().map(OsString::from).collect(),
             },
             None => Action::Exit(1),
-        },
+        }
+    };
+    match run(&config) {
+        Outcome::Exit(code) => Action::Exit(code),
+        // The `ssh` the terminal stood in for runs as the command, and the shell
+        // follows it: this process is the pane's program and the shell is what
+        // is left to return to.
+        Outcome::FallBack if parsed.first => {
+            let code = std::process::Command::new(&env.ssh)
+                .args(&parsed.ssh_args)
+                .status()
+                .map_or(255, status_code);
+            shell(code)
+        }
+        Outcome::FallBack => plain_ssh(),
+        Outcome::Shell(code) => shell(code),
     }
 }
 
@@ -528,7 +562,7 @@ fn serve(
                     }
                     ToHold::End { code, note } => {
                         let outcome = if config.first {
-                            Outcome::Shell
+                            Outcome::Shell(code)
                         } else {
                             Outcome::Exit(i32::from(code))
                         };
@@ -573,20 +607,24 @@ fn run_program(config: &Config, argv: &[Vec<u8>], raw: &mut Option<Raw>) -> u8 {
             .args(args.iter().map(|arg| std::ffi::OsStr::from_bytes(arg)))
             .status()
             .ok()
-            .map(|status| {
-                use std::os::unix::process::ExitStatusExt;
-                match (status.code(), status.signal()) {
-                    (Some(code), _) => u8::try_from(code).unwrap_or(1),
-                    (None, Some(signal)) => u8::try_from(128 + signal).unwrap_or(255),
-                    (None, None) => 255,
-                }
-            }),
+            .map(status_code),
         None => None,
     };
     if was_raw {
         *raw = Raw::enter(config.input);
     }
     status.unwrap_or(255)
+}
+
+/// How a program ended as the status a shell would see: its code, 128 plus the
+/// signal that ended it, or 255 when it says neither.
+fn status_code(status: std::process::ExitStatus) -> u8 {
+    use std::os::unix::process::ExitStatusExt;
+    match (status.code(), status.signal()) {
+        (Some(code), _) => u8::try_from(code).unwrap_or(1),
+        (None, Some(signal)) => u8::try_from(128 + signal).unwrap_or(255),
+        (None, None) => 255,
+    }
 }
 
 /// bateri will not show a terminal.
@@ -596,7 +634,7 @@ fn refused(config: &Config, state: &State, fall_back: bool, text: String) -> Fin
     }
     Finish {
         outcome: if config.first {
-            Outcome::Shell
+            Outcome::Shell(u8::try_from(EXIT_REFUSED).unwrap_or(u8::MAX))
         } else {
             Outcome::Exit(EXIT_REFUSED)
         },

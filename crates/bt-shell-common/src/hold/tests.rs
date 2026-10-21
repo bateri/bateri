@@ -397,7 +397,8 @@ fn a_terminal_that_is_gone_says_so_and_the_first_program_runs_a_shell() {
     app.until("the pipe ended", |_| {
         hold.handle.as_ref().is_some_and(JoinHandle::is_finished)
     });
-    assert_eq!(hold.outcome(), Outcome::Shell);
+    // The block the first program stood in as ends with what `ssh` says of a failure.
+    assert_eq!(hold.outcome(), Outcome::Shell(255));
     until("the line shown", || {
         hold.shown.bytes() == b"the terminal is gone\n"
     });
@@ -490,6 +491,21 @@ fn the_command_line() {
     assert_eq!(first.shell_args, ["--posix"]);
     let existing = ok(&["--terminal", "b-1", "--account", "rasp", "--offset", "42"]).expect("one");
     assert_eq!(existing.offset, Some(42));
+    // The arguments of an existing terminal name its server for whoever reads the process's
+    // command line; nothing is asked of them.
+    let named = ok(&[
+        "--first",
+        "--terminal",
+        "b-1",
+        "--account",
+        "rasp",
+        "--",
+        "-p",
+        "2222",
+        "rasp",
+    ])
+    .expect("an existing terminal and the server's name");
+    assert_eq!(named.ssh_args, [os("-p"), os("2222"), os("rasp")]);
     // An argument of ssh that looks like ours stays ssh's.
     let odd = ok(&["--", "--first", "-oX=y"]).expect("odd");
     assert!(!odd.first);
@@ -499,7 +515,6 @@ fn the_command_line() {
         &["--bogus"][..],
         &["--terminal", "b-1"][..],
         &["--account", "rasp"][..],
-        &["--terminal", "b-1", "--account", "rasp", "--", "rasp"][..],
         &["--offset", "1", "--", "rasp"][..],
         &["--offset", "x", "--terminal", "b-1", "--account", "a"][..],
         &["--terminal"][..],
@@ -631,7 +646,7 @@ fn ssh_hold_process() {
                 _ if !same_modes(&before, &after) => 92,
                 Outcome::Exit(code) => code,
                 Outcome::FallBack => 90,
-                Outcome::Shell => 91,
+                Outcome::Shell(_) => 91,
             }
         }
         _ => {
@@ -722,6 +737,53 @@ fn the_process_runs_plain_ssh_or_the_shell_in_its_place() {
         .expect("read");
     assert!(stdout.contains("the terminal is gone"), "{stdout:?}");
     assert!(stdout.contains("started --posix"), "{stdout:?}");
+    // The pane reads this first program as the `ssh` its shell never ran: the marks of
+    // that command come before anything else and its `D` carries the status the failure
+    // had, then the shell starts.
+    let begun = bt_core::first_command_begun();
+    let ended = bt_core::first_command_ended(255);
+    let (begun, ended) = (
+        String::from_utf8_lossy(&begun).into_owned(),
+        String::from_utf8_lossy(&ended).into_owned(),
+    );
+    let at_begin = stdout.find(&begun).expect("the block began");
+    let at_end = stdout.find(&ended).expect("the block ended");
+    assert!(
+        at_begin < stdout.find("the terminal is gone").expect("the note")
+            && stdout.find("the terminal is gone") < Some(at_end),
+        "the note is the command's, between its `A` and its `D`: {stdout:?}"
+    );
+    assert!(
+        at_end < stdout.find("started --posix").expect("the shell"),
+        "the shell follows the `D`: {stdout:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_first_program_that_cannot_show_a_terminal_runs_ssh_as_a_command_and_then_the_shell() {
+    let dir = scratch("first-ssh");
+    let sep = '\u{1f}';
+    // Nobody listens: the plain `ssh` (here `echo`) runs as a child, not in the process's
+    // place, and the shell is what follows it; the marks bracket it.
+    let output = process(&format!(
+        "main{sep}{}{sep}--first{sep}--shell-arg{sep}--posix{sep}--{sep}-p{sep}22{sep}rasp",
+        dir.display()
+    ))
+    .stdin(Stdio::null())
+    .output()
+    .expect("the process");
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout).replace('\r', "");
+    let begun = String::from_utf8_lossy(&bt_core::first_command_begun()).into_owned();
+    let ended = String::from_utf8_lossy(&bt_core::first_command_ended(0)).into_owned();
+    let began = stdout.find(&begun).expect("the block began");
+    let ssh = stdout.find("-p 22 rasp").expect("ssh ran");
+    let end = stdout
+        .find(&ended)
+        .expect("the block ended with ssh's status");
+    let shell = stdout.find("started --posix").expect("the shell ran");
+    assert!(began < ssh && ssh < end && end < shell, "{stdout:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

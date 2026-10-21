@@ -312,6 +312,13 @@ pub fn remote_login(session: &bt_core::Session) -> Option<u64> {
 /// `zsh script`, stays undecided for the whole command and produces a probe per
 /// output edge (at most one per main queue turn).
 pub fn remote(parent: ShellParent, child: u32, table: &impl ProcessTable) -> Probe {
+    // The pane's own program may be the pipe to a terminal a server keeps
+    // (`ssh-hold --first`): there is no shell above it, so it is not found as a
+    // member of the foreground group below. It is asked first and by itself —
+    // after it ends the pane's program is the shell, which is not this.
+    if let Some(found) = first_program(child, table) {
+        return found;
+    }
     let Some(shell) = shell_pid(parent, child, table) else {
         return Probe::Local;
     };
@@ -378,6 +385,22 @@ pub fn remote(parent: ShellParent, child: u32, table: &impl ProcessTable) -> Pro
         return Probe::Undecided;
     }
     Probe::Local
+}
+
+/// The answer when the pane's own program (`child`, whatever it was started as)
+/// is `bateri ssh-hold …`: its target, or local for a holder that names none
+/// (a command to run, no arguments). `None` for any other program, so the
+/// shell's foreground group is asked instead.
+fn first_program(child: u32, table: &impl ProcessTable) -> Option<Probe> {
+    let name = table.name(child)?;
+    if !is_bateri(&name) {
+        return None;
+    }
+    let args = table.procargs(child, &[])?.args;
+    Some(match remote_target(&name, &args)? {
+        Some(target) => Probe::Remote(target),
+        None => Probe::Local,
+    })
 }
 
 /// A name whose argv is worth reading: ssh, mosh's client and the Perl running
@@ -2029,6 +2052,81 @@ pub(crate) mod tests {
             remote_of(&[(200, 101, &["bateri", "ssh-hold", "--", "prod", "uptime"])]),
             Probe::Local
         );
+    }
+
+    #[test]
+    fn a_pane_whose_own_program_is_the_pipe_to_a_kept_terminal_is_a_remote_session() {
+        // `ssh-hold --first` is the pane's child: no shell above it, and it is not a member
+        // of a foreground group the shell left. It is asked first, whatever the pane's
+        // shell parent is.
+        let held = |argv: &[&'static str]| {
+            let table = Table::new(Some(100)).run(100, 1, 100, argv);
+            (
+                remote(ShellParent::Login, 100, &table),
+                remote(ShellParent::Direct, 100, &table),
+            )
+        };
+        let (login, direct) = held(&[
+            "/Applications/bateri.app/Contents/MacOS/bateri",
+            "ssh-hold",
+            "--first",
+            "--shell-arg",
+            "--posix",
+            "--",
+            "-p",
+            "2222",
+            "deploy@prod",
+        ]);
+        for probe in [login, direct] {
+            let Probe::Remote(target) = probe else {
+                panic!("a first program is a remote session: {probe:?}");
+            };
+            assert_eq!(target.host, "deploy@prod");
+            assert_eq!(target.port, Some(2222));
+            assert_eq!(target.argv, words(&["ssh", "-p", "2222", "deploy@prod"]));
+        }
+        // A holder started to resume a terminal names its server by the arguments it was
+        // given beside the terminal's place; one given none names none.
+        let (login, _) = held(&[
+            "bateri",
+            "ssh-hold",
+            "--first",
+            "--terminal",
+            "b-1",
+            "--account",
+            "u@prod:22",
+            "--",
+            "prod",
+        ]);
+        assert_eq!(login, remote_host_with_argv("prod", &["ssh", "prod"]));
+        let (login, direct) = held(&[
+            "bateri",
+            "ssh-hold",
+            "--first",
+            "--terminal",
+            "b-1",
+            "--account",
+            "a",
+        ]);
+        assert_eq!((login, direct), (Probe::Local, Probe::Local));
+        // Any other program of the pane is the shell's business: a login shell's group is asked.
+        let table = login_shell(200).run(200, 101, 200, &["ssh", "prod"]);
+        assert_eq!(
+            remote(ShellParent::Login, 100, &table),
+            remote_host_with_argv("prod", &["ssh", "prod"])
+        );
+        let table = Table::new(Some(100)).run(100, 1, 100, &["bateri", "focus"]);
+        assert_eq!(remote(ShellParent::Direct, 100, &table), Probe::Undecided);
+    }
+
+    fn remote_host_with_argv(host: &str, argv: &[&str]) -> Probe {
+        Probe::Remote(Target {
+            host: host.to_owned(),
+            port: None,
+            kind: RemoteKind::Ssh,
+            argv: words(argv),
+            nonce: None,
+        })
     }
 
     #[test]
