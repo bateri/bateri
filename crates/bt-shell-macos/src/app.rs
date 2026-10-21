@@ -1291,6 +1291,12 @@ pub(crate) struct Ivars {
     /// when the quit closes the panes, taken by [`AppDelegate::shutdown`], which says so
     /// to the service before it signals a pane's program.
     end_kept: Cell<bool>,
+    /// The application is going: set first thing in [`AppDelegate::shutdown`], never
+    /// cleared. AppKit closes every window **after** `applicationWillTerminate:` returns,
+    /// and each close reaches the window's `windowWillClose:` like the user's red button;
+    /// this tells the two apart ([`AppDelegate::is_terminating`]) — what becomes of the
+    /// terminals on servers at a quit is [`AppDelegate::shutdown`]'s, by `keep_running`.
+    terminating: Cell<bool>,
     /// The Mac is logging out, restarting or shutting down
     /// (`NSWorkspaceWillPowerOffNotification`): the programs end with it, so
     /// a quit leaves no reminder that they keep running. Never cleared — a
@@ -2902,6 +2908,7 @@ impl AppDelegate {
             hand_to_bound: Cell::new(false),
             end_programs: Cell::new(false),
             end_kept: Cell::new(false),
+            terminating: Cell::new(false),
             powering_off: Cell::new(false),
             quit_notice: RefCell::new(None),
             relaunch_after: Cell::new(false),
@@ -6305,6 +6312,13 @@ impl AppDelegate {
         self.ivars().settings.borrow()
     }
 
+    /// Whether the application is going ([`Ivars::terminating`]): a window that closes now
+    /// is closed by the quit — AppKit closes them all after `applicationWillTerminate:` —
+    /// and not by the user.
+    pub(crate) fn is_terminating(&self) -> bool {
+        self.ivars().terminating.get()
+    }
+
     /// The shortcuts in effect ([`Ivars::keys`]): the table read against the file's `[keys]`.
     pub(crate) fn keys(&self) -> Rc<Resolved> {
         self.ivars().keys.borrow().clone()
@@ -7622,7 +7636,12 @@ impl AppDelegate {
     /// The **single** place of the app's teardown order; every exit path goes through here
     /// (`applicationWillTerminate:` and `runDeadline:`). A single
     /// window's close does not come here, nor does it wait (`TerminalWindow`'s
-    /// `windowWillClose:`).
+    /// `windowWillClose:`). The other way round it does: once `applicationWillTerminate:`
+    /// returns, AppKit closes every window that is still open — after a handover, all of
+    /// them — and each close arrives at `windowWillClose:`. That close is this quit's, not
+    /// the user's, so the first step here marks the application as going
+    /// ([`AppDelegate::is_terminating`]): the terminals on servers are this function's to
+    /// end or keep, and a window closed by the quit must not end them behind its back.
     ///
     /// Today there is a single call: the timed run reaches `process::exit`, the interactive ⌘Q
     /// AppKit's exit, and while the main thread waits the timer cannot
@@ -7654,6 +7673,10 @@ impl AppDelegate {
     /// interactive close the result is dropped — not collected, since nobody
     /// reads it.
     fn shutdown(&self) -> Option<Teardown> {
+        // First: from here on a window that closes is closed by the quit (AppKit closes them
+        // all once `applicationWillTerminate:` returns), and what the quit does to the
+        // terminals on servers is decided below, by `keep_running`, not by those closes.
+        self.ivars().terminating.set(true);
         // The watchdog's budget starts at **shutdown**, not at process start:
         // startup (GPU device, pipeline setup, first window) can take seconds
         // on a cold machine, and if that were deducted from the budget a
@@ -9391,6 +9414,32 @@ mod tests {
             .find("end_kept_terminal()")
             .expect("the window ends it");
         assert!(ended < will_close.find("begin_close()").expect("and closes"));
+        // AppKit closes every window after `applicationWillTerminate:` with the same
+        // notification (`tests/terminate.rs` holds it to that): the window ends the
+        // terminals only when the close is not the quit's, and the quit says it is going
+        // before anything else it does — before the handover, which leaves every window open
+        // with its panes still showing their terminals.
+        let asked = will_close
+            .find("app.is_terminating()")
+            .expect("the window asks whether the quit closes it");
+        let gate = will_close
+            .find("if !terminating {")
+            .expect("and ends nothing when it does");
+        assert!(
+            asked < gate && gate < ended,
+            "the gate stands before the ending"
+        );
+        let app = include_str!("app.rs");
+        let shutdown = &app[app
+            .find("    fn shutdown(&self) -> Option<Teardown> {")
+            .expect("shutdown")..];
+        let shutdown = &shutdown[..shutdown.find("\n    }\n").expect("its end")];
+        let going = shutdown
+            .find("self.ivars().terminating.set(true);")
+            .expect("the quit marks the application as going");
+        let first_step = shutdown.find("\n        if ").expect("its first step");
+        assert!(going < first_step, "first thing, before the handover");
+        assert!(going < shutdown.find("self.hand_over(").expect("the handover"));
 
         // A pane or a tab that moves is not closed: the terminal it shows goes with it.
         for (source, mover) in [

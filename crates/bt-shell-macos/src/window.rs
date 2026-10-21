@@ -853,7 +853,13 @@ define_class!(
         }
 
         /// The window is closing: the red button, ⇧⌘W, ⌘W in its last tab
-        /// and the last tab's shell exit arrive here.
+        /// and the last tab's shell exit arrive here — and so does the quit: once
+        /// `applicationWillTerminate:` returns AppKit closes every window still
+        /// open (after a handover to a holder, every window), with this same
+        /// notification. Only the user's close ends the terminals servers keep for
+        /// the panes; the quit's is [`crate::app::AppDelegate::shutdown`]'s, by
+        /// `keep_running`, and is told apart by
+        /// [`crate::app::AppDelegate::is_terminating`].
         ///
         /// Closing is **not waited on**: it is started and the
         /// handle drops, the `"PTY teardown"` thread finishes its work in the
@@ -874,11 +880,17 @@ define_class!(
         fn window_will_close(&self, _n: &NSNotification) {
             // Closing the panes also removes the frame observers and drops the
             // panes from `AppDelegate::pane`'s lookup
-            // (`TerminalPane::begin_close`). The window closes because the user
-            // closed it (a quit does not come through here): the terminals servers
-            // keep for its panes end first, while the panes can still be found.
-            for pane in self.panes() {
-                pane.end_kept_terminal();
+            // (`TerminalPane::begin_close`). When the user closed the window the
+            // terminals servers keep for its panes end first, while the panes can
+            // still be found. When the quit did (AppKit closes every window after
+            // `applicationWillTerminate:`), they are not this close's: an update or a
+            // ⌘Q under `"quit"` handed the panes over and the terminals go on, and a
+            // quit that ends them has said so already.
+            let terminating = app::delegate(self.mtm()).is_some_and(|app| app.is_terminating());
+            if !terminating {
+                for pane in self.panes() {
+                    pane.end_kept_terminal();
+                }
             }
             drop(self.begin_close());
             // Let go of the delegate now: AppKit must not send the closing

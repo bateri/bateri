@@ -164,7 +164,9 @@ pub(crate) fn claim(account: &str, terminal: &SessionId) {
 /// The user closed the pane: the terminal it shows ends on the server. Called
 /// **before** the pane's program is signalled (the service reads the pane from
 /// the holder, which the signal ends); a pane that shows nothing is nothing to
-/// do. A quit, a crash and an update do not say it.
+/// do. A quit, a crash and an update do not say it — not even through the windows
+/// AppKit closes after `applicationWillTerminate:`, which `windowWillClose:` knows
+/// are the quit's ([`crate::app::AppDelegate::is_terminating`]).
 pub(crate) fn end(pane: &PaneUuid) {
     if let Some(service) = SERVICE.get() {
         service.end(pane);

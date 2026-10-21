@@ -255,3 +255,11 @@ harness = false
 [[test]]
 name = "pencere"
 harness = false
+
+# What AppKit's quit does to the windows still open: it closes them after
+# `applicationWillTerminate:`, and a window's `windowWillClose:` must tell that
+# close from the user's. A child process quits (`terminate:` ends the process);
+# its own `main`, for the same reason as `embed`'s.
+[[test]]
+name = "terminate"
+harness = false
