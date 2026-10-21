@@ -19,8 +19,21 @@ check:
 # — that listing became most of the test step (seen with `sample`).
 # Objects older than two days belong to builds that have since been replaced;
 # losing one only drops the debugger's line info for a crate not rebuilt since.
+# The rest of a replaced build stays too: every toolchain upgrade, fork `rev`,
+# dependency change or feature set leaves its libraries, test binaries and
+# incremental caches beside the current ones, here and in `make linux`'s
+# target/linux. They grew the target to 137 GB for a 5 MB app. A file nothing
+# has read for three days (access time) is one no current build uses; a build
+# that does need it again only recompiles it. Read, not written: a library that
+# is still current keeps its first build's mtime for weeks.
 prune:
 	@if [ -d target/debug/deps ]; then find target/debug/deps -name '*.o' -mtime +2 -delete; fi
+	@for deps in target/debug/deps target/linux/debug/deps; do \
+		if [ -d $$deps ]; then find $$deps -type f -atime +3 -delete; fi; \
+	done
+	@for dir in target/debug/incremental/*/ target/linux/debug/incremental/*/; do \
+		if [ -d "$$dir" ] && [ -z "$$(find "$$dir" -type f -atime -4 -print -quit)" ]; then rm -rf "$$dir"; fi; \
+	done
 
 fmt:
 	$(CARGO) fmt --all -- --check
