@@ -20,6 +20,8 @@ commit. Pushing is a separate step.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-22
+
 ### Added
 
 - **A pane answers a program's view and shows it.** No new function: a program in
