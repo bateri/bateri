@@ -189,6 +189,13 @@ __bateri_cwd() {
 # one that ran a command: an empty line or a cancelled one closes a block it did not run.
 __bateri_block=0
 __bateri_ran=0
+# The statuses of a command that is only stopped, not over (⌃Z, a STOP, TTIN or TTOU): 128 + the
+# signal, whose numbers are the system's. `__bateri_precmd` leaves such a program its screen.
+__bateri_stopped=
+for __bateri_signal in $(kill -l TSTP STOP TTIN TTOU 2> /dev/null); do
+  __bateri_stopped+=" $((128 + __bateri_signal))"
+done
+unset __bateri_signal
 __bateri_ps0_user=${PS0-}
 __bateri_ps0=
 # After `C`, the title as the command finds it goes onto the terminal's title stack (`CSI 22 t`)
@@ -222,6 +229,9 @@ __bateri_precmd() {
   local status=$?
   if (( __bateri_ran )); then
     __bateri_ran=0
+    # The alternate screen a program that is over left on goes with it, its kitty key stack
+    # first, before `D`; not for one that is only stopped (the zsh script says why).
+    [[ " $__bateri_stopped " == *" $status "* ]] || printf '\033[<4096u\033[?1049l'
     printf '\033]133;D;%s;bt_block=%s\007' "$status" "$__bateri_block"
     # The input modes the command left on go with it (the zsh script says why).
     printf '\033[?1000;1002;1003;1004;1005;1006;1016;2048l\033[<4096u'

@@ -285,6 +285,13 @@ of every installed copy. A version without a section is not released.
   wrote another. The shell integration now puts back the name the tab had when
   the command started, before your own prompt hooks run, so a prompt that names
   the window itself still has the last word.
+- **A full-screen program that dies no longer leaves the pane blank.** When a
+  program on the alternate screen ended without giving it back — killed, crashed,
+  or the vim behind an ssh whose connection dropped — the prompt came back on
+  its empty page with the dock hidden, and the pane looked dead. The shell
+  integration now gives the screen back when the command is over, so the pane
+  shows what it showed before the program started, with your prompt. A program
+  you stop with ⌃Z keeps its screen for `fg`.
 - **The selected tab no longer spreads over the tab beside it.** After a tab
   opened and closed in quick succession (a tab a server program asked for whose
   program ended at once, or ⌘T then ⌘W), the next tab to open beside the

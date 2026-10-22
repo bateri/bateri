@@ -84,10 +84,18 @@ __bateri_preexec() {
 
 # The title the command set goes back, first among the precmd hooks so a
 # user's hook that names the window at every prompt still has the last word
-# (the local wrapper's reason).
+# (the local wrapper's reason); so does the alternate screen a program that is
+# over left on, after its kitty key stack, and not for one that is only stopped
+# (the local wrapper's reasons). The signal numbers are this server's.
 __bateri_title_back() {
   local code=$?
-  (( __bateri_ran )) && print -nr -- $'\e[23t'
+  emulate -L zsh
+  if (( __bateri_ran )); then
+    print -nr -- $'\e[23t'
+    if (( code <= 128 )) || [[ ${signals[code - 127]-} != (TSTP|STOP|TTIN|TTOU) ]]; then
+      print -nr -- $'\e[<4096u\e[?1049l'
+    fi
+  fi
   return code
 }
 

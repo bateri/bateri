@@ -5316,6 +5316,17 @@ fn left_on_by_a_command() -> Vec<u8> {
     .into_bytes()
 }
 
+/// The bytes that give back the screen a program that is over left on (the
+/// wrapper scripts print the same before `D`, unless the program is only
+/// stopped): its kitty keyboard stack emptied first, because each screen has
+/// its own and the program's is the one showing, then the alternate screen left
+/// (`?1049l` does nothing on the main one). Without them a program that died on
+/// the alternate screen — killed, or its connection gone — leaves the prompt
+/// drawn there, with the dock hidden.
+fn screen_left_by_a_command() -> Vec<u8> {
+    format!("\x1b[<{}u\x1b[?1049l", crate::reset::KEYBOARD_STACK_DEPTH).into_bytes()
+}
+
 /// The marks of a first program that begins: the prompt of [`FIRST_BLOCK`], the
 /// command running (`C`) and the title pushed as a shell pushes it as a command
 /// starts (`CSI 22 t`; [`first_command_ended`] pops it).
@@ -5326,10 +5337,12 @@ pub fn first_command_begun() -> Vec<u8> {
 }
 
 /// The marks of a first program that is over with `code`: the title popped, the
-/// block closed (`D`) and the modes the program may have left on turned off.
-/// What follows is the shell's own: its first prompt is block 1.
+/// screen it left on given back, the block closed (`D`) and the modes the
+/// program may have left on turned off. What follows is the shell's own: its
+/// first prompt is block 1.
 pub fn first_command_ended(code: u8) -> Vec<u8> {
     let mut bytes = b"\x1b[23t".to_vec();
+    bytes.extend_from_slice(&screen_left_by_a_command());
     bytes.extend_from_slice(format!("\x1b]133;D;{code};bt_block={FIRST_BLOCK}\x07").as_bytes());
     bytes.extend_from_slice(&left_on_by_a_command());
     bytes
@@ -11532,9 +11545,29 @@ mod tests {
         ] {
             assert!(script.contains(&modes), "{name}: the modes");
             assert!(script.contains(&pop), "{name}: the keyboard stack");
+            // The screen, its stack popped first, in the script's own spelling of ESC; and
+            // the stop that holds it back. The remote scripts have no live shell in the
+            // tests: this is what keeps them in step.
+            assert!(
+                ["\\e", "\\033"]
+                    .iter()
+                    .any(|esc| script.contains(&format!("{pop}{esc}[?1049l"))),
+                "{name}: the alternate screen, after the stack"
+            );
+            assert!(
+                script.contains("TSTP") || script.contains("stopped"),
+                "{name}: the stop"
+            );
         }
         let ended = String::from_utf8(first_command_ended(0)).expect("text");
         assert!(ended.contains(&modes) && ended.contains(&pop));
+        // The first program's screen goes back before its `D`, as the scripts give it.
+        let screen = String::from_utf8(screen_left_by_a_command()).expect("text");
+        let (back, end) = (ended.find(&screen), ended.find("\x1b]133;D;"));
+        assert!(
+            back.is_some() && back < end,
+            "the screen before `D`: {ended:?}"
+        );
         // The reset of a picture turns each of them off too.
         let reset = String::from_utf8(crate::reset::keeping_history(80)).expect("text");
         for mode in LEFT_ON_MODES.split(';') {

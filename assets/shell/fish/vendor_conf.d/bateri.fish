@@ -98,6 +98,15 @@ function __bateri_end --on-event fish_postexec
     set -l code $status
     if test $__bateri_ran = 1
         set -g __bateri_ran 0
+        # The alternate screen a program that is over left on goes with it, its
+        # kitty key stack first, before `D` (the zsh script says why). Not for one
+        # that is only stopped: fish says 0 for a job ⌃Z stopped, so the job list
+        # is asked — a builtin, through a pipe so that no job leaves `string`
+        # reading the terminal. Any stopped job holds it back: a program that dies
+        # while another waits stopped keeps its screen (a known limit).
+        if not jobs 2>/dev/null | string match -qr '\tstopped\t'
+            printf '\e[<4096u\e[?1049l'
+        end
         printf '\e]133;D;%s;bt_block=%s\a' $code $__bateri_block
         # The input modes the command left on go with it (the zsh script says
         # why). fish drops a mouse report, but the terminal goes on sending

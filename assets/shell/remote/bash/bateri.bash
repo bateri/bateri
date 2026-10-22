@@ -109,6 +109,12 @@ __bateri_percent() {
 # sits on that output's row.
 __bateri_block=0
 __bateri_ran=0
+# A stopped command's statuses, with this server's signal numbers (the local wrapper's reason).
+__bateri_stopped=
+for __bateri_signal in $(kill -l TSTP STOP TTIN TTOU 2> /dev/null); do
+  __bateri_stopped+=" $((128 + __bateri_signal))"
+done
+unset __bateri_signal
 __bateri_blocks=
 if [[ $__bateri_rblock =~ ^[0-9]+$ ]] &&
   (( BASH_VERSINFO[0] * 100 + BASH_VERSINFO[1] >= 404 )); then
@@ -126,6 +132,8 @@ __bateri_precmd() {
   if [[ -n $__bateri_blocks ]]; then
     if (( __bateri_ran )); then
       __bateri_ran=0
+      # The screen a program that is over left on, before `D` (the local wrapper's reasons).
+      [[ " $__bateri_stopped " == *" $status "* ]] || printf '\033[<4096u\033[?1049l'
       printf '\033]133;D;%s;bt_remote=%s.%s\007' "$status" "$__bateri_rshell" "$__bateri_block"
       # The input modes the command left on go with it, and the title it set (the local
       # wrapper's reasons).

@@ -3822,6 +3822,136 @@ pub(crate) mod tests {
         session.shutdown();
     }
 
+    /// A command takes the alternate screen and ends on it, the way a killed TUI or the vim
+    /// behind a dropped ssh does. At the next prompt the screen it found is back — the prompt
+    /// is not drawn on the program's blank page, where the dock would stay hidden.
+    fn a_command_gives_back_the_screen_it_left_on(session: &Session) {
+        at_the_prompt(session);
+        session.write(b"printf '\\033[?1049h'; sleep 1\r");
+        wait_until("the command did not take the screen", || {
+            session.on_alternate_screen()
+        });
+        wait_until("the command did not end", || {
+            session
+                .shell_state()
+                .is_some_and(|state| state.phase == ShellPhase::Input && state.last_exit == Some(0))
+        });
+        assert!(!session.on_alternate_screen());
+    }
+
+    /// A program on the alternate screen stopped with ⌃Z is not over: the screen stays its, so
+    /// that `fg` brings it back to it. Once it ends, the screen goes back.
+    fn a_stopped_command_keeps_its_screen(session: &Session) {
+        let phase = |wanted: ShellPhase| {
+            move || {
+                session
+                    .shell_state()
+                    .is_some_and(|state| state.phase == wanted)
+            }
+        };
+        at_the_prompt(session);
+        session.write(b"sh -c \"printf '\\033[?1049h'; exec sleep 30\"\r");
+        wait_until("the program did not take the screen", || {
+            session.on_alternate_screen()
+        });
+        session.write(b"\x1a");
+        wait_until(
+            "the stop did not bring the prompt",
+            phase(ShellPhase::Input),
+        );
+        assert!(
+            session.on_alternate_screen(),
+            "a stopped program lost its screen"
+        );
+        session.write(b"fg\r");
+        wait_until("fg did not run", phase(ShellPhase::Running));
+        session.write(b"\x03");
+        wait_until("the program did not end", phase(ShellPhase::Input));
+        assert!(!session.on_alternate_screen());
+    }
+
+    fn zsh_without_a_dock(root: &TempRoot) -> Session {
+        let home = root.0.join("home");
+        std::fs::create_dir_all(&home).expect("could not set up the fake home directory");
+        let wrapper = copy_wrapper(&root.0);
+        let env = HashMap::from([
+            ("HOME".to_owned(), home.display().to_string()),
+            ("ZDOTDIR".to_owned(), wrapper.display().to_string()),
+            ("BATERI_DOCK".to_owned(), "off".to_owned()),
+        ]);
+        Session::spawn(
+            shell_options(
+                (
+                    "/bin/zsh".to_owned(),
+                    vec!["-l".to_owned(), "-i".to_owned()],
+                ),
+                &home,
+                env,
+                false,
+            ),
+            Arc::new(SilentWake),
+        )
+        .expect("could not open the session")
+    }
+
+    #[test]
+    fn a_zsh_command_gives_back_the_screen_it_left_on() {
+        let root = TempRoot::new("zsh-screen");
+        let session = zsh_without_a_dock(&root);
+        a_command_gives_back_the_screen_it_left_on(&session);
+        session.shutdown();
+    }
+
+    #[test]
+    fn a_stopped_zsh_command_keeps_its_screen() {
+        let root = TempRoot::new("zsh-stopped");
+        let session = zsh_without_a_dock(&root);
+        a_stopped_command_keeps_its_screen(&session);
+        session.shutdown();
+    }
+
+    #[test]
+    fn a_bash_command_gives_back_the_screen_it_left_on() {
+        let Some(bash) = bash() else { return };
+        let root = TempRoot::new("bash-screen");
+        let home = root.0.join("home");
+        std::fs::create_dir_all(&home).expect("could not set up the fake home directory");
+        let session = spawn_bash(&bash, &home, &[]);
+        a_command_gives_back_the_screen_it_left_on(&session);
+        session.shutdown();
+    }
+
+    #[test]
+    fn a_stopped_bash_command_keeps_its_screen() {
+        let Some(bash) = bash() else { return };
+        let root = TempRoot::new("bash-stopped");
+        let home = root.0.join("home");
+        std::fs::create_dir_all(&home).expect("could not set up the fake home directory");
+        let session = spawn_bash(&bash, &home, &[]);
+        a_stopped_command_keeps_its_screen(&session);
+        session.shutdown();
+    }
+
+    #[test]
+    fn a_fish_command_gives_back_the_screen_it_left_on() {
+        let Some(fish) = fish() else { return };
+        let root = TempRoot::new("fish-screen");
+        let home = root.0.join("home");
+        let session = spawn_fish(&fish, &home, None, &[("BATERI_DOCK", "off".to_owned())]);
+        a_command_gives_back_the_screen_it_left_on(&session);
+        session.shutdown();
+    }
+
+    #[test]
+    fn a_stopped_fish_command_keeps_its_screen() {
+        let Some(fish) = fish() else { return };
+        let root = TempRoot::new("fish-stopped");
+        let home = root.0.join("home");
+        let session = spawn_fish(&fish, &home, None, &[("BATERI_DOCK", "off".to_owned())]);
+        a_stopped_command_keeps_its_screen(&session);
+        session.shutdown();
+    }
+
     /// A command names the window and ends without naming it back, the way a program drawn in
     /// the terminal or a killed TUI does. At the next prompt the tab has the name it had before
     /// the command, not the program's.

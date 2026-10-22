@@ -333,10 +333,26 @@ __bateri_ssh() {
 # would keep the name from before the command, a `cd` behind. Not printed with
 # `D` for the same reason.
 #
+# So does the alternate screen a program that is over left on — one killed, one
+# that crashed, the vim behind an ssh that dropped: the screen it had goes, the
+# one it found comes back, and the prompt is drawn there and not on a blank
+# full-screen page (where bateri also keeps the dock hidden). In this hook, so a
+# user hook that prints (a theme's line above the prompt) prints on that screen.
+# The kitty key stack is popped first: each screen has its own, and the program's
+# is the one showing. Not for a program that is only stopped (⌃Z, or a STOP,
+# TTIN or TTOU): its status is 128 + the signal, and `fg` brings it back to its
+# screen. `$signals` holds the names one place above their numbers.
+#
 # `$?` is handed back: the hooks after this one read the command's status.
 __bateri_title_back() {
   local code=$?
-  (( __bateri_ran )) && print -nr -- $'\e[23t'
+  emulate -L zsh
+  if (( __bateri_ran )); then
+    print -nr -- $'\e[23t'
+    if (( code <= 128 )) || [[ ${signals[code - 127]-} != (TSTP|STOP|TTIN|TTOU) ]]; then
+      print -nr -- $'\e[<4096u\e[?1049l'
+    fi
+  fi
   return code
 }
 
@@ -361,8 +377,8 @@ __bateri_precmd() {
     # never turns them off, and ZLE takes the reports for typed text
     # (`35;12;7M…` on the line at every mouse move, `48;…t` at every resize)
     # and the kitty forms for keys it does not bind.
-    # Bracketed paste is the shell's own; the alternate screen is what is on
-    # screen, not how input arrives — neither is touched.
+    # Bracketed paste is the shell's own, so it is not touched; the alternate
+    # screen went back already (`__bateri_title_back`).
     print -nr -- $'\e[?1000;1002;1003;1004;1005;1006;1016;2048l\e[<4096u'
   fi
   (( __bateri_block++ ))

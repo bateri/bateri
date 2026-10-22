@@ -74,6 +74,11 @@ if string match -qr '^[0-9]+$' -- "$__bateri_rblock"; and set -q fish_pid
         set -l code $status
         if test $__bateri_ran = 1
             set -g __bateri_ran 0
+            # The screen a program that is over left on, before `D`, and not while a
+            # job is stopped (the local wrapper's reasons).
+            if not jobs 2>/dev/null | string match -qr '\tstopped\t'
+                printf '\e[<4096u\e[?1049l'
+            end
             printf '\e]133;D;%s;bt_remote=%s.%s\a' $code $__bateri_rshell $__bateri_block
             # The input modes the command left on go with it, and the title it set (the
             # local wrapper's reasons).
