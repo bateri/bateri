@@ -1518,7 +1518,8 @@ pub(crate) fn render_with(
         glow_strength,
         caret: None,
         caret_text: theme.background_linear(),
-        // With no input row (remote session) there is no mark either:
+        // With no input row (a remote session whose shell has not taken the dock)
+        // there is no mark either:
         // the mark is the start of the input row and must not sit on the
         // context row. Before all the early returns, so no arm brings it back.
         sigil: (input_rows > 0).then(|| sigil_color(shell, theme)),

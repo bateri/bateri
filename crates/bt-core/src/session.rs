@@ -1297,8 +1297,9 @@ pub struct Blocks {
     /// ([`grid_input::read`]); published with it.
     line_cells: Vec<grid_input::GridPos>,
     /// The block [`Self::line`] was read for: publishing it asks whether that
-    /// is still the open one.
-    line_block: u32,
+    /// is still the open one. The key names the shell too, the remote one's
+    /// block when our remote shell has the dock.
+    line_block: Option<BlockKey>,
     /// Whether [`Self::line`] was read in this frame.
     line_read: bool,
 }
@@ -3541,7 +3542,12 @@ pub(crate) fn block_text<R: Rows>(rows: &R, start: i32, key: BlockKey) -> String
 /// It finds **the same row** as `suppress_from` in [`Session::frame`]'s loop
 /// but cannot replace it: that value is born cell by cell, during drawing, and
 /// the gate must decide before the loop.
-fn anchor_row_at_or_above<T>(term: &Term<T>, row: u16, offset: i32, block: u32) -> Option<u16> {
+fn anchor_row_at_or_above<T>(
+    term: &Term<T>,
+    row: u16,
+    offset: i32,
+    block: BlockKey,
+) -> Option<u16> {
     (0..=row).rev().find(|&probe| {
         let line = Point::new(Line(i32::from(probe) - offset), Column(0))
             .grid_clamp(term, Boundary::Grid)
@@ -3549,7 +3555,7 @@ fn anchor_row_at_or_above<T>(term: &Term<T>, row: u16, offset: i32, block: u32) 
         (0..term.columns()).any(|col| {
             term.grid()[line][Column(col)]
                 .hyperlink()
-                .and_then(|link| block_id(link.uri()))
+                .and_then(|link| block_key(link.uri()))
                 == Some(block)
         })
     })
@@ -4676,9 +4682,9 @@ fn block_id(uri: &str) -> Option<u32> {
 /// ([`crate::shell::RemoteShell`]), or a restored history's
 /// `bateri://sblock/<k>.<role>` ([`snapshot::saved_key`]). The drawing
 /// loops, [`block_row_continues`] and ⌘K's kept row ([`row_block`]) read
-/// all three; suppression's anchor
-/// ([`anchor_row_at_or_above`]) asks [`block_id`] — the local input line is
-/// the only one suppressed.
+/// all three; suppression's anchor ([`anchor_row_at_or_above`]) asks for the
+/// key of the input line being written — the local shell's, or our remote
+/// shell's while it has the dock ([`crate::shell::SuppressedInput::key`]).
 fn block_key(uri: &str) -> Option<BlockKey> {
     if let Some(id) = uri.strip_prefix("bateri://block/") {
         return id.parse().ok().map(BlockKey::Local);
@@ -5834,7 +5840,7 @@ impl Session {
             caret,
             needed_rows,
             end_left,
-            remote,
+            (remote, remote_dock),
             raw,
             transfer,
             program,
@@ -5858,7 +5864,10 @@ impl Session {
                 log.caret(now),
                 dock::needed_rows(&log.dock, budget.cols),
                 end_left,
-                log.context.remote.is_some(),
+                // The remote session with **no dock of its own**: its dock is the
+                // context row alone. A remote shell that has taken the dock has
+                // an input row like the local one ([`ShellLog::remote_dock_on`]).
+                (log.context.remote.is_some(), log.remote_dock_on()),
                 log.raw_active(),
                 log.context.transfer.is_some(),
                 log.context.program.is_some(),
@@ -6083,7 +6092,7 @@ impl Session {
             .filter(|input| input.grid && !alt_screen)
             .map(|input| {
                 grid_input::locate(&term, cursor_point.line.0, rows, |uri| {
-                    block_key(uri) == Some(BlockKey::Local(input.block))
+                    block_key(uri) == Some(input.key())
                 })
             });
         let grid_found = located.and_then(Result::ok);
@@ -6095,7 +6104,7 @@ impl Session {
             } = &mut *blocks;
             grid_input::read(&term, found, cursor_point, colors, &theme, line, line_cells);
             blocks.line_read = true;
-            blocks.line_block = suppressed_block.map_or(0, |input| input.block);
+            blocks.line_block = suppressed_block.map(|input| input.key());
         }
         let grid_hidden = grid_found
             .filter(|_| (0..rows).contains(&cursor_row))
@@ -6206,7 +6215,7 @@ impl Session {
             // asked — on a `for>` row the cursor is legitimately below the anchor.
             let blank_mirror = input.blank;
             let at_anchor = !blank_mirror
-                || anchor_row_at_or_above(&term, to, offset, input.block)
+                || anchor_row_at_or_above(&term, to, offset, input.key())
                     .is_none_or(|anchor| anchor == to);
             //
             // **The temporal question first**: if the mirror of the user's
@@ -6575,7 +6584,7 @@ impl Session {
                 // The suppression's upper end from the same read: the **first**
                 // anchor row of the block being written. `get_or_insert` does not
                 // write the second row — in a multi-line prompt the range must start from the top.
-                if suppressed_block.is_some_and(|input| BlockKey::Local(input.block) == id) {
+                if suppressed_block.is_some_and(|input| input.key() == id) {
                     suppress_from.get_or_insert(row);
                 }
             }
@@ -7044,7 +7053,7 @@ impl Session {
         let input_rows_of = |needed_rows: usize| -> u16 {
             if !self.dock {
                 1
-            } else if remote {
+            } else if remote && (alt_screen || !remote_dock) {
                 0
             } else if alt_screen {
                 1
@@ -7088,12 +7097,14 @@ impl Session {
             // zeroes the share a mirror left `Live` (while ZLE's `edit-command-line`
             // opens vim) must not push the grid up by the band.
             //
-            // **Zero in a remote session**: while ssh runs the shell has
-            // no input row, the dock drops to the context row alone and the grid is
-            // drawn down (`bt-gpu`'s band surplus). The rule does not change on the
-            // alternate screen: there the remote dock **stays** as the status bar
-            // (its share is one row, `bt-shell`'s `dock_rows_for`), the local one
-            // is lifted.
+            // **Zero in a remote session** whose shell has not taken the dock: while
+            // ssh runs the local shell has no input row, the dock drops to the
+            // context row alone and the grid is drawn down (`bt-gpu`'s band
+            // surplus). A remote shell of ours that has taken it
+            // ([`crate::shell::ShellLog::remote_dock_on`]) has the local one's row.
+            // The rule does not change on the alternate screen: there the remote
+            // dock **stays** as the status bar (its share is one row, `bt-shell`'s
+            // `dock_rows_for`) either way, the local one is lifted.
             //
             // **Zero for a program reading the keyboard itself** too, after the
             // alternate screen: the input row is the program's own now.
@@ -7167,7 +7178,10 @@ impl Session {
         if blocks.line_read {
             let answers = self.key_gen.load(Ordering::Acquire);
             let mut log = lock(&self.shell);
-            if log.publish_grid(&blocks.line, &blocks.line_cells, blocks.line_block, answers) {
+            let published = blocks.line_block.is_some_and(|block| {
+                log.publish_grid(&blocks.line, &blocks.line_cells, block, answers)
+            });
+            if published {
                 cursor.input_rows = input_rows_of(dock::needed_rows(&log.dock, budget.cols));
             }
         } else if let Some(input) = suppressed_block.filter(|input| input.grid) {
@@ -7180,7 +7194,7 @@ impl Session {
             let mut log = lock(&self.shell);
             if !grid_taller {
                 log.dock_cells.clear();
-            } else if log.release_grid(input.block) {
+            } else if log.release_grid(input.key()) {
                 cursor.input_rows = input_rows_of(dock::needed_rows(&log.dock, budget.cols));
             }
         }
@@ -10694,6 +10708,11 @@ impl Session {
                 false
             } else {
                 log.context.server = server;
+                // The pane stopped showing a server's terminal: its shell's line
+                // is not the dock's any more.
+                if !server {
+                    log.leave_remote_dock();
+                }
                 true
             }
         };
@@ -10931,7 +10950,7 @@ impl Session {
             let link = hover_taken.as_deref().and_then(|hover| {
                 hover.dock_link(&shell.dock, cols.input, input_rows, shell.dock_scroll)
             });
-            (shell.local.state, change, range, shell.dock_scroll, link)
+            (shell.input_state(), change, range, shell.dock_scroll, link)
         };
         // The remote folder's title fallback (no OSC 7), after the `shell`
         // round: the status bar shows what the links resolve under.
@@ -19755,13 +19774,18 @@ mod tests {
 
     /// The dock's characters as one string (every row, in sink order).
     fn dock_chars(session: &Session) -> String {
+        dock_chars_with(session, 0)
+    }
+
+    /// [`dock_chars`] for a band with `input_rows` input rows.
+    fn dock_chars_with(session: &Session, input_rows: u16) -> String {
         let mut chars = String::new();
         session.dock(
             DockCols {
                 input: 60,
                 context: 60,
             },
-            Some(0),
+            Some(input_rows),
             &mut DockState::default(),
             &mut DockContext::default(),
             false,
@@ -20031,6 +20055,93 @@ mod tests {
             cursor.input_rows, 0,
             "a remote alternate screen keeps the dock as the context row alone"
         );
+    }
+
+    /// A local prompt, `ssh`'s `C`, and — once the test lets it — our remote
+    /// shell's prompt with its line `echo foo bar` and the dock events under its
+    /// identity (`w` and the zsh mirror). The test releases each step with a newline.
+    fn spawn_remote_dock_session(wake: Arc<TestWake>) -> Session {
+        let remote_prompt = "\\033]133;A;bt_remote=1.9.1\\007\
+             \\033]8;;bateri://rblock/1.9.1\\007$ \\033]8;;\\007\
+             \\033]133;B;bt_remote=1.9.1\\007";
+        let remote_events = "\\033]8133;bt_remote=1.9.1;w\\007\
+             \\033]8133;bt_remote=1.9.1;u;12;;ZWNobyBmb28gYmFy;;;bWFpbg==\\007";
+        spawn_docked_session(
+            &format!(
+                "stty -echo; printf '{}'; read _; printf '\\033]133;C\\007'; read _; \
+                 printf '\\r\\n{remote_prompt}echo foo bar{remote_events}'; sleep 5",
+                anchored_prompt(1),
+            ),
+            wake,
+        )
+    }
+
+    /// **A remote shell of ours that took the dock has the dock's input row**:
+    /// the row, the caret and the suppression follow its prompt, as the local
+    /// shell's do, and the line leaves the grid.
+    #[test]
+    fn a_remote_shell_that_took_the_dock_has_its_input_row_and_its_line_leaves_the_grid() {
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_remote_dock_session(Arc::clone(&wake));
+        session.write(b"\n");
+        assert_eq!(wake.wait_commands(1, Duration::from_secs(5)), 1);
+        let command = session.running_command().expect("running after `C`");
+        assert!(session.set_remote(command, Some(&RemoteTarget::ssh("prod"))));
+        assert!(session.set_server(command, true));
+        let (_, cursor) = frame_until(&session, BUDGET, |_, _| true);
+        assert_eq!(cursor.input_rows, 0, "no event yet: the context row alone");
+
+        session.write(b"\n");
+        let (cells, cursor) = frame_until(&session, BUDGET, |_, cursor| {
+            cursor.input_rows > 0 && cursor.caret_in_dock
+        });
+        assert!(
+            !cursor.visible,
+            "the grid's cursor is not drawn: {cursor:?}"
+        );
+        assert!(
+            !(0..cursor.rows).any(|row| row_glyphs(&cells, row).contains("echo")),
+            "the line left the grid"
+        );
+        let (dock, _) = draw_dock(&session);
+        assert!(dock.sigil.is_some(), "the input row has its marker");
+        // Blank cells carry no glyph.
+        let shown = dock_chars_with(&session, cursor.input_rows);
+        assert!(shown.contains("echofoobar"), "{shown:?}");
+        // The dock's selection and its editing keys work on the remote line: the gate is the
+        // local one's, and the widget's command goes out through the pane's PTY.
+        session.dock_select(SelectKind::Word, dock_point(6, CellHalf::Left));
+        assert_eq!(session.selection_text().as_deref(), Some("foo"));
+        let generation = session.key_gen.load(Ordering::Acquire);
+        assert!(
+            session.dock_key(DockKey::Backspace),
+            "the editing gate is open"
+        );
+        assert_ne!(
+            session.key_gen.load(Ordering::Acquire),
+            generation,
+            "the widget's command went to the shell"
+        );
+        session.shutdown();
+    }
+
+    /// A plain `ssh` has no remote shell of ours: the same stream changes
+    /// nothing, and the line stays in the grid.
+    #[test]
+    fn a_plain_ssh_keeps_the_context_row_alone_and_the_line_in_the_grid() {
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_remote_dock_session(Arc::clone(&wake));
+        session.write(b"\n");
+        assert_eq!(wake.wait_commands(1, Duration::from_secs(5)), 1);
+        let command = session.running_command().expect("running after `C`");
+        assert!(session.set_remote(command, Some(&RemoteTarget::ssh("prod"))));
+        session.write(b"\n");
+        let (_, cursor) = frame_until(&session, BUDGET, |cells, cursor| {
+            (0..cursor.rows).any(|row| row_glyphs(cells, row).contains("echo"))
+        });
+        assert_eq!(cursor.input_rows, 0, "{cursor:?}");
+        assert!(!cursor.caret_in_dock && cursor.visible, "{cursor:?}");
+        session.shutdown();
     }
 
     /// A program reading the keyboard itself: the PTY's raw modes mark the

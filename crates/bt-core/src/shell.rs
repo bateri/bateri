@@ -217,6 +217,14 @@ pub(crate) enum BlockKey {
     },
 }
 
+/// A bare id is the local shell's block ([`BlockKey::Local`]): the namespace
+/// the dock's grid reads were written for.
+impl From<u32> for BlockKey {
+    fn from(id: u32) -> Self {
+        Self::Local(id)
+    }
+}
+
 /// The running block of each ledger — the frame path's `running` argument
 /// ([`ShellLog::running_blocks`]), read once per frame.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -2478,6 +2486,20 @@ pub(crate) struct ShellLog {
     /// ([`DockPrediction`]). Its lifetime is only one generation — any intervening
     /// input invalidates it; `e` and `A` clear it too.
     pub(crate) dock_pending: Option<DockPrediction>,
+    /// Whether our remote shell has taken the dock in this remote session: it
+    /// sent a dock event under [`Self::remote_dock_gate`]. While it holds (and the
+    /// pane shows a server's terminal, [`DockContext::server`]) the dock is the
+    /// remote shell's — its prompt phase, its block trail, its input row
+    /// ([`Self::remote_dock_on`]) — and the local shell, which is behind ssh, owns
+    /// none of it. Without it the remote session keeps the context row alone.
+    ///
+    /// The dock's state stays one ([`Self::dock`] and the fields around it are the
+    /// local shell's before ssh and after it, the remote shell's between): the
+    /// first event resets what the local prompt left, and the session's two edges
+    /// — a different remote shell, our local `D`/`A` — reset it again
+    /// ([`Self::leave_remote_dock`]). It crosses the handover, so a prompt on
+    /// screen across an update keeps its dock.
+    pub(crate) remote_dock: bool,
     /// Command generation: incremented on every **transition** of the phase to
     /// `Running`.
     ///
@@ -2804,6 +2826,9 @@ pub(crate) struct SuppressedInput {
     /// The identity of the block being written; [`crate::Session::frame`] finds its
     /// **row** from the anchor — the shell does not know which row it is on.
     pub(crate) block: u32,
+    /// The remote shell the block belongs to, if it is our remote shell's
+    /// ([`ShellLog::remote_dock_on`]); `None` for the local shell's.
+    pub(crate) remote: Option<RemoteShell>,
     /// The line is read from the grid ([`ShellLog::dock_grid`]) and the frame
     /// finds the rows to hide from the cells themselves. The fields below that
     /// describe a mirror (`blank`, `from_anchor`, `last_ink`, `insert_keymap`)
@@ -2845,6 +2870,19 @@ pub(crate) struct SuppressedInput {
     pub(crate) answers: u64,
 }
 
+impl SuppressedInput {
+    /// The block's key, the namespace its prompt's anchor is read in.
+    pub(crate) fn key(&self) -> BlockKey {
+        match self.remote {
+            Some(shell) => BlockKey::Remote {
+                shell,
+                id: self.block,
+            },
+            None => BlockKey::Local(self.block),
+        }
+    }
+}
+
 impl ShellLog {
     pub(crate) fn new(scrollback: usize) -> Self {
         Self {
@@ -2861,6 +2899,7 @@ impl ShellLog {
             click_events: false,
             dock_cells: Vec::new(),
             dock_pending: None,
+            remote_dock: false,
             command: 0,
             paste_since_remote: false,
             login: None,
@@ -2991,6 +3030,7 @@ impl ShellLog {
                 // does not carry the remote indicator into the next prompt. The remote shell's
                 // identity-less `A` never reaches here (the gate above).
                 outcome.title = self.context.clear_remote();
+                self.leave_remote_dock();
                 self.dock_editable = false;
                 self.dock_grid = false;
                 self.dock_cells.clear();
@@ -3041,6 +3081,7 @@ impl ShellLog {
                     offer.mark = self.context.remote_mark;
                 }
                 outcome.title = self.context.clear_remote();
+                self.leave_remote_dock();
                 outcome.ended = true;
                 // Counted by **our** `D` alone, the clock's rule: iTerm2's
                 // identity-less `D` before ours would count the command twice.
@@ -3066,13 +3107,39 @@ impl ShellLog {
     /// A new remote shell starts a new trail: the old session's ledger cannot
     /// be read under the new one's numbers (two sessions' `rblock/1`s).
     fn apply_remote(&mut self, remote: RemoteMark) -> bool {
+        // **A held `line-finish` ends on every remote mark**, as on every local
+        // one ([`Self::apply`]) — the remote dock's, not a local one: a remote mark
+        // touches nothing local.
+        if self.remote_dock && self.end_since.take().is_some() {
+            self.end_line();
+        }
         if self.remote_shell != Some(remote.shell) {
             self.remote.clear();
             self.remote_shell = Some(remote.shell);
+            // Another shell on the server is another prompt: the previous one's
+            // line and capabilities are not its own. The dock mode stays — the
+            // new shell's events are taken under the same gate.
+            if self.remote_dock {
+                self.reset_dock_surface();
+            }
         }
         match remote.mark {
-            Mark::PromptStart { .. } => {
+            Mark::PromptStart { click_events, .. } => {
                 self.remote.prompt(Some(remote.id));
+                // The prompt's capabilities are the prompt's, as for the local
+                // `A` ([`Self::apply`]) — only while the pane shows a server's
+                // terminal, the one place a remote dock event is taken. The
+                // announcement is set even before the first event: fish says it
+                // before the prompt string's `g`, which is that event.
+                if self.context.server {
+                    self.click_events = click_events;
+                    if self.remote_dock {
+                        self.dock_editable = false;
+                        self.dock_grid = false;
+                        self.dock_cells.clear();
+                        self.dock_pending = None;
+                    }
+                }
                 false
             }
             Mark::PromptEnd => {
@@ -3158,17 +3225,31 @@ impl ShellLog {
                 self.notes.push(note);
                 outcome.notified = true;
             }
-            // **While a remote session is active OSC 8133 is ignored**: the
-            // local shell is behind ssh and the only 8133 that can arrive is a remote
-            // one — a remote mirror would draw a foreign line in the local dock, and
-            // a remote `8133;w` would make the local dock send `CSI 8133 ~` editing
-            // commands to the remote shell. The defense is here, not in a script's
-            // care. Our `D` clears the remote state, so the next local 8133 applies.
+            // **While a remote session is active an identity-less OSC 8133 is
+            // ignored**: the local shell is behind ssh and the only 8133 that can
+            // arrive is a remote one — a remote mirror would draw a foreign line in
+            // the local dock, and a remote `8133;w` would make the local dock send
+            // `CSI 8133 ~` editing commands to the remote shell. The defense is here,
+            // not in a script's care. Our `D` clears the remote state, so the next
+            // local 8133 applies. The one remote 8133 that is taken is our remote
+            // shell's own, with its identity, in the arm below.
             ScanEvent::Dock(_) if self.context.remote.is_some() => {}
             ScanEvent::Dock(event) => {
                 let generation = self.environment.generation;
                 outcome.mirrored = self.apply_dock(event, answers);
                 outcome.environment = self.environment.generation != generation;
+            }
+            // **The one 8133 a remote session lets through**: our remote
+            // shell's, carrying its identity ([`Scanner`]'s `bt_remote=`
+            // prefix) and arriving under [`Self::remote_dock_gate`]; anything else
+            // is the foreign mirror the arm above drops. Before the remote
+            // session exists (the probe has not run) the gate is shut too: an
+            // identified event never reaches the local dock, which an identity-less
+            // one still can.
+            ScanEvent::RemoteDock { shell, event } => {
+                if self.remote_dock_gate(shell) {
+                    outcome.mirrored = self.apply_remote_dock(event, answers);
+                }
             }
             // The directory arrives **resolved**: the scanner did the scheme, the path and
             // the percent-decoding, and only a drawable path and whether the authority is
@@ -3355,6 +3436,7 @@ impl ShellLog {
             (target.host.as_str(), target.port)
         }
         let changed = self.context.remote.as_ref().map(named) != target.map(named);
+        let had_host = self.context.remote.is_some();
         // Another host's load is not this one's; the same host
         // re-reported keeps its indicator.
         if changed {
@@ -3364,6 +3446,11 @@ impl ShellLog {
             self.context.server = false;
             // Another host's prompt is not this one's login.
             self.paste_since_remote = false;
+            // Nor is its line the dock's — unless there was no host: the probe
+            // that finds the target after an update is no edge of the session.
+            if had_host {
+                self.leave_remote_dock();
+            }
         }
         match target {
             Some(target) => {
@@ -3460,7 +3547,7 @@ impl ShellLog {
 
     /// Stamps the handover's raw answer; **if unchanged the stamp does not move**.
     fn observe_caret(&mut self) {
-        let raw = caret_home(self.local.state, self.caret_status(), false);
+        let raw = caret_home(self.input_state(), self.caret_status(), false);
         if raw != self.caret_raw {
             self.caret_raw = raw;
             // **The clock is read only on change.** `apply_scan` is the reader thread's
@@ -3515,8 +3602,7 @@ impl ShellLog {
                 // ([`Self::end_since`]). The clock is read only here, that is, once per ⏎ —
                 // [`Self::observe_caret`]'s rule.
                 let typing = self
-                    .local
-                    .state
+                    .input_state()
                     .is_some_and(|state| state.phase == ShellPhase::Input);
                 if typing && self.dock.status == DockStatus::Live {
                     self.end_since = Some(Instant::now());
@@ -3816,15 +3902,20 @@ impl ShellLog {
     ///   is the previous (finished) block and suppression would start from the
     ///   **wrong** row.
     pub(crate) fn suppressed_input(&self) -> Option<SuppressedInput> {
-        if self.local.state?.phase != ShellPhase::Input {
+        // **The trail that holds the dock** ([`Self::input_track`]): the local
+        // shell's, or — while our remote shell has taken the dock — the remote
+        // one's, whose block the prompt's anchor names (`bateri://rblock/…`).
+        let (track, remote) = self.input_track();
+        if track.state?.phase != ShellPhase::Input {
             return None;
         }
         if self.dock_grid {
             // The grid is the source, so there is no mirror to be fresh or
             // stale and no text to measure: the frame finds the rows itself.
-            return match self.local.blocks.last()? {
+            return match track.blocks.last()? {
                 (block, Outcome::Pending { .. }) => Some(SuppressedInput {
                     block,
+                    remote,
                     grid: true,
                     blank: false,
                     from_anchor: false,
@@ -3838,9 +3929,10 @@ impl ShellLog {
         if self.dock.status != DockStatus::Live {
             return None;
         }
-        match self.local.blocks.last()? {
+        match track.blocks.last()? {
             (block, Outcome::Pending { .. }) => Some(SuppressedInput {
                 block,
+                remote,
                 grid: false,
                 blank: self.dock.display_chars == 0 && self.dock.prebuffer.is_empty(),
                 from_anchor: !self.dock.prebuffer.is_empty() || self.end_since.is_some(),
@@ -3849,6 +3941,114 @@ impl ShellLog {
                 answers: self.dock.answers,
             }),
             (_, Outcome::Finished { .. }) => None,
+        }
+    }
+
+    /// Whether our remote shell has the dock now: it took it
+    /// ([`Self::remote_dock`]), the pane shows a server's terminal
+    /// ([`DockContext::server`]) and the remote session is on. Every dock
+    /// reader that asked "is there a remote session" to say "no input row, no
+    /// suppression" asks this too, and the answer is the same for all of them
+    /// — the input row, the suppression, the caret's owner and the editing
+    /// gate stand or fall together.
+    pub(crate) fn remote_dock_on(&self) -> bool {
+        self.remote_dock && self.context.server && self.context.remote.is_some()
+    }
+
+    /// The trail whose prompt the dock shows and the remote shell it belongs to
+    /// (`None` for the local one): the remote trail while
+    /// [`Self::remote_dock_on`], otherwise the local shell's, byte for byte.
+    fn input_track(&self) -> (&BlockTrack, Option<RemoteShell>) {
+        match self.remote_shell.filter(|_| self.remote_dock_on()) {
+            Some(shell) => (&self.remote, Some(shell)),
+            None => (&self.local, None),
+        }
+    }
+
+    /// The phase of the shell that has the dock ([`Self::input_track`]).
+    pub(crate) fn input_state(&self) -> Option<ShellState> {
+        self.input_track().0.state
+    }
+
+    /// The key of the block being written on the shell that has the dock, or
+    /// `None` if its last block is finished.
+    fn pending_key(&self) -> Option<BlockKey> {
+        let (track, remote) = self.input_track();
+        match track.blocks.last()? {
+            (id, Outcome::Pending { .. }) => Some(match remote {
+                Some(shell) => BlockKey::Remote { shell, id },
+                None => BlockKey::Local(id),
+            }),
+            (_, Outcome::Finished { .. }) => None,
+        }
+    }
+
+    /// **The remote dock's gate** (the shell's identity, the pane, the
+    /// phase), asked for every identified dock event: the event is taken only if
+    ///
+    /// - it names the shell the trail has seen ([`Self::remote_shell`], set by
+    ///   its first mark) — a foreign mirror, an old bateri's integration in a
+    ///   nested ssh and a second shell in tmux carry another identity or none;
+    /// - the pane shows a server's terminal ([`DockContext::server`]), which is
+    ///   what puts a remote shell of ours behind it: a plain `ssh` and `mosh`
+    ///   have none, and the context row is all they get;
+    /// - that shell is at its prompt: after its `A` and before its `C`. A nested
+    ///   ssh or a program is `Running` on the trail, so the dock's input closes by
+    ///   itself and opens again at the `A` that follows the nested session's `D`.
+    ///   (`Prompt` and `Input` both: fish prints its `g` before the `B`.)
+    pub(crate) fn remote_dock_gate(&self, shell: RemoteShell) -> bool {
+        self.context.server
+            && self.context.remote.is_some()
+            && self.remote_shell == Some(shell)
+            && self
+                .remote
+                .state
+                .is_some_and(|state| matches!(state.phase, ShellPhase::Prompt | ShellPhase::Input))
+    }
+
+    /// Applies a dock event that passed [`Self::remote_dock_gate`]; `true` if
+    /// the dock changed, as [`Self::apply_dock`]'s answer.
+    ///
+    /// The **first** event of a remote session takes the dock: what the local
+    /// prompt left in it (its editing word, its grid flag, a held line) is not the
+    /// remote shell's and goes before the event is applied, and the dock's row
+    /// appears — a change of its own, whatever the event says. **The branch is not
+    /// taken**: the remote context row is `⇄ host` and its path, it carries no
+    /// branch, and the local one must not be overwritten by a server's.
+    fn apply_remote_dock(&mut self, event: DockEvent<'_>, answers: u64) -> bool {
+        if matches!(event, DockEvent::Branch { .. }) {
+            return false;
+        }
+        let took = !self.remote_dock;
+        if took {
+            self.reset_dock_surface();
+            self.remote_dock = true;
+        }
+        self.apply_dock(event, answers) || took
+    }
+
+    /// Empties the dock's state — the line, the selection and scroll, the
+    /// capabilities of the prompt, a held `line-finish` — for the one that takes
+    /// the dock next. [`Self::click_events`] is not here: it comes with the `A`.
+    fn reset_dock_surface(&mut self) {
+        self.end_since = None;
+        self.dock_selection = None;
+        self.dock_scroll = None;
+        self.dock_editable = false;
+        self.dock_grid = false;
+        self.dock_cells.clear();
+        self.dock_pending = None;
+        self.end_line();
+    }
+
+    /// The remote session's dock ends: the local shell's `A`/`D` (the one that
+    /// ends the session, [`Self::apply`]) or a host that is no longer this one
+    /// ([`Self::set_remote`]). A connection that drops leaves no remote `e`, so
+    /// the remote line would hang in the dock until the local prompt's mirror
+    /// replaced it.
+    pub(crate) fn leave_remote_dock(&mut self) {
+        if std::mem::take(&mut self.remote_dock) {
+            self.reset_dock_surface();
         }
     }
 
@@ -3889,15 +4089,14 @@ impl ShellLog {
         &mut self,
         staged: &DockState,
         cells: &[GridPos],
-        block: u32,
+        block: impl Into<BlockKey>,
         answers: u64,
     ) -> bool {
         // The line was read for `block`; the reader thread can have run the
         // whole of `e C D A g B` since, and the new prompt is not that line.
-        let current = matches!(
-            self.local.blocks.last(),
-            Some((last, Outcome::Pending { .. })) if last == block
-        );
+        // The key carries the shell too: a remote trail's `1` is not the local
+        // `1` the dock may have gone back to.
+        let current = self.pending_key() == Some(block.into());
         if !current || !self.grid_open() {
             return false;
         }
@@ -3927,12 +4126,9 @@ impl ShellLog {
     /// The gate is [`Self::publish_grid`]'s, asked again under the lock for
     /// its reasons — and one more: an `Unavailable` would end a held
     /// `line-finish`.
-    pub(crate) fn release_grid(&mut self, block: u32) -> bool {
+    pub(crate) fn release_grid(&mut self, block: impl Into<BlockKey>) -> bool {
         self.dock_cells.clear();
-        let current = matches!(
-            self.local.blocks.last(),
-            Some((last, Outcome::Pending { .. })) if last == block
-        );
+        let current = self.pending_key() == Some(block.into());
         if !current
             || !self.grid_open()
             || self.dock.status == DockStatus::Unavailable(DockFault::Tall)
@@ -3946,16 +4142,17 @@ impl ShellLog {
 
     /// Whether a grid-sourced line may be published and clicked at this
     /// moment: the shell said `g` at this prompt, the line is still being
-    /// written, and the dock has an input row at all — a remote session or a
-    /// program reading the keyboard itself has none.
+    /// written, and the dock has an input row at all — a remote session whose
+    /// shell has not taken the dock ([`Self::remote_dock_on`]) or a program
+    /// reading the keyboard itself has none. The phase is the one of the shell
+    /// that has the dock ([`Self::input_state`]).
     pub(crate) fn grid_open(&self) -> bool {
         self.dock_grid
             && self.end_since.is_none()
-            && self.context.remote.is_none()
+            && (self.context.remote.is_none() || self.remote_dock_on())
             && !self.raw_active()
             && self
-                .local
-                .state
+                .input_state()
                 .is_some_and(|state| state.phase == ShellPhase::Input)
     }
 
@@ -4023,7 +4220,7 @@ impl ShellLog {
     /// hold that follows `C` — a held answer would give the caret to a dock that
     /// draws no row and the grid's cursor would be hidden with it.
     pub(crate) fn caret(&self, now: Instant) -> CaretDecision {
-        if self.context.remote.is_some() || self.raw_active() {
+        if (self.context.remote.is_some() && !self.remote_dock_on()) || self.raw_active() {
             return CaretDecision {
                 home: CaretHome::Grid,
                 hold_left: None,
@@ -4033,7 +4230,7 @@ impl ShellLog {
             .checked_sub(now.saturating_duration_since(self.caret_since))
             .filter(|left| !left.is_zero());
         let status = self.caret_status();
-        let home = caret_home(self.local.state, status, held.is_some());
+        let home = caret_home(self.input_state(), status, held.is_some());
         // The two answers being compared pass through the **same gate** and differ only
         // in `held`: deriving the raw answer through a second path (calling
         // `caret_home_raw` directly) would make it possible for the two to diverge. If
@@ -4041,7 +4238,7 @@ impl ShellLog {
         // applied too, and the window would request a frame every 150 ms that changed
         // nothing — the silent-leak class for which the `quiet=` token is the last line
         // of defense.
-        let unheld = caret_home(self.local.state, status, false);
+        let unheld = caret_home(self.input_state(), status, false);
         CaretDecision {
             home,
             // The remainder derives from **the answer having been flipped**, not from a
@@ -4617,6 +4814,14 @@ pub(crate) enum ScanEvent<'a> {
     /// [`ShellLog::apply`] cannot receive it.
     RemoteMark(RemoteMark),
     Dock(DockEvent<'a>),
+    /// A dock event carrying our remote shell's identity (`8133;bt_remote=<P>.<S>.<n>;…`,
+    /// [`split_remote`]): its own arm, as [`Self::RemoteMark`] is, so that the arm
+    /// that drops a remote session's foreign 8133 cannot receive it and the gate that
+    /// takes it ([`ShellLog::remote_dock_gate`]) cannot receive a foreign one.
+    RemoteDock {
+        shell: RemoteShell,
+        event: DockEvent<'a>,
+    },
     /// The working directory, the **resolved** full path, and whether the authority is
     /// this machine ([`LOCAL_AUTHORITIES`]). A rejected URI produces no event at all:
     /// there is no "directory could not be read" state, because the right answer is to
@@ -4913,8 +5118,9 @@ impl Scanner {
             ScanState::Payload(Arm::Dock) => {
                 if is_terminator(byte) {
                     // Decoding happens **before** `close`: `close` empties the buffer.
+                    let (remote, body) = split_remote(&self.dock);
                     let outcome = parse_dock(
-                        &self.dock,
+                        body,
                         &mut self.decoded,
                         &mut self.line,
                         &mut self.branch,
@@ -4922,17 +5128,20 @@ impl Scanner {
                     );
                     self.close(byte);
                     let event = match outcome {
-                        DockOutcome::Update => ScanEvent::Dock(DockEvent::Update(&self.line)),
-                        DockOutcome::End => ScanEvent::Dock(DockEvent::End),
+                        DockOutcome::Update => dock_event(remote, DockEvent::Update(&self.line)),
+                        DockOutcome::End => dock_event(remote, DockEvent::End),
                         DockOutcome::Unavailable(fault) => {
-                            ScanEvent::Dock(DockEvent::Unavailable(fault))
+                            dock_event(remote, DockEvent::Unavailable(fault))
                         }
-                        DockOutcome::Branch => ScanEvent::Dock(DockEvent::Branch {
-                            branch: &self.branch,
-                            environment: &self.environment,
-                        }),
-                        DockOutcome::Editable => ScanEvent::Dock(DockEvent::Editable),
-                        DockOutcome::Grid => ScanEvent::Dock(DockEvent::Grid),
+                        DockOutcome::Branch => dock_event(
+                            remote,
+                            DockEvent::Branch {
+                                branch: &self.branch,
+                                environment: &self.environment,
+                            },
+                        ),
+                        DockOutcome::Editable => dock_event(remote, DockEvent::Editable),
+                        DockOutcome::Grid => dock_event(remote, DockEvent::Grid),
                         DockOutcome::Setup(Some(fault)) => ScanEvent::RemoteSetup(fault),
                         DockOutcome::Info(Some(nonce)) => ScanEvent::RemoteUp(nonce),
                         // An unknown code is a newer bootstrap's: nothing to say.
@@ -4940,12 +5149,19 @@ impl Scanner {
                     };
                     on_event(event);
                 } else if is_ignored(byte) {
-                } else if self.dock.len() == DOCK_PAYLOAD_LIMIT {
+                } else if self.dock.len() >= DOCK_PAYLOAD_LIMIT
+                    && self.dock.len() == dock_limit(&self.dock)
+                {
                     // Unlike 133's silent drop, the overflow is reported **immediately**: so that the
                     // consumer can say "I cannot show it". The rest of the sequence is still
-                    // skipped so that we see what follows it.
+                    // skipped so that we see what follows it. The identity comes first in a
+                    // remote payload for this: the overflow knows whose it is.
                     self.state = ScanState::Skip;
-                    on_event(ScanEvent::Dock(DockEvent::Unavailable(DockFault::Overflow)));
+                    let (remote, _) = split_remote(&self.dock);
+                    on_event(dock_event(
+                        remote,
+                        DockEvent::Unavailable(DockFault::Overflow),
+                    ));
                 } else {
                     self.dock.push(byte);
                 }
@@ -5386,6 +5602,53 @@ pub(crate) fn remote_key(value: &str) -> Option<(RemoteShell, u32)> {
         .next()
         .is_none()
         .then_some((RemoteShell { parent, pid }, id))
+}
+
+/// A dock payload's leading identity: `bt_remote=<P>.<S>.<n>;{the payload}` is
+/// our remote shell's dock event ([`ScanEvent::RemoteDock`]) and the rest is
+/// the payload the local form carries, byte for byte ([`parse_dock`]). The
+/// identity is **first** and by name, the marks' field: a payload that does
+/// not start with it is the local form, and one that starts with it but does
+/// not parse is nobody's (it falls through as the local form and reads as an
+/// unknown operation). First, so that an overflow — which has seen only the
+/// start of a payload — still knows whose it is. The numbers are the marks'
+/// ([`remote_key`]); the dock event takes the shell from them, the block it
+/// reads from the trail.
+fn split_remote(payload: &[u8]) -> (Option<RemoteShell>, &[u8]) {
+    if !payload.starts_with(REMOTE_ID_FIELD) {
+        return (None, payload);
+    }
+    let (field, body) = match payload.iter().position(|&byte| byte == b';') {
+        Some(at) => (&payload[..at], &payload[at + 1..]),
+        None => (payload, &payload[payload.len()..]),
+    };
+    match remote_id(field) {
+        Some((shell, _)) => (Some(shell), body),
+        None => (None, payload),
+    }
+}
+
+/// The scanner's event for a dock event of `remote`'s shell, or the local form
+/// when it carried no identity.
+fn dock_event(remote: Option<RemoteShell>, event: DockEvent<'_>) -> ScanEvent<'_> {
+    match remote {
+        Some(shell) => ScanEvent::RemoteDock { shell, event },
+        None => ScanEvent::Dock(event),
+    }
+}
+
+/// [`DOCK_PAYLOAD_LIMIT`] for the payload read so far, **counted on the shell's
+/// line**: the identity prefix is not the shell's, so a remote payload gets its
+/// length on top and the same body overflows on both forms or on neither (the
+/// two sides of the budget, [`parse_dock`]'s `o`, must give the same answer).
+fn dock_limit(payload: &[u8]) -> usize {
+    let (remote, body) = split_remote(payload);
+    DOCK_PAYLOAD_LIMIT
+        + if remote.is_some() {
+            payload.len() - body.len()
+        } else {
+            0
+        }
 }
 
 fn number<T: std::str::FromStr>(field: &[u8]) -> Option<T> {
@@ -5927,18 +6190,25 @@ const STATE_HEADER: &str = "bateri-state";
 /// across an update instead of waiting for the next prompt; a version 4 blob
 /// reads as "nothing active".
 ///
+/// Version 6: the remote dock's flag ([`ShellLog::remote_dock`]) crosses, so
+/// a prompt of our remote shell on screen across an update keeps its dock
+/// (its line, its editing word and its grid flag crossed already, with the
+/// local ones); a version 5 blob reads as "the remote shell has not taken the
+/// dock".
+///
 /// **Only forward once released.** A bateri rolled back to the version
 /// before reads this one as unknown (the reader is strict,
 /// [`Carried::decode`]): an update's pane is not adopted at all — the
 /// restore path brings its layout back, not its program — and a held pane
 /// takes a fresh shell state ([`crate::AdoptMode`]). A released bump is
 /// therefore never undone, a mistake in it is fixed by the next version.
-const STATE_VERSION: u32 = 5;
+const STATE_VERSION: u32 = 6;
 
-/// The first version that carries the active environment
-/// ([`DockContext::environment`]). Once [`STATE_OLDEST`] reaches it, the
-/// branch that reads an older blob as "nothing active" is dead and goes.
-const STATE_ENVIRONMENT: u32 = 5;
+/// The first version that carries the remote dock's flag
+/// ([`ShellLog::remote_dock`]). Once [`STATE_OLDEST`] reaches it, the branch
+/// that reads an older blob as "not taken" is dead and goes. (Version 5's
+/// environment reached it with this bump and its branch went.)
+const STATE_REMOTE_DOCK: u32 = 6;
 
 /// The oldest version the reader still takes: the current one and the one
 /// before it.
@@ -6145,6 +6415,8 @@ pub(crate) struct Carried {
     /// [`ShellLog::click_events`]: a click in the dock reaches the fish
     /// prompt that is on screen across the update.
     click_events: bool,
+    /// [`ShellLog::remote_dock`].
+    remote_dock: bool,
     command: u64,
     login: Option<u64>,
     remote_up: Option<(u64, String)>,
@@ -6239,6 +6511,7 @@ impl Carried {
             format!("editable {}", u8::from(self.dock_editable)),
             format!("dock-grid {}", u8::from(self.dock_grid)),
             format!("click-events {}", u8::from(self.click_events)),
+            format!("remote-dock {}", u8::from(self.remote_dock)),
             format!("command {}", self.command),
             format!("login {}", render_number(self.login)),
             match &self.remote_up {
@@ -6359,38 +6632,31 @@ impl Carried {
         };
         let cwd = text_of(take("cwd")?)?;
         let branch = text_of(take("branch")?)?;
-        let (environment, reported, reported_cwd) = if version >= STATE_ENVIRONMENT {
-            let texts = |values: Vec<&str>| -> Option<Vec<String>> {
-                values.iter().map(|value| parse_text(value)?).collect()
-            };
-            let [python, python_version, node, node_wanted]: [String; 4] =
-                texts(take("environment")?)?.try_into().ok()?;
-            let [
-                reported_cwd,
-                virtual_env,
-                virtual_env_prompt,
-                conda_prefix,
-                conda_prompt,
-                node_path,
-            ]: [String; 6] = texts(take("environment-report")?)?.try_into().ok()?;
-            (
-                DockEnvironment {
-                    python,
-                    python_version,
-                    node,
-                    node_wanted,
-                },
-                ShellEnvironment {
-                    virtual_env,
-                    virtual_env_prompt,
-                    conda_prefix,
-                    conda_prompt,
-                    node: node_path,
-                },
-                reported_cwd,
-            )
-        } else {
-            Default::default()
+        let texts = |values: Vec<&str>| -> Option<Vec<String>> {
+            values.iter().map(|value| parse_text(value)?).collect()
+        };
+        let [python, python_version, node, node_wanted]: [String; 4] =
+            texts(take("environment")?)?.try_into().ok()?;
+        let [
+            reported_cwd,
+            virtual_env,
+            virtual_env_prompt,
+            conda_prefix,
+            conda_prompt,
+            node_path,
+        ]: [String; 6] = texts(take("environment-report")?)?.try_into().ok()?;
+        let environment = DockEnvironment {
+            python,
+            python_version,
+            node,
+            node_wanted,
+        };
+        let reported = ShellEnvironment {
+            virtual_env,
+            virtual_env_prompt,
+            conda_prefix,
+            conda_prompt,
+            node: node_path,
         };
         let remote_cwd = text_of(take("remote-cwd")?)?;
         let remote_setup = match one(take("remote-setup")?)?.as_str() {
@@ -6445,6 +6711,11 @@ impl Carried {
         let dock_fresh = flag(take("dock-fresh")?)?;
         let dock_editable = flag(take("editable")?)?;
         let (dock_grid, click_events) = (flag(take("dock-grid")?)?, flag(take("click-events")?)?);
+        let remote_dock = if version >= STATE_REMOTE_DOCK {
+            flag(take("remote-dock")?)?
+        } else {
+            false
+        };
         let command = one(take("command")?)?.parse().ok()?;
         let login = number(take("login")?)?;
         let remote_up = match take("remote-up")?.as_slice() {
@@ -6479,6 +6750,7 @@ impl Carried {
             dock_editable,
             dock_grid,
             click_events,
+            remote_dock,
             command,
             login,
             remote_up,
@@ -6515,6 +6787,7 @@ impl ShellLog {
             dock_editable: self.dock_editable,
             dock_grid: self.dock_grid,
             click_events: self.click_events,
+            remote_dock: self.remote_dock,
             command: self.command,
             login: self.login,
             remote_up: self.remote_up.clone(),
@@ -6567,6 +6840,7 @@ impl ShellLog {
         self.dock_editable = carried.dock_editable;
         self.dock_grid = carried.dock_grid;
         self.click_events = carried.click_events;
+        self.remote_dock = carried.remote_dock;
         self.command = carried.command;
         self.login = carried.login;
         self.remote_up = carried.remote_up;
@@ -7484,18 +7758,44 @@ mod tests {
         for chunk in chunks {
             scanner.feed(chunk, |event| {
                 if let ScanEvent::Dock(event) = event {
-                    seen.push(match event {
-                        DockEvent::Update(line) => DockSnapshot::Update(line.clone()),
-                        DockEvent::End => DockSnapshot::End,
-                        DockEvent::Unavailable(fault) => DockSnapshot::Unavailable(fault),
-                        DockEvent::Branch { branch, .. } => DockSnapshot::Branch(branch.to_owned()),
-                        DockEvent::Editable => DockSnapshot::Editable,
-                        DockEvent::Grid => DockSnapshot::Grid,
-                    });
+                    seen.push(snapshot_of(event));
                 }
             });
         }
         seen
+    }
+
+    fn snapshot_of(event: DockEvent<'_>) -> DockSnapshot {
+        match event {
+            DockEvent::Update(line) => DockSnapshot::Update(line.clone()),
+            DockEvent::End => DockSnapshot::End,
+            DockEvent::Unavailable(fault) => DockSnapshot::Unavailable(fault),
+            DockEvent::Branch { branch, .. } => DockSnapshot::Branch(branch.to_owned()),
+            DockEvent::Editable => DockSnapshot::Editable,
+            DockEvent::Grid => DockSnapshot::Grid,
+        }
+    }
+
+    /// The dock events that carry our remote shell's identity, with it.
+    fn remote_dock_events(bytes: &[u8]) -> Vec<(RemoteShell, DockSnapshot)> {
+        let mut scanner = Scanner::new();
+        let mut seen = Vec::new();
+        scanner.feed(bytes, |event| {
+            if let ScanEvent::RemoteDock { shell, event } = event {
+                seen.push((shell, snapshot_of(event)));
+            }
+        });
+        seen
+    }
+
+    /// A dock sequence as our remote shell prints it: the identity of its
+    /// block comes first, the rest is the local form byte for byte.
+    fn remote_dock(parent: u32, id: u32, local_form: &[u8]) -> Vec<u8> {
+        let head = b"\x1b]8133;";
+        let mut out = head.to_vec();
+        out.extend_from_slice(format!("bt_remote={parent}.9.{id};").as_bytes());
+        out.extend_from_slice(local_form.strip_prefix(&head[..]).expect("a dock sequence"));
+        out
     }
 
     fn dock_events(bytes: &[u8]) -> Vec<DockSnapshot> {
@@ -8140,9 +8440,12 @@ mod tests {
         assert_eq!(log.caret(now + HANDOVER_HOLD).home, CaretHome::Dock);
     }
 
-    /// **A remote session's OSC 8133 does not reach the local dock**: the
+    /// **A remote session's identity-less OSC 8133 does not reach the local dock**: the
     /// mirror, the branch and the editing widget's capability stay as the local shell
     /// left them; our `D` ends the remote session and the next local 8133 applies.
+    /// (Our remote shell's own, with its identity, is the remote dock's:
+    /// `a_dock_event_that_is_not_our_remote_shells_leaves_the_dock_alone` and the tests
+    /// around it.)
     #[test]
     fn a_remote_sessions_8133_is_ignored_until_the_local_d() {
         let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
@@ -9179,6 +9482,7 @@ mod tests {
             | ScanEvent::RemoteSetup(_)
             | ScanEvent::RemoteUp(_)
             | ScanEvent::RemoteMark(_)
+            | ScanEvent::RemoteDock { .. }
             | ScanEvent::StatusQuery
             | ScanEvent::CellSizeQuery
             | ScanEvent::Status(_)
@@ -11518,6 +11822,7 @@ mod tests {
             outcome.ended |= one.ended;
             outcome.remote_edge |= one.remote_edge;
             outcome.status |= one.status;
+            outcome.mirrored |= one.mirrored;
         });
         outcome
     }
@@ -11847,6 +12152,407 @@ mod tests {
                 local: Some(1),
                 remote: Some((shell(1), 2)),
             }
+        );
+    }
+
+    /// A server pane's log with our remote shell at its prompt: block 1's `A` and
+    /// `B`, the session running behind a local `ssh` command.
+    fn server_log() -> ShellLog {
+        let mut log = ssh_log();
+        log.context.server = true;
+        feed(
+            &mut log,
+            b"\x1b]133;A;bt_remote=1.9.1\x07\x1b]133;B;bt_remote=1.9.1\x07",
+        );
+        log
+    }
+
+    fn remote_phase(log: &ShellLog) -> Option<ShellPhase> {
+        log.remote.state.map(|state| state.phase)
+    }
+
+    /// **The remote dock's wire form**: the identity first, then the local form
+    /// byte for byte — an identified event is its own arm, the local form's
+    /// parser is the one that reads the rest, and an overflow knows whose it is.
+    #[test]
+    fn a_remote_dock_payload_is_the_local_one_behind_its_identity() {
+        let local = dock_update(2, "$ ", "ls -la", "", &["0 2 fg=green"]);
+        let wanted = dock_line(&local);
+        for (event, snapshot) in [
+            (local.clone(), DockSnapshot::Update(wanted)),
+            (b"\x1b]8133;e\x07".to_vec(), DockSnapshot::End),
+            (b"\x1b]8133;w\x07".to_vec(), DockSnapshot::Editable),
+            (b"\x1b]8133;g\x07".to_vec(), DockSnapshot::Grid),
+            (
+                b"\x1b]8133;o\x07".to_vec(),
+                DockSnapshot::Unavailable(DockFault::Overflow),
+            ),
+        ] {
+            assert_eq!(
+                remote_dock_events(&remote_dock(7, 3, &event)),
+                vec![(RemoteShell { parent: 7, pid: 9 }, snapshot)]
+            );
+            // Not the local arm's, so the arm that drops a remote session's
+            // foreign mirror never sees it.
+            assert!(dock_events(&remote_dock(7, 3, &event)).is_empty());
+        }
+        // Split at every byte.
+        let sequence = remote_dock(7, 3, &local);
+        for at in 0..=sequence.len() {
+            let (head, tail) = sequence.split_at(at);
+            let mut scanner = Scanner::new();
+            let mut seen = 0;
+            for chunk in [head, tail] {
+                scanner.feed(chunk, |event| {
+                    seen += usize::from(matches!(event, ScanEvent::RemoteDock { .. }));
+                });
+            }
+            assert_eq!(seen, 1, "split at {at}");
+        }
+        // An identity that does not parse is nobody's: the local arm reads the whole
+        // payload and finds an operation it does not know.
+        for bad in [
+            &b"\x1b]8133;bt_remote=7.9;u;0;;;;\x07"[..],
+            &b"\x1b]8133;bt_remote=x.9.1;e\x07"[..],
+            &b"\x1b]8133;bt_remote=7.9.1.2;e\x07"[..],
+        ] {
+            assert!(remote_dock_events(bad).is_empty());
+            assert_eq!(
+                dock_events(bad),
+                vec![DockSnapshot::Unavailable(DockFault::Malformed)]
+            );
+        }
+    }
+
+    #[test]
+    fn a_remote_dock_payload_overflows_where_the_local_one_does_and_says_whose_it_is() {
+        // `u;0;;` and then the line: the payload is `5 + len` bytes.
+        let sequence = |prefix: &[u8], len: usize| {
+            let mut out = b"\x1b]8133;".to_vec();
+            out.extend_from_slice(prefix);
+            out.extend_from_slice(b"u;0;;");
+            out.extend(std::iter::repeat_n(b'A', len));
+            out.push(0x07);
+            out
+        };
+        let overflow = || DockSnapshot::Unavailable(DockFault::Overflow);
+        let fits = DOCK_PAYLOAD_LIMIT - 5;
+        for prefix in [
+            &b"bt_remote=7.9.1;"[..],
+            &b"bt_remote=4294967295.4294967295.4294967295;"[..],
+        ] {
+            // The line that just fits locally fits behind the identity, and one byte more
+            // overflows both, the remote one as the remote shell's.
+            let events = remote_dock_events(&sequence(prefix, fits));
+            assert!(
+                !events.iter().any(|(_, event)| *event == overflow()),
+                "{events:?}"
+            );
+            assert_eq!(
+                remote_dock_events(&sequence(prefix, fits + 1)),
+                vec![(
+                    RemoteShell {
+                        parent: if prefix.len() == 16 { 7 } else { u32::MAX },
+                        pid: if prefix.len() == 16 { 9 } else { u32::MAX },
+                    },
+                    overflow()
+                )]
+            );
+        }
+        assert!(!dock_events(&sequence(b"", fits)).contains(&overflow()));
+        assert_eq!(dock_events(&sequence(b"", fits + 1)), vec![overflow()]);
+    }
+
+    /// **Our remote shell's dock event takes the dock** while the shell is at its
+    /// prompt on a server's terminal: the row, the suppression and the caret are the
+    /// remote shell's, with its block's key.
+    #[test]
+    fn our_remote_shells_dock_events_take_the_dock_at_its_prompt() {
+        let mut log = server_log();
+        assert!(!log.remote_dock_on(), "no event, no dock");
+        assert!(log.suppressed_input().is_none());
+        assert_eq!(log.caret(Instant::now()).home, CaretHome::Grid);
+
+        let outcome = feed(&mut log, &remote_dock(1, 1, b"\x1b]8133;w\x07"));
+        assert!(outcome.mirrored, "the row appears with the first event");
+        assert!(log.remote_dock_on() && log.dock_editable);
+        feed(
+            &mut log,
+            &remote_dock(1, 1, &dock_update(2, "$ ", "ls", "", &[])),
+        );
+        assert_eq!(log.dock.buffer, "ls");
+        let input = log.suppressed_input().expect("the remote prompt is open");
+        assert_eq!(
+            (input.block, input.remote, input.grid),
+            (1, Some(shell(1)), false)
+        );
+        assert_eq!(
+            input.key(),
+            BlockKey::Remote {
+                shell: shell(1),
+                id: 1
+            }
+        );
+        assert_eq!(
+            log.input_state().map(|state| state.phase),
+            Some(ShellPhase::Input)
+        );
+        assert_eq!(log.caret(Instant::now()).home, CaretHome::Dock);
+        // The local shell is behind ssh and its trail is untouched.
+        assert_eq!(
+            log.local.state.map(|state| state.phase),
+            Some(ShellPhase::Running)
+        );
+
+        // ⏎: held, as the local one is, and the remote `C` ends the hold.
+        feed(&mut log, &remote_dock(1, 1, b"\x1b]8133;e\x07"));
+        assert!(log.end_since.is_some(), "the accepted line is held");
+        feed(&mut log, b"\x1b]133;C;bt_remote=1.9.1\x07");
+        assert!(log.end_since.is_none());
+        assert_eq!(log.dock.status, DockStatus::Idle);
+        assert!(log.dock.buffer.is_empty());
+        assert!(log.suppressed_input().is_none());
+    }
+
+    #[test]
+    fn a_dock_event_that_is_not_our_remote_shells_leaves_the_dock_alone() {
+        let line = dock_update(2, "$ ", "rm", "", &[]);
+        let untouched = |log: &ShellLog, why: &str| {
+            assert!(!log.remote_dock, "{why}");
+            assert!(log.dock.buffer.is_empty() && !log.dock_editable, "{why}");
+            assert_eq!(log.dock.status, DockStatus::Idle, "{why}");
+        };
+        let mut log = server_log();
+        feed(&mut log, &remote_dock(2, 1, &line));
+        feed(&mut log, &remote_dock(2, 1, b"\x1b]8133;w\x07"));
+        untouched(&log, "another shell's identity");
+
+        let mut log = server_log();
+        feed(&mut log, &line);
+        feed(&mut log, b"\x1b]8133;w\x07");
+        untouched(&log, "no identity: the foreign mirror");
+
+        let mut log = server_log();
+        log.context.server = false;
+        feed(&mut log, &remote_dock(1, 1, &line));
+        feed(&mut log, &remote_dock(1, 1, b"\x1b]8133;w\x07"));
+        untouched(&log, "a plain ssh has no remote shell of ours behind it");
+
+        let mut log = ssh_log();
+        log.context.server = true;
+        feed(&mut log, &remote_dock(1, 1, &line));
+        untouched(&log, "the shell has not spoken: its identity is unknown");
+
+        let mut log = server_log();
+        feed(&mut log, b"\x1b]133;C;bt_remote=1.9.1\x07");
+        feed(&mut log, &remote_dock(1, 1, &line));
+        feed(&mut log, &remote_dock(1, 1, b"\x1b]8133;w\x07"));
+        untouched(&log, "a command is running on the server");
+
+        // The branch is the local context line's and a server's is not taken; it
+        // does not take the dock either.
+        let mut log = server_log();
+        log.context.branch = "main".into();
+        let branch = format!("\x1b]8133;b;{}\x07", b64(b"remote"));
+        feed(&mut log, &remote_dock(1, 1, branch.as_bytes()));
+        assert_eq!(log.context.branch, "main");
+        untouched(&log, "a branch");
+    }
+
+    /// A nested ssh is the remote shell's command (`Running` on its trail): the
+    /// dock's input closes by itself and opens again at the prompt that follows.
+    #[test]
+    fn the_remote_dock_closes_under_a_running_command_and_opens_at_the_next_prompt() {
+        let mut log = server_log();
+        feed(&mut log, &remote_dock(1, 1, b"\x1b]8133;w\x07"));
+        feed(
+            &mut log,
+            &remote_dock(1, 1, &dock_update(3, "$ ", "ssh x", "", &[])),
+        );
+        feed(&mut log, &remote_dock(1, 1, b"\x1b]8133;e\x07"));
+        feed(&mut log, b"\x1b]133;C;bt_remote=1.9.1\x07");
+        assert_eq!(remote_phase(&log), Some(ShellPhase::Running));
+        // The inner machine's mirror (an old bateri's integration) arrives under the
+        // same identity: the shell is running a command, so it is not taken.
+        feed(
+            &mut log,
+            &remote_dock(1, 1, &dock_update(1, "$ ", "inner", "", &[])),
+        );
+        assert!(log.dock.buffer.is_empty());
+        assert!(log.remote_dock, "the session's dock mode stays");
+        assert!(log.suppressed_input().is_none());
+
+        feed(
+            &mut log,
+            b"\x1b]133;D;0;bt_remote=1.9.1\x07\x1b]133;A;bt_remote=1.9.2\x07\
+              \x1b]133;B;bt_remote=1.9.2\x07",
+        );
+        feed(&mut log, &remote_dock(1, 2, b"\x1b]8133;w\x07"));
+        feed(
+            &mut log,
+            &remote_dock(1, 2, &dock_update(2, "$ ", "pwd", "", &[])),
+        );
+        assert_eq!(log.dock.buffer, "pwd");
+        assert_eq!(log.suppressed_input().map(|input| input.block), Some(2));
+    }
+
+    #[test]
+    fn the_session_s_edges_reset_the_dock() {
+        // Our local `D` ends the session.
+        let mut log = server_log();
+        feed(&mut log, &remote_dock(1, 1, b"\x1b]8133;w\x07"));
+        feed(
+            &mut log,
+            &remote_dock(1, 1, &dock_update(2, "$ ", "ls", "", &[])),
+        );
+        feed(&mut log, b"\x1b]133;D;255;bt_block=1\x07");
+        assert!(!log.remote_dock && !log.remote_dock_on());
+        assert!(log.dock.buffer.is_empty() && !log.dock_editable);
+        assert_eq!(log.dock.status, DockStatus::Idle);
+        assert!(log.context.remote.is_none());
+
+        // The probe says the host is another one.
+        let mut log = server_log();
+        feed(&mut log, &remote_dock(1, 1, b"\x1b]8133;w\x07"));
+        assert!(log.set_remote(Some(&RemoteTarget::ssh("stage"))));
+        assert!(!log.remote_dock && !log.dock_editable);
+
+        // The pane stops showing a server's terminal.
+        let mut log = server_log();
+        feed(&mut log, &remote_dock(1, 1, b"\x1b]8133;w\x07"));
+        log.context.server = false;
+        assert!(!log.remote_dock_on(), "the row goes with the flag");
+
+        // Another shell on the server starts its own prompt, and the dock mode stays
+        // for it.
+        let mut log = server_log();
+        feed(&mut log, &remote_dock(1, 1, b"\x1b]8133;w\x07"));
+        feed(
+            &mut log,
+            &remote_dock(1, 1, &dock_update(2, "$ ", "ls", "", &[])),
+        );
+        feed(&mut log, b"\x1b]133;A;bt_remote=2.9.1\x07");
+        assert!(log.remote_dock);
+        assert!(log.dock.buffer.is_empty() && !log.dock_editable);
+        feed(&mut log, &remote_dock(1, 1, b"\x1b]8133;w\x07"));
+        assert!(!log.dock_editable, "the first shell is not the trail's now");
+        feed(&mut log, b"\x1b]133;B;bt_remote=2.9.1\x07");
+        feed(&mut log, &remote_dock(2, 1, b"\x1b]8133;w\x07"));
+        assert!(log.dock_editable);
+    }
+
+    /// The local prompt's leftovers are not the remote shell's: the first event
+    /// resets them, and each remote `A` clears the prompt's capabilities as the
+    /// local `A` does.
+    #[test]
+    fn the_remote_shell_does_not_inherit_the_local_prompts_capabilities() {
+        let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
+        log.apply(Mark::PromptStart {
+            id: Some(1),
+            click_events: false,
+        });
+        log.apply_scan(ScanEvent::Dock(DockEvent::Editable));
+        log.apply(Mark::PromptEnd);
+        log.apply(Mark::CommandStart);
+        assert!(log.set_remote(Some(&RemoteTarget::ssh("prod"))));
+        log.context.server = true;
+        assert!(log.dock_editable, "the local zsh's word is still set");
+        feed(
+            &mut log,
+            b"\x1b]133;A;bt_remote=1.9.1\x07\x1b]133;B;bt_remote=1.9.1\x07",
+        );
+        feed(&mut log, &remote_dock(1, 1, b"\x1b]8133;g\x07"));
+        assert!(!log.dock_editable && log.dock_grid);
+        // The next remote prompt forgets the grid word until it says it again.
+        feed(&mut log, b"\x1b]133;A;bt_remote=1.9.2\x07");
+        assert!(!log.dock_grid && log.remote_dock);
+    }
+
+    /// bash and fish: the line is read from the grid and a click reaches the
+    /// remote shell — the key is the remote block's, not a local block with the
+    /// same number.
+    #[test]
+    fn a_remote_grid_line_is_published_and_clicked_under_the_remote_blocks_key() {
+        let mut log = ssh_log();
+        log.context.server = true;
+        feed(
+            &mut log,
+            b"\x1b]133;A;bt_remote=1.9.1\x07\x1b]133;A;click_events=1;bt_remote=1.9.1\x07",
+        );
+        assert!(log.click_events);
+        feed(&mut log, &remote_dock(1, 1, b"\x1b]8133;g\x07"));
+        feed(&mut log, b"\x1b]133;B;bt_remote=1.9.1\x07");
+        let key = BlockKey::Remote {
+            shell: shell(1),
+            id: 1,
+        };
+        assert!(
+            !log.publish_grid(&typed("ab"), &cells_of_ab(), 1, 1),
+            "a local key"
+        );
+        assert!(log.publish_grid(&typed("ab"), &cells_of_ab(), key, 1));
+        let input = log.suppressed_input().expect("the line is suppressed");
+        assert!(input.grid && input.key() == key);
+        assert!(log.grid_open());
+        let point = DockPoint {
+            index: 0,
+            half: CellHalf::Left,
+        };
+        log.dock_selection = Some(DockSelection::new(
+            SelectKind::Simple,
+            point,
+            point,
+            &log.dock.buffer,
+            false,
+        ));
+        assert_eq!(log.grid_click(), Some(cells_of_ab()[0]));
+        // The remote `e`, `C` and the next prompt close it like the local ones.
+        feed(&mut log, &remote_dock(1, 1, b"\x1b]8133;e\x07"));
+        assert_eq!(log.grid_click(), None);
+        assert!(!log.publish_grid(&typed("abc"), &cells_of_ab(), key, 2));
+        // A server pane without the dock's gate reads nothing.
+        let mut log = ssh_log();
+        feed(
+            &mut log,
+            b"\x1b]133;A;click_events=1;bt_remote=1.9.1\x07\x1b]133;B;bt_remote=1.9.1\x07",
+        );
+        assert!(
+            !log.click_events,
+            "not a server pane: the announcement is not taken"
+        );
+        assert!(!log.grid_open());
+    }
+
+    /// The remote dock survives an update: the flag crosses with the rest of the
+    /// dock's state, and the pane sets `server` again from the process table.
+    #[test]
+    fn the_remote_dock_crosses_the_handover() {
+        let mut log = server_log();
+        feed(&mut log, &remote_dock(1, 1, b"\x1b]8133;w\x07"));
+        feed(
+            &mut log,
+            &remote_dock(1, 1, &dock_update(2, "$ ", "ls", "", &[])),
+        );
+        let carried = Carried::decode(&log.carried(None, 0).encode()).unwrap();
+        let mut fresh = ShellLog::new(BLOCK_LOG_FLOOR);
+        fresh.restore(carried, 0);
+        assert!(fresh.remote_dock && fresh.dock_editable);
+        assert_eq!(fresh.dock.buffer, "ls");
+        assert!(
+            !fresh.remote_dock_on(),
+            "the target and `server` come from the probe"
+        );
+        assert!(fresh.set_remote(Some(&RemoteTarget::ssh("prod"))));
+        fresh.context.server = true;
+        // `set_remote` is a change from nothing: the flag stays through it.
+        assert!(
+            fresh.remote_dock,
+            "a first target is no edge of the session"
+        );
+        assert!(fresh.remote_dock_on());
+        assert_eq!(
+            fresh.suppressed_input().map(|input| input.remote),
+            Some(Some(shell(1)))
         );
     }
 
@@ -12620,6 +13326,8 @@ mod tests {
                 ScanEvent::Dock(DockEvent::Editable) => "editable".to_owned(),
                 ScanEvent::Dock(DockEvent::Grid) => "grid".to_owned(),
                 ScanEvent::Dock(DockEvent::Unavailable(fault)) => format!("fault {fault:?}"),
+                // The previous scripts print no identity on a dock event.
+                ScanEvent::RemoteDock { .. } => "remote dock".to_owned(),
                 ScanEvent::PasteOn => "paste".to_owned(),
                 ScanEvent::RemoteSetup(fault) => format!("setup {}", fault.code()),
                 ScanEvent::RemoteUp(nonce) => format!("up {nonce}"),
@@ -12661,67 +13369,9 @@ mod tests {
     }
 
     #[test]
-    fn the_version_4_fixture_still_reads_and_is_written_as_version_5() {
-        // Written by version 4 — the one before the current: the grid source's flag and
-        // the click announcement follow `editable`, and a highlight's flags may carry `i` (italic),
-        // which only a grid-sourced line sets.
-        let fixture = "bateri-state 4\n\
-                       local running 0 1791108000000 6 0/120/1791107880,p/1791108000\n\
-                       remote - - - 0 -\n\
-                       remote-shell -\n\
-                       cwd +/tmp\n\
-                       branch +\n\
-                       remote-cwd +\n\
-                       remote-setup -\n\
-                       reconnect -\n\
-                       dock live 3 6 +a 0\n\
-                       predisplay +\n\
-                       buffer +gits\n\
-                       postdisplay +ta\n\
-                       prebuffer +\n\
-                       dock-fresh 1\n\
-                       editable 0\n\
-                       dock-grid 1\n\
-                       click-events 1\n\
-                       command 8\n\
-                       login -\n\
-                       remote-up -\n\
-                       typed -\n\
-                       ours 1\n\
-                       command-open 0\n\
-                       cleared -\n\
-                       hl 0 3 r112233 - bi\n\
-                       end\n";
-        let carried = Carried::decode(fixture.as_bytes()).unwrap();
-        assert!(carried.dock_grid && carried.click_events && !carried.dock_editable);
-        // A version 4 blob has no environment; written again it is version 5's — the
-        // same fields and the environment's two lines after `branch`.
-        assert_eq!(carried.environment, DockEnvironment::default());
-        assert_eq!(
-            String::from_utf8(carried.encode()).unwrap(),
-            fixture
-                .replace("bateri-state 4\n", "bateri-state 5\n")
-                .replace(
-                    "branch +\n",
-                    "branch +\nenvironment + + + +\nenvironment-report + + + + + +\n"
-                )
-        );
-        // It lands in the ledger, and an `A` clears it as it does the editing word.
-        let mut fresh = ShellLog::new(100);
-        fresh.restore(carried, 0);
-        assert!(fresh.dock_grid && fresh.click_events);
-        assert!(fresh.dock.highlights[0].style.italic);
-        fresh.apply(Mark::PromptStart {
-            id: None,
-            click_events: false,
-        });
-        assert!(!fresh.dock_grid && !fresh.click_events);
-    }
-
-    #[test]
-    fn the_version_5_fixture_reads_and_writes_byte_for_byte() {
-        // Written by version 5 — the current one: the row's environment and the report
-        // it was resolved from follow `branch`.
+    fn the_version_5_fixture_still_reads_and_is_written_as_version_6() {
+        // Written by version 5 — the one before the current: the row's environment and
+        // the report it was resolved from follow `branch`. It has no remote dock flag.
         let fixture = "bateri-state 5\n\
                        local - - - 0 -\n\
                        remote - - - 0 -\n\
@@ -12752,7 +13402,18 @@ mod tests {
                        cleared -\n\
                        end\n";
         let carried = Carried::decode(fixture.as_bytes()).unwrap();
-        assert_eq!(carried.encode(), fixture.as_bytes());
+        assert!(
+            !carried.remote_dock,
+            "a version 5 blob has not taken the dock"
+        );
+        // Written again it is version 6's: the same fields and the remote dock's flag
+        // after the click announcement.
+        assert_eq!(
+            String::from_utf8(carried.encode()).unwrap(),
+            fixture
+                .replace("bateri-state 5\n", "bateri-state 6\n")
+                .replace("click-events 0\n", "click-events 0\nremote-dock 0\n")
+        );
         let mut fresh = ShellLog::new(100);
         fresh.restore(carried, 0);
         assert_eq!(fresh.context.environment.python, "(.venv)");
