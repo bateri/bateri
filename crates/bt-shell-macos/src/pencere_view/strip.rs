@@ -3,8 +3,8 @@
 //!
 //! A native view of the application's own at the top of the pane, **outside the view's area**:
 //! the web view is under it and never draws into it, so a view that imitates the terminal
-//! cannot imitate this. It says where the program runs, which program it is and what the view
-//! is, and has one button, **Quit ⌃C**, that writes ⌃C to the program
+//! cannot imitate this. It says where the program runs, which program it is (its icon, when it
+//! gave one, and its name) and what the view is, and has one button, **Quit ⌃C**, that writes ⌃C to the program
 //! (`TerminalPane::quit_program`, the key's own path). The words, the cleaning of the names a
 //! program gives and where the parts stand when the strip is narrow are `bt-shell-common`'s;
 //! what is here is measuring, drawing and the colours — all from the theme, none of them
@@ -16,23 +16,31 @@
 //! The names are of two sizes and sit on one baseline, the one that centres the program's
 //! capitals on the strip: centring each field's box would set them at two heights.
 //!
+//! The icon is the program's own (its MCP `icons`, as the protocol's host library took them: a
+//! still PNG, JPEG or WebP it checked and bounded, never fetched), chosen for the theme's ground
+//! (`icon::pick`) each time the strip is painted, so a theme that turns from dark to light takes
+//! the program's light picture.
+//!
 //! The strip takes no keyboard: the button refuses first responder, and a press anywhere on
 //! the strip gives the keyboard to the view (`TerminalPane::focus`) as a press in the pane does.
 
 use std::cell::{Cell, RefCell};
 
 use bt_core::Theme;
+use bt_core::pencere::icon::{self, Icon};
 use bt_shell_common::view_strip::{self, Strip, Widths};
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
-use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
+use objc2::{
+    AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel,
+};
 use objc2_app_kit::{
     NSAutoresizingMaskOptions, NSBezierPath, NSBox, NSBoxType, NSColor, NSEvent, NSFont,
-    NSFontAttributeName, NSFontWeightMedium, NSForegroundColorAttributeName, NSLineBreakMode,
-    NSTextField, NSTitlePosition, NSView,
+    NSFontAttributeName, NSFontWeightMedium, NSForegroundColorAttributeName, NSImage,
+    NSImageScaling, NSImageView, NSLineBreakMode, NSTextField, NSTitlePosition, NSView,
 };
 use objc2_foundation::{
-    NSAttributedString, NSAttributedStringKey, NSDictionary, NSMutableAttributedString,
+    NSAttributedString, NSAttributedStringKey, NSData, NSDictionary, NSMutableAttributedString,
     NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
 };
 
@@ -60,6 +68,9 @@ const BUTTON_CORNER: f64 = 6.0;
 /// plate on both, which no fixed colour would.
 const BUTTON_FILL: f64 = 0.10;
 const BUTTON_EDGE: f64 = 0.22;
+/// The pixels a side of the icon the strip asks for: its points on a Retina screen, so a
+/// picture made for that size is taken over a bigger one scaled down.
+const ICON_PIXELS: u32 = 32;
 
 /// The colours the strip is drawn with, from the theme.
 struct Palette {
@@ -74,6 +85,10 @@ pub(super) struct StripIvars {
     place: Retained<NSTextField>,
     program: Retained<NSTextField>,
     title: Retained<NSTextField>,
+    /// The program's icon, left of its name; empty and hidden when it gave none the strip can
+    /// draw. `icons` are all it gave, to choose from again when the theme changes.
+    icon: Retained<NSImageView>,
+    icons: Vec<Icon>,
     /// The button's box and the button that fills it ([`JumpButton`]: the pane's button with
     /// the hand cursor over all of it).
     surface: Retained<NSBox>,
@@ -127,11 +142,13 @@ define_class!(
 );
 
 impl StripView {
-    /// A strip saying `text`, painted with `theme`, of the width of `frame`.
+    /// A strip saying `text`, with one of `icons` before the program's name, painted with
+    /// `theme`, of the width of `frame`.
     pub(super) fn new(
         mtm: MainThreadMarker,
         frame: NSRect,
         text: &Strip,
+        icons: &[Icon],
         theme: &Theme,
     ) -> Retained<Self> {
         let label = |string: Option<&String>, font: Retained<NSFont>| {
@@ -144,6 +161,8 @@ impl StripView {
         let place = label(text.place.as_ref(), NSFont::systemFontOfSize(TEXT));
         let program = label(text.program.as_ref(), name_font());
         let title = label(text.title.as_ref(), NSFont::systemFontOfSize(TEXT));
+        let icon = NSImageView::new(mtm);
+        icon.setImageScaling(NSImageScaling::ScaleProportionallyUpOrDown);
 
         let surface = NSBox::new(mtm);
         surface.setBoxType(NSBoxType::Custom);
@@ -168,10 +187,13 @@ impl StripView {
             place,
             program,
             title,
+            icon,
+            icons: icons.to_vec(),
             surface,
             button,
             natural: Cell::new(Widths {
                 place: 0.0,
+                icon: 0.0,
                 program: 0.0,
                 title: 0.0,
                 button: 0.0,
@@ -185,6 +207,7 @@ impl StripView {
         );
         let ivars = this.ivars();
         this.addSubview(&ivars.place);
+        this.addSubview(&ivars.icon);
         this.addSubview(&ivars.program);
         this.addSubview(&ivars.title);
         this.addSubview(&ivars.surface);
@@ -213,9 +236,15 @@ impl StripView {
         self.setNeedsDisplay(true);
     }
 
-    /// The text's colours, the button's fill and label, and the measures of them all.
+    /// The text's colours, the icon for the ground, the button's fill and label, and the
+    /// measures of them all.
     fn colour(&self, theme: &Theme) {
         let ivars = self.ivars();
+        let image = icon::pick(&ivars.icons, theme.is_dark(), ICON_PIXELS).and_then(|icon| {
+            let data = NSData::with_bytes(&icon.bytes);
+            NSImage::initWithData(NSImage::alloc(), &data)
+        });
+        ivars.icon.setImage(image.as_deref());
         ivars.place.setTextColor(Some(&srgb(theme.info, 1.0)));
         ivars
             .program
@@ -270,6 +299,11 @@ impl StripView {
         };
         ivars.natural.set(Widths {
             place: width(&ivars.place),
+            icon: if ivars.icon.image().is_some() {
+                view_strip::ICON
+            } else {
+                0.0
+            },
             program: width(&ivars.program),
             title: width(&ivars.title),
             button: ivars.surface.frame().size.width,
@@ -295,6 +329,18 @@ impl StripView {
             None => field.setHidden(true),
         };
         place(&ivars.place, layout.place);
+        match layout.icon {
+            // On the names' line: the picture's middle on the program's capitals'.
+            Some(span) => {
+                let middle = baseline + name_font().capHeight() / 2.0;
+                ivars.icon.setFrame(NSRect::new(
+                    NSPoint::new(span.x, (middle - view_strip::ICON / 2.0).round()),
+                    NSSize::new(span.width, view_strip::ICON),
+                ));
+                ivars.icon.setHidden(false);
+            }
+            None => ivars.icon.setHidden(true),
+        }
         place(&ivars.program, layout.program);
         place(&ivars.title, layout.title);
         let button = ivars.surface.frame().size;

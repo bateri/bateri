@@ -62,6 +62,7 @@ use ::pencere::theme::{Rgb, Theme as ViewTheme};
 use ::pencere::token::Entropy;
 
 pub use ::pencere::bundle::{Digest, Store, Verified};
+pub use ::pencere::icon;
 pub use ::pencere::message::HostInfo;
 pub use ::pencere::sandbox::{
     Consent, Declared, Directive, Domain, Grant, Locality, Permission, UiMeta,

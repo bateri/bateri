@@ -46,7 +46,10 @@ of every installed copy. A version without a section is not released.
   a terminal a server keeps. A strip of bateri's own stays above the view and says,
   once each, where the program runs, which program it is and what the view shows
   (“⇄ rasp  Docker UI  Containers”, in the words the program gives itself and its tool),
-  with one button, **Quit ⌃C**.
+  with one button, **Quit ⌃C**. When the program gives itself an icon, the strip shows
+  it beside the program's name, the one made for a dark or a light theme as yours is;
+  bateri never fetches an icon from the network, it draws only a small picture the
+  program sends with its name.
   The program can also close its view and keep running. The view has the keyboard but
   for your shortcuts —
   ⌘T, ⌘D, ⌘W, ⌘P and the rest, as you set them in `[keys]` — and the commands that

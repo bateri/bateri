@@ -46,8 +46,8 @@ use objc2::runtime::AnyObject;
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSButton, NSEvent,
-    NSEventModifierFlags, NSEventType, NSMenu, NSMenuItem, NSTextField, NSView, NSWindow,
-    NSWindowStyleMask,
+    NSEventModifierFlags, NSEventType, NSImageView, NSMenu, NSMenuItem, NSTextField, NSView,
+    NSWindow, NSWindowStyleMask,
 };
 use objc2_core_graphics::CGImage;
 use objc2_foundation::{
@@ -234,7 +234,7 @@ impl Program {
             &format!(
                 "{{\"jsonrpc\":\"2.0\",\"id\":{id},\"result\":{{\"protocolVersion\":\"2025-11-25\",\
 \"capabilities\":{{\"tools\":{{}}}},\"serverInfo\":{{\"name\":\"show\",\"title\":\"Pencere Test\",\
-\"version\":\"0\"}}}}}}"
+\"version\":\"0\",\"icons\":[{{\"src\":\"{ICON}\"}}]}}}}}}"
             ),
         );
         let tools = self.wait_for("\"method\":\"tools/list\"");
@@ -395,6 +395,10 @@ fn strip_view(pane: &TerminalPane) -> Option<Retained<NSView>> {
             .contains("BateriPencereStrip")
     })
 }
+
+/// The test program's icon (`serverInfo.icons`): a 64-pixel PNG of three stacked boxes, as a
+/// `data:` URI, the only kind a terminal takes.
+const ICON: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAAy0lEQVR42u3YsQ3CMBBG4QzowhJTsIMrClgD0dEyAYUHSEXrUYwcKR1VSOP4e9JJVqr4j+zcvWkCAAD4QUg5hpRLSLl2Wu3d4z+brwepuCWAcqAAypYA6pFqtwBOt3c9P19LtfVQAbQNX+ZHvX7uS7V1LyHsEkD76uvm12rPBOAIuATHCWCk3+DwjdDYrfDwwxDAB/ABfAAfoBU2DBmHBeAIuAT5AD6AD+ADwAfwAXwAH8AH8AF8AB/AB/ABfAAfwAfwAXwAAAAAOucLnVucWIVm/igAAAAASUVORK5CYII=";
 
 /// Every view under `view`, `view` first.
 fn descendants(view: Retained<NSView>) -> Vec<Retained<NSView>> {
@@ -633,6 +637,36 @@ fn run(dir: &Path) {
         })
         .collect();
     assert_eq!(words, ["Pencere Test", "Show things"], "{words:?}");
+    // Left of the program's name, the picture it gave for itself, at the strip's icon size.
+    let pictures: Vec<NSRect> = strip
+        .subviews()
+        .iter()
+        .filter_map(|view| {
+            view.downcast_ref::<NSImageView>()
+                .filter(|picture| !picture.isHidden() && picture.image().is_some())
+                .map(|picture| picture.frame())
+        })
+        .collect();
+    let [picture] = pictures.as_slice() else {
+        panic!("one icon in the strip: {pictures:?}")
+    };
+    assert_eq!(
+        picture.size,
+        NSSize::new(view_strip::ICON, view_strip::ICON)
+    );
+    let name = strip
+        .subviews()
+        .iter()
+        .find_map(|view| {
+            view.downcast_ref::<NSTextField>()
+                .filter(|field| field.stringValue().to_string() == "Pencere Test")
+                .map(|field| field.frame())
+        })
+        .expect("the program's name");
+    assert_eq!(
+        name.origin.x,
+        picture.origin.x + view_strip::ICON + view_strip::ICON_GAP
+    );
     assert_eq!(
         strip.frame().origin.y + strip.frame().size.height,
         bounds.size.height

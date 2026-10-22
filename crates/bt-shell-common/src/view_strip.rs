@@ -4,7 +4,7 @@
 //! terminal under it. So the application keeps a strip of its own at the top of the pane,
 //! outside the view's area, that says what the view cannot say for itself, each thing once:
 //! where the program runs (`⇄ prod`, the dock's mark for a server; nothing on this Mac), which
-//! program it is, what the view is (its title, when it says more than the program's name), and
+//! program it is (its icon, when it gave one, and its name), what the view is (its title, when it says more than the program's name), and
 //! the way out — one button, **Quit ⌃C**, the verb and the key it is.
 //!
 //! Every name in it comes from the program or from the machine it runs on, so it is **cleaned
@@ -159,6 +159,13 @@ fn hides_or_reverses(c: char) -> bool {
     )
 }
 
+/// The side of the program's icon, points: a little over the height of the name's capitals, as
+/// an application's icon stands by its name in a menu.
+pub const ICON: f64 = 16.0;
+/// The gap between the program's icon and its name, points: closer than [`GAP`], since the two
+/// are one part and give way together.
+pub const ICON_GAP: f64 = 6.0;
+
 /// The gap left of the first part, points.
 pub const LEFT: f64 = 14.0;
 /// The gap between the parts, points: the parts are told apart by their colours and this, with
@@ -182,6 +189,9 @@ pub struct Span {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Layout {
     pub place: Option<Span>,
+    /// The program's icon, just left of its name: it stays when the name is cut to nothing and
+    /// goes when the program does.
+    pub icon: Option<Span>,
     pub program: Option<Span>,
     pub title: Option<Span>,
     /// The button, at the right edge; it never gives way.
@@ -192,6 +202,8 @@ pub struct Layout {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Widths {
     pub place: f64,
+    /// [`ICON`] when there is an icon to draw, else 0.
+    pub icon: f64,
     pub program: f64,
     pub title: f64,
     pub button: f64,
@@ -201,7 +213,8 @@ pub struct Widths {
 /// place, the program and the title stand in that order from the left, in what is left. When
 /// they do not fit, the title is cut (to no less than [`MIN_PART`]) and then goes, then the
 /// program is cut, and the place last — where the program runs is what a view must not lose to
-/// a long title or a long name.
+/// a long title or a long name. The program's icon and its name are one part: the name is cut
+/// before the icon, and the two go together.
 pub fn arrange(width: f64, natural: Widths) -> Layout {
     let button_width = natural.button.max(0.0).min((width - LEFT - RIGHT).max(0.0));
     let button = Span {
@@ -210,9 +223,19 @@ pub fn arrange(width: f64, natural: Widths) -> Layout {
     };
     // Up to the button, less the gap before it.
     let room = (button.x - GAP - LEFT).max(0.0);
+    let (icon, name) = (natural.icon.max(0.0), natural.program.max(0.0));
+    let joined = if icon > 0.0 && name > 0.0 {
+        ICON_GAP
+    } else {
+        0.0
+    };
     let [place, program, title] = fit(
         room,
-        [natural.place, natural.program, natural.title].map(|width| width.max(0.0)),
+        [
+            natural.place.max(0.0),
+            icon + joined + name,
+            natural.title.max(0.0),
+        ],
     );
     let mut x = LEFT;
     let mut put = |width: f64| {
@@ -222,9 +245,29 @@ pub fn arrange(width: f64, natural: Widths) -> Layout {
             span
         })
     };
+    let place = put(place);
+    let (icon, program) = match put(program) {
+        Some(span) if icon > 0.0 => {
+            let icon = icon.min(span.width);
+            let rest = span.width - icon - ICON_GAP;
+            let program = (name > 0.0 && rest > 0.0).then_some(Span {
+                x: span.x + icon + ICON_GAP,
+                width: rest,
+            });
+            (
+                Some(Span {
+                    x: span.x,
+                    width: icon,
+                }),
+                program,
+            )
+        }
+        program => (None, program),
+    };
     Layout {
-        place: put(place),
-        program: put(program),
+        place,
+        icon,
+        program,
         title: put(title),
         button,
     }
@@ -414,6 +457,7 @@ mod tests {
     fn widths() -> Widths {
         Widths {
             place: 60.0,
+            icon: 0.0,
             program: 100.0,
             title: 120.0,
             button: 70.0,
@@ -493,15 +537,20 @@ mod tests {
     fn a_lone_part_is_cut_rather_than_dropped_and_nothing_goes_negative() {
         let lone = Widths {
             place: 0.0,
+            icon: 0.0,
             program: 0.0,
             title: 300.0,
             button: 70.0,
         };
         assert_eq!(arrange(200.0, lone).title, span(14.0, 100.0));
-        for width in [0.0, 10.0, 50.0, 100.0, 130.0, 160.0] {
-            for natural in [widths(), lone] {
+        let pictured = Widths {
+            icon: ICON,
+            ..widths()
+        };
+        for width in [0.0, 10.0, 50.0, 100.0, 130.0, 160.0, 190.0, 250.0] {
+            for natural in [widths(), lone, pictured] {
                 let layout = arrange(width, natural);
-                for part in [layout.place, layout.program, layout.title]
+                for part in [layout.place, layout.icon, layout.program, layout.title]
                     .into_iter()
                     .flatten()
                     .chain([layout.button])
@@ -510,5 +559,55 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn the_icon_stands_left_of_the_program_and_the_rest_moves_over() {
+        let layout = arrange(
+            900.0,
+            Widths {
+                icon: ICON,
+                ..widths()
+            },
+        );
+        assert_eq!(layout.place, span(14.0, 60.0));
+        assert_eq!(layout.icon, span(82.0, ICON));
+        assert_eq!(layout.program, span(82.0 + ICON + ICON_GAP, 100.0));
+        assert_eq!(
+            layout.title,
+            span(82.0 + ICON + ICON_GAP + 100.0 + GAP, 120.0)
+        );
+        // No icon, no room taken for one.
+        assert_eq!(arrange(900.0, widths()).icon, None);
+    }
+
+    #[test]
+    fn the_icon_gives_way_with_the_program_and_after_its_name() {
+        let pictured = Widths {
+            icon: ICON,
+            ..widths()
+        };
+        // Room 150: the place keeps 60, the icon and the name share 82, the name is cut.
+        let layout = arrange(250.0, pictured);
+        assert_eq!(layout.icon, span(82.0, ICON));
+        assert_eq!(
+            layout.program,
+            span(82.0 + ICON + ICON_GAP, 82.0 - ICON - ICON_GAP)
+        );
+        // Room 80: the program goes, and its icon with it.
+        let layout = arrange(180.0, pictured);
+        assert_eq!((layout.icon, layout.program), (None, None));
+        assert_eq!(layout.place, span(14.0, 60.0));
+        // An icon with no name stands alone where the program would.
+        let layout = arrange(
+            900.0,
+            Widths {
+                program: 0.0,
+                ..pictured
+            },
+        );
+        assert_eq!(layout.icon, span(82.0, ICON));
+        assert_eq!(layout.program, None);
+        assert_eq!(layout.title, span(82.0 + ICON + GAP, 120.0));
     }
 }

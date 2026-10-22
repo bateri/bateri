@@ -233,7 +233,7 @@ kablo-proto = { git = "https://github.com/bateri/kablo", rev = "74ac4a4d4800ffa0
 # the protocol is meant to be embedded by closed products too. User-approved dependency
 # decision (2026-10-21); it brings `serde`, `serde_json` and `sha2` into the graph, all
 # MIT/Apache-2.0. `make audit` fails if `rev` is not a full hash or does not resolve.
-pencere = { git = "https://github.com/bateri/pencere", rev = "067361093b84230ee27bce8aed8793d420fe3620" }
+pencere = { git = "https://github.com/bateri/pencere", rev = "cb32811915a2d06bb3440280b78b86d362f7df91" }
 
 bt-core = { path = "crates/bt-core" }
 bt-atlas = { path = "crates/bt-atlas" }

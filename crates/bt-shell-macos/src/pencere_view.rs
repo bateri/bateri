@@ -71,6 +71,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 use block2::DynBlock;
+use bt_core::pencere::icon::Icon;
 use bt_core::pencere::{Shelf, Size as ViewSize, ViewSource, ViewStart, system_random};
 use bt_core::{Session, Theme};
 use bt_shell_common::palette::{Modifiers, menu_item_id};
@@ -192,6 +193,17 @@ pub(crate) fn said_program(start: &ViewStart) -> Option<&str> {
         .program
         .as_deref()
         .filter(|name| !name.trim().is_empty())
+}
+
+/// The icons the strip draws by the program's name: the program's own (`serverInfo`'s), else
+/// those of the tool the view is for. The strip names the program, so its picture comes first;
+/// a program that gave only its tool one still has a face.
+fn strip_icons(start: &ViewStart) -> &[Icon] {
+    if start.program_icons.is_empty() {
+        &start.tool_icons
+    } else {
+        &start.program_icons
+    }
 }
 
 /// The view's area in a pane of `bounds` (the pane's unflipped points): all of it under the
@@ -762,7 +774,7 @@ impl ViewHost {
             web.setAllowsMagnification(false);
             web.setInspectable(false);
         }
-        let strip = strip::StripView::new(mtm, strip_area(frame), text, theme);
+        let strip = strip::StripView::new(mtm, strip_area(frame), text, strip_icons(start), theme);
         let host = Self {
             web,
             strip,
