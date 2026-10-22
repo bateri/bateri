@@ -228,7 +228,13 @@ fn the_shells_files_go_with_the_look_for_kablo_and_cost_no_call_of_their_own() {
         2,
         "the same two calls (`uname` and the look) when the files are all that was missing"
     );
-    for name in ["bash/dock.bash", "fish/dock.fish", "boot.sh", "zsh/.zshenv"] {
+    for name in [
+        "bash/dock.bash",
+        "fish/dock.fish",
+        "zsh/dock.zsh",
+        "boot.sh",
+        "zsh/.zshenv",
+    ] {
         assert!(!written(name).is_empty(), "{name}");
     }
     // The agent's command knows where kablo is: the place `ensure` found.

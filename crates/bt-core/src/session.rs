@@ -3282,7 +3282,7 @@ impl DockEditLine {
 }
 
 /// The head of the single sequence that goes from the terminal to the shell
-/// (`CSI 8133 ~`); the format is in the script's wire header (`assets/shell/zsh/bateri.zsh`).
+/// (`CSI 8133 ~`); the format is in the script's wire header (`assets/shell/zsh/dock.zsh`).
 const DOCK_EDIT_PREFIX: &str = "\x1b[8133~";
 
 /// The edit command: delete `BUFFER`'s `[start, end)` range, put the caret at
@@ -14640,7 +14640,7 @@ mod tests {
 
     /// One frame of ZLE's mirror: the `u` arm, the bodies base64.
     ///
-    /// The same sequence the script's (`assets/shell/zsh/bateri.zsh`)
+    /// The same sequence the script's (`assets/shell/zsh/dock.zsh`)
     /// `__bateri_dock_redraw` prints; `PREDISPLAY`, `POSTDISPLAY` and
     /// `region_highlight` are empty, because the suppression's gate is the
     /// mirror's **state**, not its content.
@@ -19178,14 +19178,18 @@ mod tests {
     /// not match); none of these changes its form.
     #[test]
     fn the_previous_widget_still_takes_the_commands() {
-        let script = include_str!("../../../assets/shell/zsh/bateri.zsh");
+        let script = include_str!("../../../assets/shell/zsh/dock.zsh");
         assert!(
             script.contains("bindkey -M $map $'\\e[8133~' __bateri_dock_edit"),
             "the widget's binding moved"
         );
         assert_eq!(DOCK_EDIT_PREFIX, "\x1b[8133~");
+        // The capability is the local wrapper's `ESC ] 8133 ; w BEL` when the shell has no
+        // server identity (the identity is empty there, and in front of the letter otherwise).
         assert!(
-            script.contains("$'\\e]8133;w\\a'"),
+            script.contains(
+                "$'\\e]8133;'${__bateri_rshell:+bt_remote=$__bateri_rshell.$__bateri_block;}$'w\\a'"
+            ),
             "the capability's form moved"
         );
     }

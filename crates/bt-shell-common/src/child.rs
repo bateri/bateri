@@ -1272,6 +1272,7 @@ pub(crate) mod tests {
             ".zshrc",
             ".zlogin",
             "bateri.zsh",
+            "dock.zsh",
             "zdotdir.zsh",
         ] {
             assert!(dir.join(file).is_file(), "{file} missing from the wrapper");
@@ -1297,6 +1298,7 @@ pub(crate) mod tests {
             ".zshrc",
             ".zlogin",
             "bateri.zsh",
+            "dock.zsh",
             "zdotdir.zsh",
         ] {
             std::fs::copy(source.join(file), wrapper.join(file))

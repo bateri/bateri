@@ -3270,7 +3270,7 @@ mod tests {
         // must be outside `%{…%}` (zsh must count them); were they put inside
         // the width would drop to zero and the mark would cover the command's
         // first letter.
-        let script = include_str!("../../../assets/shell/zsh/bateri.zsh");
+        let script = include_str!("../../../assets/shell/zsh/dock.zsh");
         let line = script
             .lines()
             .find(|line| line.contains("__bateri_ps1="))

@@ -716,10 +716,11 @@ const MAGIC: &str = "bateri_boot=1";
 /// `~/.local/share/bateri/shell/` ([`files_script`] writes them), embedded at
 /// build time: the local zsh wrapper's four `ZDOTDIR` files and its swap
 /// **verbatim**, the remote zsh body beside them, bash's `ENV` file and fish's
-/// `vendor_conf.d` file with the dock's functions each of them shares with the
-/// Mac's own wrapper (`bash/dock.bash`, `fish/dock.fish`: the same bytes, not a
-/// copy), the agent's command with its counter, and the bootstrap.
-const REMOTE_FILES: [(&str, &str); 13] = [
+/// `vendor_conf.d` file, with the dock's functions each of the three shares with
+/// the Mac's own wrapper (`zsh/dock.zsh`, `bash/dock.bash`, `fish/dock.fish`: the
+/// same bytes, not a copy), the agent's command with its counter, and the
+/// bootstrap.
+const REMOTE_FILES: [(&str, &str); 14] = [
     (
         "zsh/.zshenv",
         include_str!("../../../assets/shell/zsh/.zshenv"),
@@ -739,6 +740,10 @@ const REMOTE_FILES: [(&str, &str); 13] = [
     (
         "zsh/zdotdir.zsh",
         include_str!("../../../assets/shell/zsh/zdotdir.zsh"),
+    ),
+    (
+        "zsh/dock.zsh",
+        include_str!("../../../assets/shell/zsh/dock.zsh"),
     ),
     (
         "zsh/bateri.zsh",
@@ -2302,12 +2307,16 @@ mod tests {
         let argv = kablo_argv(Some(&deepest), Some(u32::MAX), NONCE, None);
         assert_eq!(argv[2], boot_in(Some(&deepest)).as_bytes());
         // Every file the server's shells are set up from is embedded, the shared swap is the
-        // local wrapper's own, and so are the dock's functions of bash and fish.
+        // local wrapper's own, and so are the dock's functions of the three shells.
         assert!(REMOTE_FILES.iter().all(|(_, content)| !content.is_empty()));
         for (path, local) in [
             (
                 "zsh/zdotdir.zsh",
                 include_str!("../../../assets/shell/zsh/zdotdir.zsh"),
+            ),
+            (
+                "zsh/dock.zsh",
+                include_str!("../../../assets/shell/zsh/dock.zsh"),
             ),
             (
                 "bash/dock.bash",
@@ -2516,6 +2525,16 @@ mod remote_shells {
         // The files are on the server before the terminal starts: the call that looks for kablo
         // wrote them.
         super::seed_files(shell, home, extra, None);
+        sshd_with_seeded(shell, home, extra, dock)
+    }
+
+    /// [`sshd_with`] for files that are on the server already (a test that took one away).
+    fn sshd_with_seeded(
+        shell: &Path,
+        home: &Path,
+        extra: &[(&str, String)],
+        dock: bool,
+    ) -> Session {
         let mut env = HashMap::from([
             ("HOME".to_owned(), home.display().to_string()),
             ("SHELL".to_owned(), shell.display().to_string()),
@@ -3000,6 +3019,12 @@ mod remote_shells {
         ".bash_profile",
         "PS1='USERPS1XY> '\nPROMPT_COMMAND='PS1=\"THEMEXY> \"'\n",
     )];
+    /// zsh's: the prompt, the right prompt and a `precmd` that writes the prompt again at every
+    /// prompt (p10k and starship do the like from their own hooks).
+    const ZSH_THEME: &[(&str, &str)] = &[(
+        ".zshrc",
+        "PS1='USERPS1XY> '\nRPROMPT=THEMEXY\nprecmd() { PS1='THEMEXY> ' }\n",
+    )];
     const FISH_THEME: &[(&str, &str)] = &[(
         ".config/fish/config.fish",
         "function fish_prompt\n  echo -n 'USERPS1XY> '\nend\n\
@@ -3073,6 +3098,92 @@ mod remote_shells {
         close(&session);
     }
 
+    /// zsh keeps the display of its line editor on a mirror (`8133;u` and the rest, which the
+    /// terminal takes through the server shell's identity), not on the grid: the typed line is in
+    /// the dock, a click moves the shell's caret through the widget, and a completion list that
+    /// would not fit the screen is asked about first (`LISTMAX`).
+    #[test]
+    fn a_server_zsh_has_the_dock() {
+        let Some((session, _root)) = docked("zsh", "dock", ZSH_THEME, &[]) else {
+            return;
+        };
+        the_server_shell_has_a_dock("zsh", &session, true);
+        session.write(b"echo \"[lm=$LISTMAX]\"\n");
+        wait_until("zsh: LISTMAX is not the dock's", || {
+            screen_has(&session, "[lm=0]")
+        });
+        close(&session);
+    }
+
+    /// The edit widget is bound at every prompt and in every insert keymap, so a keymap the user
+    /// (or a plugin) changes later does not leave the dock without its clicks: the gate opens at
+    /// the next prompt and a click moves the caret.
+    #[test]
+    fn a_server_zsh_binds_its_widget_again_when_the_keymap_changes() {
+        for (index, setup) in [
+            "bindkey -v",
+            "bindkey -N mymap emacs; bindkey -A mymap main",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let Some((session, _root)) = docked("zsh", &format!("keymap{index}"), ZSH_THEME, &[])
+            else {
+                return;
+            };
+            let blocks = std::cell::RefCell::new(Blocks::default());
+            let dock = || read_dock(&session, &blocks);
+            session.write(format!("{setup}\n").as_bytes());
+            wait_until(&format!("{setup}: the next prompt was not a dock"), || {
+                let dock = dock();
+                dock.status == DockStatus::Live && dock.buffer.is_empty()
+            });
+            wait_until(&format!("{setup}: the gate did not open"), || {
+                dock();
+                session.can_edit_dock()
+            });
+            session.write("abc dëf".as_bytes());
+            wait_until(&format!("{setup}: the line was not in the dock"), || {
+                dock().buffer == "abc dëf"
+            });
+            for at in [3usize, 0, 7] {
+                click_dock(&session, &blocks, at as u16);
+                wait_until(&format!("{setup}: the caret did not follow"), || {
+                    dock().cursor == at
+                });
+            }
+            close(&session);
+        }
+    }
+
+    /// A server whose zsh is too old for `add-zle-hook-widget`, or that lacks the dock's file,
+    /// is a shell without a dock: its prompt, its blocks, nothing of the Mac's.
+    #[test]
+    fn a_server_zsh_without_the_docks_file_keeps_its_prompt_and_its_blocks() {
+        let Some(shell) = which("zsh") else {
+            println!("SKIPPED: zsh is not installed");
+            return;
+        };
+        let root = TempRoot::new("remote-nofile-zsh");
+        let home = root.0.join("home");
+        std::fs::create_dir_all(&home).expect("home");
+        let home = std::fs::canonicalize(&home).expect("home");
+        std::fs::write(home.join(".zshrc"), "PS1='USERPS1XY> '\n").expect("rc file");
+        // The call that looks for kablo wrote every file but this one.
+        super::seed_files(&shell, &home, &[], None);
+        std::fs::remove_file(home.join(".local/share/bateri/shell/zsh/dock.zsh")).expect("remove");
+        let session = sshd_with_seeded(&shell, &home, &[], true);
+        wait_until("zsh: no prompt", || screen_has(&session, "USERPS1XY>"));
+        session.write(b"echo \"[lm=$LISTMAX]\"\n");
+        wait_until("zsh: LISTMAX changed", || screen_has(&session, "[lm=100]"));
+        assert_ne!(
+            read_dock(&session, &std::cell::RefCell::new(Blocks::default())).status,
+            DockStatus::Live
+        );
+        draws_remote_blocks(&session, "zsh");
+        close(&session);
+    }
+
     #[test]
     fn a_server_fish_has_the_dock() {
         let Some((session, _root)) = docked("fish", "dock", FISH_THEME, &[]) else {
@@ -3092,7 +3203,12 @@ mod remote_shells {
             ".config/fish/config.fish",
             "function fish_prompt\n  echo -n 'USERPS1XY> '\nend\n",
         )];
-        for (name, files) in [("bash", BASH_THEME), ("fish", FISH_PLAIN)] {
+        const ZSH_PLAIN: &[(&str, &str)] = &[(".zshrc", "PS1='USERPS1XY> '\n")];
+        for (name, files) in [
+            ("bash", BASH_THEME),
+            ("fish", FISH_PLAIN),
+            ("zsh", ZSH_PLAIN),
+        ] {
             let Some((session, _root)) =
                 docked(name, "blocks", files, &[("BATERI_DOCK", "off".to_owned())])
             else {

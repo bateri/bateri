@@ -140,8 +140,9 @@ fn info_plist_template_carries_the_updater_keys() {
     );
 }
 
-/// The zsh wrapper's inventory is **exactly** these six files (the ZDOTDIR
-/// swap, `zdotdir.zsh`, joined with remote shell integration).
+/// The zsh wrapper's inventory is **exactly** these seven files (the ZDOTDIR
+/// swap, `zdotdir.zsh`, and the dock's functions, `dock.zsh`, joined with remote
+/// shell integration).
 ///
 /// The "nothing missing" half is also asked by `bt-shell-common` (the test of
 /// `child::zsh_wrapper_dir`); the half this one alone sees is **the excess**.
@@ -183,6 +184,7 @@ fn zsh_wrapper_inventory_is_exactly_what_the_bundle_copies() {
             ".zshenv",
             ".zshrc",
             "bateri.zsh",
+            "dock.zsh",
             "zdotdir.zsh"
         ],
         "the assets/shell/zsh inventory changed; `make bundle`'s copy and cmp \
