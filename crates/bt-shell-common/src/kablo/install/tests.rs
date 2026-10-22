@@ -79,13 +79,15 @@ impl Channel for Home {
         {
             *first ^= 1;
         }
-        // The server's side: `sh -c <script>` in the home directory.
+        // The server's side: `sh -c <script>` in the home directory, which is the home the script
+        // writes the shells' files to (the test machine's own must never be written to).
         let command = format!("sh -c {}", sq(&format!("{}{script}", self.prefix)));
+        let dir = sq(&self.dir.to_string_lossy());
         let reply = run_command(
             &[
                 "sh".into(),
                 "-c".into(),
-                format!("cd {} && {command}", sq(&self.dir.to_string_lossy())),
+                format!("cd {dir} && HOME={dir} SHELL=/bin/zsh XDG_DATA_HOME= {command}"),
             ],
             &bytes,
             Duration::from_secs(20),
@@ -205,6 +207,47 @@ fn the_first_connection_writes_kablo_and_the_next_finds_it() {
     assert!(!second.fresh);
     assert_eq!(home.uploads(), 1, "no second upload");
     assert_eq!(std::fs::read(&file).expect("the file"), KABLO.as_bytes());
+}
+
+#[test]
+fn the_shells_files_go_with_the_look_for_kablo_and_cost_no_call_of_their_own() {
+    let root = TempRoot::new("kablo-files");
+    let bundle = package(&root.0, "0.2.0", KABLO);
+    let home = Home::new(&root.0.join("home"));
+    std::fs::create_dir_all(&home.dir).expect("home");
+    let shell = home.dir.join(".local/share/bateri/shell");
+    let written = |name: &str| std::fs::read_to_string(shell.join(name)).expect(name);
+
+    // A server that has kablo already: one `uname`, one look — and the files.
+    ensure(&home, &bundle).expect("installed");
+    let calls = home.calls.borrow().len();
+    std::fs::remove_dir_all(&shell).expect("start again");
+    ensure(&home, &bundle).expect("found");
+    assert_eq!(
+        home.calls.borrow().len() - calls,
+        2,
+        "the same two calls (`uname` and the look) when the files are all that was missing"
+    );
+    for name in ["bash/dock.bash", "fish/dock.fish", "boot.sh", "zsh/.zshenv"] {
+        assert!(!written(name).is_empty(), "{name}");
+    }
+    // The agent's command knows where kablo is: the place `ensure` found.
+    assert!(
+        written("bin/bateri").contains(".local/share/kablo/0.2.0/kablo"),
+        "the agent's command lost kablo's place"
+    );
+    // The command is the one that can be run, the files are the owner's.
+    let mode = |name: &str| {
+        std::fs::metadata(shell.join(name))
+            .expect(name)
+            .permissions()
+            .mode()
+            & 0o777
+    };
+    assert_eq!(mode("bin/bateri"), 0o700);
+    assert_eq!(mode("bash/dock.bash"), 0o600);
+    // The files do not touch the look: kablo is found and not written again.
+    assert_eq!(home.uploads(), 1);
 }
 
 #[test]
@@ -437,6 +480,7 @@ fn a_renewal_that_cannot_be_asked_is_nothing_more_than_a_no() {
 fn the_scripts_are_one_line_of_plain_sh_a_login_shell_hands_on_as_it_is() {
     for script in [
         probe_script("0.2.0"),
+        probe_and_files_script("0.2.0"),
         upload_script("0.2.0", &sha256_hex(b"x")),
         upgrade_script("0.2.0"),
     ] {

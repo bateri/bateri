@@ -57,6 +57,17 @@ set -e BATERI_DOCK
 
 status is-interactive; or return
 
+# The dock's prompt (`dock.fish`, one level above this directory, shared with the server's wrapper).
+# Without the file the prompt is the user's, with the marks around it, as for `"blocks"`.
+if test $__bateri_dock = 1
+    set -l __bateri_dock_file (status dirname)/../dock.fish
+    if test -r $__bateri_dock_file
+        source $__bateri_dock_file
+    else
+        set -g __bateri_dock 0
+    end
+end
+
 # "Has a command run since the last prompt": `D` is printed only after a
 # command that really ran. An Enter on an empty line draws a new prompt but no
 # command finished.
@@ -82,6 +93,7 @@ function __bateri_begin --on-event fish_prompt
     set -g __bateri_block (math $__bateri_block + 1)
     printf '\e]133;A;bt_block=%s\a' $__bateri_block
     if test $__bateri_dock = 1
+        set -g __bateri_dock_anchor bateri://block/$__bateri_block
         __bateri_take
     else
         __bateri_wrap
@@ -138,53 +150,6 @@ function __bateri_start --on-event fish_preexec
     end
     # The title as the command finds it, for `__bateri_end` to put back.
     printf '\e]8;;\a\e]133;C\a\e[22t'
-end
-
-# The prompt the terminal draws a dock for: nothing of the user's.
-#
-# A dock session hands the prompt to the terminal, as zsh's does: the line fish
-# draws is read back from the grid and shown in the dock, and the user's prompt
-# is not drawn (`integration = "blocks"` gives it back). What fish prints here
-# is a contract with the terminal (`grid_input.rs`):
-#
-#   anchor, two real spaces, `g`, `B`
-#
-# - THE TWO SPACES ARE REAL WIDTH, the same two columns zsh's dock prompt has: the
-#   command line starts at the third column, and fish, which knows the prompt's
-#   width, wraps and places its caret right. The anchor is the id-less OSC 8 link
-#   of the block, laid over the cells. It stays open to `fish_preexec`, so every
-#   cell fish draws after it carries the same link id; that id is what tells the
-#   terminal where the input line begins (a job notice printed under the open
-#   link is not part of it, as fish redraws a cached prompt with a fresh id).
-# - THE SECOND SPACE IS DRAWN IN THE AUTOSUGGESTION'S STYLE. It is a style
-#   sample: the terminal tells a suggestion from what was typed by the cells
-#   after the caret that look like it. fish turns the variable into a color
-#   with the same code `set_color` uses, so the sample is never the terminal's
-#   own guess at fish's color syntax. A theme with no suggestion color leaves
-#   the sample plain, and then everything is what was typed.
-# - `g` says "this prompt's line is read from the grid". It is printed in the
-#   prompt, not at the event: fish prints a bare `A` at every redraw (a cached
-#   prompt, a resize) and every `A` forgets `g`, so only what comes with the
-#   prompt's text survives. `B` is ours because fish's own came only in 4.0.
-#
-# The right prompt and the mode prompt are emptied (a vi mode indicator would
-# sit in the middle of the line the terminal reads). They, and the prompt, are
-# defined again at EVERY prompt, so a theme or a `fish_config prompt choose`
-# that writes them later is taken back at the next one. A user's own handler on
-# this event that does it runs after ours and wins (the wrapper's known limit,
-# below); that prompt's line is then drawn in the grid as the user wrote it.
-function __bateri_take
-    function fish_prompt --description 'bateri: the prompt the terminal draws a dock for'
-        printf '\e]8;;bateri://block/%s\a ' $__bateri_block
-        set -q fish_color_autosuggestion[1]; and set_color $fish_color_autosuggestion 2>/dev/null
-        printf ' '
-        set_color normal
-        printf '\e]8133;g\a\e]133;B\a'
-    end
-    function fish_right_prompt --description 'bateri: the terminal draws the right side'
-    end
-    function fish_mode_prompt --description 'bateri: the terminal draws the mode'
-    end
 end
 
 # The prompt the terminal reads blocks from when there is no dock (`BATERI_DOCK`

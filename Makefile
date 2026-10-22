@@ -426,18 +426,21 @@ bundle: sparkle
 	@# (`/etc/zshrc` once spawned a `.zsh_history` there) or a
 	@# `.DS_Store` would silently enter the product through a recursive copy.
 	@# That the directory's inventory is EXACTLY these six files is tested
-	@# by `bundle_assets`; fish's is the one file below, in the `vendor_conf.d`
+	@# by `bundle_assets`; fish's is the file below, in the `vendor_conf.d`
 	@# fish reads it from (`shell/` is the `XDG_DATA_DIRS` entry that
-	@# makes fish find it), and bash's is the one file `ENV` points at. The remote wrapper (`assets/shell/remote/`)
-	@# is not copied: `bateri ssh-argv` embeds it at build time.
+	@# makes fish find it) and its dock's functions, `dock.fish`, one level above, where
+	@# fish reads nothing by itself; bash's is the file `ENV` points at and the dock's
+	@# functions it reads, `dock.bash`. The remote wrapper (`assets/shell/remote/`) is not
+	@# copied: the application embeds it (with the two dock files) and writes it to a server.
 	mkdir -p $(STAGE)/Contents/Resources/shell/zsh
 	cp assets/shell/zsh/.zshenv assets/shell/zsh/.zprofile assets/shell/zsh/.zshrc \
 		assets/shell/zsh/.zlogin assets/shell/zsh/bateri.zsh assets/shell/zsh/zdotdir.zsh \
 		$(STAGE)/Contents/Resources/shell/zsh/
 	mkdir -p $(STAGE)/Contents/Resources/shell/fish/vendor_conf.d
 	cp assets/shell/fish/vendor_conf.d/bateri.fish $(STAGE)/Contents/Resources/shell/fish/vendor_conf.d/
+	cp assets/shell/fish/dock.fish $(STAGE)/Contents/Resources/shell/fish/
 	mkdir -p $(STAGE)/Contents/Resources/shell/bash
-	cp assets/shell/bash/bateri.bash $(STAGE)/Contents/Resources/shell/bash/
+	cp assets/shell/bash/bateri.bash assets/shell/bash/dock.bash $(STAGE)/Contents/Resources/shell/bash/
 	@# kablo's files: the release is checked against its own list, then exactly the
 	@# files the list names are copied (no glob: a second version in the directory
 	@# would be a package with two).
@@ -488,7 +491,7 @@ bundle: sparkle
 	for f in Credits.html THIRD-PARTY-LICENSES.txt; do \
 		cmp -s assets/bundle/$$f $$c/Resources/$$f || fail "$$f is not in the package or differs from the input"; \
 	done; \
-	for f in zsh/.zshenv zsh/.zprofile zsh/.zshrc zsh/.zlogin zsh/bateri.zsh zsh/zdotdir.zsh fish/vendor_conf.d/bateri.fish bash/bateri.bash; do \
+	for f in zsh/.zshenv zsh/.zprofile zsh/.zshrc zsh/.zlogin zsh/bateri.zsh zsh/zdotdir.zsh fish/vendor_conf.d/bateri.fish fish/dock.fish bash/bateri.bash bash/dock.bash; do \
 		cmp -s assets/shell/$$f $$c/Resources/shell/$$f || fail "shell/$$f is not in the package or differs from the input"; \
 	done; \
 	kd=$$c/Resources/kablo; \

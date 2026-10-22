@@ -9,6 +9,12 @@
 //! and rename it into place — so a file at the place is always a whole one and
 //! a binary that terminals run from is never written over.
 //!
+//! **The shells' files go with the look** ([`probe_and_files_script`]): the files a terminal's
+//! shell is set up from (the dock's functions, the wrappers, the agent's command) are written to
+//! the server in the call that looks for kablo, every time, whether or not kablo is already
+//! there — a file that is the same is left as it is. They are the Mac's own bytes, so a server
+//! never runs a wrapper older than the application that opens its terminal.
+//!
 //! **The binary comes from the package** ([`Bundle`]): a directory with kablo's
 //! release files — one binary per target and its `SHA256SUMS`. The version is
 //! read from the names in that list, never from the version of
@@ -250,8 +256,9 @@ pub struct Installed {
 }
 
 /// Makes sure the server has the package's kablo: asks what the server is,
-/// looks for the binary and writes it if it is not there. See the module
-/// documentation for what a [`Failure`] means.
+/// looks for the binary (writing the shells' files in the same call) and writes
+/// it if it is not there. See the module documentation for what a [`Failure`]
+/// means.
 pub fn ensure(channel: &dyn Channel, bundle: &Bundle) -> Result<Installed, Failure> {
     let target = server_target(channel)?;
     let artifact = bundle
@@ -263,8 +270,11 @@ pub fn ensure(channel: &dyn Channel, bundle: &Bundle) -> Result<Installed, Failu
         path: bundle.remote_path(),
         fresh: false,
     };
+    // The shells' files ride the call that looks for kablo: no step of their own, on a connection
+    // that has no limit on how many bytes one call carries ([`probe_and_files_script`]).
+    let files = crate::ssh_wrap::files_script(Some(&installed.path));
     let probe = channel
-        .run(&probe_script(bundle.version()), &[])
+        .run(&probe_and_files_script(bundle.version()), files.as_bytes())
         .map_err(|error| Failure::transient(format!("looking for kablo: {error}")))?;
     // A macOS binary is code-signed when the package is made, and a signature
     // is part of the file: two packages of the same kablo have two sums. What
@@ -345,6 +355,28 @@ pub fn probe_script(version: &str) -> String {
         "f=.local/share/kablo/{version}/kablo; if [ -x $f ]; then echo present; \
          (sha256sum $f || shasum -a 256 $f) 2>/dev/null; $f version 2>/dev/null; fi"
     )
+}
+
+/// [`probe_script`], and then the server's `sh` reads from the call's standard input the script
+/// that writes the shells' files ([`crate::ssh_wrap::files_script`]): the files go to the server
+/// in the call that looks for kablo, not in one of their own — and not in the terminal's command
+/// either, whose one argument could not hold them. What that script says is not the call's: its
+/// output is dropped and the call ends well, so [`look`] reads the probe alone; a file that could
+/// not be written is found missing by the bootstrap. The agent's command in them names the place
+/// kablo has when the package's is the one the server ends up with; where [`look`] finds another
+/// binary there, [`ensure`] fails and the `ssh` is the plain one, which runs none of them. One
+/// line of `sh`, like the others.
+pub fn probe_and_files_script(version: &str) -> String {
+    format!("{}; sh -s >/dev/null 2>&1; :", probe_script(version))
+}
+
+/// Writes the shells' files alone, to a server whose kablo is where `installed` says (the
+/// application's ledger knew it, so there was no look): the same script, the same bytes, as a call
+/// of their own. **Best effort**: what could not be written is found missing by the bootstrap,
+/// which says so.
+pub fn put_files(channel: &dyn Channel, installed: &Installed) {
+    let files = crate::ssh_wrap::files_script(Some(&installed.path));
+    let _ = channel.run("sh -s >/dev/null 2>&1; :", files.as_bytes());
 }
 
 /// What [`probe_script`] found.

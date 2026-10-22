@@ -91,6 +91,8 @@ struct Fake {
     letters: Mutex<Vec<Letter>>,
     /// The number the server's counter gives next; 0 is a server that cannot count.
     next_number: AtomicU64,
+    /// The settings draw the dock (`[shell] integration = "auto"`).
+    dock: AtomicBool,
     /// Who opened what, as the server's records say.
     records: Mutex<Vec<(crate::agent::Terminal, crate::agent::notes::Record)>>,
     /// How long reading the records takes.
@@ -120,6 +122,7 @@ impl Fake {
             mail: AtomicBool::new(false),
             letters: Mutex::new(Vec::new()),
             next_number: AtomicU64::new(0),
+            dock: AtomicBool::new(true),
             records: Mutex::new(Vec::new()),
             records_take: Mutex::new(Duration::ZERO),
         })
@@ -277,6 +280,10 @@ impl Backend for Fake {
         Some("0.2.0".into())
     }
 
+    fn dock(&self) -> bool {
+        self.dock.load(Ordering::SeqCst)
+    }
+
     /// What the real one does to a server: its relays are replaced by the ones of the
     /// release this computer brings.
     fn refresh(&self, _: &KabloHost) -> Option<Installed> {
@@ -346,6 +353,10 @@ impl Backend for Fake {
             .lock()
             .expect("lock")
             .push(account.to_owned());
+    }
+
+    fn files(&self, _: &KabloHost, _: &Installed) {
+        self.note("files");
     }
 
     fn number(&self, _: &KabloHost) -> Option<u64> {
@@ -672,6 +683,55 @@ fn a_numbered_terminal_is_found_again_by_its_number_after_a_restart() {
     until("the pane found again", || second.shown(&pane).is_some());
     assert_eq!(second.shown(&pane).expect("shown").terminal, terminal);
     second.stop();
+}
+
+/// The look for kablo writes the shells' files (`install`); an account the ledger brings back is
+/// not looked at, so its first new terminal writes them on the way to its number — once, and not
+/// for an account made by a look.
+#[test]
+fn the_files_of_a_restarted_account_are_written_for_its_first_new_terminal_only() {
+    let ledger = Arc::new(Ledger::memory());
+    let world = Fake::new(Bridge::new(Age::Current));
+    pane_named(&world);
+    let first = Rig::kept("files-1", world.clone(), ledger.clone(), END_GRACE);
+    let holder = Holder::new(&first.socket(), "b-1");
+    let terminal = first.terminals(1).remove(0);
+    world.bridge().write(&terminal, b"abc");
+    until("shown", || holder.shown.bytes() == b"abc");
+    assert_eq!(world.count("install"), 1);
+    assert_eq!(world.count("files"), 0, "the look wrote them");
+    first.service.stop();
+    drop(first);
+
+    // The restored pane takes its terminal back: that brings the account back, unlooked at.
+    let again = Rig::kept("files-2", world.clone(), ledger.clone(), END_GRACE);
+    let resumed = Holder::start(
+        &again.socket(),
+        "b-1",
+        Target::Resume {
+            account: "u@rasp:22".into(),
+            offset: Some(3),
+        },
+    );
+    world.bridge().write(&terminal, b"def");
+    until("the pane is back", || resumed.shown.bytes() == b"def");
+    assert_eq!(world.count("files"), 0, "a pane coming back writes nothing");
+    let numbered = world.count("number");
+    let _third = Holder::new(&again.socket(), "b-3");
+    until("the new terminal was numbered", || {
+        world.count("number") == numbered + 1
+    });
+    assert_eq!(
+        world.count("install"),
+        1,
+        "a recalled account is not looked at"
+    );
+    assert_eq!(world.count("files"), 1);
+    let _fourth = Holder::new(&again.socket(), "b-4");
+    until("the next terminal was numbered", || {
+        world.count("number") == numbered + 2
+    });
+    assert_eq!(world.count("files"), 1, "once");
 }
 
 /// A number a person took by hand (`kablo new --id t7`) is skipped: the counter is asked again,
@@ -1407,14 +1467,46 @@ fn a_new_terminal_starts_in_the_folder_the_pane_lookup_names() {
         .argv_of(&terminal)
         .expect("started")
         .to_vec();
-    // The bootstrap carries where kablo is on that server, for the agent's command.
-    let kablo = Some(".local/share/kablo/0.2.0/kablo");
     assert_eq!(
         argv[2],
-        ssh_wrap::boot_in(Some("/srv/app"), kablo).as_bytes(),
+        ssh_wrap::boot_in(Some("/srv/app")).as_bytes(),
         "the bootstrap that goes to /srv/app"
     );
-    assert_ne!(argv[2], ssh_wrap::boot_in(None, kablo).as_bytes());
+    assert_ne!(argv[2], ssh_wrap::boot_in(None).as_bytes());
+}
+
+/// The dock's tier is the settings' (`[shell] integration`): `"blocks"` reaches a new terminal as
+/// `BATERI_DOCK=off` in its environment, the dock leaves the environment as it is — the
+/// shells there read it, and `bateri` hands it to the terminals it opens.
+#[test]
+fn a_new_terminal_gets_the_dock_tier_the_settings_say() {
+    for (dock, expected) in [(true, Vec::new()), (false, vec![("BATERI_DOCK", "off")])] {
+        let rig = Rig::new(if dock { "tier-dock" } else { "tier-blocks" });
+        pane_named(&rig.world);
+        rig.world.dock.store(dock, Ordering::SeqCst);
+        let _holder = Holder::new(&rig.socket(), "b-1");
+        let terminal = rig.terminals(1).remove(0);
+        let env = rig
+            .world
+            .bridge()
+            .env_of(&terminal)
+            .expect("started")
+            .to_vec();
+        let env: Vec<(String, String)> = env
+            .into_iter()
+            .map(|(name, value)| {
+                (
+                    String::from_utf8(name).expect("text"),
+                    String::from_utf8(value).expect("text"),
+                )
+            })
+            .collect();
+        let expected: Vec<(String, String)> = expected
+            .into_iter()
+            .map(|(name, value)| (name.to_owned(), value.to_owned()))
+            .collect();
+        assert_eq!(env, expected, "dock: {dock}");
+    }
 }
 
 /// The panes' connection: told once per change, from a first connection that

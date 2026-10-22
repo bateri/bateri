@@ -61,7 +61,7 @@ case $mode in
   config) printf 'user u\nhostname h\nport 22\nrequesttty auto\nsessiontype default\nproxyjump none\n'; exit 0;;
   check) if [ -e "$cp" ]; then echo "Master running (pid=1)" >&2; exit 0; fi; echo "Control socket connect($cp): No such file or directory" >&2; exit 255;;
   master) if [ {master_exit} -eq 0 ]; then : > "$cp"; fi; exit {master_exit};;
-  *) cd {home} && HOME={home} exec sh -c "$last";;
+  *) cd {home} && HOME={home} SHELL=/bin/zsh XDG_DATA_HOME= exec sh -c "$last";;
 esac
 "#,
             log = log.display(),
@@ -557,6 +557,56 @@ fn a_build_without_the_package_has_nothing_to_install() {
         key: "u@h:22".into(),
     };
     assert_eq!(backend.install(&host), Err(Refusal::plain()));
+}
+
+/// The shells' files go to a server whose kablo is where the ledger says without a look at it:
+/// the same script, over the connection the bridge takes.
+#[test]
+fn the_shells_files_are_written_to_a_server_the_ledger_knew() {
+    let world = stand_in("files", 0);
+    let backend = world.backend(Some(world.package()));
+    let host = KabloHost {
+        host: "rasp".into(),
+        port: None,
+        argv: vec!["ssh".into(), "rasp".into()],
+        config: String::new(),
+        key: "u@h:22".into(),
+    };
+    let installed = Installed {
+        target: Target::LinuxX86_64,
+        version: "0.2.0".into(),
+        path: ".local/share/kablo/0.2.0/kablo".into(),
+        fresh: false,
+    };
+    backend.files(&host, &installed);
+    let shell = world.home.join(".local/share/bateri/shell");
+    assert!(shell.join("bash/dock.bash").is_file());
+    assert!(
+        std::fs::read_to_string(shell.join("bin/bateri"))
+            .expect("the agent's command")
+            .contains(".local/share/kablo/0.2.0/kablo"),
+        "kablo's place is where the ledger says"
+    );
+}
+
+/// The dock's tier a server's new terminal gets is the settings' `[shell] integration`, the
+/// answer the Mac's own shells get: `"auto"` draws the dock, `"blocks"` and `"off"` do not.
+#[test]
+fn the_dock_tier_of_a_new_terminal_is_the_settings() {
+    let world = stand_in("tier", 0);
+    let mut backend = world.backend(None);
+    assert!(backend.dock());
+    for (setting, dock) in [
+        (bt_core::ShellIntegration::Auto, true),
+        (bt_core::ShellIntegration::Blocks, false),
+        (bt_core::ShellIntegration::Off, false),
+    ] {
+        backend.settings = Box::new(move || Settings {
+            shell_integration: setting,
+            ..Settings::default()
+        });
+        assert_eq!(backend.dock(), dock, "{setting:?}");
+    }
 }
 
 #[test]

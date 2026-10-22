@@ -30,6 +30,13 @@ fi
 # exported; ours, so out of the environment (the zsh wrapper's reason).
 __bateri_rblock=${BATERI_RBLOCK-}
 unset BATERI_RBLOCK
+# The dock's tier is the Mac's `[shell] integration`: `off` there is `"blocks"` (no dock), anything
+# else is the dock. It is READ, not taken out: it stays in the environment so that `bateri`, the
+# agent's command, hands it to the terminals it opens (`bin/bateri`).
+__bateri_dock=1
+if [ "${BATERI_DOCK-}" = off ]; then
+  __bateri_dock=0
+fi
 if [ "${BATERI_HISTFILE-}" = unexport ]; then
   export -n HISTFILE
 fi
@@ -92,8 +99,9 @@ __bateri_percent() {
 # with our remote field, `bt_remote=<P>.<S>.<n>` (`P` the local `ssh` block,
 # `S` this shell's pid — two shells under one `ssh` command line are two
 # trails — and `n` its counter) — never `bt_block=`, which bateri reads as the local
-# shell's. The anchor is printed, the user's `PS1` is not touched; no `B` (its
-# consumers are the local dock's).
+# shell's. WITHOUT A DOCK (`BATERI_DOCK=off`, the Mac's `"blocks"`) the anchor is printed and the
+# user's `PS1` is not touched, no `B`. WITH ONE the prompt is the terminal's, as on the Mac
+# (`dock.bash`): the anchor, the `B` and the dock's events all carry the same identity.
 #
 # THE CLOSING NEEDS `PS0` (bash 4.4): the only hook between reading a command
 # and running it without a `DEBUG` trap (which is the user's). Before 4.4
@@ -120,7 +128,27 @@ if [[ $__bateri_rblock =~ ^[0-9]+$ ]] &&
   (( BASH_VERSINFO[0] * 100 + BASH_VERSINFO[1] >= 404 )); then
   __bateri_blocks=1
   __bateri_rshell=$__bateri_rblock.$$
-  PS0='${__bateri_none[__bateri_ran=1]-}\e]8;;\a\e]133;C;bt_remote=${__bateri_rshell}.${__bateri_block}\a\e[22t'"${PS0-}"
+  # The dock needs the blocks (its events carry the same identity) and its functions, the file
+  # beside this one (`dock.bash`, shared with the Mac's own wrapper); without either the shell
+  # is as it is without a dock.
+  __bateri_dock_file=${BASH_SOURCE[0]%/*}/dock.bash
+  if (( __bateri_dock )) && [[ -r $__bateri_dock_file ]]; then
+    . "$__bateri_dock_file"
+  else
+    __bateri_dock=0
+  fi
+  unset __bateri_dock_file
+  # With a dock the line is handed back to the grid first (`8133;e`): Enter has already moved
+  # the caret down a row by the time `PS0` is printed, and until `e` arrives the dock would show
+  # the new, empty row (the local wrapper says so at length).
+  __bateri_ps0_end=
+  if (( __bateri_dock )); then
+    __bateri_ps0_end='\e]8133;bt_remote=${__bateri_rshell}.${__bateri_block};e\a'
+  fi
+  PS0='${__bateri_none[__bateri_ran=1]-}'$__bateri_ps0_end'\e]8;;\a\e]133;C;bt_remote=${__bateri_rshell}.${__bateri_block}\a\e[22t'"${PS0-}"
+  unset __bateri_ps0_end
+else
+  __bateri_dock=0
 fi
 
 # Before the prompt: the directory, the finished command's `D`, the next
@@ -140,12 +168,26 @@ __bateri_precmd() {
       printf '\033[?1000;1002;1003;1004;1005;1006;1016;2048l\033[<4096u\033[23t'
     fi
     __bateri_block=$(( __bateri_block + 1 ))
-    printf '\033]133;A;bt_remote=%s.%s\007\033]8;;bateri://rblock/%s.%s\007' \
-      "$__bateri_rshell" "$__bateri_block" "$__bateri_rshell" "$__bateri_block"
+    printf '\033]133;A;bt_remote=%s.%s\007' "$__bateri_rshell" "$__bateri_block"
+    # With a dock the anchor is in the prompt itself (`__bateri_prompt`), so that a prompt readline
+    # draws again keeps it.
+    (( __bateri_dock )) ||
+      printf '\033]8;;bateri://rblock/%s.%s\007' "$__bateri_rshell" "$__bateri_block"
   fi
   return $status
 }
 
-# First, so `$?` is still the command's when it runs; appended to whatever the
-# user's files set (a bash 5.1 array keeps its other elements).
-PROMPT_COMMAND="__bateri_precmd${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
+if (( __bateri_dock )); then
+  # The prompt is the terminal's: `dock.bash` sets it, with this shell's identity, at every
+  # prompt, LAST in `PROMPT_COMMAND` (a theme's entries come before it, and it sees what they wrote).
+  __bateri_prompt() {
+    local status=$?
+    __bateri_dock_ps1 "bateri://rblock/$__bateri_rshell.$__bateri_block" "$__bateri_rshell.$__bateri_block"
+    return $status
+  }
+  __bateri_hook_prompt_command
+else
+  # First, so `$?` is still the command's when it runs; appended to whatever the
+  # user's files set (a bash 5.1 array keeps its other elements).
+  PROMPT_COMMAND="__bateri_precmd${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
+fi

@@ -95,6 +95,8 @@ pub struct Session {
     terminated: Option<bool>,
     /// The command the terminal was made with.
     argv: Vec<Vec<u8>>,
+    /// The environment it was made with, over the defaults.
+    env: Vec<(Vec<u8>, Vec<u8>)>,
 }
 
 impl Session {
@@ -119,6 +121,7 @@ impl Session {
             unavailable: 0,
             terminated: None,
             argv: Vec::new(),
+            env: Vec::new(),
         }
     }
 
@@ -605,6 +608,11 @@ impl Bridge {
         self.sessions.get(id).map(|s| s.argv.as_slice())
     }
 
+    /// The environment the terminal was made with, over the defaults.
+    pub fn env_of(&self, id: &SessionId) -> Option<&[(Vec<u8>, Vec<u8>)]> {
+        self.sessions.get(id).map(|s| s.env.as_slice())
+    }
+
     /// How `terminate` was asked for the terminal (`Some(force)`).
     pub fn terminated(&self, id: &SessionId) -> Option<bool> {
         self.sessions.get(id).and_then(|s| s.terminated)
@@ -843,6 +851,7 @@ impl Bridge {
         }
         let mut session = Session::new(spec.size.unwrap_or_default());
         session.argv = spec.argv.clone();
+        session.env = spec.env.clone();
         self.sessions.insert(id.clone(), session);
         if let Some(status) = self.status(&id) {
             self.send(&Packet::about(id, Message::Created(status)));

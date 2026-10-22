@@ -327,6 +327,13 @@ pub trait Backend: Send + Sync + 'static {
         None
     }
 
+    /// Writes the files the shells of a new terminal are set up from to the server, for an account
+    /// the ledger brought back: `install` does it with the look for kablo, and a recalled account
+    /// is not looked at (kablo is where the ledger says), so without this its new terminals would
+    /// start from the files an earlier application left. Best effort, on a thread of its own, once
+    /// per account per run.
+    fn files(&self, _server: &KabloHost, _installed: &Installed) {}
+
     /// Starts the bridge to the server.
     fn carry(&self, server: &KabloHost, installed: &Installed) -> io::Result<Carried>;
 
@@ -359,6 +366,13 @@ pub trait Backend: Send + Sync + 'static {
     /// How many rows of scrollback the server keeps for a new terminal.
     fn history(&self) -> Option<u32> {
         None
+    }
+
+    /// Whether the shells of a new terminal draw the dock (the settings' `[shell] integration`
+    /// says so: `"auto"`); `false` is `"blocks"`, the marks without the dock. The same answer the
+    /// Mac's own shells get, so a server is no different.
+    fn dock(&self) -> bool {
+        true
     }
 
     /// The connection to the server of the terminal `pane` shows went or came
@@ -542,6 +556,8 @@ enum Msg {
         account: String,
         spec: NewSession,
         number: Option<u64>,
+        /// The account's files were written on the way ([`Backend::files`]).
+        filed: bool,
     },
     Dialed {
         account: String,
@@ -673,6 +689,10 @@ struct Account {
     /// The terminals the ledger has marked to end were asked to, on the connection
     /// that is up (false again when it goes).
     purged: bool,
+    /// The files a new terminal's shell is set up from are on the server as this application
+    /// has them: written with the look for kablo ([`Backend::install`]) or, for an account the
+    /// ledger brought back, by the first new terminal's step ([`Backend::files`]).
+    files: bool,
 }
 
 /// What one account's server keeps that no pane of this Mac shows, in the roster's two halves.
@@ -1223,8 +1243,12 @@ impl Core {
                 account,
                 spec,
                 number,
+                filed,
             } => {
                 self.refresh = true;
+                if filed && let Some(entry) = self.accounts.get_mut(&account) {
+                    entry.files = true;
+                }
                 if self
                     .started(hold, &account, spec, terminal_named(number))
                     .is_err()
@@ -2103,6 +2127,8 @@ impl Core {
                 ..installed
             };
             entry.stale = false;
+            // The look that renewed it wrote the shells' files too.
+            entry.files = true;
             self.shared.ledger.remember(&entry.server, &entry.installed);
         }
         match outcome {
@@ -2266,11 +2292,11 @@ impl Core {
         let Some(known) = self.shared.ledger.known(account) else {
             return;
         };
-        self.make_account(known.server(), known.installed(), Instant::now());
+        self.make_account(known.server(), known.installed(), false, Instant::now());
     }
 
     /// A client for the server and the account it stands for.
-    fn make_account(&mut self, server: KabloHost, installed: Installed, now: Instant) {
+    fn make_account(&mut self, server: KabloHost, installed: Installed, files: bool, now: Instant) {
         let key = server.key.clone();
         let name = self.shared.backend.name();
         let stale = self
@@ -2294,6 +2320,7 @@ impl Core {
                 dialing: false,
                 queued: Arc::new(AtomicUsize::new(0)),
                 purged: false,
+                files,
             },
         );
     }
@@ -2354,7 +2381,7 @@ impl Core {
     fn prepare(&mut self, hold: HoldId, server: KabloHost, pane: PaneInfo) {
         let numbered = self.hub.version_of(hold) >= wire::NAMED;
         if let Some(entry) = self.accounts.get(&server.key) {
-            let spec = new_session(&self.shared, &pane, &entry.installed);
+            let spec = new_session(&self.shared, &pane);
             let account = entry.server.key.clone();
             if !numbered {
                 if self.started(hold, &account, spec, None).is_err() {
@@ -2362,7 +2389,10 @@ impl Core {
                 }
                 return;
             }
-            if !self.ask_number(hold, server, account, spec) {
+            // An account the ledger brought back has had no look at its server: its files are
+            // written on the way to the number, once.
+            let files = (!entry.files).then(|| entry.installed.clone());
+            if !self.ask_number(hold, server, account, spec, files) {
                 self.hub.refuse(hold, true, "");
             }
             return;
@@ -2391,17 +2421,24 @@ impl Core {
         server: KabloHost,
         account: String,
         spec: NewSession,
+        files: Option<Installed>,
     ) -> bool {
         let shared = Arc::clone(&self.shared);
         thread::Builder::new()
             .name("ssh-hold numbers".into())
             .spawn(move || {
+                // Before the number, so that the terminal starts from files that are there.
+                let filed = files.is_some_and(|installed| {
+                    shared.backend.files(&server, &installed);
+                    true
+                });
                 let number = shared.backend.number(&server);
                 let _ = shared.tx.send(Msg::Numbered {
                     hold,
                     account,
                     spec,
                     number,
+                    filed,
                 });
             })
             .is_ok()
@@ -2422,7 +2459,7 @@ impl Core {
         let server = self.accounts.get(account).map(|entry| entry.server.clone());
         match server {
             Some(server) if again => {
-                if !self.ask_number(hold, server, account.to_owned(), spec) {
+                if !self.ask_number(hold, server, account.to_owned(), spec, None) {
                     self.hub.refuse(hold, true, "");
                 }
             }
@@ -2445,7 +2482,7 @@ impl Core {
         let account = ready.server.key.clone();
         if !self.accounts.contains_key(&account) {
             self.shared.ledger.remember(&ready.server, &ready.installed);
-            self.make_account(ready.server.clone(), ready.installed.clone(), now);
+            self.make_account(ready.server.clone(), ready.installed.clone(), true, now);
         }
         if let Some(note) = &ready.note {
             self.hub.say(hold, note);
@@ -2464,10 +2501,10 @@ fn terminal_named(number: Option<u64>) -> Option<SessionId> {
     number.and_then(|number| SessionId::new(&format!("t{number}")).ok())
 }
 
-/// The new terminal's request: the bootstrap as the command (carrying where
-/// kablo is on that server, for the agent's command there), bateri's
+/// The new terminal's request: the bootstrap as the command (the shells' files are on the server
+/// already: `install::ensure` wrote them), the dock's tier as its environment, bateri's
 /// scrollback as the history.
-fn new_session(shared: &Shared, pane: &PaneInfo, installed: &Installed) -> NewSession {
+fn new_session(shared: &Shared, pane: &PaneInfo) -> NewSession {
     let nonce = ssh_wrap::new_nonce().unwrap_or_else(|| "0".repeat(ssh_wrap::NONCE_LEN));
     // `NewSession` is not exhaustive: it is started from its default.
     let mut spec = NewSession::default();
@@ -2476,8 +2513,12 @@ fn new_session(shared: &Shared, pane: &PaneInfo, installed: &Installed) -> NewSe
         pane.block,
         &nonce,
         pane.tab.as_ref(),
-        Some(&installed.path),
     );
+    // The dock's tier goes with the terminal, in its environment: the shells there read it, and
+    // `bateri` (the agent's command) hands it to the terminals it opens.
+    if !shared.backend.dock() {
+        spec.env.push((b"BATERI_DOCK".to_vec(), b"off".to_vec()));
+    }
     spec.history = shared.backend.history();
     spec
 }
@@ -2511,7 +2552,7 @@ fn prepare(
             server.host
         )
     });
-    let spec = new_session(shared, pane, &installed);
+    let spec = new_session(shared, pane);
     // Last, so that a number is not drawn for a terminal that was never going to start.
     let number = if numbered {
         backend.number(&server)

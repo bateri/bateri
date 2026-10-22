@@ -233,6 +233,15 @@ impl Backend for SshBackend {
         }
     }
 
+    fn files(&self, server: &KabloHost, installed: &Installed) {
+        let target = self.target(server);
+        let channel = SshChannel {
+            argv: ssh_argv_for(&target, &self.route_of(&target)),
+            limit: install::STEP_LIMIT,
+        };
+        install::put_files(&channel, installed);
+    }
+
     fn number(&self, server: &KabloHost) -> Option<u64> {
         // Only a server kablo is kept on has numbers to give: the connection is the one the
         // install used.
@@ -322,6 +331,10 @@ impl Backend for SshBackend {
 
     fn history(&self) -> Option<u32> {
         (self.history)()
+    }
+
+    fn dock(&self) -> bool {
+        (self.settings)().shell_integration.wants_dock()
     }
 
     fn terminal_changed(&self, pane: &PaneUuid) {

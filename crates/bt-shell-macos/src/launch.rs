@@ -40,11 +40,11 @@ pub struct Identity {
     /// dock and the command blocks.
     pub zsh_wrapper_dir: Option<PathBuf>,
     /// The same for fish (bateri's `Resources/shell/fish`, the directory that
-    /// holds `vendor_conf.d`). `None`: a fish pane gets no integration, as a
+    /// holds `vendor_conf.d` and `dock.fish`). `None`: a fish pane gets no integration, as a
     /// zsh pane without [`Self::zsh_wrapper_dir`].
     pub fish_wrapper_dir: Option<PathBuf>,
     /// The same for bash (bateri's `Resources/shell/bash`, the directory that holds
-    /// `bateri.bash`, the file `ENV` is pointed at). `None`: a bash pane gets no integration.
+    /// `bateri.bash`, the file `ENV` is pointed at, and `dock.bash`, which it reads). `None`: a bash pane gets no integration.
     pub bash_wrapper_dir: Option<PathBuf>,
 }
 
@@ -182,7 +182,8 @@ pub(crate) fn integration_env(
     // answer to "is there a dock in this session". The terminal gives the
     // decision, the shell is not asked (`ShellIntegration::wants_dock`). fish
     // and bash are no exception: their docks read the line from the grid, so
-    // they need no mirror, only the script's prompt.
+    // they need no mirror, only the script's prompt. A server's terminal gets the same decision
+    // from the same predicate (`kablo::Backend::dock`, as `BATERI_DOCK=off` in its environment).
     if !setting.wants_dock() {
         env.push(("BATERI_DOCK".to_owned(), "off".to_owned()));
     }

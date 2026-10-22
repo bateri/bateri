@@ -367,7 +367,12 @@ bt_open() {
     if bt_err=$(
       umask "$bt_umask" 2>/dev/null
       unset LC_BATERI_TAB_URL BATERI_TAB_URL TERM_SESSION_ID
-      "$bt_kablo" new --id "$bt_id" --cwd "$bt_cwd" --env "PATH=$PATH" -- "$@" 2>&1 >/dev/null
+      # The dock's tier (the Mac's `"blocks"`) goes on to the new terminal: its shell reads it.
+      if [ "${BATERI_DOCK-}" = off ]; then
+        "$bt_kablo" new --id "$bt_id" --cwd "$bt_cwd" --env "PATH=$PATH" --env BATERI_DOCK=off -- "$@" 2>&1 >/dev/null
+      else
+        "$bt_kablo" new --id "$bt_id" --cwd "$bt_cwd" --env "PATH=$PATH" -- "$@" 2>&1 >/dev/null
+      fi
     ); then
       break
     fi

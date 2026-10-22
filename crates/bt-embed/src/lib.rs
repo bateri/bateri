@@ -385,8 +385,9 @@ pub unsafe extern "C" fn bt_pane_config_set_zsh_scripts(
 }
 
 /// The shell integration's fish scripts (bateri's `Resources/shell/fish`, the directory that
-/// holds `vendor_conf.d`). NULL or empty: a fish pane gets no integration. It is read when the
-/// user's shell is fish, as `bt_pane_config_set_zsh_scripts`'s directory is when it is zsh.
+/// holds `vendor_conf.d` and `dock.fish`). NULL or empty: a fish pane gets no integration. It is
+/// read when the user's shell is fish, as `bt_pane_config_set_zsh_scripts`'s directory is when
+/// it is zsh.
 ///
 /// # Safety
 /// As [`bt_pane_config_set_helper`].
@@ -405,7 +406,7 @@ pub unsafe extern "C" fn bt_pane_config_set_fish_scripts(
 }
 
 /// The shell integration's bash scripts (bateri's `Resources/shell/bash`, the directory that
-/// holds `bateri.bash`). NULL or empty: a bash pane gets no integration. It is read when the
+/// holds `bateri.bash` and `dock.bash`). NULL or empty: a bash pane gets no integration. It is read when the
 /// user's shell is bash 4.4 or newer, as `bt_pane_config_set_zsh_scripts`'s directory is when
 /// it is zsh; an older bash (macOS's own is 3.2) runs as it did.
 ///

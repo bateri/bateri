@@ -140,8 +140,14 @@ impl Server {
 
     /// The bootstrap a new terminal runs, as kablo runs it (an argument vector).
     fn bootstrap(&self) {
-        let argv =
-            crate::ssh_wrap::kablo_argv(None, None, "00c0ffee00c0ffee", None, Some(KABLO_PATH));
+        // The files are on the server before the terminal starts (`install::ensure` wrote them).
+        crate::ssh_wrap::seed_files(
+            &self.home.join("bin/zsh"),
+            &self.home,
+            &[],
+            Some(KABLO_PATH),
+        );
+        let argv = crate::ssh_wrap::kablo_argv(None, None, "00c0ffee00c0ffee", None);
         let words: Vec<String> = argv
             .iter()
             .map(|word| String::from_utf8(word.clone()).expect("text"))
@@ -181,6 +187,18 @@ impl Server {
     }
 
     fn run_file(&self, shell: &Path, file: &Path, here: Option<&str>, args: &[&str]) -> Said {
+        self.run_file_with(shell, file, here, args, &[])
+    }
+
+    /// [`Self::run_file`], with `extra` in the environment the terminal's shell had.
+    fn run_file_with(
+        &self,
+        shell: &Path,
+        file: &Path,
+        here: Option<&str>,
+        args: &[&str],
+        extra: &[(&str, &str)],
+    ) -> Said {
         // The caller has a umask of its own (the script must not keep its owner-only one for
         // what it starts) and stands in a tab (which a terminal it starts is not in).
         let mut command = Command::new("/bin/sh");
@@ -198,6 +216,7 @@ impl Server {
             .env("PATH", std::env::var_os("PATH").unwrap_or_default())
             .env("STUB_DIR", &self.stub)
             .env("LC_TERMINAL_VERSION", VERSION)
+            .envs(extra.iter().copied())
             .current_dir(&self.home)
             .stdin(Stdio::null());
         if let Some(here) = here {
@@ -691,6 +710,40 @@ fn the_terminal_it_starts_has_the_callers_umask_and_none_of_the_callers_tab() {
         );
         let record = std::fs::metadata(server.state().join("terminals/t1")).expect("a record");
         assert_eq!(record.permissions().mode() & 0o777, 0o600);
+    }
+}
+
+/// The dock's tier travels: a terminal the command starts gets `BATERI_DOCK=off` where the
+/// shell it runs in has it (the Mac's `"blocks"`), and nothing of the kind where it has not.
+#[test]
+fn the_terminal_it_starts_gets_the_docks_tier_of_the_one_that_asked() {
+    for (name, shell) in shells() {
+        let server = Server::new(&format!("dock-{name}"));
+        server.mac_says(PLACED);
+        let said = server.run_file_with(
+            &shell,
+            &server.script(),
+            Some("t4"),
+            &["split", "--", "make"],
+            &[("BATERI_DOCK", "off")],
+        );
+        assert_eq!(said.status, 0, "{name}: {}", said.err);
+        let mut call = new_call(&server, "t1", &["make"]);
+        call.insert(7, "--env".to_owned());
+        call.insert(8, "BATERI_DOCK=off".to_owned());
+        assert_eq!(server.calls_of("new"), [call], "{name}");
+
+        server.forget_calls();
+        server.mac_says(PLACED);
+        let said = server.run(&shell, Some("t4"), &["split", "--", "make"]);
+        assert_eq!(said.status, 0, "{name}: {}", said.err);
+        assert!(
+            server
+                .calls_of("new")
+                .iter()
+                .all(|call| !call.iter().any(|word| word.contains("BATERI_DOCK"))),
+            "{name}: the tier came from nowhere"
+        );
     }
 }
 

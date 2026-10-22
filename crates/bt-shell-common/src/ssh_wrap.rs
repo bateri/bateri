@@ -12,7 +12,9 @@
 //! shell to boot) nor [`Fact::NoKablo`] (kablo cannot be kept on it). What
 //! fails any of them is the plain `ssh`, with nothing of bateri's on the
 //! server and no connection of bateri's to it. [`kablo_argv`] is the
-//! bootstrap the terminal runs there.
+//! bootstrap the terminal runs there; the files its shell is set up from are
+//! not in it but written beforehand, over the connection the user made
+//! ([`files_script`]).
 //!
 //! **What stays of the wrapped form**, for one purpose: a shell started before
 //! an update still has the previous `ssh` function, which asks `bateri
@@ -612,22 +614,20 @@ pub fn kablo_path(
 /// starting directory ([`boot_in`]), `parent` the local block of the `ssh`
 /// command, `tab` the pane's identity; the nonce is the attempt's
 /// ([`new_nonce`]), which here proves nothing (a terminal the server keeps is
-/// not rerun) but is the bootstrap's `$2`. `kablo` is where kablo is on that
-/// server, relative to home (`kablo::install::Installed::path`): the command
-/// an agent runs there (`bateri`) takes it from the file the bootstrap writes.
+/// not rerun) but is the bootstrap's `$2`. The shells' files are not in it: they
+/// are on the server before it runs ([`files_script`]).
 pub fn kablo_argv(
     cwd: Option<&str>,
     parent: Option<u32>,
     nonce: &str,
     tab: Option<&PaneUuid>,
-    kablo: Option<&str>,
 ) -> Vec<Vec<u8>> {
     let parent = parent.map_or_else(|| NO_PARENT.to_owned(), |parent| parent.to_string());
     let tab = tab.map_or_else(|| NO_TAB.to_owned(), PaneUuid::url);
     [
         "sh",
         "-c",
-        &boot_in(cwd, kablo),
+        &boot_in(cwd),
         BOOT_NAME,
         &parent,
         nonce,
@@ -703,7 +703,7 @@ const AGENT_COMMAND: &str = include_str!("../../../assets/shell/remote/bin/bater
 /// ([`crate::kablo::install::next_number`]) — one rule for both, not the same rule twice.
 pub const COUNTER: &str = include_str!("../../../assets/shell/remote/next.sh");
 
-/// The word in [`AGENT_COMMAND`] that [`payload`] replaces with kablo's place.
+/// The word in [`AGENT_COMMAND`] that [`files_script`] replaces with kablo's place.
 /// Left as it is when the place is not known (or not one [`is_kablo_path`]
 /// takes): the command then looks for `kablo` on `PATH`.
 const KABLO_PLACEHOLDER: &str = "__BATERI_KABLO__";
@@ -712,13 +712,14 @@ const KABLO_PLACEHOLDER: &str = "__BATERI_KABLO__";
 /// starts with it (a decoder that ignored `-d` prints base64, not this).
 const MAGIC: &str = "bateri_boot=1";
 
-/// The files the bootstrap writes under `~/.local/share/bateri/shell/`,
-/// embedded at build time (the subcommand runs
-/// on every `ssh`, so it reads no package file): the local zsh wrapper's four
-/// `ZDOTDIR` files and its swap **verbatim**, the remote zsh body beside them,
-/// bash's `ENV` file, fish's `vendor_conf.d` file, the agent's command with its
-/// counter, and the bootstrap.
-const REMOTE_FILES: [(&str, &str); 11] = [
+/// The files the server's shells are set up from, under
+/// `~/.local/share/bateri/shell/` ([`files_script`] writes them), embedded at
+/// build time: the local zsh wrapper's four `ZDOTDIR` files and its swap
+/// **verbatim**, the remote zsh body beside them, bash's `ENV` file and fish's
+/// `vendor_conf.d` file with the dock's functions each of them shares with the
+/// Mac's own wrapper (`bash/dock.bash`, `fish/dock.fish`: the same bytes, not a
+/// copy), the agent's command with its counter, and the bootstrap.
+const REMOTE_FILES: [(&str, &str); 13] = [
     (
         "zsh/.zshenv",
         include_str!("../../../assets/shell/zsh/.zshenv"),
@@ -748,8 +749,16 @@ const REMOTE_FILES: [(&str, &str); 11] = [
         include_str!("../../../assets/shell/remote/bash/bateri.bash"),
     ),
     (
+        "bash/dock.bash",
+        include_str!("../../../assets/shell/bash/dock.bash"),
+    ),
+    (
         "fish/vendor_conf.d/bateri.fish",
         include_str!("../../../assets/shell/remote/fish/vendor_conf.d/bateri.fish"),
+    ),
+    (
+        "fish/dock.fish",
+        include_str!("../../../assets/shell/fish/dock.fish"),
     ),
     ("bin/bateri", AGENT_COMMAND),
     ("next.sh", COUNTER),
@@ -758,30 +767,60 @@ const REMOTE_FILES: [(&str, &str); 11] = [
     ("boot.sh", BOOT_SCRIPT),
 ];
 
-/// The payload: [`MAGIC`], [`BOOT_SCRIPT`] as the variable `bt_boot`,
-/// `bt_files` (one `bt_put` per [`REMOTE_FILES`] entry, its content a
-/// single-quoted literal (`upload::sq`, the crate's one quoting rule) — no
-/// here-document: bash as `sh` would write one to `/tmp`; `boot.sh` itself is
-/// written from the variable, so the text carries it once), the starting
-/// directory `bt_cwd` when there is one ([`is_start_dir`]; the same quoting),
-/// then `eval "$bt_boot"`. `kablo` is where kablo is on the server, relative
-/// to home, for the agent's command ([`KABLO_PLACEHOLDER`]).
-/// The directory rides here rather than as a word of [`remote_command`]: the
-/// payload is base64 and `eval`ed by `sh`, so any path is one literal, and
-/// the command's positional form ([`unwrap`]) stays as older builds read it.
-fn payload(cwd: Option<&str>, kablo: Option<&str>) -> String {
+/// The script the server's `sh` reads from its standard input to write
+/// [`REMOTE_FILES`] under `${XDG_DATA_HOME:-~/.local/share}/bateri/shell/`:
+/// each file under a temporary name and renamed into place (a shell that starts
+/// meanwhile reads a whole file), one that is already the same left as it is
+/// (no rename on every connection), owner-only, nothing in `/tmp`, no log, the
+/// agent's command executable. `kablo` is where kablo is on that server,
+/// relative to home (`kablo::install::Installed::path`): the command an agent
+/// runs there (`bateri`) takes it from the file ([`KABLO_PLACEHOLDER`]); a place
+/// that is not one [`is_kablo_path`] takes leaves the word as it is.
+///
+/// **It is sent over the ssh connection the user made**, with the call that
+/// looks for kablo (`kablo::install::ensure`), and not inside the bootstrap:
+/// the files are far more bytes than the one argument the bootstrap travels in
+/// (Linux takes 128 KiB for one word), and the connection has no such limit. It
+/// is for a login shell the integration serves (zsh, bash, fish: `$SHELL`, as
+/// sshd sets it); for any other nothing is written. It never fails the call:
+/// what could not be written is found missing by the bootstrap, which says so.
+pub fn files_script(kablo: Option<&str>) -> String {
+    /// Where the files go, and the function that puts one there.
+    const PRELUDE: &str = r#"case ${SHELL##*/} in zsh | bash | fish) ;; *) exit 0 ;; esac
+bt_data=${XDG_DATA_HOME:-}
+case $bt_data in /*) ;; *) bt_data=$HOME/.local/share ;; esac
+bt_dir=$bt_data/bateri/shell
+bt_put() {
+  bt_tmp=$bt_dir/$1.tmp.$$
+  if printf '%s' "$2" > "$bt_tmp"; then
+    if cmp -s "$bt_tmp" "$bt_dir/$1"; then
+      rm -f "$bt_tmp"
+      return 0
+    fi
+    if mv -f "$bt_tmp" "$bt_dir/$1"; then
+      return 0
+    fi
+  fi
+  rm -f "$bt_tmp"
+  return 1
+}
+"#;
     let kablo = kablo.filter(|kablo| is_kablo_path(kablo));
-    // The bootstrap is in the text once: a variable `bt_files` writes to
-    // `boot.sh` from and the end of the text `eval`s.
-    let mut text = format!(
-        "{MAGIC}\nbt_boot={}\nbt_files() {{\n",
-        crate::upload::sq(BOOT_SCRIPT)
-    );
-    for (path, content) in REMOTE_FILES {
-        if path == "boot.sh" {
-            text.push_str("  bt_put 'boot.sh' \"$bt_boot\" || return 1\n");
-            continue;
+    let mut dirs: Vec<&str> = Vec::new();
+    for (path, _) in REMOTE_FILES {
+        if let Some((dir, _)) = path.rsplit_once('/') {
+            if !dirs.contains(&dir) {
+                dirs.push(dir);
+            }
         }
+    }
+    let made = dirs
+        .iter()
+        .map(|dir| format!("\"$bt_dir/{dir}\""))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut text = format!("{PRELUDE}(umask 077 && mkdir -p {made} && \\\n");
+    for (path, content) in REMOTE_FILES {
         let content = match kablo {
             Some(kablo) if content.contains(KABLO_PLACEHOLDER) => {
                 std::borrow::Cow::Owned(content.replace(KABLO_PLACEHOLDER, kablo))
@@ -789,16 +828,72 @@ fn payload(cwd: Option<&str>, kablo: Option<&str>) -> String {
             _ => std::borrow::Cow::Borrowed(content),
         };
         text.push_str(&format!(
-            "  bt_put {} {} || return 1\n",
+            "  bt_put {} {} && \\\n",
             crate::upload::sq(path),
             crate::upload::sq(&content)
         ));
     }
-    text.push_str("}\n");
+    text.push_str("  { chmod u+x \"$bt_dir/bin/bateri\" || :; }) 2>/dev/null\nexit 0\n");
+    text
+}
+
+/// What the call that looks for kablo does to a server, for a test: `sh -s` reads
+/// [`files_script`] with the environment sshd gives a command (`HOME`, `SHELL`,
+/// `XDG_DATA_HOME` pinned under the home, `extra` on top). The files are in place when it
+/// returns; what it could not write it did not.
+#[cfg(test)]
+pub(crate) fn seed_files(
+    shell: &std::path::Path,
+    home: &std::path::Path,
+    extra: &[(&str, String)],
+    kablo: Option<&str>,
+) -> std::process::ExitStatus {
+    seed_files_with(std::path::Path::new("/bin/sh"), shell, home, extra, kablo)
+}
+
+/// [`seed_files`] through the interpreter `sh` (a server's `sh` may be dash, BusyBox's ash…).
+#[cfg(test)]
+pub(crate) fn seed_files_with(
+    sh: &std::path::Path,
+    shell: &std::path::Path,
+    home: &std::path::Path,
+    extra: &[(&str, String)],
+    kablo: Option<&str>,
+) -> std::process::ExitStatus {
+    use std::io::Write as _;
+    let mut child = std::process::Command::new(sh)
+        .arg("-s")
+        .env_clear()
+        .env("HOME", home)
+        .env("SHELL", shell)
+        .env("XDG_DATA_HOME", home.join(".local/share"))
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .envs(extra.iter().map(|(key, value)| (*key, value.as_str())))
+        .current_dir(home)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("sh");
+    // A script that ends at once (a shell the integration does not serve) leaves its input
+    // unread, as it does over ssh: a broken pipe is no failure.
+    let _ = child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(files_script(kablo).as_bytes());
+    child.wait().expect("sh ended")
+}
+
+/// The bootstrap's payload: the magic line, the starting directory when
+/// there is one, and the bootstrap (`assets/shell/remote/boot.sh`) itself,
+/// `eval`ed on the server.
+fn payload(cwd: Option<&str>) -> String {
+    let mut text = format!("{MAGIC}\n");
     if let Some(cwd) = cwd.filter(|cwd| is_start_dir(cwd)) {
         text.push_str(&format!("bt_cwd={}\n", crate::upload::sq(cwd)));
     }
-    text.push_str("eval \"$bt_boot\"\n");
+    text.push_str(&format!("eval {}\n", crate::upload::sq(BOOT_SCRIPT)));
     text
 }
 
@@ -855,20 +950,19 @@ fn one_liner(payload: &str) -> String {
 /// one-liner carrying the base64 payload. Always [`is_inline`].
 pub fn boot() -> &'static str {
     static BOOT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    BOOT.get_or_init(|| one_liner(&payload(None, None)))
+    BOOT.get_or_init(|| one_liner(&payload(None)))
 }
 
 /// [`boot`], starting the login shell in `cwd` when it is one
 /// ([`is_start_dir`]) — the remote folder ⌘T's tab was in, which the new
 /// terminal asks for ([`kablo_argv`]). Still [`is_inline`]: the directory is
 /// inside the base64 payload ([`payload`]).
-pub fn boot_in(cwd: Option<&str>, kablo: Option<&str>) -> std::borrow::Cow<'static, str> {
+pub fn boot_in(cwd: Option<&str>) -> std::borrow::Cow<'static, str> {
     let cwd = cwd.filter(|cwd| is_start_dir(cwd));
-    let kablo = kablo.filter(|kablo| is_kablo_path(kablo));
-    if cwd.is_none() && kablo.is_none() {
+    if cwd.is_none() {
         return std::borrow::Cow::Borrowed(boot());
     }
-    std::borrow::Cow::Owned(one_liner(&payload(cwd, kablo)))
+    std::borrow::Cow::Owned(one_liner(&payload(cwd)))
 }
 
 /// Whether `path` can be kablo's place in the agent's command: relative to
@@ -1762,7 +1856,7 @@ mod tests {
     fn a_new_terminal_runs_the_bootstrap_as_an_argument_vector() {
         let tab =
             PaneUuid::from_url("bateri://tab/00000000-0000-4000-8000-000000000001").expect("a tab");
-        let argv = kablo_argv(None, Some(7), NONCE, Some(&tab), None);
+        let argv = kablo_argv(None, Some(7), NONCE, Some(&tab));
         let text: Vec<String> = argv
             .iter()
             .map(|word| String::from_utf8(word.clone()).expect("text"))
@@ -1789,11 +1883,11 @@ mod tests {
             "' {BOOT_NAME} 7 {NONCE} {TERM_PROGRAM_VERSION} bateri://tab/00000000-0000-4000-8000-000000000001"
         )));
         // Without a block or a tab the placeholders the bootstrap reads.
-        let bare = kablo_argv(None, None, NONCE, None, None);
+        let bare = kablo_argv(None, None, NONCE, None);
         assert_eq!(bare[4], b"-");
         assert_eq!(bare[7], b"-");
         // A starting directory rides in the payload.
-        let in_dir = kablo_argv(Some("/srv/app"), None, NONCE, None, None);
+        let in_dir = kablo_argv(Some("/srv/app"), None, NONCE, None);
         assert_ne!(in_dir[2], bare[2]);
     }
 
@@ -1809,10 +1903,10 @@ mod tests {
             assert!(!is_start_dir(dir), "{dir:?}");
         }
         // One the server could not be sent builds no other bootstrap.
-        assert_eq!(boot_in(Some("src"), None), boot());
-        assert_eq!(boot_in(None, None), boot());
-        assert_ne!(boot_in(Some("/srv"), None), boot());
-        assert!(is_inline(&boot_in(Some("/a'b \"c\" $d !e \\f"), None)));
+        assert_eq!(boot_in(Some("src")), boot());
+        assert_eq!(boot_in(None), boot());
+        assert_ne!(boot_in(Some("/srv")), boot());
+        assert!(is_inline(&boot_in(Some("/a'b \"c\" $d !e \\f"))));
     }
 
     /// With bateri's instance directory, the wrapped session became a
@@ -2174,11 +2268,11 @@ mod tests {
 
     /// The most one argument of the command a new terminal runs may be: Linux's
     /// `MAX_ARG_STRLEN` is 128 KiB for one word, and the bootstrap is one word
-    /// (`sh -c <it>`). It carries every file the integration writes (84 KiB with
-    /// the agent's command, and the shells' files); the room under the limit is
-    /// what a file added later has, and a test that fails here means a file
-    /// has to be smaller, not the number larger.
-    const ONE_ARGUMENT: usize = 108 * 1024;
+    /// (`sh -c <it>`). It carries the bootstrap and nothing else — the shells' files are
+    /// written over the ssh connection ([`files_script`]), because they are more bytes than
+    /// that one word could hold — so the bound is well under the limit, and a test that fails
+    /// here means the bootstrap grew, not that the number should.
+    const ONE_ARGUMENT: usize = 32 * 1024;
 
     /// The real bootstrap (not a stub) survives every login shell's quoting,
     /// round-trips through the wrapped form (`unwrap` reads what an older
@@ -2191,33 +2285,49 @@ mod tests {
             is_inline(boot),
             "the one-liner breaks a login shell's quoting"
         );
-        assert!(payload(None, None).starts_with(&format!("{MAGIC}\n")));
+        assert!(payload(None).starts_with(&format!("{MAGIC}\n")));
         let command = remote_command(boot, Some(u32::MAX), NONCE, None);
         assert!(command.len() < ONE_ARGUMENT, "{} bytes", command.len());
-        // The longest starting directory it carries, too, and the place of
-        // kablo that makes the agent's command whole.
+        // The longest starting directory it carries, too.
         let deepest = format!("/{}", "a".repeat(START_DIR_MAX - 1));
-        let command = remote_command(&boot_in(Some(&deepest), None), Some(u32::MAX), NONCE, None);
+        let command = remote_command(&boot_in(Some(&deepest)), Some(u32::MAX), NONCE, None);
         assert!(command.len() < ONE_ARGUMENT, "{} bytes", command.len());
-        let place = ".local/share/kablo/0.4.0-rc.1+b2/kablo";
-        let whole = boot_in(Some(&deepest), Some(place));
+        let whole = boot_in(Some(&deepest));
         assert!(is_inline(&whole));
         assert!(whole.len() < ONE_ARGUMENT, "{} bytes", whole.len());
         let args = words(&["-p", "2222", "prod"]);
         let wrapped = wrap(&args, boot, None, NONCE, None, None);
         assert_eq!(unwrap(&wrapped), &args[..]);
         // And as the argument vector a new terminal runs (nothing is quoted).
-        let argv = kablo_argv(Some(&deepest), Some(u32::MAX), NONCE, None, None);
-        assert_eq!(argv[2], boot_in(Some(&deepest), None).as_bytes());
-        // Every file the bootstrap writes is embedded, and the shared swap is
-        // the local wrapper's own.
+        let argv = kablo_argv(Some(&deepest), Some(u32::MAX), NONCE, None);
+        assert_eq!(argv[2], boot_in(Some(&deepest)).as_bytes());
+        // Every file the server's shells are set up from is embedded, the shared swap is the
+        // local wrapper's own, and so are the dock's functions of bash and fish.
         assert!(REMOTE_FILES.iter().all(|(_, content)| !content.is_empty()));
-        assert!(
-            REMOTE_FILES
-                .iter()
-                .any(|(path, content)| *path == "zsh/zdotdir.zsh"
-                    && *content == include_str!("../../../assets/shell/zsh/zdotdir.zsh"))
-        );
+        for (path, local) in [
+            (
+                "zsh/zdotdir.zsh",
+                include_str!("../../../assets/shell/zsh/zdotdir.zsh"),
+            ),
+            (
+                "bash/dock.bash",
+                include_str!("../../../assets/shell/bash/dock.bash"),
+            ),
+            (
+                "fish/dock.fish",
+                include_str!("../../../assets/shell/fish/dock.fish"),
+            ),
+        ] {
+            assert!(
+                REMOTE_FILES
+                    .iter()
+                    .any(|(at, content)| *at == path && *content == local),
+                "{path} is not the local wrapper's file"
+            );
+        }
+        // The files are what does not fit one argument: they are in no part of it.
+        let files: usize = REMOTE_FILES.iter().map(|(_, content)| content.len()).sum();
+        assert!(files > ONE_ARGUMENT, "{files} bytes of files");
     }
 
     #[test]
@@ -2329,11 +2439,12 @@ mod remote_shells {
     use std::sync::Arc;
 
     use bt_core::{
-        Blocks, CaretShape, CursorBlink, Osc52, RemoteKind, RemoteSetupFault, RemoteTarget,
-        Session, SessionOptions, TerminalOptions, Theme,
+        Blocks, CaretShape, CursorBlink, DockStatus, Osc52, RemoteKind, RemoteSetupFault,
+        RemoteTarget, Session, SessionOptions, TerminalOptions, Theme,
     };
 
     use super::{boot, boot_in, remote_command};
+    use crate::child::tests::{click_dock, read_dock, screen};
     use crate::child::{SilentWake, wait_until};
     use crate::settings::TempRoot;
 
@@ -2396,6 +2507,15 @@ mod remote_shells {
     /// The stand-in for `ssh` holds the server's shell on a `read` until the
     /// probe is in, so its first prompt cannot beat it.
     fn sshd(shell: &Path, home: &Path, extra: &[(&str, String)]) -> Session {
+        sshd_with(shell, home, extra, false)
+    }
+
+    /// [`sshd`], and with `dock` the session is a pane that shows a server's terminal and has
+    /// the dock's payload (`set_server`): the one place the server shell's dock events are taken.
+    fn sshd_with(shell: &Path, home: &Path, extra: &[(&str, String)], dock: bool) -> Session {
+        // The files are on the server before the terminal starts: the call that looks for kablo
+        // wrote them.
+        super::seed_files(shell, home, extra, None);
         let mut env = HashMap::from([
             ("HOME".to_owned(), home.display().to_string()),
             ("SHELL".to_owned(), shell.display().to_string()),
@@ -2436,7 +2556,7 @@ mod remote_shells {
                     blink: CursorBlink::default(),
                 },
                 theme: Theme::BATERI,
-                dock: false,
+                dock,
                 cluster: false,
                 initial_input: None,
                 shell_marks: false,
@@ -2464,6 +2584,12 @@ mod remote_shells {
             session.set_remote(command, Some(&target)),
             "the probe's answer was not taken"
         );
+        if dock {
+            assert!(
+                session.set_server(command, true),
+                "the pane's terminal was not taken"
+            );
+        }
         session.write(b"\n");
         session
     }
@@ -2612,6 +2738,137 @@ mod remote_shells {
         session.shutdown();
     }
 
+    /// The call that looks for kablo writes the shells' files, and writes them as the bootstrap
+    /// used to: every file with the bytes it was built with (kablo's place in the agent's
+    /// command), owner-only, the command runnable, a file that is the same left alone and one
+    /// that is not put back, nothing for a login shell the integration does not serve, a relative
+    /// `XDG_DATA_HOME` ignored — through the `sh`s a server may have — and a call that cannot
+    /// write ends well (the bootstrap says what is missing).
+    #[test]
+    fn the_files_script_writes_every_file_once_and_only_for_a_shell_it_serves() {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+        let place = ".local/share/kablo/0.2.0/kablo";
+        let mut shells = vec![PathBuf::from("/bin/sh")];
+        shells.extend(which("dash"));
+        for sh in shells {
+            let name = sh.display().to_string();
+            let root = TempRoot::new("remote-files-script");
+            let home = std::fs::canonicalize(&root.0).expect("root").join("home");
+            std::fs::create_dir_all(&home).expect("home");
+            let shell = Path::new("/usr/bin/bash");
+            let dir = home.join(".local/share/bateri/shell");
+            let serve = |extra: &[(&str, String)]| {
+                super::seed_files_with(&sh, shell, &home, extra, Some(place))
+            };
+            assert!(serve(&[]).success(), "{name}");
+            let mut stamps = Vec::new();
+            for (path, content) in super::REMOTE_FILES {
+                let expected = content.replace(super::KABLO_PLACEHOLDER, place);
+                let file = dir.join(path);
+                assert_eq!(
+                    std::fs::read_to_string(&file).unwrap_or_default(),
+                    expected,
+                    "{name}: {path}"
+                );
+                let meta = std::fs::metadata(&file).expect("file");
+                let want = if path == "bin/bateri" { 0o700 } else { 0o600 };
+                assert_eq!(meta.permissions().mode() & 0o777, want, "{name}: {path}");
+                stamps.push((file, meta.ino()));
+            }
+            assert_eq!(
+                std::fs::metadata(dir.join("bash"))
+                    .expect("dir")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700,
+                "{name}: the directories are the owner's"
+            );
+            let strays = |dir: &Path| {
+                let mut found = Vec::new();
+                let mut todo = vec![dir.to_path_buf()];
+                while let Some(next) = todo.pop() {
+                    for entry in std::fs::read_dir(&next).expect("dir").flatten() {
+                        if entry.path().is_dir() {
+                            todo.push(entry.path());
+                        } else if entry.file_name().to_string_lossy().contains(".tmp.") {
+                            found.push(entry.path());
+                        }
+                    }
+                }
+                found
+            };
+            assert!(strays(&dir).is_empty(), "{name}: a temporary name stayed");
+
+            // The same bytes again: no file is replaced. Changed bytes: put back.
+            assert!(serve(&[]).success(), "{name}");
+            for (file, inode) in &stamps {
+                assert_eq!(
+                    std::fs::metadata(file).expect("file").ino(),
+                    *inode,
+                    "{name}: {} was written again",
+                    file.display()
+                );
+            }
+            std::fs::write(dir.join("bash/dock.bash"), "edited").expect("edit");
+            assert!(serve(&[]).success(), "{name}");
+            assert_eq!(
+                std::fs::read_to_string(dir.join("bash/dock.bash")).expect("dock"),
+                include_str!("../../../assets/shell/bash/dock.bash"),
+                "{name}"
+            );
+
+            // A relative `XDG_DATA_HOME` is ignored, as the spec says; an absolute one is used.
+            let other = root.0.join("home2");
+            std::fs::create_dir_all(&other).expect("home2");
+            let other = std::fs::canonicalize(&other).expect("home2");
+            let wrote = super::seed_files_with(
+                &sh,
+                shell,
+                &other,
+                &[("XDG_DATA_HOME", "relative/data".to_owned())],
+                None,
+            );
+            assert!(wrote.success(), "{name}");
+            assert!(other.join(".local/share/bateri/shell/boot.sh").is_file());
+            assert!(!other.join("relative").exists(), "{name}");
+            let elsewhere = root.0.join("data");
+            super::seed_files_with(
+                &sh,
+                shell,
+                &other,
+                &[("XDG_DATA_HOME", elsewhere.display().to_string())],
+                None,
+            );
+            assert!(
+                elsewhere.join("bateri/shell/bin/bateri").is_file(),
+                "{name}"
+            );
+            // Without kablo's place the agent's command keeps the word it looks for kablo by.
+            let bare = std::fs::read_to_string(other.join(".local/share/bateri/shell/bin/bateri"))
+                .expect("command");
+            assert!(bare.contains(super::KABLO_PLACEHOLDER), "{name}");
+
+            // A shell the integration does not serve gets nothing, and a place that cannot be
+            // written to is no failure of the call.
+            let third = root.0.join("home3");
+            std::fs::create_dir_all(third.join(".local/share")).expect("home3");
+            for plain in ["/bin/sh", "/bin/dash", "/usr/bin/tcsh", ""] {
+                let status = super::seed_files_with(&sh, Path::new(plain), &third, &[], None);
+                assert!(status.success(), "{name}: {plain}");
+                assert!(
+                    !third.join(".local/share/bateri").exists(),
+                    "{name}: {plain}"
+                );
+            }
+            std::fs::write(third.join(".local/share/bateri"), "").expect("blocker");
+            assert!(
+                super::seed_files_with(&sh, shell, &third, &[], None).success(),
+                "{name}: a write that fails"
+            );
+        }
+    }
+
     #[test]
     fn zsh_gets_the_integration_through_its_own_files() {
         // The common shape: `~/.zshenv` moves the configuration with
@@ -2698,6 +2955,171 @@ mod remote_shells {
                 screen_has(&session, "vendor=kept")
             });
             draws_remote_blocks(&session, "fish");
+            close(&session);
+        }
+    }
+
+    /// A server shell in the pane that shows its terminal (`sshd_with`'s dock) with the files the
+    /// test writes to the home (`files`: name and text); `None` (and a line that says why) where
+    /// the shell is not on this machine.
+    fn docked(
+        name: &str,
+        tier: &str,
+        files: &[(&str, &str)],
+        extra: &[(&str, String)],
+    ) -> Option<(Session, TempRoot)> {
+        let Some(shell) = which(name) else {
+            println!("SKIPPED: {name} is not installed");
+            return None;
+        };
+        if name == "bash"
+            && !crate::child::bash_version(&shell)
+                .is_some_and(crate::child::BashVersion::integrates)
+        {
+            println!("SKIPPED: this bash is older than the integration's 4.4");
+            return None;
+        }
+        // A root of its own for each kind of session: tests run side by side, and a root with
+        // the same name is one home.
+        let root = TempRoot::new(&format!("remote-{tier}-{name}"));
+        let home = root.0.join("home");
+        std::fs::create_dir_all(&home).expect("home");
+        let home = std::fs::canonicalize(&home).expect("home");
+        for (file, text) in files {
+            let path = home.join(file);
+            std::fs::create_dir_all(path.parent().expect("a directory")).expect("rc directory");
+            std::fs::write(path, text).expect("rc file");
+        }
+        let session = sshd_with(&shell, &home, extra, true);
+        Some((session, root))
+    }
+
+    /// The prompt a user's files write, and a theme's rewrite of it at every prompt: neither may
+    /// be drawn where the terminal draws the dock.
+    const BASH_THEME: &[(&str, &str)] = &[(
+        ".bash_profile",
+        "PS1='USERPS1XY> '\nPROMPT_COMMAND='PS1=\"THEMEXY> \"'\n",
+    )];
+    const FISH_THEME: &[(&str, &str)] = &[(
+        ".config/fish/config.fish",
+        "function fish_prompt\n  echo -n 'USERPS1XY> '\nend\n\
+         function fish_right_prompt\n  echo -n 'THEMEXY'\nend\n",
+    )];
+
+    /// The dock of a server shell, end to end, for a shell that reads its line from the grid:
+    /// the prompt the user's files write is not drawn, the typed line is in the dock with the
+    /// caret after it and not on the grid, a click in the dock moves the shell's caret (bash's
+    /// widget; fish has none, so `clicks` is false there), Enter makes the command a block and the
+    /// next prompt a dock again. All of it through the identity the server's shell prints: the
+    /// terminal takes no dock event of anybody else's.
+    fn the_server_shell_has_a_dock(name: &str, session: &Session, clicks: bool) {
+        let blocks = std::cell::RefCell::new(Blocks::default());
+        let dock = || read_dock(session, &blocks);
+        let rows = || screen(session, &mut blocks.borrow_mut());
+        wait_until(&format!("{name}: the first prompt was not a dock"), || {
+            let dock = dock();
+            dock.status == DockStatus::Live && dock.buffer.is_empty()
+        });
+        session.write(b"echo su");
+        wait_until(
+            &format!("{name}: the dock did not show the typed line"),
+            || {
+                let dock = dock();
+                dock.status == DockStatus::Live && dock.buffer == "echo su"
+            },
+        );
+        assert_eq!(dock().cursor, 7, "{name}: the caret is after the line");
+        let drawn = rows().join("\n");
+        assert!(
+            !drawn.contains("USERPS1XY")
+                && !drawn.contains("THEMEXY")
+                && !drawn.contains("echo su"),
+            "{name}: the grid shows what the dock is for:\n{drawn}"
+        );
+        if clicks {
+            for index in [3usize, 0, 7] {
+                click_dock(session, &blocks, index as u16);
+                wait_until(
+                    &format!("{name}: the caret did not follow the click"),
+                    || dock().cursor == index,
+                );
+            }
+            assert_eq!(dock().buffer, "echo su", "{name}: the click edited");
+        }
+        session.write(b"\n");
+        wait_until(&format!("{name}: the command did not run"), || {
+            rows().iter().any(|row| row == "su")
+        });
+        let mut now = Blocks::default();
+        screen(session, &mut now);
+        assert!(
+            !now.as_slice().is_empty(),
+            "{name}: the command's anchor was not on the grid"
+        );
+        wait_until(&format!("{name}: the next prompt was not a dock"), || {
+            let dock = dock();
+            dock.status == DockStatus::Live && dock.buffer.is_empty()
+        });
+        // The blocks are the same blocks: a failing command, a long one and their counters.
+        draws_remote_blocks(session, name);
+    }
+
+    #[test]
+    fn a_server_bash_has_the_dock() {
+        let Some((session, _root)) = docked("bash", "dock", BASH_THEME, &[]) else {
+            return;
+        };
+        the_server_shell_has_a_dock("bash", &session, true);
+        close(&session);
+    }
+
+    #[test]
+    fn a_server_fish_has_the_dock() {
+        let Some((session, _root)) = docked("fish", "dock", FISH_THEME, &[]) else {
+            return;
+        };
+        the_server_shell_has_a_dock("fish", &session, false);
+        close(&session);
+    }
+
+    /// `[shell] integration = "blocks"` on the Mac reaches the server as `BATERI_DOCK=off` in the
+    /// terminal's environment: the user's prompt is drawn with the marks around it, the line stays
+    /// on the grid, and the widget is never bound (nothing answers a click).
+    #[test]
+    fn a_server_shell_under_the_blocks_setting_keeps_its_prompt_and_opens_no_dock() {
+        // (No right prompt here: it would sit where a block's counter is drawn.)
+        const FISH_PLAIN: &[(&str, &str)] = &[(
+            ".config/fish/config.fish",
+            "function fish_prompt\n  echo -n 'USERPS1XY> '\nend\n",
+        )];
+        for (name, files) in [("bash", BASH_THEME), ("fish", FISH_PLAIN)] {
+            let Some((session, _root)) =
+                docked(name, "blocks", files, &[("BATERI_DOCK", "off".to_owned())])
+            else {
+                continue;
+            };
+            let blocks = std::cell::RefCell::new(Blocks::default());
+            let rows = || screen(&session, &mut blocks.borrow_mut());
+            wait_until(&format!("{name}: no prompt"), || {
+                rows().iter().any(|row| row.contains("XY>"))
+            });
+            session.write(b"echo su");
+            wait_until(
+                &format!("{name}: the line was not drawn on the grid"),
+                || rows().iter().any(|row| row.contains("> echo su")),
+            );
+            assert_eq!(
+                read_dock(&session, &blocks).status,
+                DockStatus::Idle,
+                "{name}"
+            );
+            assert!(!session.can_edit_dock(), "{name}");
+            // Enter runs it (a block with the success stripe), and the blocks are drawn as ever.
+            session.write(b"\n");
+            wait_until(&format!("{name}: the command did not run"), || {
+                rows().iter().any(|row| row == "su")
+            });
+            draws_remote_blocks(&session, name);
             close(&session);
         }
     }
@@ -2844,6 +3266,7 @@ mod remote_shells {
     /// ledger, and a mark of a session with no running command is not kept.
     fn raw_output(shell: &Path, home: &Path, extra: &[(&str, String)]) -> Vec<u8> {
         use std::io::Read as _;
+        super::seed_files(shell, home, extra, None);
         let mut child = std::process::Command::new(shell)
             .arg("-c")
             .arg(remote_command(boot(), Some(PARENT), NONCE, None))
@@ -2954,12 +3377,7 @@ mod remote_shells {
             let run = |cwd: Option<&str>| {
                 let out = std::process::Command::new(&sh)
                     .arg("-c")
-                    .arg(remote_command(
-                        &boot_in(cwd, None),
-                        Some(PARENT),
-                        NONCE,
-                        None,
-                    ))
+                    .arg(remote_command(&boot_in(cwd), Some(PARENT), NONCE, None))
                     .env_clear()
                     .env("HOME", &home)
                     .env("SHELL", &shell)

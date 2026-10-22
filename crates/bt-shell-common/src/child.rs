@@ -2449,7 +2449,7 @@ pub(crate) mod tests {
     /// The line the dock shows, as the frame reads it from the grid and publishes it. The frame
     /// is what publishes, so every look is a frame; `blocks` is the caller's so the scratch the
     /// frame fills lives as long as the test does.
-    fn read_dock(session: &Session, blocks: &std::cell::RefCell<Blocks>) -> DockState {
+    pub(crate) fn read_dock(session: &Session, blocks: &std::cell::RefCell<Blocks>) -> DockState {
         screen(session, &mut blocks.borrow_mut());
         let mut state = DockState::default();
         session.dock_state(&mut state);
@@ -2589,7 +2589,7 @@ pub(crate) mod tests {
 
     /// One frame and one drawing of the dock, as the window does: the drawing is what leaves
     /// the dock's last drawn window behind, and a click in the dock is resolved against it.
-    fn draw_dock(session: &Session, blocks: &std::cell::RefCell<Blocks>) {
+    pub(crate) fn draw_dock(session: &Session, blocks: &std::cell::RefCell<Blocks>) {
         let cursor = session.frame(
             |_| (),
             |_| (),
@@ -2623,7 +2623,7 @@ pub(crate) mod tests {
 
     /// A click in the dock the way the window ends one: press on the character's left half,
     /// release without a drag.
-    fn click_dock(session: &Session, blocks: &std::cell::RefCell<Blocks>, index: u16) {
+    pub(crate) fn click_dock(session: &Session, blocks: &std::cell::RefCell<Blocks>, index: u16) {
         draw_dock(session, blocks);
         session.dock_select(
             bt_core::SelectKind::Simple,

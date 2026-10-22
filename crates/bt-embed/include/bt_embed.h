@@ -192,11 +192,11 @@ bool bt_pane_config_set_helper(BtPaneConfig *config, const char *path);
  * blocks. */
 bool bt_pane_config_set_zsh_scripts(BtPaneConfig *config, const char *dir);
 /* The same for fish (bateri's Resources/shell/fish, the directory that holds
- * vendor_conf.d). NULL or empty: a fish pane gets no integration. Read when the
- * user's shell is fish, as the zsh directory is when it is zsh. */
+ * vendor_conf.d and dock.fish). NULL or empty: a fish pane gets no integration.
+ * Read when the user's shell is fish, as the zsh directory is when it is zsh. */
 bool bt_pane_config_set_fish_scripts(BtPaneConfig *config, const char *dir);
 /* The same for bash (bateri's Resources/shell/bash, the directory that holds
- * bateri.bash). NULL or empty: a bash pane gets no integration. Read when the
+ * bateri.bash and dock.bash). NULL or empty: a bash pane gets no integration. Read when the
  * user's shell is bash 4.4 or newer; an older bash (macOS's own is 3.2) runs as
  * it did. */
 bool bt_pane_config_set_bash_scripts(BtPaneConfig *config, const char *dir);
