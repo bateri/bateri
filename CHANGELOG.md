@@ -292,6 +292,12 @@ of every installed copy. A version without a section is not released.
   integration now gives the screen back when the command is over, so the pane
   shows what it showed before the program started, with your prompt. A program
   you stop with ⌃Z keeps its screen for `fg`.
+- **A program that hands you a shell can show its view again when you leave
+  it.** An app that steps aside for a shell of its own (an editor's “drop to a
+  shell”) could not open its view once you came back: when that shell loaded
+  the iTerm2 integration, or was fish, its prompt marks made bateri think your
+  own prompt was up, and a view asked for at a prompt is ignored. Only your
+  shell's own prompt counts now.
 - **The selected tab no longer spreads over the tab beside it.** After a tab
   opened and closed in quick succession (a tab a server program asked for whose
   program ended at once, or ⌘T then ⌘W), the next tab to open beside the

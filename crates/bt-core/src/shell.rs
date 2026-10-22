@@ -3271,13 +3271,23 @@ impl ShellLog {
     /// a view in its pane is ignored while this is so: what arrives then is not a
     /// program's writing but something the shell is echoing (the pencere
     /// specification's hardening, §6.2).
+    ///
+    /// **The prompt is our shell's**, as for [`Self::at_prompt`]: while a command of
+    /// ours is open ([`Self::running_command`]) the phase a foreign shell's marks
+    /// moved is not one. A shell a program starts — an editor handing the pane to
+    /// `$SHELL` for a while — prints its own identity-less `D`/`A`/`B` when its rc
+    /// file loads the iTerm2 integration, or because it is fish 4, and the marks that
+    /// would move the phase back are dropped once the program is marked as reading
+    /// the keyboard ([`Self::raw_active`]); a shell left with ⌃D prints none at all.
+    /// Read from the phase alone, the program the shell came back to was taken for
+    /// a prompt and its `hello` was ignored for as long as it ran.
     pub(crate) fn prompt_editing(&self) -> bool {
         let editing =
             |state: Option<ShellState>| state.is_some_and(|state| state.phase == ShellPhase::Input);
         if self.context.remote.is_some() {
             return self.remote_shell.is_some() && editing(self.remote.state);
         }
-        editing(self.local.state)
+        editing(self.local.state) && self.running_command().is_none()
     }
 
     /// Whether the pane is in a remote session now: the program that writes to
@@ -11930,6 +11940,35 @@ mod tests {
         feed(&mut log, b"\x1b]133;C;bt_remote=1.9.1\x07");
         assert!(!log.prompt_editing());
         assert!(!ShellLog::new(BLOCK_LOG_FLOOR).in_remote_session());
+    }
+
+    /// A program hands the pane to a shell of its own for a while (an editor's
+    /// "drop to a shell"), and that shell prints identity-less marks — the iTerm2
+    /// integration its rc file loads, or fish 4's own. Its prompt is not ours: our
+    /// command is open until our `D`, and the program the shell gives the pane back
+    /// to is the one writing, however the inner shell ended (`exit`, or ⌃D, which
+    /// prints no mark).
+    #[test]
+    fn a_shell_a_program_starts_does_not_make_its_prompt_ours() {
+        let mut log = ShellLog::new(BLOCK_LOG_FLOOR);
+        feed(&mut log, b"\x1b]133;A;bt_block=1\x07\x1b]133;B\x07");
+        assert!(log.prompt_editing());
+        feed(&mut log, b"\x1b]133;C\x07");
+        assert!(!log.prompt_editing(), "our command runs");
+        // The inner shell's first prompt, before anything marks the program as
+        // reading the keyboard: the marks get through and move the phase.
+        feed(&mut log, b"\x1b]133;D;0\x07\x1b]133;A\x07\x1b]133;B\x07");
+        assert!(log.running_command().is_some(), "our command is still open");
+        assert!(
+            !log.prompt_editing(),
+            "the inner shell's prompt is not ours"
+        );
+        // Our own prompt is again.
+        feed(
+            &mut log,
+            b"\x1b]133;D;0;bt_block=1\x07\x1b]133;A;bt_block=2\x07\x1b]133;B\x07",
+        );
+        assert!(log.prompt_editing());
     }
 
     /// The ended commands' tallies: our identified `D` and our remote
