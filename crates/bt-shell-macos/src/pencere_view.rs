@@ -59,7 +59,7 @@ pub(crate) mod face;
 mod files;
 mod serve;
 mod still;
-mod strip;
+pub(crate) mod strip;
 mod wait;
 
 #[cfg(test)]
@@ -246,7 +246,7 @@ pub(crate) fn keyboard_in_view(window: &NSWindow) -> bool {
 
 /// The strip's place in a pane of `bounds`: the top [`view_strip::HEIGHT`] points, or all of a
 /// pane that is shorter. With [`view_area`] it is the pane exactly.
-fn strip_area(bounds: NSRect) -> NSRect {
+pub(crate) fn strip_area(bounds: NSRect) -> NSRect {
     let height = bounds.size.height.clamp(0.0, view_strip::HEIGHT);
     NSRect::new(
         NSPoint::new(
@@ -821,7 +821,7 @@ impl ViewHost {
 
     /// Points the strip's button at the pane (`quitProgram:`).
     pub(crate) fn aim(&self, pane: &TerminalPane) {
-        self.strip.aim(pane);
+        self.strip.aim(pane, objc2::sel!(quitProgram:));
     }
 
     /// Runs a call of the shell page's script.

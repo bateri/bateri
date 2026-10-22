@@ -17,6 +17,9 @@ bt-core = { workspace = true }
 # `notices` turns the renderer's font notices (`bt_gpu::FontNotice`) into
 # window-subtitle text.
 bt-gpu = { workspace = true }
+# The UI kit's page engine (`native_view`): the bridge that puts its draw list on the
+# renderer. No platform library, no other crate of the workspace.
+bt-view = { workspace = true }
 # The passwd entry (`child`, `getpwuid_r`), the process table (`jobs`: the
 # `libproc` half and `sysctl(KERN_PROCARGS2)` on macOS), `upload`'s
 # `kill`/`waitid` and `watch` (`O_EVTONLY` on macOS; inotify, `eventfd`

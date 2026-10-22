@@ -848,6 +848,25 @@ impl Theme {
         self.step(self.dock_ground_rgb())
     }
 
+    /// The background `steps` steps above, **linear** RGBA: [`Theme::step`]'s
+    /// rule applied to the panes' own background `steps` times — the tone
+    /// of a surface standing that many levels over the content (a card, a
+    /// field, a key cap in a UI page). `0` is the background itself.
+    ///
+    /// **Not a role but a value derived from the rule for "a surface a step
+    /// above"**, the same one the dock's folder row and the split tab's
+    /// ground use, so a page's cards, the dock and the ground round the
+    /// cards cannot drift apart. A page names the level, never a colour.
+    pub const fn raised_linear(&self, steps: u8) -> LinearRgba {
+        let mut tone = rgb(self.background);
+        let mut left = steps;
+        while left > 0 {
+            tone = self.step(tone);
+            left -= 1;
+        }
+        linear_rgba(tone)
+    }
+
     /// `base` a step toward the foreground: **the one rule for "a surface a
     /// step above"** — the folder row above the dock's ground, the split
     /// tab's ground above the panes. The step is larger on a dark theme,
@@ -1510,6 +1529,29 @@ mod tests {
                 "the folder row must be told apart from the input row"
             );
         }
+    }
+
+    #[test]
+    fn a_raised_surface_is_the_background_stepped_that_many_times() {
+        for theme in [Theme::BATERI, Theme::BATERI_LIGHT, Theme::LINEN] {
+            assert_eq!(theme.raised_linear(0), theme.background_linear());
+            let once = theme.step(rgb(theme.background));
+            let twice = theme.step(once);
+            assert_eq!(
+                theme.raised_linear(1),
+                linear_rgba(once),
+                "one step is the rule's"
+            );
+            assert_eq!(theme.raised_linear(2), linear_rgba(twice));
+            assert_ne!(theme.raised_linear(1), theme.raised_linear(2));
+        }
+        // Black lifted 8 % toward the foreground, once and again.
+        let [r, g, b] = Theme::BATERI.dock_ground_srgb();
+        assert_eq!(
+            Theme::BATERI.raised_linear(1),
+            LinearRgba::from_srgb(r, g, b),
+            "on pure black the first step is the dock's ground"
+        );
     }
 
     #[test]

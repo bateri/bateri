@@ -114,6 +114,8 @@ audit:
 	if $(CARGO) tree -p bt-gpu -e normal | grep -E "bt-shell"; then echo "audit: bt-gpu links upward, to the shell layer (bt-shell-*)"; fail=1; fi; \
 	if $(CARGO) tree -p bt-shell-common -e normal --depth 1 | grep -E "(^|[ ─])objc2 v|objc2-app-kit|objc2-quartz-core|objc2-foundation|objc2-user-notifications|block2|bt-shell-(macos|linux)"; then echo "audit: bt-shell-common links to a platform shell or the AppKit family"; fail=1; fi; \
 	if grep -rnE "objc2|dispatch2|block2" crates/bt-shell-common/src | grep -v "^crates/bt-shell-common/src/watch/dispatch.rs:" | grep -v ":[[:space:]]*//"; then echo "audit: platform call in bt-shell-common outside watch's macOS body (watch/dispatch.rs)"; fail=1; fi; \
+	if $(CARGO) tree -p bt-view -e normal --prefix none | tail -n +2 | grep -E "^(bt-|objc2|dispatch2|block2|metal|wgpu)"; then echo "audit: bt-view links to a crate of this workspace or a platform library — the page engine depends on its layout crate alone"; fail=1; fi; \
+	if grep -rnE "objc2|dispatch2|block2|wgpu|bt_(core|atlas|gpu|shell|embed)" crates/bt-view/src | grep -v ":[[:space:]]*//"; then echo "audit: platform call or a workspace crate named in bt-view source"; fail=1; fi; \
 	if grep -rn "objc2\|core_text\|core_graphics" crates/bt-core/src | grep -v ":[[:space:]]*//"; then echo "audit: platform call in bt-core source"; fail=1; fi; \
 	kablo_tree=$$($(CARGO) tree --workspace -e normal); kablo_revs=""; \
 	for fork in vte alacritty_terminal kablo-proto; do \
@@ -804,7 +806,7 @@ embed-tag:
 LINUX_DOCKERFILE = tools/linux/Dockerfile
 LINUX_RUST = $(shell sed -n 's/^FROM rust:\([0-9]*\.[0-9]*\)-.*/\1/p' $(LINUX_DOCKERFILE))
 LINUX_IMAGE = bateri-linux:$(LINUX_RUST)
-LINUX_CRATES = -p bt-core -p bt-atlas -p bt-gpu -p bt-shell-common
+LINUX_CRATES = -p bt-core -p bt-atlas -p bt-gpu -p bt-view -p bt-shell-common
 # In a linked worktree `.git` is a file naming the main repository's git directory by its
 # absolute path, which the container does not have: the tests that read the repository would
 # find none. The common git directory is mounted read-only at that same path; in the main

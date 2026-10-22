@@ -32,7 +32,8 @@
 //! (`palette`), what an agent on a server asks of bateri: the message, where the pane it
 //! opened lands and what `ls` tells (`agent`), the files a program's views are made of,
 //! kept on disk by their digest (`view_store`), the strip the application keeps over
-//! such a view (`view_strip`) and what the view asks of the person — the access it
+//! such a view (`view_strip`), a page of the UI kit shown in a pane — the engine's draw list on the
+//! renderer, in the pane's theme and font (`native_view`) — and what the view asks of the person — the access it
 //! declared and the links it opens — with what is remembered of the answer (`view_ask`).
 //!
 //! **The boundary:** no AppKit, Foundation, Quartz or notification centre —
@@ -63,6 +64,7 @@ pub mod kablo;
 pub mod keys;
 pub mod links;
 pub mod moves;
+pub mod native_view;
 pub mod notices;
 #[cfg(test)]
 mod outward_contract;

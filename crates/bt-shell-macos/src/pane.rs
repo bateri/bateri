@@ -2230,6 +2230,10 @@ pub struct PaneIvars {
     /// ([`TerminalPane::drain_views`]); the terminal's frames stop for as long as
     /// it is there.
     pencere: RefCell<Option<ViewHost>>,
+    /// The strip over the debug demo page, while one is up (`crate::native_page` is the page's
+    /// side; the strip is the application's own, the same one a program's view has).
+    #[cfg(debug_assertions)]
+    demo_strip: RefCell<Option<Retained<pencere_view::strip::StripView>>>,
     /// The deadlines set on the conversation with that program's view
     /// ([`TerminalPane::wait_for_view`]).
     view_waits: RefCell<Waits>,
@@ -2655,7 +2659,10 @@ define_class!(
             } else if action == Some(sel!(showFolderInFinder:)) {
                 // A folder of this Mac: a remote tab's is the server's.
                 self.local_folder().is_some_and(|folder| folder.is_dir())
-            } else if cfg!(debug_assertions) && action == Some(sel!(showUiSamplePage:)) {
+            } else if cfg!(debug_assertions)
+                && (action == Some(sel!(showUiSamplePage:))
+                    || action == Some(sel!(showContainerDemo:)))
+            {
                 // The gauge page is the terminal's cover, like a program's view:
                 // not while one of those is up.
                 !self.shows_view()
@@ -2727,6 +2734,22 @@ define_class!(
         #[unsafe(method(showUiSamplePage:))]
         fn show_ui_sample_page_sent(&self, _sender: Option<&AnyObject>) {
             self.toggle_sample_page();
+        }
+
+        /// Debug ▸ Show Container List Demo: the engine's page over this pane's terminal,
+        /// or off again (debug builds, `crate::native_page`).
+        #[cfg(debug_assertions)]
+        #[unsafe(method(showContainerDemo:))]
+        fn show_container_demo_sent(&self, _sender: Option<&AnyObject>) {
+            self.toggle_container_demo();
+        }
+
+        /// The strip's button over a page of the kit's own: the page comes down and the
+        /// terminal is the pane's again.
+        #[cfg(debug_assertions)]
+        #[unsafe(method(closeUiPage:))]
+        fn close_ui_page_sent(&self, _sender: Option<&AnyObject>) {
+            self.take_page_down();
         }
 
         /// Shell ▸ Show Folder in Finder (grey in a remote session).
@@ -2936,6 +2959,8 @@ impl TerminalPane {
             bar_pointer: Cell::new((false, false)),
             seen: Cell::new(true),
             pencere: RefCell::new(None),
+            #[cfg(debug_assertions)]
+            demo_strip: RefCell::new(None),
             view_waits: RefCell::new(Waits::default()),
             view_owed: RefCell::new(None),
             view_asking: pencere_view::ask::Asking::default(),
@@ -4376,6 +4401,10 @@ impl TerminalPane {
         if let Some(host) = self.view_host() {
             host.paint(&theme);
         }
+        #[cfg(debug_assertions)]
+        if let Some(strip) = self.ivars().demo_strip.borrow().as_ref() {
+            strip.paint(&theme);
+        }
         if let Some(bar) = self.ivars().search.get() {
             bar.paint(&theme, theme.is_dark());
         }
@@ -5777,7 +5806,7 @@ impl TerminalPane {
             return;
         };
         if link.shows_page() {
-            link.set_page(None);
+            self.take_page_down();
             return;
         }
         if self.shows_view() {
@@ -5790,6 +5819,52 @@ impl TerminalPane {
         ))));
     }
 
+    /// Debug ▸ Show Container List Demo: the engine's container-list page over the
+    /// terminal, under the application's own strip (the one a program's view has, its button
+    /// closing the page), or off again.
+    #[cfg(debug_assertions)]
+    pub(crate) fn toggle_container_demo(&self) {
+        let Some(link) = self.link() else {
+            return;
+        };
+        if link.shows_page() {
+            self.take_page_down();
+            return;
+        }
+        if self.shows_view() {
+            return;
+        }
+        let Some(session) = self.session() else {
+            return;
+        };
+        let theme = session.theme();
+        let ivars = self.ivars();
+        let strip = crate::native_page::strip(self, &theme);
+        self.addSubview_positioned_relativeTo(
+            &strip,
+            NSWindowOrderingMode::Below,
+            Some(&ivars.link_veil),
+        );
+        ivars.demo_strip.replace(Some(strip));
+        let family = ivars.font.borrow().family.clone();
+        link.set_page(Some(bt_shell_common::native_view::containers_demo(
+            family,
+            view_strip::HEIGHT as f32,
+        )));
+    }
+
+    /// Takes the page down, whichever it is: its strip with it, and the terminal's frames
+    /// come back.
+    #[cfg(debug_assertions)]
+    fn take_page_down(&self) {
+        if let Some(link) = self.link() {
+            link.set_page(None);
+        }
+        if let Some(strip) = self.ivars().demo_strip.take() {
+            strip.removeFromSuperview();
+        }
+    }
+
     /// A key while the gauge page is up: Esc and ⌃C close it, nothing else
     /// reaches the hidden terminal. `true` when the page took the key.
     #[cfg(debug_assertions)]
@@ -5798,7 +5873,7 @@ impl TerminalPane {
             return false;
         }
         if matches!(characters, Some("\u{1b}" | "\u{3}")) {
-            self.toggle_sample_page();
+            self.take_page_down();
         }
         true
     }

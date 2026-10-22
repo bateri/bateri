@@ -546,6 +546,26 @@ mod tests {
     }
 
     #[test]
+    fn a_heavy_weight_of_the_terminal_family_is_a_heavier_face_too() {
+        if !proportional() {
+            return;
+        }
+        let mut atlas = TextAtlas::new(256);
+        let regular = atlas
+            .open(&style(Family::Terminal(None), 20.0, 400))
+            .expect("opens");
+        for weight in [600, 650, 700] {
+            let heavy = atlas
+                .open(&style(Family::Terminal(None), 20.0, weight))
+                .expect("opens");
+            assert_ne!(
+                regular, heavy,
+                "weight {weight} of the terminal's face is not the regular one"
+            );
+        }
+    }
+
+    #[test]
     fn the_terminal_family_is_one_fixed_advance() {
         if !proportional() {
             return;

@@ -32,8 +32,8 @@ use bt_core::Theme;
 use bt_shell_common::view_icon::Lay;
 use bt_shell_common::view_strip::{self, Strip, Widths};
 use objc2::rc::Retained;
-use objc2::runtime::AnyObject;
-use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
+use objc2::runtime::{AnyObject, Sel};
+use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{
     NSAutoresizingMaskOptions, NSBezierPath, NSBox, NSBoxType, NSColor, NSEvent, NSFont,
     NSFontAttributeName, NSFontWeightMedium, NSForegroundColorAttributeName, NSImageScaling,
@@ -79,7 +79,7 @@ struct Palette {
     hairline: Retained<NSColor>,
 }
 
-pub(super) struct StripIvars {
+pub(crate) struct StripIvars {
     palette: RefCell<Palette>,
     /// Where the program runs, its name and the view's title; a part the strip does not say
     /// is an empty field, never shown.
@@ -105,7 +105,7 @@ define_class!(
     #[thread_kind = MainThreadOnly]
     #[name = "BateriPencereStrip"]
     #[ivars = StripIvars]
-    pub(super) struct StripView;
+    pub(crate) struct StripView;
 
     unsafe impl NSObjectProtocol for StripView {}
 
@@ -145,7 +145,7 @@ define_class!(
 impl StripView {
     /// A strip saying `text`, with the program's face before its name, painted with `theme`,
     /// of the width of `frame`.
-    pub(super) fn new(
+    pub(crate) fn new(
         mtm: MainThreadMarker,
         frame: NSRect,
         text: &Strip,
@@ -222,20 +222,20 @@ impl StripView {
         this
     }
 
-    /// Points the button at the pane's `quitProgram:`.
-    pub(super) fn aim(&self, pane: &TerminalPane) {
+    /// Points the button at `action` of the pane: `quitProgram:` over a program's view, the
+    /// close of the page over a page of the kit's own.
+    pub(crate) fn aim(&self, pane: &TerminalPane, action: Sel) {
         let target: &AnyObject = pane.as_ref();
-        // SAFETY: the selector is the pane's `quitProgram:`, which takes a single
-        // `Option<&AnyObject>`; the pane holds the strip through its view host (the target is
-        // weak).
+        // SAFETY: `action` is one of the pane's own selectors, which takes a single
+        // `Option<&AnyObject>`; the pane holds the strip (the target is weak).
         unsafe {
             self.ivars().button.setTarget(Some(target));
-            self.ivars().button.setAction(Some(sel!(quitProgram:)));
+            self.ivars().button.setAction(Some(action));
         }
     }
 
     /// Paints the strip with `theme` again, as the pane's other surfaces are.
-    pub(super) fn paint(&self, theme: &Theme) {
+    pub(crate) fn paint(&self, theme: &Theme) {
         self.ivars().palette.replace(palette(theme));
         self.colour(theme);
         self.arrange();

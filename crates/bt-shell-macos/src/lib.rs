@@ -58,6 +58,8 @@ mod keychain;
 mod launch;
 mod locale;
 mod menu;
+#[cfg(debug_assertions)]
+mod native_page;
 mod pacer;
 mod palette;
 mod pane;

@@ -711,7 +711,10 @@ pub(crate) fn install(
     bar.addItem(&submenu(
         mtm,
         "Debug",
-        &[item(mtm, "Show UI Sample Page", sel!(showUiSamplePage:))],
+        &[
+            item(mtm, "Show Container List Demo", sel!(showContainerDemo:)),
+            item(mtm, "Show UI Sample Page", sel!(showUiSamplePage:)),
+        ],
     ));
     // Every key of the bar is the table's: the defaults now, the file's once it is read
     // ([`keys::apply`] again, on launch and on every change of `[keys]`).

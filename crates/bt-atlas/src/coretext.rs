@@ -758,7 +758,22 @@ fn with_weight(font: CFRetained<CTFont>, weight: u16) -> CFRetained<CTFont> {
     let wanted = unsafe { CTFontDescriptor::with_attributes(attributes.as_opaque()) };
     // SAFETY: `font` is alive; size 0.0 keeps its size, a null matrix its
     // matrix, and `wanted` adds the weight to the font's own descriptor.
-    unsafe { font.copy_with_attributes(0.0, ptr::null(), Some(&wanted)) }
+    let heavier = unsafe { font.copy_with_attributes(0.0, ptr::null(), Some(&wanted)) };
+    // A family with two faces (the usual monospaced one: regular and bold) has no face
+    // for "semibold", and CoreText answers a weight it cannot place with the font it was
+    // asked about. A heavy request then is the family's bold, as the grid's bold is: a
+    // title set in the terminal's face must not come out as plain as the text.
+    if weight >= 600 && heavier == font {
+        let bold = CTFontSymbolicTraits::TraitBold;
+        // SAFETY: `font` is alive; a null matrix keeps its matrix and size 0.0 its size.
+        if let Some(derived) = unsafe { font.copy_with_symbolic_traits(0.0, ptr::null(), bold, bold) }
+            // SAFETY: `derived` was just created and is alive in this scope.
+            && unsafe { derived.symbolic_traits() }.contains(bold)
+        {
+            return derived;
+        }
+    }
+    heavier
 }
 
 /// Sample characters and family names for the platformless tests: a test body
