@@ -805,6 +805,12 @@ LINUX_DOCKERFILE = tools/linux/Dockerfile
 LINUX_RUST = $(shell sed -n 's/^FROM rust:\([0-9]*\.[0-9]*\)-.*/\1/p' $(LINUX_DOCKERFILE))
 LINUX_IMAGE = bateri-linux:$(LINUX_RUST)
 LINUX_CRATES = -p bt-core -p bt-atlas -p bt-gpu -p bt-shell-common
+# In a linked worktree `.git` is a file naming the main repository's git directory by its
+# absolute path, which the container does not have: the tests that read the repository would
+# find none. The common git directory is mounted read-only at that same path; in the main
+# checkout it is `.git` itself and nothing more is mounted.
+LINUX_GIT_COMMON = $(shell git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
+LINUX_GIT_MOUNT = $(if $(filter-out $(CURDIR)/.git,$(LINUX_GIT_COMMON)),-v "$(LINUX_GIT_COMMON)":"$(LINUX_GIT_COMMON)":ro)
 
 linux:
 	@yerel=$$(rustc --version | sed -n 's/^rustc \([0-9]*\.[0-9]*\).*/\1/p'); \
@@ -815,7 +821,7 @@ linux:
 	@if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then \
 		echo "SKIPPED: Docker is missing or the daemon does not answer — make linux could not run"; exit 78; fi
 	docker build -q -t $(LINUX_IMAGE) -f $(LINUX_DOCKERFILE) tools/linux
-	docker run --rm -v "$(CURDIR)":/w -v bateri-linux-cargo:/usr/local/cargo/registry \
+	docker run --rm -v "$(CURDIR)":/w $(LINUX_GIT_MOUNT) -v bateri-linux-cargo:/usr/local/cargo/registry \
 		-v bateri-linux-cargo-git:/usr/local/cargo/git \
 		-e CARGO_TARGET_DIR=/w/target/linux $(LINUX_IMAGE) sh -c '\
 		cargo clippy $(LINUX_CRATES) --all-targets --locked -- -D warnings && \
