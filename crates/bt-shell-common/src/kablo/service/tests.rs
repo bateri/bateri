@@ -1194,6 +1194,35 @@ fn a_pane_is_told_when_the_kind_of_the_program_in_front_changes_and_not_its_name
     assert!(rig.service.shown(&pane).is_none());
 }
 
+/// The server's first word on what is in front of a terminal is news even for a program no
+/// table knows: a pane handed over with a program's view over the terminal waits for it to know
+/// whether the program is still there. After it, such a name is no news again.
+#[test]
+fn a_pane_is_told_the_servers_first_word_on_its_terminal_whatever_the_program() {
+    let rig = Rig::new("first-word");
+    let pane = pane_named(&rig.world);
+    let _holder = Holder::new(&rig.socket(), "b-1");
+    let terminal = rig.terminals(1).remove(0);
+    until("the pane found", || rig.service.shown(&pane).is_some());
+    assert_eq!(rig.world.fronted(), 0, "the server has not said");
+
+    rig.world.bridge().set_state(&terminal, saying("dockerpen"));
+    until("told of the first word", || rig.world.fronted() == 1);
+    assert_eq!(rig.service.shown(&pane).and_then(|s| s.kind()), None);
+    rig.world.bridge().set_state(&terminal, saying("node"));
+    until("the name", || {
+        rig.service
+            .shown(&pane)
+            .is_some_and(|shown| shown.program.as_deref() == Some("node"))
+    });
+    std::thread::sleep(Duration::from_millis(150));
+    assert_eq!(
+        rig.world.fronted(),
+        1,
+        "a second name no one knows is no news"
+    );
+}
+
 #[test]
 fn a_program_name_is_shown_without_the_controls_the_server_sent() {
     let rig = Rig::new("clean");

@@ -124,10 +124,16 @@ impl Waits {
     }
 
     /// The program is offered a restart again ([`bt_core::Session::restart_view`]): an
-    /// offer that went unanswered before is not this one.
+    /// offer that went unanswered before is not this one, and neither is the time of an
+    /// offer still waited for — the new token has a time of its own, or an offer made late in
+    /// the first one's (the first went nowhere: a terminal a server keeps, before its bridge
+    /// was up) would be forgotten almost at once.
     pub(crate) fn restart_offered(&mut self) {
         if self.spent == Some(State::Offered) {
             self.spent = None;
+        }
+        if self.armed == Some(State::Offered) {
+            self.armed = None;
         }
     }
 

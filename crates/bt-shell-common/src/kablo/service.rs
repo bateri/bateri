@@ -384,9 +384,11 @@ pub trait Backend: Send + Sync + 'static {
     /// The program in front of the terminal `pane` shows is another one as far as
     /// the pane's icon tells ([`Shown::kind`]): `npm` for `claude`, a program
     /// for the shell. Told once per change of that kind — not of the name: one
-    /// program nothing here knows for another is not news — and with the terminal
+    /// program nothing here knows for another is not news — with the terminal
     /// appearing (a program already in front) or going (the pane has the server's
-    /// icon again). Called on the service's thread; the application hops to its own.
+    /// icon again), and when the server first says what is in front, whatever it is
+    /// (a pane handed over with a program's view over the terminal waits for that
+    /// word). Called on the service's thread; the application hops to its own.
     fn program_changed(&self, _pane: &PaneUuid) {}
 
     /// The terminals the account's server keeps in the background
@@ -1698,11 +1700,19 @@ impl Core {
         let kind_of = |shown: &HashMap<PaneUuid, Shown>, pane: &PaneUuid| {
             shown.get(pane).and_then(Shown::kind)
         };
+        // The server's first word on what is in front is news whatever the kind: a pane handed
+        // over with a program's view over its terminal waits for it to know whether the program
+        // is still there.
+        let said = |shown: &HashMap<PaneUuid, Shown>, pane: &PaneUuid| {
+            shown.get(pane).is_some_and(|shown| shown.program.is_some())
+        };
         for pane in shown
             .keys()
             .chain(before.keys().filter(|p| !shown.contains_key(*p)))
         {
-            if kind_of(&before, pane) != kind_of(&shown, pane) {
+            if kind_of(&before, pane) != kind_of(&shown, pane)
+                || (said(&shown, pane) && !said(&before, pane))
+            {
                 self.shared.backend.program_changed(pane);
             }
         }

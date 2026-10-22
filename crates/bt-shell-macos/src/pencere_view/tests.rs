@@ -538,6 +538,24 @@ fn an_offer_that_ran_out_is_not_waited_for_again_until_the_conversation_has_been
 }
 
 #[test]
+fn an_offer_made_again_while_the_first_is_waited_for_has_a_time_of_its_own() {
+    let mut waits = Waits::default();
+    let (first, _) = waits.observe(Some(State::Offered)).expect("set");
+    // The first offer went nowhere and the program is offered again: a new token, a new time.
+    waits.restart_offered();
+    let (second, delay) = waits
+        .observe(Some(State::Offered))
+        .expect("the new offer waits");
+    assert_eq!(delay, OFFERED);
+    assert_ne!(first, second);
+    assert!(
+        !waits.expired(first),
+        "the first offer's time is not the new one's"
+    );
+    assert!(waits.expired(second));
+}
+
+#[test]
 fn the_requests_of_a_view_are_waited_for_once_for_a_burst() {
     let mut waits = Waits::default();
     let (first, delay) = waits.requests_out().expect("a request waits");
