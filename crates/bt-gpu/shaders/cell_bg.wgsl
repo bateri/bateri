@@ -99,22 +99,9 @@ fn cell_bg_fragment(in: Out) -> @location(0) vec4<f32> {
 // in `frame.rs` inflates it); the glow lives exactly in that difference. The
 // fragment does not recompute the inflation — its size is already `shape.z`.
 
-// Signed distance to a rounded box; negative = inside, zero = the edge.
-// `p` is relative to the centre, `half_size` the half extent.
-//
-// The `min` is NOT a policy but a mathematical precondition: the SDF needs the
-// radius not to exceed the half extent. The one side that decides the radius's
-// VALUE is Rust (bt_gpu::frame::caret_radius_px) — it is the side that knows
-// the cell size and the tests read from there. The clamp here only defends
-// against a broken immediate.
-//
-// `max(q, 0.0)` must be spelled with a vector in WGSL: there is no scalar
-// splat.
-fn rounded_box_sdf(p: vec2<f32>, half_size: vec2<f32>, radius: f32) -> f32 {
-    let r = min(radius, min(half_size.x, half_size.y));
-    let q = abs(p) - half_size + r;
-    return length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0) - r;
-}
+// `rounded_box_sdf` (the signed distance to a rounded box) lives in
+// `sdf.wgsl`, appended to this file at compile time like `edge.wgsl`, because
+// the UI kit's pipeline (`ui.wgsl`) draws its corners with the same function.
 
 @fragment
 fn caret_fragment(in: Out) -> @location(0) vec4<f32> {

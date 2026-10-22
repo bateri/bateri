@@ -705,6 +705,14 @@ pub(crate) fn install(
     bar.addItem(&edit_menu);
     bar.addItem(&view_menu);
     bar.addItem(&window_menu);
+    // Debug builds only: the gauge for the UI kit. No key and no table row, so
+    // the shortcut page has nothing of it to list.
+    #[cfg(debug_assertions)]
+    bar.addItem(&submenu(
+        mtm,
+        "Debug",
+        &[item(mtm, "Show UI Sample Page", sel!(showUiSamplePage:))],
+    ));
     // Every key of the bar is the table's: the defaults now, the file's once it is read
     // ([`keys::apply`] again, on launch and on every change of `[keys]`).
     keys::apply(

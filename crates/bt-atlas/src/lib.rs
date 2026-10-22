@@ -53,6 +53,7 @@ mod freetype;
 mod raster;
 mod rules;
 mod system;
+mod text;
 
 use std::collections::{HashMap, HashSet};
 
@@ -62,6 +63,10 @@ use rules::Faces;
 pub use rules::{Face, FontIssue, Metrics, SizeClass};
 pub use rules::{family_issue, monospaced_families};
 use system::{Backend, Font, FontSystem};
+pub use text::{
+    Family, FontId, GlyphEntry, PlacedGlyph, SUBPIXELS, ShapedText, TextAtlas, TextStyle,
+    TextUpload, subpixel,
+};
 
 /// The cell's two spacing multipliers: `[font] line_height` and
 /// `[font] letter_spacing`.

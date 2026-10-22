@@ -1193,6 +1193,11 @@ define_class!(
         #[unsafe(method(scrollWheel:))]
         fn scroll_wheel(&self, event: &NSEvent) {
             self.note_interaction();
+            // The debug gauge page covers the terminal: the wheel is not the grid's.
+            #[cfg(debug_assertions)]
+            if self.pane().is_some_and(|pane| pane.shows_sample_page()) {
+                return;
+            }
             let Some(session) = self.ivars().session.get() else {
                 return;
             };
@@ -1306,6 +1311,13 @@ define_class!(
         #[unsafe(method(keyDown:))]
         fn key_down(&self, event: &NSEvent) {
             self.note_interaction();
+            // The debug gauge page covers the terminal: its keys are the page's.
+            #[cfg(debug_assertions)]
+            if let Some(pane) = self.pane()
+                && pane.sample_page_key(event.characters().map(|c| c.to_string()).as_deref())
+            {
+                return;
+            }
             let flags = event.modifierFlags();
             let Some(session) = self.ivars().session.get() else {
                 return;
@@ -2481,6 +2493,11 @@ impl BateriView {
     /// On release `Clamp`'s `fill_rows` is passed as zero: the area above the
     /// band must give a cell too, `bt-core` does the clamping.
     fn button_event(&self, event: &NSEvent, button: MouseButton, pressed: bool) {
+        // The debug gauge page covers the terminal: a press is not the grid's.
+        #[cfg(debug_assertions)]
+        if self.pane().is_some_and(|pane| pane.shows_sample_page()) {
+            return;
+        }
         let Some(session) = self.ivars().session.get() else {
             return;
         };
@@ -2734,6 +2751,10 @@ impl BateriView {
     /// motion *states* a place and is rejected outside the grid - a pointer
     /// roaming over the title bar must not report row 0 to the application.
     fn motion_event(&self, event: &NSEvent, button: Option<MouseButton>) {
+        #[cfg(debug_assertions)]
+        if self.pane().is_some_and(|pane| pane.shows_sample_page()) {
+            return;
+        }
         let Some(session) = self.ivars().session.get() else {
             return;
         };

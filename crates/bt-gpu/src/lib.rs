@@ -19,6 +19,13 @@
 //! are this crate's too: `bt-atlas` gives slot numbers and CPU bitmaps, this
 //! crate writes them to the textures and draws them with the `cell` pipeline.
 //!
+//! **A pane can also paint a UI page instead of the grid** ([`UiPage`],
+//! [`UiList`]): boxes with radii, borders and soft shadows and glyphs of
+//! proportional text, drawn by two more pipelines (`ui.wgsl`) in pixels of the
+//! surface. The renderer measures that text and draws it from one font
+//! registry and one text atlas, so a width asked of it is the width it paints;
+//! nothing in the list knows what a terminal is, nor what built it.
+//!
 //! **There are six pipelines** and three share a vertex: `cell_bg`
 //! (backgrounds, block stripes, the dock's ground), `cell` (glyphs and rules;
 //! it samples the atlas), `caret` (`cell_bg_vertex` + `caret_fragment`),
@@ -86,6 +93,7 @@ pub use link::{DisplayLink, Layout, Origin, Pacer, Shot, Snapshot, TickTarget, T
 pub use metrics::{CellMetrics, FontNotice, GridInset, family_notice};
 pub use renderer::Renderer;
 pub use renderer::shrink::tile_crop;
+pub use renderer::ui::{UiContext, UiGlyph, UiItem, UiList, UiPage, UiQuad, UiRect, tint};
 pub use scrollbar::{Mode as ScrollbarMode, ScrollbarLayout, strip_px as scrollbar_strip_px};
 pub use stats::{MIN_SAMPLES, Samples, Stats};
 pub use surface::Surface;
@@ -94,3 +102,8 @@ pub use surface::Surface;
 /// chain opens without a notice. Re-exported because `bt-shell` does not see
 /// `bt-atlas` (the precedent is [`FontNotice`]).
 pub use bt_atlas::monospaced_families;
+
+/// The UI kit's text types, re-exported for the same reason: a page names a
+/// font ([`TextStyle`]) and gets a measured line ([`ShapedText`]) back
+/// without `bt-shell` seeing `bt-atlas`.
+pub use bt_atlas::{Family as TextFamily, FontId as TextFontId, ShapedText, TextStyle};

@@ -143,6 +143,7 @@ use crate::frame::{ContextStrip, Frame};
 use crate::glyph_fx::GlyphFx;
 use crate::metrics::CellMetrics;
 use crate::motion::Motion;
+use crate::renderer::ui::{UiContext, UiPage};
 use crate::scrollbar::{Look, Mode, Scrollbar, ScrollbarLayout};
 use crate::stats::Stats;
 use crate::surface::{self, Acquired};
@@ -717,6 +718,11 @@ struct Core {
     /// font, `Arc` would make a false promise of "may cross threads".
     /// `session` really crosses, so it stays `Arc`.
     renderer: Rc<Renderer>,
+    /// A UI page that paints the surface in place of the terminal grid
+    /// ([`DisplayLink::set_page`]). While there is one, a tick that has
+    /// damage builds and draws the page and nothing of the terminal's frame
+    /// path runs; a tick without damage sleeps.
+    page: RefCell<Option<Box<dyn UiPage>>>,
     /// The window's surface; `bt-shell` sizes it, the tick acquires from it.
     surface: Rc<Surface>,
     session: Arc<Session>,
@@ -1229,6 +1235,10 @@ impl Core {
             self.waker.pacer().set_running(false);
             return;
         }
+        // A page covering the terminal draws instead of it.
+        if self.page_tick() {
+            return;
+        }
         // The first frame has no `dt`: starting at `0.0` beats inventing an
         // unknown interval. `Motion::advance` does the clamping and it must be
         // there (reason: `motion::DT_MAX`).
@@ -1627,6 +1637,56 @@ impl Core {
         // frame would land in `cpu_encode`, and that token claims the
         // drawing's duration.
         self.notice_alt_screen();
+    }
+
+    /// The tick of a link that shows a UI page: `false` when there is none
+    /// (the terminal's own frame path runs), otherwise the tick is spent here.
+    ///
+    /// A frame is drawn only for damage — the surface resized, the theme or
+    /// the font changed, the page asked for one ([`DisplayLink::request_frame`])
+    /// — and a tick without it puts the pacer to sleep, so a page that does
+    /// not change costs no frames. The terminal's output is damage too: it is
+    /// taken here and answered with a page frame, so a program streaming under
+    /// a page redraws the page each time. The page is the debug sample today.
+    fn page_tick(&self) -> bool {
+        let mut slot = self.page.borrow_mut();
+        let Some(page) = slot.as_mut() else {
+            return false;
+        };
+        if !self.session.take_damage() {
+            self.waker.pacer().set_running(false);
+            return true;
+        }
+        let Some(texture) = self.acquire() else {
+            return true;
+        };
+        let theme = self.session.theme();
+        self.theme.set(theme);
+        let size_px = self.surface.size().unwrap_or((0, 0));
+        let cx = UiContext {
+            renderer: &self.renderer,
+            size_px,
+            scale: self.cell.get().scale(),
+            theme: &theme,
+        };
+        let mut list = page.build(&cx);
+        // The text atlas filled and was cleared while the list was built:
+        // glyphs placed before the clear point at texels later ones took.
+        if self.renderer.ui_flushed() {
+            list = page.build(&cx);
+            let _ = self.renderer.ui_flushed();
+        }
+        let target = surface::target(&texture);
+        match self
+            .renderer
+            .draw_ui(&target, theme.background_linear(), &list)
+        {
+            Ok(()) => self.renderer.present(texture),
+            Err(e) => {
+                self.retry.draw_failed(&e);
+            }
+        }
+        true
     }
 
     /// The "no damage" branch of [`Core::tick`]: two possibilities left and
@@ -2758,6 +2818,7 @@ impl DisplayLink {
         renderer.set_gpu_timing(stats.is_some());
         let core = Rc::new(Core {
             renderer,
+            page: RefCell::new(None),
             surface,
             session,
             retry,
@@ -2961,6 +3022,20 @@ impl DisplayLink {
     /// frame; the stop condition is the tick itself.
     pub fn request_frame(&self) {
         self.waker.wake();
+    }
+
+    /// Shows `page` over the terminal — its list is painted in place of the
+    /// grid — or, with `None`, takes it down and the terminal's frames come
+    /// back. Either way a frame is asked for: what was drawn is no longer
+    /// valid. Main thread, like every call here.
+    pub fn set_page(&self, page: Option<Box<dyn UiPage>>) {
+        *self.core.page.borrow_mut() = page;
+        self.waker.wake();
+    }
+
+    /// Whether a page is shown ([`DisplayLink::set_page`]).
+    pub fn shows_page(&self) -> bool {
+        self.core.page.borrow().is_some()
     }
 
     /// Scrolling **input** arrived — the wheel, a page scroll, a search jump —

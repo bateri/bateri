@@ -8,7 +8,9 @@
 //! planes), `selection` (the mouse selection and the search highlights),
 //! `image` (the pictures programs send, one texture each),
 //! `glyph_fx` (the dock's typing effects) and `shrink` (the reduction a still
-//! of the pane is brought to a tile by, `shrink.rs`). Why each pipeline exists
+//! of the pane is brought to a tile by, `shrink.rs`) — and two more that paint
+//! a UI page instead of the grid, `ui_quad` and `ui_glyph` (boxes and
+//! proportional text, `ui.rs`). Why each pipeline exists
 //! is written on [`Gpu`]'s fields; why the draws come in the
 //! order they do, per surface, is written in [`Renderer::plan`].
 //!
@@ -1027,6 +1029,9 @@ pub(crate) struct Gpu {
     /// The atlas planes' bind group layout and the linear sampler again — it
     /// is a picture being scaled — and no vertex buffer.
     shrink: wgpu::RenderPipeline,
+    /// The UI kit's boxes and glyphs (`ui.wgsl`): the pipelines a page's draw
+    /// list is painted with ([`ui`]).
+    ui: ui::Pipelines,
     /// The atlas planes' bind group layout: texture @0, sampler @1.
     plane_layout: wgpu::BindGroupLayout,
     /// The effects' layout: mask @0, colour @1, nearest @2, linear @3.
@@ -1157,6 +1162,7 @@ impl Gpu {
             source: wgpu::ShaderSource::Wgsl(
                 concat!(
                     include_str!("../shaders/cell_bg.wgsl"),
+                    include_str!("../shaders/sdf.wgsl"),
                     include_str!("../shaders/edge.wgsl")
                 )
                 .into(),
@@ -1302,6 +1308,7 @@ impl Gpu {
             min_filter: wgpu::FilterMode::Linear,
             ..wgpu::SamplerDescriptor::default()
         });
+        let ui = ui::Pipelines::new(&device, &plane_layout);
         if let Some(error) = block_on(scope.pop()) {
             return Err(format!("pipeline creation failed: {error}"));
         }
@@ -1319,6 +1326,7 @@ impl Gpu {
             glyph_fx,
             image,
             shrink,
+            ui,
             plane_layout,
             fx_layout,
             sampler,
@@ -1772,6 +1780,8 @@ pub struct Renderer {
     timing: Cell<bool>,
     /// Idle [`Timing`]s, reused.
     spare: RefCell<Vec<Timing>>,
+    /// The UI kit's half: the text atlas and the page's instance buffers.
+    ui: RefCell<ui::UiState>,
     /// Test hook: the next frame carries an invalid scissor, so its submit
     /// fails validation (the synchronous error leg).
     #[cfg(test)]
@@ -1804,6 +1814,7 @@ impl Renderer {
             in_flight: RefCell::new(VecDeque::new()),
             timing: Cell::new(false),
             spare: RefCell::new(Vec::new()),
+            ui: RefCell::new(ui::UiState::default()),
             #[cfg(test)]
             poison: Cell::new(false),
         }
@@ -3318,5 +3329,8 @@ mod picture_tests;
 pub(crate) mod shrink;
 #[cfg(test)]
 pub(crate) mod tests;
+pub mod ui;
+#[cfg(test)]
+mod ui_tests;
 #[cfg(test)]
 mod wgpu_tests;

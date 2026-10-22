@@ -68,6 +68,8 @@ mod pointer;
 mod preview;
 mod promise;
 mod remote_ports;
+#[cfg(debug_assertions)]
+mod sample_page;
 mod search_bar;
 mod server_card;
 mod server_stats;

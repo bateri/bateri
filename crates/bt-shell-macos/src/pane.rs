@@ -2655,6 +2655,10 @@ define_class!(
             } else if action == Some(sel!(showFolderInFinder:)) {
                 // A folder of this Mac: a remote tab's is the server's.
                 self.local_folder().is_some_and(|folder| folder.is_dir())
+            } else if cfg!(debug_assertions) && action == Some(sel!(showUiSamplePage:)) {
+                // The gauge page is the terminal's cover, like a program's view:
+                // not while one of those is up.
+                !self.shows_view()
             } else {
                 true
             }
@@ -2715,6 +2719,14 @@ define_class!(
             if let Some(text) = self.folder_text() {
                 clipboard::copy(&NSPasteboard::generalPasteboard(), Some(text));
             }
+        }
+
+        /// Debug ▸ Show UI Sample Page: the kit's gauge page over this pane's
+        /// terminal, or off again (debug builds, `crate::sample_page`).
+        #[cfg(debug_assertions)]
+        #[unsafe(method(showUiSamplePage:))]
+        fn show_ui_sample_page_sent(&self, _sender: Option<&AnyObject>) {
+            self.toggle_sample_page();
         }
 
         /// Shell ▸ Show Folder in Finder (grey in a remote session).
@@ -5747,6 +5759,48 @@ impl TerminalPane {
     /// pane for the keyboard and the focus).
     fn view_host(&self) -> Option<ViewHost> {
         self.ivars().pencere.borrow().clone()
+    }
+
+    /// Whether the debug gauge page is over the terminal.
+    #[cfg(debug_assertions)]
+    pub(crate) fn shows_sample_page(&self) -> bool {
+        self.link().is_some_and(DisplayLink::shows_page)
+    }
+
+    /// Debug ▸ Show UI Sample Page: puts the gauge page over the terminal, or
+    /// takes it down. Its frames are the link's ([`DisplayLink::set_page`]);
+    /// the terminal's come back with the page's end, drawn again with whatever
+    /// it printed meanwhile.
+    #[cfg(debug_assertions)]
+    pub(crate) fn toggle_sample_page(&self) {
+        let Some(link) = self.link() else {
+            return;
+        };
+        if link.shows_page() {
+            link.set_page(None);
+            return;
+        }
+        if self.shows_view() {
+            return;
+        }
+        let font = self.ivars().font.borrow();
+        link.set_page(Some(Box::new(crate::sample_page::SamplePage::new(
+            font.family.clone(),
+            font.size,
+        ))));
+    }
+
+    /// A key while the gauge page is up: Esc and ⌃C close it, nothing else
+    /// reaches the hidden terminal. `true` when the page took the key.
+    #[cfg(debug_assertions)]
+    pub(crate) fn sample_page_key(&self, characters: Option<&str>) -> bool {
+        if !self.shows_sample_page() {
+            return false;
+        }
+        if matches!(characters, Some("\u{1b}" | "\u{3}")) {
+            self.toggle_sample_page();
+        }
+        true
     }
 
     /// Whether a program's view is over the terminal.

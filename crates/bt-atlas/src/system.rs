@@ -12,6 +12,7 @@
 
 use crate::raster::DrawResult;
 use crate::rules::{Face, InkRect, Metrics, RawMetrics};
+use crate::text::{Family, ShapedLine, TextBitmap};
 
 /// The primitives a platform's font stack answers.
 ///
@@ -112,6 +113,38 @@ pub(crate) trait FontSystem {
         baseline: f64,
         target: &mut [u8],
     ) -> DrawResult;
+
+    /// Does the backend shape and draw **proportional** text (`crate::text`)?
+    /// A backend that does not keeps the defaults below, which all answer
+    /// "no": the caller asks this first, so the defaults are never a silent
+    /// wrong answer.
+    const PROPORTIONAL: bool = false;
+
+    /// Opens `family` at `size` pixels and `weight` (CSS scale, 100–900;
+    /// 400 is regular). `None`: the backend has no proportional text.
+    fn open_text(_family: &Family, _size: f64, _weight: u16) -> Option<Self::Font> {
+        None
+    }
+
+    /// Are two opened fonts the same font — the identity the text registry
+    /// numbers by (CoreText: `CFEqual`, which sees size and variation too).
+    fn same_font(_a: &Self::Font, _b: &Self::Font) -> bool {
+        false
+    }
+
+    /// Shapes one line of `text` from `font`, falling back through the
+    /// system's cascade per run.
+    fn shape_line(_font: &Self::Font, _text: &str) -> Option<ShapedLine<Self::Font>> {
+        None
+    }
+
+    /// Draws one glyph's coverage into a tight bitmap, its origin shifted
+    /// right by `sub` pixels (`0.0 <= sub < 1.0`): the horizontal sub-pixel
+    /// position the text atlas keys on. `None` for a glyph with no ink
+    /// (a space) or a drawing target the backend could not make.
+    fn draw_text_glyph(_font: &Self::Font, _glyph: u32, _sub: f64) -> Option<TextBitmap> {
+        None
+    }
 }
 
 /// The font system of the platform being built.

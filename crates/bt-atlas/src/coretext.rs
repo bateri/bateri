@@ -18,13 +18,15 @@ use objc2_core_graphics::{
     CGBitmapContextCreate, CGColorSpace, CGContext, CGGlyph, CGImageAlphaInfo, kCGColorSpaceSRGB,
 };
 use objc2_core_text::{
-    CTFont, CTFontDescriptor, CTFontOrientation, CTFontSymbolicTraits, CTLine, CTRun,
-    kCTFontAttributeName, kCTFontFamilyNameAttribute, kCTFontSymbolicTrait, kCTFontTraitsAttribute,
+    CTFont, CTFontDescriptor, CTFontOrientation, CTFontSymbolicTraits, CTFontUIFontType, CTLine,
+    CTRun, kCTFontAttributeName, kCTFontFamilyNameAttribute, kCTFontSymbolicTrait,
+    kCTFontTraitsAttribute, kCTFontWeightTrait,
 };
 
 use crate::raster::DrawResult;
 use crate::rules::{Face, InkRect, Metrics, RawMetrics};
 use crate::system::FontSystem;
+use crate::text::{Family, ShapedLine, ShapedRun, TextBitmap};
 
 /// Order of preference. A name that cannot be found is skipped **silently**:
 /// SF Mono ships with Xcode, it is not on every machine, and its absence is
@@ -540,6 +542,223 @@ impl FontSystem for CoreText {
         drop(ctx);
         DrawResult::Drawn
     }
+
+    const PROPORTIONAL: bool = true;
+
+    /// The system face is `CTFontCreateUIFontForLanguage`'s (San Francisco),
+    /// the terminal family goes through the grid's own opening rules: the
+    /// named family if the machine has it, the default chain's otherwise —
+    /// so the UI can be set in the very font the grid uses.
+    fn open_text(family: &Family, size: f64, weight: u16) -> Option<Self::Font> {
+        let base = match family {
+            // SAFETY: a named UI constant; a null language asks for the
+            // system's own; the return is checked.
+            Family::System => {
+                unsafe { CTFont::new_ui_font_for_language(CTFontUIFontType::System, size, None) }?
+            }
+            Family::Terminal(Some(name)) => {
+                let (font, returned) = Self::open(name, size);
+                if returned == *name {
+                    font
+                } else {
+                    Self::open_default(size).0
+                }
+            }
+            Family::Terminal(None) => Self::open_default(size).0,
+        };
+        Some(with_weight(base, weight))
+    }
+
+    /// `CFEqual` on the two fonts: it sees the size and the variation axes
+    /// too, which the PostScript name does not (the system face is a variable
+    /// font whose weights share a name).
+    fn same_font(a: &Self::Font, b: &Self::Font) -> bool {
+        a == b
+    }
+
+    /// One `CTLine` for the whole string. The line does the cascade itself:
+    /// a character the font lacks arrives in a run of the font CoreText chose,
+    /// and each run reports the font it used, so the glyph numbers are
+    /// always read with the right font.
+    fn shape_line(font: &Self::Font, text: &str) -> Option<ShapedLine<Self::Font>> {
+        let string = CFString::from_str(text);
+        // SAFETY: the key is a constant CoreText exports, alive for the whole
+        // program.
+        let font_key = unsafe { kCTFontAttributeName };
+        let attributes = CFDictionary::from_slices(&[font_key], &[&**font]);
+        // SAFETY: the allocator is the default (`None`), the string and the
+        // dictionary are alive; the dictionary has the shape CoreText expects
+        // — `kCTFontAttributeName` → `CTFont`.
+        let attributed =
+            unsafe { CFAttributedString::new(None, Some(&string), Some(attributes.as_opaque())) }?;
+        // SAFETY: `attributed` is alive; the line copies it.
+        let line = unsafe { CTLine::with_attributed_string(&attributed) };
+        let (mut ascent, mut descent, mut leading) = (0.0, 0.0, 0.0);
+        // SAFETY: three valid out pointers, alive for the call.
+        let width = unsafe { line.typographic_bounds(&mut ascent, &mut descent, &mut leading) };
+        if ascent + descent <= 0.0 {
+            // An empty line reports nothing; its height is the font's.
+            // SAFETY: `font` is alive; pure reads.
+            unsafe {
+                ascent = font.ascent();
+                descent = font.descent();
+                leading = font.leading();
+            }
+        }
+        // SAFETY: `line` is alive; per the documentation the array's elements
+        // are `CTRun`.
+        let runs = unsafe { line.glyph_runs() };
+        // SAFETY: the function's documentation gives the element type as
+        // `CTRun`.
+        let runs = unsafe { runs.cast_unchecked::<CTRun>() };
+        let mut shaped = Vec::new();
+        for run in runs.iter() {
+            // SAFETY: `run` is alive; a pure read.
+            let count = usize::try_from(unsafe { run.glyph_count() }).unwrap_or(0);
+            if count == 0 {
+                continue;
+            }
+            let mut glyphs = vec![0 as CGGlyph; count];
+            let mut positions = vec![CGPoint::ZERO; count];
+            // A zero length copies from the start to the run's end. Both
+            // buffers hold `count` elements, the run's own glyph count; the
+            // pointers derive from the slices, not from the first element.
+            let whole = CFRange {
+                location: 0,
+                length: 0,
+            };
+            // SAFETY: the buffers are `count` long and alive for both calls.
+            unsafe {
+                run.glyphs(whole, NonNull::from(&mut glyphs[..]).cast::<CGGlyph>());
+                run.positions(whole, NonNull::from(&mut positions[..]).cast::<CGPoint>());
+            }
+            // SAFETY: `run` is alive; the attribute dictionary is the line's
+            // as it falls to the run, its keys are `CFString`.
+            let attributes = unsafe { run.attributes() };
+            // SAFETY: the keys of CoreText's attribute dictionary are
+            // `CFString`; the value's type is checked below with `downcast`.
+            let attributes = unsafe { attributes.cast_unchecked::<CFString, CFType>() };
+            let used = attributes
+                .get(font_key)
+                .and_then(|used| used.downcast::<CTFont>().ok())
+                .unwrap_or_else(|| font.clone());
+            shaped.push(ShapedRun {
+                font: used,
+                glyphs: glyphs
+                    .into_iter()
+                    .zip(positions)
+                    .map(|(glyph, at)| (u32::from(glyph), at.x))
+                    .collect(),
+            });
+        }
+        Some(ShapedLine {
+            runs: shaped,
+            width,
+            ascent,
+            descent,
+            leading,
+        })
+    }
+
+    /// The bitmap is the glyph's ink box widened to whole pixels at the
+    /// requested sub-pixel offset, plus a one-pixel margin on every side:
+    /// antialiasing bleeds a fraction past the box and a linear sampler
+    /// reads one texel beyond it.
+    fn draw_text_glyph(font: &Self::Font, glyph: u32, sub: f64) -> Option<TextBitmap> {
+        let ink = Self::ink(font, glyph);
+        if ink.width <= 0.0 || ink.height <= 0.0 {
+            return None;
+        }
+        let left = (ink.x + sub).floor() - 1.0;
+        let right = (ink.x + sub + ink.width).ceil() + 1.0;
+        let bottom = (ink.y).floor() - 1.0;
+        let top = (ink.y + ink.height).ceil() + 1.0;
+        // A glyph this large is a broken font, not text.
+        if right - left > 1024.0 || top - bottom > 1024.0 {
+            return None;
+        }
+        let (w, h) = ((right - left) as usize, (top - bottom) as usize);
+        let mut data = vec![0u8; w * h];
+        // Same context as the grid's mask: alpha only, 8 bits, grey smoothing
+        // off (the target is one channel and the system dropped subpixel AA).
+        // SAFETY: `data` is w*h bytes and alive while the context lives (to
+        // the end of this function); the dimensions match the buffer.
+        let ctx = unsafe {
+            CGBitmapContextCreate(
+                data.as_mut_ptr().cast::<c_void>(),
+                w,
+                h,
+                8,
+                w,
+                None,
+                CGImageAlphaInfo::Only.0,
+            )
+        }?;
+        CGContext::set_should_antialias(Some(&ctx), true);
+        CGContext::set_allows_font_smoothing(Some(&ctx), false);
+        CGContext::set_should_smooth_fonts(Some(&ctx), false);
+        CGContext::set_gray_fill_color(Some(&ctx), 1.0, 1.0);
+        // The bitmap's origin is `(left, bottom)` of font space, so the glyph
+        // origin sits at `(sub - left, -bottom)`; CG's y runs up and the
+        // buffer's first row is the top, as the grid's slots are.
+        let position = CGPoint::new(sub - left, -bottom);
+        let glyph = cg_glyph(glyph);
+        // SAFETY: one glyph, one position, the count matches both; context
+        // alive.
+        unsafe { font.draw_glyphs(NonNull::from(&glyph), NonNull::from(&position), 1, &ctx) };
+        drop(ctx);
+        Some(TextBitmap {
+            width: u16::try_from(w).ok()?,
+            height: u16::try_from(h).ok()?,
+            left: left as i16,
+            top: top as i16,
+            data,
+        })
+    }
+}
+
+/// The CoreText weight trait (`NSFontWeight`'s scale, -1…1) for a CSS weight:
+/// the named weights are the system's own constants, the values between them
+/// interpolated.
+fn weight_trait(weight: u16) -> f64 {
+    const STOPS: [(f64, f64); 9] = [
+        (100.0, -0.8),
+        (200.0, -0.6),
+        (300.0, -0.4),
+        (400.0, 0.0),
+        (500.0, 0.23),
+        (600.0, 0.3),
+        (700.0, 0.4),
+        (800.0, 0.56),
+        (900.0, 0.62),
+    ];
+    let w = f64::from(weight).clamp(100.0, 900.0);
+    let upper = STOPS.iter().position(|&(at, _)| at >= w).unwrap_or(8);
+    if upper == 0 {
+        return STOPS[0].1;
+    }
+    let ((w0, t0), (w1, t1)) = (STOPS[upper - 1], STOPS[upper]);
+    t0 + (t1 - t0) * (w - w0) / (w1 - w0)
+}
+
+/// `font` at `weight`: regular is left as opened, any other weight asks the
+/// same family for the nearest face with that weight trait.
+fn with_weight(font: CFRetained<CTFont>, weight: u16) -> CFRetained<CTFont> {
+    if weight == 400 {
+        return font;
+    }
+    let value = CFNumber::new_f64(weight_trait(weight));
+    // SAFETY: both keys are constants CoreText exports, alive for the whole
+    // program.
+    let (traits_key, weight_key) = unsafe { (kCTFontTraitsAttribute, kCTFontWeightTrait) };
+    let traits = CFDictionary::from_slices(&[weight_key], &[&*value]);
+    let attributes = CFDictionary::from_slices(&[traits_key], &[&*traits]);
+    // SAFETY: the dictionary has the shape CoreText expects —
+    // `kCTFontWeightTrait` → `CFNumber` under `kCTFontTraitsAttribute`.
+    let wanted = unsafe { CTFontDescriptor::with_attributes(attributes.as_opaque()) };
+    // SAFETY: `font` is alive; size 0.0 keeps its size, a null matrix its
+    // matrix, and `wanted` adds the weight to the font's own descriptor.
+    unsafe { font.copy_with_attributes(0.0, ptr::null(), Some(&wanted)) }
 }
 
 /// Sample characters and family names for the platformless tests: a test body
