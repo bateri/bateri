@@ -4,6 +4,8 @@
 
 use std::io::{Read, Write};
 use std::os::unix::fs::DirBuilderExt;
+use std::process::Command;
+use std::time::{Duration, Instant};
 
 use super::*;
 use crate::kablo::install::sha256_hex;
@@ -318,6 +320,55 @@ fn the_install_and_the_bridge_ride_the_master_and_ask_nothing() {
     reader.read_to_end(&mut rest).expect("ended");
     // A bridge that was let go of said nothing: the network, if anything.
     assert_eq!(ended(), Cause::Dropped);
+}
+
+/// A bridge that never opened is ended at every attempt, and what its ssh started goes with
+/// it: a `ProxyCommand` left behind (a `cloudflared` waiting for a login) was one more process
+/// at every attempt. The stand-in's `attach` starts a process of its own in the background, as a
+/// proxy does.
+#[test]
+fn ending_a_bridge_ends_what_its_ssh_started() {
+    let world = stand_in("bridge-group", 0);
+    let backend = world.backend(Some(world.package()));
+    let host = backend.route(&["rasp".into()]).expect("kablo");
+    let argv = backend.master(&host).expect("plan").expect("step");
+    assert_eq!(run_argv(&argv), 0);
+    let installed = backend.install(&host).expect("installed");
+    let started = world.home.join("started");
+    crate::child::tests::write_program(
+        &world.home.join(&installed.path),
+        &format!(
+            "#!/bin/sh\ncase $1 in attach) sleep 60 & echo $! > '{}'; exec cat;; esac\n",
+            started.display()
+        ),
+    );
+
+    let carried = backend.carry(&host, &installed).expect("a bridge");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let pid = loop {
+        if let Some(pid) = std::fs::read_to_string(&started)
+            .ok()
+            .and_then(|text| text.trim().parse::<libc::pid_t>().ok())
+        {
+            break pid;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the bridge's ssh started nothing"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    (carried.close)();
+    // Gone once reaped; its parent went with it, so launchd reaps it.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    // SAFETY: signal 0 only asks whether the process exists.
+    while unsafe { libc::kill(pid, 0) } == 0 {
+        assert!(
+            Instant::now() < deadline,
+            "what the bridge's ssh started outlived the bridge"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 /// The server's counter is run over the connection the user made, as a step of its own: the same

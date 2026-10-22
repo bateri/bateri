@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 use std::os::unix::fs::PermissionsExt;
+use std::process::Command;
 
 use super::*;
 use crate::settings::TempRoot;

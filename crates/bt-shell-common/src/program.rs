@@ -1175,12 +1175,15 @@ pub fn run_version(exec: &Path, timeout: Duration) -> Option<String> {
 
 /// Kills `child`'s process group and reaps `child`. The child is not
 /// reaped before the signal, so its pid — the group's id — cannot have
-/// been reused; a group whose members all ended is no error.
-fn end_group(child: &mut std::process::Child) {
+/// been reused; a group whose members all ended is no error. The child
+/// itself is killed too, so one that leads no group is not waited for
+/// forever.
+pub(crate) fn end_group(child: &mut std::process::Child) {
     if let Ok(group) = libc::pid_t::try_from(child.id()) {
         // SAFETY: a signal to the group our own unreaped child leads.
         unsafe { libc::kill(-group, libc::SIGKILL) };
     }
+    let _ = child.kill();
     let _ = child.wait();
 }
 

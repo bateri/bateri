@@ -20,7 +20,7 @@
 
 use std::io::Read as _;
 use std::net::{IpAddr, TcpListener, TcpStream, ToSocketAddrs};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::time::{Duration, Instant};
 
 /// How long a reach test waits for the server — a **design constant**: long
@@ -105,7 +105,7 @@ pub fn cancel(ssh: &[String], local: u16, address: IpAddr, remote: u16) {
     let Some(argv) = cancel_argv(ssh, &forward_spec(local, address, remote)) else {
         return;
     };
-    let _ = Command::new(&argv[0])
+    let _ = crate::ssh_route::command(&argv[0])
         .args(&argv[1..])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -150,7 +150,7 @@ pub fn forward(
 ) -> Result<Forwarded, String> {
     let spec = forward_spec(local, address, remote);
     let control = control_argv(ssh, &spec).ok_or_else(|| "No ssh command".to_owned())?;
-    let master = Command::new(&control[0])
+    let master = crate::ssh_route::command(&control[0])
         .args(&control[1..])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -160,7 +160,7 @@ pub fn forward(
         return Ok(Forwarded::Master);
     }
     let tunnel = tunnel_argv(ssh, &spec).ok_or_else(|| "No ssh command".to_owned())?;
-    let mut child = Command::new(&tunnel[0])
+    let mut child = crate::ssh_route::command(&tunnel[0])
         .args(&tunnel[1..])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -186,8 +186,7 @@ pub fn forward(
             return Ok(Forwarded::Tunnel(child));
         }
         if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
+            crate::program::end_group(&mut child);
             return Err("The forward did not start in time".to_owned());
         }
         std::thread::sleep(Duration::from_millis(100));

@@ -41,7 +41,7 @@
 use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use kablo_proto::install::{self, Target};
@@ -477,7 +477,7 @@ pub fn run_command(argv: &[String], input: &[u8], limit: Duration) -> io::Result
     let (program, args) = argv
         .split_first()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "empty argv"))?;
-    let mut child = Command::new(program)
+    let mut child = crate::ssh_route::command(program)
         .args(args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -513,8 +513,7 @@ pub fn run_command(argv: &[String], input: &[u8], limit: Duration) -> io::Result
             break Some(status);
         }
         if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
+            crate::program::end_group(&mut child);
             break None;
         }
         std::thread::sleep(Duration::from_millis(5));

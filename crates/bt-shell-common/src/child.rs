@@ -531,6 +531,110 @@ fn parse_bash_version(text: &str) -> Option<BashVersion> {
     Some(BashVersion::new(major.parse().ok()?, minor.parse().ok()?))
 }
 
+/// The `PATH` the user's shell has, once [`learn_login_path`] got it; `None` before that, when
+/// it was never asked (a timed run, a subcommand, a test) or when the shell gave no answer.
+///
+/// A bundle opened from the Dock inherits launchd's `PATH` (`/usr/bin:/bin:/usr/sbin:/sbin`):
+/// what the user installed (Homebrew's `/opt/homebrew/bin`) is not on it. The panes do not care
+/// — their shell builds its own — but a process the application starts itself does: an ssh
+/// whose `ProxyCommand` names `cloudflared` gets "command not found" and the connection closes,
+/// while the same `ssh` typed in a pane works. The answer goes only to those children
+/// ([`crate::ssh_route::command`]); our own environment does not change.
+///
+/// Never waits: the answer comes from a thread, and an ssh started before it — a restored pane's
+/// connection at launch — runs with the inherited `PATH`, as every ssh did before.
+pub fn login_path() -> Option<&'static std::ffi::OsStr> {
+    LOGIN_PATH.get().and_then(Option::as_deref)
+}
+
+static LOGIN_PATH: std::sync::OnceLock<Option<OsString>> = std::sync::OnceLock::new();
+
+/// How long [`learn_login_path`] waits for the shell's answer. A feel threshold, not a measured
+/// number: an interactive login shell with a heavy startup takes a second or two, and the
+/// question runs on a thread of its own, so a shell that hangs costs nothing but the answer.
+const LOGIN_PATH_LIMIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Asks the user's shell for its `PATH` on a thread of its own; the answer is [`login_path`]'s,
+/// for the life of the process. The application calls it once at launch, the subcommands never:
+/// `ssh-hold` and the rest run in a pane and inherit the pane shell's `PATH` already.
+pub fn learn_login_path() {
+    let _ = std::thread::Builder::new()
+        .name("login PATH".into())
+        .spawn(|| {
+            let path = shell().and_then(|shell| query_login_path(&shell, LOGIN_PATH_LIMIT));
+            let _ = LOGIN_PATH.set(path);
+        });
+}
+
+/// What the shell prints its `PATH` between: an interactive shell's startup files may print
+/// anything (a greeting, a prompt's escape sequences), the answer is what stands between two
+/// of these.
+const PATH_MARK: &str = "_BATERI_PATH_";
+
+/// The question of [`learn_login_path`]: the shell as an **interactive login** shell — the shell
+/// a pane runs, so the `PATH` is the one the user has in a terminal, `~/.zshrc`'s additions
+/// included — prints its `PATH` between two marks. `printf` and `"$PATH"` read the same in sh,
+/// bash, zsh and fish (fish joins a path variable with colons).
+///
+/// No stdin, no stderr. The shell leads a process group of its own and the group is killed once
+/// the answer is in or the time is up, so the question ends where the answer does: an agent a
+/// startup file started in the background holds nothing open past it. (One that left the group
+/// with its own `setsid` and kept the pipe keeps the reading thread until it exits.)
+fn query_login_path(shell: &Path, limit: std::time::Duration) -> Option<OsString> {
+    use std::io::Read as _;
+    use std::os::unix::process::CommandExt as _;
+    use std::process::{Command, Stdio};
+    let mut child = Command::new(shell)
+        .args(["-i", "-l", "-c"])
+        .arg(format!(r#"printf '\n{PATH_MARK}%s{PATH_MARK}\n' "$PATH""#))
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn()
+        .ok()?;
+    let (done, answer) = std::sync::mpsc::channel();
+    let reader = child.stdout.take().and_then(|mut stdout| {
+        std::thread::Builder::new()
+            .name("login PATH reads".into())
+            .spawn(move || {
+                let mut seen = Vec::new();
+                let mut buffer = [0u8; 4096];
+                while let Ok(n @ 1..) = stdout.read(&mut buffer) {
+                    seen.extend_from_slice(&buffer[..n]);
+                    if let Some(path) = parse_login_path(&seen) {
+                        let _ = done.send(path);
+                        return;
+                    }
+                }
+            })
+            .ok()
+    });
+    let path = reader.and_then(|_| answer.recv_timeout(limit).ok());
+    crate::program::end_group(&mut child);
+    path
+}
+
+/// The `PATH` between the last pair of marks in what the shell printed; `None` while the pair is
+/// not complete, and for an empty or relative-only answer.
+fn parse_login_path(printed: &[u8]) -> Option<OsString> {
+    use std::os::unix::ffi::OsStrExt as _;
+    let mark = PATH_MARK.as_bytes();
+    let marks: Vec<usize> = printed
+        .windows(mark.len())
+        .enumerate()
+        .filter(|(_, window)| *window == mark)
+        .map(|(at, _)| at)
+        .collect();
+    let [.., open, close] = marks[..] else {
+        return None;
+    };
+    let path = &printed[open + mark.len()..close];
+    path.split(|&byte| byte == b':')
+        .any(|entry| entry.starts_with(b"/"))
+        .then(|| std::ffi::OsStr::from_bytes(path).to_owned())
+}
+
 /// The `XDG_DATA_DIRS` entry that makes fish read the wrapper in `wrapper` (the directory
 /// [`fish_wrapper_dir`] returns): its parent.
 pub fn fish_data_dir(wrapper: &Path) -> Option<&Path> {
@@ -1015,6 +1119,88 @@ pub(crate) mod tests {
                 .expect("the stand-in was run");
             assert_eq!(asked, "asked\n", "{name}: the shell was asked again");
         }
+    }
+
+    #[test]
+    fn the_login_path_is_what_stands_between_the_last_two_marks() {
+        let printed = |text: &str| parse_login_path(text.as_bytes());
+        let path = |text: &str| Some(OsString::from(text));
+        assert_eq!(
+            printed("\n_BATERI_PATH_/opt/homebrew/bin:/usr/bin_BATERI_PATH_\n"),
+            path("/opt/homebrew/bin:/usr/bin")
+        );
+        // A startup file's greeting and a prompt's escape sequences around the answer.
+        assert_eq!(
+            printed(
+                "Welcome!\n\x1b]7;file:///Users\x07\n_BATERI_PATH_/usr/bin:/bin_BATERI_PATH_\n\x1b[?2004l"
+            ),
+            path("/usr/bin:/bin")
+        );
+        // Half an answer is no answer yet.
+        assert_eq!(printed("\n_BATERI_PATH_/usr/bin:/b"), None);
+        // An empty `PATH`, or one with no absolute entry, is not one to give an ssh.
+        assert_eq!(printed("\n_BATERI_PATH__BATERI_PATH_\n"), None);
+        assert_eq!(printed("\n_BATERI_PATH_bin:.:_BATERI_PATH_\n"), None);
+        assert_eq!(printed("no answer at all"), None);
+    }
+
+    #[test]
+    fn the_login_path_is_asked_of_an_interactive_login_shell() {
+        let root = TempRoot::new("login-path");
+        let limit = std::time::Duration::from_secs(10);
+        // The stand-in answers only to the flags a pane's shell is started with, and prints
+        // the `PATH` its startup would build.
+        let shell = stand_in(
+            &root.0,
+            "shell",
+            "[ \"$1 $2 $3\" = '-i -l -c' ] || exit 1\n\
+             echo 'a greeting'\n\
+             PATH=/from/login/bin:/usr/bin:/bin exec /bin/sh -c \"$4\"",
+        );
+        assert_eq!(
+            query_login_path(&shell, limit),
+            Some(OsString::from("/from/login/bin:/usr/bin:/bin"))
+        );
+        // A shell that prints nothing and ends is no answer, at once.
+        let silent = stand_in(&root.0, "silent", "exit 0");
+        let started = std::time::Instant::now();
+        assert_eq!(query_login_path(&silent, limit), None);
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        assert_eq!(query_login_path(&root.0.join("missing"), limit), None);
+    }
+
+    #[test]
+    fn the_login_path_question_ends_where_its_answer_does() {
+        let root = TempRoot::new("login-path-ends");
+        // A startup file that leaves an agent behind holding the pipe: the answer is taken
+        // when it is complete, not when the pipe closes, and the agent goes with the group.
+        let agent = stand_in(
+            &root.0,
+            "agent",
+            "sleep 30 &\nPATH=/usr/bin:/bin exec /bin/sh -c \"$4\"",
+        );
+        let started = std::time::Instant::now();
+        assert_eq!(
+            query_login_path(&agent, std::time::Duration::from_secs(10)),
+            Some(OsString::from("/usr/bin:/bin"))
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(8),
+            "the question waited for the agent: {:?}",
+            started.elapsed()
+        );
+        // A shell that never answers is killed when the limit passes.
+        let hang = stand_in(&root.0, "hang", "exec sleep 30");
+        let started = std::time::Instant::now();
+        assert_eq!(
+            query_login_path(&hang, std::time::Duration::from_millis(200)),
+            None
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "the question outlived its limit: {:?}",
+            started.elapsed()
+        );
     }
 
     #[test]

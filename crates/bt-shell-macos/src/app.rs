@@ -1378,6 +1378,12 @@ define_class!(
         fn did_finish_launching(&self, _n: &NSNotification) {
             let mtm = self.mtm();
             disable_press_and_hold();
+            // The `PATH` the ssh the application runs gets is the user's
+            // shell's, asked first so that it is in before the restored panes
+            // dial; a timed run starts no ssh and runs no startup file.
+            if self.ivars().run.is_none() {
+                crate::child::learn_login_path();
+            }
             // macOS's own tabs are off: every window carries its tabs itself
             // (`window`'s header). Turned off before the menu exists, so AppKit
             // adds no Show Tab Bar / Show All Tabs to View and no tab items

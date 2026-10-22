@@ -1292,7 +1292,7 @@ pub(crate) fn last_line(text: &str) -> &str {
 
 /// Runs the remote script over ssh (without input): exit code, stdout, stderr.
 fn run_ssh(ssh: &[String], script: &str) -> std::io::Result<(Option<i32>, String, String)> {
-    let output = Command::new(&ssh[0])
+    let output = crate::ssh_route::command(&ssh[0])
         .args(&ssh[1..])
         .arg(remote_command(script))
         .stdin(Stdio::null())
@@ -1309,7 +1309,7 @@ fn run_ssh(ssh: &[String], script: &str) -> std::io::Result<(Option<i32>, String
 /// a dead link**; standard output and error go nowhere, so no pipe an open master
 /// connection still holds can keep us waiting either.
 fn run_ssh_within(ssh: &[String], script: &str, limit: Duration) -> bool {
-    let child = Command::new(&ssh[0])
+    let child = crate::ssh_route::command(&ssh[0])
         .args(&ssh[1..])
         .arg(remote_command(script))
         .stdin(Stdio::null())
@@ -1325,8 +1325,7 @@ fn run_ssh_within(ssh: &[String], script: &str, limit: Duration) -> bool {
             Ok(Some(status)) => return status.success(),
             Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
             _ => {
-                let _ = child.kill();
-                let _ = child.wait();
+                crate::program::end_group(&mut child);
                 return false;
             }
         }
@@ -1537,7 +1536,7 @@ pub fn transfer(
     tick: impl Fn(),
 ) -> Outcome {
     let parent = local.path.parent().unwrap_or(Path::new("/"));
-    let remote = Command::new(&ssh[0])
+    let remote = crate::ssh_route::command(&ssh[0])
         .args(&ssh[1..])
         .arg(remote_command(&extract_script(dir)))
         .stdin(Stdio::piped())
@@ -1561,8 +1560,7 @@ pub fn transfer(
     let mut local_tar = match local_tar {
         Ok(child) => child,
         Err(error) => {
-            let _ = remote.kill();
-            let _ = remote.wait();
+            crate::program::end_group(&mut remote);
             return Outcome::Failed(format!("tar could not be started: {error}"));
         }
     };

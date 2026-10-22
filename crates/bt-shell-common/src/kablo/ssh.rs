@@ -27,7 +27,7 @@
 
 use std::io::{self, Read};
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -253,7 +253,7 @@ impl Backend for SshBackend {
         let (program, args) = argv
             .split_first()
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "empty argv"))?;
-        let mut child = Command::new(program)
+        let mut child = ssh_route::command(program)
             .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -262,8 +262,7 @@ impl Backend for SshBackend {
         let (Some(stdin), Some(stdout), Some(stderr)) =
             (child.stdin.take(), child.stdout.take(), child.stderr.take())
         else {
-            let _ = child.kill();
-            let _ = child.wait();
+            crate::program::end_group(&mut child);
             return Err(io::Error::other("the bridge has no pipes"));
         };
         // What ssh says when it is refused is the only way to tell a login that
@@ -279,10 +278,8 @@ impl Backend for SshBackend {
         Ok(Carried {
             reader: Box::new(stdout),
             writer: Box::new(stdin),
-            close: Box::new(move || {
-                let _ = child.kill();
-                let _ = child.wait();
-            }),
+            // The ssh with its proxy: a bridge that never opened is ended at every attempt.
+            close: Box::new(move || crate::program::end_group(&mut child)),
             ended: Box::new(move || {
                 if let Some(reading) = reading {
                     let _ = reading.join();

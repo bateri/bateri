@@ -137,7 +137,7 @@ fn stream(
         Ok(child) => child,
         Err(error) => return Outcome::Failed(format!("tar could not be started: {error}")),
     };
-    let remote = Command::new(&ssh[0])
+    let remote = crate::ssh_route::command(&ssh[0])
         .args(&ssh[1..])
         .arg(remote_command(script))
         .stdin(Stdio::null())

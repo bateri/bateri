@@ -134,6 +134,32 @@ pub fn decide(
     Plan::Open(socket.to_owned())
 }
 
+/// An ssh the application runs itself — the masters, the bridges, the file jobs,
+/// the forwards; never a pane's — with the `PATH` the user's shell has
+/// ([`crate::child::login_path`]): a `ProxyCommand` or `Match exec` that names a
+/// tool the user installed (`cloudflared`, `tsh`) finds it the way it does in a
+/// terminal, and `ssh` itself is the one a terminal runs, so the channels ride a
+/// master the same program made. Every such ssh is made here: one made with
+/// `Command::new` gets launchd's `PATH` when bateri is opened from the Dock, and
+/// a server the `ssh` typed in a pane reaches closes on the application's.
+///
+/// The ssh leads a process group of its own, and what it starts — the
+/// `ProxyCommand` — is in it: one that is given up on is ended with
+/// [`crate::program::end_group`], never `Child::kill` alone. `SIGKILL` gives ssh
+/// no moment to end its proxy, which runs on (a `cloudflared` that waits for a
+/// login, one more at every attempt of a bridge). None of these ssh is a
+/// master that outlives its command (`ControlMaster=no`; the one that opens a
+/// master is waited for, not ended), so the group holds nothing but its own.
+pub fn command(program: impl AsRef<std::ffi::OsStr>) -> Command {
+    use std::os::unix::process::CommandExt as _;
+    let mut command = Command::new(program);
+    command.process_group(0);
+    if let Some(path) = crate::child::login_path() {
+        command.env("PATH", path);
+    }
+    command
+}
+
 /// The seam in front of the ssh process: argv in, (exit code, stdout, stderr)
 /// out. [`SystemSsh`] runs it; the tests answer from a table.
 pub trait SshRunner {
@@ -148,10 +174,7 @@ impl SshRunner for SystemSsh {
         let (program, args) = argv
             .split_first()
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "empty argv"))?;
-        let output = Command::new(program)
-            .args(args)
-            .stdin(Stdio::null())
-            .output()?;
+        let output = command(program).args(args).stdin(Stdio::null()).output()?;
         Ok((
             output.status.code(),
             String::from_utf8_lossy(&output.stdout).into_owned(),
@@ -1751,7 +1774,7 @@ fn run_master(
     let (program, args) = argv
         .split_first()
         .ok_or_else(|| Denied::Failed(format!("No ssh command for {}", target.host)))?;
-    let mut child = Command::new(program)
+    let mut child = command(program)
         .args(args)
         .envs(askpass_env(askpass, ask_socket))
         .stdin(Stdio::null())
@@ -2231,6 +2254,41 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("temp directory");
         dir
+    }
+
+    /// Every ssh the application runs is made by [`command`]: one made with `Command::new`
+    /// runs with launchd's `PATH` when bateri is opened from the Dock, and a `ProxyCommand`
+    /// that names a tool the user installed fails from the application while the same `ssh`
+    /// works in a pane. A system program named by its absolute path (`/usr/bin/tar`) is not an
+    /// ssh.
+    #[test]
+    fn every_ssh_the_application_runs_is_made_with_the_users_path() {
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        for file in [
+            "ssh_route.rs",
+            "upload.rs",
+            "download.rs",
+            "port_forward.rs",
+            "remote_helper.rs",
+            "kablo/install.rs",
+            "kablo/ssh.rs",
+        ] {
+            let text = std::fs::read_to_string(source.join(file)).expect(file);
+            let code = text
+                .split("\n#[cfg(test)]\nmod tests")
+                .next()
+                .unwrap_or(&text);
+            assert_ne!(code.len(), text.len(), "{file}: its tests were not found");
+            for line in code.lines().filter(|line| line.contains("Command::new(")) {
+                let system = line.contains("Command::new(\"/");
+                let the_one = file == "ssh_route.rs"
+                    && line.trim() == "let mut command = Command::new(program);";
+                assert!(
+                    system || the_one,
+                    "{file}: an ssh not made by `command`: {line}"
+                );
+            }
+        }
     }
 
     #[test]

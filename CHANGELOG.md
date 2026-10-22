@@ -12,6 +12,21 @@ of every installed copy. A version without a section is not released.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A server reached through a `ProxyCommand` stays reachable after its
+  connection drops.** With bateri opened from the Dock, the ssh that bateri
+  starts itself — to bring a kept terminal back, to move files, to forward a
+  port — ran without the `PATH` your shell sets, so a `ProxyCommand` naming a
+  tool you installed (`cloudflared`, `tsh`, …) was "command not found": the
+  first `ssh` in a pane connected, but once that connection dropped the pane
+  waited for good, and a new `ssh` to the same server hung too. bateri now asks
+  your shell for its `PATH` once at launch and gives it to every ssh it starts.
+- **Reconnecting to a server no longer leaves its `ProxyCommand` running.**
+  While a kept terminal's server could not be reached, every attempt left one
+  more proxy behind — a `cloudflared` waiting for a login every fifty seconds.
+  An ssh that bateri gives up on now ends with what it started.
+
 ## [0.22.0] - 2026-10-22
 
 ### Added

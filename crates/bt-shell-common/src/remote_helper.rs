@@ -29,7 +29,7 @@
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, ChildStdin, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -115,7 +115,7 @@ impl HelperSession {
         let Some((program, args)) = ssh.split_first() else {
             return Err(format!("No ssh command for {host}"));
         };
-        let mut child = Command::new(program)
+        let mut child = crate::ssh_route::command(program)
             .args(args)
             .arg(remote_command(&helper_script()))
             .stdin(Stdio::piped())
@@ -124,8 +124,7 @@ impl HelperSession {
             .spawn()
             .map_err(|error| format!("ssh could not be started: {error}"))?;
         let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
-            let _ = child.kill();
-            let _ = child.wait();
+            crate::program::end_group(&mut child);
             return Err(format!("ssh could not be started for {host}"));
         };
         let stderr = Some(collect_stderr(child.stderr.take(), None, None));
@@ -269,8 +268,7 @@ impl HelperSession {
     /// The open's failure text: the process is ended first, so its error
     /// output is complete (ssh's own last line says why).
     fn failure(mut self, host: &str, timed_out: bool) -> String {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        crate::program::end_group(&mut self.child);
         let stderr = self
             .stderr
             .take()
@@ -282,9 +280,8 @@ impl HelperSession {
 
 impl Drop for HelperSession {
     fn drop(&mut self) {
-        // Closing stdin ends the loop; the kill makes sure a stuck ssh goes too.
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        // Closing stdin ends the loop; the kill makes sure a stuck ssh goes too, with its proxy.
+        crate::program::end_group(&mut self.child);
     }
 }
 
