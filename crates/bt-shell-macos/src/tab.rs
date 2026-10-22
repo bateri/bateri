@@ -60,6 +60,7 @@ use crate::embed;
 use crate::launch::Closing;
 use crate::notices::Source;
 use crate::pane::{PaneHost, TerminalPane};
+use crate::pencere_view::face::FaceId;
 use crate::program::identity::Kind;
 use crate::restore::{SavedTab, Shape};
 use crate::sheets;
@@ -1344,6 +1345,12 @@ impl TerminalTab {
         Emblem {
             kind: ended.unwrap_or_else(|| self.focused_pane().program_kind()),
             edges: tabs::deck_edges(self.panes().len()),
+            // The program's own icon while its view is up: the program, not the process that
+            // runs it. An ended command's mark is the command's.
+            face: ended
+                .is_none()
+                .then(|| self.focused_pane().view_face())
+                .flatten(),
         }
     }
 
@@ -1673,6 +1680,10 @@ impl TerminalTab {
                     id,
                     place,
                     kind: ended.unwrap_or_else(|| pane.program_kind()),
+                    face: ended
+                        .is_none()
+                        .then(|| pane.view_face().map(FaceId::raw))
+                        .flatten(),
                     name: pane
                         .session()
                         .map(|session| session.title())

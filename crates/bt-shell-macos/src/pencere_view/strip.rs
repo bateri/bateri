@@ -17,33 +17,34 @@
 //! capitals on the strip: centring each field's box would set them at two heights.
 //!
 //! The icon is the program's own (its MCP `icons`, as the protocol's host library took them: a
-//! still PNG, JPEG or WebP it checked and bounded, never fetched), chosen for the theme's ground
-//! (`icon::pick`) each time the strip is painted, so a theme that turns from dark to light takes
-//! the program's light picture.
+//! still PNG, JPEG or WebP it checked and bounded, never fetched), the face for the theme's
+//! ground ([`super::face`]) each time the strip is painted, so a theme that turns from dark to
+//! light takes the program's light picture. One that brings its own ground has its corners cut
+//! as a tab's tile has them; a shape stands as it is.
 //!
 //! The strip takes no keyboard: the button refuses first responder, and a press anywhere on
 //! the strip gives the keyboard to the view (`TerminalPane::focus`) as a press in the pane does.
 
 use std::cell::{Cell, RefCell};
+use std::rc::Rc;
 
 use bt_core::Theme;
-use bt_core::pencere::icon::{self, Icon};
+use bt_shell_common::view_icon::Lay;
 use bt_shell_common::view_strip::{self, Strip, Widths};
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
-use objc2::{
-    AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel,
-};
+use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSAutoresizingMaskOptions, NSBezierPath, NSBox, NSBoxType, NSColor, NSEvent, NSFont,
-    NSFontAttributeName, NSFontWeightMedium, NSForegroundColorAttributeName, NSImage,
-    NSImageScaling, NSImageView, NSLineBreakMode, NSTextField, NSTitlePosition, NSView,
+    NSFontAttributeName, NSFontWeightMedium, NSForegroundColorAttributeName, NSImageScaling,
+    NSImageView, NSLineBreakMode, NSTextField, NSTitlePosition, NSView,
 };
 use objc2_foundation::{
-    NSAttributedString, NSAttributedStringKey, NSData, NSDictionary, NSMutableAttributedString,
+    NSAttributedString, NSAttributedStringKey, NSDictionary, NSMutableAttributedString,
     NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
 };
 
+use super::face::{Faces, face};
 use crate::pane::{JumpButton, TerminalPane};
 
 /// The program's name's size, points: the one strong word on the strip.
@@ -68,9 +69,9 @@ const BUTTON_CORNER: f64 = 6.0;
 /// plate on both, which no fixed colour would.
 const BUTTON_FILL: f64 = 0.10;
 const BUTTON_EDGE: f64 = 0.22;
-/// The pixels a side of the icon the strip asks for: its points on a Retina screen, so a
-/// picture made for that size is taken over a bigger one scaled down.
-const ICON_PIXELS: u32 = 32;
+/// The corner of an icon that brings its own ground, points: a tab's tile's (5 on its 18) at
+/// the icon's side.
+const ICON_CORNER: f64 = 4.5;
 
 /// The colours the strip is drawn with, from the theme.
 struct Palette {
@@ -86,9 +87,9 @@ pub(super) struct StripIvars {
     program: Retained<NSTextField>,
     title: Retained<NSTextField>,
     /// The program's icon, left of its name; empty and hidden when it gave none the strip can
-    /// draw. `icons` are all it gave, to choose from again when the theme changes.
+    /// draw. `faces` are its pictures, to choose from again when the theme changes.
     icon: Retained<NSImageView>,
-    icons: Vec<Icon>,
+    faces: Rc<Faces>,
     /// The button's box and the button that fills it ([`JumpButton`]: the pane's button with
     /// the hand cursor over all of it).
     surface: Retained<NSBox>,
@@ -142,13 +143,13 @@ define_class!(
 );
 
 impl StripView {
-    /// A strip saying `text`, with one of `icons` before the program's name, painted with
-    /// `theme`, of the width of `frame`.
+    /// A strip saying `text`, with the program's face before its name, painted with `theme`,
+    /// of the width of `frame`.
     pub(super) fn new(
         mtm: MainThreadMarker,
         frame: NSRect,
         text: &Strip,
-        icons: &[Icon],
+        faces: Rc<Faces>,
         theme: &Theme,
     ) -> Retained<Self> {
         let label = |string: Option<&String>, font: Retained<NSFont>| {
@@ -163,6 +164,11 @@ impl StripView {
         let title = label(text.title.as_ref(), NSFont::systemFontOfSize(TEXT));
         let icon = NSImageView::new(mtm);
         icon.setImageScaling(NSImageScaling::ScaleProportionallyUpOrDown);
+        // Its layer cuts the corners of a picture that brings its own ground.
+        icon.setWantsLayer(true);
+        if let Some(layer) = icon.layer() {
+            layer.setMasksToBounds(true);
+        }
 
         let surface = NSBox::new(mtm);
         surface.setBoxType(NSBoxType::Custom);
@@ -188,7 +194,7 @@ impl StripView {
             program,
             title,
             icon,
-            icons: icons.to_vec(),
+            faces,
             surface,
             button,
             natural: Cell::new(Widths {
@@ -240,11 +246,12 @@ impl StripView {
     /// measures of them all.
     fn colour(&self, theme: &Theme) {
         let ivars = self.ivars();
-        let image = icon::pick(&ivars.icons, theme.is_dark(), ICON_PIXELS).and_then(|icon| {
-            let data = NSData::with_bytes(&icon.bytes);
-            NSImage::initWithData(NSImage::alloc(), &data)
-        });
-        ivars.icon.setImage(image.as_deref());
+        let face = ivars.faces.on(theme.is_dark()).and_then(face);
+        ivars.icon.setImage(face.as_ref().map(|face| &*face.image));
+        if let Some(layer) = ivars.icon.layer() {
+            let ground = face.as_ref().is_some_and(|face| face.lay == Lay::Ground);
+            layer.setCornerRadius(if ground { ICON_CORNER } else { 0.0 });
+        }
         ivars.place.setTextColor(Some(&srgb(theme.info, 1.0)));
         ivars
             .program

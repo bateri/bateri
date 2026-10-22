@@ -88,6 +88,7 @@ pub mod tree_text;
 pub mod undo;
 pub mod upload;
 pub mod view_ask;
+pub mod view_icon;
 pub mod view_store;
 pub mod view_strip;
 // Bodies exist for macOS and Linux only; elsewhere the module is absent

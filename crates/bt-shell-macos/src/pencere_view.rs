@@ -55,6 +55,7 @@
 //! deadlines) is `pane`'s.
 
 pub(crate) mod ask;
+pub(crate) mod face;
 mod files;
 mod serve;
 mod still;
@@ -195,9 +196,10 @@ pub(crate) fn said_program(start: &ViewStart) -> Option<&str> {
         .filter(|name| !name.trim().is_empty())
 }
 
-/// The icons the strip draws by the program's name: the program's own (`serverInfo`'s), else
-/// those of the tool the view is for. The strip names the program, so its picture comes first;
-/// a program that gave only its tool one still has a face.
+/// The icons the application draws for the program — by its name on the strip, on its tab's
+/// tile: the program's own (`serverInfo`'s), else those of the tool the view is for. Both name
+/// the program, so its picture comes first; a program that gave only its tool one still has a
+/// face.
 fn strip_icons(start: &ViewStart) -> &[Icon] {
     if start.program_icons.is_empty() {
         &start.tool_icons
@@ -701,6 +703,9 @@ pub(crate) struct ViewHost {
     /// What the program calls itself ([`said_program`]), for the questions the view asks
     /// after it started.
     program: Option<String>,
+    /// The program's icon as the application's chrome draws it ([`face`]): in the strip, and
+    /// on the tab's tile while the view is up.
+    faces: Rc<face::Faces>,
 }
 
 impl ViewHost {
@@ -774,13 +779,15 @@ impl ViewHost {
             web.setAllowsMagnification(false);
             web.setInspectable(false);
         }
-        let strip = strip::StripView::new(mtm, strip_area(frame), text, strip_icons(start), theme);
+        let faces = Rc::new(face::Faces::new(strip_icons(start)));
+        let strip = strip::StripView::new(mtm, strip_area(frame), text, Rc::clone(&faces), theme);
         let host = Self {
             web,
             strip,
             bridge,
             shot,
             program: said_program(start).map(str::to_owned),
+            faces,
         };
         host.paint(theme);
         // SAFETY: a request for the shell's own URL.
@@ -794,6 +801,12 @@ impl ViewHost {
     /// What the program that opened the view calls itself, when it said.
     pub(crate) fn program(&self) -> Option<&str> {
         self.program.as_deref()
+    }
+
+    /// The program's icon for a ground that is dark or not, when it gave one the application
+    /// can draw: what its tab's tile wears while the view is up.
+    pub(crate) fn face(&self, dark: bool) -> Option<face::FaceId> {
+        self.faces.on(dark)
     }
 
     /// The web view, to put in the pane.

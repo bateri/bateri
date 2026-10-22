@@ -137,6 +137,7 @@ use std::time::{Duration, Instant};
 use block2::RcBlock;
 use bt_core::{HostMark, IconColors, Mods, Theme};
 use bt_shell_common::shortcuts::Step;
+use bt_shell_common::view_icon::Lay;
 use dispatch2::{DispatchQueue, DispatchTime};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Bool, ProtocolObject, Sel};
@@ -174,6 +175,7 @@ use crate::arrange;
 use crate::card::{IDENTITY, fitted};
 use crate::groups::{Click, GroupId, group_place, group_spot_at, spot_at, spot_slot};
 use crate::icon;
+use crate::pencere_view::face::{self, Face as ProgramFace, FaceId};
 use crate::program::identity::Kind as ProgramKind;
 use crate::search_bar::mix;
 use crate::split::Rect;
@@ -1051,6 +1053,9 @@ fn inks(icon: &icon::Icon, style: IconStyle, palette: Palette) -> Inks {
 pub(crate) struct Emblem {
     pub(crate) kind: ProgramKind,
     pub(crate) edges: usize,
+    /// The program's own icon while its view is up ([`face`]), worn instead of `kind`'s mark;
+    /// a face that is gone by the time it is drawn leaves the mark.
+    pub(crate) face: Option<FaceId>,
 }
 
 /// What the glyph draws.
@@ -1298,7 +1303,7 @@ fn centred_square(rect: NSRect, side: f64) -> NSRect {
 /// tile, only the small indicator.
 fn draw_tile(emblem: Emblem, style: IconStyle, palette: Palette) {
     let slot = glyph_slot();
-    let Emblem { kind, edges } = emblem;
+    let Emblem { kind, edges, face } = emblem;
     let inks = inks(icon::of(kind), style, palette);
     // The cards behind, back to front, each turned about its own middle.
     for step in (1..=edges.min(tabs::DECK_EDGES)).rev() {
@@ -1311,9 +1316,89 @@ fn draw_tile(emblem: Emblem, style: IconStyle, palette: Palette) {
     }
     NSGraphicsContext::saveGraphicsState_class();
     turn(slot, tabs::deck_card(slot.size.width, 0, edges).turn);
-    draw_face(slot, TILE_ROUND, inks.tile.rgb, palette);
-    draw_mark(kind, centred_square(slot, MARK_TILED), &inks.mark.color());
+    match face.and_then(face::face) {
+        Some(face) => draw_program_face(slot, TILE_ROUND, MARK_TILED, &face, palette),
+        None => {
+            draw_face(slot, TILE_ROUND, inks.tile.rgb, palette);
+            draw_mark(kind, centred_square(slot, MARK_TILED), &inks.mark.color());
+        }
+    }
     NSGraphicsContext::restoreGraphicsState_class();
+}
+
+/// A program's own icon on a tile in `rect`, `radius` round, in the program's colours and the
+/// tile's measures (`view_icon`): one that brings its own ground fills the tile, cut to its
+/// corners, with the tile's hairline over it; a shape stands on the theme's face where a mark
+/// stands, `mark` across. The face, its shadow and its line are the application's either way.
+fn draw_program_face(rect: NSRect, radius: f64, mark: f64, face: &ProgramFace, palette: Palette) {
+    draw_face(rect, radius, palette.tile_face(), palette);
+    match face.lay {
+        Lay::Ground => {
+            let inset = TILE_LINE / 2.0;
+            let inner = NSRect::new(
+                NSPoint::new(rect.origin.x + inset, rect.origin.y + inset),
+                NSSize::new(rect.size.width - TILE_LINE, rect.size.height - TILE_LINE),
+            );
+            let path = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(
+                inner,
+                radius - inset,
+                radius - inset,
+            );
+            NSGraphicsContext::saveGraphicsState_class();
+            path.addClip();
+            draw_picture(&face.image, covering(inner, face.image.size()));
+            NSGraphicsContext::restoreGraphicsState_class();
+            path.setLineWidth(TILE_LINE);
+            palette.tile_line().color().setStroke();
+            path.stroke();
+        }
+        Lay::Mark => {
+            let square = centred_square(rect, mark);
+            draw_picture(&face.image, fitting(square, face.image.size()));
+        }
+    }
+}
+
+/// `image` in `rect`, the right way up in a flipped drawing too.
+fn draw_picture(image: &NSImage, rect: NSRect) {
+    // SAFETY: no hints.
+    unsafe {
+        image.drawInRect_fromRect_operation_fraction_respectFlipped_hints(
+            rect,
+            NSRect::ZERO,
+            NSCompositingOperation::SourceOver,
+            1.0,
+            true,
+            None,
+        );
+    }
+}
+
+/// The rect a picture of `size` takes to cover `rect`, centred on it (the rest is cut).
+fn covering(rect: NSRect, size: NSSize) -> NSRect {
+    picture_rect(rect, size, f64::max)
+}
+
+/// The rect a picture of `size` takes to fit in `rect`, centred on it.
+fn fitting(rect: NSRect, size: NSSize) -> NSRect {
+    picture_rect(rect, size, f64::min)
+}
+
+/// A picture of `size` scaled by the scale `pick` takes of the two that make its width and its
+/// height `rect`'s, centred on `rect`.
+fn picture_rect(rect: NSRect, size: NSSize, pick: fn(f64, f64) -> f64) -> NSRect {
+    if size.width <= 0.0 || size.height <= 0.0 {
+        return rect;
+    }
+    let scale = pick(rect.size.width / size.width, rect.size.height / size.height);
+    let (width, height) = (size.width * scale, size.height * scale);
+    NSRect::new(
+        NSPoint::new(
+            rect.origin.x + (rect.size.width - width) / 2.0,
+            rect.origin.y + (rect.size.height - height) / 2.0,
+        ),
+        NSSize::new(width, height),
+    )
 }
 
 /// [`draw_tile`] in a picture [`TILE_ROOM`] to each side of the badge's middle, which is the
@@ -1629,7 +1714,13 @@ fn draw_bare_arrow(at: NSPoint, down: bool, color: u32) {
 /// The icon of tab `label` for a menu row (Show All Tabs): its mark on its tile, as the chip wears
 /// it, and what the tab reports as a dot on the corner.
 fn list_image(label: &Label, style: IconStyle, palette: Palette) -> Retained<NSImage> {
-    listed_image(label.emblem.kind, label.indicator, style, palette)
+    listed_image(
+        label.emblem.kind,
+        label.emblem.face,
+        label.indicator,
+        style,
+        palette,
+    )
 }
 
 /// The icon of a tab for a row of the command palette: the Show All Tabs row's, drawn in the
@@ -1643,6 +1734,7 @@ pub(crate) fn palette_icon(
 ) -> Retained<NSImage> {
     listed_image(
         emblem.kind,
+        emblem.face,
         indicator,
         IconStyle::current(mtm),
         Palette::of(theme),
@@ -1656,6 +1748,7 @@ pub(crate) const PALETTE_ICON_SIDE: f64 = LIST_SIDE;
 /// across: the menu row's icon, and a pane's on the card's map.
 fn listed_image(
     kind: ProgramKind,
+    face: Option<FaceId>,
     indicator: Option<Indicator>,
     style: IconStyle,
     palette: Palette,
@@ -1665,7 +1758,7 @@ fn listed_image(
         return dot_image(dot);
     }
     let draw = RcBlock::new(move |_rect: NSRect| -> Bool {
-        draw_listed(kind, indicator, style, palette);
+        draw_listed(kind, face, indicator, style, palette);
         Bool::YES
     });
     NSImage::imageWithSize_flipped_drawingHandler(NSSize::new(LIST_SIDE, LIST_SIDE), true, &draw)
@@ -1674,14 +1767,20 @@ fn listed_image(
 /// [`list_image`]'s drawing, in a [`LIST_SIDE`] square at the origin.
 fn draw_listed(
     kind: ProgramKind,
+    face: Option<FaceId>,
     indicator: Option<Indicator>,
     style: IconStyle,
     palette: Palette,
 ) {
     let slot = NSRect::new(NSPoint::ZERO, NSSize::new(LIST_SIDE, LIST_SIDE));
-    let inks = inks(icon::of(kind), style, palette);
-    draw_face(slot, TILE_RADIUS, inks.tile.rgb, palette);
-    draw_mark(kind, centred_square(slot, MARK_LISTED), &inks.mark.color());
+    match face.and_then(face::face) {
+        Some(face) => draw_program_face(slot, TILE_RADIUS, MARK_LISTED, &face, palette),
+        None => {
+            let inks = inks(icon::of(kind), style, palette);
+            draw_face(slot, TILE_RADIUS, inks.tile.rgb, palette);
+            draw_mark(kind, centred_square(slot, MARK_LISTED), &inks.mark.color());
+        }
+    }
     if let Some(indicator) = indicator {
         draw_corner_dot(indicator, slot, palette);
     }
@@ -4463,7 +4562,13 @@ impl MapTile {
         iv.palette.set(Some(palette));
         self.setFrame(frame);
         let (width, height) = (frame.size.width, frame.size.height);
-        let image = listed_image(pane.kind, pane.indicator, map.style, palette);
+        let image = listed_image(
+            pane.kind,
+            pane.face.map(FaceId::of),
+            pane.indicator,
+            map.style,
+            palette,
+        );
         iv.icon.setImage(Some(&image));
         iv.icon.setFrame(NSRect::new(
             NSPoint::new(MAP_TILE_AT, MAP_TILE_AT),
@@ -8392,6 +8497,7 @@ mod tests {
         line_span, pick_click, single_label, spin_of, title_double_click,
     };
     use super::{MAP_SCRIM_NAME_ONLY, TileShot, paint_tile};
+    use super::{MARK_TILED, TILE_ROUND, draw_program_face, face};
     use crate::groups::Click;
     use crate::icon;
     use crate::program::identity::{Agent, Kind as ProgramKind};
@@ -8598,6 +8704,7 @@ mod tests {
                 emblem: Emblem {
                     kind: ProgramKind::Shell,
                     edges: 1,
+                    face: None,
                 },
                 style: IconStyle {
                     icons,
@@ -8624,6 +8731,7 @@ mod tests {
                 emblem: Emblem {
                     kind: ProgramKind::Shell,
                     edges: 0,
+                    face: None,
                 },
                 style: IconStyle::default(),
                 indicator,
@@ -9065,6 +9173,7 @@ mod tests {
             emblem: Emblem {
                 kind: ProgramKind::Shell,
                 edges: 1,
+                face: None,
             },
             running: None,
             upload: None,
@@ -9225,6 +9334,63 @@ mod tests {
                 parts.contains(&format!("iv.{part}.clone()")),
                 "{part} fills the chip and is one of its parts"
             );
+        }
+    }
+
+    // ─── a program's own icon on a tile ──────────────────────────────────
+
+    /// The face `faces` has for a dark ground on a 22 × 18 tile at (10, 10) points, drawn as a
+    /// tab's tile is.
+    fn program_tile(faces: &face::Faces) -> (usize, Vec<[u8; 4]>) {
+        let face = face::face(faces.on(true).expect("a face")).expect("kept");
+        let palette = Palette::of(&Theme::BATERI);
+        in_a_flipped_view(|| {
+            let rect = NSRect::new(NSPoint::new(10.0, 10.0), NSSize::new(22.0, 18.0));
+            draw_program_face(rect, TILE_ROUND, MARK_TILED, &face, palette);
+        })
+    }
+
+    /// Whether `pixel` is the sample ground's `#D97757`, give or take the colour space.
+    fn clay(pixel: [u8; 4]) -> bool {
+        let [r, g, b, a] = pixel;
+        a > 240 && r > 190 && (90..150).contains(&g) && b < 120
+    }
+
+    /// Whether `pixel` is the sample shape's `#4C7CC4`, give or take the colour space.
+    fn blue(pixel: [u8; 4]) -> bool {
+        let [r, g, b, a] = pixel;
+        a > 240 && b > 170 && r < 110 && (100..150).contains(&g)
+    }
+
+    #[test]
+    fn a_program_icon_with_its_own_ground_is_the_tile_cut_to_its_corners() {
+        let picture = program_tile(&face::samples::ground());
+        // Its colour fills the tile to the edges, the hairline aside...
+        for (x, y) in [
+            (21.0, 19.0),
+            (11.5, 19.0),
+            (30.5, 19.0),
+            (21.0, 11.5),
+            (21.0, 26.5),
+        ] {
+            let pixel = at(&picture, x, y);
+            assert!(clay(pixel), "at ({x}, {y}): {pixel:?}");
+        }
+        // ...and the tile's corner is round: not the picture's.
+        let corner = at(&picture, 10.25, 10.25);
+        assert!(!clay(corner), "the corner: {corner:?}");
+    }
+
+    #[test]
+    fn a_program_icon_that_is_a_shape_stands_on_the_face_at_a_marks_size() {
+        let picture = program_tile(&face::samples::mark());
+        // The picture in the middle, inside the mark's 12 points...
+        let middle = at(&picture, 21.0, 19.0);
+        assert!(blue(middle), "the middle: {middle:?}");
+        // ...and the theme's face round it, opaque, where the picture is not.
+        for (x, y) in [(12.0, 19.0), (30.0, 19.0)] {
+            let pixel = at(&picture, x, y);
+            assert!(!blue(pixel) && pixel[3] > 240, "at ({x}, {y}): {pixel:?}");
         }
     }
 }

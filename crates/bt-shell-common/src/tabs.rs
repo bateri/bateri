@@ -1950,6 +1950,10 @@ pub struct CardPane {
     pub place: Rect,
     /// The program it shows; while it reports an ended command, the one that ended.
     pub kind: Kind,
+    /// The program's own icon, as the shell names the picture it keeps, while the pane shows
+    /// the program's view and reports no ended command: drawn instead of [`kind`](Self::kind)'s
+    /// mark.
+    pub face: Option<u64>,
     pub name: String,
     /// What it reports, by the rule that picks the tab's own ([`indicator`], over this pane's
     /// signals alone).
@@ -4667,6 +4671,7 @@ mod tests {
             id,
             place,
             kind: Kind::Shell,
+            face: None,
             name: format!("pane {id}"),
             indicator,
             exit: None,

@@ -4670,6 +4670,10 @@ impl TerminalWindow {
         }
         self.apply_chrome(&theme);
         self.bar().set_theme(&theme);
+        // The labels again: a program's tile wears its icon for the new ground
+        // (`TerminalPane::view_face`), and a theme that turns from dark to light takes the
+        // program's light picture.
+        self.refresh_bar();
         // An open palette wears the new theme too (a theme shown while the palette is up).
         if let Some(palette) = self.ivars().root.palette() {
             palette.set_theme(&theme);

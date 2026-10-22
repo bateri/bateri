@@ -47,9 +47,12 @@ of every installed copy. A version without a section is not released.
   once each, where the program runs, which program it is and what the view shows
   (“⇄ rasp  Docker UI  Containers”, in the words the program gives itself and its tool),
   with one button, **Quit ⌃C**. When the program gives itself an icon, the strip shows
-  it beside the program's name, the one made for a dark or a light theme as yours is;
-  bateri never fetches an icon from the network, it draws only a small picture the
-  program sends with its name.
+  it beside the program's name, and the tab wears it on its tile — in the tabs menu and on
+  the tab's card too — instead of the mark of what runs the program (Node, Python): in the
+  program's colours, in bateri's frame, an icon with a background of its own as the whole
+  tile and a bare shape on the tile like bateri's own marks; the one made for a dark or a
+  light theme as yours is. bateri never fetches an icon from the network, it draws only a
+  small picture the program sends with its name.
   The program can also close its view and keep running. The view has the keyboard but
   for your shortcuts —
   ⌘T, ⌘D, ⌘W, ⌘P and the rest, as you set them in `[keys]` — and the commands that

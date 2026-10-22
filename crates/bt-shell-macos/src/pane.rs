@@ -145,9 +145,10 @@ pub trait PaneHost {
     /// thread's news; the screen's is the frame path's, so a tab that draws
     /// nothing hears it when it is next drawn.
     fn activity_changed(&self, pane: u64);
-    /// What the pane runs changed ([`TerminalPane::program_kind`]): the tab's icon is read again.
-    /// Nothing for an owner that draws no such icon — the embedding interface has no event for
-    /// it, and `activity_changed`'s is a command's or the screen's.
+    /// What the pane runs changed ([`TerminalPane::program_kind`]), or a program's view came or
+    /// went ([`TerminalPane::view_face`]): the tab's icon is read again. Nothing for an owner
+    /// that draws no such icon — the embedding interface has no event for it, and
+    /// `activity_changed`'s is a command's or the screen's.
     fn program_changed(&self, _pane: u64) {}
     /// The pane's transfer queue ended, as `finish` says: what the tab's chip plays out and
     /// leaves on the tab while the user is elsewhere. Called **before** the pane tells its
@@ -5738,6 +5739,14 @@ impl TerminalPane {
         self.ivars().pencere.borrow().is_some()
     }
 
+    /// The icon of the program whose view is over the terminal, for the pane's theme's ground,
+    /// when it gave one the application can draw: what the tab's tile wears instead of the mark
+    /// of the process that runs the program (`node` under a program that calls itself Docker).
+    pub(crate) fn view_face(&self) -> Option<crate::pencere_view::face::FaceId> {
+        let dark = self.session()?.theme().is_dark();
+        self.view_host()?.face(dark)
+    }
+
     /// Whether the keyboard is in the pane: in the terminal, or in the view that
     /// covers it.
     fn keyboard_here(&self) -> bool {
@@ -5845,6 +5854,8 @@ impl TerminalPane {
         if keyboard {
             self.focus();
         }
+        // The tab's tile wears the program's icon now (`view_face`).
+        self.host().program_changed(ivars.id);
     }
 
     /// Takes the view down: the keyboard goes back to the terminal if the view
@@ -5867,6 +5878,8 @@ impl TerminalPane {
         {
             link.set_visible(self.ivars().seen.get());
         }
+        // And the mark of what runs in the pane again.
+        self.host().program_changed(self.ivars().id);
     }
 
     /// The program's view goes with the pane, whatever it was doing: no
@@ -7006,6 +7019,20 @@ mod tests {
         let at = hold.find("fn program_changed(").expect("program_changed");
         let body = &hold[at..at + hold[at..].find("\n}\n").expect("its end")];
         assert!(body.contains("server_program_changed()"));
+    }
+
+    /// A program's view coming and going is news for the tab: its tile wears the program's own
+    /// icon while the view is up (`view_face`) and the mark of what runs in the pane again after.
+    /// Nothing else tells the tab, and a tile that missed it would keep the other picture until
+    /// the next title change. A source scan, because the panes need a window server.
+    #[test]
+    fn a_view_that_comes_or_goes_has_the_tab_read_its_icon_again() {
+        let pane = include_str!("pane.rs");
+        for signature in ["    fn start_view(", "    fn end_view("] {
+            let at = pane.find(signature).expect(signature);
+            let body = &pane[at..at + pane[at..].find("\n    }\n").expect("its end")];
+            assert!(body.contains("program_changed("), "{signature}");
+        }
     }
 
     /// A program's view is started again at the two places the screen is restored without the
