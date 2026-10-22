@@ -12,6 +12,8 @@ of every installed copy. A version without a section is not released.
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-10-22
+
 ### Added
 
 - **A program on a server can open panes and tabs in bateri, look at what is
