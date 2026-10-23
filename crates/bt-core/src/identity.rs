@@ -54,7 +54,7 @@ pub fn pane_env(id: &PaneUuid) -> [(&'static str, String); 3] {
 /// A pane's persistent identity: the canonical UUID text (8-4-4-4-12 hex),
 /// normalized to uppercase. Not the in-process pane number, which means
 /// nothing in another process: this one is given outward, written to the
-/// saved layout and carried across an update's handover.
+/// saved layout and the ledger of the terminals kablo keeps.
 ///
 /// Typed, because the same text goes two ways — into the shell's environment
 /// and to matching an incoming URL — and both sides must see the same form: a

@@ -956,7 +956,7 @@ fn run(dir: &Path) {
     until("the reopened view to go", || !covered(&pane));
 
     // The pane's view started again where the screen came back without its messages (a
-    // handover, a reconnection): the pane that is the user's has the keyboard in the new view
+    // new bateri showing the terminal, a reconnection): the pane that is the user's has the keyboard in the new view
     // as it had in the first, and a keyboard that finds its way into the terminal under the
     // view goes back to the view when the pane is the user's again.
     assert!(pane.focus(), "the keyboard is in the pane's terminal");

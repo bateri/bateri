@@ -27,11 +27,10 @@
 //! `winget` print — says "working" and "failed" and nothing else, and a program that
 //! speaks the richer protocol must not be second-guessed by the poorer one.
 //!
-//! **Not journaled, not handed over.** The records live in the shell ledger beside
-//! the other terminal-owned state, not in `Term`, so no `Session` method that
-//! changes the grid is involved. They are not carried across an update's handover:
-//! a program re-reports on its next change, and until then the tab shows what the
-//! shell's own marks say.
+//! **Not in `Term`.** The records live in the shell ledger beside the other
+//! terminal-owned state, so no `Session` method that changes the grid is involved. They
+//! are rebuilt from the bytes when a terminal is shown again: a program re-reports on its
+//! next change, and until then the tab shows what the shell's own marks say.
 //!
 //! **What reads them.** [`ProgramStatus::activity`] — the tab's indicator: a
 //! program that reports owns the "running" ring (it spins while the program works

@@ -133,7 +133,7 @@ audit:
 			|| { echo "audit: unjustified panic path in bt-core ($$f)"; fail=1; }; \
 	done; \
 	if grep -rnE "beginSheet|endSheet|attachedSheet" crates/bt-shell-macos/src --include='*.rs' | grep -v "^crates/bt-shell-macos/src/sheets.rs:" | grep -v "^crates/bt-shell-macos/src/settings_window" | grep -v ":[[:space:]]*//"; then echo "audit: a sheet begun, ended or asked about outside the sheet gate (bt-shell-macos sheets.rs)"; fail=1; fi; \
-	app_mods="agent|app|arrange|hold_service|keeper|menu|palette|pane_drag|settings_window|split_view|tab|tab_bar|tab_drag|tab_group|tab_merge|tab_side|tab_switch|tab_title|updater|window"; \
+	app_mods="agent|app|arrange|hold_service|leaving|menu|palette|pane_drag|settings_window|split_view|tab|tab_bar|tab_drag|tab_group|tab_merge|tab_side|tab_switch|tab_title|updater|window"; \
 	for f in crates/bt-shell-macos/src/*.rs; do \
 		m=$$(basename "$$f" .rs); \
 		if echo "$$m" | grep -qxE "lib|$$app_mods"; then continue; fi; \
@@ -232,7 +232,7 @@ test:
 # wgpu gives no drawable to an occluded window, and the gate used to fall with
 # `frames=0` when another application was in front.
 smoke:
-	env -u BT_SCROLL_TEST -u BT_FRAME_STATS -u BT_JOURNAL BT_RUN_SECONDS=3 $(CARGO) run -q -p bateri
+	env -u BT_SCROLL_TEST -u BT_FRAME_STATS BT_RUN_SECONDS=3 $(CARGO) run -q -p bateri
 
 # WGSL canary: the shaders are embedded with `include_str!` and have no build
 # step, so the canary is the test that sets up the pipelines — naga validation
@@ -712,8 +712,8 @@ ship:
 # not destroy the working package. It stops if a bateri is open and does not
 # close it — killing the shells in the user's session is not a build target's
 # decision. Only the application counts: its argv is the binary alone (or
-# with AppKit's `-` options), while `bateri hold …` — the process that keeps
-# the programs running after bateri quits — and the other subcommands carry a
+# with AppKit's `-` options), while `bateri ssh-hold …` — the program of a pane
+# that shows a terminal a server keeps — and the other subcommands carry a
 # word after it and do not block an install.
 INSTALL_DIR ?= /Applications
 INSTALLED = $(INSTALL_DIR)/bateri.app

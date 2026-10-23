@@ -12,7 +12,7 @@
 //!   has not answered. Its end is the view being torn down without the answer, so
 //!   it is short — a view that does not answer is stuck, and it is over the
 //!   pane;
-//! * **`Offered`**: a token is out. After a restart (an update's handover, a
+//! * **`Offered`**: a token is out. After a restart (a new bateri showing the terminal, a
 //!   connection that came back) it is a token the program was handed unasked, and a
 //!   program that does not open its view again must not leave it valid for as long as
 //!   the pane lives; the end of the wait is the token being forgotten. A token for a

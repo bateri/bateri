@@ -23,6 +23,24 @@ of every installed copy. A version without a section is not released.
   screen and the bottom line keeps saying `Reconnecting…`. `integration = "blocks"` leaves the
   server's line to its shell, as it does locally.
 
+### Changed
+
+- **Programs in local tabs outlive an update, a kept quit and a crash the way programs on servers do.**
+  Each tab's shell now runs in a terminal kablo keeps on this Mac, and bateri shows it: an
+  update, ⌘Q under `keep_running = "quit"` and a crash leave the programs running, and the
+  next bateri shows them again where they were — with their screens, the blocks of the
+  commands they ran and the dock — without a helper process of bateri's own. A shell that has
+  nothing running in front is simply shown again at its prompt. What `keep_running` decides
+  has not changed. **This update is the one time the programs in local tabs end:** the
+  helper processes the previous bateri kept its programs in cannot hand them to kablo, so the
+  first launch ends them. Windows, tabs and splits come back from the saved session (not under
+  `restore_windows = "off"`), as new shells with their history; tabs that show a terminal on a
+  server come back with their programs.
+  Where kablo cannot be had for a tab it opens as a plain terminal, which does not survive
+  an update or a crash and asks before it closes.
+- **A terminal a tab keeps remembers as many lines as `scrollback` says.** It costs
+  memory in kablo for as long as it lives, as much as its history is long.
+
 ### Fixed
 
 - **A server reached through a `ProxyCommand` stays reachable after its

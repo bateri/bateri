@@ -282,7 +282,6 @@ mod tests {
                 pane_uuid: None,
                 hostname: None,
                 replay: None,
-                journal: None,
                 views: None,
             },
             Arc::new(QuietWake),

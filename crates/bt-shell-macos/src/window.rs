@@ -33,7 +33,7 @@
 //! [`TerminalWindow::fold_tab`]) and ends
 //! in a layout edge (`AppDelegate::layout_changed`): the selection, the
 //! order, the names and which window a tab is in are part of the layout the
-//! bound holder keeps and the crash restore reads, and nothing else would
+//! crash restore reads, and nothing else would
 //! carry them — selecting a tab no longer makes another window key. The applier's order is fixed: a container is shown or hidden
 //! **first**, and only then are its panes told — visibility and focus read
 //! the hierarchy as it stands (`isHiddenOrHasHiddenAncestor`). While the
@@ -669,7 +669,7 @@ define_class!(
     unsafe impl NSObjectProtocol for TerminalWindow {}
 
     unsafe impl NSWindowDelegate for TerminalWindow {
-        // The frame is part of the layout the bound holder keeps; a drag or
+        // The frame is part of the layout the crash restore reads; a drag or
         // a live resize is a burst the delayed trigger folds into one.
         #[unsafe(method(windowDidMove:))]
         fn window_did_move(&self, _n: &NSNotification) {
@@ -855,7 +855,7 @@ define_class!(
         /// The window is closing: the red button, ⇧⌘W, ⌘W in its last tab
         /// and the last tab's shell exit arrive here — and so does the quit: once
         /// `applicationWillTerminate:` returns AppKit closes every window still
-        /// open (after a handover to a holder, every window), with this same
+        /// open (when the programs are kept, every window), with this same
         /// notification. Only the user's close ends the terminals servers keep for
         /// the panes; the quit's is [`crate::app::AppDelegate::shutdown`]'s, by
         /// `keep_running`, and is told apart by
@@ -2161,7 +2161,6 @@ impl TerminalWindow {
     /// frame — the application's business) and only **then** do the shells
     /// start ([`TerminalTab::start_restored`]), so each sees its final size
     /// in its first `TIOCSWINSZ` and the replayed history wraps once. The
-    /// live handover hands file descriptors here instead of shells. The
     /// window's later tabs come back through [`TerminalWindow::restore_tab`].
     ///
     /// `launches` is indexed by `saved`'s shape's leaves. If no shell starts
@@ -2579,7 +2578,7 @@ impl TerminalWindow {
         }
     }
 
-    /// A layout edge for the bound holder (`AppDelegate::layout_changed`).
+    /// A layout edge, for the layout on disk (`AppDelegate::layout_changed`).
     pub(crate) fn layout_changed(&self) {
         if let Some(app) = app::delegate(self.mtm()) {
             app.layout_changed();

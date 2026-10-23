@@ -624,7 +624,6 @@ printf 'READY\n'; stty size; pixels; read line; printf 'GOT:%s\n' "$line"; stty 
         pane_uuid: bt_core::PaneUuid::parse("5A1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0"),
         hostname: None,
         replay: None,
-        journal: None,
         views: None,
     };
     let (spec, size) = new_session(&options.child_launch(), 1000);
@@ -743,7 +742,6 @@ fn behind_login(
         pane_uuid: bt_core::PaneUuid::parse("5A1E2D3C-4B5A-6978-8796-A5B4C3D2E1F1"),
         hostname: None,
         replay: None,
-        journal: None,
         views: None,
     };
     (options, parent)
@@ -887,7 +885,6 @@ fn plain_options(script: &str, home: &Path) -> bt_core::SessionOptions {
         pane_uuid: bt_core::PaneUuid::parse("6B2F3E4D-5C6B-4A89-9EA0-B6C5D4E3F201"),
         hostname: None,
         replay: None,
-        journal: None,
         views: None,
     }
 }

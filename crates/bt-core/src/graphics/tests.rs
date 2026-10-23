@@ -1109,25 +1109,6 @@ fn a_query_whose_few_bytes_hold_a_great_many_pixels_is_refused_before_they_are_d
     assert_eq!(answers, ok(7));
 }
 
-#[test]
-fn the_open_flag_and_the_wait_for_it() {
-    let hub = Hub::new();
-    let started = Instant::now();
-    hub.wait_closed(Duration::from_secs(5));
-    assert!(
-        started.elapsed() < Duration::from_secs(1),
-        "closed: no wait"
-    );
-    hub.set_open(true);
-    let started = Instant::now();
-    hub.wait_closed(Duration::from_millis(60));
-    assert!(
-        started.elapsed() >= Duration::from_millis(60),
-        "open: waits the grace"
-    );
-    hub.set_open(false);
-}
-
 // ─── bytes ──────────────────────────────────────────────────────────────
 
 #[test]
@@ -1705,7 +1686,7 @@ mod screenful {
     }
 
     /// The same bytes parsed with no store to place into and nobody to answer,
-    /// as the journal's replay parses them (the cell's size from its own
+    /// as a bare replay parses them (the cell's size from its own
     /// bookkeeping): the terminal it leaves.
     fn replayed(stream: &[u8], columns: usize, lines: usize, history: usize) -> Term<Told> {
         let config = Config {
@@ -1798,8 +1779,8 @@ mod screenful {
         screen.feed(&at(8, 3));
         screen.feed(&wire("a=T,f=32,s=10,v=80,i=1", &rgba(10, 80, 0)));
         screen.feed(b"after");
-        // The journal recorded the stream as the program wrote it, the image
-        // in it; the copy reads that, with nothing to place it in.
+        // The stream as the program wrote it, the image in it; the copy reads
+        // that, with nothing to place it in.
         assert!(String::from_utf8_lossy(&screen.stream).contains("_G"));
         let copy = replayed(&screen.stream, 20, 10, 100);
         let point = |term: &Term<Told>| term.grid().cursor.point;
@@ -1987,7 +1968,7 @@ mod screenful {
 
     #[test]
     fn a_command_with_no_store_to_place_into_moves_the_cursor_all_the_same() {
-        // The journal's copy has no sink: the command applies nothing, and its
+        // A copy with no sink: the command applies nothing, and its
         // movement is the stream's.
         let mut term = Term::new(Config::default(), &size(20, 10), Told::default());
         let mut parser: Processor = Processor::new();
@@ -2893,7 +2874,7 @@ fn in_a_remote_session_a_name_is_refused_without_touching_what_it_names() {
         ("a=t,t=t,f=32,s=1,v=1,i=1", temp.name(), STAYS),
         ("a=t,t=s,f=32,s=1,v=1,i=1", object.name(), STAYS),
         // And one that moves the cursor: it still does, by its keys alone —
-        // the journal's replay cannot know the name was refused, and the
+        // a replay with no store cannot know the name was refused, and the
         // cursor has to be where the replay puts it.
         ("a=T,t=f,f=100,s=30,v=40,i=1", png.name(), moves(1, 3)),
     ] {

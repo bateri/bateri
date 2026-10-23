@@ -625,10 +625,6 @@ impl PtyOps for LocalOps {
     /// ([`Msg::HoldEof`]), and the terminal is let go of: detached, and shown again by the next
     /// bateri that finds it in the ledger.
     fn hangup(&self, _pid: u32, _exit: BorrowedFd<'_>) {}
-
-    /// A signal to the program is not something the terminal takes from outside; a size that
-    /// differs is what makes it redraw ([`PtyOps::resize`]).
-    fn winch(&self, _master: BorrowedFd<'_>) {}
 }
 
 /// What the loop is told, from the threads that carry bytes and do the slow
@@ -1292,7 +1288,7 @@ fn accept_loop(listener: &UnixListener, tx: &Sender<Msg>, stop: &AtomicBool) {
                         continue;
                     }
                     // Another user's process is turned away before it says a word.
-                    let Ok((peer_uid, pid)) = crate::handover::peer(&stream) else {
+                    let Ok((peer_uid, pid)) = crate::jobs::peer(&stream) else {
                         continue;
                     };
                     if peer_uid != uid {

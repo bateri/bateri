@@ -750,7 +750,7 @@ static CATALOG: [Setting; 34] = [
         "terminal.keep_running",
         Terminal,
         "Keep Programs Running",
-        "handover background survive",
+        "background survive",
         false,
         None,
         KeepRunning,

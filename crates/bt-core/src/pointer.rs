@@ -21,10 +21,10 @@
 //! alone.
 //!
 //! **Only the live stream keeps them.** The replays that rebuild a session's
-//! `Term` (the journal's copy, a handover's VT) have no sink and drop the
-//! requests. Unlike DECSET 1016 this is deliberate: a lost shape breaks no
-//! program, the pointer is bateri's own after an update or a crash until the
-//! program asks again — a page under the pointer does at the next hover.
+//! `Term` (a bare replay) have no sink and drop the requests. Unlike DECSET 1016 this is
+//! deliberate: a lost shape breaks no program, the pointer is bateri's own after an update
+//! or a crash until the program asks again — a page under the pointer does at the next
+//! hover.
 
 use std::str::FromStr;
 use std::sync::{Mutex, MutexGuard, PoisonError};

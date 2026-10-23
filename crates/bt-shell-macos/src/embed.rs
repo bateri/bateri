@@ -40,8 +40,8 @@ use objc2_foundation::NSRect;
 
 use crate::Run;
 use crate::child;
-use crate::launch::{self, Adopted, Held, Launch};
-use crate::pane::{Holder, PaneLaunch};
+use crate::launch::{self, Held, Launch};
+use crate::pane::PaneLaunch;
 
 pub use crate::footer::ListeningPort;
 pub use crate::launch::{Identity, Integration};
@@ -98,10 +98,6 @@ pub struct Config {
     pub(crate) run: Option<Run>,
     /// bateri's measurement ledger (the timed run's `BT_FRAME_STATS`).
     pub(crate) stats: Option<Arc<Stats>>,
-    /// bateri's bound holder, which keeps the pane's programs through a crash or a quit.
-    pub(crate) keeper: Option<Rc<dyn Holder>>,
-    /// A program a previous bateri handed over, carried on instead of a new shell.
-    pub(crate) adopt: Option<Adopted>,
     /// A terminal a server keeps shown as the pane's first program, the shell following it
     /// ([`Held`]); `None` → the shell is the first program.
     pub(crate) held: Option<Held>,
@@ -111,7 +107,7 @@ impl Config {
     /// A pane as an application that hosts one opens it: a new shell in the user's home, the
     /// shell integration from `identity` and `settings` ([`shell_integration`]), motion and the
     /// scroll bar as the settings and the system say — what bateri gives a pane of its own, but
-    /// for what only bateri keeps (its holder, its ssh masters).
+    /// for what only bateri keeps (its ssh masters).
     pub fn new(
         mtm: MainThreadMarker,
         id: u64,
@@ -142,8 +138,6 @@ impl Config {
             masters: None,
             run: None,
             stats: None,
-            keeper: None,
-            adopt: None,
             held: None,
         }
     }
@@ -151,14 +145,13 @@ impl Config {
 
 impl Config {
     /// The same pane with `launch`'s start: its directory, first input,
-    /// identity, replayed history and handed-over program.
+    /// identity and replayed history.
     pub(crate) fn with_launch(self, launch: Launch) -> Self {
         let Launch {
             working_directory,
             initial_input,
             uuid,
             replay,
-            adopt,
             env,
             held,
         } = launch;
@@ -167,7 +160,6 @@ impl Config {
             initial_input,
             uuid,
             replay,
-            adopt,
             env,
             held,
             ..self
@@ -221,8 +213,6 @@ pub fn open(
         follow_window,
         run,
         stats,
-        keeper,
-        adopt,
         held,
     } = config;
     let pane = TerminalPane::new(
@@ -241,7 +231,6 @@ pub fn open(
                 initial_input,
                 uuid,
                 replay,
-                adopt,
                 env,
                 held,
             },
@@ -251,7 +240,6 @@ pub fn open(
             scrollbar,
             zoom,
             masters,
-            keeper,
             identity,
         },
     )?;

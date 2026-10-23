@@ -5,7 +5,7 @@
 //!
 //! bateri leans on both halves. The quit's own work is in `applicationWillTerminate:`
 //! (`AppDelegate::shutdown`): it decides by `keep_running` what becomes of the programs and of
-//! the terminals servers keep, and after a handover it leaves every window open with its panes.
+//! the terminals servers keep, and when it keeps them it leaves every window open with its panes.
 //! Then AppKit closes those windows, and `TerminalWindow`'s `windowWillClose:` — which ends the
 //! terminals servers keep when the *user* closes a window — must know the close is the quit's.
 //! It asks `AppDelegate::is_terminating`, which `shutdown` sets first; that only works because

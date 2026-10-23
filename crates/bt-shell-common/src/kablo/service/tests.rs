@@ -2192,8 +2192,8 @@ fn a_terminal_left_to_end_is_ended_by_the_next_connection_to_its_account() {
     assert!(ledger.keeps("u@rasp:22", &kept));
 }
 
-/// The holder of a pane survives the bateri that served it (an update's holder keeps it; so does
-/// `"quit"`'s) and finds the next one at the same place: it asks again by itself, from the byte
+/// The holder of a pane survives the bateri that served it (an update keeps it; so does
+/// `"quit"`) and finds the next one at the same place: it asks again by itself, from the byte
 /// it was at, and the terminal goes on — nothing twice, nothing missing — with nobody having
 /// told the new bateri anything but what the ledger kept.
 #[test]

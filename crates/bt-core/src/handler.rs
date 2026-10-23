@@ -42,7 +42,7 @@
 //! and asks the parser to halt right behind the command
 //! ([`Handler::halt_requested`]); the read loop lets go of the lock, decodes,
 //! takes the lock back and calls [`ClusterHandler::resume`], which applies the
-//! record. Without a [`Sink`] (the journal's replay) the command only moves
+//! record. Without a [`Sink`] (a bare replay) the command only moves
 //! the cursor, by the same numbers, and the parser never halts. A move to or
 //! from the alternate screen drops what that screen's store holds; a clear of
 //! the screen (`CSI 2 J`, `CSI 3 J`) and a reset delete the placements in
@@ -95,10 +95,8 @@ pub(crate) const RESIZE_REPORT_MODE: u16 = 2048;
 
 /// The DEC private modes the stream's wrapper keeps because alacritty does
 /// not know them: `Term` has no bit for either, so they live with the session
-/// ([`Sink::kept_modes`]). Every stream that rebuilds a session's `Term` (a
-/// handover's VT, the journal's scratch copy) binds a `KeptModes` of its own
-/// ([`ClusterHandler::kept_modes`]) and hands it to
-/// [`crate::snapshot::encode_live`], which writes the set ones back; one held
+/// ([`Sink::kept_modes`]). Every stream that rebuilds a session's `Term` binds
+/// a `KeptModes` of its own ([`ClusterHandler::kept_modes`]); one held
 /// together, so a path cannot carry one mode across and drop the other.
 #[derive(Debug, Default)]
 pub(crate) struct KeptModes {
@@ -165,8 +163,8 @@ pub(crate) struct ClusterHandler<'a, U: EventListener> {
     last_input: &'a mut bool,
     /// The session's graphics ([`crate::graphics`]): the store the commands
     /// are applied to and where the program is answered. `None` for every
-    /// stream that is not the live one (the journal's replay, the handover's
-    /// snapshot): there a command only moves the cursor.
+    /// stream that is not the live one (a bare replay): there a command only
+    /// moves the cursor.
     graphics: Option<&'a dyn Sink>,
     /// The session's DECSET 1016 and 2048 ([`KeptModes`]) — where the modes
     /// land, since `Term` does not keep them. `None` for a stream with no
@@ -201,9 +199,8 @@ impl<'a, U: EventListener> ClusterHandler<'a, U> {
     }
 
     /// Lets the wrapper keep DECSET 1016 and 2048 in `modes` for a stream
-    /// that has no sink: the replays that rebuild a session's `Term` (a
-    /// handover's VT, the journal's scratch copy) carry the modes across with
-    /// it.
+    /// that has no sink: the replays that rebuild a session's `Term` carry the
+    /// modes across with it.
     pub(crate) fn kept_modes(mut self, modes: &'a KeptModes) -> Self {
         self.modes = Some(modes);
         self
@@ -497,9 +494,8 @@ impl<'a, U: EventListener> ClusterHandler<'a, U> {
 /// start at the top and no line enters the history (a line feed at the
 /// bottom of a region below a fixed row — apt's progress bar —, `CSI M`): the
 /// view ends past the history and the next frame indexes outside the grid.
-/// The clamp moves only the view, which the snapshot does not read, so the
-/// journal needs no record of it; the view lands on the history's top, where
-/// alacritty's arithmetic was heading anyway.
+/// The clamp moves only the view, which the snapshot does not read; the view
+/// lands on the history's top, where alacritty's arithmetic was heading anyway.
 impl<U: EventListener> Drop for ClusterHandler<'_, U> {
     fn drop(&mut self) {
         let grid = self.term.grid();

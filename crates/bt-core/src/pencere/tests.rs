@@ -732,7 +732,7 @@ fn a_restart_offers_a_new_token_to_the_program_that_had_a_view() {
     let token = open_a_view(&mut pane);
     let desk = pane.rig.desk.as_ref().expect("a desk");
     desk.take_views();
-    // As after a handover: the pane is a program's again, no shell around it.
+    // As after a restart: the pane is a program's again, no shell around it.
     *lock(&seen) = Observed::default();
 
     desk.restart(pane.rig.write());
@@ -755,7 +755,7 @@ fn a_restart_offers_a_new_token_to_the_program_that_had_a_view() {
 
 // ---- a stream with no desk ------------------------------------------------
 
-/// A stream that has no desk — the journal's replay and the handover's VT —
+/// A stream that has no desk — a bare replay of the bytes —
 /// builds the screen the live one builds and writes nothing.
 #[test]
 fn a_replay_with_no_desk_builds_the_same_screen_and_writes_nothing() {
@@ -779,7 +779,7 @@ fn a_replay_with_no_desk_builds_the_same_screen_and_writes_nothing() {
     live.feed(&stream);
     assert!(!lock(&live.rig.input).is_empty(), "the live pane answers");
 
-    // The journal's replay: commands, no sink.
+    // A replay with commands and no sink.
     let input: Input = Arc::default();
     let mut term = Term::new(
         alacritty_terminal::term::Config::default(),
@@ -796,7 +796,7 @@ fn a_replay_with_no_desk_builds_the_same_screen_and_writes_nothing() {
     assert!(lock(&input).is_empty(), "a replay answers nobody");
     assert_eq!(text_of(&term), live.text());
 
-    // The handover's VT: no commands either.
+    // A replay with no commands either.
     let mut term = Term::new(
         alacritty_terminal::term::Config::default(),
         &TermSize::new(40, 6),
@@ -1226,7 +1226,6 @@ struct TtyOps(Mutex<Option<crate::TtyReading>>);
 impl PtyOps for TtyOps {
     fn resize(&self, _: BorrowedFd<'_>, _: crate::PtySize) {}
     fn hangup(&self, _: u32, _: BorrowedFd<'_>) {}
-    fn winch(&self, _: BorrowedFd<'_>) {}
     fn tty(&self, _: u32) -> Option<crate::TtyReading> {
         *lock(&self.0)
     }

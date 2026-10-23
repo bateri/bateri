@@ -27,7 +27,7 @@
 //! asked for by a program on the server (it closes with its terminal, or says who asked) — so a
 //! session that uses
 //! nothing new stays readable by the bateri before
-//! it, whose reader drops any other number and, with it, a holder's programs. A version's frozen
+//! it, whose reader drops any other number and, with it, the saved layout. A version's frozen
 //! text stays in the tests: its reader must keep reading it. The strip a window saves is the
 //! flat order the groups were kept in (`groups::Groups::check`: the ungrouped tabs, then each
 //! group's tabs together, in the groups' order), and the reader builds the grouping through that
@@ -51,14 +51,8 @@
 //! ([`read_recent`], [`write_recent`], [`clear_recent`]) is application state that lives in the
 //! directory without being part of the layout, so the sweep and the layout's clears leave it, and
 //! `restore_windows = "off"` removes it. [`save_layout`] writes the
-//! layout alone, without histories, while bateri runs — the way back after a crash nobody held
-//! the programs through (no holder, or `keep_running = "update"`).
-//!
-//! **The attempt marker** ([`bump_attempt`], [`attempt_mode`]) counts, in a holder's instance
-//! directory, the launches that started taking that holder's programs and never settled: a
-//! restore that crashes the launch would otherwise crash every launch after it — the holder
-//! waits for an acknowledgement that never comes. The second attempt restores no screen, the
-//! third gives the programs up.
+//! layout alone, without histories, while bateri runs — the way back after a crash that
+//! left no saved session.
 //!
 //! Pure except the file bodies, which are thin; it sees no AppKit (the `split`/`zoom`
 //! precedent).
@@ -399,54 +393,6 @@ impl Shape {
     }
 }
 
-impl Saved {
-    /// This layout without the panes `taken` names — they come back where an
-    /// earlier layout placed them — and without a tab or a window left
-    /// empty; every pane it keeps joins `taken`. Several holders' layouts can
-    /// name one program (a holder's, and the holder of the bateri that took
-    /// it and crashed): walked newest first, each comes once.
-    pub fn place_after(&self, taken: &mut Vec<PaneUuid>) -> Saved {
-        let mut windows = Vec::new();
-        for window in &self.windows {
-            let mut tabs = Vec::new();
-            let mut kept = Vec::new();
-            let mut selected = None;
-            for (index, tab) in window.tabs.iter().enumerate() {
-                let keep: Vec<bool> = tab
-                    .panes
-                    .iter()
-                    .map(|pane| !taken.contains(&pane.uuid))
-                    .collect();
-                let Some(tab) = tab.retain(&keep) else {
-                    continue;
-                };
-                taken.extend(tab.panes.iter().map(|pane| pane.uuid.clone()));
-                if index == window.selected {
-                    selected = Some(tabs.len());
-                }
-                tabs.push(tab);
-                kept.push(index);
-            }
-            if tabs.is_empty() {
-                continue;
-            }
-            let (groups, grouped) = window.keeping(&kept);
-            for (tab, group) in tabs.iter_mut().zip(grouped) {
-                tab.group = group;
-            }
-            windows.push(SavedWindow {
-                frame: window.frame,
-                tabs,
-                selected: selected.unwrap_or(0),
-                key: window.key,
-                side_width: window.side_width,
-                groups,
-            });
-        }
-        Saved { windows }
-    }
-}
-
 impl SavedTab {
     /// The tab without the panes `keep` says no to (`keep` runs over `panes`): the tree loses
     /// their leaves ([`Shape`]'s split with one side left becomes that side), the indices count
@@ -540,37 +486,6 @@ impl SavedWindow {
                 })
             })
             .collect()
-    }
-
-    /// The groups once only the tabs `kept` (their indices here, in order) remain: a group none of
-    /// them is in is gone, the others count again, and a group's resident that did not stay is
-    /// forgotten. The second list is the new group of each kept tab.
-    fn keeping(&self, kept: &[usize]) -> (Vec<SavedGroup>, Vec<Option<usize>>) {
-        let mut groups = Vec::new();
-        let mut moved = Vec::new();
-        for (at, group) in self.groups.iter().enumerate() {
-            if kept.iter().any(|&old| self.tabs[old].group == Some(at)) {
-                moved.push(Some(groups.len()));
-                groups.push(SavedGroup {
-                    name: group.name.clone(),
-                    collapsed: group.collapsed,
-                    resident: group
-                        .resident
-                        .and_then(|tab| kept.iter().position(|&old| old == tab)),
-                });
-            } else {
-                moved.push(None);
-            }
-        }
-        let grouped = kept
-            .iter()
-            .map(|&old| {
-                self.tabs[old]
-                    .group
-                    .and_then(|group| moved.get(group).copied().flatten())
-            })
-            .collect();
-        (groups, grouped)
     }
 
     /// The window's strip and groups as the models the rule lives in, tabs named by their index;
@@ -1264,55 +1179,6 @@ pub fn clear(lock: &Lock) -> io::Result<()> {
     Ok(())
 }
 
-// ─── the attempt marker ──────────────────────────────────────────────────
-
-/// The attempt marker's name in an instance directory (the module doc).
-const ATTEMPT: &str = "restore-attempt";
-
-/// What a launch does with a holder's programs, from the attempts before it that never
-/// settled ([`bump_attempt`]'s answer).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AttemptMode {
-    /// The first attempt: everything comes back.
-    Normal,
-    /// The second: the programs are taken, but nothing that went through the parser before the
-    /// crash is replayed again — no screen, no state, no carried output, no history.
-    Safe,
-    /// The third: the programs are given up, nothing is restored, one empty window.
-    GiveUp,
-}
-
-/// The mode after `previous` unsettled attempts.
-pub fn attempt_mode(previous: u32) -> AttemptMode {
-    match previous {
-        0 => AttemptMode::Normal,
-        1 => AttemptMode::Safe,
-        _ => AttemptMode::GiveUp,
-    }
-}
-
-/// Counts one more attempt in `dir` (`0600`, through a temporary name) and returns the count
-/// before it. A missing or unreadable marker counts as none — the wrong way is one attempt too
-/// many, never a lost program. A write that fails is not an error the launch can act on: the
-/// count before it is still the answer.
-pub fn bump_attempt(dir: &Path) -> u32 {
-    let path = dir.join(ATTEMPT);
-    let previous = fs::read_to_string(&path)
-        .ok()
-        .and_then(|text| text.trim().parse::<u32>().ok())
-        .unwrap_or(0);
-    let _ = write_atomic(
-        &path,
-        format!("{}\n", previous.saturating_add(1)).as_bytes(),
-    );
-    previous
-}
-
-/// Removes the marker in `dir`: the launch settled, or bateri quit cleanly.
-pub fn clear_attempt(dir: &Path) {
-    let _ = fs::remove_file(dir.join(ATTEMPT));
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1951,33 +1817,6 @@ mod tests {
             windows: vec![grouped],
         };
         assert_eq!(Saved::parse(&saved.render()), Some(saved.clone()));
-        let id = |n: u32| id(&uuid(n));
-        // The second tab and the fourth are taken: `a` keeps its resident, `b` loses its own.
-        let placed = saved.place_after(&mut vec![id(2), id(4)]);
-        let window = &placed.windows[0];
-        assert_eq!(window.tabs.len(), 3);
-        assert_eq!(
-            window.tabs.iter().map(|tab| tab.group).collect::<Vec<_>>(),
-            [None, Some(0), Some(1)]
-        );
-        assert_eq!(window.selected, 0, "the selected tab went: the first stays");
-        assert_eq!(
-            window
-                .groups
-                .iter()
-                .map(|group| (group.name.as_str(), group.collapsed, group.resident))
-                .collect::<Vec<_>>(),
-            [("a", false, Some(1)), ("b", true, None)]
-        );
-        assert_eq!(Saved::parse(&placed.render()), Some(placed.clone()));
-        // Both of `b`'s tabs: the group goes, and with no group left the layout is a plain list.
-        let placed = saved.place_after(&mut vec![id(4), id(5)]);
-        assert_eq!(placed.windows[0].groups.len(), 1);
-        assert_eq!(placed.windows[0].groups[0].name, "a");
-        assert_eq!(Saved::parse(&placed.render()), Some(placed));
-        let placed = saved.place_after(&mut vec![id(2), id(3), id(4), id(5)]);
-        assert!(placed.windows[0].groups.is_empty());
-        assert!(placed.render().starts_with("bateri-session 1\n"));
     }
 
     /// The groups a live window saves are the ones over the tabs that are saved: a tab that is
@@ -2544,70 +2383,5 @@ mod tests {
         assert!(without_one.shape.covers(without_one.panes.len()));
         assert_eq!(tab.retain(&[false, false, false]), None);
         assert_eq!(tab.retain(&[]), None);
-    }
-
-    #[test]
-    fn the_attempt_marker_counts_until_cleared() {
-        let root = TempRoot::new("restore-attempt");
-        let dir = root.0.join("instance");
-        fs::create_dir_all(&dir).expect("dir");
-        assert_eq!(bump_attempt(&dir), 0);
-        assert_eq!(mode(&dir.join(ATTEMPT)), 0o600);
-        assert_eq!(bump_attempt(&dir), 1);
-        assert_eq!(bump_attempt(&dir), 2);
-        assert_eq!(bump_attempt(&dir), 3);
-        clear_attempt(&dir);
-        assert_eq!(bump_attempt(&dir), 0);
-        fs::write(dir.join(ATTEMPT), b"garbage").expect("garbage");
-        assert_eq!(bump_attempt(&dir), 0, "an unreadable marker counts as none");
-        assert_eq!(
-            [0, 1, 2, 7].map(attempt_mode),
-            [
-                AttemptMode::Normal,
-                AttemptMode::Safe,
-                AttemptMode::GiveUp,
-                AttemptMode::GiveUp
-            ]
-        );
-    }
-
-    #[test]
-    fn a_pane_two_layouts_name_comes_once_where_the_first_places_it() {
-        let newest = Saved {
-            windows: vec![window(vec![single(A), single(B)]), window(vec![single(C)])],
-        };
-        let mut taken = Vec::new();
-        assert_eq!(newest.place_after(&mut taken), newest, "nothing taken yet");
-        assert_eq!(
-            taken,
-            [id(A), id(B), id(C)],
-            "every pane of the first layout"
-        );
-        // An older layout: B alone in a tab (taken), a tab of A beside a new
-        // pane, and a window of C only (taken).
-        let new = "22222222-3333-4444-5555-666666666666";
-        let mut older_split = single(A);
-        older_split.panes.push(pane(new));
-        older_split.shape = Shape::Split {
-            axis: Axis::Vertical,
-            ratio: 0.5,
-            first: Box::new(Shape::Leaf(0)),
-            second: Box::new(Shape::Leaf(1)),
-        };
-        let mut first = window(vec![single(B), older_split]);
-        first.selected = 1;
-        let older = Saved {
-            windows: vec![first, window(vec![single(C)])],
-        };
-        let placed = older.place_after(&mut taken);
-        assert_eq!(placed.windows.len(), 1, "the window of C alone went");
-        let window = &placed.windows[0];
-        assert_eq!(window.tabs.len(), 1, "the tab of B alone went");
-        assert_eq!(window.selected, 0, "the selected tab moved with the tabs");
-        assert_eq!(window.tabs[0].panes, vec![pane(new)]);
-        assert_eq!(window.tabs[0].shape, Shape::Leaf(0));
-        assert!(taken.contains(&id(new)));
-        // Nothing left to place.
-        assert_eq!(older.place_after(&mut taken).windows, Vec::new());
     }
 }

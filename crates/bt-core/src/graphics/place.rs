@@ -180,8 +180,8 @@ fn cell_size(cell: (u16, u16)) -> (u32, u32) {
 /// the image's *first* column, on its *last* row, so the placement is anchored
 /// from the grid itself, whatever the movement scrolled, and the clamp of the
 /// columns' movement at the right edge cannot hide where the image began. A
-/// stream that has no store to place into (the journal's replay) makes the
-/// same movement from the same numbers.
+/// stream that has no store to place into makes the same movement from the
+/// same numbers.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Motion {
     /// How many rows below the placement's top the cursor is when it is anchored.

@@ -68,7 +68,7 @@ pub fn fate(keep: KeepRunning, event: Event) -> Fate {
 
 /// Whether a launch ends the terminals the bateri before it left in the ledger: after a
 /// crash under `"update"`, and only when the programs did not come over (`carried`: the
-/// update's own relaunch, or a holder that kept them through the crash).
+/// update's own relaunch, which wrote that it was).
 pub fn ends_leftovers(keep: KeepRunning, carried: bool) -> bool {
     !carried && fate(keep, Event::Crash) == Fate::EndsAtTheNextLaunch
 }

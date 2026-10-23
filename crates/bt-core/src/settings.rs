@@ -431,9 +431,9 @@ impl RestoreWindows {
 /// so `restore_windows = "off"` no longer ends the programs on an update.
 ///
 /// It **doesn't enter** `TerminalOptions` and [`Changes`] (precedent
-/// [`ConfirmClose`]): ⌘Q and the quit read it at that moment, and the live
-/// switch — the holder that keeps the programs is spawned or told to leave —
-/// is the platform shell's, from the old and the new value. It is an ordinary
+/// [`ConfirmClose`]): ⌘Q, the quit and the launch after a crash read it at that
+/// moment, and the one live part — the permission ⌘Q's reminder needs — is the
+/// platform shell's, from the old and the new value. It is an ordinary
 /// key: a value that isn't accepted is the default at launch and leaves the
 /// value in effect at save time, and an unusable file is the default. A
 /// fallback never **turns** the value into `Quit` — the default is `Crash` —
@@ -1984,9 +1984,7 @@ restore_windows = "all"
 # update, crash also when bateri crashes or is forced to quit, quit also when
 # you quit it — then quitting asks nothing, and Quit and End Programs (⌥⌘Q)
 # ends them. The next bateri takes them back with their screens and
-# scrollback; a pane already open when you switched away from update comes
-# back with its program redrawing the screen. Restarting the Mac or logging
-# out ends them.
+# scrollback. Restarting the Mac or logging out ends them.
 keep_running = "crash"
 
 [appearance]

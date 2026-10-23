@@ -888,7 +888,7 @@ impl TerminalTab {
         self.layout_changed();
     }
 
-    /// A layout edge for the bound holder (`AppDelegate::layout_changed`).
+    /// A layout edge, for the layout on disk (`AppDelegate::layout_changed`).
     pub(crate) fn layout_changed(&self) {
         if let Some(app) = app::delegate(self.mtm()) {
             app.layout_changed();

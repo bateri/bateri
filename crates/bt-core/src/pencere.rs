@@ -33,12 +33,12 @@
 //! log, the master's modes — is read before the conversation is locked, and the
 //! wake is called after both are released).
 //!
-//! **What does not come in.** A stream with no desk (the journal's replay, the
-//! handover's VT, a session opened without [`ViewOptions`]) skips the frames:
-//! the bytes are still the parser's and the screen is the same, but nothing is
-//! heard or written — a replay must not answer twice. A frame that was cut by a
-//! handover is not carried: the new process offers the program a restart
-//! instead (§10.7), which is what the stream the old process had cannot give.
+//! **What does not come in.** A stream with no desk (a replay into a bare `Term`, a
+//! session opened without [`ViewOptions`]) skips the frames: the bytes are still the
+//! parser's and the screen is the same, but nothing is heard or written — a replay must not
+//! answer twice. The past of a terminal shown again ([`crate::Silence`]) is heard without
+//! being answered, and the program is offered a restart instead (§10.7), which is what the
+//! stream the old process had cannot give.
 //!
 //! **A known limit.** The scanner (OSC 133) has read the whole of a read by the
 //! time the parser reaches a frame in it, so a command's end and a frame written

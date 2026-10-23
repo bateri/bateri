@@ -53,9 +53,9 @@ pub mod embed;
 mod footer;
 mod hold_service;
 mod hyperlink;
-mod keeper;
 mod keychain;
 mod launch;
+mod leaving;
 mod locale;
 mod menu;
 mod pacer;
@@ -88,9 +88,9 @@ mod window;
 // The platform-independent half lives in `bt-shell-common`; imported
 // at the crate root so `crate::settings` and friends keep resolving.
 use bt_shell_common::{
-    child, download, environment, focus, gesture, grid, groups, handover, icon, jobs, journal,
-    keys, links, moves, notices, port_forward, ports, preview_cache, program, quote, remote_files,
-    remote_helper, restore, settings, split, ssh_route, tabs, undo, upload, watch, zoom,
+    child, download, environment, focus, gesture, grid, groups, icon, jobs, keys, links, moves,
+    notices, port_forward, ports, preview_cache, program, quote, remote_files, remote_helper,
+    restore, retired_holders, settings, split, ssh_route, tabs, undo, upload, watch, zoom,
 };
 
 use std::time::{Duration, Instant};
@@ -226,46 +226,6 @@ pub fn focus() -> Option<i32> {
     ))
 }
 
-/// `bateri hold --fd FD --dir DIR`: `Some(exit code)` when the process
-/// was started as the update's holder, `None` otherwise. `main` calls it
-/// before the window-server check — the holder has no GUI and outlives the
-/// bateri that started it. The body is
-/// [`bt_shell_common::handover::hold_main`].
-pub fn hold() -> Option<i32> {
-    let mut args = std::env::args_os().skip(1);
-    if args.next()? != "hold" {
-        return None;
-    }
-    let Some(argv) = args
-        .map(|arg| arg.into_string().ok())
-        .collect::<Option<Vec<String>>>()
-    else {
-        eprintln!("{}", bt_shell_common::handover::USAGE);
-        return Some(bt_shell_common::handover::EXIT_USAGE);
-    };
-    Some(bt_shell_common::handover::hold_main(&argv))
-}
-
-/// `bateri compact --fd FD`: `Some(exit code)` when a bound holder started
-/// this process to rebuild one pane's screen after a crash, `None`
-/// otherwise. Before the window-server check, like [`hold`]: no GUI, and the
-/// holder runs it from any session. The body is
-/// [`bt_shell_common::journal::compact_main`].
-pub fn compact() -> Option<i32> {
-    let mut args = std::env::args_os().skip(1);
-    if args.next()? != "compact" {
-        return None;
-    }
-    let Some(argv) = args
-        .map(|arg| arg.into_string().ok())
-        .collect::<Option<Vec<String>>>()
-    else {
-        eprintln!("{}", bt_shell_common::journal::COMPACT_USAGE_TEXT);
-        return Some(bt_shell_common::journal::COMPACT_USAGE);
-    };
-    Some(bt_shell_common::journal::compact_main(&argv))
-}
-
 /// The shell of the smoke and measurement runs. **Not** the user's `$SHELL`:
 /// the result must not depend on the rc files.
 ///
@@ -331,11 +291,6 @@ pub struct Run {
     /// it, so the most expensive part of startup (creating the GPU device and
     /// the pipelines) is inside the measurement.
     pub stats_since: Option<Instant>,
-    /// `BT_JOURNAL`: every pane records its journal in this process and
-    /// compacts it here too — no holder takes it (`bt_core::Journal::in_memory`).
-    /// The run measures what the journal costs the reader thread and the
-    /// compaction; the token line does not change.
-    pub journal: bool,
 }
 
 pub struct Options {
@@ -368,16 +323,12 @@ pub fn run(opts: Options) -> Result<(), GpuError> {
     // The startup stamp must be taken **before** the first renderer (first
     // window), and the type enforces it: `Options` carries an `Instant`, not
     // a flag.
-    // The update's handover comes first: nothing of this process may
-    // spawn a child before it ([`app::arrive`]). ⇧ held leaves the bound
-    // holders out — they keep their programs for the next launch.
     let skip_restore = app::shift_held_at_launch(&opts);
-    let arrival = app::arrive(&opts, !skip_restore);
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
     // `delegate` outlives `app.run()` in this scope: AppKit's and the
     // window's delegate properties are weak, this Retained is the owner.
-    let delegate = app::AppDelegate::new(mtm, opts, arrival, skip_restore);
+    let delegate = app::AppDelegate::new(mtm, opts, skip_restore);
     app.setDelegate(Some(ProtocolObject::from_ref(&*delegate)));
     app.run();
     Ok(())

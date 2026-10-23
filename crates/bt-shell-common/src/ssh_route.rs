@@ -56,7 +56,7 @@ use std::time::{Duration, Instant};
 use bt_core::RemoteTarget;
 
 use crate::focus::FOCUS_SOCKET;
-use crate::handover::{holder_listening, is_holder_socket_name};
+use crate::retired_holders::{holder_listening, is_holder_socket_name};
 use crate::upload::connection;
 
 // ─── route ───────────────────────────────────────────────────────────────
@@ -1970,37 +1970,6 @@ pub fn prepare_instance(root: &Path, instance: &str) -> io::Result<PathBuf> {
     }
 }
 
-/// Hands an existing instance directory to `to`: the update's holder takes the old bateri's directories
-/// (`from` = its spawner), the new bateri takes them from the holder (`from`
-/// = the holder's pid, from the connection's credentials) — **before** its
-/// sweep, or the sweep of a dead owner's directory would end the live ssh's
-/// `u-<key>` socket and the attempts' files. Admitted only for a private
-/// directory of this user with an owner file whose owner is `to` already,
-/// **dead**, or exactly `from`: a living bateri's directory is never taken
-/// by anyone it did not hand it to. The owner file is written whole (a
-/// hidden name, then renamed), so no reader sees it half written.
-/// [`prepare_instance`]'s contract is unchanged: it takes the directory this
-/// returns as its own.
-pub fn adopt_instance(dir: &Path, from: Option<u32>, to: u32) -> io::Result<()> {
-    let refused = |why: &str| io::Error::new(io::ErrorKind::PermissionDenied, why.to_owned());
-    let Some(current) = owner(dir) else {
-        return Err(refused("not an instance directory of this user"));
-    };
-    if current == to {
-        return Ok(());
-    }
-    if alive(current) && from != Some(current) {
-        return Err(refused("the instance's owner is alive"));
-    }
-    let temp = dir.join(format!(".{OWNER_FILE}-{}", random_hex()?));
-    let written = std::fs::write(&temp, to.to_string())
-        .and_then(|()| std::fs::rename(&temp, dir.join(OWNER_FILE)));
-    if written.is_err() {
-        let _ = std::fs::remove_file(&temp);
-    }
-    written
-}
-
 /// `ssh -O exit` on `socket` without a destination of the user's: `-F
 /// /dev/null` (the user's configuration is not read — a control command
 /// rides the socket), `BatchMode=yes`, a placeholder host.
@@ -2116,9 +2085,8 @@ pub fn sweep(roots: &[PathBuf], own: &str) {
         sweep_flat(root);
     }
     for entry in instance_entries(roots) {
-        // A live holder keeps its directory whoever the owner file
-        // names: a new bateri that adopted it may have died before its ACK,
-        // and the holder still waits for the next one.
+        // A live holder of an older bateri keeps its directory whoever the
+        // owner file names: its socket is the only way to find it.
         if entry.name == own || entry.owner.is_none_or(alive) || holder_listening(&entry.dir) {
             continue;
         }
@@ -2163,6 +2131,14 @@ fn instance_entries(roots: &[PathBuf]) -> Vec<InstanceEntry> {
         }
     }
     found
+}
+
+/// The instance directories under `roots`, whole or half born.
+pub(crate) fn instance_directories(roots: &[PathBuf]) -> Vec<PathBuf> {
+    instance_entries(roots)
+        .into_iter()
+        .map(|entry| entry.dir)
+        .collect()
 }
 
 /// A living bateri instance: its pid and its directories, in the roots' order.
@@ -2230,7 +2206,7 @@ fn sweep_flat(base: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::handover::HANDOVER_SOCKET;
+    const HANDOVER_SOCKET: &str = "handover";
     use std::cell::RefCell;
     use std::thread;
 
@@ -2540,7 +2516,7 @@ mod tests {
     /// Two bastions' `ProxyCommand`s to the same inner address are two
     /// servers: two sockets, or a job rides a master to the other one. A
     /// host without one keeps its pinned name — its master may outlive this
-    /// build (an update's handover finds it by that name).
+    /// build (an update's new bateri finds it by that name).
     #[test]
     fn a_proxy_command_separates_the_key_and_a_direct_host_keeps_its_own() {
         let through = |bastion: &str| {
@@ -3898,52 +3874,13 @@ exit $code
         std::fs::remove_dir_all(&root).unwrap();
     }
 
-    /// A directory passes to a new owner only from a dead owner or
-    /// from the one handing it over — never from any other living bateri —
-    /// and the sweep leaves a live holder's directory alone even when its
-    /// owner file names a dead process.
+    /// The sweep leaves a live holder's directory (a holder of the bateri before kablo) alone
+    /// even when its owner file names a dead process, and a directory a user's live session
+    /// socket sits in is kept whole.
     #[test]
-    fn an_instance_is_adopted_only_from_the_dead_or_its_giver() {
-        let root = scratch("adopt");
+    fn the_sweep_leaves_a_live_holders_directory_alone() {
+        let root = scratch("holders");
         let base = root.join("s");
-        // A living owner that is not this process: a child standing in for
-        // another bateri.
-        let mut other = Command::new("/bin/sleep").arg("30").spawn().expect("sleep");
-        let other_pid = other.id();
-        let living = prepare_instance(&base, "11111111").unwrap();
-        std::fs::write(living.join(OWNER_FILE), other_pid.to_string()).unwrap();
-        let me = std::process::id();
-        assert!(
-            adopt_instance(&living, None, me).is_err(),
-            "a living bateri's directory was taken"
-        );
-        assert!(
-            adopt_instance(&living, Some(me), me).is_err(),
-            "taken by naming oneself the giver"
-        );
-        assert_eq!(owner(&living), Some(other_pid));
-        adopt_instance(&living, Some(other_pid), me).expect("handed over by its owner");
-        assert_eq!(owner(&living), Some(me));
-        adopt_instance(&living, None, me).expect("taking one's own again");
-
-        // A dead owner's directory, with a user's live session socket in it.
-        let dead = prepare_instance(&base, "22222222").unwrap();
-        std::fs::write(dead.join(OWNER_FILE), dead_pid().to_string()).unwrap();
-        let session = UnixListener::bind(dead.join("u-0123456789abcdef")).unwrap();
-        adopt_instance(&dead, None, me).expect("a dead owner's directory");
-        sweep(std::slice::from_ref(&base), "ffffffff");
-        assert!(
-            dead.join("u-0123456789abcdef").exists(),
-            "the adopted directory was swept"
-        );
-        let left: Vec<String> = std::fs::read_dir(&dead)
-            .unwrap()
-            .flatten()
-            .map(|entry| entry.file_name().to_string_lossy().into_owned())
-            .filter(|name| name.starts_with('.'))
-            .collect();
-        assert!(left.is_empty(), "a temporary owner file stayed: {left:?}");
-        drop(session);
 
         // A dead owner but a live holder: kept; once the holder is gone, swept.
         let held = prepare_instance(&base, "33333333").unwrap();
@@ -3973,13 +3910,6 @@ exit $code
         sweep(std::slice::from_ref(&base), "ffffffff");
         assert!(!bound.exists(), "a dead bound holder's directory stays");
 
-        // Not an instance directory at all.
-        let bare = root.join("bare");
-        prepare_dir(&bare).unwrap();
-        assert!(adopt_instance(&bare, None, me).is_err());
-
-        let _ = other.kill();
-        let _ = other.wait();
         std::fs::remove_dir_all(&root).unwrap();
     }
 
@@ -4363,7 +4293,6 @@ exit $code
                 pane_uuid: None,
                 hostname: None,
                 replay: None,
-                journal: None,
                 views: None,
             },
             Arc::clone(&wake) as Arc<dyn bt_core::Wake>,
@@ -4504,7 +4433,6 @@ exit $code
                 pane_uuid: None,
                 hostname: None,
                 replay: None,
-                journal: None,
                 views: None,
             },
             Arc::new(crate::child::SilentWake),

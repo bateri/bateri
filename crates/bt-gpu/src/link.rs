@@ -3216,8 +3216,8 @@ impl DisplayLink {
     /// path) until the shell's first prompt, then comes in with the scene
     /// `kind` names ([`crate::arrival`]).
     ///
-    /// **Only for a pane born with a shell of its own.** A carried-over pane
-    /// (the update's handover, a crash recovery) has a shell that is at its
+    /// **Only for a pane born with a shell of its own.** A pane that shows a
+    /// terminal again (an update, a crash recovery) has a shell that is at its
     /// prompt already, a pane without a dock has nothing to hold back, and the
     /// timed run never asks — none of them calls this, and an unarmed link has
     /// no scene.
