@@ -57,6 +57,13 @@ use objc2_foundation::{
     NSRange, NSRangePointer, NSRect, NSSize, NSString, NSUInteger, NSURL,
 };
 
+#[cfg(debug_assertions)]
+use bt_shell_common::native_view::{
+    Button as PageButton, Input, Menu as PageMenu, MenuEntry as PageMenuEntry, Point as PagePoint,
+};
+#[cfg(debug_assertions)]
+use objc2_app_kit::NSMenu;
+
 use crate::clipboard;
 use crate::gesture::{Drag, Gesture, Press, Release};
 use crate::hyperlink::LinkState;
@@ -1013,6 +1020,13 @@ define_class!(
         /// exact region (above the dock, a bar to draw) is asked here.
         #[unsafe(method(mouseEntered:))]
         fn mouse_entered(&self, event: &NSEvent) {
+            #[cfg(debug_assertions)]
+            if let Some(pane) = self.pane()
+                && pane.shows_sample_page()
+            {
+                pane.page_input(Input::Move(self.page_point(event)));
+                return;
+            }
             if self.is_strip_event(event) {
                 let inside = self.scrollbar_region(event.locationInWindow()).is_some();
                 self.set_scrollbar_hover(inside);
@@ -1031,6 +1045,13 @@ define_class!(
         /// `mouseMoved:` would see neither the exit nor an unfocused pane.
         #[unsafe(method(mouseExited:))]
         fn mouse_exited(&self, event: &NSEvent) {
+            #[cfg(debug_assertions)]
+            if let Some(pane) = self.pane()
+                && pane.shows_sample_page()
+            {
+                pane.page_input(Input::Leave);
+                return;
+            }
             if self.is_strip_event(event) {
                 self.set_scrollbar_hover(false);
                 self.block_hover(event.locationInWindow(), false);
@@ -1073,6 +1094,15 @@ define_class!(
         #[unsafe(method(mouseMoved:))]
         fn mouse_moved(&self, event: &NSEvent) {
             self.note_interaction();
+            // A debug page covers the terminal: the pointer is over the page, and the
+            // terminal's scroll bar under it reacts to nothing.
+            #[cfg(debug_assertions)]
+            if let Some(pane) = self.pane()
+                && pane.shows_sample_page()
+            {
+                pane.page_input(Input::Move(self.page_point(event)));
+                return;
+            }
             if self.scrollbar_motion(event) {
                 return;
             }
@@ -1112,6 +1142,17 @@ define_class!(
 
         /// The link context menu's items ([`BateriView::link_menu`]): the menu's
         /// link is parked in the link state and taken by the item.
+        /// An entry of the menu a debug page asked for was picked: its index is the item's tag.
+        #[cfg(debug_assertions)]
+        #[unsafe(method(pageMenuPicked:))]
+        fn page_menu_picked(&self, sender: Option<&AnyObject>) {
+            if let Some(item) = sender.and_then(|sender| sender.downcast_ref::<NSMenuItem>())
+                && let Some(pane) = self.pane()
+            {
+                pane.page_menu_pick(usize::try_from(item.tag()).unwrap_or(usize::MAX));
+            }
+        }
+
         #[unsafe(method(openLinkFromMenu:))]
         fn open_link_from_menu(&self, _sender: Option<&AnyObject>) {
             self.menu_open_link();
@@ -1193,9 +1234,22 @@ define_class!(
         #[unsafe(method(scrollWheel:))]
         fn scroll_wheel(&self, event: &NSEvent) {
             self.note_interaction();
-            // The debug gauge page covers the terminal: the wheel is not the grid's.
+            // A debug page covers the terminal: the wheel is the page's, with AppKit's
+            // momentum (the events keep coming after the fingers lift), none of our own.
             #[cfg(debug_assertions)]
-            if self.pane().is_some_and(|pane| pane.shows_sample_page()) {
+            if let Some(pane) = self.pane()
+                && pane.shows_sample_page()
+            {
+                let raw = event.scrollingDeltaY() as f32;
+                let dy = -if event.hasPreciseScrollingDeltas() {
+                    raw
+                } else {
+                    raw * 12.0
+                };
+                pane.page_input(Input::Scroll {
+                    at: self.page_point(event),
+                    dy,
+                });
                 return;
             }
             let Some(session) = self.ivars().session.get() else {
@@ -1311,10 +1365,10 @@ define_class!(
         #[unsafe(method(keyDown:))]
         fn key_down(&self, event: &NSEvent) {
             self.note_interaction();
-            // The debug gauge page covers the terminal: its keys are the page's.
+            // A debug page of the kit's covers the terminal: its keys are the page's.
             #[cfg(debug_assertions)]
             if let Some(pane) = self.pane()
-                && pane.sample_page_key(event.characters().map(|c| c.to_string()).as_deref())
+                && pane.page_key(event)
             {
                 return;
             }
@@ -2493,9 +2547,28 @@ impl BateriView {
     /// On release `Clamp`'s `fill_rows` is passed as zero: the area above the
     /// band must give a cell too, `bt-core` does the clamping.
     fn button_event(&self, event: &NSEvent, button: MouseButton, pressed: bool) {
-        // The debug gauge page covers the terminal: a press is not the grid's.
+        // A debug page covers the terminal: a press is the page's, not the grid's.
         #[cfg(debug_assertions)]
-        if self.pane().is_some_and(|pane| pane.shows_sample_page()) {
+        if let Some(pane) = self.pane()
+            && pane.shows_sample_page()
+        {
+            let at = self.page_point(event);
+            let button = match button {
+                MouseButton::Left => Some(PageButton::Left),
+                MouseButton::Right => Some(PageButton::Right),
+                _ => None,
+            };
+            if let Some(button) = button {
+                pane.page_input(if pressed {
+                    Input::Press {
+                        at,
+                        button,
+                        mods: crate::native_page::mods_of(event.modifierFlags()),
+                    }
+                } else {
+                    Input::Release { at, button }
+                });
+            }
             return;
         }
         let Some(session) = self.ivars().session.get() else {
@@ -2816,6 +2889,55 @@ impl BateriView {
 
     /// [`Self::window_point_cell`] with the pixel too: what the mouse reports
     /// to the application are made of (`bt-core`'s [`Pointer`]).
+    /// Where `event` is in the view, points from its top-left corner (the view is flipped): the
+    /// coordinates a debug page of the kit is asked in.
+    #[cfg(debug_assertions)]
+    fn page_point(&self, event: &NSEvent) -> PagePoint {
+        let at = self.convertPoint_fromView(event.locationInWindow(), None);
+        PagePoint::new(at.x as f32, at.y as f32)
+    }
+
+    /// Pops up the menu a debug page asked for, where it said (the view's points). Items are
+    /// enabled by hand: a targeted item would otherwise always be enabled. The pick comes back
+    /// as [`BateriView::page_menu_picked`] with the entry's index in the tag.
+    #[cfg(debug_assertions)]
+    pub(crate) fn show_page_menu(&self, menu: &PageMenu) {
+        let mtm = self.mtm();
+        let shown = NSMenu::new(mtm);
+        shown.setAutoenablesItems(false);
+        for (index, entry) in menu.entries.iter().enumerate() {
+            match entry {
+                PageMenuEntry::Separator => shown.addItem(&NSMenuItem::separatorItem(mtm)),
+                PageMenuEntry::Item {
+                    title,
+                    key,
+                    enabled,
+                } => {
+                    let key = key.map(String::from).unwrap_or_default();
+                    // SAFETY: `initWithTitle:action:keyEquivalent:` takes two `NSString`s and a
+                    // selector this view implements; `setTarget:` keeps the target weakly and
+                    // the view outlives the menu's modal tracking.
+                    let item = unsafe {
+                        let item = NSMenuItem::initWithTitle_action_keyEquivalent(
+                            NSMenuItem::alloc(mtm),
+                            &NSString::from_str(title),
+                            Some(sel!(pageMenuPicked:)),
+                            &NSString::from_str(&key),
+                        );
+                        item.setTarget(Some(self));
+                        item
+                    };
+                    item.setKeyEquivalentModifierMask(NSEventModifierFlags::empty());
+                    item.setTag(index as isize);
+                    item.setEnabled(*enabled);
+                    shown.addItem(&item);
+                }
+            }
+        }
+        let at = NSPoint::new(f64::from(menu.at.x), f64::from(menu.at.y));
+        shown.popUpMenuPositioningItem_atLocation_inView(None, at, Some(self));
+    }
+
     fn window_point_pointer(&self, in_window: NSPoint, outside: OutOfGrid) -> Option<Pointer> {
         let (metrics, (cols, rows)) = self.ivars().metrics.get()?;
         let point = self.convertPoint_fromView(in_window, None);

@@ -149,6 +149,7 @@ use crate::stats::Stats;
 use crate::surface::{self, Acquired};
 use crate::{GpuError, Renderer, Surface};
 
+mod page;
 mod still;
 pub use still::{Shot, Snapshot};
 
@@ -723,6 +724,9 @@ struct Core {
     /// damage builds and draws the page and nothing of the terminal's frame
     /// path runs; a tick without damage sleeps.
     page: RefCell<Option<Box<dyn UiPage>>>,
+    /// What asks for the page's frames, apart from the terminal's damage
+    /// ([`page::PageFrames`]).
+    page_frames: page::PageFrames,
     /// The window's surface; `bt-shell` sizes it, the tick acquires from it.
     surface: Rc<Surface>,
     session: Arc<Session>,
@@ -1236,7 +1240,7 @@ impl Core {
             return;
         }
         // A page covering the terminal draws instead of it.
-        if self.page_tick() {
+        if self.page_tick(now) {
             return;
         }
         // The first frame has no `dt`: starting at `0.0` beats inventing an
@@ -1642,25 +1646,30 @@ impl Core {
     /// The tick of a link that shows a UI page: `false` when there is none
     /// (the terminal's own frame path runs), otherwise the tick is spent here.
     ///
-    /// A frame is drawn only for damage — the surface resized, the theme or
-    /// the font changed, the page asked for one ([`DisplayLink::request_frame`])
-    /// — and a tick without it puts the pacer to sleep, so a page that does
-    /// not change costs no frames. The terminal's output is damage too: it is
-    /// taken here and answered with a page frame, so a program streaming under
-    /// a page redraws the page each time. The page is the debug sample today.
-    fn page_tick(&self) -> bool {
+    /// A frame is drawn only when the page's own state asked for one — the
+    /// surface resized, the font changed, the page was poked
+    /// ([`DisplayLink::request_frame`], [`DisplayLink::poke_page`]) — or the
+    /// theme is not the one last drawn; a tick without it puts the pacer to
+    /// sleep, so a page that does not change costs no frames. **The
+    /// terminal's output is not one of those reasons**: it plants the shared
+    /// damage flag and that flag is not read here (nor consumed — the
+    /// terminal draws itself again with whatever it printed when the page
+    /// comes down), so a program streaming under a page costs ticks that draw
+    /// nothing.
+    fn page_tick(&self, now: f64) -> bool {
         let mut slot = self.page.borrow_mut();
         let Some(page) = slot.as_mut() else {
             return false;
         };
-        if !self.session.take_damage() {
+        let theme = self.session.theme();
+        if !self.page_frames.take(self.theme.get() != theme) {
             self.waker.pacer().set_running(false);
             return true;
         }
         let Some(texture) = self.acquire() else {
+            self.page_frames.ask();
             return true;
         };
-        let theme = self.session.theme();
         self.theme.set(theme);
         let size_px = self.surface.size().unwrap_or((0, 0));
         let cx = UiContext {
@@ -1668,6 +1677,8 @@ impl Core {
             size_px,
             scale: self.cell.get().scale(),
             theme: &theme,
+            now,
+            reduce_motion: self.motion.get().reduce(),
         };
         let mut list = page.build(&cx);
         // The text atlas filled and was cleared while the list was built:
@@ -1676,6 +1687,11 @@ impl Core {
             list = page.build(&cx);
             let _ = self.renderer.ui_flushed();
         }
+        // A page that is still moving asks for the next frame itself; the
+        // pacer keeps running until one passes with nothing to say.
+        if page.animating() {
+            self.page_frames.ask();
+        }
         let target = surface::target(&texture);
         match self
             .renderer
@@ -1683,6 +1699,7 @@ impl Core {
         {
             Ok(()) => self.renderer.present(texture),
             Err(e) => {
+                self.page_frames.ask();
                 self.retry.draw_failed(&e);
             }
         }
@@ -2819,6 +2836,7 @@ impl DisplayLink {
         let core = Rc::new(Core {
             renderer,
             page: RefCell::new(None),
+            page_frames: page::PageFrames::default(),
             surface,
             session,
             retry,
@@ -3021,7 +3039,18 @@ impl DisplayLink {
     /// the [`Waker`], so "ask for a frame" has one definition. Its cost is one
     /// frame; the stop condition is the tick itself.
     pub fn request_frame(&self) {
+        self.core.page_frames.ask();
         self.waker.wake();
+    }
+
+    /// The shown page's own state changed (a pointer moved over it, a key,
+    /// a wheel): a frame of the page, and nothing else. Unlike
+    /// [`DisplayLink::request_frame`] it plants no damage for the terminal
+    /// underneath — the grid does not change. A no-op for the pacer when no
+    /// page is shown. Main thread, like every call here.
+    pub fn poke_page(&self) {
+        self.core.page_frames.ask();
+        self.waker.resume();
     }
 
     /// Shows `page` over the terminal — its list is painted in place of the
@@ -3030,6 +3059,7 @@ impl DisplayLink {
     /// valid. Main thread, like every call here.
     pub fn set_page(&self, page: Option<Box<dyn UiPage>>) {
         *self.core.page.borrow_mut() = page;
+        self.core.page_frames.ask();
         self.waker.wake();
     }
 

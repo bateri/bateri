@@ -9,7 +9,7 @@
 use crate::style::{
     Border, Direction, Display, Items, Justify, Length, Overflow, Shadow, Style, Track,
 };
-use crate::{Align, Color, Family};
+use crate::{Align, Color, Family, Id};
 
 /// What an element is.
 #[derive(Clone, Debug, PartialEq)]
@@ -30,12 +30,23 @@ pub(crate) struct Spark {
     pub peak: Option<f32>,
 }
 
+/// What an element is to the pointer and the keyboard, apart from how it looks.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct Meta {
+    pub id: Option<Id>,
+    /// The pointer can hover it and press it (it answers a click).
+    pub pressable: bool,
+    /// The keyboard can be on it.
+    pub focusable: bool,
+}
+
 /// One element of a page, and the elements inside it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Element {
     pub(crate) kind: Kind,
     pub(crate) style: Style,
     pub(crate) children: Vec<Element>,
+    pub(crate) meta: Meta,
 }
 
 /// A box: a column of its children until told otherwise.
@@ -68,6 +79,7 @@ impl Element {
             kind,
             style: Style::default(),
             children: Vec::new(),
+            meta: Meta::default(),
         }
     }
 
@@ -99,6 +111,34 @@ impl Element {
             Some(child) => self.child(child),
             None => self,
         }
+    }
+
+    // --- Names and answers ---------------------------------------------------------------
+
+    /// Names the element, so what is kept about it between builds (a scroll position, a
+    /// fade) and what the host asks of it (its box) can find it.
+    #[must_use]
+    pub fn id(mut self, id: Id) -> Self {
+        self.meta.id = Some(id);
+        self
+    }
+
+    /// Names the element and makes it something the pointer answers: it can be hovered,
+    /// pressed and clicked (`Ui::hover`, `Ui::press`), and the pointer takes the hand's
+    /// shape over it.
+    #[must_use]
+    pub fn press(mut self, id: Id) -> Self {
+        self.meta.id = Some(id);
+        self.meta.pressable = true;
+        self
+    }
+
+    /// The keyboard can be on this element (it is named too: see [`Element::id`]); focus
+    /// moves between such elements in the order they are written.
+    #[must_use]
+    pub fn focusable(mut self) -> Self {
+        self.meta.focusable = true;
+        self
     }
 
     // --- Layout: the box ---------------------------------------------------------------

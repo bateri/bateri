@@ -84,7 +84,11 @@ use crate::focus::Moment;
 use crate::grid::{self, Grid, split_into_grid};
 use bt_shell_common::kablo::roster::Background;
 use bt_shell_common::kablo::service::{PaneLink, Shown};
+#[cfg(debug_assertions)]
+use bt_shell_common::native_view::{Cursor as PageCursor, Input, Keyboard, Reply};
 use bt_shell_common::view_strip;
+#[cfg(debug_assertions)]
+use objc2_app_kit::NSEvent;
 
 use crate::jobs::{self, Foreground, Probe, ShellParent, SystemTable};
 use crate::journal::PaneJournal;
@@ -2234,6 +2238,10 @@ pub struct PaneIvars {
     /// side; the strip is the application's own, the same one a program's view has).
     #[cfg(debug_assertions)]
     demo_strip: RefCell<Option<Retained<pencere_view::strip::StripView>>>,
+    /// What the debug demo page needs to be used while it is up: the handle its input goes by,
+    /// the filter's text field, the pointer's tracking area (`crate::native_page`).
+    #[cfg(debug_assertions)]
+    demo_page: RefCell<Option<crate::native_page::Page>>,
     /// The deadlines set on the conversation with that program's view
     /// ([`TerminalPane::wait_for_view`]).
     view_waits: RefCell<Waits>,
@@ -2588,6 +2596,16 @@ define_class!(
             self.apply_search();
         }
 
+        /// The text of a field this pane is the delegate of changed: the debug demo page's
+        /// filter (the search field has its action, `searchFieldChanged:`).
+        #[unsafe(method(controlTextDidChange:))]
+        fn control_text_did_change(&self, notification: &NSNotification) {
+            #[cfg(debug_assertions)]
+            self.demo_field_changed(notification);
+            #[cfg(not(debug_assertions))]
+            let _ = notification;
+        }
+
         /// The field's command hook: ⏎ the previous (older), ⇧⏎
         /// the next (newer) match; Esc closes the panel — instead of
         /// `NSSearchField`'s "clear the text" default. The remaining commands
@@ -2598,12 +2616,26 @@ define_class!(
         #[unsafe(method(control:textView:doCommandBySelector:))]
         fn control_do_command(
             &self,
-            _control: &AnyObject,
+            control: &AnyObject,
             _text_view: &AnyObject,
             command: Sel,
         ) -> bool {
             self.note_interaction();
-            if command == sel!(insertNewline:) {
+            // The debug demo page's filter field has this pane for its delegate too: its keys
+            // are not the search bar's.
+            #[cfg(debug_assertions)]
+            let demo_field = self
+                .is_demo_field(control)
+                .then(|| self.demo_field_command(command));
+            #[cfg(not(debug_assertions))]
+            let demo_field: Option<bool> = {
+                let _ = control;
+                None
+            };
+            // No `return`: `define_class!` converts the `bool` at the end of the body.
+            if let Some(handled) = demo_field {
+                handled
+            } else if command == sel!(insertNewline:) {
                 let shift = NSApplication::sharedApplication(self.mtm())
                     .currentEvent()
                     .is_some_and(|event| event.modifierFlags().contains(NSEventModifierFlags::Shift));
@@ -2630,7 +2662,7 @@ define_class!(
         fn validate_menu_item(&self, item: &NSMenuItem) -> bool {
             let action = item.action();
             // No `return`: `define_class!` converts the `bool` at the end of the body.
-            if self.shows_view() && pencere_view::is_content_item(item) {
+            if (self.shows_view() || self.shows_page()) && pencere_view::is_content_item(item) {
                 // A program's view is the pane's content: Edit, scrolling and the text size
                 // are the view's while it is shown (the shortcut table's mark), so these
                 // items are grey and a key the view did not handle does not run them here.
@@ -2961,6 +2993,8 @@ impl TerminalPane {
             pencere: RefCell::new(None),
             #[cfg(debug_assertions)]
             demo_strip: RefCell::new(None),
+            #[cfg(debug_assertions)]
+            demo_page: RefCell::new(None),
             view_waits: RefCell::new(Waits::default()),
             view_owed: RefCell::new(None),
             view_asking: pencere_view::ask::Asking::default(),
@@ -4405,6 +4439,10 @@ impl TerminalPane {
         if let Some(strip) = self.ivars().demo_strip.borrow().as_ref() {
             strip.paint(&theme);
         }
+        #[cfg(debug_assertions)]
+        if let Some(page) = self.ivars().demo_page.borrow().as_ref() {
+            crate::native_page::paint(&page.field, &theme);
+        }
         if let Some(bar) = self.ivars().search.get() {
             bar.paint(&theme, theme.is_dark());
         }
@@ -5790,6 +5828,19 @@ impl TerminalPane {
         self.ivars().pencere.borrow().clone()
     }
 
+    /// Whether a page of the kit's own (debug builds: the gauge page, the container-list demo)
+    /// is over the terminal.
+    pub(crate) fn shows_page(&self) -> bool {
+        #[cfg(debug_assertions)]
+        {
+            self.shows_sample_page()
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            false
+        }
+    }
+
     /// Whether the debug gauge page is over the terminal.
     #[cfg(debug_assertions)]
     pub(crate) fn shows_sample_page(&self) -> bool {
@@ -5821,7 +5872,9 @@ impl TerminalPane {
 
     /// Debug ▸ Show Container List Demo: the engine's container-list page over the
     /// terminal, under the application's own strip (the one a program's view has, its button
-    /// closing the page), or off again.
+    /// closing the page), or off again. The page is used: the pointer, the wheel and the
+    /// keys go to it ([`TerminalPane::page_input`], [`TerminalPane::page_key`]), its filter is
+    /// a text field of AppKit's and its row menu an `NSMenu`.
     #[cfg(debug_assertions)]
     pub(crate) fn toggle_container_demo(&self) {
         let Some(link) = self.link() else {
@@ -5847,14 +5900,32 @@ impl TerminalPane {
         );
         ivars.demo_strip.replace(Some(strip));
         let family = ivars.font.borrow().family.clone();
-        link.set_page(Some(bt_shell_common::native_view::containers_demo(
-            family,
+        let (page, handle) = bt_shell_common::native_view::containers_demo(
+            family.clone(),
             view_strip::HEIGHT as f32,
-        )));
+        );
+        let field = crate::native_page::filter_field(self, &theme, family.as_deref());
+        self.addSubview_positioned_relativeTo(
+            &field,
+            NSWindowOrderingMode::Below,
+            Some(&ivars.link_veil),
+        );
+        {
+            // The page says where its box for the field is whenever it is laid out another way.
+            let field = field.clone();
+            handle.on_field(move |place| crate::native_page::place_field(&field, place));
+        }
+        let area = crate::native_page::pointer_area(self.view());
+        ivars.demo_page.replace(Some(crate::native_page::Page {
+            handle,
+            field,
+            area,
+        }));
+        link.set_page(Some(page));
     }
 
-    /// Takes the page down, whichever it is: its strip with it, and the terminal's frames
-    /// come back.
+    /// Takes the page down, whichever it is: its strip and field with it, and the terminal's
+    /// frames come back.
     #[cfg(debug_assertions)]
     fn take_page_down(&self) {
         if let Some(link) = self.link() {
@@ -5863,19 +5934,174 @@ impl TerminalPane {
         if let Some(strip) = self.ivars().demo_strip.take() {
             strip.removeFromSuperview();
         }
+        if let Some(page) = self.ivars().demo_page.take() {
+            // The keyboard was in the field: it goes back to the terminal.
+            let typing = page.field.currentEditor().is_some();
+            self.view().removeTrackingArea(&page.area);
+            page.field.removeFromSuperview();
+            if typing && let Some(window) = self.window() {
+                window.makeFirstResponder(Some(self.view()));
+            }
+        }
     }
 
-    /// A key while the gauge page is up: Esc and ⌃C close it, nothing else
-    /// reaches the hidden terminal. `true` when the page took the key.
+    /// The handle the demo page's input goes by, if that is the page up.
     #[cfg(debug_assertions)]
-    pub(crate) fn sample_page_key(&self, characters: Option<&str>) -> bool {
+    fn demo_handle(&self) -> Option<bt_shell_common::native_view::ContainersHandle> {
+        self.ivars()
+            .demo_page
+            .borrow()
+            .as_ref()
+            .map(|page| page.handle.clone())
+    }
+
+    /// A key while a page of the kit's is up: ⌃C closes it, Esc closes the gauge page, and the
+    /// demo page reads the rest (⌘ keys are the menu's: its content items are grey, so a
+    /// key that reaches here is nobody's and is swallowed). Nothing reaches the hidden
+    /// terminal. `true` when a page is up and took the key.
+    #[cfg(debug_assertions)]
+    pub(crate) fn page_key(&self, event: &NSEvent) -> bool {
         if !self.shows_sample_page() {
             return false;
         }
-        if matches!(characters, Some("\u{1b}" | "\u{3}")) {
+        let characters = event.characters().map(|text| text.to_string());
+        let flags = event.modifierFlags();
+        if pencere_view::is_interrupt(flags, characters.as_deref()) {
             self.take_page_down();
+            return true;
+        }
+        match self.demo_handle() {
+            None => {
+                if matches!(characters.as_deref(), Some("\u{1b}")) {
+                    self.take_page_down();
+                }
+            }
+            Some(handle) => {
+                if let Some(key) = characters.as_deref().and_then(crate::native_page::key_of) {
+                    let mods = crate::native_page::mods_of(flags);
+                    self.apply_page_reply(handle.input(Input::Key { key, mods }), false);
+                }
+            }
         }
         true
+    }
+
+    /// The pointer or the wheel over a page of the kit's, in the view's points. `true` when a
+    /// page is up: nothing of it is the grid's.
+    #[cfg(debug_assertions)]
+    pub(crate) fn page_input(&self, input: Input) -> bool {
+        if !self.shows_sample_page() {
+            return false;
+        }
+        if let Some(handle) = self.demo_handle() {
+            let pointer = !matches!(input, Input::Key { .. });
+            self.apply_page_reply(handle.input(input), pointer);
+        }
+        true
+    }
+
+    /// Does what a page said back: a frame of it when it changed, the menu it asked for, the
+    /// keyboard in its field, text on the pasteboard, the pointer's shape, its end.
+    #[cfg(debug_assertions)]
+    fn apply_page_reply(&self, reply: Reply, pointer: bool) {
+        if reply.close {
+            self.take_page_down();
+            return;
+        }
+        if reply.redraw
+            && let Some(link) = self.link()
+        {
+            link.poke_page();
+        }
+        if pointer {
+            match reply.cursor {
+                PageCursor::Pointer => NSCursor::pointingHandCursor().set(),
+                PageCursor::Text => NSCursor::IBeamCursor().set(),
+                PageCursor::Arrow => NSCursor::arrowCursor().set(),
+            }
+        }
+        if let Some(Keyboard::Filter) = reply.keyboard {
+            let field = self
+                .ivars()
+                .demo_page
+                .borrow()
+                .as_ref()
+                .map(|p| p.field.clone());
+            if let (Some(field), Some(window)) = (field, self.window()) {
+                window.makeFirstResponder(Some(&field));
+            }
+        }
+        if let Some(text) = reply.copy {
+            clipboard::copy(&NSPasteboard::generalPasteboard(), Some(text));
+        }
+        // Last: the menu holds this call until the person has chosen.
+        if let Some(menu) = reply.menu {
+            self.view().show_page_menu(&menu);
+        }
+    }
+
+    /// The person picked entry `index` of the menu the page asked for.
+    #[cfg(debug_assertions)]
+    pub(crate) fn page_menu_pick(&self, index: usize) {
+        if let Some(handle) = self.demo_handle() {
+            self.apply_page_reply(handle.pick(index), false);
+        }
+    }
+
+    /// Whether `control` is the demo page's filter field.
+    #[cfg(debug_assertions)]
+    fn is_demo_field(&self, control: &AnyObject) -> bool {
+        self.ivars()
+            .demo_page
+            .borrow()
+            .as_ref()
+            .is_some_and(|page| {
+                std::ptr::eq(
+                    std::ptr::from_ref(control).cast::<()>(),
+                    std::ptr::from_ref(&*page.field).cast::<()>(),
+                )
+            })
+    }
+
+    /// A key of the filter field's: ⏎, ↓, Tab and Esc leave it (the text stays) and give the
+    /// keyboard back to the page, where a further Esc closes it. The rest is the field's.
+    #[cfg(debug_assertions)]
+    fn demo_field_command(&self, command: Sel) -> bool {
+        let leaves = [
+            sel!(cancelOperation:),
+            sel!(insertNewline:),
+            sel!(moveDown:),
+            sel!(insertTab:),
+        ];
+        if !leaves.contains(&command) {
+            return false;
+        }
+        if let Some(window) = self.window() {
+            window.makeFirstResponder(Some(self.view()));
+        }
+        true
+    }
+
+    /// The text of the demo page's filter field changed: the list narrows to it.
+    #[cfg(debug_assertions)]
+    fn demo_field_changed(&self, notification: &NSNotification) {
+        let Some(object) = notification.object() else {
+            return;
+        };
+        if !self.is_demo_field(&object) {
+            return;
+        }
+        let Some(handle) = self.demo_handle() else {
+            return;
+        };
+        let text = self
+            .ivars()
+            .demo_page
+            .borrow()
+            .as_ref()
+            .map(|page| page.field.stringValue().to_string())
+            .unwrap_or_default();
+        self.apply_page_reply(handle.set_query(&text), false);
     }
 
     /// Whether a program's view is over the terminal.

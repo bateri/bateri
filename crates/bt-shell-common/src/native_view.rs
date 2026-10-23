@@ -17,14 +17,20 @@
 //! and lays the result out again, so a pane that is split or resized finds the page laid out
 //! for its new size.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use bt_core::{LinearRgba, Theme};
 use bt_gpu::{
     Renderer, ShapedText, TextFamily, TextFontId, TextStyle, UiContext, UiList, UiPage, UiQuad,
     UiRect, tint,
 };
-use bt_view::{Color, DrawList, Element, Family, Font, Measure, Metrics, Paint, Quad, Size, Tone};
+use bt_view::demo::Containers;
+pub use bt_view::{
+    Button, Cursor, Input, Key, Keyboard, Menu, MenuEntry, Mods, Point, Rect, Reply, Tone,
+};
+use bt_view::{Color, DrawList, Element, Family, Font, Laid, Measure, Metrics, Paint, Quad, Size};
 
 /// What `tone` is in `theme`: the nine roles are the theme's own, the rest are the values it
 /// derives from them (surfaces a step above the ground, the hairline, the shadow's colour).
@@ -208,14 +214,203 @@ impl<F: FnMut(Size) -> Element> UiPage for EnginePage<F> {
     }
 }
 
-/// The container-list page of the engine's demo (`bt_view::demo`) as a pane's page: fixed
-/// data, laid out again for every size the pane has. `terminal` is the pane's font family;
-/// `inset` the points at the top the application keeps for its own strip.
-pub fn containers_demo(terminal: Option<String>, inset: f32) -> Box<dyn UiPage> {
-    let page = bt_view::demo::Containers::fixture();
-    Box::new(EnginePage::new(terminal, inset, move |size| {
-        page.view(size)
-    }))
+/// The container list of the engine's demo as a pane's page, and the handle the pane drives it
+/// by. `terminal` is the pane's font family; `inset` the points at the top the application
+/// keeps for its own strip.
+///
+/// The page is the engine's [`Containers`] with what the person does to it: the handle takes
+/// the pane's input ([`ContainersHandle::input`]) in the pane's points, answers what the page
+/// says back ([`Reply`]) and tells the host where the filter's text field stands
+/// ([`ContainersHandle::on_field`]). **A page at rest costs no frames**: the page draws when the
+/// handle's input changed what it shows, and keeps asking for frames only while a fade of its
+/// is moving ([`UiPage::animating`]).
+pub fn containers_demo(
+    terminal: Option<String>,
+    inset: f32,
+) -> (Box<dyn UiPage>, ContainersHandle) {
+    let shared = Rc::new(RefCell::new(Shared {
+        page: Containers::fixture(),
+        laid: bt_view::layout(bt_view::div(), Size::new(1.0, 1.0), 1.0, &mut NoText),
+        inset,
+        field: None,
+        on_field: None,
+    }));
+    let page = ContainersPage {
+        terminal,
+        inset,
+        shaped: Shaped::default(),
+        shared: Rc::clone(&shared),
+    };
+    (Box::new(page), ContainersHandle { shared })
+}
+
+/// A host that has no text to measure: the page laid out before the first frame has no words.
+struct NoText;
+
+impl Measure for NoText {
+    fn measure(&mut self, _font: &Font, _text: &str) -> Metrics {
+        Metrics::default()
+    }
+}
+
+/// What the page and its handle share.
+struct Shared {
+    page: Containers,
+    /// The page as it was last laid out: what the pointer is asked against.
+    laid: Laid,
+    /// Points at the top of the pane the application keeps.
+    inset: f32,
+    /// Where the filter's field was last said to stand, in the pane's points.
+    field: Option<Rect>,
+    on_field: Option<Rc<dyn Fn(Option<Rect>)>>,
+}
+
+/// The drive of the container-list page: the pane's input in, the page's reply out. Cloned
+/// freely; all of it on the main thread.
+#[derive(Clone)]
+pub struct ContainersHandle {
+    shared: Rc<RefCell<Shared>>,
+}
+
+impl ContainersHandle {
+    /// What the person did, in the pane's points (the top-left corner of the pane is the
+    /// origin; the strip's room is included). The reply's points are the pane's too.
+    pub fn input(&self, input: Input) -> Reply {
+        let mut shared = self.shared.borrow_mut();
+        let inset = shared.inset;
+        let Shared { page, laid, .. } = &mut *shared;
+        from_pane(page.input(into_page(input, inset), laid), inset)
+    }
+
+    /// The filter field's text changed.
+    pub fn set_query(&self, text: &str) -> Reply {
+        let mut shared = self.shared.borrow_mut();
+        let inset = shared.inset;
+        from_pane(shared.page.set_query(text), inset)
+    }
+
+    /// The person picked the `index`th entry of the menu the last reply asked for.
+    pub fn pick(&self, index: usize) -> Reply {
+        let mut shared = self.shared.borrow_mut();
+        let inset = shared.inset;
+        from_pane(shared.page.pick(index), inset)
+    }
+
+    /// Where the filter's text field stands, in the pane's points, as of the last frame.
+    pub fn field(&self) -> Option<Rect> {
+        self.shared.borrow().field
+    }
+
+    /// `told` is called, on the thread that builds the frame, when the filter field's place
+    /// changes (the pane resized, the page laid out another way): the host moves its field to
+    /// it. Called once with the place the page has now, if it has one.
+    pub fn on_field(&self, told: impl Fn(Option<Rect>) + 'static) {
+        let (field, told) = {
+            let mut shared = self.shared.borrow_mut();
+            let told: Rc<dyn Fn(Option<Rect>)> = Rc::new(told);
+            shared.on_field = Some(Rc::clone(&told));
+            (shared.field, told)
+        };
+        if field.is_some() {
+            told(field);
+        }
+    }
+}
+
+/// An input in the pane's points as the page's: the strip's room is not the page's.
+fn into_page(input: Input, inset: f32) -> Input {
+    let up = |at: Point| Point::new(at.x, at.y - inset);
+    match input {
+        Input::Move(at) => Input::Move(up(at)),
+        Input::Press { at, button, mods } => Input::Press {
+            at: up(at),
+            button,
+            mods,
+        },
+        Input::Release { at, button } => Input::Release { at: up(at), button },
+        Input::Scroll { at, dy } => Input::Scroll { at: up(at), dy },
+        other @ (Input::Leave | Input::Key { .. }) => other,
+    }
+}
+
+/// A reply of the page with its points in the pane's.
+fn from_pane(mut reply: Reply, inset: f32) -> Reply {
+    if let Some(menu) = &mut reply.menu {
+        menu.at.y += inset;
+    }
+    reply
+}
+
+/// The engine's container list as a [`UiPage`]: built from the shared state for every frame
+/// the link asks for.
+struct ContainersPage {
+    terminal: Option<String>,
+    inset: f32,
+    shaped: Shaped,
+    shared: Rc<RefCell<Shared>>,
+}
+
+/// The most times a page is built for one frame: the rows in view depend on how far the list is
+/// scrolled, and what the scroll comes to depends on the rows — a second build settles it.
+const BUILDS: usize = 3;
+
+impl UiPage for ContainersPage {
+    fn build(&mut self, cx: &UiContext<'_>) -> UiList {
+        let scale = cx.scale as f32;
+        let inset = (self.inset * scale).round();
+        let width = cx.size_px.0 as f32;
+        let height = (cx.size_px.1 as f32 - inset).max(0.0);
+        let size = Size::new(width / scale, height / scale);
+        if self.shaped.lines.len() > SHAPED_LIMIT {
+            self.shaped.lines.clear();
+        }
+        let mut typeset = Typeset {
+            renderer: cx.renderer,
+            terminal: &self.terminal,
+            shaped: &mut self.shaped,
+        };
+        let (list, told) = {
+            let mut shared = self.shared.borrow_mut();
+            shared.page.advance(cx.now, cx.reduce_motion);
+            let mut laid = bt_view::layout(
+                shared.page.view(size),
+                Size::new(width, height),
+                scale,
+                &mut typeset,
+            );
+            for _ in 1..BUILDS {
+                if !shared.page.settle(&laid) {
+                    break;
+                }
+                laid = bt_view::layout(
+                    shared.page.view(size),
+                    Size::new(width, height),
+                    scale,
+                    &mut typeset,
+                );
+            }
+            let draws = laid.paint(&mut typeset);
+            let list = to_list(cx.renderer, cx.theme, &mut typeset, &draws, (0.0, inset));
+            // The field's room, in the pane's points: the strip's room above the page is added.
+            let field =
+                Containers::field(&laid).map(|r| Rect::new(r.x, r.y + shared.inset, r.w, r.h));
+            let told = (field != shared.field)
+                .then(|| shared.on_field.clone().map(|told| (told, field)))
+                .flatten();
+            shared.field = field;
+            shared.laid = laid;
+            (list, told)
+        };
+        // After the page is let go of: the host moves its field in this call.
+        if let Some((told, field)) = told {
+            told(field);
+        }
+        list
+    }
+
+    fn animating(&self) -> bool {
+        self.shared.borrow().page.animating()
+    }
 }
 
 #[cfg(test)]
@@ -309,8 +504,10 @@ mod tests {
             size_px: (2000, 1200),
             scale: 2.0,
             theme: &theme,
+            now: 0.0,
+            reduce_motion: false,
         };
-        let mut page = containers_demo(None, 32.0);
+        let (mut page, _) = containers_demo(None, 32.0);
         let list = page.build(&cx);
         let boxes = list
             .items()
@@ -327,5 +524,116 @@ mod tests {
         } else {
             assert_eq!(glyphs, 0);
         }
+    }
+
+    #[test]
+    fn the_strips_room_is_not_the_pages_and_a_menu_comes_back_in_the_panes_points() {
+        use bt_view::{Button, Menu, Mods};
+        let moved = into_page(Input::Move(Point::new(10.0, 50.0)), 32.0);
+        assert_eq!(moved, Input::Move(Point::new(10.0, 18.0)));
+        let pressed = into_page(
+            Input::Press {
+                at: Point::new(1.0, 40.0),
+                button: Button::Right,
+                mods: Mods::default(),
+            },
+            32.0,
+        );
+        assert!(matches!(pressed, Input::Press { at, .. } if at == Point::new(1.0, 8.0)));
+        assert_eq!(into_page(Input::Leave, 32.0), Input::Leave);
+        let reply = Reply {
+            menu: Some(Menu {
+                at: Point::new(4.0, 8.0),
+                entries: Vec::new(),
+            }),
+            ..Reply::default()
+        };
+        assert_eq!(
+            from_pane(reply, 32.0).menu.map(|menu| menu.at),
+            Some(Point::new(4.0, 40.0))
+        );
+    }
+
+    #[test]
+    fn the_keyboard_is_answered_before_the_first_frame() {
+        let (_page, handle) = containers_demo(None, 32.0);
+        let escape = Input::Key {
+            key: bt_view::Key::Escape,
+            mods: bt_view::Mods::default(),
+        };
+        assert!(handle.input(escape).close);
+        assert_eq!(handle.field(), None, "no frame, no place for the field");
+        // A pointer over a page that was never laid out is over nothing.
+        assert!(!handle.input(Input::Move(Point::new(5.0, 50.0))).redraw);
+    }
+
+    /// The page on the real renderer: it draws on a request and rests, the fades that start
+    /// with the pointer end by themselves, and the host is told where its field goes.
+    /// Skipped where no GPU device can be had.
+    #[test]
+    fn the_page_rests_between_the_inputs_that_change_it_and_tells_the_host_its_field() {
+        let Ok(renderer) = Renderer::system_default() else {
+            eprintln!("skipped: no GPU device");
+            return;
+        };
+        let theme = Theme::BATERI;
+        let build = |page: &mut Box<dyn UiPage>, now: f64, reduce_motion: bool| {
+            page.build(&UiContext {
+                renderer: &renderer,
+                size_px: (2000, 1200),
+                scale: 2.0,
+                theme: &theme,
+                now,
+                reduce_motion,
+            })
+        };
+        let (mut page, handle) = containers_demo(None, 32.0);
+        let told: Rc<RefCell<Vec<Option<Rect>>>> = Rc::default();
+        {
+            let told = Rc::clone(&told);
+            handle.on_field(move |field| told.borrow_mut().push(field));
+        }
+        build(&mut page, 1.0, false);
+        let field = handle.field().expect("the filter's field has a place");
+        assert_eq!(told.borrow().as_slice(), &[Some(field)]);
+        assert!(field.y >= 32.0, "below the strip: {field:?}");
+        // Laid out again the same way, the host is not told again.
+        build(&mut page, 1.1, false);
+        assert_eq!(told.borrow().len(), 1);
+        assert!(!page.animating());
+
+        // A press on the field's box asks for the keyboard for the host's field.
+        let middle = Point::new(field.x + field.w / 2.0, field.y + field.h / 2.0);
+        let press = handle.input(Input::Press {
+            at: middle,
+            button: bt_view::Button::Left,
+            mods: bt_view::Mods::default(),
+        });
+        assert_eq!(press.keyboard, Some(bt_view::Keyboard::Filter));
+
+        // The pointer over a row: one frame's worth of change, then fades until they end.
+        let over_a_row = Point::new(300.0, 32.0 + 150.0);
+        let moved = handle.input(Input::Move(over_a_row));
+        assert!(moved.redraw);
+        let same = handle.input(Input::Move(Point::new(301.0, 32.0 + 151.0)));
+        assert!(!same.redraw, "the same row: no frame");
+        let mut now = 2.0;
+        let mut frames = 0;
+        loop {
+            build(&mut page, now, false);
+            frames += 1;
+            now += 1.0 / 60.0;
+            if !page.animating() {
+                break;
+            }
+            assert!(frames < 40, "the page never came to rest");
+        }
+        assert!(frames > 2, "a fade takes a few frames, not one: {frames}");
+        // Under Reduce Motion the same change is one frame.
+        let (mut page, handle) = containers_demo(None, 32.0);
+        build(&mut page, 1.0, true);
+        assert!(handle.input(Input::Move(over_a_row)).redraw);
+        build(&mut page, 1.1, true);
+        assert!(!page.animating());
     }
 }

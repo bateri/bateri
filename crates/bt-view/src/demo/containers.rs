@@ -9,7 +9,11 @@
 //! drops the columns that matter least, the way the list this was drawn from does, and a
 //! narrow one drops the rail too.
 
-use crate::{Align, Element, Size, Tone, Track, div, spacer, spark, text};
+use crate::{Align, Element, Id, Rows, Size, Tone, Track, Ui, div, spacer, spark, text};
+
+mod interact;
+
+use interact::{Row, RowKey, Status, What};
 
 /// The rail folds away under this page width, points.
 const RAIL_BELOW: f32 = 780.0;
@@ -21,6 +25,25 @@ const NARROW_BELOW: f32 = 660.0;
 const TINY_BELOW: f32 = 470.0;
 /// One row's height, points.
 const ROW: f32 = 32.0;
+/// The room above a project's row, points.
+const GROUP_GAP: f32 = 6.0;
+/// The room before the list's first row and after its last, points.
+const LIST_LEAD: f32 = 6.0;
+const LIST_TRAIL: f32 = 8.0;
+
+/// The list of containers: the box that scrolls.
+pub(crate) const LIST: Id = Id::named("containers list");
+/// The filter's box, and the room inside it the host's text field takes.
+pub(crate) const SEARCH: Id = Id::named("containers filter");
+pub(crate) const FIELD: Id = Id::named("containers filter field");
+/// The button that groups the list by project.
+const GROUP_BUTTON: Id = Id::named("containers group");
+/// The button that would sort it: there is one order in the fixed list, so it only looks it.
+const SORT_BUTTON: Id = Id::named("containers sort");
+
+/// The roles of an element's fades (`Id::role`).
+const HOVERED: u8 = 0;
+const CHOSEN: u8 = 1;
 
 /// What a container is doing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -30,6 +53,8 @@ pub enum State {
     Starting,
     /// Running, and its health check fails.
     Unhealthy,
+    /// Frozen: still there, doing nothing.
+    Paused,
     /// Ended with this exit code.
     Exited(i32),
 }
@@ -129,10 +154,32 @@ impl Width {
 #[derive(Clone, Debug)]
 pub struct Containers {
     containers: Vec<Container>,
-    /// The name of the highlighted row.
-    selected: Option<&'static str>,
+    /// The row the cursor is on.
+    cursor: Option<RowKey>,
+    /// The containers marked, to act on many at once.
+    marked: Vec<&'static str>,
     /// Projects whose rows are folded away.
     collapsed: Vec<&'static str>,
+    /// What the filter field says.
+    query: String,
+    /// Which state of container to show.
+    status: Status,
+    /// Whether the list is grouped by project.
+    grouped: bool,
+    /// What the page remembers between builds: the hover, the scroll, the fades.
+    ui: Ui,
+    /// Where the pointer last was over the page, points: the hover is asked again where it
+    /// stands when the page moves under it.
+    pointer: Option<crate::Point>,
+    /// How tall the list's window was when the page was last laid out, points.
+    list_view: f32,
+    /// What the entries of the menu that is up do, by entry; and the containers they do it to.
+    menu: interact::MenuState,
+    /// The modifiers held when the last button went down: a click on a project's row folds it
+    /// unless it was a click that marks.
+    press_mods: crate::Mods,
+    /// Reduce Motion, as of the last frame: a change snaps.
+    reduce_motion: bool,
 }
 
 impl Containers {
@@ -266,11 +313,26 @@ impl Containers {
                 "up 2m",
             ),
         ];
-        Self {
+        let mut page = Self {
             containers,
-            selected: Some("api"),
+            cursor: Some(RowKey::Container("api")),
+            marked: Vec::new(),
             collapsed: vec!["stats"],
+            query: String::new(),
+            status: Status::All,
+            grouped: true,
+            ui: Ui::default(),
+            pointer: None,
+            list_view: 400.0,
+            menu: interact::MenuState::default(),
+            press_mods: crate::Mods::default(),
+            reduce_motion: false,
+        };
+        // The choice starts shown, not fading in.
+        if let Some(key) = page.cursor {
+            page.ui.fades.snap(key.id().role(CHOSEN), 1.0);
         }
+        page
     }
 
     /// The page for a pane of `size` points.
@@ -285,7 +347,7 @@ impl Containers {
             .clip()
             .child(self.header())
             .child(self.toolbar())
-            .child(self.list(width));
+            .child(self.list(width, size.h));
         let body = div()
             .row()
             .grow(1.0)
@@ -467,6 +529,8 @@ impl Containers {
     }
 
     fn toolbar(&self) -> Element {
+        // The host's text field stands in the box: the page draws the box and the key that
+        // reaches it, and keeps the room (`FIELD`).
         let search = div()
             .row()
             .items_center()
@@ -478,14 +542,14 @@ impl Containers {
             .rounded(6.0)
             .bg(Tone::Raised(1))
             .border(1.0, Tone::Line)
-            .child(
-                text("Filter by name, image, port\u{2026}")
-                    .color(Tone::Quiet)
-                    .grow(1.0)
-                    .truncate(),
-            )
+            .press(SEARCH)
+            .child(div().id(FIELD).grow(1.0).min_w(0.0).h(18.0))
             .child(kbd("/", 10.5));
-        let option = |label: &str, count: usize, active: bool, tone: Option<Tone>| {
+        let counts = self.counts();
+        let option = |status: Status, count: usize, tone: Option<Tone>| {
+            let active = self.status == status;
+            let id = status.id();
+            let glow = self.glow(id);
             let mut cell = div()
                 .row()
                 .items_center()
@@ -493,7 +557,12 @@ impl Containers {
                 .h(24.0)
                 .px(9.0)
                 .rounded(6.0)
-                .color(if active { Tone::Foreground } else { Tone::Dim });
+                .press(id)
+                .color(if active || glow > 0.0 {
+                    Tone::Foreground
+                } else {
+                    Tone::Dim
+                });
             if active {
                 cell = cell.bg(Tone::Raised(2)).border(1.0, Tone::Line).shadow(
                     0.0,
@@ -501,9 +570,11 @@ impl Containers {
                     2.0,
                     Tone::Shadow.alpha(0.5),
                 );
+            } else if glow > 0.0 {
+                cell = cell.bg(Tone::Foreground.alpha(0.07 * glow));
             }
             let count_color = tone.unwrap_or(if active { Tone::Dim } else { Tone::Quiet });
-            cell.child(text(label))
+            cell.child(text(status.label()))
                 .child(text(count.to_string()).text_size(10.5).color(count_color))
         };
         let segmented = div()
@@ -514,16 +585,12 @@ impl Containers {
             .bg(Tone::Raised(1))
             .border(1.0, Tone::Line)
             .no_shrink()
-            .child(option("All", self.containers.len(), true, None))
-            .child(option("Running", self.up(), false, None))
-            .child(option(
-                "Stopped",
-                self.containers.len() - self.up(),
-                false,
-                None,
-            ))
-            .child(option("Issues", self.issues(), false, Some(Tone::Error)));
-        let button = |label: &str, pressed: bool| {
+            .child(option(Status::All, counts.all, None))
+            .child(option(Status::Running, counts.running, None))
+            .child(option(Status::Stopped, counts.stopped, None))
+            .child(option(Status::Issues, counts.issues, Some(Tone::Error)));
+        let button = |label: &str, id: Id, pressed: bool| {
+            let glow = self.glow(id);
             let mut button = div()
                 .row()
                 .items_center()
@@ -531,12 +598,24 @@ impl Containers {
                 .px(9.0)
                 .rounded(6.0)
                 .no_shrink()
-                .color(if pressed { Tone::Foreground } else { Tone::Dim });
+                .color(if pressed || glow > 0.0 {
+                    Tone::Foreground
+                } else {
+                    Tone::Dim
+                });
             if pressed {
                 button = button
                     .bg(Tone::Accent.alpha(0.13))
                     .border(1.0, Tone::Accent.alpha(0.4));
+            } else if glow > 0.0 {
+                button = button.bg(Tone::Foreground.alpha(0.07 * glow));
             }
+            // A button that does nothing does not answer the pointer either.
+            button = if id == SORT_BUTTON {
+                button.id(id)
+            } else {
+                button.press(id)
+            };
             button.child(text(label).text_size(11.5))
         };
         div()
@@ -548,13 +627,13 @@ impl Containers {
             .pb(8.0)
             .child(search)
             .child(segmented)
-            .child(button("Group", true))
-            .child(button("Name \u{2193}", false))
+            .child(button("Group", GROUP_BUTTON, self.grouped))
+            .child(button("Name \u{2193}", SORT_BUTTON, false))
     }
 
     // --- The list ----------------------------------------------------------------------------
 
-    fn list(&self, width: Width) -> Element {
+    fn list(&self, width: Width, view: f32) -> Element {
         let head = |label: &str, active: bool| {
             text(if active {
                 format!("{} \u{25be}", label.to_uppercase())
@@ -587,30 +666,28 @@ impl Containers {
             .color(Tone::Quiet)
             .children(heads);
 
-        let mut rows: Vec<Element> = Vec::new();
-        let mut shown = Vec::new();
-        for c in &self.containers {
-            if shown.contains(&c.project) {
-                continue;
-            }
-            shown.push(c.project);
-            let members: Vec<&Container> = self
-                .containers
-                .iter()
-                .filter(|m| m.project == c.project)
-                .collect();
-            let folded = c.project.is_some_and(|p| self.collapsed.contains(&p));
-            rows.push(group_row(c.project, &members, folded));
-            if !folded {
-                for member in members {
-                    rows.push(container_row(
-                        member,
-                        width,
-                        self.selected == Some(member.name),
-                    ));
-                }
-            }
+        // Only the rows in view are made; the rest of the list's length is two spacers.
+        let rows = self.rows();
+        let places = Self::places(&rows);
+        let offset = self.ui.scroll_offset(LIST);
+        let window = places.window(offset, view, 2.0 * ROW);
+        let mut body = div()
+            .col()
+            .id(LIST)
+            .focusable()
+            .grow(1.0)
+            .min_h(0.0)
+            .px(8.0)
+            .scroll_y(offset)
+            .child(div().h(places.top(window.start)).no_shrink());
+        if rows.is_empty() {
+            body = body.child(self.nothing());
         }
+        for row in &rows[window.clone()] {
+            body = body.child(self.row(row, width));
+        }
+        body = body.child(div().h(places.total() - places.top(window.end)).no_shrink());
+
         div()
             .col()
             .grow(1.0)
@@ -618,20 +695,89 @@ impl Containers {
             .clip()
             .child(head)
             .child(div().h(1.0).no_shrink().bg(Tone::Line.alpha(0.6)))
+            .child(body)
+    }
+
+    /// Where the rows stand in the list: their heights, and the room around them.
+    fn places(rows: &[Row]) -> Rows {
+        Rows::new(rows.iter().map(Row::height)).padded(LIST_LEAD, LIST_TRAIL)
+    }
+
+    /// What the list says where no container is shown.
+    fn nothing(&self) -> Element {
+        let reason = if self.query.is_empty() {
+            format!("No {} containers.", self.status.label().to_lowercase())
+        } else {
+            format!("No container matches \u{201c}{}\u{201d}.", self.query)
+        };
+        div()
+            .col()
+            .items_center()
+            .gap(4.0)
+            .pt(48.0)
+            .no_shrink()
+            .child(text(reason).color(Tone::Dim))
             .child(
-                div()
-                    .col()
-                    .grow(1.0)
-                    .min_h(0.0)
-                    .clip()
-                    .px(8.0)
-                    .pt(6.0)
-                    .children(rows),
+                text("Change the filter, or press Esc in the field to leave it.")
+                    .text_size(11.0)
+                    .color(Tone::Quiet),
             )
+    }
+
+    /// The element of one row of the list.
+    fn row(&self, row: &Row, width: Width) -> Element {
+        let id = row.key.id();
+        let chosen = self.ui.fades.level(id.role(CHOSEN));
+        let hovered = self.ui.fades.level(id.role(HOVERED));
+        let look = Look { chosen, hovered };
+        match row.what {
+            What::Group {
+                project,
+                ref members,
+                folded,
+            } => {
+                let members: Vec<&Container> =
+                    members.iter().map(|at| &self.containers[*at]).collect();
+                group_row(id, project, &members, folded, look)
+            }
+            What::Container(at) => {
+                let c = &self.containers[at];
+                container_row(id, c, width, look, self.marked.contains(&c.name))
+            }
+        }
     }
 }
 
-fn group_row(project: Option<&str>, members: &[&Container], folded: bool) -> Element {
+/// How lit a row is: the choice of it (the cursor's, or the pointer's click) and the pointer's
+/// being over it, each between 0 and 1 as the fades have it.
+#[derive(Clone, Copy)]
+struct Look {
+    chosen: f32,
+    hovered: f32,
+}
+
+impl Look {
+    /// The row dressed: a chosen one on the accent with its border, one the pointer is over
+    /// on a faint light.
+    fn dress(self, row: Element) -> Element {
+        if self.chosen > 0.0 {
+            row.bg(Tone::Accent.alpha(0.13 * self.chosen))
+                .border(1.0, Tone::Accent.alpha(0.55 * self.chosen))
+        } else if self.hovered > 0.0 {
+            row.bg(Tone::Foreground.alpha(0.055 * self.hovered))
+        } else {
+            row
+        }
+    }
+}
+
+fn group_row(
+    id: Id,
+    project: Option<&str>,
+    members: &[&Container],
+    folded: bool,
+    look: Look,
+) -> Element {
     let up = members.iter().filter(|m| m.is_up()).count();
     let issues = members.iter().filter(|m| m.has_issue()).count();
     let stack = members
@@ -652,39 +798,42 @@ fn group_row(project: Option<&str>, members: &[&Container], folded: bool) -> Ele
     } else {
         format!("{up}/{} up", members.len())
     };
-    div()
-        .row()
-        .items_center()
-        .gap(8.0)
-        .h(ROW)
-        .mt(6.0)
-        .px(8.0)
-        .rounded(6.0)
-        .no_shrink()
-        .color(Tone::Dim)
-        .child(
-            div()
-                .row()
-                .justify_center()
-                .w(18.0)
-                .child(text(if folded { "\u{25b8}" } else { "\u{25be}" }).text_size(11.0)),
-        )
-        .child(
-            text(project.unwrap_or("Standalone"))
-                .weight(650)
-                .color(Tone::Foreground)
-                .no_shrink(),
-        )
-        .child(stack)
-        .child(text(summary).text_size(11.5).color(Tone::Quiet).truncate())
+    look.dress(
+        div()
+            .row()
+            .items_center()
+            .gap(8.0)
+            .h(ROW)
+            .mt(GROUP_GAP)
+            .px(8.0)
+            .rounded(6.0)
+            .no_shrink()
+            .press(id)
+            .color(Tone::Dim)
+            .child(
+                div()
+                    .row()
+                    .justify_center()
+                    .w(18.0)
+                    .child(text(if folded { "\u{25b8}" } else { "\u{25be}" }).text_size(11.0)),
+            )
+            .child(
+                text(project.unwrap_or("Standalone"))
+                    .weight(650)
+                    .color(Tone::Foreground)
+                    .no_shrink(),
+            )
+            .child(stack)
+            .child(text(summary).text_size(11.5).color(Tone::Quiet).truncate()),
+    )
 }
 
 /// A container's row, under its project's: the name is set in from the project's.
-fn container_row(c: &Container, width: Width, selected: bool) -> Element {
+fn container_row(id: Id, c: &Container, width: Width, look: Look, marked: bool) -> Element {
     let up = c.is_up();
     let tone = match c.state {
         State::Running => Tone::Success,
-        State::Starting => Tone::Warning,
+        State::Starting | State::Paused => Tone::Warning,
         State::Unhealthy => Tone::Error,
         State::Exited(code) if code != 0 => Tone::Error,
         State::Exited(_) => Tone::Quiet,
@@ -692,6 +841,7 @@ fn container_row(c: &Container, width: Width, selected: bool) -> Element {
     let state_tag = match c.state {
         State::Unhealthy => Some(("unhealthy".to_owned(), Tone::Error)),
         State::Starting => Some(("starting".to_owned(), Tone::Warning)),
+        State::Paused => Some(("paused".to_owned(), Tone::Warning)),
         State::Exited(code) if code != 0 => Some((format!("exited {code}"), Tone::Error)),
         _ => None,
     };
@@ -800,13 +950,20 @@ fn container_row(c: &Container, width: Width, selected: bool) -> Element {
         .px(8.0)
         .rounded(6.0)
         .no_shrink()
+        .press(id)
         .children(cells);
-    if selected {
-        row = row
-            .bg(Tone::Accent.alpha(0.13))
-            .border(1.0, Tone::Accent.alpha(0.55));
+    if marked {
+        // A bar at the row's edge: the container is marked, to be acted on with the others.
+        row = row.child(
+            div()
+                .absolute()
+                .inset(Some(8.0), None, Some(8.0), Some(1.0))
+                .w(3.0)
+                .rounded(1.5)
+                .bg(Tone::Accent),
+        );
     }
-    row
+    look.dress(row)
 }
 
 /// A value at the right of a meter: the number, in a box of its own width.
@@ -972,6 +1129,9 @@ fn wave(seed: u32, base: f32, spike: f32) -> Vec<f32> {
         })
         .collect()
 }
+
+#[cfg(test)]
+mod interact_tests;
 
 #[cfg(test)]
 mod tests {

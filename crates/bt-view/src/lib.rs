@@ -13,25 +13,44 @@
 //! the layout crate and stands apart from the rest of the workspace, so that what a page is
 //! written in can be taken, as it is, to wherever a page is shown.
 //!
+//! A page is not only drawn: it answers the pointer, the wheel and the keyboard. Elements are
+//! named ([`Id`]) and the ones that answer the pointer say so ([`Element::press`]); what a page
+//! keeps between builds — what is hovered, pressed, focused, how far a list is scrolled, how
+//! far a highlight has faded — is a [`Ui`] kept by those names; a long list builds only the
+//! rows in view ([`Rows`]). What the host tells a page is an [`Input`], and what the page
+//! tells back a [`Reply`].
+//!
 //! [`demo`] is a worked page — a container list — that is also the engine's gauge.
 
 pub mod demo;
 
 mod color;
 mod element;
+mod fades;
 mod geometry;
+mod id;
+mod input;
 mod layout;
 mod paint;
+mod rows;
 mod style;
 mod text;
+mod ui;
 
 pub use color::{Color, Tone};
 pub use element::{Element, div, spacer, spark, text};
+pub use fades::{FADE_SECONDS, Fades};
 pub use geometry::{Point, Rect, Size};
-pub use layout::{Laid, layout};
+pub use id::Id;
+pub use input::{Button, Cursor, Input, Key, Keyboard, Menu, MenuEntry, Mods, Reply};
+pub use layout::{Extent, Laid, layout};
 pub use paint::{DrawList, Paint, Quad, Run};
+pub use rows::Rows;
 pub use style::{Border, Shadow, Track};
 pub use text::{Align, Family, Font, Measure, Metrics};
+pub use ui::Ui;
 
+#[cfg(test)]
+mod interact_tests;
 #[cfg(test)]
 mod tests;

@@ -155,7 +155,7 @@ pub(crate) fn time_zone_name() -> Option<String> {
 /// Whether a key is ⌃C and only ⌃C: Control held and no other modifier, and the
 /// character it makes is the interrupt (`characters` gives it with the modifiers
 /// applied, as [`crate::view::BateriView`] reads it).
-fn is_interrupt(flags: NSEventModifierFlags, characters: Option<&str>) -> bool {
+pub(crate) fn is_interrupt(flags: NSEventModifierFlags, characters: Option<&str>) -> bool {
     let held = flags
         & (NSEventModifierFlags::Control
             | NSEventModifierFlags::Command

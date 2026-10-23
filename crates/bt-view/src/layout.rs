@@ -13,11 +13,11 @@ use taffy::style::{
 };
 use taffy::{NodeId, TaffyTree};
 
-use crate::element::{Kind, Spark};
+use crate::element::{Kind, Meta, Spark};
 use crate::style::{
     Border, Direction, Display, Items, Justify, Length, Overflow, Shadow, Style, TextStyle, Track,
 };
-use crate::{Align, Color, Element, Family, Font, Measure, Metrics, Rect, Size, Tone};
+use crate::{Align, Color, Element, Family, Font, Id, Measure, Metrics, Point, Rect, Size, Tone};
 
 /// The text a page is written in until a box says otherwise: the terminal's face at 12.5
 /// points, regular, in the foreground, at the start of its box.
@@ -65,6 +65,11 @@ pub(crate) struct Node {
     pub border: Option<Border>,
     pub radii: [f32; 4],
     pub shadow: Option<Shadow>,
+    /// The element that holds this one (its place in the paint order).
+    pub parent: Option<usize>,
+    pub meta: Meta,
+    /// For a box that scrolls: how tall its content is and how tall the box is, pixels.
+    pub extent: Option<(f32, f32)>,
 }
 
 /// A page laid out: every element's box, in the order they are painted.
@@ -88,9 +93,12 @@ struct Leaf {
 struct Pending {
     id: NodeId,
     parent: Option<usize>,
+    meta: Meta,
     overflow: Overflow,
     /// Pixels.
     scroll: (f32, f32),
+    /// The room inside the box below its content, pixels.
+    pad_bottom: f32,
     hidden: bool,
     content: Content,
     fill: Option<Color>,
@@ -142,11 +150,18 @@ pub fn layout(mut root: Element, viewport: Size, scale: f32, measure: &mut dyn M
     let mut nodes: Vec<Node> = Vec::with_capacity(pending.len());
     // Where each element's children are measured from, and the clip they inherit.
     let mut origins: Vec<(f32, f32, Rect, bool)> = Vec::with_capacity(pending.len());
+    // How far down each box's children reach, where the box does not scroll them: the length
+    // of what a scrolling box holds.
+    let mut reach: Vec<f32> = Vec::with_capacity(pending.len());
+    // What each box scrolls its children by, and the room it keeps below them, pixels.
+    let mut inside: Vec<(f32, f32)> = Vec::with_capacity(pending.len());
     for entry in pending {
         let Ok(laid) = tree.layout(entry.id) else {
             // A node Taffy does not know: nothing of it (cannot happen — its own ids).
             nodes.push(empty(page));
             origins.push((0.0, 0.0, page, true));
+            reach.push(0.0);
+            inside.push((0.0, 0.0));
             continue;
         };
         let (ox, oy, outer_clip, outer_hidden) = entry
@@ -171,6 +186,12 @@ pub fn layout(mut root: Element, viewport: Size, scale: f32, measure: &mut dyn M
             own_clip,
             hidden,
         ));
+        if let Some(parent) = entry.parent {
+            let held = rect.bottom() + inside[parent].0;
+            reach[parent] = reach[parent].max(held);
+        }
+        reach.push(0.0);
+        inside.push((entry.scroll.1, entry.pad_bottom));
         nodes.push(Node {
             rect,
             clip: outer_clip,
@@ -180,7 +201,15 @@ pub fn layout(mut root: Element, viewport: Size, scale: f32, measure: &mut dyn M
             border: entry.border,
             radii: entry.radii,
             shadow: entry.shadow,
+            parent: entry.parent,
+            meta: entry.meta,
+            extent: (entry.overflow == Overflow::Scroll).then_some((0.0, rect.h)),
         });
+    }
+    for (index, node) in nodes.iter_mut().enumerate() {
+        if let Some((content, _)) = &mut node.extent {
+            *content = (reach[index] - node.rect.y).max(0.0) + inside[index].1;
+        }
     }
     Laid {
         nodes,
@@ -199,6 +228,9 @@ fn empty(page: Rect) -> Node {
         border: None,
         radii: [0.0; 4],
         shadow: None,
+        parent: None,
+        meta: Meta::default(),
+        extent: None,
     }
 }
 
@@ -216,6 +248,7 @@ fn build(
         kind,
         style,
         children,
+        meta,
     } = element;
     let text = style.text.over(outer);
     let font = Font {
@@ -230,8 +263,10 @@ fn build(
     pending.push(Pending {
         id: NodeId::new(0),
         parent,
+        meta,
         overflow: style.overflow,
         scroll: (px(style.scroll.0), px(style.scroll.1)),
+        pad_bottom: px(style.padding[2]),
         hidden: style.display == Display::None,
         content: Content::None,
         fill: style.fill,
@@ -433,5 +468,105 @@ impl Laid {
     /// know where things stand reads.
     pub fn rects(&self) -> impl Iterator<Item = Rect> + '_ {
         self.nodes.iter().map(|node| node.rect)
+    }
+
+    // --- Asking the page where things are ------------------------------------------------
+    //
+    // Everything below speaks in points, the page's own unit: a pointer's place goes in and
+    // a box comes out the way the page was written.
+
+    /// Pixels to a point.
+    pub fn scale(&self) -> f32 {
+        self.scale
+    }
+
+    /// The part of `node` that shows, pixels: its box where the boxes around it let it be seen.
+    fn shown(node: &Node) -> Rect {
+        node.rect.intersect(node.clip)
+    }
+
+    fn named(&self, id: Id) -> Option<&Node> {
+        self.nodes.iter().find(|node| node.meta.id == Some(id))
+    }
+
+    /// The box of the element named `id`, points (where it is on the page now, whatever of it
+    /// is cut off by a box around it).
+    pub fn bounds(&self, id: Id) -> Option<Rect> {
+        let node = self.named(id)?;
+        let s = self.scale;
+        Some(Rect::new(
+            node.rect.x / s,
+            node.rect.y / s,
+            node.rect.w / s,
+            node.rect.h / s,
+        ))
+    }
+
+    /// The named elements whose visible part holds `at`, the innermost first. An element that is
+    /// `hidden`, or whose place is cut off by a box around it, is not there.
+    pub fn ids_at(&self, at: Point) -> Vec<Id> {
+        let (x, y) = (at.x * self.scale, at.y * self.scale);
+        self.nodes
+            .iter()
+            .rev()
+            .filter(|node| !node.hidden && Self::shown(node).contains(x, y))
+            .filter_map(|node| node.meta.id)
+            .collect()
+    }
+
+    /// The element under `at` that answers the pointer ([`crate::Element::press`]): the topmost.
+    pub fn hit(&self, at: Point) -> Option<Id> {
+        let (x, y) = (at.x * self.scale, at.y * self.scale);
+        self.nodes
+            .iter()
+            .rev()
+            .find(|node| node.meta.pressable && !node.hidden && Self::shown(node).contains(x, y))
+            .and_then(|node| node.meta.id)
+    }
+
+    /// How tall the content of the scrolling box named `id` is and how tall the box is.
+    pub fn scroll_extent(&self, id: Id) -> Option<Extent> {
+        let (content, view) = self.named(id)?.extent?;
+        Some(Extent {
+            content: content / self.scale,
+            view: view / self.scale,
+        })
+    }
+
+    /// The elements the keyboard can be on, in the order they are written.
+    pub fn focus_order(&self) -> Vec<Id> {
+        self.nodes
+            .iter()
+            .filter(|node| node.meta.focusable && !node.hidden)
+            .filter_map(|node| node.meta.id)
+            .collect()
+    }
+
+    /// `id` and the named elements that hold it, innermost first: where a key goes, from the
+    /// element the keyboard is on out to the boxes around it.
+    pub fn path_of(&self, id: Id) -> Vec<Id> {
+        let mut path = Vec::new();
+        let mut at = self.nodes.iter().position(|node| node.meta.id == Some(id));
+        while let Some(index) = at {
+            if let Some(named) = self.nodes[index].meta.id {
+                path.push(named);
+            }
+            at = self.nodes[index].parent;
+        }
+        path
+    }
+}
+
+/// The length of what a scrolling box holds against the box's own, points.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Extent {
+    pub content: f32,
+    pub view: f32,
+}
+
+impl Extent {
+    /// The furthest the content can be scrolled: 0 when it fits.
+    pub fn max_offset(self) -> f32 {
+        (self.content - self.view).max(0.0)
     }
 }

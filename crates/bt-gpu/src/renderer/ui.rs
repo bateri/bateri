@@ -233,6 +233,11 @@ pub struct UiContext<'a> {
     pub scale: f64,
     /// The pane's palette.
     pub theme: &'a Theme,
+    /// The frame's time, seconds on the pacer's clock: what a page that animates measures its
+    /// steps by.
+    pub now: f64,
+    /// Reduce Motion is on: a page that animates snaps instead.
+    pub reduce_motion: bool,
 }
 
 /// Something that fills a pane's surface with a [`UiList`] instead of the
@@ -243,6 +248,13 @@ pub trait UiPage {
     /// The list for this surface. May be called again for the same state (the
     /// text atlas filled up and was cleared while building).
     fn build(&mut self, cx: &UiContext<'_>) -> UiList;
+
+    /// Whether the page is still moving after the frame [`UiPage::build`] just made: the link
+    /// asks for the next frame itself until this says no, so every animation of a page has the
+    /// stop condition of its own end and a page at rest costs no frames.
+    fn animating(&self) -> bool {
+        false
+    }
 }
 
 /// `ui.wgsl`'s `Immediates`: the surface's size, for the NDC scale. 8 bytes,
