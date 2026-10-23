@@ -294,6 +294,17 @@ bt-shell-macos = { path = "crates/bt-shell-macos" }
 vte = { git = "https://github.com/bateri/kablo", rev = "74ac4a4d4800ffa0a370bac98dd6558b817608d9" }
 alacritty_terminal = { git = "https://github.com/bateri/kablo", rev = "74ac4a4d4800ffa0a370bac98dd6558b817608d9" }
 
+# On macOS the default development profile keeps full debug info in object files beside every
+# build ("unpacked") and never removes the ones a rebuild replaces: each edit at the bottom
+# crate left about 2 600 more of them, and a busy checkout grew past 100 GB in a few days.
+# Line tables with split debug info off keep nothing beside the build and roughly halve a
+# rebuild; the price is that a backtrace's frames carry function names but no file:line (a
+# panic's own message still says where). For a run that needs them, override from the
+# environment: `CARGO_PROFILE_DEV_SPLIT_DEBUGINFO=packed` (slower links, full lines).
+[profile.dev]
+debug = "line-tables-only"
+split-debuginfo = "off"
+
 # A page module is compiled to machine code when its page opens, by the sandbox's code
 # generator; built without optimization (a debug build) that takes seconds and the page is
 # not there while it does. The generator and what feeds it are optimized in the development
