@@ -11,6 +11,7 @@
 //! package has no kablo calls and every `ssh` is the plain one).
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -68,19 +69,42 @@ pub(crate) fn end_leftovers() -> usize {
     ledger().end_all()
 }
 
-/// The terminals of this Mac's own panes that the bateri before this one left in the ledger (it
-/// crashed, or its quit did not wait for them) are marked to end, whatever `keep_running` says:
-/// no pane can show one again yet, and a row left would be a program running for nobody. The
-/// account's first connection ends them, before anything else.
-pub(crate) fn end_local_leftovers() {
-    let ledger = ledger();
-    for terminal in ledger.terminals_of(local::ACCOUNT) {
-        ledger.end(local::ACCOUNT, &terminal);
+/// The first windows of a launch are built, and `panes` are the panes they have: the terminals of
+/// this Mac that the bateri before left and that no pane of them is for are ended
+/// ([`Service::end_unclaimed`]) — a
+/// program running for no window. What became of the terminals at the launch's start (a crash
+/// under `keep_running = "update"`, [`end_leftovers`]) was decided before, and what the table
+/// says of a quit was done by the quit itself.
+pub(crate) fn end_unclaimed(panes: &[PaneUuid]) {
+    if let Some(service) = SERVICE.get() {
+        service.end_unclaimed(panes);
     }
 }
 
+/// Whether the ledger has a terminal of this Mac that is meant to live: a launch that asks it
+/// finds out whether there is anything to show again.
+pub(crate) fn keeps_local() -> bool {
+    ledger()
+        .terminals()
+        .iter()
+        .any(|row| !row.ending && local::is_account(&row.account))
+}
+
+/// This bateri is leaving to be updated: the terminals the ledger keeps are carried on by the one
+/// that starts next ([`Ledger::leave_for_update`]).
+pub(crate) fn leave_for_update() {
+    ledger().leave_for_update();
+}
+
+/// Whether the bateri before this one left to be updated; said once
+/// ([`Ledger::arrived_by_update`]).
+pub(crate) fn arrived_by_update() -> bool {
+    ledger().arrived_by_update()
+}
+
 /// A quit that ends the terminals ([`bt_shell_common::kablo::quit`]): the terminals the
-/// panes show are asked to end and waited for, at most [`QUIT_END_WAIT`] — a server that does not
+/// panes have — the one of this Mac that carries a pane's bytes and the one a server keeps that
+/// it shows — are asked to end and waited for, at most [`QUIT_END_WAIT`] — a server that does not
 /// answer is ended at the next connection. **Before** the panes' programs are signalled.
 pub(crate) fn end_all(panes: &[PaneUuid]) {
     if let Some(service) = SERVICE.get() {
@@ -88,13 +112,29 @@ pub(crate) fn end_all(panes: &[PaneUuid]) {
     }
 }
 
-/// The terminals of this Mac that carry the panes' bytes ([`TerminalPane::is_streamed`]) are
-/// asked to end and waited for, at most [`QUIT_END_WAIT`]; a terminal a server keeps that a pane
-/// shows is left as it is. **Before** the panes' programs are signalled.
-pub(crate) fn end_local(panes: &[PaneUuid]) {
+/// The user cleared the pane's scrollback: the terminals it has forget theirs
+/// ([`Service::forget_past`]).
+pub(crate) fn forget_past(pane: &PaneUuid) {
     if let Some(service) = SERVICE.get() {
-        service.end_local(panes, QUIT_END_WAIT);
+        service.forget_past(pane);
     }
+}
+
+/// A view opened or closed in the pane: said beside the terminal of this Mac that carries its
+/// bytes ([`Ledger::set_view`]).
+pub(crate) fn view_changed(pane: &PaneUuid, open: bool) {
+    let ledger = ledger();
+    if let Some(terminal) = ledger.local_terminal_of(pane) {
+        ledger.set_view(local::ACCOUNT, &terminal, open);
+    }
+}
+
+/// Whether the pane's terminal of this Mac had a view open when it was last said.
+pub(crate) fn view_was_open(pane: &PaneUuid) -> bool {
+    let ledger = ledger();
+    ledger
+        .local_terminal_of(pane)
+        .is_some_and(|terminal| ledger.view_of(local::ACCOUNT, &terminal))
 }
 
 /// The terminal the pane shows, if it shows one a kablo server keeps (the
@@ -414,6 +454,21 @@ pub(crate) fn take_directory(pane: u64) -> Option<String> {
 /// a busy main thread is a request that is not served (the plain `ssh`).
 const PANE_WAIT: Duration = Duration::from_secs(2);
 
+/// How long it is waited for while the launch is still building its windows. The main thread is
+/// then in one long stretch, each pane of it waiting for its terminal, and the pipes that were
+/// running in the terminals found again are asking bateri for the server terminals they showed:
+/// a pipe that is answered that it is in no pane ends, and its pane with the shell behind it.
+const LAUNCH_PANE_WAIT: Duration = Duration::from_secs(30);
+
+/// Whether the launch is still building its first windows ([`launch_over`]).
+static LAUNCHING: AtomicBool = AtomicBool::new(true);
+
+/// The launch's first windows are built, whatever became of them: the main queue is not busy
+/// with them any more.
+pub(crate) fn launch_over() {
+    LAUNCHING.store(false, Ordering::Release);
+}
+
 /// Whether the service is on its way, so that a pane that wants a terminal of this Mac knows
 /// whether to wait for it: it is started on a thread of its own, beside the sweep of the sockets
 /// a dead bateri left, and the first window does not wait for either.
@@ -574,7 +629,12 @@ fn pane_of(peer: &Peer) -> Option<PaneInfo> {
         let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
         let _ = sender.send(delegate(mtm).and_then(|delegate| delegate.pane_of_process(pid)));
     });
-    receiver.recv_timeout(PANE_WAIT).ok().flatten()
+    let wait = if LAUNCHING.load(Ordering::Acquire) {
+        LAUNCH_PANE_WAIT
+    } else {
+        PANE_WAIT
+    };
+    receiver.recv_timeout(wait).ok().flatten()
 }
 
 #[cfg(test)]

@@ -96,6 +96,8 @@ pub struct Session {
     unavailable: u32,
     /// `terminate` was asked (`Some(force)`).
     terminated: Option<bool>,
+    /// How many times a client asked the terminal to forget its past.
+    forgotten: u32,
     /// The command the terminal was made with.
     argv: Vec<Vec<u8>>,
     /// The environment it was made with, over the defaults.
@@ -123,6 +125,7 @@ impl Session {
             views: Vec::new(),
             unavailable: 0,
             terminated: None,
+            forgotten: 0,
             argv: Vec::new(),
             env: Vec::new(),
         }
@@ -621,6 +624,11 @@ impl Bridge {
         self.sessions.get(id).and_then(|s| s.terminated)
     }
 
+    /// How many times the terminal was asked to forget its past.
+    pub fn forgotten(&self, id: &SessionId) -> u32 {
+        self.sessions.get(id).map_or(0, |s| s.forgotten)
+    }
+
     /// The bytes of the picture of a terminal whose program has written up to
     /// `end`: what a client writes to a freshly reset terminal to see the screen.
     pub fn picture_of(end: u64) -> Vec<u8> {
@@ -901,6 +909,19 @@ impl Bridge {
             Message::Status => {
                 if let Some(status) = self.status(&id) {
                     self.send(&Packet::about(id, Message::StatusReply(status)));
+                }
+            }
+            // The past goes: the journal and, with it, the offsets before the present.
+            Message::Forget => {
+                let attached = self.sessions.get(&id).is_some_and(|s| s.attached);
+                if attached {
+                    if let Some(session) = self.sessions.get_mut(&id) {
+                        session.retained_from = session.end();
+                        session.journal.clear();
+                        session.forgotten += 1;
+                    }
+                } else {
+                    self.error(Some(&id), ErrorCode::NOT_ATTACHED, "not attached");
                 }
             }
             _ => {}

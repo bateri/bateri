@@ -173,6 +173,18 @@ impl PaneHost for TabHost {
         crate::hold_service::leave(pane);
     }
 
+    fn forget_past(&self, pane: &bt_core::PaneUuid) {
+        crate::hold_service::forget_past(pane);
+    }
+
+    fn view_changed(&self, pane: &bt_core::PaneUuid, open: bool) {
+        crate::hold_service::view_changed(pane, open);
+    }
+
+    fn view_was_open(&self, pane: &bt_core::PaneUuid) -> bool {
+        crate::hold_service::view_was_open(pane)
+    }
+
     fn retry_kept_terminal(&self, pane: &bt_core::PaneUuid) {
         crate::hold_service::retry(pane);
     }

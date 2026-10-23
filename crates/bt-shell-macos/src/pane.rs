@@ -270,6 +270,19 @@ pub trait PaneHost {
     /// is not ended, and nothing keeps a record that a quit or a crash would end it by.
     /// Asked **before** [`TerminalPane::begin_close`], as [`PaneHost::end_kept_terminal`].
     fn leave_kept_terminal(&self, _pane: &PaneUuid) {}
+    /// The user cleared what the pane remembers (Clear Scrollback, Clear to Start): the
+    /// terminals the pane has forget their past too, so that the bateri that finds them again
+    /// does not give back what was cleared. The default is an owner that keeps no terminals.
+    fn forget_past(&self, _pane: &PaneUuid) {}
+    /// A program's view opened or closed in the pane: written beside the terminal of this
+    /// Mac that carries the pane's bytes, so that a bateri that finds the terminal again
+    /// offers the program a restart of it. The default is an owner that keeps no terminals.
+    fn view_changed(&self, _pane: &PaneUuid, _open: bool) {}
+    /// Whether a view was open in the pane when the bateri before this one left, as
+    /// [`PaneHost::view_changed`] wrote it.
+    fn view_was_open(&self, _pane: &PaneUuid) -> bool {
+        false
+    }
     /// ⏎ in a pane that waits for its connection: the account of the terminal it
     /// shows dials now instead of waiting out its pause. The default is an
     /// owner that has no such terminals.
@@ -3962,6 +3975,17 @@ impl TerminalPane {
             },
         };
         let session = Arc::new(session);
+        // A terminal that was running when this bateri came: its screen is being built from its
+        // own past, which also says (the ledger) whether a program's view was open over it. The
+        // program is in the position of one taken over from another process — its view did not
+        // come, its dock's mirror is the past's — and is treated as one: offered a restart, nudged
+        // to redraw.
+        let shown_again = session.is_shown_again();
+        if shown_again {
+            nudge = true;
+            carried_on = true;
+            view_was_open = self.host().view_was_open(self.uuid());
+        }
         // The program kept running through the handover and its view did not: what the view
         // lived on (the token, the files, the messages) went with the old process, so the
         // program is offered a restart and opens the view again. Offered, not forced: the
@@ -4131,6 +4155,7 @@ impl TerminalPane {
         // focus only when the prompt comes. The link itself arms nothing for a
         // pane without a dock or one that is hidden.
         if !adopting
+            && !shown_again
             && self.ivars().run.is_none()
             && let Some(link) = self.link()
         {
@@ -4155,10 +4180,33 @@ impl TerminalPane {
                 Wake::command_started(&*self.ivars().wake);
             }
         }
+        // The past of a terminal shown again is read on the reader's thread, and what the tab and
+        // the probes learn from edges was not told while it was: told once it has been read.
+        if shown_again {
+            self.after_on_main(0, REPLAY_POLL, Self::replay_polled);
+        }
         // Last: the session is in its slot and the pane in its window, so the
         // layout the registration sends at once places this pane.
         self.register_with_holder(mtm);
         Ok(())
+    }
+
+    /// Whether the past of the terminal this pane shows again has been read, asked every
+    /// [`REPLAY_POLL`] (`tries` is the number of times it was asked) until it has — or for
+    /// [`REPLAY_POLLS`] times, a bound for a connection that never says the past is complete.
+    fn replay_polled(&self, tries: u64) {
+        let Some(session) = self.session().cloned() else {
+            return;
+        };
+        if session.replaying() && tries < REPLAY_POLLS {
+            self.after_on_main(tries + 1, REPLAY_POLL, Self::replay_polled);
+            return;
+        }
+        // The edges the past raised were not told ([`bt_core::Silence`]): a command that runs
+        // now is news to the tab (its ring, its program's icon) and the probes that start from
+        // it — the remote session, the program in front — run once, as for a pane taken over
+        // from another process.
+        Wake::command_started(&*self.ivars().wake);
     }
 
     /// The session's journal at birth: the timed run's `BT_JOURNAL` in this
@@ -5953,6 +6001,9 @@ impl TerminalPane {
         }
         // The tab's tile wears the program's icon now (`view_face`).
         self.host().program_changed(ivars.id);
+        // And the terminal that carries the pane's bytes remembers it: a bateri that finds the
+        // terminal again offers the program a restart of its view.
+        self.host().view_changed(self.uuid(), true);
     }
 
     /// Takes the view down: the keyboard goes back to the terminal if the view
@@ -5977,6 +6028,7 @@ impl TerminalPane {
         }
         // And the mark of what runs in the pane again.
         self.host().program_changed(self.ivars().id);
+        self.host().view_changed(self.uuid(), false);
     }
 
     /// The program's view goes with the pane, whatever it was doing: no
@@ -6363,16 +6415,22 @@ impl TerminalPane {
     /// byte goes to the shell; on the alternate screen the item is grey and
     /// the call is a no-op anyway.
     pub(crate) fn clear_to_start(&self) {
-        if let Some(session) = self.session() {
-            session.clear_to_start();
+        if let Some(session) = self.session()
+            && session.clear_to_start()
+        {
+            // The terminals behind the pane forget theirs too: a bateri that finds them again
+            // does not give back the lines that were cleared.
+            self.host().forget_past(self.uuid());
         }
     }
 
     /// Edit ▸ Clear Scrollback (⌥⌘K): scrollback only —
     /// `Session::clear_scrollback`.
     pub(crate) fn clear_scrollback(&self) {
-        if let Some(session) = self.session() {
-            session.clear_scrollback();
+        if let Some(session) = self.session()
+            && session.clear_scrollback()
+        {
+            self.host().forget_past(self.uuid());
         }
     }
 
@@ -6966,6 +7024,12 @@ fn adopt_session(
 /// the signal, a scheduling round; a quarter of a second covers a loaded
 /// machine and is too short to notice the narrower frame. A design constant.
 const NUDGE_GAP: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// How often the pane of a terminal shown again asks whether its past has been read.
+const REPLAY_POLL: Duration = Duration::from_millis(50);
+
+/// How many times it asks at most: a minute.
+const REPLAY_POLLS: u64 = 1200;
 
 /// Nudges an adopted pane's program to redraw the screen that did not come
 /// back: the PTY one column narrower now, its own size [`NUDGE_GAP`] later

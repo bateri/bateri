@@ -30,6 +30,15 @@
 //!   ([`Ledger::ending`]). It is also what `keep_running = "update"` makes of every
 //!   live terminal after a crash.
 //!
+//! A terminal row may say the pane it carries has a program's **view** open (`view`, after
+//! the state; version 2): the view lives on messages the terminal's bytes carry, and a bateri
+//! that finds the terminal again offers the program a restart of it
+//! ([`Ledger::set_view`], [`Ledger::view_of`]). One more fact outlives the process and is
+//! not a terminal's: that the bateri that left did so **for an update** (`U`; version 2),
+//! which is what tells the one that starts next that the terminals left in the ledger are
+//! carried on and not left behind by a crash ([`Ledger::leave_for_update`],
+//! [`Ledger::arrived_by_update`]).
+//!
 //! **What is not here.** No secret: the arguments are the ones the session
 //! record already keeps for a remote pane (`restore`'s `remote_line`), a password
 //! lives in the Keychain, and a login is asked again when the connection needs it.
@@ -140,12 +149,16 @@ pub struct Row {
     pub pane: Option<PaneUuid>,
     /// Asked to end and not seen to have: the next connection ends it.
     pub ending: bool,
+    /// The program in the pane it carries has a view open.
+    pub view: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct Rows {
     accounts: BTreeMap<String, Known>,
     terminals: Vec<Row>,
+    /// The bateri that wrote this left to be updated.
+    updating: bool,
 }
 
 impl Rows {
@@ -169,13 +182,19 @@ impl Rows {
 
     fn render(&self) -> String {
         // The oldest version that holds everything there is to write: an earlier bateri reads a
-        // ledger that has no account of this Mac.
-        let version = if self.accounts.contains_key(local::ACCOUNT) {
+        // ledger that has no account of this Mac, no view and no update.
+        let version = if self.accounts.contains_key(local::ACCOUNT)
+            || self.updating
+            || self.terminals.iter().any(|row| row.view)
+        {
             VERSION
         } else {
             OLDEST
         };
         let mut out = format!("{HEADER} {version}\n");
+        if self.updating {
+            out.push_str("U\n");
+        }
         for known in self.accounts.values() {
             if known.is_local() {
                 out.push_str(&format!(
@@ -201,11 +220,12 @@ impl Rows {
         }
         for row in &self.terminals {
             out.push_str(&format!(
-                "T {} {} {} {}\n",
+                "T {} {} {} {}{}\n",
                 escape(&row.account),
                 row.terminal.as_str(),
                 row.pane.as_ref().map_or("-", PaneUuid::as_str),
                 if row.ending { "ending" } else { "live" },
+                if row.view { " view" } else { "" },
             ));
         }
         out
@@ -248,8 +268,10 @@ impl Rows {
                         return None;
                     }
                 }
+                // That the bateri left to be updated: from version 2 on, and only once.
+                "U" if version >= 2 && !rows.updating => rows.updating = true,
                 "T" => {
-                    let row = parse_terminal(&mut tokens)?;
+                    let row = parse_terminal(&mut tokens, version)?;
                     if rows.position(&row.account, &row.terminal).is_some() {
                         return None;
                     }
@@ -312,7 +334,7 @@ fn parse_local<'a>(tokens: &mut impl Iterator<Item = &'a str>) -> Option<Known> 
 }
 
 /// A `T` line's fields after the letter.
-fn parse_terminal<'a>(tokens: &mut impl Iterator<Item = &'a str>) -> Option<Row> {
+fn parse_terminal<'a>(tokens: &mut impl Iterator<Item = &'a str>, version: u32) -> Option<Row> {
     let account = unescape(tokens.next()?)?;
     let terminal = SessionId::new(tokens.next()?).ok()?;
     let pane = match tokens.next()? {
@@ -324,11 +346,18 @@ fn parse_terminal<'a>(tokens: &mut impl Iterator<Item = &'a str>) -> Option<Row>
         "ending" => true,
         _ => return None,
     };
+    // The word after the state, in a ledger that has such a thing; the line ends after it.
+    let view = match tokens.next() {
+        None => false,
+        Some("view") if version >= 2 => true,
+        Some(_) => return None,
+    };
     (!account.is_empty()).then_some(Row {
         account,
         terminal,
         pane,
         ending,
+        view,
     })
 }
 
@@ -433,6 +462,7 @@ impl Ledger {
                     terminal: terminal.clone(),
                     pane: pane.cloned(),
                     ending: false,
+                    view: false,
                 }),
             }
             (true, ())
@@ -450,6 +480,7 @@ impl Ledger {
                     terminal: terminal.clone(),
                     pane: None,
                     ending: true,
+                    view: false,
                 }),
             }
             rows.forget_idle_accounts();
@@ -511,6 +542,60 @@ impl Ledger {
             }
             rows.forget_idle_accounts();
             (count > 0, count)
+        })
+    }
+
+    /// The terminal of this Mac that carried the pane's bytes before the bateri that showed it
+    /// was gone, when it is meant to live: the pane is shown it again instead of getting a new
+    /// one.
+    pub fn local_terminal_of(&self, pane: &PaneUuid) -> Option<SessionId> {
+        self.read(|rows| {
+            rows.terminals
+                .iter()
+                .find(|row| {
+                    !row.ending
+                        && local::is_account(&row.account)
+                        && row.pane.as_ref() == Some(pane)
+                })
+                .map(|row| row.terminal.clone())
+        })
+    }
+
+    /// Whether the program in the pane the terminal carries has a view open: said as the view
+    /// opens and closes, read by the bateri that finds the terminal again.
+    pub fn set_view(&self, account: &str, terminal: &SessionId, open: bool) {
+        self.change(|rows| {
+            let Some(at) = rows.position(account, terminal) else {
+                return (false, ());
+            };
+            if rows.terminals[at].view == open {
+                return (false, ());
+            }
+            rows.terminals[at].view = open;
+            (true, ())
+        });
+    }
+
+    /// Whether the terminal's pane had a view open when it was last said.
+    pub fn view_of(&self, account: &str, terminal: &SessionId) -> bool {
+        self.read(|rows| {
+            rows.position(account, terminal)
+                .is_some_and(|at| rows.terminals[at].view)
+        })
+    }
+
+    /// The bateri is leaving to be updated: what stays in the ledger is carried on by the one
+    /// that starts next, not left behind.
+    pub fn leave_for_update(&self) {
+        self.change(|rows| (!std::mem::replace(&mut rows.updating, true), ()));
+    }
+
+    /// Whether the bateri before this one left to be updated; said once — the mark goes with the
+    /// answer, so that the launch after a crash is not taken for the update's.
+    pub fn arrived_by_update(&self) -> bool {
+        self.change(|rows| {
+            let updating = std::mem::take(&mut rows.updating);
+            (updating, updating)
         })
     }
 

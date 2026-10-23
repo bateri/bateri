@@ -1286,11 +1286,19 @@ pub(crate) struct Ivars {
     /// bateri ▸ Quit and End Programs asked for the next quit — consumed by
     /// it ([`AppDelegate::terminate_reply`]), whatever it turns into.
     end_programs: Cell<bool>,
-    /// This quit ends the terminals the panes show on servers
-    /// ([`bt_shell_common::kablo::quit::fate`]): set by [`AppDelegate::terminate_reply`]
-    /// when the quit closes the panes, taken by [`AppDelegate::shutdown`], which says so
-    /// to the service before it signals a pane's program.
+    /// This quit ends the terminals kablo keeps for the panes — the ones of this Mac and the
+    /// ones on servers ([`bt_shell_common::kablo::quit::fate`]): set by
+    /// [`AppDelegate::terminate_reply`] when the quit closes the panes, taken by
+    /// [`AppDelegate::shutdown`], which says so to the service before it signals a pane's
+    /// program.
     end_kept: Cell<bool>,
+    /// This quit is the update's: the terminals left in the ledger are carried on by the bateri
+    /// that starts next ([`AppDelegate::terminate_reply`] sets it, [`AppDelegate::shutdown`]
+    /// writes it down).
+    leaving_for_update: Cell<bool>,
+    /// This quit keeps the programs kablo keeps running (⌘Q under `keep_running = "quit"`): the
+    /// reminder that they do is left when the panes close ([`AppDelegate::shutdown`]).
+    quit_keeps: Cell<bool>,
     /// The application is going: set first thing in [`AppDelegate::shutdown`], never
     /// cleared. AppKit closes every window **after** `applicationWillTerminate:` returns,
     /// and each close reaches the window's `windowWillClose:` like the user's red button;
@@ -2919,6 +2927,8 @@ impl AppDelegate {
             hand_to_bound: Cell::new(false),
             end_programs: Cell::new(false),
             end_kept: Cell::new(false),
+            leaving_for_update: Cell::new(false),
+            quit_keeps: Cell::new(false),
             terminating: Cell::new(false),
             powering_off: Cell::new(false),
             quit_notice: RefCell::new(None),
@@ -3342,6 +3352,9 @@ impl AppDelegate {
         // Consumed by this quit whatever it turns into.
         let relaunch = crate::updater::take_relaunch();
         let kind = QuitKind::of(relaunch, self.ivars().end_programs.take());
+        self.ivars()
+            .leaving_for_update
+            .set(kind == QuitKind::Relaunch);
         self.ivars().hand_to_bound.set(false);
         self.ivars().end_kept.set(false);
         self.ivars().quit_notice.replace(None);
@@ -3354,9 +3367,17 @@ impl AppDelegate {
         // counts only if it answers now; under `"quit"` one that does not is
         // replaced first, so no program ends unasked on an assumption.
         let keep = self.settings().keep_running;
-        let mut bound = keeper::pings_for_quit(keep, kind)
+        self.ivars()
+            .quit_keeps
+            .set(kind == QuitKind::Quit && quit::fate(keep, kind.event()) == quit::Fate::Keeps);
+        // The panes whose terminals kablo keeps need no holder to outlive this process: they are
+        // shown again from the ledger by the bateri that starts next, whichever way this one goes.
+        // A holder is for the panes that are ordinary (kablo could not be had for them).
+        let ordinary = self.all_panes().iter().any(|pane| !pane.is_streamed());
+        let mut bound = ordinary
+            && keeper::pings_for_quit(keep, kind)
             && self.ivars().keeper.as_deref().is_some_and(Keeper::verified);
-        if keeper::spawns_for_quit(keep, kind, bound) {
+        if ordinary && keeper::spawns_for_quit(keep, kind, bound) {
             bound = self.replace_keeper();
         }
         match keeper::quit_path(keep, kind, bound) {
@@ -3377,7 +3398,7 @@ impl AppDelegate {
             }
             // Nothing dies, so nothing is asked — unless the holder cannot be
             // born, then today's question.
-            QuitPath::ToUpdateHolder if self.prepare_handover() => {
+            QuitPath::ToUpdateHolder if ordinary && self.prepare_handover() => {
                 return NSApplicationTerminateReply::TerminateNow;
             }
             QuitPath::ToUpdateHolder | QuitPath::Close => {}
@@ -3392,7 +3413,7 @@ impl AppDelegate {
         let unit = window::unit_for(panes.len(), self.tabs().len());
         let asked: Vec<_> = panes
             .iter()
-            .filter(|pane| ends_kept || !pane.shows_kept_terminal())
+            .filter(|pane| ends_kept || !(pane.shows_kept_terminal() || pane.is_streamed()))
             .cloned()
             .collect();
         let Some(foregrounds) = window::foregrounds_to_ask(timed, confirm, &asked) else {
@@ -3527,18 +3548,8 @@ impl AppDelegate {
         if let Some(masters) = &self.ivars().masters {
             masters.begin_quit();
         }
-        // The panes whose terminals kablo keeps on this Mac end with them (a handover does not
-        // carry them, for now), and that is asked and waited for before they close. Only those
-        // terminals: a pane that shows a terminal a server keeps leaves it to the server (an
-        // update is not a reason to end it).
-        let streamed: Vec<_> = left
-            .iter()
-            .filter(|pane| pane.is_streamed())
-            .map(|pane| pane.uuid().clone())
-            .collect();
-        if !streamed.is_empty() {
-            crate::hold_service::end_local(&streamed);
-        }
+        // The panes whose terminals kablo keeps are among those that could not be frozen: they
+        // close here and their terminals run on, shown again by the bateri that starts next.
         let closing: Vec<_> = left.iter().filter_map(|pane| pane.begin_close()).collect();
         let deadline = Instant::now() + SHUTDOWN_GRACE;
         for closing in closing {
@@ -3737,6 +3748,12 @@ impl AppDelegate {
         }
     }
 
+    /// Whether some pane's program lives in a terminal kablo keeps on this Mac: it runs past this
+    /// process unless something ends it, and the windows it is shown in are the layout's to say.
+    fn any_kept_terminal(&self) -> bool {
+        self.all_panes().iter().any(|pane| pane.is_streamed())
+    }
+
     /// A layout edge's disk write, once the burst settles
     /// ([`keeper::LAYOUT_DELAY`]) — only once the launch settled.
     fn save_layout_later(&self) {
@@ -3764,7 +3781,7 @@ impl AppDelegate {
     /// process without the session directory's lock, nor one that quits —
     /// the quit's save took the lock and writes the whole session.
     fn save_layout(&self) {
-        if self.settings().restore_windows == RestoreWindows::Off {
+        if self.settings().restore_windows == RestoreWindows::Off && !self.any_kept_terminal() {
             return;
         }
         let lock = self.ivars().restore_lock.borrow();
@@ -4804,19 +4821,39 @@ impl AppDelegate {
     /// the saved session; the directory's lock is still taken for the save at
     /// quit.
     fn restore_or_open(&self) -> Result<(), String> {
+        let skipping = self.ivars().skip_restore;
+        let opened = self.restore_or_open_windows();
+        crate::hold_service::launch_over();
+        // The first windows are built and every pane of them has asked for its terminal: what
+        // the bateri before left on this Mac and none of them showed again is a program running
+        // for no window, and ends. Not when this launch built no windows from the save (⇧ at
+        // launch leaves the save for the next), and not in a bateri that does not hold the
+        // session directory (a second instance of the bundle: the first one's terminals are its
+        // own).
+        if opened.is_ok() && !skipping && self.ivars().restore_lock.borrow().is_some() {
+            let panes: Vec<_> = self
+                .all_panes()
+                .iter()
+                .map(|pane| pane.uuid().clone())
+                .collect();
+            crate::hold_service::end_unclaimed(&panes);
+        }
+        opened
+    }
+
+    /// [`AppDelegate::restore_or_open`]'s body: the windows.
+    fn restore_or_open_windows(&self) -> Result<(), String> {
         let arrival = self.ivars().arrival.take();
-        // `keep_running = "update"`: a crash leaves the terminals on the servers behind and
-        // this launch ends them, unless the programs came over (an update's relaunch, or
-        // holders that kept them): those are still shown, not left.
-        let carried = arrival.as_ref().is_some_and(|arrival| {
-            restore::attempt_mode(arrival.attempt) != restore::AttemptMode::GiveUp
-        });
+        // `keep_running = "update"`: a crash leaves the terminals kablo keeps behind and this
+        // launch ends them, unless the programs came over (an update's relaunch, which wrote that
+        // it was, or holders that kept them): those are still shown, not left.
+        let carried = crate::hold_service::arrived_by_update()
+            || arrival.as_ref().is_some_and(|arrival| {
+                restore::attempt_mode(arrival.attempt) != restore::AttemptMode::GiveUp
+            });
         if quit::ends_leftovers(self.settings().keep_running, carried) {
             crate::hold_service::end_leftovers();
         }
-        // What this Mac's own terminals a crash left are nobody's to show yet, whatever the
-        // table says of a server's: they end here, before the first pane makes its own.
-        crate::hold_service::end_local_leftovers();
         let mut safe = false;
         if let Some(arrival) = arrival {
             self.ivars().attempt_marks.replace(arrival.marked.clone());
@@ -4966,6 +5003,11 @@ impl AppDelegate {
     fn take_saved(&self, histories: bool) -> Option<Saved> {
         let lock = self.restore_lock()?;
         let saved = match self.settings().restore_windows {
+            // The windows of terminals kablo kept running come back whatever the setting says:
+            // they need a window to be shown in ([`AppDelegate::save_session`]).
+            RestoreWindows::Off if crate::hold_service::keeps_local() => {
+                restore::take(&lock, false)
+            }
             RestoreWindows::Off => {
                 // "off writes nothing and deletes what was saved": the palette's Recent too.
                 let _ = restore::clear(&lock);
@@ -5232,7 +5274,13 @@ impl AppDelegate {
         let Some(lock) = self.ivars().restore_lock.take() else {
             return;
         };
-        let setting = self.settings().restore_windows;
+        // `"off"` is no windows coming back — but the terminals this quit keeps running need
+        // windows to be shown in: their layout is saved, without scrollback.
+        let keeps = !self.ivars().end_kept.get() && self.any_kept_terminal();
+        let setting = match self.settings().restore_windows {
+            RestoreWindows::Off if keeps => RestoreWindows::Layout,
+            setting => setting,
+        };
         let result = match setting {
             RestoreWindows::Off => restore::clear(&lock),
             RestoreWindows::All | RestoreWindows::Layout => {
@@ -7718,6 +7766,11 @@ impl AppDelegate {
         }
         // A clean quit — a handover or not — is no crash of a restore.
         self.clear_attempt_marks();
+        // The update's quit leaves the terminals kablo keeps for the bateri that starts next to
+        // carry on: written down, so that it does not take them for a crash's leftovers.
+        if self.ivars().leaving_for_update.take() {
+            crate::hold_service::leave_for_update();
+        }
         // A deliberate handover (`keep_running`, [`AppDelegate::terminate_reply`]):
         // the programs go to a holder and nothing below runs — no pane
         // closes, no ssh master ends. It writes the session restore save
@@ -7751,6 +7804,21 @@ impl AppDelegate {
             self.leave_quit_notice();
             return None;
         }
+        // The holder's reminder, if it was built, named programs that end here. The programs
+        // kablo keeps do run on, if this quit keeps them: the reminder names those, read before
+        // a pane closes.
+        self.ivars().quit_notice.replace(None);
+        if self.ivars().quit_keeps.take() && !self.ivars().end_kept.get() {
+            let foregrounds: Vec<_> = self
+                .all_panes()
+                .iter()
+                .filter(|pane| pane.is_streamed())
+                .map(|pane| pane.foreground())
+                .collect();
+            let notice = window::kept_notice(&foregrounds, self.ivars().powering_off.get());
+            self.ivars().quit_notice.replace(notice);
+            self.leave_quit_notice();
+        }
         // The quit ends the programs: the bound holder (if any) lets every
         // copy go **first** and is gone before a pane closes — a close that
         // hangs must not leave a copy of a master held anywhere.
@@ -7762,37 +7830,23 @@ impl AppDelegate {
         // failed handover has saved already and this is a no-op.
         self.save_session();
         let windows = self.windows();
-        // A quit that ends the terminals on servers says so **now**, before a pane's program is
+        // A quit that ends the terminals kablo keeps says so **now**, before a pane's program is
         // signalled (the holder's going lets the terminal go, and from then on the service no
         // longer knows which pane it was), and waits for them, bounded: a server that does not
         // answer is ended at the next connection (the ledger keeps the request).
         //
-        // The terminals of this Mac's own panes (kablo's, [`TerminalPane::is_streamed`]) end with
-        // their panes whatever `keep_running` says, for now: the pane that would show one again
-        // after the quit comes with the pane's reconnecting.
-        //
-        // Two sets, because a pane can be both: one that shows a terminal a server keeps and
-        // whose program (the pipe to it) runs in a terminal of this Mac. The first is ended
-        // whole — the server's terminal and the pane's carrier — when the quit ends the
-        // servers' terminals; the rest of the streamed panes end their carrier alone, and the
-        // server's terminal is left to `keep_running`.
+        // That is all the pane's terminals are told: the quit that keeps them says nothing — the
+        // panes close, their streams are let go of, and the terminals of this Mac and the ones
+        // on servers run on, to be shown again by the bateri that starts next.
         let ends_kept = self.ivars().end_kept.take();
-        let all_panes = self.all_panes();
-        let panes: Vec<_> = all_panes
+        let panes: Vec<_> = self
+            .all_panes()
             .iter()
-            .filter(|pane| ends_kept && pane.shows_kept_terminal())
-            .map(|pane| pane.uuid().clone())
-            .collect();
-        let carriers: Vec<_> = all_panes
-            .iter()
-            .filter(|pane| pane.is_streamed() && !(ends_kept && pane.shows_kept_terminal()))
+            .filter(|pane| ends_kept && (pane.shows_kept_terminal() || pane.is_streamed()))
             .map(|pane| pane.uuid().clone())
             .collect();
         if !panes.is_empty() {
             crate::hold_service::end_all(&panes);
-        }
-        if !carriers.is_empty() {
-            crate::hold_service::end_local(&carriers);
         }
         // The panes' closes below end their remote sessions; the masters'
         // `exit` is `close_all`'s, under the shared deadline.

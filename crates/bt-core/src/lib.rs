@@ -109,9 +109,9 @@ pub use session::{
     CellHalf, ChildLaunch, Click, Cursor, DirtyFlag, DockKey, Frozen, InitialInput, LinkHit,
     LinkHover, LinkKind, LinkPoint, LinkSpan, LinkStamp, Osc52, PathCandidate, Pointer, PtyOps,
     PtySize, SHUTDOWN_GRACE, ScrollGlide, ScrollIntent, ScrollPosition, SelectKind, SelectionPoint,
-    SelectionRun, SelectionRuns, Session, SessionOptions, ShutdownHandle, Stream, StreamExit,
-    Teardown, TerminalOptions, TrackBlock, TrackMark, TrackMarks, TtyReading, UnderlineStyle,
-    Wheel, load_shell, smoke_shell,
+    SelectionRun, SelectionRuns, Session, SessionOptions, ShutdownHandle, Silence, Stream,
+    StreamExit, Teardown, TerminalOptions, TrackBlock, TrackMark, TrackMarks, TtyReading,
+    UnderlineStyle, Wheel, load_shell, smoke_shell,
 };
 pub use settings::{
     CURSOR_BLINK_INTERVAL, CURSOR_BLINK_RANGE, CURSOR_GLOW, CURSOR_GLOW_RANGE, CURSOR_RADIUS,

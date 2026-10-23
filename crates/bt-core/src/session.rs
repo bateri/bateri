@@ -2179,6 +2179,10 @@ struct AdapterInner {
     /// land in the shell as typed input, a copy would replace what the user
     /// copied since. `TappedPty` clears it at the master's first read.
     muted: AtomicBool,
+    /// Whether the bytes being read are the past of a stream ([`Silence`]): muted, as above, and
+    /// the edges of what they show (a command that ended, a prompt) are not raised either.
+    /// Set by the read that took them, cleared by the first read of live bytes.
+    replaying: AtomicBool,
     /// The kitty graphics commands: the images of each screen and the record
     /// a halted parser waits for ([`crate::graphics`]).
     ///
@@ -2228,6 +2232,7 @@ impl Adapter {
             child_exited: AtomicBool::new(false),
             desk,
             muted: AtomicBool::new(false),
+            replaying: AtomicBool::new(false),
             graphics: Hub::new(),
             modes: KeptModes::default(),
             pointer: PointerShapes::default(),
@@ -2627,8 +2632,59 @@ impl TappedPty {
         match &mut self.pty {
             PtyKind::Spawned(pty) => pty.reader().read(buf),
             PtyKind::Adopted(pty) => pty.file().read(buf),
-            PtyKind::Stream(pty) => pty.file().read(buf),
+            PtyKind::Stream(pty) if pty.silence.is_none() => pty.file().read(buf),
+            PtyKind::Stream(pty) => Self::read_past(pty, &self.adapter.0, buf),
         }
+    }
+
+    /// A read of a stream that starts with a past ([`Silence`]): the session is muted for the
+    /// bytes of the past and not for the rest, and a read that holds the end of one and the
+    /// start of the other is cut there, the rest served by the next read.
+    ///
+    /// The flag is set **by the read**, before the bytes are scanned and parsed, and the reader
+    /// parses every read of this stretch alone ([`crate::reader::EventLoop::silence`]), so the
+    /// bytes of one read are parsed under the state that read set.
+    fn read_past(pty: &mut StreamPty, adapter: &AdapterInner, buf: &mut [u8]) -> io::Result<usize> {
+        let Some(silence) = pty.silence.clone() else {
+            return pty.file().read(buf);
+        };
+        // A read that took nothing changes nothing: the session stays muted through a quiet
+        // stream, and the first live bytes are what unmute it, in the read that takes them —
+        // there is nothing a muted session could have kept from a stream that says nothing.
+        let got = if pty.carry.is_empty() {
+            match pty.master.read(buf) {
+                Ok(0) => return Ok(0),
+                Ok(got) => got,
+                Err(error) => return Err(error),
+            }
+        } else {
+            let got = pty.carry.len().min(buf.len());
+            buf[..got].copy_from_slice(&pty.carry[..got]);
+            pty.carry.drain(..got);
+            got
+        };
+        // `until` is read **after** the bytes: the feeder says where the past ends before it
+        // writes the bytes it covers, so a byte that was read is covered by what is read here.
+        let past = silence
+            .reach()
+            .saturating_sub(pty.taken)
+            .min(got as u64)
+            .try_into()
+            .unwrap_or(got);
+        let given = if past > 0 && past < got {
+            // The end of the past is inside this read: the rest is live and comes next.
+            let mut rest = buf[past..got].to_vec();
+            rest.append(&mut pty.carry);
+            pty.carry = rest;
+            past
+        } else {
+            got
+        };
+        adapter.muted.store(past > 0, Ordering::Release);
+        adapter.replaying.store(past > 0, Ordering::Release);
+        pty.taken += given as u64;
+        silence.took(pty.taken, past > 0, !pty.carry.is_empty());
+        Ok(given)
     }
 }
 
@@ -2699,6 +2755,12 @@ impl io::Read for TappedPty {
             }
             let answers = key_gen.load(Ordering::Acquire);
             let outcome = lock(&self.shell).apply_scan_answering(event, answers);
+            // The past of a terminal shown again ([`Silence`]) builds the state — the blocks,
+            // the phase, the remote session — and raises no edge: a command that ended before
+            // the bateri was here is not news (a tab would show it as finished, a
+            // notification would come again). The owner reads the state once the past is read
+            // ([`Session::replaying`]).
+            let past = adapter.0.replaying.load(Ordering::Acquire);
             if outcome.title {
                 wake.title_changed();
             }
@@ -2707,12 +2769,14 @@ impl io::Read for TappedPty {
                     adapter.0.title_epoch.load(Ordering::Acquire),
                     Ordering::Release,
                 );
-                wake.command_started();
+                if !past {
+                    wake.command_started();
+                }
             }
-            if outcome.up {
+            if outcome.up && !past {
                 wake.remote_up();
             }
-            if outcome.prompt || outcome.ended {
+            if (outcome.prompt || outcome.ended) && !past {
                 wake.phase_edge();
             }
             // A command ended — the local one's `D` (an `ssh` is a local command
@@ -2725,7 +2789,7 @@ impl io::Read for TappedPty {
             if outcome.prompt && adapter.0.pointer.clear() {
                 wake.pointer_changed();
             }
-            if outcome.remote_edge {
+            if outcome.remote_edge && !past {
                 wake.remote_command_edge();
             }
             if outcome.mirrored {
@@ -2737,7 +2801,7 @@ impl io::Read for TappedPty {
             if outcome.status {
                 wake.program_status_changed();
             }
-            if outcome.notified {
+            if outcome.notified && !past {
                 wake.notification();
             }
             if outcome.prompt
@@ -2979,6 +3043,98 @@ pub struct Stream {
     pub pid: u32,
     /// What the session asks of the terminal: its size, its end.
     pub ops: Arc<dyn PtyOps>,
+    /// The start of the stream, when it is a replay of what the program wrote before this
+    /// session was there to read it ([`Silence`]). `None`: a terminal that was just made, every
+    /// byte of which is live.
+    pub silence: Option<Arc<Silence>>,
+}
+
+/// How much of the start of a [`Stream`] is the past: output a program wrote while no session
+/// read it (a terminal shown again after the bateri that showed it was gone), which the new
+/// session is fed from the first byte so that its screen, its blocks and its modes are what
+/// they were, and which must **do** nothing again.
+///
+/// The bytes before [`Silence::extend`]'s position are parsed with the session muted
+/// ([`AdapterInner::muted`]): the questions in them are not answered — the program was told
+/// long ago, or has stopped waiting —, a copy to the clipboard or a bell is not repeated, the
+/// view protocol's frames are not answered, and a command that started or ended then raises no
+/// edge for the tab to show. The bytes after are the program's now, in every way.
+///
+/// The feeder (the owner of the stream's other end, which knows from the server how far the
+/// questions were answered) writes the position **before** the bytes it covers, and closes the
+/// part once no more bytes will be added to it; the reader counts what it took, so that it knows
+/// where the past ends in what it reads and a read that holds both is cut there.
+#[derive(Debug, Default)]
+pub struct Silence {
+    /// The stream's bytes before this position are the past.
+    until: AtomicU64,
+    /// No byte will be added to the past any more.
+    closed: AtomicBool,
+    /// How many bytes of the stream the session has taken.
+    read: AtomicU64,
+    /// The last read took bytes of the past.
+    now: AtomicBool,
+    /// A read was cut at the end of the past and its live rest waits for the next one.
+    carrying: AtomicBool,
+}
+
+impl Silence {
+    /// A past with nothing in it yet, open.
+    pub fn new() -> Arc<Silence> {
+        Arc::new(Silence::default())
+    }
+
+    /// The first `to` bytes of the stream are the past. Said before those bytes are written;
+    /// a position the past already reaches, or one said after it was closed, changes nothing.
+    pub fn extend(&self, to: u64) {
+        if !self.closed.load(Ordering::Acquire) {
+            self.until.fetch_max(to, Ordering::AcqRel);
+        }
+    }
+
+    /// The past is complete: no more bytes are added to it.
+    pub fn close(&self) {
+        self.closed.store(true, Ordering::Release);
+    }
+
+    /// Whether [`Silence::close`] was said.
+    pub fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::Acquire)
+    }
+
+    /// Whether the session has not yet read all of the past: the feeder has not said it is
+    /// complete, or the session took fewer bytes than it reaches. One that is done is the
+    /// program's live terminal.
+    pub fn pending(&self) -> bool {
+        // `closed` first: what it says was written after the position it follows.
+        !(self.closed.load(Ordering::Acquire)
+            && self.read.load(Ordering::Acquire) >= self.until.load(Ordering::Acquire))
+    }
+
+    /// How many bytes from the start of the stream are the past, as far as the feeder has said.
+    pub fn reach(&self) -> u64 {
+        self.until.load(Ordering::Acquire)
+    }
+
+    /// The session took bytes: up to `read` in all, of the past or not; `carrying`: the rest of
+    /// the read that took them is kept for the next.
+    fn took(&self, read: u64, past: bool, carrying: bool) {
+        self.read.store(read, Ordering::Release);
+        self.now.store(past, Ordering::Release);
+        self.carrying.store(carrying, Ordering::Release);
+    }
+
+    /// Whether bytes that were read are waiting to be read again, which no readiness of the
+    /// stream will say: the reader does not leave its round before it has them.
+    pub(crate) fn is_carrying(&self) -> bool {
+        self.carrying.load(Ordering::Acquire)
+    }
+
+    /// Whether the last read took bytes of the past: the reader parses that read alone
+    /// ([`crate::reader::EventLoop::silence`]).
+    pub(crate) fn in_past(&self) -> bool {
+        self.now.load(Ordering::Acquire)
+    }
 }
 
 /// How the program of a [`Stream`] ended.
@@ -3012,6 +3168,13 @@ struct StreamPty {
     status: Arc<StreamExit>,
     pid: u32,
     ops: Arc<dyn PtyOps>,
+    /// The past at the start of the stream ([`Stream::silence`]).
+    silence: Option<Arc<Silence>>,
+    /// How many bytes of the stream the reader has taken: the position of the next one.
+    taken: u64,
+    /// The live part of a read that held the end of the past too, served before anything else
+    /// is read.
+    carry: Vec<u8>,
 }
 
 impl StreamPty {
@@ -3076,10 +3239,12 @@ impl StreamPty {
 }
 
 impl Drop for StreamPty {
-    /// The terminal is asked to end **before** the stream closes: the owner finds the pane by
-    /// the stream, and a stream that has closed is a pane that is gone — a program that was
-    /// meant to end would be let go of and live on. (A PTY's end is the other way round: the
-    /// slave's hangup is the mechanism, so [`AdoptedPty`] closes first.)
+    /// The owner is told the session lets go of the stream **before** it closes, so that it can
+    /// tell a pane that is gone from one whose session was dropped. What becomes of the terminal
+    /// is the owner's to decide and was said already: ending it is a request of its own (the
+    /// user's close, a quit that ends the programs); a stream that is let go of leaves it running.
+    /// (A PTY's end is the other way round: the slave's hangup is the mechanism, so
+    /// [`AdoptedPty`] closes first.)
     fn drop(&mut self) {
         self.ops.hangup(self.pid, self.exit.as_fd());
     }
@@ -5490,6 +5655,8 @@ pub struct Session {
     /// Whether the terminal is a stream ([`Session::streamed`]) and not a PTY: it has no
     /// master to read modes from or to hand over.
     streamed: bool,
+    /// The past a stream starts with, when it is a terminal shown again ([`Stream::silence`]).
+    past: OnceLock<Arc<Silence>>,
     /// An adopted PTY's syscalls ([`Adoption::ops`]): the nudge sizes the PTY
     /// through them on the master's copy, not through the reader
     /// ([`Session::nudge_size`]). `None` for a spawned PTY.
@@ -5674,9 +5841,17 @@ impl Session {
             status,
             pid,
             ops,
+            silence,
         } = stream;
-        let replay = options.replay.take();
-        let (session, event_loop, at_birth) = Self::assemble(
+        // A terminal shown again carries its own past, which is the history the screen is made
+        // of: a text history of an earlier run would be written above it a second time. And its
+        // program is running already: the line a new pane types at its first prompt (a remote
+        // pane's `ssh host`, ready) would be typed into whatever is in front of the terminal now.
+        let replay = options.replay.take().filter(|_| silence.is_none());
+        if silence.is_some() {
+            options.initial_input = None;
+        }
+        let (session, mut event_loop, at_birth) = Self::assemble(
             options,
             wake,
             Birth {
@@ -5686,6 +5861,9 @@ impl Session {
                     status,
                     pid,
                     ops: Arc::clone(&ops),
+                    silence: silence.clone(),
+                    taken: 0,
+                    carry: Vec::new(),
                 }),
                 child_pid: pid,
                 master: None,
@@ -5698,6 +5876,13 @@ impl Session {
                 ops: Some(ops),
             },
         )?;
+        if let Some(silence) = silence {
+            // Muted from the first byte: the first read says whether it is the past's.
+            session.adapter.0.muted.store(true, Ordering::Release);
+            session.adapter.0.replaying.store(true, Ordering::Release);
+            let _ = session.past.set(Arc::clone(&silence));
+            event_loop.silence(silence);
+        }
         *lock(&session.reader) = Some(event_loop.spawn());
         if let Some(line) = at_birth {
             session.write_owned(line.into_bytes());
@@ -5924,6 +6109,7 @@ impl Session {
             child_pid,
             master,
             adopted,
+            past: OnceLock::new(),
             streamed,
             ops,
             journal,
@@ -13123,6 +13309,20 @@ impl Session {
         self.streamed
     }
 
+    /// Whether the session was given a terminal that was running already, to show again
+    /// ([`Stream::silence`]): its screen is built from the terminal's own past.
+    pub fn is_shown_again(&self) -> bool {
+        self.past.get().is_some()
+    }
+
+    /// Whether the session is still reading the past of a terminal it was given to show again
+    /// ([`Stream::silence`]): the screen is not yet what the terminal's history makes of it, and
+    /// what the tab shows of the program's state (a command that runs, a program in front) is
+    /// not final. `false` for a session whose terminal was just made.
+    pub fn replaying(&self) -> bool {
+        self.past.get().is_some_and(|past| past.pending())
+    }
+
     /// The pid of the PTY's child — an adopted session's too ([`Session::adopt`],
     /// the pid it was given) — **not the shell's**, at least not always: in
     /// an unbounded session the child is `login(1)` and the shell is its child.
@@ -14555,6 +14755,11 @@ mod tests {
     }
 
     fn streamed() -> Streamed {
+        streamed_over(None)
+    }
+
+    /// [`streamed`] over a stream that starts with a past, or not.
+    fn streamed_over(silence: Option<Arc<Silence>>) -> Streamed {
         use std::os::unix::net::UnixStream;
         let (terminal, master) = UnixStream::pair().expect("socketpair");
         master.set_nonblocking(true).expect("non-blocking");
@@ -14571,6 +14776,7 @@ mod tests {
                 status: Arc::clone(&status),
                 pid: 4242,
                 ops: Arc::clone(&ops) as Arc<dyn PtyOps>,
+                silence,
             },
         )
         .expect("a streamed session");
@@ -14714,6 +14920,120 @@ mod tests {
         terminal.status.signal(9);
         terminal.exit = None;
         assert_eq!(terminal.wake.wait_exit(Duration::from_secs(8)), Some(None));
+    }
+
+    /// Everything a program can make a terminal do besides drawing: a question, a copy, a bell,
+    /// a notification, each followed by a word that says which stretch it was in.
+    fn doings(word: &str) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        // Device attributes: a question the session would answer with a line of its own.
+        bytes.extend_from_slice(b"\x1b[c");
+        // OSC 52, the clipboard: the text "x" in base64.
+        bytes.extend_from_slice(b"\x1b]52;c;eA==\x07");
+        bytes.extend_from_slice(b"\x07");
+        bytes.extend_from_slice(b"\x1b]9;a note\x07");
+        bytes.extend_from_slice(word.as_bytes());
+        bytes.extend_from_slice(b"\r\n");
+        bytes
+    }
+
+    /// What the session typed into a stream: read until `count` bytes are in or it is quiet.
+    fn typed_into(terminal: &mut std::os::unix::net::UnixStream, count: usize) -> Vec<u8> {
+        terminal
+            .set_read_timeout(Some(Duration::from_millis(600)))
+            .expect("timeout");
+        let mut typed = Vec::new();
+        let mut buffer = [0u8; 256];
+        while typed.len() < count {
+            match io::Read::read(terminal, &mut buffer) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => typed.extend_from_slice(&buffer[..n]),
+            }
+        }
+        typed
+    }
+
+    #[test]
+    fn a_terminal_shown_again_reads_its_past_without_doing_what_it_did_and_the_rest_as_it_comes() {
+        use std::io::Write as _;
+        let past = Silence::new();
+        let mut terminal = streamed_over(Some(Arc::clone(&past)));
+        assert!(terminal.session.replaying());
+        let before = doings("old_stretch");
+        let after = doings("new_stretch");
+        // The feeder says where the past ends before it writes the bytes it covers, and the
+        // bytes of both stretches arrive in one write: the read that takes them is cut.
+        past.extend(before.len() as u64);
+        past.close();
+        let mut bytes = before.clone();
+        bytes.extend_from_slice(&after);
+        terminal.terminal.write_all(&bytes).expect("written");
+
+        let text = wait_text(&terminal.session, "new_stretch");
+        assert!(text.contains("old_stretch"), "{text}");
+        // The past is on the screen and did nothing: one question answered, one copy, one bell,
+        // one notification — the live stretch's.
+        let typed = typed_into(&mut terminal.terminal, 7);
+        assert_eq!(
+            typed
+                .windows(5)
+                .filter(|window| window == b"\x1b[?6c")
+                .count(),
+            1,
+            "{typed:?}"
+        );
+        let state = terminal.wake.state.lock().unwrap();
+        assert_eq!(state.copies, ["x"], "only the live copy");
+        assert_eq!(state.bells, 1);
+        assert_eq!(state.notes, 1);
+        drop(state);
+        assert!(!terminal.session.replaying());
+    }
+
+    #[test]
+    fn the_past_of_a_terminal_that_says_nothing_after_it_is_read_and_ends_when_it_is_closed() {
+        use std::io::Write as _;
+        let past = Silence::new();
+        let mut terminal = streamed_over(Some(Arc::clone(&past)));
+        let before = doings("only_past");
+        // Written in two parts, the feeder not done after the first.
+        past.extend(5);
+        terminal.terminal.write_all(&before[..5]).expect("written");
+        wait_until("the first part taken", Duration::from_secs(8), || {
+            past.read.load(Ordering::SeqCst) == 5
+        });
+        assert!(terminal.session.replaying(), "the feeder is not done");
+        past.extend(before.len() as u64);
+        past.close();
+        terminal.terminal.write_all(&before[5..]).expect("written");
+        wait_text(&terminal.session, "only_past");
+        wait_until("the past read", Duration::from_secs(8), || {
+            !terminal.session.replaying()
+        });
+        // Nothing of it was answered or done, and nothing arrived to unmute the session: the
+        // first live bytes are what do.
+        assert_eq!(typed_into(&mut terminal.terminal, 1), b"");
+        let state = terminal.wake.state.lock().unwrap();
+        assert!(state.copies.is_empty());
+        assert_eq!((state.bells, state.notes), (0, 0));
+        drop(state);
+        terminal
+            .terminal
+            .write_all(b"\x07live\r\n")
+            .expect("written");
+        wait_text(&terminal.session, "live");
+        wait_until("the bell", Duration::from_secs(8), || {
+            terminal.wake.state.lock().unwrap().bells == 1
+        });
+    }
+
+    #[test]
+    fn a_past_with_nothing_in_it_is_over_when_it_is_closed() {
+        let past = Silence::new();
+        let terminal = streamed_over(Some(Arc::clone(&past)));
+        assert!(terminal.session.replaying(), "not until the feeder says so");
+        past.close();
+        assert!(!terminal.session.replaying());
     }
 
     #[test]

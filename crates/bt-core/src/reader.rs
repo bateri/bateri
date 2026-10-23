@@ -69,6 +69,7 @@ use polling::{Event as PollingEvent, Events, PollMode, Poller};
 use crate::graphics::{Commands, Sink};
 use crate::handler::ClusterHandler;
 use crate::journal::{Journal, Side};
+use crate::session::Silence;
 
 /// The most bytes read from the PTY before a forced synchronization.
 pub(crate) const READ_BUFFER_SIZE: usize = 0x10_0000;
@@ -249,6 +250,8 @@ pub(crate) struct EventLoop<T: tty::EventedPty, U: EventListener> {
     /// The session's graphics ([`EventLoop::graphics`]); `None`: none, and
     /// the graphics commands the stream may carry only move the cursor.
     graphics: Option<Arc<dyn Sink>>,
+    /// The past a stream starts with ([`EventLoop::silence`]); `None`: none.
+    silence: Option<Arc<Silence>>,
 }
 
 /// The read gate's state between two loop rounds: while closed, since when
@@ -297,6 +300,7 @@ where
             read_first: None,
             journal: None,
             graphics: None,
+            silence: None,
         })
     }
 
@@ -406,6 +410,14 @@ where
     /// reader tell the prefix's replies from the live ones (`TappedPty`).
     pub(crate) fn read_first(&mut self, prefix: usize) {
         self.read_first = Some(prefix);
+    }
+
+    /// The stream starts with a past ([`Silence`]): a read of its bytes is parsed alone, before
+    /// the next one is made — the read decides whether the session is muted for the bytes it
+    /// took, and two reads parsed together would be parsed under the second one's answer. The
+    /// reads of live bytes are not held to it.
+    pub(crate) fn silence(&mut self, silence: Arc<Silence>) {
+        self.silence = Some(silence);
     }
 
     /// The PTY the loop owned — after `join`, when nothing reads it.
@@ -564,7 +576,12 @@ where
                 terminal = match fair.try_lock_unfair() {
                     // At the buffer limit, take the lock by waiting — and in
                     // the serial rounds always, so a read is parsed alone.
-                    None if serial || unprocessed >= buf.len() => Some(fair.lock_unfair()),
+                    None if serial
+                        || unprocessed >= buf.len()
+                        || self.silence.as_ref().is_some_and(|past| past.in_past()) =>
+                    {
+                        Some(fair.lock_unfair())
+                    }
                     None => continue,
                     locked => locked,
                 };
@@ -645,8 +662,11 @@ where
             processed += unprocessed;
             unprocessed = 0;
 
-            // Do not hold the terminal locked longer than needed.
-            if processed >= MAX_LOCKED_READ {
+            // Do not hold the terminal locked longer than needed — unless a read of a stream's
+            // past left its live rest behind: nothing about the stream says it is there to read.
+            if processed >= MAX_LOCKED_READ
+                && !self.silence.as_ref().is_some_and(|past| past.is_carrying())
+            {
                 break;
             }
         }

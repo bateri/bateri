@@ -859,3 +859,147 @@ fn a_pane_over_a_real_kablo_is_found_and_read_by_its_childs_pid_behind_login_too
     drop(session);
     service.stop();
 }
+
+/// The options of a pane over `/bin/sh` running `script`, without the integration's marks.
+fn plain_options(script: &str, home: &Path) -> bt_core::SessionOptions {
+    bt_core::SessionOptions {
+        command: Some((
+            "/bin/sh".to_owned(),
+            vec!["-c".to_owned(), script.to_owned()],
+        )),
+        working_directory: Some(home.to_owned()),
+        home: None,
+        env: std::collections::HashMap::new(),
+        cols: 80,
+        rows: 24,
+        cell_px: (9, 18),
+        terminal: bt_core::TerminalOptions {
+            scrollback: 100,
+            osc52: bt_core::Osc52::Off,
+            cursor: bt_core::CaretShape::default(),
+            blink: bt_core::CursorBlink::default(),
+        },
+        theme: bt_core::Theme::BATERI,
+        dock: false,
+        cluster: true,
+        initial_input: None,
+        shell_marks: false,
+        pane_uuid: bt_core::PaneUuid::parse("6B2F3E4D-5C6B-4A89-9EA0-B6C5D4E3F201"),
+        hostname: None,
+        replay: None,
+        journal: None,
+        views: None,
+    }
+}
+
+#[test]
+fn a_pane_over_a_real_kablo_comes_back_to_its_terminal_with_its_screen_and_the_program_is_told_nothing()
+ {
+    let Some(bundle) = release() else {
+        eprintln!("SKIPPED: there is no kablo release to run (../kablo/dist or KABLO_DIST)");
+        return;
+    };
+    let mut ground = Ground::new("back");
+    let service_dir = ground.root.join("svc");
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&service_dir)
+        .expect("the service's directory");
+    let kablo =
+        kablo_proto::install::install_path_in(&ground.home.to_string_lossy(), bundle.version())
+            .expect("a path");
+    let backend = Arc::new(RealMac {
+        bundle,
+        home: ground.home.clone(),
+        sockets: ground.sockets.clone(),
+    });
+    let ledger = Arc::new(Ledger::memory());
+
+    // The program asks the terminal a question and turns on the pixel mouse, then writes down,
+    // byte by byte, every line it is typed — the questions' answers included, which come as
+    // input.
+    let log = ground.root.join("received");
+    let script = format!(
+        "printf 'FIRST\\n'; printf '\\033[?1016h'; printf '\\033[c'; \
+         while IFS= read -r line; do \
+         printf '%s' \"$line\" | od -An -c -v | tr -d ' \\n' >> '{}'; echo >> '{}'; \
+         printf 'LINE\\n'; done",
+        log.display(),
+        log.display()
+    );
+
+    // The first bateri: the pane's terminal is made, its question is answered once, the pane
+    // types a line.
+    let service = Service::start(&service_dir, backend.clone(), ledger.clone()).expect("a service");
+    let options = plain_options(&script, &ground.home);
+    let (spec, size) = new_session(&options.child_launch(), 1000);
+    let pane = options.pane_uuid.clone().expect("a pane");
+    let stream = service
+        .open_local(&pane, spec, size, Duration::from_secs(30))
+        .expect("a terminal of this Mac");
+    assert!(stream.silence.is_none(), "a terminal just made has no past");
+    let id = ledger.terminals_of(ACCOUNT).remove(0);
+    ground.kept = Some(PathBuf::from(kablo));
+    ground.made.push(id.clone());
+    let session = bt_core::Session::streamed(
+        options,
+        Arc::new(Ends::default()) as Arc<dyn bt_core::Wake>,
+        stream,
+    )
+    .expect("a session over the stream");
+    waits_for("the program's first words", || shows(&session, "FIRST"));
+    waits_for("the pixel mouse", || session.pixel_mouse());
+    session.write(b"a\r");
+    waits_for("the first line", || shows(&session, "LINE"));
+    waits_for("the program's log", || {
+        std::fs::read_to_string(&log).is_ok_and(|text| text.lines().count() == 1)
+    });
+    // The bateri goes; the terminal does not.
+    drop(session);
+    service.stop();
+
+    // The next bateri: the pane finds its terminal, not a new one, and is given the whole of
+    // what it wrote. The pane was restored with a line ready for its first prompt (a remote
+    // pane's `ssh host`): the program is running already, and the line is not typed into it.
+    let service = Service::start(&service_dir, backend, ledger.clone()).expect("a second service");
+    let mut options = plain_options(&script, &ground.home);
+    options.initial_input = Some(bt_core::InitialInput::run("injected"));
+    let (spec, size) = new_session(&options.child_launch(), 1000);
+    let stream = service
+        .open_local(&pane, spec, size, Duration::from_secs(30))
+        .expect("its terminal");
+    assert!(stream.pid > 1);
+    assert!(stream.silence.is_some(), "a terminal that has a past");
+    assert_eq!(ledger.terminals_of(ACCOUNT), [id.clone()]);
+    let ends = Arc::new(Ends::default());
+    let session =
+        bt_core::Session::streamed(options, Arc::clone(&ends) as Arc<dyn bt_core::Wake>, stream)
+            .expect("a session over the stream");
+    assert!(session.is_shown_again());
+    waits_for("the screen of the past", || {
+        shows(&session, "FIRST") && shows(&session, "LINE")
+    });
+    waits_for("the pixel mouse across the restart", || {
+        session.pixel_mouse()
+    });
+    waits_for("the past read", || !session.replaying());
+
+    // What the pane types reaches the program, and what the program has been told is the one
+    // answer to its question and the two lines: the past was read without answering again.
+    session.write(b"x\r");
+    waits_for("the second line", || {
+        std::fs::read_to_string(&log).is_ok_and(|text| text.lines().count() == 2)
+    });
+    let received = std::fs::read_to_string(&log).expect("the log");
+    let answers = received.matches("033[?6c").count();
+    assert_eq!(answers, 1, "one answer to the one question: {received:?}");
+    let lines: Vec<&str> = received.lines().collect();
+    assert!(lines[0].ends_with('a'), "{received:?}");
+    assert_eq!(lines[1], "x", "nothing but the typed line: {received:?}");
+    assert_eq!(lines.len(), 2, "{received:?}");
+
+    service.end_all(std::slice::from_ref(&pane), Duration::from_secs(10));
+    waits_for("the session to see the end", || !session.reader_alive());
+    drop(session);
+    service.stop();
+}

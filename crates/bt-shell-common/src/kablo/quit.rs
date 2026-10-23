@@ -1,9 +1,10 @@
-//! What becomes of the terminals bateri keeps on servers when something happens
-//! to bateri: the one table, so that the quit, the update, the crash and the
-//! launch after them all read the same cell.
+//! What becomes of the terminals bateri keeps — the ones on servers and the ones of this
+//! Mac, where every pane's program runs — when something happens to bateri: the one table, so
+//! that the quit, the update, the crash and the launch after them all read the same cell.
 //!
 //! **One rule for the user: a terminal on a server is a local terminal that does
-//! not die with the connection.** What the user chose for the programs here
+//! not die with the connection, and a local terminal is one that does not die with
+//! the application.** What the user chose for the programs here
 //! (`[terminal] keep_running`) is what the terminals there get — nothing is
 //! learned about the server — and what a lost connection or a closed lid does is
 //! nothing at all, in every row: that is the point of keeping them.

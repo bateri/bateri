@@ -9,6 +9,10 @@ fn pane() -> PaneUuid {
     PaneUuid::parse(PANE).expect("a uuid")
 }
 
+fn other_pane() -> PaneUuid {
+    PaneUuid::parse("1A2B3C4D-5E6F-7081-92A3-B4C5D6E7F801").expect("a pane")
+}
+
 fn id(name: &str) -> SessionId {
     SessionId::new(name).expect("an id")
 }
@@ -65,18 +69,21 @@ fn rich() -> Rows {
         terminal: id("b-0123456789abcdef0123456789abcdef"),
         pane: Some(pane()),
         ending: false,
+        view: false,
     });
     rows.terminals.push(Row {
         account: "root@prod:22".to_owned(),
         terminal: id("b-fedcba9876543210fedcba9876543210"),
         pane: None,
         ending: false,
+        view: false,
     });
     rows.terminals.push(Row {
         account: "gone@elsewhere:22".to_owned(),
         terminal: id("b-1"),
         pane: None,
         ending: true,
+        view: false,
     });
     rows
 }
@@ -122,6 +129,7 @@ fn richer() -> Rows {
         terminal: id("t1"),
         pane: Some(pane()),
         ending: false,
+        view: false,
     });
     rows
 }
@@ -178,6 +186,122 @@ fn a_row_for_this_mac_is_understood_exactly_or_not_at_all() {
         assert_eq!(Rows::parse(&text), None, "{text:?}");
     }
     assert!(Rows::parse(V2_FIXTURE).is_some(), "the control");
+}
+
+/// [`richer`] with the view of the pane the terminal of this Mac carries open and the mark that
+/// the bateri before left to be updated.
+fn watched() -> Rows {
+    let mut rows = richer();
+    rows.terminals
+        .last_mut()
+        .expect("the terminal of this Mac")
+        .view = true;
+    rows.updating = true;
+    rows
+}
+
+/// What [`watched`] is as text, frozen like the other versions: still version 2, the view a
+/// word after the state and the update's mark a line of its own after the header.
+const V2_WATCHED_FIXTURE: &str = concat!(
+    "bateri-kablo 2\n",
+    "U\n",
+    r"A ada@rasp:2222\svia\smy\sjump:22 rasp 2222 aarch64-unknown-linux-musl 0.2.0 ssh -p 2222 -J my\sjump ada@rasp",
+    "\n",
+    "L aarch64-apple-darwin 0.2.0-dev+222309ff9090\n",
+    "A root@prod:22 prod - aarch64-apple-darwin 0.2.1-rc.1 ssh prod\n",
+    r"T ada@rasp:2222\svia\smy\sjump:22 b-0123456789abcdef0123456789abcdef 0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0 live",
+    "\n",
+    "T root@prod:22 b-fedcba9876543210fedcba9876543210 - live\n",
+    "T gone@elsewhere:22 b-1 - ending\n",
+    "T local t1 0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0 live view\n",
+);
+
+#[test]
+fn a_view_and_the_marks_of_an_update_are_the_second_version_and_the_texts_before_stay_what_they_were()
+ {
+    assert_eq!(Rows::parse(V2_WATCHED_FIXTURE), Some(watched()));
+    assert_eq!(watched().render(), V2_WATCHED_FIXTURE);
+    // A ledger with a view or an update and no account of this Mac is still not version 1.
+    let mut alone = rich();
+    alone.updating = true;
+    assert!(alone.render().starts_with("bateri-kablo 2\nU\n"));
+    let mut viewing = rich();
+    viewing.terminals[0].view = true;
+    assert!(viewing.render().starts_with("bateri-kablo 2\n"));
+    assert_eq!(Rows::parse(&viewing.render()), Some(viewing));
+    // The earlier texts are read as they were: no view, no update.
+    assert!(!Rows::parse(V2_FIXTURE).expect("v2").updating);
+    assert!(
+        Rows::parse(V2_FIXTURE)
+            .expect("v2")
+            .terminals
+            .iter()
+            .all(|row| !row.view)
+    );
+    // And neither word exists in the first version.
+    for text in [
+        V1_FIXTURE.replacen(" live\n", " live view\n", 1),
+        V1_FIXTURE.replacen("bateri-kablo 1\n", "bateri-kablo 1\nU\n", 1),
+        V2_WATCHED_FIXTURE.replacen("U\n", "U\nU\n", 1),
+        V2_WATCHED_FIXTURE.replacen(" live view\n", " live view extra\n", 1),
+        V2_WATCHED_FIXTURE.replacen(" live view\n", " live seen\n", 1),
+    ] {
+        assert_eq!(Rows::parse(&text), None, "{text:?}");
+    }
+}
+
+#[test]
+fn the_view_of_a_pane_and_the_departure_for_an_update_outlive_the_process() {
+    let dir = crate::settings::TempRoot::new("ledger-view");
+    let path = dir.0.join("kablo");
+    let mac_installed = Installed {
+        target: Target::MacosAarch64,
+        version: "0.2.0-dev+222309ff9090".to_owned(),
+        path: String::new(),
+        fresh: true,
+    };
+    let ledger = Ledger::open(path.clone());
+    ledger.remember(&local::host(), &mac_installed);
+    ledger.shown(local::ACCOUNT, &id("t1"), Some(&pane()));
+    assert!(!ledger.view_of(local::ACCOUNT, &id("t1")));
+    ledger.set_view(local::ACCOUNT, &id("t1"), true);
+    ledger.leave_for_update();
+    // Another process: it reads the file.
+    let next = Ledger::open(path);
+    assert!(next.view_of(local::ACCOUNT, &id("t1")));
+    assert_eq!(next.local_terminal_of(&pane()), Some(id("t1")));
+    assert!(next.arrived_by_update(), "the update's launch");
+    assert!(
+        !next.arrived_by_update(),
+        "said once: the launch after a crash is not the update's"
+    );
+    next.set_view(local::ACCOUNT, &id("t1"), false);
+    assert!(!next.view_of(local::ACCOUNT, &id("t1")));
+    // A terminal the ledger does not have has no view, and saying one changes nothing.
+    next.set_view(local::ACCOUNT, &id("nope"), true);
+    assert!(!next.view_of(local::ACCOUNT, &id("nope")));
+}
+
+#[test]
+fn a_pane_is_shown_the_terminal_of_this_mac_it_had_while_it_is_meant_to_live() {
+    let ledger = Ledger::memory();
+    let server = server("ada@rasp:2222", &["ssh", "-p", "2222", "ada@rasp"]);
+    ledger.remember(&server, &installed());
+    ledger.shown("ada@rasp:2222", &id("b-1"), Some(&pane()));
+    assert_eq!(
+        ledger.local_terminal_of(&pane()),
+        None,
+        "a server's terminal is shown by the pipe, not found as the pane's own"
+    );
+    ledger.shown(local::ACCOUNT, &id("t1"), Some(&pane()));
+    assert_eq!(ledger.local_terminal_of(&pane()), Some(id("t1")));
+    assert_eq!(ledger.local_terminal_of(&other_pane()), None);
+    ledger.end(local::ACCOUNT, &id("t1"));
+    assert_eq!(
+        ledger.local_terminal_of(&pane()),
+        None,
+        "one asked to end is not shown again"
+    );
 }
 
 #[test]

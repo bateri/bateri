@@ -46,8 +46,21 @@
 //! ended is [`Hub::exit_of`]; the words a framed holder is sent as frames (a bell, a line, a
 //! refusal) it is sent as the bytes that show them. Everything else — the routing, the
 //! position, the backlog, the ending — is the framed holder's.
+//!
+//! **A raw holder that is given a terminal that was running** ([`Hub::resume_raw`]) is a pane
+//! shown again after the bateri that showed it was gone. It is attached from the first byte the
+//! server still has and is not given a picture in place of bytes that hold questions the server
+//! has answered: the pane's terminal parses the whole of it, muted for the part the questions of
+//! which were answered ([`bt_core::Silence`]) — the hub says how far that part reaches as the
+//! bytes are written, and when no more of it will come. When the server no longer has the bytes
+//! the pane is given a picture, as every pane is, and is muted for the picture and for the
+//! bytes of the answered part that follow it.
 
 use std::collections::{BTreeMap, VecDeque};
+
+use std::sync::Arc;
+
+use bt_core::Silence;
 
 use super::{Attach, Client, ErrorCode, Event, Exit, NewSession, SessionId, Size};
 use crate::hold::wire::{self, AppReader, CHUNK, Open, Target, ToApp, ToHold, exit_status};
@@ -150,6 +163,10 @@ struct Binding {
     /// the wrong place after the next restart. A picture sets the position itself when
     /// it is whole.
     attached_at: Option<u64>,
+    /// How far the server has answered the program's questions, once it has said so, for a
+    /// terminal whose start is the past of a pane that was not there to read it
+    /// ([`Hold::silence`]).
+    answered: Option<u64>,
 }
 
 struct Hold {
@@ -174,6 +191,11 @@ struct Hold {
     /// Nothing is read from this holder any more and, once `out` is written,
     /// its connection is to be closed.
     finished: bool,
+    /// The past a raw holder's stream starts with ([`Hub::resume_raw`]).
+    silence: Option<Arc<Silence>>,
+    /// How many bytes were put in `out` since the holder was made, a raw holder's: the position
+    /// of the next in its stream.
+    fed: u64,
 }
 
 impl Hold {
@@ -189,6 +211,21 @@ impl Hold {
             bound: None,
             renumber: None,
             finished: false,
+            silence: None,
+            fed: 0,
+        }
+    }
+
+    /// Bytes for a raw holder's stream.
+    fn put(&mut self, bytes: &[u8]) {
+        self.out.extend_from_slice(bytes);
+        self.fed += bytes.len() as u64;
+    }
+
+    /// No more of the past will be written.
+    fn close_past(&self) {
+        if let Some(silence) = &self.silence {
+            silence.close();
         }
     }
 
@@ -199,11 +236,11 @@ impl Hold {
         }
         // What a pane reads is bytes: the words of the wire are the bytes that show them.
         match message {
-            ToHold::Output { data, .. } => self.out.extend_from_slice(data),
-            ToHold::Bell => self.out.push(0x07),
+            ToHold::Output { data, .. } => self.put(data),
+            ToHold::Bell => self.put(&[0x07]),
             ToHold::Note { text } => {
-                self.out.extend_from_slice(text.as_bytes());
-                self.out.extend_from_slice(b"\r\n");
+                self.put(text.as_bytes());
+                self.put(b"\r\n");
             }
             ToHold::End { code, note } => {
                 if let Some(note) = note {
@@ -223,14 +260,15 @@ impl Hold {
 
     /// A line of the hub's own, after what the terminal wrote.
     fn line(&mut self, text: &str) {
-        self.out.extend_from_slice(b"\r\n");
-        self.out.extend_from_slice(text.as_bytes());
-        self.out.extend_from_slice(b"\r\n");
+        self.put(b"\r\n");
+        self.put(text.as_bytes());
+        self.put(b"\r\n");
     }
 
     fn finish(&mut self, message: &ToHold) {
         self.send(message);
         self.finished = true;
+        self.close_past();
     }
 }
 
@@ -330,10 +368,11 @@ impl Hub {
                 terminal,
                 offset,
                 truncated,
-                ..
+                answered,
             } => {
                 if let Some(hold) = hold_of(self, terminal)
-                    && let Some(binding) = self.holds.get_mut(&hold).and_then(|h| h.bound.as_mut())
+                    && let Some(entry) = self.holds.get_mut(&hold)
+                    && let Some(binding) = entry.bound.as_mut()
                 {
                     binding.shown = true;
                     // Output from here on starts at `offset`, unless a picture
@@ -344,6 +383,16 @@ impl Hub {
                     }
                     if asked {
                         binding.attached_at = Some(*offset);
+                    }
+                    // A terminal shown again: the bytes below `answered` are the past. With
+                    // none of them coming — the stream starts at or beyond it — the past is
+                    // complete before it starts; with a picture coming, the picture is the
+                    // past and what follows it is judged by the picture's end.
+                    if let Some(silence) = entry.silence.clone() {
+                        binding.answered = Some(*answered);
+                        if !truncated && *answered <= *offset {
+                            silence.close();
+                        }
                     }
                 }
                 return;
@@ -450,13 +499,10 @@ impl Hub {
 
     /// Program output for a holder.
     fn give(&mut self, hold: HoldId, data: &[u8]) {
-        let Some(Hold {
-            out,
-            raw,
-            bound: Some(binding),
-            ..
-        }) = self.holds.get_mut(&hold)
-        else {
+        let Some(entry) = self.holds.get_mut(&hold) else {
+            return;
+        };
+        let Some(binding) = entry.bound.as_mut() else {
             return;
         };
         binding.shown = true;
@@ -464,20 +510,36 @@ impl Hub {
         if let Some(at) = binding.attached_at.take() {
             binding.end = at;
         }
+        // A terminal shown again: how much of these bytes is the past is said before they are
+        // written, and the past is complete once the stream has passed where it ends.
+        if entry.raw
+            && let Some(silence) = &entry.silence
+            && let Some(answered) = binding.answered
+            && !silence.is_closed()
+        {
+            let past = answered.saturating_sub(binding.end).min(data.len() as u64);
+            if past > 0 {
+                silence.extend(entry.fed + past);
+            }
+            if binding.end + data.len() as u64 >= answered {
+                silence.close();
+            }
+        }
         // The position moves with each frame, so a long write is cut here and
         // not by the codec, which would cut it the same way: one rule for
         // where the stream stands after a frame.
         for chunk in data.chunks(CHUNK) {
             binding.end += chunk.len() as u64;
-            if *raw {
-                out.extend_from_slice(chunk);
+            if entry.raw {
+                entry.out.extend_from_slice(chunk);
+                entry.fed += chunk.len() as u64;
                 continue;
             }
             ToHold::Output {
                 end: binding.end,
                 data: chunk.to_vec(),
             }
-            .encode(out);
+            .encode(&mut entry.out);
         }
     }
 
@@ -494,13 +556,10 @@ impl Hub {
         last: bool,
         data: &[u8],
     ) {
-        let Some(Hold {
-            out,
-            raw,
-            bound: Some(binding),
-            ..
-        }) = self.holds.get_mut(&hold)
-        else {
+        let Some(entry) = self.holds.get_mut(&hold) else {
+            return;
+        };
+        let Some(binding) = entry.bound.as_mut() else {
             return;
         };
         binding.shown = true;
@@ -512,10 +571,21 @@ impl Hub {
         };
         bytes.reserve(data.len());
         bytes.extend_from_slice(data);
-        if *raw {
-            out.extend_from_slice(&bytes);
+        if entry.raw {
+            entry.out.extend_from_slice(&bytes);
+            entry.fed += bytes.len() as u64;
             if last {
                 binding.end = offset;
+            }
+            // A terminal shown again: a picture is the screen the past made. It is all past,
+            // and what follows it is the past too as far as the questions were answered.
+            if let Some(silence) = entry.silence.clone()
+                && !silence.is_closed()
+            {
+                silence.extend(entry.fed);
+                if last && binding.answered.is_none_or(|answered| answered <= offset) {
+                    silence.close();
+                }
             }
             return;
         }
@@ -526,7 +596,7 @@ impl Hub {
                 end: if whole { offset } else { binding.end },
                 data: piece.to_vec(),
             }
-            .encode(out);
+            .encode(&mut entry.out);
         }
         if last {
             binding.end = offset;
@@ -574,6 +644,9 @@ impl Hub {
     /// Lets go of the holder's terminal: it is no longer routed, and when
     /// `detach` the client stops the stream.
     fn release(&mut self, hold: HoldId, detach: bool) {
+        if let Some(entry) = self.holds.get(&hold) {
+            entry.close_past();
+        }
         let Some(binding) = self.holds.get_mut(&hold).and_then(|h| h.bound.take()) else {
             return;
         };
@@ -790,6 +863,40 @@ impl Hub {
         Ok(())
     }
 
+    /// Shows a raw holder a terminal of `account` that is running already: one a bateri before
+    /// this one made for the pane, found again. The holder is bound to it and attached from the
+    /// first byte the server has, and it is given the [`Silence`] that says how much of what it
+    /// is sent is the past (see the module documentation) — the owner hands it to the pane's
+    /// session. The stream is nobody's yet when the server does not have the terminal: the holder
+    /// is refused, as a terminal that was asked for and is not there is anywhere.
+    pub fn resume_raw(
+        &mut self,
+        hold: HoldId,
+        account: &str,
+        terminal: SessionId,
+        size: Size,
+    ) -> Result<Arc<Silence>, Declined> {
+        if !self
+            .holds
+            .get(&hold)
+            .is_some_and(|entry| entry.raw && entry.bound.is_none())
+        {
+            return Err(Declined::NoRequest);
+        }
+        let Some(client) = self.clients.get_mut(account) else {
+            return Err(Declined::NoClient);
+        };
+        client.attach(terminal.clone(), Attach::new(size).from(0).replaying());
+        let silence = Silence::new();
+        if let Some(entry) = self.holds.get_mut(&hold) {
+            entry.silence = Some(Arc::clone(&silence));
+        }
+        // Not shown until the server attaches it: a terminal it does not have is a refusal the
+        // owner answers (the pane makes a new terminal), not a line under what was shown.
+        self.bind(hold, account, terminal, 0, false, false);
+        Ok(silence)
+    }
+
     /// How the terminal's program ended, for a holder the hub has said its last word to.
     pub fn exit_of(&self, hold: HoldId) -> Option<Exit> {
         self.holds.get(&hold).and_then(|entry| entry.exit)
@@ -997,6 +1104,7 @@ impl Hub {
                 shown,
                 picture_asked,
                 attached_at: None,
+                answered: None,
             });
         }
     }

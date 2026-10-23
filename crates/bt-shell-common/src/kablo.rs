@@ -202,6 +202,13 @@ pub struct Attach {
     /// instead. For a terminal this client had and lost sight of (an application that was
     /// restarted); a connection that breaks does it by itself.
     pub check: bool,
+    /// The owner reads the bytes it is given from a terminal of its own that holds back the
+    /// answers to the questions in the part the server has answered already (it is told how far
+    /// that is, [`Event::Attached`]'s `answered`): the first attach does not ask for a picture
+    /// instead of such bytes. A terminal the owner has been showing, whose connection broke, is
+    /// attached again the ordinary way. For a terminal shown again after the bateri that showed it
+    /// was gone, whose bytes are all there is to build the screen from.
+    pub replaying: bool,
 }
 
 impl Attach {
@@ -213,6 +220,7 @@ impl Attach {
             picture: false,
             take: false,
             check: false,
+            replaying: false,
         }
     }
 
@@ -246,6 +254,14 @@ impl Attach {
             ..self
         }
     }
+
+    /// Holding back the answers itself ([`Attach::replaying`]).
+    pub fn replaying(self) -> Attach {
+        Attach {
+            replaying: true,
+            ..self
+        }
+    }
 }
 
 /// What happened, in order.
@@ -267,7 +283,8 @@ pub enum Event {
     /// a picture follows in place of the bytes asked for. `answered` is how
     /// far the server has answered the program's questions; the client
     /// does not act on it (the picture flag already keeps a question from being
-    /// answered twice) and passes it on for whoever shows the bytes some other way.
+    /// answered twice, unless the attach was [`Attach::replaying`]) and passes it on for
+    /// whoever shows the bytes some other way.
     Attached {
         /// The terminal.
         terminal: SessionId,
@@ -431,6 +448,9 @@ struct Terminal {
     retry: Option<Instant>,
     /// How many attaches in a row the server could not serve.
     unavailable: u32,
+    /// The first attach holds the answers back itself ([`Attach::replaying`]) and has not been
+    /// served yet.
+    replay_wanted: bool,
 }
 
 impl Terminal {
@@ -451,6 +471,7 @@ impl Terminal {
             adopting: false,
             retry: None,
             unavailable: 0,
+            replay_wanted: attach.replaying,
         }
     }
 }
@@ -865,6 +886,20 @@ impl Client {
         self.terminals.remove(id);
     }
 
+    /// The server is asked to forget the past of an attached terminal: the scrollback its screen
+    /// keeps and the record of its output so far. A terminal attached afterwards — after a
+    /// restart of the owner — is not given the lines that were cleared (what Clear Scrollback and
+    /// Clear to Start ask of the terminal the user looks at), and this client is not affected.
+    /// `false` when nothing was asked: the connection is not live or the terminal is not
+    /// attached. A server from before the message skips it.
+    pub fn forget_past(&mut self, id: &SessionId) -> bool {
+        if !self.link.is_live() || !self.is_attached(id) {
+            return false;
+        }
+        self.queue(Packet::about(id.clone(), Message::Forget));
+        true
+    }
+
     // What is known
 
     /// The offset of the next byte of output owed for a terminal: what an
@@ -1032,7 +1067,7 @@ impl Client {
         }
         let mut view = View::new(terminal.size);
         view.picture = terminal.picture_wanted;
-        view.picture_if_answered = true;
+        view.picture_if_answered = !terminal.replay_wanted;
         view.keep_after_end = true;
         view.take = terminal.take_wanted;
         view.name = self.name;
@@ -1072,6 +1107,9 @@ impl Client {
                 terminal.picture_wanted = false;
                 terminal.take_wanted = false;
                 terminal.unavailable = 0;
+                // Served: a connection that breaks from here on is attached again the ordinary
+                // way, with a picture in place of bytes that hold a question already answered.
+                terminal.replay_wanted = false;
                 self.events.push_back(Event::Attached {
                     terminal: id,
                     offset,
