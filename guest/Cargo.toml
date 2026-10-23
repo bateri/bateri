@@ -4,7 +4,7 @@
 # host workspace pins; `make check` never builds them, so it needs no WebAssembly toolchain.
 [workspace]
 resolver = "3"
-members = ["sdk", "messages", "containers", "broken", "chatty", "componentize", "demopen"]
+members = ["sdk", "messages", "containers", "broken", "chatty", "componentize", "cbindgen", "demopen"]
 
 [workspace.package]
 version = "0.1.0"
@@ -22,13 +22,16 @@ bateri-view-sdk = { path = "sdk" }
 bateri-view-messages = { path = "messages" }
 # The wire the program half of a view speaks: frames, bundles, digests. Its host half is the
 # terminal's; the program uses the same crate to write what the terminal reads.
-pencere = { git = "https://github.com/bateri/pencere", rev = "e4e3566cc721633f5debd517e3a59fb6591b208c" }
+pencere = { git = "https://github.com/bateri/pencere", rev = "6caacce006bd5522fbe7f29a11a1571ffd767b25" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # The bindings of the interface in `crates/bt-view-wasm/wit`, and the tool that turns a module
 # that uses them into a component. Versions of the era of the runtime the host links.
 wit-bindgen = { version = "=0.46.0", default-features = false, features = ["macros", "realloc"] }
 wit-component = "=0.239.0"
+# The generator of the C bindings (`cbindgen`), the same release as the macros.
+wit-bindgen-c = "=0.46.0"
+wit-bindgen-core = "=0.46.0"
 
 [profile.release]
 # Small and fast to compile for the runtime (its Cranelift compile time grows with the module);

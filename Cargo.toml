@@ -119,9 +119,12 @@ objc2-web-kit = { version = "0.3", default-features = false, features = [
 # compiles; Apache-2.0 WITH LLVM-exception (GPL-3 compatible). The default set is cut to what
 # runs a component: no async, cache, GC, profiling, coredump or pooling allocator. The
 # version is the newest that builds with the toolchain pinned by `rust-version` (a newer
-# release asks for a newer rustc); a toolchain bump is the time to move it.
+# release asks for a newer rustc); a toolchain bump is the time to move it. `gc` and
+# `gc-drc` are what the runtime's exceptions need (an exception is an object on its collected
+# heap): the interpreter of the scripting language (`bt-view-wasm`'s `luau`) reports a script's
+# errors with C++ exceptions, and a module that throws needs the runtime to catch.
 wasmtime = { version = "38", default-features = false, features = [
-    "runtime", "cranelift", "component-model", "std",
+    "runtime", "cranelift", "component-model", "std", "gc", "gc-drc",
 ] }
 # The main queue (`bt-shell-macos`) and vnode sources (`bt-shell-common`'s
 # `watch`). User-approved dependency decision.
@@ -260,7 +263,7 @@ kablo-proto = { git = "https://github.com/bateri/kablo", rev = "74ac4a4d4800ffa0
 # the protocol is meant to be embedded by closed products too. User-approved dependency
 # decision (2026-10-21); it brings `serde`, `serde_json` and `sha2` into the graph, all
 # MIT/Apache-2.0. `make audit` fails if `rev` is not a full hash or does not resolve.
-pencere = { git = "https://github.com/bateri/pencere", rev = "e4e3566cc721633f5debd517e3a59fb6591b208c" }
+pencere = { git = "https://github.com/bateri/pencere", rev = "6caacce006bd5522fbe7f29a11a1571ffd767b25" }
 
 bt-core = { path = "crates/bt-core" }
 bt-atlas = { path = "crates/bt-atlas" }

@@ -34,6 +34,11 @@ Choices:
   the package: it gets no entry here. The check is both halves, so a GPL crate
   from anywhere else still stops the script.
 - Sparkle's LICENSE (MIT + external notices such as bsdiff/sais/ed25519) as is.
+- The scripting language's interpreter (`crates/bt-view-wasm/luau/luau.wasm`, built from
+  `guest/luau`) is not a crate: it is Luau, and statically the C and C++ runtimes of the
+  toolchain that built it (wasi-libc with its musl, libc++, libc++abi, libunwind and
+  compiler-rt of LLVM). Their texts are kept beside the sources it is built from
+  (`guest/luau/licenses/`), and are given as they are.
 - The color schemes bateri adapts (`tools/import_themes.py`, the one list a
   theme is added to): the collection the values are read from and each
   project the schemes come from, with its copyright line and license — MIT
@@ -236,8 +241,43 @@ def main():
             "Licensed under the MIT License, with the external notices it carries;",
             "full text below.", RULE, "", sparkle, ""]
 
+    out += module_notices()
+
     out += theme_notices("Version 2.0" in "\n".join(out))
     sys.stdout.write("\n".join(out))
+
+
+LICENSES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "guest", "luau", "licenses")
+
+
+def licensed(name):
+    with open(os.path.join(LICENSES, name), encoding="utf-8") as f:
+        return f.read().rstrip()
+
+
+def module_notices():
+    """The notices of what the interpreter module is made of besides our own code: Luau
+    (MIT, with the Lua notice it keeps), and the runtimes of the toolchain that are linked
+    into it, each with the text it comes with."""
+    return [
+        RULE, "Luau", "https://luau.org", "https://github.com/luau-lang/luau",
+        "Licensed under the MIT License, with the notice of Lua it derives from; full text",
+        "below. It is the interpreter that runs a view written as a script, built into a",
+        "WebAssembly module (`luau.wasm`) together with the libraries named after it.",
+        RULE, "", licensed("luau.txt"), "", licensed("lua.txt"), "",
+        RULE, "wasi-libc (with musl, dlmalloc and cloudlibc)",
+        "https://github.com/WebAssembly/wasi-libc",
+        "The C library linked into the interpreter module: licensed as the file says; full",
+        "text below.",
+        RULE, "", licensed("wasi-libc.txt"), "",
+        RULE, "libc++, libc++abi, libunwind and compiler-rt (the LLVM Project)",
+        "https://llvm.org",
+        "The C++ library, its ABI and unwinding libraries and the compiler's runtime, linked",
+        "into the interpreter module: the Apache License 2.0 with LLVM exceptions (the text",
+        "of the Apache License is given above, with the exceptions) and the licenses of the",
+        "LLVM Project below.",
+        RULE, "", licensed("llvm.txt"), "",
+    ]
 
 
 def llvm_exception_notices(pkgs, crates):

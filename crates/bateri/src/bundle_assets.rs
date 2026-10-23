@@ -335,6 +335,12 @@ fn third_party_license_ships_with_attribution() {
         "MIT License",
         "Sparkle",
         "iTerm2-Color-Schemes",
+        // The interpreter of the scripting language is built into the binary with the C and
+        // C++ runtimes of the toolchain that made it: their notices travel with it.
+        "Luau",
+        "Roblox Corporation",
+        "wasi-libc",
+        "libc++, libc++abi, libunwind and compiler-rt",
     ] {
         assert!(
             licenses.contains(needle),
@@ -347,6 +353,7 @@ fn third_party_license_ships_with_attribution() {
         "Apache License",
         "Sparkle",
         "MIT License",
+        "Luau",
         "iTerm2-Color-Schemes",
         "THIRD-PARTY-LICENSES.txt",
     ] {

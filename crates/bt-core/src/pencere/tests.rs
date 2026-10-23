@@ -142,7 +142,7 @@ impl Rig {
         let flow = crate::flow::Flow::new();
         let desk = observer.map(|observer| {
             let mut options = ViewOptions::new("bateri-test", "0.0.0");
-            options.wasm_entry_limit = wasm_entry_limit;
+            options.native_entry_limit = wasm_entry_limit;
             options.size = Size {
                 width: 800,
                 height: 600,
@@ -1341,6 +1341,67 @@ fn a_component_opens_a_view_of_its_kind_and_messages_go_between_it_and_the_progr
     );
 }
 
+/// What a script is, for the tests.
+const SCRIPT: &[u8] = b"return { render = function() end }";
+
+#[test]
+fn a_script_opens_a_view_of_its_kind_and_its_failure_reaches_the_program_with_its_words() {
+    let (rig, _wake) = Rig::with_modules(1 << 20);
+    let mut pane = Pane::new(rig);
+    pane.feed(&wire(
+        "hello",
+        1,
+        None,
+        None,
+        r#"{"versions":[1],"views":["lua","web"]}"#,
+    ));
+    let welcome = pane.rig.written();
+    assert!(
+        welcome[0].payload.contains(r#""views":["lua","web"]"#),
+        "{}",
+        welcome[0].payload
+    );
+    let open = format!(
+        concat!(
+            r#"{{"token":"{token}","view":"lua","program":"demopen","#,
+            r#""bundle":{{"entry":"view.lua","files":[{{"path":"view.lua","sha256":"{digest}","#,
+            r#""size":{size},"type":"text/x-lua"}}]}}}}"#
+        ),
+        token = token_of(&welcome[0]),
+        digest = Digest::of(SCRIPT).to_string(),
+        size = SCRIPT.len(),
+    );
+    pane.feed(&[ALTERNATE_SCREEN, &wire("open", 2, None, None, &open)].concat());
+    assert_eq!(pane.rig.written()[0].kind, "need");
+    pane.feed(&wire(
+        "file",
+        3,
+        None,
+        Some(&Digest::of(SCRIPT).to_string()),
+        &::pencere::base64::encode(SCRIPT),
+    ));
+    let rig = Arc::clone(&pane.rig);
+    let desk = rig.desk.as_ref().expect("a desk");
+    let views = desk.take_views();
+    let [Action::StartView(start)] = views.as_slice() else {
+        panic!("one view to start, got {views:?}");
+    };
+    assert_eq!(start.kind, ViewKind::Lua);
+
+    // The script made an error: the view closes and the program is told, in the words of the
+    // script, the line included.
+    desk.apply(pane.rig.write(), |conversation| {
+        conversation.view_failed("script:12: attempt to index nil with 'x'")
+    });
+    let wrote = pane.rig.written();
+    assert_eq!(wrote.len(), 1, "{wrote:?}");
+    assert_eq!(wrote[0].kind, "closed");
+    assert_eq!(
+        wrote[0].payload,
+        r#"{"reason":"error","code":"view","message":"script:12: attempt to index nil with 'x'"}"#
+    );
+}
+
 #[test]
 fn what_the_program_says_for_the_module_is_counted_until_the_module_takes_it() {
     let (mut pane, _, _) = open_a_module_view();
@@ -1435,7 +1496,9 @@ fn a_message_the_module_sends_after_its_view_ended_writes_nothing_to_the_pane() 
             desk.program_ended(pane.rig.write());
         }),
         ("the view failing", |pane, _, desk| {
-            desk.apply(pane.rig.write(), |conversation| conversation.view_failed());
+            desk.apply(pane.rig.write(), |conversation| {
+                conversation.view_failed("the page trapped")
+            });
         }),
     ];
     for (name, end) in endings {

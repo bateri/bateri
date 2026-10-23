@@ -60,6 +60,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "cbindgen"
+version = "0.1.0"
+dependencies = [
+ "wit-bindgen-c",
+ "wit-bindgen-core",
+]
+
+[[package]]
 name = "cfg-if"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -230,7 +238,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 [[package]]
 name = "pencere"
 version = "0.1.0"
-source = "git+https://github.com/bateri/pencere?rev=e4e3566cc721633f5debd517e3a59fb6591b208c#e4e3566cc721633f5debd517e3a59fb6591b208c"
+source = "git+https://github.com/bateri/pencere?rev=6caacce006bd5522fbe7f29a11a1571ffd767b25#6caacce006bd5522fbe7f29a11a1571ffd767b25"
 dependencies = [
  "serde",
  "serde_json",
@@ -433,6 +441,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f17a85883d4e6d00e8a97c586de764dabcc06133f7f1d55dce5cdc070ad7fe59"
 dependencies = [
  "wit-bindgen-rust-macro",
+]
+
+[[package]]
+name = "wit-bindgen-c"
+version = "0.46.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "71b16befd50133a7bc7e3e8115d6dc4ad3aa33b654d04fd8cb8d118806b689a8"
+dependencies = [
+ "anyhow",
+ "heck",
+ "indexmap",
+ "wasm-encoder",
+ "wasm-metadata",
+ "wit-bindgen-core",
+ "wit-component",
 ]
 
 [[package]]

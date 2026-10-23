@@ -21,7 +21,7 @@
 /// (`page.room`); it does not ask again and again, and it is not closed for being fast. What the
 /// program says to the page is held to what the page has taken (the program's own `write` slows
 /// down), so a page is never handed more than it can read.
-package bateri:view@0.3.0;
+package bateri:view@0.4.0;
 
 interface types {
     /// A name for an element, so that what is kept about it between frames (a scroll position,
@@ -443,6 +443,23 @@ interface program {
     send: func(message: string) -> delivery;
 }
 
+/// Why a module cannot go on. A module that stops says so before it does, so the person is told
+/// what happened and not only that the page is gone.
+interface diagnostics {
+    /// The module cannot go on: `message` is why, in words for a person (a script's error, with
+    /// the line it is on). The application closes the page when the call that said it returns,
+    /// whatever that call returns, and tells the program the message; it reads nothing the
+    /// module handed out in that call.
+    fail: func(message: string);
+}
+
+/// What a module that is a language's interpreter is given to run: the program's own text.
+interface script {
+    /// The bytes of the script the application runs this module for, as the program sent them.
+    /// The same every time it is asked.
+    source: func() -> list<u8>;
+}
+
 /// What the module is: a page.
 interface page {
     use types.{size, frame, event, reply};
@@ -472,5 +489,7 @@ interface page {
 world view {
     import layout;
     import program;
+    import diagnostics;
+    import script;
     export page;
 }

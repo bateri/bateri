@@ -1,6 +1,6 @@
 //! The conversation of `demopen` with its terminal (specification: the capability query, the
-//! open with a bundle whose entry is a WebAssembly component, the messages of the view, the
-//! end), and with the view once it runs.
+//! open with a bundle whose entry is a WebAssembly component or a Lua script, the messages of
+//! the view, the end), and with the view once it runs.
 //!
 //! Everything on the wire is `pencere`'s own code: the frames are written by the crate that
 //! reads them, and the digest and the base64 of the module are its too.
@@ -37,9 +37,6 @@ pub enum Outcome {
 /// How long a terminal that speaks the protocol has to answer a `hello` (specification §5.3).
 const ANSWER_WITHIN: Duration = Duration::from_secs(2);
 
-/// The name of the module in the bundle.
-const ENTRY: &str = "containers.wasm";
-
 /// How long a program that said `bye` reads on for the answer before it gives up (specification
 /// §10.3).
 const ANSWER_TO_BYE: Duration = Duration::from_millis(500);
@@ -47,12 +44,32 @@ const ANSWER_TO_BYE: Duration = Duration::from_millis(500);
 /// How often the made-up host reports.
 const EVERY: Duration = Duration::from_secs(1);
 
-/// The kinds of view this program can show, in the order it prefers them (specification §5.5):
-/// the one it carries is a WebAssembly component.
-const VIEWS: [&str; 1] = ["wasm"];
+/// A kind of view this program can show (specification §5.5), and the file it is the bundle of.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Kind {
+    /// What the `hello` lists and the `open` names.
+    pub name: &'static str,
+    /// The name of the file in the bundle.
+    entry: &'static str,
+    /// Its media type.
+    media_type: &'static str,
+}
 
-/// The kind of view the `open` names.
-const VIEW: &str = "wasm";
+impl Kind {
+    /// The view is a WebAssembly component.
+    pub const WASM: Self = Self {
+        name: "wasm",
+        entry: "containers.wasm",
+        media_type: pencere::bundle::WASM_MEDIA_TYPE,
+    };
+
+    /// The view is a script in the Lua language.
+    pub const LUA: Self = Self {
+        name: "lua",
+        entry: "containers.lua",
+        media_type: pencere::bundle::LUA_MEDIA_TYPE,
+    };
+}
 
 #[derive(Serialize)]
 struct Open<'a> {
@@ -86,6 +103,8 @@ struct Bye<'a> {
 
 struct Conversation<'a> {
     tty: Tty,
+    /// The kind of view shown, and its file.
+    kind: Kind,
     module: &'a [u8],
     ids: Ids,
     decoder: StreamDecoder,
@@ -101,17 +120,21 @@ struct Conversation<'a> {
     flood: bool,
     /// Bytes of data the view's `upload` calls have carried so far.
     uploaded: u64,
+    /// Why the view failed, in the words the terminal gave when it told the program.
+    failure: Option<String>,
 }
 
-/// Shows the view and serves it until it is over. With `flood` the readings come as fast as the
-/// terminal takes them. The bytes the view sent with its `upload` calls come back with how it
-/// ended.
-pub fn run(module: &[u8], flood: bool) -> (Outcome, u64) {
+/// Shows the view (`module` is the file of a view of `kind`) and serves it until it is over. With
+/// `flood` the readings come as fast as the terminal takes them. The bytes the view sent with its
+/// `upload` calls come back with how it ended, and the words the terminal gave if the view
+/// failed: they are for the person once the terminal is given back.
+pub fn run(kind: Kind, module: &[u8], flood: bool) -> (Outcome, u64, Option<String>) {
     let Ok(tty) = Tty::take() else {
-        return (Outcome::NoView, 0);
+        return (Outcome::NoView, 0, None);
     };
     let mut talk = Conversation {
         tty,
+        kind,
         module,
         ids: Ids::new(),
         decoder: StreamDecoder::new(Direction::ToProgram),
@@ -122,10 +145,11 @@ pub fn run(module: &[u8], flood: bool) -> (Outcome, u64) {
         next_push: Instant::now(),
         flood,
         uploaded: 0,
+        failure: None,
     };
     let outcome = talk.go();
     talk.tty.give_back();
-    (outcome, talk.uploaded)
+    (outcome, talk.uploaded, talk.failure)
 }
 
 impl Conversation<'_> {
@@ -155,7 +179,7 @@ impl Conversation<'_> {
                 id: hello,
                 re: None,
                 digest: None,
-                payload: &hello_payload(),
+                payload: &hello_payload(self.kind),
             },
             Split::Fill,
             &mut bytes,
@@ -188,7 +212,7 @@ impl Conversation<'_> {
                     && message.kind == "welcome"
                     && message.re() == Some(hello)
                 {
-                    answer = Some(offer_of(&message));
+                    answer = Some(offer_of(&message, self.kind));
                     break;
                 }
             }
@@ -241,16 +265,16 @@ impl Conversation<'_> {
         self.subscription = None;
         let open = Open {
             token,
-            view: VIEW,
+            view: self.kind.name,
             program: "demopen",
             title: "Containers",
             bundle: Bundle {
-                entry: ENTRY,
+                entry: self.kind.entry,
                 files: [File {
-                    path: ENTRY,
+                    path: self.kind.entry,
                     sha256: Digest::of(self.module).to_string(),
                     size: self.module.len(),
-                    media_type: pencere::bundle::WASM_MEDIA_TYPE,
+                    media_type: self.kind.media_type,
                 }],
             },
         };
@@ -379,11 +403,14 @@ impl Conversation<'_> {
             }
             // The view is over, for whatever reason: the person closed it, or it failed. The
             // program has nothing more to show.
-            "closed" => Some(Outcome::Ended),
+            "closed" => {
+                self.failure = failure_of(&message.payload);
+                Some(Outcome::Ended)
+            }
             // The terminal started again and asks for the view again (specification §10.7):
             // the view is a new one and asks for what it needs afresh.
             "welcome" if message.re().is_none() => {
-                let offer = offer_of(message);
+                let offer = offer_of(message, self.kind);
                 match offer {
                     Some(token) if self.open(&token).is_ok() => None,
                     _ => Some(Outcome::Ended),
@@ -507,16 +534,17 @@ impl Conversation<'_> {
     }
 }
 
-/// The `hello`: the versions this program speaks and the kinds of view it can show.
-fn hello_payload() -> String {
-    json::to_wire(&json!({ "versions": [1], "views": VIEWS })).unwrap_or_default()
+/// The `hello`: the versions this program speaks and the kinds of view it can show (the one it
+/// carries).
+fn hello_payload(kind: Kind) -> String {
+    json::to_wire(&json!({ "versions": [1], "views": [kind.name] })).unwrap_or_default()
 }
 
 /// The token of a `welcome` that offers one for a host that shows this program's kind of view:
-/// a version and a token, `bundle` among the features and `wasm` among the views. `None` for any
-/// other — a host that shares no version, takes no bundles, or whose `views` is empty or has no
-/// kind of this program's: the list is shown as text at once.
-fn offer_of(message: &Frame) -> Option<String> {
+/// a version and a token, `bundle` among the features and the program's kind among the views.
+/// `None` for any other — a host that shares no version, takes no bundles, or whose `views` is
+/// empty or has no kind of this program's: the list is shown as text at once.
+fn offer_of(message: &Frame, kind: Kind) -> Option<String> {
     let welcome: Value = serde_json::from_str(&message.payload).ok()?;
     welcome.get("version")?;
     let token = welcome.get("token")?.as_str()?.to_owned();
@@ -532,7 +560,25 @@ fn offer_of(message: &Frame) -> Option<String> {
     };
     let features = names("features")?;
     let views = names("views")?;
-    (features.iter().any(|f| f == "bundle") && views.iter().any(|v| v == VIEW)).then_some(token)
+    (features.iter().any(|f| f == "bundle") && views.iter().any(|v| v == kind.name))
+        .then_some(token)
+}
+
+/// The words a `closed` gives for a view that failed (`reason` `error` with a `message`), made fit
+/// for a terminal that is going to print them: the terminal has cleaned them already, and a
+/// program does not rely on that.
+fn failure_of(payload: &str) -> Option<String> {
+    let closed: Value = serde_json::from_str(payload).ok()?;
+    if closed.get("reason")?.as_str()? != "error" {
+        return None;
+    }
+    let words: String = closed
+        .get("message")?
+        .as_str()?
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect();
+    (!words.is_empty()).then_some(words)
 }
 
 /// Whether `bytes` hold a terminal's answer to `CSI c`: `ESC [ ? … c`.
@@ -572,17 +618,41 @@ mod tests {
             r#"{{"version":1,"token":"abc",{host},"features":["dismiss"],"views":["wasm"]}}"#
         );
         let none = format!(r#"{{"supported":[2],{host}}}"#);
-        assert_eq!(offer_of(&welcome(&wasm)).as_deref(), Some("abc"));
-        assert_eq!(offer_of(&welcome(&web)), None);
-        assert_eq!(offer_of(&welcome(&nothing)), None);
-        assert_eq!(offer_of(&welcome(&no_bundles)), None);
-        assert_eq!(offer_of(&welcome(&none)), None);
-        assert_eq!(offer_of(&welcome("not json")), None);
+        let wasm_only = Kind::WASM;
+        assert_eq!(offer_of(&welcome(&wasm), wasm_only).as_deref(), Some("abc"));
+        assert_eq!(offer_of(&welcome(&web), wasm_only), None);
+        assert_eq!(offer_of(&welcome(&nothing), wasm_only), None);
+        assert_eq!(offer_of(&welcome(&no_bundles), wasm_only), None);
+        assert_eq!(offer_of(&welcome(&none), wasm_only), None);
+        assert_eq!(offer_of(&welcome("not json"), wasm_only), None);
+        // A terminal that runs components and not scripts does not offer a token for a script.
+        assert_eq!(offer_of(&welcome(&wasm), Kind::LUA), None);
+        let lua = format!(
+            r#"{{"version":1,"token":"abc",{host},"features":["bundle","dismiss"],"views":["lua","web"]}}"#
+        );
+        assert_eq!(offer_of(&welcome(&lua), Kind::LUA).as_deref(), Some("abc"));
+    }
+
+    #[test]
+    fn the_words_of_a_view_that_failed_are_read_from_the_closed_and_nothing_else_is() {
+        let failed = r#"{"reason":"error","code":"view","message":"script:12: boom\u001b[2J"}"#;
+        assert_eq!(failure_of(failed).as_deref(), Some("script:12: boom[2J"));
+        assert_eq!(failure_of(r#"{"reason":"user"}"#), None);
+        assert_eq!(failure_of(r#"{"reason":"error","code":"view"}"#), None);
+        assert_eq!(failure_of(r#"{"reason":"error","message":""}"#), None);
+        assert_eq!(failure_of("not json"), None);
     }
 
     #[test]
     fn the_hello_lists_the_one_kind_of_view_this_program_shows() {
-        assert_eq!(hello_payload(), r#"{"versions":[1],"views":["wasm"]}"#);
+        assert_eq!(
+            hello_payload(Kind::WASM),
+            r#"{"versions":[1],"views":["wasm"]}"#
+        );
+        assert_eq!(
+            hello_payload(Kind::LUA),
+            r#"{"versions":[1],"views":["lua"]}"#
+        );
     }
 
     /// The size of a message toward the program is the protocol's, and the messages crate and

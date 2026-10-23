@@ -29,7 +29,7 @@ fn component(name: &str) -> Option<Vec<u8>> {
 }
 
 /// Every line is as wide as it has characters: enough to lay a page out.
-struct Rough;
+pub(crate) struct Rough;
 
 impl Measure for Rough {
     fn measure(&mut self, font: &Font, text: &str) -> Metrics {
@@ -40,10 +40,10 @@ impl Measure for Rough {
     }
 }
 
-struct Open {
-    module: Module,
-    woken: Receiver<()>,
-    seen: Update,
+pub(crate) struct Open {
+    pub(crate) module: Module,
+    pub(crate) woken: Receiver<()>,
+    pub(crate) seen: Update,
 }
 
 fn open(name: &str, limits: Limits) -> Option<Open> {
@@ -67,7 +67,7 @@ fn open_for(name: &str, limits: Limits, program: Arc<dyn Program>) -> Option<Ope
 
 impl Open {
     /// Takes what is waiting, waiting up to `within` for there to be something.
-    fn take(&mut self, within: Duration) -> Update {
+    pub(crate) fn take(&mut self, within: Duration) -> Update {
         let _ = self.woken.recv_timeout(within);
         let update = self.module.poll();
         if update.frame.is_some() {
@@ -79,7 +79,7 @@ impl Open {
     }
 
     /// Takes until `done` says so of what came, or `within` has passed.
-    fn until(&mut self, within: Duration, done: impl Fn(&Update) -> bool) -> Update {
+    pub(crate) fn until(&mut self, within: Duration, done: impl Fn(&Update) -> bool) -> Update {
         let began = Instant::now();
         loop {
             let left = within.saturating_sub(began.elapsed());
@@ -91,7 +91,7 @@ impl Open {
     }
 }
 
-const SIZE: Size = Size {
+pub(crate) const SIZE: Size = Size {
     w: 1000.0,
     h: 700.0,
 };
@@ -275,13 +275,18 @@ fn a_page_that_takes_memory_without_end_is_refused_it() {
 }
 
 #[test]
-fn a_page_that_traps_or_runs_out_of_stack_is_closed_with_the_trap() {
-    for letter in ['t', 's'] {
-        let Some((fault, _)) = broken(letter, Limits::default()) else {
-            return;
-        };
-        assert!(matches!(fault, Fault::Trap(_)), "{letter}: {fault:?}");
-    }
+fn a_page_that_panics_says_why_and_one_that_runs_out_of_stack_is_closed_with_the_trap() {
+    let Some((fault, _)) = broken('t', Limits::default()) else {
+        return;
+    };
+    assert!(
+        matches!(&fault, Fault::Failed(why) if why.contains("this page trapped on purpose")),
+        "{fault:?}"
+    );
+    let Some((fault, _)) = broken('s', Limits::default()) else {
+        return;
+    };
+    assert!(matches!(fault, Fault::Trap(_)), "{fault:?}");
 }
 
 #[test]

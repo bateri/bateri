@@ -162,6 +162,22 @@ impl Module {
         Self::spawn(move || World::load(&bytes, limits, held), program, wake)
     }
 
+    /// Starts the interpreter on `script` (a page that is a script, not a component) under
+    /// `limits`, for `program`: the same sandbox, the same terms.
+    pub fn from_script(
+        script: Vec<u8>,
+        limits: Limits,
+        program: Arc<dyn Program>,
+        wake: impl Fn() + Send + Sync + 'static,
+    ) -> Self {
+        let held = Arc::clone(&program);
+        Self::spawn(
+            move || World::load_script(script, limits, held),
+            program,
+            wake,
+        )
+    }
+
     /// Asks for the page for a viewport of `size` points at `now` seconds. Returns at once;
     /// the page comes with the next taking.
     pub fn render(&self, size: Size, now: f64, reduce_motion: bool) {

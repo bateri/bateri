@@ -135,11 +135,11 @@ pub struct ViewOptions {
     /// How to find the group the pane's shell leads ([`ShellGroup`]); `None` for a pane
     /// whose child is the shell itself.
     pub shell_group: Option<ShellGroup>,
-    /// The most bytes a view that is a WebAssembly component may be, when the application
-    /// shows such views (it runs them in a sandbox of its own and draws them): the pane then
-    /// offers the kind `wasm` as well as `web` in its `welcome`. `None` for one that does not,
-    /// whose panes leave `wasm` out of it and refuse such an `open`.
-    pub wasm_entry_limit: Option<u64>,
+    /// The most bytes a view that is a WebAssembly component or a Lua script may be, when the
+    /// application shows such views (it runs them in a sandbox of its own and draws them): the
+    /// pane then offers the kinds `wasm` and `lua` as well as `web` in its `welcome`. `None` for
+    /// one that does not, whose panes leave them out of it and refuse such an `open`.
+    pub native_entry_limit: Option<u64>,
 }
 
 impl ViewOptions {
@@ -160,7 +160,7 @@ impl ViewOptions {
                 height: 0,
             },
             shell_group: None,
-            wasm_entry_limit: None,
+            native_entry_limit: None,
         }
     }
 }
@@ -593,15 +593,15 @@ impl Desk {
             size,
             // The observer's: how it finds the shell is [`pane_observer`]'s.
             shell_group: _,
-            wasm_entry_limit,
+            native_entry_limit,
         } = options;
         let mut config = Config::new(host, view_theme(&theme, &font_mono), size);
-        // The kinds of view this pane opens: the page of a WebAssembly module, when the
-        // application can run one, and the web view. The program's `hello` lists what it can
-        // show and the `welcome` keeps the ones of these it listed, in its order.
-        if let Some(limit) = wasm_entry_limit {
-            config.views = vec![ViewKind::Wasm, ViewKind::Web];
-            config.wasm_entry_limit = limit;
+        // The kinds of view this pane opens: the page of a WebAssembly module or of a script,
+        // when the application can run one, and the web view. The program's `hello` lists what
+        // it can show and the `welcome` keeps the ones of these it listed, in its order.
+        if let Some(limit) = native_entry_limit {
+            config.views = vec![ViewKind::Wasm, ViewKind::Lua, ViewKind::Web];
+            config.native_entry_limit = limit;
         }
         config.view.locale = locale;
         config.view.time_zone = time_zone;

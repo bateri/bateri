@@ -49,6 +49,21 @@ impl bateri::view::program::Host for Host {
     }
 }
 
+impl bateri::view::diagnostics::Host for Host {
+    fn fail(&mut self, message: String) {
+        // The first thing a module says is why; what it says after is a consequence.
+        if self.failed.is_none() {
+            self.failed = Some(sandbox::failure_words(&message));
+        }
+    }
+}
+
+impl bateri::view::script::Host for Host {
+    fn source(&mut self) -> Vec<u8> {
+        self.script.to_vec()
+    }
+}
+
 fn rect_of(rect: Rect) -> wit::Rect {
     wit::Rect {
         x: rect.x,
@@ -514,14 +529,44 @@ impl World {
         let engine = sandbox::engine()?;
         let component =
             Component::new(&engine, bytes).map_err(|why| Fault::Load(format!("{why:#}")))?;
+        Self::start(engine, &component, limits, program, Arc::from(&[][..]))
+    }
+
+    /// Starts the interpreter on `script`: the component of [`crate::luau`] (compiled once for
+    /// the process, so that the next page of a script starts at once) and the script it runs.
+    pub(crate) fn load_script(
+        script: Vec<u8>,
+        limits: Limits,
+        program: Arc<dyn Program>,
+    ) -> Result<Self, Fault> {
+        let engine = sandbox::engine()?;
+        let component = crate::luau::component(&engine)?;
+        let mut world = Self::start(engine, &component, limits, program, script.into())?;
+        // The interpreter starts the script when it is first called. Call it now, under the time
+        // a module has to start in: a script that does not start (it has an error, or it never
+        // finishes) is found out here, and its first page is not charged for its start.
+        let page = world.view.bateri_view_page();
+        sandbox::call(&mut world.store, world.limits.start, |store| {
+            page.call_settle(store)
+        })?;
+        Ok(world)
+    }
+
+    fn start(
+        engine: wasmtime::Engine,
+        component: &Component,
+        limits: Limits,
+        program: Arc<dyn Program>,
+        script: Arc<[u8]>,
+    ) -> Result<Self, Fault> {
         let mut linker = Linker::<Host>::new(&engine);
         View::add_to_linker::<Host, HasSelf<Host>>(&mut linker, |host| host)
             .map_err(|why| Fault::Load(format!("{why:#}")))?;
-        let mut store = sandbox::store(&engine, &limits, program);
+        let mut store = sandbox::store(&engine, &limits, program, script);
         // The module's own start runs under the start budget; what it does not offer to the
         // page is found out here (an import nobody gave).
         let view = sandbox::call(&mut store, limits.start, |store| {
-            View::instantiate(store, &component, &linker)
+            View::instantiate(store, component, &linker)
         })
         .map_err(|fault| match fault {
             Fault::Trap(why) => Fault::Load(why),

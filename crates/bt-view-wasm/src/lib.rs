@@ -8,9 +8,15 @@
 //! every call, and a module that goes past either, traps or hands out something that is not a
 //! page is closed — the application is told why and goes on.
 //!
+//! A page can also be a **script**: the logic is then text in the Lua language (Luau) that an
+//! interpreter, itself such a module (`LUAU_COMPONENT`), runs under the same terms and hands the
+//! same kind of page out of. A module or a script that stops says why — a script's error comes
+//! with its line — and that is what the page's program is told.
+//!
 //! This crate knows no window, no renderer and no terminal: it depends on the engine and on the
 //! runtime, and moves out of the workspace with the engine.
 
+mod luau;
 mod module;
 mod sandbox;
 mod watchdog;
@@ -18,6 +24,11 @@ mod world;
 
 #[cfg(test)]
 mod guests_tests;
+#[cfg(test)]
+mod luau_containers_tests;
+#[cfg(test)]
+mod luau_tests;
 
+pub use luau::COMPONENT as LUAU_COMPONENT;
 pub use module::{Answer, Frame, Module, Runner, Update};
 pub use sandbox::{Fault, Limits, Program, Unbounded};

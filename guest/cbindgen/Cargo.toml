@@ -1,0 +1,13 @@
+[package]
+name = "cbindgen"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+# The C generator of the bindings the SDK's macros are the Rust half of: the same release, so the
+# C and the Rust speak one ABI.
+wit-bindgen-c = { workspace = true }
+wit-bindgen-core = { workspace = true }

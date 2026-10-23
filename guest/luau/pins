@@ -1,0 +1,10 @@
+# What the interpreter module is built from, pinned: change a line here and the module is rebuilt
+# (`make luau`) from exactly that.
+#
+# Luau, as the release's source archive (the build fetches it and checks its digest before
+# it unpacks it).
+LUAU_VERSION=0.740
+LUAU_SHA256=419f96e4ecf5a0dd415a2625ea7ea9dc8a407e86d64b25e00936302b25a7afbd
+# The toolchain: wasi-sdk's own image, pinned by the digest of its multi-platform index so that
+# the machine's architecture and a later tag of the same name change nothing.
+WASI_SDK_IMAGE=ghcr.io/webassembly/wasi-sdk@sha256:52595085a0ffbaf574d8d678a9aa81305f0b3af81c639291f15bc7713e42848e

@@ -3,7 +3,7 @@ CARGO ?= cargo
 # Prerequisite order is only guaranteed under serial make; under -j the promises
 # "cheapest gate first" and "version first" break.
 .NOTPARALLEL:
-.PHONY: check prune fmt audit clippy test shader smoke terminfo test-race scan bundle package install release publish ship release-gate sparkle dmgbuild linux embed-swift embed-tag guest guest-test guest-linux
+.PHONY: check prune fmt audit clippy test shader smoke terminfo test-race scan bundle package install release publish ship release-gate sparkle dmgbuild linux embed-swift embed-tag guest guest-test guest-linux luau
 
 # Definition of done. Homebrew rustc is not pinned (there is deliberately no
 # rust-toolchain.toml): the version is printed first so a clippy failure that
@@ -121,6 +121,7 @@ audit:
 	if grep -rnE "objc2|dispatch2|block2|wgpu|bt_(core|atlas|gpu|shell|embed)" crates/bt-view-wasm/src | grep -v ":[[:space:]]*//"; then echo "audit: platform call or a workspace crate named in bt-view-wasm source"; fail=1; fi; \
 	if $(CARGO) tree --workspace -e normal -i wasmtime --depth 1 --prefix none | tail -n +2 | grep -vE "^bt-view-wasm "; then echo "audit: the WebAssembly runtime is linked by a crate other than bt-view-wasm — one door to it"; fail=1; fi; \
 	if grep -nE "^(bt-(core|atlas|gpu|shell|embed)[a-z-]*|bt-view-wasm) *=" guest/*/Cargo.toml guest/Cargo.toml; then echo "audit: a page module depends on a crate of the application — a module is written with the SDK and the engine's builder (bt-view) alone"; fail=1; fi; \
+	if [ "$$(sh guest/luau/inputs.sh)" != "$$(cat crates/bt-view-wasm/luau/inputs.sha256 2>/dev/null)" ]; then echo "audit: crates/bt-view-wasm/luau/luau.wasm is not built from the sources of guest/luau and the interface in view.wit as they are now — make luau rebuilds it"; fail=1; fi; \
 	if grep -rn "objc2\|core_text\|core_graphics" crates/bt-core/src | grep -v ":[[:space:]]*//"; then echo "audit: platform call in bt-core source"; fail=1; fi; \
 	kablo_tree=$$($(CARGO) tree --workspace -e normal); kablo_revs=""; \
 	for fork in vte alacritty_terminal kablo-proto; do \
@@ -874,6 +875,38 @@ guest-test: guest
 	$(CARGO) test -p bt-shell-common native_view::module
 	$(CARGO) test -p bt-core -- the_demo_program an_interrupt_ends_the_demo a_restart_closes_the_modules a_program_that_floods a_slow_module a_page_sends a_program_whose_kind what_the_page_said what_a_shell_the_pane
 	$(CARGO) test --manifest-path guest/Cargo.toml -p demopen -p bateri-view-messages
+
+# The interpreter of the scripting language (`crates/bt-view-wasm/luau/luau.wasm`): Luau, the bridge
+# that gives a script the page interface, and the preludes that are the language's side of it
+# (`guest/luau`), as a component. It is built in wasi-sdk's own container (the image, the
+# release of Luau and its digest are pinned in `guest/luau/pins`; nothing is installed on this
+# machine but Docker) and kept in the repository, so that building the application and
+# `make check` need no toolchain for WebAssembly. Whenever the interface (`view.wit`) or any of
+# what the module is built from changes, it is built again here — `make audit` fails, naming
+# this target, while it is not — and the scripts people wrote do not: they run on whatever the
+# interpreter has become.
+LUAU_WORK = guest/target/luau
+LUAU_OUT = crates/bt-view-wasm/luau
+luau:
+	@command -v rustup >/dev/null 2>&1 || { echo "luau: rustup is missing (the tools that make the component are built with its stable toolchain)"; exit 1; }
+	@if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then \
+		echo "SKIPPED: Docker is missing or the daemon does not answer — make luau could not run"; exit 78; fi
+	@set -e; . ./guest/luau/pins; \
+	mkdir -p $(LUAU_WORK); \
+	archive=$(LUAU_WORK)/luau-$$LUAU_VERSION.tar.gz; \
+	digest() { shasum -a 256 "$$1" | cut -d' ' -f1; }; \
+	if [ ! -f "$$archive" ] || [ "$$(digest "$$archive")" != "$$LUAU_SHA256" ]; then \
+		curl -fsSL -o "$$archive" "https://github.com/luau-lang/luau/archive/refs/tags/$$LUAU_VERSION.tar.gz"; fi; \
+	[ "$$(digest "$$archive")" = "$$LUAU_SHA256" ] || { echo "luau: the archive of Luau $$LUAU_VERSION is not the one pinned in guest/luau/pins (sha256 $$LUAU_SHA256)"; exit 1; }; \
+	rm -rf $(LUAU_WORK)/src $(LUAU_WORK)/out $(LUAU_WORK)/bindings; \
+	mkdir -p $(LUAU_WORK)/src; \
+	tar -xzf "$$archive" -C $(LUAU_WORK)/src --strip-components=1; \
+	$(GUEST_CARGO) run -q --manifest-path guest/Cargo.toml -p cbindgen -- crates/bt-view-wasm/wit view $(LUAU_WORK)/bindings; \
+	docker run --rm --user "$$(id -u):$$(id -g)" -v "$(CURDIR)/guest/luau":/luau:ro -v "$(CURDIR)/$(LUAU_WORK)":/work \
+		"$$WASI_SDK_IMAGE" sh /luau/build.sh /work/src /work/bindings /work/out; \
+	$(GUEST_CARGO) run -q --manifest-path guest/Cargo.toml -p componentize -- $(LUAU_WORK)/out/luau-core.wasm $(LUAU_OUT)/luau.wasm; \
+	sh guest/luau/inputs.sh >$(LUAU_OUT)/inputs.sha256; \
+	ls -l $(LUAU_OUT)/luau.wasm
 
 LINUX_DOCKERFILE = tools/linux/Dockerfile
 LINUX_RUST = $(shell sed -n 's/^FROM rust:\([0-9]*\.[0-9]*\)-.*/\1/p' $(LINUX_DOCKERFILE))

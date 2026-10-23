@@ -10,8 +10,9 @@
 //! The component imports **nothing but the page's interface** (`bateri:view`): a page cannot
 //! read a file, open a socket, ask the time or print — the application gives it what it needs
 //! as an event, and what it can ask of the application is the layout of the page it last
-//! drew ([`Layout`]). A page that a program in the pane opened can also talk to that program:
-//! [`say`] sends it a message and [`Page::message`] hears the program's (the messages are
+//! drew ([`Layout`]). A panic ends the page, and says why on the way out. A page that a program
+//! in the pane opened can also talk to that program: [`say`] sends it a message and
+//! [`Page::message`] hears the program's (the messages are
 //! `bateri-view-messages`'; the terminal only carries them). What the program can take is the
 //! program's: `say` answers whether it has the room, and a page that was told *full* keeps what
 //! it meant to say and is called once, in [`Page::room`], when it has. A page that runs forever,
@@ -47,6 +48,7 @@ pub mod bindings {
 
 mod convert;
 
+use bindings::bateri::view::diagnostics as to_diagnostics;
 use bindings::bateri::view::layout as host;
 use bindings::bateri::view::program as to_program;
 
@@ -142,6 +144,16 @@ fn point_in(at: Point) -> bindings::bateri::view::types::Point {
     bindings::bateri::view::types::Point { x: at.x, y: at.y }
 }
 
+/// Makes a panic say why before it ends the page: the application is told the panic's words
+/// (what was wrong and where) and not only that the module trapped. Installed by
+/// [`export_page!`], before the page is made.
+#[doc(hidden)]
+pub fn install_panic_hook() {
+    std::panic::set_hook(Box::new(|info| {
+        to_diagnostics::fail(&info.to_string());
+    }));
+}
+
 /// A page.
 pub trait Page: Sized + 'static {
     /// The page as it is when it opens.
@@ -182,8 +194,10 @@ macro_rules! export_page {
     ($page:ty) => {
         const _: () = {
             ::std::thread_local! {
-                static PAGE: ::std::cell::RefCell<$page> =
-                    ::std::cell::RefCell::new(<$page as $crate::Page>::new());
+                static PAGE: ::std::cell::RefCell<$page> = ::std::cell::RefCell::new({
+                    $crate::install_panic_hook();
+                    <$page as $crate::Page>::new()
+                });
             }
 
             struct Glue;

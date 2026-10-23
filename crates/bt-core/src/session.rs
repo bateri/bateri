@@ -11971,10 +11971,13 @@ impl Session {
         self.adapter.0.desk.as_ref().is_some_and(Desk::take_room)
     }
 
-    /// A WebAssembly view ended on its own failure (its module trapped, went over a limit or
-    /// was too large): the view closes and the program is told `closed` with `reason` `error`.
-    pub fn view_failed(&self) {
-        self.adapter.view(pencere::Conversing::view_failed);
+    /// A view the terminal draws itself ended on its own failure (its module trapped, went
+    /// over a limit or was too large; its script made an error): the view closes and the program
+    /// is told `closed` with `reason` `error` and `why` as the words, which it can print once
+    /// the terminal is its own again.
+    pub fn view_failed(&self, why: &str) {
+        self.adapter
+            .view(|conversation| conversation.view_failed(why));
     }
 
     /// The person's answer to the question a [`pencere::Action::Consent`] asked, whose
@@ -30721,7 +30724,7 @@ e\\314\\201.'; sleep 5";
             80,
         );
         let mut views = ViewOptions::new("bateri-test", "0.0.0");
-        views.wasm_entry_limit = Some(4 << 20);
+        views.native_entry_limit = Some(4 << 20);
         options.views = Some(views);
         let wake = Arc::new(TestWake::default());
         let session = Session::spawn(options, Arc::clone(&wake) as Arc<dyn Wake>).unwrap();
@@ -30795,6 +30798,68 @@ e\\314\\201.'; sleep 5";
         session.shutdown();
     }
 
+    /// The demo program with `--lua` shows the same page as a script: the pane learns the kind
+    /// is `lua`, holds the script as the view's entry, and when the view fails the program is
+    /// told why and says so on the screen once the terminal is the shell's again. The sandbox
+    /// (the script's side) is played by the test.
+    #[test]
+    fn the_demo_program_shows_a_script_when_asked_to_and_says_why_when_its_view_fails() {
+        use crate::pencere::Action;
+        let program =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../guest/dist/demopen");
+        if !program.is_file() {
+            eprintln!("skipped: {} is not built (`make guest`)", program.display());
+            return;
+        }
+        let mut options = test_options(
+            (
+                "/bin/sh".into(),
+                vec![
+                    "-c".into(),
+                    "set -m; \"$1\" --lua".into(),
+                    "sh".into(),
+                    program.display().to_string(),
+                ],
+            ),
+            80,
+        );
+        let mut views = ViewOptions::new("bateri-test", "0.0.0");
+        views.native_entry_limit = Some(4 << 20);
+        options.views = Some(views);
+        let wake = Arc::new(TestWake::default());
+        let session = Session::spawn(options, Arc::clone(&wake) as Arc<dyn Wake>).unwrap();
+
+        let mut started = None;
+        wait_until("the view to start", Duration::from_secs(20), || {
+            for action in session.take_view_actions() {
+                if let Action::StartView(start) = action {
+                    started = Some(start);
+                }
+            }
+            started.is_some()
+        });
+        let start = started.unwrap();
+        assert_eq!(start.kind, crate::pencere::ViewKind::Lua);
+        let entry = session.view_entry().expect("an entry");
+        let (media, script) = session.serve_view_file(&entry).expect("the script is held");
+        assert_eq!(media, "text/x-lua");
+        assert!(
+            std::str::from_utf8(&script).is_ok_and(|text| text.contains("bateri")),
+            "a script of the page"
+        );
+
+        // The script made an error: the pane closes the view, the program is told, and it leaves
+        // having said why.
+        session.view_failed("script:12: attempt to index nil with 'x'");
+        assert_eq!(wake.wait_exit(Duration::from_secs(20)), Some(Some(0)));
+        wait_until("the program's words", Duration::from_secs(10), || {
+            the_screen(&session)
+                .contains("demopen: the view failed: script:12: attempt to index nil with 'x'")
+        });
+        assert!(!session.module_message(r#"{"call":{"id":1,"method":"x"}}"#));
+        session.shutdown();
+    }
+
     /// ⌃C in a program's view reaches the program as the terminal's interrupt, and the program
     /// ends the way the protocol says: it tells the terminal (`bye` with its token), gives the
     /// terminal back and leaves, and the view goes with the program. What the page says after
@@ -30822,7 +30887,7 @@ e\\314\\201.'; sleep 5";
             80,
         );
         let mut views = ViewOptions::new("bateri-test", "0.0.0");
-        views.wasm_entry_limit = Some(4 << 20);
+        views.native_entry_limit = Some(4 << 20);
         options.views = Some(views);
         let wake = Arc::new(TestWake::default());
         let session = Session::spawn(options, Arc::clone(&wake) as Arc<dyn Wake>).unwrap();
@@ -30884,7 +30949,7 @@ e\\314\\201.'; sleep 5";
             80,
         );
         let mut views = ViewOptions::new("bateri-test", "0.0.0");
-        views.wasm_entry_limit = Some(4 << 20);
+        views.native_entry_limit = Some(4 << 20);
         options.views = Some(views);
         let wake = Arc::new(TestWake::default());
         let session = Session::spawn(options, Arc::clone(&wake) as Arc<dyn Wake>).unwrap();
@@ -30941,7 +31006,7 @@ e\\314\\201.'; sleep 5";
         command.extend(args.iter().map(|arg| (*arg).to_owned()));
         let mut options = test_options(("/bin/sh".into(), command), 80);
         let mut views = ViewOptions::new("bateri-test", "0.0.0");
-        views.wasm_entry_limit = modules.then_some(4 << 20);
+        views.native_entry_limit = modules.then_some(4 << 20);
         options.views = Some(views);
         let wake = Arc::new(TestWake::default());
         let session = Session::spawn(options, Arc::clone(&wake) as Arc<dyn Wake>).unwrap();
@@ -31228,7 +31293,7 @@ e\\314\\201.'; sleep 5";
         command.extend(args.iter().map(|arg| (*arg).to_owned()));
         let mut options = test_options(("/bin/sh".into(), command), 80);
         let mut views = ViewOptions::new("bateri-test", "0.0.0");
-        views.wasm_entry_limit = Some(4 << 20);
+        views.native_entry_limit = Some(4 << 20);
         options.views = Some(views);
         let wake = Arc::new(TestWake::default());
         let session = Session::spawn(options, Arc::clone(&wake) as Arc<dyn Wake>).unwrap();

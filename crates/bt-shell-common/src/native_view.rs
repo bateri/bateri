@@ -34,7 +34,7 @@ pub use bt_view::{
 };
 use bt_view::{Color, DrawList, Element, Family, Font, Laid, Measure, Metrics, Paint, Quad, Size};
 pub use bt_view_wasm::Limits;
-pub use module::{ModuleHandle, module_page};
+pub use module::{ModuleHandle, module_page, script_page};
 
 /// What `tone` is in `theme`: the nine roles are the theme's own, the rest are the values it
 /// derives from them (surfaces a step above the ground, the hairline, the shadow's colour).

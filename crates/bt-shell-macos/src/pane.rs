@@ -5828,9 +5828,9 @@ impl TerminalPane {
         options.locale = pencere_view::locale_tag();
         options.time_zone = pencere_view::time_zone_name();
         options.size = pencere_view::content_size(self.bounds());
-        // A program may open a view that is a module: it is run in the sandbox and drawn as a
-        // page of the kit, up to the size the sandbox compiles.
-        options.wasm_entry_limit =
+        // A program may open a view that is a module or a script: it is run in the sandbox and
+        // drawn as a page of the kit, up to the size the sandbox compiles.
+        options.native_entry_limit =
             Some(bt_shell_common::native_view::Limits::default().component as u64);
         options.shell_group = Some(ShellGroup::new(move |child| {
             jobs::shell_group(shell_parent, child, &SystemTable)
@@ -6136,12 +6136,13 @@ impl TerminalPane {
             self.apply_page_reply(reply, pointer);
         }
         if let Some(why) = drained.ended {
-            eprintln!("bateri: the page module {why}; the terminal is back");
+            eprintln!("bateri: {why}; the terminal is back");
             if self.program_page_up()
                 && let Some(session) = self.session()
             {
-                // The program is told the view failed, not that the person closed it.
-                session.view_failed();
+                // The program is told the view failed, not that the person closed it, and
+                // why: it is the one that can say so on the screen once the shell has it back.
+                session.view_failed(&why);
             }
             self.take_page_down();
             return;
@@ -6363,8 +6364,9 @@ impl TerminalPane {
         }
     }
 
-    /// Puts a view that is a WebAssembly component over the terminal: the module the program
-    /// sent (its entry, held in the session's store), run in the sandbox and drawn by the link
+    /// Puts a view that is a WebAssembly component or a Lua script over the terminal: the module
+    /// or the script the program sent (its entry, held in the session's store), run in the
+    /// sandbox (a script by the interpreter that is a module of the sandbox's) and drawn by the link
     /// as a page of the kit in place of the grid, under the application's strip — the one a
     /// web view has, whose button sends ⌃C to the program. The page is used like a web view
     /// is: the pointer, the wheel and the keys go to it, its filter is a text field of AppKit's
@@ -6378,15 +6380,15 @@ impl TerminalPane {
         // The crate has one view at a time; a stale one goes first.
         self.end_view();
         let Some(link) = self.link() else {
-            session.view_failed();
+            session.view_failed("the pane cannot draw a view");
             return;
         };
         let Some((_, bytes)) = session
             .view_entry()
             .and_then(|entry| session.serve_view_file(&entry))
         else {
-            eprintln!("bateri: the program's view has no module to run; the terminal stays");
-            session.view_failed();
+            eprintln!("bateri: the program's view has nothing to run; the terminal stays");
+            session.view_failed("the view's file is not there to run");
             return;
         };
         let ivars = self.ivars();
@@ -6414,14 +6416,27 @@ impl TerminalPane {
         };
         // Held to the program that opened it: what it says is what the program has the room
         // for, and what it takes of the program's words lets the program say more.
-        let (page, handle) = bt_shell_common::native_view::module_page(
-            bytes.to_vec(),
-            bt_shell_common::native_view::Limits::default(),
-            family.clone(),
-            inset,
-            self.session().map(|session| session.flow()),
-            wake,
-        );
+        let limits = bt_shell_common::native_view::Limits::default();
+        let flow = self.session().map(|session| session.flow());
+        let (page, handle) = if start.kind == bt_core::pencere::ViewKind::Lua {
+            bt_shell_common::native_view::script_page(
+                bytes.to_vec(),
+                limits,
+                family.clone(),
+                inset,
+                flow,
+                wake,
+            )
+        } else {
+            bt_shell_common::native_view::module_page(
+                bytes.to_vec(),
+                limits,
+                family.clone(),
+                inset,
+                flow,
+                wake,
+            )
+        };
         let handle: Rc<dyn PageDrive> = Rc::new(handle);
         let field = crate::native_page::filter_field(self, &theme, family.as_deref());
         self.addSubview_positioned_relativeTo(
@@ -6453,7 +6468,7 @@ impl TerminalPane {
     /// the veils, so a pane that is not the keyboard's dims over its view and its strip as it
     /// does over its terminal.
     fn start_view(&self, session: &Arc<Session>, start: &bt_core::pencere::ViewStart) {
-        if start.kind == bt_core::pencere::ViewKind::Wasm {
+        if start.kind.is_native() {
             self.start_native_view(session, start);
             return;
         }
@@ -8014,7 +8029,7 @@ mod tests {
         let drain = body("    pub(crate) fn drain_page(");
         assert!(drain.contains("self.program_page_up()"), "{drain}");
         assert!(drain.contains("session.module_message(message)"), "{drain}");
-        assert!(drain.contains("session.view_failed()"), "{drain}");
+        assert!(drain.contains("session.view_failed(&why)"), "{drain}");
         assert!(
             pane.matches("module_message(").count() == 1,
             "nothing else writes a module's words"

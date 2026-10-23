@@ -110,12 +110,47 @@ pub fn module_page(
     flow: Option<Flow>,
     wake: impl Fn() + Send + Sync + 'static,
 ) -> (Box<dyn UiPage>, ModuleHandle) {
+    page_around(
+        |program, wake| Module::from_component(bytes, limits, program, wake),
+        terminal,
+        inset,
+        flow,
+        wake,
+    )
+}
+
+/// The page of a script as a pane's [`UiPage`]: the same as [`module_page`], with the
+/// interpreter of the script's language as the module and `script` (its text) as what it runs.
+pub fn script_page(
+    script: Vec<u8>,
+    limits: Limits,
+    terminal: Option<String>,
+    inset: f32,
+    flow: Option<Flow>,
+    wake: impl Fn() + Send + Sync + 'static,
+) -> (Box<dyn UiPage>, ModuleHandle) {
+    page_around(
+        |program, wake| Module::from_script(script, limits, program, wake),
+        terminal,
+        inset,
+        flow,
+        wake,
+    )
+}
+
+fn page_around(
+    start: impl FnOnce(Arc<dyn Program>, Box<dyn Fn() + Send + Sync>) -> Module,
+    terminal: Option<String>,
+    inset: f32,
+    flow: Option<Flow>,
+    wake: impl Fn() + Send + Sync + 'static,
+) -> (Box<dyn UiPage>, ModuleHandle) {
     let program: Arc<dyn Program> = match flow {
         Some(flow) => Arc::new(Held(flow)),
         None => Arc::new(Unbounded),
     };
     let shared = Rc::new(RefCell::new(Shared {
-        module: Module::from_component(bytes, limits, program, wake),
+        module: start(program, Box::new(wake)),
         root: None,
         animating: false,
         asked: None,
@@ -404,6 +439,56 @@ mod tests {
         assert!(replies[0].0.redraw);
     }
 
+    /// The container list as a script, through the pane's page: the same as the module's —
+    /// empty until the interpreter has made the page, then the list; a page at rest asks nothing
+    /// of the script and wakes nobody; the pointer over a row changes it.
+    #[test]
+    fn a_scripts_container_list_is_drawn_then_at_rest_and_answers_the_pointer() {
+        let Ok(renderer) = Renderer::system_default() else {
+            eprintln!("skipped: no GPU device");
+            return;
+        };
+        let theme = Theme::BATERI;
+        let (told, woken) = channel();
+        let told = std::sync::Mutex::new(told);
+        let script = include_bytes!("../../../../guest/luau/examples/containers.lua").to_vec();
+        let (mut page, handle) =
+            script_page(script, Limits::default(), None, 32.0, None, move || {
+                let _ = told.lock().unwrap().send(());
+            });
+        assert_eq!(boxes(&build(&mut page, &renderer, &theme, 0.0)), 0);
+        assert!(wait(&woken), "the script handed out no page");
+        let drained = handle.drain(&mut |_, _| {});
+        assert!(drained.redraw, "{drained:?}");
+        assert_eq!(drained.ended, None);
+        let list = build(&mut page, &renderer, &theme, 0.1);
+        assert!(boxes(&list) > 100, "the rows and dots of the list");
+        let field = handle.field().expect("room for the filter's field");
+        assert!(field.y >= 32.0, "below the strip: {field:?}");
+
+        // Laid out and settled, the page is at rest: nothing wakes the application for it.
+        while woken.recv_timeout(Duration::from_millis(300)).is_ok() {
+            let _ = handle.drain(&mut |_, _| {});
+            build(&mut page, &renderer, &theme, 0.2);
+        }
+        assert!(!page.animating());
+        for step in 0..3 {
+            build(&mut page, &renderer, &theme, 1.0 + f64::from(step));
+        }
+        assert!(
+            woken.recv_timeout(Duration::from_millis(300)).is_err(),
+            "a page at rest woke the application"
+        );
+
+        handle.send_input(Input::Move(Point::new(300.0, 32.0 + 150.0)));
+        assert!(wait(&woken));
+        let mut replies = Vec::new();
+        let drained = handle.drain(&mut |reply, pointer| replies.push((reply, pointer)));
+        assert!(drained.redraw);
+        assert_eq!(replies.len(), 1);
+        assert!(replies[0].1 && replies[0].0.redraw);
+    }
+
     /// The page of a module a program opened: it asks the program for what it shows, takes
     /// what the program pushes, redraws once for it, and a page at rest after that wakes nobody.
     #[test]
@@ -512,5 +597,76 @@ mod tests {
         let why = drained.ended.expect("a reason");
         assert!(why.contains("loaded"), "{why}");
         assert_eq!(handle.drain(&mut |_, _| {}).ended, None);
+    }
+
+    /// A script that makes an error ends its page with the error and the line it is on, which
+    /// is what the program is told, once.
+    #[test]
+    fn a_script_that_makes_an_error_ends_with_its_line_told_once() {
+        let (told, woken) = channel();
+        let told = std::sync::Mutex::new(told);
+        let (_page, handle) = script_page(
+            b"local ok = 1\nerror('no page for you', 0)".to_vec(),
+            Limits::default(),
+            None,
+            32.0,
+            None,
+            move || {
+                let _ = told.lock().unwrap().send(());
+            },
+        );
+        assert!(wait(&woken));
+        let drained = handle.drain(&mut |_, _| {});
+        assert_eq!(drained.ended.as_deref(), Some("no page for you"));
+        assert_eq!(handle.drain(&mut |_, _| {}).ended, None);
+
+        let (told, woken) = channel();
+        let told = std::sync::Mutex::new(told);
+        let (_page, handle) = script_page(
+            b"local x = 1\nlocal y = = 2".to_vec(),
+            Limits::default(),
+            None,
+            32.0,
+            None,
+            move || {
+                let _ = told.lock().unwrap().send(());
+            },
+        );
+        assert!(wait(&woken));
+        let why = handle.drain(&mut |_, _| {}).ended.expect("a reason");
+        assert!(why.starts_with("script:2:"), "{why}");
+    }
+
+    /// A script's page through the pane's page, like a module's: drawn once the interpreter has
+    /// made it.
+    #[test]
+    fn a_scripts_page_is_drawn_through_the_pane() {
+        let Ok(renderer) = Renderer::system_default() else {
+            eprintln!("skipped: no GPU device");
+            return;
+        };
+        let theme = Theme::BATERI;
+        let (told, woken) = channel();
+        let told = std::sync::Mutex::new(told);
+        let (mut page, handle) = script_page(
+            br#"return { render = function()
+                return bateri.div():bg("raised1"):p(8):child(bateri.text("hello")):child(
+                    bateri.div():size(20, 20):bg("accent"))
+            end }"#
+                .to_vec(),
+            Limits::default(),
+            None,
+            32.0,
+            None,
+            move || {
+                let _ = told.lock().unwrap().send(());
+            },
+        );
+        assert_eq!(boxes(&build(&mut page, &renderer, &theme, 0.0)), 0);
+        assert!(wait(&woken), "the script handed out no page");
+        let drained = handle.drain(&mut |_, _| {});
+        assert!(drained.redraw && drained.ended.is_none(), "{drained:?}");
+        let list = build(&mut page, &renderer, &theme, 0.1);
+        assert!(boxes(&list) >= 2, "the two boxes of the page");
     }
 }

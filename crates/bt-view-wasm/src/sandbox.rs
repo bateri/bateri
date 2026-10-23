@@ -92,7 +92,8 @@ impl Default for Limits {
     }
 }
 
-/// Why a module is gone.
+/// Why a module is gone. Each reads as a sentence on its own: it is what the program of the page is
+/// told, and what the person who started the program may be shown.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Fault {
     /// The bytes are not a component, or it needs more than the page's interface.
@@ -107,17 +108,23 @@ pub enum Fault {
     Malformed(String),
     /// The module said more to its program in one call than a call may, or a message too long.
     Flooded(String),
+    /// The module said it cannot go on, and why (`diagnostics.fail`): for a script, the error
+    /// with the line it is on.
+    Failed(String),
 }
 
 impl std::fmt::Display for Fault {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Load(why) => write!(f, "could not be loaded: {why}"),
-            Self::Timeout => f.write_str("did not come back in time"),
-            Self::Memory => f.write_str("asked for more memory than it may have"),
-            Self::Trap(why) => write!(f, "trapped: {why}"),
-            Self::Malformed(why) => write!(f, "handed out something that is not a page: {why}"),
-            Self::Flooded(why) => write!(f, "said too much to its program: {why}"),
+            Self::Load(why) => write!(f, "the page could not be loaded: {why}"),
+            Self::Timeout => f.write_str("the page did not come back in time"),
+            Self::Memory => f.write_str("the page asked for more memory than it may have"),
+            Self::Trap(why) => write!(f, "the page trapped: {why}"),
+            Self::Malformed(why) => {
+                write!(f, "the page handed out something that is not a page: {why}")
+            }
+            Self::Flooded(why) => write!(f, "the page said too much to its program: {why}"),
+            Self::Failed(why) => f.write_str(why),
         }
     }
 }
@@ -185,6 +192,10 @@ pub(crate) struct Host {
     pub(crate) overflowed: bool,
     /// The program the module is for: whether it has the room for what the module says.
     pub(crate) program: Arc<dyn Program>,
+    /// What the module said when it could not go on (`diagnostics.fail`), the first time it did.
+    pub(crate) failed: Option<String>,
+    /// The script a module that is an interpreter runs (`script.source`).
+    pub(crate) script: Arc<[u8]>,
 }
 
 impl Host {
@@ -199,22 +210,34 @@ impl Host {
             allowed: (limits.messages, limits.message),
             overflowed: false,
             program,
+            failed: None,
+            script: Arc::from(&[][..]),
         }
     }
 }
 
 /// An engine for modules: compiled to be interrupted by the epoch, speaking the component
-/// model, with nothing of the host's to offer.
+/// model and the exceptions of the interpreters, with nothing of the host's to offer. Every
+/// engine is made the same way: a component compiled by one can be run by another
+/// ([`crate::luau`]).
 pub(crate) fn engine() -> Result<Engine, Fault> {
     let mut config = Config::new();
     config.epoch_interruption(true);
     config.wasm_component_model(true);
+    config.wasm_exceptions(true);
     Engine::new(&config).map_err(|why| Fault::Load(format!("{why:#}")))
 }
 
-/// A store for one module under `limits`.
-pub(crate) fn store(engine: &Engine, limits: &Limits, program: Arc<dyn Program>) -> Store<Host> {
-    let mut store = Store::new(engine, Host::new(limits, program));
+/// A store for one module under `limits`; `script` is what a module that runs one is given.
+pub(crate) fn store(
+    engine: &Engine,
+    limits: &Limits,
+    program: Arc<dyn Program>,
+    script: Arc<[u8]>,
+) -> Store<Host> {
+    let mut host = Host::new(limits, program);
+    host.script = script;
+    let mut store = Store::new(engine, host);
     store.limiter(|host| &mut host.limiter);
     store
 }
@@ -231,19 +254,48 @@ pub(crate) fn call<R>(
     let guard = watchdog::arm(store.engine(), within);
     let outcome = body(store);
     drop(guard);
-    outcome.map_err(|why| fault_of(store, &why))
+    match outcome {
+        // A module that said it cannot go on is gone whatever it handed out after: what it
+        // returned is not read.
+        Ok(value) => match store.data_mut().failed.take() {
+            Some(why) => Err(Fault::Failed(why)),
+            None => Ok(value),
+        },
+        Err(why) => Err(fault_of(store, &why)),
+    }
 }
 
 fn fault_of(store: &Store<Host>, why: &wasmtime::Error) -> Fault {
     if store.data().limiter.exceeded {
         return Fault::Memory;
     }
+    if matches!(why.downcast_ref::<Trap>(), Some(Trap::Interrupt)) {
+        return Fault::Timeout;
+    }
+    // What it said before it stopped is the reason, the trap only how.
+    if let Some(said) = store.data().failed.clone() {
+        return Fault::Failed(said);
+    }
     match why.downcast_ref::<Trap>() {
-        Some(Trap::Interrupt) => Fault::Timeout,
         Some(trap) => Fault::Trap(trap.to_string()),
         None => Fault::Trap(format!("{why:#}")),
     }
 }
+
+/// What a module said when it could not go on, fit to show a person: the control characters
+/// (a terminal would act on them) are spaces, and it is cut to [`MAX_FAILURE`] characters.
+pub(crate) fn failure_words(message: &str) -> String {
+    message
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .take(MAX_FAILURE)
+        .collect::<String>()
+        .trim()
+        .to_owned()
+}
+
+/// The most characters of the words a module says it failed with.
+pub(crate) const MAX_FAILURE: usize = 1000;
 
 #[cfg(test)]
 mod tests {
@@ -263,7 +315,7 @@ mod tests {
         );
         let component =
             Component::new(&engine, source).map_err(|why| Fault::Load(format!("{why:#}")))?;
-        let mut store = store(&engine, limits, Arc::new(Unbounded));
+        let mut store = store(&engine, limits, Arc::new(Unbounded), Arc::from(&[][..]));
         let linker = Linker::<Host>::new(&engine);
         let instance = call(&mut store, limits.start, |store| {
             linker.instantiate(store, &component)
@@ -326,7 +378,7 @@ mod tests {
         )
         .expect("a component");
         let limits = quick();
-        let mut store = store(&engine, &limits, Arc::new(Unbounded));
+        let mut store = store(&engine, &limits, Arc::new(Unbounded), Arc::from(&[][..]));
         let linker = Linker::<Host>::new(&engine);
         let why = linker
             .instantiate(&mut store, &component)
