@@ -20194,6 +20194,62 @@ mod tests {
         session.shutdown();
     }
 
+    /// **Another shell of ours on the server, with no dock to give**, takes over the pane's
+    /// prompt (a dock-less tier, a shell that never printed a mirror): the dock is not
+    /// its — the context row alone, the line where the shell wrote it and the caret in
+    /// the grid — and not the previous shell's empty row with the caret in it.
+    #[test]
+    fn a_new_shell_without_a_dock_does_not_inherit_the_previous_shells_row() {
+        let prompt = |shell: &str| {
+            format!(
+                "\\033]133;A;bt_remote={shell}\\007\
+                 \\033]8;;bateri://rblock/{shell}\\007$ \\033]8;;\\007\
+                 \\033]133;B;bt_remote={shell}\\007"
+            )
+        };
+        let events = "\\033]8133;bt_remote=1.9.1;w\\007\
+             \\033]8133;bt_remote=1.9.1;u;12;;ZWNobyBmb28gYmFy;;;bWFpbg==\\007";
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_docked_session(
+            &format!(
+                "stty -echo; printf '{}'; read _; printf '\\033]133;C\\007'; \
+                 read _; printf '\\r\\n{}echo foo bar{events}'; \
+                 read _; printf '\\r\\n{}echo typed'; sleep 5",
+                anchored_prompt(1),
+                prompt("1.9.1"),
+                prompt("2.9.1"),
+            ),
+            Arc::clone(&wake),
+        );
+        session.write(b"\n");
+        assert_eq!(wake.wait_commands(1, Duration::from_secs(5)), 1);
+        let command = session.running_command().expect("running after `C`");
+        assert!(session.set_remote(command, Some(&RemoteTarget::ssh("prod"))));
+        assert!(session.set_server(command, true));
+        session.write(b"\n");
+        let (_, cursor) = frame_until(&session, BUDGET, |cells, cursor| {
+            cursor.input_rows > 0
+                && cursor.caret_in_dock
+                && !(0..cursor.rows).any(|row| row_glyphs(cells, row).contains("echo"))
+        });
+        assert!(cursor.caret_in_dock, "the first shell has the dock");
+
+        session.write(b"\n");
+        let (cells, cursor) = frame_until(&session, BUDGET, |cells, _| {
+            (0..10).any(|row| row_glyphs(cells, row).contains("typed"))
+        });
+        assert_eq!(cursor.input_rows, 0, "the context row alone: {cursor:?}");
+        assert!(
+            !cursor.caret_in_dock && cursor.visible,
+            "the caret is in the grid, where the line is: {cursor:?}"
+        );
+        assert!(
+            (0..cursor.rows).any(|row| row_glyphs(&cells, row).contains("typed")),
+            "the line is in the grid"
+        );
+        session.shutdown();
+    }
+
     /// The refresh command goes out where the widget is bound and nowhere else, and
     /// it is not input: the window stays and the mirror stays the shell's answer.
     #[test]

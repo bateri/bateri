@@ -3120,13 +3120,12 @@ impl ShellLog {
         if self.remote_shell != Some(remote.shell) {
             self.remote.clear();
             self.remote_shell = Some(remote.shell);
-            self.held_dock.clear();
-            // Another shell on the server is another prompt: the previous one's
-            // line and capabilities are not its own. The dock mode stays — the
-            // new shell's events are taken under the same gate.
-            if self.remote_dock {
-                self.reset_dock_surface();
-            }
+            // Another shell on the server is another prompt: the previous one's line,
+            // capabilities **and the dock itself** are not its own. It takes the dock
+            // with its first event, under the same gate — a shell that gives none (a
+            // dock-less tier, an integration older than the dock) leaves the context row
+            // alone and its line in the grid, with the caret.
+            self.leave_remote_dock();
         }
         match remote.mark {
             Mark::PromptStart { click_events, .. } => {
@@ -12695,8 +12694,8 @@ mod tests {
         log.context.server = false;
         assert!(!log.remote_dock_on(), "the row goes with the flag");
 
-        // Another shell on the server starts its own prompt, and the dock mode stays
-        // for it.
+        // Another shell on the server starts its own prompt: the dock is not its until
+        // it says so.
         let mut log = server_log();
         feed(&mut log, &remote_dock(1, 1, b"\x1b]8133;w\x07"));
         feed(
@@ -12704,13 +12703,16 @@ mod tests {
             &remote_dock(1, 1, &dock_update(2, "$ ", "ls", "", &[])),
         );
         feed(&mut log, b"\x1b]133;A;bt_remote=2.9.1\x07");
-        assert!(log.remote_dock);
+        assert!(!log.remote_dock && !log.remote_dock_on());
         assert!(log.dock.buffer.is_empty() && !log.dock_editable);
         feed(&mut log, &remote_dock(1, 1, b"\x1b]8133;w\x07"));
         assert!(!log.dock_editable, "the first shell is not the trail's now");
         feed(&mut log, b"\x1b]133;B;bt_remote=2.9.1\x07");
         feed(&mut log, &remote_dock(2, 1, b"\x1b]8133;w\x07"));
-        assert!(log.dock_editable);
+        assert!(
+            log.dock_editable && log.remote_dock,
+            "the new shell takes it"
+        );
     }
 
     /// The local prompt's leftovers are not the remote shell's: the first event
