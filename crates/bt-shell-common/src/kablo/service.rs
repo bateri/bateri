@@ -106,6 +106,7 @@ use kablo_proto::v1::{NewSession, Status};
 use super::hub::{Declined, HoldId, Hub, HubEvent};
 use super::install::Installed;
 use super::ledger::Ledger;
+use super::local;
 use super::roster::{Background, Roster, background_note, sort_recent_first};
 use super::{Attach, Cause, Client, ErrorCode, Event, Link, SessionId, Size, Talk};
 use crate::agent::Terminal;
@@ -212,6 +213,17 @@ impl PaneLink {
 }
 
 impl Shown {
+    /// Whether the terminal is one of this Mac's own ([`super::local`]) and not a server's. **The
+    /// one place that says which kind a pane's terminal is** (the account's name decides, by
+    /// [`local::is_account`], the one rule of which kind an account is): everything bateri does
+    /// for a server — its "on {host}" in the lines the user reads, the connection that is lost
+    /// and comes back, the server's card and list, the load, the files and the ports — asks this
+    /// and does not guess from the host or the arguments, which a terminal of this Mac does not
+    /// have.
+    pub fn is_local(&self) -> bool {
+        local::is_account(&self.account)
+    }
+
     /// Whether the terminal this is serves `target`, the remote session the pane's
     /// `ssh` is in: the same server as the user typed it. **The one rule of
     /// what bateri does on a server for a pane**: file drops and downloads,
@@ -327,8 +339,10 @@ pub trait Backend: Send + Sync + 'static {
     /// Called with how the program of [`Backend::master`] ended.
     fn master_made(&self, server: &KabloHost, status: u8) -> Result<(), Refusal>;
 
-    /// Puts kablo on the server (or finds it there).
-    fn install(&self, server: &KabloHost) -> Result<Installed, Refusal>;
+    /// Puts kablo on the server (or finds it there). `live` are the account's terminals the
+    /// ledger has: when the kablo written is not the one they run, they are the ones renewed
+    /// with it (never the machine's other terminals).
+    fn install(&self, server: &KabloHost, live: &[SessionId]) -> Result<Installed, Refusal>;
 
     /// The number of the next terminal on the server (`7` for the `t7` an agent there is told
     /// and says), from the server's counter, which the agent's command there draws from too.
@@ -358,13 +372,14 @@ pub trait Backend: Send + Sync + 'static {
     /// Puts the version this computer brings on a server that has had another
     /// (a ledger's account after bateri was updated) and has the terminals it
     /// runs renewed with it, without ending any; the answer is what is on the
-    /// server now. Called on the thread that makes the bridge, **before** it is
+    /// server now. `live` are the account's terminals the ledger has ([`Backend::install`]).
+    /// Called on the thread that makes the bridge, **before** it is
     /// made: a bridge that runs is not replaced by the renewal. `None`: it could
     /// not be done now (no connection, a login nobody saved, a server that will
     /// not take the file) — the bridge is made from the binary the ledger knows,
     /// which is still there and serves the relays that run, and the next dial of
     /// the account tries again.
-    fn refresh(&self, _server: &KabloHost) -> Option<Installed> {
+    fn refresh(&self, _server: &KabloHost, _live: &[SessionId]) -> Option<Installed> {
         None
     }
 
@@ -570,6 +585,13 @@ enum Msg {
         /// The account's files were written on the way ([`Backend::files`]).
         filed: bool,
     },
+    /// The account of this Mac is wanted ([`Service::open_here`]).
+    Here(Pending),
+    /// kablo was put on this Mac, or could not be.
+    HereMade {
+        outcome: Result<Installed, Refusal>,
+        pending: Pending,
+    },
     Dialed {
         account: String,
         outcome: io::Result<Carried>,
@@ -640,6 +662,13 @@ enum Msg {
     },
     Stop,
 }
+
+/// What is told when the account of this Mac is there, or could not be made: its name.
+type Told = Box<dyn FnOnce(Result<String, Refusal>) + Send>;
+
+/// A [`Told`] that the thread making the account and the loop both reach: whichever finds it
+/// first says it, so that a thread that could not be made does not leave the caller waiting.
+type Pending = Arc<Mutex<Option<Told>>>;
 
 /// What a request's preparation produced.
 struct Ready {
@@ -1005,6 +1034,21 @@ impl Service {
         }
     }
 
+    /// Makes the account of this Mac ([`super::local`]) if the service has none, and tells `done`
+    /// its name — or why there is none ([`Refusal::plain`]: the package brings no kablo, or it
+    /// cannot be kept here). Putting kablo in the home directory takes its time, so `done` is
+    /// called on a thread of the service's, which must not wait: the application hops to its own.
+    /// The account dials its bridge as every account does; no terminal is made by this.
+    pub fn open_here(&self, done: impl FnOnce(Result<String, Refusal>) + Send + 'static) {
+        let pending: Pending = Arc::new(Mutex::new(Some(Box::new(done))));
+        if let Err(error) = self.tx.send(Msg::Here(Arc::clone(&pending))) {
+            // The service is gone; nobody else will say it.
+            if let Msg::Here(pending) = error.0 {
+                tell(&pending, Err(Refusal::plain()));
+            }
+        }
+    }
+
     /// Try now: the account of the terminal `pane` shows dials at once instead
     /// of waiting out its pause. What ⏎ does on a pane that waits for the
     /// connection. A pane that shows nothing does nothing.
@@ -1347,6 +1391,8 @@ impl Core {
                     client.hang_up(talk);
                 }
             }
+            Msg::Here(pending) => self.here(pending),
+            Msg::HereMade { outcome, pending } => self.here_made(outcome, &pending, now),
             Msg::Survey { account, done } => self.survey(account, done, now),
             Msg::Recorded { id, records } => {
                 if let Some(survey) = self.surveys.iter_mut().find(|survey| survey.id == id) {
@@ -2094,7 +2140,8 @@ impl Core {
                         // The terminals are renewed before any bridge exists:
                         // the renewal does not replace one that runs.
                         let refreshed = if stale {
-                            shared.backend.refresh(&server)
+                            let live = shared.ledger.terminals_of(&account);
+                            shared.backend.refresh(&server, &live)
                         } else {
                             None
                         };
@@ -2293,6 +2340,44 @@ impl Core {
                 Some(server) => self.prepare(hold, server, pane),
                 None => self.hub.refuse(hold, true, ""),
             },
+        }
+    }
+
+    /// The account of this Mac is wanted: told at once if the service has it, else made on a
+    /// thread of its own ([`Backend::install`] puts kablo in the home directory).
+    fn here(&mut self, pending: Pending) {
+        if self.accounts.contains_key(local::ACCOUNT) {
+            tell(&pending, Ok(local::ACCOUNT.to_owned()));
+            return;
+        }
+        let shared = Arc::clone(&self.shared);
+        let spawned = thread::Builder::new()
+            .name("kablo makes this Mac's account".into())
+            .spawn({
+                let pending = Arc::clone(&pending);
+                move || {
+                    let live = shared.ledger.terminals_of(local::ACCOUNT);
+                    let outcome = shared.backend.install(&local::host(), &live);
+                    let _ = shared.tx.send(Msg::HereMade { outcome, pending });
+                }
+            });
+        if spawned.is_err() {
+            tell(&pending, Err(Refusal::plain()));
+        }
+    }
+
+    fn here_made(&mut self, outcome: Result<Installed, Refusal>, pending: &Pending, now: Instant) {
+        match outcome {
+            Ok(installed) => {
+                // A second request that was made while the first was still putting kablo there.
+                if !self.accounts.contains_key(local::ACCOUNT) {
+                    let host = local::host();
+                    self.shared.ledger.remember(&host, &installed);
+                    self.make_account(host, installed, true, now);
+                }
+                tell(pending, Ok(local::ACCOUNT.to_owned()));
+            }
+            Err(refusal) => tell(pending, Err(refusal)),
         }
     }
 
@@ -2507,6 +2592,14 @@ impl Core {
     }
 }
 
+/// Says what became of the account of this Mac to whoever asked, once.
+fn tell(pending: &Pending, outcome: Result<String, Refusal>) {
+    let told = pending.lock().unwrap_or_else(|e| e.into_inner()).take();
+    if let Some(told) = told {
+        told(outcome);
+    }
+}
+
 /// The name of the terminal the server's counter numbered: `t7` for 7.
 fn terminal_named(number: Option<u64>) -> Option<SessionId> {
     number.and_then(|number| SessionId::new(&format!("t{number}")).ok())
@@ -2556,7 +2649,8 @@ fn prepare(
         let status = answer.recv().map_err(|_| Refusal::plain())?;
         backend.master_made(&server, status)?;
     }
-    let installed = backend.install(&server)?;
+    let live = shared.ledger.terminals_of(&server.key);
+    let installed = backend.install(&server, &live)?;
     let note = installed.fresh.then(|| {
         format!(
             "bateri: kablo is set up on {}; if the connection drops, this terminal keeps running",

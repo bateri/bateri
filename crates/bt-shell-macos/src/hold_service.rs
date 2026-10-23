@@ -418,6 +418,8 @@ pub(crate) fn serve(
         bases,
         state_path: crate::remote_hosts_path(&home),
         bundle: bundle(),
+        // The same package serves this Mac's own account: its place is below the real home.
+        home: Some(home.clone()),
         settings: Box::new(settings_of),
         panes: Box::new(pane_of),
         runner: Box::new(ssh_route::SystemSsh),

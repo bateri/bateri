@@ -1,5 +1,8 @@
 //! The service's steps over ssh ([`SshBackend`]): the master connection the
-//! user makes on the pane, kablo put on the server, and the bridge.
+//! user makes on the pane, kablo put on the server, and the bridge. The account of this Mac
+//! ([`super::local`]) rides the same backend: its steps are the ones below with the transport
+//! changed (a shell in the home directory, a bridge started here), and the steps that only a
+//! server has — the master, the shells' files, the counter, the notes — are not taken for it.
 //!
 //! **Everything rides one connection.** The first `ssh` to a server makes a
 //! master connection **on the pane's own terminal** — the program is `ssh -M -N
@@ -26,15 +29,18 @@
 //! would only ask again.
 
 use std::io::{self, Read};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
 use bt_core::{PaneUuid, RemoteKind, RemoteTarget, Settings};
 
+use kablo_proto::SessionId;
+
 use super::Cause;
 use super::install::{self, Bundle, Channel, Failure, Installed, SshChannel};
+use super::local::{self, LocalChannel};
 use super::service::{Backend, Carried, Letter, PaneInfo, PaneLink, Peer, Refusal};
 use crate::ssh_route::{self, Ask, Asker, Denied, Masters, Plan, Route, SshRunner};
 use crate::ssh_wrap::{self, Fact, KabloHost};
@@ -74,6 +80,10 @@ pub struct SshBackend {
     pub state_path: PathBuf,
     /// kablo's binaries as the package carries them; none, and no `ssh` is a kablo call.
     pub bundle: Option<Bundle>,
+    /// This Mac's home directory, which kablo's place for the account of this Mac is below
+    /// ([`local`]); with a [`bundle`](SshBackend::bundle) the Mac has an account. `None`: it has
+    /// none, and a pane of this Mac is an ordinary terminal.
+    pub home: Option<PathBuf>,
     /// The settings as they are now.
     pub settings: Box<dyn Fn() -> Settings + Send + Sync>,
     /// The pane a process runs in.
@@ -155,6 +165,25 @@ impl SshBackend {
         }
     }
 
+    /// The package and the home directory the account of this Mac needs; none of either, no
+    /// account.
+    fn here(&self) -> Option<(&Bundle, &Path)> {
+        Some((self.bundle.as_ref()?, self.home.as_deref()?))
+    }
+
+    /// kablo for this Mac ([`install::ensure_here`]); a failure is no kablo here, for now: the
+    /// Mac is not a server that is remembered as one kablo cannot be kept on.
+    fn install_here(&self, live: &[SessionId]) -> Result<Installed, Refusal> {
+        let (bundle, home) = self.here().ok_or_else(Refusal::plain)?;
+        let channel = LocalChannel::new(home.to_owned());
+        let installed = install::ensure_here(&channel, bundle).map_err(|_| Refusal::plain())?;
+        if installed.fresh {
+            // The binary was not there: terminals this user has here run an earlier one.
+            settle(&here_channel(home), &installed, live);
+        }
+        Ok(installed)
+    }
+
     fn remember(&self, fact: Fact, server: &KabloHost) {
         let _ = ssh_wrap::record(
             &self.state_path,
@@ -178,6 +207,10 @@ impl Backend for SshBackend {
     }
 
     fn master(&self, server: &KabloHost) -> Result<Option<Vec<Vec<u8>>>, Refusal> {
+        // There is no connection to make to this Mac.
+        if local::is_account(&server.key) {
+            return Ok(None);
+        }
         let target = self.target(server);
         match ssh_route::plan(&*self.runner, &target, &self.bases) {
             Plan::Ready(_) => Ok(None),
@@ -191,6 +224,9 @@ impl Backend for SshBackend {
     }
 
     fn master_made(&self, server: &KabloHost, status: u8) -> Result<(), Refusal> {
+        if local::is_account(&server.key) {
+            return Ok(());
+        }
         match status {
             0 => {}
             // ssh's own failure, a signal (Ctrl-C at the prompt): what the user
@@ -206,7 +242,10 @@ impl Backend for SshBackend {
         }
     }
 
-    fn install(&self, server: &KabloHost) -> Result<Installed, Refusal> {
+    fn install(&self, server: &KabloHost, live: &[SessionId]) -> Result<Installed, Refusal> {
+        if local::is_account(&server.key) {
+            return self.install_here(live);
+        }
         let bundle = self.bundle.as_ref().ok_or_else(Refusal::plain)?;
         let target = self.target(server);
         let channel = SshChannel {
@@ -220,7 +259,7 @@ impl Backend for SshBackend {
                     // The binary was not there: terminals this user has on the
                     // server run an earlier one, and are renewed before a bridge
                     // exists to be left behind.
-                    renew(&channel.argv, &installed);
+                    renew(&channel.argv, &installed, live);
                 }
                 Ok(installed)
             }
@@ -234,6 +273,10 @@ impl Backend for SshBackend {
     }
 
     fn files(&self, server: &KabloHost, installed: &Installed) {
+        // The shells of this Mac start from the application's own files.
+        if local::is_account(&server.key) {
+            return;
+        }
         let target = self.target(server);
         let channel = SshChannel {
             argv: ssh_argv_for(&target, &self.route_of(&target)),
@@ -244,7 +287,10 @@ impl Backend for SshBackend {
 
     fn number(&self, server: &KabloHost) -> Option<u64> {
         // Only a server kablo is kept on has numbers to give: the connection is the one the
-        // install used.
+        // install used. This Mac has no counter: its terminals keep the names they are made with.
+        if local::is_account(&server.key) {
+            return None;
+        }
         self.bundle.as_ref()?;
         let target = self.target(server);
         let channel = SshChannel {
@@ -255,6 +301,13 @@ impl Backend for SshBackend {
     }
 
     fn carry(&self, server: &KabloHost, installed: &Installed) -> io::Result<Carried> {
+        if local::is_account(&server.key) {
+            let home = self
+                .home
+                .as_deref()
+                .ok_or_else(|| io::Error::other("this Mac has no home to keep kablo in"))?;
+            return local::carry(home, installed);
+        }
         let target = self.target(server);
         let route = self.route_for_bridge(&target)?;
         let mut argv = ssh_argv_for(&target, &route);
@@ -305,7 +358,14 @@ impl Backend for SshBackend {
             .map(|bundle| bundle.version().to_owned())
     }
 
-    fn refresh(&self, server: &KabloHost) -> Option<Installed> {
+    fn refresh(&self, server: &KabloHost, live: &[SessionId]) -> Option<Installed> {
+        if local::is_account(&server.key) {
+            let (bundle, home) = self.here()?;
+            let installed =
+                install::ensure_here(&LocalChannel::new(home.to_owned()), bundle).ok()?;
+            settle(&here_channel(home), &installed, live);
+            return Some(installed);
+        }
         let bundle = self.bundle.as_ref()?;
         let target = self.target(server);
         // The connection the bridge is about to take, made here when it is not
@@ -321,7 +381,7 @@ impl Backend for SshBackend {
         // can: terminals are running there, and what `install` would write down
         // changes what the next `ssh` is.
         let installed = install::ensure(&channel, bundle).ok()?;
-        renew(&argv, &installed);
+        renew(&argv, &installed, live);
         Some(installed)
     }
 
@@ -367,6 +427,10 @@ impl Backend for SshBackend {
         let Some(news) = &self.notes else {
             return;
         };
+        // A server's script leaves notes; this Mac has no such script.
+        if local::is_account(&server.key) {
+            return;
+        }
         // Only a server kablo is kept on has been written to by the script.
         if self.bundle.is_none() {
             return;
@@ -401,7 +465,7 @@ impl Backend for SshBackend {
         server: &KabloHost,
     ) -> Vec<(crate::agent::Terminal, crate::agent::notes::Record)> {
         // Only a server kablo is kept on has been written to by the script.
-        if self.bundle.is_none() {
+        if self.bundle.is_none() || local::is_account(&server.key) {
             return Vec::new();
         }
         let target = self.target(server);
@@ -418,16 +482,30 @@ impl Backend for SshBackend {
     }
 }
 
-/// The server's running terminals are renewed with the binary just checked
-/// ([`install::upgrade_sessions`]), on a channel of its own that is let less
-/// time than the install: what is waiting for it is a pane that shows a
-/// connection being made.
-fn renew(argv: &[String], installed: &Installed) {
+/// The server's terminals that bateri keeps (`live`, the ledger's) are renewed with the binary
+/// just checked ([`install::upgrade_sessions`]) and the version they left is removed when
+/// nothing runs from it ([`install::prune_versions`]), on a channel of its own that is let less
+/// time than the install: what is waiting for it is a pane that shows a connection being made.
+fn renew(argv: &[String], installed: &Installed, live: &[SessionId]) {
     let channel = SshChannel {
         argv: argv.to_vec(),
         limit: install::UPGRADE_LIMIT,
     };
-    install::upgrade_sessions(&channel, installed);
+    settle(&channel, installed, live);
+}
+
+/// [`renew`] on any channel: the same two steps for a server and for this Mac.
+fn settle(channel: &dyn Channel, installed: &Installed, live: &[SessionId]) {
+    install::upgrade_sessions(channel, installed, live);
+    install::prune_versions(channel, installed);
+}
+
+/// This Mac's channel for [`settle`]: the bound of a renewal, not of an install.
+fn here_channel(home: &Path) -> LocalChannel {
+    LocalChannel {
+        home: home.to_owned(),
+        limit: install::UPGRADE_LIMIT,
+    }
 }
 
 /// How long a connection that is made again for a renewal may take to be made

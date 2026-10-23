@@ -41,6 +41,14 @@ fn until(message: &str, mut ready: impl FnMut() -> bool) {
     panic!("{message}");
 }
 
+/// The names of terminals, joined by commas.
+fn names(ids: &[SessionId]) -> String {
+    ids.iter()
+        .map(SessionId::as_str)
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 fn host(key: &str) -> KabloHost {
     KabloHost {
         host: "rasp".into(),
@@ -56,6 +64,11 @@ struct Fake {
     bridge: Arc<Mutex<Bridge>>,
     /// What was asked, in order.
     log: Mutex<Vec<String>>,
+    /// The terminals the install and the renewal were told were the ledger's, in order
+    /// (`install:t1,t2`).
+    lives: Mutex<Vec<String>>,
+    /// The install is refused ([`Refusal::plain`]): no kablo can be put there now.
+    install_refuses: AtomicBool,
     pane: AtomicBool,
     /// What the pane lookup says of the pane when there is one.
     info: Mutex<PaneInfo>,
@@ -104,6 +117,8 @@ impl Fake {
         Arc::new(Fake {
             bridge: Arc::new(Mutex::new(bridge)),
             log: Mutex::new(Vec::new()),
+            lives: Mutex::new(Vec::new()),
+            install_refuses: AtomicBool::new(false),
             pane: AtomicBool::new(true),
             info: Mutex::new(PaneInfo::default()),
             kablo: AtomicBool::new(true),
@@ -166,6 +181,11 @@ impl Fake {
 
     fn background_told(&self) -> Vec<String> {
         self.background.lock().expect("lock").clone()
+    }
+
+    /// The terminals each install and renewal was told were the ledger's.
+    fn lives(&self) -> Vec<String> {
+        self.lives.lock().expect("lock").clone()
     }
 
     fn note(&self, what: &str) {
@@ -266,8 +286,15 @@ impl Backend for Fake {
         }
     }
 
-    fn install(&self, _: &KabloHost) -> Result<Installed, Refusal> {
+    fn install(&self, _: &KabloHost, live: &[SessionId]) -> Result<Installed, Refusal> {
         self.note("install");
+        self.lives
+            .lock()
+            .expect("lock")
+            .push(format!("install:{}", names(live)));
+        if self.install_refuses.load(Ordering::SeqCst) {
+            return Err(Refusal::plain());
+        }
         Ok(Installed {
             target: kablo_proto::install::Target::LinuxX86_64,
             version: "0.2.0".into(),
@@ -286,8 +313,12 @@ impl Backend for Fake {
 
     /// What the real one does to a server: its relays are replaced by the ones of the
     /// release this computer brings.
-    fn refresh(&self, _: &KabloHost) -> Option<Installed> {
+    fn refresh(&self, _: &KabloHost, live: &[SessionId]) -> Option<Installed> {
         self.note("refresh");
+        self.lives
+            .lock()
+            .expect("lock")
+            .push(format!("refresh:{}", names(live)));
         if self.refresh_fails.load(Ordering::SeqCst) {
             return None;
         }
@@ -1897,6 +1928,8 @@ fn a_restarted_bateri_renews_the_kablo_its_ledger_remembers_before_it_dials() {
         "0.2.0",
         "known at the release it is at"
     );
+    // The renewal is told the terminals the ledger has of the account, and no others.
+    assert_eq!(world.lives(), ["install:", "refresh:b-1"]);
 
     // And once: a bridge made again does not renew a server that was.
     world.break_connection();
@@ -2999,4 +3032,90 @@ fn a_survey_whose_records_are_slow_waits_for_them() {
     );
     assert!(survey.terminals.is_some());
     assert_eq!(survey.records.len(), 1);
+}
+
+// ─── this Mac's account ──────────────────────────────────────────────────
+
+/// Asks for the account of this Mac and waits for what is told.
+fn open_here(service: &Service) -> Result<String, Refusal> {
+    let (tx, told) = mpsc::channel();
+    service.open_here(move |outcome| {
+        let _ = tx.send(outcome);
+    });
+    told.recv_timeout(Duration::from_secs(15)).expect("told")
+}
+
+#[test]
+fn this_macs_account_is_made_once_dialed_like_any_other_and_written_in_the_ledger() {
+    let ledger = Arc::new(Ledger::memory());
+    // A terminal an earlier run of bateri left: the one a new kablo would renew.
+    ledger.shown(
+        local::ACCOUNT,
+        &SessionId::new("t1").expect("an id"),
+        Some(&PaneUuid::parse("0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0").expect("a pane")),
+    );
+    let world = Fake::new(Bridge::new(Age::Current));
+    let rig = Rig::kept("here", world.clone(), ledger.clone(), END_GRACE);
+
+    assert_eq!(open_here(&rig.service), Ok(local::ACCOUNT.to_owned()));
+    until("the bridge", || world.count("carry") == 1);
+    // kablo was looked for once, told the terminals of this account and no other, and nothing of
+    // a server's was asked: there is no connection to make, no counter, no file to write.
+    assert_eq!(world.count("install"), 1);
+    assert_eq!(world.lives(), ["install:t1"]);
+    for server_only in ["master", "files", "number", "records"] {
+        assert_eq!(world.count(server_only), 0, "{server_only}");
+    }
+    let known = ledger.known(local::ACCOUNT).expect("in the ledger");
+    assert!(known.is_local());
+    assert_eq!(known.version, "0.2.0");
+
+    // Asked again, it is told at once and kablo is not looked for again.
+    assert_eq!(open_here(&rig.service), Ok(local::ACCOUNT.to_owned()));
+    assert_eq!(world.count("install"), 1);
+    assert_eq!(world.count("carry"), 1);
+}
+
+#[test]
+fn an_account_of_this_mac_that_cannot_be_made_is_told_and_leaves_nothing_behind() {
+    let ledger = Arc::new(Ledger::memory());
+    let world = Fake::new(Bridge::new(Age::Current));
+    world.install_refuses.store(true, Ordering::SeqCst);
+    let rig = Rig::kept("here-refused", world.clone(), ledger.clone(), END_GRACE);
+
+    assert_eq!(open_here(&rig.service), Err(Refusal::plain()));
+    assert!(ledger.known(local::ACCOUNT).is_none());
+    assert_eq!(
+        world.count("carry"),
+        0,
+        "no bridge for an account that is not there"
+    );
+
+    // The next request tries again, and this time kablo is there.
+    world.install_refuses.store(false, Ordering::SeqCst);
+    assert_eq!(open_here(&rig.service), Ok(local::ACCOUNT.to_owned()));
+    until("the bridge", || world.count("carry") == 1);
+}
+
+#[test]
+fn a_terminal_is_this_macs_by_its_account_alone() {
+    let shown = |account: &str| Shown {
+        account: account.to_owned(),
+        host: String::new(),
+        argv: Vec::new(),
+        terminal: SessionId::new("t1").expect("an id"),
+        program: None,
+        link: PaneLink::Live,
+        taken_by: None,
+    };
+    assert!(shown(local::ACCOUNT).is_local());
+    assert!(!shown("u@rasp:22").is_local());
+    // A host that is empty is not what says it: the account is.
+    assert!(
+        !Shown {
+            host: String::new(),
+            ..shown("u@rasp:22")
+        }
+        .is_local()
+    );
 }

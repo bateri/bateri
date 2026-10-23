@@ -14,7 +14,10 @@
 //! - **an account** (`A`): the key, the server as the user typed it, the `ssh`
 //!   arguments that reach it, and the platform and version of the kablo put there
 //!   — [`Known`], enough to start a client without asking the user anything. It
-//!   exists as long as one of its terminals is meant to live;
+//!   exists as long as one of its terminals is meant to live. **This Mac's account**
+//!   ([`super::local`]) has no server to name and no arguments: its row is an `L`,
+//!   the platform and the version alone, and a ledger that has one is written as
+//!   version 2 (without it, as version 1, which an earlier bateri reads too);
 //! - **a terminal** (`T … live`): a terminal bateri started, with the pane that
 //!   shows it; it is written when the request is made (a crash between the request
 //!   and the server's answer must not leave a terminal nobody can name) and
@@ -38,9 +41,9 @@
 //! installed app never see each other's terminals — a ledger they shared would have
 //! one end the other's — and the sweeps of the layout leave it alone. Its text is
 //! line based like the layout's: the first line names the version ([`HEADER`] +
-//! [`VERSION`]), then `A {key} {host} {port|-} {target} {version} {argument}…` and
-//! `T {account} {terminal} {pane|-} {live|ending}`, text fields escaped as the
-//! layout's are. Every version the writer still writes is read, and a version's
+//! [`VERSION`]), then `A {key} {host} {port|-} {target} {version} {argument}…`, `L {target}
+//! {version}` (version 2) and `T {account} {terminal} {pane|-} {live|ending}`, text fields
+//! escaped as the layout's are. Every version the writer still writes is read, and a version's
 //! text stays frozen in the tests; a file that is not understood is an empty ledger
 //! (a newer bateri's after a downgrade is dropped, not misread). Every change is
 //! written through a temporary name and a `rename` (a half-written file is never
@@ -62,14 +65,19 @@ use kablo_proto::SessionId;
 use kablo_proto::install::{self, Target};
 
 use super::install::Installed;
+use super::local;
 use crate::restore::{escape, unescape, write_atomic};
 use crate::ssh_wrap::KabloHost;
 
 /// The first line's word; the version follows it after one space.
 pub const HEADER: &str = "bateri-kablo";
 
-/// The format's current version.
-pub const VERSION: u32 = 1;
+/// The format's newest version: the one that can hold this Mac's account.
+pub const VERSION: u32 = 2;
+
+/// The oldest version the writer still writes (a ledger with no account of this Mac), and so the
+/// oldest the reader keeps reading.
+pub const OLDEST: u32 = 1;
 
 /// A server as the ledger remembers it: what [`Ledger::remember`] was told when the
 /// account was made.
@@ -93,6 +101,9 @@ impl Known {
     /// The server, as the service starts a client for it. `config` is empty: it is
     /// decided once, when the account is made, and nothing reads it afterwards.
     pub fn server(&self) -> KabloHost {
+        if self.is_local() {
+            return local::host();
+        }
         KabloHost {
             host: self.host.clone(),
             port: self.port,
@@ -100,6 +111,11 @@ impl Known {
             config: String::new(),
             key: self.key.clone(),
         }
+    }
+
+    /// Whether the account is this Mac's ([`local::is_account`]).
+    pub fn is_local(&self) -> bool {
+        local::is_account(&self.key)
     }
 
     /// The kablo that is on the server, as installing it left it.
@@ -152,8 +168,23 @@ impl Rows {
     }
 
     fn render(&self) -> String {
-        let mut out = format!("{HEADER} {VERSION}\n");
+        // The oldest version that holds everything there is to write: an earlier bateri reads a
+        // ledger that has no account of this Mac.
+        let version = if self.accounts.contains_key(local::ACCOUNT) {
+            VERSION
+        } else {
+            OLDEST
+        };
+        let mut out = format!("{HEADER} {version}\n");
         for known in self.accounts.values() {
+            if known.is_local() {
+                out.push_str(&format!(
+                    "L {} {}\n",
+                    known.target.triple(),
+                    escape(&known.version)
+                ));
+                continue;
+            }
             out.push_str(&format!(
                 "A {} {} {} {} {}",
                 escape(&known.key),
@@ -184,10 +215,11 @@ impl Rows {
     fn parse(text: &str) -> Option<Rows> {
         let mut lines = text.split('\n');
         let mut header = lines.next()?.split(' ');
-        if header.next()? != HEADER
-            || header.next()?.parse::<u32>().ok()? != VERSION
-            || header.next().is_some()
-        {
+        if header.next()? != HEADER {
+            return None;
+        }
+        let version = header.next()?.parse::<u32>().ok()?;
+        if !(OLDEST..=VERSION).contains(&version) || header.next().is_some() {
             return None;
         }
         let mut rows = Rows::default();
@@ -205,6 +237,13 @@ impl Rows {
             match tokens.next()? {
                 "A" => {
                     let known = parse_account(&mut tokens)?;
+                    if rows.accounts.insert(known.key.clone(), known).is_some() {
+                        return None;
+                    }
+                }
+                // This Mac's account: from version 2 on, and only once.
+                "L" if version >= 2 => {
+                    let known = parse_local(&mut tokens)?;
                     if rows.accounts.insert(known.key.clone(), known).is_some() {
                         return None;
                     }
@@ -241,11 +280,32 @@ fn parse_account<'a>(tokens: &mut impl Iterator<Item = &'a str>) -> Option<Known
     let version = unescape(tokens.next()?)?;
     install::install_path(&version).ok()?;
     let argv = tokens.map(unescape).collect::<Option<Vec<String>>>()?;
-    (!key.is_empty() && !host.is_empty() && !argv.is_empty()).then_some(Known {
-        key,
-        host,
-        port,
-        argv,
+    // This Mac's account has a row of its own: an `A` with its key is not one.
+    (!key.is_empty() && !host.is_empty() && !argv.is_empty() && !local::is_account(&key)).then_some(
+        Known {
+            key,
+            host,
+            port,
+            argv,
+            target,
+            version,
+        },
+    )
+}
+
+/// An `L` line's fields after the letter: this Mac's account, the platform and the version.
+fn parse_local<'a>(tokens: &mut impl Iterator<Item = &'a str>) -> Option<Known> {
+    let triple = tokens.next()?;
+    let target = Target::ALL
+        .into_iter()
+        .find(|target| target.triple() == triple)?;
+    let version = unescape(tokens.next()?)?;
+    install::install_path(&version).ok()?;
+    Some(Known {
+        key: local::ACCOUNT.to_owned(),
+        host: String::new(),
+        port: None,
+        argv: Vec::new(),
         target,
         version,
     })
@@ -451,6 +511,18 @@ impl Ledger {
             }
             rows.forget_idle_accounts();
             (count > 0, count)
+        })
+    }
+
+    /// The terminals of one account, those meant to live and those to end, in the order they were
+    /// started: the ones a new kablo on its machine renews, and no others.
+    pub fn terminals_of(&self, account: &str) -> Vec<SessionId> {
+        self.read(|rows| {
+            rows.terminals
+                .iter()
+                .filter(|row| row.account == account)
+                .map(|row| row.terminal.clone())
+                .collect()
         })
     }
 

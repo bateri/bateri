@@ -20,7 +20,7 @@ dependencies = [
 [[package]]
 name = "alacritty_terminal"
 version = "0.26.0"
-source = "git+https://github.com/bateri/kablo?rev=74ac4a4d4800ffa0a370bac98dd6558b817608d9#74ac4a4d4800ffa0a370bac98dd6558b817608d9"
+source = "git+https://github.com/bateri/kablo?rev=222309ff909078aa8af4ec4519d5467b91a0a09d#222309ff909078aa8af4ec4519d5467b91a0a09d"
 dependencies = [
  "base64",
  "bitflags",
@@ -604,7 +604,7 @@ dependencies = [
 [[package]]
 name = "kablo-proto"
 version = "0.2.0"
-source = "git+https://github.com/bateri/kablo?rev=74ac4a4d4800ffa0a370bac98dd6558b817608d9#74ac4a4d4800ffa0a370bac98dd6558b817608d9"
+source = "git+https://github.com/bateri/kablo?rev=222309ff909078aa8af4ec4519d5467b91a0a09d#222309ff909078aa8af4ec4519d5467b91a0a09d"
 
 [[package]]
 name = "libc"
@@ -1380,7 +1380,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 [[package]]
 name = "vte"
 version = "0.15.0"
-source = "git+https://github.com/bateri/kablo?rev=74ac4a4d4800ffa0a370bac98dd6558b817608d9#74ac4a4d4800ffa0a370bac98dd6558b817608d9"
+source = "git+https://github.com/bateri/kablo?rev=222309ff909078aa8af4ec4519d5467b91a0a09d#222309ff909078aa8af4ec4519d5467b91a0a09d"
 dependencies = [
  "arrayvec",
  "bitflags",

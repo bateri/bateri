@@ -24,12 +24,17 @@
 //! sent.
 //!
 //! **A new binary replaces the old one under running terminals**
-//! ([`upgrade_sessions`]): terminals the server runs from an earlier release are
-//! renewed with the one just written (`kablo upgrade --all`), without ending a
-//! shell or dropping a client. A *running bridge* (`kablo attach`) is not
-//! replaced by it, so a bridge is made only after the renewal; one that was
-//! made before it stays what it was and speaks to the new relay under the
-//! rule that a release reads the one before it.
+//! ([`upgrade_sessions`]): the terminals bateri keeps there, which run from an earlier
+//! release, are renewed with the one just written (`kablo upgrade <id>`, one per
+//! terminal of the ledger — never `--all`: the machine's other terminals are not
+//! bateri's to move), without ending a shell or dropping a client. A *running bridge*
+//! (`kablo attach`) is not replaced by it, so a bridge is made only after the renewal;
+//! one that was made before it stays what it was and speaks to the new relay under the
+//! rule that a release reads the one before it. The version the renewal left behind goes
+//! when no terminal of the machine runs from it ([`prune_versions`]).
+//!
+//! **This Mac is a place kablo is put too** ([`ensure_here`], [`super::local`]): the same
+//! steps through a channel that is `sh` in the home directory, without the shells' files.
 //!
 //! **What goes wrong is of two kinds** ([`Failure`]). A server that kablo
 //! *cannot* be kept on — a platform it is not built for, a home that is not
@@ -50,6 +55,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
+use kablo_proto::SessionId;
 use kablo_proto::install::{self, Target};
 
 use crate::upload::sq;
@@ -260,6 +266,18 @@ pub struct Installed {
 /// it if it is not there. See the module documentation for what a [`Failure`]
 /// means.
 pub fn ensure(channel: &dyn Channel, bundle: &Bundle) -> Result<Installed, Failure> {
+    place(channel, bundle, true)
+}
+
+/// [`ensure`] for this Mac ([`super::local`]): the same look and the same write, without the
+/// shells' files — a terminal here starts from the application's own, and the files of a server
+/// have no reader on the Mac that writes them.
+pub fn ensure_here(channel: &dyn Channel, bundle: &Bundle) -> Result<Installed, Failure> {
+    place(channel, bundle, false)
+}
+
+/// What [`ensure`] and [`ensure_here`] are, with the shells' files (`files`) or without.
+fn place(channel: &dyn Channel, bundle: &Bundle, files: bool) -> Result<Installed, Failure> {
     let target = server_target(channel)?;
     let artifact = bundle
         .artifact(target)
@@ -272,10 +290,13 @@ pub fn ensure(channel: &dyn Channel, bundle: &Bundle) -> Result<Installed, Failu
     };
     // The shells' files ride the call that looks for kablo: no step of their own, on a connection
     // that has no limit on how many bytes one call carries ([`probe_and_files_script`]).
-    let files = crate::ssh_wrap::files_script(Some(&installed.path));
-    let probe = channel
-        .run(&probe_and_files_script(bundle.version()), files.as_bytes())
-        .map_err(|error| Failure::transient(format!("looking for kablo: {error}")))?;
+    let probe = if files {
+        let files = crate::ssh_wrap::files_script(Some(&installed.path));
+        channel.run(&probe_and_files_script(bundle.version()), files.as_bytes())
+    } else {
+        channel.run(&probe_script(bundle.version()), &[])
+    }
+    .map_err(|error| Failure::transient(format!("looking for kablo: {error}")))?;
     // A macOS binary is code-signed when the package is made, and a signature
     // is part of the file: two packages of the same kablo have two sums. What
     // such a file says its version is has to do.
@@ -435,26 +456,125 @@ pub fn upload_script(version: &str, sha256: &str) -> String {
     )
 }
 
-/// The script that has the terminals the server is running (this user's, all of
-/// them) renewed with the binary of `version`, which is there: the relay of each
-/// is replaced by the one in that binary and the warden follows, with the shell,
-/// its programs and the clients attached to it staying as they are. The path is
-/// the one relative to the home directory the commands start in; kablo makes it
-/// absolute itself. One line of `sh`, like the others.
-pub fn upgrade_script(version: &str) -> String {
-    format!("f=.local/share/kablo/{version}/kablo; $f upgrade --all $f")
+/// The script that has the terminals `ids` renewed with the binary of `version`, which is
+/// there: the relay of each is replaced by the one in that binary and the warden follows, with
+/// the shell, its programs and the clients attached to it staying as they are. Only the
+/// terminals bateri keeps (its ledger's), never `--all`: the machine's other terminals — those
+/// a person made by hand, those another build of bateri keeps — are theirs to move. The path is
+/// the one relative to the home directory the commands start in; kablo makes it absolute
+/// itself. One line of `sh`, like the others, and a failure of one terminal (it ended meanwhile)
+/// is not the others': the status is 1 if any was not renewed. An id that could be read as an
+/// option (`-x`) is left out. `None` when there is no terminal to renew.
+pub fn upgrade_script(version: &str, ids: &[SessionId]) -> Option<String> {
+    let ids: Vec<&str> = ids
+        .iter()
+        .map(SessionId::as_str)
+        .filter(|id| !id.starts_with('-'))
+        .collect();
+    (!ids.is_empty()).then(|| {
+        format!(
+            "f=.local/share/kablo/{version}/kablo; s=0; for i in {}; do $f upgrade $i $f || s=1; done; exit $s",
+            ids.join(" ")
+        )
+    })
 }
 
-/// Renews the server's running terminals with the kablo [`ensure`] found or
-/// wrote ([`upgrade_script`]) — **best effort**: a server with no terminals has
-/// no directory for them and the command says so; a terminal that cannot be
-/// renewed keeps its relay and is served by the bridge's "this release and the
-/// one before" rule. Nothing it says changes what happens next, so the answer
-/// (every terminal renewed, or there were none) is for a test and a log.
-pub fn upgrade_sessions(channel: &dyn Channel, installed: &Installed) -> bool {
-    channel
-        .run(&upgrade_script(&installed.version), &[])
-        .is_ok_and(|reply| reply.status == Some(0))
+/// Renews the terminals `ids` with the kablo [`ensure`] found or wrote ([`upgrade_script`]) —
+/// **best effort**: a terminal that cannot be renewed keeps its relay and is served by the
+/// bridge's "this release and the one before" rule. Nothing it says changes what happens next,
+/// so the answer (every terminal renewed, or there were none) is for a test and a log.
+pub fn upgrade_sessions(channel: &dyn Channel, installed: &Installed, ids: &[SessionId]) -> bool {
+    match upgrade_script(&installed.version, ids) {
+        Some(script) => channel
+            .run(&script, &[])
+            .is_ok_and(|reply| reply.status == Some(0)),
+        None => true,
+    }
+}
+
+// ─── the versions nobody runs ────────────────────────────────────────────
+
+/// How long a version's directory has to be untouched before it may go. A directory that was
+/// written a moment ago may belong to a terminal about to be made — by another build of
+/// bateri on the same machine that has installed its kablo and not yet started a terminal from
+/// it — and the machine's terminals say nothing of it yet.
+const PRUNE_AGE_MINUTES: u32 = 10;
+
+/// The marker between the two halves of [`census_script`]'s answer.
+const CENSUS_MARK: &str = "---";
+
+/// The script that says which versions of kablo are installed and which terminals run from
+/// which: the directories of [`kablo_proto::install::ROOT`] that hold a binary, [`CENSUS_MARK`],
+/// then what the binary of `version` (the one that stays) lists as the machine's terminals —
+/// **all** of them, this user's, whoever started them. Its status is that of the listing: a
+/// listing that failed is not an empty one, and [`unused_versions`] is not asked about it. One
+/// line of `sh`, like the others.
+pub fn census_script(version: &str) -> String {
+    format!(
+        "r=.local/share/kablo; for d in $r/*/; do [ -x $d/kablo ] && echo ${{d%/}}; done; \
+         echo {CENSUS_MARK}; $r/{version}/kablo list --json"
+    )
+}
+
+/// The installed versions nothing runs from, given what [`census_script`] said: a version that is
+/// not `keep`, that no terminal on the machine runs its relay or its warden from
+/// (`"version"` and `"warden_version"` of the listing), and that is a name kablo would have made
+/// ([`kablo_proto::install::install_dir`]). Empty for an answer that is not a whole one — the
+/// script failed, or the listing is not one — because nothing is known to be unused then.
+pub fn unused_versions(reply: &Reply, keep: &str) -> Vec<String> {
+    if reply.status != Some(0) {
+        return Vec::new();
+    }
+    let Some((dirs, listing)) = reply.out.split_once(&format!("{CENSUS_MARK}\n")) else {
+        return Vec::new();
+    };
+    // `kablo list --json` is an array of objects; one that is not one is not read.
+    if !listing.trim_start().starts_with('[') || !listing.trim_end().ends_with(']') {
+        return Vec::new();
+    }
+    let used = |name: &str| {
+        ["version", "warden_version"]
+            .iter()
+            .any(|key| listing.contains(&format!("\"{key}\":\"{name}\"")))
+    };
+    dirs.lines()
+        .filter_map(|line| line.trim().rsplit('/').next())
+        .filter(|name| *name != keep && install::install_dir(name).is_ok() && !used(name))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The script that removes the version directories `names` (each one [`unused_versions`] gave,
+/// a name that can only be a directory directly under the root) that were not written in the
+/// last [`PRUNE_AGE_MINUTES`] minutes. One line of `sh`, like the others.
+pub fn prune_script(names: &[String]) -> Option<String> {
+    let names: Vec<&str> = names
+        .iter()
+        .map(String::as_str)
+        .filter(|name| install::install_dir(name).is_ok())
+        .collect();
+    (!names.is_empty()).then(|| {
+        format!(
+            "cd .local/share/kablo && for v in {}; do [ -z \"$(find $v -maxdepth 0 -mmin -{PRUNE_AGE_MINUTES})\" ] && rm -rf $v; done; :",
+            names.join(" ")
+        )
+    })
+}
+
+/// Removes the versions of kablo nothing runs from, once the machine has the one in `installed`
+/// and its terminals were renewed with it: after an update the previous release's directory
+/// would otherwise stay for good. **Best effort**, and it removes nothing it has not been told is
+/// unused by a whole answer. The same rule on this Mac and on a server; the answer is the names
+/// that were asked to go, for a test and a log.
+pub fn prune_versions(channel: &dyn Channel, installed: &Installed) -> Vec<String> {
+    let Ok(reply) = channel.run(&census_script(&installed.version), &[]) else {
+        return Vec::new();
+    };
+    let unused = unused_versions(&reply, &installed.version);
+    if let Some(script) = prune_script(&unused) {
+        let _ = channel.run(&script, &[]);
+    }
+    unused
 }
 
 // ─── the number of a terminal ────────────────────────────────────────────
@@ -506,11 +626,25 @@ impl Channel for SshChannel {
 /// Runs `argv`, writes `input` to it, collects what it says; ends it when it
 /// takes longer than `limit`.
 pub fn run_command(argv: &[String], input: &[u8], limit: Duration) -> io::Result<Reply> {
+    run_command_in(argv, input, limit, None)
+}
+
+/// [`run_command`] in the directory `dir` (this process's own when `None`).
+pub fn run_command_in(
+    argv: &[String],
+    input: &[u8],
+    limit: Duration,
+    dir: Option<&Path>,
+) -> io::Result<Reply> {
     let (program, args) = argv
         .split_first()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "empty argv"))?;
-    let mut child = crate::ssh_route::command(program)
-        .args(args)
+    let mut command = crate::ssh_route::command(program);
+    command.args(args);
+    if let Some(dir) = dir {
+        command.current_dir(dir);
+    }
+    let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

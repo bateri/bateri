@@ -46,6 +46,10 @@
 //! ssh (the master connection on the pane's terminal, the install, the bridge) and
 //! `install` the rules for putting kablo on a server from the package's files.
 //!
+//! `local` is this Mac as an account of its own: the same steps with the transport changed (a
+//! shell in the home directory for an ssh channel, a `kablo attach` started here for the
+//! one at the far end of an ssh), so a pane of this Mac can be a terminal kablo keeps.
+//!
 //! `mail` is the other direction: what a program on the server (`kablo app`) hands the
 //! app, as tickets the bridge gives a client that said it takes them and the
 //! conversations the client opens to answer them (`take_tickets`, `accept`, `say`,
@@ -71,6 +75,7 @@ pub mod fake;
 pub mod hub;
 pub mod install;
 pub mod ledger;
+pub mod local;
 pub mod mail;
 pub mod quit;
 pub mod roster;

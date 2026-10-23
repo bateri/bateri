@@ -101,6 +101,120 @@ fn the_text_of_the_first_version_is_read_and_written_byte_for_byte() {
     assert_eq!(rich().render(), V1_FIXTURE);
 }
 
+/// This Mac's account as the ledger remembers it: no server to name, no arguments.
+fn mac() -> Known {
+    Known {
+        key: local::ACCOUNT.to_owned(),
+        host: String::new(),
+        port: None,
+        argv: Vec::new(),
+        target: Target::MacosAarch64,
+        version: "0.2.0-dev+222309ff9090".to_owned(),
+    }
+}
+
+/// [`rich`] with this Mac's account and a terminal of it.
+fn richer() -> Rows {
+    let mut rows = rich();
+    rows.accounts.insert(local::ACCOUNT.to_owned(), mac());
+    rows.terminals.push(Row {
+        account: local::ACCOUNT.to_owned(),
+        terminal: id("t1"),
+        pane: Some(pane()),
+        ending: false,
+    });
+    rows
+}
+
+/// Version 2 for [`richer`], frozen like [`V1_FIXTURE`]: the account of this Mac is an `L` row
+/// (the sort is by key, so it stands between the servers'). Version 1 stays beside it, because
+/// a ledger with no such account is still written as version 1.
+const V2_FIXTURE: &str = concat!(
+    "bateri-kablo 2\n",
+    r"A ada@rasp:2222\svia\smy\sjump:22 rasp 2222 aarch64-unknown-linux-musl 0.2.0 ssh -p 2222 -J my\sjump ada@rasp",
+    "\n",
+    "L aarch64-apple-darwin 0.2.0-dev+222309ff9090\n",
+    "A root@prod:22 prod - aarch64-apple-darwin 0.2.1-rc.1 ssh prod\n",
+    r"T ada@rasp:2222\svia\smy\sjump:22 b-0123456789abcdef0123456789abcdef 0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0 live",
+    "\n",
+    "T root@prod:22 b-fedcba9876543210fedcba9876543210 - live\n",
+    "T gone@elsewhere:22 b-1 - ending\n",
+    "T local t1 0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0 live\n",
+);
+
+#[test]
+fn the_account_of_this_mac_is_the_second_version_and_the_first_stays_what_it_was() {
+    assert_eq!(Rows::parse(V2_FIXTURE), Some(richer()));
+    assert_eq!(richer().render(), V2_FIXTURE);
+    // Without the account the text is the first version's, byte for byte: an earlier bateri reads
+    // it, and the next write after the account went is not one it would drop.
+    let mut without = richer();
+    without.accounts.remove(local::ACCOUNT);
+    without.terminals.pop();
+    assert_eq!(without.render(), V1_FIXTURE);
+    assert_eq!(Rows::parse(V1_FIXTURE), Some(rich()));
+}
+
+#[test]
+fn a_row_for_this_mac_is_understood_exactly_or_not_at_all() {
+    let broken = |from: &str, to: &str| {
+        assert!(V2_FIXTURE.contains(from), "{from:?}");
+        V2_FIXTURE.replacen(from, to, 1)
+    };
+    for text in [
+        // The first version has no such row.
+        V2_FIXTURE.replacen("bateri-kablo 2", "bateri-kablo 1", 1),
+        // Twice, or as an `A` with the key: this Mac's account has the one row.
+        format!("{V2_FIXTURE}L aarch64-apple-darwin 0.2.0\n"),
+        format!("{V2_FIXTURE}A local here - aarch64-apple-darwin 0.2.0 ssh here\n"),
+        broken("L aarch64-apple-darwin", "L vax-unknown-vms"),
+        broken("0.2.0-dev+222309ff9090", "../x"),
+        broken(
+            "L aarch64-apple-darwin 0.2.0-dev+222309ff9090\n",
+            "L aarch64-apple-darwin\n",
+        ),
+        broken("0.2.0-dev+222309ff9090\n", "0.2.0-dev+222309ff9090 extra\n"),
+    ] {
+        assert_eq!(Rows::parse(&text), None, "{text:?}");
+    }
+    assert!(Rows::parse(V2_FIXTURE).is_some(), "the control");
+}
+
+#[test]
+fn the_account_of_this_mac_is_remembered_like_a_servers_and_starts_no_ssh() {
+    let ledger = Ledger::memory();
+    let mac_installed = Installed {
+        target: Target::MacosAarch64,
+        version: "0.2.0-dev+222309ff9090".to_owned(),
+        path: ".local/share/kablo/0.2.0-dev+222309ff9090/kablo".to_owned(),
+        fresh: true,
+    };
+    ledger.remember(&local::host(), &mac_installed);
+    let known = ledger.known(local::ACCOUNT).expect("remembered");
+    assert_eq!(known, mac());
+    assert!(known.is_local());
+    // What the service starts a client from: this Mac, not a server with an address.
+    assert_eq!(known.server(), local::host());
+    assert_eq!(
+        known.installed(),
+        Installed {
+            fresh: false,
+            ..mac_installed
+        }
+    );
+    // The terminals of the account are the ledger's to hand to a renewal, and those of no other.
+    ledger.shown(local::ACCOUNT, &id("t1"), Some(&pane()));
+    ledger.shown(local::ACCOUNT, &id("t2"), None);
+    ledger.shown("ada@rasp:2222", &id("b-1"), None);
+    assert_eq!(ledger.terminals_of(local::ACCOUNT), [id("t1"), id("t2")]);
+    assert!(ledger.terminals_of("nobody").is_empty());
+    // It is there as long as one terminal is meant to live, like a server's.
+    ledger.gone(local::ACCOUNT, &id("t1"));
+    assert!(ledger.known(local::ACCOUNT).is_some());
+    ledger.gone(local::ACCOUNT, &id("t2"));
+    assert!(ledger.known(local::ACCOUNT).is_none());
+}
+
 #[test]
 fn text_that_is_not_exactly_understood_is_an_empty_ledger() {
     let broken = |from: &str, to: &str| {
@@ -109,7 +223,8 @@ fn text_that_is_not_exactly_understood_is_an_empty_ledger() {
     };
     for text in [
         String::new(),
-        "bateri-kablo 2\n".to_owned(),
+        "bateri-kablo 3\n".to_owned(),
+        "bateri-kablo 0\n".to_owned(),
         "bateri-kablo 1 extra\n".to_owned(),
         "bateri-kablo 1".to_owned(),
         broken("aarch64-unknown-linux-musl", "vax-unknown-vms"),
