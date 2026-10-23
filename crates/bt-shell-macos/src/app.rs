@@ -3152,10 +3152,13 @@ impl AppDelegate {
         pid: u32,
     ) -> Option<bt_shell_common::kablo::service::PaneInfo> {
         let device = jobs::controlling_terminal(pid)?;
+        // The pane's own PTY master where it has one, the kernel's record of its program's
+        // terminal where its shell runs in a terminal kablo keeps: either way a number the
+        // kernel gave, equal to `device` exactly when the process is in that pane.
         let pane = find_open(self.all_panes(), |pane| {
             let in_it = pane
                 .session()
-                .and_then(|session| session.with_pty_fd(jobs::pty_device))
+                .and_then(|session| jobs::session_device(session))
                 == Some(device);
             (in_it, pane.is_closed())
         })?;
@@ -3524,15 +3527,17 @@ impl AppDelegate {
         if let Some(masters) = &self.ivars().masters {
             masters.begin_quit();
         }
-        // The panes whose terminals kablo keeps end with them (a handover does not carry
-        // them, for now), and that is asked and waited for before they close.
+        // The panes whose terminals kablo keeps on this Mac end with them (a handover does not
+        // carry them, for now), and that is asked and waited for before they close. Only those
+        // terminals: a pane that shows a terminal a server keeps leaves it to the server (an
+        // update is not a reason to end it).
         let streamed: Vec<_> = left
             .iter()
             .filter(|pane| pane.is_streamed())
             .map(|pane| pane.uuid().clone())
             .collect();
         if !streamed.is_empty() {
-            crate::hold_service::end_all(&streamed);
+            crate::hold_service::end_local(&streamed);
         }
         let closing: Vec<_> = left.iter().filter_map(|pane| pane.begin_close()).collect();
         let deadline = Instant::now() + SHUTDOWN_GRACE;
@@ -7765,15 +7770,29 @@ impl AppDelegate {
         // The terminals of this Mac's own panes (kablo's, [`TerminalPane::is_streamed`]) end with
         // their panes whatever `keep_running` says, for now: the pane that would show one again
         // after the quit comes with the pane's reconnecting.
+        //
+        // Two sets, because a pane can be both: one that shows a terminal a server keeps and
+        // whose program (the pipe to it) runs in a terminal of this Mac. The first is ended
+        // whole — the server's terminal and the pane's carrier — when the quit ends the
+        // servers' terminals; the rest of the streamed panes end their carrier alone, and the
+        // server's terminal is left to `keep_running`.
         let ends_kept = self.ivars().end_kept.take();
-        let panes: Vec<_> = self
-            .all_panes()
+        let all_panes = self.all_panes();
+        let panes: Vec<_> = all_panes
             .iter()
-            .filter(|pane| (ends_kept && pane.shows_kept_terminal()) || pane.is_streamed())
+            .filter(|pane| ends_kept && pane.shows_kept_terminal())
+            .map(|pane| pane.uuid().clone())
+            .collect();
+        let carriers: Vec<_> = all_panes
+            .iter()
+            .filter(|pane| pane.is_streamed() && !(ends_kept && pane.shows_kept_terminal()))
             .map(|pane| pane.uuid().clone())
             .collect();
         if !panes.is_empty() {
             crate::hold_service::end_all(&panes);
+        }
+        if !carriers.is_empty() {
+            crate::hold_service::end_local(&carriers);
         }
         // The panes' closes below end their remote sessions; the masters'
         // `exit` is `close_all`'s, under the shared deadline.

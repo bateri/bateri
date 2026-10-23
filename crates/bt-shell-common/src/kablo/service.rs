@@ -604,6 +604,10 @@ impl PtyOps for LocalOps {
         let (done, finished) = mpsc::channel();
         let message = Msg::EndAll {
             panes: vec![self.pane.clone()],
+            // Only the carrier: the pane may show a server's terminal besides (its program is
+            // the pipe to it), and whether that one ends is the user's close or the quit's
+            // doing, not the stream's being let go of.
+            reach: Reach::Local,
             done,
         };
         if self.tx.send(message).is_ok() {
@@ -614,6 +618,19 @@ impl PtyOps for LocalOps {
     /// A signal to the program is not something the terminal takes from outside; a size that
     /// differs is what makes it redraw ([`PtyOps::resize`]).
     fn winch(&self, _master: BorrowedFd<'_>) {}
+}
+
+/// Which of a pane's terminals a request that ends them reaches. A pane has up to two: the
+/// terminal of this Mac its bytes come from, and the terminal a server keeps that it shows
+/// when its program is the pipe to one. They are two handles with two fates: the session
+/// letting go of its stream ends the first and says nothing of the second.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Reach {
+    /// Both: the user closed the pane, or the quit ends the terminals servers keep.
+    All,
+    /// The one of this Mac: it carries the pane's bytes and is nobody's once the pane's session
+    /// is gone.
+    Local,
 }
 
 /// What the loop is told, from the threads that carry bytes and do the slow
@@ -699,6 +716,7 @@ enum Msg {
     /// `done` is told when they have, or when none could be asked.
     EndAll {
         panes: Vec<PaneUuid>,
+        reach: Reach,
         done: Sender<()>,
     },
     BridgeEof {
@@ -957,8 +975,11 @@ impl Service {
         })
     }
 
-    /// The terminal the pane shows, if it shows one: written by the loop after
-    /// anything that could change it, so it is what was true a moment ago.
+    /// The terminal a server keeps that the pane shows, if it shows one: written by the loop
+    /// after anything that could change it, so it is what was true a moment ago. **Never a
+    /// terminal of this Mac** ([`Shown::is_local`]): the terminal that carries a pane's bytes
+    /// is not what the pane shows, and every surface that is for servers (the card, the list,
+    /// the load, the files, "on {host}") asks here.
     pub fn shown(&self, pane: &PaneUuid) -> Option<Shown> {
         self.shown
             .lock()
@@ -1056,8 +1077,9 @@ impl Service {
         let _ = self.tx.send(Msg::Relist);
     }
 
-    /// The user closed the pane: the terminal it shows ends on the server
-    /// (hung up now, killed after [`END_GRACE`] if it is still there). Say it
+    /// The user closed the pane: the terminals it has end — the one it shows ends on the server
+    /// (hung up now, killed after [`END_GRACE`] if it is still there), and the one of this Mac
+    /// that carries its bytes with it. Say it
     /// **before** the pane's program is signalled — the holder's going is the
     /// terminal being let go of, and from then on the pane is not found. A
     /// pane that shows nothing, and a connection that is down, do nothing.
@@ -1108,9 +1130,22 @@ impl Service {
     /// connection that is down, are not waited for. Say it **before** the panes'
     /// programs are signalled, as [`Service::end`] must be said.
     pub fn end_all(&self, panes: &[PaneUuid], wait: Duration) {
+        self.end_panes(panes, Reach::All, wait);
+    }
+
+    /// [`Service::end_all`] for the terminals of this Mac that carry the panes' bytes and no
+    /// others: a pane that also shows a terminal a server keeps leaves that one as it is. A
+    /// quit that keeps the servers' terminals ends the carriers with this, and the update's
+    /// handover does too for the panes it could not carry.
+    pub fn end_local(&self, panes: &[PaneUuid], wait: Duration) {
+        self.end_panes(panes, Reach::Local, wait);
+    }
+
+    fn end_panes(&self, panes: &[PaneUuid], reach: Reach, wait: Duration) {
         let (done, finished) = mpsc::channel();
         let message = Msg::EndAll {
             panes: panes.to_vec(),
+            reach,
             done,
         };
         if self.tx.send(message).is_ok() {
@@ -1458,7 +1493,7 @@ impl Core {
             }
             Msg::BringBack(pane) => self.bring_back(&pane),
             Msg::EndTerminal { account, terminal } => self.end_terminal(&account, &terminal, now),
-            Msg::EndAll { panes, done } => self.end_all(&panes, done, now),
+            Msg::EndAll { panes, reach, done } => self.end_all(&panes, reach, done, now),
             Msg::Dialed {
                 account,
                 outcome,
@@ -1872,7 +1907,10 @@ impl Core {
                 continue;
             };
             // The Mac's own terminals are no server's: what asks for a server's terminal of a
-            // pane does not find one.
+            // pane does not find one. A pane can have both — its program is the pipe to a
+            // server's terminal and runs in a terminal of this Mac — and what it *shows* is the
+            // server's: the two are two handles, this one carries the bytes, and the writer
+            // leaves it out, so which of the two holds is looked at last decides nothing.
             if local::is_account(account) {
                 continue;
             }
@@ -2032,6 +2070,15 @@ impl Core {
             .collect()
     }
 
+    /// The terminals `pane` shows that a server keeps: the account of this Mac is not one
+    /// ([`local::is_account`]) — its terminal carries the pane's bytes, it is not what the pane
+    /// shows, and a request about the terminal a pane *shows* does not reach it.
+    fn shown_terminals_of(&self, pane: &PaneUuid) -> Vec<(String, SessionId)> {
+        let mut terminals = self.terminals_of(pane);
+        terminals.retain(|(account, _)| !local::is_account(account));
+        terminals
+    }
+
     /// The user closed `pane`: the terminal it shows is asked to hang up, and
     /// killed after the grace if it is still there. A connection that is down
     /// cannot ask; the ledger keeps the request and the next connection to the
@@ -2070,7 +2117,7 @@ impl Core {
     /// pane left off. The ledger writes the terminal down again — it is this Mac's to end once
     /// more — and the pane is no longer dimmed once the next pass writes what it shows.
     fn bring_back(&mut self, pane: &PaneUuid) {
-        for (account, terminal) in self.terminals_of(pane) {
+        for (account, terminal) in self.shown_terminals_of(pane) {
             let Some(client) = self.hub.client_mut(&account) else {
                 continue;
             };
@@ -2087,7 +2134,9 @@ impl Core {
     /// The user closed `pane` and left its terminal running ([`Service::leave`]): nothing is
     /// asked of the server, and the ledger forgets the terminal.
     fn leave(&mut self, pane: &PaneUuid) {
-        for (account, terminal) in self.terminals_of(pane) {
+        // The pane's own terminal of this Mac is not left running: it ends with the pane's
+        // session ([`Reach::Local`]), whatever the pane chose to leave on a server.
+        for (account, terminal) in self.shown_terminals_of(pane) {
             self.shared.ledger.gone(&account, &terminal);
         }
     }
@@ -2102,10 +2151,18 @@ impl Core {
     }
 
     /// A quit that ends the terminals ([`Service::end_all`]).
-    fn end_all(&mut self, panes: &[PaneUuid], done: Sender<()>, now: Instant) {
+    fn end_all(&mut self, panes: &[PaneUuid], reach: Reach, done: Sender<()>, now: Instant) {
         let mut pending = BTreeSet::new();
         for pane in panes {
-            for (account, terminal) in self.terminals_of(pane) {
+            let terminals = match reach {
+                Reach::All => self.terminals_of(pane),
+                Reach::Local => {
+                    let mut terminals = self.terminals_of(pane);
+                    terminals.retain(|(account, _)| local::is_account(account));
+                    terminals
+                }
+            };
+            for (account, terminal) in terminals {
                 if self.is_taken(&account, &terminal) {
                     self.shared.ledger.gone(&account, &terminal);
                     continue;

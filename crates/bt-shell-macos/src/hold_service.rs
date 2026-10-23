@@ -88,6 +88,15 @@ pub(crate) fn end_all(panes: &[PaneUuid]) {
     }
 }
 
+/// The terminals of this Mac that carry the panes' bytes ([`TerminalPane::is_streamed`]) are
+/// asked to end and waited for, at most [`QUIT_END_WAIT`]; a terminal a server keeps that a pane
+/// shows is left as it is. **Before** the panes' programs are signalled.
+pub(crate) fn end_local(panes: &[PaneUuid]) {
+    if let Some(service) = SERVICE.get() {
+        service.end_local(panes, QUIT_END_WAIT);
+    }
+}
+
 /// The terminal the pane shows, if it shows one a kablo server keeps (the
 /// program in front of it included, as the server last said). `None` for a pane
 /// that shows its own shell and, in a process without the service, for every pane.

@@ -3733,20 +3733,34 @@ impl TerminalPane {
         self.start_session(mtm, grid, birth)
     }
 
-    /// The terminal of this Mac the pane's shell runs in: kablo's, started with what
-    /// [`Session::spawn`] would start the shell with. `None` — an ordinary pane, the shell is
-    /// the session's own child — in a timed run (its scripts are the result and kablo is not
-    /// part of it), for a pane whose first program is the pipe to a server's terminal (it
-    /// shows that terminal; the pipe running in a terminal of this Mac comes with the pane's
-    /// other readers), and where there is no kablo to put it in
-    /// ([`PaneHost::open_local_terminal`]). A pane like that does not outlive its session.
-    fn local_terminal(&self, options: &SessionOptions, held: bool) -> Option<bt_core::Stream> {
-        if self.ivars().run.is_some() || held {
+    /// The terminal of this Mac the pane's first program runs in: kablo's, started with what
+    /// [`Session::spawn`] would start it with — the shell, or for a pane that shows a terminal
+    /// a server keeps the pipe to it (`ssh-hold --first`), which is then this terminal's
+    /// program and the pane's two terminals are two handles: this one carries the bytes, the
+    /// server's is what the pane shows ([`Self::kept_terminal`]-side questions, [`Shown`]).
+    /// `None` — an ordinary pane, the program is the session's own child — in a timed run
+    /// (its scripts are the result and kablo is not part of it) and where there is no kablo to
+    /// put it in ([`PaneHost::open_local_terminal`]). A pane like that does not outlive its
+    /// session.
+    ///
+    /// The stream's ops read the pane's terminal from the outside, by the program's pid
+    /// ([`jobs::StreamTty`]): `shell_parent` says how the shell is found below it.
+    fn local_terminal(
+        &self,
+        options: &SessionOptions,
+        shell_parent: ShellParent,
+    ) -> Option<bt_core::Stream> {
+        if self.ivars().run.is_some() {
             return None;
         }
         let history = u32::try_from(options.terminal.scrollback).unwrap_or(u32::MAX);
-        self.host()
-            .open_local_terminal(self.uuid(), &options.child_launch(), history)
+        let stream =
+            self.host()
+                .open_local_terminal(self.uuid(), &options.child_launch(), history)?;
+        Some(bt_core::Stream {
+            ops: Arc::new(jobs::StreamTty::new(stream.ops, shell_parent)),
+            ..stream
+        })
     }
 
     /// Opens the session and attaches the link that drives frames. The order
@@ -3940,7 +3954,7 @@ impl TerminalPane {
             // A terminal window without a shell is an empty box; what to do is
             // the caller's call (first window: the process exits; later ones:
             // that window closes).
-            None => match self.local_terminal(&options, held.is_some()) {
+            None => match self.local_terminal(&options, shell_parent) {
                 // The shell runs in a terminal of kablo's on this Mac and the session reads
                 // its bytes; the child's parent there is what it is for a shell started here.
                 Some(stream) => (Session::streamed(options, wake, stream)?, shell_parent),
@@ -5244,7 +5258,7 @@ impl TerminalPane {
         }
         if session.alt_screen()
             || !session
-                .with_pty_fd(jobs::tty_modes)
+                .tty_modes(jobs::tty_modes)
                 .is_some_and(TtyModes::raw)
             || !jobs::job_in_foreground(parent, session.child_pid(), &SystemTable)
         {
@@ -7125,6 +7139,46 @@ mod tests {
             assert!(
                 entry(sheet, signature).contains("server_target()"),
                 "{signature}"
+            );
+        }
+        // A terminal of this Mac that carries a pane's bytes is no server: none of the surfaces
+        // that are for servers asks whether the pane is streamed, and the questions that decide
+        // "shows a server's terminal" do not either.
+        for (name, source) in [
+            ("uploader.rs", include_str!("uploader.rs")),
+            ("preview.rs", include_str!("preview.rs")),
+            ("promise.rs", include_str!("promise.rs")),
+            ("stats.rs", include_str!("stats.rs")),
+            ("server_card.rs", include_str!("server_card.rs")),
+            ("hyperlink.rs", include_str!("hyperlink.rs")),
+            ("remote_ports.rs", include_str!("remote_ports.rs")),
+            ("footer.rs", include_str!("footer.rs")),
+            ("password_sheet.rs", include_str!("password_sheet.rs")),
+        ] {
+            let code = &source[..source.find("#[cfg(test)]").unwrap_or(source.len())];
+            assert!(
+                !code.contains("is_streamed"),
+                "{name}: a server surface asks `server_target` or the terminal the pane shows, \
+                 never whether the pane's bytes come from a terminal of this Mac"
+            );
+        }
+        let pane = include_str!("pane.rs");
+        let body = |signature: &str| {
+            let at = pane
+                .find(signature)
+                .unwrap_or_else(|| panic!("{signature}"));
+            let rest = &pane[at..];
+            rest[..rest.find("\n    }\n").expect("its end")].to_owned()
+        };
+        for signature in [
+            "pub(crate) fn shows_kept_terminal(",
+            "pub(crate) fn server_target(",
+            "pub(crate) fn saved_kept(",
+            "pub(crate) fn opener(",
+        ] {
+            assert!(
+                !body(signature).contains("is_streamed"),
+                "{signature}: the terminal a pane shows is the server's, whatever carries its bytes"
             );
         }
         // And the pane's half of the connection bateri keeps for them: it is registered

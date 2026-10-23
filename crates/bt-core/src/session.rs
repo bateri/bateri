@@ -3108,6 +3108,29 @@ pub trait PtyOps: Send + Sync {
     /// kernel names for the master (`TIOCGPGRP`). The size is not touched: a
     /// program that handles the signal redraws whatever the size did.
     fn winch(&self, master: BorrowedFd<'_>);
+    /// The terminal the program `pid` is on, read from the outside, for a session that has no
+    /// master to read it from ([`Session::streamed`]): its modes and its foreground group.
+    /// `None` is "cannot be read" (the program is gone, the platform cannot) and the default —
+    /// a spawned or adopted PTY reads its master.
+    fn tty(&self, _pid: u32) -> Option<TtyReading> {
+        None
+    }
+    /// The number of the terminal device the program `pid` is on, in the form the platform shell
+    /// says it for every process ([`Session::terminal_device`]). `None` as [`PtyOps::tty`].
+    fn terminal(&self, _pid: u32) -> Option<u64> {
+        None
+    }
+}
+
+/// What the terminal a streamed session's program is on says: the two readings the pane's
+/// questions of a PTY ask (the modes, [`Session::tty_modes`]; who is in front, the view
+/// protocol's check that the shell is) when the PTY is not ours to hold.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TtyReading {
+    /// `ICANON` and `ECHO`.
+    pub modes: TtyModes,
+    /// The terminal's foreground process group; `None` when it has none or it cannot be read.
+    pub foreground: Option<u32>,
 }
 
 /// What [`Session::freeze`] hands over: everything another
@@ -5734,7 +5757,14 @@ impl Session {
                 views,
                 options.theme,
                 Arc::clone(&wake),
-                pencere::pane_observer(Arc::clone(&shell), Arc::clone(&master), child_pid, group),
+                pencere::pane_observer(
+                    Arc::clone(&shell),
+                    Arc::clone(&master),
+                    // A stream has no master: its tty is read by its program's pid.
+                    ops.clone().filter(|_| streamed),
+                    child_pid,
+                    group,
+                ),
             )
         });
         let adapter = Adapter::new(
@@ -13123,6 +13153,39 @@ impl Session {
             .and_then(|file| read(file.as_fd()))
     }
 
+    /// The terminal of a streamed session's program, read from the outside ([`PtyOps::tty`]):
+    /// `None` for any other session, for a program that has ended (its pid may be another
+    /// process's now) and when the platform cannot read it.
+    pub fn tty_reading(&self) -> Option<TtyReading> {
+        if !self.streamed || !self.reader_alive() {
+            return None;
+        }
+        self.ops.as_ref()?.tty(self.child_pid)
+    }
+
+    /// The device number of the terminal the session's program is on, for the one question a
+    /// stream cannot answer from a master: *which pane is this process in*
+    /// ([`PtyOps::terminal`]). `None` for any other session and as [`Session::tty_reading`].
+    pub fn terminal_device(&self) -> Option<u64> {
+        if !self.streamed || !self.reader_alive() {
+            return None;
+        }
+        self.ops.as_ref()?.terminal(self.child_pid)
+    }
+
+    /// The terminal's modes: `modes` read from the master's copy where there is one, the
+    /// stream's own reading ([`Session::tty_reading`]) where there is none.
+    pub fn tty_modes(
+        &self,
+        modes: impl FnOnce(std::os::fd::BorrowedFd<'_>) -> Option<TtyModes>,
+    ) -> Option<TtyModes> {
+        if self.streamed {
+            self.tty_reading().map(|reading| reading.modes)
+        } else {
+            self.with_pty_fd(modes)
+        }
+    }
+
     /// Whether the remote session is past its login: `Some(the
     /// remote generation)` if so, `None` while ssh still asks (a host key, a
     /// password) or without a remote session. A background job of the remote
@@ -13157,7 +13220,7 @@ impl Session {
             log.running_command() == Some(command) && log.login_signalled(titled)
         };
         // Off the shell lock: a syscall.
-        if !signalled && !self.with_pty_fd(modes).is_some_and(TtyModes::logged_in) {
+        if !signalled && !self.tty_modes(modes).is_some_and(TtyModes::logged_in) {
             return None;
         }
         let mut log = lock(&self.shell);
@@ -13199,7 +13262,7 @@ impl Session {
             command
         };
         // Off the shell lock: a syscall.
-        if !self.with_pty_fd(modes).is_some_and(TtyModes::raw) {
+        if !self.tty_modes(modes).is_some_and(TtyModes::raw) {
             return None;
         }
         let marked = {
@@ -14449,11 +14512,16 @@ mod tests {
         fn winch(&self, _master: BorrowedFd<'_>) {}
     }
 
-    /// What the owner of a stream is asked, recorded.
+    /// What the owner of a stream is asked, recorded; and what it says of the terminal its
+    /// program is on, set by the test.
     #[derive(Default)]
     struct StreamOps {
         sizes: Mutex<Vec<PtySize>>,
         hangups: std::sync::atomic::AtomicU32,
+        reading: Mutex<Option<TtyReading>>,
+        device: Mutex<Option<u64>>,
+        /// The pids the terminal was asked about.
+        asked: Mutex<Vec<u32>>,
     }
 
     impl PtyOps for StreamOps {
@@ -14464,6 +14532,14 @@ mod tests {
             self.hangups.fetch_add(1, Ordering::SeqCst);
         }
         fn winch(&self, _master: BorrowedFd<'_>) {}
+        fn tty(&self, pid: u32) -> Option<TtyReading> {
+            lock(&self.asked).push(pid);
+            *lock(&self.reading)
+        }
+        fn terminal(&self, pid: u32) -> Option<u64> {
+            lock(&self.asked).push(pid);
+            *lock(&self.device)
+        }
     }
 
     /// A session over a stream and the owner's ends of it: the terminal (what the program
@@ -14535,6 +14611,85 @@ mod tests {
         // Nothing of a PTY is there to read modes from or to carry over.
         assert!(terminal.session.with_pty_fd(|_| Some(())).is_none());
         assert!(terminal.session.freeze().is_err());
+    }
+
+    /// A stream has no master, so what the pane asks of the PTY it asks of its owner by the
+    /// program's pid: the modes (the remote login's and the raw check's), the device (which pane a
+    /// process is in), the reading as a whole. A program that has ended is not asked: its pid
+    /// may be another process's now.
+    #[test]
+    fn a_streamed_session_reads_its_terminal_through_its_owner_by_its_programs_pid() {
+        use std::io::Write as _;
+        let mut terminal = streamed();
+        let raw = TtyModes {
+            canonical: false,
+            echo: false,
+        };
+        // Nothing said yet: nothing known, and the master's closure is never called.
+        assert_eq!(
+            terminal
+                .session
+                .tty_modes(|_| unreachable!("a stream has no master")),
+            None
+        );
+        *lock(&terminal.ops.reading) = Some(TtyReading {
+            modes: raw,
+            foreground: Some(77),
+        });
+        *lock(&terminal.ops.device) = Some(0x1234);
+        assert_eq!(terminal.session.tty_modes(|_| None), Some(raw));
+        assert_eq!(terminal.session.terminal_device(), Some(0x1234));
+        assert_eq!(
+            terminal.session.tty_reading().and_then(|r| r.foreground),
+            Some(77)
+        );
+        assert!(
+            lock(&terminal.ops.asked).iter().all(|pid| *pid == 4242),
+            "the program's pid and no other"
+        );
+        // The raw check marks the running command through the owner's reading.
+        terminal
+            .terminal
+            .write_all(b"\x1b]133;A;bt_block=1\x07\x1b]133;C\x07RUN")
+            .expect("written");
+        wait_text(&terminal.session, "RUN");
+        let command = terminal.session.running_command().expect("a command runs");
+        assert_eq!(
+            terminal
+                .session
+                .note_raw(|_| unreachable!("a stream has no master")),
+            Some(command)
+        );
+        // The program ends: it is not asked any more.
+        terminal.status.code(0);
+        terminal.exit = None;
+        assert_eq!(
+            terminal.wake.wait_exit(Duration::from_secs(8)),
+            Some(Some(0))
+        );
+        wait_until("the reader to end", Duration::from_secs(8), || {
+            !terminal.session.reader_alive()
+        });
+        let asked = lock(&terminal.ops.asked).len();
+        assert_eq!(terminal.session.tty_reading(), None);
+        assert_eq!(terminal.session.terminal_device(), None);
+        assert_eq!(lock(&terminal.ops.asked).len(), asked);
+    }
+
+    /// A session that holds its PTY does not ask its owner anything: the master is read.
+    #[test]
+    fn a_spawned_session_has_no_stream_to_ask() {
+        let session = spawn_with_cols(sh("sleep 5"), 40, Arc::new(TestWake::default()));
+        assert_eq!(session.tty_reading(), None);
+        assert_eq!(session.terminal_device(), None);
+        assert!(
+            session
+                .tty_modes(|_| Some(TtyModes {
+                    canonical: true,
+                    echo: true
+                }))
+                .is_some()
+        );
     }
 
     #[test]

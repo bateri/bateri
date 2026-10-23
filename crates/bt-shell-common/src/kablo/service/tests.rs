@@ -62,6 +62,10 @@ fn host(key: &str) -> KabloHost {
 /// The world around the service, as a test sets it.
 struct Fake {
     bridge: Arc<Mutex<Bridge>>,
+    /// The kablo of this Mac as a world of its own, when a test has both this Mac's terminals
+    /// and a server's (one bridge cannot be two machines' connections at once); without it,
+    /// every account rides [`Fake::bridge`].
+    mac: std::sync::OnceLock<Arc<Mutex<Bridge>>>,
     /// What was asked, in order.
     log: Mutex<Vec<String>>,
     /// The terminals the install and the renewal were told were the ledger's, in order
@@ -116,6 +120,7 @@ impl Fake {
     fn new(bridge: Bridge) -> Arc<Fake> {
         Arc::new(Fake {
             bridge: Arc::new(Mutex::new(bridge)),
+            mac: std::sync::OnceLock::new(),
             log: Mutex::new(Vec::new()),
             lives: Mutex::new(Vec::new()),
             install_refuses: AtomicBool::new(false),
@@ -212,6 +217,29 @@ impl Fake {
 
     fn bridge(&self) -> std::sync::MutexGuard<'_, Bridge> {
         self.bridge.lock().expect("lock")
+    }
+
+    /// This Mac's kablo becomes a world of its own ([`Fake::mac`]).
+    fn apart_mac(&self) {
+        let _ = self
+            .mac
+            .set(Arc::new(Mutex::new(Bridge::new(Age::Current))));
+    }
+
+    /// The bridge of this Mac's kablo: the one of its own after [`Fake::apart_mac`], else the
+    /// only one.
+    fn mac(&self) -> std::sync::MutexGuard<'_, Bridge> {
+        self.mac.get().unwrap_or(&self.bridge).lock().expect("lock")
+    }
+
+    /// The bridge an account rides.
+    fn bridge_of(&self, account: &str) -> Arc<Mutex<Bridge>> {
+        if local::is_account(account)
+            && let Some(apart) = self.mac.get()
+        {
+            return Arc::clone(apart);
+        }
+        Arc::clone(&self.bridge)
     }
 }
 
@@ -331,7 +359,7 @@ impl Backend for Fake {
         })
     }
 
-    fn carry(&self, _: &KabloHost, _: &Installed) -> io::Result<Carried> {
+    fn carry(&self, server: &KabloHost, _: &Installed) -> io::Result<Carried> {
         self.note("carry");
         if let Some(kind) = *self.carry_error.lock().expect("lock") {
             return Err(io::Error::new(kind, "no bridge"));
@@ -345,16 +373,17 @@ impl Backend for Fake {
         }
         let closed = Arc::new(AtomicBool::new(false));
         // A new connection to the server: what the old one had in flight is lost.
-        self.bridge().disconnect();
+        let bridge = self.bridge_of(&server.key);
+        bridge.lock().expect("lock").disconnect();
         self.carried.lock().expect("lock").push(Arc::clone(&closed));
         let ends = Arc::clone(&closed);
         Ok(Carried {
             reader: Box::new(FromBridge {
-                bridge: Arc::clone(&self.bridge),
+                bridge: Arc::clone(&bridge),
                 closed,
                 pending: Vec::new(),
             }),
-            writer: Box::new(ToBridge(Arc::clone(&self.bridge))),
+            writer: Box::new(ToBridge(bridge)),
             close: Box::new(move || ends.store(true, Ordering::SeqCst)),
             ended: {
                 let cause = Arc::clone(&self.eof_cause);
@@ -3377,4 +3406,158 @@ fn panes_that_wait_for_the_account_of_this_mac_share_the_making_of_it() {
     assert_eq!(world.count("install"), 1);
     assert_eq!(world.count("carry"), 1);
     assert_eq!(ledger.terminals_of(local::ACCOUNT).len(), 3);
+}
+
+// ─── a pane with two terminals: the one of this Mac and a server's ──────
+
+/// A pane whose program is the pipe to a terminal a server keeps, running in a terminal of this
+/// Mac: the pane's two terminals. Returns the rig, the pane, the pane's stream, the holder (the
+/// pipe), the carrier's name and the server terminal's.
+fn a_pane_with_two_terminals(
+    name: &str,
+    grace: Duration,
+) -> (
+    Rig,
+    PaneUuid,
+    Pane,
+    Holder,
+    SessionId,
+    SessionId,
+    Arc<Ledger>,
+) {
+    let ledger = Arc::new(Ledger::memory());
+    let world = Fake::new(Bridge::new(Age::Current));
+    world.apart_mac();
+    let rig = Rig::kept(name, world, ledger.clone(), grace);
+    let pane = pane_named(&rig.world);
+    let mac = Pane::of(open_local(&rig, &pane).expect("a terminal of this Mac"));
+    let carrier = ledger.terminals_of(local::ACCOUNT).remove(0);
+    // The pipe runs inside that terminal and is admitted to the pane that terminal is in.
+    let holder = Holder::new(&rig.socket(), "b-1");
+    until("the server's terminal", || {
+        rig.service.shown(&pane).is_some()
+    });
+    let server = rig
+        .service
+        .shown(&pane)
+        .map(|shown| shown.terminal)
+        .expect("shown");
+    (rig, pane, mac, holder, carrier, server, ledger)
+}
+
+/// The pane's two handles are apart: what asks for the terminal the pane **shows** finds the
+/// server's, whichever of the two holds was admitted last, and nothing that is for servers
+/// (the background list, the account's lists) finds the terminal of this Mac.
+#[test]
+fn a_pane_that_runs_in_a_terminal_of_this_mac_and_shows_a_servers_is_a_server_pane_alone() {
+    let (rig, pane, _mac, _holder, carrier, server, ledger) =
+        a_pane_with_two_terminals("two-handles", END_GRACE);
+    assert_ne!(carrier, server);
+    for _ in 0..5 {
+        let shown = rig.service.shown(&pane).expect("shown");
+        assert_eq!(
+            (shown.account.as_str(), &shown.terminal),
+            ("u@rasp:22", &server)
+        );
+        assert!(!shown.is_local());
+        thread::sleep(Duration::from_millis(20));
+    }
+    // Both are the pane's in the ledger, each under its own account.
+    assert_eq!(ledger.pane_of(local::ACCOUNT, &carrier), Some(pane.clone()));
+    assert_eq!(ledger.pane_of("u@rasp:22", &server), Some(pane.clone()));
+    // Neither list of a server's terminals has a terminal of this Mac's.
+    rig.service.refresh_background();
+    assert!(rig.service.background(local::ACCOUNT).is_empty());
+    assert!(
+        rig.service
+            .background_all()
+            .iter()
+            .all(|found| !local::is_account(&found.account))
+    );
+    assert!(rig.service.elsewhere_all().is_empty());
+    // A pane that only runs in a terminal of this Mac shows none: it is not a server pane.
+    let plain = PaneUuid::parse("5a7e9c40-1b2d-4e3f-8a6b-0c9d1e2f3a4b").expect("a uuid");
+    let _plain = Pane::of(open_local(&rig, &plain).expect("a terminal"));
+    thread::sleep(Duration::from_millis(100));
+    assert_eq!(rig.service.shown(&plain), None);
+}
+
+/// The session's stream being let go of ends the terminal that carries the pane's bytes and
+/// nothing else: the server's terminal, which the pane shows, stays for whatever the quit or the
+/// user's close says about it.
+#[test]
+fn letting_go_of_the_stream_of_a_pane_that_shows_a_server_ends_only_the_carrier() {
+    let (rig, pane, mac, _holder, carrier, server, ledger) =
+        a_pane_with_two_terminals("two-handles-hangup", END_GRACE);
+    let Pane { ops, master, .. } = mac;
+    ops.hangup(0, master.as_fd());
+    drop(master);
+    until("the carrier hung up", || {
+        rig.world.mac().terminated(&carrier) == Some(false)
+    });
+    // Waited for the answer of the loop, so a request that was going to reach the server's
+    // terminal has done so.
+    rig.service.refresh_background();
+    thread::sleep(Duration::from_millis(200));
+    assert_eq!(rig.world.bridge().terminated(&server), None);
+    assert!(ledger.keeps("u@rasp:22", &server), "the server's row stays");
+    assert_eq!(
+        rig.service.shown(&pane).map(|shown| shown.terminal),
+        Some(server)
+    );
+}
+
+/// Leaving the server's terminal running (the close question's answer) touches the pane's other
+/// terminal in no way: it is not left running, it ends with the session.
+#[test]
+fn leaving_a_pane_running_lets_go_of_the_servers_terminal_and_not_of_the_carrier() {
+    let (rig, pane, mac, holder, carrier, server, ledger) =
+        a_pane_with_two_terminals("two-handles-leave", END_GRACE);
+    rig.service.leave(&pane);
+    until("the server's row goes", || {
+        !ledger.keeps("u@rasp:22", &server)
+    });
+    assert!(
+        ledger.terminals_of(local::ACCOUNT).contains(&carrier),
+        "the carrier's row stays"
+    );
+    // The holder goes with the pane, and the session lets go of its stream after.
+    let Holder { handle, typed, .. } = holder;
+    drop(typed);
+    if let Some(handle) = handle {
+        let _ = handle.join();
+    }
+    let Pane { ops, master, .. } = mac;
+    ops.hangup(0, master.as_fd());
+    until("the carrier hung up", || {
+        rig.world.mac().terminated(&carrier) == Some(false)
+    });
+    assert_eq!(
+        rig.world.bridge().terminated(&server),
+        None,
+        "what was left running is still running"
+    );
+    assert!(rig.world.bridge().has(&server));
+}
+
+/// A quit that ends the terminals servers keep ends both of the pane's; one that keeps them
+/// ends the carrier and leaves the server's.
+#[test]
+fn a_quit_ends_both_of_a_panes_terminals_or_the_carrier_alone_as_the_setting_says() {
+    // Keeps the servers' terminals: the carrier alone.
+    let (rig, pane, _mac, _holder, carrier, server, _ledger) =
+        a_pane_with_two_terminals("two-handles-quit-keeps", END_GRACE);
+    rig.service
+        .end_local(std::slice::from_ref(&pane), Duration::from_secs(10));
+    assert_eq!(rig.world.mac().terminated(&carrier), Some(false));
+    assert_eq!(rig.world.bridge().terminated(&server), None);
+    drop(rig);
+
+    // Ends them: both.
+    let (rig, pane, _mac, _holder, carrier, server, _ledger) =
+        a_pane_with_two_terminals("two-handles-quit-ends", END_GRACE);
+    rig.service
+        .end_all(std::slice::from_ref(&pane), Duration::from_secs(10));
+    assert_eq!(rig.world.mac().terminated(&carrier), Some(false));
+    assert_eq!(rig.world.bridge().terminated(&server), Some(false));
 }

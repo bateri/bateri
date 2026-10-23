@@ -689,3 +689,173 @@ printf 'READY\n'; stty size; pixels; read line; printf 'GOT:%s\n' "$line"; stty 
     drop(session);
     service.stop();
 }
+
+/// The options of a session whose program is `script` run by `/bin/sh`, the way a pane's shell is
+/// started on this machine: behind `login(1)` on macOS (the program is its child, and `login`
+/// is root's), the program itself elsewhere.
+fn behind_login(
+    script: &str,
+    home: &std::path::Path,
+) -> (bt_core::SessionOptions, crate::jobs::ShellParent) {
+    let (command, parent) = if cfg!(target_os = "macos") {
+        let user = std::env::var("USER").unwrap_or_else(|_| "nobody".to_owned());
+        (
+            (
+                "/usr/bin/login".to_owned(),
+                vec![
+                    "-qflp".to_owned(),
+                    user,
+                    "/bin/sh".to_owned(),
+                    "-c".to_owned(),
+                    script.to_owned(),
+                ],
+            ),
+            crate::jobs::ShellParent::Login,
+        )
+    } else {
+        (
+            (
+                "/bin/sh".to_owned(),
+                vec!["-c".to_owned(), script.to_owned()],
+            ),
+            crate::jobs::ShellParent::Direct,
+        )
+    };
+    let options = bt_core::SessionOptions {
+        command: Some(command),
+        working_directory: Some(home.to_owned()),
+        home: None,
+        env: std::collections::HashMap::new(),
+        cols: 80,
+        rows: 24,
+        cell_px: (9, 18),
+        terminal: bt_core::TerminalOptions {
+            scrollback: 100,
+            osc52: bt_core::Osc52::Off,
+            cursor: bt_core::CaretShape::default(),
+            blink: bt_core::CursorBlink::default(),
+        },
+        theme: bt_core::Theme::BATERI,
+        dock: false,
+        cluster: true,
+        initial_input: None,
+        shell_marks: false,
+        pane_uuid: bt_core::PaneUuid::parse("5A1E2D3C-4B5A-6978-8796-A5B4C3D2E1F1"),
+        hostname: None,
+        replay: None,
+        journal: None,
+        views: None,
+    };
+    (options, parent)
+}
+
+#[test]
+fn a_pane_over_a_real_kablo_is_found_and_read_by_its_childs_pid_behind_login_too() {
+    let Some(bundle) = release() else {
+        eprintln!("SKIPPED: there is no kablo release to run (../kablo/dist or KABLO_DIST)");
+        return;
+    };
+    let mut ground = Ground::new("tty");
+    let service_dir = ground.root.join("svc");
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&service_dir)
+        .expect("the service's directory");
+    let kablo =
+        kablo_proto::install::install_path_in(&ground.home.to_string_lossy(), bundle.version())
+            .expect("a path");
+    let backend = RealMac {
+        bundle,
+        home: ground.home.clone(),
+        sockets: ground.sockets.clone(),
+    };
+    let ledger = Arc::new(Ledger::memory());
+    let service =
+        Service::start(&service_dir, Arc::new(backend), Arc::clone(&ledger)).expect("a service");
+
+    // A password prompt's modes (canonical, no echo), then a wait.
+    let (options, parent) = behind_login(
+        "stty icanon -echo; printf 'READY\\n'; exec sleep 60",
+        &ground.home,
+    );
+    let (spec, size) = new_session(&options.child_launch(), 100);
+    let pane = options.pane_uuid.clone().expect("a pane");
+    let mut stream = service
+        .open_local(&pane, spec, size, Duration::from_secs(30))
+        .expect("a terminal of this Mac");
+    let id = ledger.terminals_of(ACCOUNT).remove(0);
+    ground.kept = Some(PathBuf::from(kablo));
+    ground.made.push(id);
+    // The stream's ops read the terminal by the program's pid, as a pane makes them.
+    stream.ops = Arc::new(crate::jobs::StreamTty::new(stream.ops, parent));
+    let ends = Arc::new(Ends::default());
+    let session = bt_core::Session::streamed(options, ends as Arc<dyn bt_core::Wake>, stream)
+        .expect("a session over the stream");
+    waits_for("the program's first words", || shows(&session, "READY"));
+
+    let pid = session.child_pid();
+    // What kablo says the pid is: the process `login` runs, the one the pane's shell is the
+    // child of — or, where there is no login, the program itself.
+    if cfg!(target_os = "macos") {
+        use crate::jobs::ProcessTable;
+        assert_eq!(crate::jobs::SystemTable.name(pid).as_deref(), Some("login"));
+    }
+    // The terminal is found by the kernel's record of the pane's process, and it is the one the
+    // pane's shell is on.
+    let device = crate::jobs::pane_terminal(parent, pid).expect("the pane's terminal");
+    assert_eq!(session.terminal_device(), Some(device));
+    assert_eq!(crate::jobs::session_device(&session), Some(device));
+    // A process of the pane is in the pane: the program the shell was made into.
+    let shell = {
+        use crate::jobs::ProcessTable;
+        crate::jobs::SystemTable
+            .children(pid)
+            .first()
+            .copied()
+            .unwrap_or(pid)
+    };
+    assert_eq!(crate::jobs::controlling_terminal(shell), Some(device));
+    // The modes the program set are the ones read, and the shell's group is in front.
+    let modes = bt_core::TtyModes {
+        canonical: true,
+        echo: false,
+    };
+    waits_for("the program's modes from the outside", || {
+        session.tty_modes(crate::jobs::tty_modes) == Some(modes)
+    });
+    let reading = session.tty_reading().expect("a reading");
+    assert_eq!(reading.modes, modes);
+    {
+        use crate::jobs::ProcessTable;
+        assert_eq!(
+            reading.foreground,
+            crate::jobs::SystemTable
+                .groups(shell)
+                .map(|groups| groups.own)
+        );
+    }
+    assert!(reading.foreground.is_some_and(|group| group > 1));
+    // The questions that were always the process table's work the same by the stream's pid:
+    // the shell is in front, and the pane's processes are the shell and what it started.
+    assert_eq!(
+        crate::jobs::foreground(parent, pid, &crate::jobs::SystemTable),
+        crate::jobs::Foreground::Idle
+    );
+    assert!(!crate::jobs::job_in_foreground(
+        parent,
+        pid,
+        &crate::jobs::SystemTable
+    ));
+    assert_eq!(
+        crate::ports::pane_pids(parent, pid, &crate::jobs::SystemTable, &[])[0],
+        shell
+    );
+
+    // A program that has ended is not asked: its pid may be another process's now.
+    service.end_all(std::slice::from_ref(&pane), Duration::from_secs(10));
+    waits_for("the session to see the end", || !session.reader_alive());
+    assert_eq!(session.tty_reading(), None);
+    assert_eq!(session.terminal_device(), None);
+    drop(session);
+    service.stop();
+}

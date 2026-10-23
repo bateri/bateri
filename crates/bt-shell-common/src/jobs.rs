@@ -1270,6 +1270,157 @@ fn device_number(rdev: u64) -> u64 {
     (major << 8) | (minor & 0xff) | ((minor & !0xff) << 12)
 }
 
+// ─── the terminal of a pane whose PTY this process does not hold ─────────
+
+/// The path of terminal device `device` (in [`controlling_terminal`]'s number): macOS names a
+/// device with `devname`, which answers in a buffer of its own — one caller at a time, the name
+/// copied before the next. Checked against the file the path names: the number of a terminal
+/// that has gone may be a name nobody has, or another terminal's.
+#[cfg(target_os = "macos")]
+fn terminal_path(device: u64) -> Option<std::path::PathBuf> {
+    if device == 0 {
+        return None;
+    }
+    static ONE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let dev = libc::dev_t::from_ne_bytes(u32::try_from(device).ok()?.to_ne_bytes());
+    let name = {
+        let _one = ONE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // SAFETY: `devname` returns null or a NUL-terminated name in a buffer of its own that
+        // stays valid until the next call, copied here under the lock.
+        let name = unsafe { libc::devname(dev, libc::S_IFCHR) };
+        if name.is_null() {
+            return None;
+        }
+        // SAFETY: not null, NUL-terminated, copied while the lock is held.
+        unsafe { std::ffi::CStr::from_ptr(name) }.to_owned()
+    };
+    let path = std::path::Path::new("/dev").join(std::ffi::OsStr::from_bytes(name.to_bytes()));
+    terminal_at(&path, device).then_some(path)
+}
+
+/// [`terminal_path`] on Linux: a pseudo-terminal is `/dev/pts/N`, and `tty_nr` says N as the
+/// minor of a major in the Unix98 range.
+#[cfg(target_os = "linux")]
+fn terminal_path(device: u64) -> Option<std::path::PathBuf> {
+    let major = (device >> 8) & 0xfff;
+    let minor = (device & 0xff) | ((device >> 12) & 0xfff00);
+    if !(136..=143).contains(&major) {
+        return None;
+    }
+    let path = std::path::PathBuf::from(format!("/dev/pts/{}", (major - 136) * 256 + minor));
+    terminal_at(&path, device).then_some(path)
+}
+
+/// Whether `path` is the character device `device`.
+fn terminal_at(path: &std::path::Path, device: u64) -> bool {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    std::fs::metadata(path)
+        .is_ok_and(|meta| meta.file_type().is_char_device() && device_number(meta.rdev()) == device)
+}
+
+/// The two modes of terminal device `device` ([`tty_modes`]), read from the outside: the
+/// device is opened **without becoming anyone's controlling terminal** and without waiting,
+/// read, and closed again before this returns. It must not stay open: a kablo terminal's
+/// end is seen when the last descriptor of its device goes, and a descriptor kept here would
+/// keep a finished program's terminal alive.
+fn terminal_modes(device: u64) -> Option<bt_core::TtyModes> {
+    use std::os::fd::AsFd;
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOCTTY | libc::O_NONBLOCK)
+        .open(terminal_path(device)?)
+        .ok()?;
+    tty_modes(file.as_fd())
+}
+
+/// The process of a pane whose terminal questions are asked, and the terminal's device: the
+/// PTY's child when the kernel lets it be read, else the shell below it. `login(1)` is root's
+/// and its long info reads as nothing ([`ProcessTable::groups`]); a child that is the pane's
+/// own program (`ssh-hold --first`) is the user's and answers.
+fn terminal_process(
+    parent: ShellParent,
+    child: u32,
+    table: &impl ProcessTable,
+) -> Option<(u32, u64)> {
+    [Some(child), shell_pid(parent, child, table)]
+        .into_iter()
+        .flatten()
+        .find_map(|pid| controlling_terminal(pid).map(|device| (pid, device)))
+}
+
+/// The device of the terminal the pane whose PTY child is `child` is on. The question a
+/// stream asks where a spawned pane asks its master ([`pty_device`]): both give the number
+/// [`controlling_terminal`] gives for a process in the pane.
+pub fn pane_terminal(parent: ShellParent, child: u32) -> Option<u64> {
+    terminal_process(parent, child, &SystemTable).map(|(_, device)| device)
+}
+
+/// The terminal of the pane whose PTY child is `child`, read from the outside: its two modes
+/// and its foreground group (the kernel's record of the pane's process, not `tcgetpgrp`,
+/// which a process outside the terminal's session cannot ask). `None` while no process of
+/// the pane has a terminal that can be read.
+pub fn pane_tty(parent: ShellParent, child: u32) -> Option<bt_core::TtyReading> {
+    let (pid, device) = terminal_process(parent, child, &SystemTable)?;
+    Some(bt_core::TtyReading {
+        modes: terminal_modes(device)?,
+        foreground: SystemTable
+            .groups(pid)
+            .map(|groups| groups.foreground)
+            .filter(|&group| group != 0),
+    })
+}
+
+/// The device of the terminal `session`'s program is on: the master's slave where the
+/// session holds the master, [`pane_terminal`] by way of the stream's ops where it does not.
+/// The number a process in the pane gives ([`controlling_terminal`]).
+pub fn session_device(session: &bt_core::Session) -> Option<u64> {
+    if session.is_streamed() {
+        session.terminal_device()
+    } else {
+        session.with_pty_fd(pty_device)
+    }
+}
+
+/// [`bt_core::PtyOps`] of a stream whose program is a child of a kablo terminal: what the
+/// stream's owner does for the size and the end, and the pane's terminal read from the
+/// outside by the program's pid.
+pub struct StreamTty {
+    inner: std::sync::Arc<dyn bt_core::PtyOps>,
+    parent: ShellParent,
+}
+
+impl StreamTty {
+    /// `inner`'s ops, with the terminal read the way `parent` says the shell is found.
+    pub fn new(inner: std::sync::Arc<dyn bt_core::PtyOps>, parent: ShellParent) -> StreamTty {
+        StreamTty { inner, parent }
+    }
+}
+
+impl bt_core::PtyOps for StreamTty {
+    fn resize(&self, master: std::os::fd::BorrowedFd<'_>, size: bt_core::PtySize) {
+        self.inner.resize(master, size);
+    }
+
+    fn hangup(&self, pid: u32, exit: std::os::fd::BorrowedFd<'_>) {
+        self.inner.hangup(pid, exit);
+    }
+
+    fn winch(&self, master: std::os::fd::BorrowedFd<'_>) {
+        self.inner.winch(master);
+    }
+
+    fn tty(&self, pid: u32) -> Option<bt_core::TtyReading> {
+        pane_tty(self.parent, pid)
+    }
+
+    fn terminal(&self, pid: u32) -> Option<u64> {
+        pane_terminal(self.parent, pid)
+    }
+}
+
 /// A process's start time, comparable only for equality: what
 /// tells a live pid from a reused one. macOS: `p_starttime` in microseconds
 /// (`sysctl(KERN_PROC_PID)`, readable on root-owned `login(1)` too, where
@@ -3112,6 +3263,157 @@ pub(crate) mod tests {
             assert_eq!(modes().map(TtyModes::logged_in), Some(!expected.canonical));
             session.shutdown();
         }
+    }
+
+    /// A pseudo-terminal pair of the test's own: the master, the slave opened through the path
+    /// [`terminal_path`] makes of the device, and that device.
+    fn pty_pair() -> (std::os::fd::OwnedFd, std::os::fd::OwnedFd, u64) {
+        use std::os::fd::{AsFd, FromRawFd, OwnedFd};
+        use std::os::unix::fs::OpenOptionsExt;
+        // SAFETY: `posix_openpt` has no preconditions; the result is checked and owned at once.
+        let master = unsafe { libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY) };
+        assert!(
+            master >= 0,
+            "no pseudo-terminal: {}",
+            std::io::Error::last_os_error()
+        );
+        // SAFETY: a descriptor just made, owned by nobody else.
+        let master = unsafe { OwnedFd::from_raw_fd(master) };
+        // SAFETY: the master is open for both calls.
+        unsafe {
+            assert_eq!(libc::grantpt(std::os::fd::AsRawFd::as_raw_fd(&master)), 0);
+            assert_eq!(libc::unlockpt(std::os::fd::AsRawFd::as_raw_fd(&master)), 0);
+        }
+        let device = pty_device(master.as_fd()).expect("the master's slave has a device");
+        let slave = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NOCTTY)
+            .open(terminal_path(device).expect("the device has a path"))
+            .expect("the slave");
+        (master, slave.into(), device)
+    }
+
+    /// Sets the line discipline of the terminal `fd` is on to `canonical` and `echo`.
+    fn set_modes(fd: &std::os::fd::OwnedFd, canonical: bool, echo: bool) {
+        use std::os::fd::AsRawFd;
+        // SAFETY: an all-zero `termios` is a valid value; the descriptor is open for the calls.
+        unsafe {
+            let mut modes: libc::termios = std::mem::zeroed();
+            assert_eq!(libc::tcgetattr(fd.as_raw_fd(), &mut modes), 0);
+            for (flag, on) in [(libc::ICANON, canonical), (libc::ECHO, echo)] {
+                if on {
+                    modes.c_lflag |= flag;
+                } else {
+                    modes.c_lflag &= !flag;
+                }
+            }
+            assert_eq!(libc::tcsetattr(fd.as_raw_fd(), libc::TCSANOW, &modes), 0);
+        }
+    }
+
+    /// Reads one byte of `master` without waiting: `None` when it would wait (something still
+    /// holds the slave), `Some(read result)` when the answer is the end.
+    fn master_says_end(master: &std::os::fd::OwnedFd) -> bool {
+        use std::os::fd::AsRawFd;
+        // SAFETY: `fcntl` and `read` on an open descriptor and a buffer of this frame.
+        unsafe {
+            let flags = libc::fcntl(master.as_raw_fd(), libc::F_GETFL);
+            libc::fcntl(master.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK);
+            let mut byte = 0u8;
+            let got = libc::read(master.as_raw_fd(), (&raw mut byte).cast(), 1);
+            if got == 0 {
+                return true;
+            }
+            // The end of a terminal is a hang-up error on Linux, an empty read on macOS; a
+            // read that would wait says someone still has the other side open.
+            got < 0 && std::io::Error::last_os_error().kind() != std::io::ErrorKind::WouldBlock
+        }
+    }
+
+    /// A terminal read from the outside gives its modes as they are set, and holds nothing
+    /// afterwards: the end of the terminal is seen by whoever has the master as soon as the
+    /// program's own descriptors are gone, which is the whole of what a kablo terminal's
+    /// finishing depends on. The control is a descriptor kept open on purpose, which must read
+    /// as "not ended" — without it the end proves nothing.
+    #[test]
+    fn a_terminal_read_from_its_device_is_not_kept_open() {
+        let (master, slave, device) = pty_pair();
+        set_modes(&slave, false, false);
+        assert_eq!(
+            terminal_modes(device),
+            Some(TtyModes {
+                canonical: false,
+                echo: false
+            })
+        );
+        set_modes(&slave, true, true);
+        assert_eq!(
+            terminal_modes(device),
+            Some(TtyModes {
+                canonical: true,
+                echo: true
+            })
+        );
+        // Read again and again, it leaves nothing behind either.
+        for _ in 0..8 {
+            assert!(terminal_modes(device).is_some());
+        }
+        // The control: a second descriptor of the device is open, and the master waits.
+        let kept = std::fs::OpenOptions::new()
+            .read(true)
+            .open(terminal_path(device).expect("path"))
+            .expect("a second slave");
+        drop(slave);
+        assert!(
+            !master_says_end(&master),
+            "the control did not hold the terminal open"
+        );
+        drop(kept);
+        assert!(
+            master_says_end(&master),
+            "a descriptor of the device was left open"
+        );
+    }
+
+    /// A device that is not there, or is not a terminal, has no path and no modes.
+    #[test]
+    fn a_device_that_is_no_terminal_has_no_path() {
+        // Zero is "no terminal" ([`controlling_terminal`]), and on macOS the name of the console.
+        assert_eq!(terminal_modes(0), None);
+        assert_eq!(terminal_path(0), None);
+        assert_eq!(terminal_path(u64::MAX), None);
+    }
+
+    /// The pane's terminal read by its child's pid — what a stream without a master has — is
+    /// the one the master gives: the device the gate compares, the modes the remote login and
+    /// the raw check read, and the foreground group the view protocol compares with the shell's.
+    #[test]
+    fn a_panes_terminal_by_the_childs_pid_is_the_masters() {
+        let session = stty_session("-icanon -echo");
+        let pid = session.child_pid();
+        let read = || pane_tty(ShellParent::Direct, pid);
+        wait_until("`stty` not seen from the outside", || {
+            read().map(|tty| tty.modes)
+                == Some(TtyModes {
+                    canonical: false,
+                    echo: false,
+                })
+        });
+        assert_eq!(
+            pane_terminal(ShellParent::Direct, pid),
+            session.with_pty_fd(pty_device),
+            "the device a process in the pane is found by"
+        );
+        assert_eq!(
+            read().and_then(|tty| tty.foreground),
+            SystemTable.groups(pid).map(|groups| groups.own),
+            "the shell is in front: its group is the terminal's foreground"
+        );
+        // A pid that is nothing has no terminal.
+        assert_eq!(pane_terminal(ShellParent::Direct, u32::MAX - 1), None);
+        assert_eq!(pane_tty(ShellParent::Direct, u32::MAX - 1), None);
+        session.shutdown();
     }
 
     #[test]

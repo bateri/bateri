@@ -1217,3 +1217,52 @@ fn a_file_being_stored_does_not_make_a_pane_wait_for_another_file() {
     writing.join().expect("the writer ends");
     reading.join().expect("the reader ends");
 }
+
+// ─── the pane's tty, read for a pane that has no master ────────────────
+
+/// A stream's owner that says what the terminal its program is on is.
+struct TtyOps(Mutex<Option<crate::TtyReading>>);
+
+impl PtyOps for TtyOps {
+    fn resize(&self, _: BorrowedFd<'_>, _: crate::PtySize) {}
+    fn hangup(&self, _: u32, _: BorrowedFd<'_>) {}
+    fn winch(&self, _: BorrowedFd<'_>) {}
+    fn tty(&self, _: u32) -> Option<crate::TtyReading> {
+        *lock(&self.0)
+    }
+}
+
+/// The two checks of the hardening rules are made for a pane that runs in a terminal of this
+/// Mac as they are for one that holds a PTY: the shell is in front when its group is the
+/// terminal's foreground, and the modes are the program's. A terminal that cannot be read
+/// leaves both unknown, never "no" (a `hello` is not answered into a line editor on a guess).
+#[test]
+fn the_tty_of_a_streamed_pane_is_read_through_its_owner() {
+    let shell = Arc::new(Mutex::new(ShellLog::new(100)));
+    let ops = Arc::new(TtyOps(Mutex::new(None)));
+    // The child is the shell, a leader of its own group: 4242.
+    let observer = pane_observer(
+        shell,
+        Arc::new(Mutex::new(None)),
+        Some(Arc::clone(&ops) as Arc<dyn PtyOps>),
+        4242,
+        None,
+    );
+    let unread = observer();
+    assert_eq!(unread.shell_in_foreground, None);
+    assert_eq!(unread.tty_canonical_or_echo, None);
+
+    let reading = |foreground, canonical, echo| crate::TtyReading {
+        modes: crate::TtyModes { canonical, echo },
+        foreground,
+    };
+    *lock(&ops.0) = Some(reading(Some(4242), false, false));
+    let at_prompt = observer();
+    assert_eq!(at_prompt.shell_in_foreground, Some(true));
+    assert_eq!(at_prompt.tty_canonical_or_echo, Some(false));
+
+    *lock(&ops.0) = Some(reading(Some(9000), true, false));
+    let program = observer();
+    assert_eq!(program.shell_in_foreground, Some(false));
+    assert_eq!(program.tty_canonical_or_echo, Some(true));
+}

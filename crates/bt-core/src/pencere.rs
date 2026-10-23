@@ -70,6 +70,7 @@ pub use ::pencere::sandbox::{
 pub use ::pencere::session::{Action, Size, State, ViewSource, ViewStart};
 
 use crate::color::{Theme, srgb_bytes};
+use crate::session::PtyOps;
 use crate::shell::ShellLog;
 use crate::wake::Wake;
 
@@ -430,13 +431,15 @@ fn observed(editing: bool, remote: bool, tty: Option<Tty>, shell: Option<u32>) -
 }
 
 /// The observer of a pane: the shell's log for the prompt and the remote
-/// session, the master's copy for the tty. Each is read with its own leaf lock
+/// session, the master's copy for the tty (a stream's own reading of it, by the
+/// program's pid, where it has no master). Each is read with its own leaf lock
 /// and none is held while another is taken. `child_pid` is the pid of the
 /// pane's child, which `group` turns into the shell's group where the child is
 /// not the shell (`login(1)` on macOS).
 pub(crate) fn pane_observer(
     shell: Arc<Mutex<ShellLog>>,
     master: Arc<Mutex<Option<File>>>,
+    stream: Option<Arc<dyn PtyOps>>,
     child_pid: u32,
     group: Option<ShellGroup>,
 ) -> Observer {
@@ -448,6 +451,13 @@ pub(crate) fn pane_observer(
         };
         let tty = if remote {
             None
+        } else if let Some(ops) = &stream {
+            // No master: the terminal is read from the outside, by the program's pid. The
+            // frame being heard is the program writing, so the pid is its own.
+            ops.tty(child_pid).map(|reading| Tty {
+                foreground: reading.foreground,
+                canonical_or_echo: reading.modes.canonical || reading.modes.echo,
+            })
         } else {
             lock(&master)
                 .as_ref()
