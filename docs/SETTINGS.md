@@ -1724,9 +1724,12 @@ does nothing either and the terminal works as it is.
   it off leaves no trace.
 - **Real** OSC 133 marks set up by another tool are read even while it is
   `"off"`: the key means "do not set up the wrapper", not "ignore the marks".
-- When you move to a remote machine over SSH, our script is not there and the
-  marks do not come. This is not a fault; the terminal works in its usual
-  state.
+- When you move to a remote machine over a plain SSH, our script is not there and
+  the marks do not come. This is not a fault; the terminal works in its usual
+  state. A terminal the server keeps (see [Remote shell
+  integration](#remote-shell-integration)) is set up by a script of ours on the
+  server, and this key's choice goes with it: with `"blocks"` or `"off"` the
+  server's shell keeps its own line and prompt.
 
 **This key does not apply when you save, as the other keys do** — it is the
 one exception. Integration is set up when the shell **starts**, and by the
@@ -2060,6 +2063,14 @@ root). The pane shows that terminal as if `ssh` had run in it, so you log in
 the way you always did (the password, the second factor and the question
 whether to trust the server's key are asked in the pane), the dock shows
 `⇄ host`, and the directory (OSC 7) and then command blocks work remotely too.
+The line you type at the server's prompt is in the dock, as in a local tab —
+zsh, bash 4.4 or newer and fish: you click in it, select, edit it with ←, → and
+⌫, paste with ⌘V, and the grid does not show the line twice. The dock's bottom
+line stays what it was — `⇄ rasp  ~/app`, a short warning when the server's load
+passes a threshold — with no branch, no environment and no permanent gauge.
+Where you set `integration = "blocks"` (above), the server's shell keeps its own
+line and prompt, the way a local one does. While a command runs on the server, or
+in a full-screen program, the dock's line steps aside as it does locally.
 Where the connection drops — a Wi-Fi that goes, a laptop that sleeps — the
 terminal and what runs in it stay on the server, and the pane goes on from where
 it was when the connection is back. A second `ssh` to the same account rides
@@ -2098,8 +2109,8 @@ keeps, and where, in `~/Library/Application Support/bateri/session/` beside the
 saved windows; nothing secret is in it (no password, no key).
 
 While the connection is down the pane shows the terminal's last screen under a
-veil (the dock stays clear), without the caret, and the dock's context line says
-what is going on: `⇄ rasp  Reconnecting… · ⏎ try now`. Keys are not sent — the
+veil — the grid and the line you had typed in the dock — without the caret, and
+the dock's bottom line stays clear and says what is going on: `⇄ rasp  Reconnecting… · ⏎ try now`. Keys are not sent — the
 system beeps — except ⏎, which tries again at once instead of waiting out the
 pause (1 s, 2 s, up to 30 s), and scrolling through the screen still works.
 bateri also tries again the moment the Mac wakes up. A key or an agent signs in

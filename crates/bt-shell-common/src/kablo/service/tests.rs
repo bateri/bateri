@@ -1604,6 +1604,29 @@ fn a_screen_is_back_only_when_a_passive_one_goes_live() {
     }
 }
 
+/// Only the server's own word that the shell is in front lets the pane speak to the shell
+/// on its own: not a program, not a name it has not given, not a terminal another computer
+/// may have run a program in.
+#[test]
+fn the_shell_is_spoken_to_on_its_own_only_when_the_server_says_it_is_in_front() {
+    let shown = |program: Option<&str>| Shown {
+        account: "u@rasp:22".into(),
+        host: "rasp".into(),
+        argv: vec!["ssh".into(), "rasp".into()],
+        terminal: SessionId::new("t35").expect("an id"),
+        program: program.map(str::to_owned),
+        link: PaneLink::Live,
+        taken_by: None,
+    };
+    for shell in ["zsh", "-zsh", "bash", "fish"] {
+        assert!(shown(Some(shell)).shell_in_front(), "{shell}");
+    }
+    for other in ["vim", "npm", "python3", "sudo", ""] {
+        assert!(!shown(Some(other)).shell_in_front(), "{other:?}");
+    }
+    assert!(!shown(None).shell_in_front(), "the server has not said");
+}
+
 /// The computer waking up is the same as the user asking, for every account.
 #[test]
 fn waking_dials_the_accounts_that_wait_for_their_pause() {

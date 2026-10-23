@@ -12,6 +12,17 @@ of every installed copy. A version without a section is not released.
 
 ## [Unreleased]
 
+### Added
+
+- **The line you type on a server is in the dock.** In a terminal the server keeps
+  (the one a plain `ssh` opens when remote shell integration is on), the line at the
+  server's prompt now sits in the dock like it does in a local tab, in zsh, bash and
+  fish: click in it, select, edit it with ← → ⌫, paste into it, and it is no longer
+  shown a second time in the grid above. The dock's bottom line stays the short
+  `⇄ rasp  ~/app`. While the connection is down, the line you had typed dims with the
+  screen and the bottom line keeps saying `Reconnecting…`. `integration = "blocks"` leaves the
+  server's line to its shell, as it does locally.
+
 ### Fixed
 
 - **A server reached through a `ProxyCommand` stays reachable after its

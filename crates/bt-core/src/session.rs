@@ -10704,17 +10704,10 @@ impl Session {
         let changed = {
             let mut log = lock(&self.shell);
             let current = log.running_command() == Some(command) && log.context.remote.is_some();
-            if !current || log.context.server == server {
-                false
-            } else {
-                log.context.server = server;
-                // The pane stopped showing a server's terminal: its shell's line
-                // is not the dock's any more.
-                if !server {
-                    log.leave_remote_dock();
-                }
-                true
-            }
+            // Turning it on opens the remote dock's gate for what the shell's
+            // first prompt said before it ([`crate::shell::ShellLog::set_server`]);
+            // turning it off ends the shell's line as the dock's.
+            current && log.set_server(server)
         };
         if changed {
             self.request_frame();
@@ -12377,6 +12370,38 @@ impl Session {
     fn paste_refreshes(&self, bytes: &[u8]) -> bool {
         bytes.iter().any(|b| matches!(b, b'\n' | b'\r'))
             && self.dock_edit_line().is_some_and(|line| !line.grid)
+    }
+
+    /// Asks a **server shell's** editing widget to print its mirror again
+    /// ([`DOCK_REFRESH_COMMAND`]); `true` if the command went out.
+    ///
+    /// For the moment a screen is the terminal's again without the stream that drew it
+    /// (a connection that came back): the mirror the dock holds is the one of the last
+    /// event it heard, and the shell is the one who knows the line now. **The caller
+    /// asks the server first** that the shell is in front and that no other computer had
+    /// the terminal — what this session remembers of the prompt is from before the
+    /// connection went, and the bytes are keys to a program. The gate here is
+    /// [`Session::paste`]'s, exactly — the
+    /// remote dock is on, the widget is bound at this prompt (`w`), the line is a
+    /// mirrored one and the mirror answers the last input — because the bytes are
+    /// a command only at a prompt that binds them: a shell running a program would
+    /// read them as keys.
+    ///
+    /// Not user input: the selection stays, the window stays where the user scrolled it
+    /// and the generation does not advance, so the row does not fall back to the grid
+    /// for the round trip ([`Session::set_focus`]'s way of writing). bash and fish
+    /// have no mirror to ask for — their line is read from the grid at every frame
+    /// ([`ShellLog::dock_grid`]) — and take nothing from it.
+    pub fn refresh_dock(&self) -> bool {
+        if !lock(&self.shell).remote_dock_on() {
+            return false;
+        }
+        // A grid-read line (bash, fish) has no mirror to ask for.
+        if self.dock_edit_line().is_none_or(|line| line.grid) {
+            return false;
+        }
+        self.send(Msg::Input(DOCK_REFRESH_COMMAND.into()));
+        true
     }
 
     fn can_be_typed(&self, bytes: &[u8]) -> bool {
@@ -20096,8 +20121,12 @@ mod tests {
         assert_eq!(cursor.input_rows, 0, "no event yet: the context row alone");
 
         session.write(b"\n");
-        let (cells, cursor) = frame_until(&session, BUDGET, |_, cursor| {
-            cursor.input_rows > 0 && cursor.caret_in_dock
+        // The row appears with the widget's word (`w`) and the line leaves the grid with the
+        // mirror (`u`) a moment after: the frame is waited for with both.
+        let (cells, cursor) = frame_until(&session, BUDGET, |cells, cursor| {
+            cursor.input_rows > 0
+                && cursor.caret_in_dock
+                && !(0..cursor.rows).any(|row| row_glyphs(cells, row).contains("echo"))
         });
         assert!(
             !cursor.visible,
@@ -20126,6 +20155,94 @@ mod tests {
             generation,
             "the widget's command went to the shell"
         );
+        session.shutdown();
+    }
+
+    /// **The server's first prompt beats the pane's word that it is a server's
+    /// terminal**: the output of a fast login arrives before the probe's answer
+    /// and the registry's. The prompt's events were the shell's own and only
+    /// early — the dock opens on the prompt that is already on screen, with the line
+    /// that was typed into it.
+    #[test]
+    fn a_prompt_printed_before_the_pane_knows_its_server_gets_the_dock() {
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_remote_dock_session(Arc::clone(&wake));
+        session.write(b"\n");
+        assert_eq!(wake.wait_commands(1, Duration::from_secs(5)), 1);
+        let command = session.running_command().expect("running after `C`");
+        // The remote prompt and its events are on the stream, and the grid shows the
+        // line: nobody has said it is a server's terminal.
+        session.write(b"\n");
+        let (_, cursor) = frame_until(&session, BUDGET, |cells, cursor| {
+            (0..cursor.rows).any(|row| row_glyphs(cells, row).contains("echo"))
+        });
+        assert!(
+            !cursor.caret_in_dock || cursor.input_rows <= 1,
+            "{cursor:?}"
+        );
+
+        assert!(session.set_remote(command, Some(&RemoteTarget::ssh("prod"))));
+        assert!(session.set_server(command, true));
+        let (cells, cursor) = frame_until(&session, BUDGET, |_, cursor| {
+            cursor.input_rows > 0 && cursor.caret_in_dock
+        });
+        assert!(
+            !(0..cursor.rows).any(|row| row_glyphs(&cells, row).contains("echo")),
+            "the line left the grid"
+        );
+        assert!(dock_chars_with(&session, cursor.input_rows).contains("echofoobar"));
+        session.shutdown();
+    }
+
+    /// The refresh command goes out where the widget is bound and nowhere else, and
+    /// it is not input: the window stays and the mirror stays the shell's answer.
+    #[test]
+    fn a_server_shells_mirror_is_asked_for_again_only_where_its_widget_listens() {
+        let out = std::env::temp_dir().join(format!("bateri-refresh-{}", std::process::id()));
+        let remote_prompt = "\\033]133;A;bt_remote=1.9.1\\007\
+             \\033]8;;bateri://rblock/1.9.1\\007$ \\033]8;;\\007\
+             \\033]133;B;bt_remote=1.9.1\\007";
+        let remote_events = "\\033]8133;bt_remote=1.9.1;w\\007\
+             \\033]8133;bt_remote=1.9.1;u;12;;ZWNobyBmb28gYmFy;;;bWFpbg==\\007";
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_docked_session(
+            &format!(
+                "stty -echo -icanon min 1; printf '{}'; read _; printf '\\033]133;C\\007'; \
+                 printf '\\r\\n{remote_prompt}echo foo bar{remote_events}'; \
+                 dd bs=1 count=9 of='{}' 2>/dev/null; sleep 5",
+                anchored_prompt(1),
+                out.display(),
+            ),
+            Arc::clone(&wake),
+        );
+        assert!(!session.refresh_dock(), "a local prompt has no remote dock");
+        session.write(b"\n");
+        assert_eq!(wake.wait_commands(1, Duration::from_secs(5)), 1);
+        let command = session.running_command().expect("running after `C`");
+        assert!(session.set_remote(command, Some(&RemoteTarget::ssh("prod"))));
+        assert!(session.set_server(command, true));
+        let (_, cursor) = frame_until(&session, BUDGET, |_, cursor| {
+            cursor.input_rows > 0 && cursor.caret_in_dock
+        });
+        assert!(cursor.input_rows > 0);
+
+        let generation = session.key_gen.load(Ordering::Acquire);
+        assert!(session.refresh_dock());
+        assert_eq!(
+            session.key_gen.load(Ordering::Acquire),
+            generation,
+            "not user input: the mirror that answers it is still the answer to the last key"
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let sent = loop {
+            let sent = std::fs::read(&out).unwrap_or_default();
+            if sent.len() == 9 || Instant::now() > deadline {
+                break sent;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let _ = std::fs::remove_file(&out);
+        assert_eq!(sent, b"\x1b[8133~r\x07");
         session.shutdown();
     }
 

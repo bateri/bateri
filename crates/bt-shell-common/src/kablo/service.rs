@@ -237,6 +237,17 @@ impl Shown {
             .and_then(crate::program::identity::from_server)
     }
 
+    /// Whether the server has said that the shell itself is in front of the terminal
+    /// (`-zsh`, `bash`, `fish`). `false` while it has not said, and for a program: a
+    /// byte meant for a shell's line editor is a key to anything else. The pane asks
+    /// before it speaks to the shell on its own (`Session::refresh_dock`), because what
+    /// the pane remembers of the terminal is a picture from before the connection went.
+    pub fn shell_in_front(&self) -> bool {
+        self.program
+            .as_deref()
+            .is_some_and(crate::program::is_shell_name)
+    }
+
     /// What a question about closing the pane calls the program that would
     /// end: the program in front with the server it runs on (`npm on rasp`), or
     /// `None` when the shell is in front (waiting for a command) or the server

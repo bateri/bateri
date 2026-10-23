@@ -4415,14 +4415,33 @@ impl TerminalPane {
         self.ivars().link_veil.setHidden(!link.is_passive());
         self.place_link_veil();
         self.apply_connection();
-        // The screen came back, not the messages a program's view lives on: a view that
-        // is open is offered to the program again. Once per change, like everything above
-        // (`PaneLink::comes_back`): a reconnection's failed attempts are no news.
-        if before.comes_back(link)
-            && self.shows_view()
-            && let Some(session) = self.session().cloned()
-        {
-            self.restart_view_offered(&session);
+        // The screen came back — from a picture or a replay — and not the stream that
+        // drew it. Once per change, like everything above (`PaneLink::comes_back`): a
+        // reconnection's failed attempts are no news.
+        if before.comes_back(link) {
+            // The server shell's mirror of its line is the one of the last event this
+            // pane heard: the shell is asked to say it again. Not of a terminal another
+            // computer had (it may have started a program in it since) and only when the
+            // server itself says the shell is in front — what the session remembers of the
+            // prompt is a picture from before the connection went, and the bytes are
+            // keys to anything but a shell (bash and fish need nothing, their line is read
+            // from the grid at every frame).
+            if before != PaneLink::Taken
+                && let Some(session) = self.session()
+                && self
+                    .host()
+                    .kept_terminal(self.uuid())
+                    .is_some_and(|shown| shown.shell_in_front())
+            {
+                session.refresh_dock();
+            }
+            // Nor are the messages a program's view lives on back: a view that is open
+            // is offered to the program again.
+            if self.shows_view()
+                && let Some(session) = self.session().cloned()
+            {
+                self.restart_view_offered(&session);
+            }
         }
         self.offer_owed_view();
     }
@@ -4458,10 +4477,13 @@ impl TerminalPane {
         );
     }
 
-    /// The veil's frame: the pane without the dock's band, in the pane's own
-    /// (unflipped) points. The band is the grid's reserve for it
-    /// ([`bt_gpu::dock_px`], what "Jump to latest" stands on): the context row
-    /// at the bottom stays clear and keeps saying what is happening.
+    /// The veil's frame: the pane without the dock's context row, in the pane's own
+    /// (unflipped) points. The row is the one thing that stays clear and keeps
+    /// saying what is happening; everything above it is a picture of a moment that
+    /// has passed — the grid and, on a server's terminal that has the dock, the line
+    /// typed into its input row, which is why the frame stops at the context row
+    /// ([`grid::veil_clear_rows`]) and not at the whole share the grid reserves for the
+    /// dock ([`bt_gpu::dock_px`], what "Jump to latest" stands on).
     fn place_link_veil(&self) {
         let ivars = self.ivars();
         if ivars.link_veil.isHidden() {
@@ -4472,7 +4494,7 @@ impl TerminalPane {
         };
         let scale = window.backingScaleFactor();
         let dock = f64::from(bt_gpu::dock_px(
-            ivars.dock_rows.get(),
+            grid::veil_clear_rows(ivars.dock_rows.get()),
             self.cell_metrics(scale),
         )) / scale;
         let bounds = self.bounds();
@@ -7157,6 +7179,21 @@ mod tests {
         assert!(
             body.find("return;").expect("the return") < body.find("restart_view_offered(").unwrap()
         );
+        // The server shell's mirror is asked for at the same edge and under the same
+        // rule: a screen that is back is not the stream that drew it.
+        assert!(body.contains("session.refresh_dock()"));
+        // And only where the terminal was never another computer's and the server says the
+        // shell is in front: the bytes are keys to a program.
+        assert!(body.contains("before != PaneLink::Taken"));
+        assert!(body.contains("shown.shell_in_front()"));
+        assert!(
+            body.find("return;").expect("the return")
+                < body.find("session.refresh_dock()").unwrap()
+        );
+        assert!(
+            body.find("before.comes_back(link)").unwrap()
+                < body.find("session.refresh_dock()").unwrap()
+        );
         // The owed offer is asked wherever the server's word on the terminal can have come.
         for edge in [
             "pub(crate) fn set_connection(",
@@ -7167,6 +7204,22 @@ mod tests {
             let body = &pane[at..at + pane[at..].find("\n    }\n").expect("its end")];
             assert!(body.contains("self.offer_owed_view();"), "{edge}");
         }
+    }
+
+    /// The connection-lost veil stops at the dock's context row — the line typed into the
+    /// remote dock's input row is a picture of a moment that has passed, like the grid, and
+    /// the context row keeps saying what is going on. The measure is
+    /// [`grid::veil_clear_rows`] (its own test holds the arithmetic); this scan holds that the
+    /// frame asks it and not the dock's whole share. A source scan, because the pane needs a
+    /// window server.
+    #[test]
+    fn the_connection_veil_stops_at_the_context_row() {
+        let pane = include_str!("pane.rs");
+        let pane = &pane[..pane.find("#[cfg(test)]").unwrap_or(pane.len())];
+        let at = pane.find("fn place_link_veil(").expect("the placement");
+        let body = &pane[at..at + pane[at..].find("\n    }\n").expect("its end")];
+        assert!(body.contains("grid::veil_clear_rows(ivars.dock_rows.get())"));
+        assert!(!body.contains("dock_px(\n            ivars.dock_rows.get()"));
     }
 
     /// A pane handed over with a program's view over a terminal a server keeps owes that program

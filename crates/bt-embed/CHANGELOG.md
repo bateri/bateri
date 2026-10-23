@@ -22,13 +22,14 @@ commit. Pushing is a separate step.
 
 ### Changed
 
-- **The bash and fish script directories hold one file more each**: `dock.bash` beside
-  `bateri.bash`, and `dock.fish` beside `vendor_conf.d` (above it, where fish reads nothing by
-  itself). They are the dock's functions, which the shell scripts read; a host that copies the
-  directories `bt_pane_config_set_bash_scripts` and `bt_pane_config_set_fish_scripts` name,
-  whole, as it should, has nothing to do. A host that copies the named files one by one must add
-  them: without `dock.bash` a bash pane runs as it did, unmarked, and without `dock.fish` a fish
-  pane has the marks around its own prompt and no dock.
+- **The zsh, bash and fish script directories hold one file more each**: `dock.zsh` beside
+  `bateri.zsh`, `dock.bash` beside `bateri.bash`, and `dock.fish` beside `vendor_conf.d` (above
+  it, where fish reads nothing by itself). They are the dock's functions, which the shell scripts
+  read; a host that copies the directories `bt_pane_config_set_zsh_scripts`,
+  `bt_pane_config_set_bash_scripts` and `bt_pane_config_set_fish_scripts` name, whole, as it
+  should, has nothing to do. A host that copies the named files one by one must add them: without
+  `dock.zsh` or `dock.bash` the pane's shell runs as it did, unmarked, and without `dock.fish` a
+  fish pane has the marks around its own prompt and no dock.
 
 ## [0.2.0] - 2026-10-22
 

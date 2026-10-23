@@ -257,6 +257,20 @@ pub fn dock_rows_for(alt_screen: bool, remote: bool, birth: u16) -> u16 {
     }
 }
 
+/// The rows of the dock's band that the **connection-lost veil** leaves clear: the
+/// context row, alone, whatever the dock holds above it. The veil dims what is a picture
+/// of a moment that has passed — the grid and, on a server's terminal that has the dock,
+/// the line typed into its input row — and the context row at the bottom keeps saying what
+/// is going on (`Reconnecting…`), at full clarity.
+///
+/// A count of rows the pane's PTY share is made of ([`bt_gpu::dock_px`]'s argument), so the
+/// veil's frame and the dock's own band stay one measure: the context row, and none when the
+/// pane has no dock (`dock_rows == 0`). A share that is already that one row (a remote
+/// program on the alternate screen) is left as it is.
+pub fn veil_clear_rows(dock_rows: u16) -> u16 {
+    dock_rows.min(1)
+}
+
 #[cfg(test)]
 mod tests {
     use bt_core::ContentEdge;
@@ -284,6 +298,32 @@ mod tests {
     /// allows — the row arithmetic every test that is not about the fade asks
     /// about.
     const NO_TOP: f32 = 0.0;
+
+    /// The veil stops where the context row starts: for the dock's whole share (the input
+    /// row and the context row) it leaves exactly the context row's height, and it
+    /// leaves none where there is no dock to say anything.
+    #[test]
+    fn the_veil_leaves_the_context_row_clear_and_nothing_more() {
+        let cell = metrics(9, 18, 6);
+        let context_row = bt_gpu::dock_px(1, cell);
+        assert!(context_row > 0.0);
+        assert!(
+            bt_gpu::dock_px(DOCK_ROWS, cell) > context_row,
+            "the share is more than the context row, or this proves nothing"
+        );
+        // The dock's share, its alternate-screen one-row form and none.
+        assert_eq!(
+            bt_gpu::dock_px(veil_clear_rows(DOCK_ROWS), cell),
+            context_row
+        );
+        assert_eq!(bt_gpu::dock_px(veil_clear_rows(1), cell), context_row);
+        assert_eq!(bt_gpu::dock_px(veil_clear_rows(0), cell), 0.0);
+        // Whatever `dock_rows_for` gives a remote pane, in or out of a full-screen program.
+        for alt in [false, true] {
+            let rows = dock_rows_for(alt, true, DOCK_ROWS);
+            assert!(bt_gpu::dock_px(veil_clear_rows(rows), cell) <= context_row);
+        }
+    }
 
     #[test]
     fn cell_metrics_come_from_outside() {
