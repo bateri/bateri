@@ -78,6 +78,8 @@ pub(crate) struct Rig {
     pointer: PointerShapes,
     pub(crate) desk: Option<Desk>,
     pub(crate) input: Input,
+    /// What the desk counts of what passes between the program and the module.
+    pub(crate) flow: crate::flow::Flow,
 }
 
 impl Sink for Rig {
@@ -137,6 +139,7 @@ impl Rig {
         wasm_entry_limit: Option<u64>,
     ) -> (Arc<Self>, Arc<CountingWake>) {
         let wake = Arc::new(CountingWake::default());
+        let flow = crate::flow::Flow::new();
         let desk = observer.map(|observer| {
             let mut options = ViewOptions::new("bateri-test", "0.0.0");
             options.wasm_entry_limit = wasm_entry_limit;
@@ -144,7 +147,14 @@ impl Rig {
                 width: 800,
                 height: 600,
             };
-            Desk::new(options, Theme::BATERI, wake.clone(), observer)
+            Desk::new(
+                options,
+                Theme::BATERI,
+                wake.clone(),
+                observer,
+                flow.clone(),
+                Box::new(|| {}),
+            )
         });
         let rig = Arc::new(Self {
             hub: Hub::new(),
@@ -152,6 +162,7 @@ impl Rig {
             pointer: PointerShapes::default(),
             desk,
             input: Arc::default(),
+            flow,
         });
         (rig, wake)
     }
@@ -209,7 +220,13 @@ pub(crate) fn wire(
 
 /// The program's `hello`.
 pub(crate) fn hello() -> Vec<u8> {
-    wire("hello", 1, None, None, r#"{"versions":[1]}"#)
+    wire(
+        "hello",
+        1,
+        None,
+        None,
+        r#"{"versions":[1],"views":["wasm","web"]}"#,
+    )
 }
 
 /// What follows `"key":` in JSON text, up to the end of the text.
@@ -329,7 +346,7 @@ fn open_of_bundle(token: &str, meta: &str) -> Vec<u8> {
     let digest = Digest::of(PAGE).to_string();
     let open = format!(
         concat!(
-            r#"{{"token":"{token}","tool":{{"name":"list_containers","arguments":{{}}}},"#,
+            r#"{{"token":"{token}","view":"web","tool":{{"name":"list_containers","arguments":{{}}}},"#,
             r#""bundle":{{"entry":"index.html","files":[{{"path":"index.html","sha256":"{digest}","#,
             r#""size":{size},"type":"text/html"}}]{meta}}}}}"#
         ),
@@ -431,7 +448,7 @@ fn bare_open(token: &str) -> Vec<u8> {
         2,
         None,
         None,
-        &format!(r#"{{"token":"{token}","tool":{{"name":"t","arguments":{{}}}}}}"#),
+        &format!(r#"{{"token":"{token}","view":"web","tool":{{"name":"t","arguments":{{}}}}}}"#),
     )
 }
 
@@ -668,6 +685,17 @@ fn the_right_token_in_a_bye_ends_the_view_and_the_pane_is_written_nothing_after(
     assert_eq!(
         desk.apply(|_| {}, |conversation| conversation.state()),
         State::Ended
+    );
+    // The program waits for one answer to its `bye`, and reads up to it (§10.3).
+    let answer = pane.rig.written();
+    assert_eq!(answer.len(), 1, "{answer:?}");
+    assert_eq!(
+        (
+            answer[0].kind.as_str(),
+            answer[0].re(),
+            answer[0].payload.as_str()
+        ),
+        ("closed", Some(7), r#"{"reason":"program"}"#)
     );
     // The program is gone: the person's close, or anything else, writes nothing.
     desk.apply(pane.rig.write(), |conversation| conversation.close_view());
@@ -1238,7 +1266,7 @@ const COMPONENT: &[u8] = b"\0asm\x01\0\0\0";
 fn module_open(token: &str) -> Vec<u8> {
     let open = format!(
         concat!(
-            r#"{{"token":"{token}","program":"demopen","title":"Containers","#,
+            r#"{{"token":"{token}","view":"wasm","program":"demopen","title":"Containers","#,
             r#""bundle":{{"entry":"view.wasm","files":[{{"path":"view.wasm","sha256":"{digest}","#,
             r#""size":{size},"type":"application/wasm"}}]}}}}"#
         ),
@@ -1269,7 +1297,7 @@ fn open_a_module_view() -> (Pane, String, Arc<CountingWake>) {
     assert!(
         welcome[0]
             .payload
-            .contains(r#""features":["bundle","dismiss","wasm"]"#),
+            .contains(r#""features":["bundle","dismiss"],"views":["wasm","web"]"#),
         "{}",
         welcome[0].payload
     );
@@ -1311,6 +1339,62 @@ fn a_component_opens_a_view_of_its_kind_and_messages_go_between_it_and_the_progr
         (wrote[0].kind.as_str(), wrote[0].payload.as_str()),
         ("msg", said)
     );
+}
+
+#[test]
+fn what_the_program_says_for_the_module_is_counted_until_the_module_takes_it() {
+    let (mut pane, _, _) = open_a_module_view();
+    let rig = Arc::clone(&pane.rig);
+    let desk = rig.desk.as_ref().expect("a desk");
+    desk.take_views();
+    assert_eq!(rig.flow.inbox(), 0);
+    let text = r#"{"push":{"id":1,"value":{"readings":[]}}}"#;
+    pane.feed(&wire("msg", 4, None, None, text));
+    pane.feed(&wire("msg", 5, None, None, text));
+    assert_eq!(desk.take_views().len(), 2);
+    let counted = rig.flow.inbox();
+    assert!(counted >= 2 * text.len(), "{counted}");
+    rig.flow.taken(text.len());
+    assert!(rig.flow.inbox() < counted);
+    rig.flow.taken(text.len());
+    assert_eq!(rig.flow.inbox(), 0);
+}
+
+#[test]
+fn the_end_of_the_view_forgets_what_the_module_never_took() {
+    let (mut pane, token, _) = open_a_module_view();
+    let rig = Arc::clone(&pane.rig);
+    let desk = rig.desk.as_ref().expect("a desk");
+    desk.take_views();
+    let text = r#"{"push":{"id":1,"value":{"readings":[]}}}"#;
+    for id in 4..8 {
+        pane.feed(&wire("msg", id, None, None, text));
+    }
+    assert!(rig.flow.inbox() > 0);
+    // The module has said something the program has not read: that is forgotten too.
+    assert!(rig.flow.may_say(100));
+    let bye = format!(r#"{{"token":"{token}","reason":"signal"}}"#);
+    pane.feed(&wire("bye", 9, None, None, &bye));
+    assert_eq!(rig.flow.inbox(), 0);
+    assert!(rig.flow.pending() < 100, "{}", rig.flow.pending());
+}
+
+#[test]
+fn a_module_told_full_is_news_for_the_shell_once_like_any_other() {
+    let (pane, _, wake) = open_a_module_view();
+    let rig = Arc::clone(&pane.rig);
+    let desk = rig.desk.as_ref().expect("a desk");
+    desk.take_views();
+    let before = wake_count(&wake);
+    assert!(!desk.take_room());
+    desk.room_returned();
+    desk.room_returned();
+    assert_eq!(wake_count(&wake), before + 1, "once, however often");
+    assert!(desk.take_room());
+    assert!(!desk.take_room(), "taken");
+    // News for the shell again once it has taken the last.
+    desk.room_returned();
+    assert_eq!(wake_count(&wake), before + 2);
 }
 
 #[test]

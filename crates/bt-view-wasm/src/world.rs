@@ -16,7 +16,7 @@ use wasmtime::Store;
 use wasmtime::component::{Component, HasSelf, Linker};
 
 use crate::module::{Frame, Runner};
-use crate::sandbox::{self, Fault, Host, Limits};
+use crate::sandbox::{self, Fault, Host, Limits, Program};
 
 wasmtime::component::bindgen!({
     path: "wit",
@@ -30,15 +30,22 @@ use bateri::view::types as wit;
 impl bateri::view::types::Host for Host {}
 
 impl bateri::view::program::Host for Host {
-    fn send(&mut self, message: String) {
+    fn send(&mut self, message: String) -> bateri::view::program::Delivery {
+        use bateri::view::program::Delivery;
         let (messages, bytes) = self.allowed;
         if self.sent.len() >= messages || message.len() > bytes {
-            // Not kept, and the application closes the module when the call is over: a call
-            // cannot fill the program's input however it is written.
+            // Not kept, and the application closes the module when the call is over: these
+            // are limits on the work of a call, not on what the program can take.
             self.overflowed = true;
-            return;
+            return Delivery::Full;
+        }
+        // The program may not have read what it was told before. Not an error: the module
+        // keeps the message and is called again when the program has read.
+        if !self.program.may_say(message.len()) {
+            return Delivery::Full;
         }
         self.sent.push(message);
+        Delivery::Accepted
     }
 }
 
@@ -492,7 +499,11 @@ pub(crate) struct World {
 impl World {
     /// Compiles `bytes` (a component, binary or text) and starts it. The compiling is slow —
     /// the caller is on a thread of its own.
-    pub(crate) fn load(bytes: &[u8], limits: Limits) -> Result<Self, Fault> {
+    pub(crate) fn load(
+        bytes: &[u8],
+        limits: Limits,
+        program: Arc<dyn Program>,
+    ) -> Result<Self, Fault> {
         if bytes.len() > limits.component {
             return Err(Fault::Load(format!(
                 "the component is {} bytes; the most that is run is {}",
@@ -506,7 +517,7 @@ impl World {
         let mut linker = Linker::<Host>::new(&engine);
         View::add_to_linker::<Host, HasSelf<Host>>(&mut linker, |host| host)
             .map_err(|why| Fault::Load(format!("{why:#}")))?;
-        let mut store = sandbox::store(&engine, &limits);
+        let mut store = sandbox::store(&engine, &limits, program);
         // The module's own start runs under the start budget; what it does not offer to the
         // page is found out here (an import nobody gave).
         let view = sandbox::call(&mut store, limits.start, |store| {
@@ -581,6 +592,15 @@ impl Runner for World {
         reply_out(reply, &self.limits)
     }
 
+    fn room(&mut self) -> Result<Reply, Fault> {
+        let page = self.view.bateri_view_page();
+        let reply = sandbox::call(&mut self.store, self.limits.call, |store| {
+            page.call_room(store)
+        })?;
+        self.within_what_a_call_may_send()?;
+        reply_out(reply, &self.limits)
+    }
+
     fn take_sent(&mut self) -> Vec<String> {
         std::mem::take(&mut self.store.data_mut().sent)
     }
@@ -593,6 +613,7 @@ impl Runner for World {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sandbox::Unbounded;
 
     fn edges() -> wit::Edges {
         wit::Edges {
@@ -916,7 +937,7 @@ mod tests {
             message: 10,
             ..Limits::default()
         };
-        let mut host = Host::new(&limits);
+        let mut host = Host::new(&limits, Arc::new(Unbounded));
         host.send("{}".into());
         host.send(r#"{"a":1}"#.into());
         assert_eq!(host.sent, ["{}", r#"{"a":1}"#]);
@@ -925,9 +946,46 @@ mod tests {
         host.send("{}".into());
         assert!(host.overflowed);
         assert_eq!(host.sent.len(), 2);
-        let mut host = Host::new(&limits);
+        let mut host = Host::new(&limits, Arc::new(Unbounded));
         host.send(r#"{"too":"long"}"#.into());
         assert!(host.overflowed);
         assert!(host.sent.is_empty());
+    }
+
+    /// A program that has room for so many bytes in all.
+    struct Room(std::sync::atomic::AtomicUsize);
+
+    impl Program for Room {
+        fn may_say(&self, bytes: usize) -> bool {
+            self.0
+                .fetch_update(
+                    std::sync::atomic::Ordering::SeqCst,
+                    std::sync::atomic::Ordering::SeqCst,
+                    |left| left.checked_sub(bytes),
+                )
+                .is_ok()
+        }
+
+        fn taken(&self, _bytes: usize) {}
+    }
+
+    #[test]
+    fn a_program_without_the_room_makes_the_module_full_and_not_closed() {
+        use bateri::view::program::{Delivery, Host as _};
+        let mut host = Host::new(
+            &Limits::default(),
+            Arc::new(Room(std::sync::atomic::AtomicUsize::new(10))),
+        );
+        assert!(matches!(host.send("{}".into()), Delivery::Accepted));
+        // Not kept, and the module is not at fault: it is told, and keeps the message.
+        assert!(matches!(
+            host.send(r#"{"a":1234567}"#.into()),
+            Delivery::Full
+        ));
+        assert!(!host.overflowed);
+        assert_eq!(host.sent, ["{}"]);
+        // A smaller one still fits.
+        assert!(matches!(host.send(r#"{"a":1}"#.into()), Delivery::Accepted));
+        assert_eq!(host.sent.len(), 2);
     }
 }

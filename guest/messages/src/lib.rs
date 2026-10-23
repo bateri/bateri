@@ -25,9 +25,12 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// The most bytes one message may have: what the terminal carries between a program and its
-/// view (a message of the stream's protocol), less room for its own framing.
-pub const MAX_BYTES: usize = 64 << 10;
+/// The most bytes one message may have: the protocol's own limit for a message toward the
+/// program (1 MiB, specification §4.6). The terminal carries them as they are, and the same
+/// bound holds in the other direction so that one rule serves both. The sandbox holds a module to
+/// the same number (`bt_view_wasm::Limits::message`), and the demo program's tests pin the two to
+/// the protocol's.
+pub const MAX_BYTES: usize = 1 << 20;
 
 /// One message.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

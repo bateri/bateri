@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use bt_view::{Event, Font, Input, Key, Measure, Metrics, Mods, Point, Size};
 use wasmtime::component::Component;
 
-use crate::{Fault, Limits, Module, Update};
+use crate::{Fault, Limits, Module, Program, Unbounded, Update};
 
 fn component(name: &str) -> Option<Vec<u8>> {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -47,10 +47,15 @@ struct Open {
 }
 
 fn open(name: &str, limits: Limits) -> Option<Open> {
+    open_for(name, limits, Arc::new(Unbounded))
+}
+
+/// The module `name`, for `program`.
+fn open_for(name: &str, limits: Limits, program: Arc<dyn Program>) -> Option<Open> {
     let bytes = component(name)?;
     let (told, woken) = channel();
     let told = std::sync::Mutex::new(told);
-    let module = Module::from_component(bytes, limits, move || {
+    let module = Module::from_component(bytes, limits, program, move || {
         let _ = told.lock().unwrap().send(());
     });
     Some(Open {
@@ -342,7 +347,7 @@ fn a_component_over_the_size_the_application_runs_is_not_compiled() {
     };
     let (told, woken) = channel();
     let told = std::sync::Mutex::new(told);
-    let module = Module::from_component(bytes, limits, move || {
+    let module = Module::from_component(bytes, limits, Arc::new(Unbounded), move || {
         let _ = told.lock().unwrap().send(());
     });
     assert!(woken.recv_timeout(Duration::from_secs(20)).is_ok());
@@ -350,4 +355,172 @@ fn a_component_over_the_size_the_application_runs_is_not_compiled() {
         Some(Fault::Load(why)) => assert!(why.contains("bytes"), "{why}"),
         other => panic!("expected a refusal to load, got {other:?}"),
     }
+}
+
+/// A program that has room for so many messages, and counts the bytes the module has taken of
+/// what it said.
+struct Room {
+    left: std::sync::atomic::AtomicUsize,
+    taken: std::sync::atomic::AtomicUsize,
+}
+
+impl Room {
+    fn with(messages: usize) -> Arc<Self> {
+        Arc::new(Self {
+            left: std::sync::atomic::AtomicUsize::new(messages),
+            taken: std::sync::atomic::AtomicUsize::new(0),
+        })
+    }
+
+    fn add(&self, messages: usize) {
+        self.left
+            .fetch_add(messages, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl Program for Room {
+    fn may_say(&self, _bytes: usize) -> bool {
+        self.left
+            .fetch_update(
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+                |left| left.checked_sub(1),
+            )
+            .is_ok()
+    }
+
+    fn taken(&self, bytes: usize) {
+        self.taken
+            .fetch_add(bytes, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// The numbers of the messages `chatty` has said, in the order it said them.
+fn numbers(sent: &[String]) -> Vec<u64> {
+    sent.iter()
+        .map(|text| {
+            text.split("\"n\":")
+                .nth(1)
+                .and_then(|rest| rest.split('}').next())
+                .and_then(|n| n.parse().ok())
+                .unwrap_or(0)
+        })
+        .collect()
+}
+
+/// A module that is told its program has no room is not closed: it keeps the message it was told
+/// *full* to, says nothing more until it is called, and says that one first when it is. It is
+/// called once for each time, and nothing is lost or said twice.
+#[test]
+fn a_module_told_full_keeps_what_it_meant_to_say_and_goes_on_when_it_is_called_for_room() {
+    let program = Room::with(10);
+    let Some(mut page) = open_for("chatty", Limits::default(), program.clone()) else {
+        return;
+    };
+    // Called for room before it has said anything: it has nothing to go on with.
+    page.module.room();
+    page.until(Duration::from_millis(300), |_| false);
+    assert!(page.seen.sent.is_empty());
+    assert!(page.seen.closed.is_none());
+
+    page.module.message("go".to_owned());
+    // (The first message waits for the component to be compiled.)
+    page.until(Duration::from_secs(30), |update| {
+        !update.sent.is_empty() || update.closed.is_some()
+    });
+    page.until(Duration::from_millis(300), |_| false);
+    assert_eq!(numbers(&page.seen.sent), (1..=10).collect::<Vec<_>>());
+    assert_eq!(
+        program.taken.load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "the module took the two bytes of what the program said"
+    );
+
+    // Room for five: it goes on from the message it was told full to, not from the next.
+    program.add(5);
+    page.module.room();
+    page.until(Duration::from_millis(500), |_| false);
+    assert_eq!(numbers(&page.seen.sent), (1..=15).collect::<Vec<_>>());
+    assert!(page.seen.closed.is_none());
+
+    // Room for everything: one call says as many as a call of the page says, and no more until
+    // it is called again — and it is not closed for it.
+    program.add(1_000);
+    page.module.room();
+    page.until(Duration::from_millis(500), |_| false);
+    assert_eq!(numbers(&page.seen.sent), (1..=45).collect::<Vec<_>>());
+    page.module.room();
+    page.until(Duration::from_millis(500), |_| false);
+    assert_eq!(numbers(&page.seen.sent), (1..=75).collect::<Vec<_>>());
+    assert!(page.seen.closed.is_none());
+    assert!(page.module.poll().closed.is_none());
+}
+
+/// The data and the number a chunk of the container list's payload carries, and whether it is the
+/// last.
+fn chunk_of(text: &str) -> (u64, usize, bool) {
+    let after = |key: &str| text.split(key).nth(1).expect("a member");
+    let seq = after(r#""seq":"#)
+        .split([',', '}'])
+        .next()
+        .and_then(|n| n.parse().ok())
+        .expect("a number");
+    let data = after(r#""data":""#).split('"').next().expect("data").len();
+    let last = after(r#""last":"#).starts_with("true");
+    (seq, data, last)
+}
+
+/// Shift-U on the container list sends its program 4 MiB in chunks, as far as the program has the
+/// room: it is told *full*, keeps the chunk, goes on when called for room, and in the end every
+/// byte is said once, in order, the last chunk saying so.
+#[test]
+fn the_container_list_sends_its_payload_as_fast_as_its_program_has_room_and_loses_none() {
+    let program = Room::with(1 /* the subscription */ + 3);
+    let Some(mut page) = open_for("containers", Limits::default(), program.clone()) else {
+        return;
+    };
+    page.module.render(SIZE, 0.0, false);
+    page.until(Duration::from_secs(30), |u| {
+        u.frame.is_some() || u.closed.is_some()
+    });
+    // A page nobody opened has no one to send the payload to; this one is told its program is
+    // there by its first word.
+    page.module
+        .message(r#"{"push":{"id":1,"value":{"readings":[]}}}"#.to_owned());
+    page.module.event(Event::Input(Input::Key {
+        key: Key::Char('U'),
+        mods: Mods::default(),
+    }));
+    page.until(Duration::from_millis(500), |_| false);
+    let chunks = |sent: &[String]| -> Vec<(u64, usize, bool)> {
+        sent.iter()
+            .filter(|text| text.contains(r#""method":"upload""#))
+            .map(|text| chunk_of(text))
+            .collect()
+    };
+    assert_eq!(
+        chunks(&page.seen.sent).len(),
+        3,
+        "three chunks, then told full"
+    );
+
+    // The program reads; the page is called for room and goes on, a few chunks in a call and the
+    // next call being its next frame. Nothing is closed.
+    let mut calls = 0;
+    while chunks(&page.seen.sent).last().is_none_or(|last| !last.2) {
+        calls += 1;
+        assert!(calls < 200, "the payload never ended");
+        program.add(1_000);
+        page.module.room();
+        page.module.render(SIZE, f64::from(calls) * 0.016, false);
+        page.until(Duration::from_millis(100), |_| false);
+        assert!(page.seen.closed.is_none(), "{:?}", page.seen.closed);
+    }
+    let all = chunks(&page.seen.sent);
+    assert_eq!(
+        all.iter().map(|c| c.0).collect::<Vec<_>>(),
+        (1..=all.len() as u64).collect::<Vec<_>>()
+    );
+    assert_eq!(all.iter().map(|c| c.1).sum::<usize>(), 4 << 20);
+    assert_eq!(all.iter().filter(|c| c.2).count(), 1);
 }

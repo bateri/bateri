@@ -86,6 +86,7 @@ use crate::cluster::{ClusterId, Clusters};
 use crate::color::{self, LinearRgba, Theme};
 use crate::commands::{CommandId, CommandPhase, CommandState, command_state};
 use crate::dock::{self, Dock, DockBudget, DockCols, DockEdit, DockPoint};
+use crate::flow::Flow;
 use crate::graphics::{self, Hub, Pictures};
 use crate::grid_input;
 use crate::handler::{ClusterHandler, KeptModes, resize_report};
@@ -2073,6 +2074,11 @@ struct AdapterInner {
     /// held. The desk's observer takes the shell's log and the master's copy,
     /// each with the slot not held.
     desk: Option<Desk>,
+    /// What passes between the program and the module of its view, and how fast
+    /// ([`crate::flow`]): the bytes the writer has not written are counted by the loop's
+    /// channel (every message to the loop's write queue goes through it) and by the loop that
+    /// writes them.
+    flow: Flow,
     /// Whether the application's questions go unanswered ([`Adapter::reply`])
     /// and its clipboard writes are dropped: set while an adopted pane's
     /// carried prefix is parsed under [`AdoptMode::Bound`] — that output was
@@ -2108,6 +2114,7 @@ impl Adapter {
         theme: Theme,
         blink: CursorBlink,
         desk: Option<Desk>,
+        flow: Flow,
     ) -> Self {
         Self(Arc::new(AdapterInner {
             wake,
@@ -2128,6 +2135,7 @@ impl Adapter {
             search_pending: AtomicBool::new(false),
             child_exited: AtomicBool::new(false),
             desk,
+            flow,
             muted: AtomicBool::new(false),
             graphics: Hub::new(),
             modes: KeptModes::default(),
@@ -2234,6 +2242,19 @@ impl Adapter {
         if let Some(sender) = self.0.sender.get() {
             // The channel dies only on shutdown; staying silent on that path is right.
             let _ = sender.send(Msg::Input(bytes.into()));
+        }
+    }
+
+    /// Puts the module's words (frames of the protocol) on the writer's queue for them. Not
+    /// the key queue: they are written behind every key, and dropped when the program can no
+    /// longer be their reader ([`Flow::module_may_write`]). `epoch` is the view they were said
+    /// for.
+    fn module_input(&self, epoch: u64, bytes: Vec<u8>) {
+        if bytes.is_empty() {
+            return;
+        }
+        if let Some(sender) = self.0.sender.get() {
+            let _ = sender.send(Msg::Module { epoch, bytes });
         }
     }
 
@@ -5476,6 +5497,7 @@ impl Session {
         // after a save inside a session and silently ignored in a fresh window.
         //
         // **Before** `TappedPty`: the first input goes through its channel.
+        let flow = Flow::new();
         let desk = options.views.take().map(|views| {
             // How the shell is found (`login(1)` forks it on macOS) goes to the observer; the
             // content area is the application's word, in the unit a view is told it in.
@@ -5485,6 +5507,8 @@ impl Session {
                 options.theme,
                 Arc::clone(&wake),
                 pencere::pane_observer(Arc::clone(&shell), Arc::clone(&master), child_pid, group),
+                flow.clone(),
+                pencere::pane_discard(Arc::clone(&shell), Arc::clone(&master)),
             )
         });
         let adapter = Adapter::new(
@@ -5493,6 +5517,7 @@ impl Session {
             options.theme,
             options.terminal.blink,
             desk,
+            flow.clone(),
         );
         // The first input's two delivery paths: in a session with a
         // wrapper, on the reader thread at our first identified `A`; without a
@@ -5579,10 +5604,45 @@ impl Session {
             options.cluster,
         )?;
         event_loop.graphics(Arc::new(adapter.clone()));
+        // What the program and the module of its view say to each other is held to what the
+        // other can take: the loop leaves the PTY unread while the module has not taken what
+        // it was sent, and writes what the module says as fast as the program reads it. The
+        // channel counts what it queues for the loop (so it is made after the flow is fitted).
+        // The two wakes go the other way — to the loop through its channel (as the journal's
+        // room does), and to the shell through the desk, which the adapter holds: weakly,
+        // because the adapter holds the flow.
+        event_loop.flow(flow.clone());
+        // …and asks, before it writes a word of the module's, whether the program is still the
+        // one that reads the tty.
+        event_loop.module_check({
+            let adapter = Arc::downgrade(&adapter.0);
+            move || {
+                adapter
+                    .upgrade()
+                    .and_then(|adapter| adapter.desk.as_ref().map(Desk::module_may_go))
+                    .unwrap_or(true)
+            }
+        });
         let sender = event_loop.channel();
         // The channel is born only here; since the adapter's copies share the
         // same body a single `set` binds them all.
         let _ = adapter.0.sender.set(sender.clone());
+        flow.on_reader({
+            let sender = sender.clone();
+            move || {
+                let _ = sender.send(Msg::Room);
+            }
+        });
+        flow.on_room({
+            let adapter = Arc::downgrade(&adapter.0);
+            move || {
+                if let Some(adapter) = adapter.upgrade()
+                    && let Some(desk) = &adapter.desk
+                {
+                    desk.room_returned();
+                }
+            }
+        });
         // The compaction's room wakes the loop through its channel.
         if let Some(journal) = &journal {
             event_loop.journal(Arc::clone(journal));
@@ -11882,11 +11942,33 @@ impl Session {
     /// view's own failure, the program's end — nothing is written, so a message that arrives
     /// late can never land in the shell's input as keystrokes. Whether it was written.
     pub fn module_message(&self, text: &str) -> bool {
-        self.adapter
-            .0
-            .desk
-            .as_ref()
-            .is_some_and(|desk| desk.module_message(text, |bytes| self.adapter.input(bytes)))
+        let flow = &self.adapter.0.flow;
+        // The gate on the module's words: shut by a signal character on its way to the program
+        // and by the end of the view, before the pane has heard of either. Nothing is queued
+        // through a shut gate, and what is queued carries the number of the view.
+        let wrote = flow.module_ticket().is_some_and(|epoch| {
+            self.adapter.0.desk.as_ref().is_some_and(|desk| {
+                desk.module_message(text, |bytes| self.adapter.module_input(epoch, bytes))
+            })
+        });
+        // The module said it to the flow's count before it reached here; what was written is
+        // in the writer's queue now, and what was not (the view is over) is not owed to anyone.
+        flow.said(text.len());
+        wrote
+    }
+
+    /// What passes between the program of this pane and the module of its view, and how fast
+    /// ([`Flow`]): the module asks it whether it may say more ([`Flow::may_say`]) and tells it
+    /// what it has taken of the program's messages ([`Flow::taken`]). The same one for the
+    /// whole life of the pane.
+    pub fn flow(&self) -> Flow {
+        self.adapter.0.flow.clone()
+    }
+
+    /// Whether a module that was told its program cannot take more may say again; clears it
+    /// ([`Wake::view_changed`] says when to ask, along with the view's other news).
+    pub fn take_room(&self) -> bool {
+        self.adapter.0.desk.as_ref().is_some_and(Desk::take_room)
     }
 
     /// A WebAssembly view ended on its own failure (its module trapped, went over a limit or
@@ -30836,6 +30918,616 @@ e\\314\\201.'; sleep 5";
         });
         session.close_view();
         assert!(wake.wait_exit(Duration::from_secs(20)).is_some());
+        session.shutdown();
+    }
+
+    /// A pane running the demo program with `args` (`make guest` builds it; `None` where it is
+    /// not), whose desk opens WebAssembly views when `modules` and web views alone when not.
+    fn demo_pane(args: &[&str], modules: bool) -> Option<(Arc<TestWake>, Session)> {
+        let program =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../guest/dist/demopen");
+        if !program.is_file() {
+            eprintln!("skipped: {} is not built (`make guest`)", program.display());
+            return None;
+        }
+        // `set -m` makes the program a job of its own: the tty's foreground group is not the
+        // shell's, as for a command a shell started.
+        let mut command = vec![
+            "-c".to_owned(),
+            "set -m; \"$@\"".to_owned(),
+            "sh".to_owned(),
+            program.display().to_string(),
+        ];
+        command.extend(args.iter().map(|arg| (*arg).to_owned()));
+        let mut options = test_options(("/bin/sh".into(), command), 80);
+        let mut views = ViewOptions::new("bateri-test", "0.0.0");
+        views.wasm_entry_limit = modules.then_some(4 << 20);
+        options.views = Some(views);
+        let wake = Arc::new(TestWake::default());
+        let session = Session::spawn(options, Arc::clone(&wake) as Arc<dyn Wake>).unwrap();
+        Some((wake, session))
+    }
+
+    /// Waits for the view of the demo program to start.
+    fn wait_for_the_view(session: &Session) {
+        use crate::pencere::Action;
+        wait_until("the view to start", Duration::from_secs(20), || {
+            session
+                .take_view_actions()
+                .iter()
+                .any(|action| matches!(action, Action::StartView(_)))
+        });
+    }
+
+    /// The screen's rows, trailing blanks trimmed, joined.
+    fn the_screen(session: &Session) -> String {
+        (0..10)
+            .map(|line| line_text(session, line))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// A program that pushes as fast as it can, and a module that takes none of it: the reader
+    /// leaves the PTY unread when the module has not taken the last of what was sent, so the
+    /// program's own write waits and the inbox stays where it is — and ⌃C, which goes the other
+    /// way, still reaches the program, which ends and takes its view with it.
+    #[test]
+    fn a_program_that_floods_its_module_waits_for_it_and_an_interrupt_still_reaches_it() {
+        use crate::pencere::Action;
+        let Some((wake, session)) = demo_pane(&["--flood"], true) else {
+            return;
+        };
+        wait_for_the_view(&session);
+        let flow = session.flow();
+        assert!(session.module_message(r#"{"subscribe":{"id":1,"topic":"stats"}}"#));
+
+        // The program floods; nothing takes it. The reader stops: the inbox stops growing, at the
+        // bound and one read over it at the most.
+        wait_until("the inbox to fill", Duration::from_secs(20), || {
+            flow.inbox() >= crate::INBOX_LIMIT
+        });
+        std::thread::sleep(Duration::from_millis(300));
+        let held = flow.inbox();
+        std::thread::sleep(Duration::from_millis(700));
+        assert_eq!(
+            flow.inbox(),
+            held,
+            "the reader read on while the module took nothing"
+        );
+        assert!(
+            held <= crate::INBOX_LIMIT + (256 << 10),
+            "{held} bytes waiting for the module, over the bound {} by more than a read",
+            crate::INBOX_LIMIT
+        );
+
+        // The key the person presses: the reader is waiting for the module, and the key gets to
+        // the program all the same — written to the PTY while the inbox is still full.
+        session.write(&[0x03]);
+        wait_until("the key to be written", Duration::from_secs(10), || {
+            flow.pending() == 0
+        });
+        assert_eq!(
+            flow.inbox(),
+            held,
+            "the key was written by a reader that read on"
+        );
+        // The program has the key and is leaving, but the tty will not let it go with what it
+        // wrote unread: it ends when the module has taken what it was sent and the reader reads
+        // on. The module takes it now.
+        let mut destroyed = false;
+        let mut left = None;
+        wait_until(
+            "the program to end at ⌃C",
+            Duration::from_secs(20),
+            || {
+                for action in session.take_view_actions() {
+                    match action {
+                        Action::ToView(text) => flow.taken(text.len()),
+                        Action::DestroyView => destroyed = true,
+                        _ => {}
+                    }
+                }
+                left = wake.wait_exit(Duration::from_millis(10));
+                left.is_some()
+            },
+        );
+        assert_eq!(left, Some(Some(130)));
+        // The view goes with the program and nothing is left counted for a module that is gone.
+        wait_until("the view to end", Duration::from_secs(20), || {
+            destroyed |= session
+                .take_view_actions()
+                .iter()
+                .any(|action| matches!(action, Action::DestroyView));
+            destroyed
+        });
+        assert_eq!(flow.inbox(), 0);
+        session.shutdown();
+    }
+
+    /// A program that floods a module that is slow but there gets everything it pushes, and the
+    /// module never has more waiting for it than the bound and a read.
+    #[test]
+    fn a_slow_module_is_given_all_that_a_flooding_program_pushes_and_never_more_than_it_can_hold() {
+        use crate::pencere::Action;
+        let Some((wake, session)) = demo_pane(&["--flood"], true) else {
+            return;
+        };
+        wait_for_the_view(&session);
+        let flow = session.flow();
+        assert!(session.module_message(r#"{"subscribe":{"id":1,"topic":"stats"}}"#));
+        let mut taken = 0_usize;
+        let mut widest = 0_usize;
+        let began = Instant::now();
+        // A module that takes a message every few milliseconds, for a couple of seconds.
+        while began.elapsed() < Duration::from_secs(3) {
+            widest = widest.max(flow.inbox());
+            let actions = session.take_view_actions();
+            let mut messages = Vec::new();
+            for action in actions {
+                if let Action::ToView(text) = action {
+                    messages.push(text);
+                }
+            }
+            for text in messages {
+                assert!(
+                    text.starts_with(r#"{"push":{"id":1,"value":{"readings":["#),
+                    "{text}"
+                );
+                flow.taken(text.len());
+                taken += 1;
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(taken > 500, "only {taken} readings in three seconds");
+        assert!(
+            widest <= crate::INBOX_LIMIT + (256 << 10),
+            "{widest} bytes waiting for the module at the most"
+        );
+        session.write(&[0x03]);
+        let mut left = None;
+        wait_until(
+            "the program to end at ⌃C",
+            Duration::from_secs(20),
+            || {
+                for action in session.take_view_actions() {
+                    if let Action::ToView(text) = action {
+                        flow.taken(text.len());
+                    }
+                }
+                left = wake.wait_exit(Duration::from_millis(10));
+                left.is_some()
+            },
+        );
+        assert_eq!(left, Some(Some(130)));
+        session.shutdown();
+    }
+
+    /// A page with a lot to say: the demo program is sent 4 MiB in chunks by a page that is told
+    /// *full* by the pane's flow when the program has not read what it was sent, waits to be told
+    /// there is room, and goes on. Every byte arrives, the program counts them and says how many
+    /// when it leaves.
+    #[test]
+    fn a_page_sends_its_program_a_large_payload_in_chunks_and_the_program_counts_every_byte() {
+        use crate::pencere::Action;
+        let Some((wake, session)) = demo_pane(&[], true) else {
+            return;
+        };
+        wait_for_the_view(&session);
+        let flow = session.flow();
+        let total: usize = 4 << 20;
+        let chunk: usize = 48 << 10;
+        let chunks = total.div_ceil(chunk);
+        let mut told_full = 0;
+        let mut answers = Vec::new();
+        for seq in 1..=chunks {
+            let size = chunk.min(total - (seq - 1) * chunk);
+            let text = format!(
+                r#"{{"call":{{"id":{seq},"method":"upload","params":{{"seq":{seq},"data":"{}","last":{}}}}}}}"#,
+                "x".repeat(size),
+                seq == chunks
+            );
+            while !flow.may_say(text.len()) {
+                told_full += 1;
+                // The module waits to be called for room: the shell is told, and takes it.
+                wait_until("room for the page", Duration::from_secs(20), || {
+                    session.take_room()
+                });
+            }
+            assert!(session.module_message(&text));
+            for action in session.take_view_actions() {
+                if let Action::ToView(text) = action {
+                    flow.taken(text.len());
+                    answers.push(text);
+                }
+            }
+        }
+        assert!(
+            told_full > 0,
+            "the page was never told the program had no room"
+        );
+        wait_until("the program's answer", Duration::from_secs(20), || {
+            for action in session.take_view_actions() {
+                if let Action::ToView(text) = action {
+                    flow.taken(text.len());
+                    answers.push(text);
+                }
+            }
+            answers.iter().any(|text| text.contains(r#""response""#))
+        });
+        let answer = answers
+            .iter()
+            .find(|text| text.contains(r#""response""#))
+            .unwrap();
+        assert!(
+            answer.contains(&format!(r#""result":{{"bytes":{total}}}"#)),
+            "{answer}"
+        );
+
+        // The person ends the program; it says how many bytes the view sent, as it leaves.
+        session.write(&[0x03]);
+        assert_eq!(wake.wait_exit(Duration::from_secs(20)), Some(Some(130)));
+        let line = format!("demopen: the view sent {total} bytes");
+        wait_until("the program's count", Duration::from_secs(10), || {
+            the_screen(&session).contains(&line)
+        });
+        session.shutdown();
+    }
+
+    /// A pane running the demo program with `args` and then a reader, as a shell runs a command
+    /// and then reads the tty for the next one. The reader waits for a second and writes what it
+    /// read, in hex, to the returned file, which appears when it is done. `marks` has the wrapper
+    /// say where the command begins and ends, as shell integration does, so that the pane learns
+    /// the program ended from the shell and not from the program. `lag` is how long the shell
+    /// takes to draw its prompt before it reads: zero is a reader that is already there. With
+    /// `shell_reads` the reader is the shell itself (it `exec`s the reader, so the foreground
+    /// group of the tty is the shell's, as it is when a shell reads) and the file is the raw
+    /// bytes, complete when the pane's child has ended.
+    fn demo_pane_then_reader(
+        name: &str,
+        args: &[&str],
+        marks: bool,
+        lag: &str,
+        shell_reads: bool,
+    ) -> Option<(TempDir, std::path::PathBuf, Arc<TestWake>, Session)> {
+        let program =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../guest/dist/demopen");
+        if !program.is_file() {
+            eprintln!("skipped: {} is not built (`make guest`)", program.display());
+            return None;
+        }
+        let dir = TempDir::new(name);
+        let out = dir.0.join("read-after");
+        let begin = if marks {
+            "printf '\\033]133;A;bt_block=1\\007\\033]133;C\\007'"
+        } else {
+            ":"
+        };
+        let end = if marks {
+            "printf '\\033]133;D;%s;bt_block=1\\007' \"$code\""
+        } else {
+            ":"
+        };
+        let reader = if shell_reads {
+            "exec dd bs=4096 count=100 of=\"$out\" 2>/dev/null"
+        } else {
+            "dd bs=4096 count=100 2>/dev/null | od -An -tx1 | tr -d ' \\n' > \"$out.tmp\"; \
+             mv \"$out.tmp\" \"$out\"; sleep 30"
+        };
+        let script = format!(
+            "set -m; out=\"$1\"; shift; {begin}; \"$@\"; code=$?; {end}; sleep {lag}; \
+             stty -icanon -echo min 0 time 10; {reader}"
+        );
+        let mut command = vec![
+            "-c".to_owned(),
+            script,
+            "sh".to_owned(),
+            out.display().to_string(),
+            program.display().to_string(),
+        ];
+        command.extend(args.iter().map(|arg| (*arg).to_owned()));
+        let mut options = test_options(("/bin/sh".into(), command), 80);
+        let mut views = ViewOptions::new("bateri-test", "0.0.0");
+        views.wasm_entry_limit = Some(4 << 20);
+        options.views = Some(views);
+        let wake = Arc::new(TestWake::default());
+        let session = Session::spawn(options, Arc::clone(&wake) as Arc<dyn Wake>).unwrap();
+        Some((dir, out, wake, session))
+    }
+
+    /// The page of the view, played: it keeps saying chunks of a payload to its program, as a
+    /// page does until it hears its view is over, and takes what the program says only when the
+    /// test lets it.
+    struct Chatter<'a> {
+        session: &'a Session,
+        calls: u64,
+    }
+
+    impl<'a> Chatter<'a> {
+        fn new(session: &'a Session) -> Self {
+            Self { session, calls: 0 }
+        }
+
+        /// Says chunks while the program has room for them (what the pane's flow answers), as the
+        /// module in the sandbox would, and hands them to the pane the way the shell does. How
+        /// many the pane wrote.
+        fn say(&mut self) -> usize {
+            let flow = self.session.flow();
+            let mut wrote = 0;
+            for _ in 0..8 {
+                let data = "x".repeat(20 << 10);
+                self.calls += 1;
+                let call = self.calls;
+                let text = format!(
+                    r#"{{"call":{{"id":{call},"method":"upload","params":{{"seq":{call},"data":"{data}","last":false}}}}}}"#
+                );
+                if !flow.may_say(text.len()) {
+                    break;
+                }
+                if self.session.module_message(&text) {
+                    wrote += 1;
+                }
+            }
+            wrote
+        }
+
+        /// The module takes what the program said.
+        fn take(&self) {
+            for action in self.session.take_view_actions() {
+                if let crate::pencere::Action::ToView(text) = action {
+                    self.session.flow().taken(text.len());
+                }
+            }
+        }
+    }
+
+    /// What the reader that came after the program read in its second, in hex: nothing is `""`.
+    fn read_after(out: &std::path::Path) -> Option<String> {
+        std::fs::read_to_string(out).ok()
+    }
+
+    /// The reader that came after the program found nothing in the tty.
+    fn found(out: &std::path::Path) {
+        let read = read_after(out).expect("the reader is done");
+        assert!(
+            read.is_empty(),
+            "the next reader found {} bytes of input: {}",
+            read.len() / 2,
+            &read[..read.len().min(80)]
+        );
+    }
+
+    /// A page that has said a lot to a program that does not read — the reader of the pane waits
+    /// for a module that takes nothing, the program is stuck in its own write, and 256 KiB of the
+    /// page's words wait in the writer — and ⌃C. The character goes out ahead of them and they are
+    /// dropped; the page that goes on saying chunks until it hears the view ended is refused. After
+    /// the program has gone, what reads the tty next finds nothing in it.
+    #[test]
+    fn what_the_page_said_never_reaches_what_reads_the_tty_after_an_interrupt() {
+        let Some((_dir, out, _wake, session)) =
+            demo_pane_then_reader("leak-interrupt", &["--flood"], false, "0", false)
+        else {
+            return;
+        };
+        wait_for_the_view(&session);
+        let flow = session.flow();
+        assert!(session.module_message(r#"{"subscribe":{"id":1,"topic":"stats"}}"#));
+        let mut page = Chatter::new(&session);
+        wait_until(
+            "a backlog of the page's words",
+            Duration::from_secs(20),
+            || {
+                page.say();
+                flow.pending() >= (200 << 10)
+            },
+        );
+
+        session.write(&[0x03]);
+        // The page goes on until it hears: nothing it says is written.
+        for _ in 0..20 {
+            assert_eq!(page.say(), 0, "a chunk was written after ⌃C");
+        }
+        wait_until(
+            "the program to end and the next reader to read",
+            Duration::from_secs(30),
+            || {
+                page.take();
+                page.say();
+                read_after(&out).is_some()
+            },
+        );
+        found(&out);
+        assert_eq!(page.say(), 0);
+        session.shutdown();
+    }
+
+    /// The same when the program ends first, with a `bye` (a TERM it was sent, not the character
+    /// ⌃C): the pane learns of it from the program, closes the gate, drops what waits and answers
+    /// the `bye`; the program reads up to the answer and throws away the rest. What the page
+    /// said before the pane knew is behind the answer in the queue, and is read by the program.
+    #[test]
+    fn what_the_page_said_never_reaches_what_reads_the_tty_after_a_bye() {
+        let Some((_dir, out, _wake, session)) =
+            demo_pane_then_reader("leak-bye", &["--flood"], false, "0", false)
+        else {
+            return;
+        };
+        wait_for_the_view(&session);
+        let flow = session.flow();
+        assert!(session.module_message(r#"{"subscribe":{"id":1,"topic":"stats"}}"#));
+        let mut page = Chatter::new(&session);
+        wait_until(
+            "a backlog of the page's words",
+            Duration::from_secs(20),
+            || {
+                page.say();
+                flow.pending() >= (200 << 10)
+            },
+        );
+
+        // The program is told to end from outside, not through the pane: the module takes at
+        // once, so that its `bye` is read before it gives up waiting to say it.
+        let program = std::process::Command::new("pgrep")
+            .args(["-P", &session.child_pid().to_string(), "demopen"])
+            .output()
+            .expect("pgrep");
+        let pid: i32 = String::from_utf8_lossy(&program.stdout)
+            .split_whitespace()
+            .next()
+            .and_then(|pid| pid.parse().ok())
+            .expect("the program is the shell's child");
+        // SAFETY: a signal to a process of ours, by number.
+        assert_eq!(unsafe { libc::kill(pid, libc::SIGTERM) }, 0);
+        page.take();
+        wait_until(
+            "the program to end and the next reader to read",
+            Duration::from_secs(30),
+            || {
+                page.take();
+                page.say();
+                read_after(&out).is_some()
+            },
+        );
+        found(&out);
+        // The view is over for the pane: the page's words are refused.
+        assert_eq!(page.say(), 0);
+        session.shutdown();
+    }
+
+    /// And when the program is killed from outside: it says nothing, and the words the pane wrote
+    /// before it knew sit unread in the tty (a queue of 1022 bytes on this system, two frames).
+    /// The pane learns from the shell — the command's end — gives up the rest and throws away
+    /// what the program left unread, from the master's side, before the shell reads.
+    #[test]
+    fn what_the_page_said_is_thrown_away_when_the_program_is_killed_from_outside() {
+        let Some((_dir, out, _wake, session)) =
+            demo_pane_then_reader("leak-kill", &["--flood"], true, "0.2", false)
+        else {
+            return;
+        };
+        wait_for_the_view(&session);
+        let flow = session.flow();
+        assert!(session.module_message(r#"{"subscribe":{"id":1,"topic":"stats"}}"#));
+        let mut page = Chatter::new(&session);
+        wait_until(
+            "a backlog of the page's words",
+            Duration::from_secs(20),
+            || {
+                page.say();
+                flow.pending() >= (200 << 10)
+            },
+        );
+
+        let program = std::process::Command::new("pgrep")
+            .args(["-P", &session.child_pid().to_string(), "demopen"])
+            .output()
+            .expect("pgrep");
+        let pid: i32 = String::from_utf8_lossy(&program.stdout)
+            .split_whitespace()
+            .next()
+            .and_then(|pid| pid.parse().ok())
+            .expect("the program is the shell's child");
+        // SAFETY: a signal to a process of ours, by number.
+        assert_eq!(unsafe { libc::kill(pid, libc::SIGKILL) }, 0);
+        wait_until(
+            "the shell to read after the program",
+            Duration::from_secs(30),
+            || {
+                page.take();
+                page.say();
+                read_after(&out).is_some()
+            },
+        );
+        found(&out);
+        session.shutdown();
+    }
+
+    /// A program killed from outside in a shell the pane learns nothing from (no marks): the pane
+    /// cannot tell the program is gone until the shell is back in front of the tty, which it sees
+    /// only when it next tries to write. What the page said and the program had not read is in the
+    /// tty's queue by then, and the shell reads it: at most the 1022 bytes the queue holds on this
+    /// system (Appendix B of the specification). Nothing more follows it, however long the page
+    /// goes on: without the check before each write the page would feed the shell for as long as
+    /// it spoke.
+    #[test]
+    fn what_a_shell_the_pane_learns_nothing_from_can_read_after_a_kill_is_what_the_queue_held() {
+        let Some((_dir, out, wake, session)) =
+            demo_pane_then_reader("leak-kill-quiet", &["--flood"], false, "0.2", true)
+        else {
+            return;
+        };
+        wait_for_the_view(&session);
+        let flow = session.flow();
+        assert!(session.module_message(r#"{"subscribe":{"id":1,"topic":"stats"}}"#));
+        let mut page = Chatter::new(&session);
+        wait_until(
+            "a backlog of the page's words",
+            Duration::from_secs(20),
+            || {
+                page.say();
+                flow.pending() >= (200 << 10)
+            },
+        );
+        let program = std::process::Command::new("pgrep")
+            .args(["-P", &session.child_pid().to_string(), "demopen"])
+            .output()
+            .expect("pgrep");
+        let pid: i32 = String::from_utf8_lossy(&program.stdout)
+            .split_whitespace()
+            .next()
+            .and_then(|pid| pid.parse().ok())
+            .expect("the program is the shell's child");
+        // SAFETY: a signal to a process of ours, by number.
+        assert_eq!(unsafe { libc::kill(pid, libc::SIGKILL) }, 0);
+        let mut left = None;
+        wait_until(
+            "the shell to read, and end",
+            Duration::from_secs(30),
+            || {
+                page.take();
+                page.say();
+                left = wake.wait_exit(Duration::from_millis(10));
+                left.is_some()
+            },
+        );
+        let found = std::fs::metadata(&out).map_or(0, |meta| meta.len());
+        assert!(
+            found <= 1022,
+            "the shell read {found} bytes the page said, over the {} the queue holds",
+            1022
+        );
+        session.shutdown();
+    }
+
+    /// A terminal that opens none of the kinds of view the program can show says so in its
+    /// answer, and the program shows its list as text at once, not after the time it would wait
+    /// for a terminal that says nothing.
+    #[test]
+    fn a_program_whose_kind_of_view_the_pane_does_not_open_shows_text_at_once() {
+        use crate::pencere::Action;
+        let Some((_wake, session)) = demo_pane(&[], false) else {
+            return;
+        };
+        let began = Instant::now();
+        while !the_screen(&session).contains("toolbox") {
+            assert!(
+                began.elapsed() < Duration::from_secs(10),
+                "no list as text; the screen:\n{}",
+                the_screen(&session)
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            began.elapsed() < Duration::from_millis(1500),
+            "the program waited {:?} for a view that was never going to come",
+            began.elapsed()
+        );
+        assert!(
+            !session
+                .take_view_actions()
+                .iter()
+                .any(|action| matches!(action, Action::StartView(_)))
+        );
         session.shutdown();
     }
 

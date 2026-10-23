@@ -172,7 +172,7 @@ impl Program {
     fn hello(&mut self) -> String {
         let id = self.take_id();
         self.say(&format!(
-            "{ESC}_pencere;hello;id={id};{{\"versions\":[1]}}{ESC}\\{ESC}[c"
+            "{ESC}_pencere;hello;id={id};{{\"versions\":[1],\"views\":[\"web\"]}}{ESC}\\{ESC}[c"
         ));
         let welcome = self.wait_for("pencere;welcome");
         assert!(
@@ -219,7 +219,7 @@ impl Program {
         self.send(
             "open",
             &format!(
-                "{{\"token\":\"{token}\",\"tool\":{{\"name\":\"show\",\"arguments\":{{}}}}{bundle}}}"
+                "{{\"token\":\"{token}\",\"view\":\"web\",\"tool\":{{\"name\":\"show\",\"arguments\":{{}}}}{bundle}}}"
             ),
         );
     }

@@ -15,10 +15,10 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use bt_core::Flow;
 use bt_view::{Element, Event, Size, Tone, div, text};
-use bt_view_wasm::{Limits, Module};
+use bt_view_wasm::{Limits, Module, Program, Unbounded};
 
-use super::allowance::Allowance;
 use super::{
     Drained, Input, PageDrive, Rect, Reply, Shaped, Typeset, UiContext, UiList, UiPage, from_pane,
     into_page, to_list,
@@ -47,8 +47,6 @@ struct Shared {
     told_end: bool,
     /// What the module said to its program that the pane has not carried.
     sent: Vec<String>,
-    /// How much it may say, over time.
-    allowance: Allowance,
 }
 
 impl Shared {
@@ -67,18 +65,10 @@ impl Shared {
                 .into_iter()
                 .map(|answer| (from_pane(answer.reply, inset), answer.pointer)),
         );
-        let now = std::time::Instant::now();
-        for message in update.sent {
-            if self.ended.is_some() {
-                break;
-            }
-            if self.allowance.take(now, message.len()) {
-                self.sent.push(message);
-            } else {
-                // The program's input is not a place to pour into: the module is done.
-                self.ended =
-                    Some("said more to its program than the program's input can take".to_owned());
-            }
+        // How much the module may say is not decided here: it was told *full* by the flow when
+        // the program had no room, and what it said is what the program has room for.
+        if self.ended.is_none() {
+            self.sent.extend(update.sent);
         }
         if let Some(fault) = update.closed
             && self.ended.is_none()
@@ -88,28 +78,44 @@ impl Shared {
     }
 }
 
-/// How much a module may say to its program in one burst, and how fast it may keep saying it:
-/// what a program that reads its input at its leisure can hold, and a rate far above what a
-/// page that talks to a program needs.
-const SAY_BURST: usize = 256 << 10;
-const SAY_PER_SECOND: usize = 128 << 10;
+/// What a module is held to in what it says to the program of its pane: the program's `flow`
+/// ([`Flow`]) says whether the program has the room, and is told what the module takes of what
+/// the program says. A module whose page no program opened (the engine's own, in this process)
+/// has none: whatever it says goes nowhere.
+struct Held(Flow);
+
+impl Program for Held {
+    fn may_say(&self, bytes: usize) -> bool {
+        self.0.may_say(bytes)
+    }
+
+    fn taken(&self, bytes: usize) {
+        self.0.taken(bytes);
+    }
+}
 
 /// The page of a module as a pane's [`UiPage`], and the handle the pane drives it by.
 ///
 /// `bytes` is the component (binary or text) and `limits` what it is held to. `terminal` is the
 /// pane's font family and `inset` the points at the top the application keeps for its strip.
-/// `wake` is called from the module's thread when it has put something out; it hops to the main
-/// thread and has the pane drain the handle ([`PageDrive::drain`]). Returns at once: the module
-/// is compiled and started on its thread.
+/// `flow` is the flow of the program that opened the page, if one did. `wake` is called from the
+/// module's thread when it has put something out; it hops to the main thread and has the pane
+/// drain the handle ([`PageDrive::drain`]). Returns at once: the module is compiled and started
+/// on its thread.
 pub fn module_page(
     bytes: Vec<u8>,
     limits: Limits,
     terminal: Option<String>,
     inset: f32,
+    flow: Option<Flow>,
     wake: impl Fn() + Send + Sync + 'static,
 ) -> (Box<dyn UiPage>, ModuleHandle) {
+    let program: Arc<dyn Program> = match flow {
+        Some(flow) => Arc::new(Held(flow)),
+        None => Arc::new(Unbounded),
+    };
     let shared = Rc::new(RefCell::new(Shared {
-        module: Module::from_component(bytes, limits, wake),
+        module: Module::from_component(bytes, limits, program, wake),
         root: None,
         animating: false,
         asked: None,
@@ -121,7 +127,6 @@ pub fn module_page(
         ended: None,
         told_end: false,
         sent: Vec::new(),
-        allowance: Allowance::new(SAY_BURST, SAY_PER_SECOND),
     }));
     let page = ModulePage {
         terminal,
@@ -166,6 +171,10 @@ impl PageDrive for ModuleHandle {
 
     fn send_message(&self, text: &str) {
         self.shared.borrow().module.message(text.to_owned());
+    }
+
+    fn send_room(&self) {
+        self.shared.borrow().module.room();
     }
 
     fn watch_field(&self, told: Box<dyn Fn(Option<Rect>)>) {
@@ -343,9 +352,10 @@ mod tests {
         let theme = Theme::BATERI;
         let (told, woken) = channel();
         let told = std::sync::Mutex::new(told);
-        let (mut page, handle) = module_page(bytes, Limits::default(), None, 32.0, move || {
-            let _ = told.lock().unwrap().send(());
-        });
+        let (mut page, handle) =
+            module_page(bytes, Limits::default(), None, 32.0, None, move || {
+                let _ = told.lock().unwrap().send(());
+            });
         let places: Rc<RefCell<Vec<Option<Rect>>>> = Rc::default();
         {
             let places = Rc::clone(&places);
@@ -404,9 +414,10 @@ mod tests {
         let theme = Theme::BATERI;
         let (told, woken) = channel();
         let told = std::sync::Mutex::new(told);
-        let (mut page, handle) = module_page(bytes, Limits::default(), None, 32.0, move || {
-            let _ = told.lock().unwrap().send(());
-        });
+        let (mut page, handle) =
+            module_page(bytes, Limits::default(), None, 32.0, None, move || {
+                let _ = told.lock().unwrap().send(());
+            });
         build(&mut page, &renderer, &theme, 0.0);
         assert!(wait(&woken));
         let drained = handle.drain(&mut |_, _| {});
@@ -455,66 +466,30 @@ mod tests {
         );
     }
 
-    /// A module that says more than its allowance is closed; what it said before is said.
+    /// What a module is held to in what it says is its program's flow: told *full* when the
+    /// program has not read what it was told. The module is not closed for it.
     #[test]
-    fn a_module_that_talks_without_end_is_closed_and_what_it_said_first_is_said() {
-        use bt_view_wasm::{Fault, Frame, Runner};
-
-        struct Chatty;
-        impl Runner for Chatty {
-            fn render(&mut self, _: Size, _: f64, _: bool) -> Result<Frame, Fault> {
-                Ok(Frame {
-                    root: div(),
-                    animating: false,
-                })
-            }
-            fn settle(&mut self) -> Result<bool, Fault> {
-                Ok(false)
-            }
-            fn handle(&mut self, _: Event) -> Result<Reply, Fault> {
-                Ok(Reply::none())
-            }
-            fn lay_out(&mut self, _: Arc<bt_view::Laid>) {}
-            fn take_sent(&mut self) -> Vec<String> {
-                vec!["x".repeat(100 << 10); 5]
-            }
+    fn a_modules_program_is_the_flow_of_its_pane() {
+        let flow = Flow::new();
+        let held = Held(flow.clone());
+        let mut said = 0;
+        while held.may_say(64 << 10) {
+            said += 1;
+            assert!(said < 100, "never told full");
         }
+        assert_eq!(said, bt_core::BACKLOG_LIMIT / (64 << 10));
+        // What the module takes goes to the flow too (nothing was counted: it stays at zero).
+        held.taken(100);
+        assert_eq!(flow.inbox(), 0);
+    }
 
-        let (told, woken) = channel();
-        let told = std::sync::Mutex::new(told);
-        let module = Module::spawn(
-            || Ok(Chatty),
-            move || {
-                let _ = told.lock().unwrap().send(());
-            },
-        );
-        module.render(Size::new(100.0, 100.0), 0.0, false);
-        let shared = Rc::new(RefCell::new(Shared {
-            module,
-            root: None,
-            animating: false,
-            asked: None,
-            inset: 0.0,
-            field: None,
-            on_field: None,
-            redraw: false,
-            replies: Vec::new(),
-            ended: None,
-            told_end: false,
-            sent: Vec::new(),
-            allowance: Allowance::new(SAY_BURST, SAY_PER_SECOND),
-        }));
-        let handle = ModuleHandle { shared };
-        assert!(wait(&woken));
-        let drained = handle.drain(&mut |_, _| {});
+    /// The limit of one message toward the program is the protocol's, held in one place.
+    #[test]
+    fn a_message_to_the_program_is_held_to_the_protocols_limit() {
         assert_eq!(
-            drained.sent.len(),
-            2,
-            "the burst, 256 KiB, holds two of 100 KiB"
+            Limits::default().message,
+            bt_core::pencere::MAX_VIEW_MESSAGE
         );
-        let why = drained.ended.expect("closed for talking too much");
-        assert!(why.contains("more to its program"), "{why}");
-        assert_eq!(handle.drain(&mut |_, _| {}).ended, None, "told once");
     }
 
     /// A module that is not a page is closed with why, and the pane is told once.
@@ -527,6 +502,7 @@ mod tests {
             Limits::default(),
             None,
             32.0,
+            None,
             move || {
                 let _ = told.lock().unwrap().send(());
             },

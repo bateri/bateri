@@ -56,6 +56,7 @@ mod cluster;
 mod color;
 mod commands;
 mod dock;
+mod flow;
 mod graphics;
 mod grid_input;
 mod handler;
@@ -87,6 +88,7 @@ pub use dock::{
     StatsLevel, StatsMetric, StatsThreshold, TEXT_COL as DOCK_TEXT_COL, UPLOAD_GLYPHS, footer_hit,
     footer_span, footer_spans, footer_trailing,
 };
+pub use flow::{BACKLOG_LIMIT, BACKLOG_LOW, Flow, INBOX_LIMIT, INBOX_LOW};
 pub use graphics::{Picture, PictureLayer, Pictures};
 pub use history::{CommandRecord, MEMORY_LIMIT as COMMAND_MEMORY_LIMIT, RecordState};
 pub use identity::{LC_TERMINAL, PaneUuid, TERM_PROGRAM, TERM_PROGRAM_VERSION, pane_env};

@@ -15,10 +15,13 @@
 /// `program.send` and hears the program's in `page.message`. The application only carries them —
 /// the words are the program's and the page's own.
 ///
-/// Version 0.2.0 adds that (`program`, `page.message`) and nothing else: a module of 0.1.0 asks
-/// for nothing the application no longer gives, and one of 0.2.0 that is opened where no program
-/// listens says things into the void.
-package bateri:view@0.2.0;
+/// What the program can take is the program's: it may be a process that reads when it likes. A
+/// page that says more than the program has read is told so (`program.send` answers `full`),
+/// keeps what it wanted to say, and is called once when the program has read enough
+/// (`page.room`); it does not ask again and again, and it is not closed for being fast. What the
+/// program says to the page is held to what the page has taken (the program's own `write` slows
+/// down), so a page is never handed more than it can read.
+package bateri:view@0.3.0;
 
 interface types {
     /// A name for an element, so that what is kept about it between frames (a scroll position,
@@ -421,12 +424,23 @@ interface layout {
 
 /// What the module can say to the program that opened the page, if one did.
 interface program {
-    /// A message for the program: one JSON object, written as text. It is carried as it is and
-    /// not read; the program is told it only while the page is open, and a page that says more
-    /// in one call than the application allows, or more at once than fits a message, is closed.
+    /// What became of a message.
+    enum delivery {
+        /// The application has it and will carry it to the program, as it is and not read; the
+        /// program is told it only while the page is open.
+        accepted,
+        /// The program has not read what it was told before: the message was not taken, the page
+        /// keeps it, and `page.room` is called once when the program has read enough. A page
+        /// that is told *full* and sends again before that is told *full* again.
+        full,
+    }
+
+    /// A message for the program: one JSON object, written as text. A page that says more in one
+    /// call than the application allows, or a message longer than the protocol's limit for one
+    /// (1 MiB), is closed; one the program has not the room for is not (`delivery.full`).
     /// Returns at once; nothing comes back but what the program says in its own time
     /// (`page.message`).
-    send: func(message: string);
+    send: func(message: string) -> delivery;
 }
 
 /// What the module is: a page.
@@ -448,6 +462,11 @@ interface page {
     /// The program that opened the page said something: one JSON object, as the program wrote
     /// it, which the module reads and may not trust. `redraw` of the reply says the page changed.
     message: func(message: string) -> reply;
+
+    /// The program has read enough that a message `program.send` answered `full` to can be sent:
+    /// called once for each time the page was told *full*, and never when it was not. The page
+    /// sends what it kept. `redraw` of the reply says the page changed.
+    room: func() -> reply;
 }
 
 world view {

@@ -609,6 +609,12 @@ pub(crate) struct ViewIvars {
     /// closes inside `applicationDidFinishLaunching`, **before the run loop
     /// turns**, so no event can fall in between.
     session: OnceCell<Arc<Session>>,
+    /// The pointer was last over the page of this pane and not over what lies on top of it
+    /// ([`BateriView::over_page`]). A page's answer to a move sets the pointer's shape only
+    /// while this holds: the window gets every move, and an answer to one made elsewhere (the
+    /// handle of a divider between panes, the tab column) would set the shape over the
+    /// cursor rects of the view that is there.
+    page_over: Cell<bool>,
     /// The mouse's gesture ledger: the selection drag, the presses reported to
     /// the application and the motion report's notch - the rules and
     /// rationales are in [`Gesture`], a tested struct. `Cell` + `Copy`: every
@@ -1021,7 +1027,7 @@ define_class!(
             if let Some(pane) = self.pane()
                 && pane.page_is_up()
             {
-                pane.page_input(Input::Move(self.page_point(event)));
+                self.page_pointer(&pane, event);
                 return;
             }
             if self.is_strip_event(event) {
@@ -1045,7 +1051,7 @@ define_class!(
             if let Some(pane) = self.pane()
                 && pane.page_is_up()
             {
-                pane.page_input(Input::Leave);
+                self.page_pointer_left(&pane);
                 return;
             }
             if self.is_strip_event(event) {
@@ -1095,7 +1101,7 @@ define_class!(
             if let Some(pane) = self.pane()
                 && pane.page_is_up()
             {
-                pane.page_input(Input::Move(self.page_point(event)));
+                self.page_pointer(&pane, event);
                 return;
             }
             if self.scrollbar_motion(event) {
@@ -1956,6 +1962,7 @@ impl BateriView {
     pub(crate) fn new(mtm: MainThreadMarker, frame: NSRect) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(ViewIvars {
             session: OnceCell::new(),
+            page_over: Cell::new(false),
             gesture: Cell::new(Gesture::default()),
             consumed: Cell::new(false),
             commanded: Cell::new(false),
@@ -2884,6 +2891,66 @@ impl BateriView {
     fn page_point(&self, event: &NSEvent) -> PagePoint {
         let at = self.convertPoint_fromView(event.locationInWindow(), None);
         PagePoint::new(at.x as f32, at.y as f32)
+    }
+
+    /// Whether the pointer of `event` is over the page of the pane, and not over something that
+    /// lies on top of it: the point is in the pane's visible area, and the view the window finds
+    /// there is the pane or one of its own (the page's field). The handle of a divider reaches a
+    /// few points into the panes either side of the gap; the tab column and the other pane are
+    /// other views.
+    fn over_page(&self, pane: &TerminalPane, event: &NSEvent) -> bool {
+        let in_window = event.locationInWindow();
+        let at = pane.convertPoint_fromView(in_window, None);
+        let visible = pane.visibleRect();
+        let inside = at.x >= visible.origin.x
+            && at.x < visible.origin.x + visible.size.width
+            && at.y >= visible.origin.y
+            && at.y < visible.origin.y + visible.size.height;
+        if !inside {
+            return false;
+        }
+        let Some(content) = self.window().and_then(|window| window.contentView()) else {
+            return false;
+        };
+        // `hitTest:` takes the point in the coordinates of the receiver's superview.
+        // SAFETY: reading the superview on the main thread; the `Retained` keeps it alive.
+        let above = unsafe { content.superview() };
+        let there = above.map_or(in_window, |above| {
+            above.convertPoint_fromView(in_window, None)
+        });
+        content
+            .hitTest(there)
+            .is_some_and(|hit| hit.isDescendantOf(pane))
+    }
+
+    /// A move of the pointer, for the page of the pane if it is over it. Leaving the page is
+    /// told to it once, and then it hears nothing and sets no pointer ([`BateriView::page_over`]):
+    /// the cursor rects of what the pointer is over decide the shape.
+    fn page_pointer(&self, pane: &TerminalPane, event: &NSEvent) {
+        if self.over_page(pane, event) {
+            self.ivars().page_over.set(true);
+            pane.page_input(Input::Move(self.page_point(event)));
+        } else {
+            self.page_pointer_left(pane);
+        }
+    }
+
+    /// The pointer is not over the page any more: it is told once, and its answer sets no pointer.
+    fn page_pointer_left(&self, pane: &TerminalPane) {
+        if self.ivars().page_over.replace(false) {
+            pane.page_input(Input::Leave);
+        }
+    }
+
+    /// Whether the pointer was last over the page, and so whether its answer to a move may set the
+    /// pointer's shape.
+    pub(crate) fn page_pointer_is_over(&self) -> bool {
+        self.ivars().page_over.get()
+    }
+
+    /// The page is gone: the pointer is over nothing of it, whatever it was last over.
+    pub(crate) fn forget_page_pointer(&self) {
+        self.ivars().page_over.set(false);
     }
 
     /// Pops up the menu a debug page asked for, where it said (the view's points). Items are

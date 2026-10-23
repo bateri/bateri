@@ -12,8 +12,11 @@
 //! as an event, and what it can ask of the application is the layout of the page it last
 //! drew ([`Layout`]). A page that a program in the pane opened can also talk to that program:
 //! [`say`] sends it a message and [`Page::message`] hears the program's (the messages are
-//! `bateri-view-messages`'; the terminal only carries them). A page that runs forever, takes memory without end or traps is closed by
-//! the application, and the terminal underneath comes back.
+//! `bateri-view-messages`'; the terminal only carries them). What the program can take is the
+//! program's: `say` answers whether it has the room, and a page that was told *full* keeps what
+//! it meant to say and is called once, in [`Page::room`], when it has. A page that runs forever,
+//! takes memory without end or traps is closed by the application, and the terminal underneath
+//! comes back.
 //!
 //! ```ignore
 //! use bateri_view_sdk::{Event, Frame, Layout, Page, Reply, Size, div, export_page, text};
@@ -123,10 +126,16 @@ impl Queries for Layout {
 
 /// Says something to the program that opened the page: one JSON object, written as text (a
 /// message of `bateri-view-messages`). Returns at once; the program answers in its own time
-/// ([`Page::message`]). A page that says more in one call than the application allows is
-/// closed.
-pub fn say(message: &str) {
-    to_program::send(message);
+/// ([`Page::message`]).
+///
+/// True when the application has the message and carries it to the program. False when the
+/// program has not read what it was told before: the message is **not** taken, the page keeps
+/// it, and [`Page::room`] is called once when the program has read enough — the page does not
+/// try again by itself. A page that says more in one call than the application allows (a number
+/// of messages, or one longer than the protocol's limit of 1 MiB) is closed.
+#[must_use = "a message the program had no room for is not sent: keep it for Page::room"]
+pub fn say(message: &str) -> bool {
+    matches!(to_program::send(message), to_program::Delivery::Accepted)
 }
 
 fn point_in(at: Point) -> bindings::bateri::view::types::Point {
@@ -155,6 +164,13 @@ pub trait Page: Sized + 'static {
     /// it. The program is not trusted — it may be a program the person did not mean to start.
     /// The reply's `redraw` says the page changed. A page no program opened is never told.
     fn message(&mut self, _text: &str, _layout: &Layout) -> Reply {
+        Reply::none()
+    }
+
+    /// The program has read enough for the page to say what [`say`] told it the program had no
+    /// room for. Called once for each time the page was told so, and never when it was not.
+    /// The reply's `redraw` says the page changed.
+    fn room(&mut self, _layout: &Layout) -> Reply {
         Reply::none()
     }
 }
@@ -204,6 +220,12 @@ macro_rules! export_page {
                             &text,
                             &$crate::Layout,
                         ))
+                    })
+                }
+
+                fn room() -> $crate::bindings::bateri::view::types::Reply {
+                    PAGE.with_borrow_mut(|page| {
+                        $crate::to_wit_reply(<$page as $crate::Page>::room(page, &$crate::Layout))
                     })
                 }
 

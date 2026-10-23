@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex};
 
 use bt_view::{Element, Event, Input, Laid, Reply, Size};
 
-use crate::sandbox::{Fault, Limits};
+use crate::sandbox::{Fault, Limits, Program};
 use crate::world::World;
 
 /// A page the module handed out: the tree, and whether the page is still moving.
@@ -46,6 +46,12 @@ pub trait Runner: Send + 'static {
     fn message(&mut self, _text: String) -> Result<Reply, Fault> {
         Ok(Reply::none())
     }
+    /// The program has read enough that what the module was told *full* to can be sent: called
+    /// once for each time the module was told so.
+    fn room(&mut self) -> Result<Reply, Fault> {
+        Ok(Reply::none())
+    }
+
     /// What the module has said to its program since the last taking.
     fn take_sent(&mut self) -> Vec<String> {
         Vec::new()
@@ -62,6 +68,8 @@ enum Command {
     Laid(Arc<Laid>),
     Event(Event),
     Message(String),
+    /// The program has read enough that the module may say what it kept.
+    Room,
     Stop,
 }
 
@@ -115,6 +123,7 @@ impl Module {
     /// taken ([`Module::poll`]): it hops to wherever the application listens and returns.
     pub fn spawn<R: Runner>(
         make: impl FnOnce() -> Result<R, Fault> + Send + 'static,
+        program: Arc<dyn Program>,
         wake: impl Fn() + Send + Sync + 'static,
     ) -> Self {
         let (commands, inbox) = channel();
@@ -127,7 +136,8 @@ impl Module {
                     mailbox: &posting,
                     wake: &wake,
                 };
-                let outcome = catch_unwind(AssertUnwindSafe(|| serve(make, &inbox, &post)));
+                let outcome =
+                    catch_unwind(AssertUnwindSafe(|| serve(make, &*program, &inbox, &post)));
                 let ended = match outcome {
                     Ok(Ok(())) => return,
                     Ok(Err(fault)) => fault,
@@ -141,13 +151,15 @@ impl Module {
         Self { commands, mailbox }
     }
 
-    /// Starts the component in `bytes` (binary or text) under `limits`.
+    /// Starts the component in `bytes` (binary or text) under `limits`, for `program`.
     pub fn from_component(
         bytes: Vec<u8>,
         limits: Limits,
+        program: Arc<dyn Program>,
         wake: impl Fn() + Send + Sync + 'static,
     ) -> Self {
-        Self::spawn(move || World::load(&bytes, limits), wake)
+        let held = Arc::clone(&program);
+        Self::spawn(move || World::load(&bytes, limits, held), program, wake)
     }
 
     /// Asks for the page for a viewport of `size` points at `now` seconds. Returns at once;
@@ -165,9 +177,19 @@ impl Module {
         let _ = self.commands.send(Command::Event(event));
     }
 
-    /// Tells the module what its program said (a JSON object, as written). Returns at once.
+    /// Tells the module what its program said (a JSON object, as written). Returns at once, and
+    /// never waits: the caller is the application's thread. What the program says is held to
+    /// what the module takes by the application, which stops reading the program's output
+    /// while the module has not taken the last of it ([`Program::taken`]) — this queue is as
+    /// long as that leaves it.
     pub fn message(&self, text: String) {
         let _ = self.commands.send(Command::Message(text));
+    }
+
+    /// Tells the module the program has read enough for it to say what it was told *full* to
+    /// ([`Program::may_say`]). Returns at once.
+    pub fn room(&self) {
+        let _ = self.commands.send(Command::Room);
     }
 
     /// Tells the module the page was laid out as `laid`: it may ask of it from now on, and is
@@ -265,6 +287,7 @@ impl Post<'_> {
 /// The module's life: made, then asked until it is stopped or gone.
 fn serve<R: Runner>(
     make: impl FnOnce() -> Result<R, Fault>,
+    program: &dyn Program,
     inbox: &Receiver<Command>,
     post: &Post<'_>,
 ) -> Result<(), Fault> {
@@ -350,23 +373,18 @@ fn serve<R: Runner>(
                 Command::Message(text) => {
                     settled = 0;
                     let reply = runner.message(text.clone())?;
+                    // Taken: the program may say more. After the page was told, and not for a
+                    // page that failed on it (the view is over, and the application lets go
+                    // of what it counted).
+                    program.taken(text.len());
                     post.say(runner.take_sent());
-                    owed |= reply.redraw;
-                    // What the page redraws is the page that follows the batch; the rest of
-                    // the reply (a menu, the keyboard, the pasteboard, the end) is told now.
-                    if reply.close
-                        || reply.menu.is_some()
-                        || reply.keyboard.is_some()
-                        || reply.copy.is_some()
-                    {
-                        post.put(
-                            None,
-                            Some(Answer {
-                                reply,
-                                pointer: false,
-                            }),
-                        );
-                    }
+                    owed |= answered(reply, post);
+                }
+                Command::Room => {
+                    settled = 0;
+                    let reply = runner.room()?;
+                    post.say(runner.take_sent());
+                    owed |= answered(reply, post);
                 }
             }
         }
@@ -376,6 +394,23 @@ fn serve<R: Runner>(
             post.put(Some(frame), None);
         }
     }
+}
+
+/// What the page said back to something the program did: whether it wants to be drawn again
+/// (the page that follows the batch), and the rest of the reply (a menu, the keyboard, the
+/// pasteboard, the end), which is told now.
+fn answered(reply: Reply, post: &Post<'_>) -> bool {
+    let redraw = reply.redraw;
+    if reply.close || reply.menu.is_some() || reply.keyboard.is_some() || reply.copy.is_some() {
+        post.put(
+            None,
+            Some(Answer {
+                reply,
+                pointer: false,
+            }),
+        );
+    }
+    redraw
 }
 
 /// The most pages in a row a settle may ask for: the first settles what depends on the layout,
@@ -389,6 +424,7 @@ fn is_render(command: &Command) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sandbox::Unbounded;
     use bt_view::{Button, Mods, Point, div, text};
     use std::sync::mpsc;
     use std::time::Duration;
@@ -482,6 +518,7 @@ mod tests {
         };
         let module = Module::spawn(
             move || Ok(plain),
+            Arc::new(Unbounded),
             move || {
                 let _ = told.lock().unwrap().send(());
             },
@@ -738,6 +775,7 @@ mod tests {
         let told = Mutex::new(told);
         let module = Module::spawn(
             || Err::<Never, _>(Fault::Load("not a component".into())),
+            Arc::new(Unbounded),
             move || {
                 let _ = told.lock().unwrap().send(());
             },
@@ -768,6 +806,7 @@ mod tests {
         let told = Mutex::new(told);
         let module = Module::spawn(
             || Ok(Panics),
+            Arc::new(Unbounded),
             move || {
                 let _ = told.lock().unwrap().send(());
             },
@@ -801,7 +840,7 @@ mod tests {
             fn lay_out(&mut self, _: Arc<Laid>) {}
         }
         let (gone, gone_rx) = mpsc::channel();
-        let module = Module::spawn(|| Ok(Marker(gone)), || {});
+        let module = Module::spawn(|| Ok(Marker(gone)), Arc::new(Unbounded), || {});
         drop(module);
         gone_rx
             .recv_timeout(Duration::from_secs(5))

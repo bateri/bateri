@@ -5993,11 +5993,13 @@ impl TerminalPane {
                         }
                     });
                 };
+                // The engine's own page: no program opened it, so none holds it to anything.
                 let (page, handle) = bt_shell_common::native_view::module_page(
                     bytes,
                     bt_shell_common::native_view::Limits::default(),
                     family.clone(),
                     inset,
+                    None,
                     wake,
                 );
                 (page, Rc::new(handle))
@@ -6039,6 +6041,7 @@ impl TerminalPane {
             // The keyboard was in the field: it goes back to the terminal.
             let typing = page.field.currentEditor().is_some();
             self.view().removeTrackingArea(&page.area);
+            self.view().forget_page_pointer();
             page.field.removeFromSuperview();
             if typing && let Some(window) = self.window() {
                 window.makeFirstResponder(Some(self.view()));
@@ -6168,7 +6171,10 @@ impl TerminalPane {
         {
             link.poke_page();
         }
-        if pointer {
+        // Only while the pointer is over the page itself: an answer that comes after it left
+        // would set the shape over the cursor rects of whatever it is over now (the divider's
+        // handle between panes, the tab column).
+        if pointer && self.view().page_pointer_is_over() {
             match reply.cursor {
                 PageCursor::Pointer => NSCursor::pointingHandCursor().set(),
                 PageCursor::Text => NSCursor::IBeamCursor().set(),
@@ -6296,6 +6302,13 @@ impl TerminalPane {
         let Some(session) = self.session().cloned() else {
             return;
         };
+        // A module that was told its program had no room and may say again.
+        if session.take_room()
+            && self.program_page_up()
+            && let Some(handle) = self.page_handle()
+        {
+            handle.send_room();
+        }
         for action in session.take_view_actions() {
             match action {
                 Action::StartView(start) => self.start_view(&session, &start),
@@ -6304,8 +6317,12 @@ impl TerminalPane {
                         if let Some(handle) = self.page_handle() {
                             handle.send_message(&message);
                         }
-                    } else if let Some(host) = self.view_host() {
-                        host.deliver(&message);
+                    } else {
+                        if let Some(host) = self.view_host() {
+                            host.deliver(&message);
+                        }
+                        // No module takes it, so the program is not made to wait for one.
+                        session.flow().taken(message.len());
                     }
                 }
                 Action::DestroyView => self.end_view(),
@@ -6395,11 +6412,14 @@ impl TerminalPane {
                 }
             });
         };
+        // Held to the program that opened it: what it says is what the program has the room
+        // for, and what it takes of the program's words lets the program say more.
         let (page, handle) = bt_shell_common::native_view::module_page(
             bytes.to_vec(),
             bt_shell_common::native_view::Limits::default(),
             family.clone(),
             inset,
+            self.session().map(|session| session.flow()),
             wake,
         );
         let handle: Rc<dyn PageDrive> = Rc::new(handle);
@@ -8008,6 +8028,61 @@ mod tests {
         let reply = body("    fn apply_page_reply(");
         assert!(reply.contains("if !self.program_page_up() {"), "{reply}");
         assert!(!reply.contains("close_view"), "{reply}");
+    }
+
+    /// A page sets the pointer's shape only while the pointer is over the page itself. The window
+    /// gets every move and the first responder's view hears them all, so a move over the handle
+    /// of a divider (which reaches a few points into the panes either side of its gap) or over
+    /// the tab column must not go to the page, and the page's answer to the one that took the
+    /// pointer out of it must not set a shape: that overrode the divider's resize pointer. A
+    /// source scan, because what it guards needs a window server and a split tab with a view in
+    /// one pane.
+    #[test]
+    fn a_page_hears_and_answers_only_the_moves_over_the_page_itself() {
+        let view = include_str!("view.rs");
+        let view = &view[..view.find("#[cfg(test)]").unwrap_or(view.len())];
+        let pane = include_str!("pane.rs");
+        let pane = &pane[..pane.find("#[cfg(test)]").unwrap_or(pane.len())];
+        let body = |source: &'static str, signature: &str| {
+            let at = source.find(signature).expect(signature);
+            // A method of an `impl` ends at its closing brace one indent out; the view's
+            // handlers are one level deeper, in the class definition.
+            let end = if signature.starts_with("        ") {
+                "\n        }\n"
+            } else {
+                "\n    }\n"
+            };
+            &source[at..at + source[at..].find(end).expect("its end")]
+        };
+        // Nothing hands the page a move without asking where the pointer is.
+        assert_eq!(
+            view.matches("Input::Move(").count(),
+            1,
+            "the page is moved in one place"
+        );
+        assert!(body(view, "    fn page_pointer(").contains("Input::Move("));
+        assert!(body(view, "    fn page_pointer(").contains("self.over_page("));
+        for signature in ["        fn mouse_moved(", "        fn mouse_entered("] {
+            let moved = body(view, signature);
+            assert!(moved.contains("self.page_pointer("), "{signature}: {moved}");
+            assert!(!moved.contains("page_input"), "{signature}: {moved}");
+        }
+        // The pointer is over the page when it is in the pane's visible area and the view the
+        // window finds there is the pane's own (the divider's handle is not).
+        let over = body(view, "    fn over_page(");
+        assert!(over.contains("visibleRect()"), "{over}");
+        assert!(over.contains(".hitTest("), "{over}");
+        assert!(over.contains("isDescendantOf("), "{over}");
+        // Leaving is told once.
+        let left = body(view, "    fn page_pointer_left(");
+        assert!(left.contains("page_over.replace(false)"), "{left}");
+        assert!(left.contains("Input::Leave"), "{left}");
+        // An answer sets the shape only while the pointer is over the page.
+        let reply = body(pane, "    fn apply_page_reply(");
+        let set = reply.find(".set()").expect("a shape is set");
+        let guard = reply.find("page_pointer_is_over()").expect("the guard");
+        assert!(guard < set, "{reply}");
+        assert!(body(pane, "    fn take_page_down(").contains("forget_page_pointer()"));
     }
 
     /// A pane that shows a program's view has the keyboard in the view, and the window's ways of

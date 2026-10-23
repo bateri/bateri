@@ -16,6 +16,9 @@
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+/// How long a program that was asked to end waits for the terminal to take its last words.
+pub const FAREWELL: std::time::Duration = std::time::Duration::from_millis(400);
+
 /// A signal that ends the program arrived.
 static ENDED_BY_SIGNAL: AtomicBool = AtomicBool::new(false);
 
@@ -96,7 +99,12 @@ impl Tty {
             libc::tcsetattr(0, libc::TCSANOW, &self.saved);
         }
         if self.alternate {
-            let _ = write_all(b"\x1b[?1049l");
+            let _ = if signalled() {
+                // Asked to end: it does not wait for a terminal that is not reading.
+                write_all_within(b"\x1b[?1049l", FAREWELL)
+            } else {
+                write_all(b"\x1b[?1049l")
+            };
         }
     }
 }
@@ -110,16 +118,17 @@ impl Drop for Tty {
 /// Writes all of `bytes` to the terminal.
 pub fn write_all(mut bytes: &[u8]) -> io::Result<()> {
     while !bytes.is_empty() {
+        // A program that is asked to end does not go on with a write a signal cut short: the
+        // rest would wait again for a terminal that is not reading.
+        if signalled() {
+            return Err(io::ErrorKind::Interrupted.into());
+        }
         // SAFETY: writes from a slice we own to the output descriptor.
         let wrote = unsafe { libc::write(1, bytes.as_ptr().cast(), bytes.len()) };
         if wrote < 0 {
             let error = io::Error::last_os_error();
             if error.kind() == io::ErrorKind::Interrupted {
-                // A program that is asked to end does not wait for a terminal that has stopped
-                // taking what it writes.
-                if signalled() {
-                    return Err(error);
-                }
+                // (The top of the loop ends a write a signal interrupted.)
                 continue;
             }
             if error.kind() == io::ErrorKind::WouldBlock {
@@ -131,6 +140,70 @@ pub fn write_all(mut bytes: &[u8]) -> io::Result<()> {
         bytes = &bytes[wrote as usize..];
     }
     Ok(())
+}
+
+/// Writes all of `bytes` to the terminal, giving up after `within`: the way a program that has
+/// been asked to end says its last words. A terminal that is not reading (the pane's reader waits
+/// for its view to catch up) must not keep it from leaving; what could not be said is what the
+/// shell's own hooks put right when the command is over.
+///
+/// The bound is the wait for the tty to say it has room, and the pieces written once it has are
+/// small, so that a write finds the room it was promised; it is not a guarantee against a write
+/// that waits anyway (a signal that ends the program flushes the tty's queue, which is what
+/// lets a write that was waiting return).
+pub fn write_all_within(mut bytes: &[u8], within: std::time::Duration) -> io::Result<()> {
+    let until = std::time::Instant::now() + within;
+    while !bytes.is_empty() {
+        let left = until.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return Err(io::ErrorKind::TimedOut.into());
+        }
+        let mut poll = libc::pollfd {
+            fd: 1,
+            events: libc::POLLOUT,
+            revents: 0,
+        };
+        let wait = i32::try_from(left.as_millis().min(100)).unwrap_or(100);
+        // SAFETY: one pollfd, owned here.
+        let ready = unsafe { libc::poll(&mut poll, 1, wait) };
+        if ready < 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        }
+        if ready == 0 {
+            continue;
+        }
+        // Writable means some room, not all of it: a few bytes at a time are written, so a write
+        // that finds less room than asked for does not wait.
+        let piece = bytes.len().min(64);
+        // SAFETY: writes from a slice we own to the output descriptor.
+        let wrote = unsafe { libc::write(1, bytes.as_ptr().cast(), piece) };
+        if wrote < 0 {
+            let error = io::Error::last_os_error();
+            if matches!(
+                error.kind(),
+                io::ErrorKind::Interrupted | io::ErrorKind::WouldBlock
+            ) {
+                continue;
+            }
+            return Err(error);
+        }
+        bytes = &bytes[wrote as usize..];
+    }
+    Ok(())
+}
+
+/// Throws away what the terminal has queued for this program and it has not read
+/// (`tcflush` with `TCIFLUSH`): the last thing a program does with its input, so that what the
+/// host wrote and the program did not read is not left for whatever reads the tty next.
+pub fn discard_input() {
+    // SAFETY: tcflush takes a descriptor and a queue selector and touches nothing else.
+    unsafe {
+        libc::tcflush(0, libc::TCIFLUSH);
+    }
 }
 
 /// Waits up to `milliseconds` for input, and reads what there is into `buffer`: `Ok(Some(n))`

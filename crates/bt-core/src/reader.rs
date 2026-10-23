@@ -66,6 +66,7 @@ use alacritty_terminal::vte::ansi::{self, Handler as _};
 use alacritty_terminal::{thread, tty};
 use polling::{Event as PollingEvent, Events, PollMode, Poller};
 
+use crate::flow::Flow;
 use crate::graphics::{Commands, Sink};
 use crate::handler::ClusterHandler;
 use crate::journal::{Journal, Side};
@@ -87,8 +88,15 @@ pub(crate) const PTY_CHILD_EVENT_TOKEN: usize = 1;
 /// Messages sent to the loop.
 #[derive(Debug)]
 pub(crate) enum Msg {
-    /// Bytes to write to the PTY.
+    /// Bytes to write to the PTY: the person's keys, the terminal's answers, the frames of the
+    /// protocol. One after the other, whole.
     Input(Cow<'static, [u8]>),
+
+    /// The words of the module of the pane's view for its program, as the frames the protocol
+    /// wrote, tagged with the view they were said for. Their own queue: the writer takes a key
+    /// ahead of them, drops them when the program can no longer be their reader, and never writes
+    /// one for a view that is over ([`Flow::module_may_write`]).
+    Module { epoch: u64, bytes: Vec<u8> },
 
     /// The loop must shut down.
     Shutdown,
@@ -96,11 +104,12 @@ pub(crate) enum Msg {
     /// The PTY must be resized.
     Resize(WindowSize),
 
-    /// The journal's compaction made room (or the journal broke): the
-    /// read gate is asked again. A channel message, not a bare poller
-    /// wake: an empty wake with an empty channel is the DEC 2026 timeout's
-    /// arm, which would apply a synchronized update early and ask for a
-    /// frame. Sent only to a loop that has a journal.
+    /// The journal's compaction made room (or the journal broke), or the
+    /// module of the pane's view has taken enough of what the program said
+    /// ([`Flow::taken`]): the read gate is asked again. A channel message, not
+    /// a bare poller wake: an empty wake with an empty channel is the DEC 2026
+    /// timeout's arm, which would apply a synchronized update early and ask
+    /// for a frame. Sent only to a loop that has a journal or a flow.
     Room,
 }
 
@@ -110,21 +119,55 @@ pub(crate) enum Msg {
 pub(crate) struct EventLoopSender {
     sender: Sender<Msg>,
     poller: Arc<Poller>,
+    /// Counts the bytes a message puts on the write queue, whoever sends them: the loop takes
+    /// them off the count as it writes them ([`Flow::written`]).
+    flow: Option<Flow>,
 }
 
 impl EventLoopSender {
     /// `Err` if the receiver dropped or the poller could not be woken; the
     /// caller's only question is "did it go through", no detail is carried.
     pub(crate) fn send(&self, msg: Msg) -> Result<(), ()> {
+        if let Some(flow) = &self.flow {
+            match &msg {
+                Msg::Input(bytes) => {
+                    // A signal character flushes the tty's input when it is written, and what
+                    // is written after it is read by whatever reads the tty next: the module's
+                    // bytes stop before it is queued, and the writer finds the gate shut.
+                    if bytes.iter().any(|byte| SIGNAL_CHARS.contains(byte)) {
+                        flow.interrupt();
+                    }
+                    // Before it is queued: the loop that writes it finds it counted.
+                    flow.queued(bytes.len());
+                }
+                Msg::Module { bytes, .. } => flow.queued(bytes.len()),
+                _ => {}
+            }
+        }
         self.sender.send(msg).map_err(|_| ())?;
         self.poller.notify().map_err(|_| ())
     }
+}
+
+/// The characters that make the tty signal the program's group and flush its input (`ISIG`):
+/// ⌃C (interrupt) and ⌃\ (quit). The terminal's own settings could name others; these are the
+/// ones the pane writes and the ones a person types.
+const SIGNAL_CHARS: [u8; 2] = [0x03, 0x1c];
+
+/// Which queue the buffer being written came from.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Lane {
+    /// Keys, answers, frames of the protocol.
+    Keys,
+    /// A frame of the module's words, for the view with this number.
+    Module(u64),
 }
 
 /// Tracks how much of a buffer has been written.
 struct Writing {
     source: Cow<'static, [u8]>,
     written: usize,
+    lane: Lane,
 }
 
 impl Writing {
@@ -133,6 +176,16 @@ impl Writing {
         Writing {
             source: c,
             written: 0,
+            lane: Lane::Keys,
+        }
+    }
+
+    #[inline]
+    fn module(epoch: u64, frame: Vec<u8>) -> Writing {
+        Writing {
+            source: Cow::Owned(frame),
+            written: 0,
+            lane: Lane::Module(epoch),
         }
     }
 
@@ -157,6 +210,11 @@ impl Writing {
 #[derive(Default)]
 pub(crate) struct State {
     write_list: VecDeque<Cow<'static, [u8]>>,
+    /// The module's words, a frame at a time, each with the view it was said for. Behind
+    /// `write_list`: the person's keys never wait for them.
+    module_list: VecDeque<(u64, Vec<u8>)>,
+    /// Bytes of the module's the writer gave up since the flow was last told.
+    dropped: usize,
     writing: Option<Writing>,
     parser: ansi::Processor,
     /// Whether the last `Handler` call was `input` — [`ClusterHandler`]'s
@@ -171,15 +229,79 @@ pub(crate) struct State {
 
 impl State {
     #[inline]
-    fn ensure_next(&mut self) {
+    fn ensure_next(&mut self, flow: Option<&Flow>) {
         if self.writing.is_none() {
-            self.goto_next();
+            self.goto_next(flow);
         }
     }
 
-    #[inline]
-    fn goto_next(&mut self) {
+    /// The next buffer to write: a key before any word of the module's; of the module's, the
+    /// next frame that may still be written, the others dropped. Nothing is begun between the
+    /// first and the last byte of a buffer — the one being written is finished (or given up)
+    /// before this is asked.
+    fn goto_next(&mut self, flow: Option<&Flow>) {
         self.writing = self.write_list.pop_front().map(Writing::new);
+        if self.writing.is_some() {
+            return;
+        }
+        while let Some((epoch, frame)) = self.module_list.pop_front() {
+            if flow.is_none_or(|flow| flow.module_may_write(epoch, false)) {
+                self.writing = Some(Writing::module(epoch, frame));
+                return;
+            }
+            self.dropped += frame.len();
+        }
+    }
+
+    /// Queues the module's words as frames, whole: each ends with the `ESC \` that closes it,
+    /// and the writer never splits one. Words for a view the flow no longer lets are dropped.
+    fn queue_module(&mut self, flow: Option<&Flow>, epoch: u64, bytes: Vec<u8>) {
+        if flow.is_some_and(|flow| !flow.module_may_write(epoch, false)) {
+            self.dropped += bytes.len();
+            return;
+        }
+        let mut start = 0;
+        let mut at = 0;
+        while at + 1 < bytes.len() {
+            if bytes[at] == 0x1b && bytes[at + 1] == b'\\' {
+                self.module_list
+                    .push_back((epoch, bytes[start..at + 2].to_vec()));
+                start = at + 2;
+                at += 2;
+            } else {
+                at += 1;
+            }
+        }
+        if start < bytes.len() {
+            self.module_list.push_back((epoch, bytes[start..].to_vec()));
+        }
+    }
+
+    /// Gives up the module's words the flow no longer lets be written: the frames that wait, and
+    /// the one under way if it may not be finished.
+    fn drop_module(&mut self, flow: &Flow) {
+        let mut dropped = 0;
+        self.module_list.retain(|(epoch, frame)| {
+            let keep = flow.module_may_write(*epoch, false);
+            if !keep {
+                dropped += frame.len();
+            }
+            keep
+        });
+        if let Some(Writing {
+            lane: Lane::Module(epoch),
+            written,
+            ..
+        }) = &self.writing
+            && !flow.module_may_write(*epoch, *written > 0)
+        {
+            dropped += self
+                .writing
+                .as_ref()
+                .map_or(0, |w| w.remaining_bytes().len());
+            self.writing = None;
+        }
+        self.dropped += dropped;
     }
 
     #[inline]
@@ -189,7 +311,7 @@ impl State {
 
     #[inline]
     fn needs_write(&self) -> bool {
-        self.writing.is_some() || !self.write_list.is_empty()
+        self.writing.is_some() || !self.write_list.is_empty() || !self.module_list.is_empty()
     }
 
     #[inline]
@@ -249,6 +371,15 @@ pub(crate) struct EventLoop<T: tty::EventedPty, U: EventListener> {
     /// The session's graphics ([`EventLoop::graphics`]); `None`: none, and
     /// the graphics commands the stream may carry only move the cursor.
     graphics: Option<Arc<dyn Sink>>,
+    /// What passes between the program and the module of its view
+    /// ([`EventLoop::flow`]); `None`: nothing is held to what the module takes.
+    flow: Option<Flow>,
+    /// Asked before the module's words are written: whether the program is still the one that
+    /// reads the tty ([`EventLoop::module_check`]); `None`: it is taken to be.
+    module_check: Option<Box<dyn Fn() -> bool + Send>>,
+    /// The child has exited and the loop reads what is left: the PTY is read to its end
+    /// whatever the module has taken, because there is no program left to slow down.
+    draining: bool,
 }
 
 /// The read gate's state between two loop rounds: while closed, since when
@@ -297,6 +428,9 @@ where
             read_first: None,
             journal: None,
             graphics: None,
+            flow: None,
+            module_check: None,
+            draining: false,
         })
     }
 
@@ -313,12 +447,39 @@ where
         self.journal = Some(journal);
     }
 
+    /// Holds the PTY to what the module of the pane's view takes of what the program says:
+    /// reading stops while the module has not taken the program's messages down from
+    /// [`crate::INBOX_LIMIT`], and the bytes this loop writes to the program are counted off
+    /// what the module said ([`Flow::written`]).
+    pub(crate) fn flow(&mut self, flow: Flow) {
+        self.flow = Some(flow);
+    }
+
+    /// Fits the question the writer asks before it writes a word of the module's: whether the
+    /// program is still the one that reads the tty. A program killed from outside says nothing,
+    /// and the shell that took the tty back would otherwise be fed what the page goes on saying.
+    pub(crate) fn module_check(&mut self, check: impl Fn() -> bool + Send + 'static) {
+        self.module_check = Some(Box::new(check));
+    }
+
+    /// Whether the module's words may go to the tty now.
+    fn module_reader_is_there(&self) -> bool {
+        self.module_check.as_ref().is_none_or(|check| check())
+    }
+
+    /// Whether the module has not yet taken what the program said, down to where the loop reads
+    /// again ([`Flow::inbox_closed`]). Never once the child has exited.
+    fn flow_closed(&self) -> bool {
+        !self.draining && self.flow.as_ref().is_some_and(Flow::inbox_closed)
+    }
+
     /// Whether the journal has room for the next read — always without a
-    /// journal.
+    /// journal — and the module has taken what the program said.
     fn gate_open(&self) -> bool {
         self.journal
             .as_ref()
             .is_none_or(|journal| journal.gate_open())
+            && !self.flow_closed()
     }
 
     /// The read gate, before the next poll: closes the PTY's read interest
@@ -335,7 +496,17 @@ where
         interest: &mut PollingEvent,
         poll_opts: PollMode,
     ) -> Option<Instant> {
-        let journal = Arc::clone(self.journal.as_ref()?);
+        let flow_open = !self.flow_closed();
+        let Some(journal) = self.journal.as_ref().map(Arc::clone) else {
+            // No journal: the read interest follows the module alone.
+            if flow_open != interest.readable {
+                interest.readable = flow_open;
+                if let Err(err) = self.pty.reregister(&self.poll, *interest, poll_opts) {
+                    panic!("reader loop re-registration failed: {err}"); // audit: alacritty parity, the crash reaches the shutdown report through join's Err
+                }
+            }
+            return None;
+        };
         let mut open = journal.gate_open();
         if open {
             gate.stalled = None;
@@ -359,6 +530,7 @@ where
                 }
             }
         }
+        let open = open && flow_open;
         if open != interest.readable {
             interest.readable = open;
             // The same deliberate panic as the write interest's below.
@@ -504,10 +676,13 @@ where
         bytes
     }
 
+    /// The loop's channel. Fit the loop's flow first ([`EventLoop::flow`]): the sender counts
+    /// what it queues for it.
     pub(crate) fn channel(&self) -> EventLoopSender {
         EventLoopSender {
             sender: self.tx.clone(),
             poller: self.poll.clone(),
+            flow: self.flow.clone(),
         }
     }
 
@@ -516,6 +691,9 @@ where
         while let Some(msg) = self.rx.recv() {
             match msg {
                 Msg::Input(input) => state.write_list.push_back(input),
+                Msg::Module { epoch, bytes } => {
+                    state.queue_module(self.flow.as_ref(), epoch, bytes)
+                }
                 Msg::Resize(window_size) => self.pty.on_resize(window_size),
                 // Only a wake: the gate is asked at the top of the round.
                 Msg::Room => {}
@@ -645,8 +823,10 @@ where
             processed += unprocessed;
             unprocessed = 0;
 
-            // Do not hold the terminal locked longer than needed.
-            if processed >= MAX_LOCKED_READ {
+            // Do not hold the terminal locked longer than needed — nor read on when the module of
+            // the pane's view has not taken what the program said: the program's `write` waits
+            // in the tty, and the rest is read when the module has made room.
+            if processed >= MAX_LOCKED_READ || self.flow_closed() {
                 break;
             }
         }
@@ -661,10 +841,30 @@ where
 
     #[inline]
     fn pty_write(&mut self, state: &mut State) -> io::Result<()> {
-        state.ensure_next();
+        let result = self.pty_write_queued(state);
+        self.tell_dropped(state);
+        result
+    }
+
+    fn pty_write_queued(&mut self, state: &mut State) -> io::Result<()> {
+        state.ensure_next(self.flow.as_ref());
 
         'write_many: while let Some(mut current) = state.take_current() {
             'write_one: loop {
+                // The module's words are written only while the flow lets them: between two
+                // writes of the same frame too, because a signal character that is on its way to
+                // the program takes the gate away from one that is half written. A key does not.
+                if let Lane::Module(epoch) = current.lane
+                    && (!self.module_reader_is_there()
+                        || !self
+                            .flow
+                            .as_ref()
+                            .is_none_or(|flow| flow.module_may_write(epoch, current.written > 0)))
+                {
+                    state.dropped += current.remaining_bytes().len();
+                    state.goto_next(self.flow.as_ref());
+                    break 'write_one;
+                }
                 match self.pty.writer().write(current.remaining_bytes()) {
                     Ok(0) => {
                         state.set_current(Some(current));
@@ -672,8 +872,14 @@ where
                     }
                     Ok(n) => {
                         current.advance(n);
+                        if let Some(flow) = &self.flow {
+                            flow.written(n);
+                            if current.lane != Lane::Keys {
+                                flow.wrote_module();
+                            }
+                        }
                         if current.finished() {
-                            state.goto_next();
+                            state.goto_next(self.flow.as_ref());
                             break 'write_one;
                         }
                     }
@@ -689,6 +895,26 @@ where
         }
 
         Ok(())
+    }
+
+    /// The module's words given up are no longer waiting for the program to read them.
+    fn tell_dropped(&self, state: &mut State) {
+        if state.dropped > 0 {
+            if let Some(flow) = &self.flow {
+                flow.written(state.dropped);
+            }
+            state.dropped = 0;
+        }
+    }
+
+    /// Applies the flow's gate on the module's words to the queue: before the next round of
+    /// writing, so that a signal character that shut it is written ahead of them and a view that
+    /// ended leaves none waiting.
+    fn apply_module_gate(&self, state: &mut State) {
+        if let Some(flow) = &self.flow {
+            state.drop_module(flow);
+        }
+        self.tell_dropped(state);
     }
 
     pub(crate) fn spawn(mut self) -> JoinHandle<(Self, State)> {
@@ -777,6 +1003,9 @@ where
                 if !self.drain_recv_channel(&mut state) {
                     break;
                 }
+                // The module's words a signal character or the end of the view took away, dropped
+                // before anything is written: the character goes out first.
+                self.apply_module_gate(&mut state);
 
                 for event in events.iter() {
                     match event.key {
@@ -788,6 +1017,7 @@ where
                                     self.event_proxy.send_event(Event::ChildExit(status));
                                 }
                                 if self.drain_on_exit {
+                                    self.draining = true;
                                     let _ = self.pty_read(&mut state, &mut buf, false);
                                 }
                                 self.terminal.lock().exit();
@@ -838,7 +1068,9 @@ where
                     }
                 }
 
-                // Register write interest if needed.
+                // Register write interest if needed. (What the gate took away since the round
+                // began is not waiting to be written.)
+                self.apply_module_gate(&mut state);
                 let needs_write = state.needs_write();
                 if needs_write != interest.writable {
                     interest.writable = needs_write;
@@ -950,13 +1182,60 @@ mod tests {
         Wire(Vec<u8>),
     }
 
+    /// The program's side of the tty's input: it takes what the test gives it room for, and
+    /// reports `WouldBlock` for the rest, as a tty whose queue is full does.
+    #[derive(Clone)]
+    struct Room {
+        /// Everything written, in order.
+        taken: Arc<Mutex<Vec<u8>>>,
+        /// How many more bytes it will take.
+        left: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Room {
+        fn open() -> Self {
+            Self {
+                taken: Arc::default(),
+                left: Arc::new(std::sync::atomic::AtomicUsize::new(usize::MAX)),
+            }
+        }
+
+        fn give(&self, bytes: usize) {
+            self.left.store(bytes, Ordering::SeqCst);
+        }
+
+        fn taken(&self) -> Vec<u8> {
+            self.taken.lock().unwrap().clone()
+        }
+    }
+
+    impl Write for Room {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            let left = self.left.load(Ordering::SeqCst);
+            if left == 0 {
+                return Err(ErrorKind::WouldBlock.into());
+            }
+            let take = buf.len().min(left);
+            self.taken.lock().unwrap().extend_from_slice(&buf[..take]);
+            if left != usize::MAX {
+                self.left.store(left - take, Ordering::SeqCst);
+            }
+            Ok(take)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
     struct ScriptedPty {
         steps: VecDeque<Step>,
         /// The bytes of the step being given that the PTY still has.
         pending: Vec<u8>,
         /// The most bytes a read of it gives (a pipe gives what it has).
         chunk: usize,
-        void: io::Sink,
+        /// What the program is written: all of it, unless the test gives it less room.
+        room: Room,
         /// How much of the buffer each read of the script was offered.
         offered: Vec<usize>,
     }
@@ -967,7 +1246,7 @@ mod tests {
                 steps: steps.into_iter().collect(),
                 pending: Vec::new(),
                 chunk: usize::MAX,
-                void: io::sink(),
+                room: Room::open(),
                 offered: Vec::new(),
             }
         }
@@ -999,7 +1278,7 @@ mod tests {
 
     impl tty::EventedReadWrite for ScriptedPty {
         type Reader = Self;
-        type Writer = io::Sink;
+        type Writer = Room;
 
         unsafe fn register(
             &mut self,
@@ -1023,7 +1302,7 @@ mod tests {
         }
 
         fn writer(&mut self) -> &mut Self::Writer {
-            &mut self.void
+            &mut self.room
         }
     }
 
@@ -1251,6 +1530,229 @@ mod tests {
         assert!(row.starts_with("hello world"), "{row:?}");
         assert!(!sink.hub.is_parked());
         assert_eq!(sink.hub.with_images(|images| images.main().ids()), [1]);
+    }
+
+    /// The module of the pane's view has not taken what the program said: the loop reads no
+    /// further than the read it is on, and goes on with the next when the module has taken enough.
+    #[test]
+    fn a_loop_whose_module_has_not_taken_what_was_said_reads_no_further() {
+        use crate::flow::{Flow, INBOX_LIMIT};
+        let sink = quiet_sink();
+        let pty = ScriptedPty::new([Step::Text("one "), Step::Text("two "), Step::Text("three")]);
+        let (mut event_loop, terminal) = scripted_loop(pty, &sink, false);
+        let flow = Flow::new();
+        event_loop.flow(flow.clone());
+        // The module has not taken the program's messages down from the bound.
+        flow.heard(INBOX_LIMIT);
+        let mut state = State::default();
+        let mut buf = vec![0; 4096];
+        let read = event_loop
+            .pty_read(&mut state, &mut buf, true)
+            .expect("read");
+        assert_eq!(read, "one ".len(), "one read, and no more");
+        assert_eq!(
+            event_loop.pty_mut().steps.len(),
+            2,
+            "the rest is in the PTY"
+        );
+        assert!(!event_loop.gate_open());
+        // The module takes it: the loop reads the rest.
+        flow.taken(INBOX_LIMIT);
+        assert!(event_loop.gate_open());
+        event_loop
+            .pty_read(&mut state, &mut buf, true)
+            .expect("read");
+        let row = grid_row(&terminal.lock(), 0);
+        assert!(row.starts_with("one two three"), "{row:?}");
+    }
+
+    /// The child has exited and the loop reads what the PTY has left, whatever the module has
+    /// taken: there is no program left to slow down.
+    #[test]
+    fn a_loop_that_drains_a_child_that_exited_reads_on_whatever_the_module_has_taken() {
+        use crate::flow::{Flow, INBOX_LIMIT};
+        let sink = quiet_sink();
+        let pty = ScriptedPty::new([Step::Text("a"), Step::Text("b"), Step::Text("c")]);
+        let (mut event_loop, terminal) = scripted_loop(pty, &sink, false);
+        let flow = Flow::new();
+        event_loop.flow(flow.clone());
+        flow.heard(INBOX_LIMIT);
+        event_loop.draining = true;
+        let mut state = State::default();
+        let mut buf = vec![0; 4096];
+        event_loop
+            .pty_read(&mut state, &mut buf, true)
+            .expect("read");
+        let row = grid_row(&terminal.lock(), 0);
+        assert!(row.starts_with("abc"), "{row:?}");
+    }
+
+    /// Three frames of a message of the module's, `size` bytes each, as the protocol writes them.
+    fn frames(size: usize, which: &[u8]) -> Vec<u8> {
+        which
+            .iter()
+            .flat_map(|letter| {
+                let mut frame = b"\x1b_".to_vec();
+                frame.resize(size - 2, *letter);
+                frame.extend_from_slice(b"\x1b\\");
+                frame
+            })
+            .collect()
+    }
+
+    /// A loop for the module's words over a PTY that takes what the test gives it room for, with
+    /// the flow fitted and a view up; its channel, its flow, the program's side of the tty and
+    /// the number of the view.
+    fn laned_loop() -> (
+        EventLoop<ScriptedPty, VoidListener>,
+        EventLoopSender,
+        Flow,
+        Room,
+        u64,
+    ) {
+        let sink = quiet_sink();
+        let (mut event_loop, _terminal) = scripted_loop(ScriptedPty::new([]), &sink, false);
+        let flow = Flow::new();
+        event_loop.flow(flow.clone());
+        let sender = event_loop.channel();
+        flow.begin();
+        let epoch = flow.module_ticket().expect("a view is up");
+        let room = event_loop.pty_mut().room.clone();
+        (event_loop, sender, flow, room, epoch)
+    }
+
+    /// One round of the loop's writing: what the channel holds, the gate, the write.
+    fn round(event_loop: &mut EventLoop<ScriptedPty, VoidListener>, state: &mut State) {
+        assert!(event_loop.drain_recv_channel(state));
+        event_loop.apply_module_gate(state);
+        event_loop.pty_write(state).expect("write");
+        event_loop.apply_module_gate(state);
+    }
+
+    /// A key goes ahead of the module's frames that wait, and never inside one: a frame that
+    /// is half written is finished first.
+    #[test]
+    fn a_key_is_written_ahead_of_the_modules_frames_and_never_inside_one() {
+        let (mut event_loop, sender, flow, room, epoch) = laned_loop();
+        let mut state = State::default();
+        // Three frames of 100 bytes, and room for 150: the first whole, half of the second.
+        sender
+            .send(Msg::Module {
+                epoch,
+                bytes: frames(100, b"abc"),
+            })
+            .unwrap();
+        room.give(150);
+        round(&mut event_loop, &mut state);
+        assert_eq!(room.taken().len(), 150);
+        // A key arrives while the second frame is half written, and more room comes.
+        sender.send(Msg::Input(Cow::Borrowed(b"k"))).unwrap();
+        room.give(usize::MAX);
+        round(&mut event_loop, &mut state);
+        let taken = room.taken();
+        let mut expected = frames(100, b"ab");
+        expected.push(b'k');
+        expected.extend(frames(100, b"c"));
+        assert_eq!(
+            taken, expected,
+            "the key between the second frame and the third"
+        );
+        assert_eq!(flow.pending(), 0);
+    }
+
+    /// A signal character goes first: the frame under way is given up where it stands, the ones
+    /// that wait are dropped, and not a byte of the module's follows — the character flushes the
+    /// tty's input, and what comes after it is read by whatever reads the tty next.
+    #[test]
+    fn a_signal_character_is_written_ahead_of_the_modules_words_and_none_follows_it() {
+        let (mut event_loop, sender, flow, room, epoch) = laned_loop();
+        let mut state = State::default();
+        sender
+            .send(Msg::Module {
+                epoch,
+                bytes: frames(100, b"abc"),
+            })
+            .unwrap();
+        room.give(150);
+        round(&mut event_loop, &mut state);
+        // ⌃C: the sender shuts the gate before it queues the character.
+        sender.send(Msg::Input(Cow::Borrowed(b"\x03"))).unwrap();
+        assert_eq!(flow.module_ticket(), None);
+        // Words the module still says, through a gate it has not heard shut, are dropped too.
+        sender
+            .send(Msg::Module {
+                epoch,
+                bytes: frames(100, b"d"),
+            })
+            .unwrap();
+        room.give(usize::MAX);
+        round(&mut event_loop, &mut state);
+        round(&mut event_loop, &mut state);
+        let taken = room.taken();
+        let mut expected = frames(100, b"a");
+        expected.extend_from_slice(&frames(100, b"b")[..50]);
+        expected.push(0x03);
+        assert_eq!(
+            taken, expected,
+            "the character, and nothing of the module's after it"
+        );
+        assert_eq!(flow.pending(), 0, "what was given up is not owed to anyone");
+    }
+
+    /// Any other end of the view: the frame under way is finished, so that the program is not
+    /// left half a frame, and the ones behind it are dropped.
+    #[test]
+    fn the_end_of_the_view_finishes_the_frame_under_way_and_drops_the_rest() {
+        let (mut event_loop, sender, flow, room, epoch) = laned_loop();
+        let mut state = State::default();
+        sender
+            .send(Msg::Module {
+                epoch,
+                bytes: frames(100, b"abc"),
+            })
+            .unwrap();
+        room.give(150);
+        round(&mut event_loop, &mut state);
+        flow.end();
+        room.give(usize::MAX);
+        round(&mut event_loop, &mut state);
+        round(&mut event_loop, &mut state);
+        assert_eq!(room.taken(), frames(100, b"ab"), "two whole frames");
+        assert_eq!(flow.pending(), 0);
+    }
+
+    /// Words for a view that is over, or for one before the one that is up, are never written.
+    #[test]
+    fn words_for_a_view_that_is_over_or_an_earlier_one_are_never_written() {
+        let (mut event_loop, sender, flow, room, epoch) = laned_loop();
+        let mut state = State::default();
+        flow.end();
+        sender
+            .send(Msg::Module {
+                epoch,
+                bytes: frames(100, b"a"),
+            })
+            .unwrap();
+        round(&mut event_loop, &mut state);
+        assert!(room.taken().is_empty(), "the view is over");
+        // The next view is up: its words are written, the earlier view's are not.
+        flow.begin();
+        let next = flow.module_ticket().expect("up again");
+        sender
+            .send(Msg::Module {
+                epoch,
+                bytes: frames(100, b"b"),
+            })
+            .unwrap();
+        sender
+            .send(Msg::Module {
+                epoch: next,
+                bytes: frames(100, b"c"),
+            })
+            .unwrap();
+        round(&mut event_loop, &mut state);
+        assert_eq!(room.taken(), frames(100, b"c"));
+        assert_eq!(flow.pending(), 0);
     }
 
     /// A DEC 2026 update that timed out is applied with the same care: the

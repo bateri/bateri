@@ -40,12 +40,24 @@ const ANSWER_WITHIN: Duration = Duration::from_secs(2);
 /// The name of the module in the bundle.
 const ENTRY: &str = "containers.wasm";
 
+/// How long a program that said `bye` reads on for the answer before it gives up (specification
+/// §10.3).
+const ANSWER_TO_BYE: Duration = Duration::from_millis(500);
+
 /// How often the made-up host reports.
 const EVERY: Duration = Duration::from_secs(1);
+
+/// The kinds of view this program can show, in the order it prefers them (specification §5.5):
+/// the one it carries is a WebAssembly component.
+const VIEWS: [&str; 1] = ["wasm"];
+
+/// The kind of view the `open` names.
+const VIEW: &str = "wasm";
 
 #[derive(Serialize)]
 struct Open<'a> {
     token: &'a str,
+    view: &'a str,
     program: &'a str,
     title: &'a str,
     bundle: Bundle<'a>,
@@ -85,12 +97,18 @@ struct Conversation<'a> {
     subscription: Option<u64>,
     tick: u32,
     next_push: Instant,
+    /// Push as fast as the terminal takes it, not once a second.
+    flood: bool,
+    /// Bytes of data the view's `upload` calls have carried so far.
+    uploaded: u64,
 }
 
-/// Shows the view and serves it until it is over.
-pub fn run(module: &[u8]) -> Outcome {
+/// Shows the view and serves it until it is over. With `flood` the readings come as fast as the
+/// terminal takes them. The bytes the view sent with its `upload` calls come back with how it
+/// ended.
+pub fn run(module: &[u8], flood: bool) -> (Outcome, u64) {
     let Ok(tty) = Tty::take() else {
-        return Outcome::NoView;
+        return (Outcome::NoView, 0);
     };
     let mut talk = Conversation {
         tty,
@@ -102,10 +120,12 @@ pub fn run(module: &[u8]) -> Outcome {
         subscription: None,
         tick: 0,
         next_push: Instant::now(),
+        flood,
+        uploaded: 0,
     };
     let outcome = talk.go();
     talk.tty.give_back();
-    outcome
+    (outcome, talk.uploaded)
 }
 
 impl Conversation<'_> {
@@ -135,7 +155,7 @@ impl Conversation<'_> {
                 id: hello,
                 re: None,
                 digest: None,
-                payload: r#"{"versions":[1]}"#,
+                payload: &hello_payload(),
             },
             Split::Fill,
             &mut bytes,
@@ -221,6 +241,7 @@ impl Conversation<'_> {
         self.subscription = None;
         let open = Open {
             token,
+            view: VIEW,
             program: "demopen",
             title: "Containers",
             bundle: Bundle {
@@ -261,7 +282,12 @@ impl Conversation<'_> {
             &mut bytes,
         )
         .map_err(|_| ())?;
-        terminal::write_all(&bytes).map_err(|_| ())?;
+        if terminal::signalled() {
+            // Asked to end: the last words are said if the terminal takes them soon.
+            terminal::write_all_within(&bytes, terminal::FAREWELL).map_err(|_| ())?;
+        } else {
+            terminal::write_all(&bytes).map_err(|_| ())?;
+        }
         Ok(id)
     }
 
@@ -316,6 +342,10 @@ impl Conversation<'_> {
     /// seen soon).
     fn wait(&self) -> i32 {
         let moment = Duration::from_millis(100);
+        if self.flood && self.subscription.is_some() {
+            // Only a look at the input: the next reading is due already.
+            return 0;
+        }
         let left = if self.subscription.is_some() {
             self.next_push
                 .saturating_duration_since(Instant::now())
@@ -390,6 +420,7 @@ impl Conversation<'_> {
                 }
                 Ok(())
             }
+            Message::Call(call) if call.method == "upload" => self.on_upload(&call),
             Message::Call(call) => self.say(&Message::failure(
                 call.id,
                 "not-found",
@@ -400,12 +431,27 @@ impl Conversation<'_> {
         sent.is_err().then_some(Outcome::Ended)
     }
 
+    /// A chunk of the payload the view sends: counted, and the last one is answered with how
+    /// much there has been. The view says nothing of how it chunks; the count is the program's.
+    fn on_upload(&mut self, call: &bateri_view_messages::Call) -> Result<(), ()> {
+        let data = call
+            .params
+            .get("data")
+            .and_then(Value::as_str)
+            .map_or(0, str::len);
+        self.uploaded += data as u64;
+        if call.params.get("last").and_then(Value::as_bool) == Some(true) {
+            return self.say(&Message::answer(call.id, json!({ "bytes": self.uploaded })));
+        }
+        Ok(())
+    }
+
     /// The reading of this second, if the view listens and it is time.
     fn push_if_due(&mut self) -> Result<(), ()> {
         let Some(id) = self.subscription else {
             return Ok(());
         };
-        if Instant::now() < self.next_push {
+        if !self.flood && Instant::now() < self.next_push {
             return Ok(());
         }
         let readings: Vec<Value> = bt_view::demo::readings(self.tick)
@@ -417,27 +463,76 @@ impl Conversation<'_> {
         self.say(&Message::push(id, json!({ "readings": readings })))
     }
 
-    /// Ends the view and says why (a `bye` with the token it was opened with).
+    /// Ends the view and says why (a `bye` with the token it was opened with), then does what
+    /// the protocol asks of a program that ends (specification §10.3): reads, and throws away,
+    /// what the terminal has queued up to its answer, and throws away what is left. A frame the
+    /// terminal wrote before it learned of the `bye` must not be left in the tty for the shell
+    /// that reads it next.
     fn bye(&mut self, reason: &str) {
-        let Ok(payload) = json::to_wire(&Bye {
+        let sent = json::to_wire(&Bye {
             token: &self.token,
             reason,
-        }) else {
-            return;
-        };
-        let _ = self.send("bye", None, None, &payload);
+        })
+        .map_err(|_| ())
+        .and_then(|payload| self.send("bye", None, None, &payload));
+        if let Ok(bye) = sent {
+            self.read_up_to_the_answer_to(bye);
+        }
+        terminal::discard_input();
+    }
+
+    /// Reads and drops whatever comes until the terminal's `closed` that answers `bye`, or the
+    /// wait is over.
+    fn read_up_to_the_answer_to(&mut self, bye: u32) {
+        let until = Instant::now() + ANSWER_TO_BYE;
+        let mut buffer = [0u8; 4096];
+        while let Some(left) = until.checked_duration_since(Instant::now()) {
+            let wait = i32::try_from(left.as_millis().min(50)).unwrap_or(50);
+            match terminal::read(&mut buffer, wait) {
+                Err(_) | Ok(Some(0)) => return,
+                Ok(None) => {}
+                Ok(Some(got)) => {
+                    let mut events = Vec::new();
+                    self.decoder.feed(&buffer[..got], &mut events);
+                    let answered = events.iter().any(|event| {
+                        matches!(event, Event::Message(message)
+                            if message.kind == "closed" && message.re() == Some(bye))
+                    });
+                    if answered {
+                        return;
+                    }
+                }
+            }
+        }
     }
 }
 
-/// The token of a `welcome` that offers one for a host that shows a component: version and
-/// token, and `bundle` and `wasm` among the features. `None` for any other.
+/// The `hello`: the versions this program speaks and the kinds of view it can show.
+fn hello_payload() -> String {
+    json::to_wire(&json!({ "versions": [1], "views": VIEWS })).unwrap_or_default()
+}
+
+/// The token of a `welcome` that offers one for a host that shows this program's kind of view:
+/// a version and a token, `bundle` among the features and `wasm` among the views. `None` for any
+/// other — a host that shares no version, takes no bundles, or whose `views` is empty or has no
+/// kind of this program's: the list is shown as text at once.
 fn offer_of(message: &Frame) -> Option<String> {
     let welcome: Value = serde_json::from_str(&message.payload).ok()?;
     welcome.get("version")?;
     let token = welcome.get("token")?.as_str()?.to_owned();
-    let features = welcome.get("features")?.as_array()?;
-    let has = |name: &str| features.iter().any(|f| f.as_str() == Some(name));
-    (has("bundle") && has("wasm")).then_some(token)
+    let names = |member: &str| -> Option<Vec<String>> {
+        Some(
+            welcome
+                .get(member)?
+                .as_array()?
+                .iter()
+                .filter_map(|name| name.as_str().map(str::to_owned))
+                .collect(),
+        )
+    };
+    let features = names("features")?;
+    let views = names("views")?;
+    (features.iter().any(|f| f == "bundle") && views.iter().any(|v| v == VIEW)).then_some(token)
 }
 
 /// Whether `bytes` hold a terminal's answer to `CSI c`: `ESC [ ? … c`.
@@ -465,15 +560,39 @@ mod tests {
     fn a_terminal_that_shows_components_offers_its_token_and_no_other_does() {
         let host = r#""host":{"name":"t","version":"0"}"#;
         let wasm = format!(
-            r#"{{"version":1,"token":"abc",{host},"features":["bundle","dismiss","wasm"]}}"#
+            r#"{{"version":1,"token":"abc",{host},"features":["bundle","dismiss"],"views":["wasm","web"]}}"#
         );
-        let web =
-            format!(r#"{{"version":1,"token":"abc",{host},"features":["bundle","dismiss"]}}"#);
+        let web = format!(
+            r#"{{"version":1,"token":"abc",{host},"features":["bundle","dismiss"],"views":["web"]}}"#
+        );
+        let nothing = format!(
+            r#"{{"version":1,"token":"abc",{host},"features":["bundle","dismiss"],"views":[]}}"#
+        );
+        let no_bundles = format!(
+            r#"{{"version":1,"token":"abc",{host},"features":["dismiss"],"views":["wasm"]}}"#
+        );
         let none = format!(r#"{{"supported":[2],{host}}}"#);
         assert_eq!(offer_of(&welcome(&wasm)).as_deref(), Some("abc"));
         assert_eq!(offer_of(&welcome(&web)), None);
+        assert_eq!(offer_of(&welcome(&nothing)), None);
+        assert_eq!(offer_of(&welcome(&no_bundles)), None);
         assert_eq!(offer_of(&welcome(&none)), None);
         assert_eq!(offer_of(&welcome("not json")), None);
+    }
+
+    #[test]
+    fn the_hello_lists_the_one_kind_of_view_this_program_shows() {
+        assert_eq!(hello_payload(), r#"{"versions":[1],"views":["wasm"]}"#);
+    }
+
+    /// The size of a message toward the program is the protocol's, and the messages crate and
+    /// the sandbox hold to the same number.
+    #[test]
+    fn a_message_is_held_to_the_protocols_limit() {
+        assert_eq!(
+            bateri_view_messages::MAX_BYTES,
+            pencere::session::MAX_VIEW_MESSAGE
+        );
     }
 
     #[test]

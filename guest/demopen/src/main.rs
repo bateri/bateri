@@ -8,9 +8,13 @@
 //!
 //! ```text
 //! demopen            the view if the terminal shows one, the list as text if not
+//! demopen --flood    the view, with the readings pushed as fast as the terminal takes them
 //! demopen --text     the list as text, whatever the terminal is
 //! demopen --json     the list as JSON, a line for each container
 //! ```
+//!
+//! In the view, Shift-U sends this program a large payload; the program counts what it gets and
+//! says how much when it leaves.
 //!
 //! The list and the numbers are the page's own (`bt_view::demo`): this program makes up nothing
 //! the page does not know the names of. The protocol half (frames, bundle, token) is
@@ -33,17 +37,8 @@ fn main() -> ExitCode {
         .collect::<Vec<_>>()
         .as_slice()
     {
-        [] => {
-            if terminal::is_terminal() {
-                match view::run(VIEW) {
-                    view::Outcome::Ended => return ExitCode::SUCCESS,
-                    view::Outcome::Interrupted => return ExitCode::from(130),
-                    view::Outcome::NoView => {}
-                }
-            }
-            print!("{}", table::text());
-            ExitCode::SUCCESS
-        }
+        [] => shown(false),
+        ["--flood"] => shown(true),
         ["--text"] => {
             print!("{}", table::text());
             ExitCode::SUCCESS
@@ -63,7 +58,25 @@ fn main() -> ExitCode {
     }
 }
 
-const USAGE: &str = "usage: demopen [--text | --json]\n\n  \
+/// The view if the terminal shows one, and the list as text if not.
+fn shown(flood: bool) -> ExitCode {
+    if terminal::is_terminal() {
+        let (outcome, uploaded) = view::run(VIEW, flood);
+        if uploaded > 0 {
+            println!("demopen: the view sent {uploaded} bytes");
+        }
+        match outcome {
+            view::Outcome::Ended => return ExitCode::SUCCESS,
+            view::Outcome::Interrupted => return ExitCode::from(130),
+            view::Outcome::NoView => {}
+        }
+    }
+    print!("{}", table::text());
+    ExitCode::SUCCESS
+}
+
+const USAGE: &str = "usage: demopen [--flood | --text | --json]\n\n  \
     (no option)  a view in a terminal that shows one, the list as text in one that does not\n  \
+    --flood      the view, with the readings pushed as fast as the terminal takes them\n  \
     --text       the list as text\n  \
     --json       the list as JSON, a line for each container";

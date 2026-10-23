@@ -16,6 +16,33 @@ use wasmtime::{Config, Engine, ResourceLimiter, Store, Trap};
 
 use crate::watchdog;
 
+/// The program that opened the page, as far as the page's speed goes: what it can take of what
+/// the page says, and how the page takes what it says. The application gives it; the sandbox
+/// only asks.
+pub trait Program: Send + Sync + 'static {
+    /// The module wants to say `bytes` to its program (a message): whether the program has the
+    /// room for it. When not, the module is told *full* and keeps the message, and the
+    /// application calls it again (`Module::room`) once the program has read enough. From the
+    /// module's thread.
+    fn may_say(&self, bytes: usize) -> bool;
+
+    /// The module has taken a message of `bytes` the program said: the program may say more.
+    /// From the module's thread, after the page was told.
+    fn taken(&self, bytes: usize);
+}
+
+/// A program that can always be told, and that is never made to wait for the page.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Unbounded;
+
+impl Program for Unbounded {
+    fn may_say(&self, _bytes: usize) -> bool {
+        true
+    }
+
+    fn taken(&self, _bytes: usize) {}
+}
+
 /// What a module is held to.
 #[derive(Clone, Debug)]
 pub struct Limits {
@@ -39,9 +66,10 @@ pub struct Limits {
     pub menu: usize,
     /// Bytes of the component itself: a larger one is not compiled.
     pub component: usize,
-    /// Messages to the program one call may send.
+    /// Messages to the program one call may send: a work limit, as the bytes of one are. How
+    /// many the program can take is not this (see [`Program`]).
     pub messages: usize,
-    /// Bytes of one message to the program.
+    /// Bytes of one message to the program: the protocol's own limit for one (1 MiB).
     pub message: usize,
 }
 
@@ -59,7 +87,7 @@ impl Default for Limits {
             menu: 256,
             component: 4 << 20,
             messages: 32,
-            message: 64 << 10,
+            message: 1 << 20,
         }
     }
 }
@@ -155,10 +183,12 @@ pub(crate) struct Host {
     pub(crate) allowed: (usize, usize),
     /// A call sent more than it may: the application closes the module when it comes back.
     pub(crate) overflowed: bool,
+    /// The program the module is for: whether it has the room for what the module says.
+    pub(crate) program: Arc<dyn Program>,
 }
 
 impl Host {
-    pub(crate) fn new(limits: &Limits) -> Self {
+    pub(crate) fn new(limits: &Limits, program: Arc<dyn Program>) -> Self {
         Self {
             limiter: Limiter {
                 memory: limits.memory,
@@ -168,6 +198,7 @@ impl Host {
             sent: Vec::new(),
             allowed: (limits.messages, limits.message),
             overflowed: false,
+            program,
         }
     }
 }
@@ -182,8 +213,8 @@ pub(crate) fn engine() -> Result<Engine, Fault> {
 }
 
 /// A store for one module under `limits`.
-pub(crate) fn store(engine: &Engine, limits: &Limits) -> Store<Host> {
-    let mut store = Store::new(engine, Host::new(limits));
+pub(crate) fn store(engine: &Engine, limits: &Limits, program: Arc<dyn Program>) -> Store<Host> {
+    let mut store = Store::new(engine, Host::new(limits, program));
     store.limiter(|host| &mut host.limiter);
     store
 }
@@ -232,7 +263,7 @@ mod tests {
         );
         let component =
             Component::new(&engine, source).map_err(|why| Fault::Load(format!("{why:#}")))?;
-        let mut store = store(&engine, limits);
+        let mut store = store(&engine, limits, Arc::new(Unbounded));
         let linker = Linker::<Host>::new(&engine);
         let instance = call(&mut store, limits.start, |store| {
             linker.instantiate(store, &component)
@@ -295,7 +326,7 @@ mod tests {
         )
         .expect("a component");
         let limits = quick();
-        let mut store = store(&engine, &limits);
+        let mut store = store(&engine, &limits, Arc::new(Unbounded));
         let linker = Linker::<Host>::new(&engine);
         let why = linker
             .instantiate(&mut store, &component)

@@ -67,11 +67,18 @@ pub use ::pencere::message::HostInfo;
 pub use ::pencere::sandbox::{
     Consent, Declared, Directive, Domain, Grant, Locality, Permission, UiMeta,
 };
-pub use ::pencere::session::{Action, Size, State, ViewKind, ViewSource, ViewStart};
+pub use ::pencere::session::{
+    Action, MAX_VIEW_MESSAGE, Size, State, ViewKind, ViewSource, ViewStart,
+};
 
 use crate::color::{Theme, srgb_bytes};
+use crate::flow::Flow;
 use crate::shell::ShellLog;
 use crate::wake::Wake;
+
+/// What the pane does to throw away what its program left unread in the tty: from the master, and
+/// only where the system lets the master do it ([`pane_discard`]).
+pub(crate) type Discard = Box<dyn Fn() + Send + Sync>;
 
 /// The monospaced font list a view is given when the person named no family
 /// (`[font] family`): the system's, as a CSS `font-family`.
@@ -129,8 +136,9 @@ pub struct ViewOptions {
     /// whose child is the shell itself.
     pub shell_group: Option<ShellGroup>,
     /// The most bytes a view that is a WebAssembly component may be, when the application
-    /// shows such views (it runs them in a sandbox of its own and draws them); `None` for one
-    /// that does not, whose panes refuse them.
+    /// shows such views (it runs them in a sandbox of its own and draws them): the pane then
+    /// offers the kind `wasm` as well as `web` in its `welcome`. `None` for one that does not,
+    /// whose panes leave `wasm` out of it and refuse such an `open`.
     pub wasm_entry_limit: Option<u64>,
 }
 
@@ -462,6 +470,30 @@ pub(crate) fn pane_observer(
     })
 }
 
+/// Throws away what the pane's program left unread in the tty, from the master's side, where
+/// the system lets it (macOS: the master's `TCIFLUSH` is the input queue the program reads).
+/// Nowhere else: a tty whose queue the master cannot reach is left as it is, and what the
+/// module said and was not read stays a bound written down, not a promise.
+pub(crate) fn pane_discard(
+    shell: Arc<Mutex<ShellLog>>,
+    master: Arc<Mutex<Option<File>>>,
+) -> Discard {
+    Box::new(move || {
+        // A pane in a remote session has `ssh`'s tty: the program is elsewhere.
+        if lock(&shell).in_remote_session() {
+            return;
+        }
+        #[cfg(target_os = "macos")]
+        if let Some(file) = lock(&master).as_ref() {
+            // SAFETY: `tcflush` takes an open descriptor and nothing else; the file is held
+            // open for the call by the lock.
+            unsafe { libc::tcflush(file.as_raw_fd(), libc::TCIFLUSH) };
+        }
+        #[cfg(not(target_os = "macos"))]
+        let _ = &master;
+    })
+}
+
 /// The terminal's look as the view is given it: the roles come from the
 /// theme's own values and its own rules — the dim role, the accent, the
 /// separator's step toward the background — and none is computed again here.
@@ -510,6 +542,10 @@ pub(crate) struct Desk {
     observer: Observer,
     /// The token's source failed ([`SystemEntropy`]): no view opens.
     entropy_failed: Arc<AtomicBool>,
+    /// What passes between the program and the module of its view, and how fast.
+    flow: Flow,
+    /// Throws away the input the program of the pane left unread.
+    discard: Discard,
 }
 
 struct Inner {
@@ -531,6 +567,9 @@ struct Slots {
     /// The conversation is in a state the shell sets a deadline for
     /// ([`waits`]), as the shell was last told: each edge of it is news.
     waiting: bool,
+    /// A module that was told its program cannot take more may say again: the shell has not
+    /// been through it yet.
+    room: bool,
 }
 
 impl Desk {
@@ -541,6 +580,8 @@ impl Desk {
         theme: Theme,
         wake: Arc<dyn Wake>,
         observer: Observer,
+        flow: Flow,
+        discard: Discard,
     ) -> Self {
         let failed = Arc::new(AtomicBool::new(false));
         let ViewOptions {
@@ -555,8 +596,11 @@ impl Desk {
             wasm_entry_limit,
         } = options;
         let mut config = Config::new(host, view_theme(&theme, &font_mono), size);
+        // The kinds of view this pane opens: the page of a WebAssembly module, when the
+        // application can run one, and the web view. The program's `hello` lists what it can
+        // show and the `welcome` keeps the ones of these it listed, in its order.
         if let Some(limit) = wasm_entry_limit {
-            config.wasm = true;
+            config.views = vec![ViewKind::Wasm, ViewKind::Web];
             config.wasm_entry_limit = limit;
         }
         config.view.locale = locale;
@@ -574,10 +618,13 @@ impl Desk {
                 parked: VecDeque::new(),
                 views: Vec::new(),
                 waiting: false,
+                room: false,
             }),
             wake,
             observer,
             entropy_failed: failed,
+            flow,
+            discard,
         }
     }
 
@@ -666,9 +713,45 @@ impl Desk {
         wrote.get()
     }
 
+    /// Whether the program of the pane is the one reading the tty: the rule a `hello` is answered
+    /// by (§6.2), the other way round. A shell back in front, a tty that echoes, a prompt being
+    /// edited: something else reads, and the module's words are not for it.
+    fn program_may_read(&self) -> bool {
+        let seen = (self.observer)();
+        !(seen.prompt_editing
+            || seen.shell_in_foreground == Some(true)
+            || seen.tty_canonical_or_echo == Some(true))
+    }
+
+    /// Asked by the writer before it writes (more of) a frame of the module's: whether the
+    /// program is still the reader. If not — the program died with no `bye` and no word from the
+    /// shell yet — the module's words are given up for good and what the program left unread is
+    /// thrown away, as if its end had been announced. Without this a page that goes on saying
+    /// things would feed the shell that took the tty back.
+    pub(crate) fn module_may_go(&self) -> bool {
+        if self.program_may_read() {
+            return true;
+        }
+        self.flow.interrupt();
+        if self.flow.module_was_written() {
+            (self.discard)();
+        }
+        false
+    }
+
     /// The program ended (§10.3): the command's `D`, or the child's exit.
+    ///
+    /// The program can no longer be the reader of what the module said: not a byte more of it is
+    /// written, the frame under way is given up, and what the module said that the program had
+    /// not read — in the tty's queue, where the next reader of the tty would find it — is thrown
+    /// away. The caller is the loop that writes, so nothing is written between the gate and the
+    /// discard.
     pub(crate) fn program_ended(&self, write: impl Fn(Vec<u8>)) {
+        self.flow.interrupt();
         self.apply(write, Conversing::program_ended);
+        if self.flow.module_was_written() {
+            (self.discard)();
+        }
     }
 
     /// Starts the view again, with what the pane is seen as now: the crate
@@ -717,6 +800,23 @@ impl Desk {
         mem::take(&mut lock(&self.slots).views)
     }
 
+    /// Whether a module that was told its program cannot take more may say again; clears it.
+    pub(crate) fn take_room(&self) -> bool {
+        mem::take(&mut lock(&self.slots).room)
+    }
+
+    /// The program has read enough for a module that was told *full* to say more
+    /// ([`Flow::may_say`]): the shell is told, once, like news of anything else for it.
+    pub(crate) fn room_returned(&self) {
+        // The edge of its own flag, not of the view's slot: a shell that is in the middle of
+        // taking the views has passed the place where it asks for room, and a wake that was
+        // left out because views were waiting would be a module that is never called.
+        let notify = !mem::replace(&mut lock(&self.slots).room, true);
+        if notify {
+            self.wake.view_changed();
+        }
+    }
+
     /// The token's source failed: nothing may open (see [`SystemEntropy`]).
     fn close_if_unsafe(&self, inner: &mut Inner) {
         if self.entropy_failed.load(Ordering::Acquire) {
@@ -738,6 +838,23 @@ impl Desk {
         for action in inner.conversation.take_actions() {
             match action {
                 Action::Write(bytes) => writes.push(bytes),
+                // What the program said for the module is counted from here until the module
+                // takes it; a view that starts or ends counts nothing, whatever was.
+                Action::ToView(text) => {
+                    self.flow.heard(text.len());
+                    kept.push(Action::ToView(text));
+                }
+                // A view starts: its module's bytes are written, and nothing counted before is
+                // owed. A view ends, whatever ended it: nothing counted is waiting for anyone, and
+                // the module's frames that wait are dropped (the one under way is finished).
+                Action::StartView(_) => {
+                    self.flow.begin();
+                    kept.push(action);
+                }
+                Action::DestroyView => {
+                    self.flow.end();
+                    kept.push(action);
+                }
                 other => kept.push(other),
             }
         }

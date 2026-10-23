@@ -20,4 +20,4 @@ mod world;
 mod guests_tests;
 
 pub use module::{Answer, Frame, Module, Runner, Update};
-pub use sandbox::{Fault, Limits};
+pub use sandbox::{Fault, Limits, Program, Unbounded};

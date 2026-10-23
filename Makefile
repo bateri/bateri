@@ -821,7 +821,7 @@ embed-tag:
 # the environment and a PATH that Homebrew's rustc comes first in does not: it is put there
 # here. `make check` never builds them (it needs no WebAssembly toolchain); the tests that use
 # the built components stand down where they are missing and run after `make guest`.
-GUEST_MODULES = containers broken
+GUEST_MODULES = containers broken chatty
 GUEST_BIN = $(shell dirname "$$(rustup which --toolchain stable cargo 2>/dev/null)" 2>/dev/null)
 GUEST_CARGO = PATH="$(GUEST_BIN):$$PATH" DYLD_FALLBACK_LIBRARY_PATH="$(dir $(GUEST_BIN))lib" $(GUEST_BIN)/cargo
 guest:
@@ -872,7 +872,7 @@ guest-linux: guest
 guest-test: guest
 	$(CARGO) test -p bt-view-wasm guests_tests
 	$(CARGO) test -p bt-shell-common native_view::module
-	$(CARGO) test -p bt-core -- the_demo_program an_interrupt_ends_the_demo a_restart_closes_the_modules
+	$(CARGO) test -p bt-core -- the_demo_program an_interrupt_ends_the_demo a_restart_closes_the_modules a_program_that_floods a_slow_module a_page_sends a_program_whose_kind what_the_page_said what_a_shell_the_pane
 	$(CARGO) test --manifest-path guest/Cargo.toml -p demopen -p bateri-view-messages
 
 LINUX_DOCKERFILE = tools/linux/Dockerfile

@@ -66,6 +66,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
 
 [[package]]
+name = "chatty"
+version = "0.1.0"
+dependencies = [
+ "bateri-view-sdk",
+]
+
+[[package]]
 name = "componentize"
 version = "0.1.0"
 dependencies = [
@@ -223,7 +230,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 [[package]]
 name = "pencere"
 version = "0.1.0"
-source = "git+https://github.com/bateri/pencere?rev=e7f2adb295a4ab1389610c3bb0e172ab3b1ab052#e7f2adb295a4ab1389610c3bb0e172ab3b1ab052"
+source = "git+https://github.com/bateri/pencere?rev=e4e3566cc721633f5debd517e3a59fb6591b208c#e4e3566cc721633f5debd517e3a59fb6591b208c"
 dependencies = [
  "serde",
  "serde_json",

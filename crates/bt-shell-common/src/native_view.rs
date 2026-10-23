@@ -28,7 +28,6 @@ use bt_gpu::{
 };
 use bt_view::demo::Containers;
 
-mod allowance;
 mod module;
 pub use bt_view::{
     Button, Cursor, Input, Key, Keyboard, Menu, MenuEntry, Mods, Point, Rect, Reply, Tone,
@@ -103,6 +102,9 @@ pub trait PageDrive {
     /// The program that opened the page said something: one JSON object, as it wrote it. A page
     /// that no program opened (the engine's own, in this process) hears none.
     fn send_message(&self, _text: &str) {}
+    /// The program has read enough that the page may say what it was told the program had no
+    /// room for. A page that no program opened is never told.
+    fn send_room(&self) {}
     /// `told` is called, on the thread that builds the frame, when the place of the text field the
     /// page leaves room for changes (the pane resized, the page laid out another way): the host
     /// moves its field to it. Called once with the place the page has now, if it has one.
