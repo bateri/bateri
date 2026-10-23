@@ -17,6 +17,10 @@ Choices:
   (`OWN_LICENSES`) are given with their own texts: the full Apache-2.0 text
   (+ NOTICE if any), for Zlib and ISC the crate's own license file (with the
   copyright line in it).
+- The crates under "Apache-2.0 WITH LLVM-exception" (the WebAssembly runtime and its
+  code generator: a few dozen, one license file among them) are listed once, each with
+  its copyright line, under the text of that license given once — the Apache
+  License 2.0 with the LLVM exceptions that follow it in the crates' own license file.
 - Every remaining crate carries MIT as an option (MIT, "MIT OR Apache-2.0",
   "Zlib OR Apache-2.0 OR MIT", "Unlicense OR MIT"); the notice is given under
   MIT — a copyright line per crate, the text once. The copyright line comes
@@ -52,7 +56,11 @@ TARGET = "aarch64-apple-darwin"
 # via wgpu), Zlib (foldhash via wgpu) and ISC (libloading via wgpu) — user
 # decision 2026-09-30. Anything
 # else without an MIT option stops the script.
-OWN_LICENSES = {"Apache-2.0", "Zlib", "ISC"}
+OWN_LICENSES = {"Apache-2.0", "Zlib", "ISC", "Apache-2.0 WITH LLVM-exception"}
+# The license of the WebAssembly runtime's crates (user decision 2026-10-23, with the runtime):
+# Apache-2.0 plus exceptions that only relax it (the object code of a compiled work need not
+# carry the notices), so GPL-3 compatible. Its crates share one text.
+LLVM_LICENSE = "Apache-2.0 WITH LLVM-exception"
 # For crates whose license file carries no copyright line, the project's own
 # attribution instead of the author list (alacritty's repo and `Credits.html` use it).
 # bateri's own license (`Cargo.toml`, `workspace.package.license`) and the place its
@@ -174,12 +182,16 @@ def main():
 
     out = ["bateri includes, among others, the following third-party software.", ""]
 
+    with_exceptions = []
     for name, version in crates:
         pkg = pkgs[(name, version)]
         license = own_license(pkg)
         if license is None:
             continue
         root = os.path.dirname(pkg["manifest_path"])
+        if license == LLVM_LICENSE:
+            with_exceptions.append((name, version))
+            continue
         if license == "Apache-2.0":
             text = read_first(root, ("LICENSE-APACHE", "LICENSE-APACHE.md", "LICENSE-APACHE.txt",
                                      "LICENSE", "LICENSE.md", "LICENSE.txt"))
@@ -199,6 +211,9 @@ def main():
             out += [RULE, name, pkg.get("repository") or "",
                     f"Licensed under the {license} License; full text below.",
                     RULE, "", text, "", ""]
+
+    if with_exceptions:
+        out += llvm_exception_notices(pkgs, with_exceptions)
 
     out += [RULE,
             "The following Rust crates are used under the MIT License (each offers",
@@ -223,6 +238,38 @@ def main():
 
     out += theme_notices("Version 2.0" in "\n".join(out))
     sys.stdout.write("\n".join(out))
+
+
+def llvm_exception_notices(pkgs, crates):
+    """The crates under the Apache License 2.0 with the LLVM exceptions, listed once with their
+    copyright lines, and the license text given once: the first crate's license file that
+    carries the exceptions (they follow the Apache text in the file), and each NOTICE."""
+    out = [RULE,
+           "The following Rust crates are used under the Apache License, Version 2.0, with",
+           "the LLVM exceptions. The license text follows the list.",
+           RULE, ""]
+    text = None
+    notices = []
+    for name, version in crates:
+        pkg = pkgs[(name, version)]
+        root = os.path.dirname(pkg["manifest_path"])
+        out += [f"{name} {version}", *(f"  {l}" for l in copyright_lines(pkg))]
+        if pkg.get("repository"):
+            out.append(f"  {pkg['repository']}")
+        out.append("")
+        candidate = read_first(root, ("LICENSE", "LICENSE.md", "LICENSE.txt"))
+        if text is None and candidate and "LLVM Exceptions" in candidate \
+                and "Apache License" in candidate:
+            text = candidate
+        notice = read_first(root, ("NOTICE", "NOTICE.md", "NOTICE.txt"))
+        if notice and notice not in notices:
+            notices.append(notice)
+    if text is None:
+        sys.exit("no license file of the crates under the LLVM exception carries the exceptions")
+    for notice in notices:
+        out += [notice, ""]
+    out += [text, "", ""]
+    return out
 
 
 def theme_notices(apache_given):

@@ -46,7 +46,7 @@ impl Track {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) enum Display {
+pub enum Display {
     #[default]
     Flex,
     Grid,
@@ -54,14 +54,14 @@ pub(crate) enum Display {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) enum Direction {
+pub enum Direction {
     Row,
     #[default]
     Column,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Items {
+pub enum Items {
     Start,
     Center,
     End,
@@ -69,7 +69,7 @@ pub(crate) enum Items {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Justify {
+pub enum Justify {
     Start,
     Center,
     End,
@@ -77,7 +77,7 @@ pub(crate) enum Justify {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) enum Overflow {
+pub enum Overflow {
     /// Children may spill out of the box.
     #[default]
     Visible,
@@ -108,7 +108,7 @@ pub struct Shadow {
 /// sheet's `font` and `color` are inherited. A property an element does not set is the
 /// nearest ancestor's.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub(crate) struct TextStyle {
+pub struct TextStyle {
     pub family: Option<Family>,
     /// Points.
     pub size: Option<f32>,
@@ -131,7 +131,7 @@ impl TextStyle {
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
-pub(crate) struct Style {
+pub struct Style {
     pub display: Display,
     pub direction: Direction,
     /// A row that is too long goes on in a new line below.

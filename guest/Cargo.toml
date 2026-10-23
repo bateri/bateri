@@ -1,0 +1,33 @@
+# The page modules: the pages that run in bateri's sandbox (`crates/bt-view-wasm`), written with
+# the SDK. Another workspace on purpose — these are built for `wasm32-unknown-unknown` with the
+# rustup `stable` toolchain (`make guest`), while the application is built with the toolchain the
+# host workspace pins; `make check` never builds them, so it needs no WebAssembly toolchain.
+[workspace]
+resolver = "3"
+members = ["sdk", "containers", "broken", "componentize"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "GPL-3.0-or-later"
+publish = false
+
+[workspace.dependencies]
+# The page engine's builder language (`div().row().gap(8.0)`): the style language of a page is
+# the engine's own, not a copy of it.
+bt-view = { path = "../crates/bt-view" }
+bateri-view-sdk = { path = "sdk" }
+# The bindings of the interface in `crates/bt-view-wasm/wit`, and the tool that turns a module
+# that uses them into a component. Versions of the era of the runtime the host links.
+wit-bindgen = { version = "=0.46.0", default-features = false, features = ["macros", "realloc"] }
+wit-component = "=0.239.0"
+
+[profile.release]
+# Small and fast to compile for the runtime (its Cranelift compile time grows with the module);
+# a panic is a trap, not an unwinding (nothing could catch it in the sandbox anyway).
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = "debuginfo"

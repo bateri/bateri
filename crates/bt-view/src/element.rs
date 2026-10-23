@@ -13,7 +13,7 @@ use crate::{Align, Color, Family, Id};
 
 /// What an element is.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) enum Kind {
+pub enum Kind {
     Box,
     Text(String),
     Spark(Spark),
@@ -22,7 +22,7 @@ pub(crate) enum Kind {
 /// The data of a sparkline: values over time, newest last, drawn as a line with the area
 /// under it softly filled.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct Spark {
+pub struct Spark {
     pub values: Vec<f32>,
     pub color: Color,
     /// The value the top of the box stands for; the largest value (plus a little head room)
@@ -32,12 +32,14 @@ pub(crate) struct Spark {
 
 /// What an element is to the pointer and the keyboard, apart from how it looks.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub(crate) struct Meta {
+pub struct Meta {
     pub id: Option<Id>,
     /// The pointer can hover it and press it (it answers a click).
     pub pressable: bool,
     /// The keyboard can be on it.
     pub focusable: bool,
+    /// The host puts a text field of its own over this box ([`Element::text_field`]).
+    pub text_field: bool,
 }
 
 /// One element of a page, and the elements inside it.
@@ -138,6 +140,15 @@ impl Element {
     #[must_use]
     pub fn focusable(mut self) -> Self {
         self.meta.focusable = true;
+        self
+    }
+
+    /// The box is the room of a text field the host puts over the page — the page does not
+    /// draw text that is typed into, a field of the host's does (the host asks where it
+    /// stands: [`crate::Laid::text_field`]). Named too: see [`Element::id`].
+    #[must_use]
+    pub fn text_field(mut self) -> Self {
+        self.meta.text_field = true;
         self
     }
 

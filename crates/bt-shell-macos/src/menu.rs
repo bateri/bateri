@@ -713,6 +713,16 @@ pub(crate) fn install(
         "Debug",
         &[
             item(mtm, "Show Container List Demo", sel!(showContainerDemo:)),
+            item(
+                mtm,
+                "Show Container List Demo (WASM)",
+                sel!(showContainerModuleDemo:),
+            ),
+            item(
+                mtm,
+                "Show Broken Page Demo (WASM)",
+                sel!(showBrokenModuleDemo:),
+            ),
             item(mtm, "Show UI Sample Page", sel!(showUiSamplePage:)),
         ],
     ));

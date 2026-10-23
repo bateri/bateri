@@ -49,6 +49,8 @@ use bt_core::{
     SearchStatus, Session, SessionOptions, Settings, Theme, TtyModes, Wake,
 };
 use bt_core::{load_shell, smoke_shell};
+#[cfg(debug_assertions)]
+use bt_gpu::UiPage;
 use bt_gpu::{
     CellMetrics, DisplayLink, GpuError, Layout, Pacer, Renderer, ScrollbarMode, Shot, Stats,
     Surface, Waker,
@@ -85,7 +87,7 @@ use crate::grid::{self, Grid, split_into_grid};
 use bt_shell_common::kablo::roster::Background;
 use bt_shell_common::kablo::service::{PaneLink, Shown};
 #[cfg(debug_assertions)]
-use bt_shell_common::native_view::{Cursor as PageCursor, Input, Keyboard, Reply};
+use bt_shell_common::native_view::{Cursor as PageCursor, Input, Keyboard, PageDrive, Reply};
 use bt_shell_common::view_strip;
 #[cfg(debug_assertions)]
 use objc2_app_kit::NSEvent;
@@ -2698,6 +2700,18 @@ define_class!(
                 // The gauge page is the terminal's cover, like a program's view:
                 // not while one of those is up.
                 !self.shows_view()
+            } else if cfg!(debug_assertions)
+                && (action == Some(sel!(showContainerModuleDemo:))
+                    || action == Some(sel!(showBrokenModuleDemo:)))
+            {
+                // A page made by a module: as the others, and the module has to be built
+                // (`make guest`).
+                let module = if action == Some(sel!(showContainerModuleDemo:)) {
+                    "containers"
+                } else {
+                    "broken"
+                };
+                !self.shows_view() && self.module_demo_built(module)
             } else {
                 true
             }
@@ -2774,6 +2788,21 @@ define_class!(
         #[unsafe(method(showContainerDemo:))]
         fn show_container_demo_sent(&self, _sender: Option<&AnyObject>) {
             self.toggle_container_demo();
+        }
+
+        /// Debug ▸ Show Container List Demo (WASM): the same page, made by a module in the
+        /// sandbox (debug builds, `crate::native_page`).
+        #[cfg(debug_assertions)]
+        #[unsafe(method(showContainerModuleDemo:))]
+        fn show_container_module_demo_sent(&self, _sender: Option<&AnyObject>) {
+            self.toggle_module_demo("containers");
+        }
+
+        /// Debug ▸ Show Broken Page Demo (WASM): a module that goes wrong on purpose.
+        #[cfg(debug_assertions)]
+        #[unsafe(method(showBrokenModuleDemo:))]
+        fn show_broken_module_demo_sent(&self, _sender: Option<&AnyObject>) {
+            self.toggle_module_demo("broken");
         }
 
         /// The strip's button over a page of the kit's own: the page comes down and the
@@ -5877,6 +5906,33 @@ impl TerminalPane {
     /// a text field of AppKit's and its row menu an `NSMenu`.
     #[cfg(debug_assertions)]
     pub(crate) fn toggle_container_demo(&self) {
+        self.toggle_demo(None);
+    }
+
+    /// Debug ▸ Show Container List Demo (WASM) and Show Broken Page Demo (WASM): the same page
+    /// ([`TerminalPane::toggle_container_demo`]) made by a module in the sandbox (`guest/`, built
+    /// by `make guest`), or the module that goes wrong on purpose. Whatever ends the module — a
+    /// loop that never returns, memory without end, a trap — the pane is the terminal's again.
+    #[cfg(debug_assertions)]
+    pub(crate) fn toggle_module_demo(&self, module: &'static str) {
+        self.toggle_demo(Some(module));
+    }
+
+    /// Whether the page module `module` is built and can be opened (only debug builds open one).
+    pub(crate) fn module_demo_built(&self, module: &str) -> bool {
+        #[cfg(debug_assertions)]
+        {
+            crate::native_page::component_path(module).is_file()
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            let _ = module;
+            false
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    fn toggle_demo(&self, module: Option<&'static str>) {
         let Some(link) = self.link() else {
             return;
         };
@@ -5890,9 +5946,30 @@ impl TerminalPane {
         let Some(session) = self.session() else {
             return;
         };
+        let bytes = match module {
+            None => None,
+            Some(name) => {
+                let path = crate::native_page::component_path(name);
+                match std::fs::read(&path) {
+                    Ok(bytes) => Some(bytes),
+                    Err(why) => {
+                        eprintln!(
+                            "bateri: the page module {} could not be read ({why}); `make guest` builds it",
+                            path.display()
+                        );
+                        return;
+                    }
+                }
+            }
+        };
         let theme = session.theme();
         let ivars = self.ivars();
-        let strip = crate::native_page::strip(self, &theme);
+        let (program, title) = match module {
+            None => ("dockerpen", "Docker"),
+            Some("broken") => ("broken", "A page that goes wrong"),
+            Some(_) => ("dockerpen (wasm)", "Docker"),
+        };
+        let strip = crate::native_page::strip(self, &theme, program, title);
         self.addSubview_positioned_relativeTo(
             &strip,
             NSWindowOrderingMode::Below,
@@ -5900,10 +5977,37 @@ impl TerminalPane {
         );
         ivars.demo_strip.replace(Some(strip));
         let family = ivars.font.borrow().family.clone();
-        let (page, handle) = bt_shell_common::native_view::containers_demo(
-            family.clone(),
-            view_strip::HEIGHT as f32,
-        );
+        let inset = view_strip::HEIGHT as f32;
+        let (page, handle): (Box<dyn UiPage>, Rc<dyn PageDrive>) = match bytes {
+            None => {
+                let (page, handle) =
+                    bt_shell_common::native_view::containers_demo(family.clone(), inset);
+                (page, Rc::new(handle))
+            }
+            Some(bytes) => {
+                // The module's thread tells the main queue when it has put something out; the
+                // pane is found there by its id, if it is still open.
+                let id = self.id();
+                let wake = move || {
+                    DispatchQueue::main().exec_async(move || {
+                        // audit: a block running on the main queue is on the main thread by definition.
+                        let mtm =
+                            MainThreadMarker::new().expect("the main queue is the main thread");
+                        if let Some(pane) = crate::embed::pane(mtm, id) {
+                            pane.drain_page();
+                        }
+                    });
+                };
+                let (page, handle) = bt_shell_common::native_view::module_page(
+                    bytes,
+                    bt_shell_common::native_view::Limits::default(),
+                    family.clone(),
+                    inset,
+                    wake,
+                );
+                (page, Rc::new(handle))
+            }
+        };
         let field = crate::native_page::filter_field(self, &theme, family.as_deref());
         self.addSubview_positioned_relativeTo(
             &field,
@@ -5913,7 +6017,9 @@ impl TerminalPane {
         {
             // The page says where its box for the field is whenever it is laid out another way.
             let field = field.clone();
-            handle.on_field(move |place| crate::native_page::place_field(&field, place));
+            handle.watch_field(Box::new(move |place| {
+                crate::native_page::place_field(&field, place);
+            }));
         }
         let area = crate::native_page::pointer_area(self.view());
         ivars.demo_page.replace(Some(crate::native_page::Page {
@@ -5947,7 +6053,7 @@ impl TerminalPane {
 
     /// The handle the demo page's input goes by, if that is the page up.
     #[cfg(debug_assertions)]
-    fn demo_handle(&self) -> Option<bt_shell_common::native_view::ContainersHandle> {
+    fn demo_handle(&self) -> Option<Rc<dyn PageDrive>> {
         self.ivars()
             .demo_page
             .borrow()
@@ -5979,7 +6085,8 @@ impl TerminalPane {
             Some(handle) => {
                 if let Some(key) = characters.as_deref().and_then(crate::native_page::key_of) {
                     let mods = crate::native_page::mods_of(flags);
-                    self.apply_page_reply(handle.input(Input::Key { key, mods }), false);
+                    handle.send_input(Input::Key { key, mods });
+                    self.drain_page();
                 }
             }
         }
@@ -5994,10 +6101,40 @@ impl TerminalPane {
             return false;
         }
         if let Some(handle) = self.demo_handle() {
-            let pointer = !matches!(input, Input::Key { .. });
-            self.apply_page_reply(handle.input(input), pointer);
+            handle.send_input(input);
+            self.drain_page();
         }
         true
+    }
+
+    /// Takes what the page has said since the last time and does it ([`TerminalPane::apply_page_reply`]):
+    /// right after the person's input for a page of this process, and when the module's thread
+    /// wakes the main queue for a module in the sandbox. A page that is new to show gets its frame;
+    /// a module that is gone takes the page down with it (the terminal is the pane's again).
+    #[cfg(debug_assertions)]
+    pub(crate) fn drain_page(&self) {
+        let Some(handle) = self.demo_handle() else {
+            return;
+        };
+        let mut said = Vec::new();
+        let drained = handle.drain(&mut |reply, pointer| said.push((reply, pointer)));
+        for (reply, pointer) in said {
+            // A reply may have closed the page.
+            if self.demo_handle().is_none() {
+                return;
+            }
+            self.apply_page_reply(reply, pointer);
+        }
+        if let Some(why) = drained.ended {
+            eprintln!("bateri: the page module {why}; the terminal is back");
+            self.take_page_down();
+            return;
+        }
+        if drained.redraw
+            && let Some(link) = self.link()
+        {
+            link.poke_page();
+        }
     }
 
     /// Does what a page said back: a frame of it when it changed, the menu it asked for, the
@@ -6044,7 +6181,8 @@ impl TerminalPane {
     #[cfg(debug_assertions)]
     pub(crate) fn page_menu_pick(&self, index: usize) {
         if let Some(handle) = self.demo_handle() {
-            self.apply_page_reply(handle.pick(index), false);
+            handle.send_pick(index);
+            self.drain_page();
         }
     }
 
@@ -6101,7 +6239,8 @@ impl TerminalPane {
             .as_ref()
             .map(|page| page.field.stringValue().to_string())
             .unwrap_or_default();
-        self.apply_page_reply(handle.set_query(&text), false);
+        handle.send_query(&text);
+        self.drain_page();
     }
 
     /// Whether a program's view is over the terminal.

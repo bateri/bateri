@@ -543,7 +543,7 @@ impl Containers {
             .bg(Tone::Raised(1))
             .border(1.0, Tone::Line)
             .press(SEARCH)
-            .child(div().id(FIELD).grow(1.0).min_w(0.0).h(18.0))
+            .child(div().id(FIELD).text_field().grow(1.0).min_w(0.0).h(18.0))
             .child(kbd("/", 10.5));
         let counts = self.counts();
         let option = |status: Status, count: usize, tone: Option<Tone>| {

@@ -75,6 +75,18 @@ pub enum Input {
     },
 }
 
+/// Everything a page is told: what the person did to the page, the text a text field of the
+/// host's now holds, the entry picked of a menu the page asked for. A page that lives apart from
+/// the host is told by this one type.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Event {
+    Input(Input),
+    /// The host's text field holds this.
+    Text(String),
+    /// The person picked the entry with this index of the menu the page asked for.
+    MenuPick(usize),
+}
+
 /// The shape the pointer takes over the page.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Cursor {

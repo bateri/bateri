@@ -20,6 +20,11 @@
 //! rows in view ([`Rows`]). What the host tells a page is an [`Input`], and what the page
 //! tells back a [`Reply`].
 //!
+//! A page need not live in the host that shows it: [`wire`] lays an [`Element`] tree down as a flat
+//! list and picks it up again, and [`Queries`] is what a page asks of itself laid out — the pair a
+//! page kept in a sandbox is written against, as [`Laid`] answers the same questions to one that
+//! is not.
+//!
 //! [`demo`] is a worked page — a container list — that is also the engine's gauge.
 
 pub mod demo;
@@ -36,14 +41,15 @@ mod rows;
 mod style;
 mod text;
 mod ui;
+pub mod wire;
 
 pub use color::{Color, Tone};
 pub use element::{Element, div, spacer, spark, text};
 pub use fades::{FADE_SECONDS, Fades};
 pub use geometry::{Point, Rect, Size};
 pub use id::Id;
-pub use input::{Button, Cursor, Input, Key, Keyboard, Menu, MenuEntry, Mods, Reply};
-pub use layout::{Extent, Laid, layout};
+pub use input::{Button, Cursor, Event, Input, Key, Keyboard, Menu, MenuEntry, Mods, Reply};
+pub use layout::{Extent, Laid, Queries, layout};
 pub use paint::{DrawList, Paint, Quad, Run};
 pub use rows::Rows;
 pub use style::{Border, Shadow, Track};

@@ -542,6 +542,22 @@ impl Laid {
             .collect()
     }
 
+    /// The box of the element that stands for a text field of the host's
+    /// ([`crate::Element::text_field`]), points: where the host puts it.
+    pub fn text_field(&self) -> Option<Rect> {
+        let node = self
+            .nodes
+            .iter()
+            .find(|node| node.meta.text_field && !node.hidden)?;
+        let s = self.scale;
+        Some(Rect::new(
+            node.rect.x / s,
+            node.rect.y / s,
+            node.rect.w / s,
+            node.rect.h / s,
+        ))
+    }
+
     /// `id` and the named elements that hold it, innermost first: where a key goes, from the
     /// element the keyboard is on out to the boxes around it.
     pub fn path_of(&self, id: Id) -> Vec<Id> {
@@ -554,6 +570,51 @@ impl Laid {
             at = self.nodes[index].parent;
         }
         path
+    }
+}
+
+/// What a page asks of itself laid out: where things stand, what is under the pointer, how far
+/// a box can scroll. [`Laid`] answers it, and so does anything that can reach one — a page kept
+/// elsewhere than the host that laid it out (a module in a sandbox, asking across the border)
+/// is written against this and not against [`Laid`].
+pub trait Queries {
+    /// The box of the element named `id`, points.
+    fn bounds(&self, id: Id) -> Option<Rect>;
+    /// The named elements whose visible part holds `at`, innermost first.
+    fn ids_at(&self, at: Point) -> Vec<Id>;
+    /// The element under `at` that answers the pointer: the topmost.
+    fn hit(&self, at: Point) -> Option<Id>;
+    /// How tall the content of the scrolling box named `id` is and how tall the box is.
+    fn scroll_extent(&self, id: Id) -> Option<Extent>;
+    /// The elements the keyboard can be on, in the order they are written.
+    fn focus_order(&self) -> Vec<Id>;
+    /// `id` and the named elements that hold it, innermost first.
+    fn path_of(&self, id: Id) -> Vec<Id>;
+    /// The box of the text field the host puts over the page, points.
+    fn text_field(&self) -> Option<Rect>;
+}
+
+impl Queries for Laid {
+    fn bounds(&self, id: Id) -> Option<Rect> {
+        Laid::bounds(self, id)
+    }
+    fn ids_at(&self, at: Point) -> Vec<Id> {
+        Laid::ids_at(self, at)
+    }
+    fn hit(&self, at: Point) -> Option<Id> {
+        Laid::hit(self, at)
+    }
+    fn scroll_extent(&self, id: Id) -> Option<Extent> {
+        Laid::scroll_extent(self, id)
+    }
+    fn focus_order(&self) -> Vec<Id> {
+        Laid::focus_order(self)
+    }
+    fn path_of(&self, id: Id) -> Vec<Id> {
+        Laid::path_of(self, id)
+    }
+    fn text_field(&self) -> Option<Rect> {
+        Laid::text_field(self)
     }
 }
 

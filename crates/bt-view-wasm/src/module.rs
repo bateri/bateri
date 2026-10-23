@@ -1,0 +1,665 @@
+//! A page module on a thread of its own, and the mailbox between it and the application.
+//!
+//! **Nothing of the module runs on the thread that draws.** The thread that owns the module
+//! compiles it, starts it and calls it; the application only posts what it wants done (a frame
+//! for this size, this event, this layout) and later takes what came out (the page, the replies)
+//! — neither ever waits for the module. A module that does not come back is cut off where it is
+//! ([`crate::Limits`]), its thread ends and the application is told why; the application never
+//! hung with it.
+//!
+//! The posting is cheap and loses nothing that matters: a frame asked for while an older one is
+//! still wanted replaces it (only the newest is made), a run of pointer moves is one move, an
+//! event is never dropped. The application is woken once per batch of what is waiting
+//! ([`Module::spawn`]'s `wake`), not once per item.
+
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::{Arc, Mutex};
+
+use bt_view::{Element, Event, Input, Laid, Reply, Size};
+
+use crate::sandbox::{Fault, Limits};
+use crate::world::World;
+
+/// A page the module handed out: the tree, and whether the page is still moving.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Frame {
+    pub root: Element,
+    /// The page is still moving: the application asks for the next frame itself until this
+    /// says no.
+    pub animating: bool,
+}
+
+/// What a module can be asked, whatever it is made of. The sandbox is one; the tests have a
+/// plain one.
+pub trait Runner: Send + 'static {
+    /// The page for a viewport of `size` points at `now` seconds.
+    fn render(&mut self, size: Size, now: f64, reduce_motion: bool) -> Result<Frame, Fault>;
+    /// Brings what depends on the layout back within it; whether the page changed.
+    fn settle(&mut self) -> Result<bool, Fault>;
+    /// The person did something.
+    fn handle(&mut self, event: Event) -> Result<Reply, Fault>;
+    /// The layout the module may ask of from now on.
+    fn lay_out(&mut self, laid: Arc<Laid>);
+}
+
+enum Command {
+    Render {
+        size: Size,
+        now: f64,
+        reduce_motion: bool,
+    },
+    Settle,
+    Laid(Arc<Laid>),
+    Event(Event),
+    Stop,
+}
+
+/// What the module said to an event, and whether the event was the pointer's (a move, a
+/// press, the wheel): the pointer's shape after a key is nobody's to set.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Answer {
+    pub reply: Reply,
+    pub pointer: bool,
+}
+
+/// What came out of the module and has not been taken.
+#[derive(Default)]
+struct Mailbox {
+    waiting: Mutex<Waiting>,
+    /// The application has been woken and has not taken what is waiting yet.
+    woken: AtomicBool,
+}
+
+#[derive(Default)]
+struct Waiting {
+    frame: Option<Frame>,
+    replies: Vec<Answer>,
+    closed: Option<Fault>,
+}
+
+/// What the application takes from the mailbox.
+#[derive(Debug, Default, PartialEq)]
+pub struct Update {
+    /// The newest page since the last taking, if there is one.
+    pub frame: Option<Frame>,
+    /// What the module said to the events it was told, in order.
+    pub replies: Vec<Answer>,
+    /// Why the module is gone, once it is. Told again on every taking after.
+    pub closed: Option<Fault>,
+}
+
+/// A page module, on its thread.
+pub struct Module {
+    commands: Sender<Command>,
+    mailbox: Arc<Mailbox>,
+}
+
+impl Module {
+    /// Starts a module made by `make` on a thread of its own, and returns at once. `make` runs
+    /// on that thread (compiling a component is slow); if it fails, the module is closed with
+    /// the failure. `wake` is called, from the module's thread, when something is waiting to be
+    /// taken ([`Module::poll`]): it hops to wherever the application listens and returns.
+    pub fn spawn<R: Runner>(
+        make: impl FnOnce() -> Result<R, Fault> + Send + 'static,
+        wake: impl Fn() + Send + Sync + 'static,
+    ) -> Self {
+        let (commands, inbox) = channel();
+        let mailbox = Arc::new(Mailbox::default());
+        let posting = Arc::clone(&mailbox);
+        let spawned = std::thread::Builder::new()
+            .name("view-module".into())
+            .spawn(move || {
+                let post = Post {
+                    mailbox: &posting,
+                    wake: &wake,
+                };
+                let outcome = catch_unwind(AssertUnwindSafe(|| serve(make, &inbox, &post)));
+                let ended = match outcome {
+                    Ok(Ok(())) => return,
+                    Ok(Err(fault)) => fault,
+                    Err(_) => Fault::Trap("the host side of the module failed".into()),
+                };
+                post.close(ended);
+            });
+        if spawned.is_err() {
+            mailbox.close_without_wake(Fault::Load("could not start a thread".into()));
+        }
+        Self { commands, mailbox }
+    }
+
+    /// Starts the component in `bytes` (binary or text) under `limits`.
+    pub fn from_component(
+        bytes: Vec<u8>,
+        limits: Limits,
+        wake: impl Fn() + Send + Sync + 'static,
+    ) -> Self {
+        Self::spawn(move || World::load(&bytes, limits), wake)
+    }
+
+    /// Asks for the page for a viewport of `size` points at `now` seconds. Returns at once;
+    /// the page comes with the next taking.
+    pub fn render(&self, size: Size, now: f64, reduce_motion: bool) {
+        let _ = self.commands.send(Command::Render {
+            size,
+            now,
+            reduce_motion,
+        });
+    }
+
+    /// Tells the module what the person did. Returns at once.
+    pub fn event(&self, event: Event) {
+        let _ = self.commands.send(Command::Event(event));
+    }
+
+    /// Tells the module the page was laid out as `laid`: it may ask of it from now on, and is
+    /// asked to bring what depends on it back within it.
+    pub fn lay_out(&self, laid: Arc<Laid>) {
+        let _ = self.commands.send(Command::Laid(laid));
+        let _ = self.commands.send(Command::Settle);
+    }
+
+    /// Takes what the module has put out since the last taking. Never waits.
+    pub fn poll(&self) -> Update {
+        // Before the taking, so that what is posted while it happens wakes the application again.
+        self.mailbox.woken.store(false, Ordering::SeqCst);
+        let mut waiting = self
+            .mailbox
+            .waiting
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Update {
+            frame: waiting.frame.take(),
+            replies: std::mem::take(&mut waiting.replies),
+            closed: waiting.closed.clone(),
+        }
+    }
+}
+
+impl Drop for Module {
+    fn drop(&mut self) {
+        let _ = self.commands.send(Command::Stop);
+    }
+}
+
+impl Mailbox {
+    fn close_without_wake(&self, fault: Fault) {
+        let mut waiting = self
+            .waiting
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        waiting.closed.get_or_insert(fault);
+    }
+}
+
+/// The module's side of the mailbox: puts out, wakes.
+struct Post<'a> {
+    mailbox: &'a Mailbox,
+    wake: &'a dyn Fn(),
+}
+
+impl Post<'_> {
+    fn put(&self, frame: Option<Frame>, answer: Option<Answer>) {
+        {
+            let mut waiting = self
+                .mailbox
+                .waiting
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(frame) = frame {
+                waiting.frame = Some(frame);
+            }
+            if let Some(answer) = answer {
+                waiting.replies.push(answer);
+            }
+        }
+        self.wake();
+    }
+
+    fn close(&self, fault: Fault) {
+        self.mailbox.close_without_wake(fault);
+        self.wake();
+    }
+
+    /// Once per taking: a wake that is already on its way covers what is posted after it.
+    fn wake(&self) {
+        if !self.mailbox.woken.swap(true, Ordering::SeqCst) {
+            (self.wake)();
+        }
+    }
+}
+
+/// The module's life: made, then asked until it is stopped or gone.
+fn serve<R: Runner>(
+    make: impl FnOnce() -> Result<R, Fault>,
+    inbox: &Receiver<Command>,
+    post: &Post<'_>,
+) -> Result<(), Fault> {
+    let mut runner = make()?;
+    // What the page was last made for: what an event that changed it makes it again for.
+    let mut last: Option<(Size, f64, bool)> = None;
+    // How many times in a row a settle has asked for the page again without anyone else asking
+    // for anything: a module that always wants another page does not make an endless chain of them.
+    let mut settled = 0_u8;
+    // The module is up: the application hears of it with the first page.
+    loop {
+        let Ok(first) = inbox.recv() else {
+            return Ok(());
+        };
+        let mut batch = vec![first];
+        while let Ok(more) = inbox.try_recv() {
+            batch.push(more);
+        }
+        for (at, command) in batch.iter().enumerate() {
+            let later = &batch[at + 1..];
+            match command {
+                Command::Stop => return Ok(()),
+                Command::Laid(laid) => runner.lay_out(Arc::clone(laid)),
+                // Only the newest of the pages asked for is made.
+                Command::Render { .. } if later.iter().any(is_render) => {}
+                Command::Render {
+                    size,
+                    now,
+                    reduce_motion,
+                } => {
+                    last = Some((*size, *now, *reduce_motion));
+                    settled = 0;
+                    let frame = runner.render(*size, *now, *reduce_motion)?;
+                    post.put(Some(frame), None);
+                }
+                Command::Settle if later.iter().any(|c| matches!(c, Command::Settle)) => {}
+                Command::Settle => {
+                    if runner.settle()?
+                        && settled < SETTLES
+                        && let Some((size, now, reduce_motion)) = last
+                    {
+                        settled += 1;
+                        let frame = runner.render(size, now, reduce_motion)?;
+                        post.put(Some(frame), None);
+                    }
+                }
+                // A run of pointer moves is the last of them.
+                Command::Event(Event::Input(Input::Move(_)))
+                    if matches!(
+                        later.first(),
+                        Some(Command::Event(Event::Input(Input::Move(_))))
+                    ) => {}
+                Command::Event(event) => {
+                    settled = 0;
+                    let reply = runner.handle(event.clone())?;
+                    let frame = match (reply.redraw, last) {
+                        (true, Some((size, now, reduce_motion))) => {
+                            Some(runner.render(size, now, reduce_motion)?)
+                        }
+                        _ => None,
+                    };
+                    let pointer = matches!(
+                        event,
+                        Event::Input(
+                            Input::Move(_)
+                                | Input::Leave
+                                | Input::Press { .. }
+                                | Input::Release { .. }
+                                | Input::Scroll { .. }
+                        )
+                    );
+                    post.put(frame, Some(Answer { reply, pointer }));
+                }
+            }
+        }
+    }
+}
+
+/// The most pages in a row a settle may ask for: the first settles what depends on the layout,
+/// the second what the first changed — the way a page is laid out up to three times for a frame.
+const SETTLES: u8 = 3;
+
+fn is_render(command: &Command) -> bool {
+    matches!(command, Command::Render { .. })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bt_view::{Button, Mods, Point, div, text};
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    /// A module that is a few lines of Rust: it logs what it was asked and answers as it was told.
+    struct Plain {
+        log: Arc<Mutex<Vec<String>>>,
+        /// Holds the first render until the test has queued what it wants queued.
+        gate: Option<Receiver<()>>,
+        fail_on: Option<&'static str>,
+        settles: bool,
+    }
+
+    impl Plain {
+        fn note(&self, what: String) -> Result<(), Fault> {
+            self.log.lock().unwrap().push(what.clone());
+            if self.fail_on.is_some_and(|name| what.starts_with(name)) {
+                return Err(Fault::Trap(format!("planned: {what}")));
+            }
+            Ok(())
+        }
+    }
+
+    impl Runner for Plain {
+        fn render(&mut self, size: Size, now: f64, _reduce: bool) -> Result<Frame, Fault> {
+            if let Some(gate) = self.gate.take() {
+                let _ = gate.recv();
+            }
+            self.note(format!("render {} {now}", size.w))?;
+            Ok(Frame {
+                root: div().child(text(format!("{now}"))),
+                animating: false,
+            })
+        }
+
+        fn settle(&mut self) -> Result<bool, Fault> {
+            self.note("settle".into())?;
+            Ok(self.settles)
+        }
+
+        fn handle(&mut self, event: Event) -> Result<Reply, Fault> {
+            self.note(format!("handle {event:?}"))?;
+            Ok(match event {
+                Event::Text(_) => Reply::redraw(),
+                _ => Reply::none(),
+            })
+        }
+
+        fn lay_out(&mut self, _laid: Arc<Laid>) {
+            let _ = self.note("laid".into());
+        }
+    }
+
+    struct Rig {
+        module: Module,
+        log: Arc<Mutex<Vec<String>>>,
+        woken: Receiver<()>,
+    }
+
+    fn rig(gate: Option<Receiver<()>>, fail_on: Option<&'static str>, settles: bool) -> Rig {
+        let log = Arc::new(Mutex::new(Vec::new()));
+        let (told, woken) = mpsc::channel();
+        let told = Mutex::new(told);
+        let plain = Plain {
+            log: Arc::clone(&log),
+            gate,
+            fail_on,
+            settles,
+        };
+        let module = Module::spawn(
+            move || Ok(plain),
+            move || {
+                let _ = told.lock().unwrap().send(());
+            },
+        );
+        Rig { module, log, woken }
+    }
+
+    impl Rig {
+        fn woken(&self) {
+            self.woken
+                .recv_timeout(Duration::from_secs(5))
+                .expect("the application was woken");
+        }
+
+        fn log(&self) -> Vec<String> {
+            self.log.lock().unwrap().clone()
+        }
+    }
+
+    fn move_to(x: f32) -> Event {
+        Event::Input(Input::Move(Point::new(x, 1.0)))
+    }
+
+    #[test]
+    fn a_page_asked_for_comes_with_one_wake_and_never_makes_the_asker_wait() {
+        let rig = rig(None, None, false);
+        rig.module.render(Size::new(100.0, 50.0), 1.5, false);
+        rig.woken();
+        let update = rig.module.poll();
+        assert_eq!(update.closed, None);
+        let frame = update.frame.expect("a page");
+        assert_eq!(frame.root, div().child(text("1.5")));
+        assert!(update.replies.is_empty());
+        // Nothing more is waiting.
+        assert_eq!(rig.module.poll(), Update::default());
+    }
+
+    #[test]
+    fn of_the_pages_asked_for_while_the_module_is_busy_only_the_newest_is_made() {
+        let (open, gate) = mpsc::channel();
+        let rig = rig(Some(gate), None, false);
+        let size = Size::new(10.0, 10.0);
+        // The module may be inside the first (held) or not have looked yet: either way the
+        // three after it are behind it when it is let go.
+        for now in [1.0, 2.0, 3.0, 4.0] {
+            rig.module.render(size, now, false);
+        }
+        open.send(()).unwrap();
+        let began = std::time::Instant::now();
+        while !rig.log().contains(&"render 10 4".to_string())
+            && began.elapsed() < Duration::from_secs(5)
+        {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let log = rig.log();
+        assert!(log.contains(&"render 10 4".to_string()), "{log:?}");
+        assert!(!log.contains(&"render 10 2".to_string()), "{log:?}");
+        assert!(!log.contains(&"render 10 3".to_string()), "{log:?}");
+    }
+
+    #[test]
+    fn an_event_that_changed_the_page_comes_with_the_page_and_its_reply_together() {
+        let rig = rig(None, None, false);
+        rig.module.render(Size::new(10.0, 10.0), 1.0, false);
+        rig.woken();
+        let _ = rig.module.poll();
+        rig.module.event(Event::Text("api".into()));
+        rig.woken();
+        let update = rig.module.poll();
+        assert_eq!(
+            update.replies,
+            vec![Answer {
+                reply: Reply::redraw(),
+                pointer: false
+            }]
+        );
+        assert!(update.frame.is_some());
+    }
+
+    #[test]
+    fn a_run_of_pointer_moves_is_the_last_of_them_and_other_events_are_all_kept() {
+        let (open, gate) = mpsc::channel();
+        let rig = rig(Some(gate), None, false);
+        rig.module.render(Size::new(10.0, 10.0), 1.0, false);
+        for x in [1.0, 2.0, 3.0] {
+            rig.module.event(move_to(x));
+        }
+        rig.module.event(Event::Input(Input::Press {
+            at: Point::new(3.0, 1.0),
+            button: Button::Left,
+            mods: Mods::default(),
+        }));
+        rig.module.event(move_to(4.0));
+        open.send(()).unwrap();
+        let began = std::time::Instant::now();
+        while rig.log().iter().filter(|l| l.starts_with("handle")).count() < 3
+            && began.elapsed() < Duration::from_secs(5)
+        {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let handled: Vec<String> = rig
+            .log()
+            .into_iter()
+            .filter(|l| l.starts_with("handle"))
+            .collect();
+        assert_eq!(handled.len(), 3, "{handled:?}");
+        assert!(handled[0].contains("x: 3.0"), "{handled:?}");
+        assert!(handled[1].contains("Press"), "{handled:?}");
+        assert!(handled[2].contains("x: 4.0"), "{handled:?}");
+    }
+
+    #[test]
+    fn a_layout_is_followed_by_a_settle_and_a_settle_that_changed_the_page_makes_it_again() {
+        let rig = rig(None, None, true);
+        rig.module.render(Size::new(10.0, 10.0), 1.0, false);
+        rig.woken();
+        let _ = rig.module.poll();
+        let laid = Arc::new(bt_view::layout(
+            div(),
+            Size::new(10.0, 10.0),
+            1.0,
+            &mut Nothing,
+        ));
+        rig.module.lay_out(laid);
+        rig.woken();
+        let update = rig.module.poll();
+        assert!(update.frame.is_some(), "{:?}", rig.log());
+        let log = rig.log();
+        let at = |what: &str| log.iter().position(|l| l == what).unwrap();
+        assert!(at("laid") < at("settle"));
+        assert_eq!(log.iter().filter(|l| l.starts_with("render")).count(), 2);
+    }
+
+    #[test]
+    fn a_settle_that_always_wants_another_page_is_heard_a_few_times_and_then_not() {
+        let rig = rig(None, None, true);
+        rig.module.render(Size::new(10.0, 10.0), 1.0, false);
+        rig.woken();
+        let _ = rig.module.poll();
+        let laid = Arc::new(bt_view::layout(
+            div(),
+            Size::new(10.0, 10.0),
+            1.0,
+            &mut Nothing,
+        ));
+        for done in 1..=6 {
+            rig.module.lay_out(Arc::clone(&laid));
+            // One at a time: the module has settled before it is told the next layout.
+            let began = std::time::Instant::now();
+            while rig.log().iter().filter(|l| *l == "settle").count() < done
+                && began.elapsed() < Duration::from_secs(5)
+            {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        }
+        let renders = rig.log().iter().filter(|l| l.starts_with("render")).count();
+        // The one asked for, and three from the settles.
+        assert_eq!(renders, 1 + usize::from(SETTLES), "{:?}", rig.log());
+    }
+
+    struct Nothing;
+
+    impl bt_view::Measure for Nothing {
+        fn measure(&mut self, _font: &bt_view::Font, _text: &str) -> bt_view::Metrics {
+            bt_view::Metrics::default()
+        }
+    }
+
+    #[test]
+    fn a_module_that_fails_closes_with_the_reason_and_goes_on_being_safe_to_talk_to() {
+        let rig = rig(None, Some("handle"), false);
+        rig.module.event(Event::Text("x".into()));
+        rig.woken();
+        let update = rig.module.poll();
+        assert!(matches!(update.closed, Some(Fault::Trap(_))), "{update:?}");
+        // Told again, and nothing the application does afterwards can fail.
+        rig.module.render(Size::new(1.0, 1.0), 1.0, false);
+        rig.module.event(move_to(1.0));
+        assert!(matches!(rig.module.poll().closed, Some(Fault::Trap(_))));
+    }
+
+    #[test]
+    fn a_module_that_cannot_be_made_is_closed_with_why() {
+        struct Never;
+        impl Runner for Never {
+            fn render(&mut self, _: Size, _: f64, _: bool) -> Result<Frame, Fault> {
+                unreachable!()
+            }
+            fn settle(&mut self) -> Result<bool, Fault> {
+                unreachable!()
+            }
+            fn handle(&mut self, _: Event) -> Result<Reply, Fault> {
+                unreachable!()
+            }
+            fn lay_out(&mut self, _: Arc<Laid>) {}
+        }
+        let (told, woken) = mpsc::channel();
+        let told = Mutex::new(told);
+        let module = Module::spawn(
+            || Err::<Never, _>(Fault::Load("not a component".into())),
+            move || {
+                let _ = told.lock().unwrap().send(());
+            },
+        );
+        woken.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(
+            module.poll().closed,
+            Some(Fault::Load("not a component".into()))
+        );
+    }
+
+    #[test]
+    fn a_panic_in_the_host_side_of_a_module_is_a_closed_module_and_not_a_dead_application() {
+        struct Panics;
+        impl Runner for Panics {
+            fn render(&mut self, _: Size, _: f64, _: bool) -> Result<Frame, Fault> {
+                panic!("planned")
+            }
+            fn settle(&mut self) -> Result<bool, Fault> {
+                Ok(false)
+            }
+            fn handle(&mut self, _: Event) -> Result<Reply, Fault> {
+                Ok(Reply::none())
+            }
+            fn lay_out(&mut self, _: Arc<Laid>) {}
+        }
+        let (told, woken) = mpsc::channel();
+        let told = Mutex::new(told);
+        let module = Module::spawn(
+            || Ok(Panics),
+            move || {
+                let _ = told.lock().unwrap().send(());
+            },
+        );
+        module.render(Size::new(1.0, 1.0), 0.0, false);
+        woken.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(matches!(module.poll().closed, Some(Fault::Trap(_))));
+    }
+
+    #[test]
+    fn dropping_the_module_ends_its_thread() {
+        struct Marker(mpsc::Sender<()>);
+        impl Drop for Marker {
+            fn drop(&mut self) {
+                let _ = self.0.send(());
+            }
+        }
+        impl Runner for Marker {
+            fn render(&mut self, _: Size, _: f64, _: bool) -> Result<Frame, Fault> {
+                Ok(Frame {
+                    root: div(),
+                    animating: false,
+                })
+            }
+            fn settle(&mut self) -> Result<bool, Fault> {
+                Ok(false)
+            }
+            fn handle(&mut self, _: Event) -> Result<Reply, Fault> {
+                Ok(Reply::none())
+            }
+            fn lay_out(&mut self, _: Arc<Laid>) {}
+        }
+        let (gone, gone_rx) = mpsc::channel();
+        let module = Module::spawn(|| Ok(Marker(gone)), || {});
+        drop(module);
+        gone_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the module was dropped with its thread");
+    }
+}

@@ -558,7 +558,7 @@ fn a_press_on_the_filter_box_asks_for_the_keyboard_for_the_field() {
     );
     assert_eq!(reply.keyboard, Some(Keyboard::Filter));
     // The field has a place inside the box.
-    let field = Containers::field(&laid).expect("the field's room");
+    let field = laid.text_field().expect("the field's room");
     let outer = laid.bounds(SEARCH).unwrap();
     assert!(field.x >= outer.x && field.right() <= outer.right());
     assert!(field.y >= outer.y && field.bottom() <= outer.bottom());

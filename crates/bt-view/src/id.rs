@@ -15,6 +15,11 @@ impl Id {
         Self(number)
     }
 
+    /// The number of the id: what a page that lives apart from its host names an element by.
+    pub const fn number(self) -> u64 {
+        self.0
+    }
+
     /// The id of these words (a hash of them: 64 bits of FNV-1a), so a row can be named for
     /// what it shows — `Id::named("container api")` — without a table of numbers.
     pub const fn named(words: &str) -> Self {

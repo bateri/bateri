@@ -97,6 +97,44 @@ fn info_plist_template_launches_the_binary() {
     );
 }
 
+/// The entitlements `make bundle` signs the application with are the two the page sandbox's
+/// runtime needs under the hardened runtime and nothing more: an entitlement is a permission the
+/// package holds for as long as it is signed with it, so the set is not widened by editing the
+/// file in passing (and not narrowed either: without the second the runtime is killed the moment
+/// it makes the code it compiled executable).
+#[test]
+fn entitlements_are_the_two_the_page_sandbox_needs() {
+    let path = asset("bateri.entitlements");
+    let lint = Command::new("plutil")
+        .arg("-lint")
+        .arg(&path)
+        .output()
+        .expect("plutil could not be run");
+    assert!(
+        lint.status.success(),
+        "bateri.entitlements is not a valid plist: {}{}",
+        String::from_utf8_lossy(&lint.stdout),
+        String::from_utf8_lossy(&lint.stderr)
+    );
+    let json = Command::new("plutil")
+        .args(["-convert", "json", "-o", "-"])
+        .arg(&path)
+        .output()
+        .expect("plutil could not be run");
+    let json = String::from_utf8_lossy(&json.stdout);
+    for key in ["allow-jit", "allow-unsigned-executable-memory"] {
+        assert!(
+            json.contains(&format!(r#""com.apple.security.cs.{key}":true"#)),
+            "the entitlement {key} is missing: {json}"
+        );
+    }
+    assert_eq!(
+        json.matches(r#"":"#).count(),
+        2,
+        "an entitlement beyond the two: {json}"
+    );
+}
+
 /// The version and the macOS floor are **not written** into the template:
 /// `make bundle` fills the version from `Cargo.toml` and the floor from the
 /// binary's `minos` (which itself comes from `.cargo/config.toml`). Seeing a

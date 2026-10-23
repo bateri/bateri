@@ -3,7 +3,7 @@ CARGO ?= cargo
 # Prerequisite order is only guaranteed under serial make; under -j the promises
 # "cheapest gate first" and "version first" break.
 .NOTPARALLEL:
-.PHONY: check prune fmt audit clippy test shader smoke terminfo test-race scan bundle package install release publish ship release-gate sparkle dmgbuild linux embed-swift embed-tag
+.PHONY: check prune fmt audit clippy test shader smoke terminfo test-race scan bundle package install release publish ship release-gate sparkle dmgbuild linux embed-swift embed-tag guest guest-test
 
 # Definition of done. Homebrew rustc is not pinned (there is deliberately no
 # rust-toolchain.toml): the version is printed first so a clippy failure that
@@ -37,6 +37,7 @@ prune:
 
 fmt:
 	$(CARGO) fmt --all -- --check
+	$(CARGO) fmt --manifest-path guest/Cargo.toml --all -- --check
 
 # The mechanical half of the project rules: agentless and done in seconds, on
 # every `make check`. The checks that need judgment stay in code review.
@@ -116,6 +117,10 @@ audit:
 	if grep -rnE "objc2|dispatch2|block2" crates/bt-shell-common/src | grep -v "^crates/bt-shell-common/src/watch/dispatch.rs:" | grep -v ":[[:space:]]*//"; then echo "audit: platform call in bt-shell-common outside watch's macOS body (watch/dispatch.rs)"; fail=1; fi; \
 	if $(CARGO) tree -p bt-view -e normal --prefix none | tail -n +2 | grep -E "^(bt-|objc2|dispatch2|block2|metal|wgpu)"; then echo "audit: bt-view links to a crate of this workspace or a platform library — the page engine depends on its layout crate alone"; fail=1; fi; \
 	if grep -rnE "objc2|dispatch2|block2|wgpu|bt_(core|atlas|gpu|shell|embed)" crates/bt-view/src | grep -v ":[[:space:]]*//"; then echo "audit: platform call or a workspace crate named in bt-view source"; fail=1; fi; \
+	if $(CARGO) tree -p bt-view-wasm -e normal --prefix none | tail -n +2 | grep -E "^(bt-(core|atlas|gpu|shell|embed)|objc2|dispatch2|block2|metal|wgpu)"; then echo "audit: bt-view-wasm links to a crate of this workspace past the page engine or to a platform library — the sandbox depends on the engine and the runtime alone"; fail=1; fi; \
+	if grep -rnE "objc2|dispatch2|block2|wgpu|bt_(core|atlas|gpu|shell|embed)" crates/bt-view-wasm/src | grep -v ":[[:space:]]*//"; then echo "audit: platform call or a workspace crate named in bt-view-wasm source"; fail=1; fi; \
+	if $(CARGO) tree --workspace -e normal -i wasmtime --depth 1 --prefix none | tail -n +2 | grep -vE "^bt-view-wasm "; then echo "audit: the WebAssembly runtime is linked by a crate other than bt-view-wasm — one door to it"; fail=1; fi; \
+	if grep -nE "^(bt-(core|atlas|gpu|shell|embed)[a-z-]*|bt-view-wasm) *=" guest/*/Cargo.toml guest/Cargo.toml; then echo "audit: a page module depends on a crate of the application — a module is written with the SDK and the engine's builder (bt-view) alone"; fail=1; fi; \
 	if grep -rn "objc2\|core_text\|core_graphics" crates/bt-core/src | grep -v ":[[:space:]]*//"; then echo "audit: platform call in bt-core source"; fail=1; fi; \
 	kablo_tree=$$($(CARGO) tree --workspace -e normal); kablo_revs=""; \
 	for fork in vte alacritty_terminal kablo-proto; do \
@@ -464,7 +469,7 @@ bundle: sparkle
 	@# checks them against is written now, from the files as they are.
 	for f in $(STAGE)/Contents/Resources/kablo/kablo-*-apple-darwin; do $(SIGN) $$f || exit 1; done
 	cd $(STAGE)/Contents/Resources/kablo && shasum -a 256 kablo-* LICENSE THIRD-PARTY-LICENSES.txt > SHA256SUMS
-	$(SIGN) $(STAGE)
+	$(SIGN) --entitlements assets/bundle/bateri.entitlements $(STAGE)
 	codesign --verify --deep --strict $(STAGE)
 	@c=$(STAGE)/Contents; fail() { echo "bundle: content check failed — $$1"; exit 1; }; \
 	key() { plutil -extract "$$1" raw $$c/Info.plist 2>/dev/null; }; \
@@ -486,6 +491,10 @@ bundle: sparkle
 		test "$$(team $$x)" = "$$(team $(STAGE))" || fail "$$x is not signed with the same identity as the package"; \
 	done; \
 	test '$(SIGN_ID)' = - || codesign -dv $(STAGE) 2>&1 | grep -q 'flags=.*runtime' || fail "no hardened runtime"; \
+	ents=$$(codesign -d --entitlements :- $(STAGE) 2>/dev/null); \
+	for e in allow-jit allow-unsigned-executable-memory; do \
+		echo "$$ents" | grep -q "com.apple.security.cs.$$e" || fail "the application is not signed with the $$e entitlement (the sandbox's runtime compiles page modules and runs them)"; \
+	done; \
 	cmp -s LICENSE $$c/Resources/LICENSE || fail "LICENSE is not in the package or differs from the input"; \
 	for f in Credits.html THIRD-PARTY-LICENSES.txt; do \
 		cmp -s assets/bundle/$$f $$c/Resources/$$f || fail "$$f is not in the package or differs from the input"; \
@@ -803,10 +812,36 @@ embed-tag:
 	git tag -a 'bt-embed-$(EMBED_VERSION)' -m 'bt-embed $(EMBED_VERSION), ABI $(EMBED_ABI)'
 	@echo "embed-tag: bt-embed-$(EMBED_VERSION) -> $$(git rev-parse --short HEAD); nothing pushed — with a person's go: git push origin main bt-embed-$(EMBED_VERSION)"
 
+# The page modules (`guest/`): pages that run in the application's sandbox, built for
+# `wasm32-unknown-unknown` and turned into components in `guest/dist/`. The application itself is built
+# with Homebrew's rustc, which has no WebAssembly standard library; the modules are built with
+# rustup's `stable` (`rustup target add wasm32-unknown-unknown --toolchain stable`). Its linker
+# finds its LLVM through the toolchain's library directory, which rustup's own proxies put in
+# the environment and a PATH that Homebrew's rustc comes first in does not: it is put there
+# here. `make check` never builds them (it needs no WebAssembly toolchain); the tests that use
+# the built components stand down where they are missing and run after `make guest`.
+GUEST_MODULES = containers broken
+GUEST_BIN = $(shell dirname "$$(rustup which --toolchain stable cargo 2>/dev/null)" 2>/dev/null)
+GUEST_CARGO = PATH="$(GUEST_BIN):$$PATH" DYLD_FALLBACK_LIBRARY_PATH="$(dir $(GUEST_BIN))lib" $(GUEST_BIN)/cargo
+guest:
+	@command -v rustup >/dev/null 2>&1 || { echo "guest: rustup is missing (the modules are built with its stable toolchain)"; exit 1; }
+	@rustup target list --installed --toolchain stable 2>/dev/null | grep -qx wasm32-unknown-unknown || { echo "guest: rustup's stable toolchain has no wasm32-unknown-unknown target — rustup target add wasm32-unknown-unknown --toolchain stable"; exit 1; }
+	$(GUEST_CARGO) build --manifest-path guest/Cargo.toml --release --target wasm32-unknown-unknown $(addprefix -p ,$(GUEST_MODULES))
+	mkdir -p guest/dist
+	@for m in $(GUEST_MODULES); do \
+		$(GUEST_CARGO) run -q --manifest-path guest/Cargo.toml -p componentize -- guest/target/wasm32-unknown-unknown/release/$$m.wasm guest/dist/$$m.wasm || exit 1; \
+	done
+	@ls -l $(addprefix guest/dist/,$(addsuffix .wasm,$(GUEST_MODULES)))
+
+# The sandbox against the real modules: what `make check` takes on faith.
+guest-test: guest
+	$(CARGO) test -p bt-view-wasm guests_tests
+	$(CARGO) test -p bt-shell-common native_view::module
+
 LINUX_DOCKERFILE = tools/linux/Dockerfile
 LINUX_RUST = $(shell sed -n 's/^FROM rust:\([0-9]*\.[0-9]*\)-.*/\1/p' $(LINUX_DOCKERFILE))
 LINUX_IMAGE = bateri-linux:$(LINUX_RUST)
-LINUX_CRATES = -p bt-core -p bt-atlas -p bt-gpu -p bt-view -p bt-shell-common
+LINUX_CRATES = -p bt-core -p bt-atlas -p bt-gpu -p bt-view -p bt-view-wasm -p bt-shell-common
 # In a linked worktree `.git` is a file naming the main repository's git directory by its
 # absolute path, which the container does not have: the tests that read the repository would
 # find none. The common git directory is mounted read-only at that same path; in the main

@@ -27,10 +27,14 @@ use bt_gpu::{
     UiRect, tint,
 };
 use bt_view::demo::Containers;
+
+mod module;
 pub use bt_view::{
     Button, Cursor, Input, Key, Keyboard, Menu, MenuEntry, Mods, Point, Rect, Reply, Tone,
 };
 use bt_view::{Color, DrawList, Element, Family, Font, Laid, Measure, Metrics, Paint, Quad, Size};
+pub use bt_view_wasm::Limits;
+pub use module::{ModuleHandle, module_page};
 
 /// What `tone` is in `theme`: the nine roles are the theme's own, the rest are the values it
 /// derives from them (surfaces a step above the ground, the hairline, the shadow's colour).
@@ -79,6 +83,39 @@ pub fn quad(theme: &Theme, quad: &Quad, origin: (f32, f32)) -> UiQuad {
         );
     }
     out
+}
+
+/// What a pane drives a page of the kit by, whatever the page is made of: one that lives in this
+/// process ([`ContainersHandle`]) or a module in a sandbox ([`ModuleHandle`]).
+///
+/// The pane **tells** (what the person did) and **asks what has come back** ([`PageDrive::drain`]);
+/// it never waits for a page to answer. A page of this process answers at once, so the pane drains
+/// right after it tells; a module answers when it has, and the pane drains when it is woken.
+pub trait PageDrive {
+    /// The person did something with the pointer, the wheel or a key, in the pane's points (the
+    /// top-left corner of the pane is the origin; the strip's room is included).
+    fn send_input(&self, input: Input);
+    /// The filter field's text changed.
+    fn send_query(&self, text: &str);
+    /// The person picked the `index`th entry of the menu the last reply asked for.
+    fn send_pick(&self, index: usize);
+    /// `told` is called, on the thread that builds the frame, when the place of the text field the
+    /// page leaves room for changes (the pane resized, the page laid out another way): the host
+    /// moves its field to it. Called once with the place the page has now, if it has one.
+    fn watch_field(&self, told: Box<dyn Fn(Option<Rect>)>);
+    /// Hands over what the page has said since the last call: each reply, in order, with whether
+    /// the event it answers was the pointer's (the pointer's shape after a key is nobody's to
+    /// set). Never waits.
+    fn drain(&self, reply: &mut dyn FnMut(Reply, bool)) -> Drained;
+}
+
+/// What a page had besides replies.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Drained {
+    /// The page has something new to show: a frame of it is worth drawing.
+    pub redraw: bool,
+    /// Why the page is gone, the first time it is told: the pane takes it down.
+    pub ended: Option<String>,
 }
 
 /// The fonts opened and the lines shaped so far. They outlive a build: a page is laid out
@@ -234,6 +271,7 @@ pub fn containers_demo(
         inset,
         field: None,
         on_field: None,
+        replies: Vec::new(),
     }));
     let page = ContainersPage {
         terminal,
@@ -263,6 +301,8 @@ struct Shared {
     /// Where the filter's field was last said to stand, in the pane's points.
     field: Option<Rect>,
     on_field: Option<Rc<dyn Fn(Option<Rect>)>>,
+    /// What the page said that the pane has not taken ([`PageDrive::drain`]).
+    replies: Vec<(Reply, bool)>,
 }
 
 /// The drive of the container-list page: the pane's input in, the page's reply out. Cloned
@@ -314,6 +354,37 @@ impl ContainersHandle {
         if field.is_some() {
             told(field);
         }
+    }
+}
+
+impl PageDrive for ContainersHandle {
+    fn send_input(&self, input: Input) {
+        let pointer = !matches!(input, Input::Key { .. });
+        let reply = ContainersHandle::input(self, input);
+        self.shared.borrow_mut().replies.push((reply, pointer));
+    }
+
+    fn send_query(&self, text: &str) {
+        let reply = self.set_query(text);
+        self.shared.borrow_mut().replies.push((reply, false));
+    }
+
+    fn send_pick(&self, index: usize) {
+        let reply = self.pick(index);
+        self.shared.borrow_mut().replies.push((reply, false));
+    }
+
+    fn watch_field(&self, told: Box<dyn Fn(Option<Rect>)>) {
+        self.on_field(told);
+    }
+
+    fn drain(&self, reply: &mut dyn FnMut(Reply, bool)) -> Drained {
+        // Taken before they are handed over: the pane may take the page down in the middle.
+        let replies = std::mem::take(&mut self.shared.borrow_mut().replies);
+        for (said, pointer) in replies {
+            reply(said, pointer);
+        }
+        Drained::default()
     }
 }
 
@@ -392,8 +463,9 @@ impl UiPage for ContainersPage {
             let draws = laid.paint(&mut typeset);
             let list = to_list(cx.renderer, cx.theme, &mut typeset, &draws, (0.0, inset));
             // The field's room, in the pane's points: the strip's room above the page is added.
-            let field =
-                Containers::field(&laid).map(|r| Rect::new(r.x, r.y + shared.inset, r.w, r.h));
+            let field = laid
+                .text_field()
+                .map(|r| Rect::new(r.x, r.y + shared.inset, r.w, r.h));
             let told = (field != shared.field)
                 .then(|| shared.on_field.clone().map(|told| (told, field)))
                 .flatten();
@@ -565,6 +637,31 @@ mod tests {
         assert_eq!(handle.field(), None, "no frame, no place for the field");
         // A pointer over a page that was never laid out is over nothing.
         assert!(!handle.input(Input::Move(Point::new(5.0, 50.0))).redraw);
+    }
+
+    #[test]
+    fn a_page_of_this_process_answers_at_once_and_the_pane_takes_the_answers_by_draining() {
+        let (_page, handle) = containers_demo(None, 32.0);
+        let drive: &dyn PageDrive = &handle;
+        drive.send_input(Input::Move(Point::new(5.0, 50.0)));
+        drive.send_input(Input::Key {
+            key: bt_view::Key::Escape,
+            mods: bt_view::Mods::default(),
+        });
+        drive.send_query("api");
+        let mut said = Vec::new();
+        let drained = drive.drain(&mut |reply, pointer| said.push((reply, pointer)));
+        assert_eq!(drained, Drained::default());
+        assert_eq!(said.len(), 3, "one reply for each thing told");
+        // Told in order, each with whether it was the pointer's: the move, then the key.
+        assert!(said[0].1);
+        assert!(!said[1].1 && said[1].0.close);
+        assert!(!said[2].1);
+        // Taken once.
+        assert_eq!(
+            drive.drain(&mut |_, _| panic!("nothing is left to take")),
+            Drained::default()
+        );
     }
 
     /// The page on the real renderer: it draws on a request and rests, the fades that start

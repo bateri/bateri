@@ -18,7 +18,7 @@
 use std::rc::Rc;
 
 use bt_core::Theme;
-use bt_shell_common::native_view::{ContainersHandle, Key, Mods, Rect, Tone, tone_linear};
+use bt_shell_common::native_view::{Key, Mods, PageDrive, Rect, Tone, tone_linear};
 use bt_shell_common::view_strip::Strip;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
@@ -36,11 +36,16 @@ use crate::pencere_view::strip_area;
 
 /// The demo's strip over `pane`: the made-up program's name and the title of its page, a button
 /// that closes the page, painted with `theme`.
-pub(crate) fn strip(pane: &TerminalPane, theme: &Theme) -> Retained<StripView> {
+pub(crate) fn strip(
+    pane: &TerminalPane,
+    theme: &Theme,
+    program: &str,
+    title: &str,
+) -> Retained<StripView> {
     let text = Strip {
         place: None,
-        program: Some("dockerpen".to_owned()),
-        title: Some("Docker".to_owned()),
+        program: Some(program.to_owned()),
+        title: Some(title.to_owned()),
         quit_tip: "Closes the demo page. The terminal comes back.".to_owned(),
     };
     let strip = StripView::new(
@@ -54,13 +59,24 @@ pub(crate) fn strip(pane: &TerminalPane, theme: &Theme) -> Retained<StripView> {
     strip
 }
 
+/// Where the page modules (`guest/`, built by `make guest`) are: `BT_VIEW_GUEST_DIR`, else the
+/// build tree this binary came from. A development convenience of debug builds, which is all that
+/// opens them for now.
+pub(crate) fn component_path(name: &str) -> std::path::PathBuf {
+    let dir = std::env::var_os("BT_VIEW_GUEST_DIR").map_or_else(
+        || std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../guest/dist"),
+        std::path::PathBuf::from,
+    );
+    dir.join(format!("{name}.wasm"))
+}
+
 /// The height of the filter field, points: a line of the page's text, centred in the box.
 const FIELD_HEIGHT: f64 = 18.0;
 
 /// What is up while the container-list page is: the handle the pane's input goes to the page
 /// by, the filter's field, the tracking area over the pane.
 pub(crate) struct Page {
-    pub handle: ContainersHandle,
+    pub handle: Rc<dyn PageDrive>,
     pub field: Retained<NSTextField>,
     pub area: Retained<NSTrackingArea>,
 }

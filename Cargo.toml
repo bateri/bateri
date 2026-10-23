@@ -5,11 +5,16 @@ members = [
     "crates/bt-atlas",
     "crates/bt-gpu",
     "crates/bt-view",
+    "crates/bt-view-wasm",
     "crates/bt-shell-common",
     "crates/bt-shell-macos",
     "crates/bt-embed",
     "crates/bateri",
 ]
+
+# The page modules (`guest/`) are built for another target with another toolchain and have
+# their own workspace and lockfile; the host workspace never builds them.
+exclude = ["guest"]
 
 [workspace.package]
 version = "0.22.0"
@@ -106,6 +111,17 @@ objc2-web-kit = { version = "0.3", default-features = false, features = [
 # (`pencere_view::still`) — the rectangle and the width of what it gives back;
 # its rectangle is a `CGRect`, behind the `objc2-core-foundation` flag.
     "WKSnapshotConfiguration", "objc2-core-foundation",
+] }
+# The sandbox a page module runs in (`bt-view-wasm`): the WebAssembly runtime, with the
+# component model for the interface the module sees. User-approved dependency decision
+# (2026-10-23), with the `allow-jit` entitlement it needs under the hardened runtime (the
+# runtime compiles the module with Cranelift). Pure Rust except a small C helper its build
+# compiles; Apache-2.0 WITH LLVM-exception (GPL-3 compatible). The default set is cut to what
+# runs a component: no async, cache, GC, profiling, coredump or pooling allocator. The
+# version is the newest that builds with the toolchain pinned by `rust-version` (a newer
+# release asks for a newer rustc); a toolchain bump is the time to move it.
+wasmtime = { version = "38", default-features = false, features = [
+    "runtime", "cranelift", "component-model", "std",
 ] }
 # The main queue (`bt-shell-macos`) and vnode sources (`bt-shell-common`'s
 # `watch`). User-approved dependency decision.
@@ -277,3 +293,24 @@ bt-shell-macos = { path = "crates/bt-shell-macos" }
 [patch.crates-io]
 vte = { git = "https://github.com/bateri/kablo", rev = "74ac4a4d4800ffa0a370bac98dd6558b817608d9" }
 alacritty_terminal = { git = "https://github.com/bateri/kablo", rev = "74ac4a4d4800ffa0a370bac98dd6558b817608d9" }
+
+# A page module is compiled to machine code when its page opens, by the sandbox's code
+# generator; built without optimization (a debug build) that takes seconds and the page is
+# not there while it does. The generator and what feeds it are optimized in the development
+# profile too — compiled once, cached with the rest.
+[profile.dev.package.cranelift-codegen]
+opt-level = 2
+[profile.dev.package.cranelift-frontend]
+opt-level = 2
+[profile.dev.package.cranelift-entity]
+opt-level = 2
+[profile.dev.package.cranelift-bforest]
+opt-level = 2
+[profile.dev.package.regalloc2]
+opt-level = 2
+[profile.dev.package.wasmtime-internal-cranelift]
+opt-level = 2
+[profile.dev.package.wasmtime-environ]
+opt-level = 2
+[profile.dev.package.wasmparser]
+opt-level = 2

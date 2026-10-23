@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 
-use crate::{Fades, Id, Laid, Point};
+use crate::{Fades, Id, Point, Queries};
 
 /// The remembered state of a page.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -42,7 +42,7 @@ impl Ui {
 
     /// The pointer is at `at` (`None`: it left the page). Returns whether the element it is
     /// over changed.
-    pub fn point(&mut self, laid: &Laid, at: Option<Point>) -> bool {
+    pub fn point(&mut self, laid: &dyn Queries, at: Option<Point>) -> bool {
         let over = at.and_then(|at| laid.hit(at));
         std::mem::replace(&mut self.hover, over) != over
     }
@@ -50,7 +50,7 @@ impl Ui {
     /// A button went down at `at`: the element under it is the pressed one, and the keyboard
     /// moves to the nearest element around it that takes it (`focusable`). Returns the element
     /// pressed.
-    pub fn press(&mut self, laid: &Laid, at: Point) -> Option<Id> {
+    pub fn press(&mut self, laid: &dyn Queries, at: Point) -> Option<Id> {
         let hit = laid.hit(at);
         self.pressed = hit;
         let under = laid.ids_at(at);
@@ -62,7 +62,7 @@ impl Ui {
 
     /// The button came up at `at`. A click is a release over the element the press was on:
     /// returns it.
-    pub fn release(&mut self, laid: &Laid, at: Point) -> Option<Id> {
+    pub fn release(&mut self, laid: &dyn Queries, at: Point) -> Option<Id> {
         let pressed = self.pressed.take()?;
         (laid.hit(at) == Some(pressed)).then_some(pressed)
     }
@@ -76,7 +76,7 @@ impl Ui {
 
     /// Scrolls the box named `id` to `offset`, kept within the box's reach on the page `laid`
     /// (or at least 0 where the box is not known yet). Returns whether it moved.
-    pub fn scroll_to(&mut self, laid: &Laid, id: Id, offset: f32) -> bool {
+    pub fn scroll_to(&mut self, laid: &dyn Queries, id: Id, offset: f32) -> bool {
         let reach = laid.scroll_extent(id).map_or(f32::MAX, |e| e.max_offset());
         let offset = offset.clamp(0.0, reach);
         let was = self.scroll.insert(id, offset).unwrap_or(0.0);
@@ -93,7 +93,7 @@ impl Ui {
     /// The wheel turned over `at` by `dy` points (positive: down the page). The innermost
     /// scrolling box under the pointer that has room to go that way moves; one already at its
     /// end passes the turn on to the box around it. Returns whether anything moved.
-    pub fn scroll_by(&mut self, laid: &Laid, at: Point, dy: f32) -> bool {
+    pub fn scroll_by(&mut self, laid: &dyn Queries, at: Point, dy: f32) -> bool {
         for id in laid.ids_at(at) {
             let Some(extent) = laid.scroll_extent(id) else {
                 continue;
@@ -111,7 +111,7 @@ impl Ui {
     /// Brings every scrolled box back within its reach on the page `laid` — a list that got
     /// shorter (a filter) or a window that got taller. Returns whether any moved: the page
     /// is laid out again then, as its rows depend on the offset.
-    pub fn settle(&mut self, laid: &Laid) -> bool {
+    pub fn settle(&mut self, laid: &dyn Queries) -> bool {
         let mut moved = false;
         self.scroll.retain(|id, offset| {
             let Some(extent) = laid.scroll_extent(*id) else {
@@ -127,7 +127,7 @@ impl Ui {
 
     // --- The keyboard --------------------------------------------------------------------
 
-    fn takes_focus(&self, laid: &Laid, id: Id) -> bool {
+    fn takes_focus(&self, laid: &dyn Queries, id: Id) -> bool {
         laid.focus_order().contains(&id)
     }
 
@@ -139,7 +139,7 @@ impl Ui {
     /// Moves the keyboard to the next element that takes it (the previous one when `back`),
     /// around from the last to the first. From nowhere it goes to the first (the last, back).
     /// Returns the element the keyboard is on now.
-    pub fn focus_step(&mut self, laid: &Laid, back: bool) -> Option<Id> {
+    pub fn focus_step(&mut self, laid: &dyn Queries, back: bool) -> Option<Id> {
         let order = laid.focus_order();
         if order.is_empty() {
             self.focus = None;
@@ -161,7 +161,7 @@ impl Ui {
     /// Where a key goes: the element the keyboard is on, then the named elements around it,
     /// the innermost first. The page offers the key to each in turn and the first that
     /// takes it ends the walk.
-    pub fn key_path(&self, laid: &Laid) -> Vec<Id> {
+    pub fn key_path(&self, laid: &dyn Queries) -> Vec<Id> {
         self.focus
             .map_or_else(Vec::new, |focus| laid.path_of(focus))
     }

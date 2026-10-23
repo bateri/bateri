@@ -8,11 +8,10 @@
 //! changes the list itself, so a menu does something the person can see.
 
 use super::{
-    CHOSEN, Container, Containers, FIELD, GROUP_BUTTON, GROUP_GAP, HOVERED, LIST, ROW, SEARCH,
-    State, wave,
+    CHOSEN, Container, Containers, GROUP_BUTTON, GROUP_GAP, HOVERED, LIST, ROW, SEARCH, State, wave,
 };
 use crate::{
-    Button, Cursor, Id, Input, Key, Keyboard, Laid, Menu, MenuEntry, Mods, Point, Rect, Reply,
+    Button, Cursor, Id, Input, Key, Keyboard, Menu, MenuEntry, Mods, Point, Queries, Reply,
 };
 
 /// Which containers the list shows by their state.
@@ -231,7 +230,7 @@ impl Containers {
         true
     }
 
-    fn hover_to(&mut self, laid: &Laid, at: Option<Point>) -> bool {
+    fn hover_to(&mut self, laid: &dyn Queries, at: Option<Point>) -> bool {
         let was = self.ui.hover();
         if !self.ui.point(laid, at) {
             return false;
@@ -261,7 +260,7 @@ impl Containers {
     /// date — the scrolled list kept within its reach, the window's height, what the pointer is
     /// over now that the page moved under it. Returns whether the page has to be built and laid
     /// out again (the rows in view depend on how far the list is scrolled).
-    pub fn settle(&mut self, laid: &Laid) -> bool {
+    pub fn settle(&mut self, laid: &dyn Queries) -> bool {
         if let Some(extent) = laid.scroll_extent(LIST) {
             self.list_view = extent.view;
         }
@@ -270,11 +269,6 @@ impl Containers {
             self.hover_to(laid, Some(at));
         }
         moved
-    }
-
-    /// The box of the filter's text field, points: where the host puts it.
-    pub fn field(laid: &Laid) -> Option<Rect> {
-        laid.bounds(FIELD)
     }
 
     // --- The cursor --------------------------------------------------------------------
@@ -329,7 +323,7 @@ impl Containers {
     // --- What the person does ------------------------------------------------------------
 
     /// What the person did, with the page as it was last laid out (`laid`).
-    pub fn input(&mut self, input: Input, laid: &Laid) -> Reply {
+    pub fn input(&mut self, input: Input, laid: &dyn Queries) -> Reply {
         match input {
             Input::Move(at) => {
                 self.pointer = Some(at);
@@ -359,7 +353,7 @@ impl Containers {
         self.rows().into_iter().find(|row| row.key.id() == id)
     }
 
-    fn press(&mut self, laid: &Laid, at: Point, button: Button, mods: Mods) -> Reply {
+    fn press(&mut self, laid: &dyn Queries, at: Point, button: Button, mods: Mods) -> Reply {
         self.pointer = Some(at);
         self.press_mods = mods;
         let Some(id) = self.ui.press(laid, at) else {
@@ -390,7 +384,7 @@ impl Containers {
         self.reply(changed)
     }
 
-    fn release(&mut self, laid: &Laid, at: Point) -> Reply {
+    fn release(&mut self, laid: &dyn Queries, at: Point) -> Reply {
         let Some(id) = self.ui.release(laid, at) else {
             return self.reply(false);
         };
@@ -454,7 +448,7 @@ impl Containers {
 
     /// The keyboard's: moving the cursor, folding a project, marking, the filter, the
     /// commands. ⌃, ⌥ and ⌘ chords are the application's and are not read here.
-    fn key(&mut self, key: Key, mods: Mods, laid: &Laid) -> Reply {
+    fn key(&mut self, key: Key, mods: Mods, laid: &dyn Queries) -> Reply {
         if mods.any_command() {
             return self.reply(false);
         }
