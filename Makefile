@@ -255,14 +255,15 @@ shader:
 # Runs on changes that touch shared state (PTY reader thread <-> frame
 # producer). ThreadSanitizer needs nightly; the toolchain is not pinned (there
 # is deliberately no `rust-toolchain.toml`, Homebrew rustc) and there is no
-# nightly: instead two different timing profiles — first only the race_*
-# stress, then the whole suite INCLUDING the ignored ones on a single thread.
-# Without --include-ignored the second line would be a copy of `make test` and
-# would never run the race tests. When TSan nightly arrives, the third line
-# goes HERE.
+# nightly: instead the race_* stress runs under two different timing
+# profiles — first in parallel, then on a single thread. Only the race tests run
+# the second time: the rest of the suite is `make check`'s, and running all of it
+# again on one thread took half of this target's time and found nothing but the
+# flaky tests of code the change had not touched. When TSan nightly arrives, the
+# third line goes HERE.
 test-race:
 	$(CARGO) test --workspace -- --ignored race_
-	$(CARGO) test --workspace -- --include-ignored --test-threads=1
+	$(CARGO) test --workspace -- --ignored --test-threads=1 race_
 
 # Inventory of the fallback-glyph gate: passes every character in the
 # symbol and emoji blocks through the atlas's own gate and prints, per block
