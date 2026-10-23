@@ -54,6 +54,7 @@ use objc2_core_foundation::CFRetained;
 use objc2_core_graphics::CGImage;
 use objc2_foundation::{NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize};
 
+use crate::agent;
 use crate::app;
 use crate::arrange::{self, Entry, Raised, Scene, Status, Wants};
 use crate::embed;
@@ -293,9 +294,23 @@ impl PaneHost for TabHost {
         }
     }
 
-    fn program_notification(&self, _pane: u64, _title: Option<&str>, _body: &str) {
-        // A program's own notification is not shown by bateri's tabs (its
-        // notifications are its own: an upload's end, a lost connection).
+    fn program_notification(&self, pane: u64, title: Option<&str>, body: &str) {
+        // Told as a server's `bateri notify` is (`agent::notice`). One notification per pane,
+        // each replacing the last, so a program that prints them in a loop leaves one, not a
+        // pile. Without a title of its own (`OSC 9`) it is named as the tab is.
+        let Some(tab) = self.tab() else {
+            return;
+        };
+        let Some(shown) = tab.panes().into_iter().find(|p| p.id() == pane) else {
+            return;
+        };
+        let title = title
+            .map(str::to_owned)
+            .or_else(|| tab.name())
+            .or_else(|| shown.session().map(|session| session.title()))
+            .unwrap_or_default();
+        let name = format!("bateri.program.{}", shown.uuid().as_str());
+        agent::notice(Self::mtm(), Some((&tab, pane)), &title, body, Some(&name));
     }
 
     fn questions_changed(&self, _pane: u64) {

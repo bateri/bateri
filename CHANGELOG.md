@@ -22,6 +22,11 @@ of every installed copy. A version without a section is not released.
   `⇄ rasp  ~/app`. While the connection is down, the line you had typed dims with the
   screen and the bottom line keeps saying `Reconnecting…`. `integration = "blocks"` leaves the
   server's line to its shell, as it does locally.
+- **A program's notification reaches you.** When a program asks the terminal for one
+  (`printf '\e]9;Build finished\a'`, or `OSC 777;notify;title;body`), its tab is marked
+  unless you are looking at it, and while bateri is in the background it comes as a macOS
+  notification with the program's title, or the tab's. A program that sends them in a loop
+  leaves one notification per pane, the latest.
 
 ### Changed
 

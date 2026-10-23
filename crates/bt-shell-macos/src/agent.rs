@@ -802,17 +802,10 @@ fn ask_to_close(
 /// The longest a notification's words are, in characters.
 const NOTICE_LIMIT: usize = 1000;
 
-/// `bateri notify`: a notification when bateri is behind, and the tab the program runs in is
-/// marked as having news unless the user is looking at it. In front, the tab is what shows it —
-/// and when no tab of this Mac shows the program, the notification is shown in front instead, the
-/// one kind of notification that is ([`uploader::deliver_notification_in_front`]). Answered at
+/// `bateri notify`, told as every program that asks to be noticed is ([`notice`]). Answered at
 /// once: the words are delivered, what the system does with them is its own.
 fn notify(app: &AppDelegate, letter: Letter, server: &Server, from: Option<&str>, text: &str) {
-    let mtm = app.mtm();
     let found = from.and_then(|name| find_pane(app, &server.account, name));
-    if let Some((tab, pane, _)) = &found {
-        tab.news_from(pane.id());
-    }
     let program = found
         .as_ref()
         .and_then(|(_, _, shown)| shown.program.as_deref());
@@ -822,14 +815,38 @@ fn notify(app: &AppDelegate, letter: Letter, server: &Server, from: Option<&str>
         .filter(|c| !c.is_control())
         .take(NOTICE_LIMIT)
         .collect();
+    let at = found.as_ref().map(|(tab, pane, _)| (&**tab, pane.id()));
+    notice(app.mtm(), at, &title, &body, None);
+    letter.answer(Reply::Done.encode().into_bytes());
+}
+
+/// How a program that asks to be noticed is told — a server's `bateri notify` and a terminal's
+/// `OSC 9` / `OSC 777` alike. The tab it runs in (`at`: the tab and the pane) is marked as having
+/// news unless the user is looking at it. With bateri behind, the words come as a notification;
+/// one with a `replacing` name takes the place of the last one of that name. In front, the tab is
+/// what shows it — and when no tab of this Mac shows the program, the notification is shown in
+/// front instead, the one kind of notification that is
+/// ([`uploader::deliver_notification_in_front`]).
+pub(crate) fn notice(
+    mtm: MainThreadMarker,
+    at: Option<(&TerminalTab, u64)>,
+    title: &str,
+    body: &str,
+    replacing: Option<&str>,
+) {
+    if let Some((tab, pane)) = at {
+        tab.news_from(pane);
+    }
     if !NSApplication::sharedApplication(mtm).isActive() {
-        uploader::deliver_notification(&title, &body);
-    } else if found.is_none() {
+        match replacing {
+            Some(name) => uploader::deliver_notification_replacing(name, title, body),
+            None => uploader::deliver_notification(title, body),
+        }
+    } else if at.is_none() {
         // The system silences a notification delivered while bateri is in front and the tab is
         // what shows it there; with no tab of the asker here this one is shown in front.
-        uploader::deliver_notification_in_front(mtm, &title, &body);
+        uploader::deliver_notification_in_front(mtm, title, body);
     }
-    letter.answer(Reply::Done.encode().into_bytes());
 }
 
 // ─── Telling the user ────────────────────────────────────────────────────

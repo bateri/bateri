@@ -270,7 +270,7 @@ pub trait Wake: Send + Sync + 'static {
 
     /// A program asked for a notification (`OSC 9 ; text` or `OSC 777 ;
     /// notify ; …`): the receiver takes them with
-    /// [`crate::Session::take_notifications`]. bateri's own tabs show none.
+    /// [`crate::Session::take_notifications`].
     ///
     /// **Edge-triggered and payload-free** (the precedent is
     /// [`Wake::program_status_changed`]): the text waits in the ledger, at most
