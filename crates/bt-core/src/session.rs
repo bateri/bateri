@@ -11875,6 +11875,26 @@ impl Session {
             .is_some_and(|desk| desk.view_message(text, |bytes| self.adapter.input(bytes)))
     }
 
+    /// A message of the component of a WebAssembly view (a JSON object, as the component
+    /// wrote it), for the program: written to the program's input through the same gate as
+    /// everything else the view's side says (`Adapter::input`), and **only while that view is
+    /// open**. After the view has closed — the program's `bye` or `dismiss`, the person, the
+    /// view's own failure, the program's end — nothing is written, so a message that arrives
+    /// late can never land in the shell's input as keystrokes. Whether it was written.
+    pub fn module_message(&self, text: &str) -> bool {
+        self.adapter
+            .0
+            .desk
+            .as_ref()
+            .is_some_and(|desk| desk.module_message(text, |bytes| self.adapter.input(bytes)))
+    }
+
+    /// A WebAssembly view ended on its own failure (its module trapped, went over a limit or
+    /// was too large): the view closes and the program is told `closed` with `reason` `error`.
+    pub fn view_failed(&self) {
+        self.adapter.view(pencere::Conversing::view_failed);
+    }
+
     /// The person's answer to the question a [`pencere::Action::Consent`] asked, whose
     /// [`id`](pencere::Consent::id) is `id`; it is cut down to what the view declared,
     /// whatever it says. An answer to a question the conversation no longer asks (its
@@ -30587,6 +30607,236 @@ e\\314\\201.'; sleep 5";
         assert_eq!(served.map(|(media, _)| media).as_deref(), Some("text/html"));
         assert!(program.session.take_view_actions().is_empty());
         program.session.shutdown();
+    }
+
+    /// The demo program (`guest/demopen`, built by `make guest`) against a real pane: it asks
+    /// the terminal, sends its module, hears the page's subscription and pushes readings once a
+    /// second, and when the view is closed it leaves and the pane's child ends. The session is
+    /// the one the application uses, the PTY is real, the program is the one a person runs; only
+    /// the sandbox (the page's side) is played by the test.
+    #[test]
+    fn the_demo_program_shows_its_module_pushes_what_the_page_asks_for_and_leaves_when_the_view_closes()
+     {
+        use crate::pencere::Action;
+        let program =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../guest/dist/demopen");
+        if !program.is_file() {
+            eprintln!("skipped: {} is not built (`make guest`)", program.display());
+            return;
+        }
+        // `set -m` makes the program a job of its own: the tty's foreground group is not the
+        // shell's, as for a command a shell started.
+        let mut options = test_options(
+            (
+                "/bin/sh".into(),
+                vec![
+                    "-c".into(),
+                    "set -m; \"$1\"".into(),
+                    "sh".into(),
+                    program.display().to_string(),
+                ],
+            ),
+            80,
+        );
+        let mut views = ViewOptions::new("bateri-test", "0.0.0");
+        views.wasm_entry_limit = Some(4 << 20);
+        options.views = Some(views);
+        let wake = Arc::new(TestWake::default());
+        let session = Session::spawn(options, Arc::clone(&wake) as Arc<dyn Wake>).unwrap();
+
+        // The program asks, sends its module, and the view starts: of the kind that is drawn
+        // by the terminal.
+        let mut started = None;
+        wait_until("the view to start", Duration::from_secs(20), || {
+            for action in session.take_view_actions() {
+                if let Action::StartView(start) = action {
+                    started = Some(start);
+                }
+            }
+            started.is_some()
+        });
+        let start = started.unwrap();
+        assert_eq!(start.kind, crate::pencere::ViewKind::Wasm);
+        assert_eq!(start.program.as_deref(), Some("demopen"));
+        assert_eq!(start.title.as_deref(), Some("Containers"));
+        let entry = session.view_entry().expect("an entry");
+        let (media, module) = session.serve_view_file(&entry).expect("the module is held");
+        assert_eq!(media, "application/wasm");
+        assert!(module.starts_with(b"\0asm"), "a component");
+
+        // The page (played) subscribes; the program pushes at once, and again a second later.
+        let subscribe = r#"{"subscribe":{"id":1,"topic":"stats"}}"#;
+        assert!(session.module_message(subscribe));
+        let mut pushes = Vec::new();
+        wait_until("two pushes", Duration::from_secs(20), || {
+            for action in session.take_view_actions() {
+                if let Action::ToView(text) = action {
+                    pushes.push(text);
+                }
+            }
+            pushes.len() >= 2
+        });
+        for push in &pushes {
+            assert!(
+                push.starts_with(r#"{"push":{"id":1,"value":{"readings":["#),
+                "{push}"
+            );
+            assert!(push.contains(r#""name":"api""#), "{push}");
+        }
+        // A call the program does not know is answered with an error, not ignored.
+        assert!(session.module_message(r#"{"call":{"id":5,"method":"stop"}}"#));
+        let mut answers = Vec::new();
+        wait_until("the answer to the call", Duration::from_secs(20), || {
+            for action in session.take_view_actions() {
+                if let Action::ToView(text) = action
+                    && text.contains(r#""response":{"id":5"#)
+                {
+                    answers.push(text);
+                }
+            }
+            !answers.is_empty()
+        });
+        assert!(
+            answers[0].contains(r#""code":"not-found""#),
+            "{}",
+            answers[0]
+        );
+
+        // The person closes the view: the program is told, leaves, and the pane's child ends.
+        session.close_view();
+        assert!(
+            wake.wait_exit(Duration::from_secs(20)).is_some(),
+            "the program did not leave when its view was closed"
+        );
+        // Nothing the page says now reaches the pane (the child is gone, and the view is).
+        assert!(!session.module_message(subscribe));
+        session.shutdown();
+    }
+
+    /// ⌃C in a program's view reaches the program as the terminal's interrupt, and the program
+    /// ends the way the protocol says: it tells the terminal (`bye` with its token), gives the
+    /// terminal back and leaves, and the view goes with the program. What the page says after
+    /// that writes nothing: the pane's input is not where a late message goes.
+    #[test]
+    fn an_interrupt_ends_the_demo_program_and_its_view_and_a_late_word_of_the_page_writes_nothing()
+    {
+        use crate::pencere::{Action, State};
+        let program =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../guest/dist/demopen");
+        if !program.is_file() {
+            eprintln!("skipped: {} is not built (`make guest`)", program.display());
+            return;
+        }
+        let mut options = test_options(
+            (
+                "/bin/sh".into(),
+                vec![
+                    "-c".into(),
+                    "set -m; \"$1\"".into(),
+                    "sh".into(),
+                    program.display().to_string(),
+                ],
+            ),
+            80,
+        );
+        let mut views = ViewOptions::new("bateri-test", "0.0.0");
+        views.wasm_entry_limit = Some(4 << 20);
+        options.views = Some(views);
+        let wake = Arc::new(TestWake::default());
+        let session = Session::spawn(options, Arc::clone(&wake) as Arc<dyn Wake>).unwrap();
+        wait_until("the view to start", Duration::from_secs(20), || {
+            session
+                .take_view_actions()
+                .iter()
+                .any(|action| matches!(action, Action::StartView(_)))
+        });
+        assert!(session.module_message(r#"{"subscribe":{"id":1,"topic":"stats"}}"#));
+
+        // The key the person presses in the view.
+        session.write(&[0x03]);
+        let mut destroyed = false;
+        wait_until(
+            "the view to end with the program",
+            Duration::from_secs(20),
+            || {
+                destroyed |= session
+                    .take_view_actions()
+                    .iter()
+                    .any(|action| matches!(action, Action::DestroyView));
+                destroyed
+            },
+        );
+        assert_eq!(wake.wait_exit(Duration::from_secs(20)), Some(Some(130)));
+        assert!(matches!(
+            session.view_state(),
+            Some(State::Ended | State::Idle)
+        ));
+        assert!(!session.module_message(r#"{"call":{"id":9,"method":"late"}}"#));
+        session.shutdown();
+    }
+
+    /// A restart (a handover to another process, a connection that came back) closes the
+    /// module's view and offers the program the view again; the demo program opens it again
+    /// with the new token and a fresh module, and nothing stray reaches its input meanwhile. Making
+    /// a restart work for programs in general is not the point: it does not hang, it does not
+    /// write garbage, and the program that handles it gets its view back.
+    #[test]
+    fn a_restart_closes_the_modules_view_and_the_demo_program_opens_it_again() {
+        use crate::pencere::Action;
+        let program =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../guest/dist/demopen");
+        if !program.is_file() {
+            eprintln!("skipped: {} is not built (`make guest`)", program.display());
+            return;
+        }
+        let mut options = test_options(
+            (
+                "/bin/sh".into(),
+                vec![
+                    "-c".into(),
+                    "set -m; \"$1\"".into(),
+                    "sh".into(),
+                    program.display().to_string(),
+                ],
+            ),
+            80,
+        );
+        let mut views = ViewOptions::new("bateri-test", "0.0.0");
+        views.wasm_entry_limit = Some(4 << 20);
+        options.views = Some(views);
+        let wake = Arc::new(TestWake::default());
+        let session = Session::spawn(options, Arc::clone(&wake) as Arc<dyn Wake>).unwrap();
+        let mut starts = 0;
+        let mut ends = 0;
+        wait_until("the first view", Duration::from_secs(20), || {
+            for action in session.take_view_actions() {
+                starts += usize::from(matches!(action, Action::StartView(_)));
+            }
+            starts == 1
+        });
+        assert!(session.module_message(r#"{"subscribe":{"id":1,"topic":"stats"}}"#));
+
+        session.restart_view();
+        wait_until("the view again", Duration::from_secs(20), || {
+            for action in session.take_view_actions() {
+                starts += usize::from(matches!(action, Action::StartView(_)));
+                ends += usize::from(matches!(action, Action::DestroyView));
+            }
+            starts == 2 && ends == 1
+        });
+        // The new view is the new module's: it subscribes again and is pushed to.
+        assert!(session.module_message(r#"{"subscribe":{"id":1,"topic":"stats"}}"#));
+        let mut pushed = false;
+        wait_until("a push for the new view", Duration::from_secs(20), || {
+            pushed |= session
+                .take_view_actions()
+                .iter()
+                .any(|action| matches!(action, Action::ToView(text) if text.contains("readings")));
+            pushed
+        });
+        session.close_view();
+        assert!(wake.wait_exit(Duration::from_secs(20)).is_some());
+        session.shutdown();
     }
 
     /// A question about access is answered by its number. The program leaves before the person

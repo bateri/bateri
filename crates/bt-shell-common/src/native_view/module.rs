@@ -18,6 +18,7 @@ use std::sync::Arc;
 use bt_view::{Element, Event, Size, Tone, div, text};
 use bt_view_wasm::{Limits, Module};
 
+use super::allowance::Allowance;
 use super::{
     Drained, Input, PageDrive, Rect, Reply, Shaped, Typeset, UiContext, UiList, UiPage, from_pane,
     into_page, to_list,
@@ -44,6 +45,10 @@ struct Shared {
     /// Why the module is gone, until the pane has been told.
     ended: Option<String>,
     told_end: bool,
+    /// What the module said to its program that the pane has not carried.
+    sent: Vec<String>,
+    /// How much it may say, over time.
+    allowance: Allowance,
 }
 
 impl Shared {
@@ -62,6 +67,19 @@ impl Shared {
                 .into_iter()
                 .map(|answer| (from_pane(answer.reply, inset), answer.pointer)),
         );
+        let now = std::time::Instant::now();
+        for message in update.sent {
+            if self.ended.is_some() {
+                break;
+            }
+            if self.allowance.take(now, message.len()) {
+                self.sent.push(message);
+            } else {
+                // The program's input is not a place to pour into: the module is done.
+                self.ended =
+                    Some("said more to its program than the program's input can take".to_owned());
+            }
+        }
         if let Some(fault) = update.closed
             && self.ended.is_none()
         {
@@ -69,6 +87,12 @@ impl Shared {
         }
     }
 }
+
+/// How much a module may say to its program in one burst, and how fast it may keep saying it:
+/// what a program that reads its input at its leisure can hold, and a rate far above what a
+/// page that talks to a program needs.
+const SAY_BURST: usize = 256 << 10;
+const SAY_PER_SECOND: usize = 128 << 10;
 
 /// The page of a module as a pane's [`UiPage`], and the handle the pane drives it by.
 ///
@@ -96,6 +120,8 @@ pub fn module_page(
         replies: Vec::new(),
         ended: None,
         told_end: false,
+        sent: Vec::new(),
+        allowance: Allowance::new(SAY_BURST, SAY_PER_SECOND),
     }));
     let page = ModulePage {
         terminal,
@@ -138,6 +164,10 @@ impl PageDrive for ModuleHandle {
         self.shared.borrow().module.event(Event::MenuPick(index));
     }
 
+    fn send_message(&self, text: &str) {
+        self.shared.borrow().module.message(text.to_owned());
+    }
+
     fn watch_field(&self, told: Box<dyn Fn(Option<Rect>)>) {
         let (field, told) = {
             let mut shared = self.shared.borrow_mut();
@@ -162,6 +192,7 @@ impl PageDrive for ModuleHandle {
             let drained = Drained {
                 redraw: std::mem::take(&mut shared.redraw),
                 ended,
+                sent: std::mem::take(&mut shared.sent),
             };
             (std::mem::take(&mut shared.replies), drained)
         };
@@ -361,6 +392,129 @@ mod tests {
         assert_eq!(replies.len(), 1);
         assert!(replies[0].1, "a pointer move is the pointer's");
         assert!(replies[0].0.redraw);
+    }
+
+    /// The page of a module a program opened: it asks the program for what it shows, takes
+    /// what the program pushes, redraws once for it, and a page at rest after that wakes nobody.
+    #[test]
+    fn a_page_asks_its_program_for_readings_takes_them_and_is_at_rest_after() {
+        let Some((renderer, bytes)) = rig() else {
+            return;
+        };
+        let theme = Theme::BATERI;
+        let (told, woken) = channel();
+        let told = std::sync::Mutex::new(told);
+        let (mut page, handle) = module_page(bytes, Limits::default(), None, 32.0, move || {
+            let _ = told.lock().unwrap().send(());
+        });
+        build(&mut page, &renderer, &theme, 0.0);
+        assert!(wait(&woken));
+        let drained = handle.drain(&mut |_, _| {});
+        // Said at its start, to a program that may be there: one message, a subscription.
+        assert_eq!(
+            drained.sent,
+            [r#"{"subscribe":{"id":1,"topic":"stats"}}"#.to_owned()]
+        );
+        build(&mut page, &renderer, &theme, 0.1);
+        while woken.recv_timeout(Duration::from_millis(300)).is_ok() {
+            let _ = handle.drain(&mut |_, _| {});
+            build(&mut page, &renderer, &theme, 0.2);
+        }
+
+        // The program pushes a reading: the page changes, once, and nothing is said back.
+        let push = r#"{"push":{"id":1,"value":{"readings":[{"name":"api","cpu":42.5,"memory":"130MiB","share":0.3}]}}}"#;
+        handle.send_message(push);
+        assert!(wait(&woken), "a push did not reach the application");
+        let drained = handle.drain(&mut |_, _| {});
+        assert!(drained.redraw, "{drained:?}");
+        assert!(drained.sent.is_empty());
+        build(&mut page, &renderer, &theme, 0.3);
+        while woken.recv_timeout(Duration::from_millis(300)).is_ok() {
+            let _ = handle.drain(&mut |_, _| {});
+            build(&mut page, &renderer, &theme, 0.4);
+        }
+        for step in 0..3 {
+            build(&mut page, &renderer, &theme, 1.0 + f64::from(step));
+        }
+        assert!(
+            woken.recv_timeout(Duration::from_millis(300)).is_err(),
+            "a page at rest woke the application"
+        );
+
+        // A message that is not one of the program's, or is for nobody: nothing changes.
+        for noise in [
+            "not json",
+            r#"{"push":{"id":9,"value":{}}}"#,
+            r#"{"response":{"id":1,"result":{}}}"#,
+        ] {
+            handle.send_message(noise);
+        }
+        assert!(
+            woken.recv_timeout(Duration::from_millis(300)).is_err(),
+            "noise made the page change"
+        );
+    }
+
+    /// A module that says more than its allowance is closed; what it said before is said.
+    #[test]
+    fn a_module_that_talks_without_end_is_closed_and_what_it_said_first_is_said() {
+        use bt_view_wasm::{Fault, Frame, Runner};
+
+        struct Chatty;
+        impl Runner for Chatty {
+            fn render(&mut self, _: Size, _: f64, _: bool) -> Result<Frame, Fault> {
+                Ok(Frame {
+                    root: div(),
+                    animating: false,
+                })
+            }
+            fn settle(&mut self) -> Result<bool, Fault> {
+                Ok(false)
+            }
+            fn handle(&mut self, _: Event) -> Result<Reply, Fault> {
+                Ok(Reply::none())
+            }
+            fn lay_out(&mut self, _: Arc<bt_view::Laid>) {}
+            fn take_sent(&mut self) -> Vec<String> {
+                vec!["x".repeat(100 << 10); 5]
+            }
+        }
+
+        let (told, woken) = channel();
+        let told = std::sync::Mutex::new(told);
+        let module = Module::spawn(
+            || Ok(Chatty),
+            move || {
+                let _ = told.lock().unwrap().send(());
+            },
+        );
+        module.render(Size::new(100.0, 100.0), 0.0, false);
+        let shared = Rc::new(RefCell::new(Shared {
+            module,
+            root: None,
+            animating: false,
+            asked: None,
+            inset: 0.0,
+            field: None,
+            on_field: None,
+            redraw: false,
+            replies: Vec::new(),
+            ended: None,
+            told_end: false,
+            sent: Vec::new(),
+            allowance: Allowance::new(SAY_BURST, SAY_PER_SECOND),
+        }));
+        let handle = ModuleHandle { shared };
+        assert!(wait(&woken));
+        let drained = handle.drain(&mut |_, _| {});
+        assert_eq!(
+            drained.sent.len(),
+            2,
+            "the burst, 256 KiB, holds two of 100 KiB"
+        );
+        let why = drained.ended.expect("closed for talking too much");
+        assert!(why.contains("more to its program"), "{why}");
+        assert_eq!(handle.drain(&mut |_, _| {}).ended, None, "told once");
     }
 
     /// A module that is not a page is closed with why, and the pane is told once.

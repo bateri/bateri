@@ -37,6 +37,12 @@ pub struct Limits {
     pub values: usize,
     /// Entries of a menu.
     pub menu: usize,
+    /// Bytes of the component itself: a larger one is not compiled.
+    pub component: usize,
+    /// Messages to the program one call may send.
+    pub messages: usize,
+    /// Bytes of one message to the program.
+    pub message: usize,
 }
 
 impl Default for Limits {
@@ -51,6 +57,9 @@ impl Default for Limits {
             tracks: 64,
             values: 4096,
             menu: 256,
+            component: 4 << 20,
+            messages: 32,
+            message: 64 << 10,
         }
     }
 }
@@ -68,6 +77,8 @@ pub enum Fault {
     Trap(String),
     /// The module handed out something that is not a page, or one too large.
     Malformed(String),
+    /// The module said more to its program in one call than a call may, or a message too long.
+    Flooded(String),
 }
 
 impl std::fmt::Display for Fault {
@@ -78,6 +89,7 @@ impl std::fmt::Display for Fault {
             Self::Memory => f.write_str("asked for more memory than it may have"),
             Self::Trap(why) => write!(f, "trapped: {why}"),
             Self::Malformed(why) => write!(f, "handed out something that is not a page: {why}"),
+            Self::Flooded(why) => write!(f, "said too much to its program: {why}"),
         }
     }
 }
@@ -132,10 +144,17 @@ impl ResourceLimiter for Limiter {
     }
 }
 
-/// What a store holds besides the module: the limits, and the layout the module may ask of.
+/// What a store holds besides the module: the limits, the layout the module may ask of, and
+/// what it has said to its program since the application last took it.
 pub(crate) struct Host {
     pub(crate) limiter: Limiter,
     pub(crate) laid: Option<Arc<Laid>>,
+    /// What the module sent in the call that is running or ran last.
+    pub(crate) sent: Vec<String>,
+    /// What one call may send: messages, and bytes of one.
+    pub(crate) allowed: (usize, usize),
+    /// A call sent more than it may: the application closes the module when it comes back.
+    pub(crate) overflowed: bool,
 }
 
 impl Host {
@@ -146,6 +165,9 @@ impl Host {
                 exceeded: false,
             },
             laid: None,
+            sent: Vec::new(),
+            allowed: (limits.messages, limits.message),
+            overflowed: false,
         }
     }
 }

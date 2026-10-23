@@ -86,10 +86,8 @@ use crate::focus::Moment;
 use crate::grid::{self, Grid, split_into_grid};
 use bt_shell_common::kablo::roster::Background;
 use bt_shell_common::kablo::service::{PaneLink, Shown};
-#[cfg(debug_assertions)]
 use bt_shell_common::native_view::{Cursor as PageCursor, Input, Keyboard, PageDrive, Reply};
 use bt_shell_common::view_strip;
-#[cfg(debug_assertions)]
 use objc2_app_kit::NSEvent;
 
 use crate::jobs::{self, Foreground, Probe, ShellParent, SystemTable};
@@ -2236,14 +2234,13 @@ pub struct PaneIvars {
     /// ([`TerminalPane::drain_views`]); the terminal's frames stop for as long as
     /// it is there.
     pencere: RefCell<Option<ViewHost>>,
-    /// The strip over the debug demo page, while one is up (`crate::native_page` is the page's
-    /// side; the strip is the application's own, the same one a program's view has).
-    #[cfg(debug_assertions)]
-    demo_strip: RefCell<Option<Retained<pencere_view::strip::StripView>>>,
-    /// What the debug demo page needs to be used while it is up: the handle its input goes by,
-    /// the filter's text field, the pointer's tracking area (`crate::native_page`).
-    #[cfg(debug_assertions)]
-    demo_page: RefCell<Option<crate::native_page::Page>>,
+    /// The strip over a page of the kit, while one is up (`crate::native_page` is the page's
+    /// side; the strip is the application's own, the same one a program's web view has).
+    page_strip: RefCell<Option<Retained<pencere_view::strip::StripView>>>,
+    /// What a page of the kit needs to be used while it is up — a debug demo, or the view a
+    /// program opened: whose it is, the handle its input goes by, the filter's text field, the
+    /// pointer's tracking area (`crate::native_page`).
+    page_up: RefCell<Option<crate::native_page::Page>>,
     /// The deadlines set on the conversation with that program's view
     /// ([`TerminalPane::wait_for_view`]).
     view_waits: RefCell<Waits>,
@@ -2598,14 +2595,11 @@ define_class!(
             self.apply_search();
         }
 
-        /// The text of a field this pane is the delegate of changed: the debug demo page's
-        /// filter (the search field has its action, `searchFieldChanged:`).
+        /// The text of a field this pane is the delegate of changed: a page's filter (the
+        /// search field has its action, `searchFieldChanged:`).
         #[unsafe(method(controlTextDidChange:))]
         fn control_text_did_change(&self, notification: &NSNotification) {
-            #[cfg(debug_assertions)]
-            self.demo_field_changed(notification);
-            #[cfg(not(debug_assertions))]
-            let _ = notification;
+            self.page_field_changed(notification);
         }
 
         /// The field's command hook: ⏎ the previous (older), ⇧⏎
@@ -2623,19 +2617,13 @@ define_class!(
             command: Sel,
         ) -> bool {
             self.note_interaction();
-            // The debug demo page's filter field has this pane for its delegate too: its keys
-            // are not the search bar's.
-            #[cfg(debug_assertions)]
-            let demo_field = self
-                .is_demo_field(control)
-                .then(|| self.demo_field_command(command));
-            #[cfg(not(debug_assertions))]
-            let demo_field: Option<bool> = {
-                let _ = control;
-                None
-            };
+            // A page's filter field has this pane for its delegate too: its keys are not the
+            // search bar's.
+            let page_field = self
+                .is_page_field(control)
+                .then(|| self.page_field_command(command));
             // No `return`: `define_class!` converts the `bool` at the end of the body.
-            if let Some(handled) = demo_field {
+            if let Some(handled) = page_field {
                 handled
             } else if command == sel!(insertNewline:) {
                 let shift = NSApplication::sharedApplication(self.mtm())
@@ -3020,10 +3008,8 @@ impl TerminalPane {
             bar_pointer: Cell::new((false, false)),
             seen: Cell::new(true),
             pencere: RefCell::new(None),
-            #[cfg(debug_assertions)]
-            demo_strip: RefCell::new(None),
-            #[cfg(debug_assertions)]
-            demo_page: RefCell::new(None),
+            page_strip: RefCell::new(None),
+            page_up: RefCell::new(None),
             view_waits: RefCell::new(Waits::default()),
             view_owed: RefCell::new(None),
             view_asking: pencere_view::ask::Asking::default(),
@@ -3230,7 +3216,7 @@ impl TerminalPane {
         // A program's view over the terminal keeps its frames stopped whatever
         // the pane's visibility says; they come back with the view's end.
         if let Some(link) = self.link() {
-            link.set_visible(visible && !self.shows_view());
+            link.set_visible(visible && !self.shows_web_view());
         }
         self.set_visible(visible);
     }
@@ -4464,12 +4450,10 @@ impl TerminalPane {
         if let Some(host) = self.view_host() {
             host.paint(&theme);
         }
-        #[cfg(debug_assertions)]
-        if let Some(strip) = self.ivars().demo_strip.borrow().as_ref() {
+        if let Some(strip) = self.ivars().page_strip.borrow().as_ref() {
             strip.paint(&theme);
         }
-        #[cfg(debug_assertions)]
-        if let Some(page) = self.ivars().demo_page.borrow().as_ref() {
+        if let Some(page) = self.ivars().page_up.borrow().as_ref() {
             crate::native_page::paint(&page.field, &theme);
         }
         if let Some(bar) = self.ivars().search.get() {
@@ -5844,6 +5828,10 @@ impl TerminalPane {
         options.locale = pencere_view::locale_tag();
         options.time_zone = pencere_view::time_zone_name();
         options.size = pencere_view::content_size(self.bounds());
+        // A program may open a view that is a module: it is run in the sandbox and drawn as a
+        // page of the kit, up to the size the sandbox compiles.
+        options.wasm_entry_limit =
+            Some(bt_shell_common::native_view::Limits::default().component as u64);
         options.shell_group = Some(ShellGroup::new(move |child| {
             jobs::shell_group(shell_parent, child, &SystemTable)
         }));
@@ -5857,23 +5845,30 @@ impl TerminalPane {
         self.ivars().pencere.borrow().clone()
     }
 
-    /// Whether a page of the kit's own (debug builds: the gauge page, the container-list demo)
-    /// is over the terminal.
+    /// Whether a page of the kit's own — the view a program opened as a module, or a debug
+    /// build's gauge page and demos — is over the terminal.
     pub(crate) fn shows_page(&self) -> bool {
-        #[cfg(debug_assertions)]
-        {
-            self.shows_sample_page()
-        }
-        #[cfg(not(debug_assertions))]
-        {
-            false
-        }
+        self.page_is_up()
     }
 
-    /// Whether the debug gauge page is over the terminal.
-    #[cfg(debug_assertions)]
-    pub(crate) fn shows_sample_page(&self) -> bool {
+    /// Whether a page of the kit is over the terminal (the link paints it in place of the grid).
+    pub(crate) fn page_is_up(&self) -> bool {
         self.link().is_some_and(DisplayLink::shows_page)
+    }
+
+    /// Whose the page that is up is, if one is of the owners that keep state here (the debug
+    /// gauge page has none).
+    fn page_owner(&self) -> Option<crate::native_page::Owner> {
+        self.ivars()
+            .page_up
+            .borrow()
+            .as_ref()
+            .map(|page| page.owner)
+    }
+
+    /// Whether the page that is up is the view a program opened.
+    fn program_page_up(&self) -> bool {
+        self.page_owner() == Some(crate::native_page::Owner::Program)
     }
 
     /// Debug ▸ Show UI Sample Page: puts the gauge page over the terminal, or
@@ -5975,7 +5970,7 @@ impl TerminalPane {
             NSWindowOrderingMode::Below,
             Some(&ivars.link_veil),
         );
-        ivars.demo_strip.replace(Some(strip));
+        ivars.page_strip.replace(Some(strip));
         let family = ivars.font.borrow().family.clone();
         let inset = view_strip::HEIGHT as f32;
         let (page, handle): (Box<dyn UiPage>, Rc<dyn PageDrive>) = match bytes {
@@ -6022,7 +6017,8 @@ impl TerminalPane {
             }));
         }
         let area = crate::native_page::pointer_area(self.view());
-        ivars.demo_page.replace(Some(crate::native_page::Page {
+        ivars.page_up.replace(Some(crate::native_page::Page {
+            owner: crate::native_page::Owner::Demo,
             handle,
             field,
             area,
@@ -6032,15 +6028,14 @@ impl TerminalPane {
 
     /// Takes the page down, whichever it is: its strip and field with it, and the terminal's
     /// frames come back.
-    #[cfg(debug_assertions)]
     fn take_page_down(&self) {
         if let Some(link) = self.link() {
             link.set_page(None);
         }
-        if let Some(strip) = self.ivars().demo_strip.take() {
+        if let Some(strip) = self.ivars().page_strip.take() {
             strip.removeFromSuperview();
         }
-        if let Some(page) = self.ivars().demo_page.take() {
+        if let Some(page) = self.ivars().page_up.take() {
             // The keyboard was in the field: it goes back to the terminal.
             let typing = page.field.currentEditor().is_some();
             self.view().removeTrackingArea(&page.area);
@@ -6052,31 +6047,35 @@ impl TerminalPane {
     }
 
     /// The handle the demo page's input goes by, if that is the page up.
-    #[cfg(debug_assertions)]
-    fn demo_handle(&self) -> Option<Rc<dyn PageDrive>> {
+    fn page_handle(&self) -> Option<Rc<dyn PageDrive>> {
         self.ivars()
-            .demo_page
+            .page_up
             .borrow()
             .as_ref()
             .map(|page| page.handle.clone())
     }
 
-    /// A key while a page of the kit's is up: ⌃C closes it, Esc closes the gauge page, and the
-    /// demo page reads the rest (⌘ keys are the menu's: its content items are grey, so a
-    /// key that reaches here is nobody's and is swallowed). Nothing reaches the hidden
-    /// terminal. `true` when a page is up and took the key.
-    #[cfg(debug_assertions)]
+    /// A key while a page of the kit's is up: ⌃C closes a demo and goes to the program of a
+    /// program's view (which ends, and the view with it — the same rule as a web view's, the
+    /// strip's Quit ⌃C), Esc closes the gauge page, and the page reads the rest (⌘ keys are
+    /// the menu's: its content items are grey, so a key that reaches here is nobody's and is
+    /// swallowed). Nothing reaches the hidden terminal. `true` when a page is up and took the
+    /// key.
     pub(crate) fn page_key(&self, event: &NSEvent) -> bool {
-        if !self.shows_sample_page() {
+        if !self.page_is_up() {
             return false;
         }
         let characters = event.characters().map(|text| text.to_string());
         let flags = event.modifierFlags();
         if pencere_view::is_interrupt(flags, characters.as_deref()) {
-            self.take_page_down();
+            if self.program_page_up() {
+                self.interrupt_program();
+            } else {
+                self.take_page_down();
+            }
             return true;
         }
-        match self.demo_handle() {
+        match self.page_handle() {
             None => {
                 if matches!(characters.as_deref(), Some("\u{1b}")) {
                     self.take_page_down();
@@ -6095,12 +6094,11 @@ impl TerminalPane {
 
     /// The pointer or the wheel over a page of the kit's, in the view's points. `true` when a
     /// page is up: nothing of it is the grid's.
-    #[cfg(debug_assertions)]
     pub(crate) fn page_input(&self, input: Input) -> bool {
-        if !self.shows_sample_page() {
+        if !self.page_is_up() {
             return false;
         }
-        if let Some(handle) = self.demo_handle() {
+        if let Some(handle) = self.page_handle() {
             handle.send_input(input);
             self.drain_page();
         }
@@ -6111,22 +6109,37 @@ impl TerminalPane {
     /// right after the person's input for a page of this process, and when the module's thread
     /// wakes the main queue for a module in the sandbox. A page that is new to show gets its frame;
     /// a module that is gone takes the page down with it (the terminal is the pane's again).
-    #[cfg(debug_assertions)]
     pub(crate) fn drain_page(&self) {
-        let Some(handle) = self.demo_handle() else {
+        let Some(handle) = self.page_handle() else {
             return;
         };
         let mut said = Vec::new();
         let drained = handle.drain(&mut |reply, pointer| said.push((reply, pointer)));
+        // What the page said to its program goes to the session's gate, which writes it only
+        // while the program's view is open: a page that was torn down a moment ago writes
+        // nothing.
+        if self.program_page_up()
+            && let Some(session) = self.session()
+        {
+            for message in &drained.sent {
+                session.module_message(message);
+            }
+        }
         for (reply, pointer) in said {
             // A reply may have closed the page.
-            if self.demo_handle().is_none() {
+            if self.page_handle().is_none() {
                 return;
             }
             self.apply_page_reply(reply, pointer);
         }
         if let Some(why) = drained.ended {
             eprintln!("bateri: the page module {why}; the terminal is back");
+            if self.program_page_up()
+                && let Some(session) = self.session()
+            {
+                // The program is told the view failed, not that the person closed it.
+                session.view_failed();
+            }
             self.take_page_down();
             return;
         }
@@ -6139,11 +6152,16 @@ impl TerminalPane {
 
     /// Does what a page said back: a frame of it when it changed, the menu it asked for, the
     /// keyboard in its field, text on the pasteboard, the pointer's shape, its end.
-    #[cfg(debug_assertions)]
     fn apply_page_reply(&self, reply: Reply, pointer: bool) {
         if reply.close {
-            self.take_page_down();
-            return;
+            // A debug demo is the person's to close (Esc is its key for it). A program's view
+            // is the program's to end — its `dismiss` or `bye`, or ⌃C, which reaches the
+            // program — so the page's wish to close is not carried: a key the page reads for
+            // itself does not end what the program put there.
+            if !self.program_page_up() {
+                self.take_page_down();
+                return;
+            }
         }
         if reply.redraw
             && let Some(link) = self.link()
@@ -6160,7 +6178,7 @@ impl TerminalPane {
         if let Some(Keyboard::Filter) = reply.keyboard {
             let field = self
                 .ivars()
-                .demo_page
+                .page_up
                 .borrow()
                 .as_ref()
                 .map(|p| p.field.clone());
@@ -6178,33 +6196,26 @@ impl TerminalPane {
     }
 
     /// The person picked entry `index` of the menu the page asked for.
-    #[cfg(debug_assertions)]
     pub(crate) fn page_menu_pick(&self, index: usize) {
-        if let Some(handle) = self.demo_handle() {
+        if let Some(handle) = self.page_handle() {
             handle.send_pick(index);
             self.drain_page();
         }
     }
 
     /// Whether `control` is the demo page's filter field.
-    #[cfg(debug_assertions)]
-    fn is_demo_field(&self, control: &AnyObject) -> bool {
-        self.ivars()
-            .demo_page
-            .borrow()
-            .as_ref()
-            .is_some_and(|page| {
-                std::ptr::eq(
-                    std::ptr::from_ref(control).cast::<()>(),
-                    std::ptr::from_ref(&*page.field).cast::<()>(),
-                )
-            })
+    fn is_page_field(&self, control: &AnyObject) -> bool {
+        self.ivars().page_up.borrow().as_ref().is_some_and(|page| {
+            std::ptr::eq(
+                std::ptr::from_ref(control).cast::<()>(),
+                std::ptr::from_ref(&*page.field).cast::<()>(),
+            )
+        })
     }
 
     /// A key of the filter field's: ⏎, ↓, Tab and Esc leave it (the text stays) and give the
     /// keyboard back to the page, where a further Esc closes it. The rest is the field's.
-    #[cfg(debug_assertions)]
-    fn demo_field_command(&self, command: Sel) -> bool {
+    fn page_field_command(&self, command: Sel) -> bool {
         let leaves = [
             sel!(cancelOperation:),
             sel!(insertNewline:),
@@ -6221,20 +6232,19 @@ impl TerminalPane {
     }
 
     /// The text of the demo page's filter field changed: the list narrows to it.
-    #[cfg(debug_assertions)]
-    fn demo_field_changed(&self, notification: &NSNotification) {
+    fn page_field_changed(&self, notification: &NSNotification) {
         let Some(object) = notification.object() else {
             return;
         };
-        if !self.is_demo_field(&object) {
+        if !self.is_page_field(&object) {
             return;
         }
-        let Some(handle) = self.demo_handle() else {
+        let Some(handle) = self.page_handle() else {
             return;
         };
         let text = self
             .ivars()
-            .demo_page
+            .page_up
             .borrow()
             .as_ref()
             .map(|page| page.field.stringValue().to_string())
@@ -6243,8 +6253,15 @@ impl TerminalPane {
         self.drain_page();
     }
 
-    /// Whether a program's view is over the terminal.
+    /// Whether a program's view is over the terminal: its web view, or the module it sent,
+    /// drawn as a page of the kit.
     pub(crate) fn shows_view(&self) -> bool {
+        self.shows_web_view() || self.program_page_up()
+    }
+
+    /// Whether a program's web view is over the terminal. The terminal's frames stop under it;
+    /// under a program's module they go on, for they draw the module's page.
+    pub(crate) fn shows_web_view(&self) -> bool {
         self.ivars().pencere.borrow().is_some()
     }
 
@@ -6283,7 +6300,11 @@ impl TerminalPane {
             match action {
                 Action::StartView(start) => self.start_view(&session, &start),
                 Action::ToView(message) => {
-                    if let Some(host) = self.view_host() {
+                    if self.program_page_up() {
+                        if let Some(handle) = self.page_handle() {
+                            handle.send_message(&message);
+                        }
+                    } else if let Some(host) = self.view_host() {
                         host.deliver(&message);
                     }
                 }
@@ -6325,11 +6346,97 @@ impl TerminalPane {
         }
     }
 
+    /// Puts a view that is a WebAssembly component over the terminal: the module the program
+    /// sent (its entry, held in the session's store), run in the sandbox and drawn by the link
+    /// as a page of the kit in place of the grid, under the application's strip — the one a
+    /// web view has, whose button sends ⌃C to the program. The page is used like a web view
+    /// is: the pointer, the wheel and the keys go to it, its filter is a text field of AppKit's
+    /// and its row menu an `NSMenu`; ⌃C goes to the program, which ends and takes the view
+    /// with it. What the module says goes to the program through the session, and only while
+    /// the view is open; what the program says reaches the module as `Action::ToView`.
+    ///
+    /// A module that cannot be started (its entry is not there, or is not a component the
+    /// sandbox takes) fails the view: the program is told, and the terminal stays.
+    fn start_native_view(&self, session: &Arc<Session>, start: &bt_core::pencere::ViewStart) {
+        // The crate has one view at a time; a stale one goes first.
+        self.end_view();
+        let Some(link) = self.link() else {
+            session.view_failed();
+            return;
+        };
+        let Some((_, bytes)) = session
+            .view_entry()
+            .and_then(|entry| session.serve_view_file(&entry))
+        else {
+            eprintln!("bateri: the program's view has no module to run; the terminal stays");
+            session.view_failed();
+            return;
+        };
+        let ivars = self.ivars();
+        let theme = session.theme();
+        let strip = crate::native_page::program_strip(self, &theme, &self.view_strip(start));
+        self.addSubview_positioned_relativeTo(
+            &strip,
+            NSWindowOrderingMode::Below,
+            Some(&ivars.link_veil),
+        );
+        ivars.page_strip.replace(Some(strip));
+        let family = ivars.font.borrow().family.clone();
+        let inset = view_strip::HEIGHT as f32;
+        // The module's thread tells the main queue when it has put something out; the pane is
+        // found there by its id, if it is still open.
+        let id = self.id();
+        let wake = move || {
+            DispatchQueue::main().exec_async(move || {
+                // audit: a block running on the main queue is on the main thread by definition.
+                let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
+                if let Some(pane) = crate::embed::pane(mtm, id) {
+                    pane.drain_page();
+                }
+            });
+        };
+        let (page, handle) = bt_shell_common::native_view::module_page(
+            bytes.to_vec(),
+            bt_shell_common::native_view::Limits::default(),
+            family.clone(),
+            inset,
+            wake,
+        );
+        let handle: Rc<dyn PageDrive> = Rc::new(handle);
+        let field = crate::native_page::filter_field(self, &theme, family.as_deref());
+        self.addSubview_positioned_relativeTo(
+            &field,
+            NSWindowOrderingMode::Below,
+            Some(&ivars.link_veil),
+        );
+        {
+            // The page says where its box for the field is whenever it is laid out another way.
+            let field = field.clone();
+            handle.watch_field(Box::new(move |place| {
+                crate::native_page::place_field(&field, place);
+            }));
+        }
+        let area = crate::native_page::pointer_area(self.view());
+        ivars.page_up.replace(Some(crate::native_page::Page {
+            owner: crate::native_page::Owner::Program,
+            handle,
+            field,
+            area,
+        }));
+        link.set_page(Some(page));
+        // The mark of what runs in the pane (the tab's tile).
+        self.host().program_changed(ivars.id);
+    }
+
     /// Puts the view over the terminal, with the application's strip above it: over the
     /// terminal's small surfaces (the link label, the block tip, the jump button) and under
     /// the veils, so a pane that is not the keyboard's dims over its view and its strip as it
     /// does over its terminal.
     fn start_view(&self, session: &Arc<Session>, start: &bt_core::pencere::ViewStart) {
+        if start.kind == bt_core::pencere::ViewKind::Wasm {
+            self.start_native_view(session, start);
+            return;
+        }
         // The crate has one view at a time; a stale one goes first.
         self.end_view();
         self.sync_view_size();
@@ -6372,6 +6479,14 @@ impl TerminalPane {
     /// keyboard), and the terminal's frames come back — it is drawn again, with
     /// the screen the program left.
     fn end_view(&self) {
+        if self.program_page_up() {
+            // A module's page: down with its strip and field, and the terminal's frames come
+            // back. What the view had out goes with it, as a web view's does.
+            self.view_gone();
+            self.take_page_down();
+            self.host().program_changed(self.ivars().id);
+            return;
+        }
         let Some(host) = self.ivars().pencere.take() else {
             return;
         };
@@ -6394,6 +6509,10 @@ impl TerminalPane {
     /// The program's view goes with the pane, whatever it was doing: no
     /// teardown is asked of the view and no frame comes back.
     fn drop_view(&self) {
+        if self.program_page_up() {
+            self.view_gone();
+            self.take_page_down();
+        }
         if let Some(host) = self.ivars().pencere.take() {
             self.view_gone();
             host.close();
@@ -7830,6 +7949,65 @@ mod tests {
             wake.contains("possibly under it when a command's"),
             "the trait says the `Term` lock may be held"
         );
+    }
+
+    /// A module's page is a program's view, and every way a view goes takes the page down with
+    /// it: the session's `DestroyView` (`end_view`), the pane's closing and a handover
+    /// (`drop_view`, which `quiesce` calls). A source scan: what it guards needs a window server
+    /// and a program with a view in a pane; a way out that forgot the page would leave a module
+    /// running under a terminal nobody can reach.
+    #[test]
+    fn every_way_a_view_goes_takes_a_modules_page_down_with_it() {
+        let pane = include_str!("pane.rs");
+        let pane = &pane[..pane.find("#[cfg(test)]").unwrap_or(pane.len())];
+        let body = |signature: &str| {
+            let at = pane.find(signature).expect(signature);
+            &pane[at..at + pane[at..].find("\n    }\n").expect("its end")]
+        };
+        for signature in ["    fn end_view(&self) {", "    fn drop_view(&self) {"] {
+            let body = body(signature);
+            assert!(body.contains("program_page_up()"), "{signature}: {body}");
+            assert!(body.contains("take_page_down()"), "{signature}: {body}");
+        }
+        assert!(
+            body("    fn quiesce(").contains("self.drop_view()"),
+            "the pane's closing drops its view"
+        );
+        // The program's view is a view for everything that asks (the menu's greys, the
+        // handover's record, the restart a coming-back screen offers) and a web view for the
+        // one thing that is the web view's: the terminal's frames stopping.
+        assert!(body("    pub(crate) fn shows_view(").contains("self.program_page_up()"));
+        assert!(body("    pub fn set_visibility(").contains("!self.shows_web_view()"));
+    }
+
+    /// What reaches the program from a module's page goes by the session's one gate
+    /// (`Session::module_message`, which writes only while the view is open), only for the
+    /// program's page, and ⌃C and the strip's button are the program's, as a web view's are.
+    #[test]
+    fn a_modules_words_go_to_the_program_by_the_one_gate_and_its_interrupt_is_the_programs() {
+        let pane = include_str!("pane.rs");
+        let pane = &pane[..pane.find("#[cfg(test)]").unwrap_or(pane.len())];
+        let body = |signature: &str| {
+            let at = pane.find(signature).expect(signature);
+            &pane[at..at + pane[at..].find("\n    }\n").expect("its end")]
+        };
+        let drain = body("    pub(crate) fn drain_page(");
+        assert!(drain.contains("self.program_page_up()"), "{drain}");
+        assert!(drain.contains("session.module_message(message)"), "{drain}");
+        assert!(drain.contains("session.view_failed()"), "{drain}");
+        assert!(
+            pane.matches("module_message(").count() == 1,
+            "nothing else writes a module's words"
+        );
+        let key = body("    pub(crate) fn page_key(");
+        assert!(key.contains("self.interrupt_program()"), "{key}");
+        let strip = include_str!("native_page.rs");
+        let at = strip.find("fn program_strip(").expect("program_strip");
+        assert!(strip[at..at + 600].contains("sel!(quitProgram:)"));
+        // A page's wish to close ends a debug demo and nothing a program opened.
+        let reply = body("    fn apply_page_reply(");
+        assert!(reply.contains("if !self.program_page_up() {"), "{reply}");
+        assert!(!reply.contains("close_view"), "{reply}");
     }
 
     /// A pane that shows a program's view has the keyboard in the view, and the window's ways of

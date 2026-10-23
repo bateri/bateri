@@ -11,4 +11,6 @@ crate-type = ["cdylib"]
 
 [dependencies]
 bateri-view-sdk = { workspace = true }
+bateri-view-messages = { workspace = true }
 bt-view = { workspace = true }
+serde_json = { workspace = true }

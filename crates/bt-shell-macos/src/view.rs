@@ -57,11 +57,9 @@ use objc2_foundation::{
     NSRange, NSRangePointer, NSRect, NSSize, NSString, NSUInteger, NSURL,
 };
 
-#[cfg(debug_assertions)]
 use bt_shell_common::native_view::{
     Button as PageButton, Input, Menu as PageMenu, MenuEntry as PageMenuEntry, Point as PagePoint,
 };
-#[cfg(debug_assertions)]
 use objc2_app_kit::NSMenu;
 
 use crate::clipboard;
@@ -1020,9 +1018,8 @@ define_class!(
         /// exact region (above the dock, a bar to draw) is asked here.
         #[unsafe(method(mouseEntered:))]
         fn mouse_entered(&self, event: &NSEvent) {
-            #[cfg(debug_assertions)]
             if let Some(pane) = self.pane()
-                && pane.shows_sample_page()
+                && pane.page_is_up()
             {
                 pane.page_input(Input::Move(self.page_point(event)));
                 return;
@@ -1045,9 +1042,8 @@ define_class!(
         /// `mouseMoved:` would see neither the exit nor an unfocused pane.
         #[unsafe(method(mouseExited:))]
         fn mouse_exited(&self, event: &NSEvent) {
-            #[cfg(debug_assertions)]
             if let Some(pane) = self.pane()
-                && pane.shows_sample_page()
+                && pane.page_is_up()
             {
                 pane.page_input(Input::Leave);
                 return;
@@ -1096,9 +1092,8 @@ define_class!(
             self.note_interaction();
             // A debug page covers the terminal: the pointer is over the page, and the
             // terminal's scroll bar under it reacts to nothing.
-            #[cfg(debug_assertions)]
             if let Some(pane) = self.pane()
-                && pane.shows_sample_page()
+                && pane.page_is_up()
             {
                 pane.page_input(Input::Move(self.page_point(event)));
                 return;
@@ -1143,7 +1138,6 @@ define_class!(
         /// The link context menu's items ([`BateriView::link_menu`]): the menu's
         /// link is parked in the link state and taken by the item.
         /// An entry of the menu a debug page asked for was picked: its index is the item's tag.
-        #[cfg(debug_assertions)]
         #[unsafe(method(pageMenuPicked:))]
         fn page_menu_picked(&self, sender: Option<&AnyObject>) {
             if let Some(item) = sender.and_then(|sender| sender.downcast_ref::<NSMenuItem>())
@@ -1236,9 +1230,8 @@ define_class!(
             self.note_interaction();
             // A debug page covers the terminal: the wheel is the page's, with AppKit's
             // momentum (the events keep coming after the fingers lift), none of our own.
-            #[cfg(debug_assertions)]
             if let Some(pane) = self.pane()
-                && pane.shows_sample_page()
+                && pane.page_is_up()
             {
                 let raw = event.scrollingDeltaY() as f32;
                 let dy = -if event.hasPreciseScrollingDeltas() {
@@ -1366,7 +1359,6 @@ define_class!(
         fn key_down(&self, event: &NSEvent) {
             self.note_interaction();
             // A debug page of the kit's covers the terminal: its keys are the page's.
-            #[cfg(debug_assertions)]
             if let Some(pane) = self.pane()
                 && pane.page_key(event)
             {
@@ -2548,9 +2540,8 @@ impl BateriView {
     /// band must give a cell too, `bt-core` does the clamping.
     fn button_event(&self, event: &NSEvent, button: MouseButton, pressed: bool) {
         // A debug page covers the terminal: a press is the page's, not the grid's.
-        #[cfg(debug_assertions)]
         if let Some(pane) = self.pane()
-            && pane.shows_sample_page()
+            && pane.page_is_up()
         {
             let at = self.page_point(event);
             let button = match button {
@@ -2824,8 +2815,7 @@ impl BateriView {
     /// motion *states* a place and is rejected outside the grid - a pointer
     /// roaming over the title bar must not report row 0 to the application.
     fn motion_event(&self, event: &NSEvent, button: Option<MouseButton>) {
-        #[cfg(debug_assertions)]
-        if self.pane().is_some_and(|pane| pane.shows_sample_page()) {
+        if self.pane().is_some_and(|pane| pane.page_is_up()) {
             return;
         }
         let Some(session) = self.ivars().session.get() else {
@@ -2891,7 +2881,6 @@ impl BateriView {
     /// to the application are made of (`bt-core`'s [`Pointer`]).
     /// Where `event` is in the view, points from its top-left corner (the view is flipped): the
     /// coordinates a debug page of the kit is asked in.
-    #[cfg(debug_assertions)]
     fn page_point(&self, event: &NSEvent) -> PagePoint {
         let at = self.convertPoint_fromView(event.locationInWindow(), None);
         PagePoint::new(at.x as f32, at.y as f32)
@@ -2900,7 +2889,6 @@ impl BateriView {
     /// Pops up the menu a debug page asked for, where it said (the view's points). Items are
     /// enabled by hand: a targeted item would otherwise always be enabled. The pick comes back
     /// as [`BateriView::page_menu_picked`] with the entry's index in the tag.
-    #[cfg(debug_assertions)]
     pub(crate) fn show_page_menu(&self, menu: &PageMenu) {
         let mtm = self.mtm();
         let shown = NSMenu::new(mtm);

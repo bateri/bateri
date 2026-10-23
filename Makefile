@@ -3,7 +3,7 @@ CARGO ?= cargo
 # Prerequisite order is only guaranteed under serial make; under -j the promises
 # "cheapest gate first" and "version first" break.
 .NOTPARALLEL:
-.PHONY: check prune fmt audit clippy test shader smoke terminfo test-race scan bundle package install release publish ship release-gate sparkle dmgbuild linux embed-swift embed-tag guest guest-test
+.PHONY: check prune fmt audit clippy test shader smoke terminfo test-race scan bundle package install release publish ship release-gate sparkle dmgbuild linux embed-swift embed-tag guest guest-test guest-linux
 
 # Definition of done. Homebrew rustc is not pinned (there is deliberately no
 # rust-toolchain.toml): the version is printed first so a clippy failure that
@@ -832,11 +832,47 @@ guest:
 		$(GUEST_CARGO) run -q --manifest-path guest/Cargo.toml -p componentize -- guest/target/wasm32-unknown-unknown/release/$$m.wasm guest/dist/$$m.wasm || exit 1; \
 	done
 	@ls -l $(addprefix guest/dist/,$(addsuffix .wasm,$(GUEST_MODULES)))
+	$(GUEST_CARGO) build --manifest-path guest/Cargo.toml --release -p demopen
+	cp guest/target/release/demopen guest/dist/demopen
+	@ls -l guest/dist/demopen
 
-# The sandbox against the real modules: what `make check` takes on faith.
+# The demo program (`guest/demopen`) for the servers it is shown on: static musl builds of both
+# Linux architectures, made in containers of their own architecture the way kablo's `make dist`
+# makes its binaries (the other architecture than the machine's runs emulated: slow the first
+# time and exact), into `guest/dist/`. They carry the container list's module (`make guest`
+# builds it first), so one file is all a server needs. Nothing is copied anywhere: putting a
+# binary on a server is a person's to do.
+GUEST_LINUX_TARGETS = aarch64-unknown-linux-musl x86_64-unknown-linux-musl
+GUEST_DOCKERFILE = guest/Dockerfile
+guest-linux: guest
+	@if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then \
+		echo "SKIPPED: Docker is missing or the daemon does not answer — make guest-linux could not run"; exit 78; fi
+	@set -e; for target in $(GUEST_LINUX_TARGETS); do \
+		arch=$${target%%-*}; \
+		case $$arch in x86_64) platform=linux/amd64 want='x86-64';; aarch64) platform=linux/arm64 want='ARM aarch64';; esac; \
+		image="bateri-guest-linux-$$arch"; \
+		echo "==> $$target, in a $$platform container"; \
+		docker build -q --platform $$platform -t $$image -f $(GUEST_DOCKERFILE) guest >/dev/null; \
+		docker run --rm --platform $$platform -v "$(CURDIR)":/w -v bateri-guest-cargo:/usr/local/cargo/registry \
+			-v bateri-guest-cargo-git:/usr/local/cargo/git \
+			-e CARGO_TARGET_DIR=/w/guest/target/linux-$$arch $$image \
+			cargo build --release --locked --manifest-path guest/Cargo.toml -p demopen --target $$target; \
+		cp "guest/target/linux-$$arch/$$target/release/demopen" "guest/dist/demopen-$$target"; \
+		described=$$(docker run --rm --platform $$platform -v "$(CURDIR)/guest/dist":/dist:ro $$image file "/dist/demopen-$$target"); \
+		echo "$$described"; \
+		echo "$$described" | grep -Eq "statically linked|static-pie linked" || { echo "guest-linux: demopen-$$target is not statically linked"; exit 1; }; \
+		echo "$$described" | grep -q "$$want" || { echo "guest-linux: demopen-$$target is not a $$arch binary"; exit 1; }; \
+		docker run --rm --platform $$platform -v "$(CURDIR)/guest/dist":/dist:ro $$image "/dist/demopen-$$target" --json | head -n 2; \
+	done
+	@ls -l guest/dist/demopen-*
+
+# The sandbox against the real modules and the demo program in a real pane: what `make check` takes
+# on faith.
 guest-test: guest
 	$(CARGO) test -p bt-view-wasm guests_tests
 	$(CARGO) test -p bt-shell-common native_view::module
+	$(CARGO) test -p bt-core -- the_demo_program an_interrupt_ends_the_demo a_restart_closes_the_modules
+	$(CARGO) test --manifest-path guest/Cargo.toml -p demopen -p bateri-view-messages
 
 LINUX_DOCKERFILE = tools/linux/Dockerfile
 LINUX_RUST = $(shell sed -n 's/^FROM rust:\([0-9]*\.[0-9]*\)-.*/\1/p' $(LINUX_DOCKERFILE))

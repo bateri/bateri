@@ -10,7 +10,15 @@
 ///
 /// Lengths are in points, colours are named for the theme (the nine roles and the values
 /// derived from them), never as numbers: the application resolves them in the pane's theme.
-package bateri:view@0.1.0;
+///
+/// A page that a program in the pane opened can talk to that program: it says things with
+/// `program.send` and hears the program's in `page.message`. The application only carries them —
+/// the words are the program's and the page's own.
+///
+/// Version 0.2.0 adds that (`program`, `page.message`) and nothing else: a module of 0.1.0 asks
+/// for nothing the application no longer gives, and one of 0.2.0 that is opened where no program
+/// listens says things into the void.
+package bateri:view@0.2.0;
 
 interface types {
     /// A name for an element, so that what is kept about it between frames (a scroll position,
@@ -411,6 +419,16 @@ interface layout {
     text-field: func() -> option<rect>;
 }
 
+/// What the module can say to the program that opened the page, if one did.
+interface program {
+    /// A message for the program: one JSON object, written as text. It is carried as it is and
+    /// not read; the program is told it only while the page is open, and a page that says more
+    /// in one call than the application allows, or more at once than fits a message, is closed.
+    /// Returns at once; nothing comes back but what the program says in its own time
+    /// (`page.message`).
+    send: func(message: string);
+}
+
 /// What the module is: a page.
 interface page {
     use types.{size, frame, event, reply};
@@ -426,9 +444,14 @@ interface page {
 
     /// The person did something.
     handle: func(event: event) -> reply;
+
+    /// The program that opened the page said something: one JSON object, as the program wrote
+    /// it, which the module reads and may not trust. `redraw` of the reply says the page changed.
+    message: func(message: string) -> reply;
 }
 
 world view {
     import layout;
+    import program;
     export page;
 }

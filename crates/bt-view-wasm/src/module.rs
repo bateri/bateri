@@ -42,6 +42,14 @@ pub trait Runner: Send + 'static {
     fn handle(&mut self, event: Event) -> Result<Reply, Fault>;
     /// The layout the module may ask of from now on.
     fn lay_out(&mut self, laid: Arc<Laid>);
+    /// The program that opened the page said something (a JSON object, as written).
+    fn message(&mut self, _text: String) -> Result<Reply, Fault> {
+        Ok(Reply::none())
+    }
+    /// What the module has said to its program since the last taking.
+    fn take_sent(&mut self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 enum Command {
@@ -53,6 +61,7 @@ enum Command {
     Settle,
     Laid(Arc<Laid>),
     Event(Event),
+    Message(String),
     Stop,
 }
 
@@ -76,6 +85,7 @@ struct Mailbox {
 struct Waiting {
     frame: Option<Frame>,
     replies: Vec<Answer>,
+    sent: Vec<String>,
     closed: Option<Fault>,
 }
 
@@ -86,6 +96,8 @@ pub struct Update {
     pub frame: Option<Frame>,
     /// What the module said to the events it was told, in order.
     pub replies: Vec<Answer>,
+    /// What the module said to its program, in order: JSON objects, as written, not read.
+    pub sent: Vec<String>,
     /// Why the module is gone, once it is. Told again on every taking after.
     pub closed: Option<Fault>,
 }
@@ -153,6 +165,11 @@ impl Module {
         let _ = self.commands.send(Command::Event(event));
     }
 
+    /// Tells the module what its program said (a JSON object, as written). Returns at once.
+    pub fn message(&self, text: String) {
+        let _ = self.commands.send(Command::Message(text));
+    }
+
     /// Tells the module the page was laid out as `laid`: it may ask of it from now on, and is
     /// asked to bring what depends on it back within it.
     pub fn lay_out(&self, laid: Arc<Laid>) {
@@ -172,6 +189,7 @@ impl Module {
         Update {
             frame: waiting.frame.take(),
             replies: std::mem::take(&mut waiting.replies),
+            sent: std::mem::take(&mut waiting.sent),
             closed: waiting.closed.clone(),
         }
     }
@@ -217,6 +235,20 @@ impl Post<'_> {
         self.wake();
     }
 
+    /// What the module said to its program: kept in order, and the application woken.
+    fn say(&self, sent: Vec<String>) {
+        if sent.is_empty() {
+            return;
+        }
+        self.mailbox
+            .waiting
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .sent
+            .extend(sent);
+        self.wake();
+    }
+
     fn close(&self, fault: Fault) {
         self.mailbox.close_without_wake(fault);
         self.wake();
@@ -251,6 +283,10 @@ fn serve<R: Runner>(
         while let Ok(more) = inbox.try_recv() {
             batch.push(more);
         }
+        // The program said something that changed the page: one page for all it said in this
+        // batch, made after the last of it (a program that pushes fast does not make the
+        // module build a page for every push).
+        let mut owed = false;
         for (at, command) in batch.iter().enumerate() {
             let later = &batch[at + 1..];
             match command {
@@ -266,6 +302,7 @@ fn serve<R: Runner>(
                     last = Some((*size, *now, *reduce_motion));
                     settled = 0;
                     let frame = runner.render(*size, *now, *reduce_motion)?;
+                    post.say(runner.take_sent());
                     post.put(Some(frame), None);
                 }
                 Command::Settle if later.iter().any(|c| matches!(c, Command::Settle)) => {}
@@ -278,6 +315,7 @@ fn serve<R: Runner>(
                         let frame = runner.render(size, now, reduce_motion)?;
                         post.put(Some(frame), None);
                     }
+                    post.say(runner.take_sent());
                 }
                 // A run of pointer moves is the last of them.
                 Command::Event(Event::Input(Input::Move(_)))
@@ -288,9 +326,12 @@ fn serve<R: Runner>(
                 Command::Event(event) => {
                     settled = 0;
                     let reply = runner.handle(event.clone())?;
+                    post.say(runner.take_sent());
                     let frame = match (reply.redraw, last) {
                         (true, Some((size, now, reduce_motion))) => {
-                            Some(runner.render(size, now, reduce_motion)?)
+                            let frame = runner.render(size, now, reduce_motion)?;
+                            post.say(runner.take_sent());
+                            Some(frame)
                         }
                         _ => None,
                     };
@@ -306,7 +347,33 @@ fn serve<R: Runner>(
                     );
                     post.put(frame, Some(Answer { reply, pointer }));
                 }
+                Command::Message(text) => {
+                    settled = 0;
+                    let reply = runner.message(text.clone())?;
+                    post.say(runner.take_sent());
+                    owed |= reply.redraw;
+                    // What the page redraws is the page that follows the batch; the rest of
+                    // the reply (a menu, the keyboard, the pasteboard, the end) is told now.
+                    if reply.close
+                        || reply.menu.is_some()
+                        || reply.keyboard.is_some()
+                        || reply.copy.is_some()
+                    {
+                        post.put(
+                            None,
+                            Some(Answer {
+                                reply,
+                                pointer: false,
+                            }),
+                        );
+                    }
+                }
             }
+        }
+        if owed && let Some((size, now, reduce_motion)) = last {
+            let frame = runner.render(size, now, reduce_motion)?;
+            post.say(runner.take_sent());
+            post.put(Some(frame), None);
         }
     }
 }
@@ -333,6 +400,7 @@ mod tests {
         gate: Option<Receiver<()>>,
         fail_on: Option<&'static str>,
         settles: bool,
+        said: bool,
     }
 
     impl Plain {
@@ -373,6 +441,26 @@ mod tests {
         fn lay_out(&mut self, _laid: Arc<Laid>) {
             let _ = self.note("laid".into());
         }
+
+        fn message(&mut self, text: String) -> Result<Reply, Fault> {
+            self.note(format!("message {text}"))?;
+            Ok(if text.contains("redraw") {
+                Reply::redraw()
+            } else {
+                Reply::none()
+            })
+        }
+
+        fn take_sent(&mut self) -> Vec<String> {
+            let log = self.log.lock().unwrap();
+            // A module that answers a message `ping` with a message of its own, once.
+            if log.last().is_some_and(|last| last == "message ping") && !self.said {
+                drop(log);
+                self.said = true;
+                return vec![r#"{"cancel":{"id":1}}"#.to_owned()];
+            }
+            Vec::new()
+        }
     }
 
     struct Rig {
@@ -390,6 +478,7 @@ mod tests {
             gate,
             fail_on,
             settles,
+            said: false,
         };
         let module = Module::spawn(
             move || Ok(plain),
@@ -414,6 +503,62 @@ mod tests {
 
     fn move_to(x: f32) -> Event {
         Event::Input(Input::Move(Point::new(x, 1.0)))
+    }
+
+    #[test]
+    fn what_the_program_says_is_heard_in_order_one_page_follows_a_run_of_it_and_what_the_module_says_back_is_kept()
+     {
+        let (hold, gate) = mpsc::channel();
+        let rig = rig(Some(gate), None, false);
+        rig.module.render(Size::new(10.0, 10.0), 0.0, false);
+        // Queued while the first render is held: all of it is one batch.
+        rig.module.message("ping".into());
+        rig.module.message("redraw 1".into());
+        rig.module.message("quiet".into());
+        rig.module.message("redraw 2".into());
+        hold.send(()).unwrap();
+        rig.woken();
+        let mut update = rig.module.poll();
+        // The page the module made last is the one that comes: wait for the second render, the
+        // one after the run of messages.
+        let began = std::time::Instant::now();
+        let renders = |rig: &Rig| rig.log().iter().filter(|l| l.starts_with("render")).count();
+        while (update.sent.is_empty() || renders(&rig) < 2)
+            && began.elapsed() < Duration::from_secs(5)
+        {
+            std::thread::sleep(Duration::from_millis(10));
+            let more = rig.module.poll();
+            update.sent.extend(more.sent);
+            update.frame = more.frame.or(update.frame);
+        }
+        assert!(update.frame.is_some());
+        assert_eq!(update.sent, [r#"{"cancel":{"id":1}}"#.to_owned()]);
+        let log = rig.log();
+        let heard: Vec<&String> = log.iter().filter(|l| l.starts_with("message")).collect();
+        assert_eq!(
+            heard,
+            [
+                "message ping",
+                "message redraw 1",
+                "message quiet",
+                "message redraw 2"
+            ]
+        );
+        // One page for the whole run: the first render, and one more after the last message.
+        assert_eq!(renders(&rig), 2, "{log:?}");
+        assert_eq!(rig.module.poll().closed, None);
+    }
+
+    #[test]
+    fn a_module_that_fails_on_a_message_is_closed_like_one_that_fails_on_anything() {
+        let rig = rig(None, Some("message"), false);
+        rig.module.render(Size::new(10.0, 10.0), 0.0, false);
+        rig.woken();
+        assert!(rig.module.poll().frame.is_some());
+        rig.module.message("hello".into());
+        rig.woken();
+        let update = rig.module.poll();
+        assert!(matches!(update.closed, Some(Fault::Trap(_))), "{update:?}");
     }
 
     #[test]

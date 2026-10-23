@@ -29,6 +29,19 @@ use bateri::view::types as wit;
 
 impl bateri::view::types::Host for Host {}
 
+impl bateri::view::program::Host for Host {
+    fn send(&mut self, message: String) {
+        let (messages, bytes) = self.allowed;
+        if self.sent.len() >= messages || message.len() > bytes {
+            // Not kept, and the application closes the module when the call is over: a call
+            // cannot fill the program's input however it is written.
+            self.overflowed = true;
+            return;
+        }
+        self.sent.push(message);
+    }
+}
+
 fn rect_of(rect: Rect) -> wit::Rect {
     wit::Rect {
         x: rect.x,
@@ -480,6 +493,13 @@ impl World {
     /// Compiles `bytes` (a component, binary or text) and starts it. The compiling is slow —
     /// the caller is on a thread of its own.
     pub(crate) fn load(bytes: &[u8], limits: Limits) -> Result<Self, Fault> {
+        if bytes.len() > limits.component {
+            return Err(Fault::Load(format!(
+                "the component is {} bytes; the most that is run is {}",
+                bytes.len(),
+                limits.component
+            )));
+        }
         let engine = sandbox::engine()?;
         let component =
             Component::new(&engine, bytes).map_err(|why| Fault::Load(format!("{why:#}")))?;
@@ -504,6 +524,21 @@ impl World {
     }
 }
 
+impl World {
+    /// A call that sent more than a call may is the end of the module: what it sent is dropped.
+    fn within_what_a_call_may_send(&mut self) -> Result<(), Fault> {
+        let host = self.store.data_mut();
+        if std::mem::take(&mut host.overflowed) {
+            host.sent.clear();
+            return Err(Fault::Flooded(format!(
+                "at most {} messages of {} bytes in one call",
+                self.limits.messages, self.limits.message
+            )));
+        }
+        Ok(())
+    }
+}
+
 impl Runner for World {
     fn render(&mut self, size: Size, now: f64, reduce_motion: bool) -> Result<Frame, Fault> {
         let page = self.view.bateri_view_page();
@@ -514,14 +549,17 @@ impl Runner for World {
         let frame = sandbox::call(&mut self.store, self.limits.call, |store| {
             page.call_render(store, size, now, reduce_motion)
         })?;
+        self.within_what_a_call_may_send()?;
         frame_out(frame, &self.limits)
     }
 
     fn settle(&mut self) -> Result<bool, Fault> {
         let page = self.view.bateri_view_page();
-        sandbox::call(&mut self.store, self.limits.call, |store| {
+        let changed = sandbox::call(&mut self.store, self.limits.call, |store| {
             page.call_settle(store)
-        })
+        })?;
+        self.within_what_a_call_may_send()?;
+        Ok(changed)
     }
 
     fn handle(&mut self, event: Event) -> Result<Reply, Fault> {
@@ -530,7 +568,21 @@ impl Runner for World {
         let reply = sandbox::call(&mut self.store, self.limits.call, |store| {
             page.call_handle(store, &event)
         })?;
+        self.within_what_a_call_may_send()?;
         reply_out(reply, &self.limits)
+    }
+
+    fn message(&mut self, text: String) -> Result<Reply, Fault> {
+        let page = self.view.bateri_view_page();
+        let reply = sandbox::call(&mut self.store, self.limits.call, |store| {
+            page.call_message(store, &text)
+        })?;
+        self.within_what_a_call_may_send()?;
+        reply_out(reply, &self.limits)
+    }
+
+    fn take_sent(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.store.data_mut().sent)
     }
 
     fn lay_out(&mut self, laid: Arc<Laid>) {
@@ -854,5 +906,28 @@ mod tests {
             event_in(Event::MenuPick(usize::MAX)),
             wit::Event::MenuPick(u32::MAX)
         ));
+    }
+
+    #[test]
+    fn what_a_module_says_to_its_program_is_kept_within_what_a_call_may_send() {
+        use bateri::view::program::Host as _;
+        let limits = Limits {
+            messages: 2,
+            message: 10,
+            ..Limits::default()
+        };
+        let mut host = Host::new(&limits);
+        host.send("{}".into());
+        host.send(r#"{"a":1}"#.into());
+        assert_eq!(host.sent, ["{}", r#"{"a":1}"#]);
+        assert!(!host.overflowed);
+        // A third in one call, or one that is too long: not kept, and the call is past its limit.
+        host.send("{}".into());
+        assert!(host.overflowed);
+        assert_eq!(host.sent.len(), 2);
+        let mut host = Host::new(&limits);
+        host.send(r#"{"too":"long"}"#.into());
+        assert!(host.overflowed);
+        assert!(host.sent.is_empty());
     }
 }

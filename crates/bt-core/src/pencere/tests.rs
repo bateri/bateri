@@ -114,21 +114,32 @@ impl Rig {
     pub(crate) fn new(views: bool) -> (Arc<Self>, Seen, Arc<CountingWake>) {
         let seen: Seen = Arc::default();
         let observed = Arc::clone(&seen);
-        let (rig, wake) =
-            Self::build(views.then(|| -> Observer { Box::new(move || *lock(&observed)) }));
+        let (rig, wake) = Self::build(
+            views.then(|| -> Observer { Box::new(move || *lock(&observed)) }),
+            None,
+        );
         (rig, seen, wake)
     }
 
     /// A rig with a desk whose observer is `observer`: for a test that looks at
     /// what is held when the desk reads the pane.
     pub(crate) fn with_observer(observer: Observer) -> (Arc<Self>, Arc<CountingWake>) {
-        Self::build(Some(observer))
+        Self::build(Some(observer), None)
     }
 
-    fn build(observer: Option<Observer>) -> (Arc<Self>, Arc<CountingWake>) {
+    /// A rig whose desk shows WebAssembly views of up to `limit` bytes.
+    pub(crate) fn with_modules(limit: u64) -> (Arc<Self>, Arc<CountingWake>) {
+        Self::build(Some(Box::new(Observed::default)), Some(limit))
+    }
+
+    fn build(
+        observer: Option<Observer>,
+        wasm_entry_limit: Option<u64>,
+    ) -> (Arc<Self>, Arc<CountingWake>) {
         let wake = Arc::new(CountingWake::default());
         let desk = observer.map(|observer| {
             let mut options = ViewOptions::new("bateri-test", "0.0.0");
+            options.wasm_entry_limit = wasm_entry_limit;
             options.size = Size {
                 width: 800,
                 height: 600,
@@ -1216,4 +1227,198 @@ fn a_file_being_stored_does_not_make_a_pane_wait_for_another_file() {
     release.send(()).expect("the writer waits");
     writing.join().expect("the writer ends");
     reading.join().expect("the reader ends");
+}
+
+// ---- a view that is a WebAssembly component --------------------------------------------
+
+/// What the component is, for the tests: the header of an empty one.
+const COMPONENT: &[u8] = b"\0asm\x01\0\0\0";
+
+/// The program's `open` of a view that is a component, on the alternate screen.
+fn module_open(token: &str) -> Vec<u8> {
+    let open = format!(
+        concat!(
+            r#"{{"token":"{token}","program":"demopen","title":"Containers","#,
+            r#""bundle":{{"entry":"view.wasm","files":[{{"path":"view.wasm","sha256":"{digest}","#,
+            r#""size":{size},"type":"application/wasm"}}]}}}}"#
+        ),
+        token = token,
+        digest = Digest::of(COMPONENT).to_string(),
+        size = COMPONENT.len(),
+    );
+    [ALTERNATE_SCREEN, &wire("open", 2, None, None, &open)].concat()
+}
+
+fn module_file() -> Vec<u8> {
+    wire(
+        "file",
+        3,
+        None,
+        Some(&Digest::of(COMPONENT).to_string()),
+        &::pencere::base64::encode(COMPONENT),
+    )
+}
+
+/// A pane whose program has opened a view that is a component. Returns the pane and the token.
+fn open_a_module_view() -> (Pane, String, Arc<CountingWake>) {
+    let (rig, wake) = Rig::with_modules(1 << 20);
+    let mut pane = Pane::new(rig);
+    pane.feed(&hello());
+    let welcome = pane.rig.written();
+    assert_eq!(welcome.len(), 1, "{welcome:?}");
+    assert!(
+        welcome[0]
+            .payload
+            .contains(r#""features":["bundle","dismiss","wasm"]"#),
+        "{}",
+        welcome[0].payload
+    );
+    let token = token_of(&welcome[0]);
+    pane.feed(&module_open(&token));
+    let need = pane.rig.written();
+    assert_eq!(need.len(), 1, "{need:?}");
+    assert_eq!(need[0].kind, "need");
+    pane.feed(&module_file());
+    // No MCP session: the pane is written nothing, and the view is there to start.
+    assert!(pane.rig.written().is_empty());
+    (pane, token, wake)
+}
+
+#[test]
+fn a_component_opens_a_view_of_its_kind_and_messages_go_between_it_and_the_program() {
+    let (mut pane, _, _) = open_a_module_view();
+    let rig = Arc::clone(&pane.rig);
+    let desk = rig.desk.as_ref().expect("a desk");
+    let views = desk.take_views();
+    let [Action::StartView(start)] = views.as_slice() else {
+        panic!("one view to start, got {views:?}");
+    };
+    assert_eq!(start.kind, ViewKind::Wasm);
+    assert_eq!(start.program.as_deref(), Some("demopen"));
+    assert_eq!(start.title.as_deref(), Some("Containers"));
+
+    // The program says something to the view: it reaches the shell as it is.
+    let text = r#"{"push":{"id":1,"value":{"readings":[]}}}"#;
+    pane.feed(&wire("msg", 4, None, None, text));
+    assert_eq!(desk.take_views(), [Action::ToView(text.to_owned())]);
+
+    // The view says something to the program: it is written through the pane's input.
+    let said = r#"{"subscribe":{"id":1,"topic":"stats"}}"#;
+    assert!(desk.module_message(said, pane.rig.write()));
+    let wrote = pane.rig.written();
+    assert_eq!(wrote.len(), 1, "{wrote:?}");
+    assert_eq!(
+        (wrote[0].kind.as_str(), wrote[0].payload.as_str()),
+        ("msg", said)
+    );
+}
+
+#[test]
+fn a_message_the_module_sends_after_its_view_ended_writes_nothing_to_the_pane() {
+    let said = r#"{"call":{"id":9,"method":"stop"}}"#;
+    type End = fn(&Pane, &str, &Desk);
+    let endings: [(&str, End); 5] = [
+        ("the program's bye", |pane, token, _| {
+            let bye = format!(r#"{{"token":"{token}","reason":"signal"}}"#);
+            let desk = pane.rig.desk.as_ref().expect("a desk");
+            let mut events = Vec::new();
+            let mut stream = StreamDecoder::new(Direction::ToHost);
+            stream.feed(&wire("bye", 7, None, None, &bye), &mut events);
+            for event in events {
+                if let FrameEvent::Message(message) = event {
+                    desk.park(message, true);
+                }
+            }
+            desk.settle(pane.rig.write());
+        }),
+        ("the program's dismiss", |pane, token, _| {
+            let dismiss = format!(r#"{{"token":"{token}"}}"#);
+            let desk = pane.rig.desk.as_ref().expect("a desk");
+            let mut events = Vec::new();
+            let mut stream = StreamDecoder::new(Direction::ToHost);
+            stream.feed(&wire("dismiss", 7, None, None, &dismiss), &mut events);
+            for event in events {
+                if let FrameEvent::Message(message) = event {
+                    desk.park(message, true);
+                }
+            }
+            desk.settle(pane.rig.write());
+        }),
+        ("the person closing the view", |pane, _, desk| {
+            desk.apply(pane.rig.write(), |conversation| conversation.close_view());
+        }),
+        ("the end of the program", |pane, _, desk| {
+            desk.program_ended(pane.rig.write());
+        }),
+        ("the view failing", |pane, _, desk| {
+            desk.apply(pane.rig.write(), |conversation| conversation.view_failed());
+        }),
+    ];
+    for (name, end) in endings {
+        let (pane, token, _) = open_a_module_view();
+        let rig = Arc::clone(&pane.rig);
+        let desk = rig.desk.as_ref().expect("a desk");
+        desk.take_views();
+        assert!(
+            desk.module_message(said, pane.rig.write()),
+            "{name}: while it is open"
+        );
+        pane.rig.written();
+
+        end(&pane, &token, desk);
+        assert!(
+            desk.take_views().contains(&Action::DestroyView),
+            "{name}: the view is destroyed"
+        );
+        // Whatever the end wrote (a `closed`), the pane's input is emptied: what matters is
+        // what the late message adds.
+        lock(&pane.rig.input).clear();
+
+        assert!(!desk.module_message(said, pane.rig.write()), "{name}");
+        assert!(
+            lock(&pane.rig.input).is_empty(),
+            "{name}: a late message reached the pane's input: {:?}",
+            pane.rig.written()
+        );
+    }
+}
+
+#[test]
+fn a_pane_that_shows_no_components_refuses_one_and_runs_no_view() {
+    let (rig, _, _) = Rig::new(true);
+    let mut pane = Pane::new(rig);
+    pane.feed(&hello());
+    let welcome = pane.rig.written();
+    assert!(
+        !welcome[0].payload.contains("wasm"),
+        "it does not say it shows them: {}",
+        welcome[0].payload
+    );
+    pane.feed(&module_open(&token_of(&welcome[0])));
+    let closed = pane.rig.written();
+    assert_eq!(closed.len(), 1, "{closed:?}");
+    assert_eq!(closed[0].kind, "closed");
+    assert!(
+        closed[0].payload.contains(r#""code":"unsupported""#),
+        "{}",
+        closed[0].payload
+    );
+    let desk = pane.rig.desk.as_ref().expect("a desk");
+    assert!(desk.take_views().is_empty());
+}
+
+#[test]
+fn a_component_over_the_limit_is_refused_before_a_byte_of_it_is_asked_for() {
+    let (rig, _) = Rig::with_modules(4);
+    let mut pane = Pane::new(rig);
+    pane.feed(&hello());
+    let token = token_of(&pane.rig.written()[0]);
+    pane.feed(&module_open(&token));
+    let closed = pane.rig.written();
+    assert_eq!(closed.len(), 1, "{closed:?}");
+    assert!(
+        closed[0].payload.contains(r#""code":"limit""#),
+        "{}",
+        closed[0].payload
+    );
 }

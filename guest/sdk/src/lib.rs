@@ -10,7 +10,9 @@
 //! The component imports **nothing but the page's interface** (`bateri:view`): a page cannot
 //! read a file, open a socket, ask the time or print — the application gives it what it needs
 //! as an event, and what it can ask of the application is the layout of the page it last
-//! drew ([`Layout`]). A page that runs forever, takes memory without end or traps is closed by
+//! drew ([`Layout`]). A page that a program in the pane opened can also talk to that program:
+//! [`say`] sends it a message and [`Page::message`] hears the program's (the messages are
+//! `bateri-view-messages`'; the terminal only carries them). A page that runs forever, takes memory without end or traps is closed by
 //! the application, and the terminal underneath comes back.
 //!
 //! ```ignore
@@ -43,6 +45,7 @@ pub mod bindings {
 mod convert;
 
 use bindings::bateri::view::layout as host;
+use bindings::bateri::view::program as to_program;
 
 pub use bt_view::wire;
 pub use bt_view::{
@@ -118,6 +121,14 @@ impl Queries for Layout {
     }
 }
 
+/// Says something to the program that opened the page: one JSON object, written as text (a
+/// message of `bateri-view-messages`). Returns at once; the program answers in its own time
+/// ([`Page::message`]). A page that says more in one call than the application allows is
+/// closed.
+pub fn say(message: &str) {
+    to_program::send(message);
+}
+
 fn point_in(at: Point) -> bindings::bateri::view::types::Point {
     bindings::bateri::view::types::Point { x: at.x, y: at.y }
 }
@@ -139,6 +150,13 @@ pub trait Page: Sized + 'static {
     /// The person did something (or the application's text field changed, or an entry of a menu
     /// the page asked for was picked).
     fn handle(&mut self, event: Event, layout: &Layout) -> Reply;
+
+    /// The program that opened the page said something: one JSON object, as the program wrote
+    /// it. The program is not trusted — it may be a program the person did not mean to start.
+    /// The reply's `redraw` says the page changed. A page no program opened is never told.
+    fn message(&mut self, _text: &str, _layout: &Layout) -> Reply {
+        Reply::none()
+    }
 }
 
 /// Makes the component of a page: `export_page!(MyPage);` at the root of the crate (a
@@ -174,6 +192,18 @@ macro_rules! export_page {
                 fn settle() -> bool {
                     PAGE.with_borrow_mut(|page| {
                         <$page as $crate::Page>::settle(page, &$crate::Layout)
+                    })
+                }
+
+                fn message(
+                    text: ::std::string::String,
+                ) -> $crate::bindings::bateri::view::types::Reply {
+                    PAGE.with_borrow_mut(|page| {
+                        $crate::to_wit_reply(<$page as $crate::Page>::message(
+                            page,
+                            &text,
+                            &$crate::Layout,
+                        ))
                     })
                 }
 

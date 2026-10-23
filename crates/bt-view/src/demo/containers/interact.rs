@@ -812,7 +812,7 @@ impl Container {
                 sum.wrapping_mul(31).wrapping_add(u32::from(byte))
             });
             self.history = wave(seed, 0.3, 1.0);
-            self.memory = ("12MiB", 0.06);
+            self.memory = ("12MiB".to_owned(), 0.06);
             self.cpu = 0.3;
         }
         self.state = state;

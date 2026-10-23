@@ -28,6 +28,7 @@ use bt_gpu::{
 };
 use bt_view::demo::Containers;
 
+mod allowance;
 mod module;
 pub use bt_view::{
     Button, Cursor, Input, Key, Keyboard, Menu, MenuEntry, Mods, Point, Rect, Reply, Tone,
@@ -99,6 +100,9 @@ pub trait PageDrive {
     fn send_query(&self, text: &str);
     /// The person picked the `index`th entry of the menu the last reply asked for.
     fn send_pick(&self, index: usize);
+    /// The program that opened the page said something: one JSON object, as it wrote it. A page
+    /// that no program opened (the engine's own, in this process) hears none.
+    fn send_message(&self, _text: &str) {}
     /// `told` is called, on the thread that builds the frame, when the place of the text field the
     /// page leaves room for changes (the pane resized, the page laid out another way): the host
     /// moves its field to it. Called once with the place the page has now, if it has one.
@@ -116,6 +120,11 @@ pub struct Drained {
     pub redraw: bool,
     /// Why the page is gone, the first time it is told: the pane takes it down.
     pub ended: Option<String>,
+    /// What the page said to its program since the last call, in order: JSON objects, as it
+    /// wrote them. The pane carries them to the program, and only while the page's view is
+    /// open (`bt_core::Session::module_message`). Told before `ended`: what a page said before
+    /// it went is said.
+    pub sent: Vec<String>,
 }
 
 /// The fonts opened and the lines shaped so far. They outlive a build: a page is laid out

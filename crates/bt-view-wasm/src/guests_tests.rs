@@ -69,6 +69,7 @@ impl Open {
             self.seen.frame = update.frame.clone();
         }
         self.seen.replies.extend(update.replies.iter().cloned());
+        self.seen.sent.extend(update.sent.iter().cloned());
         update
     }
 
@@ -275,5 +276,78 @@ fn a_page_that_traps_or_runs_out_of_stack_is_closed_with_the_trap() {
             return;
         };
         assert!(matches!(fault, Fault::Trap(_)), "{letter}: {fault:?}");
+    }
+}
+
+#[test]
+fn the_container_list_asks_its_program_for_readings_and_shows_what_it_pushes() {
+    let Some(mut page) = open("containers", Limits::default()) else {
+        return;
+    };
+    page.module.render(SIZE, 0.0, false);
+    let update = page.until(Duration::from_secs(20), |u| {
+        u.frame.is_some() || u.closed.is_some()
+    });
+    assert_eq!(update.closed, None);
+    // At its start the page asked the program (if there is one) to be told the numbers.
+    assert_eq!(
+        page.seen.sent,
+        [r#"{"subscribe":{"id":1,"topic":"stats"}}"#.to_owned()]
+    );
+
+    // The program pushes a reading; the page that comes is the engine's own page with it.
+    let push = r#"{"push":{"id":1,"value":{"readings":[{"name":"api","cpu":42.5,"memory":"130MiB","share":0.3}]}}}"#;
+    page.module.message(push.to_owned());
+    let update = page.until(Duration::from_secs(20), |u| {
+        u.frame.is_some() || u.closed.is_some()
+    });
+    assert_eq!(update.closed, None);
+    let frame = update.frame.expect("a page for the push");
+    let mut native = bt_view::demo::Containers::fixture();
+    native.advance(0.0, false);
+    assert!(native.live(&[bt_view::demo::Reading {
+        name: "api".into(),
+        cpu: 42.5,
+        memory: "130MiB".into(),
+        share: 0.3,
+    }]));
+    assert!(
+        frame.root == native.view(SIZE),
+        "the module's page differs from the engine's with the same reading"
+    );
+
+    // A push for another subscription, a response, and what is not a message change nothing and
+    // make no page.
+    for noise in [
+        r#"{"push":{"id":7,"value":{"readings":[]}}}"#,
+        r#"{"response":{"id":1,"result":{}}}"#,
+        "[]",
+    ] {
+        page.module.message(noise.to_owned());
+    }
+    let update = page.take(Duration::from_millis(500));
+    assert_eq!(update.closed, None);
+    assert!(update.frame.is_none(), "noise made a page");
+    assert_eq!(page.seen.sent.len(), 1, "and it said nothing back");
+}
+
+#[test]
+fn a_component_over_the_size_the_application_runs_is_not_compiled() {
+    let Some(bytes) = component("containers") else {
+        return;
+    };
+    let limits = Limits {
+        component: bytes.len() - 1,
+        ..Limits::default()
+    };
+    let (told, woken) = channel();
+    let told = std::sync::Mutex::new(told);
+    let module = Module::from_component(bytes, limits, move || {
+        let _ = told.lock().unwrap().send(());
+    });
+    assert!(woken.recv_timeout(Duration::from_secs(20)).is_ok());
+    match module.poll().closed {
+        Some(Fault::Load(why)) => assert!(why.contains("bytes"), "{why}"),
+        other => panic!("expected a refusal to load, got {other:?}"),
     }
 }

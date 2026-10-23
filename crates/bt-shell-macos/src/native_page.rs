@@ -13,7 +13,9 @@
 //! pointer is whoever has the keyboard, and the handle the pane's input goes to the page by
 //! ([`bt_shell_common::native_view::ContainersHandle`]).
 //!
-//! Debug builds only for now (`Debug ▸ Show Container List Demo`).
+//! A page is up for one of two owners ([`Owner`]): a debug build's demo of the kit (`Debug ▸
+//! Show Container List Demo`), whose button and ⌃C close it, or the view a program opened — a
+//! module the program sent — whose ⌃C and button go to the program, which ends it.
 
 use std::rc::Rc;
 
@@ -34,8 +36,27 @@ use crate::pencere_view::face::Faces;
 use crate::pencere_view::strip::StripView;
 use crate::pencere_view::strip_area;
 
+/// The strip over the view a program opened: the words of `text` (`view_strip::strip`, the
+/// same as over a web view) and the one button, which sends ⌃C to the program.
+pub(crate) fn program_strip(
+    pane: &TerminalPane,
+    theme: &Theme,
+    text: &Strip,
+) -> Retained<StripView> {
+    let strip = StripView::new(
+        pane.mtm(),
+        strip_area(pane.bounds()),
+        text,
+        Rc::new(Faces::new(&[])),
+        theme,
+    );
+    strip.aim(pane, sel!(quitProgram:));
+    strip
+}
+
 /// The demo's strip over `pane`: the made-up program's name and the title of its page, a button
 /// that closes the page, painted with `theme`.
+#[cfg(debug_assertions)]
 pub(crate) fn strip(
     pane: &TerminalPane,
     theme: &Theme,
@@ -60,8 +81,8 @@ pub(crate) fn strip(
 }
 
 /// Where the page modules (`guest/`, built by `make guest`) are: `BT_VIEW_GUEST_DIR`, else the
-/// build tree this binary came from. A development convenience of debug builds, which is all that
-/// opens them for now.
+/// build tree this binary came from. A development convenience of the debug menu's demos.
+#[cfg(debug_assertions)]
 pub(crate) fn component_path(name: &str) -> std::path::PathBuf {
     let dir = std::env::var_os("BT_VIEW_GUEST_DIR").map_or_else(
         || std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../guest/dist"),
@@ -73,9 +94,21 @@ pub(crate) fn component_path(name: &str) -> std::path::PathBuf {
 /// The height of the filter field, points: a line of the page's text, centred in the box.
 const FIELD_HEIGHT: f64 = 18.0;
 
+/// Whose a page is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Owner {
+    /// The debug menu's: the person opened it and closes it.
+    #[cfg(debug_assertions)]
+    Demo,
+    /// A program's view: the program ends it (⌃C reaches the program, its `closed` or `bye`
+    /// brings the page down), and what the page says goes to the program.
+    Program,
+}
+
 /// What is up while the container-list page is: the handle the pane's input goes to the page
-/// by, the filter's field, the tracking area over the pane.
+/// by, the filter's field, the tracking area over the pane, whose page it is.
 pub(crate) struct Page {
+    pub owner: Owner,
     pub handle: Rc<dyn PageDrive>,
     pub field: Retained<NSTextField>,
     pub area: Retained<NSTrackingArea>,
@@ -97,7 +130,7 @@ fn ink(theme: &Theme, tone: Tone) -> Retained<NSColor> {
 
 /// The filter's field for `pane`: no border and no ground (the page draws the box), the
 /// terminal's face at the size of the page's text, the theme's ink. The pane is its delegate
-/// (`TerminalPane::demo_field_changed`, `demo_field_command`).
+/// (`TerminalPane::page_field_changed`, `page_field_command`).
 pub(crate) fn filter_field(
     pane: &TerminalPane,
     theme: &Theme,

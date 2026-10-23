@@ -67,7 +67,7 @@ pub use ::pencere::message::HostInfo;
 pub use ::pencere::sandbox::{
     Consent, Declared, Directive, Domain, Grant, Locality, Permission, UiMeta,
 };
-pub use ::pencere::session::{Action, Size, State, ViewSource, ViewStart};
+pub use ::pencere::session::{Action, Size, State, ViewKind, ViewSource, ViewStart};
 
 use crate::color::{Theme, srgb_bytes};
 use crate::shell::ShellLog;
@@ -128,6 +128,10 @@ pub struct ViewOptions {
     /// How to find the group the pane's shell leads ([`ShellGroup`]); `None` for a pane
     /// whose child is the shell itself.
     pub shell_group: Option<ShellGroup>,
+    /// The most bytes a view that is a WebAssembly component may be, when the application
+    /// shows such views (it runs them in a sandbox of its own and draws them); `None` for one
+    /// that does not, whose panes refuse them.
+    pub wasm_entry_limit: Option<u64>,
 }
 
 impl ViewOptions {
@@ -148,6 +152,7 @@ impl ViewOptions {
                 height: 0,
             },
             shell_group: None,
+            wasm_entry_limit: None,
         }
     }
 }
@@ -547,8 +552,13 @@ impl Desk {
             size,
             // The observer's: how it finds the shell is [`pane_observer`]'s.
             shell_group: _,
+            wasm_entry_limit,
         } = options;
         let mut config = Config::new(host, view_theme(&theme, &font_mono), size);
+        if let Some(limit) = wasm_entry_limit {
+            config.wasm = true;
+            config.wasm_entry_limit = limit;
+        }
         config.view.locale = locale;
         config.view.time_zone = time_zone;
         let entropy = SystemEntropy {
@@ -637,6 +647,21 @@ impl Desk {
                 write(bytes);
             },
             |conversation| conversation.view_message(text),
+        );
+        wrote.get()
+    }
+
+    /// A message of the component of a WebAssembly view, for the program: written only while
+    /// that view is open ([`Conversing::module_message`]), through the same gate as every
+    /// other word to the program. Whether it was written.
+    pub(crate) fn module_message(&self, text: &str, write: impl Fn(Vec<u8>)) -> bool {
+        let wrote = Cell::new(false);
+        self.apply(
+            |bytes| {
+                wrote.set(true);
+                write(bytes);
+            },
+            |conversation| conversation.module_message(text),
         );
         wrote.get()
     }

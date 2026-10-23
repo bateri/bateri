@@ -12,8 +12,10 @@
 use crate::{Align, Element, Id, Rows, Size, Tone, Track, Ui, div, spacer, spark, text};
 
 mod interact;
+mod live;
 
 use interact::{Row, RowKey, Status, What};
+pub use live::{Reading, readings};
 
 /// The rail folds away under this page width, points.
 const RAIL_BELOW: f32 = 780.0;
@@ -71,7 +73,7 @@ pub struct Container {
     /// CPU over the last seconds, newest last.
     pub history: Vec<f32>,
     /// Memory now, and its share of what the container may use (`0.0..=1.0`).
-    pub memory: (&'static str, f32),
+    pub memory: (String, f32),
     pub ports: Vec<u16>,
     /// How long it has been so: `up 3m`, `2m ago`.
     pub age: &'static str,
@@ -186,17 +188,18 @@ impl Containers {
     /// A small, made-up Docker host: a shop with a container in each state, a blog that is
     /// stopped, a project folded away and one container of no project.
     pub fn fixture() -> Self {
-        let running = |name, project, image, cpu, history, memory, ports, age| Container {
-            name,
-            project,
-            image,
-            state: State::Running,
-            cpu,
-            history,
-            memory,
-            ports,
-            age,
-        };
+        let running =
+            |name, project, image, cpu, history, memory: (&str, f32), ports, age| Container {
+                name,
+                project,
+                image,
+                state: State::Running,
+                cpu,
+                history,
+                memory: (memory.0.to_owned(), memory.1),
+                ports,
+                age,
+            };
         let shop = Some("shop");
         let blog = Some("blog");
         let stats = Some("stats");
@@ -207,7 +210,7 @@ impl Containers {
             state: State::Exited(code),
             cpu: 0.0,
             history: Vec::new(),
-            memory: ("", 0.0),
+            memory: (String::new(), 0.0),
             ports: Vec::new(),
             age,
         };
@@ -333,6 +336,11 @@ impl Containers {
             page.ui.fades.snap(key.id().role(CHOSEN), 1.0);
         }
         page
+    }
+
+    /// The containers of the list, in the order the page keeps them.
+    pub fn containers(&self) -> &[Container] {
+        &self.containers
     }
 
     /// The page for a pane of `size` points.
@@ -915,7 +923,7 @@ fn container_row(id: Id, c: &Container, width: Width, look: Look, marked: bool) 
                                 .bg(color),
                         ),
                 )
-                .child(value(c.memory.0.to_owned()))
+                .child(value(c.memory.0.clone()))
         } else {
             dash()
         });
