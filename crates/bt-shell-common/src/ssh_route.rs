@@ -3874,6 +3874,17 @@ exit $code
         std::fs::remove_dir_all(&root).unwrap();
     }
 
+    /// Waits, up to two seconds, until nobody listens on a holder's socket in `dir`. A test that
+    /// closes its listener does not end the listening at once: a child another test forks at that
+    /// moment holds the socket until it execs, as a holder that ends is gone only once nothing
+    /// holds its socket.
+    fn let_go(dir: &Path) {
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while holder_listening(dir) && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
     /// The sweep leaves a live holder's directory (a holder of the bateri before kablo) alone
     /// even when its owner file names a dead process, and a directory a user's live session
     /// socket sits in is kept whole.
@@ -3892,6 +3903,7 @@ exit $code
             "a live holder's directory was swept"
         );
         drop(holder);
+        let_go(&held);
         sweep(std::slice::from_ref(&base), "ffffffff");
         assert!(!held.exists(), "a dead holder's directory stays");
 
@@ -3907,6 +3919,7 @@ exit $code
             "a live bound holder's directory was swept"
         );
         drop(holder);
+        let_go(&bound);
         sweep(std::slice::from_ref(&base), "ffffffff");
         assert!(!bound.exists(), "a dead bound holder's directory stays");
 
