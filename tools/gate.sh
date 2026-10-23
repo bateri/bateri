@@ -7,9 +7,10 @@
 #                       agent's and the remote scripts' tests, the program view's files its
 #                       test; a manifest, the Makefile or this script names every heavy test.
 #   gate.sh push        everything once, on a clean tree: the fast tier, every heavy test and
-#                       the program view (`make test-all`), `make linux` when a crate that
-#                       builds on Linux changed, `make bundle` when what goes in the package
-#                       changed. The pre-push hook (`tools/pre-push`) asks for its stamp.
+#                       the program view (`make test-all`), `make linux-server` when what
+#                       bateri runs on a server changed, `make bundle` when what goes in the
+#                       package changed. The pre-push hook (`tools/pre-push`) asks for its
+#                       stamp. The whole Linux gate is the release's (`make linux`).
 #   gate.sh check-push  whether HEAD passed the push tier (the release gate's question).
 #
 # A stamp names the content that passed — the working tree's files as a git tree, the
@@ -36,13 +37,15 @@ GIT_INDEX_FILE=$index git add -A >/dev/null 2>&1
 tree=$(GIT_INDEX_FILE=$index git write-tree)
 rm -f "$index"
 
+# The stamp is a list, newest last, of what passed: `<tier> <tree>`. Going back to content
+# that passed (a revert, a stash) finds it again; the list keeps its last few hundred lines.
 stamped() { [ -f "$stamp" ] && grep -qx "$1 $tree" "$stamp"; }
 last_of() { [ -f "$stamp" ] && sed -n "s/^$1 \\([0-9a-f]*\\)\$/\\1/p" "$stamp" | tail -n 1; }
 write_stamp() {
     local t
     for t in "$@"; do
-        { [ -f "$stamp" ] && grep -v "^$t " "$stamp"; echo "$t $tree"; } >"$stamp.new" &&
-            mv "$stamp.new" "$stamp"
+        { [ -f "$stamp" ] && grep -vx "$t $tree" "$stamp"; echo "$t $tree"; } |
+            tail -n 300 >"$stamp.new" && mv "$stamp.new" "$stamp"
     done
 }
 only_unread() {
@@ -83,7 +86,7 @@ base=$(git rev-parse "$(git merge-base HEAD "$upstream")^{tree}")
 files=$(git diff --name-only "$base" "$tree")
 
 areas=""
-all_heavy=0 view=0 linux=0 bundle=0 smoke=0 race=0
+all_heavy=0 view=0 server=0 bundle=0 smoke=0 race=0
 while IFS= read -r f; do
     [ -n "$f" ] || continue
     case $f in
@@ -101,8 +104,9 @@ while IFS= read -r f; do
         crates/bt-shell-common/src/view_* | crates/bt-shell-macos/tests/pencere.rs) view=1 ;;
     esac
     case $f in
-    crates/bt-core/* | crates/bt-atlas/* | crates/bt-gpu/* | crates/bt-shell-common/* | \
-        Cargo.toml | Cargo.lock | tools/linux/*) linux=1 ;;
+    assets/shell/* | crates/bt-shell-common/src/agent/* | crates/bt-shell-common/src/ssh_wrap* | \
+        crates/bt-shell-common/src/kablo/install* | tools/linux/* | Cargo.lock | Makefile | \
+        tools/gate.sh) server=1 ;;
     esac
     case $f in assets/bundle/* | assets/shell/* | crates/bateri/*) bundle=1 ;; esac
     case $f in crates/bt-shell-macos/src/* | crates/bt-gpu/src/*) smoke=1 ;; esac
@@ -139,16 +143,24 @@ if [ "$tier" = commit ]; then
         step heavy make test-heavy AREA="$areas"
     fi
     [ "$view" = 1 ] && step view make test-view
-    [ "$linux" = 1 ] && echo "  linux: a crate that builds on Linux changed — \`make gate-push\` runs it"
+    [ "$server" = 1 ] && echo "  linux-server: what runs on a server changed — \`make gate-push\` runs it on Linux"
     [ "$bundle" = 1 ] && echo "  bundle: what goes in the package changed — \`make gate-push\` builds it"
 else
     if stamped commit; then echo "  check: this content passed it already"; else step check make check; fi
-    step all make test-all
-    [ "$linux" = 1 ] && step linux make linux
+    if stamped full; then echo "  all: this content passed every test already"; else step all make test-all; fi
+    [ "$server" = 1 ] && step linux-server make linux-server
     [ "$bundle" = 1 ] && step bundle make bundle
 fi
 [ "$smoke" = 1 ] && echo "  smoke: window code changed — \`make smoke\` if what a window does changed"
 [ "$race" = 1 ] && echo "  race: the reader or the frame path changed — \`make test-race\` if shared state did"
 
-if [ "$tier" = push ]; then write_stamp push commit base; else write_stamp commit base; fi
+# `full`: every test of the suite passed for this content — a commit run that took every heavy
+# test and the view, or a push run — so the push tier does not run them again.
+if [ "$tier" = push ]; then
+    write_stamp push commit full base
+elif [ "$all_heavy" = 1 ]; then
+    write_stamp commit full base
+else
+    write_stamp commit base
+fi
 echo "gate ($tier): green — stamped $(git rev-parse --short HEAD)'s content"

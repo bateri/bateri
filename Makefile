@@ -3,7 +3,7 @@ CARGO ?= cargo
 # Prerequisite order is only guaranteed under serial make; under -j the promises
 # "cheapest gate first" and "version first" break.
 .NOTPARALLEL:
-.PHONY: check prune fmt audit clippy test test-heavy test-view test-all gate gate-push hooks shader smoke terminfo test-race scan bundle package install release publish ship release-gate sparkle dmgbuild linux
+.PHONY: check prune fmt audit clippy test test-heavy test-view test-all gate gate-push hooks linux-server linux-run shader smoke terminfo test-race scan bundle package install release publish ship release-gate sparkle dmgbuild linux
 
 # Definition of done. Homebrew rustc is not pinned (there is deliberately no
 # rust-toolchain.toml): the version is printed first so a clippy failure that
@@ -704,7 +704,7 @@ release-gate:
 		| awk 'NF { p = 1 } p' | awk '{ l[NR] = $$0 } END { n = NR; while (n > 0 && l[n] ~ /^[[:space:]]*$$/) n--; for (i = 1; i <= n; i++) print l[i] }' > $(NOTES); \
 	grep -q '[^[:space:]]' $(NOTES) || { echo "release: CHANGELOG.md has no '## [$(VERSION)]' section or it is empty (turn Unreleased into the version)"; exit 1; }
 
-release: release-gate package
+release: release-gate linux package
 	@spctl -a -vv -t exec $(APP) 2>&1 | grep -q 'source=Notarized Developer ID' && xcrun stapler validate -q $(APP) || \
 		{ echo "release: the package is not notarized, it does not enter the release"; exit 1; }
 	@spctl -a -vv -t open --context context:primary-signature $(DMG) 2>&1 | grep -q 'source=Notarized Developer ID' || \
@@ -776,8 +776,9 @@ terminfo:
 # The rule "bt-core is platformless, the gate is compiling for Linux" is
 # this command.
 # OUTSIDE `make check`, because it needs Docker and its first run builds the
-# image and compiles the whole graph for Linux; run it when a crate that
-# compiles on Linux changed.
+# image and compiles the whole graph for Linux. Two runs share it: `linux`, the
+# whole of it, in the release; `linux-server`, what runs on a server, before a
+# push that touched it (`make gate-push`).
 # The scope grows over time — today bt-core, bt-atlas's FreeType/
 # fontconfig/harfrust backend, bt-gpu (Vulkan; `wgsl_pipelines_build` and the
 # offscreen pixel tests run on lavapipe) and bt-shell-common (`jobs`'s
@@ -801,7 +802,23 @@ LINUX_RUST = $(shell sed -n 's/^FROM rust:\([0-9]*\.[0-9]*\)-.*/\1/p' $(LINUX_DO
 LINUX_IMAGE = bateri-linux:$(LINUX_RUST)
 LINUX_CRATES = -p bt-core -p bt-atlas -p bt-gpu -p bt-shell-common
 
-linux:
+# The full gate: every Linux crate's clippy and every test but those `NOT_HEAVY` names. The
+# release runs it, once a version: bateri ships for macOS today, and the gate keeps the crates
+# that are to run on Linux one day from drifting until then.
+linux: LINUX_CMD = cargo clippy $(LINUX_CRATES) --all-targets --locked -- -D warnings && \
+	cargo test $(LINUX_CRATES) --all-targets --locked -- --include-ignored $(NOT_HEAVY)
+linux: linux-run
+
+# What bateri runs on a server, which is Linux far more often than not: the agent's `bateri`
+# script, the remote shells' integration and kablo's install steps, in a Linux shell with
+# Linux's tools. `make gate-push` runs it when their files changed. The same test binaries as
+# `linux` (`--lib`), so neither builds the other's again.
+SERVER_TESTS = agent::script:: ssh_wrap::remote_shells:: kablo::install::
+linux-server: LINUX_CMD = cargo test $(LINUX_CRATES) --lib --locked -- --include-ignored \
+	$(NOT_HEAVY) $(SERVER_TESTS)
+linux-server: linux-run
+
+linux-run:
 	@yerel=$$(rustc --version | sed -n 's/^rustc \([0-9]*\.[0-9]*\).*/\1/p'); \
 	if [ -z "$(LINUX_RUST)" ]; then \
 		echo "linux: could not read the rust version from the FROM line of $(LINUX_DOCKERFILE)"; exit 1; fi; \
@@ -812,6 +829,4 @@ linux:
 	docker build -q -t $(LINUX_IMAGE) -f $(LINUX_DOCKERFILE) tools/linux
 	docker run --rm -v "$(CURDIR)":/w -v bateri-linux-cargo:/usr/local/cargo/registry \
 		-v bateri-linux-cargo-git:/usr/local/cargo/git \
-		-e CARGO_TARGET_DIR=/w/target/linux $(LINUX_IMAGE) sh -c '\
-		cargo clippy $(LINUX_CRATES) --all-targets --locked -- -D warnings && \
-		cargo test $(LINUX_CRATES) --all-targets --locked -- --include-ignored $(NOT_HEAVY)'
+		-e CARGO_TARGET_DIR=/w/target/linux $(LINUX_IMAGE) sh -c '$(LINUX_CMD)'
