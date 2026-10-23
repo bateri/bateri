@@ -3036,6 +3036,12 @@ pub(crate) mod tests {
             "the control did not hold the terminal open"
         );
         drop(kept);
+        // Not at once: a child another test forks at this moment holds every descriptor of
+        // this process until it execs, the device's among them.
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !master_says_end(&master) && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
         assert!(
             master_says_end(&master),
             "a descriptor of the device was left open"
