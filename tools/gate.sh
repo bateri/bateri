@@ -18,8 +18,8 @@
 # committing what passed keeps its stamp, and the same content is never checked twice. The
 # files a run looks at are those that differ from the last content that passed; with no
 # stamp, from the upstream's. A tier passes with nothing run when the content differs from
-# its last green one only in files no build or test reads (`UNREAD`: the README and the
-# changelog; `docs/SETTINGS.md` is read by tests and is not one).
+# its last green one only in files no build or test reads (`UNREAD`: the README, the
+# changelog and the pre-push hook; `docs/SETTINGS.md` is read by tests and is not one).
 #
 # Each step's output goes to a log under the git directory; the screen gets one line a step.
 set -u
@@ -28,7 +28,7 @@ cd "$(git rev-parse --show-toplevel)" || exit 1
 git_dir=$(git rev-parse --git-dir)
 stamp=$git_dir/bateri-gate
 logs=$git_dir/bateri-gate-logs
-UNREAD="README.md CHANGELOG.md"
+UNREAD="README.md CHANGELOG.md tools/pre-push"
 
 # The working tree as a tree object, through a copy of the index: the real one is not touched.
 index=$(mktemp)

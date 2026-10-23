@@ -15,4 +15,8 @@ while read -r local_ref local_sha _remote_ref _remote_sha; do
         status=1
     fi
 done
+if [ $status -ne 0 ]; then
+    echo "pre-push: run \`make gate-push\` and push again. A branch from before the gate (main"
+    echo "pre-push: 672e950) has no \`make gate-push\`: push it with \`git push --no-verify\`."
+fi
 exit $status
