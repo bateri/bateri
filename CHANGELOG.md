@@ -38,6 +38,12 @@ of every installed copy. A version without a section is not released.
   server come back with their programs.
   Where kablo cannot be had for a tab it opens as a plain terminal, which does not survive
   an update or a crash and asks before it closes.
+- **A launch that crashes while it brings your tabs back does not crash the next one too.**
+  The next launch brings the windows and their programs back from a picture of each screen and
+  its scrollback, without reading the terminals' output again, and that scrollback is not kept
+  for the launch after it; if this launch crashes as well, the one after opens a single fresh
+  window and leaves the programs running for a later launch, as holding ⇧ while bateri opens
+  does.
 - **A terminal a tab keeps remembers as many lines as `scrollback` says.** It costs
   memory in kablo for as long as it lives, as much as its history is long.
 

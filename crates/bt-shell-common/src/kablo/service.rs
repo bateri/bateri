@@ -414,6 +414,13 @@ pub trait Backend: Send + Sync + 'static {
         None
     }
 
+    /// Whether a terminal of this Mac shown again is read from its past ([`Hub::resume_raw`]):
+    /// `false` in a launch after one that did not settle, which may have been crashed by what
+    /// it read there. Asked as each pane is given its terminal.
+    fn shows_past(&self) -> bool {
+        true
+    }
+
     /// Whether the shells of a new terminal draw the dock (the settings' `[shell] integration`
     /// says so: `"auto"`); `false` is `"blocks"`, the marks without the dock. The same answer the
     /// Mac's own shells get, so a server is no different.
@@ -2737,10 +2744,13 @@ impl Core {
         let hold = self.hub.open_raw();
         let (terminal, silence) = match &resume {
             Some(terminal) => {
-                match self
-                    .hub
-                    .resume_raw(hold, local::ACCOUNT, terminal.clone(), size)
-                {
+                match self.hub.resume_raw(
+                    hold,
+                    local::ACCOUNT,
+                    terminal.clone(),
+                    size,
+                    self.shared.backend.shows_past(),
+                ) {
                     Ok(silence) => (terminal.clone(), Some(silence)),
                     Err(_) => {
                         self.hub.closed(hold);

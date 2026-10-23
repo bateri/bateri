@@ -99,6 +99,7 @@ impl World {
             runner: Box::new(Through(self.ssh.clone())),
             name: Some("MacBook".into()),
             history: Box::new(|| Some(5000)),
+            past: Box::new(|| true),
             masters: None,
             linked: Box::new(|_, _| ()),
             changed: Box::new(|_| ()),

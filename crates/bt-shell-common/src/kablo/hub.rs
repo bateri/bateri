@@ -54,7 +54,8 @@
 //! which were answered ([`bt_core::Silence`]) — the hub says how far that part reaches as the
 //! bytes are written, and when no more of it will come. When the server no longer has the bytes
 //! the pane is given a picture, as every pane is, and is muted for the picture and for the
-//! bytes of the answered part that follow it.
+//! bytes of the answered part that follow it. A launch after one that did not settle shows it
+//! without its past: from now on, with a picture, and the server forgets the past it had.
 
 use std::collections::{BTreeMap, VecDeque};
 
@@ -193,6 +194,9 @@ struct Hold {
     finished: bool,
     /// The past a raw holder's stream starts with ([`Hub::resume_raw`]).
     silence: Option<Arc<Silence>>,
+    /// The server is asked to forget the terminal's past once it has attached it: a raw holder
+    /// shown again without its past ([`Hub::resume_raw`]).
+    forget_past: bool,
     /// How many bytes were put in `out` since the holder was made, a raw holder's: the position
     /// of the next in its stream.
     fed: u64,
@@ -212,6 +216,7 @@ impl Hold {
             renumber: None,
             finished: false,
             silence: None,
+            forget_past: false,
             fed: 0,
         }
     }
@@ -370,6 +375,7 @@ impl Hub {
                 truncated,
                 answered,
             } => {
+                let mut forget = false;
                 if let Some(hold) = hold_of(self, terminal)
                     && let Some(entry) = self.holds.get_mut(&hold)
                     && let Some(binding) = entry.bound.as_mut()
@@ -390,10 +396,16 @@ impl Hub {
                     // past and what follows it is judged by the picture's end.
                     if let Some(silence) = entry.silence.clone() {
                         binding.answered = Some(*answered);
-                        if !truncated && *answered <= *offset {
+                        if !truncated && !asked && *answered <= *offset {
                             silence.close();
                         }
                     }
+                    forget = std::mem::take(&mut entry.forget_past);
+                }
+                // Attached now, so the request reaches the terminal: the picture it is given was
+                // made of the screen, which forgetting leaves.
+                if forget && let Some(client) = self.clients.get_mut(account) {
+                    client.forget_past(terminal);
                 }
                 return;
             }
@@ -869,12 +881,18 @@ impl Hub {
     /// is sent is the past (see the module documentation) — the owner hands it to the pane's
     /// session. The stream is nobody's yet when the server does not have the terminal: the holder
     /// is refused, as a terminal that was asked for and is not there is anywhere.
+    ///
+    /// Without `past` the holder is attached from now, with a picture of the screen, the past
+    /// for the [`Silence`], and the server is asked to forget the terminal's past once it has
+    /// attached it: the launch before this one did not settle, and what crashed it may be in
+    /// those bytes, which are then read by no bateri after this one either.
     pub fn resume_raw(
         &mut self,
         hold: HoldId,
         account: &str,
         terminal: SessionId,
         size: Size,
+        past: bool,
     ) -> Result<Arc<Silence>, Declined> {
         if !self
             .holds
@@ -886,14 +904,20 @@ impl Hub {
         let Some(client) = self.clients.get_mut(account) else {
             return Err(Declined::NoClient);
         };
-        client.attach(terminal.clone(), Attach::new(size).from(0).replaying());
+        let attach = if past {
+            Attach::new(size).from(0).replaying()
+        } else {
+            Attach::new(size).from_now().with_picture()
+        };
+        client.attach(terminal.clone(), attach);
         let silence = Silence::new();
         if let Some(entry) = self.holds.get_mut(&hold) {
             entry.silence = Some(Arc::clone(&silence));
+            entry.forget_past = !past;
         }
         // Not shown until the server attaches it: a terminal it does not have is a refusal the
         // owner answers (the pane makes a new terminal), not a line under what was shown.
-        self.bind(hold, account, terminal, 0, false, false);
+        self.bind(hold, account, terminal, 0, !past, false);
         Ok(silence)
     }
 

@@ -110,6 +110,8 @@ struct Fake {
     next_number: AtomicU64,
     /// The settings draw the dock (`[shell] integration = "auto"`).
     dock: AtomicBool,
+    /// A terminal of this Mac shown again is read from its past ([`Backend::shows_past`]).
+    past: AtomicBool,
     /// Who opened what, as the server's records say.
     records: Mutex<Vec<(crate::agent::Terminal, crate::agent::notes::Record)>>,
     /// How long reading the records takes.
@@ -143,6 +145,7 @@ impl Fake {
             letters: Mutex::new(Vec::new()),
             next_number: AtomicU64::new(0),
             dock: AtomicBool::new(true),
+            past: AtomicBool::new(true),
             records: Mutex::new(Vec::new()),
             records_take: Mutex::new(Duration::ZERO),
         })
@@ -337,6 +340,10 @@ impl Backend for Fake {
 
     fn dock(&self) -> bool {
         self.dock.load(Ordering::SeqCst)
+    }
+
+    fn shows_past(&self) -> bool {
+        self.past.load(Ordering::SeqCst)
     }
 
     /// What the real one does to a server: its relays are replaced by the ones of the
@@ -3531,6 +3538,58 @@ fn a_terminal_whose_start_the_server_no_longer_has_is_shown_as_a_picture_that_is
     // on from the picture's end with nothing owed.
     assert_eq!(past.reach(), read.len() as u64);
     second.stop();
+}
+
+#[test]
+fn after_a_launch_that_did_not_settle_a_pane_is_shown_a_picture_that_is_all_past_and_the_past_is_forgotten()
+ {
+    let back = Comeback::leaves("local-back-unsettled", b"one\r\n");
+    let id = back.terminal.clone();
+    back.world.bridge().write(&id, b"two\r\n");
+    back.world.bridge().answer_until(&id, 7);
+    back.world.past.store(false, Ordering::SeqCst);
+
+    let second = back.arrives();
+    let stream = second
+        .open_local(&back.pane, a_shell(), MAC, Duration::from_secs(15))
+        .expect("its terminal");
+    assert_eq!(back.ledger.terminals_of(local::ACCOUNT), [id.clone()]);
+    let mut mac = Pane::of(stream);
+    let past = mac.silence.clone().expect("a terminal shown again");
+    // A picture of the screen from now on, and none of the bytes it was made of.
+    let picture = Bridge::picture_of(10);
+    let read = mac.reads(&picture);
+    assert!(!read.windows(3).any(|bytes| bytes == b"one"), "{read:?}");
+    let (offset, view) = back.world.bridge().attaches(&id).pop().expect("an attach");
+    assert_eq!(offset, kablo_proto::v1::OFFSET_END);
+    assert!(view.expect("a view").picture);
+    // The picture is the past, although the server had answered the questions only up to a byte
+    // before it: it is read muted, all of it.
+    until("the past said", || past.is_closed());
+    assert_eq!(past.reach(), read.len() as u64);
+    // And the server forgets what came before it, so the bateri after this one is not given those
+    // bytes either.
+    until("the past forgotten", || {
+        back.world.bridge().forgotten(&id) == 1
+    });
+    drop(mac);
+    second.stop();
+
+    back.world.past.store(true, Ordering::SeqCst);
+    let third = back.arrives();
+    let mut mac = Pane::of(
+        third
+            .open_local(&back.pane, a_shell(), MAC, Duration::from_secs(15))
+            .expect("its terminal"),
+    );
+    let read = mac.reads(&picture);
+    assert!(!read.windows(3).any(|bytes| bytes == b"one"), "{read:?}");
+    let (offset, _) = back.world.bridge().attaches(&id).pop().expect("an attach");
+    assert_eq!(
+        offset, 0,
+        "from the first byte, which the server no longer has"
+    );
+    third.stop();
 }
 
 #[test]

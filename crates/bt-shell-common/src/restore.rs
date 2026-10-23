@@ -44,15 +44,24 @@
 //! one), created `0700`, its files `0600`. A [`Lock`] owns it: a second instance of the same
 //! bundle neither reads nor writes. [`save`] writes the histories first and the layout **last**,
 //! each through a temporary name and a `rename` — the layout's rename is the commit, so a save cut
-//! halfway leaves the previous layout readable. [`take`] reads the layout and **deletes** it
-//! before anything is replayed (a layout that crashes the launch must not come back on the next
-//! one); [`history`] reads and deletes one pane's history; [`clear`] removes everything.
+//! halfway leaves the previous layout readable. [`take`] reads the layout and leaves it where it
+//! is until the launch settles and writes its own ([`save_layout`]): a launch that crashes is read
+//! again by the next one, which is how that one shows the terminals kablo keeps again; [`history`]
+//! reads and deletes one pane's history; [`clear`] removes everything.
 //! Histories no layout names, and leftover temporaries, are swept — the palette's Recent
 //! ([`read_recent`], [`write_recent`], [`clear_recent`]) is application state that lives in the
 //! directory without being part of the layout, so the sweep and the layout's clears leave it, and
 //! `restore_windows = "off"` removes it. [`save_layout`] writes the
 //! layout alone, without histories, while bateri runs — the way back after a crash that
 //! left no saved session.
+//!
+//! **The attempt marker** ([`bump_attempt`], [`attempt_mode`]) counts the launches that read the
+//! session and never settled — a restore that crashes the launch would otherwise crash every
+//! launch after it, since the layout stays. The second attempt reads what went through a parser
+//! in the launch before again from nothing — no history, and the terminals kablo keeps come back
+//! with a picture of their screen, their past forgotten; the third reads no session, as a launch
+//! with ⇧ held does, and the terminals wait for a later one. The marker is application state like
+//! the Recent: the sweep and the clears leave it, a settled launch or a clean quit removes it.
 //!
 //! Pure except the file bodies, which are thin; it sees no AppKit (the `split`/`zoom`
 //! precedent).
@@ -1077,6 +1086,7 @@ fn sweep(lock: &Lock, keep: &HashSet<String>) {
         if name == LOCK
             || name == LAYOUT
             || name == RECENT
+            || name == ATTEMPT
             || name == LEDGER
             || name == ledger_temporary()
             || keep.contains(name)
@@ -1089,18 +1099,22 @@ fn sweep(lock: &Lock, keep: &HashSet<String>) {
     }
 }
 
-/// Reads the layout and deletes it — before anything is replayed (module doc). A missing or
-/// unreadable layout is `None`; one that does not parse is `None` and takes its histories with
-/// it. Histories the layout does not name are swept.
+/// Reads the layout and leaves it until the launch writes its own (module doc). A missing or
+/// unreadable layout is `None`; one that does not parse is `None`, deleted, and takes its
+/// histories with it. Histories the layout does not name are swept.
 ///
 /// Without `histories` (`restore_windows = "layout"`) every history is swept **unread** and no
 /// returned pane claims one: a user who said the scrollback should not come back must not see an
 /// earlier `"all"` save's once more.
 pub fn take(lock: &Lock, histories: bool) -> Option<Saved> {
     let path = lock.dir.join(LAYOUT);
-    let text = fs::read_to_string(&path);
-    let _ = fs::remove_file(&path);
-    let mut saved = text.ok().as_deref().and_then(Saved::parse);
+    let mut saved = fs::read_to_string(&path)
+        .ok()
+        .as_deref()
+        .and_then(Saved::parse);
+    if saved.is_none() {
+        let _ = fs::remove_file(&path);
+    }
     if !histories {
         for pane in saved
             .iter_mut()
@@ -1177,6 +1191,57 @@ pub fn clear(lock: &Lock) -> io::Result<()> {
     }
     sweep(lock, &HashSet::new());
     Ok(())
+}
+
+// ─── the attempt marker ──────────────────────────────────────────────────
+
+/// The attempt marker's name in the directory (the module doc).
+const ATTEMPT: &str = "restore-attempt";
+
+/// What a launch does with the saved session, from the launches before it that read it and never
+/// settled ([`bump_attempt`]'s answer).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AttemptMode {
+    /// The first attempt: everything comes back.
+    Normal,
+    /// The second: the windows come back, but nothing that went through a parser in the launch
+    /// before is read again — no history, and the terminals kablo keeps are shown a picture of
+    /// their screen, their past forgotten.
+    Safe,
+    /// The third: the session is not read, as with ⇧ held at launch; the terminals it names wait
+    /// for a later launch, untouched.
+    GiveUp,
+}
+
+/// The mode after `previous` unsettled attempts.
+pub fn attempt_mode(previous: u32) -> AttemptMode {
+    match previous {
+        0 => AttemptMode::Normal,
+        1 => AttemptMode::Safe,
+        _ => AttemptMode::GiveUp,
+    }
+}
+
+/// Counts one more attempt (`0600`, through a temporary name) and returns the count before it. A
+/// missing or unreadable marker counts as none — the wrong way is one attempt too many, never a
+/// session lost. A write that fails is not an error the launch can act on: the count before it
+/// is still the answer.
+pub fn bump_attempt(lock: &Lock) -> u32 {
+    let path = lock.dir.join(ATTEMPT);
+    let previous = fs::read_to_string(&path)
+        .ok()
+        .and_then(|text| text.trim().parse::<u32>().ok())
+        .unwrap_or(0);
+    let _ = write_atomic(
+        &path,
+        format!("{}\n", previous.saturating_add(1)).as_bytes(),
+    );
+    previous
+}
+
+/// Removes the marker: the launch settled, or bateri quit cleanly.
+pub fn clear_attempt(lock: &Lock) {
+    let _ = fs::remove_file(lock.dir.join(ATTEMPT));
 }
 
 #[cfg(test)]
@@ -2146,16 +2211,27 @@ mod tests {
             assert_eq!(mode(&dir.join(name)), 0o600);
         }
 
-        // `take` returns the layout and deletes it; the histories wait for `history`.
-        assert_eq!(take(&lock, true), Some(saved));
-        assert!(!dir.join(LAYOUT).exists());
+        // `take` returns the layout and leaves it for the launch to write over; the histories wait
+        // for `history`.
+        assert_eq!(take(&lock, true), Some(saved.clone()));
+        assert!(dir.join(LAYOUT).exists());
         assert_eq!(
             history(&lock, &id(A)).as_deref(),
             Some(&b"\x1b[1mhello\r\n"[..])
         );
         assert_eq!(history(&lock, &id(A)), None, "read once");
         assert_eq!(history(&lock, &id(B)), None);
+        // A launch that did not settle is read again by the next, without what it read.
+        assert_eq!(take(&lock, true), Some(saved));
+        assert_eq!(history(&lock, &id(A)), None);
         // Without a layout, the histories nobody read are orphans and go with the next take.
+        save_layout(
+            &lock,
+            &Saved {
+                windows: Vec::new(),
+            },
+        )
+        .expect("no windows");
         assert_eq!(take(&lock, true), None);
         assert_eq!(names(&dir), vec!["lock".to_owned()]);
 
@@ -2217,7 +2293,10 @@ mod tests {
         );
         save(&lock, &saved, &[(id(A), b"secret".to_vec())]).expect("save");
         let taken = take(&lock, false).expect("the layout still comes back");
-        assert_eq!(names(lock.dir()), vec!["lock".to_owned()]);
+        assert_eq!(
+            names(lock.dir()),
+            vec!["layout".to_owned(), "lock".to_owned()]
+        );
         assert!(
             taken
                 .windows
@@ -2238,6 +2317,39 @@ mod tests {
             pane.history = false;
         }
         assert_eq!(taken, expected);
+    }
+
+    #[test]
+    fn the_attempt_marker_counts_until_cleared_and_outlasts_the_layouts_clears() {
+        let root = TempRoot::new("restore-attempt");
+        let lock = lock(&root.0.join("s")).expect("lock");
+        assert_eq!(bump_attempt(&lock), 0);
+        assert_eq!(mode(&lock.dir().join(ATTEMPT)), 0o600);
+        assert_eq!(bump_attempt(&lock), 1);
+        // A launch that clears the layout, takes it or sweeps does not settle anything.
+        save(&lock, &rich(), &[(id(A), b"x".to_vec())]).expect("save");
+        let _ = take(&lock, true);
+        clear(&lock).expect("clear");
+        assert_eq!(bump_attempt(&lock), 2);
+        assert_eq!(bump_attempt(&lock), 3);
+        clear_attempt(&lock);
+        clear_attempt(&lock);
+        assert_eq!(bump_attempt(&lock), 0);
+        fs::write(lock.dir().join(ATTEMPT), b"garbage").expect("garbage");
+        assert_eq!(
+            bump_attempt(&lock),
+            0,
+            "an unreadable marker counts as none"
+        );
+        assert_eq!(
+            [0, 1, 2, 7].map(attempt_mode),
+            [
+                AttemptMode::Normal,
+                AttemptMode::Safe,
+                AttemptMode::GiveUp,
+                AttemptMode::GiveUp
+            ]
+        );
     }
 
     /// The ledger of kept terminals is not a layout: a clear, a take and the sweeps leave it

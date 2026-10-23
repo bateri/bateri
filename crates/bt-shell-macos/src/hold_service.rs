@@ -463,6 +463,18 @@ const LAUNCH_PANE_WAIT: Duration = Duration::from_secs(30);
 /// Whether the launch is still building its first windows ([`launch_over`]).
 static LAUNCHING: AtomicBool = AtomicBool::new(true);
 
+/// Whether the terminals of this Mac this launch shows again are read from their past
+/// ([`without_past`]).
+static PAST: AtomicBool = AtomicBool::new(true);
+
+/// The launch before this one did not settle: the terminals of this Mac it shows again come back
+/// with a picture of their screen and without their past, which kablo then forgets
+/// ([`bt_shell_common::kablo::service::Backend::shows_past`]). Said before the first pane asks
+/// for its terminal; read as each one does.
+pub(crate) fn without_past() {
+    PAST.store(false, Ordering::Release);
+}
+
 /// The launch's first windows are built, whatever became of them: the main queue is not busy
 /// with them any more.
 pub(crate) fn launch_over() {
@@ -564,6 +576,7 @@ pub(crate) fn serve(
         runner: Box::new(ssh_route::SystemSsh),
         name: computer_name(),
         history: Box::new(history),
+        past: Box::new(|| PAST.load(Ordering::Acquire)),
         masters,
         linked: Box::new(link_changed),
         changed: Box::new(terminal_changed),

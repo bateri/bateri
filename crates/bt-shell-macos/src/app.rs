@@ -619,13 +619,19 @@ fn gone_with_its_terminal(pane: &SavedPane, start: &Launch) -> bool {
 }
 
 /// How long after the first windows are built a launch counts as settled
-/// ([`AppDelegate::settled`]): the layout starts going to disk. Not counted in
+/// ([`AppDelegate::settled`]): the layout starts going to disk and the attempt marker goes
+/// ([`restore::clear_attempt`]). Not counted in
 /// frames — a background tab, a pane hidden by a zoom or a sleeping display
 /// draws none, and a launch with two tabs would never settle. What can still
 /// crash a launch after its windows are built is the readers parsing the past
-/// of each terminal shown again, which takes a fraction of this; a crash later
-/// than this is another fault than the restore. A design constant.
+/// of each terminal shown again, which takes a fraction of this, and the launch waits for them
+/// ([`SETTLE_TRIES`]); a crash later than that is another fault than the restore. A design
+/// constant.
 const SETTLE_DELAY: Duration = Duration::from_secs(5);
+
+/// How many [`SETTLE_DELAY`]s a launch waits at most for the panes that still read the past of
+/// their terminals: a minute, the bound a pane gives a past that is never said to be complete.
+const SETTLE_TRIES: u32 = 12;
 
 /// How long the system waits before it shows ⌘Q's reminder that programs
 /// keep running ([`AppDelegate::leave_quit_notice`]). A notification arriving
@@ -1031,9 +1037,13 @@ pub(crate) struct Ivars {
     /// Sparkle's install handler while the relaunch waits for the transfers
     /// and the password sheets to end ([`AppDelegate::postpone_update`]).
     postponed_update: RefCell<Option<RcBlock<dyn Fn()>>>,
-    /// ⇧ was held when this launch began ([`shift_held_at_launch`]): nothing is
+    /// ⇧ was held when this launch began ([`shift_held_at_launch`]), or the two launches before
+    /// it read the session and never settled ([`restore::AttemptMode::GiveUp`]): nothing is
     /// restored.
-    skip_restore: bool,
+    skip_restore: Cell<bool>,
+    /// The launch before this one read the session and never settled
+    /// ([`restore::AttemptMode::Safe`]): what went through a parser then is not read again.
+    safe_restore: Cell<bool>,
     /// This launch is the arrival of an update from the bateri before kablo: its update's
     /// holder was waiting ([`retired_holders::update_waiting`]). The ledger of that bateri does
     /// not say it left to be updated, and this is what does.
@@ -2603,7 +2613,8 @@ impl AppDelegate {
             terminating: Cell::new(false),
             powering_off: Cell::new(false),
             postponed_update: RefCell::new(None),
-            skip_restore,
+            skip_restore: Cell::new(skip_restore),
+            safe_restore: Cell::new(false),
             old_update,
             layout_writer: Cell::new(false),
             layout_save_pending: Cell::new(false),
@@ -3080,25 +3091,43 @@ impl AppDelegate {
         if self.ivars().run.is_some() {
             return;
         }
+        self.settle_after(0);
+    }
+
+    /// [`AppDelegate::settle_later`]'s clock, `tries` delays in: a pane that still reads the past
+    /// of its terminal can still crash the launch with it, and is waited for, at most
+    /// [`SETTLE_TRIES`] delays.
+    fn settle_after(&self, tries: u32) {
         let Ok(when) = DispatchTime::try_from(SETTLE_DELAY) else {
             self.settled();
             return;
         };
-        let _ = DispatchQueue::main().after(when, || {
+        let _ = DispatchQueue::main().after(when, move || {
             // audit: a block running on the main queue is on the main thread by definition.
             let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
             if let Some(app) = delegate(mtm) {
-                app.settled();
+                let replaying = app
+                    .all_panes()
+                    .iter()
+                    .any(|pane| pane.session().is_some_and(|session| session.replaying()));
+                if replaying && tries + 1 < SETTLE_TRIES {
+                    app.settle_after(tries + 1);
+                } else {
+                    app.settled();
+                }
             }
         });
     }
 
-    /// The launch settled: what it restored did not crash it, so the layout
-    /// starts going to disk on its edges — written once now, so a crash before
-    /// the next edge still finds it. Not before: the layout file is read and
-    /// deleted before a restore replays anything, and writing it back during a
-    /// restore that crashes would bring the same restore back on every launch.
+    /// The launch settled: what it restored did not crash it, so the attempt marker goes and the
+    /// layout starts going to disk on its edges — written once now, so a crash before the next
+    /// edge still finds it. Not before: the layout file stays as the launch read it until now,
+    /// and writing it during a restore that crashes would bring that restore back; the marker
+    /// is what makes the launch after such a crash read less of it ([`restore::attempt_mode`]).
     fn settled(&self) {
+        if let Some(lock) = self.ivars().restore_lock.borrow().as_ref() {
+            restore::clear_attempt(lock);
+        }
         self.ivars().layout_writer.set(true);
         self.save_layout();
     }
@@ -4136,8 +4165,8 @@ impl AppDelegate {
     /// over either (the next launch shows them); otherwise the directory's lock
     /// is taken for the save at quit.
     fn restore_or_open(&self) -> Result<(), String> {
-        let skipping = self.ivars().skip_restore;
         let opened = self.restore_or_open_windows();
+        let skipping = self.ivars().skip_restore.get();
         crate::hold_service::launch_over();
         // The first windows are built and every pane of them has asked for its terminal: what
         // the bateri before left on this Mac and none of them showed again is a program running
@@ -4162,6 +4191,33 @@ impl AppDelegate {
         // shares the ledger but owns nothing of it, and decides nothing about what the bateri
         // before left.
         let lock = self.restore_lock();
+        // A launch that reads the session is counted until it settles: the launches before it
+        // that read it and never settled say how much of it is read again.
+        if let Some(lock) = lock.as_ref()
+            && !self.ivars().skip_restore.get()
+        {
+            match restore::attempt_mode(restore::bump_attempt(lock)) {
+                restore::AttemptMode::Normal => {}
+                restore::AttemptMode::Safe => {
+                    eprintln!(
+                        "bateri: the launch before did not settle; its terminals come back \
+                         without their past"
+                    );
+                    self.ivars().safe_restore.set(true);
+                    crate::hold_service::without_past();
+                }
+                restore::AttemptMode::GiveUp => {
+                    eprintln!(
+                        "bateri: the two launches before did not settle; the saved windows \
+                         wait for the next launch"
+                    );
+                    // Nothing of the session is read, so nothing of it can crash this launch:
+                    // the next one reads it all again.
+                    restore::clear_attempt(lock);
+                    self.ivars().skip_restore.set(true);
+                }
+            }
+        }
         // `keep_running = "update"`: a crash leaves the terminals kablo keeps behind and this
         // launch ends them, unless the programs came over (an update's relaunch, which wrote
         // that it was, or the update of the bateri before kablo, whose holder was waiting):
@@ -4174,7 +4230,7 @@ impl AppDelegate {
         {
             crate::hold_service::end_leftovers();
         }
-        if self.ivars().skip_restore {
+        if self.ivars().skip_restore.get() {
             // The terminals that wait to be shown are named by the saved session, which this
             // launch does not read: it must not write a session of its own over it, or the
             // next launch would find them nobody's.
@@ -4228,7 +4284,8 @@ impl AppDelegate {
                 let _ = restore::clear_recent(&lock);
                 None
             }
-            RestoreWindows::All => restore::take(&lock, true),
+            // The histories went through a parser in the launch that did not settle.
+            RestoreWindows::All => restore::take(&lock, !self.ivars().safe_restore.get()),
             RestoreWindows::Layout => restore::take(&lock, false),
         };
         self.ivars().restore_lock.replace(Some(lock));
@@ -4388,6 +4445,8 @@ impl AppDelegate {
         let Some(lock) = self.ivars().restore_lock.take() else {
             return;
         };
+        // A clean quit is no crash of a restore.
+        restore::clear_attempt(&lock);
         // `"off"` is no windows coming back — but the terminals this quit keeps running need
         // windows to be shown in: their layout is saved, without scrollback.
         let keeps = !self.ivars().end_kept.get() && self.any_kept_terminal();
@@ -9414,11 +9473,34 @@ mod tests {
             "only the owner of the session directory ends what the bateri before left"
         );
         assert!(body[..leftovers].contains("self.ivars().old_update"));
-        let skip = body.find("self.ivars().skip_restore").expect("the skip");
+        let skip = body
+            .find("if self.ivars().skip_restore.get()")
+            .expect("the skip");
         assert!(
             body[skip..].contains("keeps_local()"),
             "a skipped launch with terminals waiting gives up the lock"
         );
+    }
+
+    /// A launch that reads the session is counted first, and only a settled launch or a clean
+    /// quit takes the count back: the launch after a restore that crashed reads less of it. A
+    /// source scan, because the launch needs a window server.
+    #[test]
+    fn a_launch_is_counted_before_it_reads_the_session_until_it_settles_or_quits() {
+        let app = include_str!("app.rs");
+        let body_of = |name: &str| {
+            let at = app.find(name).expect(name);
+            &app[at..at + app[at..].find("\n    }\n").expect("its end")]
+        };
+        let windows = body_of("    fn restore_or_open_windows(");
+        let count = windows.find("restore::bump_attempt(").expect("the count");
+        let read = windows.find("self.take_saved(").expect("the read");
+        assert!(
+            count < read,
+            "counted before anything of the session is read"
+        );
+        assert!(body_of("    fn settled(").contains("restore::clear_attempt("));
+        assert!(body_of("    fn save_session(").contains("restore::clear_attempt("));
     }
 
     #[test]

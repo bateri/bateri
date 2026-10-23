@@ -94,6 +94,9 @@ pub struct SshBackend {
     pub name: Option<String>,
     /// The scrollback a terminal on a server keeps.
     pub history: Box<dyn Fn() -> Option<u32> + Send + Sync>,
+    /// Whether a terminal of this Mac shown again is read from its past
+    /// ([`Backend::shows_past`]).
+    pub past: Box<dyn Fn() -> bool + Send + Sync>,
     /// The application's masters: what makes the connection again, with the
     /// password the Keychain keeps, when the one the user made is gone. `None`:
     /// only what `ssh` can do without a person (a key, an agent).
@@ -391,6 +394,10 @@ impl Backend for SshBackend {
 
     fn history(&self) -> Option<u32> {
         (self.history)()
+    }
+
+    fn shows_past(&self) -> bool {
+        (self.past)()
     }
 
     fn dock(&self) -> bool {
