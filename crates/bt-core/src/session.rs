@@ -2689,14 +2689,18 @@ impl io::Read for TappedPty {
                 }
                 return;
             }
-            let answers = key_gen.load(Ordering::Acquire);
-            let outcome = lock(&self.shell).apply_scan_answering(event, answers);
             // The past of a terminal shown again ([`Silence`]) builds the state — the blocks,
             // the phase, the remote session — and raises no edge: a command that ended before
             // the bateri was here is not news (a tab would show it as finished, a
             // notification would come again). The owner reads the state once the past is read
-            // ([`Session::replaying`]).
+            // ([`Session::replaying`]). A notification is no state: kept, the past's would be
+            // taken with the next one the program asks for.
             let past = adapter.0.replaying.load(Ordering::Acquire);
+            if past && matches!(event, ScanEvent::Notify(_)) {
+                return;
+            }
+            let answers = key_gen.load(Ordering::Acquire);
+            let outcome = lock(&self.shell).apply_scan_answering(event, answers);
             if outcome.title {
                 wake.title_changed();
             }
@@ -2737,7 +2741,7 @@ impl io::Read for TappedPty {
             if outcome.status {
                 wake.program_status_changed();
             }
-            if outcome.notified && !past {
+            if outcome.notified {
                 wake.notification();
             }
             if outcome.prompt
@@ -14014,7 +14018,7 @@ mod tests {
         bytes.extend_from_slice(b"\x1b[c");
         // OSC 52, the clipboard: the text "x" in base64.
         bytes.extend_from_slice(b"\x1b]52;c;eA==\x07");
-        bytes.extend_from_slice(b"\x1b]9;a note\x07");
+        bytes.extend_from_slice(format!("\x1b]9;note of {word}\x07").as_bytes());
         bytes.extend_from_slice(word.as_bytes());
         bytes.extend_from_slice(b"\r\n");
         bytes
@@ -14069,6 +14073,15 @@ mod tests {
         assert_eq!(state.copies, ["x"], "only the live copy");
         assert_eq!(state.notes, 1);
         drop(state);
+        // And the past's notification is not kept to be taken with the live one: it would come
+        // again with the next notification the program asks for.
+        let bodies: Vec<String> = terminal
+            .session
+            .take_notifications()
+            .into_iter()
+            .map(|note| note.body)
+            .collect();
+        assert_eq!(bodies, ["note of new_stretch"]);
         assert!(!terminal.session.replaying());
     }
 
