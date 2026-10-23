@@ -78,7 +78,7 @@ mod wake;
 
 pub use cluster::{ClusterId, Clusters};
 pub use color::{LinearRgba, Theme, contrast_ratio};
-pub use commands::{CommandId, CommandNews, CommandPhase, CommandState, news as command_news};
+pub use commands::{CommandId, CommandPhase, CommandState};
 pub use dock::{
     Dock, DockBudget, DockButton, DockCaret, DockCols, DockEdit, EDIT_MAX, EditCells,
     FooterControl, FooterHit, PORTS_GLYPHS, PROGRAM_GLYPHS, STATS_GLYPHS, STATS_THRESHOLDS,
@@ -91,7 +91,7 @@ pub use identity::{LC_TERMINAL, PaneUuid, TERM_PROGRAM, TERM_PROGRAM_VERSION, pa
 pub use input::{Arrow, FunctionKey, MouseButton, MouseModifiers, TextKey};
 pub use notify::Notification;
 pub use pointer::PointerShape;
-pub use program_status::{ProgramActivity, ProgramRecord, State as ProgramState};
+pub use program_status::{ProgramActivity, State as ProgramState};
 pub use reset::keeping_history as reset_keeping_history;
 pub use search::{
     SearchCover, SearchDirection, SearchQuery, SearchReport, SearchRun, SearchRuns, SearchStatus,

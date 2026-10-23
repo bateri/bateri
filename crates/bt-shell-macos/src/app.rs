@@ -4104,7 +4104,6 @@ impl AppDelegate {
             reduce_motion: self.reduce_motion(),
             smooth_scroll: self.smooth_scroll(),
             scrollbar: self.scrollbar_mode(),
-            follow_window: false,
             run: self.ivars().run,
             stats: self.stats(),
             held,

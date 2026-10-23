@@ -268,16 +268,6 @@ pub trait Wake: Send + Sync + 'static {
     /// above apply. The implementor posts **at most one** job to its queue.
     fn program_status_changed(&self);
 
-    /// The terminal's bell rang (`BEL` outside a sequence). bateri's own tabs
-    /// ignore it; a host embedding the pane may show it.
-    ///
-    /// **Edge-triggered and payload-free** (the precedent is
-    /// [`Wake::title_changed`]): a program can ring it in a loop, so the
-    /// implementor posts **at most one** job to its queue. It arrives on the
-    /// reader thread **while the `Term` lock is held**; the three prohibitions
-    /// above apply. A bell the past of a stream rang is not passed on.
-    fn bell(&self);
-
     /// A program asked for a notification (`OSC 9 ; text` or `OSC 777 ;
     /// notify ; …`): the receiver takes them with
     /// [`crate::Session::take_notifications`]. bateri's own tabs show none.

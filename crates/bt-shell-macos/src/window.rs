@@ -3166,8 +3166,6 @@ impl TerminalWindow {
                 })
                 .collect(),
             asking: !self.selection_free(),
-            // A window whose last tab leaves closes: bateri has no window without a tab.
-            stays_empty: false,
             // The title row's bar shows one group at a time; the column lists them all.
             one_cluster: !self.bar().is_side(),
         }

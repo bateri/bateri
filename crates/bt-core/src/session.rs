@@ -2460,8 +2460,9 @@ impl EventListener for Adapter {
             // the next `set_options` or OSC 0/2.
             Event::Title(title) => self.store_title(Some(title)),
             Event::ResetTitle => self.store_title(None),
-            // There is no bell in this set; it is silently dropped like an
-            // unknown sequence (no panic in the PTY path). The
+            // The bell (`BEL` outside a sequence) is dropped — bateri neither
+            // rings nor flashes — like an unknown sequence (no panic in the PTY
+            // path). The
             // second half of the "ignored and LOGGED" rule is debt: `tracing` is
             // not yet a dependency, there is no logger in the workspace —
             // alacritty's own `log::error!` lines fall to the floor for the same
@@ -2478,14 +2479,10 @@ impl EventListener for Adapter {
             // does not move (at the end of the history) and on every change of
             // the mouse reporting mode (DECSET 1000/1002/1003), i.e. it would
             // produce empty frames.
-            // The bell (`BEL` outside a sequence): bateri's tabs ignore it, a host
-            // embedding the pane hears it. Not one the past of a stream rang hours ago.
-            Event::Bell => {
-                if !self.0.muted.load(Ordering::Acquire) {
-                    self.0.wake.bell();
-                }
-            }
-            Event::ClipboardLoad(..) | Event::MouseCursorDirty | Event::CursorBlinkingChange => {}
+            Event::Bell
+            | Event::ClipboardLoad(..)
+            | Event::MouseCursorDirty
+            | Event::CursorBlinkingChange => {}
         }
     }
 }
@@ -2900,7 +2897,7 @@ pub struct Stream {
 ///
 /// The bytes before [`Silence::extend`]'s position are parsed with the session muted
 /// ([`AdapterInner::muted`]): the questions in them are not answered — the program was told
-/// long ago, or has stopped waiting —, a copy to the clipboard or a bell is not repeated, the
+/// long ago, or has stopped waiting —, a copy to the clipboard or a notification is not repeated, the
 /// view protocol's frames are not answered, and a command that started or ended then raises no
 /// edge for the tab to show. The bytes after are the program's now, in every way.
 ///
@@ -9863,14 +9860,6 @@ impl Session {
         lock(&self.shell).notes.take()
     }
 
-    /// Every program status record (`OSC 7501`, or `OSC 9;4` standing in for the root one), by
-    /// id: its state and its progress — what a host embedding the pane shows of a program that
-    /// reports. Its news is [`Wake::program_status_changed`]. One leaf-lock round.
-    ///
-    pub fn program_records(&self) -> Vec<crate::ProgramRecord> {
-        lock(&self.shell).program.records()
-    }
-
     /// The name the reporting program gave itself (`app=` of `OSC 7501`): the root
     /// record's, else the latest record's that has one; `None` when no record does. A
     /// restricted name of at most 32 bytes **to be looked up in a table, never shown** — what
@@ -9881,21 +9870,13 @@ impl Session {
         lock(&self.shell).program.app().map(str::to_owned)
     }
 
-    /// The newest command as the shell's ledger knows it ([`CommandState`]) — what a host
-    /// that reports commands one by one looks at on every activity edge
-    /// ([`crate::command_news`]). Our remote shell's while its session runs, else the local
-    /// shell's; `None` before any prompt. One leaf-lock round; `Term` is not touched.
+    /// The newest command as the shell's ledger knows it ([`CommandState`]). Our remote shell's
+    /// while its session runs, else the local shell's; `None` before any prompt. One leaf-lock
+    /// round; `Term` is not touched.
     ///
     pub fn last_command(&self) -> Option<CommandState> {
         let log = lock(&self.shell);
         command_state(&log, log.last_block()?)
-    }
-
-    /// Command `id` as the ledger knows it now; `None` once the ledger has let it go. One
-    /// leaf-lock round.
-    ///
-    pub fn command(&self, id: CommandId) -> Option<CommandState> {
-        command_state(&lock(&self.shell), id.0)
     }
 
     /// Command `id`'s line as the screen shows it — its prompt's rows joined
@@ -13244,8 +13225,6 @@ mod tests {
         remote_edges: u32,
         /// How many times [`Wake::program_status_changed`] came.
         statuses: u32,
-        /// How many times [`Wake::bell`] came.
-        bells: u32,
         /// How many times [`Wake::notification`] came.
         notes: u32,
         /// How many times [`Wake::view_changed`] came.
@@ -13385,11 +13364,6 @@ mod tests {
 
         fn program_status_changed(&self) {
             self.state.lock().unwrap().statuses += 1;
-            self.cond.notify_all();
-        }
-
-        fn bell(&self) {
-            self.state.lock().unwrap().bells += 1;
             self.cond.notify_all();
         }
 
@@ -14032,15 +14006,14 @@ mod tests {
         assert_eq!(terminal.wake.wait_exit(Duration::from_secs(8)), Some(None));
     }
 
-    /// Everything a program can make a terminal do besides drawing: a question, a copy, a bell,
-    /// a notification, each followed by a word that says which stretch it was in.
+    /// Everything a program can make a terminal do besides drawing: a question, a copy, a
+    /// notification, each followed by a word that says which stretch it was in.
     fn doings(word: &str) -> Vec<u8> {
         let mut bytes = Vec::new();
         // Device attributes: a question the session would answer with a line of its own.
         bytes.extend_from_slice(b"\x1b[c");
         // OSC 52, the clipboard: the text "x" in base64.
         bytes.extend_from_slice(b"\x1b]52;c;eA==\x07");
-        bytes.extend_from_slice(b"\x07");
         bytes.extend_from_slice(b"\x1b]9;a note\x07");
         bytes.extend_from_slice(word.as_bytes());
         bytes.extend_from_slice(b"\r\n");
@@ -14081,8 +14054,8 @@ mod tests {
 
         let text = wait_text(&terminal.session, "new_stretch");
         assert!(text.contains("old_stretch"), "{text}");
-        // The past is on the screen and did nothing: one question answered, one copy, one bell,
-        // one notification — the live stretch's.
+        // The past is on the screen and did nothing: one question answered, one copy, one
+        // notification — the live stretch's.
         let typed = typed_into(&mut terminal.terminal, 7);
         assert_eq!(
             typed
@@ -14094,7 +14067,6 @@ mod tests {
         );
         let state = terminal.wake.state.lock().unwrap();
         assert_eq!(state.copies, ["x"], "only the live copy");
-        assert_eq!(state.bells, 1);
         assert_eq!(state.notes, 1);
         drop(state);
         assert!(!terminal.session.replaying());
@@ -14125,15 +14097,15 @@ mod tests {
         assert_eq!(typed_into(&mut terminal.terminal, 1), b"");
         let state = terminal.wake.state.lock().unwrap();
         assert!(state.copies.is_empty());
-        assert_eq!((state.bells, state.notes), (0, 0));
+        assert_eq!(state.notes, 0);
         drop(state);
         terminal
             .terminal
-            .write_all(b"\x07live\r\n")
+            .write_all(b"\x1b]9;now\x07live\r\n")
             .expect("written");
         wait_text(&terminal.session, "live");
-        wait_until("the bell", Duration::from_secs(8), || {
-            terminal.wake.state.lock().unwrap().bells == 1
+        wait_until("the live notification", Duration::from_secs(8), || {
+            terminal.wake.state.lock().unwrap().notes == 1
         });
     }
 
@@ -25420,10 +25392,10 @@ e\\314\\201.'; sleep 5";
     }
 
     #[test]
-    fn a_programs_bell_and_notifications_reach_the_wake_and_wait_to_be_taken() {
+    fn a_programs_notifications_reach_the_wake_and_wait_to_be_taken() {
         let wake = Arc::new(TestWake::default());
         let session = spawn_session(
-            "printf '\\007\\033]9;build ready\\007\\033]9;4;1;50\\007             \\033]777;notify;CI;tests passed\\033\\\\'; sleep 5",
+            "printf '\\033]9;build ready\\007\\033]9;4;1;50\\007             \\033]777;notify;CI;tests passed\\033\\\\'; sleep 5",
             Arc::clone(&wake),
         );
         let state = wake
@@ -25431,11 +25403,11 @@ e\\314\\201.'; sleep 5";
             .wait_timeout_while(
                 wake.state.lock().unwrap(),
                 Duration::from_secs(5),
-                |state| state.bells == 0 || state.notes == 0,
+                |state| state.notes == 0,
             )
             .unwrap()
             .0;
-        assert!(state.bells >= 1, "the bell rang");
+        assert!(state.notes >= 1, "a notification came");
         drop(state);
         let deadline = Instant::now() + Duration::from_secs(5);
         let mut notes = Vec::new();

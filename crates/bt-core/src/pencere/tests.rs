@@ -60,7 +60,6 @@ impl Wake for CountingWake {
     fn blocks_changed(&self) {}
     fn unseen_changed(&self) {}
     fn program_status_changed(&self) {}
-    fn bell(&self) {}
     fn notification(&self) {}
     fn view_changed(&self) {
         self.changes.fetch_add(1, Ordering::AcqRel);

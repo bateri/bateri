@@ -1,29 +1,28 @@
 //! Opening a terminal pane — the one way a pane comes to be. bateri's tabs open theirs here, and
-//! so does an application that hosts a pane in a view of its own: the same birth, the same
-//! events, and nothing of bateri's application object on the way.
+//! so do the tests that open a pane with no application object: the same birth, the same events,
+//! and nothing of bateri's application on the way. A pane that reached into the application
+//! (`app::delegate()`) would work in a tab and silently not where there is none.
 //!
-//! **What a host gives** ([`Config`]): an id for the pane, unique for the process's life; the
+//! **What an owner gives** ([`Config`]): an id for the pane, unique for the process's life; the
 //! owner that hears its events ([`Host`]); who the application is ([`Identity`]: its name, the
 //! helper program the shell integration asks, the integration's scripts); the settings and the
 //! theme; where the shell starts and what it is first given. [`Config::new`] fills the rest the
 //! way bateri does — the shell integration from the identity and the settings, motion and the
 //! scroll bar from the settings and the system.
 //!
-//! **What a host is told** ([`Host`]): every event a pane has for its owner, on the main thread,
-//! with the pane's id. No event has a default a host could forget to answer, except the three
-//! whose default is a working answer (the remote copy goes to the general pasteboard; a pane
-//! that is never moved between owners hears no move; a link the host does not take is opened by
-//! the pane as bateri opens it).
+//! **What an owner is told** ([`Host`]): every event a pane has for its owner, on the main
+//! thread, with the pane's id. Only the events whose default is a working answer have one (the
+//! remote copy goes to the general pasteboard; a pane that is never moved between owners hears no
+//! move).
 //!
-//! **What a host does after [`open`]**: it puts the pane — an `NSView` — in its view hierarchy,
+//! **What an owner does after [`open`]**: it puts the pane — an `NSView` — in its view hierarchy,
 //! tells it its frame is set ([`TerminalPane::observe_frame`]) and starts its shell
-//! ([`TerminalPane::start`]); [`TerminalPane::close`] ends it. The pane follows its window by
-//! itself ([`Config::follow_window`]); when the host hides or shows the pane or a view above it,
-//! it says so ([`TerminalPane::refresh_visibility`]) — no notification tells a view that.
+//! ([`TerminalPane::start`]); [`TerminalPane::close`] ends it. The owner tells the pane what its
+//! window does (key, occlusion, scale, a question ending) through the pane's own methods.
 //!
 //! **A pane is found by its id** ([`pane`]): the jobs a pane sends to the main queue from its
-//! reader thread and its background work find it here, whoever its host is. A pane opened here is
-//! found until its closing begins.
+//! reader thread and its background work find it here, whoever its owner is. A pane opened here
+//! is found until its closing begins.
 
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -45,7 +44,7 @@ use crate::pane::PaneLaunch;
 
 pub use crate::footer::ListeningPort;
 pub use crate::launch::{Identity, Integration};
-pub use crate::pane::{LinkRequest, PaneHost as Host, TerminalPane};
+pub use crate::pane::{PaneHost as Host, TerminalPane};
 pub use crate::sheets::{Cover, Owner, OwnerSlot, WeakCover};
 pub use bt_shell_common::jobs::Foreground;
 pub use bt_shell_common::notices::Source;
@@ -90,10 +89,6 @@ pub struct Config {
     pub smooth_scroll: bool,
     /// The scroll bar's form, resolved.
     pub scrollbar: ScrollbarMode,
-    /// Whether the pane follows its window by itself ([`TerminalPane::follow_window`]):
-    /// its focus, drawing, scale and parked questions. bateri's window does it for its
-    /// panes; a host that only places the pane in a view leaves it on.
-    pub follow_window: bool,
     /// bateri's timed run's recipe; `None` → interactive.
     pub(crate) run: Option<Run>,
     /// bateri's measurement ledger (the timed run's `BT_FRAME_STATS`).
@@ -123,7 +118,6 @@ impl Config {
             smooth_scroll: launch::smooth_scroll(&settings, reduce_motion),
             scrollbar: launch::scrollbar(settings.scrollbar, || launch::overlay_scrollers(mtm)),
             reduce_motion,
-            follow_window: true,
             id,
             host,
             identity,
@@ -210,7 +204,6 @@ pub fn open(
         reduce_motion,
         smooth_scroll,
         scrollbar,
-        follow_window,
         run,
         stats,
         held,
@@ -243,9 +236,6 @@ pub fn open(
             identity,
         },
     )?;
-    if follow_window {
-        pane.follow_window();
-    }
     OPENED.with(|opened| opened.borrow_mut().push((id, Weak::new(&pane))));
     Ok(pane)
 }

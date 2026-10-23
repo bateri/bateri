@@ -737,8 +737,6 @@ impl bt_core::Wake for SilentWake {
     fn unseen_changed(&self) {}
     fn program_status_changed(&self) {}
 
-    fn bell(&self) {}
-
     fn notification(&self) {}
 }
 

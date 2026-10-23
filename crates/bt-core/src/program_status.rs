@@ -3,11 +3,10 @@
 //! terminal keeps one record per id.
 //!
 //! **What is kept and what is not.** A record holds its state, when it entered
-//! it, its `progress` — a number from 0 to 100 a host embedding the pane shows
-//! ([`crate::Session::program_records`]) — and its `app`. `kind`, `app`, `title`
-//! and `msg` are **validated** (a report that breaks a limit, fails to decode or
-//! carries a control character is discarded whole, as the protocol says); `kind`,
-//! `title` and `msg` are not stored: nothing shows them yet, and a text nobody
+//! it, and its `app`. `kind`, `progress`, `app`, `title` and `msg` are
+//! **validated** (a report that breaks a limit, fails to decode or carries a
+//! control character is discarded whole, as the protocol says); `kind`,
+//! `progress`, `title` and `msg` are not stored: nothing shows them yet, and a text nobody
 //! reads is attack surface for nothing. When a surface shows `msg` or `title` it
 //! stores them then, and neutralizes bidirectional and invisible formatting
 //! characters on the way out.
@@ -122,8 +121,6 @@ pub(crate) enum Report {
     Set {
         id: String,
         state: State,
-        /// From 0 to 100; `None` when the report gives none.
-        progress: Option<u8>,
         /// The validated `app` name ([`MAX_APP`] bytes of [`name_byte`]s);
         /// `None` when the report gives none or an empty one.
         app: Option<String>,
@@ -175,10 +172,9 @@ pub(crate) fn parse(payload: &[u8], decoded: &mut Vec<u8>) -> Option<Report> {
     {
         return None;
     }
-    let progress = match progress {
-        Some(value) => Some(percent(value)?),
-        None => None,
-    };
+    if let Some(value) = progress {
+        percent(value)?;
+    }
     let app = match app {
         Some(value) if !(value.len() <= MAX_APP && value.iter().copied().all(name_byte)) => {
             return None;
@@ -198,7 +194,6 @@ pub(crate) fn parse(payload: &[u8], decoded: &mut Vec<u8>) -> Option<Report> {
     Some(Report::Set {
         id,
         state: State::parse(state)?,
-        progress,
         app,
     })
 }
@@ -219,38 +214,24 @@ fn percent(value: &[u8]) -> Option<u8> {
 /// root record: `0` clears it; `1` (a value), `3` (indeterminate) and `4`
 /// (paused, with or without a value) are work; `2` (the red bar) is a failure.
 /// `None` for what is not a progress report — a notification text, an unknown
-/// state, a missing one. The percentage is read where the state carries one
-/// (`1`, `2`, `4`); one that is missing or not 0 to 100 is no percentage, not a
-/// reason to drop the report — the bar's state is what the ring shows.
+/// state, a missing one. The percentage is not read: the bar's state is what the
+/// ring shows.
 pub(crate) fn progress(payload: &[u8]) -> Option<Report> {
     let mut fields = payload.split(|&byte| byte == b';');
     if fields.next()? != b"4" {
         return None;
     }
     let root = String::new;
-    let state = fields.next()?;
-    let value = fields.next().and_then(percent);
-    Some(match state {
-        b"0" => Report::Clear { id: root() },
-        b"1" | b"4" => Report::Set {
-            id: root(),
-            state: State::Working,
-            progress: value,
-            app: None,
-        },
-        b"3" => Report::Set {
-            id: root(),
-            state: State::Working,
-            progress: None,
-            app: None,
-        },
-        b"2" => Report::Set {
-            id: root(),
-            state: State::Error,
-            progress: value,
-            app: None,
-        },
+    let state = match fields.next()? {
+        b"0" => return Some(Report::Clear { id: root() }),
+        b"1" | b"3" | b"4" => State::Working,
+        b"2" => State::Error,
         _ => return None,
+    };
+    Some(Report::Set {
+        id: root(),
+        state,
+        app: None,
     })
 }
 
@@ -295,8 +276,6 @@ fn text(value: &[u8], limit: usize, decoded: &mut Vec<u8>) -> Option<()> {
 #[derive(Clone, Debug)]
 struct Record {
     state: State,
-    /// From 0 to 100, as its last report said; `None` when it gave none.
-    progress: Option<u8>,
     /// The program's name as a report gave it, kept to be looked up
     /// ([`ProgramStatus::app`]); a report that names none keeps the last one.
     app: Option<String>,
@@ -305,16 +284,6 @@ struct Record {
     since: Instant,
     /// The update's number; the smallest is evicted first.
     updated: u64,
-}
-
-/// One record as a host reads it ([`crate::Session::program_records`]).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ProgramRecord {
-    /// The record's id, slash-separated; the root record's is empty.
-    pub id: String,
-    pub state: State,
-    /// From 0 to 100; `None` when its last report gave none.
-    pub progress: Option<u8>,
 }
 
 /// What a tab reads: the reporting program's side of its indicator
@@ -363,12 +332,7 @@ impl ProgramStatus {
         match report {
             Report::Query => false,
             Report::Clear { id } => self.clear(&id),
-            Report::Set {
-                id,
-                state,
-                progress,
-                app,
-            } => {
+            Report::Set { id, state, app } => {
                 self.clock += 1;
                 let (entered, since) = match self.records.get(&id) {
                     Some(record) if record.state == state => (false, record.since),
@@ -386,7 +350,6 @@ impl ProgramStatus {
                     id,
                     Record {
                         state,
-                        progress,
                         app,
                         since,
                         updated: self.clock,
@@ -436,18 +399,6 @@ impl ProgramStatus {
             };
             self.records.remove(&oldest);
         }
-    }
-
-    /// Every record, by id.
-    pub(crate) fn records(&self) -> Vec<ProgramRecord> {
-        self.records
-            .iter()
-            .map(|(id, record)| ProgramRecord {
-                id: id.clone(),
-                state: record.state,
-                progress: record.progress,
-            })
-            .collect()
     }
 
     /// The reporting program's name, to be looked up in a table and never
@@ -501,7 +452,6 @@ mod tests {
         Report::Set {
             id: id.to_owned(),
             state,
-            progress: None,
             app: None,
         }
     }
@@ -510,7 +460,6 @@ mod tests {
         Report::Set {
             id: id.to_owned(),
             state,
-            progress: None,
             app: Some(app.to_owned()),
         }
     }
@@ -567,38 +516,6 @@ mod tests {
             read(&format!("state=working:id={wide}")),
             None,
             "over 128 bytes"
-        );
-    }
-
-    #[test]
-    fn a_reports_progress_is_kept_with_its_record() {
-        assert_eq!(
-            read("state=working:id=build:progress=40"),
-            Some(Report::Set {
-                id: "build".to_owned(),
-                state: State::Working,
-                progress: Some(40),
-                app: None,
-            })
-        );
-        let mut status = ProgramStatus::default();
-        let now = Instant::now();
-        status.apply(read("state=working:id=build:progress=40").unwrap(), now);
-        status.apply(read("state=blocked:id=build/ask").unwrap(), now);
-        assert_eq!(
-            status.records(),
-            [
-                ProgramRecord {
-                    id: "build".to_owned(),
-                    state: State::Working,
-                    progress: Some(40),
-                },
-                ProgramRecord {
-                    id: "build/ask".to_owned(),
-                    state: State::Blocked,
-                    progress: None,
-                },
-            ]
         );
     }
 
@@ -701,41 +618,27 @@ mod tests {
 
     #[test]
     fn the_progress_sequence_maps_onto_the_root_record() {
-        let root = |state, progress| {
+        let root = |state| {
             Some(Report::Set {
                 id: String::new(),
                 state,
-                progress,
                 app: None,
             })
         };
-        assert_eq!(progress(b"4;1;50"), root(State::Working, Some(50)));
-        assert_eq!(
-            progress(b"4;3"),
-            root(State::Working, None),
-            "indeterminate"
-        );
-        assert_eq!(
-            progress(b"4;3;70"),
-            root(State::Working, None),
-            "indeterminate has no value"
-        );
+        assert_eq!(progress(b"4;1;50"), root(State::Working));
+        assert_eq!(progress(b"4;3"), root(State::Working), "indeterminate");
         assert_eq!(
             progress(b"4;4;30"),
-            root(State::Working, Some(30)),
+            root(State::Working),
             "paused is not over"
         );
-        assert_eq!(
-            progress(b"4;2;80"),
-            root(State::Error, Some(80)),
-            "the red bar"
-        );
+        assert_eq!(progress(b"4;2;80"), root(State::Error), "the red bar");
         assert_eq!(
             progress(b"4;1;150"),
-            root(State::Working, None),
-            "a value out of range is no value"
+            root(State::Working),
+            "a value out of range does not drop the bar"
         );
-        assert_eq!(progress(b"4;1"), root(State::Working, None));
+        assert_eq!(progress(b"4;1"), root(State::Working));
         assert_eq!(progress(b"4;0"), Some(Report::Clear { id: String::new() }));
         assert_eq!(progress(b"4"), None, "no state");
         assert_eq!(progress(b"4;9"), None, "an unknown state");

@@ -82,7 +82,6 @@ pub mod ssh_hosts;
 pub mod ssh_route;
 pub mod ssh_wrap;
 pub mod tabs;
-pub mod tree_text;
 pub mod undo;
 pub mod upload;
 pub mod view_ask;

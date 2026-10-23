@@ -3,7 +3,7 @@ CARGO ?= cargo
 # Prerequisite order is only guaranteed under serial make; under -j the promises
 # "cheapest gate first" and "version first" break.
 .NOTPARALLEL:
-.PHONY: check prune fmt audit clippy test shader smoke terminfo test-race scan bundle package install release publish ship release-gate sparkle dmgbuild linux embed-swift embed-tag
+.PHONY: check prune fmt audit clippy test shader smoke terminfo test-race scan bundle package install release publish ship release-gate sparkle dmgbuild linux
 
 # Definition of done. Homebrew rustc is not pinned (there is deliberately no
 # rust-toolchain.toml): the version is printed first so a clippy failure that
@@ -83,10 +83,9 @@ fmt:
 # - The pane stands without bateri's application: in bt-shell-macos a module
 #   that is the pane's reaches no application module (app, window, tab, menu,
 #   …) — what it needs comes through its host (`PaneHost`) — and a pane is
-#   opened only in `embed.rs`, bateri's own tabs included. bt-embed, the C
-#   interface, reaches bt-shell-macos only through `embed`. A shortcut past
-#   that door would work in bateri and silently not in an application that
-#   hosts the pane.
+#   opened only in `embed.rs`, bateri's own tabs included. A shortcut past
+#   that door would work in bateri's tabs and silently not in a pane opened
+#   without the application, as its tests open one.
 # - The parser and the emulator are forks: `vte` and `alacritty_terminal` resolve
 #   to kablo's repository, at the commit `[patch.crates-io]` pins (`rev` in
 #   Cargo.toml), through that patch. If a patch stops applying (alacritty_terminal
@@ -139,8 +138,7 @@ audit:
 		if echo "$$m" | grep -qxE "lib|$$app_mods"; then continue; fi; \
 		if grep -nE "crate::($$app_mods)\b|^use crate::\{[^}]*\b($$app_mods)\b" "$$f" | grep -vE "^[0-9]+:[[:space:]]*//"; then echo "audit: $$f is the pane's and reaches an application module (app, window, tab, …): what it needs goes through the pane's host (PaneHost) or comes down to the pane"; fail=1; fi; \
 	done; \
-	if grep -rn "TerminalPane::new(" crates/bt-shell-macos/src --include='*.rs' | grep -v "^crates/bt-shell-macos/src/embed.rs:" | grep -v ":[[:space:]]*//"; then echo "audit: a pane opened outside embed::open — bateri opens its panes the way an embedding application does"; fail=1; fi; \
-	if grep -rnE "bt_shell_macos::" crates/bt-embed --include='*.rs' | grep -vE "bt_shell_macos::embed\b" | grep -v ":[[:space:]]*//"; then echo "audit: bt-embed reaches bt-shell-macos past its embedding door (bt_shell_macos::embed) — what a C host needs comes through embed, as bateri's own panes do"; fail=1; fi; \
+	if grep -rn "TerminalPane::new(" crates/bt-shell-macos/src --include='*.rs' | grep -v "^crates/bt-shell-macos/src/embed.rs:" | grep -v ":[[:space:]]*//"; then echo "audit: a pane opened outside embed::open — every pane, bateri's tabs and the tests' alike, is born at that one door"; fail=1; fi; \
 	if [ -d assets/shell ] && grep -rnE "(>>?|sed -i|tee).*(\.zshenv|\.zprofile|\.zshrc|\.zlogin|\.zlogout|\.bashrc|\.bash_profile|\.profile|config\.fish)" assets/shell; then echo "audit: shell integration writes to the user's rc file"; fail=1; fi; \
 	git diff --quiet HEAD -- Cargo.lock $$(git ls-files '*Cargo.toml') || echo "audit: warning — Cargo.toml/Cargo.lock differs from HEAD; is the dependency decision recorded?"; \
 	test $$fail -eq 0 && echo "audit: clean"
@@ -665,7 +663,7 @@ release-gate:
 		| awk 'NF { p = 1 } p' | awk '{ l[NR] = $$0 } END { n = NR; while (n > 0 && l[n] ~ /^[[:space:]]*$$/) n--; for (i = 1; i <= n; i++) print l[i] }' > $(NOTES); \
 	grep -q '[^[:space:]]' $(NOTES) || { echo "release: CHANGELOG.md has no '## [$(VERSION)]' section or it is empty (turn Unreleased into the version)"; exit 1; }
 
-release: release-gate embed-swift package
+release: release-gate package
 	@spctl -a -vv -t exec $(APP) 2>&1 | grep -q 'source=Notarized Developer ID' && xcrun stapler validate -q $(APP) || \
 		{ echo "release: the package is not notarized, it does not enter the release"; exit 1; }
 	@spctl -a -vv -t open --context context:primary-signature $(DMG) 2>&1 | grep -q 'source=Notarized Developer ID' || \
@@ -757,54 +755,6 @@ terminfo:
 #    bound to `/w`, outputs go to `target/linux` (so they do not mix with the
 #    macOS build; `/target/` is already in .gitignore), crate downloads in a
 #    named volume.
-# The C interface's sample host (`crates/bt-embed`): a Swift application built with swiftc from
-# the hand-written header asks the layout engine a verdict and a plan, then opens a pane with the
-# shell integration, gives its shell a variable, a directory and a command that writes both to a
-# file and fails, and passes when the command's start and end (with its exit code) and the shell's
-# exit reach it as events and the file holds what it gave. Not in `make check` (swiftc and a window); the release runs it.
-# The static library is built here only — in a debug build it is ~400 MB, and nothing else
-# links it. The system libraries are what rustc prints for it (`cargo rustc -p bt-embed --lib
-# --crate-type staticlib -- --print native-static-libs`); one gone missing fails the link loudly.
-EMBED_DIR = target/embed-swift
-EMBED_LIBS = -framework UserNotifications -framework Security -framework AppKit -framework QuartzCore \
-	-framework Metal -framework Foundation -framework CoreText -framework CoreGraphics \
-	-framework CoreFoundation -lobjc -liconv
-
-embed-swift:
-	$(CARGO) rustc -q -p bt-embed --lib --crate-type staticlib
-	@mkdir -p $(EMBED_DIR)
-	xcrun swiftc -swift-version 5 -import-objc-header crates/bt-embed/include/bt_embed.h \
-		crates/bt-embed/examples/swift-host/main.swift target/debug/libbt_embed.a $(EMBED_LIBS) \
-		-o $(EMBED_DIR)/swift-host
-	@if [ "$$(launchctl managername 2>/dev/null)" != Aqua ]; then \
-		echo "embed-swift: SKIPPED (no window server session)"; exit 0; fi; \
-	BT_EMBED_ZSH=$(CURDIR)/assets/shell/zsh BT_EMBED_FISH=$(CURDIR)/assets/shell/fish BT_EMBED_BASH=$(CURDIR)/assets/shell/bash $(EMBED_DIR)/swift-host
-
-# The embedding interface's own release: an annotated `bt-embed-<version>` tag on the commit
-# that turned `crates/bt-embed/CHANGELOG.md`'s Unreleased section into `## [<version>] - <date>`.
-# Its versions run apart from bateri's `v<version>` tags, which `make release` keeps for bateri
-# itself; a product that links the pane builds against one of these. The version is the
-# changelog's topmost one. It stops on a dirty tree, a non-empty Unreleased section (the version
-# was not made yet), a tag that exists here or on origin, and either check not running green — a
-# skipped Swift sample (no window server) is not green. It pushes nothing: that is a person's go,
-# as with `make publish`.
-EMBED_CHANGELOG = crates/bt-embed/CHANGELOG.md
-EMBED_VERSION = $(shell sed -n 's/^\#\# \[\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)\] - [0-9-]*$$/\1/p' $(EMBED_CHANGELOG) | head -1)
-EMBED_ABI = $(shell sed -n 's/^\#define BT_EMBED_ABI_VERSION \([0-9]*\)u$$/\1/p' crates/bt-embed/include/bt_embed.h)
-
-embed-tag:
-	@test -z "$$(git status --porcelain)" || { echo "embed-tag: the working tree is not clean; the tag must name a known code"; exit 1; }
-	@test -n "$(EMBED_VERSION)" || { echo "embed-tag: $(EMBED_CHANGELOG) has no '## [x.y.z] - date' section"; exit 1; }
-	@test -z "$$(awk '/^## \[Unreleased\]/ { on = 1; next } /^## \[/ { if (on) exit } on && NF' $(EMBED_CHANGELOG))" || \
-		{ echo "embed-tag: the Unreleased section of $(EMBED_CHANGELOG) is not empty — turn it into the version and commit first"; exit 1; }
-	@! git rev-parse -q --verify 'refs/tags/bt-embed-$(EMBED_VERSION)' >/dev/null || { echo "embed-tag: tag bt-embed-$(EMBED_VERSION) already exists — the next version goes in $(EMBED_CHANGELOG) first"; exit 1; }
-	@! git ls-remote --exit-code --tags origin 'refs/tags/bt-embed-$(EMBED_VERSION)' >/dev/null 2>&1 || { echo "embed-tag: tag bt-embed-$(EMBED_VERSION) already exists on origin"; exit 1; }
-	@$(MAKE) --no-print-directory check
-	@out=$$($(MAKE) --no-print-directory embed-swift 2>&1); echo "$$out" | tail -1; \
-		echo "$$out" | grep -q '^embed-swift: ok' || { echo "embed-tag: the Swift sample did not run green"; exit 1; }
-	git tag -a 'bt-embed-$(EMBED_VERSION)' -m 'bt-embed $(EMBED_VERSION), ABI $(EMBED_ABI)'
-	@echo "embed-tag: bt-embed-$(EMBED_VERSION) -> $$(git rev-parse --short HEAD); nothing pushed — with a person's go: git push origin main bt-embed-$(EMBED_VERSION)"
-
 LINUX_DOCKERFILE = tools/linux/Dockerfile
 LINUX_RUST = $(shell sed -n 's/^FROM rust:\([0-9]*\.[0-9]*\)-.*/\1/p' $(LINUX_DOCKERFILE))
 LINUX_IMAGE = bateri-linux:$(LINUX_RUST)

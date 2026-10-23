@@ -13,11 +13,11 @@
 //! subclass; the session's core, the search bar, the upload queue and the
 //! pane-level menu selectors) live in separate objects.
 //!
-//! **A pane is opened one way, bateri's and any host's** ([`embed`]): what it is
+//! **A pane is opened one way, by bateri's tabs and by the tests alike** ([`embed`]): what it is
 //! born with ([`embed::Config`]), the owner that hears its events
 //! ([`embed::Host`]; bateri's is `tab::TabHost`) and who the application is
-//! ([`embed::Identity`]); main-queue callbacks find the pane by its id wherever
-//! it is hosted ([`embed::pane`]). The pane and the modules it is made of never
+//! ([`embed::Identity`]); main-queue callbacks find the pane by its id whoever
+//! owns it ([`embed::pane`]). The pane and the modules it is made of never
 //! reach the application's (`app`, `window`, `tab`, `menu`, …): what they need
 //! goes through the owner or comes down to them — `make audit` holds both
 //! rules, and a test opens a pane with no bateri application object at all

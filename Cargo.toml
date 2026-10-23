@@ -6,7 +6,6 @@ members = [
     "crates/bt-gpu",
     "crates/bt-shell-common",
     "crates/bt-shell-macos",
-    "crates/bt-embed",
     "crates/bateri",
 ]
 

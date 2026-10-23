@@ -63,9 +63,7 @@ use objc2_app_kit::{
     NSFontWeightRegular, NSForegroundColorAttributeName, NSLineBreakMode, NSMenuItem, NSPasteboard,
     NSPasteboardNameFind, NSPopoverDelegate, NSSearchFieldDelegate, NSTextField,
     NSTextFieldDelegate, NSTitlePosition, NSView, NSViewFrameDidChangeNotification,
-    NSWindowDidBecomeKeyNotification, NSWindowDidChangeBackingPropertiesNotification,
-    NSWindowDidChangeOcclusionStateNotification, NSWindowDidEndSheetNotification,
-    NSWindowDidResignKeyNotification, NSWindowOcclusionState, NSWindowOrderingMode,
+    NSWindowOcclusionState, NSWindowOrderingMode,
 };
 use objc2_core_foundation::CFRetained;
 use objc2_core_graphics::CGImage;
@@ -112,8 +110,7 @@ use crate::zoom::Zoom;
 use crate::{Run, Workload};
 use crate::{child, locale};
 
-/// Events the pane hands to its owner — today
-/// `tab::TabHost`, tomorrow an embedding application.
+/// Events the pane hands to its owner: `tab::TabHost`, or a test's fake owner.
 ///
 /// All of them are called **on the main thread** and with the pane's id
 /// ([`TerminalPane::id`]): the owner holds several panes (splits) and must
@@ -146,13 +143,13 @@ pub trait PaneHost {
     fn activity_changed(&self, pane: u64);
     /// What the pane runs changed ([`TerminalPane::program_kind`]), or a program's view came or
     /// went ([`TerminalPane::view_face`]): the tab's icon is read again. Nothing for an owner
-    /// that draws no such icon — the embedding interface has no event for it, and
-    /// `activity_changed`'s is a command's or the screen's.
+    /// that draws no such icon (the tests'); `activity_changed`'s is a command's or the
+    /// screen's.
     fn program_changed(&self, _pane: u64) {}
     /// The pane's transfer queue ended, as `finish` says: what the tab's chip plays out and
     /// leaves on the tab while the user is elsewhere. Called **before** the pane tells its
     /// title the transfer is gone, so the tab reads the end together with that news. Nothing for
-    /// an owner that draws no such chip — the embedding interface has no event for it.
+    /// an owner that draws no such chip (the tests').
     fn upload_ended(&self, _pane: u64, _finish: crate::tabs::Finish) {}
     /// Notification to the user (upload finished, failed, connection lost).
     fn notify(&self, pane: u64, title: &str, body: &str);
@@ -180,19 +177,6 @@ pub trait PaneHost {
     /// taken up: a mark the owner shows for a question waiting to be seen
     /// may have changed.
     fn questions_changed(&self, pane: u64);
-    /// The ports the pane's programs listen on — and, in a remote session,
-    /// the server's — changed ([`TerminalPane::listening_ports`]): a scan
-    /// found new ones or a server went. Scans run while `[shell] ports` is on.
-    fn ports_changed(&self, pane: u64);
-    /// The user opened a link (⌘-click, or the link menu's Open): `true` if
-    /// the owner took it — a file shown in its own editor at its line — and
-    /// the pane does nothing more. The default leaves it to the pane, which
-    /// opens it as bateri does (`links::action`'s white list: a URL or a
-    /// document in its default application, the rest revealed, an uncommon
-    /// scheme asked about first).
-    fn open_link(&self, _pane: u64, _link: &LinkRequest) -> bool {
-        false
-    }
     /// Whether `chord`, pressed while a program's view has the keyboard, is the owner's own
     /// shortcut — a tab, a window, a split, the palette — and not the view's: the view never
     /// sees it and the owner's main menu runs it (`pencere_view`). The owner answers from its
@@ -202,8 +186,6 @@ pub trait PaneHost {
     fn keeps_key(&self, _chord: &Chord) -> bool {
         false
     }
-    /// The terminal's bell rang (`BEL`), at most once per main-queue turn.
-    fn bell(&self, pane: u64);
     /// A program asked for a notification (`OSC 9`'s text, `OSC 777`'s
     /// title and body) — not bateri's own ([`Self::notify`]): what the
     /// program wrote, cleaned of control characters and bounded.
@@ -333,37 +315,6 @@ impl KeptLogin for NoKeptLogin {
     fn raise(&self, _: &PaneUuid) -> bool {
         false
     }
-}
-
-/// A link the user opened, as the pane's owner may take it
-/// ([`PaneHost::open_link`]): the link as found and checked — a path exists
-/// by the time it is asked about.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum LinkRequest {
-    /// A URL as written: plain text, or an OSC 8 link's target. Its scheme
-    /// is anything the program wrote.
-    Url(String),
-    /// A local file or directory, with the line and column a
-    /// `path:line:col` named. `path` is the link as it names it — a symlink
-    /// stays the symlink; `target` is the object it leads to once every
-    /// symlink and Finder alias on it is followed (`links::Resolved::target`).
-    /// An owner that hands the link to the system judges and opens `target`:
-    /// Launch Services follows `path` and would launch an `.app` or run a
-    /// script a harmless-looking name points at.
-    Path {
-        path: std::path::PathBuf,
-        target: std::path::PathBuf,
-        directory: bool,
-        line: Option<u32>,
-        col: Option<u32>,
-    },
-    /// A path on the remote session's server, absolute there.
-    RemotePath {
-        path: String,
-        directory: bool,
-        line: Option<u32>,
-        col: Option<u32>,
-    },
 }
 
 /// Column count of the smallest pane: a split that would drop
@@ -1124,9 +1075,6 @@ struct ShellWake {
     /// on the main queue — `title_pending`'s twin: at most one job, which
     /// reads the latest activity.
     activity_pending: Arc<AtomicBool>,
-    /// Whether the bell's news ([`PaneHost::bell`]) is waiting on the main
-    /// queue: a program ringing in a loop makes one job.
-    bell_pending: Arc<AtomicBool>,
     /// Whether the notifications' news ([`PaneHost::program_notification`])
     /// is waiting: one job, which takes every notification waiting.
     notes_pending: Arc<AtomicBool>,
@@ -1666,23 +1614,6 @@ impl Wake for ShellWake {
             let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
             if let Some(pane) = lookup(mtm, id) {
                 pane.resolve_environment();
-            }
-        });
-    }
-
-    fn bell(&self) {
-        // Reader thread, under the `Term` lock: one job, no lock taken here.
-        if self.timed || self.bell_pending.swap(true, Ordering::AcqRel) {
-            return;
-        }
-        let pending = Arc::clone(&self.bell_pending);
-        let (id, lookup) = (self.id, self.lookup);
-        DispatchQueue::main().exec_async(move || {
-            pending.store(false, Ordering::Release);
-            // audit: a block running on the main queue is on the main thread by definition.
-            let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
-            if let Some(pane) = lookup(mtm, id) {
-                pane.host().bell(id);
             }
         });
     }
@@ -2287,54 +2218,6 @@ define_class!(
         fn view_frame_did_change(&self, _n: &NSNotification) {
             self.refresh_geometry();
         }
-
-        /// A window became key — this pane's, if [`TerminalPane::follow_window`]
-        /// set it up: what bateri's window does for the panes of its tab on
-        /// screen. A host hides the pane itself, not a container: hidden, the
-        /// pane is not the user's.
-        #[unsafe(method(hostWindowDidBecomeKey:))]
-        fn host_window_did_become_key(&self, n: &NSNotification) {
-            if self.is_my_window(n) && !self.isHiddenOrHasHiddenAncestor() {
-                self.window_became_key();
-            }
-        }
-
-        /// This pane's window resigned key ([`TerminalPane::follow_window`]).
-        #[unsafe(method(hostWindowDidResignKey:))]
-        fn host_window_did_resign_key(&self, n: &NSNotification) {
-            if self.is_my_window(n) {
-                self.window_resigned_key();
-            }
-        }
-
-        /// This pane's window was covered, uncovered, miniaturized or brought
-        /// back ([`TerminalPane::follow_window`]): a window the compositor may
-        /// have emptied needs a frame, and a covered one draws none.
-        #[unsafe(method(hostWindowDidChangeOcclusionState:))]
-        fn host_window_did_change_occlusion(&self, n: &NSNotification) {
-            if self.is_my_window(n) {
-                self.set_visibility(self.window_seen() && !self.isHiddenOrHasHiddenAncestor());
-            }
-        }
-
-        /// This pane's window moved to a screen of another scale
-        /// ([`TerminalPane::follow_window`]): the size in points did not change,
-        /// so no frame notification comes.
-        #[unsafe(method(hostWindowDidChangeBackingProperties:))]
-        fn host_window_did_change_backing(&self, n: &NSNotification) {
-            if self.is_my_window(n) {
-                self.refresh_geometry();
-            }
-        }
-
-        /// A question on this pane's window ended ([`TerminalPane::follow_window`]):
-        /// one the pane parked behind it opens now.
-        #[unsafe(method(hostWindowDidEndSheet:))]
-        fn host_window_did_end_sheet(&self, n: &NSNotification) {
-            if self.is_my_window(n) {
-                crate::sheets::open_parked(self);
-            }
-        }
     }
 
     /// Closing of the "Show files (N)" popover and of the server card, told
@@ -2800,7 +2683,6 @@ impl TerminalPane {
                 up_pending: Arc::default(),
                 typed_pending: Arc::default(),
                 activity_pending: Arc::default(),
-                bell_pending: Arc::default(),
                 notes_pending: Arc::default(),
             }),
             zoom: Cell::new(zoom),
@@ -2930,58 +2812,6 @@ impl TerminalPane {
                 Some(&self.ivars().view),
             );
         }
-    }
-
-    /// The pane follows its window by itself: its focus with the window's
-    /// key state, its drawing with the window's occlusion, its geometry with
-    /// the window's scale, and a question it parked behind the window's own
-    /// question opens when that one ends. bateri's window does all of it for
-    /// its tabs' panes and does not call this; a host that only places the
-    /// pane in a view of its own needs it, or its pane silently keeps the
-    /// state it was born with. Ends with the pane's closing.
-    pub fn follow_window(&self) {
-        let center = NSNotificationCenter::defaultCenter();
-        // SAFETY: each selector is defined on this class and takes a single
-        // `&NSNotification`; the names are constants AppKit exposes. No
-        // object: the pane may change windows, so each handler checks the
-        // notification's window is the pane's own.
-        unsafe {
-            for (selector, name) in [
-                (
-                    sel!(hostWindowDidBecomeKey:),
-                    NSWindowDidBecomeKeyNotification,
-                ),
-                (
-                    sel!(hostWindowDidResignKey:),
-                    NSWindowDidResignKeyNotification,
-                ),
-                (
-                    sel!(hostWindowDidChangeOcclusionState:),
-                    NSWindowDidChangeOcclusionStateNotification,
-                ),
-                (
-                    sel!(hostWindowDidChangeBackingProperties:),
-                    NSWindowDidChangeBackingPropertiesNotification,
-                ),
-                (
-                    sel!(hostWindowDidEndSheet:),
-                    NSWindowDidEndSheetNotification,
-                ),
-            ] {
-                center.addObserver_selector_name_object(self, selector, Some(name), None);
-            }
-        }
-    }
-
-    /// Whether `n` is about the window this pane is in.
-    fn is_my_window(&self, n: &NSNotification) -> bool {
-        let (Some(object), Some(window)) = (n.object(), self.window()) else {
-            return false;
-        };
-        std::ptr::eq(
-            Retained::as_ptr(&object).cast::<u8>(),
-            Retained::as_ptr(&window).cast::<u8>(),
-        )
     }
 
     /// Whether the pane's window can be seen — not covered, not miniaturized.
@@ -7168,12 +6998,6 @@ mod tests {
         }
         fn questions_changed(&self, pane: u64) {
             self.0.borrow_mut().push((pane, "questions".into()));
-        }
-        fn ports_changed(&self, pane: u64) {
-            self.0.borrow_mut().push((pane, "ports".into()));
-        }
-        fn bell(&self, pane: u64) {
-            self.0.borrow_mut().push((pane, "bell".into()));
         }
         fn program_notification(&self, pane: u64, _title: Option<&str>, _body: &str) {
             self.0.borrow_mut().push((pane, "note".into()));

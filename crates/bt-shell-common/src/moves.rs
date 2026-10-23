@@ -38,11 +38,6 @@
 //! with the strip, and the moves of tabs *between* groups and of groups themselves
 //! ([`Move::RegroupTabs`], [`Move::MoveGroup`], [`Move::GroupToWindow`],
 //! [`Move::GroupToNewWindow`], [`Move::TabsToNewWindow`]) are planned here like any other.
-//!
-//! **Whether an emptied window closes is the window's.** bateri's windows close when a move
-//! takes their last tab; a host whose windows are places of their own (a workspace that stays
-//! when its last terminal moves out) says so in the picture ([`Window::stays_empty`]), and the
-//! same moves leave such a window open — and undoable.
 
 use crate::groups::{GroupId, Groups, Target};
 use crate::split::{Direction, Tree};
@@ -64,11 +59,6 @@ pub struct Window {
     /// which blocks all of it: nothing moves into or out of it. A tab's own question does not
     /// count; it leaves the screen with its tab.
     pub asking: bool,
-    /// The window outlives its tabs: a move that takes its last one leaves it open and empty,
-    /// and Undo Move can take that move back. bateri's windows close instead (`false`); a host
-    /// whose windows are places of their own — a workspace that stays when its last terminal
-    /// moves out — keeps them (`true`).
-    pub stays_empty: bool,
     /// The window shows one cluster of its strip at a time — the group on screen, or the
     /// ungrouped tabs (bateri's tab bar in the title row) — and keeps its place when tabs are
     /// regrouped away from it: the next tab of the cluster comes forward instead of the screen
@@ -78,16 +68,14 @@ pub struct Window {
 }
 
 impl Window {
-    /// Whether a move that takes `leaving` of its tabs closes this window: they are all it has,
-    /// and it does not outlive them.
+    /// Whether a move that takes `leaving` of its tabs closes this window: they are all it has.
     fn closes_without(&self, leaving: usize) -> bool {
-        !self.stays_empty && self.order.len() <= leaving
+        self.order.len() <= leaving
     }
 
-    /// The step that closes this window once a move has left it without a tab — none for a
-    /// window that stays.
-    fn close_if_emptied(&self) -> Option<Step> {
-        (!self.stays_empty).then_some(Step::CloseIfEmptied { window: self.id })
+    /// The step that closes this window once a move has left it without a tab.
+    fn close_if_emptied(&self) -> Step {
+        Step::CloseIfEmptied { window: self.id }
     }
 
     /// Tab `tab` as it stands, if it is here.
@@ -179,8 +167,7 @@ pub enum Move {
     /// Tab `tab` becomes a window of its own — Move Tab to New Window, a tab dragged out of its
     /// strip and let go over nothing. `at` is where it was let go (a point on the screen, in
     /// the platform's coordinates): the new window's title row goes under it; without it the
-    /// window takes its old window's size and place, cascaded. A window's only tab stays,
-    /// unless the window outlives its tabs ([`Window::stays_empty`]).
+    /// window takes its old window's size and place, cascaded. A window's only tab stays.
     TabToNewWindow { tab: u64, at: Option<(f64, f64)> },
     /// Pane `pane` becomes a window of its own, as the one tab of it — Move Split to New
     /// Window, a pane let go over no window. A tab's only pane is the tab: it moves as in
@@ -590,7 +577,7 @@ fn tab_to_tab(
             tree,
         },
     ];
-    steps.extend(from.close_if_emptied());
+    steps.push(from.close_if_emptied());
     Ok(Plan {
         steps,
         after: vec![
@@ -746,7 +733,7 @@ fn pane_to_new_tab(
         tabs: vec![tab],
         target,
     }));
-    steps.extend(from.close_if_emptied());
+    steps.push(from.close_if_emptied());
     let closes = panes == 1 && from.closes_without(1);
     Ok(Plan {
         steps,
@@ -772,7 +759,7 @@ fn tab_to_new_window(
 ) -> Result<Plan, Refusal> {
     let (from, _) = holding_tab(world, tab).ok_or(Refusal::Quiet)?;
     // A window's only tab stays where it is: the window would close and another just like it
-    // open. A window that outlives its tabs lets it go.
+    // open.
     if from.closes_without(1) || from.asking {
         return Err(Refusal::Beep);
     }
@@ -877,7 +864,7 @@ fn tab_to_strip(world: &[Window], tab: u64, window: u64, index: usize) -> Result
             },
         ]
         .into_iter()
-        .chain(from.close_if_emptied())
+        .chain([from.close_if_emptied()])
         .collect(),
         after: vec![Step::Raise { window: onto.id }],
         undo: None,
@@ -928,7 +915,7 @@ fn merge_all_windows(world: &[Window], into: u64) -> Result<Plan, Refusal> {
                 target: Target::New(group.name.clone()),
             });
         }
-        steps.extend(other.close_if_emptied());
+        steps.push(other.close_if_emptied());
     }
     Ok(Plan {
         steps,
@@ -1118,7 +1105,7 @@ fn group_to_window(
             to,
         });
     }
-    steps.extend(from.close_if_emptied());
+    steps.push(from.close_if_emptied());
     // The window it leaves closes if the group was all it had, and then there is nothing to undo.
     let closes = from.closes_without(tabs.len());
     let resident = from.groups.resident(Some(group));
@@ -1177,7 +1164,7 @@ fn tabs_to_window(
         tabs: tabs.clone(),
         target,
     });
-    steps.extend(from.close_if_emptied());
+    steps.push(from.close_if_emptied());
     // The window they leave closes if they were all it had, and then there is nothing to undo.
     let closes = from.closes_without(tabs.len());
     Ok(Plan {
@@ -1223,8 +1210,7 @@ fn tabs_to_new_window(
 
 /// A window made of `tabs` of `from`, grouped under `group` if a name is given, ungrouped if not.
 /// Like a lone tab's, it takes the old window's size and place (or goes under `at`); a window that
-/// is only these tabs stays where it is, and one that outlives its tabs lets them go. Undo Move
-/// takes the tabs back and closes the window.
+/// is only these tabs stays where it is. Undo Move takes the tabs back and closes the window.
 fn new_window_of(
     from: &Window,
     tabs: Vec<u64>,
@@ -1466,7 +1452,6 @@ mod tests {
             groups: Groups::new(),
             tabs,
             asking: false,
-            stays_empty: false,
             one_cluster: false,
         }
     }
@@ -2502,62 +2487,6 @@ mod tests {
     }
 
     #[test]
-    fn a_window_that_outlives_its_tabs_stays_open_and_its_move_can_be_taken_back() {
-        let mut world = world();
-        world[0] = window(
-            1,
-            vec![shape(10, split(Tree::Leaf(100), Tree::Leaf(101)), 101)],
-            10,
-        );
-        world[0].stays_empty = true;
-        let host = roomy(&world);
-
-        // Its only tab joins another window's tab: no step closes it, and Undo Move keeps a
-        // record, since the window is there to put the tab back in.
-        let plan = plan(
-            &world,
-            Move::TabToTab {
-                tab: 10,
-                into: 21,
-                place: beside(),
-            },
-            &host,
-        )
-        .unwrap();
-        assert!(!plan.steps.contains(&Step::CloseIfEmptied { window: 1 }));
-        let record = plan.undo.clone().expect("the window it left stays");
-
-        // Its only tab may leave for a window of its own too.
-        assert!(super::plan(&world, Move::TabToNewWindow { tab: 10, at: None }, &host).is_ok());
-
-        // Taken back, the tab is born again in the window that stayed empty.
-        let mut after = world.clone();
-        after[0].tabs.clear();
-        after[0].order = Tabs::empty();
-        reshaped(
-            &mut after[1],
-            21,
-            split(
-                split(Tree::Leaf(210), Tree::Leaf(211)),
-                split(Tree::Leaf(100), Tree::Leaf(101)),
-            ),
-            101,
-        );
-        let undo = undoing(&after, record).unwrap();
-        assert!(undo.steps.contains(&Step::Reshape {
-            window: 1,
-            tab: 10,
-            tree: world[0].tabs[0].tree.clone(),
-            name: None,
-        }));
-        assert!(undo.steps.contains(&Step::PutStrip {
-            window: 1,
-            order: world[0].order.clone(),
-            groups: Groups::new(),
-        }));
-    }
-
-    #[test]
     fn a_move_naming_nothing_there_is_ends_quietly() {
         let world = world();
         let host = roomy(&world);
@@ -3231,21 +3160,6 @@ mod tests {
             Some(&Step::CloseIfEmptied { window: 3 })
         );
         assert_eq!(moved.undo, None);
-        // A window that outlives its tabs stays, and can be taken back.
-        world[2].stays_empty = true;
-        let moved = plan(
-            &world,
-            Move::GroupToWindow {
-                window: 3,
-                group: gid(&world[2], "solo"),
-                into: 1,
-                to: 9,
-            },
-            &Cramped,
-        )
-        .unwrap();
-        assert!(!moved.steps.contains(&Step::CloseIfEmptied { window: 3 }));
-        assert!(moved.undo.is_some());
     }
 
     #[test]
