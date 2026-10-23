@@ -63,6 +63,7 @@ fn a_step_here_is_sh_in_the_home_directory() {
 }
 
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn a_bridge_here_is_the_installed_kablo_run_as_attach_and_ending_it_ends_only_it() {
     let root = TempRoot::new("local-bridge");
     let home = root.0.join("mac");
@@ -303,6 +304,7 @@ const SIZE: Size = Size {
 };
 
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn a_real_kablo_is_installed_here_keeps_a_terminal_past_its_bridge_and_is_read_by_the_census() {
     let Some(bundle) = release() else {
         eprintln!("SKIPPED: there is no kablo release to run (../kablo/dist or KABLO_DIST)");
@@ -569,6 +571,7 @@ fn waits_for(what: &str, mut ready: impl FnMut() -> bool) {
 }
 
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn a_pane_over_a_real_kablo_shows_what_the_program_writes_types_into_it_is_sized_by_it_and_hears_its_end()
  {
     let Some(bundle) = release() else {
@@ -747,6 +750,7 @@ fn behind_login(
 }
 
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn a_pane_over_a_real_kablo_is_found_and_read_by_its_childs_pid_behind_login_too() {
     let Some(bundle) = release() else {
         eprintln!("SKIPPED: there is no kablo release to run (../kablo/dist or KABLO_DIST)");
@@ -889,6 +893,7 @@ fn plain_options(script: &str, home: &Path) -> bt_core::SessionOptions {
 }
 
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn a_pane_over_a_real_kablo_comes_back_to_its_terminal_with_its_screen_and_the_program_is_told_nothing()
  {
     let Some(bundle) = release() else {

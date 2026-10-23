@@ -4668,6 +4668,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn a_cleanup_on_a_dead_link_gives_up_instead_of_holding_the_queue() {
         let root = scratch("dead");
         let target = root.join("dst");
@@ -4698,6 +4699,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn a_stop_does_not_wait_on_pipes_a_master_connection_still_holds() {
         let root = scratch("held");
         let target = root.join("dst");

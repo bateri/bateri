@@ -2074,6 +2074,7 @@ mod tests {
     /// The subcommand: it is given the **wrapped**
     /// arguments and its first question is the attempt's own proof.
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn the_fallback_subcommand_records_plain_and_prints_the_rerun() {
         let dir = scratch("fell");
         let path = dir.join("remote-hosts");
@@ -2763,6 +2764,7 @@ mod remote_shells {
     /// `XDG_DATA_HOME` ignored — through the `sh`s a server may have — and a call that cannot
     /// write ends well (the bootstrap says what is missing).
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn the_files_script_writes_every_file_once_and_only_for_a_shell_it_serves() {
         use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
         let place = ".local/share/kablo/0.2.0/kablo";
@@ -2888,6 +2890,7 @@ mod remote_shells {
     }
 
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn zsh_gets_the_integration_through_its_own_files() {
         // The common shape: `~/.zshenv` moves the configuration with
         // `ZDOTDIR` and sets a plain (not exported) variable. sshd's first hop
@@ -2910,6 +2913,7 @@ mod remote_shells {
     /// bash: a login shell from bash 4 on (POSIX mode left, `ENV` gone, the
     /// history file bash's own and not exported), `--rcfile` before it.
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn bash_gets_the_integration_as_a_login_shell() {
         let Some((session, _root)) = integrates(
             "bash",
@@ -2956,6 +2960,7 @@ mod remote_shells {
     }
 
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn fish_gets_the_integration_through_vendor_conf() {
         if let Some((session, _root)) = integrates("fish", ".config/fish/config.fish", &[]) {
             // Our directory is out of `XDG_DATA_DIRS` again (it was unset).
@@ -3089,6 +3094,7 @@ mod remote_shells {
     }
 
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn a_server_bash_has_the_dock() {
         let Some((session, _root)) = docked("bash", "dock", BASH_THEME, &[]) else {
             return;
@@ -3102,6 +3108,7 @@ mod remote_shells {
     /// the dock, a click moves the shell's caret through the widget, and a completion list that
     /// would not fit the screen is asked about first (`LISTMAX`).
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn a_server_zsh_has_the_dock() {
         let Some((session, _root)) = docked("zsh", "dock", ZSH_THEME, &[]) else {
             return;
@@ -3158,6 +3165,7 @@ mod remote_shells {
     /// A server whose zsh is too old for `add-zle-hook-widget`, or that lacks the dock's file,
     /// is a shell without a dock: its prompt, its blocks, nothing of the Mac's.
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn a_server_zsh_without_the_docks_file_keeps_its_prompt_and_its_blocks() {
         let Some(shell) = which("zsh") else {
             println!("SKIPPED: zsh is not installed");
@@ -3184,6 +3192,7 @@ mod remote_shells {
     }
 
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn a_server_fish_has_the_dock() {
         let Some((session, _root)) = docked("fish", "dock", FISH_THEME, &[]) else {
             return;
@@ -3196,6 +3205,7 @@ mod remote_shells {
     /// terminal's environment: the user's prompt is drawn with the marks around it, the line stays
     /// on the grid, and the widget is never bound (nothing answers a click).
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn a_server_shell_under_the_blocks_setting_keeps_its_prompt_and_opens_no_dock() {
         // (No right prompt here: it would sit where a block's counter is drawn.)
         const FISH_PLAIN: &[(&str, &str)] = &[(
@@ -3242,6 +3252,7 @@ mod remote_shells {
     /// The directory of the agent's command is added once: a shell that
     /// starts with it in `PATH` already does not get it twice.
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn the_agents_command_is_on_the_path_once_also_when_it_was_there() {
         let zsh = [
             (".zshenv", "export ZDOTDIR=$HOME/cfg\n"),
@@ -3416,6 +3427,7 @@ mod remote_shells {
     /// and a version outside its alphabet are not exported. The login shell
     /// is a stand-in of the right name that prints the three and exits.
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn the_bootstrap_exports_the_identity() {
         let sh = which("sh").expect("sh");
         let tab = bt_core::PaneUuid::parse("0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0").unwrap();
@@ -3470,6 +3482,7 @@ mod remote_shells {
     /// resolved); `~` is the server's home, and a folder that is not there
     /// leaves the shell at home. Any name survives the payload's quoting.
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn the_bootstrap_starts_the_shell_in_the_directory() {
         let sh = which("sh").expect("sh");
         for name in ["zsh", "sh"] {

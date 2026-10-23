@@ -184,6 +184,7 @@ fn the_version_is_the_names_not_the_one_this_build_links() {
 }
 
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn the_first_connection_writes_kablo_and_the_next_finds_it() {
     let root = TempRoot::new("kablo-install");
     let bundle = package(&root.0, "0.2.0", KABLO);
@@ -218,6 +219,7 @@ fn the_first_connection_writes_kablo_and_the_next_finds_it() {
 }
 
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn the_shells_files_go_with_the_look_for_kablo_and_cost_no_call_of_their_own() {
     let root = TempRoot::new("kablo-files");
     let bundle = package(&root.0, "0.2.0", KABLO);
@@ -265,6 +267,7 @@ fn the_shells_files_go_with_the_look_for_kablo_and_cost_no_call_of_their_own() {
 }
 
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn a_binary_that_is_there_and_is_not_the_packages_is_left_alone() {
     let root = TempRoot::new("kablo-differs");
     let bundle = package(&root.0, "0.2.0", KABLO);
@@ -285,6 +288,7 @@ fn a_binary_that_is_there_and_is_not_the_packages_is_left_alone() {
 }
 
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn a_macos_binary_another_package_signed_is_the_same_kablo() {
     // Two packages of one kablo release sign the macOS binary each its own way,
     // so the sums differ though the file is the same kablo: the version it says
@@ -306,6 +310,7 @@ fn a_macos_binary_another_package_signed_is_the_same_kablo() {
 }
 
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn a_file_that_cannot_run_is_replaced_and_a_write_that_fails_halfway_is_a_bad_moment() {
     let root = TempRoot::new("kablo-halfway");
     let bundle = package(&root.0, "0.2.0", KABLO);
@@ -338,6 +343,7 @@ fn a_file_that_cannot_run_is_replaced_and_a_write_that_fails_halfway_is_a_bad_mo
 }
 
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn a_server_kablo_cannot_be_kept_on_is_told_apart_from_a_bad_moment() {
     let root = TempRoot::new("kablo-impossible");
     let bundle = package(&root.0, "0.2.0", KABLO);
@@ -429,6 +435,7 @@ const KABLO_RENEWING: &str = "#!/bin/sh\ncase $1 in version) echo \"version=0.2.
      upgrade) echo \"$* from $(pwd)\" >>\"$(dirname \"$0\")/upgrades\"; [ -e \"$(dirname \"$0\")/none\" ] && exit 1; exit 0;; esac\n";
 
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn the_terminals_of_the_server_are_renewed_with_the_binary_that_was_written() {
     let root = TempRoot::new("kablo-renew");
     let bundle = package(&root.0, "0.2.0", KABLO_RENEWING);
@@ -528,6 +535,7 @@ fn the_scripts_are_one_line_of_plain_sh_a_login_shell_hands_on_as_it_is() {
 }
 
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn the_ssh_channel_sends_the_script_as_one_word_for_sh_and_ends_a_step_that_takes_too_long() {
     let root = TempRoot::new("kablo-channel");
     let log = root.0.join("argv");
@@ -585,6 +593,7 @@ fn counting_home(root: &TempRoot, name: &str) -> (Home, PathBuf) {
 }
 
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn the_servers_counter_gives_each_terminal_the_next_number_and_never_the_same_twice() {
     let root = TempRoot::new("counter");
     let (home, dir) = counting_home(&root, "home");
@@ -764,6 +773,7 @@ fn kept(home: &Home, version: &str) -> bool {
 }
 
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn the_versions_nothing_runs_are_removed_and_the_ones_something_runs_stay() {
     let root = TempRoot::new("kablo-prune");
     let (home, installed) = home_with(
@@ -802,6 +812,7 @@ fn the_versions_nothing_runs_are_removed_and_the_ones_something_runs_stay() {
 }
 
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn nothing_is_removed_when_the_machines_terminals_could_not_be_listed() {
     let root = TempRoot::new("kablo-prune-broken");
     let (home, installed) = home_with(&root.0, &[("0.1.0", true)]);
@@ -835,6 +846,7 @@ fn a_name_that_is_not_a_version_is_never_handed_to_rm() {
 }
 
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn this_mac_gets_kablo_by_the_same_steps_without_the_shells_files() {
     let root = TempRoot::new("kablo-here");
     let bundle = package(&root.0, "0.2.0", KABLO);

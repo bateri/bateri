@@ -175,6 +175,7 @@ fn run_argv(argv: &[Vec<u8>]) -> u8 {
 }
 
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn a_kablo_call_is_the_decisions_and_needs_the_package() {
     let world = stand_in("route", 0);
     let args = vec!["rasp".to_owned()];
@@ -198,6 +199,7 @@ fn a_kablo_call_is_the_decisions_and_needs_the_package() {
 }
 
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn the_master_is_made_on_the_pane_where_the_files_jobs_look_for_it() {
     let world = stand_in("master", 0);
     let backend = world.backend(Some(world.package()));
@@ -263,6 +265,7 @@ fn world_without_socket() -> World {
 }
 
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn the_install_and_the_bridge_ride_the_master_and_ask_nothing() {
     let world = stand_in("install", 0);
     let backend = world.backend(Some(world.package()));
@@ -347,6 +350,7 @@ fn the_install_and_the_bridge_ride_the_master_and_ask_nothing() {
 /// at every attempt. The stand-in's `attach` starts a process of its own in the background, as a
 /// proxy does.
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn ending_a_bridge_ends_what_its_ssh_started() {
     let world = stand_in("bridge-group", 0);
     let backend = world.backend(Some(world.package()));
@@ -395,6 +399,7 @@ fn ending_a_bridge_ends_what_its_ssh_started() {
 /// bytes the agent's command there runs, the home the server says (a stand-in that sets it, as an
 /// ssh login does).
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn the_counter_is_asked_over_the_master_and_a_build_without_the_package_has_none() {
     let world = stand_in("number", 0);
     let backend = world.backend(Some(world.package()));
@@ -430,6 +435,7 @@ fn the_counter_is_asked_over_the_master_and_a_build_without_the_package_has_none
 /// own, handed over with the server it came from and removed on the server; a build without the
 /// package, or one that places nothing, asks nothing.
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn what_the_script_left_for_the_application_is_read_over_the_master_and_removed() {
     let world = stand_in("notes", 0);
     let host = world
@@ -485,6 +491,7 @@ fn what_the_script_left_for_the_application_is_read_over_the_master_and_removed(
 /// Who opened which terminal is read over the master the same way, and left where it is; a build
 /// without the package asks nothing.
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn who_opened_what_is_read_over_the_master_and_left_on_the_server() {
     let world = stand_in("records", 0);
     let host = world
@@ -539,6 +546,7 @@ fn what_ssh_says_when_the_bridge_ends_tells_a_login_from_a_network() {
 }
 
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn a_server_kablo_cannot_be_kept_on_is_written_down_and_a_bad_moment_is_not() {
     // A home that cannot be written to.
     let world = stand_in("impossible", 0);
@@ -582,6 +590,7 @@ fn a_build_without_the_package_has_nothing_to_install() {
 /// The shells' files go to a server whose kablo is where the ledger says without a look at it:
 /// the same script, over the connection the bridge takes.
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn the_shells_files_are_written_to_a_server_the_ledger_knew() {
     let world = stand_in("files", 0);
     let backend = world.backend(Some(world.package()));
@@ -612,6 +621,7 @@ fn the_shells_files_are_written_to_a_server_the_ledger_knew() {
 /// The dock's tier a server's new terminal gets is the settings' `[shell] integration`, the
 /// answer the Mac's own shells get: `"auto"` draws the dock, `"blocks"` and `"off"` do not.
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn the_dock_tier_of_a_new_terminal_is_the_settings() {
     let world = stand_in("tier", 0);
     let mut backend = world.backend(None);
@@ -630,6 +640,7 @@ fn the_dock_tier_of_a_new_terminal_is_the_settings() {
 }
 
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn a_kablo_of_an_older_release_is_replaced_under_the_terminals_it_runs() {
     let world = stand_in("refresh", 0);
     let backend = world.backend(Some(world.package()));
@@ -681,6 +692,7 @@ fn a_kablo_of_an_older_release_is_replaced_under_the_terminals_it_runs() {
 }
 
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn a_renewal_that_cannot_be_done_now_says_so_and_writes_nothing_down() {
     // No package: nothing to bring.
     let world = stand_in("refresh-none", 0);
@@ -700,6 +712,7 @@ fn a_renewal_that_cannot_be_done_now_says_so_and_writes_nothing_down() {
 }
 
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn the_application_takes_mail_when_it_brought_a_handler_for_it() {
     let world = stand_in("mail", 0);
     let mut backend = world.backend(None);
@@ -709,6 +722,7 @@ fn the_application_takes_mail_when_it_brought_a_handler_for_it() {
 }
 
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn this_macs_account_takes_the_same_steps_with_no_server_and_no_connection() {
     let world = stand_in("here", 0);
     let mac = world._root.0.join("mac");
@@ -788,6 +802,7 @@ fn this_macs_account_takes_the_same_steps_with_no_server_and_no_connection() {
 }
 
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn this_macs_account_needs_the_package_and_a_home_to_keep_kablo_in() {
     let world = stand_in("here-bare", 0);
     let here = local::host();

@@ -917,6 +917,7 @@ fn a_holder_of_the_version_before_is_not_numbered() {
 }
 
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn the_master_step_runs_on_the_pane_and_its_ending_decides() {
     // It ends well: the terminal follows.
     let rig = Rig::new("master-ok");
@@ -1019,6 +1020,7 @@ fn the_next_terminal_of_an_account_rides_the_bridge_that_is_there() {
 }
 
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn a_broken_bridge_is_made_again_and_the_terminal_goes_on_with_no_byte_twice() {
     let rig = Rig::new("broken");
     let mut holder = Holder::new(&rig.socket(), "b-1");
@@ -1039,6 +1041,7 @@ fn a_broken_bridge_is_made_again_and_the_terminal_goes_on_with_no_byte_twice() {
 }
 
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn a_bridge_that_cannot_be_started_is_tried_again_and_a_server_that_speaks_no_version_is_given_up()
 {
     // The first attempts fail: the terminal waits for the one that works.
@@ -1391,6 +1394,7 @@ fn closing_a_pane_hangs_its_terminal_up_and_kills_it_when_it_stays() {
 }
 
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn a_terminal_that_goes_by_itself_after_the_hang_up_is_not_killed() {
     let rig = Rig::graced(
         "end-went",
@@ -1446,6 +1450,7 @@ fn a_pane_that_shows_nothing_ends_nothing_and_a_pane_is_ended_once() {
 /// grace — and the ledger lets go of it, so that no quit and no launch after a crash ends it; with
 /// the pane's holder gone it is in the background, and a pane that shows it again writes it back.
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn a_terminal_left_running_is_not_ended_and_the_ledger_forgets_it() {
     let ledger = Arc::new(Ledger::memory());
     let rig = Rig::kept(
@@ -1579,6 +1584,7 @@ fn a_new_terminal_gets_the_dock_tier_the_settings_say() {
 /// The panes' connection: told once per change, from a first connection that
 /// is not a lost one to a lost one that comes back by a clock the user skips.
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn a_pane_is_told_when_its_connection_goes_and_comes_back_and_not_once_per_attempt() {
     let rig = Rig::new("passive");
     let pane = pane_named(&rig.world);
@@ -1696,6 +1702,7 @@ fn the_shell_is_spoken_to_on_its_own_only_when_the_server_says_it_is_in_front() 
 
 /// The computer waking up is the same as the user asking, for every account.
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn waking_dials_the_accounts_that_wait_for_their_pause() {
     let rig = Rig::new("wake");
     let pane = pane_named(&rig.world);
@@ -1731,6 +1738,7 @@ fn waking_dials_the_accounts_that_wait_for_their_pause() {
 /// A login nobody saved: nothing is tried until the user says so, and the user
 /// saying so with the login still missing asks once and waits again.
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn a_login_nobody_saved_waits_for_the_user_and_tries_nothing_meanwhile() {
     let rig = Rig::new("login");
     let pane = pane_named(&rig.world);
@@ -1921,6 +1929,7 @@ fn the_old_release(ledger: &Ledger) {
 }
 
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn a_restarted_bateri_renews_the_kablo_its_ledger_remembers_before_it_dials() {
     let ledger = Arc::new(Ledger::memory());
     // The terminal runs under the relay of the release before.
@@ -1976,6 +1985,7 @@ fn a_restarted_bateri_renews_the_kablo_its_ledger_remembers_before_it_dials() {
 /// A renewal that cannot be made now (no connection, a server that will not take the
 /// file) does not stand in the bridge's way and is made at the next dial.
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn a_renewal_that_cannot_be_made_leaves_the_account_as_it_was_until_the_next_dial() {
     let ledger = Arc::new(Ledger::memory());
     let world = Fake::new(Bridge::new(Age::Old));
@@ -2243,6 +2253,7 @@ fn the_holder_that_waited_through_a_restart_finds_its_terminal_where_it_left_it(
 /// even when the pane goes on as a plain `ssh` whose process-table target is the
 /// same. A lost connection and a return are not changes.
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn a_pane_is_told_when_the_terminal_it_shows_appears_and_when_it_goes() {
     let rig = Rig::new("changed");
     let pane = pane_named(&rig.world);
@@ -2667,6 +2678,7 @@ fn a_relay_that_names_no_clients_keeps_every_terminal_in_the_background() {
 /// taken, and by whom; closing it ends nothing on the server and the ledger does not name the
 /// terminal (a quit that ends terminals must not end the other Mac's); ⏎ takes it back.
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn a_terminal_another_mac_took_dims_the_pane_and_closing_it_ends_nothing() {
     let ledger = Arc::new(Ledger::memory());
     let rig = Rig::kept(
@@ -2975,6 +2987,7 @@ fn an_application_that_takes_no_mail_is_given_none_and_a_ticket_that_comes_anywa
 }
 
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn an_answer_to_a_letter_of_a_connection_that_went_is_not_said_on_the_next() {
     let (rig, _holder, _terminal) = mail_rig("letter-stale");
     let stream = program_opens(&rig, None);
@@ -3541,6 +3554,7 @@ fn a_terminal_whose_start_the_server_no_longer_has_is_shown_as_a_picture_that_is
 }
 
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn after_a_launch_that_did_not_settle_a_pane_is_shown_a_picture_that_is_all_past_and_the_past_is_forgotten()
  {
     let back = Comeback::leaves("local-back-unsettled", b"one\r\n");
@@ -3681,6 +3695,7 @@ fn what_a_crash_left_of_this_macs_is_ended_by_the_first_connection_and_not_shown
 }
 
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn what_no_pane_of_the_launch_showed_again_is_ended_and_what_one_did_is_not() {
     let back = Comeback::leaves("local-unclaimed", b"x\r\n");
     let abandoned = SessionId::new("b-00000000000000000000000000000002").expect("a name");

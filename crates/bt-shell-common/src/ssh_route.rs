@@ -3195,6 +3195,7 @@ exit $code
     }
 
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn a_master_opens_through_askpass_end_to_end() {
         let (root, masters) = rig("open", "s3cr3t");
         let target = host_target(&root, "prod");
@@ -3234,6 +3235,7 @@ exit $code
     }
 
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn a_cancelled_question_stops_ssh_before_an_empty_password() {
         let (root, masters) = rig("cancel", "s3cr3t");
         let target = host_target(&root, "prod");
@@ -3250,6 +3252,7 @@ exit $code
     }
 
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn three_wrong_passwords_fail_with_sshs_reason() {
         let (root, masters) = rig("wrong", "s3cr3t");
         let target = host_target(&root, "prod");
@@ -3268,6 +3271,7 @@ exit $code
     }
 
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn an_unknown_host_key_is_refused_with_the_terminal_hint() {
         let (root, masters) = rig("hostkey", "s3cr3t");
         let target = host_target(&root, "stranger");
@@ -3281,6 +3285,7 @@ exit $code
     }
 
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn a_background_job_never_opens_a_master() {
         let (root, masters) = rig("never", "s3cr3t");
         let target = host_target(&root, "prod");
@@ -3333,6 +3338,7 @@ exit $code
 
     /// Another pane's cancelled sheet is not this job's answer: it asks at its own.
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn a_joiner_asks_itself_when_the_owner_is_cancelled() {
         let (root, masters) = rig("rejoin", "s3cr3t");
         let masters = Arc::new(masters);
@@ -3367,6 +3373,7 @@ exit $code
     }
 
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn two_jobs_to_one_host_open_one_master() {
         one_opening_for_two_jobs("flight");
     }
@@ -3388,6 +3395,7 @@ exit $code
     }
 
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn a_saved_password_answers_without_a_sheet() {
         let (root, masters, store) = rig_saved("saved", "s3cr3t", Some("s3cr3t"));
         let target = host_target(&root, "prod");
@@ -3406,6 +3414,7 @@ exit $code
     }
 
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn a_refused_saved_password_asks_at_the_sheet_and_is_replaced_on_success() {
         let (root, masters, store) = rig_saved("stale", "s3cr3t", Some("old"));
         let target = host_target(&root, "prod");
@@ -3430,6 +3439,7 @@ exit $code
     }
 
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn an_unticked_box_saves_nothing_and_drops_a_refused_password() {
         let (root, masters, store) = rig_saved("unticked", "s3cr3t", None);
         let target = host_target(&root, "prod");
@@ -3450,6 +3460,7 @@ exit $code
     }
 
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn a_wrong_password_is_never_saved() {
         let (root, masters, store) = rig_saved("nosave", "s3cr3t", None);
         let target = host_target(&root, "prod");
@@ -3468,6 +3479,7 @@ exit $code
     }
 
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn a_background_job_opens_once_with_the_saved_password() {
         let (root, masters, _) = rig_saved("bgsaved", "s3cr3t", Some("s3cr3t"));
         let target = host_target(&root, "prod");
@@ -3485,6 +3497,7 @@ exit $code
     /// generation, however much later — connects again. Only the user's
     /// successful sign-in clears it.
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn a_refused_saved_password_is_not_retried_in_the_background() {
         let (root, masters, store) = rig_saved("bgstale", "s3cr3t", Some("old"));
         let target = host_target(&root, "prod");
@@ -3520,6 +3533,7 @@ exit $code
     /// A background attempt that the saved password cannot finish (a code
     /// follows it) is not repeated either: one half-login, then the mark.
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn a_background_job_stops_at_a_second_factor_for_good() {
         let (root, masters, store) = rig_saved("bg2fa", "s3cr3t", None);
         let account = Account {
@@ -3535,6 +3549,7 @@ exit $code
     }
 
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn a_user_job_asks_itself_after_a_refused_background_attempt() {
         let (root, masters, _) = rig_saved("bguser", "s3cr3t", Some("old"));
         let target = host_target(&root, "prod");
@@ -3559,6 +3574,7 @@ exit $code
     /// (not as the account's: nothing to remember, nothing stale), the saved
     /// one answers the destination, and the bastion's is never saved over it.
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn the_saved_password_goes_to_the_destination_and_never_to_its_jump_host() {
         let (root, masters, store) = rig_saved("jump", "s3cr3t", None);
         lock(&store.saved).insert(jumped_account(), "s3cr3t".to_owned());
@@ -3582,6 +3598,7 @@ exit $code
     /// saved password there — and without calling it refused: the user's
     /// sign-in then neither hears it is stale nor loses it.
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn a_jump_hosts_question_in_the_background_leaves_the_saved_password_alone() {
         let (root, masters, store) = rig_saved("jumpbg", "s3cr3t", None);
         lock(&store.saved).insert(jumped_account(), "s3cr3t".to_owned());
@@ -3606,6 +3623,7 @@ exit $code
     /// stays). Without the hold every background tick would open another
     /// connection to the bastion. The user's sign-in lifts it.
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn a_jump_hosts_question_stops_the_background_until_the_user_signs_in() {
         let (root, masters, store) = rig_saved("jumphold", "s3cr3t", None);
         lock(&store.saved).insert(jumped_account(), "s3cr3t".to_owned());
@@ -3630,6 +3648,7 @@ exit $code
     }
 
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn forget_removes_the_password_and_stops_our_master() {
         let (root, masters, store) = rig_saved("forget", "s3cr3t", Some("s3cr3t"));
         let target = host_target(&root, "prod");

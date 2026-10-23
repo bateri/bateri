@@ -3,7 +3,7 @@ CARGO ?= cargo
 # Prerequisite order is only guaranteed under serial make; under -j the promises
 # "cheapest gate first" and "version first" break.
 .NOTPARALLEL:
-.PHONY: check prune fmt audit clippy test shader smoke terminfo test-race scan bundle package install release publish ship release-gate sparkle dmgbuild linux
+.PHONY: check prune fmt audit clippy test test-heavy test-view test-all gate gate-push hooks shader smoke terminfo test-race scan bundle package install release publish ship release-gate sparkle dmgbuild linux
 
 # Definition of done. Homebrew rustc is not pinned (there is deliberately no
 # rust-toolchain.toml): the version is printed first so a clippy failure that
@@ -153,8 +153,48 @@ clippy:
 # The forks of the parser and of the emulator live in kablo's repository (`vendor/vte`
 # and `vendor/alacritty_terminal` there), and their tests, upstream's and ours, run in
 # kablo's gate: the owner of the code owns its tests. Here only the workspace's own.
+# This is the fast tier: the heavy tests — those that start a real shell, program, ssh or
+# kablo, or wait seconds on a clock — are `#[ignore = "heavy: …"]`, and the program view's
+# test (its own `main`) runs only with `BT_HEAVY`. `test-heavy`, `test-view` and `test-all`
+# run them; which of them a change needs, `make gate` and `make gate-push` decide.
 test:
 	$(CARGO) test --workspace --all-targets
+
+# The tests `#[ignore]`d for something else than being heavy, by their paths: the race tier
+# (`make test-race`), the font inventories (`make scan`, `raster_digest`), the frame-loop
+# measurement hook, the askpass child the master tests start themselves and the tests that
+# need a local sshd. A new `#[ignore]` of that kind goes here too, or the heavy runs try it.
+NOT_HEAVY = --skip ::race_ --skip census::tests::census --skip raster_digest \
+	--skip wgpu_tests::offscreen_frame_loop --skip ssh_route::tests::askpass_child \
+	--skip ssh_route::tests::a_real_master_opens --skip ssh_route::tests::password_sshd_
+
+# The libraries' heavy tests: those whose path holds one of AREA's words
+# (`AREA="child:: kablo::"`), every one without it. Nothing is built again: the same test
+# binaries as `test`, the ignored tests taken.
+test-heavy:
+	$(CARGO) test --workspace --lib -- --ignored $(NOT_HEAVY) $(AREA)
+
+# The program view's test, end to end in a real web view (tens of seconds, one at a time).
+test-view:
+	BT_HEAVY=1 $(CARGO) test --workspace --test pencere
+
+# Every test but those `NOT_HEAVY` names: the fast tier and the heavy one together, the push
+# tier's run.
+test-all:
+	BT_HEAVY=1 $(CARGO) test --workspace --all-targets -- --include-ignored $(NOT_HEAVY)
+
+# What a change needs, picked by the files it touched (`tools/gate.sh` says how): `gate` for
+# a commit — the fast tier and the touched areas' heavy tests; `gate-push` before a push —
+# everything once, `make linux` and `make bundle` when their inputs changed. Each stamps the
+# tree that passed; the pre-push hook asks for `gate-push`'s, `make hooks` puts it in place.
+gate:
+	@tools/gate.sh commit
+
+gate-push:
+	@tools/gate.sh push
+
+hooks:
+	ln -sf "$(CURDIR)/tools/pre-push" "$$(git rev-parse --git-path hooks)/pre-push"
 
 # Opens the window, and when BT_RUN_SECONDS expires looks at the number of
 # frames, cells, glyphs, rule lines and atlas slots:
@@ -656,6 +696,7 @@ RELEASE_URL = https://github.com/$(REPO)/releases/download/v$(VERSION)/
 release-gate:
 	@echo '$(VERSION)' | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$$' || { echo "release: version '$(VERSION)' is not x.y.z (Cargo.toml)"; exit 1; }
 	@test -z "$$(git status --porcelain)" || { echo "release: the working tree is not clean, the version must come from a known code"; exit 1; }
+	@tools/gate.sh check-push || { echo "release: run \`make gate-push\` first — a release goes out only from a commit that passed every test"; exit 1; }
 	@! git rev-parse -q --verify 'refs/tags/v$(VERSION)' >/dev/null || { echo "release: tag v$(VERSION) already exists — bump the version in Cargo.toml"; exit 1; }
 	@! git ls-remote --exit-code --tags origin 'refs/tags/v$(VERSION)' >/dev/null || { echo "release: tag v$(VERSION) already exists on origin"; exit 1; }
 	@rm -rf $(RELEASE_DIR) && mkdir -p $(RELEASE_DIR); \
@@ -773,4 +814,4 @@ linux:
 		-v bateri-linux-cargo-git:/usr/local/cargo/git \
 		-e CARGO_TARGET_DIR=/w/target/linux $(LINUX_IMAGE) sh -c '\
 		cargo clippy $(LINUX_CRATES) --all-targets --locked -- -D warnings && \
-		cargo test $(LINUX_CRATES) --all-targets --locked'
+		cargo test $(LINUX_CRATES) --all-targets --locked -- --include-ignored $(NOT_HEAVY)'

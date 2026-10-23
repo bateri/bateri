@@ -1785,6 +1785,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn a_version_that_lingers_after_its_line_is_not_waited_for() {
         let dir = std::env::temp_dir().join(format!("bt-program-linger-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -2367,6 +2368,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn the_details_job_reads_the_version_and_the_venv() {
         let dir = std::env::temp_dir().join(format!("bt-program-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -2406,6 +2408,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn a_version_that_does_not_come_in_time_is_killed() {
         let dir = std::env::temp_dir().join(format!("bt-program-slow-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
