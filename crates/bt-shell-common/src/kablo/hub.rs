@@ -38,10 +38,18 @@
 //! A holder that is slow to write what it is given grows [`Hub::backlog`]; the
 //! owner stops reading the server's stream while it is large, which is the
 //! server's own flow control reaching the program.
+//!
+//! **A raw holder** ([`Hub::open_raw`]) is the pane itself, not a program in it: a pane that
+//! shows a terminal of this Mac reads the terminal's bytes as they are (no frames, nothing to
+//! greet or ask) and types into it as they are. It is bound to the terminal the moment the
+//! owner starts it ([`Hub::start_raw`]), told its size with [`Hub::resize`], and how the program
+//! ended is [`Hub::exit_of`]; the words a framed holder is sent as frames (a bell, a line, a
+//! refusal) it is sent as the bytes that show them. Everything else — the routing, the
+//! position, the backlog, the ending — is the framed holder's.
 
 use std::collections::{BTreeMap, VecDeque};
 
-use super::{Attach, Client, ErrorCode, Event, NewSession, SessionId};
+use super::{Attach, Client, ErrorCode, Event, Exit, NewSession, SessionId, Size};
 use crate::hold::wire::{self, AppReader, CHUNK, Open, Target, ToApp, ToHold, exit_status};
 
 /// One holder's connection, as the hub knows it.
@@ -147,6 +155,11 @@ struct Binding {
 struct Hold {
     reader: AppReader,
     out: Vec<u8>,
+    /// The holder is the pane itself ([`Hub::open_raw`]): `out` is the terminal's bytes and
+    /// what it sends is typed.
+    raw: bool,
+    /// How the terminal's program ended, once the hub has said its last word to the holder.
+    exit: Option<Exit>,
     /// The wire version agreed, 0 before the greeting.
     version: u8,
     /// The request waiting for the owner.
@@ -168,6 +181,8 @@ impl Hold {
         Hold {
             reader: AppReader::new(),
             out: Vec::new(),
+            raw: false,
+            exit: None,
             version: 0,
             pending: None,
             running: false,
@@ -178,7 +193,39 @@ impl Hold {
     }
 
     fn send(&mut self, message: &ToHold) {
-        message.encode(&mut self.out);
+        if !self.raw {
+            message.encode(&mut self.out);
+            return;
+        }
+        // What a pane reads is bytes: the words of the wire are the bytes that show them.
+        match message {
+            ToHold::Output { data, .. } => self.out.extend_from_slice(data),
+            ToHold::Bell => self.out.push(0x07),
+            ToHold::Note { text } => {
+                self.out.extend_from_slice(text.as_bytes());
+                self.out.extend_from_slice(b"\r\n");
+            }
+            ToHold::End { code, note } => {
+                if let Some(note) = note {
+                    self.line(note);
+                }
+                self.exit.get_or_insert(Exit::Code(i32::from(*code)));
+            }
+            ToHold::Refused { text, .. } => {
+                if !text.is_empty() {
+                    self.line(text);
+                }
+                self.exit.get_or_insert(Exit::Code(1));
+            }
+            ToHold::Welcome { .. } | ToHold::Bound { .. } | ToHold::Run { .. } => {}
+        }
+    }
+
+    /// A line of the hub's own, after what the terminal wrote.
+    fn line(&mut self, text: &str) {
+        self.out.extend_from_slice(b"\r\n");
+        self.out.extend_from_slice(text.as_bytes());
+        self.out.extend_from_slice(b"\r\n");
     }
 
     fn finish(&mut self, message: &ToHold) {
@@ -322,6 +369,7 @@ impl Hub {
                 if let Some(hold) = hold_of(self, terminal) {
                     self.release(hold, false);
                     if let Some(hold) = self.holds.get_mut(&hold) {
+                        hold.exit = Some(*exit);
                         hold.finish(&ToHold::End {
                             code: exit_status(*exit),
                             note: None,
@@ -404,6 +452,7 @@ impl Hub {
     fn give(&mut self, hold: HoldId, data: &[u8]) {
         let Some(Hold {
             out,
+            raw,
             bound: Some(binding),
             ..
         }) = self.holds.get_mut(&hold)
@@ -420,6 +469,10 @@ impl Hub {
         // where the stream stands after a frame.
         for chunk in data.chunks(CHUNK) {
             binding.end += chunk.len() as u64;
+            if *raw {
+                out.extend_from_slice(chunk);
+                continue;
+            }
             ToHold::Output {
                 end: binding.end,
                 data: chunk.to_vec(),
@@ -443,6 +496,7 @@ impl Hub {
     ) {
         let Some(Hold {
             out,
+            raw,
             bound: Some(binding),
             ..
         }) = self.holds.get_mut(&hold)
@@ -458,6 +512,13 @@ impl Hub {
         };
         bytes.reserve(data.len());
         bytes.extend_from_slice(data);
+        if *raw {
+            out.extend_from_slice(&bytes);
+            if last {
+                binding.end = offset;
+            }
+            return;
+        }
         let pieces: Vec<&[u8]> = bytes.chunks(CHUNK).collect();
         for (at, piece) in pieces.iter().enumerate() {
             let whole = last && at + 1 == pieces.len();
@@ -479,6 +540,19 @@ impl Hub {
         let id = HoldId(self.next);
         self.next += 1;
         self.holds.insert(id, Hold::new());
+        id
+    }
+
+    /// A raw holder: the pane itself, which reads the terminal's bytes and types into it as
+    /// they are ([`Hub::start_raw`] gives it its terminal). It needs no greeting and asks for
+    /// nothing, so it is bound to a terminal by the owner alone.
+    pub fn open_raw(&mut self) -> HoldId {
+        let id = HoldId(self.next);
+        self.next += 1;
+        let mut hold = Hold::new();
+        hold.raw = true;
+        hold.version = wire::VERSION;
+        self.holds.insert(id, hold);
         id
     }
 
@@ -518,6 +592,11 @@ impl Hub {
             return;
         };
         if entry.finished {
+            return;
+        }
+        // A raw holder says nothing but what is typed.
+        if entry.raw {
+            self.typed(hold, bytes);
             return;
         }
         entry.reader.push(bytes);
@@ -600,31 +679,42 @@ impl Hub {
                 entry.running = false;
                 self.events.push_back(HubEvent::Ran { hold, status });
             }
-            ToApp::Input(bytes) => {
-                let sent = match entry.bound.as_ref() {
-                    Some(binding) => {
-                        let (account, terminal) =
-                            (binding.account.clone(), binding.terminal.clone());
-                        self.clients
-                            .get_mut(&account)
-                            .is_some_and(|client| client.input(&terminal, &bytes))
-                    }
-                    None => false,
-                };
-                if !sent && let Some(entry) = self.holds.get_mut(&hold) {
-                    entry.send(&ToHold::Bell);
-                }
+            ToApp::Input(bytes) => self.typed(hold, &bytes),
+            ToApp::Resize(size) => self.resize(hold, size),
+        }
+    }
+
+    /// What the holder typed goes to its terminal; a holder whose terminal does not take it
+    /// (the connection is down, the terminal is not there yet) is told with a bell and the
+    /// keys are dropped.
+    fn typed(&mut self, hold: HoldId, bytes: &[u8]) {
+        let sent = match self.holds.get(&hold).and_then(|entry| entry.bound.as_ref()) {
+            Some(binding) => {
+                let (account, terminal) = (binding.account.clone(), binding.terminal.clone());
+                self.clients
+                    .get_mut(&account)
+                    .is_some_and(|client| client.input(&terminal, bytes))
             }
-            ToApp::Resize(size) => {
-                if let Some(binding) = entry.bound.as_ref() {
-                    let (account, terminal) = (binding.account.clone(), binding.terminal.clone());
-                    if let Some(client) = self.clients.get_mut(&account) {
-                        client.resize(&terminal, size);
-                    }
-                } else if let Some(open) = entry.pending.as_mut() {
-                    open.size = size;
-                }
+            None => false,
+        };
+        if !sent && let Some(entry) = self.holds.get_mut(&hold) {
+            entry.send(&ToHold::Bell);
+        }
+    }
+
+    /// The holder's pane changed size: its terminal's is the same from now on (a request that
+    /// is still waiting has it for when it is started).
+    pub fn resize(&mut self, hold: HoldId, size: Size) {
+        let Some(entry) = self.holds.get_mut(&hold) else {
+            return;
+        };
+        if let Some(binding) = entry.bound.as_ref() {
+            let (account, terminal) = (binding.account.clone(), binding.terminal.clone());
+            if let Some(client) = self.clients.get_mut(&account) {
+                client.resize(&terminal, size);
             }
+        } else if let Some(open) = entry.pending.as_mut() {
+            open.size = size;
         }
     }
 
@@ -667,6 +757,42 @@ impl Hub {
             entry.renumber = renumber;
         }
         Ok(())
+    }
+
+    /// Starts a terminal of `account` named `terminal` for a raw holder, which is bound to it at
+    /// once and is sent its bytes from the first. The owner names it: a request repeated cannot
+    /// make two.
+    pub fn start_raw(
+        &mut self,
+        hold: HoldId,
+        account: &str,
+        terminal: SessionId,
+        spec: NewSession,
+        size: Size,
+    ) -> Result<(), Declined> {
+        if !self
+            .holds
+            .get(&hold)
+            .is_some_and(|entry| entry.raw && entry.bound.is_none())
+        {
+            return Err(Declined::NoRequest);
+        }
+        let Some(client) = self.clients.get_mut(account) else {
+            return Err(Declined::NoClient);
+        };
+        if client
+            .new_terminal(terminal.clone(), spec, Attach::new(size))
+            .is_err()
+        {
+            return Err(Declined::Refused);
+        }
+        self.bind(hold, account, terminal, 0, false, false);
+        Ok(())
+    }
+
+    /// How the terminal's program ended, for a holder the hub has said its last word to.
+    pub fn exit_of(&self, hold: HoldId) -> Option<Exit> {
+        self.holds.get(&hold).and_then(|entry| entry.exit)
     }
 
     /// Ties the holder to the terminal it asked to see again ([`Target::Resume`])

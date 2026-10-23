@@ -21,6 +21,15 @@
 //! for a server pane (file drops, the load indicator, the server's ports, a server's files and
 //! counter, the notes a program left there) is done for it. The one place that says which is
 //! which is the account's name ([`is_account`], [`Shown::is_local`](super::service::Shown)).
+//!
+//! **What a pane gets.** A pane's shell runs in a terminal of this account, and the pane's session
+//! reads its bytes from a stream the service holds as a raw holder
+//! ([`super::service::Service::open_local`], [`super::hub::Hub::open_raw`]): the terminal is
+//! started with the command, the environment and the directory the session would have started its
+//! own child with ([`new_session`]), so the shell cannot tell. For now such a pane is not carried
+//! over an update or a quit — its terminal is ended with its session — and it is not in
+//! [`super::service::Service::shown`]: the surfaces that ask for a server's terminal of a pane do
+//! not find one.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -29,9 +38,9 @@ use std::time::Duration;
 
 use kablo_proto::install;
 
-use super::Cause;
 use super::install::{Channel, Installed, Reply, run_command_in};
 use super::service::Carried;
+use super::{Cause, NewSession, Size};
 use crate::ssh_wrap::KabloHost;
 
 /// The account of this Mac. Not a shape any server's key has (`user@host:port`, or the digits of
@@ -131,6 +140,40 @@ pub fn start(mut command: Command) -> io::Result<Carried> {
 /// The bridge to this Mac's terminals: `kablo attach` from the version `installed` names.
 pub fn carry(home: &Path, installed: &Installed) -> io::Result<Carried> {
     start(bridge_command(home, installed)?)
+}
+
+/// The request that starts a pane's terminal here: the pane's own command, environment and
+/// directory as `launch` says them ([`bt_core::SessionOptions::child_launch`]), and `history`
+/// rows of scrollback kept for it; with the size the terminal starts at, in the cells and the
+/// pixels the program is told.
+pub fn new_session(launch: &bt_core::ChildLaunch, history: u32) -> (NewSession, Size) {
+    use std::os::unix::ffi::OsStrExt as _;
+    // `NewSession` is not exhaustive: it is started from its default.
+    let mut spec = NewSession::default();
+    spec.argv = launch
+        .argv
+        .iter()
+        .map(|arg| arg.as_bytes().to_vec())
+        .collect();
+    spec.env = launch
+        .env
+        .iter()
+        .map(|(name, value)| (name.as_bytes().to_vec(), value.as_bytes().to_vec()))
+        .collect();
+    spec.cwd = launch
+        .cwd
+        .as_ref()
+        .map(|dir| dir.as_os_str().as_bytes().to_vec());
+    spec.history = Some(history);
+    let pixels =
+        |cells: u16, each: u16| u16::try_from(u32::from(cells) * u32::from(each)).unwrap_or(0);
+    let size = Size {
+        cols: launch.size.cols,
+        rows: launch.size.rows,
+        xpixel: pixels(launch.size.cols, launch.size.cell_width),
+        ypixel: pixels(launch.size.rows, launch.size.cell_height),
+    };
+    (spec, size)
 }
 
 #[cfg(test)]

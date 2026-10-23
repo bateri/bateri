@@ -246,7 +246,7 @@ pub fn ssh_args_in(args: &[String]) -> Option<&[String]> {
 /// A name for a new terminal: `b-` and 128 random bits as hex. Made here, not
 /// by the application, so that asking again after a lost connection names the
 /// same terminal.
-fn new_terminal_name() -> io::Result<SessionId> {
+pub(crate) fn new_terminal_name() -> io::Result<SessionId> {
     let mut bytes = [0u8; 16];
     std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
     let mut name = String::from("b-");

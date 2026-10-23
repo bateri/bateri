@@ -221,6 +221,20 @@ pub trait PaneHost {
     fn kept_terminal(&self, _pane: &PaneUuid) -> Option<Shown> {
         None
     }
+    /// A terminal of this Mac for the pane `pane` to show instead of a shell of its own: the
+    /// stream its session reads and writes ([`bt_core::Session::streamed`]), the terminal
+    /// started with what `launch` says and `history` rows of scrollback. `None` — the default,
+    /// an owner that keeps no terminals for its panes — leaves the pane an ordinary one: its
+    /// shell is the session's own child. Asked on the main thread while the pane starts, and
+    /// it may wait there for the terminal.
+    fn open_local_terminal(
+        &self,
+        _pane: &PaneUuid,
+        _launch: &bt_core::ChildLaunch,
+        _history: u32,
+    ) -> Option<bt_core::Stream> {
+        None
+    }
     /// The terminals the server of `account` keeps that no pane of this Mac shows and no other
     /// Mac has open, the last to write first: what the server's card lists. The default is an
     /// owner that has no such terminals.
@@ -3277,6 +3291,12 @@ impl TerminalPane {
         self.host().kept_terminal(self.uuid()).is_some()
     }
 
+    /// Whether the pane's shell runs in a terminal of this Mac that kablo keeps
+    /// ([`Session::streamed`]) and not in a child of this process.
+    pub(crate) fn is_streamed(&self) -> bool {
+        self.session().is_some_and(|session| session.is_streamed())
+    }
+
     /// The remote session bateri does things on a server for, if the pane has
     /// one: [`Session::remote_target`] (the running command's generation, the
     /// server, the folder it reported) **when the pane shows a terminal that
@@ -3713,6 +3733,22 @@ impl TerminalPane {
         self.start_session(mtm, grid, birth)
     }
 
+    /// The terminal of this Mac the pane's shell runs in: kablo's, started with what
+    /// [`Session::spawn`] would start the shell with. `None` — an ordinary pane, the shell is
+    /// the session's own child — in a timed run (its scripts are the result and kablo is not
+    /// part of it), for a pane whose first program is the pipe to a server's terminal (it
+    /// shows that terminal; the pipe running in a terminal of this Mac comes with the pane's
+    /// other readers), and where there is no kablo to put it in
+    /// ([`PaneHost::open_local_terminal`]). A pane like that does not outlive its session.
+    fn local_terminal(&self, options: &SessionOptions, held: bool) -> Option<bt_core::Stream> {
+        if self.ivars().run.is_some() || held {
+            return None;
+        }
+        let history = u32::try_from(options.terminal.scrollback).unwrap_or(u32::MAX);
+        self.host()
+            .open_local_terminal(self.uuid(), &options.child_launch(), history)
+    }
+
     /// Opens the session and attaches the link that drives frames. The order
     /// is required: `Session` wants `Wake`, the link wants `Session`, `Waker`
     /// is born from the link.
@@ -3904,7 +3940,12 @@ impl TerminalPane {
             // A terminal window without a shell is an empty box; what to do is
             // the caller's call (first window: the process exits; later ones:
             // that window closes).
-            None => (Session::spawn(options, wake)?, shell_parent),
+            None => match self.local_terminal(&options, held.is_some()) {
+                // The shell runs in a terminal of kablo's on this Mac and the session reads
+                // its bytes; the child's parent there is what it is for a shell started here.
+                Some(stream) => (Session::streamed(options, wake, stream)?, shell_parent),
+                None => (Session::spawn(options, wake)?, shell_parent),
+            },
         };
         let session = Arc::new(session);
         // The program kept running through the handover and its view did not: what the view
@@ -5545,6 +5586,11 @@ impl TerminalPane {
             return None;
         }
         let session = Arc::clone(self.session()?);
+        // A terminal kablo keeps is not carried by this process to the next: it is not this
+        // process's child to hand over, and there is no master to freeze.
+        if session.is_streamed() {
+            return None;
+        }
         let parent = *self.ivars().shell_parent.get()?;
         let pid = session.child_pid();
         let start = jobs::start_time(pid)?;

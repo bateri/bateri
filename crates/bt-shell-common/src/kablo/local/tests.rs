@@ -6,7 +6,7 @@
 use std::io::{Read, Write};
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::process::{Command, Stdio};
-use std::sync::mpsc;
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -14,6 +14,8 @@ use kablo_proto::SessionId;
 
 use super::*;
 use crate::kablo::install::{self, Bundle, Failure, ensure_here, prune_versions, unused_versions};
+use crate::kablo::ledger::Ledger;
+use crate::kablo::service::{Backend, PaneInfo, Peer, Refusal, Service};
 use crate::kablo::{Attach, Client, Event, Exit, NewSession, Size};
 use crate::settings::TempRoot;
 
@@ -429,4 +431,261 @@ impl Channel for EnvChannel {
         );
         self.inner.run(&script, input)
     }
+}
+
+// ─── a pane over a real kablo ────────────────────────────────────────────
+
+/// This Mac for the service, with the release the test has, below the test's own home and with
+/// the test's own socket directory for everything kablo makes.
+struct RealMac {
+    bundle: Bundle,
+    home: PathBuf,
+    sockets: PathBuf,
+}
+
+impl Backend for RealMac {
+    fn pane(&self, _: &Peer) -> Option<PaneInfo> {
+        None
+    }
+
+    fn route(&self, _: &[String]) -> Option<KabloHost> {
+        None
+    }
+
+    fn master(&self, _: &KabloHost) -> Result<Option<Vec<Vec<u8>>>, Refusal> {
+        Ok(None)
+    }
+
+    fn master_made(&self, _: &KabloHost, _: u8) -> Result<(), Refusal> {
+        Ok(())
+    }
+
+    fn install(&self, _: &KabloHost, _: &[SessionId]) -> Result<Installed, Refusal> {
+        ensure_here(&LocalChannel::new(self.home.clone()), &self.bundle)
+            .map_err(|_| Refusal::plain())
+    }
+
+    fn version(&self) -> Option<String> {
+        Some(self.bundle.version().to_owned())
+    }
+
+    fn carry(&self, _: &KabloHost, installed: &Installed) -> io::Result<Carried> {
+        let mut command = bridge_command(&self.home, installed)?;
+        command
+            .env(sockdir_variable(), &self.sockets)
+            .env("KABLO_TEST_END_KEEP_MS", "200");
+        start(command)
+    }
+}
+
+/// What a pane's session says to its owner: only the end of the program is kept.
+#[derive(Default)]
+struct Ends {
+    exit: Mutex<Option<Option<i32>>>,
+    changed: std::sync::Condvar,
+}
+
+impl Ends {
+    fn waits(&self) -> Option<Option<i32>> {
+        let exit = self.exit.lock().expect("lock");
+        let (exit, _) = self
+            .changed
+            .wait_timeout_while(exit, Duration::from_secs(20), |exit| exit.is_none())
+            .expect("lock");
+        *exit
+    }
+}
+
+impl bt_core::Wake for Ends {
+    fn wake(&self) {}
+    fn child_exit(&self, code: Option<i32>) {
+        *self.exit.lock().expect("lock") = Some(code);
+        self.changed.notify_all();
+    }
+    fn copy_to_clipboard(&self, _: String) {}
+    fn title_changed(&self) {}
+    fn search_changed(&self) {}
+    fn command_started(&self) {}
+    fn phase_edge(&self) {}
+    fn remote_command_edge(&self) {}
+    fn mirror_changed(&self) {}
+    fn environment_changed(&self) {}
+    fn remote_up(&self) {}
+    fn remote_typed(&self) {}
+    fn link_hover_lost(&self) {}
+    fn pointer_changed(&self) {}
+    fn blocks_changed(&self) {}
+    fn unseen_changed(&self) {}
+    fn program_status_changed(&self) {}
+    fn bell(&self) {}
+    fn notification(&self) {}
+}
+
+/// The grid's text, one row to a line.
+fn screen(session: &bt_core::Session) -> String {
+    let mut rows: Vec<Vec<char>> = Vec::new();
+    session.frame(
+        |cell| {
+            let (row, col) = (usize::from(cell.row), usize::from(cell.col));
+            if rows.len() <= row {
+                rows.resize(row + 1, Vec::new());
+            }
+            if rows[row].len() <= col {
+                rows[row].resize(col + 1, ' ');
+            }
+            rows[row][col] = cell.ch.unwrap_or(' ');
+        },
+        |_| (),
+        &mut bt_core::Blocks::default(),
+        &mut bt_core::SelectionRuns::default(),
+        &mut bt_core::SearchRuns::default(),
+        &mut bt_core::TrackMarks::default(),
+        &mut bt_core::Clusters::default(),
+        &mut bt_core::Pictures::default(),
+        bt_core::ScrollGlide::default(),
+        bt_core::DockBudget {
+            share: 0.5,
+            cols: 80,
+        },
+    );
+    rows.iter()
+        .map(|row| row.iter().collect::<String>().trim_end().to_owned())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn shows(session: &bt_core::Session, needle: &str) -> bool {
+    screen(session).contains(needle)
+}
+
+fn waits_for(what: &str, mut ready: impl FnMut() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while Instant::now() < deadline {
+        if ready() {
+            return;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    panic!("{what}");
+}
+
+#[test]
+fn a_pane_over_a_real_kablo_shows_what_the_program_writes_types_into_it_is_sized_by_it_and_hears_its_end()
+ {
+    let Some(bundle) = release() else {
+        eprintln!("SKIPPED: there is no kablo release to run (../kablo/dist or KABLO_DIST)");
+        return;
+    };
+    let mut ground = Ground::new("pane");
+    let service_dir = ground.root.join("svc");
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&service_dir)
+        .expect("the service's directory");
+    let kablo =
+        kablo_proto::install::install_path_in(&ground.home.to_string_lossy(), bundle.version())
+            .expect("a path");
+    let backend = RealMac {
+        bundle,
+        home: ground.home.clone(),
+        sockets: ground.sockets.clone(),
+    };
+    let ledger = Arc::new(Ledger::memory());
+    let service =
+        Service::start(&service_dir, Arc::new(backend), Arc::clone(&ledger)).expect("a service");
+
+    // The program: says the identity it was given, then its size, waits for a line, says it
+    // again and the line, and ends with 3.
+    let script = r#"env | grep -E '^(TERM_PROGRAM|TERM_SESSION_ID|BATERI_TAB_URL|LC_BATERI_TAB_URL|LC_TERMINAL|TERM|COLORTERM|PWD)=' | sort | sed 's/^/ENV:/'
+pixels() { command -v python3 >/dev/null && python3 -c "import fcntl,termios,struct;print('PIX:%d,%d'%struct.unpack('HHHH',fcntl.ioctl(0,termios.TIOCGWINSZ,bytes(8)))[2:])" || echo PIX:none; }
+printf 'READY\n'; stty size; pixels; read line; printf 'GOT:%s\n' "$line"; stty size; pixels; exit 3"#;
+    let options = bt_core::SessionOptions {
+        command: Some((
+            "/bin/sh".to_owned(),
+            vec!["-c".to_owned(), script.to_owned()],
+        )),
+        working_directory: Some(ground.home.clone()),
+        home: None,
+        env: std::collections::HashMap::new(),
+        cols: 80,
+        rows: 24,
+        cell_px: (9, 18),
+        terminal: bt_core::TerminalOptions {
+            scrollback: 100,
+            osc52: bt_core::Osc52::Off,
+            cursor: bt_core::CaretShape::default(),
+            blink: bt_core::CursorBlink::default(),
+        },
+        theme: bt_core::Theme::BATERI,
+        dock: false,
+        cluster: true,
+        initial_input: None,
+        shell_marks: false,
+        pane_uuid: bt_core::PaneUuid::parse("5A1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0"),
+        hostname: None,
+        replay: None,
+        journal: None,
+        views: None,
+    };
+    let (spec, size) = new_session(&options.child_launch(), 1000);
+    assert_eq!(
+        (size.cols, size.rows, size.xpixel, size.ypixel),
+        (80, 24, 720, 432),
+        "the cells and the pixels the program is told"
+    );
+    let pane = options.pane_uuid.clone().expect("a pane");
+    let stream = service
+        .open_local(&pane, spec, size, Duration::from_secs(30))
+        .expect("a terminal of this Mac");
+    // The terminal is the Mac's, in the ledger with the pane, and the program's id is known.
+    let id = ledger.terminals_of(ACCOUNT).remove(0);
+    ground.kept = Some(PathBuf::from(kablo));
+    ground.made.push(id.clone());
+    assert!(stream.pid > 1);
+
+    let ends = Arc::new(Ends::default());
+    let session =
+        bt_core::Session::streamed(options, Arc::clone(&ends) as Arc<dyn bt_core::Wake>, stream)
+            .expect("a session over the stream");
+    assert!(session.is_streamed());
+
+    // What the program writes is on the grid, and the size it has is the grid's.
+    waits_for("the program's first words", || shows(&session, "READY"));
+    waits_for("its size", || shows(&session, "24 80"));
+    // The pixels of the cells the session has are the terminal's (the program reads them with
+    // `TIOCGWINSZ`); a machine without python3 says so and the claim is not made.
+    waits_for("its pixels", || shows(&session, "PIX:"));
+    let has_python = !shows(&session, "PIX:none");
+    if has_python {
+        assert!(shows(&session, "PIX:720,432"), "{}", screen(&session));
+    }
+    // The identity the pane gave the program is what it got: the outward contract's variables
+    // are the session's, kablo carries them as they are.
+    let screen_now = screen(&session);
+    for line in [
+        "ENV:BATERI_TAB_URL=bateri://tab/5A1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0",
+        "ENV:LC_BATERI_TAB_URL=bateri://tab/5A1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0",
+        "ENV:LC_TERMINAL=bateri",
+        "ENV:TERM=xterm-256color",
+        "ENV:COLORTERM=truecolor",
+        "ENV:TERM_PROGRAM=bateri",
+        "ENV:TERM_SESSION_ID=5A1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0",
+    ] {
+        assert!(screen_now.contains(line), "{line}\n{screen_now}");
+    }
+
+    // A new size reaches the program: the terminal is sized through the service.
+    assert!(session.resize(50, 12, (7, 15)));
+    // What the pane types reaches the program.
+    session.write(b"typed\r");
+    waits_for("the typed line", || shows(&session, "GOT:typed"));
+    waits_for("the new size", || shows(&session, "12 50"));
+    if has_python {
+        waits_for("the new pixels", || shows(&session, "PIX:350,180"));
+    }
+    // The program ends with 3: the session is told, after the last of its bytes.
+    assert_eq!(ends.waits(), Some(Some(3)));
+    assert!(shows(&session, "GOT:typed"));
+    drop(session);
+    service.stop();
 }

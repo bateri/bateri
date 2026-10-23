@@ -11,7 +11,7 @@
 //! package has no kablo calls and every `ssh` is the plain one).
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use dispatch2::DispatchQueue;
@@ -24,6 +24,7 @@ use bt_core::PaneUuid;
 use bt_shell_common::kablo::SessionId;
 use bt_shell_common::kablo::install::Bundle;
 use bt_shell_common::kablo::ledger::Ledger;
+use bt_shell_common::kablo::local;
 use bt_shell_common::kablo::roster::Background;
 use bt_shell_common::kablo::service::{
     PaneInfo, PaneLink, Peer, QUIT_END_WAIT, Service, Shown, Survey,
@@ -65,6 +66,17 @@ pub(crate) fn keeps(account: &str, terminal: &SessionId) -> bool {
 /// ended by the first connection to their servers, before anything else. How many.
 pub(crate) fn end_leftovers() -> usize {
     ledger().end_all()
+}
+
+/// The terminals of this Mac's own panes that the bateri before this one left in the ledger (it
+/// crashed, or its quit did not wait for them) are marked to end, whatever `keep_running` says:
+/// no pane can show one again yet, and a row left would be a program running for nobody. The
+/// account's first connection ends them, before anything else.
+pub(crate) fn end_local_leftovers() {
+    let ledger = ledger();
+    for terminal in ledger.terminals_of(local::ACCOUNT) {
+        ledger.end(local::ACCOUNT, &terminal);
+    }
 }
 
 /// A quit that ends the terminals ([`bt_shell_common::kablo::quit`]): the terminals the
@@ -392,6 +404,69 @@ pub(crate) fn take_directory(pane: u64) -> Option<String> {
 /// How long the main queue is waited for when a process asks which pane it is in:
 /// a busy main thread is a request that is not served (the plain `ssh`).
 const PANE_WAIT: Duration = Duration::from_secs(2);
+
+/// Whether the service is on its way, so that a pane that wants a terminal of this Mac knows
+/// whether to wait for it: it is started on a thread of its own, beside the sweep of the sockets
+/// a dead bateri left, and the first window does not wait for either.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Readiness {
+    /// Nothing started it, and nothing will (a timed run, a process with no home).
+    Never,
+    /// [`expect_service`] said so and [`service_over`] has not.
+    Coming,
+    /// The service is up or will not be.
+    Over,
+}
+
+static READY: (Mutex<Readiness>, Condvar) = (Mutex::new(Readiness::Never), Condvar::new());
+
+/// How long a pane waits for the service to come up when it is asked for: it is a socket and a
+/// few threads, so this is a bound for a machine that does not answer, not a time anyone waits.
+const SERVICE_WAIT: Duration = Duration::from_secs(5);
+
+/// How long a pane waits for its terminal of this Mac, kablo being put on the machine included:
+/// past this the pane is an ordinary one.
+const LOCAL_WAIT: Duration = Duration::from_secs(10);
+
+/// The service is about to be started on a thread ([`serve`]): said **before** the thread, on the thread that
+/// goes on to open the first window, so that the window's pane finds it coming.
+pub(crate) fn expect_service() {
+    *READY.0.lock().unwrap_or_else(|e| e.into_inner()) = Readiness::Coming;
+}
+
+/// What was started by [`expect_service`] is over, whatever became of it: whoever waits for the
+/// service knows now.
+pub(crate) fn service_over() {
+    *READY.0.lock().unwrap_or_else(|e| e.into_inner()) = Readiness::Over;
+    READY.1.notify_all();
+}
+
+/// The service, once it is up; waits for it if it is coming, and `None` if it will not be.
+fn service() -> Option<&'static Service> {
+    let state = READY.0.lock().unwrap_or_else(|e| e.into_inner());
+    drop(
+        READY
+            .1
+            .wait_timeout_while(state, SERVICE_WAIT, |state| *state == Readiness::Coming)
+            .unwrap_or_else(|e| e.into_inner()),
+    );
+    SERVICE.get()
+}
+
+/// The terminal of this Mac the pane `pane` is to show, as the ends of the stream its session
+/// reads and writes: kablo's terminal, started with what the pane would have started its shell
+/// with ([`bt_core::SessionOptions::child_launch`]) and `history` rows of scrollback. `None`
+/// when there is no kablo to put it in (a build without the package, a machine kablo is not
+/// built for, a service that did not come up): the pane is an ordinary one.
+pub(crate) fn open_local(
+    pane: &PaneUuid,
+    launch: &bt_core::ChildLaunch,
+    history: u32,
+) -> Option<bt_core::Stream> {
+    let service = service()?;
+    let (spec, size) = local::new_session(launch, history);
+    service.open_local(pane, spec, size, LOCAL_WAIT).ok()
+}
 
 /// Starts the service in `dir`, the instance's directory. Silent when it cannot
 /// (no home, a path too long for a socket): the holders then find nobody and run

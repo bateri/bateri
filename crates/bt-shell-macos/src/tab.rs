@@ -156,6 +156,15 @@ impl PaneHost for TabHost {
         app::delegate(Self::mtm()).is_some_and(|app| app.keys().kept_from_view(chord))
     }
 
+    fn open_local_terminal(
+        &self,
+        pane: &bt_core::PaneUuid,
+        launch: &bt_core::ChildLaunch,
+        history: u32,
+    ) -> Option<bt_core::Stream> {
+        crate::hold_service::open_local(pane, launch, history)
+    }
+
     fn end_kept_terminal(&self, pane: &bt_core::PaneUuid) {
         crate::hold_service::end(pane);
     }

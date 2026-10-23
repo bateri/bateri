@@ -4,7 +4,7 @@
 
 use std::fs::File;
 use std::io::{Read, Write};
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::fs::DirBuilderExt;
 use std::sync::atomic::{AtomicU32, AtomicU64};
 use std::thread::JoinHandle;
@@ -3118,4 +3118,263 @@ fn a_terminal_is_this_macs_by_its_account_alone() {
         }
         .is_local()
     );
+}
+
+// ─── the panes of this Mac ───────────────────────────────────────────────
+
+fn a_pane() -> PaneUuid {
+    PaneUuid::parse("5A1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0").expect("a pane")
+}
+
+const MAC: Size = Size {
+    cols: 100,
+    rows: 30,
+    xpixel: 800,
+    ypixel: 600,
+};
+
+/// What the pane asks for: a shell under the identity bateri gives, with ten thousand rows.
+fn a_shell() -> NewSession {
+    let mut spec = NewSession::default();
+    spec.argv = vec![b"/bin/zsh".to_vec(), b"-l".to_vec()];
+    spec.env = vec![(b"TERM_PROGRAM".to_vec(), b"bateri".to_vec())];
+    spec.cwd = Some(b"/tmp".to_vec());
+    spec.history = Some(10_000);
+    spec
+}
+
+/// The stream's ends as a pane's session has them, blocking and with a bound on a wait.
+struct Pane {
+    master: UnixStream,
+    exit: UnixStream,
+    status: Arc<StreamExit>,
+    ops: Arc<dyn PtyOps>,
+    pid: u32,
+}
+
+impl Pane {
+    fn of(stream: Stream) -> Pane {
+        let master = UnixStream::from(stream.master);
+        master.set_nonblocking(false).expect("blocking");
+        master
+            .set_read_timeout(Some(Duration::from_secs(15)))
+            .expect("timeout");
+        let exit = UnixStream::from(stream.exit);
+        exit.set_read_timeout(Some(Duration::from_secs(15)))
+            .expect("timeout");
+        Pane {
+            master,
+            exit,
+            status: stream.status,
+            ops: stream.ops,
+            pid: stream.pid,
+        }
+    }
+
+    /// Reads until `bytes` has appeared in what was read.
+    fn reads(&mut self, bytes: &[u8]) -> Vec<u8> {
+        let mut read = Vec::new();
+        let mut chunk = [0u8; 4096];
+        while !read.windows(bytes.len()).any(|window| window == bytes) {
+            let n = self.master.read(&mut chunk).expect("the terminal's bytes");
+            assert_ne!(n, 0, "the stream ended: {read:?}");
+            read.extend_from_slice(&chunk[..n]);
+        }
+        read
+    }
+}
+
+fn open_local(rig: &Rig, pane: &PaneUuid) -> Result<Stream, Refusal> {
+    rig.service
+        .open_local(pane, a_shell(), MAC, Duration::from_secs(15))
+}
+
+#[test]
+fn a_pane_of_this_mac_reads_its_terminals_bytes_as_they_are_and_types_into_it() {
+    let ledger = Arc::new(Ledger::memory());
+    let world = Fake::new(Bridge::new(Age::Current));
+    let rig = Rig::kept("local-pane", world.clone(), ledger.clone(), END_GRACE);
+    let pane = a_pane();
+
+    let stream = open_local(&rig, &pane).expect("a terminal");
+    let mut mac = Pane::of(stream);
+    // The terminal is there, started as asked, at the size asked, under the Mac's account.
+    let terminals = ledger.terminals_of(local::ACCOUNT);
+    assert_eq!(terminals.len(), 1, "{terminals:?}");
+    let id = terminals[0].clone();
+    assert!(id.as_str().starts_with("b-"));
+    assert!(world.bridge().has(&id));
+    assert_eq!(
+        world.bridge().argv_of(&id),
+        Some(&[b"/bin/zsh".to_vec(), b"-l".to_vec()][..])
+    );
+    assert_eq!(world.bridge().size_of(&id), Some(MAC));
+    assert_eq!(ledger.pane_of(local::ACCOUNT, &id), Some(pane.clone()));
+    // Kablo was put on this Mac once, and nothing of a server's was asked.
+    assert_eq!(world.count("install"), 1);
+    for server_only in ["master", "files", "number", "records"] {
+        assert_eq!(world.count(server_only), 0, "{server_only}");
+    }
+
+    // What the program writes is what the pane reads: no frame, every byte.
+    let mut output = b"ready\r\n\x1b[31mred\x1b[0m".to_vec();
+    output.extend(0..=255u8);
+    world.bridge().write(&id, &output);
+    let read = mac.reads(&output);
+    assert!(read.ends_with(&output), "{read:?}");
+    // What the pane types is what the program is typed.
+    mac.master.write_all(b"ls -la\r").expect("typed");
+    until("the keys typed", || {
+        world.bridge().typed(&id) == b"ls -la\r"
+    });
+    // Its size is the terminal's, in the pixels the program is told.
+    mac.ops.resize(
+        mac.master.as_fd(),
+        PtySize {
+            cols: 120,
+            rows: 40,
+            cell_width: 8,
+            cell_height: 16,
+        },
+    );
+    until("the size", || {
+        world.bridge().size_of(&id)
+            == Some(Size {
+                cols: 120,
+                rows: 40,
+                xpixel: 960,
+                ypixel: 640,
+            })
+    });
+
+    // It is not a server's pane: nothing that asks for a server's terminal finds it.
+    assert!(rig.service.shown(&pane).is_none());
+    assert!(rig.service.background(local::ACCOUNT).is_empty());
+    assert!(rig.service.background_all().is_empty());
+    assert!(world.changed().is_empty() && world.links().is_empty());
+}
+
+#[test]
+fn the_end_of_the_program_reaches_the_pane_after_its_last_byte_with_the_status() {
+    let ledger = Arc::new(Ledger::memory());
+    let world = Fake::new(Bridge::new(Age::Current));
+    let rig = Rig::kept("local-exit", world.clone(), ledger.clone(), END_GRACE);
+    let mut mac = Pane::of(open_local(&rig, &a_pane()).expect("a terminal"));
+    // The process id the terminal's program has is the stream's.
+    assert_eq!(mac.pid, crate::kablo::fake::FAKE_PID);
+    let id = ledger.terminals_of(local::ACCOUNT).remove(0);
+
+    world.bridge().write(&id, b"goodbye\r\n");
+    world.bridge().exit(&id, Exit::Code(7));
+    // The pane's connection closes when the program has ended and everything it wrote is in the
+    // socket; the status is written before the exit signal.
+    let mut rest = Vec::new();
+    mac.master.read_to_end(&mut rest).expect("to the end");
+    assert_eq!(rest, b"goodbye\r\n");
+    let mut signal = Vec::new();
+    mac.exit.read_to_end(&mut signal).expect("the signal");
+    assert_eq!(
+        mac.status.status().and_then(|status| status.code()),
+        Some(7)
+    );
+    // The ledger forgot the terminal, and so did the pane.
+    until("the ledger", || {
+        ledger.terminals_of(local::ACCOUNT).is_empty()
+    });
+
+    // A signal is no code.
+    let mut other = Pane::of(open_local(&rig, &a_pane()).expect("a terminal"));
+    let id = ledger.terminals_of(local::ACCOUNT).remove(0);
+    world.bridge().exit(&id, Exit::Signal(9));
+    let mut signal = Vec::new();
+    other.exit.read_to_end(&mut signal).expect("the signal");
+    let status = other.status.status().expect("a status");
+    assert_eq!(status.code(), None);
+}
+
+#[test]
+fn letting_go_of_the_stream_hangs_the_terminal_up() {
+    let ledger = Arc::new(Ledger::memory());
+    let world = Fake::new(Bridge::new(Age::Current));
+    let rig = Rig::kept("local-hangup", world.clone(), ledger.clone(), END_GRACE);
+    let mac = Pane::of(open_local(&rig, &a_pane()).expect("a terminal"));
+    let id = ledger.terminals_of(local::ACCOUNT).remove(0);
+    assert_eq!(world.bridge().terminated(&id), None);
+
+    // The session's end: the terminal is asked to end first and the stream closes after, so
+    // the pane is still found when the request is made.
+    let Pane { ops, master, .. } = mac;
+    ops.hangup(0, master.as_fd());
+    drop(master);
+    until("the hang-up", || {
+        world.bridge().terminated(&id) == Some(false)
+    });
+}
+
+#[test]
+fn a_pane_that_gave_up_waiting_leaves_no_terminal_behind() {
+    let ledger = Arc::new(Ledger::memory());
+    let world = Fake::new(Bridge::new(Age::Current));
+    let rig = Rig::kept("local-gave-up", world.clone(), ledger.clone(), END_GRACE);
+
+    let outcome = rig
+        .service
+        .open_local(&a_pane(), a_shell(), MAC, Duration::ZERO);
+    assert_eq!(outcome.err(), Some(Refusal::plain()));
+    // The terminal is made all the same, a moment later, and ended: nobody will show it.
+    until("the terminal ended", || {
+        ledger
+            .terminals_of(local::ACCOUNT)
+            .first()
+            .is_some_and(|id| world.bridge().terminated(id) == Some(false))
+    });
+
+    // The wait that ran out is not paid again by the next pane: it is an ordinary one at once.
+    let again = Instant::now();
+    assert_eq!(open_local(&rig, &a_pane()).err(), Some(Refusal::plain()));
+    assert!(again.elapsed() < Duration::from_secs(1));
+    assert_eq!(world.count("carry"), 1);
+}
+
+#[test]
+fn where_kablo_cannot_be_put_the_pane_is_an_ordinary_one_and_the_step_is_not_repeated_at_once() {
+    let world = Fake::new(Bridge::new(Age::Current));
+    world.install_refuses.store(true, Ordering::SeqCst);
+    let rig = Rig::over("local-refused", world.clone());
+
+    assert_eq!(open_local(&rig, &a_pane()).err(), Some(Refusal::plain()));
+    assert_eq!(open_local(&rig, &a_pane()).err(), Some(Refusal::plain()));
+    assert_eq!(world.count("install"), 1, "the failed step is not repeated");
+    assert_eq!(world.count("carry"), 0);
+}
+
+#[test]
+fn panes_that_wait_for_the_account_of_this_mac_share_the_making_of_it() {
+    let ledger = Arc::new(Ledger::memory());
+    let world = Fake::new(Bridge::new(Age::Current));
+    let rig = Rig::kept("local-two", world.clone(), ledger.clone(), END_GRACE);
+
+    let panes: Vec<_> = (0..3)
+        .map(|_| {
+            let (reply, answer) = mpsc::channel();
+            let ask = Ask {
+                pane: a_pane(),
+                spec: a_shell(),
+                size: MAC,
+                reply,
+            };
+            rig.service.tx.send(Msg::Local(ask)).expect("sent");
+            answer
+        })
+        .collect();
+    for answer in &panes {
+        let stream = answer
+            .recv_timeout(Duration::from_secs(15))
+            .expect("an answer")
+            .expect("a terminal");
+        assert_eq!(stream.pid, crate::kablo::fake::FAKE_PID);
+    }
+    assert_eq!(world.count("install"), 1);
+    assert_eq!(world.count("carry"), 1);
+    assert_eq!(ledger.terminals_of(local::ACCOUNT).len(), 3);
 }

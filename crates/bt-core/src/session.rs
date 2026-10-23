@@ -1393,6 +1393,104 @@ impl SelectionRuns {
     }
 }
 
+/// What the child of a session is started with, apart from the environment it inherits: the
+/// command, the directory, the environment added to it and the size it starts at. The same
+/// answer for the child this process starts ([`Session::spawn`]) and for one a kablo terminal
+/// starts on its behalf ([`SessionOptions::child_launch`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChildLaunch {
+    /// The command, the program first; empty is the user's login shell.
+    pub argv: Vec<String>,
+    /// The environment added to the inherited one, sorted by name.
+    pub env: Vec<(String, String)>,
+    /// The starting directory.
+    pub cwd: Option<PathBuf>,
+    /// The size the child starts at.
+    pub size: PtySize,
+}
+
+impl SessionOptions {
+    /// The environment added to the child's inherited one: [`SessionOptions::env`] with what this
+    /// crate writes over it (its doc has the precedence).
+    fn child_env(&self) -> HashMap<String, String> {
+        // `tty::setup_env()` is NOT CALLED: it changes our own process's
+        // environment with `set_var` and writes `TERM=alacritty` if alacritty is
+        // installed on the machine. We give the environment to the child directly.
+        //
+        // The order is the precedence order (`SessionOptions::env`): the two
+        // constants enter the additional environment's map **afterwards** — the
+        // ones that override the same key are them.
+        let mut env = self.env.clone();
+        env.insert("TERM".to_owned(), "xterm-256color".to_owned());
+        env.insert("COLORTERM".to_owned(), "truecolor".to_owned());
+        // The identity family is in the same layer. A side gain of its being
+        // non-overridable: the `TERM_PROGRAM=Apple_Terminal` inherited from
+        // another terminal was making Apple's session script write into the
+        // wrapper's `ZDOTDIR` via `/etc/zshrc` (measured).
+        env.insert("TERM_PROGRAM".to_owned(), TERM_PROGRAM.to_owned());
+        env.insert(
+            "TERM_PROGRAM_VERSION".to_owned(),
+            TERM_PROGRAM_VERSION.to_owned(),
+        );
+        // The `LC_` family is the same identity across ssh: ssh's stock
+        // `SendEnv LC_*` carries it, a wrapped session's bootstrap exports it
+        // too. An inherited `LC_TERMINAL=iTerm2` is overridden like
+        // `TERM_PROGRAM=Apple_Terminal`.
+        env.insert("LC_TERMINAL".to_owned(), LC_TERMINAL.to_owned());
+        env.insert(
+            "LC_TERMINAL_VERSION".to_owned(),
+            TERM_PROGRAM_VERSION.to_owned(),
+        );
+        // `PWD` is the directory as we named it (seen in the real
+        // window): `chdir` resolves nothing, but the shell sets its `PWD` from
+        // `getcwd()` unless the inherited one names the same directory — and
+        // the inherited one is ours (`/` from LaunchServices). Without it a
+        // restored or inherited `/tmp` came back as `/private/tmp` in the
+        // title and the dock. Only an absolute path: a shell trusts `PWD` only
+        // when it is absolute and points at `.`, so the wrong direction is
+        // safe — a stale value is ignored, not believed. `login -qflp` keeps
+        // it (`-p`).
+        if let Some(dir) = self
+            .working_directory
+            .as_deref()
+            .filter(|dir| dir.is_absolute())
+        {
+            env.insert("PWD".to_owned(), dir.display().to_string());
+        }
+        if let Some(id) = &self.pane_uuid {
+            for (name, value) in crate::identity::pane_env(id) {
+                env.insert(name.to_owned(), value);
+            }
+        }
+        env
+    }
+
+    /// What [`Session::spawn`] starts its child with, for a child that is started some other
+    /// way (a kablo terminal). Reads the options, takes nothing out of them.
+    pub fn child_launch(&self) -> ChildLaunch {
+        let grid = GridSize::for_spawn(self.cols, self.rows);
+        let size = window_size(grid, self.cell_px);
+        let mut env: Vec<(String, String)> = self.child_env().into_iter().collect();
+        env.sort();
+        ChildLaunch {
+            argv: self
+                .command
+                .iter()
+                .flat_map(|(program, args)| std::iter::once(program).chain(args))
+                .cloned()
+                .collect(),
+            env,
+            cwd: self.working_directory.clone(),
+            size: PtySize {
+                cols: size.num_cols,
+                rows: size.num_lines,
+                cell_width: size.cell_width,
+                cell_height: size.cell_height,
+            },
+        }
+    }
+}
+
 /// The session's opening settings.
 #[derive(Clone, Debug)]
 pub struct SessionOptions {
@@ -2529,6 +2627,7 @@ impl TappedPty {
         match &mut self.pty {
             PtyKind::Spawned(pty) => pty.reader().read(buf),
             PtyKind::Adopted(pty) => pty.file().read(buf),
+            PtyKind::Stream(pty) => pty.file().read(buf),
         }
     }
 }
@@ -2704,6 +2803,7 @@ impl tty::EventedReadWrite for TappedPty {
         match &mut self.pty {
             PtyKind::Spawned(pty) => unsafe { pty.register(poll, interest, poll_opts) },
             PtyKind::Adopted(pty) => unsafe { pty.register(poll, interest, poll_opts) },
+            PtyKind::Stream(pty) => unsafe { pty.register(poll, interest, poll_opts) },
         }
     }
 
@@ -2716,6 +2816,7 @@ impl tty::EventedReadWrite for TappedPty {
         match &mut self.pty {
             PtyKind::Spawned(pty) => pty.reregister(poll, interest, poll_opts),
             PtyKind::Adopted(pty) => pty.reregister(poll, interest, poll_opts),
+            PtyKind::Stream(pty) => pty.reregister(poll, interest, poll_opts),
         }
     }
 
@@ -2723,6 +2824,7 @@ impl tty::EventedReadWrite for TappedPty {
         match &mut self.pty {
             PtyKind::Spawned(pty) => pty.deregister(poll),
             PtyKind::Adopted(pty) => pty.deregister(poll),
+            PtyKind::Stream(pty) => pty.deregister(poll),
         }
     }
 
@@ -2734,6 +2836,7 @@ impl tty::EventedReadWrite for TappedPty {
         match &mut self.pty {
             PtyKind::Spawned(pty) => pty.writer(),
             PtyKind::Adopted(pty) => pty.file(),
+            PtyKind::Stream(pty) => pty.file(),
         }
     }
 }
@@ -2745,6 +2848,8 @@ impl tty::EventedPty for TappedPty {
             // The exit fd's only readiness is the exit: no status, the
             // child is not ours (`Adapter`'s `Exit` arm sends the news).
             PtyKind::Adopted(_) => Some(tty::ChildEvent::Exited(None)),
+            // The owner of the stream wrote how the program ended before it signalled the end.
+            PtyKind::Stream(pty) => Some(tty::ChildEvent::Exited(pty.status.status())),
         }
     }
 }
@@ -2754,6 +2859,7 @@ impl OnResize for TappedPty {
         match &mut self.pty {
             PtyKind::Spawned(pty) => pty.on_resize(window_size),
             PtyKind::Adopted(pty) => pty.resize(window_size),
+            PtyKind::Stream(pty) => pty.resize(window_size),
         }
     }
 }
@@ -2765,6 +2871,9 @@ enum PtyKind {
     /// Adopted from another bateri across an update ([`Session::adopt`]):
     /// the child is not ours, so no `wait`.
     Adopted(AdoptedPty),
+    /// A terminal that runs elsewhere (a kablo terminal on this Mac): the bytes of a stream the
+    /// owner feeds and drains, no PTY at all ([`Session::streamed`]).
+    Stream(StreamPty),
 }
 
 /// An adopted PTY: the master, the child's exit fd and the platform's two
@@ -2847,6 +2956,131 @@ impl Drop for AdoptedPty {
     fn drop(&mut self) {
         // SAFETY: dropped exactly once, here, and never touched after.
         unsafe { ManuallyDrop::drop(&mut self.master) };
+        self.ops.hangup(self.pid, self.exit.as_fd());
+    }
+}
+
+/// A terminal that runs elsewhere, as the session is given it ([`Session::streamed`]): the
+/// two ends of what carries it, not a PTY.
+///
+/// `master` is one end of a socket pair, **non-blocking**: what the program writes arrives
+/// there, what the session writes goes to the program. The owner holds the other end; when the
+/// program has ended and everything it wrote is in the socket it writes how it ended into
+/// `status` and then closes the peer of `exit`, which is what tells the reader the program is
+/// gone — in that order, so the status is there when the end is.
+pub struct Stream {
+    /// The bytes, both ways.
+    pub master: OwnedFd,
+    /// Readable once the program has ended: the peer closes.
+    pub exit: OwnedFd,
+    /// How the program ended, written before `exit` is signalled.
+    pub status: Arc<StreamExit>,
+    /// The program's process id, as far as it is known (it is on this computer).
+    pub pid: u32,
+    /// What the session asks of the terminal: its size, its end.
+    pub ops: Arc<dyn PtyOps>,
+}
+
+/// How the program of a [`Stream`] ended.
+#[derive(Debug, Default)]
+pub struct StreamExit(Mutex<Option<i32>>);
+
+impl StreamExit {
+    /// The program called `exit` with `code`.
+    pub fn code(&self, code: i32) {
+        // A wait status: the exit status in the second byte, no signal in the first.
+        *lock(&self.0) = Some((code & 0xff) << 8);
+    }
+
+    /// A signal killed the program.
+    pub fn signal(&self, signal: i32) {
+        *lock(&self.0) = Some(signal & 0x7f);
+    }
+
+    /// How the program ended, once it is written.
+    pub fn status(&self) -> Option<std::process::ExitStatus> {
+        use std::os::unix::process::ExitStatusExt as _;
+        (*lock(&self.0)).map(std::process::ExitStatus::from_raw)
+    }
+}
+
+/// The [`Stream`] a session reads: [`AdoptedPty`] with the exit's status, and a different
+/// order at the end.
+struct StreamPty {
+    master: File,
+    exit: OwnedFd,
+    status: Arc<StreamExit>,
+    pid: u32,
+    ops: Arc<dyn PtyOps>,
+}
+
+impl StreamPty {
+    fn file(&mut self) -> &mut File {
+        &mut self.master
+    }
+
+    /// The same two registrations as [`AdoptedPty::register`], on the same tokens.
+    ///
+    /// # Safety
+    ///
+    /// The fds must outlive the registration (the trait's condition; the
+    /// caller is [`TappedPty`]'s `register`, which owns `self`).
+    unsafe fn register(
+        &mut self,
+        poll: &Arc<Poller>,
+        mut interest: PollingEvent,
+        poll_opts: PollMode,
+    ) -> io::Result<()> {
+        interest.key = PTY_READ_WRITE_TOKEN;
+        // SAFETY: the caller's promise — `self` owns both fds.
+        unsafe {
+            poll.add_with_mode(&*self.file(), interest, poll_opts)?;
+            poll.add_with_mode(
+                &self.exit,
+                PollingEvent::readable(PTY_CHILD_EVENT_TOKEN),
+                PollMode::Level,
+            )
+        }
+    }
+
+    fn reregister(
+        &mut self,
+        poll: &Arc<Poller>,
+        mut interest: PollingEvent,
+        poll_opts: PollMode,
+    ) -> io::Result<()> {
+        interest.key = PTY_READ_WRITE_TOKEN;
+        poll.modify_with_mode(&*self.file(), interest, poll_opts)?;
+        poll.modify_with_mode(
+            &self.exit,
+            PollingEvent::readable(PTY_CHILD_EVENT_TOKEN),
+            PollMode::Level,
+        )
+    }
+
+    fn deregister(&mut self, poll: &Arc<Poller>) -> io::Result<()> {
+        poll.delete(&*self.file())?;
+        poll.delete(&self.exit)
+    }
+
+    fn resize(&mut self, size: WindowSize) {
+        let size = PtySize {
+            cols: size.num_cols,
+            rows: size.num_lines,
+            cell_width: size.cell_width,
+            cell_height: size.cell_height,
+        };
+        let ops = Arc::clone(&self.ops);
+        ops.resize(self.file().as_fd(), size);
+    }
+}
+
+impl Drop for StreamPty {
+    /// The terminal is asked to end **before** the stream closes: the owner finds the pane by
+    /// the stream, and a stream that has closed is a pane that is gone — a program that was
+    /// meant to end would be let go of and live on. (A PTY's end is the other way round: the
+    /// slave's hangup is the mechanism, so [`AdoptedPty`] closes first.)
+    fn drop(&mut self) {
         self.ops.hangup(self.pid, self.exit.as_fd());
     }
 }
@@ -3039,9 +3273,9 @@ pub enum Teardown {
     /// The second and later calls. Nothing was waited for; the **first** call
     /// knows the shutdown's real result.
     AlreadyDone,
-    /// An **adopted** session's clean shutdown: the reader
-    /// finished, the master closed and the child got its hangup — nobody
-    /// waits for it, it is not our child.
+    /// An **adopted** or **streamed** session's clean shutdown: the reader
+    /// finished, the master closed and the child got its hangup (a stream's owner was asked to
+    /// end the terminal) — nobody waits for it, it is not our child.
     HungUp,
 }
 
@@ -5227,9 +5461,12 @@ pub struct Session {
     /// it ([`pencere::pane_observer`]); it finds `None` once this slot is
     /// taken, so the copy is not kept open by it.
     master: Arc<Mutex<Option<File>>>,
-    /// Whether the PTY was adopted ([`Session::adopt`]): its shutdown is a
-    /// hangup without `wait` ([`Teardown::HungUp`]).
+    /// Whether the PTY was adopted ([`Session::adopt`]) or is a stream
+    /// ([`Session::streamed`]): its shutdown is a hangup without `wait` ([`Teardown::HungUp`]).
     adopted: bool,
+    /// Whether the terminal is a stream ([`Session::streamed`]) and not a PTY: it has no
+    /// master to read modes from or to hand over.
+    streamed: bool,
     /// An adopted PTY's syscalls ([`Adoption::ops`]): the nudge sizes the PTY
     /// through them on the master's copy, not through the reader
     /// ([`Session::nudge_size`]). `None` for a spawned PTY.
@@ -5273,55 +5510,9 @@ impl Session {
         let grid = GridSize::for_spawn(options.cols, options.rows);
         let size = window_size(grid, options.cell_px);
 
-        // `tty::setup_env()` is NOT CALLED: it changes our own process's
-        // environment with `set_var` and writes `TERM=alacritty` if alacritty is
-        // installed on the machine. We give the environment to the child directly.
-        //
-        // The order is the precedence order (`SessionOptions::env`): the two
-        // constants enter the additional environment's map **afterwards** — the
-        // ones that override the same key are them.
-        let mut env = std::mem::take(&mut options.env);
-        env.insert("TERM".to_owned(), "xterm-256color".to_owned());
-        env.insert("COLORTERM".to_owned(), "truecolor".to_owned());
-        // The identity family is in the same layer. A side gain of its being
-        // non-overridable: the `TERM_PROGRAM=Apple_Terminal` inherited from
-        // another terminal was making Apple's session script write into the
-        // wrapper's `ZDOTDIR` via `/etc/zshrc` (measured).
-        env.insert("TERM_PROGRAM".to_owned(), TERM_PROGRAM.to_owned());
-        env.insert(
-            "TERM_PROGRAM_VERSION".to_owned(),
-            TERM_PROGRAM_VERSION.to_owned(),
-        );
-        // The `LC_` family is the same identity across ssh: ssh's stock
-        // `SendEnv LC_*` carries it, a wrapped session's bootstrap exports it
-        // too. An inherited `LC_TERMINAL=iTerm2` is overridden like
-        // `TERM_PROGRAM=Apple_Terminal`.
-        env.insert("LC_TERMINAL".to_owned(), LC_TERMINAL.to_owned());
-        env.insert(
-            "LC_TERMINAL_VERSION".to_owned(),
-            TERM_PROGRAM_VERSION.to_owned(),
-        );
-        // `PWD` is the directory as we named it (seen in the real
-        // window): `chdir` resolves nothing, but the shell sets its `PWD` from
-        // `getcwd()` unless the inherited one names the same directory — and
-        // the inherited one is ours (`/` from LaunchServices). Without it a
-        // restored or inherited `/tmp` came back as `/private/tmp` in the
-        // title and the dock. Only an absolute path: a shell trusts `PWD` only
-        // when it is absolute and points at `.`, so the wrong direction is
-        // safe — a stale value is ignored, not believed. `login -qflp` keeps
-        // it (`-p`).
-        if let Some(dir) = options
-            .working_directory
-            .as_deref()
-            .filter(|dir| dir.is_absolute())
-        {
-            env.insert("PWD".to_owned(), dir.display().to_string());
-        }
-        if let Some(id) = &options.pane_uuid {
-            for (name, value) in crate::identity::pane_env(id) {
-                env.insert(name.to_owned(), value);
-            }
-        }
+        // The environment the child gets is `SessionOptions::child_env`'s: the same answer for a
+        // child this process starts and for one a kablo terminal starts for it.
+        let env = options.child_env();
         let pty_options = tty::Options {
             shell: options
                 .command
@@ -5439,6 +5630,58 @@ impl Session {
         Ok(session)
     }
 
+    /// A session whose terminal runs elsewhere: the child is a kablo terminal's, started by the
+    /// owner of `stream` with what [`SessionOptions::child_launch`] says, and the session reads
+    /// and writes the stream where [`Session::spawn`] reads and writes a PTY.
+    ///
+    /// Everything else is the spawned session's: the reader, the scanner, the journal, the first
+    /// input, the replay. What differs is what there is no PTY for — the session has no master
+    /// to read terminal modes from ([`Session::with_pty_fd`] is `None`), its shutdown is a
+    /// hangup of the terminal ([`Teardown::HungUp`]) and the owner's `ops` size it.
+    /// `options`' `command`, `working_directory` and `env` are not read: the child is already
+    /// running.
+    pub fn streamed(
+        mut options: SessionOptions,
+        wake: Arc<dyn Wake>,
+        stream: Stream,
+    ) -> io::Result<Self> {
+        let Stream {
+            master,
+            exit,
+            status,
+            pid,
+            ops,
+        } = stream;
+        let replay = options.replay.take();
+        let (session, event_loop, at_birth) = Self::assemble(
+            options,
+            wake,
+            Birth {
+                pty: PtyKind::Stream(StreamPty {
+                    master: File::from(master),
+                    exit,
+                    status,
+                    pid,
+                    ops: Arc::clone(&ops),
+                }),
+                child_pid: pid,
+                master: None,
+                // The owner signals the end after the last byte is in the stream; the loop reads
+                // what is there on that signal.
+                drain_on_exit: true,
+                replay,
+                prefix: Vec::new(),
+                mute_prefix: false,
+                ops: Some(ops),
+            },
+        )?;
+        *lock(&session.reader) = Some(event_loop.spawn());
+        if let Some(line) = at_birth {
+            session.write_owned(line.into_bytes());
+        }
+        Ok(session)
+    }
+
     /// The common body of [`Session::spawn`] and [`Session::adopt`]: the
     /// session around a PTY that is already open. The reader is **not**
     /// started — the caller does, after its own steps — and the first input
@@ -5460,7 +5703,8 @@ impl Session {
             mute_prefix,
             ops,
         } = birth;
-        let adopted = matches!(pty, PtyKind::Adopted(_));
+        let adopted = matches!(pty, PtyKind::Adopted(_) | PtyKind::Stream(_));
+        let streamed = matches!(pty, PtyKind::Stream(_));
         let home = options.home;
         let master = Arc::new(Mutex::new(master));
         let journal = options.journal;
@@ -5650,6 +5894,7 @@ impl Session {
             child_pid,
             master,
             adopted,
+            streamed,
             ops,
             journal,
         };
@@ -12841,6 +13086,13 @@ impl Session {
         })
     }
 
+    /// Whether the terminal is a stream ([`Session::streamed`]) and not a PTY of this process:
+    /// there is no master to hand over to another process, and the terminal outlives none of
+    /// this process's ways of leaving but its own.
+    pub fn is_streamed(&self) -> bool {
+        self.streamed
+    }
+
     /// The pid of the PTY's child — an adopted session's too ([`Session::adopt`],
     /// the pid it was given) — **not the shell's**, at least not always: in
     /// an unbounded session the child is `login(1)` and the shell is its child.
@@ -14195,6 +14447,174 @@ mod tests {
         }
         fn hangup(&self, _pid: u32, _exit: BorrowedFd<'_>) {}
         fn winch(&self, _master: BorrowedFd<'_>) {}
+    }
+
+    /// What the owner of a stream is asked, recorded.
+    #[derive(Default)]
+    struct StreamOps {
+        sizes: Mutex<Vec<PtySize>>,
+        hangups: std::sync::atomic::AtomicU32,
+    }
+
+    impl PtyOps for StreamOps {
+        fn resize(&self, _master: BorrowedFd<'_>, size: PtySize) {
+            lock(&self.sizes).push(size);
+        }
+        fn hangup(&self, _pid: u32, _exit: BorrowedFd<'_>) {
+            self.hangups.fetch_add(1, Ordering::SeqCst);
+        }
+        fn winch(&self, _master: BorrowedFd<'_>) {}
+    }
+
+    /// A session over a stream and the owner's ends of it: the terminal (what the program
+    /// writes goes in, what the session types comes out), the peer of the exit signal, and the
+    /// status slot.
+    struct Streamed {
+        session: Session,
+        terminal: std::os::unix::net::UnixStream,
+        exit: Option<std::os::unix::net::UnixStream>,
+        status: Arc<StreamExit>,
+        ops: Arc<StreamOps>,
+        wake: Arc<TestWake>,
+    }
+
+    fn streamed() -> Streamed {
+        use std::os::unix::net::UnixStream;
+        let (terminal, master) = UnixStream::pair().expect("socketpair");
+        master.set_nonblocking(true).expect("non-blocking");
+        let (exit, exit_end) = UnixStream::pair().expect("socketpair");
+        let status = Arc::new(StreamExit::default());
+        let ops = Arc::new(StreamOps::default());
+        let wake = Arc::new(TestWake::default());
+        let session = Session::streamed(
+            test_options(sh("unused"), 40),
+            Arc::clone(&wake) as Arc<dyn Wake>,
+            Stream {
+                master: OwnedFd::from(master),
+                exit: OwnedFd::from(exit_end),
+                status: Arc::clone(&status),
+                pid: 4242,
+                ops: Arc::clone(&ops) as Arc<dyn PtyOps>,
+            },
+        )
+        .expect("a streamed session");
+        Streamed {
+            session,
+            terminal,
+            exit: Some(exit),
+            status,
+            ops,
+            wake,
+        }
+    }
+
+    #[test]
+    fn a_streamed_session_shows_the_bytes_of_its_stream_and_types_into_it() {
+        use std::io::Write as _;
+        let mut terminal = streamed();
+        assert!(terminal.session.is_streamed());
+        assert_eq!(terminal.session.child_pid(), 4242);
+        terminal
+            .terminal
+            .write_all(b"hello_stream\r\n")
+            .expect("written");
+        wait_text(&terminal.session, "hello_stream");
+
+        terminal.session.write(b"typed\r");
+        terminal
+            .terminal
+            .set_read_timeout(Some(Duration::from_secs(8)))
+            .expect("timeout");
+        let mut typed = Vec::new();
+        let mut buffer = [0u8; 64];
+        while typed.len() < 6 {
+            let n = io::Read::read(&mut terminal.terminal, &mut buffer).expect("typed bytes");
+            typed.extend_from_slice(&buffer[..n]);
+        }
+        assert_eq!(typed, b"typed\r");
+        // Nothing of a PTY is there to read modes from or to carry over.
+        assert!(terminal.session.with_pty_fd(|_| Some(())).is_none());
+        assert!(terminal.session.freeze().is_err());
+    }
+
+    #[test]
+    fn a_streamed_session_is_told_how_its_program_ended_after_the_last_byte() {
+        use std::io::Write as _;
+        let mut terminal = streamed();
+        // The owner's order at the end: the last bytes, the status, then the signal.
+        terminal.terminal.write_all(b"bye\r\n").expect("written");
+        terminal.status.code(7);
+        terminal.exit = None;
+        assert_eq!(
+            terminal.wake.wait_exit(Duration::from_secs(8)),
+            Some(Some(7))
+        );
+        // What was written before the end is on the screen: the end is read after the bytes.
+        wait_text(&terminal.session, "bye");
+    }
+
+    #[test]
+    fn a_program_a_signal_ended_has_no_exit_code() {
+        let mut terminal = streamed();
+        terminal.status.signal(9);
+        terminal.exit = None;
+        assert_eq!(terminal.wake.wait_exit(Duration::from_secs(8)), Some(None));
+    }
+
+    #[test]
+    fn a_streamed_session_sizes_its_terminal_through_its_owner_and_asks_it_to_end_when_it_goes() {
+        let terminal = streamed();
+        assert!(terminal.session.resize(50, 12, (7, 15)));
+        wait_until(
+            "the size reaching the owner",
+            Duration::from_secs(8),
+            || {
+                lock(&terminal.ops.sizes).last().is_some_and(|size| {
+                    (size.cols, size.rows, size.cell_width, size.cell_height) == (50, 12, 7, 15)
+                })
+            },
+        );
+        assert_eq!(terminal.ops.hangups.load(Ordering::SeqCst), 0);
+        assert_eq!(terminal.session.shutdown(), Teardown::HungUp);
+        assert_eq!(
+            terminal.ops.hangups.load(Ordering::SeqCst),
+            1,
+            "asked once, when the stream was let go of"
+        );
+    }
+
+    #[test]
+    fn the_launch_a_kablo_terminal_gets_is_what_a_spawned_child_gets() {
+        let mut options = test_options(
+            ("/usr/bin/login".into(), vec!["-qflp".into(), "ada".into()]),
+            90,
+        );
+        options.working_directory = Some(PathBuf::from("/tmp"));
+        options.env.insert("EXTRA".into(), "1".into());
+        options.env.insert("TERM".into(), "dumb".into());
+        options.pane_uuid = PaneUuid::parse("0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0");
+        let launch = options.child_launch();
+        assert_eq!(launch.argv, ["/usr/bin/login", "-qflp", "ada"]);
+        assert_eq!(launch.cwd, Some(PathBuf::from("/tmp")));
+        assert_eq!(
+            (launch.size.cols, launch.size.rows),
+            (90, 10),
+            "the size the child starts at"
+        );
+        assert_eq!((launch.size.cell_width, launch.size.cell_height), (9, 18));
+        let env: HashMap<_, _> = launch.env.iter().cloned().collect();
+        // The contract's constants win over the map, the map's own entries stay, the directory
+        // is `PWD`, the identity is the pane's.
+        assert_eq!(env["TERM"], "xterm-256color");
+        assert_eq!(env["COLORTERM"], "truecolor");
+        assert_eq!(env["TERM_PROGRAM"], TERM_PROGRAM);
+        assert_eq!(env["EXTRA"], "1");
+        assert_eq!(env["PWD"], "/tmp");
+        assert!(env.contains_key("TERM_SESSION_ID"), "{env:?}");
+        assert!(launch.env.windows(2).all(|pair| pair[0].0 <= pair[1].0));
+        // No command is the user's login shell.
+        options.command = None;
+        assert!(options.child_launch().argv.is_empty());
     }
 
     /// Freezes a `/bin/sh` running `script` (after `ready` shows) and adopts

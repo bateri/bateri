@@ -2763,7 +2763,8 @@ fn masters(carried: Option<&str>) -> Option<Arc<Masters>> {
     // `crate::run` took the update's holders before this (the handover's
     // sequence point, [`arrive`]): the sweep's `ssh` children come after it.
     let sweeper = Arc::clone(&masters);
-    let _ = std::thread::Builder::new()
+    crate::hold_service::expect_service();
+    let sweeping = std::thread::Builder::new()
         .name("ssh socket sweep".into())
         .spawn(move || {
             // The focus listener in this instance's first directory,
@@ -2779,8 +2780,12 @@ fn masters(carried: Option<&str>) -> Option<Arc<Masters>> {
                     Some(Arc::clone(&sweeper)),
                 );
             }
+            crate::hold_service::service_over();
             sweeper.sweep();
         });
+    if sweeping.is_err() {
+        crate::hold_service::service_over();
+    }
     Some(masters)
 }
 
@@ -3518,6 +3523,16 @@ impl AppDelegate {
         // must not `-O exit` a master a carried pane still rides.
         if let Some(masters) = &self.ivars().masters {
             masters.begin_quit();
+        }
+        // The panes whose terminals kablo keeps end with them (a handover does not carry
+        // them, for now), and that is asked and waited for before they close.
+        let streamed: Vec<_> = left
+            .iter()
+            .filter(|pane| pane.is_streamed())
+            .map(|pane| pane.uuid().clone())
+            .collect();
+        if !streamed.is_empty() {
+            crate::hold_service::end_all(&streamed);
         }
         let closing: Vec<_> = left.iter().filter_map(|pane| pane.begin_close()).collect();
         let deadline = Instant::now() + SHUTDOWN_GRACE;
@@ -4794,6 +4809,9 @@ impl AppDelegate {
         if quit::ends_leftovers(self.settings().keep_running, carried) {
             crate::hold_service::end_leftovers();
         }
+        // What this Mac's own terminals a crash left are nobody's to show yet, whatever the
+        // table says of a server's: they end here, before the first pane makes its own.
+        crate::hold_service::end_local_leftovers();
         let mut safe = false;
         if let Some(arrival) = arrival {
             self.ivars().attempt_marks.replace(arrival.marked.clone());
@@ -7743,16 +7761,19 @@ impl AppDelegate {
         // signalled (the holder's going lets the terminal go, and from then on the service no
         // longer knows which pane it was), and waits for them, bounded: a server that does not
         // answer is ended at the next connection (the ledger keeps the request).
-        if self.ivars().end_kept.take() {
-            let panes: Vec<_> = self
-                .all_panes()
-                .iter()
-                .filter(|pane| pane.shows_kept_terminal())
-                .map(|pane| pane.uuid().clone())
-                .collect();
-            if !panes.is_empty() {
-                crate::hold_service::end_all(&panes);
-            }
+        //
+        // The terminals of this Mac's own panes (kablo's, [`TerminalPane::is_streamed`]) end with
+        // their panes whatever `keep_running` says, for now: the pane that would show one again
+        // after the quit comes with the pane's reconnecting.
+        let ends_kept = self.ivars().end_kept.take();
+        let panes: Vec<_> = self
+            .all_panes()
+            .iter()
+            .filter(|pane| (ends_kept && pane.shows_kept_terminal()) || pane.is_streamed())
+            .map(|pane| pane.uuid().clone())
+            .collect();
+        if !panes.is_empty() {
+            crate::hold_service::end_all(&panes);
         }
         // The panes' closes below end their remote sessions; the masters'
         // `exit` is `close_all`'s, under the shared deadline.

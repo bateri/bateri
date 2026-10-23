@@ -30,6 +30,9 @@ use kablo_proto::v1::{
 };
 use kablo_proto::{Error, SIGNATURE, SessionId};
 
+/// The process id the bridge says every shell has.
+pub const FAKE_PID: u32 = 4242;
+
 /// Which version of kablo the bridge plays.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Age {
@@ -653,6 +656,7 @@ impl Bridge {
     fn status(&self, id: &SessionId) -> Option<Status> {
         let session = self.sessions.get(id)?;
         let mut status = Status::new(id.clone());
+        status.pid = FAKE_PID;
         status.size = session.size;
         status.clients =
             u32::from(session.attached) + u32::try_from(session.others.len()).unwrap_or(u32::MAX);
