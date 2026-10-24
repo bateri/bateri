@@ -37,10 +37,14 @@
 
 use std::cell::{Cell, RefCell};
 use std::fs;
-use std::io::Write as _;
+use std::io::{Read as _, Write as _};
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use bt_core::{Chord, Key, Mods, Settings, Theme};
@@ -202,6 +206,20 @@ impl Program {
     /// names one. The program calls itself “Pencere Test”, the view “Show things”, and gives
     /// its icon.
     fn open(&mut self, token: &str, files: &[(&str, &str, &[u8])], domain: Option<&str>) {
+        self.open_with_access(
+            token,
+            files,
+            domain.map(|domain| format!("{{\"connect\":[\"{domain}\"]}}")),
+        );
+    }
+
+    /// The same, asking for the `access` given as JSON.
+    fn open_with_access(
+        &mut self,
+        token: &str,
+        files: &[(&str, &str, &[u8])],
+        access: Option<String>,
+    ) {
         let list: Vec<String> = files
             .iter()
             .map(|(path, kind, bytes)| {
@@ -212,9 +230,7 @@ impl Program {
                 )
             })
             .collect();
-        let access = domain.map_or_else(String::new, |domain| {
-            format!(",\"access\":{{\"connect\":[\"{domain}\"]}}")
-        });
+        let access = access.map_or_else(String::new, |access| format!(",\"access\":{access}"));
         self.send(
             "open",
             &format!(
@@ -332,6 +348,106 @@ var started=false;\
 window.addEventListener('message',function(e){\
 if(e.source!==window.parent)return;var m=e.data;\
 if(m.context&&!started){started=true;send({close:{}})}});";
+
+/// A page that nests two frames once it is told its `context`: the origin the person allowed
+/// (`ALLOWED`) and one nobody did (`BLOCKED`). What the allowed one says to its parent is what the
+/// program hears (`framed`); the page then tries every way there is to go to another document,
+/// as `SCRIPT` does, and goes for the allowed origin itself in its own frame, and says where it
+/// is (`checked`).
+const FRAMES_SCRIPT: &str = "var send=function(m){window.parent.postMessage(m,'*')};\
+var started=false;\
+var embed=function(src){var f=document.createElement('iframe');f.src=src;document.body.appendChild(f)};\
+var escape=function(){\
+try{var h=document.createElement('a');h.href='#section';document.body.appendChild(h);h.click()}catch(e){}\
+try{location.hash='routed'}catch(e){}\
+try{location.href='ALLOWED/third'}catch(e){}\
+try{location.href='other.html'}catch(e){}\
+try{var f=document.createElement('form');f.action='other.html';f.method='post';\
+document.body.appendChild(f);f.submit()}catch(e){}\
+try{var a=document.createElement('a');a.href='other.html';document.body.appendChild(a);a.click()}catch(e){}\
+try{window.open('other.html')}catch(e){}\
+setTimeout(function(){send({call:{id:4,method:'checked',params:{path:location.pathname,hash:location.hash}}})},700)};\
+window.addEventListener('message',function(e){\
+if(e.source===window.parent){var m=e.data;\
+if(m.context&&!started){started=true;\
+send({call:{id:1,method:'hello',params:{access:m.context.access||null}}});\
+embed('ALLOWED/');embed('BLOCKED/')}return}\
+send({call:{id:20,method:'framed',params:{said:e.data}}});\
+if(e.data==='second')escape()});";
+
+/// What the server on this Mac gives a nested frame: a page that says `first` to the page that
+/// nests it and then goes on to `/second` in its own frame (a navigation of a frame the page
+/// nested), which says `second`.
+const FRAME_FIRST: &str = "<!doctype html><script>parent.postMessage('first','*');\
+setTimeout(function(){location.href='/second'},100)</script>";
+const FRAME_SECOND: &str = "<!doctype html><script>parent.postMessage('second','*')</script>";
+
+/// A server on this Mac, for a view to nest a frame of. It counts the connections it gets: one
+/// that is never asked is an origin the web view never reached.
+struct Local {
+    origin: String,
+    hits: Arc<AtomicUsize>,
+    stop: Arc<AtomicBool>,
+    thread: Option<thread::JoinHandle<()>>,
+}
+
+impl Local {
+    fn start() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("a port on this Mac");
+        listener
+            .set_nonblocking(true)
+            .expect("a listener that does not wait");
+        let port = listener.local_addr().expect("an address").port();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread = thread::spawn({
+            let (hits, stop) = (Arc::clone(&hits), Arc::clone(&stop));
+            move || {
+                while !stop.load(Ordering::Acquire) {
+                    let Ok((mut stream, _)) = listener.accept() else {
+                        thread::sleep(Duration::from_millis(10));
+                        continue;
+                    };
+                    hits.fetch_add(1, Ordering::AcqRel);
+                    let _ = stream.set_nonblocking(false);
+                    let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
+                    let mut request = [0u8; 2048];
+                    let read = stream.read(&mut request).unwrap_or(0);
+                    let head = String::from_utf8_lossy(&request[..read]).into_owned();
+                    let body = match head.split_whitespace().nth(1) {
+                        Some("/second") => FRAME_SECOND,
+                        Some("/") => FRAME_FIRST,
+                        _ => "",
+                    };
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                }
+            }
+        });
+        Self {
+            origin: format!("http://127.0.0.1:{port}"),
+            hits,
+            stop,
+            thread: Some(thread),
+        }
+    }
+
+    fn hits(&self) -> usize {
+        self.hits.load(Ordering::Acquire)
+    }
+}
+
+impl Drop for Local {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
 
 /// Whether a view covers the pane, as a host can see it: a subview of the view's class (the
 /// name may carry KVO's prefix, which AppKit adds once something observes the instance).
@@ -969,6 +1085,62 @@ fn run(dir: &Path) {
     press(&window, &sheet, "Cancel");
     program.bye(&token);
     until("the next link view to go", || !covered(&pane));
+
+    // A view the person allowed to embed an origin (`frames`, the policy's `frame-src`): the frame
+    // loads and may go on to other pages of its own, and the page that nests it is still held to
+    // the page it opened. An origin the person did not allow is not reached at all: the policy
+    // stops it before the web view asks the network.
+    let (allowed, blocked) = (Local::start(), Local::start());
+    let nested_script = FRAMES_SCRIPT
+        .replace("ALLOWED", &allowed.origin)
+        .replace("BLOCKED", &blocked.origin);
+    let nested_files = [
+        ("index.html", "text/html", PAGE.as_bytes()),
+        ("app.js", "text/javascript", nested_script.as_bytes()),
+        ("other.html", "text/html", OTHER.as_bytes()),
+    ];
+    let token = program.hello();
+    program.open_with_access(
+        &token,
+        &nested_files,
+        Some(format!("{{\"frames\":[\"{}\"]}}", allowed.origin)),
+    );
+    program.supply(&nested_files);
+    let sheet = sheet_of(&window);
+    let text = sheet_text(&sheet);
+    assert!(text.contains(&allowed.origin), "{text}");
+    press(&window, &sheet, "Allow");
+    watch_it_start(&pane, &mut program);
+    let first = program.wait_for("\"said\":\"first\"");
+    assert!(first.contains("\"method\":\"framed\""), "{first}");
+    program.wait_for("\"said\":\"second\"");
+    let checked = program.wait_for("\"method\":\"checked\"");
+    assert!(
+        checked.contains("\"path\":\"/index.html\""),
+        "the page that nested a frame stays where it loaded: {checked}"
+    );
+    assert!(
+        checked.contains("\"hash\":\"#routed\""),
+        "and still routes by its fragment: {checked}"
+    );
+    assert!(
+        !program.heard().contains("\"method\":\"moved\""),
+        "a navigation of the view's own frame was let through: {}",
+        program.heard()
+    );
+    assert_eq!(
+        allowed.hits(),
+        2,
+        "the nested frame loaded its two pages, and the view's own frame, sent to the same origin, \
+         was not let ask for a third"
+    );
+    assert_eq!(
+        blocked.hits(),
+        0,
+        "an origin that is not in the policy's frame-src was reached"
+    );
+    program.bye(&token);
+    until("the view that nested a frame to go", || !covered(&pane));
 
     // A page that asks to be closed: the program is told the view closed (reason `view`) and the
     // pane is the terminal's again, at once.

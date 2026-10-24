@@ -25,7 +25,8 @@
 //! delegates, [`Bridge`]): navigating anywhere but the one shell load and the one load
 //! of the view's entry in its frame — after it, every navigation to another document, a link
 //! to another file of the bundle, a reload and a form included, while a change of the address's
-//! `#` part, which loads nothing, is the page's (`serve::Page::allows`, specification §12.3);
+//! `#` part, which loads nothing, is the page's, and so is a frame it nests where the
+//! policy lets it (`serve::Page::allows`, specification §12.3);
 //! a new window;
 //! a file chooser; the media capture the permission policy would not have
 //! stopped; the context menu (it has Reload, which would load the shell again).
@@ -406,7 +407,7 @@ struct BridgeIvars {
     /// which makes the answer for a file.
     page: Arc<serve::Page>,
     /// What the web view has been let navigate to: the shell once, and the view's entry once
-    /// in its frame, and no navigation after ([`serve::Page::allows`]).
+    /// in its frame, and no navigation of that frame after ([`serve::Page::allows`]).
     loads: std::cell::Cell<serve::Loads>,
     /// The tab card's picture of the view, shared with the host: the bridge takes the first
     /// one when the shell has loaded ([`still::first`]).
@@ -474,9 +475,11 @@ define_class!(
 
     unsafe impl WKNavigationDelegate for Bridge {
         /// Every navigation of the web view is asked here: the shell once, the entry of the
-        /// view in its frame once, and no other document (specification §12.3: after the entry
-        /// has loaded, every navigation to another document is cancelled, whatever starts it;
-        /// one that changes only the fragment of the page is not to another document).
+        /// view in its frame once, and no other document of the view's own frame
+        /// (specification §12.3: after the entry has loaded, every navigation of the view to
+        /// another document is cancelled, whatever starts it; one that changes only the
+        /// fragment of the page is not to another document, and a frame the page nests, which
+        /// the policy allows, is not the view's).
         #[unsafe(method(webView:decidePolicyForNavigationAction:decisionHandler:))]
         fn decide(
             &self,
@@ -659,9 +662,26 @@ impl Bridge {
         };
         // SAFETY: a plain read.
         let top = unsafe { target.isMainFrame() };
+        // The document a frame below the top holds now tells the view's own frame from one the
+        // page nested ([`serve::Page::allows`]): a frame has no other identity here, and a
+        // frame that has loaded nothing yet reports an empty address.
+        let held = if top {
+            None
+        } else {
+            // SAFETY: a plain read.
+            let request = unsafe { target.request() };
+            Self::url_of(&request).map(|(_, text)| text)
+        };
+        let frame = if top {
+            serve::Frame::Top
+        } else {
+            serve::Frame::Below {
+                holds: held.as_deref(),
+            }
+        };
         let ivars = self.ivars();
         let mut loads = ivars.loads.get();
-        let allowed = ivars.page.allows(&url, top, &mut loads);
+        let allowed = ivars.page.allows(&url, frame, &mut loads);
         ivars.loads.set(loads);
         allowed
     }

@@ -11,8 +11,8 @@ use objc2_foundation::{NSPoint, NSRect, NSSize};
 
 use super::files::Pending;
 use super::serve::{
-    self, HANDLER, LOADED_HANDLER, Loads, Page, Route, SANDBOX, Served, css_color, deliver_script,
-    ground_script, js_string, route,
+    self, Frame, HANDLER, LOADED_HANDLER, Loads, Page, Route, SANDBOX, Served, css_color,
+    deliver_script, ground_script, js_string, route,
 };
 use super::still::{self, Capture, PATIENCE, Shared, Still};
 use super::wait::{OFFERED, OPENING, Waits};
@@ -388,25 +388,36 @@ fn a_message_is_a_string_in_the_script_and_never_its_code() {
 
 // ---- what the web view may navigate to --------------------------------------
 
+/// The view's own frame before its entry has loaded: the web view reports a frame that holds
+/// nothing yet by an empty address.
+const FRESH: Frame<'static> = Frame::Below { holds: Some("") };
+
+/// The view's own frame once its entry has loaded: it holds a document of the application's
+/// scheme (here, `url("index.html")`).
+const OWN: Frame<'static> = Frame::Below {
+    holds: Some(OWN_HOLDS),
+};
+const OWN_HOLDS: &str = "bateri-view://v-0123456789abcdef0123456789abcdef/index.html";
+
 #[test]
 fn the_shell_loads_once_as_the_top_document_and_nothing_else_does() {
     let page = bundle_page();
     let shell = Page::shell_url();
     let mut loads = Loads::default();
     assert!(
-        !page.allows(&url("index.html"), true, &mut loads),
+        !page.allows(&url("index.html"), Frame::Top, &mut loads),
         "the view is not a top document"
     );
-    assert!(!page.allows("https://example.com/", true, &mut loads));
-    assert!(!page.allows("file:///etc/passwd", true, &mut loads));
-    assert!(!page.allows("about:blank", true, &mut loads));
+    assert!(!page.allows("https://example.com/", Frame::Top, &mut loads));
+    assert!(!page.allows("file:///etc/passwd", Frame::Top, &mut loads));
+    assert!(!page.allows("about:blank", Frame::Top, &mut loads));
     assert_eq!(loads, Loads::default(), "a refusal is not a load");
-    assert!(page.allows(&shell, true, &mut loads));
+    assert!(page.allows(&shell, Frame::Top, &mut loads));
     assert!(
-        !page.allows(&shell, true, &mut loads),
+        !page.allows(&shell, Frame::Top, &mut loads),
         "a reload is the shell loaded again"
     );
-    assert!(!page.allows(&url("index.html"), true, &mut loads));
+    assert!(!page.allows(&url("index.html"), Frame::Top, &mut loads));
 }
 
 #[test]
@@ -414,22 +425,22 @@ fn the_views_frame_loads_its_entry_before_anything_else_and_nothing_else() {
     let page = bundle_page();
     let mut loads = Loads::default();
     assert!(
-        !page.allows(&Page::shell_url(), false, &mut loads),
+        !page.allows(&Page::shell_url(), FRESH, &mut loads),
         "the shell inside the shell"
     );
-    assert!(!page.allows("https://example.com/", false, &mut loads));
-    assert!(!page.allows("http://localhost:8080/", false, &mut loads));
+    assert!(!page.allows("https://example.com/", FRESH, &mut loads));
+    assert!(!page.allows("http://localhost:8080/", FRESH, &mut loads));
     assert!(!page.allows(
         "bateri-view://v-ffffffffffffffffffffffffffffffff/index.html",
-        false,
+        FRESH,
         &mut loads
     ));
-    assert!(!page.allows(&url("../index.html"), false, &mut loads));
+    assert!(!page.allows(&url("../index.html"), FRESH, &mut loads));
     assert_eq!(loads, Loads::default(), "a refusal is not a load");
     // A blank frame has no origin to leave, and it is not the entry.
-    assert!(page.allows("about:blank", false, &mut loads));
+    assert!(page.allows("about:blank", FRESH, &mut loads));
     assert!(!loads.entry);
-    assert!(page.allows(&url("index.html"), false, &mut loads));
+    assert!(page.allows(&url("index.html"), FRESH, &mut loads));
     assert!(loads.entry && !loads.shell);
 }
 
@@ -440,8 +451,8 @@ fn the_views_frame_loads_its_entry_before_anything_else_and_nothing_else() {
 fn after_the_entry_has_loaded_no_other_document_is_navigated_to_whatever_starts_it() {
     let page = bundle_page();
     let mut loads = Loads::default();
-    assert!(page.allows(&Page::shell_url(), true, &mut loads));
-    assert!(page.allows(&url("index.html"), false, &mut loads));
+    assert!(page.allows(&Page::shell_url(), Frame::Top, &mut loads));
+    assert!(page.allows(&url("index.html"), FRESH, &mut loads));
     for destination in [
         // The entry again: a reload, and a form posted to the page itself.
         url("index.html"),
@@ -465,12 +476,9 @@ fn after_the_entry_has_loaded_no_other_document_is_navigated_to_whatever_starts_
         "javascript:alert(1)".to_owned(),
         "bateri-view://v-ffffffffffffffffffffffffffffffff/index.html#top".to_owned(),
     ] {
+        assert!(!page.allows(&destination, OWN, &mut loads), "{destination}");
         assert!(
-            !page.allows(&destination, false, &mut loads),
-            "{destination}"
-        );
-        assert!(
-            !page.allows(&destination, true, &mut loads),
+            !page.allows(&destination, Frame::Top, &mut loads),
             "{destination}"
         );
     }
@@ -491,9 +499,9 @@ fn after_the_entry_has_loaded_no_other_document_is_navigated_to_whatever_starts_
 fn a_change_of_the_fragment_of_the_page_itself_is_let_through_and_loads_nothing() {
     let page = bundle_page();
     let mut loads = Loads::default();
-    assert!(page.allows(&Page::shell_url(), true, &mut loads));
+    assert!(page.allows(&Page::shell_url(), Frame::Top, &mut loads));
     // Before the entry it is the entry, as any address of it is.
-    assert!(page.allows(&url("index.html#first"), false, &mut loads));
+    assert!(page.allows(&url("index.html#first"), FRESH, &mut loads));
     let loaded = loads;
     for destination in [
         url("index.html#section"),
@@ -506,14 +514,11 @@ fn a_change_of_the_fragment_of_the_page_itself_is_let_through_and_loads_nothing(
         url("index.html#../secret.txt"),
         url("index.html#https://example.com/"),
     ] {
-        assert!(
-            page.allows(&destination, false, &mut loads),
-            "{destination}"
-        );
+        assert!(page.allows(&destination, OWN, &mut loads), "{destination}");
     }
     assert_eq!(loads, loaded, "a fragment is not a load");
     // Only the page's frame: the top document is the shell's, and it never moves.
-    assert!(!page.allows(&url("index.html#section"), true, &mut loads));
+    assert!(!page.allows(&url("index.html#section"), Frame::Top, &mut loads));
     // And a view with an entry in a directory, its path spelled with escapes.
     let nested = Page::new(
         INSTANCE.to_owned(),
@@ -523,12 +528,95 @@ fn a_change_of_the_fragment_of_the_page_itself_is_let_through_and_loads_nothing(
         "#101010",
     );
     let mut loads = Loads::default();
-    assert!(nested.allows(&Page::shell_url(), true, &mut loads));
-    assert!(nested.allows(&url("dir/a%20b.html"), false, &mut loads));
-    assert!(nested.allows(&url("dir/a%20b.html#x"), false, &mut loads));
-    assert!(!nested.allows(&url("dir/a%20b.html"), false, &mut loads));
-    assert!(!nested.allows(&url("dir/other.html#x"), false, &mut loads));
-    assert!(!nested.allows(&url("index.html#x"), false, &mut loads));
+    assert!(nested.allows(&Page::shell_url(), Frame::Top, &mut loads));
+    assert!(nested.allows(&url("dir/a%20b.html"), FRESH, &mut loads));
+    assert!(nested.allows(&url("dir/a%20b.html#x"), OWN, &mut loads));
+    assert!(!nested.allows(&url("dir/a%20b.html"), OWN, &mut loads));
+    assert!(!nested.allows(&url("dir/other.html#x"), OWN, &mut loads));
+    assert!(!nested.allows(&url("index.html#x"), OWN, &mut loads));
+}
+
+/// The person may have allowed the page to embed an origin, and the policy says which: the
+/// lock is for the view's own frame. A frame the page nested goes where the policy lets it —
+/// its first page, the ones after it, a blank one — and never to what is the application's own:
+/// the shell, a file of the bundle, another view's.
+#[test]
+fn a_frame_the_page_nested_is_not_held_to_the_page_and_still_not_let_into_the_application() {
+    let page = bundle_page();
+    let mut loads = Loads::default();
+    assert!(page.allows(&Page::shell_url(), Frame::Top, &mut loads));
+    assert!(page.allows(&url("index.html"), FRESH, &mut loads));
+    let loaded = loads;
+    // The frame is new and holds nothing, then a page of its origin, and goes on from there.
+    let blank = Frame::Below { holds: Some("") };
+    let theirs = Frame::Below {
+        holds: Some("https://video.example.com/a"),
+    };
+    for (frame, destination) in [
+        (blank, "https://video.example.com/"),
+        (blank, "about:blank"),
+        (theirs, "https://video.example.com/b"),
+        (theirs, "https://video.example.com/a#part"),
+        (theirs, "https://elsewhere.example.com/"),
+        (theirs, "about:blank"),
+    ] {
+        assert!(
+            page.allows(destination, frame, &mut loads),
+            "{frame:?} to {destination}"
+        );
+    }
+    for (frame, destination) in [
+        (blank, Page::shell_url()),
+        (blank, url("index.html")),
+        (blank, url("dir/other.html")),
+        (
+            blank,
+            "bateri-view://v-ffffffffffffffffffffffffffffffff/index.html".to_owned(),
+        ),
+        (theirs, url("app.js")),
+        (theirs, format!("{}#top", Page::shell_url())),
+    ] {
+        assert!(
+            !page.allows(&destination, frame, &mut loads),
+            "{frame:?} to {destination}"
+        );
+    }
+    assert_eq!(
+        loads, loaded,
+        "a frame of the page's is not a load of the view's"
+    );
+    // The top document is still the shell's, whoever asks.
+    assert!(!page.allows("https://video.example.com/", Frame::Top, &mut loads));
+}
+
+/// The view's own frame is the one that holds a document of the application, and one whose
+/// document cannot be told is taken for it: the page's frame goes nowhere, its fragment aside,
+/// however the destination is spelled, and having a frame of its own nested does not change that.
+#[test]
+fn the_views_own_frame_is_told_by_the_document_it_holds_and_goes_nowhere_else() {
+    let page = bundle_page();
+    let mut loads = Loads::default();
+    assert!(page.allows(&Page::shell_url(), Frame::Top, &mut loads));
+    assert!(page.allows(&url("index.html"), FRESH, &mut loads));
+    assert_eq!(OWN_HOLDS, url("index.html"));
+    let unknown = Frame::Below { holds: None };
+    for frame in [OWN, unknown] {
+        for destination in [
+            "https://video.example.com/",
+            "about:blank",
+            "javascript:void(0)",
+            "data:text/html,<p>x</p>",
+        ] {
+            assert!(
+                !page.allows(destination, frame, &mut loads),
+                "{frame:?} to {destination}"
+            );
+        }
+        assert!(
+            page.allows(&url("index.html#next"), frame, &mut loads),
+            "{frame:?}"
+        );
+    }
 }
 
 /// The decision is the bridge's one question, asked of every navigation, and the shell's
@@ -542,7 +630,7 @@ fn the_bridge_asks_the_one_question_of_every_navigation_and_keeps_its_answers() 
         .expect("the bridge's allows");
     let body = source[at..].split("\n    }\n").next().expect("its end");
     assert!(
-        body.contains("ivars.page.allows(&url, top, &mut loads)"),
+        body.contains("ivars.page.allows(&url, frame, &mut loads)"),
         "{body}"
     );
     assert!(body.contains("ivars.loads.set(loads)"), "{body}");

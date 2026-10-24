@@ -82,7 +82,8 @@ of every installed copy. A version without a section is not released.
   loaded, nothing takes it to another page: a link, a script changing the address, a form —
   not even another file of the program's own bundle — and a form cannot send the page to
   any address. A page that routes by the `#` part of its address (`#section`,
-  `location.hash`) keeps working. The page keeps the policy that says what it may reach as a header on every
+  `location.hash`) keeps working, and so does a site you allowed the page to embed, in its
+  frame. The page keeps the policy that says what it may reach as a header on every
   file it is given. The view still opens addresses in your browser, after you say yes.
 - **A view whose program stops reading is closed.** When more than 16 MiB of what a view said
   is waiting for a program that does not read, the view ends and the program is told. A view

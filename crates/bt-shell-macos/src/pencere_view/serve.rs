@@ -427,25 +427,37 @@ impl Page {
         }
     }
 
-    /// Whether the web view may navigate to `url`, and the record of it in `loads`: the shell,
-    /// once, as the top document; in the view's frame, the entry of the view, once. **No other
-    /// document, whoever asks** (specification §12.3): not a link, a change of `location`, a
-    /// form, a redirect or a script that opens a window, whatever it names — another file of the
-    /// bundle, the entry again (a reload) and a blank page included. What a frame that has taken
-    /// its entry is let do is move within it: a navigation that changes only the fragment
-    /// ([`Page::is_fragment_of_entry`]) loads nothing and reaches nothing, and a page that
-    /// routes by it keeps working. A blank frame (it has no origin to leave) is let through only
-    /// before the entry.
-    pub(super) fn allows(&self, url: &str, main_frame: bool, loads: &mut Loads) -> bool {
-        if main_frame {
+    /// Whether the web view may navigate `frame` to `url`, and the record of it in `loads`: the
+    /// shell, once, as the top document; in the view's own frame, the entry of the view, once.
+    /// **The view's own frame goes to no other document, whoever asks** (specification §12.3):
+    /// not a link, a change of `location`, a form, a redirect or a script that opens a window,
+    /// whatever it names — another file of the bundle, the entry again (a reload) and a blank
+    /// page included. What it is let do once it has taken its entry is move within it: a
+    /// navigation that changes only the fragment ([`Page::is_fragment_of_entry`]) loads nothing
+    /// and reaches nothing, and a page that routes by it keeps working. A blank frame (it has
+    /// no origin to leave) is let through only before the entry.
+    ///
+    /// **A frame the page nested is not the view's own.** The person may have allowed the
+    /// page to embed an origin (`frames`, the policy's `frame-src`), and the policy decides
+    /// which: the lock does not stand in its way, and goes no further than keeping what is
+    /// the application's own — the shell and every file of a bundle — out of a frame that is
+    /// not the view's. Which frame it is, is told by the document the frame holds: the view's
+    /// holds a document of the application's scheme from its entry on, and a frame the page
+    /// nests holds a blank page until it has loaded and something else after. A frame whose
+    /// document cannot be told is the view's.
+    pub(super) fn allows(&self, url: &str, frame: Frame<'_>, loads: &mut Loads) -> bool {
+        let Frame::Below { holds } = frame else {
             if loads.shell || route(&self.instance, url) != Route::Shell {
                 return false;
             }
             loads.shell = true;
             return true;
-        }
+        };
         if loads.entry {
-            return self.is_fragment_of_entry(url);
+            if holds.is_none_or(|held| after_scheme(held).is_some()) {
+                return self.is_fragment_of_entry(url);
+            }
+            return after_scheme(url).is_none();
         }
         if matches!(route(&self.instance, url), Route::View(_)) {
             loads.entry = true;
@@ -465,6 +477,16 @@ impl Page {
         !document.contains('?')
             && route(&self.instance, document) == Route::View(self.entry.clone())
     }
+}
+
+/// The frame a navigation is for.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum Frame<'a> {
+    /// The web view's top document, which is the shell's.
+    Top,
+    /// A frame below it, with the address of the document it holds now if that can be told:
+    /// the view's own frame (the shell made it) or one the page nested ([`Page::allows`]).
+    Below { holds: Option<&'a str> },
 }
 
 /// What the web view has been let navigate to so far: the shell page as the top document and
