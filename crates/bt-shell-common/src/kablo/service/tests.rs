@@ -4,7 +4,7 @@
 
 use std::fs::File;
 use std::io::{Read, Write};
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::fs::DirBuilderExt;
 use std::sync::atomic::{AtomicU32, AtomicU64};
 use std::thread::JoinHandle;
@@ -41,6 +41,14 @@ fn until(message: &str, mut ready: impl FnMut() -> bool) {
     panic!("{message}");
 }
 
+/// The names of terminals, joined by commas.
+fn names(ids: &[SessionId]) -> String {
+    ids.iter()
+        .map(SessionId::as_str)
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 fn host(key: &str) -> KabloHost {
     KabloHost {
         host: "rasp".into(),
@@ -54,8 +62,17 @@ fn host(key: &str) -> KabloHost {
 /// The world around the service, as a test sets it.
 struct Fake {
     bridge: Arc<Mutex<Bridge>>,
+    /// The kablo of this Mac as a world of its own, when a test has both this Mac's terminals
+    /// and a server's (one bridge cannot be two machines' connections at once); without it,
+    /// every account rides [`Fake::bridge`].
+    mac: std::sync::OnceLock<Arc<Mutex<Bridge>>>,
     /// What was asked, in order.
     log: Mutex<Vec<String>>,
+    /// The terminals the install and the renewal were told were the ledger's, in order
+    /// (`install:t1,t2`).
+    lives: Mutex<Vec<String>>,
+    /// The install is refused ([`Refusal::plain`]): no kablo can be put there now.
+    install_refuses: AtomicBool,
     pane: AtomicBool,
     /// What the pane lookup says of the pane when there is one.
     info: Mutex<PaneInfo>,
@@ -91,6 +108,10 @@ struct Fake {
     letters: Mutex<Vec<Letter>>,
     /// The number the server's counter gives next; 0 is a server that cannot count.
     next_number: AtomicU64,
+    /// The settings draw the dock (`[shell] integration = "auto"`).
+    dock: AtomicBool,
+    /// A terminal of this Mac shown again is read from its past ([`Backend::shows_past`]).
+    past: AtomicBool,
     /// Who opened what, as the server's records say.
     records: Mutex<Vec<(crate::agent::Terminal, crate::agent::notes::Record)>>,
     /// How long reading the records takes.
@@ -101,7 +122,10 @@ impl Fake {
     fn new(bridge: Bridge) -> Arc<Fake> {
         Arc::new(Fake {
             bridge: Arc::new(Mutex::new(bridge)),
+            mac: std::sync::OnceLock::new(),
             log: Mutex::new(Vec::new()),
+            lives: Mutex::new(Vec::new()),
+            install_refuses: AtomicBool::new(false),
             pane: AtomicBool::new(true),
             info: Mutex::new(PaneInfo::default()),
             kablo: AtomicBool::new(true),
@@ -120,6 +144,8 @@ impl Fake {
             mail: AtomicBool::new(false),
             letters: Mutex::new(Vec::new()),
             next_number: AtomicU64::new(0),
+            dock: AtomicBool::new(true),
+            past: AtomicBool::new(true),
             records: Mutex::new(Vec::new()),
             records_take: Mutex::new(Duration::ZERO),
         })
@@ -165,6 +191,11 @@ impl Fake {
         self.background.lock().expect("lock").clone()
     }
 
+    /// The terminals each install and renewal was told were the ledger's.
+    fn lives(&self) -> Vec<String> {
+        self.lives.lock().expect("lock").clone()
+    }
+
     fn note(&self, what: &str) {
         self.log.lock().expect("lock").push(what.to_owned());
     }
@@ -189,6 +220,29 @@ impl Fake {
 
     fn bridge(&self) -> std::sync::MutexGuard<'_, Bridge> {
         self.bridge.lock().expect("lock")
+    }
+
+    /// This Mac's kablo becomes a world of its own ([`Fake::mac`]).
+    fn apart_mac(&self) {
+        let _ = self
+            .mac
+            .set(Arc::new(Mutex::new(Bridge::new(Age::Current))));
+    }
+
+    /// The bridge of this Mac's kablo: the one of its own after [`Fake::apart_mac`], else the
+    /// only one.
+    fn mac(&self) -> std::sync::MutexGuard<'_, Bridge> {
+        self.mac.get().unwrap_or(&self.bridge).lock().expect("lock")
+    }
+
+    /// The bridge an account rides.
+    fn bridge_of(&self, account: &str) -> Arc<Mutex<Bridge>> {
+        if local::is_account(account)
+            && let Some(apart) = self.mac.get()
+        {
+            return Arc::clone(apart);
+        }
+        Arc::clone(&self.bridge)
     }
 }
 
@@ -263,8 +317,15 @@ impl Backend for Fake {
         }
     }
 
-    fn install(&self, _: &KabloHost) -> Result<Installed, Refusal> {
+    fn install(&self, _: &KabloHost, live: &[SessionId]) -> Result<Installed, Refusal> {
         self.note("install");
+        self.lives
+            .lock()
+            .expect("lock")
+            .push(format!("install:{}", names(live)));
+        if self.install_refuses.load(Ordering::SeqCst) {
+            return Err(Refusal::plain());
+        }
         Ok(Installed {
             target: kablo_proto::install::Target::LinuxX86_64,
             version: "0.2.0".into(),
@@ -277,10 +338,22 @@ impl Backend for Fake {
         Some("0.2.0".into())
     }
 
+    fn dock(&self) -> bool {
+        self.dock.load(Ordering::SeqCst)
+    }
+
+    fn shows_past(&self) -> bool {
+        self.past.load(Ordering::SeqCst)
+    }
+
     /// What the real one does to a server: its relays are replaced by the ones of the
     /// release this computer brings.
-    fn refresh(&self, _: &KabloHost) -> Option<Installed> {
+    fn refresh(&self, _: &KabloHost, live: &[SessionId]) -> Option<Installed> {
         self.note("refresh");
+        self.lives
+            .lock()
+            .expect("lock")
+            .push(format!("refresh:{}", names(live)));
         if self.refresh_fails.load(Ordering::SeqCst) {
             return None;
         }
@@ -293,7 +366,7 @@ impl Backend for Fake {
         })
     }
 
-    fn carry(&self, _: &KabloHost, _: &Installed) -> io::Result<Carried> {
+    fn carry(&self, server: &KabloHost, _: &Installed) -> io::Result<Carried> {
         self.note("carry");
         if let Some(kind) = *self.carry_error.lock().expect("lock") {
             return Err(io::Error::new(kind, "no bridge"));
@@ -307,16 +380,17 @@ impl Backend for Fake {
         }
         let closed = Arc::new(AtomicBool::new(false));
         // A new connection to the server: what the old one had in flight is lost.
-        self.bridge().disconnect();
+        let bridge = self.bridge_of(&server.key);
+        bridge.lock().expect("lock").disconnect();
         self.carried.lock().expect("lock").push(Arc::clone(&closed));
         let ends = Arc::clone(&closed);
         Ok(Carried {
             reader: Box::new(FromBridge {
-                bridge: Arc::clone(&self.bridge),
+                bridge: Arc::clone(&bridge),
                 closed,
                 pending: Vec::new(),
             }),
-            writer: Box::new(ToBridge(Arc::clone(&self.bridge))),
+            writer: Box::new(ToBridge(bridge)),
             close: Box::new(move || ends.store(true, Ordering::SeqCst)),
             ended: {
                 let cause = Arc::clone(&self.eof_cause);
@@ -346,6 +420,10 @@ impl Backend for Fake {
             .lock()
             .expect("lock")
             .push(account.to_owned());
+    }
+
+    fn files(&self, _: &KabloHost, _: &Installed) {
+        self.note("files");
     }
 
     fn number(&self, _: &KabloHost) -> Option<u64> {
@@ -674,6 +752,55 @@ fn a_numbered_terminal_is_found_again_by_its_number_after_a_restart() {
     second.stop();
 }
 
+/// The look for kablo writes the shells' files (`install`); an account the ledger brings back is
+/// not looked at, so its first new terminal writes them on the way to its number — once, and not
+/// for an account made by a look.
+#[test]
+fn the_files_of_a_restarted_account_are_written_for_its_first_new_terminal_only() {
+    let ledger = Arc::new(Ledger::memory());
+    let world = Fake::new(Bridge::new(Age::Current));
+    pane_named(&world);
+    let first = Rig::kept("files-1", world.clone(), ledger.clone(), END_GRACE);
+    let holder = Holder::new(&first.socket(), "b-1");
+    let terminal = first.terminals(1).remove(0);
+    world.bridge().write(&terminal, b"abc");
+    until("shown", || holder.shown.bytes() == b"abc");
+    assert_eq!(world.count("install"), 1);
+    assert_eq!(world.count("files"), 0, "the look wrote them");
+    first.service.stop();
+    drop(first);
+
+    // The restored pane takes its terminal back: that brings the account back, unlooked at.
+    let again = Rig::kept("files-2", world.clone(), ledger.clone(), END_GRACE);
+    let resumed = Holder::start(
+        &again.socket(),
+        "b-1",
+        Target::Resume {
+            account: "u@rasp:22".into(),
+            offset: Some(3),
+        },
+    );
+    world.bridge().write(&terminal, b"def");
+    until("the pane is back", || resumed.shown.bytes() == b"def");
+    assert_eq!(world.count("files"), 0, "a pane coming back writes nothing");
+    let numbered = world.count("number");
+    let _third = Holder::new(&again.socket(), "b-3");
+    until("the new terminal was numbered", || {
+        world.count("number") == numbered + 1
+    });
+    assert_eq!(
+        world.count("install"),
+        1,
+        "a recalled account is not looked at"
+    );
+    assert_eq!(world.count("files"), 1);
+    let _fourth = Holder::new(&again.socket(), "b-4");
+    until("the next terminal was numbered", || {
+        world.count("number") == numbered + 2
+    });
+    assert_eq!(world.count("files"), 1, "once");
+}
+
 /// A number a person took by hand (`kablo new --id t7`) is skipped: the counter is asked again,
 /// the terminal starts under the next number, the holder is shown it and is not let fall back to
 /// a plain `ssh`, and the row written for the number that was taken goes — that terminal is not
@@ -790,6 +917,7 @@ fn a_holder_of_the_version_before_is_not_numbered() {
 }
 
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn the_master_step_runs_on_the_pane_and_its_ending_decides() {
     // It ends well: the terminal follows.
     let rig = Rig::new("master-ok");
@@ -892,6 +1020,7 @@ fn the_next_terminal_of_an_account_rides_the_bridge_that_is_there() {
 }
 
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn a_broken_bridge_is_made_again_and_the_terminal_goes_on_with_no_byte_twice() {
     let rig = Rig::new("broken");
     let mut holder = Holder::new(&rig.socket(), "b-1");
@@ -912,6 +1041,7 @@ fn a_broken_bridge_is_made_again_and_the_terminal_goes_on_with_no_byte_twice() {
 }
 
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn a_bridge_that_cannot_be_started_is_tried_again_and_a_server_that_speaks_no_version_is_given_up()
 {
     // The first attempts fail: the terminal waits for the one that works.
@@ -1264,6 +1394,7 @@ fn closing_a_pane_hangs_its_terminal_up_and_kills_it_when_it_stays() {
 }
 
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn a_terminal_that_goes_by_itself_after_the_hang_up_is_not_killed() {
     let rig = Rig::graced(
         "end-went",
@@ -1319,6 +1450,7 @@ fn a_pane_that_shows_nothing_ends_nothing_and_a_pane_is_ended_once() {
 /// grace — and the ledger lets go of it, so that no quit and no launch after a crash ends it; with
 /// the pane's holder gone it is in the background, and a pane that shows it again writes it back.
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn a_terminal_left_running_is_not_ended_and_the_ledger_forgets_it() {
     let ledger = Arc::new(Ledger::memory());
     let rig = Rig::kept(
@@ -1407,19 +1539,52 @@ fn a_new_terminal_starts_in_the_folder_the_pane_lookup_names() {
         .argv_of(&terminal)
         .expect("started")
         .to_vec();
-    // The bootstrap carries where kablo is on that server, for the agent's command.
-    let kablo = Some(".local/share/kablo/0.2.0/kablo");
     assert_eq!(
         argv[2],
-        ssh_wrap::boot_in(Some("/srv/app"), kablo).as_bytes(),
+        ssh_wrap::boot_in(Some("/srv/app")).as_bytes(),
         "the bootstrap that goes to /srv/app"
     );
-    assert_ne!(argv[2], ssh_wrap::boot_in(None, kablo).as_bytes());
+    assert_ne!(argv[2], ssh_wrap::boot_in(None).as_bytes());
+}
+
+/// The dock's tier is the settings' (`[shell] integration`): `"blocks"` reaches a new terminal as
+/// `BATERI_DOCK=off` in its environment, the dock leaves the environment as it is — the
+/// shells there read it, and `bateri` hands it to the terminals it opens.
+#[test]
+fn a_new_terminal_gets_the_dock_tier_the_settings_say() {
+    for (dock, expected) in [(true, Vec::new()), (false, vec![("BATERI_DOCK", "off")])] {
+        let rig = Rig::new(if dock { "tier-dock" } else { "tier-blocks" });
+        pane_named(&rig.world);
+        rig.world.dock.store(dock, Ordering::SeqCst);
+        let _holder = Holder::new(&rig.socket(), "b-1");
+        let terminal = rig.terminals(1).remove(0);
+        let env = rig
+            .world
+            .bridge()
+            .env_of(&terminal)
+            .expect("started")
+            .to_vec();
+        let env: Vec<(String, String)> = env
+            .into_iter()
+            .map(|(name, value)| {
+                (
+                    String::from_utf8(name).expect("text"),
+                    String::from_utf8(value).expect("text"),
+                )
+            })
+            .collect();
+        let expected: Vec<(String, String)> = expected
+            .into_iter()
+            .map(|(name, value)| (name.to_owned(), value.to_owned()))
+            .collect();
+        assert_eq!(env, expected, "dock: {dock}");
+    }
 }
 
 /// The panes' connection: told once per change, from a first connection that
 /// is not a lost one to a lost one that comes back by a clock the user skips.
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn a_pane_is_told_when_its_connection_goes_and_comes_back_and_not_once_per_attempt() {
     let rig = Rig::new("passive");
     let pane = pane_named(&rig.world);
@@ -1512,8 +1677,32 @@ fn a_screen_is_back_only_when_a_passive_one_goes_live() {
     }
 }
 
+/// Only the server's own word that the shell is in front lets the pane speak to the shell
+/// on its own: not a program, not a name it has not given, not a terminal another computer
+/// may have run a program in.
+#[test]
+fn the_shell_is_spoken_to_on_its_own_only_when_the_server_says_it_is_in_front() {
+    let shown = |program: Option<&str>| Shown {
+        account: "u@rasp:22".into(),
+        host: "rasp".into(),
+        argv: vec!["ssh".into(), "rasp".into()],
+        terminal: SessionId::new("t35").expect("an id"),
+        program: program.map(str::to_owned),
+        link: PaneLink::Live,
+        taken_by: None,
+    };
+    for shell in ["zsh", "-zsh", "bash", "fish"] {
+        assert!(shown(Some(shell)).shell_in_front(), "{shell}");
+    }
+    for other in ["vim", "npm", "python3", "sudo", ""] {
+        assert!(!shown(Some(other)).shell_in_front(), "{other:?}");
+    }
+    assert!(!shown(None).shell_in_front(), "the server has not said");
+}
+
 /// The computer waking up is the same as the user asking, for every account.
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn waking_dials_the_accounts_that_wait_for_their_pause() {
     let rig = Rig::new("wake");
     let pane = pane_named(&rig.world);
@@ -1549,6 +1738,7 @@ fn waking_dials_the_accounts_that_wait_for_their_pause() {
 /// A login nobody saved: nothing is tried until the user says so, and the user
 /// saying so with the login still missing asks once and waits again.
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn a_login_nobody_saved_waits_for_the_user_and_tries_nothing_meanwhile() {
     let rig = Rig::new("login");
     let pane = pane_named(&rig.world);
@@ -1739,6 +1929,7 @@ fn the_old_release(ledger: &Ledger) {
 }
 
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn a_restarted_bateri_renews_the_kablo_its_ledger_remembers_before_it_dials() {
     let ledger = Arc::new(Ledger::memory());
     // The terminal runs under the relay of the release before.
@@ -1782,6 +1973,8 @@ fn a_restarted_bateri_renews_the_kablo_its_ledger_remembers_before_it_dials() {
         "0.2.0",
         "known at the release it is at"
     );
+    // The renewal is told the terminals the ledger has of the account, and no others.
+    assert_eq!(world.lives(), ["install:", "refresh:b-1"]);
 
     // And once: a bridge made again does not renew a server that was.
     world.break_connection();
@@ -1792,6 +1985,7 @@ fn a_restarted_bateri_renews_the_kablo_its_ledger_remembers_before_it_dials() {
 /// A renewal that cannot be made now (no connection, a server that will not take the
 /// file) does not stand in the bridge's way and is made at the next dial.
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn a_renewal_that_cannot_be_made_leaves_the_account_as_it_was_until_the_next_dial() {
     let ledger = Arc::new(Ledger::memory());
     let world = Fake::new(Bridge::new(Age::Old));
@@ -2015,8 +2209,8 @@ fn a_terminal_left_to_end_is_ended_by_the_next_connection_to_its_account() {
     assert!(ledger.keeps("u@rasp:22", &kept));
 }
 
-/// The holder of a pane survives the bateri that served it (an update's holder keeps it; so does
-/// `"quit"`'s) and finds the next one at the same place: it asks again by itself, from the byte
+/// The holder of a pane survives the bateri that served it (an update keeps it; so does
+/// `"quit"`) and finds the next one at the same place: it asks again by itself, from the byte
 /// it was at, and the terminal goes on — nothing twice, nothing missing — with nobody having
 /// told the new bateri anything but what the ledger kept.
 #[test]
@@ -2059,6 +2253,7 @@ fn the_holder_that_waited_through_a_restart_finds_its_terminal_where_it_left_it(
 /// even when the pane goes on as a plain `ssh` whose process-table target is the
 /// same. A lost connection and a return are not changes.
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn a_pane_is_told_when_the_terminal_it_shows_appears_and_when_it_goes() {
     let rig = Rig::new("changed");
     let pane = pane_named(&rig.world);
@@ -2483,6 +2678,7 @@ fn a_relay_that_names_no_clients_keeps_every_terminal_in_the_background() {
 /// taken, and by whom; closing it ends nothing on the server and the ledger does not name the
 /// terminal (a quit that ends terminals must not end the other Mac's); ⏎ takes it back.
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn a_terminal_another_mac_took_dims_the_pane_and_closing_it_ends_nothing() {
     let ledger = Arc::new(Ledger::memory());
     let rig = Rig::kept(
@@ -2791,6 +2987,7 @@ fn an_application_that_takes_no_mail_is_given_none_and_a_ticket_that_comes_anywa
 }
 
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn an_answer_to_a_letter_of_a_connection_that_went_is_not_said_on_the_next() {
     let (rig, _holder, _terminal) = mail_rig("letter-stale");
     let stream = program_opens(&rig, None);
@@ -2884,4 +3081,817 @@ fn a_survey_whose_records_are_slow_waits_for_them() {
     );
     assert!(survey.terminals.is_some());
     assert_eq!(survey.records.len(), 1);
+}
+
+// ─── this Mac's account ──────────────────────────────────────────────────
+
+/// Asks for the account of this Mac and waits for what is told.
+fn open_here(service: &Service) -> Result<String, Refusal> {
+    let (tx, told) = mpsc::channel();
+    service.open_here(move |outcome| {
+        let _ = tx.send(outcome);
+    });
+    told.recv_timeout(Duration::from_secs(15)).expect("told")
+}
+
+#[test]
+fn this_macs_account_is_made_once_dialed_like_any_other_and_written_in_the_ledger() {
+    let ledger = Arc::new(Ledger::memory());
+    // A terminal an earlier run of bateri left: the one a new kablo would renew.
+    ledger.shown(
+        local::ACCOUNT,
+        &SessionId::new("t1").expect("an id"),
+        Some(&PaneUuid::parse("0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0").expect("a pane")),
+    );
+    let world = Fake::new(Bridge::new(Age::Current));
+    let rig = Rig::kept("here", world.clone(), ledger.clone(), END_GRACE);
+
+    assert_eq!(open_here(&rig.service), Ok(local::ACCOUNT.to_owned()));
+    until("the bridge", || world.count("carry") == 1);
+    // kablo was looked for once, told the terminals of this account and no other, and nothing of
+    // a server's was asked: there is no connection to make, no counter, no file to write.
+    assert_eq!(world.count("install"), 1);
+    assert_eq!(world.lives(), ["install:t1"]);
+    for server_only in ["master", "files", "number", "records"] {
+        assert_eq!(world.count(server_only), 0, "{server_only}");
+    }
+    let known = ledger.known(local::ACCOUNT).expect("in the ledger");
+    assert!(known.is_local());
+    assert_eq!(known.version, "0.2.0");
+
+    // Asked again, it is told at once and kablo is not looked for again.
+    assert_eq!(open_here(&rig.service), Ok(local::ACCOUNT.to_owned()));
+    assert_eq!(world.count("install"), 1);
+    assert_eq!(world.count("carry"), 1);
+}
+
+#[test]
+fn an_account_of_this_mac_that_cannot_be_made_is_told_and_leaves_nothing_behind() {
+    let ledger = Arc::new(Ledger::memory());
+    let world = Fake::new(Bridge::new(Age::Current));
+    world.install_refuses.store(true, Ordering::SeqCst);
+    let rig = Rig::kept("here-refused", world.clone(), ledger.clone(), END_GRACE);
+
+    assert_eq!(open_here(&rig.service), Err(Refusal::plain()));
+    assert!(ledger.known(local::ACCOUNT).is_none());
+    assert_eq!(
+        world.count("carry"),
+        0,
+        "no bridge for an account that is not there"
+    );
+
+    // The next request tries again, and this time kablo is there.
+    world.install_refuses.store(false, Ordering::SeqCst);
+    assert_eq!(open_here(&rig.service), Ok(local::ACCOUNT.to_owned()));
+    until("the bridge", || world.count("carry") == 1);
+}
+
+#[test]
+fn a_terminal_is_this_macs_by_its_account_alone() {
+    let shown = |account: &str| Shown {
+        account: account.to_owned(),
+        host: String::new(),
+        argv: Vec::new(),
+        terminal: SessionId::new("t1").expect("an id"),
+        program: None,
+        link: PaneLink::Live,
+        taken_by: None,
+    };
+    assert!(shown(local::ACCOUNT).is_local());
+    assert!(!shown("u@rasp:22").is_local());
+    // A host that is empty is not what says it: the account is.
+    assert!(
+        !Shown {
+            host: String::new(),
+            ..shown("u@rasp:22")
+        }
+        .is_local()
+    );
+}
+
+// ─── the panes of this Mac ───────────────────────────────────────────────
+
+fn a_pane() -> PaneUuid {
+    PaneUuid::parse("5A1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0").expect("a pane")
+}
+
+const MAC: Size = Size {
+    cols: 100,
+    rows: 30,
+    xpixel: 800,
+    ypixel: 600,
+};
+
+/// What the pane asks for: a shell under the identity bateri gives, with ten thousand rows.
+fn a_shell() -> NewSession {
+    let mut spec = NewSession::default();
+    spec.argv = vec![b"/bin/zsh".to_vec(), b"-l".to_vec()];
+    spec.env = vec![(b"TERM_PROGRAM".to_vec(), b"bateri".to_vec())];
+    spec.cwd = Some(b"/tmp".to_vec());
+    spec.history = Some(10_000);
+    spec
+}
+
+/// The stream's ends as a pane's session has them, blocking and with a bound on a wait.
+struct Pane {
+    master: UnixStream,
+    exit: UnixStream,
+    status: Arc<StreamExit>,
+    ops: Arc<dyn PtyOps>,
+    pid: u32,
+    silence: Option<Arc<bt_core::Silence>>,
+}
+
+impl Pane {
+    fn of(stream: Stream) -> Pane {
+        let master = UnixStream::from(stream.master);
+        master.set_nonblocking(false).expect("blocking");
+        master
+            .set_read_timeout(Some(Duration::from_secs(15)))
+            .expect("timeout");
+        let exit = UnixStream::from(stream.exit);
+        exit.set_read_timeout(Some(Duration::from_secs(15)))
+            .expect("timeout");
+        Pane {
+            master,
+            exit,
+            status: stream.status,
+            ops: stream.ops,
+            pid: stream.pid,
+            silence: stream.silence,
+        }
+    }
+
+    /// Reads until `bytes` has appeared in what was read.
+    fn reads(&mut self, bytes: &[u8]) -> Vec<u8> {
+        let mut read = Vec::new();
+        let mut chunk = [0u8; 4096];
+        while !read.windows(bytes.len()).any(|window| window == bytes) {
+            let n = self.master.read(&mut chunk).expect("the terminal's bytes");
+            assert_ne!(n, 0, "the stream ended: {read:?}");
+            read.extend_from_slice(&chunk[..n]);
+        }
+        read
+    }
+}
+
+fn open_local(rig: &Rig, pane: &PaneUuid) -> Result<Stream, Refusal> {
+    rig.service
+        .open_local(pane, a_shell(), MAC, Duration::from_secs(15))
+}
+
+#[test]
+fn a_pane_of_this_mac_reads_its_terminals_bytes_as_they_are_and_types_into_it() {
+    let ledger = Arc::new(Ledger::memory());
+    let world = Fake::new(Bridge::new(Age::Current));
+    let rig = Rig::kept("local-pane", world.clone(), ledger.clone(), END_GRACE);
+    let pane = a_pane();
+
+    let stream = open_local(&rig, &pane).expect("a terminal");
+    let mut mac = Pane::of(stream);
+    // The terminal is there, started as asked, at the size asked, under the Mac's account.
+    let terminals = ledger.terminals_of(local::ACCOUNT);
+    assert_eq!(terminals.len(), 1, "{terminals:?}");
+    let id = terminals[0].clone();
+    assert!(id.as_str().starts_with("b-"));
+    assert!(world.bridge().has(&id));
+    assert_eq!(
+        world.bridge().argv_of(&id),
+        Some(&[b"/bin/zsh".to_vec(), b"-l".to_vec()][..])
+    );
+    assert_eq!(world.bridge().size_of(&id), Some(MAC));
+    assert_eq!(ledger.pane_of(local::ACCOUNT, &id), Some(pane.clone()));
+    // Kablo was put on this Mac once, and nothing of a server's was asked.
+    assert_eq!(world.count("install"), 1);
+    for server_only in ["master", "files", "number", "records"] {
+        assert_eq!(world.count(server_only), 0, "{server_only}");
+    }
+
+    // What the program writes is what the pane reads: no frame, every byte.
+    let mut output = b"ready\r\n\x1b[31mred\x1b[0m".to_vec();
+    output.extend(0..=255u8);
+    world.bridge().write(&id, &output);
+    let read = mac.reads(&output);
+    assert!(read.ends_with(&output), "{read:?}");
+    // What the pane types is what the program is typed.
+    mac.master.write_all(b"ls -la\r").expect("typed");
+    until("the keys typed", || {
+        world.bridge().typed(&id) == b"ls -la\r"
+    });
+    // Its size is the terminal's, in the pixels the program is told.
+    mac.ops.resize(
+        mac.master.as_fd(),
+        PtySize {
+            cols: 120,
+            rows: 40,
+            cell_width: 8,
+            cell_height: 16,
+        },
+    );
+    until("the size", || {
+        world.bridge().size_of(&id)
+            == Some(Size {
+                cols: 120,
+                rows: 40,
+                xpixel: 960,
+                ypixel: 640,
+            })
+    });
+
+    // It is not a server's pane: nothing that asks for a server's terminal finds it.
+    assert!(rig.service.shown(&pane).is_none());
+    assert!(rig.service.background(local::ACCOUNT).is_empty());
+    assert!(rig.service.background_all().is_empty());
+    assert!(world.changed().is_empty() && world.links().is_empty());
+}
+
+#[test]
+fn the_end_of_the_program_reaches_the_pane_after_its_last_byte_with_the_status() {
+    let ledger = Arc::new(Ledger::memory());
+    let world = Fake::new(Bridge::new(Age::Current));
+    let rig = Rig::kept("local-exit", world.clone(), ledger.clone(), END_GRACE);
+    let mut mac = Pane::of(open_local(&rig, &a_pane()).expect("a terminal"));
+    // The process id the terminal's program has is the stream's.
+    assert_eq!(mac.pid, crate::kablo::fake::FAKE_PID);
+    let id = ledger.terminals_of(local::ACCOUNT).remove(0);
+
+    world.bridge().write(&id, b"goodbye\r\n");
+    world.bridge().exit(&id, Exit::Code(7));
+    // The pane's connection closes when the program has ended and everything it wrote is in the
+    // socket; the status is written before the exit signal.
+    let mut rest = Vec::new();
+    mac.master.read_to_end(&mut rest).expect("to the end");
+    assert_eq!(rest, b"goodbye\r\n");
+    let mut signal = Vec::new();
+    mac.exit.read_to_end(&mut signal).expect("the signal");
+    assert_eq!(
+        mac.status.status().and_then(|status| status.code()),
+        Some(7)
+    );
+    // The ledger forgot the terminal, and so did the pane.
+    until("the ledger", || {
+        ledger.terminals_of(local::ACCOUNT).is_empty()
+    });
+
+    // A signal is no code.
+    let mut other = Pane::of(open_local(&rig, &a_pane()).expect("a terminal"));
+    let id = ledger.terminals_of(local::ACCOUNT).remove(0);
+    world.bridge().exit(&id, Exit::Signal(9));
+    let mut signal = Vec::new();
+    other.exit.read_to_end(&mut signal).expect("the signal");
+    let status = other.status.status().expect("a status");
+    assert_eq!(status.code(), None);
+}
+
+#[test]
+fn letting_go_of_the_stream_leaves_the_terminal_running_and_only_a_request_ends_it() {
+    let ledger = Arc::new(Ledger::memory());
+    let world = Fake::new(Bridge::new(Age::Current));
+    let rig = Rig::kept("local-hangup", world.clone(), ledger.clone(), END_GRACE);
+    let pane = a_pane();
+    let mac = Pane::of(open_local(&rig, &pane).expect("a terminal"));
+    let id = ledger.terminals_of(local::ACCOUNT).remove(0);
+    assert_eq!(world.bridge().terminated(&id), None);
+
+    // The session's end: the stream closes, and the terminal is the next bateri's to find — it
+    // is not asked to end, and the ledger still has it for the pane.
+    let Pane { ops, master, .. } = mac;
+    ops.hangup(0, master.as_fd());
+    drop(master);
+    rig.service.refresh_background();
+    thread::sleep(Duration::from_millis(300));
+    assert_eq!(world.bridge().terminated(&id), None);
+    assert!(world.bridge().has(&id));
+    assert_eq!(ledger.local_terminal_of(&pane), Some(id.clone()));
+
+    // The user's close says so first, and then the stream goes.
+    let closing = PaneUuid::parse("6b2f3e4d-5c6b-4a89-9ea0-b6c5d4e3f201").expect("a pane");
+    let other = Pane::of(open_local(&rig, &closing).expect("a terminal"));
+    let other_id = ledger.local_terminal_of(&closing).expect("its terminal");
+    rig.service.end(&closing);
+    drop(other);
+    until("the hang-up", || {
+        world.bridge().terminated(&other_id) == Some(false)
+    });
+}
+
+#[test]
+fn a_pane_that_gave_up_waiting_leaves_no_terminal_behind() {
+    let ledger = Arc::new(Ledger::memory());
+    let world = Fake::new(Bridge::new(Age::Current));
+    let rig = Rig::kept("local-gave-up", world.clone(), ledger.clone(), END_GRACE);
+
+    let outcome = rig
+        .service
+        .open_local(&a_pane(), a_shell(), MAC, Duration::ZERO);
+    assert_eq!(outcome.err(), Some(Refusal::plain()));
+    // The terminal is made all the same, a moment later, and ended: nobody will show it.
+    until("the terminal ended", || {
+        ledger
+            .terminals_of(local::ACCOUNT)
+            .first()
+            .is_some_and(|id| world.bridge().terminated(id) == Some(false))
+    });
+
+    // The wait that ran out is not paid again by the next pane: it is an ordinary one at once.
+    let again = Instant::now();
+    assert_eq!(open_local(&rig, &a_pane()).err(), Some(Refusal::plain()));
+    assert!(again.elapsed() < Duration::from_secs(1));
+    assert_eq!(world.count("carry"), 1);
+}
+
+#[test]
+fn where_kablo_cannot_be_put_the_pane_is_an_ordinary_one_and_the_step_is_not_repeated_at_once() {
+    let world = Fake::new(Bridge::new(Age::Current));
+    world.install_refuses.store(true, Ordering::SeqCst);
+    let rig = Rig::over("local-refused", world.clone());
+
+    assert_eq!(open_local(&rig, &a_pane()).err(), Some(Refusal::plain()));
+    assert_eq!(open_local(&rig, &a_pane()).err(), Some(Refusal::plain()));
+    assert_eq!(world.count("install"), 1, "the failed step is not repeated");
+    assert_eq!(world.count("carry"), 0);
+}
+
+#[test]
+fn panes_that_wait_for_the_account_of_this_mac_share_the_making_of_it() {
+    let ledger = Arc::new(Ledger::memory());
+    let world = Fake::new(Bridge::new(Age::Current));
+    let rig = Rig::kept("local-two", world.clone(), ledger.clone(), END_GRACE);
+
+    let panes: Vec<_> = (0..3)
+        .map(|_| {
+            let (reply, answer) = mpsc::channel();
+            let ask = Ask {
+                pane: a_pane(),
+                spec: a_shell(),
+                size: MAC,
+                reply,
+            };
+            rig.service.tx.send(Msg::Local(ask)).expect("sent");
+            answer
+        })
+        .collect();
+    for answer in &panes {
+        let stream = answer
+            .recv_timeout(Duration::from_secs(15))
+            .expect("an answer")
+            .expect("a terminal");
+        assert_eq!(stream.pid, crate::kablo::fake::FAKE_PID);
+    }
+    assert_eq!(world.count("install"), 1);
+    assert_eq!(world.count("carry"), 1);
+    assert_eq!(ledger.terminals_of(local::ACCOUNT).len(), 3);
+}
+
+// ─── a pane that comes back to its terminal ─────────────────────────────
+
+/// A launch after the bateri that showed `pane` was gone: the first service stopped, the program
+/// went on writing, and a second one binds the same place over the same ledger and server.
+struct Comeback {
+    ledger: Arc<Ledger>,
+    world: Arc<Fake>,
+    first: Rig,
+    pane: PaneUuid,
+    terminal: SessionId,
+}
+
+impl Comeback {
+    /// A pane with a terminal that has written `before`; then the bateri goes.
+    fn leaves(name: &str, before: &[u8]) -> Comeback {
+        let ledger = Arc::new(Ledger::memory());
+        let world = Fake::new(Bridge::new(Age::Current));
+        let first = Rig::kept(name, world.clone(), ledger.clone(), END_GRACE);
+        let pane = a_pane();
+        let mut mac = Pane::of(open_local(&first, &pane).expect("a terminal"));
+        let terminal = ledger.terminals_of(local::ACCOUNT).remove(0);
+        world.bridge().write(&terminal, before);
+        mac.reads(before);
+        drop(mac);
+        first.service.stop();
+        Comeback {
+            ledger,
+            world,
+            first,
+            pane,
+            terminal,
+        }
+    }
+
+    /// The next bateri.
+    fn arrives(&self) -> Service {
+        Service::start_with(
+            &self.first.dir,
+            self.world.clone(),
+            self.ledger.clone(),
+            END_GRACE,
+        )
+        .expect("a second service")
+    }
+}
+
+#[test]
+fn a_pane_that_comes_back_is_shown_its_terminal_from_the_first_byte_and_told_how_far_that_is_the_past()
+ {
+    let back = Comeback::leaves("local-back", b"one\r\n");
+    let id = back.terminal.clone();
+    // The program goes on while nobody reads; the server answered the questions up to byte 7,
+    // which is inside the second line.
+    back.world.bridge().write(&id, b"two\r\n");
+    back.world.bridge().answer_until(&id, 7);
+    back.world.bridge().write(&id, b"three\r\n");
+
+    let second = back.arrives();
+    let stream = second
+        .open_local(&back.pane, a_shell(), MAC, Duration::from_secs(15))
+        .expect("its terminal");
+    // The terminal is the one the pane had, not a new one, and its program's process id comes
+    // with the server's word.
+    assert_eq!(back.ledger.terminals_of(local::ACCOUNT), [id.clone()]);
+    assert_eq!(stream.pid, crate::kablo::fake::FAKE_PID);
+    let mut mac = Pane::of(stream);
+    let past = mac.silence.clone().expect("a terminal that has a past");
+    // Everything the server has, from the first byte.
+    assert_eq!(mac.reads(b"three"), b"one\r\ntwo\r\nthree\r\n");
+    let (offset, view) = back.world.bridge().attaches(&id).pop().expect("an attach");
+    assert_eq!(offset, 0);
+    let view = view.expect("a view");
+    assert!(
+        !view.picture_if_answered,
+        "the pane holds the answers back itself: bytes, not a picture in their place"
+    );
+    // The past is the part the questions of which were answered, and it is complete.
+    until("the past said", || past.is_closed());
+    assert_eq!(past.reach(), 7);
+    // The pane that comes back is the terminal's holder: what it types reaches the program.
+    mac.master.write_all(b"typed\r").expect("typed");
+    until("the keys typed", || {
+        back.world.bridge().typed(&id) == b"typed\r"
+    });
+    second.stop();
+}
+
+#[test]
+fn a_terminal_whose_start_the_server_no_longer_has_is_shown_as_a_picture_that_is_all_past() {
+    let back = Comeback::leaves("local-back-picture", b"aaaa\r\n");
+    let id = back.terminal.clone();
+    back.world.bridge().write(&id, b"bbbb\r\ncccc\r\n");
+    back.world.bridge().retain_last(&id, 6);
+    back.world.bridge().answer_until(&id, 18);
+
+    let second = back.arrives();
+    let stream = second
+        .open_local(&back.pane, a_shell(), MAC, Duration::from_secs(15))
+        .expect("its terminal");
+    let mut mac = Pane::of(stream);
+    let past = mac.silence.clone().expect("a past");
+    let picture = Bridge::picture_of(18);
+    let read = mac.reads(&picture);
+    until("the past said", || past.is_closed());
+    // The picture's bytes — the reset in front and the screen — are the past, and the stream goes
+    // on from the picture's end with nothing owed.
+    assert_eq!(past.reach(), read.len() as u64);
+    second.stop();
+}
+
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn after_a_launch_that_did_not_settle_a_pane_is_shown_a_picture_that_is_all_past_and_the_past_is_forgotten()
+ {
+    let back = Comeback::leaves("local-back-unsettled", b"one\r\n");
+    let id = back.terminal.clone();
+    back.world.bridge().write(&id, b"two\r\n");
+    back.world.bridge().answer_until(&id, 7);
+    back.world.past.store(false, Ordering::SeqCst);
+
+    let second = back.arrives();
+    let stream = second
+        .open_local(&back.pane, a_shell(), MAC, Duration::from_secs(15))
+        .expect("its terminal");
+    assert_eq!(back.ledger.terminals_of(local::ACCOUNT), [id.clone()]);
+    let mut mac = Pane::of(stream);
+    let past = mac.silence.clone().expect("a terminal shown again");
+    // A picture of the screen from now on, and none of the bytes it was made of.
+    let picture = Bridge::picture_of(10);
+    let read = mac.reads(&picture);
+    assert!(!read.windows(3).any(|bytes| bytes == b"one"), "{read:?}");
+    let (offset, view) = back.world.bridge().attaches(&id).pop().expect("an attach");
+    assert_eq!(offset, kablo_proto::v1::OFFSET_END);
+    assert!(view.expect("a view").picture);
+    // The picture is the past, although the server had answered the questions only up to a byte
+    // before it: it is read muted, all of it.
+    until("the past said", || past.is_closed());
+    assert_eq!(past.reach(), read.len() as u64);
+    // And the server forgets what came before it, so the bateri after this one is not given those
+    // bytes either.
+    until("the past forgotten", || {
+        back.world.bridge().forgotten(&id) == 1
+    });
+    drop(mac);
+    second.stop();
+
+    back.world.past.store(true, Ordering::SeqCst);
+    let third = back.arrives();
+    let mut mac = Pane::of(
+        third
+            .open_local(&back.pane, a_shell(), MAC, Duration::from_secs(15))
+            .expect("its terminal"),
+    );
+    let read = mac.reads(&picture);
+    assert!(!read.windows(3).any(|bytes| bytes == b"one"), "{read:?}");
+    let (offset, _) = back.world.bridge().attaches(&id).pop().expect("an attach");
+    assert_eq!(
+        offset, 0,
+        "from the first byte, which the server no longer has"
+    );
+    third.stop();
+}
+
+#[test]
+fn a_terminal_the_server_does_not_have_is_made_again_for_the_pane_and_the_old_one_is_let_go_of() {
+    let ledger = Arc::new(Ledger::memory());
+    let world = Fake::new(Bridge::new(Age::Current));
+    let rig = Rig::kept("local-back-gone", world.clone(), ledger.clone(), END_GRACE);
+    let pane = a_pane();
+    // The ledger has a terminal for the pane that the server (a Mac that restarted) does not.
+    let lost = SessionId::new("b-00000000000000000000000000000001").expect("a name");
+    ledger.remember(
+        &local::host(),
+        &Installed {
+            target: kablo_proto::install::Target::MacosAarch64,
+            version: "0.2.0".to_owned(),
+            path: String::new(),
+            fresh: false,
+        },
+    );
+    ledger.shown(local::ACCOUNT, &lost, Some(&pane));
+
+    let stream = open_local(&rig, &pane).expect("a terminal all the same");
+    assert!(stream.silence.is_none(), "a terminal just made has no past");
+    let made = ledger
+        .local_terminal_of(&pane)
+        .expect("the pane's terminal");
+    assert_ne!(made, lost);
+    assert!(world.bridge().has(&made));
+    assert!(
+        ledger.ending(local::ACCOUNT).contains(&lost),
+        "the one that is not there is marked to end, so that it is not found again"
+    );
+}
+
+#[test]
+fn a_terminal_whose_program_ended_while_the_bateri_was_away_is_made_again_for_the_pane() {
+    let back = Comeback::leaves("local-back-ended", b"x\r\n");
+    back.world.bridge().exit(&back.terminal, Exit::Code(0));
+    let second = back.arrives();
+    let stream = second
+        .open_local(&back.pane, a_shell(), MAC, Duration::from_secs(15))
+        .expect("a terminal");
+    assert!(
+        stream.silence.is_none(),
+        "the pane is given a new terminal, whichever of the list and the end came first"
+    );
+    let made = back
+        .ledger
+        .local_terminal_of(&back.pane)
+        .expect("a terminal");
+    assert_ne!(made, back.terminal);
+    assert!(back.ledger.ending(local::ACCOUNT).contains(&back.terminal));
+    second.stop();
+}
+
+#[test]
+fn a_local_terminal_marked_to_end_is_not_shown_again() {
+    let back = Comeback::leaves("local-back-ending", b"x\r\n");
+    back.ledger.end(local::ACCOUNT, &back.terminal);
+    let second = back.arrives();
+    let stream = second
+        .open_local(&back.pane, a_shell(), MAC, Duration::from_secs(15))
+        .expect("a terminal");
+    assert!(stream.silence.is_none());
+    assert_ne!(
+        back.ledger.local_terminal_of(&back.pane),
+        Some(back.terminal.clone())
+    );
+    second.stop();
+}
+
+/// `keep_running = "update"` and a crash: the launch after it marks every terminal to end
+/// ([`Ledger::end_all`]), the first connection to this Mac's account ends them before anything
+/// else, and the pane that would have been shown one is given a new terminal. The update's
+/// launch marks nothing ([`Ledger::arrived_by_update`]) and shows them.
+#[test]
+fn what_a_crash_left_of_this_macs_is_ended_by_the_first_connection_and_not_shown_again() {
+    let back = Comeback::leaves("local-crash", b"x\r\n");
+    assert_eq!(back.ledger.end_all(), 1, "the launch's mark");
+    let second = back.arrives();
+    let stream = second
+        .open_local(&back.pane, a_shell(), MAC, Duration::from_secs(15))
+        .expect("a terminal");
+    assert!(stream.silence.is_none(), "a new terminal, not the old one");
+    until("the old one ended", || {
+        back.world.bridge().terminated(&back.terminal) == Some(false)
+    });
+    second.stop();
+}
+
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn what_no_pane_of_the_launch_showed_again_is_ended_and_what_one_did_is_not() {
+    let back = Comeback::leaves("local-unclaimed", b"x\r\n");
+    let abandoned = SessionId::new("b-00000000000000000000000000000002").expect("a name");
+    back.world
+        .bridge()
+        .add("b-00000000000000000000000000000002", MAC);
+    back.ledger.shown(
+        local::ACCOUNT,
+        &abandoned,
+        Some(&PaneUuid::parse("7c3a4b5d-6e7f-4809-91a2-b3c4d5e6f708").expect("a pane")),
+    );
+    let second = back.arrives();
+    let _mac = Pane::of(
+        second
+            .open_local(&back.pane, a_shell(), MAC, Duration::from_secs(15))
+            .expect("its terminal"),
+    );
+    // The launch has a pane for the terminal that was found, and one for another that did not
+    // get its terminal (an ordinary pane for now): both rows stay, the third goes.
+    let waiting = PaneUuid::parse("8d4b5c6e-7f80-4a91-a2b3-c4d5e6f70819").expect("a pane");
+    back.world
+        .bridge()
+        .add("b-00000000000000000000000000000003", MAC);
+    back.ledger.shown(
+        local::ACCOUNT,
+        &SessionId::new("b-00000000000000000000000000000003").expect("a name"),
+        Some(&waiting),
+    );
+    second.end_unclaimed(&[back.pane.clone(), waiting]);
+    until("the unclaimed one ended", || {
+        back.world.bridge().terminated(&abandoned) == Some(false)
+    });
+    assert_eq!(back.world.bridge().terminated(&back.terminal), None);
+    assert!(back.ledger.keeps(local::ACCOUNT, &back.terminal));
+    thread::sleep(Duration::from_millis(200));
+    assert_eq!(
+        back.world
+            .bridge()
+            .terminated(&SessionId::new("b-00000000000000000000000000000003").expect("a name")),
+        None,
+        "a pane that is there and has no terminal yet keeps the one it had"
+    );
+    second.stop();
+}
+
+#[test]
+fn clearing_the_scrollback_of_a_pane_is_asked_of_its_terminals_too() {
+    let ledger = Arc::new(Ledger::memory());
+    let world = Fake::new(Bridge::new(Age::Current));
+    let rig = Rig::kept("local-forget", world.clone(), ledger.clone(), END_GRACE);
+    let pane = a_pane();
+    let mut mac = Pane::of(open_local(&rig, &pane).expect("a terminal"));
+    let id = ledger.terminals_of(local::ACCOUNT).remove(0);
+    world.bridge().write(&id, b"old\r\n");
+    mac.reads(b"old");
+    rig.service.forget_past(&pane);
+    until("the terminal told", || world.bridge().forgotten(&id) == 1);
+}
+
+// ─── a pane with two terminals: the one of this Mac and a server's ──────
+
+/// A pane whose program is the pipe to a terminal a server keeps, running in a terminal of this
+/// Mac: the pane's two terminals. Returns the rig, the pane, the pane's stream, the holder (the
+/// pipe), the carrier's name and the server terminal's.
+fn a_pane_with_two_terminals(
+    name: &str,
+    grace: Duration,
+) -> (
+    Rig,
+    PaneUuid,
+    Pane,
+    Holder,
+    SessionId,
+    SessionId,
+    Arc<Ledger>,
+) {
+    let ledger = Arc::new(Ledger::memory());
+    let world = Fake::new(Bridge::new(Age::Current));
+    world.apart_mac();
+    let rig = Rig::kept(name, world, ledger.clone(), grace);
+    let pane = pane_named(&rig.world);
+    let mac = Pane::of(open_local(&rig, &pane).expect("a terminal of this Mac"));
+    let carrier = ledger.terminals_of(local::ACCOUNT).remove(0);
+    // The pipe runs inside that terminal and is admitted to the pane that terminal is in.
+    let holder = Holder::new(&rig.socket(), "b-1");
+    until("the server's terminal", || {
+        rig.service.shown(&pane).is_some()
+    });
+    let server = rig
+        .service
+        .shown(&pane)
+        .map(|shown| shown.terminal)
+        .expect("shown");
+    (rig, pane, mac, holder, carrier, server, ledger)
+}
+
+/// The pane's two handles are apart: what asks for the terminal the pane **shows** finds the
+/// server's, whichever of the two holds was admitted last, and nothing that is for servers
+/// (the background list, the account's lists) finds the terminal of this Mac.
+#[test]
+fn a_pane_that_runs_in_a_terminal_of_this_mac_and_shows_a_servers_is_a_server_pane_alone() {
+    let (rig, pane, _mac, _holder, carrier, server, ledger) =
+        a_pane_with_two_terminals("two-handles", END_GRACE);
+    assert_ne!(carrier, server);
+    for _ in 0..5 {
+        let shown = rig.service.shown(&pane).expect("shown");
+        assert_eq!(
+            (shown.account.as_str(), &shown.terminal),
+            ("u@rasp:22", &server)
+        );
+        assert!(!shown.is_local());
+        thread::sleep(Duration::from_millis(20));
+    }
+    // Both are the pane's in the ledger, each under its own account.
+    assert_eq!(ledger.pane_of(local::ACCOUNT, &carrier), Some(pane.clone()));
+    assert_eq!(ledger.pane_of("u@rasp:22", &server), Some(pane.clone()));
+    // Neither list of a server's terminals has a terminal of this Mac's.
+    rig.service.refresh_background();
+    assert!(rig.service.background(local::ACCOUNT).is_empty());
+    assert!(
+        rig.service
+            .background_all()
+            .iter()
+            .all(|found| !local::is_account(&found.account))
+    );
+    assert!(rig.service.elsewhere_all().is_empty());
+    // A pane that only runs in a terminal of this Mac shows none: it is not a server pane.
+    let plain = PaneUuid::parse("5a7e9c40-1b2d-4e3f-8a6b-0c9d1e2f3a4b").expect("a uuid");
+    let _plain = Pane::of(open_local(&rig, &plain).expect("a terminal"));
+    thread::sleep(Duration::from_millis(100));
+    assert_eq!(rig.service.shown(&plain), None);
+}
+
+/// The session's stream being let go of ends neither of the pane's terminals: what becomes of
+/// them is the quit's or the user's close, said before.
+#[test]
+fn letting_go_of_the_stream_of_a_pane_that_shows_a_server_ends_neither_terminal() {
+    let (rig, pane, mac, _holder, carrier, server, ledger) =
+        a_pane_with_two_terminals("two-handles-hangup", END_GRACE);
+    let Pane { ops, master, .. } = mac;
+    ops.hangup(0, master.as_fd());
+    drop(master);
+    // Waited for the answer of the loop, so a request that was going to reach a terminal has
+    // done so.
+    rig.service.refresh_background();
+    thread::sleep(Duration::from_millis(300));
+    assert_eq!(rig.world.mac().terminated(&carrier), None);
+    assert_eq!(rig.world.bridge().terminated(&server), None);
+    assert!(ledger.keeps("u@rasp:22", &server), "the server's row stays");
+    assert!(
+        ledger.keeps(local::ACCOUNT, &carrier),
+        "and so does the carrier's, for the pane that comes back"
+    );
+    assert_eq!(
+        rig.service.shown(&pane).map(|shown| shown.terminal),
+        Some(server)
+    );
+}
+
+/// Leaving the server's terminal running (the close question's answer) lets go of it and ends the
+/// carrier: the pipe to the terminal ran in it, and the pane that would show it is gone.
+#[test]
+fn leaving_a_pane_running_lets_go_of_the_servers_terminal_and_ends_the_carrier() {
+    let (rig, pane, mac, holder, carrier, server, ledger) =
+        a_pane_with_two_terminals("two-handles-leave", END_GRACE);
+    rig.service.leave(&pane);
+    until("the server's row goes", || {
+        !ledger.keeps("u@rasp:22", &server)
+    });
+    until("the carrier hung up", || {
+        rig.world.mac().terminated(&carrier) == Some(false)
+    });
+    assert_eq!(
+        rig.world.bridge().terminated(&server),
+        None,
+        "what was left running is still running"
+    );
+    assert!(rig.world.bridge().has(&server));
+    // The holder goes with the pane, and the session lets go of its stream after.
+    let Holder { handle, typed, .. } = holder;
+    drop(typed);
+    if let Some(handle) = handle {
+        let _ = handle.join();
+    }
+    let Pane { ops, master, .. } = mac;
+    ops.hangup(0, master.as_fd());
+}
+
+/// A quit that ends the terminals ends both of the pane's; one that keeps them says nothing to
+/// either.
+#[test]
+fn a_quit_that_ends_the_terminals_ends_both_of_a_panes() {
+    let (rig, pane, _mac, _holder, carrier, server, _ledger) =
+        a_pane_with_two_terminals("two-handles-quit-ends", END_GRACE);
+    rig.service
+        .end_all(std::slice::from_ref(&pane), Duration::from_secs(10));
+    assert_eq!(rig.world.mac().terminated(&carrier), Some(false));
+    assert_eq!(rig.world.bridge().terminated(&server), Some(false));
 }

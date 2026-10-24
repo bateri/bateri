@@ -244,7 +244,6 @@ mod tests {
         fn blocks_changed(&self) {}
         fn unseen_changed(&self) {}
         fn program_status_changed(&self) {}
-        fn bell(&self) {}
         fn notification(&self) {}
     }
 
@@ -282,7 +281,6 @@ mod tests {
                 pane_uuid: None,
                 hostname: None,
                 replay: None,
-                journal: None,
                 views: None,
             },
             Arc::new(QuietWake),

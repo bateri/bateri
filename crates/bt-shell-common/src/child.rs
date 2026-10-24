@@ -737,8 +737,6 @@ impl bt_core::Wake for SilentWake {
     fn unseen_changed(&self) {}
     fn program_status_changed(&self) {}
 
-    fn bell(&self) {}
-
     fn notification(&self) {}
 }
 
@@ -1064,6 +1062,7 @@ pub(crate) mod tests {
     }
 
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn the_version_is_what_the_shell_answers_in_time() {
         let root = TempRoot::new("bash-version");
         let limit = std::time::Duration::from_secs(5);
@@ -1101,6 +1100,7 @@ pub(crate) mod tests {
     /// The memory, not the time limit: the stand-ins here are asked with a limit far above
     /// [`BASH_QUERY_LIMIT`], which a busy test run can stretch a shell's answer past.
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn a_version_is_asked_once_per_path_failures_included() {
         let limit = std::time::Duration::from_secs(30);
         let root = TempRoot::new("bash-version-cache");
@@ -1145,6 +1145,7 @@ pub(crate) mod tests {
     }
 
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn the_login_path_is_asked_of_an_interactive_login_shell() {
         let root = TempRoot::new("login-path");
         let limit = std::time::Duration::from_secs(10);
@@ -1170,6 +1171,7 @@ pub(crate) mod tests {
     }
 
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn the_login_path_question_ends_where_its_answer_does() {
         let root = TempRoot::new("login-path-ends");
         // A startup file that leaves an agent behind holding the pipe: the answer is taken
@@ -1272,6 +1274,7 @@ pub(crate) mod tests {
             ".zshrc",
             ".zlogin",
             "bateri.zsh",
+            "dock.zsh",
             "zdotdir.zsh",
         ] {
             assert!(dir.join(file).is_file(), "{file} missing from the wrapper");
@@ -1297,6 +1300,7 @@ pub(crate) mod tests {
             ".zshrc",
             ".zlogin",
             "bateri.zsh",
+            "dock.zsh",
             "zdotdir.zsh",
         ] {
             std::fs::copy(source.join(file), wrapper.join(file))
@@ -1346,6 +1350,7 @@ pub(crate) mod tests {
     }
 
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn the_terminal_takes_the_prompt_and_the_block_survives_it() {
         // **The guard of the set's most silent defect**: a zero-width `PS1`
         // writes no cell, so had the anchor's close stayed at the end of `PS1`, the cell
@@ -1397,7 +1402,6 @@ pub(crate) mod tests {
                 pane_uuid: None,
                 hostname: None,
                 replay: None,
-                journal: None,
                 views: None,
             },
             Arc::new(SilentWake),
@@ -1484,6 +1488,7 @@ pub(crate) mod tests {
     /// suppression's unit guards print the grid by hand, so they cannot see zsh's own
     /// arithmetic.
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn a_clustered_emoji_at_the_wrap_edge_stays_suppressed() {
         for cols in [9, 10] {
             let root = TempRoot::new("cluster-wrap");
@@ -1524,7 +1529,6 @@ pub(crate) mod tests {
                     pane_uuid: None,
                     hostname: None,
                     replay: None,
-                    journal: None,
                     views: None,
                 },
                 Arc::new(SilentWake),
@@ -1621,7 +1625,6 @@ pub(crate) mod tests {
                 pane_uuid: None,
                 hostname: None,
                 replay: None,
-                journal: None,
                 views: None,
             },
             Arc::new(SilentWake),
@@ -1757,7 +1760,6 @@ pub(crate) mod tests {
                 pane_uuid: None,
                 hostname: None,
                 replay: None,
-                journal: None,
                 views: None,
             },
             Arc::new(SilentWake),
@@ -1847,6 +1849,7 @@ pub(crate) mod tests {
     /// inherited remote folder (`BATERI_SSH_CWD`) up without passing it on — and a user's own
     /// `ssh` function is left alone.
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn the_wrappers_ssh_function_runs_the_hold_or_the_plain_ssh() {
         let root = TempRoot::new("ssh-function");
         let home = root.0.join("home");
@@ -1917,7 +1920,6 @@ pub(crate) mod tests {
                     pane_uuid: None,
                     hostname: None,
                     replay: None,
-                    journal: None,
                     views: None,
                 },
                 Arc::new(SilentWake),
@@ -1973,6 +1975,7 @@ pub(crate) mod tests {
     /// none of them. The user said "the duration does not show when it finishes" and no gate
     /// turned red — this is its only witness.
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn a_real_zsh_command_shows_its_duration() {
         let root = TempRoot::new("duration-terminal");
         let home = root.0.join("home");
@@ -2024,7 +2027,6 @@ pub(crate) mod tests {
                 pane_uuid: None,
                 hostname: None,
                 replay: None,
-                journal: None,
                 views: None,
             },
             Arc::new(SilentWake),
@@ -2210,7 +2212,6 @@ pub(crate) mod tests {
             pane_uuid: None,
             hostname: None,
             replay: None,
-            journal: None,
             views: None,
         }
     }
@@ -2231,6 +2232,7 @@ pub(crate) mod tests {
     }
 
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn the_fish_wrapper_loads_the_users_files_and_reports_marks() {
         // The real test of the fish wrapper: a real fish, a real PTY and a real user
         // configuration. In one round:
@@ -2333,6 +2335,7 @@ pub(crate) mod tests {
     }
 
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn fish_gets_the_data_dirs_it_would_have_had() {
         // `XDG_DATA_DIRS` unset is not "just ours": fish computes its `vendor_conf.d`,
         // `functions` and `completions` paths from the variable at startup, and ours alone would
@@ -2384,6 +2387,7 @@ pub(crate) mod tests {
     }
 
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn the_fish_prompt_keeps_its_status_and_follows_a_redefinition() {
         // The wrapper runs the user's prompt, it does not replace it, and it runs it FIRST:
         // `$status` and `$pipestatus` are what fish handed the prompt. Any command before the
@@ -2449,7 +2453,7 @@ pub(crate) mod tests {
     /// The line the dock shows, as the frame reads it from the grid and publishes it. The frame
     /// is what publishes, so every look is a frame; `blocks` is the caller's so the scratch the
     /// frame fills lives as long as the test does.
-    fn read_dock(session: &Session, blocks: &std::cell::RefCell<Blocks>) -> DockState {
+    pub(crate) fn read_dock(session: &Session, blocks: &std::cell::RefCell<Blocks>) -> DockState {
         screen(session, &mut blocks.borrow_mut());
         let mut state = DockState::default();
         session.dock_state(&mut state);
@@ -2475,6 +2479,7 @@ pub(crate) mod tests {
     }
 
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn the_fish_dock_shows_the_line_fish_draws() {
         // The real test of the fish dock: a real fish draws its prompt, colors and suggestion
         // and the terminal reads the line back from the grid. In one round:
@@ -2589,7 +2594,7 @@ pub(crate) mod tests {
 
     /// One frame and one drawing of the dock, as the window does: the drawing is what leaves
     /// the dock's last drawn window behind, and a click in the dock is resolved against it.
-    fn draw_dock(session: &Session, blocks: &std::cell::RefCell<Blocks>) {
+    pub(crate) fn draw_dock(session: &Session, blocks: &std::cell::RefCell<Blocks>) {
         let cursor = session.frame(
             |_| (),
             |_| (),
@@ -2623,7 +2628,7 @@ pub(crate) mod tests {
 
     /// A click in the dock the way the window ends one: press on the character's left half,
     /// release without a drag.
-    fn click_dock(session: &Session, blocks: &std::cell::RefCell<Blocks>, index: u16) {
+    pub(crate) fn click_dock(session: &Session, blocks: &std::cell::RefCell<Blocks>, index: u16) {
         draw_dock(session, blocks);
         session.dock_select(
             bt_core::SelectKind::Simple,
@@ -2637,6 +2642,7 @@ pub(crate) mod tests {
     }
 
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn a_click_in_the_fish_dock_moves_fishs_caret() {
         // The dock cannot edit fish's line: fish owns it. What it can do is click fish where
         // the character was drawn (fish 4.1's `click_events`, announced on its own `A`), and
@@ -2727,6 +2733,7 @@ pub(crate) mod tests {
     }
 
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn a_job_notice_stays_on_the_grid_under_a_fish_dock() {
         // fish prints a background job's end under the open link of the prompt that is on
         // screen, then draws the prompt again from its cache — the same anchor URI, a fresh
@@ -2776,6 +2783,7 @@ pub(crate) mod tests {
     }
 
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn the_fish_dock_takes_back_a_prompt_defined_later() {
         // A prompt the user (or a theme) defines after the wrapper is the terminal's again at
         // the next prompt: the event defines it at every prompt.
@@ -2804,6 +2812,7 @@ pub(crate) mod tests {
     }
 
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn the_fish_blocks_setting_keeps_the_prompt_and_opens_no_dock() {
         // `integration = "blocks"` (`BATERI_DOCK=off`): the user's prompt and the line stay in
         // the grid, and nothing is read back from it.
@@ -2856,6 +2865,7 @@ pub(crate) mod tests {
     }
 
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn the_fish_wrappers_ssh_function_runs_the_hold_or_the_plain_ssh() {
         // `ssh` is the user's until the first prompt: a function of their own wins, and
         // otherwise ours runs `bateri ssh-hold -- <the arguments>` (for that command
@@ -2952,6 +2962,7 @@ pub(crate) mod tests {
     }
 
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn the_fish_wrapper_forks_git_only_for_a_dock() {
         // The branch is the dock's context line and nothing else reads it: without a dock
         // (`BATERI_DOCK=off`) it is a `git` fork per prompt for no consumer. The stand-in `git`
@@ -3016,6 +3027,7 @@ pub(crate) mod tests {
     }
 
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn the_fish_wrapper_reports_the_environment_after_the_branch() {
         // What `activate.fish` and conda leave in the variables, and the `node` on fish's
         // `PATH`, reach the terminal at the dock's prompt; `set -e` (what `deactivate`
@@ -3053,6 +3065,7 @@ pub(crate) mod tests {
     }
 
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn the_bash_wrapper_reports_the_environment_after_the_branch() {
         // The fish test's claim for bash: `node` is found by walking `PATH`, no fork.
         let Some(bash) = bash() else { return };
@@ -3205,6 +3218,7 @@ pub(crate) mod tests {
     }
 
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn the_bash_wrapper_loads_the_login_files_and_reports_marks() {
         // The real test of the bash wrapper: a real bash, a real PTY and a real user
         // configuration. In one round:
@@ -3335,6 +3349,7 @@ pub(crate) mod tests {
     }
 
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn the_bash_prompt_is_wrapped_once_and_again_after_a_rewrite() {
         // The user's `PS1` is wrapped (anchor in front, end mark behind) and what is wrapped
         // is remembered: a prompt that comes back unchanged is wrapped again from the user's
@@ -3390,6 +3405,7 @@ pub(crate) mod tests {
     }
 
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn a_users_prompt_command_keeps_running_in_every_form() {
         // Ours go around the user's, in whatever form it is: a string, one that ends in a
         // comment (the joiner is a newline, not `;`), an array (bash 5.1 and newer keep its
@@ -3447,6 +3463,7 @@ pub(crate) mod tests {
     }
 
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn a_bash_prompt_waiting_for_a_command_closes_no_block_without_one() {
         // An empty line and a line cancelled with Ctrl-C read no command: `PS0` never runs, so
         // no `D` is printed for the block they leave — zsh's rule — and the last exit code is
@@ -3490,6 +3507,7 @@ pub(crate) mod tests {
     }
 
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn the_bash_wrappers_ssh_function_runs_the_hold_or_the_plain_ssh() {
         // `ssh` is the user's until the wrapper is read: a function or an alias of their own
         // wins, and otherwise ours runs `bateri ssh-hold -- <the arguments>` (for that command
@@ -3609,6 +3627,7 @@ pub(crate) mod tests {
     }
 
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn the_bash_dock_shows_the_line_readline_draws() {
         // The real test of the bash dock: a real bash draws the prompt the script gave it and
         // the terminal reads the line back from the grid. In one round:
@@ -3719,6 +3738,7 @@ pub(crate) mod tests {
     }
 
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn the_bash_dock_is_edited_by_clicks_and_selections() {
         // The widget end to end: the terminal's edit command goes to a real readline, which
         // moves its caret or deletes a range, and the dock reads the result back from the grid.
@@ -3821,6 +3841,7 @@ pub(crate) mod tests {
     }
 
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn the_bash_widget_only_follows_clicks_in_vi_command_mode() {
         // A deletion the terminal sends is followed by the key the user pressed, and in vi's
         // command mode that key is a command: it would run on a line that had changed under
@@ -3872,6 +3893,7 @@ pub(crate) mod tests {
     }
 
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn the_bash_marks_do_not_depend_on_promptvars() {
         // `PS0`'s flag is a parameter expansion, and a user may turn `promptvars` off: the text
         // must not be printed before every command, and the block still closes.
@@ -3900,6 +3922,7 @@ pub(crate) mod tests {
     }
 
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn the_bash_blocks_setting_keeps_the_prompt_and_opens_no_dock() {
         // `BATERI_DOCK=off`: the user's prompt is drawn with the marks around it, the line stays
         // on the grid and the widget is never bound (no `w`, nothing to answer a click).
@@ -3960,6 +3983,7 @@ pub(crate) mod tests {
     }
 
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn a_zsh_command_takes_its_input_modes_with_it() {
         let root = TempRoot::new("zsh-modes");
         let home = root.0.join("home");
@@ -3988,6 +4012,7 @@ pub(crate) mod tests {
     }
 
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn a_bash_command_takes_its_input_modes_with_it() {
         let Some(bash) = bash() else { return };
         let root = TempRoot::new("bash-modes");
@@ -3999,6 +4024,7 @@ pub(crate) mod tests {
     }
 
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn a_fish_command_takes_its_input_modes_with_it() {
         let Some(fish) = fish() else { return };
         let root = TempRoot::new("fish-modes");
@@ -4081,6 +4107,7 @@ pub(crate) mod tests {
     }
 
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn a_zsh_command_gives_back_the_screen_it_left_on() {
         let root = TempRoot::new("zsh-screen");
         let session = zsh_without_a_dock(&root);
@@ -4097,6 +4124,7 @@ pub(crate) mod tests {
     }
 
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn a_bash_command_gives_back_the_screen_it_left_on() {
         let Some(bash) = bash() else { return };
         let root = TempRoot::new("bash-screen");
@@ -4108,6 +4136,7 @@ pub(crate) mod tests {
     }
 
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn a_stopped_bash_command_keeps_its_screen() {
         let Some(bash) = bash() else { return };
         let root = TempRoot::new("bash-stopped");
@@ -4119,6 +4148,7 @@ pub(crate) mod tests {
     }
 
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn a_fish_command_gives_back_the_screen_it_left_on() {
         let Some(fish) = fish() else { return };
         let root = TempRoot::new("fish-screen");
@@ -4129,6 +4159,7 @@ pub(crate) mod tests {
     }
 
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn a_stopped_fish_command_keeps_its_screen() {
         let Some(fish) = fish() else { return };
         let root = TempRoot::new("fish-stopped");
@@ -4182,6 +4213,7 @@ pub(crate) mod tests {
     }
 
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn a_zsh_command_takes_its_title_with_it() {
         let root = TempRoot::new("zsh-title");
         let home = root.0.join("home");
@@ -4192,6 +4224,7 @@ pub(crate) mod tests {
     }
 
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn a_zsh_prompt_that_names_the_window_keeps_the_last_word() {
         // oh-my-zsh's shape: a precmd hook of the user's names the window after the directory.
         // The command moves to another directory and names the window itself; at the prompt
@@ -4227,6 +4260,7 @@ pub(crate) mod tests {
     }
 
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn a_bash_command_takes_its_title_with_it() {
         let Some(bash) = bash() else { return };
         let root = TempRoot::new("bash-title");
@@ -4238,6 +4272,7 @@ pub(crate) mod tests {
     }
 
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn a_fish_command_takes_its_title_with_it() {
         let Some(fish) = fish() else { return };
         let root = TempRoot::new("fish-title");

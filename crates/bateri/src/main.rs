@@ -41,17 +41,6 @@ fn main() -> ExitCode {
     if let Some(code) = bt_shell_macos::focus() {
         return ExitCode::from(u8::try_from(code).unwrap_or(1));
     }
-    // The update's holder: `bateri hold --fd N --dir D`, started by the
-    // old bateri while it exits — before the window-server check, since it
-    // has no GUI, and before the unknown-subcommand rule.
-    if let Some(code) = bt_shell_macos::hold() {
-        return ExitCode::from(u8::try_from(code).unwrap_or(1));
-    }
-    // A bound holder's child after a crash: `bateri compact --fd N`
-    // rebuilds one pane's screen — no GUI, any session, the same reasons.
-    if let Some(code) = bt_shell_macos::compact() {
-        return ExitCode::from(u8::try_from(code).unwrap_or(1));
-    }
     // An unknown subcommand must not open a window: a typo, or a
     // subcommand of a newer bateri asked of an older one, would otherwise
     // start the whole GUI. Arguments starting with `-` pass —
@@ -110,14 +99,9 @@ fn main() -> ExitCode {
     // need not: the **presence** of these two flags carries the meaning, not
     // the value — `BT_SCROLL_TEST=0` also selects the load.
     let scroll_test = std::env::var_os("BT_SCROLL_TEST").is_some();
-    // `BT_JOURNAL` records every pane's journal in this process — the cost a
-    // crash-proof screen puts on the reader thread, for `/measure`; a
-    // journal nobody compacts or reads back has no use outside a timed run.
-    let journal = std::env::var_os("BT_JOURNAL").is_some();
     for (name, asked) in [
         ("BT_SCROLL_TEST", scroll_test),
         ("BT_FRAME_STATS", stats_since.is_some()),
-        ("BT_JOURNAL", journal),
     ] {
         if asked && !matches!(run_seconds, Some(n) if n > 0) {
             eprintln!("bateri: {name} needs a BT_RUN_SECONDS greater than zero");
@@ -134,7 +118,6 @@ fn main() -> ExitCode {
             bt_shell_macos::Workload::Smoke
         },
         stats_since,
-        journal,
     });
     match bt_shell_macos::run(bt_shell_macos::Options { run }) {
         Ok(()) => ExitCode::SUCCESS,

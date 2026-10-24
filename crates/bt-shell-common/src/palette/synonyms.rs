@@ -65,7 +65,6 @@ const WORDS: &[(&str, &str)] = &[
     ("scrollPageDown", "page"),
     ("openSettings", "preferences config options"),
     ("checkForUpdates", "upgrade version new"),
-    ("relaunchWithHandover", "restart keep programs"),
     ("quitAndEndPrograms", "exit kill all"),
     ("tabsAtTop", "tab position bar horizontal"),
     ("tabsAtSide", "tab position sidebar vertical column left"),

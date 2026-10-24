@@ -12,12 +12,6 @@
 //! terminal options (`set_terminal_options`) and clearing the screen
 //! (`clear_to_start`, `clear_scrollback`: returning to the bottom, scrolling,
 //! scrollback, selection and the `2J` generation in the same lock).
-//! With a journal ([`SessionOptions::journal`]) every site that changes
-//! `Term`'s content records a side record in the same lock round —
-//! `resize`, the two clears, `set_terminal_options` and `frame`'s
-//! cursor-style reset on leaving the alternate screen; the others move only
-//! what the snapshot does not read (the selection, the view) and say so in
-//! their doc. A new site that changes the content records one too.
 //! The lock **order** is the same everywhere — `term` first, `size` second;
 //! when adding a new site this order is followed, because if the two locks
 //! are taken in reverse order a deadlock arises. The graphics store
@@ -48,7 +42,6 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, Read as _};
-use std::mem::ManuallyDrop;
 use std::ops::{DerefMut, RangeInclusive};
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::path::PathBuf;
@@ -59,7 +52,7 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use alacritty_terminal::event::{Event, EventListener, OnResize, VoidListener, WindowSize};
+use alacritty_terminal::event::{Event, EventListener, OnResize, WindowSize};
 use alacritty_terminal::grid::{Dimensions, Grid, Scroll};
 use alacritty_terminal::index::{Boundary, Column, Direction, Line, Point, Side};
 use alacritty_terminal::selection::{Selection, SelectionRange, SelectionType};
@@ -81,6 +74,7 @@ use alacritty_terminal::vte::ansi::{self, ClearMode, CursorShape, CursorStyle, H
 // `polling`'s never appears outside `TappedPty`, that one is aliased.
 use polling::{Event as PollingEvent, PollMode, Poller};
 
+use crate::Mods;
 use crate::block_index::{self, BlockPass, Observation};
 use crate::cluster::{ClusterId, Clusters};
 use crate::color::{self, LinearRgba, Theme};
@@ -92,14 +86,10 @@ use crate::grid_input;
 use crate::handler::{ClusterHandler, KeptModes, resize_report};
 use crate::history::{self, CommandMemory, CommandRecord, RecordState, Remembered};
 use crate::identity::{LC_TERMINAL, PaneUuid, TERM_PROGRAM, TERM_PROGRAM_VERSION};
-// The journal's side record comes in under an alias: `Side` is alacritty's
-// selection side in this module.
-use crate::Mods;
 use crate::input::{
     self, Arrow, ButtonRoute, FunctionKey, MouseButton, MouseEncoding, MouseModifiers, TextKey,
     WHEEL_DOWN, WHEEL_UP, WheelRoute,
 };
-use crate::journal::{Base, Journal, Side as JournalSide};
 use crate::link;
 use crate::pencere::{self, Desk, ViewOptions};
 use crate::pointer::{PointerShape, PointerShapes};
@@ -113,7 +103,7 @@ use crate::search::{
 };
 use crate::settings::{CaretShape, CursorBlink, HostMark, HostRule, MarkSubject};
 use crate::shell::{
-    BlockKey, COUNTER_FLOOR, CaretHome, Carried, Counter, Cursors, DockContext, DockPrediction,
+    BlockKey, COUNTER_FLOOR, CaretHome, Counter, Cursors, DockContext, DockPrediction,
     DockSelection, DockState, DockStatus, HistoryCut, Outcome, Precision, RemoteStats,
     RemoteTarget, ScanEvent, Scanner, ShellLog, ShellState, Stripe, Transfer, TtyModes,
 };
@@ -1298,8 +1288,9 @@ pub struct Blocks {
     /// ([`grid_input::read`]); published with it.
     line_cells: Vec<grid_input::GridPos>,
     /// The block [`Self::line`] was read for: publishing it asks whether that
-    /// is still the open one.
-    line_block: u32,
+    /// is still the open one. The key names the shell too, the remote one's
+    /// block when our remote shell has the dock.
+    line_block: Option<BlockKey>,
     /// Whether [`Self::line`] was read in this frame.
     line_read: bool,
 }
@@ -1390,6 +1381,104 @@ impl SelectionRuns {
     /// ([`Theme::selection_unfocused_linear`]).
     pub fn color(&self, focused: bool) -> LinearRgba {
         if focused { self.color } else { self.unfocused }
+    }
+}
+
+/// What the child of a session is started with, apart from the environment it inherits: the
+/// command, the directory, the environment added to it and the size it starts at. The same
+/// answer for the child this process starts ([`Session::spawn`]) and for one a kablo terminal
+/// starts on its behalf ([`SessionOptions::child_launch`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChildLaunch {
+    /// The command, the program first; empty is the user's login shell.
+    pub argv: Vec<String>,
+    /// The environment added to the inherited one, sorted by name.
+    pub env: Vec<(String, String)>,
+    /// The starting directory.
+    pub cwd: Option<PathBuf>,
+    /// The size the child starts at.
+    pub size: PtySize,
+}
+
+impl SessionOptions {
+    /// The environment added to the child's inherited one: [`SessionOptions::env`] with what this
+    /// crate writes over it (its doc has the precedence).
+    fn child_env(&self) -> HashMap<String, String> {
+        // `tty::setup_env()` is NOT CALLED: it changes our own process's
+        // environment with `set_var` and writes `TERM=alacritty` if alacritty is
+        // installed on the machine. We give the environment to the child directly.
+        //
+        // The order is the precedence order (`SessionOptions::env`): the two
+        // constants enter the additional environment's map **afterwards** — the
+        // ones that override the same key are them.
+        let mut env = self.env.clone();
+        env.insert("TERM".to_owned(), "xterm-256color".to_owned());
+        env.insert("COLORTERM".to_owned(), "truecolor".to_owned());
+        // The identity family is in the same layer. A side gain of its being
+        // non-overridable: the `TERM_PROGRAM=Apple_Terminal` inherited from
+        // another terminal was making Apple's session script write into the
+        // wrapper's `ZDOTDIR` via `/etc/zshrc` (measured).
+        env.insert("TERM_PROGRAM".to_owned(), TERM_PROGRAM.to_owned());
+        env.insert(
+            "TERM_PROGRAM_VERSION".to_owned(),
+            TERM_PROGRAM_VERSION.to_owned(),
+        );
+        // The `LC_` family is the same identity across ssh: ssh's stock
+        // `SendEnv LC_*` carries it, a wrapped session's bootstrap exports it
+        // too. An inherited `LC_TERMINAL=iTerm2` is overridden like
+        // `TERM_PROGRAM=Apple_Terminal`.
+        env.insert("LC_TERMINAL".to_owned(), LC_TERMINAL.to_owned());
+        env.insert(
+            "LC_TERMINAL_VERSION".to_owned(),
+            TERM_PROGRAM_VERSION.to_owned(),
+        );
+        // `PWD` is the directory as we named it (seen in the real
+        // window): `chdir` resolves nothing, but the shell sets its `PWD` from
+        // `getcwd()` unless the inherited one names the same directory — and
+        // the inherited one is ours (`/` from LaunchServices). Without it a
+        // restored or inherited `/tmp` came back as `/private/tmp` in the
+        // title and the dock. Only an absolute path: a shell trusts `PWD` only
+        // when it is absolute and points at `.`, so the wrong direction is
+        // safe — a stale value is ignored, not believed. `login -qflp` keeps
+        // it (`-p`).
+        if let Some(dir) = self
+            .working_directory
+            .as_deref()
+            .filter(|dir| dir.is_absolute())
+        {
+            env.insert("PWD".to_owned(), dir.display().to_string());
+        }
+        if let Some(id) = &self.pane_uuid {
+            for (name, value) in crate::identity::pane_env(id) {
+                env.insert(name.to_owned(), value);
+            }
+        }
+        env
+    }
+
+    /// What [`Session::spawn`] starts its child with, for a child that is started some other
+    /// way (a kablo terminal). Reads the options, takes nothing out of them.
+    pub fn child_launch(&self) -> ChildLaunch {
+        let grid = GridSize::for_spawn(self.cols, self.rows);
+        let size = window_size(grid, self.cell_px);
+        let mut env: Vec<(String, String)> = self.child_env().into_iter().collect();
+        env.sort();
+        ChildLaunch {
+            argv: self
+                .command
+                .iter()
+                .flat_map(|(program, args)| std::iter::once(program).chain(args))
+                .cloned()
+                .collect(),
+            env,
+            cwd: self.working_directory.clone(),
+            size: PtySize {
+                cols: size.num_cols,
+                rows: size.num_lines,
+                cell_width: size.cell_width,
+                cell_height: size.cell_height,
+            },
+        }
     }
 }
 
@@ -1527,13 +1616,6 @@ pub struct SessionOptions {
     /// history above the new shell's first prompt; the fill band shows them
     /// as such. `None` or empty → the session opens as it always did.
     pub replay: Option<Vec<u8>>,
-    /// Where the session records what its `Term` goes through, so another
-    /// process can rebuild the screen after bateri dies (`crate::journal`):
-    /// the PTY's bytes and the side records, and the read gate that stops
-    /// reading while it has no room. The session seeds its base from what it
-    /// replays (`replay`, or an adopted pane's VT). One session per journal.
-    /// `None` → nothing is recorded and every path is as it was without it.
-    pub journal: Option<Arc<Journal>>,
     /// What lets a program in this pane show a view in it ([`crate::pencere`]):
     /// the application's name and version, where bundle files are kept. The
     /// session then hears the view protocol in the stream and answers it; the
@@ -2061,8 +2143,8 @@ struct AdapterInner {
     /// the `false → true` transition produces [`Wake::search_changed`], its
     /// consumer is [`Session::search_step`] (by restarting the next pass from scratch).
     search_pending: AtomicBool,
-    /// Whether [`Wake::child_exit`] went: an adopted child is not ours
-    /// and its exit carries no status, so the loop sends no `ChildExit` —
+    /// Whether [`Wake::child_exit`] went: a streamed terminal's program is not our
+    /// child and its exit carries no status, so the loop sends no `ChildExit` —
     /// the `Exit` that follows every child exit sends the news then.
     child_exited: AtomicBool,
     /// The pane's desk for the view protocol ([`crate::pencere`]): the crate's
@@ -2080,12 +2162,16 @@ struct AdapterInner {
     /// writes them.
     flow: Flow,
     /// Whether the application's questions go unanswered ([`Adapter::reply`])
-    /// and its clipboard writes are dropped: set while an adopted pane's
-    /// carried prefix is parsed under [`AdoptMode::Bound`] — that output was
-    /// written while no bateri read, maybe hours ago: an answer now would
-    /// land in the shell as typed input, a copy would replace what the user
-    /// copied since. `TappedPty` clears it at the master's first read.
+    /// and its clipboard writes are dropped: set while the past of a stream
+    /// ([`Silence`]) is parsed — that output was written while no bateri read,
+    /// maybe hours ago: an answer now would land in the shell as typed input,
+    /// a copy would replace what the user copied since. The read of the first
+    /// live bytes clears it.
     muted: AtomicBool,
+    /// Whether the bytes being read are the past of a stream ([`Silence`]): muted, as above, and
+    /// the edges of what they show (a command that ended, a prompt) are not raised either.
+    /// Set by the read that took them, cleared by the first read of live bytes.
+    replaying: AtomicBool,
     /// The kitty graphics commands: the images of each screen and the record
     /// a halted parser waits for ([`crate::graphics`]).
     ///
@@ -2097,8 +2183,8 @@ struct AdapterInner {
     /// reports in pixels, and the size in the stream. The stream's wrapper
     /// writes them ([`crate::handler::ClusterHandler`]; they are not in
     /// `Term`, alacritty does not know the modes), the mouse methods and the
-    /// shell's throttle read 1016, the resize reads 2048, and the handover
-    /// carries them as `?1016h`/`?2048h` in the VT ([`snapshot::encode_live`]).
+    /// shell's throttle read 1016, the resize reads 2048, and the past of a
+    /// stream sets them again by being parsed.
     modes: KeptModes,
     /// The pointer shapes the application asked for (OSC 22, [`crate::pointer`]):
     /// the stream's wrapper keeps them, the shell reads the shown one
@@ -2137,6 +2223,7 @@ impl Adapter {
             desk,
             flow,
             muted: AtomicBool::new(false),
+            replaying: AtomicBool::new(false),
             graphics: Hub::new(),
             modes: KeptModes::default(),
             pointer: PointerShapes::default(),
@@ -2195,9 +2282,9 @@ impl graphics::Sink for Adapter {
         &self.0.pointer
     }
 
-    /// Not while the carried prefix of an adopted pane is parsed
-    /// ([`AdapterInner::muted`]): a frame written then was written while no
-    /// bateri read, and an answer now would land in the shell as typed input.
+    /// Not while the past of a stream is parsed ([`AdapterInner::muted`]): a
+    /// frame written then was written while no bateri read, and an answer now
+    /// would land in the shell as typed input.
     fn desk(&self) -> Option<&Desk> {
         self.0
             .desk
@@ -2312,7 +2399,7 @@ impl EventListener for Adapter {
             }
             // `Term::exit`'s event: the reader loop sends it right after a
             // child exit and nowhere else. A spawned child's `ChildExit` came
-            // first; an adopted one's exit has no status, so this is
+            // first; a streamed program's exit has no status, so this is
             // its news, without a code.
             Event::Exit => {
                 if !self.0.child_exited.swap(true, Ordering::AcqRel) {
@@ -2373,8 +2460,8 @@ impl EventListener for Adapter {
             // the write finishes, the threshold is unmeasured. A ceiling would
             // need a chosen number; a program flooding output can keep the
             // window busy anyway.
-            // A copy a program made while no bateri read (a bound holder's
-            // prefix, [`AdapterInner::muted`]) is hours old: it must not
+            // A copy a program made while no bateri read (the past of a stream,
+            // [`AdapterInner::muted`]) is hours old: it must not
             // replace what the user copied since.
             Event::ClipboardStore(_, text) => {
                 if !text.is_empty() && !self.0.muted.load(Ordering::Acquire) {
@@ -2394,8 +2481,9 @@ impl EventListener for Adapter {
             // the next `set_options` or OSC 0/2.
             Event::Title(title) => self.store_title(Some(title)),
             Event::ResetTitle => self.store_title(None),
-            // There is no bell in this set; it is silently dropped like an
-            // unknown sequence (no panic in the PTY path). The
+            // The bell (`BEL` outside a sequence) is dropped — bateri neither
+            // rings nor flashes — like an unknown sequence (no panic in the PTY
+            // path). The
             // second half of the "ignored and LOGGED" rule is debt: `tracing` is
             // not yet a dependency, there is no logger in the workspace —
             // alacritty's own `log::error!` lines fall to the floor for the same
@@ -2412,14 +2500,10 @@ impl EventListener for Adapter {
             // does not move (at the end of the history) and on every change of
             // the mouse reporting mode (DECSET 1000/1002/1003), i.e. it would
             // produce empty frames.
-            // The bell (`BEL` outside a sequence): bateri's tabs ignore it, a host
-            // embedding the pane hears it. Not one a holder's prefix rang hours ago.
-            Event::Bell => {
-                if !self.0.muted.load(Ordering::Acquire) {
-                    self.0.wake.bell();
-                }
-            }
-            Event::ClipboardLoad(..) | Event::MouseCursorDirty | Event::CursorBlinkingChange => {}
+            Event::Bell
+            | Event::ClipboardLoad(..)
+            | Event::MouseCursorDirty
+            | Event::CursorBlinkingChange => {}
         }
     }
 }
@@ -2431,7 +2515,7 @@ impl EventListener for Adapter {
 /// not touch the bytes** — [`io::Read::read`] returns exactly what it read from
 /// the inner `Pty`, only showing the slice to the scanner before returning.
 /// That includes a kitty graphics command (`ESC _ G … ESC \`): it is not taken
-/// out of the stream. The journal, the tail, the scanner and the parser see
+/// out of the stream. The scanner and the parser see
 /// it as the program wrote it, and the parser hands it to
 /// [`crate::handler::ClusterHandler`] in its place in the stream
 /// ([`crate::graphics`] says what that buys). The second thing that enters
@@ -2462,9 +2546,8 @@ impl EventListener for Adapter {
 /// debt is closed.
 ///
 /// **Two kinds of PTY** ([`PtyKind`]): the one this process
-/// opened and the one it adopted from another bateri across an update. The
-/// byte path is the same for both; only the fds' registration, the child's
-/// exit and the shutdown differ.
+/// opened and a stream another process feeds. The byte path is the same for
+/// both; only the fds' registration, the child's exit and the shutdown differ.
 ///
 /// Not `pub`: by the layer rule no alacritty type leaks outward.
 struct TappedPty {
@@ -2498,67 +2581,76 @@ struct TappedPty {
     /// reads) and the channel is lockless. The loop's own write queue writes
     /// the bytes to the PTY.
     adapter: Adapter,
-    /// The sequence the last read stopped in: what the handover puts
-    /// before the bytes a fresh parser reads next ([`snapshot::Tail`]).
-    /// Followed on the same slice the scanner sees, no second read.
+    /// The sequence the last read stopped in ([`snapshot::Tail`]): the next
+    /// read may carry the rest of a graphics command. Followed on the same
+    /// slice the scanner sees, no second read.
     tail: snapshot::Tail,
-    /// Bytes served **before** the fd: an adopted PTY's carried tail
-    /// and the holder's buffer — what the old side read or the holder
-    /// drained but no parser applied. They take the ordinary read path,
-    /// scanner and tail included; `prefix_at` is how far it went.
-    prefix: Vec<u8>,
-    prefix_at: usize,
-    /// The prefix's replies are dropped ([`AdapterInner::muted`]) until the
-    /// first read from the master — the reader parses every read of the
-    /// prefix before the next one (`EventLoop::read_first`), so the bytes of
-    /// that read are the first live ones.
-    muting: bool,
-    /// [`SessionOptions::journal`]: every read's bytes are recorded before
-    /// the parser sees them — a byte read but not yet parsed is not lost
-    /// with the process. After the terminal lock is taken `pty_read` reads
-    /// on under it, so this copy sometimes runs under the lock too (at most
-    /// `MAX_LOCKED_READ` bytes): a copy, no wait, no system call.
-    journal: Option<Arc<Journal>>,
 }
 
 impl TappedPty {
-    /// The bytes since the parser last stood in its ground state — read once
-    /// the reader has stopped, so no byte comes after them.
-    fn tail(&self) -> &[u8] {
-        self.tail.bytes()
-    }
-
-    /// The stream the parser reads: the next bytes of the PTY — the carried
-    /// prefix first, then the fd.
+    /// The stream the parser reads: the next bytes of the PTY.
     fn read_stream(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        if self.prefix_at < self.prefix.len() {
-            let rest = &self.prefix[self.prefix_at..];
-            let n = rest.len().min(buf.len());
-            buf[..n].copy_from_slice(&rest[..n]);
-            self.prefix_at += n;
-            if self.prefix_at == self.prefix.len() {
-                self.prefix = Vec::new();
-                self.prefix_at = 0;
-            }
-            return Ok(n);
-        }
-        if self.muting {
-            self.muting = false;
-            self.adapter.0.muted.store(false, Ordering::Release);
-        }
         match &mut self.pty {
             PtyKind::Spawned(pty) => pty.reader().read(buf),
-            PtyKind::Adopted(pty) => pty.file().read(buf),
+            PtyKind::Stream(pty) if pty.silence.is_none() => pty.file().read(buf),
+            PtyKind::Stream(pty) => Self::read_past(pty, &self.adapter.0, buf),
         }
+    }
+
+    /// A read of a stream that starts with a past ([`Silence`]): the session is muted for the
+    /// bytes of the past and not for the rest, and a read that holds the end of one and the
+    /// start of the other is cut there, the rest served by the next read.
+    ///
+    /// The flag is set **by the read**, before the bytes are scanned and parsed, and the reader
+    /// parses every read of this stretch alone ([`crate::reader::EventLoop::silence`]), so the
+    /// bytes of one read are parsed under the state that read set.
+    fn read_past(pty: &mut StreamPty, adapter: &AdapterInner, buf: &mut [u8]) -> io::Result<usize> {
+        let Some(silence) = pty.silence.clone() else {
+            return pty.file().read(buf);
+        };
+        // A read that took nothing changes nothing: the session stays muted through a quiet
+        // stream, and the first live bytes are what unmute it, in the read that takes them —
+        // there is nothing a muted session could have kept from a stream that says nothing.
+        let got = if pty.carry.is_empty() {
+            match pty.master.read(buf) {
+                Ok(0) => return Ok(0),
+                Ok(got) => got,
+                Err(error) => return Err(error),
+            }
+        } else {
+            let got = pty.carry.len().min(buf.len());
+            buf[..got].copy_from_slice(&pty.carry[..got]);
+            pty.carry.drain(..got);
+            got
+        };
+        // `until` is read **after** the bytes: the feeder says where the past ends before it
+        // writes the bytes it covers, so a byte that was read is covered by what is read here.
+        let past = silence
+            .reach()
+            .saturating_sub(pty.taken)
+            .min(got as u64)
+            .try_into()
+            .unwrap_or(got);
+        let given = if past > 0 && past < got {
+            // The end of the past is inside this read: the rest is live and comes next.
+            let mut rest = buf[past..got].to_vec();
+            rest.append(&mut pty.carry);
+            pty.carry = rest;
+            past
+        } else {
+            got
+        };
+        adapter.muted.store(past > 0, Ordering::Release);
+        adapter.replaying.store(past > 0, Ordering::Release);
+        pty.taken += given as u64;
+        silence.took(pty.taken, past > 0, !pty.carry.is_empty());
+        Ok(given)
     }
 }
 
 impl io::Read for TappedPty {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let read = self.read_stream(buf)?;
-        if let Some(journal) = &self.journal {
-            journal.record_bytes(&buf[..read]);
-        }
         // A read that continues a sequence (the `_` of an `ESC` the last read
         // ended in) may carry the rest of a command as much as one with `ESC _`
         // in it.
@@ -2601,8 +2693,8 @@ impl io::Read for TappedPty {
         let adapter = &self.adapter;
         self.scanner.feed(&buf[..read], |event| {
             // The support question is answered here, lock-free: fixed bytes
-            // through the same channel the parser's replies take (muted for an
-            // adopted prefix, like them).
+            // through the same channel the parser's replies take (muted for the
+            // past of a stream, like them).
             if matches!(event, ScanEvent::StatusQuery) {
                 adapter.reply(program_status::SUPPORT_REPLY.to_owned());
                 return;
@@ -2618,6 +2710,16 @@ impl io::Read for TappedPty {
                 }
                 return;
             }
+            // The past of a terminal shown again ([`Silence`]) builds the state — the blocks,
+            // the phase, the remote session — and raises no edge: a command that ended before
+            // the bateri was here is not news (a tab would show it as finished, a
+            // notification would come again). The owner reads the state once the past is read
+            // ([`Session::replaying`]). A notification is no state: kept, the past's would be
+            // taken with the next one the program asks for.
+            let past = adapter.0.replaying.load(Ordering::Acquire);
+            if past && matches!(event, ScanEvent::Notify(_)) {
+                return;
+            }
             let answers = key_gen.load(Ordering::Acquire);
             let outcome = lock(&self.shell).apply_scan_answering(event, answers);
             if outcome.title {
@@ -2628,12 +2730,14 @@ impl io::Read for TappedPty {
                     adapter.0.title_epoch.load(Ordering::Acquire),
                     Ordering::Release,
                 );
-                wake.command_started();
+                if !past {
+                    wake.command_started();
+                }
             }
-            if outcome.up {
+            if outcome.up && !past {
                 wake.remote_up();
             }
-            if outcome.prompt || outcome.ended {
+            if (outcome.prompt || outcome.ended) && !past {
                 wake.phase_edge();
             }
             // A command ended — the local one's `D` (an `ssh` is a local command
@@ -2646,7 +2750,7 @@ impl io::Read for TappedPty {
             if outcome.prompt && adapter.0.pointer.clear() {
                 wake.pointer_changed();
             }
-            if outcome.remote_edge {
+            if outcome.remote_edge && !past {
                 wake.remote_command_edge();
             }
             if outcome.mirrored {
@@ -2711,7 +2815,7 @@ impl tty::EventedReadWrite for TappedPty {
         poll_opts: PollMode,
     ) -> io::Result<()> {
         // The fd registration is the inner `Pty`'s: the readiness signal, the
-        // tokens and the child-event pipeline stay untouched. An adopted PTY
+        // tokens and the child-event pipeline stay untouched. A stream
         // registers the same two tokens: the master for I/O, the exit fd in
         // the child-event pipe's place.
         //
@@ -2723,7 +2827,7 @@ impl tty::EventedReadWrite for TappedPty {
         // source drops. There is no path by which `TappedPty` gives the `Pty` back.
         match &mut self.pty {
             PtyKind::Spawned(pty) => unsafe { pty.register(poll, interest, poll_opts) },
-            PtyKind::Adopted(pty) => unsafe { pty.register(poll, interest, poll_opts) },
+            PtyKind::Stream(pty) => unsafe { pty.register(poll, interest, poll_opts) },
         }
     }
 
@@ -2735,14 +2839,14 @@ impl tty::EventedReadWrite for TappedPty {
     ) -> io::Result<()> {
         match &mut self.pty {
             PtyKind::Spawned(pty) => pty.reregister(poll, interest, poll_opts),
-            PtyKind::Adopted(pty) => pty.reregister(poll, interest, poll_opts),
+            PtyKind::Stream(pty) => pty.reregister(poll, interest, poll_opts),
         }
     }
 
     fn deregister(&mut self, poll: &Arc<Poller>) -> io::Result<()> {
         match &mut self.pty {
             PtyKind::Spawned(pty) => pty.deregister(poll),
-            PtyKind::Adopted(pty) => pty.deregister(poll),
+            PtyKind::Stream(pty) => pty.deregister(poll),
         }
     }
 
@@ -2753,7 +2857,7 @@ impl tty::EventedReadWrite for TappedPty {
     fn writer(&mut self) -> &mut File {
         match &mut self.pty {
             PtyKind::Spawned(pty) => pty.writer(),
-            PtyKind::Adopted(pty) => pty.file(),
+            PtyKind::Stream(pty) => pty.file(),
         }
     }
 }
@@ -2762,9 +2866,8 @@ impl tty::EventedPty for TappedPty {
     fn next_child_event(&mut self) -> Option<tty::ChildEvent> {
         match &mut self.pty {
             PtyKind::Spawned(pty) => pty.next_child_event(),
-            // The exit fd's only readiness is the exit: no status, the
-            // child is not ours (`Adapter`'s `Exit` arm sends the news).
-            PtyKind::Adopted(_) => Some(tty::ChildEvent::Exited(None)),
+            // The owner of the stream wrote how the program ended before it signalled the end.
+            PtyKind::Stream(pty) => Some(tty::ChildEvent::Exited(pty.status.status())),
         }
     }
 }
@@ -2773,7 +2876,7 @@ impl OnResize for TappedPty {
     fn on_resize(&mut self, window_size: WindowSize) {
         match &mut self.pty {
             PtyKind::Spawned(pty) => pty.on_resize(window_size),
-            PtyKind::Adopted(pty) => pty.resize(window_size),
+            PtyKind::Stream(pty) => pty.resize(window_size),
         }
     }
 }
@@ -2782,29 +2885,170 @@ impl OnResize for TappedPty {
 enum PtyKind {
     /// Opened here; its `Drop` sends `SIGHUP` and **waits** for the child.
     Spawned(Pty),
-    /// Adopted from another bateri across an update ([`Session::adopt`]):
-    /// the child is not ours, so no `wait`.
-    Adopted(AdoptedPty),
+    /// A terminal that runs elsewhere (a kablo terminal on this Mac): the bytes of a stream the
+    /// owner feeds and drains, no PTY at all ([`Session::streamed`]).
+    Stream(StreamPty),
 }
 
-/// An adopted PTY: the master, the child's exit fd and the platform's two
-/// syscalls (`bt-core` has no `libc`; [`PtyOps`]).
-struct AdoptedPty {
-    /// `ManuallyDrop` only so `Drop` can close it **before** the hangup.
-    master: ManuallyDrop<File>,
-    /// Readable once the child exited (a `kqueue` with `NOTE_EXIT` on macOS,
-    /// a pidfd on Linux) — registered in the child-event pipe's place.
+/// A terminal that runs elsewhere, as the session is given it ([`Session::streamed`]): the
+/// two ends of what carries it, not a PTY.
+///
+/// `master` is one end of a socket pair, **non-blocking**: what the program writes arrives
+/// there, what the session writes goes to the program. The owner holds the other end; when the
+/// program has ended and everything it wrote is in the socket it writes how it ended into
+/// `status` and then closes the peer of `exit`, which is what tells the reader the program is
+/// gone — in that order, so the status is there when the end is.
+pub struct Stream {
+    /// The bytes, both ways.
+    pub master: OwnedFd,
+    /// Readable once the program has ended: the peer closes.
+    pub exit: OwnedFd,
+    /// How the program ended, written before `exit` is signalled.
+    pub status: Arc<StreamExit>,
+    /// The program's process id, as far as it is known (it is on this computer).
+    pub pid: u32,
+    /// What the session asks of the terminal: its size, its end.
+    pub ops: Arc<dyn PtyOps>,
+    /// The start of the stream, when it is a replay of what the program wrote before this
+    /// session was there to read it ([`Silence`]). `None`: a terminal that was just made, every
+    /// byte of which is live.
+    pub silence: Option<Arc<Silence>>,
+}
+
+/// How much of the start of a [`Stream`] is the past: output a program wrote while no session
+/// read it (a terminal shown again after the bateri that showed it was gone), which the new
+/// session is fed from the first byte so that its screen, its blocks and its modes are what
+/// they were, and which must **do** nothing again.
+///
+/// The bytes before [`Silence::extend`]'s position are parsed with the session muted
+/// ([`AdapterInner::muted`]): the questions in them are not answered — the program was told
+/// long ago, or has stopped waiting —, a copy to the clipboard or a notification is not repeated, the
+/// view protocol's frames are not answered, and a command that started or ended then raises no
+/// edge for the tab to show. The bytes after are the program's now, in every way.
+///
+/// The feeder (the owner of the stream's other end, which knows from the server how far the
+/// questions were answered) writes the position **before** the bytes it covers, and closes the
+/// part once no more bytes will be added to it; the reader counts what it took, so that it knows
+/// where the past ends in what it reads and a read that holds both is cut there.
+#[derive(Debug, Default)]
+pub struct Silence {
+    /// The stream's bytes before this position are the past.
+    until: AtomicU64,
+    /// No byte will be added to the past any more.
+    closed: AtomicBool,
+    /// How many bytes of the stream the session has taken.
+    read: AtomicU64,
+    /// The last read took bytes of the past.
+    now: AtomicBool,
+    /// A read was cut at the end of the past and its live rest waits for the next one.
+    carrying: AtomicBool,
+}
+
+impl Silence {
+    /// A past with nothing in it yet, open.
+    pub fn new() -> Arc<Silence> {
+        Arc::new(Silence::default())
+    }
+
+    /// The first `to` bytes of the stream are the past. Said before those bytes are written;
+    /// a position the past already reaches, or one said after it was closed, changes nothing.
+    pub fn extend(&self, to: u64) {
+        if !self.closed.load(Ordering::Acquire) {
+            self.until.fetch_max(to, Ordering::AcqRel);
+        }
+    }
+
+    /// The past is complete: no more bytes are added to it.
+    pub fn close(&self) {
+        self.closed.store(true, Ordering::Release);
+    }
+
+    /// Whether [`Silence::close`] was said.
+    pub fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::Acquire)
+    }
+
+    /// Whether the session has not yet read all of the past: the feeder has not said it is
+    /// complete, or the session took fewer bytes than it reaches. One that is done is the
+    /// program's live terminal.
+    pub fn pending(&self) -> bool {
+        // `closed` first: what it says was written after the position it follows.
+        !(self.closed.load(Ordering::Acquire)
+            && self.read.load(Ordering::Acquire) >= self.until.load(Ordering::Acquire))
+    }
+
+    /// How many bytes from the start of the stream are the past, as far as the feeder has said.
+    pub fn reach(&self) -> u64 {
+        self.until.load(Ordering::Acquire)
+    }
+
+    /// The session took bytes: up to `read` in all, of the past or not; `carrying`: the rest of
+    /// the read that took them is kept for the next.
+    fn took(&self, read: u64, past: bool, carrying: bool) {
+        self.read.store(read, Ordering::Release);
+        self.now.store(past, Ordering::Release);
+        self.carrying.store(carrying, Ordering::Release);
+    }
+
+    /// Whether bytes that were read are waiting to be read again, which no readiness of the
+    /// stream will say: the reader does not leave its round before it has them.
+    pub(crate) fn is_carrying(&self) -> bool {
+        self.carrying.load(Ordering::Acquire)
+    }
+
+    /// Whether the last read took bytes of the past: the reader parses that read alone
+    /// ([`crate::reader::EventLoop::silence`]).
+    pub(crate) fn in_past(&self) -> bool {
+        self.now.load(Ordering::Acquire)
+    }
+}
+
+/// How the program of a [`Stream`] ended.
+#[derive(Debug, Default)]
+pub struct StreamExit(Mutex<Option<i32>>);
+
+impl StreamExit {
+    /// The program called `exit` with `code`.
+    pub fn code(&self, code: i32) {
+        // A wait status: the exit status in the second byte, no signal in the first.
+        *lock(&self.0) = Some((code & 0xff) << 8);
+    }
+
+    /// A signal killed the program.
+    pub fn signal(&self, signal: i32) {
+        *lock(&self.0) = Some(signal & 0x7f);
+    }
+
+    /// How the program ended, once it is written.
+    pub fn status(&self) -> Option<std::process::ExitStatus> {
+        use std::os::unix::process::ExitStatusExt as _;
+        (*lock(&self.0)).map(std::process::ExitStatus::from_raw)
+    }
+}
+
+/// The [`Stream`] a session reads: the master, the child's exit fd and the platform's
+/// syscalls (`bt-core` has no `libc`; [`PtyOps`]), with the exit's status.
+struct StreamPty {
+    master: File,
     exit: OwnedFd,
+    status: Arc<StreamExit>,
     pid: u32,
     ops: Arc<dyn PtyOps>,
+    /// The past at the start of the stream ([`Stream::silence`]).
+    silence: Option<Arc<Silence>>,
+    /// How many bytes of the stream the reader has taken: the position of the next one.
+    taken: u64,
+    /// The live part of a read that held the end of the past too, served before anything else
+    /// is read.
+    carry: Vec<u8>,
 }
 
-impl AdoptedPty {
+impl StreamPty {
     fn file(&mut self) -> &mut File {
         &mut self.master
     }
 
-    /// The same calls `Pty::register` makes, on the same tokens.
+    /// The same two registrations as `Pty::register` makes, on the same tokens.
     ///
     /// # Safety
     ///
@@ -2860,13 +3104,12 @@ impl AdoptedPty {
     }
 }
 
-impl Drop for AdoptedPty {
-    /// The master closes first — the slave's hangup is the mechanism
-    /// (measured) — then the belt and braces: `SIGHUP` to the pid unless it already
-    /// exited. No `wait`: the child is not ours.
+impl Drop for StreamPty {
+    /// The owner is told the session lets go of the stream **before** it closes, so that it can
+    /// tell a pane that is gone from one whose session was dropped. What becomes of the terminal
+    /// is the owner's to decide and was said already: ending it is a request of its own (the
+    /// user's close, a quit that ends the programs); a stream that is let go of leaves it running.
     fn drop(&mut self) {
-        // SAFETY: dropped exactly once, here, and never touched after.
-        unsafe { ManuallyDrop::drop(&mut self.master) };
         self.ops.hangup(self.pid, self.exit.as_fd());
     }
 }
@@ -2881,87 +3124,40 @@ pub struct PtySize {
     pub cell_height: u16,
 }
 
-/// The syscalls an adopted PTY needs and `bt-core` cannot make — it has
-/// no `libc` (the [`Session::remote_login`] precedent: the platform shell
-/// passes the call in). The body is `bt_shell_common::jobs::SystemPty`.
+/// What a streamed terminal's session asks of the terminal's owner, and the reads of the
+/// platform `bt-core` cannot make — it has no `libc` (the [`Session::remote_login`]
+/// precedent: the platform shell passes the call in).
 pub trait PtyOps: Send + Sync {
-    /// `TIOCSWINSZ` on the master.
+    /// The terminal's size changed: the owner resizes it (a PTY's `TIOCSWINSZ`, a request to the
+    /// terminal's keeper). `master` is the session's end of the stream.
     fn resize(&self, master: BorrowedFd<'_>, size: PtySize);
-    /// `SIGHUP` to `pid` **unless** `exit` (the child's exit fd) is already
-    /// readable — then the pid may be another process's.
+    /// The session lets go of the terminal (its pane closed or bateri is going): what becomes
+    /// of the terminal is the owner's to decide, and was said already — ending it is a request
+    /// of its own. `pid` is the program's and `exit` the end of the stream that says it is gone.
     fn hangup(&self, pid: u32, exit: BorrowedFd<'_>);
-    /// `SIGWINCH` to the PTY's foreground process group, the group the
-    /// kernel names for the master (`TIOCGPGRP`). The size is not touched: a
-    /// program that handles the signal redraws whatever the size did.
-    fn winch(&self, master: BorrowedFd<'_>);
+    /// The terminal the program `pid` is on, read from the outside, for a session that has no
+    /// master to read it from ([`Session::streamed`]): its modes and its foreground group.
+    /// `None` is "cannot be read" (the program is gone, the platform cannot) and the default —
+    /// a spawned PTY reads its master.
+    fn tty(&self, _pid: u32) -> Option<TtyReading> {
+        None
+    }
+    /// The number of the terminal device the program `pid` is on, in the form the platform shell
+    /// says it for every process ([`Session::terminal_device`]). `None` as [`PtyOps::tty`].
+    fn terminal(&self, _pid: u32) -> Option<u64> {
+        None
+    }
 }
 
-/// What [`Session::freeze`] hands over: everything another
-/// process needs to carry the pane on without the child noticing.
-#[derive(Debug)]
-pub struct Frozen {
-    /// A copy of the PTY master; the original stays open in the frozen
-    /// session, which is leaked (`freeze`'s doc).
-    pub master: OwnedFd,
-    /// The PTY's child (`login(1)` in a normal session).
-    pub pid: u32,
-    /// The grid's size: the VT is laid out for it, so the adopting `Term`
-    /// is born with it ([`SessionOptions::cols`]/`rows`) and resized after.
-    pub cols: u16,
-    pub rows: u16,
-    /// [`Session::live_snapshot`].
-    pub vt: Vec<u8>,
-    /// [`Session::state_blob`].
-    pub blob: Vec<u8>,
-    /// The bytes after the parser's last ground state (a half sequence,
-    /// a half UTF-8 character): they go **before** whatever the master
-    /// gives next ([`Adoption::prefix`]).
-    pub tail: Vec<u8>,
-    /// Input the loop never wrote to the PTY: it goes out first on the
-    /// adopting side ([`Adoption::input`]).
-    pub input: Vec<u8>,
-}
-
-/// What [`Session::adopt`] takes: a [`Frozen`]'s parts plus the two things
-/// only the adopting process can make.
-pub struct Adoption {
-    /// The PTY master. **Non-blocking** — the frozen side's copy shares the
-    /// open file description, so `O_NONBLOCK` comes with it.
-    pub master: OwnedFd,
-    /// Readable once the child exited (`bt_shell_common::jobs::exit_fd`).
-    pub exit: OwnedFd,
-    pub pid: u32,
-    pub vt: Vec<u8>,
-    pub blob: Vec<u8>,
-    /// [`Frozen::tail`] followed by whatever the master gave meanwhile (the
-    /// holder's buffer): the ordinary read path, scanner included.
-    pub prefix: Vec<u8>,
-    pub input: Vec<u8>,
-    pub ops: Arc<dyn PtyOps>,
-    pub mode: AdoptMode,
-}
-
-/// Which holder an adopted pane comes from — what its carried parts can be
-/// trusted for ([`Session::adopt`]).
+/// What the terminal a streamed session's program is on says: the two readings the pane's
+/// questions of a PTY ask (the modes, [`Session::tty_modes`]; who is in front, the view
+/// protocol's check that the shell is) when the PTY is not ours to hold.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AdoptMode {
-    /// An update's holder: the frozen side handed over a moment ago, so the
-    /// prefix's questions are answered (the program waits for them) and a
-    /// state blob that does not decode refuses the adoption.
-    Update,
-    /// A bound holder, after a crash or a quit: the prefix may be hours of
-    /// output nobody read, so its questions go **unanswered** — a reply now
-    /// would be typed input to whatever runs — and its clipboard writes are
-    /// dropped (an old copy must not replace a newer one); an empty or undecodable blob
-    /// is a fresh state rather than a refusal (refusing after the holder
-    /// was acknowledged would end the program); and the carried mirror is
-    /// marked stale, because the blob may be older than the screen — the
-    /// freshness gate falls back on the content, the safe direction.
-    ///
-    /// **Known limit:** a prefix that ends inside a synchronized update
-    /// (DEC 2026) leaves its buffered bytes to the master's first bytes or to
-    /// the update's timeout, and a question among them is answered.
-    Bound,
+pub struct TtyReading {
+    /// `ICANON` and `ECHO`.
+    pub modes: TtyModes,
+    /// The terminal's foreground process group; `None` when it has none or it cannot be read.
+    pub foreground: Option<u32>,
 }
 
 /// The user input held while the first input is going: `Some` →
@@ -3006,25 +3202,6 @@ type Reader = JoinHandle<(EventLoop<TappedPty, Adapter>, State)>;
 /// or never cut.
 pub const SHUTDOWN_GRACE: Duration = Duration::from_millis(500);
 
-/// How long [`Session::freeze`] waits for a graphics command that is half
-/// received to finish before it cuts the stream anyway. A bound, not a
-/// measurement: a command in flight finishes in the time its bytes take to
-/// arrive, and this is what a client that went quiet in the middle of one
-/// costs the update. A cut inside a command is still not text: the command
-/// so far is in the handover's tail ([`snapshot::Tail`] follows an application
-/// program command like any other sequence) and the adopting side finishes it.
-/// The one cut that is not carried is between the chunks of a transmission:
-/// the next chunk, which names no action, reaches the adopting side as a
-/// command of its own and is answered with an error.
-const COMMAND_GRACE: Duration = Duration::from_millis(500);
-
-/// How long [`Session::freeze`] waits for the reader to stop. The reader is
-/// in a decode when the stop message reaches it, and the decode of an image
-/// that names a file can wait as long as the file's mount does; a handover
-/// does not wait with it. Past this the freeze fails, giving back what it
-/// took, and the caller closes the pane the old way.
-const FREEZE_GRACE: Duration = Duration::from_secs(2);
-
 /// The result of [`Session::shutdown`] — the source of the `teardown=` token in
 /// the smoke/measurement report.
 ///
@@ -3059,9 +3236,9 @@ pub enum Teardown {
     /// The second and later calls. Nothing was waited for; the **first** call
     /// knows the shutdown's real result.
     AlreadyDone,
-    /// An **adopted** session's clean shutdown: the reader
-    /// finished, the master closed and the child got its hangup — nobody
-    /// waits for it, it is not our child.
+    /// A **streamed** session's clean shutdown: the reader finished, the
+    /// master closed and the terminal's owner was told (it decides what becomes
+    /// of the terminal) — nobody waits for it, it is not our child.
     HungUp,
 }
 
@@ -3074,8 +3251,8 @@ pub enum Teardown {
 #[must_use = "a dropped handle does not stop the shutdown but swallows its result"]
 pub struct ShutdownHandle {
     finished: Option<mpsc::Receiver<bool>>,
-    /// Whether the session was adopted: its clean end is [`Teardown::HungUp`].
-    adopted: bool,
+    /// Whether the session was streamed: its clean end is [`Teardown::HungUp`].
+    streamed: bool,
 }
 
 impl ShutdownHandle {
@@ -3092,7 +3269,7 @@ impl ShutdownHandle {
         };
         let remaining = deadline.saturating_duration_since(Instant::now());
         match finished.recv_timeout(remaining) {
-            Ok(true) if self.adopted => Teardown::HungUp,
+            Ok(true) if self.streamed => Teardown::HungUp,
             Ok(true) => Teardown::Clean,
             // The shutdown **finished** but the reader ended with a panic: the
             // child was collected, yet this is a rule violation and must show in the report.
@@ -3302,7 +3479,7 @@ impl DockEditLine {
 }
 
 /// The head of the single sequence that goes from the terminal to the shell
-/// (`CSI 8133 ~`); the format is in the script's wire header (`assets/shell/zsh/bateri.zsh`).
+/// (`CSI 8133 ~`); the format is in the script's wire header (`assets/shell/zsh/dock.zsh`).
 const DOCK_EDIT_PREFIX: &str = "\x1b[8133~";
 
 /// The edit command: delete `BUFFER`'s `[start, end)` range, put the caret at
@@ -3562,7 +3739,12 @@ pub(crate) fn block_text<R: Rows>(rows: &R, start: i32, key: BlockKey) -> String
 /// It finds **the same row** as `suppress_from` in [`Session::frame`]'s loop
 /// but cannot replace it: that value is born cell by cell, during drawing, and
 /// the gate must decide before the loop.
-fn anchor_row_at_or_above<T>(term: &Term<T>, row: u16, offset: i32, block: u32) -> Option<u16> {
+fn anchor_row_at_or_above<T>(
+    term: &Term<T>,
+    row: u16,
+    offset: i32,
+    block: BlockKey,
+) -> Option<u16> {
     (0..=row).rev().find(|&probe| {
         let line = Point::new(Line(i32::from(probe) - offset), Column(0))
             .grid_clamp(term, Boundary::Grid)
@@ -3570,7 +3752,7 @@ fn anchor_row_at_or_above<T>(term: &Term<T>, row: u16, offset: i32, block: u32) 
         (0..term.columns()).any(|col| {
             term.grid()[line][Column(col)]
                 .hyperlink()
-                .and_then(|link| block_id(link.uri()))
+                .and_then(|link| block_key(link.uri()))
                 == Some(block)
         })
     })
@@ -4697,9 +4879,9 @@ fn block_id(uri: &str) -> Option<u32> {
 /// ([`crate::shell::RemoteShell`]), or a restored history's
 /// `bateri://sblock/<k>.<role>` ([`snapshot::saved_key`]). The drawing
 /// loops, [`block_row_continues`] and ⌘K's kept row ([`row_block`]) read
-/// all three; suppression's anchor
-/// ([`anchor_row_at_or_above`]) asks [`block_id`] — the local input line is
-/// the only one suppressed.
+/// all three; suppression's anchor ([`anchor_row_at_or_above`]) asks for the
+/// key of the input line being written — the local shell's, or our remote
+/// shell's while it has the dock ([`crate::shell::SuppressedInput::key`]).
 fn block_key(uri: &str) -> Option<BlockKey> {
     if let Some(id) = uri.strip_prefix("bateri://block/") {
         return id.parse().ok().map(BlockKey::Local);
@@ -5236,39 +5418,34 @@ pub struct Session {
     /// the login signal then comes from the output alone — and after
     /// [`Session::begin_shutdown`], which closes it **before** the `Pty`'s
     /// own `Drop`: the slave's hangup comes when it always did. Read-only use.
-    /// [`Session::freeze`] takes it: it is the handover's master.
     ///
     /// Shared with the view desk's observer, which reads the tty's modes from
     /// it ([`pencere::pane_observer`]); it finds `None` once this slot is
     /// taken, so the copy is not kept open by it.
     master: Arc<Mutex<Option<File>>>,
-    /// Whether the PTY was adopted ([`Session::adopt`]): its shutdown is a
-    /// hangup without `wait` ([`Teardown::HungUp`]).
-    adopted: bool,
-    /// An adopted PTY's syscalls ([`Adoption::ops`]): the nudge sizes the PTY
-    /// through them on the master's copy, not through the reader
-    /// ([`Session::nudge_size`]). `None` for a spawned PTY.
+    /// Whether the terminal is a stream ([`Session::streamed`]) and not a PTY: it has no
+    /// master to read modes from, and its shutdown is a hangup without `wait`
+    /// ([`Teardown::HungUp`]).
+    streamed: bool,
+    /// The past a stream starts with, when it is a terminal shown again ([`Stream::silence`]).
+    past: OnceLock<Arc<Silence>>,
+    /// A stream's syscalls ([`Stream::ops`]): the nudge sizes the terminal
+    /// through them, not through the reader ([`Session::nudge_size`]). `None`
+    /// for a spawned PTY.
     ops: Option<Arc<dyn PtyOps>>,
-    /// [`SessionOptions::journal`]: the side records go here, each in the
-    /// `Term` lock round that made its change ([`Session::record`]).
-    journal: Option<Arc<Journal>>,
 }
 
 /// The PTY side of [`Session::assemble`]'s input: what [`Session::spawn`]
-/// opened or [`Session::adopt`] was given.
+/// opened or [`Session::streamed`] was given.
 struct Birth {
     pty: PtyKind,
     child_pid: u32,
-    /// The copy behind [`Session::with_pty_fd`] and [`Session::freeze`].
+    /// The copy behind [`Session::with_pty_fd`].
     master: Option<File>,
     drain_on_exit: bool,
     /// Replayed into the fresh `Term` past the scanner: the previous
-    /// session's scrollback or the frozen VT.
+    /// session's scrollback.
     replay: Option<Vec<u8>>,
-    /// Served by the first reads ([`TappedPty::prefix`]).
-    prefix: Vec<u8>,
-    /// The prefix's replies are dropped ([`AdoptMode::Bound`]).
-    mute_prefix: bool,
     /// [`Session::ops`].
     ops: Option<Arc<dyn PtyOps>>,
 }
@@ -5288,55 +5465,9 @@ impl Session {
         let grid = GridSize::for_spawn(options.cols, options.rows);
         let size = window_size(grid, options.cell_px);
 
-        // `tty::setup_env()` is NOT CALLED: it changes our own process's
-        // environment with `set_var` and writes `TERM=alacritty` if alacritty is
-        // installed on the machine. We give the environment to the child directly.
-        //
-        // The order is the precedence order (`SessionOptions::env`): the two
-        // constants enter the additional environment's map **afterwards** — the
-        // ones that override the same key are them.
-        let mut env = std::mem::take(&mut options.env);
-        env.insert("TERM".to_owned(), "xterm-256color".to_owned());
-        env.insert("COLORTERM".to_owned(), "truecolor".to_owned());
-        // The identity family is in the same layer. A side gain of its being
-        // non-overridable: the `TERM_PROGRAM=Apple_Terminal` inherited from
-        // another terminal was making Apple's session script write into the
-        // wrapper's `ZDOTDIR` via `/etc/zshrc` (measured).
-        env.insert("TERM_PROGRAM".to_owned(), TERM_PROGRAM.to_owned());
-        env.insert(
-            "TERM_PROGRAM_VERSION".to_owned(),
-            TERM_PROGRAM_VERSION.to_owned(),
-        );
-        // The `LC_` family is the same identity across ssh: ssh's stock
-        // `SendEnv LC_*` carries it, a wrapped session's bootstrap exports it
-        // too. An inherited `LC_TERMINAL=iTerm2` is overridden like
-        // `TERM_PROGRAM=Apple_Terminal`.
-        env.insert("LC_TERMINAL".to_owned(), LC_TERMINAL.to_owned());
-        env.insert(
-            "LC_TERMINAL_VERSION".to_owned(),
-            TERM_PROGRAM_VERSION.to_owned(),
-        );
-        // `PWD` is the directory as we named it (seen in the real
-        // window): `chdir` resolves nothing, but the shell sets its `PWD` from
-        // `getcwd()` unless the inherited one names the same directory — and
-        // the inherited one is ours (`/` from LaunchServices). Without it a
-        // restored or inherited `/tmp` came back as `/private/tmp` in the
-        // title and the dock. Only an absolute path: a shell trusts `PWD` only
-        // when it is absolute and points at `.`, so the wrong direction is
-        // safe — a stale value is ignored, not believed. `login -qflp` keeps
-        // it (`-p`).
-        if let Some(dir) = options
-            .working_directory
-            .as_deref()
-            .filter(|dir| dir.is_absolute())
-        {
-            env.insert("PWD".to_owned(), dir.display().to_string());
-        }
-        if let Some(id) = &options.pane_uuid {
-            for (name, value) in crate::identity::pane_env(id) {
-                env.insert(name.to_owned(), value);
-            }
-        }
+        // The environment the child gets is `SessionOptions::child_env`'s: the same answer for a
+        // child this process starts and for one a kablo terminal starts for it.
+        let env = options.child_env();
         let pty_options = tty::Options {
             shell: options
                 .command
@@ -5359,8 +5490,6 @@ impl Session {
                 master,
                 drain_on_exit: pty_options.drain_on_exit,
                 replay,
-                prefix: Vec::new(),
-                mute_prefix: false,
                 ops: None,
             },
         )?;
@@ -5375,86 +5504,75 @@ impl Session {
         Ok(session)
     }
 
-    /// Carries on a pane another bateri froze ([`Session::freeze`]) — the
-    /// handover's adopting half. `options` is the pane's as in
-    /// [`Session::spawn`], minus what only a birth reads (`command`,
-    /// `working_directory`, `env`, `initial_input`, `replay` are ignored);
-    /// `cols`/`rows` must be the frozen size ([`Frozen::cols`]) — the VT is
-    /// laid out for it — and the caller resizes after.
+    /// A session whose terminal runs elsewhere: the child is a kablo terminal's, started by the
+    /// owner of `stream` with what [`SessionOptions::child_launch`] says, and the session reads
+    /// and writes the stream where [`Session::spawn`] reads and writes a PTY.
     ///
-    /// The order: the VT is replayed into the fresh `Term` past the scanner
-    /// (the [`SessionOptions::replay`] path), the state blob is restored on
-    /// top of it, the unsent input is queued, and the reader's first read
-    /// serves the prefix before the master — through the scanner and the
-    /// loop's own parser, since it may end inside a sequence. What the mode
-    /// changes is [`AdoptMode`]'s doc.
-    ///
-    /// Under [`AdoptMode::Update`], `Err(InvalidData)` if the blob is corrupt
-    /// or of an unknown version, before anything is touched: the caller falls
-    /// back (the restore path) and dropping `adoption` closes this side's copy
-    /// of the master.
-    pub fn adopt(
+    /// Everything else is the spawned session's: the reader, the scanner, the first
+    /// input, the replay. What differs is what there is no PTY for — the session has no master
+    /// to read terminal modes from ([`Session::with_pty_fd`] is `None`), its shutdown is a
+    /// hangup of the terminal ([`Teardown::HungUp`]) and the owner's `ops` size it.
+    /// `options`' `command`, `working_directory` and `env` are not read: the child is already
+    /// running.
+    pub fn streamed(
         mut options: SessionOptions,
-        adoption: Adoption,
         wake: Arc<dyn Wake>,
+        stream: Stream,
     ) -> io::Result<Self> {
-        let carried = Carried::decode(&adoption.blob);
-        if carried.is_none() && adoption.mode == AdoptMode::Update {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "the handover's state blob does not decode",
-            ));
-        }
-        let Adoption {
+        let Stream {
             master,
             exit,
+            status,
             pid,
-            vt,
-            blob: _,
-            prefix,
-            input,
             ops,
-            mode,
-        } = adoption;
-        let master = File::from(master);
-        let copy = master.try_clone().ok();
-        let prefix_len = prefix.len();
-        let nudge_ops = Arc::clone(&ops);
-        options.initial_input = None;
-        let (session, mut event_loop, _) = Self::assemble(
+            silence,
+        } = stream;
+        // A terminal shown again carries its own past, which is the history the screen is made
+        // of: a text history of an earlier run would be written above it a second time. And its
+        // program is running already: the line a new pane types at its first prompt (a remote
+        // pane's `ssh host`, ready) would be typed into whatever is in front of the terminal now.
+        let replay = options.replay.take().filter(|_| silence.is_none());
+        if silence.is_some() {
+            options.initial_input = None;
+        }
+        let (session, mut event_loop, at_birth) = Self::assemble(
             options,
             wake,
             Birth {
-                pty: PtyKind::Adopted(AdoptedPty {
-                    master: ManuallyDrop::new(master),
+                pty: PtyKind::Stream(StreamPty {
+                    master: File::from(master),
                     exit,
+                    status,
                     pid,
-                    ops,
+                    ops: Arc::clone(&ops),
+                    silence: silence.clone(),
+                    taken: 0,
+                    carry: Vec::new(),
                 }),
                 child_pid: pid,
-                master: copy,
-                drain_on_exit: false,
-                replay: Some(vt),
-                mute_prefix: mode == AdoptMode::Bound && !prefix.is_empty(),
-                prefix,
-                ops: Some(nudge_ops),
+                master: None,
+                // The owner signals the end after the last byte is in the stream; the loop reads
+                // what is there on that signal.
+                drain_on_exit: true,
+                replay,
+                ops: Some(ops),
             },
         )?;
-        if let Some(mut carried) = carried {
-            if mode == AdoptMode::Bound {
-                carried.mark_mirror_stale();
-            }
-            session.restore_carried(carried);
+        if let Some(silence) = silence {
+            // Muted from the first byte: the first read says whether it is the past's.
+            session.adapter.0.muted.store(true, Ordering::Release);
+            session.adapter.0.replaying.store(true, Ordering::Release);
+            let _ = session.past.set(Arc::clone(&silence));
+            event_loop.silence(silence);
         }
-        if !input.is_empty() {
-            session.send(Msg::Input(input.into()));
-        }
-        event_loop.read_first(prefix_len);
         *lock(&session.reader) = Some(event_loop.spawn());
+        if let Some(line) = at_birth {
+            session.write_owned(line.into_bytes());
+        }
         Ok(session)
     }
 
-    /// The common body of [`Session::spawn`] and [`Session::adopt`]: the
+    /// The common body of [`Session::spawn`] and [`Session::streamed`]: the
     /// session around a PTY that is already open. The reader is **not**
     /// started — the caller does, after its own steps — and the first input
     /// written at birth comes back for the caller to send.
@@ -5471,14 +5589,11 @@ impl Session {
             master,
             drain_on_exit,
             replay,
-            prefix,
-            mute_prefix,
             ops,
         } = birth;
-        let adopted = matches!(pty, PtyKind::Adopted(_));
+        let streamed = matches!(pty, PtyKind::Stream(_));
         let home = options.home;
         let master = Arc::new(Mutex::new(master));
-        let journal = options.journal;
         // The slot is born **before** the `EventLoop`: one end goes to the
         // wrapper and the reader thread, the other stays in `Session`.
         // The scrollback's ceiling is from `scrollback`: since at least one row
@@ -5506,8 +5621,17 @@ impl Session {
                 views,
                 options.theme,
                 Arc::clone(&wake),
-                pencere::pane_observer(Arc::clone(&shell), Arc::clone(&master), child_pid, group),
+                pencere::pane_observer(
+                    Arc::clone(&shell),
+                    Arc::clone(&master),
+                    // A stream has no master: its tty is read by its program's pid.
+                    ops.clone().filter(|_| streamed),
+                    child_pid,
+                    group,
+                ),
                 flow.clone(),
+                // A stream has no master either: what its program left unread stays in the
+                // terminal kablo keeps (the same as a remote session's, where it is elsewhere).
                 pencere::pane_discard(Arc::clone(&shell), Arc::clone(&master)),
             )
         });
@@ -5546,12 +5670,7 @@ impl Session {
             held_input: Arc::clone(&held_input),
             adapter: adapter.clone(),
             tail: snapshot::Tail::default(),
-            prefix,
-            prefix_at: 0,
-            muting: mute_prefix,
-            journal: journal.clone(),
         };
-        adapter.0.muted.store(mute_prefix, Ordering::Release);
         // Asked when a command names a file: a pane in a remote session is
         // not on the machine the name belongs to.
         adapter.0.graphics.set_remote_gate(Box::new({
@@ -5569,32 +5688,16 @@ impl Session {
             let mut parser: ansi::Processor = ansi::Processor::new();
             let mut last_input = false;
             let mut term = term.lock();
-            // The handover's VT carries DECSET 1016 and 2048 as it carries the
-            // other modes; they land in the flags the reader keeps from here on.
             parser.advance(
                 &mut ClusterHandler::new(&mut term, options.cluster, &mut last_input)
                     .kept_modes(&adapter.0.modes),
                 bytes,
             );
         }
-        // The screen the replay left: a carried session can be on the
-        // alternate screen already (vim, or an agent's full-screen interface,
-        // across an update). Published at birth rather than left to the first
-        // content frame, because a tab in the background draws none and its
-        // ring reads this ([`Session::alt_screen`]).
+        // The screen the replay left, published at birth rather than left to
+        // the first content frame, because a tab in the background draws none
+        // and its ring reads this ([`Session::alt_screen`]).
         let alt_at_birth = term.lock().mode().contains(TermMode::ALT_SCREEN);
-        // The journal's base is what this `Term` starts from: the bytes just
-        // replayed, at the same size and options — moved, not copied.
-        if let Some(journal) = &journal {
-            journal.seed(Base::birth(
-                replay.unwrap_or_default(),
-                options.cols,
-                options.rows,
-                options.cell_px,
-                options.terminal,
-                options.cluster,
-            ));
-        }
 
         let mut event_loop = EventLoop::new(
             Arc::clone(&term),
@@ -5643,14 +5746,6 @@ impl Session {
                 }
             }
         });
-        // The compaction's room wakes the loop through its channel.
-        if let Some(journal) = &journal {
-            event_loop.journal(Arc::clone(journal));
-            let sender = sender.clone();
-            journal.set_room(Box::new(move || {
-                let _ = sender.send(Msg::Room);
-            }));
-        }
 
         let session = Self {
             term,
@@ -5703,9 +5798,9 @@ impl Session {
             home,
             child_pid,
             master,
-            adopted,
+            past: OnceLock::new(),
+            streamed,
             ops,
-            journal,
         };
         Ok((session, event_loop, at_birth))
     }
@@ -5804,10 +5899,6 @@ impl Session {
     /// **The same observation counts the rows that came below a window
     /// scrolled up** ([`Session::unseen_rows`]); a change of the number is
     /// told after the lock ([`Wake::unseen_changed`]).
-    ///
-    /// **The journal:** the cursor-style reset on leaving the alternate screen
-    /// is recorded in this lock round; the glide moves only the view, which
-    /// the snapshot does not read.
     // The arguments are the two sinks that go through the frame's single read
     // and the caller's buffers (the precedent of `Session::dock`); gathering
     // them in a struct would create a type only for this call.
@@ -5894,7 +5985,7 @@ impl Session {
             caret,
             needed_rows,
             end_left,
-            remote,
+            (remote, remote_dock),
             raw,
             transfer,
             program,
@@ -5918,7 +6009,10 @@ impl Session {
                 log.caret(now),
                 dock::needed_rows(&log.dock, budget.cols),
                 end_left,
-                log.context.remote.is_some(),
+                // The remote session with **no dock of its own**: its dock is the
+                // context row alone. A remote shell that has taken the dock has
+                // an input row like the local one ([`ShellLog::remote_dock_on`]).
+                (log.context.remote.is_some(), log.remote_dock_on()),
                 log.raw_active(),
                 log.context.transfer.is_some(),
                 log.context.program.is_some(),
@@ -6020,9 +6114,6 @@ impl Session {
             // cost is one prompt — zsh's vi-mode resends the style in
             // `zle-line-init`.
             term.set_cursor_style(None);
-            // In this lock round. The journal is asked to compact elsewhere —
-            // the frame path starts no thread.
-            self.record(JournalSide::CursorStyleReset);
         }
         let RenderableContent {
             display_iter,
@@ -6143,7 +6234,7 @@ impl Session {
             .filter(|input| input.grid && !alt_screen)
             .map(|input| {
                 grid_input::locate(&term, cursor_point.line.0, rows, |uri| {
-                    block_key(uri) == Some(BlockKey::Local(input.block))
+                    block_key(uri) == Some(input.key())
                 })
             });
         let grid_found = located.and_then(Result::ok);
@@ -6155,7 +6246,7 @@ impl Session {
             } = &mut *blocks;
             grid_input::read(&term, found, cursor_point, colors, &theme, line, line_cells);
             blocks.line_read = true;
-            blocks.line_block = suppressed_block.map_or(0, |input| input.block);
+            blocks.line_block = suppressed_block.map(|input| input.key());
         }
         let grid_hidden = grid_found
             .filter(|_| (0..rows).contains(&cursor_row))
@@ -6266,7 +6357,7 @@ impl Session {
             // asked — on a `for>` row the cursor is legitimately below the anchor.
             let blank_mirror = input.blank;
             let at_anchor = !blank_mirror
-                || anchor_row_at_or_above(&term, to, offset, input.block)
+                || anchor_row_at_or_above(&term, to, offset, input.key())
                     .is_none_or(|anchor| anchor == to);
             //
             // **The temporal question first**: if the mirror of the user's
@@ -6635,7 +6726,7 @@ impl Session {
                 // The suppression's upper end from the same read: the **first**
                 // anchor row of the block being written. `get_or_insert` does not
                 // write the second row — in a multi-line prompt the range must start from the top.
-                if suppressed_block.is_some_and(|input| BlockKey::Local(input.block) == id) {
+                if suppressed_block.is_some_and(|input| input.key() == id) {
                     suppress_from.get_or_insert(row);
                 }
             }
@@ -7104,7 +7195,7 @@ impl Session {
         let input_rows_of = |needed_rows: usize| -> u16 {
             if !self.dock {
                 1
-            } else if remote {
+            } else if remote && (alt_screen || !remote_dock) {
                 0
             } else if alt_screen {
                 1
@@ -7148,12 +7239,14 @@ impl Session {
             // zeroes the share a mirror left `Live` (while ZLE's `edit-command-line`
             // opens vim) must not push the grid up by the band.
             //
-            // **Zero in a remote session**: while ssh runs the shell has
-            // no input row, the dock drops to the context row alone and the grid is
-            // drawn down (`bt-gpu`'s band surplus). The rule does not change on the
-            // alternate screen: there the remote dock **stays** as the status bar
-            // (its share is one row, `bt-shell`'s `dock_rows_for`), the local one
-            // is lifted.
+            // **Zero in a remote session** whose shell has not taken the dock: while
+            // ssh runs the local shell has no input row, the dock drops to the
+            // context row alone and the grid is drawn down (`bt-gpu`'s band
+            // surplus). A remote shell of ours that has taken it
+            // ([`crate::shell::ShellLog::remote_dock_on`]) has the local one's row.
+            // The rule does not change on the alternate screen: there the remote
+            // dock **stays** as the status bar (its share is one row, `bt-shell`'s
+            // `dock_rows_for`) either way, the local one is lifted.
             //
             // **Zero for a program reading the keyboard itself** too, after the
             // alternate screen: the input row is the program's own now.
@@ -7227,7 +7320,10 @@ impl Session {
         if blocks.line_read {
             let answers = self.key_gen.load(Ordering::Acquire);
             let mut log = lock(&self.shell);
-            if log.publish_grid(&blocks.line, &blocks.line_cells, blocks.line_block, answers) {
+            let published = blocks.line_block.is_some_and(|block| {
+                log.publish_grid(&blocks.line, &blocks.line_cells, block, answers)
+            });
+            if published {
                 cursor.input_rows = input_rows_of(dock::needed_rows(&log.dock, budget.cols));
             }
         } else if let Some(input) = suppressed_block.filter(|input| input.grid) {
@@ -7240,7 +7336,7 @@ impl Session {
             let mut log = lock(&self.shell);
             if !grid_taller {
                 log.dock_cells.clear();
-            } else if log.release_grid(input.block) {
+            } else if log.release_grid(input.key()) {
                 cursor.input_rows = input_rows_of(dock::needed_rows(&log.dock, budget.cols));
             }
         }
@@ -7985,8 +8081,6 @@ impl Session {
     /// selection: dragging ([`Session::update_selection`]) and Shift+click
     /// ([`Session::extend_selection`]) preserve it.
     ///
-    /// **Journal-neutral:** moves only the selection, which the snapshot
-    /// does not read — no side record ([`crate::journal`]).
     pub fn set_selection(&self, kind: SelectKind, start: SelectionPoint, end: SelectionPoint) {
         let term = self.term.lock();
         let (start_point, start_side) = anchor(&term, start);
@@ -8011,8 +8105,6 @@ impl Session {
     /// selection is stored in every case ([`Session::set_selection`]'s rationale)
     /// and its anchor stays in grid absolute — Terminal.app's behaviour.
     ///
-    /// **Journal-neutral:** moves only the selection, which the snapshot
-    /// does not read — no side record ([`crate::journal`]).
     pub fn extend_selection(&self, end: SelectionPoint) {
         let term = self.term.lock();
         let (point, side) = anchor(&term, end);
@@ -8039,8 +8131,6 @@ impl Session {
     /// where the user typed. If the row is empty the grid: there is nothing to
     /// select in the dock and an empty ⌘A selecting the history is Terminal.app's norm.
     ///
-    /// **Journal-neutral:** moves only the selection, which the snapshot
-    /// does not read — no side record ([`crate::journal`]).
     pub fn select_all(&self) {
         if self.caret_in_dock.load(Ordering::Relaxed) && self.dock_select_all() {
             return;
@@ -8105,8 +8195,6 @@ impl Session {
     /// The frame gate is the same as [`Session::set_selection`]'s: if the drawn
     /// range did not change no frame is requested.
     ///
-    /// **Journal-neutral:** moves only the selection, which the snapshot
-    /// does not read — no side record ([`crate::journal`]).
     pub fn update_selection(&self, end: SelectionPoint) {
         let mut term = self.term.lock();
         let (point, side) = anchor(&term, end);
@@ -8127,8 +8215,6 @@ impl Session {
     /// without a drag leaves, or if output pushed it into the history: the flag
     /// is not raised, no frame is requested.
     ///
-    /// **Journal-neutral:** moves only the selection, which the snapshot
-    /// does not read — no side record ([`crate::journal`]).
     pub fn clear_selection(&self) {
         // The lock drops before the body: `request_frame` must not run while the
         // `Term` lock (the two-mutex `FairMutex`) is held — the same discipline as
@@ -8211,8 +8297,6 @@ impl Session {
     /// momentum showering at the end of the history and a notch returning down at
     /// the bottom must not produce an empty frame.
     ///
-    /// **Journal-neutral:** moves only the view, which the snapshot
-    /// does not read — no side record ([`crate::journal`]).
     pub fn scroll_wheel(
         &self,
         rows: f64,
@@ -8457,7 +8541,6 @@ impl Session {
     /// it goes straight to the PTY like a mouse report, keeping the selection
     /// and the scrolled window where they are.
     ///
-    /// **Journal-neutral:** writes only to the PTY, `Term` is read for the mode.
     pub fn set_focus(&self, focused: bool) {
         let before = lock(&self.focus).replace(focused);
         if before.is_none_or(|before| before == focused) {
@@ -8486,8 +8569,6 @@ impl Session {
     /// ([`Session::reset_scroll`]): the page is a whole-row step and an in-flight
     /// glide must not shift its destination.
     ///
-    /// **Journal-neutral:** moves only the view, which the snapshot
-    /// does not read — no side record ([`crate::journal`]).
     pub fn scroll_page(&self, pages: i32) -> Option<i32> {
         let (moved, dropped) = {
             let mut term = self.term.lock();
@@ -8534,8 +8615,7 @@ impl Session {
     /// this swaps it in once with `Term::swap_alt` and does **not** swap back:
     /// the second swap would reset the alternate screen (alacritty 0.26.0,
     /// `term/mod.rs:714`). After the call the application's screen (vim,
-    /// `less`) is gone and the session must not be drawn again. A live path
-    /// (the handover set) cannot use this method.
+    /// `less`) is gone and the session must not be drawn again.
     ///
     /// Where it stops:
     ///
@@ -8555,9 +8635,6 @@ impl Session {
     ///
     /// Trailing empty rows are dropped and the stream ends with a line break.
     /// The ceiling is the user's `scrollback` — the grid holds no more.
-    ///
-    /// **Not journaled:** the session's life ends with it — what
-    /// the journal records leads up to this, not past it.
     pub fn final_history(&self) -> Vec<u8> {
         // The leaf lock **before** `Term` (module header): the cut and the
         // ledgers' copy the anchors are resolved with, in one round.
@@ -8568,73 +8645,9 @@ impl Session {
         let mut term = self.term.lock();
         history_of(&mut term, cut, &stripes)
     }
-
-    /// [`Session::final_history`] of a **frozen** session: `freeze`
-    /// drove the live `Term` destructively, so the history is read from the
-    /// VT it returned, replayed into a scratch `Term` of the frozen size —
-    /// the same screens, links and cursor, cut by the same ledger. What a
-    /// pane that falls back after the handover (or the layout save at that quit)
-    /// replays.
-    pub fn frozen_history(&self, frozen: &Frozen) -> Vec<u8> {
-        let (cut, stripes) = {
-            let shell = lock(&self.shell);
-            (shell.history_cut(), shell.saved_stripes())
-        };
-        history_of_vt(
-            &frozen.vt,
-            frozen.cols,
-            frozen.rows,
-            self.scrollback.load(Ordering::Relaxed),
-            self.cluster,
-            cut,
-            &stripes,
-        )
-    }
 }
 
-/// [`Session::final_history`] of a terminal known only by its handover VT
-/// (`encode_live`'s): replayed into a scratch `Term` of `cols` × `rows`
-/// with `scrollback` rows of history — **the ceiling of the `Term` the VT
-/// was read from** — the same screens, links and cursor, and cut by `cut`
-/// and `stripes`.
-///
-/// **The ceiling is the source's, not a count of the VT's line breaks.**
-/// `encode_live` writes a row that wraps with no break and lets autowrap
-/// carry it on to the next (`snapshot::write_rows`), so the VT holds one
-/// `\n` per **line**, and a history of long lines has several rows per
-/// `\n`: a scratch sized by them dropped the oldest rows, silently, from
-/// the scrollback a handover or a crash's rebuild saves. Replayed at the
-/// same size every row comes back as one row, so the source's history fits
-/// in the source's ceiling — `encode_live`'s own contract ("at least as
-/// much `scrolling_history`"). Nothing is allocated for it up front:
-/// alacritty grows the history as rows scroll in (`Storage::initialize`, in
-/// chunks of a thousand rows), so a large ceiling costs what the VT fills.
-pub(crate) fn history_of_vt(
-    vt: &[u8],
-    cols: u16,
-    rows: u16,
-    scrollback: usize,
-    cluster: bool,
-    cut: HistoryCut,
-    stripes: &crate::shell::SavedStripes,
-) -> Vec<u8> {
-    let config = Config {
-        scrolling_history: scrollback,
-        ..Config::default()
-    };
-    let grid = GridSize::for_spawn(cols, rows);
-    let mut term = Term::new(config, &grid, VoidListener);
-    let mut parser: ansi::Processor = ansi::Processor::new();
-    let mut last_input = false;
-    parser.advance(
-        &mut ClusterHandler::new(&mut term, cluster, &mut last_input),
-        vt,
-    );
-    history_of(&mut term, cut, stripes)
-}
-
-/// The clear's grid work on any `Term` — the live clear's and the
-/// journal's replay of it: `top` screen rows scroll into the history,
+/// The clear's grid work on any `Term`: `top` screen rows scroll into the history,
 /// deliberately past the scrolling region (the clear is the screen's), with
 /// the cursor and DECSC's record dropped by hand by as much
 /// (`Grid::scroll_up` moves neither), then the history is erased — after the
@@ -8673,105 +8686,6 @@ fn history_of<T: EventListener>(
 }
 
 impl Session {
-    /// The pane's **whole** terminal state as VT bytes — **only at the
-    /// handover**: both screens, the cursors and saved cursors, every
-    /// mode, the changed palette, the links as they are, and what alacritty
-    /// keeps private (tab stops, the scrolling region, the active set, the
-    /// keyboard and title stacks, the application's cursor style).
-    /// [`snapshot::encode_live`] has the order and the known limits.
-    ///
-    /// **Destructive, and that is why it is handover-only** — the
-    /// [`Session::final_history`] precedent, one step further: the private
-    /// fields are probed by driving `Term` **after** the content is read
-    /// (the stacks are popped empty, cells are written, the config is
-    /// replaced). After the call the session must not be drawn, fed or read
-    /// again; the caller stops the reader first, so no byte arrives in
-    /// between.
-    ///
-    /// The probes write the title slot back to the title it held; the
-    /// sentinel they pass through it may send title news on the way.
-    ///
-    /// **Not journaled:** the session's life ends with it — what
-    /// the journal records leads up to this, not past it.
-    pub fn live_snapshot(&self) -> Vec<u8> {
-        let title = &self.adapter.0.title;
-        // `Term` → the leaf title slot: the order the title events already
-        // take (module header).
-        let mut term = self.term.lock();
-        snapshot::encode_live(
-            &mut term,
-            &|| lock(title).clone(),
-            &|| (),
-            &self.adapter.0.modes,
-        )
-        .0
-    }
-
-    /// `bt-core`'s own state as a versioned blob — the handover's second half
-    /// next to [`Session::live_snapshot`]: the
-    /// block ledgers and the running command's clock, the dock's context and
-    /// last mirror, the generations the remote gates read, the deliberate
-    /// clear's flag. What is carried and what is dropped is
-    /// [`crate::shell::Carried`]'s doc. Not destructive.
-    pub fn state_blob(&self) -> Vec<u8> {
-        // A `2J` the scanner counted but no frame has turned into the flag
-        // yet (a background tab draws no frame) is a clear all the same: it
-        // crosses as set and unstamped, the frame path's own first step.
-        let unseen = self.screen_clears.load(Ordering::Relaxed)
-            != self.screen_seen.load(Ordering::Relaxed)
-            && !self.alt_screen.load(Ordering::Relaxed);
-        let cleared = if self.screen_cleared.load(Ordering::Relaxed) {
-            Some(self.screen_clear_history.load(Ordering::Relaxed))
-        } else {
-            unseen.then_some(Self::UNSTAMPED)
-        };
-        let answered = self.key_gen.load(Ordering::Acquire);
-        lock(&self.shell).carried(cleared, answered).encode()
-    }
-
-    /// Takes a [`Session::state_blob`] of this version or the one before it
-    /// over this session's fresh state; `false` → the blob is corrupt or of
-    /// an unknown version and nothing changed (the caller's fallback is the
-    /// fresh state). Meant right after the VT snapshot is replayed and
-    /// before the first frame: the clear's stamp is a scrollback length the
-    /// replay rebuilds, and the carried mirror answers this session's input
-    /// generation only if it answered the last input before the handover.
-    pub fn restore_state_blob(&self, blob: &[u8]) -> bool {
-        let Some(carried) = Carried::decode(blob) else {
-            return false;
-        };
-        self.restore_carried(carried);
-        true
-    }
-
-    /// [`Session::restore_state_blob`]'s body, on a decoded blob.
-    fn restore_carried(&self, carried: Carried) {
-        let cleared = carried.cleared;
-        let reported = {
-            let mut log = lock(&self.shell);
-            log.restore(carried, self.key_gen.load(Ordering::Acquire));
-            log.environment_request().generation > 0
-        };
-        // The counter's generations are this process's; only the flag and
-        // its stamp cross, and the frame path must not read the replay's
-        // `2J`s as a new clear.
-        self.screen_seen.store(
-            self.screen_clears.load(Ordering::Relaxed),
-            Ordering::Relaxed,
-        );
-        self.screen_cleared
-            .store(cleared.is_some(), Ordering::Relaxed);
-        self.screen_clear_history
-            .store(cleared.unwrap_or(Self::UNSTAMPED), Ordering::Relaxed);
-        self.adapter.0.wake.title_changed();
-        // The carried row resolved again with this run's settings: a part
-        // turned off since goes, the rest is the same answer.
-        if reported {
-            self.adapter.0.wake.environment_changed();
-        }
-        self.request_frame();
-    }
-
     /// Edit ▸ Clear Scrollback (⌥⌘K): erases only the scrollback; the grid stays
     /// byte for byte the same. The body of [`Session::clear_to_start`] with zero
     /// rows scrolled out — the alternate-screen rule is the same.
@@ -8831,11 +8745,6 @@ impl Session {
                 .0
                 .graphics
                 .wiped(&*term, i32::try_from(top).unwrap_or(i32::MAX), cell);
-            // The resolved effect, not the command: the replay has no shell
-            // ledger to find the kept block with.
-            self.record(JournalSide::Clear {
-                top: u32::try_from(top).unwrap_or(u32::MAX),
-            });
             clear_selection_locked(&mut term);
             self.note_screen_clear();
             self.adapter.0.wipes.fetch_add(1, Ordering::AcqRel);
@@ -8843,25 +8752,7 @@ impl Session {
         self.clear_dock_selection();
         self.adapter.search_changed();
         self.request_frame();
-        self.poke_journal();
         true
-    }
-
-    /// Records a side record in the journal, if there is one — **while the
-    /// `Term` lock is held**, in the round that made the change: its stamp is
-    /// the bytes applied by then ([`crate::journal`]).
-    fn record(&self, side: JournalSide) {
-        if let Some(journal) = &self.journal {
-            journal.record(side);
-        }
-    }
-
-    /// Asks the journal's body for a compaction if one is due — **after**
-    /// the `Term` lock: it may start a thread.
-    fn poke_journal(&self) {
-        if let Some(journal) = &self.journal {
-            Journal::poke(journal);
-        }
     }
 
     /// The **second writer** of the `CSI 2 J` generation ([`Session::screen_clears`]):
@@ -9154,8 +9045,6 @@ impl Session {
     /// on the dock is "clicking elsewhere". A single click without a drag is an
     /// empty selection and removes the old highlight (the grid's rule).
     ///
-    /// **Journal-neutral:** clears only the grid's selection, which the snapshot
-    /// does not read — no side record ([`crate::journal`]).
     pub fn dock_select(&self, kind: SelectKind, point: SelectionPoint) {
         let grid = clear_selection_locked(&mut self.term.lock());
         let dock = self.change_dock_selection(point, |_, point, buffer, _, cluster| {
@@ -9172,8 +9061,6 @@ impl Session {
     /// the clicked point, because the path that moves the
     /// caret did not exist yet). The grid's selection goes away (a single owner).
     ///
-    /// **Journal-neutral:** clears only the grid's selection, which the snapshot
-    /// does not read — no side record ([`crate::journal`]).
     pub fn dock_extend(&self, point: SelectionPoint) {
         let grid = clear_selection_locked(&mut self.term.lock());
         let dock = self.change_dock_selection(point, |current, point, buffer, caret, cluster| {
@@ -9284,8 +9171,6 @@ impl Session {
     /// selected the **logical row** and in a multi-line `BUFFER` would
     /// take only the first row.
     ///
-    /// **Journal-neutral:** clears only the grid's selection, which the snapshot
-    /// does not read — no side record ([`crate::journal`]).
     fn dock_select_all(&self) -> bool {
         let changed = {
             let mut log = lock(&self.shell);
@@ -9627,8 +9512,6 @@ impl Session {
     /// nothing to the shell: the selection starts from the caret and the caret's
     /// place is right only in a fresh mirror — in `vicmd` the key is vi's.
     ///
-    /// **Journal-neutral:** clears only the grid's selection, which the snapshot
-    /// does not read — no side record ([`crate::journal`]).
     pub fn dock_key(&self, key: DockKey) -> bool {
         // ⏎ **before** the editing gate and not tied to it: what goes is
         // typed bytes, not the widget command.
@@ -9759,7 +9642,6 @@ impl Session {
     /// reads it while its link sleeps. Its news is [`Wake::command_started`],
     /// [`Wake::phase_edge`] and [`Wake::remote_command_edge`].
     ///
-    /// **Journal-neutral:** reads only.
     pub fn activity(&self) -> Activity {
         let log = lock(&self.shell);
         Activity {
@@ -9784,7 +9666,6 @@ impl Session {
     /// history, a pointer check per cell of every row. Called on the pointer's
     /// hover, never on the frame path.
     ///
-    /// **Journal-neutral:** reads only.
     pub fn last_block_info(&self) -> Option<BlockInfo> {
         let key = lock(&self.shell).last_block()?;
         let (command, depth) = self.find_block(key)?;
@@ -9795,7 +9676,6 @@ impl Session {
     /// command's while one runs (`bt_block=` of its prompt): the parent a program the
     /// command starts names its own blocks by (`bt_remote=<parent>.…`). `None` before any block.
     ///
-    /// **Journal-neutral:** reads only.
     pub fn last_local_block(&self) -> Option<u32> {
         lock(&self.shell).last_local_block()
     }
@@ -9807,8 +9687,7 @@ impl Session {
     ///
     /// A program on the whole screen does not hide a command's rows: they are read from the
     /// primary screen behind it, in the same `Term` round (or are the text the wrapper captured
-    /// as the screen was taken); one whose rows are gone is left out. **Journal-neutral:** reads
-    /// `Term`, writes the memory only — no side record ([`crate::journal`]).
+    /// as the screen was taken); one whose rows are gone is left out.
     pub fn remember_commands(&self) {
         let cursors = lock(&self.memory).cursors();
         let fresh = lock(&self.shell).fresh_commands(cursors);
@@ -9881,8 +9760,6 @@ impl Session {
     /// ([`CommandRecord`]). The screen's own blocks that a restored session came back with are
     /// taken the first time. One `Term` round for the rows, none held with the memory's lock.
     ///
-    /// **Journal-neutral:** reads `Term`, writes the memory only — no side record
-    /// ([`crate::journal`]).
     pub fn command_records(&self) -> Vec<CommandRecord> {
         self.remember_commands();
         if !lock(&self.memory).restored() {
@@ -9964,7 +9841,6 @@ impl Session {
 
     /// The newest command this pane remembers and its line: Edit ▸ Copy Last Command.
     ///
-    /// **Journal-neutral:** see [`Self::remember_commands`].
     pub fn last_remembered(&self) -> Option<(CommandId, String)> {
         self.remember_commands();
         lock(&self.memory)
@@ -9977,7 +9853,6 @@ impl Session {
     /// has left the history. Under a program on the whole screen it is read from the primary
     /// screen behind it, which is where the shell left it.
     ///
-    /// **Journal-neutral:** reads `Term` only — no side record ([`crate::journal`]).
     pub fn command_output(&self, id: CommandId) -> Option<String> {
         let term = self.term.lock();
         let boundary = self.clear_boundary.load(Ordering::Relaxed);
@@ -9991,7 +9866,6 @@ impl Session {
     /// what [`Self::scroll_to`] takes; `None` once its row has left the history and on the
     /// alternate screen, where the window cannot be taken to it.
     ///
-    /// **Journal-neutral:** see [`Self::command_output`].
     pub fn command_depth(&self, id: CommandId) -> Option<u32> {
         self.find_block(id.0).map(|(_, depth)| depth)
     }
@@ -10048,19 +9922,8 @@ impl Session {
     /// notify ; title ; body`), oldest first — at most a few wait; a flood keeps the newest. Its
     /// news is [`Wake::notification`]. One leaf-lock round.
     ///
-    /// **Journal-neutral:** it empties the ledger's waiting notifications and never touches
-    /// `Term`.
     pub fn take_notifications(&self) -> Vec<crate::Notification> {
         lock(&self.shell).notes.take()
-    }
-
-    /// Every program status record (`OSC 7501`, or `OSC 9;4` standing in for the root one), by
-    /// id: its state and its progress — what a host embedding the pane shows of a program that
-    /// reports. Its news is [`Wake::program_status_changed`]. One leaf-lock round.
-    ///
-    /// **Journal-neutral:** reads only.
-    pub fn program_records(&self) -> Vec<crate::ProgramRecord> {
-        lock(&self.shell).program.records()
     }
 
     /// The name the reporting program gave itself (`app=` of `OSC 7501`): the root
@@ -10069,28 +9932,17 @@ impl Session {
     /// a tab's icon is chosen by. It goes with its record (a `clear`, the next prompt for a
     /// record still alive). Its news is [`Wake::program_status_changed`]. One leaf-lock round.
     ///
-    /// **Journal-neutral:** reads only.
     pub fn program_app(&self) -> Option<String> {
         lock(&self.shell).program.app().map(str::to_owned)
     }
 
-    /// The newest command as the shell's ledger knows it ([`CommandState`]) — what a host
-    /// that reports commands one by one looks at on every activity edge
-    /// ([`crate::command_news`]). Our remote shell's while its session runs, else the local
-    /// shell's; `None` before any prompt. One leaf-lock round; `Term` is not touched.
+    /// The newest command as the shell's ledger knows it ([`CommandState`]). Our remote shell's
+    /// while its session runs, else the local shell's; `None` before any prompt. One leaf-lock
+    /// round; `Term` is not touched.
     ///
-    /// **Journal-neutral:** reads only.
     pub fn last_command(&self) -> Option<CommandState> {
         let log = lock(&self.shell);
         command_state(&log, log.last_block()?)
-    }
-
-    /// Command `id` as the ledger knows it now; `None` once the ledger has let it go. One
-    /// leaf-lock round.
-    ///
-    /// **Journal-neutral:** reads only.
-    pub fn command(&self, id: CommandId) -> Option<CommandState> {
-        command_state(&lock(&self.shell), id.0)
     }
 
     /// Command `id`'s line as the screen shows it — its prompt's rows joined
@@ -10098,7 +9950,6 @@ impl Session {
     /// row has left the history. One `Term` round, a walk up from the bottom: for an event, not
     /// for the frame path.
     ///
-    /// **Journal-neutral:** reads only.
     pub fn command_line(&self, id: CommandId) -> Option<String> {
         self.find_block(id.0).map(|(text, _)| text)
     }
@@ -10118,7 +9969,6 @@ impl Session {
     /// shape as [`Session::working_directory`]: copies under the leaf lock, `Term` is not touched.
     /// Its reader is the command palette's folder rows.
     ///
-    /// **Journal-neutral:** reads only.
     pub fn branch(&self) -> Option<String> {
         let log = lock(&self.shell);
         (!log.context.branch.is_empty()).then(|| log.context.branch.clone())
@@ -10750,12 +10600,10 @@ impl Session {
         let changed = {
             let mut log = lock(&self.shell);
             let current = log.running_command() == Some(command) && log.context.remote.is_some();
-            if !current || log.context.server == server {
-                false
-            } else {
-                log.context.server = server;
-                true
-            }
+            // Turning it on opens the remote dock's gate for what the shell's
+            // first prompt said before it ([`crate::shell::ShellLog::set_server`]);
+            // turning it off ends the shell's line as the dock's.
+            current && log.set_server(server)
         };
         if changed {
             self.request_frame();
@@ -10991,7 +10839,7 @@ impl Session {
             let link = hover_taken.as_deref().and_then(|hover| {
                 hover.dock_link(&shell.dock, cols.input, input_rows, shell.dock_scroll)
             });
-            (shell.local.state, change, range, shell.dock_scroll, link)
+            (shell.input_state(), change, range, shell.dock_scroll, link)
         };
         // The remote folder's title fallback (no OSC 7), after the `shell`
         // round: the status bar shows what the links resolve under.
@@ -11353,7 +11201,6 @@ impl Session {
     /// history the number is approximate ([`search::ledger_shift`]'s
     /// unknowable shifts keep it as it was).
     ///
-    /// **Journal-neutral:** reads no `Term` state.
     pub fn unseen_rows(&self) -> u32 {
         lock(&self.unseen).rows
     }
@@ -11371,7 +11218,6 @@ impl Session {
     /// published picture, so the lane is redrawn even if no row moved — a
     /// command that finished meanwhile changed only its colour.
     ///
-    /// **Journal-neutral:** writes no `Term` state.
     pub fn set_block_marks(&self, wanted: bool) {
         let was = self.blocks_wanted.swap(wanted, Ordering::AcqRel);
         if wanted && !was {
@@ -11395,7 +11241,6 @@ impl Session {
     /// after; on the alternate screen the step does nothing — its grid is not
     /// the history's.
     ///
-    /// **Journal-neutral:** reads the grid only.
     pub fn block_step(&self) -> Option<BlockReport> {
         if !self.blocks_wanted.load(Ordering::Acquire) {
             return None;
@@ -11488,7 +11333,6 @@ impl Session {
     /// from the grid, nothing kept; the `shell` round reads its stripe,
     /// exit, duration and start from the ledger.
     ///
-    /// **Journal-neutral:** reads only.
     pub fn block_info(&self, handle: BlockHandle) -> Option<BlockInfo> {
         let HandleBody { key, depth, mark } = handle.0?;
         let limit = self.scrollback.load(Ordering::Relaxed);
@@ -11569,8 +11413,6 @@ impl Session {
     /// is built even if the match is in the fill band — the band draws no
     /// selection (the fill band's debt, a known limit) but ⌘C copies.
     ///
-    /// **Journal-neutral:** moves only the selection and the view, which the snapshot
-    /// does not read — no side record ([`crate::journal`]).
     pub fn select_search_match(&self) -> bool {
         let tracking = lock(&self.search).tracking();
         let term = self.term.lock();
@@ -11602,8 +11444,6 @@ impl Session {
     /// current match changed. `None` if there is no pattern (search closed, query
     /// empty or invalid).
     ///
-    /// **Journal-neutral:** moves only the view, which the snapshot
-    /// does not read — no side record ([`crate::journal`]).
     fn with_search(
         &self,
         work: impl FnOnce(
@@ -11786,8 +11626,7 @@ impl Session {
     /// screen, which has no scrollback. A position that is not a number is
     /// the window's own place.
     ///
-    /// **Journal-neutral:** moves only the view, which the snapshot does not
-    /// read — no side record ([`crate::journal`]). The move counts as the
+    ///  The move counts as the
     /// user's ([`Session::user_scroll`]), so a search match does not take it
     /// for output.
     pub fn scroll_to(&self, top: f32, smooth: bool) -> Option<bool> {
@@ -11897,9 +11736,6 @@ impl Session {
     }
 
     // ---- views: what a program in the pane shows (`crate::pencere`) ----
-    //
-    // None of these touches `Term`, and none is a side record — **Journal-neutral**:
-    // a view is not the screen, and what the journal rebuilds is the screen.
 
     /// Whether this pane hears the view protocol: it was opened with
     /// [`SessionOptions::views`].
@@ -12033,7 +11869,7 @@ impl Session {
     }
 
     /// Starts the view again after something that restored the screen without
-    /// the messages (a handover, a reconnection): the program is offered a
+    /// the messages (a terminal shown again, a reconnection): the program is offered a
     /// restart and opens its view again if it had one.
     pub fn restart_view(&self) {
         if let Some(desk) = &self.adapter.0.desk {
@@ -12117,7 +11953,6 @@ impl Session {
         {
             let mut term = self.term.lock();
             term.set_options(term_config(options));
-            self.record(JournalSide::Options(options));
         }
         // The block ledger's ceiling is derived from `scrollback` too and that
         // setting is **applied live**: had it not been carried here the excess of
@@ -12130,7 +11965,6 @@ impl Session {
         // A shrinking `scrollback` trims the history: if search is open the count starts over.
         self.adapter.search_changed();
         self.request_frame();
-        self.poke_journal();
     }
 
     /// A handle that can mark damage remotely.
@@ -12245,8 +12079,6 @@ impl Session {
     ///
     /// Returns the generation the send produced; `None` for empty bytes.
     ///
-    /// **Journal-neutral:** clears only the selection and moves only the view, which the snapshot
-    /// does not read — no side record ([`crate::journal`]).
     fn send_input(&self, bytes: impl FnOnce(TermMode) -> Vec<u8>) -> Option<u64> {
         let (bytes, redraw, moved) = {
             let mut term = self.term.lock();
@@ -12465,6 +12297,38 @@ impl Session {
             && self.dock_edit_line().is_some_and(|line| !line.grid)
     }
 
+    /// Asks a **server shell's** editing widget to print its mirror again
+    /// ([`DOCK_REFRESH_COMMAND`]); `true` if the command went out.
+    ///
+    /// For the moment a screen is the terminal's again without the stream that drew it
+    /// (a connection that came back): the mirror the dock holds is the one of the last
+    /// event it heard, and the shell is the one who knows the line now. **The caller
+    /// asks the server first** that the shell is in front and that no other computer had
+    /// the terminal — what this session remembers of the prompt is from before the
+    /// connection went, and the bytes are keys to a program. The gate here is
+    /// [`Session::paste`]'s, exactly — the
+    /// remote dock is on, the widget is bound at this prompt (`w`), the line is a
+    /// mirrored one and the mirror answers the last input — because the bytes are
+    /// a command only at a prompt that binds them: a shell running a program would
+    /// read them as keys.
+    ///
+    /// Not user input: the selection stays, the window stays where the user scrolled it
+    /// and the generation does not advance, so the row does not fall back to the grid
+    /// for the round trip ([`Session::set_focus`]'s way of writing). bash and fish
+    /// have no mirror to ask for — their line is read from the grid at every frame
+    /// ([`ShellLog::dock_grid`]) — and take nothing from it.
+    pub fn refresh_dock(&self) -> bool {
+        if !lock(&self.shell).remote_dock_on() {
+            return false;
+        }
+        // A grid-read line (bash, fish) has no mirror to ask for.
+        if self.dock_edit_line().is_none_or(|line| line.grid) {
+            return false;
+        }
+        self.send(Msg::Input(DOCK_REFRESH_COMMAND.into()));
+        true
+    }
+
     fn can_be_typed(&self, bytes: &[u8]) -> bool {
         // The held `line-finish` closes the exception: the mirror
         // is the accepted line's and so is its keymap — not the new line's.
@@ -12546,11 +12410,6 @@ impl Session {
         let moved = before.1 - term.grid().cursor.point.line.0;
         let reflowed = term.columns() != before.0 || term.mode().contains(TermMode::ALT_SCREEN);
         graphics.resized(&*term, moved, reflowed, cell_px);
-        self.record(JournalSide::Resize {
-            cols,
-            rows,
-            cell: cell_px,
-        });
         *prev = size;
         self.send(Msg::Resize(size));
         self.report_size(size);
@@ -12563,35 +12422,26 @@ impl Session {
         self.adapter.search_changed();
         drop(prev);
         drop(term);
-        self.poke_journal();
         true
     }
 
     /// Nudges the program to redraw — the PTY's size only, `Term` untouched:
     /// `narrow` sets it one column narrower (one wider in a single column),
-    /// then `false` puts the grid's own size back. An adopted pane whose
-    /// screen did not come back is redrawn by its program this way.
+    /// then `false` puts the grid's own size back. A pane whose screen did not
+    /// come back is redrawn by its program this way.
     ///
     /// Two calls, not one: the caller leaves a moment between them. A
     /// program behind ssh only redraws if ssh **read** the narrower size —
     /// ssh forwards the size it reads, and the remote kernel signals only a
     /// change — and two sizes written back to back are read as the last one.
-    /// For the same reason the size goes **straight to the PTY**, on the
-    /// master's copy through the adopted PTY's own syscall: through the
-    /// reader both halves would wait behind the carried prefix's parsing
-    /// and could still go out back to back. The program's redraw lands in
-    /// the PTY behind its earlier output, so the order on screen holds. A
-    /// session without the copy or the syscall (a spawned one) goes through
-    /// the reader.
+    /// The program's redraw lands in the PTY behind its earlier output, so
+    /// the order on screen holds.
     ///
     /// The size the adapter knows stays the grid's, so a resize in between
     /// is not swallowed and the second call sends whatever the grid is then;
     /// a resize the reader still has queued lands after it with the grid's
     /// size too. The size is read and written under its lock — a concurrent
     /// resize updates it under the same lock — and `term` is not taken.
-    ///
-    /// **Journal-neutral:** sizes only the PTY, which the snapshot
-    /// does not read — no side record ([`crate::journal`]).
     pub fn nudge_size(&self, narrow: bool) {
         let size = lock(&self.adapter.0.size);
         let mut sent = *size;
@@ -12602,22 +12452,7 @@ impl Session {
                 sent.num_cols + 1
             };
         }
-        let pty = PtySize {
-            cols: sent.num_cols,
-            rows: sent.num_lines,
-            cell_width: sent.cell_width,
-            cell_height: sent.cell_height,
-        };
-        let direct = self.ops.as_ref().is_some_and(|ops| {
-            use std::os::fd::AsFd;
-            lock(&self.master)
-                .as_ref()
-                .map(|master| ops.resize(master.as_fd(), pty))
-                .is_some()
-        });
-        if !direct {
-            self.send(Msg::Resize(sent));
-        }
+        self.send(Msg::Resize(sent));
         self.report_size(sent);
     }
 
@@ -12628,7 +12463,6 @@ impl Session {
     /// behind the resize it sends; lockless, so callable under the size's
     /// lock and `Term`'s.
     ///
-    /// **Journal-neutral:** an answer to the program, nothing in `Term`.
     fn report_size(&self, size: WindowSize) {
         if self.adapter.0.modes.resize_reports() {
             self.adapter.reply(resize_report(
@@ -12636,23 +12470,6 @@ impl Session {
                 size.num_cols,
                 (size.cell_width, size.cell_height),
             ));
-        }
-    }
-
-    /// Tells an adopted PTY's foreground program to redraw: `SIGWINCH`, with
-    /// the size left alone (an adopting process cannot know which pane had
-    /// images, and the images are not carried — a program that redraws on the
-    /// signal draws them again). A session without the master's copy or the
-    /// syscall (a spawned one) does nothing.
-    ///
-    /// **Journal-neutral:** a signal, which the snapshot does not read — no
-    /// side record ([`crate::journal`]).
-    pub fn winch(&self) {
-        if let Some(ops) = &self.ops
-            && let Some(master) = lock(&self.master).as_ref()
-        {
-            use std::os::fd::AsFd;
-            ops.winch(master.as_fd());
         }
     }
 
@@ -12777,133 +12594,32 @@ impl Session {
         };
         Some(ShutdownHandle {
             finished,
-            adopted: self.adopted,
+            streamed: self.streamed,
         })
     }
 
-    /// Freezes the session for the handover: the reader stops,
-    /// the PTY is **not** closed and the child gets no `SIGHUP` — another
-    /// process carries the pane on ([`Session::adopt`]) from what this
-    /// returns.
-    ///
-    /// The order loses no byte: the reader stops first (`Msg::Shutdown`,
-    /// `join`), so from then on nobody reads the master — what the child
-    /// writes stays in the kernel's buffer for the next reader. Then the DEC
-    /// 2026 buffer is applied, the tail and the unwritten input are taken,
-    /// the VT is encoded and probed ([`Session::live_snapshot`]) and the
-    /// state blob is written. The `join` is **unbounded**, unlike
-    /// [`Session::shutdown`]'s: a bounded one could leave the parser
-    /// applying bytes after the snapshot; the hang guard is the caller's
-    /// (the shutdown sentinel).
-    ///
-    /// The `(EventLoop, State)` pair is **leaked** (`mem::forget`), and on
-    /// purpose: its `Pty` would send the child `SIGHUP` the moment it
-    /// dropped, and keeping it alive means trusting AppKit's releases at
-    /// exit. The caller is a process on its way out. After the call the
-    /// session is fit only for dropping: no frame, input or snapshot
-    /// (`live_snapshot` drove `Term` destructively); its `shutdown` is
-    /// [`Teardown::AlreadyDone`].
-    ///
-    /// `Err` if the session already shut down or its master copy failed at
-    /// birth — nothing to hand over; the session is untouched — or if the
-    /// reader had panicked (the `Pty` dropped while unwinding: the child is
-    /// already hung up) — or if the reader did not stop within
-    /// [`FREEZE_GRACE`] (`TimedOut`: it is in a decode that waits on a file; it
-    /// has been told to stop, the session keeps its reader and master copy,
-    /// and closing it the old way — [`Session::begin_shutdown`] — hangs the
-    /// child up and waits for the reader like any other).
-    ///
-    /// **Not journaled:** the session's life ends with it — what
-    /// the journal records leads up to this, not past it.
-    pub fn freeze(&self) -> io::Result<Frozen> {
-        // A graphics command that has begun but not ended is cut by the stop
-        // below: the adopting side takes it up from the tail and ends it, but a
-        // transmission in chunks loses the chunks before the cut (the next one
-        // names no action there and is answered with an error). The reader goes
-        // on while this waits, so one in flight finishes ([`COMMAND_GRACE`]
-        // bounds a client that went quiet in the middle of one).
-        self.adapter.0.graphics.wait_closed(COMMAND_GRACE);
-        // Both or neither: a session with a reader but no master copy has
-        // nothing to hand over and must stay untouched.
-        let taken = {
-            let mut master = lock(&self.master);
-            let mut reader = lock(&self.reader);
-            if master.is_some() && reader.is_some() {
-                master.take().zip(reader.take())
-            } else {
-                None
-            }
-        };
-        let Some((master, reader)) = taken else {
-            return Err(io::Error::new(
-                io::ErrorKind::NotConnected,
-                "the session shut down or has no copy of its PTY master",
-            ));
-        };
-        self.send(Msg::Shutdown);
-        // The reader is waited for by its thread's end, which has a time limit
-        // (`JoinHandle::join` has none): a reader stuck in a decode must not
-        // hold the handover. One that misses it goes back to the session with
-        // the master copy, and so does everything the old way of closing
-        // needs — it was told to stop and does as soon as the decode lets it,
-        // and the shutdown the caller turns to hangs the child up.
-        let started = Instant::now();
-        while !reader.is_finished() {
-            if started.elapsed() >= FREEZE_GRACE {
-                *lock(&self.master) = Some(master);
-                *lock(&self.reader) = Some(reader);
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "the reader did not stop in time",
-                ));
-            }
-            thread::sleep(Duration::from_millis(1));
-        }
-        let Ok((mut event_loop, mut state)) = reader.join() else {
-            return Err(io::Error::other("the reader thread ended with a panic"));
-        };
-        event_loop.stop_sync(&mut state);
-        // A graphics command still arriving is in it, from its `ESC _` on:
-        // the adopting side's parser takes it up where this one stood and
-        // finishes it from what the master has left.
-        let tail = event_loop.pty_mut().tail().to_vec();
-        let mut input = event_loop.unsent(&mut state);
-        // A first input still waiting for our first identified `A` goes now,
-        // with the keys held behind it, by the reader's own rule: a ready line that finds
-        // typing is dropped.
-        let line = event_loop.pty_mut().initial_input.take();
-        let typed = lock(&self.held_input).take().unwrap_or_default();
-        if let Some(line) = line
-            && (line.run || typed.is_empty())
-        {
-            input.extend_from_slice(&line.into_bytes());
-        }
-        input.extend_from_slice(&typed);
-        std::mem::forget((event_loop, state));
-        let (cols, rows) = {
-            let term = self.term.lock();
-            let grid = term.grid();
-            (
-                u16::try_from(grid.columns()).unwrap_or(u16::MAX),
-                u16::try_from(grid.screen_lines()).unwrap_or(u16::MAX),
-            )
-        };
-        let vt = self.live_snapshot();
-        let blob = self.state_blob();
-        Ok(Frozen {
-            master: OwnedFd::from(master),
-            pid: self.child_pid,
-            cols,
-            rows,
-            vt,
-            blob,
-            tail,
-            input,
-        })
+    /// Whether the terminal is a stream ([`Session::streamed`]) and not a PTY of this process:
+    /// it has no master, and it outlives this process unless its owner is asked to end it.
+    pub fn is_streamed(&self) -> bool {
+        self.streamed
     }
 
-    /// The pid of the PTY's child — an adopted session's too ([`Session::adopt`],
-    /// the pid it was given) — **not the shell's**, at least not always: in
+    /// Whether the session was given a terminal that was running already, to show again
+    /// ([`Stream::silence`]): its screen is built from the terminal's own past.
+    pub fn is_shown_again(&self) -> bool {
+        self.past.get().is_some()
+    }
+
+    /// Whether the session is still reading the past of a terminal it was given to show again
+    /// ([`Stream::silence`]): the screen is not yet what the terminal's history makes of it, and
+    /// what the tab shows of the program's state (a command that runs, a program in front) is
+    /// not final. `false` for a session whose terminal was just made.
+    pub fn replaying(&self) -> bool {
+        self.past.get().is_some_and(|past| past.pending())
+    }
+
+    /// The pid of the PTY's child — a streamed session's too (the pid it was
+    /// given) — **not the shell's**, at least not always: in
     /// an unbounded session the child is `login(1)` and the shell is its child.
     /// The side that
     /// builds the command knows which it is, not this crate.
@@ -12918,9 +12634,8 @@ impl Session {
 
     /// Runs `read` on the PTY master's copy ([`Session::master`]); `None` if
     /// there is none (the copy failed, the session is shutting down). Its
-    /// uses are reading the terminal modes ([`Session::remote_login`]) and
-    /// duplicating the descriptor for a process that keeps the program alive
-    /// past this one — nothing is written to or read from it here. The copy's
+    /// use is reading the terminal's modes and device — nothing is written to
+    /// or read from it here. The copy's
     /// leaf lock is held for the call: `read` must be a syscall, not a wait.
     pub fn with_pty_fd<T>(
         &self,
@@ -12930,6 +12645,39 @@ impl Session {
         lock(&self.master)
             .as_ref()
             .and_then(|file| read(file.as_fd()))
+    }
+
+    /// The terminal of a streamed session's program, read from the outside ([`PtyOps::tty`]):
+    /// `None` for any other session, for a program that has ended (its pid may be another
+    /// process's now) and when the platform cannot read it.
+    pub fn tty_reading(&self) -> Option<TtyReading> {
+        if !self.streamed || !self.reader_alive() {
+            return None;
+        }
+        self.ops.as_ref()?.tty(self.child_pid)
+    }
+
+    /// The device number of the terminal the session's program is on, for the one question a
+    /// stream cannot answer from a master: *which pane is this process in*
+    /// ([`PtyOps::terminal`]). `None` for any other session and as [`Session::tty_reading`].
+    pub fn terminal_device(&self) -> Option<u64> {
+        if !self.streamed || !self.reader_alive() {
+            return None;
+        }
+        self.ops.as_ref()?.terminal(self.child_pid)
+    }
+
+    /// The terminal's modes: `modes` read from the master's copy where there is one, the
+    /// stream's own reading ([`Session::tty_reading`]) where there is none.
+    pub fn tty_modes(
+        &self,
+        modes: impl FnOnce(std::os::fd::BorrowedFd<'_>) -> Option<TtyModes>,
+    ) -> Option<TtyModes> {
+        if self.streamed {
+            self.tty_reading().map(|reading| reading.modes)
+        } else {
+            self.with_pty_fd(modes)
+        }
     }
 
     /// Whether the remote session is past its login: `Some(the
@@ -12966,7 +12714,7 @@ impl Session {
             log.running_command() == Some(command) && log.login_signalled(titled)
         };
         // Off the shell lock: a syscall.
-        if !signalled && !self.with_pty_fd(modes).is_some_and(TtyModes::logged_in) {
+        if !signalled && !self.tty_modes(modes).is_some_and(TtyModes::logged_in) {
             return None;
         }
         let mut log = lock(&self.shell);
@@ -13008,7 +12756,7 @@ impl Session {
             command
         };
         // Off the shell lock: a syscall.
-        if !self.with_pty_fd(modes).is_some_and(TtyModes::raw) {
+        if !self.tty_modes(modes).is_some_and(TtyModes::raw) {
             return None;
         }
         let marked = {
@@ -13588,8 +13336,6 @@ mod tests {
         remote_edges: u32,
         /// How many times [`Wake::program_status_changed`] came.
         statuses: u32,
-        /// How many times [`Wake::bell`] came.
-        bells: u32,
         /// How many times [`Wake::notification`] came.
         notes: u32,
         /// How many times [`Wake::view_changed`] came.
@@ -13732,11 +13478,6 @@ mod tests {
             self.cond.notify_all();
         }
 
-        fn bell(&self) {
-            self.state.lock().unwrap().bells += 1;
-            self.cond.notify_all();
-        }
-
         fn notification(&self) {
             self.state.lock().unwrap().notes += 1;
             self.cond.notify_all();
@@ -13837,7 +13578,6 @@ mod tests {
             pane_uuid: None,
             hostname: None,
             replay: None,
-            journal: None,
             views: None,
         }
     }
@@ -14169,257 +13909,389 @@ mod tests {
         assert_eq!(history, "primary\r\n");
     }
 
-    #[test]
-    fn frozen_history_keeps_the_oldest_lines_of_a_history_of_wrapped_lines() {
-        // 30 lines of 100 cells on 40 columns: 90 rows, 81 of them history —
-        // inside the scrollback of 100, but the frozen VT carries a `\n` per
-        // line only (a wrapped row goes on by autowrap), and a scratch sized
-        // by those dropped the oldest lines.
-        let lines: String = (0..30)
-            .map(|line| format!("L{line:02}{}\\r\\n", "x".repeat(97)))
-            .collect();
-        let session = spawn_with_cols(
-            sh(&format!("printf '{lines}READY'; sleep 8")),
-            40,
-            Arc::new(TestWake::default()),
-        );
-        wait_text(&session, "READY");
-        let frozen = session.freeze().expect("the session did not freeze");
-        let history = String::from_utf8(session.frozen_history(&frozen)).expect("UTF-8 history");
-        for line in 0..30 {
-            assert!(history.contains(&format!("L{line:02}")), "L{line:02} lost");
-        }
-    }
-
-    #[test]
-    fn live_snapshot_carries_both_screens_and_puts_the_title_back() {
-        let wake = Arc::new(TestWake::default());
-        let session = spawn_with_cols(
-            sh(
-                "printf 'primary\\r\\n\\033]2;mytitle\\007\\033[?1049h\\033[?2004hALTSCREEN'; sleep 5",
-            ),
-            40,
-            wake,
-        );
-        wait_text(&session, "ALTSCREEN");
-        let bytes = String::from_utf8(session.live_snapshot()).expect("UTF-8 snapshot");
-        // The title probe passed a sentinel through the slot and put it back.
-        assert_eq!(session.title(), "mytitle");
-        for part in [
-            "primary",
-            "\x1b[?1049h",
-            "ALTSCREEN",
-            "\x1b]2;mytitle\x07",
-            "\x1b[?2004h",
-        ] {
-            assert!(bytes.contains(part), "{part:?} in {bytes:?}");
-        }
-    }
-
-    #[test]
-    fn a_state_blob_moves_the_shells_ledger_to_another_session() {
-        let old = spawn_with_cols(
-            sh(
-                "printf '\\033]133;A;bt_block=1\\007\\033]133;C\\007\\033]133;D;0;bt_block=1\\007\
-                \\033]133;A;bt_block=2\\007\\033]7;file://localhost/tmp/x\\007READY'; sleep 5",
-            ),
-            40,
-            Arc::new(TestWake::default()),
-        );
-        wait_text(&old, "READY");
-        assert!(String::from_utf8_lossy(&old.state_blob()).contains("\ncleared -\n"));
-        // A `2J` no frame has seen yet (a background tab) crosses as a clear.
-        old.screen_clears.fetch_add(1, Ordering::Relaxed);
-        let blob = old.state_blob();
-        assert!(
-            String::from_utf8_lossy(&blob).contains(&format!("\ncleared {}\n", Session::UNSTAMPED))
-        );
-        let new = spawn_with_cols(sh("sleep 5"), 40, Arc::new(TestWake::default()));
-        assert!(!new.restore_state_blob(b"bateri-state 99\nend\n"));
-        assert_eq!(new.shell_state(), None);
-        assert!(new.restore_state_blob(&blob));
-        assert_eq!(new.shell_state(), old.shell_state());
-        assert_eq!(new.title(), "x");
-        // Nothing runs, so no clock: the second blob is the first, byte for byte.
-        assert_eq!(String::from_utf8(new.state_blob()), String::from_utf8(blob));
-    }
-
-    /// The two syscalls an adopted PTY makes, recorded instead of made.
+    /// What the owner of a stream is asked, recorded; and what it says of the terminal its
+    /// program is on, set by the test.
     #[derive(Default)]
-    struct RecordingOps {
-        resizes: Mutex<Vec<(u16, u16)>>,
+    struct StreamOps {
+        sizes: Mutex<Vec<PtySize>>,
+        hangups: std::sync::atomic::AtomicU32,
+        reading: Mutex<Option<TtyReading>>,
+        device: Mutex<Option<u64>>,
+        /// The pids the terminal was asked about.
+        asked: Mutex<Vec<u32>>,
     }
 
-    impl PtyOps for RecordingOps {
+    impl PtyOps for StreamOps {
         fn resize(&self, _master: BorrowedFd<'_>, size: PtySize) {
-            lock(&self.resizes).push((size.cols, size.rows));
+            lock(&self.sizes).push(size);
         }
-        fn hangup(&self, _pid: u32, _exit: BorrowedFd<'_>) {}
-        fn winch(&self, _master: BorrowedFd<'_>) {}
+        fn hangup(&self, _pid: u32, _exit: BorrowedFd<'_>) {
+            self.hangups.fetch_add(1, Ordering::SeqCst);
+        }
+        fn tty(&self, pid: u32) -> Option<TtyReading> {
+            lock(&self.asked).push(pid);
+            *lock(&self.reading)
+        }
+        fn terminal(&self, pid: u32) -> Option<u64> {
+            lock(&self.asked).push(pid);
+            *lock(&self.device)
+        }
     }
 
-    /// Freezes a `/bin/sh` running `script` (after `ready` shows) and adopts
-    /// it under `mode`, `prefix` behind the frozen tail and `blob` (or the
-    /// frozen one) as the state. The returned stream is the exit watch's
-    /// other end: kept open, the adopted child counts as alive.
-    fn adopt_frozen(
-        script: &str,
-        ready: &str,
-        mode: AdoptMode,
-        prefix: &[u8],
-        blob: Option<Vec<u8>>,
-        ops: Arc<dyn PtyOps>,
-    ) -> io::Result<(Session, Session, std::os::unix::net::UnixStream)> {
-        adopt_frozen_with(script, ready, mode, prefix, blob, ops, Arc::default())
-    }
-
-    /// [`adopt_frozen`] with the adopted session's wake.
-    fn adopt_frozen_with(
-        script: &str,
-        ready: &str,
-        mode: AdoptMode,
-        prefix: &[u8],
-        blob: Option<Vec<u8>>,
-        ops: Arc<dyn PtyOps>,
+    /// A session over a stream and the owner's ends of it: the terminal (what the program
+    /// writes goes in, what the session types comes out), the peer of the exit signal, and the
+    /// status slot.
+    struct Streamed {
+        session: Session,
+        terminal: std::os::unix::net::UnixStream,
+        exit: Option<std::os::unix::net::UnixStream>,
+        status: Arc<StreamExit>,
+        ops: Arc<StreamOps>,
         wake: Arc<TestWake>,
-    ) -> io::Result<(Session, Session, std::os::unix::net::UnixStream)> {
-        let old = spawn_with_cols(sh(script), 40, Arc::new(TestWake::default()));
-        wait_text(&old, ready);
-        let frozen = old.freeze().expect("the session did not freeze");
-        let (exit, alive) = std::os::unix::net::UnixStream::pair().expect("socketpair");
-        let new = Session::adopt(
-            test_options(sh("unused"), frozen.cols),
-            Adoption {
-                master: frozen.master,
-                exit: OwnedFd::from(exit),
-                pid: frozen.pid,
-                vt: frozen.vt,
-                blob: blob.unwrap_or(frozen.blob),
-                prefix: [frozen.tail.as_slice(), prefix].concat(),
-                input: frozen.input,
-                ops,
-                mode,
+    }
+
+    fn streamed() -> Streamed {
+        streamed_over(None)
+    }
+
+    /// [`streamed`] over a stream that starts with a past, or not.
+    fn streamed_over(silence: Option<Arc<Silence>>) -> Streamed {
+        use std::os::unix::net::UnixStream;
+        let (terminal, master) = UnixStream::pair().expect("socketpair");
+        master.set_nonblocking(true).expect("non-blocking");
+        let (exit, exit_end) = UnixStream::pair().expect("socketpair");
+        let status = Arc::new(StreamExit::default());
+        let ops = Arc::new(StreamOps::default());
+        let wake = Arc::new(TestWake::default());
+        let session = Session::streamed(
+            test_options(sh("unused"), 40),
+            Arc::clone(&wake) as Arc<dyn Wake>,
+            Stream {
+                master: OwnedFd::from(master),
+                exit: OwnedFd::from(exit_end),
+                status: Arc::clone(&status),
+                pid: 4242,
+                ops: Arc::clone(&ops) as Arc<dyn PtyOps>,
+                silence,
             },
-            wake,
-        )?;
-        Ok((old, new, alive))
-    }
-
-    /// A question in a bound holder's prefix was asked while no bateri read
-    /// — maybe hours ago — and goes unanswered, and its clipboard write is
-    /// dropped; an update's (seconds old) is answered and copied. The answer would reach the PTY's input, where the line
-    /// discipline echoes it (`echoctl`: `^[[?6c`).
-    #[test]
-    fn a_bound_prefix_asks_and_nobody_answers() {
-        for (mode, answered) in [(AdoptMode::Update, true), (AdoptMode::Bound, false)] {
-            let wake = Arc::new(TestWake::default());
-            let (_old, new, _alive) = adopt_frozen_with(
-                "stty echo echoctl; echo READY; sleep 8",
-                "READY",
-                mode,
-                b"\x1b]52;c;c3RhbGU=\x07\x1b[cPREFIXDONE",
-                None,
-                Arc::new(RecordingOps::default()),
-                Arc::clone(&wake),
-            )
-            .expect("adopted");
-            // The query and the marker are parsed together, so an answer is
-            // queued before the input below.
-            wait_text(&new, "PREFIXDONE");
-            new.write(b"MARK\n");
-            let text = wait_text(&new, "MARK");
-            assert_eq!(text.contains("[?6c"), answered, "{mode:?}: {text:?}");
-            // An old copy does not replace what the user copied since.
-            let copies = lock(&wake.state).copies.clone();
-            let expected: &[&str] = if answered { &["stale"] } else { &[] };
-            assert_eq!(copies, expected, "{mode:?}");
-            // The master's own questions are answered again.
-            assert!(!new.adapter.0.muted.load(Ordering::Acquire), "{mode:?}");
-        }
-    }
-
-    /// A bound holder's blob that does not decode (or none) is a fresh state,
-    /// not a refusal — the holder is acknowledged by then, and refusing would
-    /// end the program; an update's refuses.
-    #[test]
-    fn a_bound_adoption_takes_a_broken_blob_as_a_fresh_state() {
-        let ops = || Arc::new(RecordingOps::default()) as Arc<dyn PtyOps>;
-        let refused = adopt_frozen(
-            "echo READY; sleep 8",
-            "READY",
-            AdoptMode::Update,
-            b"",
-            Some(b"not a blob".to_vec()),
-            ops(),
-        );
-        assert_eq!(
-            refused.err().map(|error| error.kind()),
-            Some(io::ErrorKind::InvalidData)
-        );
-        for blob in [b"not a blob".to_vec(), Vec::new()] {
-            let (_old, new, _alive) = adopt_frozen(
-                "printf '\\033]133;A;bt_block=1\\007READY'; sleep 8",
-                "READY",
-                AdoptMode::Bound,
-                b"",
-                Some(blob),
-                ops(),
-            )
-            .expect("a bound adoption does not refuse");
-            assert_eq!(new.shell_state(), None, "a fresh state");
-        }
-    }
-
-    /// The carried mirror crosses stale under a bound holder (its blob may be
-    /// older than the screen) and as it was under an update's.
-    #[test]
-    fn a_bound_adoption_marks_the_mirror_stale() {
-        for (mode, fresh) in [(AdoptMode::Update, true), (AdoptMode::Bound, false)] {
-            let (_old, new, _alive) = adopt_frozen(
-                "printf '\\033]133;A;bt_block=1\\007READY'; sleep 8",
-                "READY",
-                mode,
-                b"",
-                None,
-                Arc::new(RecordingOps::default()),
-            )
-            .expect("adopted");
-            assert!(
-                new.shell_state().is_some(),
-                "{mode:?}: the blob was restored"
-            );
-            let answers = lock(&new.shell).dock.answers;
-            let generation = new.key_gen.load(Ordering::Acquire);
-            assert_eq!(answers == generation, fresh, "{mode:?}");
-        }
-    }
-
-    /// The nudge: the PTY one column narrower, then back, at once — `Term`
-    /// and the size the session knows untouched, so the grid needs no redraw
-    /// and a resize to the same size stays a no-op.
-    #[test]
-    fn a_nudge_moves_only_the_ptys_size() {
-        let ops = Arc::new(RecordingOps::default());
-        let (_old, new, _alive) = adopt_frozen(
-            "echo READY; sleep 8",
-            "READY",
-            AdoptMode::Bound,
-            b"",
-            None,
-            Arc::clone(&ops) as Arc<dyn PtyOps>,
         )
-        .expect("adopted");
-        new.nudge_size(true);
-        // Straight to the PTY, not behind the reader's queue: the gap the
-        // caller leaves between the halves is the gap the program sees.
-        assert_eq!(*lock(&ops.resizes), [(39, 10)]);
-        new.nudge_size(false);
-        assert_eq!(*lock(&ops.resizes), [(39, 10), (40, 10)]);
-        assert_eq!(new.term.lock().columns(), 40);
-        assert!(
-            !new.resize(40, 10, (9, 18)),
-            "the session's size did not move"
+        .expect("a streamed session");
+        Streamed {
+            session,
+            terminal,
+            exit: Some(exit),
+            status,
+            ops,
+            wake,
+        }
+    }
+
+    #[test]
+    fn a_streamed_session_shows_the_bytes_of_its_stream_and_types_into_it() {
+        use std::io::Write as _;
+        let mut terminal = streamed();
+        assert!(terminal.session.is_streamed());
+        assert_eq!(terminal.session.child_pid(), 4242);
+        terminal
+            .terminal
+            .write_all(b"hello_stream\r\n")
+            .expect("written");
+        wait_text(&terminal.session, "hello_stream");
+
+        terminal.session.write(b"typed\r");
+        terminal
+            .terminal
+            .set_read_timeout(Some(Duration::from_secs(8)))
+            .expect("timeout");
+        let mut typed = Vec::new();
+        let mut buffer = [0u8; 64];
+        while typed.len() < 6 {
+            let n = io::Read::read(&mut terminal.terminal, &mut buffer).expect("typed bytes");
+            typed.extend_from_slice(&buffer[..n]);
+        }
+        assert_eq!(typed, b"typed\r");
+        // Nothing of a PTY is there to read modes from.
+        assert!(terminal.session.with_pty_fd(|_| Some(())).is_none());
+    }
+
+    /// A stream has no master, so what the pane asks of the PTY it asks of its owner by the
+    /// program's pid: the modes (the remote login's and the raw check's), the device (which pane a
+    /// process is in), the reading as a whole. A program that has ended is not asked: its pid
+    /// may be another process's now.
+    #[test]
+    fn a_streamed_session_reads_its_terminal_through_its_owner_by_its_programs_pid() {
+        use std::io::Write as _;
+        let mut terminal = streamed();
+        let raw = TtyModes {
+            canonical: false,
+            echo: false,
+        };
+        // Nothing said yet: nothing known, and the master's closure is never called.
+        assert_eq!(
+            terminal
+                .session
+                .tty_modes(|_| unreachable!("a stream has no master")),
+            None
         );
+        *lock(&terminal.ops.reading) = Some(TtyReading {
+            modes: raw,
+            foreground: Some(77),
+        });
+        *lock(&terminal.ops.device) = Some(0x1234);
+        assert_eq!(terminal.session.tty_modes(|_| None), Some(raw));
+        assert_eq!(terminal.session.terminal_device(), Some(0x1234));
+        assert_eq!(
+            terminal.session.tty_reading().and_then(|r| r.foreground),
+            Some(77)
+        );
+        assert!(
+            lock(&terminal.ops.asked).iter().all(|pid| *pid == 4242),
+            "the program's pid and no other"
+        );
+        // The raw check marks the running command through the owner's reading.
+        terminal
+            .terminal
+            .write_all(b"\x1b]133;A;bt_block=1\x07\x1b]133;C\x07RUN")
+            .expect("written");
+        wait_text(&terminal.session, "RUN");
+        let command = terminal.session.running_command().expect("a command runs");
+        assert_eq!(
+            terminal
+                .session
+                .note_raw(|_| unreachable!("a stream has no master")),
+            Some(command)
+        );
+        // The program ends: it is not asked any more.
+        terminal.status.code(0);
+        terminal.exit = None;
+        assert_eq!(
+            terminal.wake.wait_exit(Duration::from_secs(8)),
+            Some(Some(0))
+        );
+        wait_until("the reader to end", Duration::from_secs(8), || {
+            !terminal.session.reader_alive()
+        });
+        let asked = lock(&terminal.ops.asked).len();
+        assert_eq!(terminal.session.tty_reading(), None);
+        assert_eq!(terminal.session.terminal_device(), None);
+        assert_eq!(lock(&terminal.ops.asked).len(), asked);
+    }
+
+    /// A session that holds its PTY does not ask its owner anything: the master is read.
+    #[test]
+    fn a_spawned_session_has_no_stream_to_ask() {
+        let session = spawn_with_cols(sh("sleep 5"), 40, Arc::new(TestWake::default()));
+        assert_eq!(session.tty_reading(), None);
+        assert_eq!(session.terminal_device(), None);
+        assert!(
+            session
+                .tty_modes(|_| Some(TtyModes {
+                    canonical: true,
+                    echo: true
+                }))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn a_streamed_session_is_told_how_its_program_ended_after_the_last_byte() {
+        use std::io::Write as _;
+        let mut terminal = streamed();
+        // The owner's order at the end: the last bytes, the status, then the signal.
+        terminal.terminal.write_all(b"bye\r\n").expect("written");
+        terminal.status.code(7);
+        terminal.exit = None;
+        assert_eq!(
+            terminal.wake.wait_exit(Duration::from_secs(8)),
+            Some(Some(7))
+        );
+        // What was written before the end is on the screen: the end is read after the bytes.
+        wait_text(&terminal.session, "bye");
+    }
+
+    #[test]
+    fn a_program_a_signal_ended_has_no_exit_code() {
+        let mut terminal = streamed();
+        terminal.status.signal(9);
+        terminal.exit = None;
+        assert_eq!(terminal.wake.wait_exit(Duration::from_secs(8)), Some(None));
+    }
+
+    /// Everything a program can make a terminal do besides drawing: a question, a copy, a
+    /// notification, each followed by a word that says which stretch it was in.
+    fn doings(word: &str) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        // Device attributes: a question the session would answer with a line of its own.
+        bytes.extend_from_slice(b"\x1b[c");
+        // OSC 52, the clipboard: the text "x" in base64.
+        bytes.extend_from_slice(b"\x1b]52;c;eA==\x07");
+        bytes.extend_from_slice(format!("\x1b]9;note of {word}\x07").as_bytes());
+        bytes.extend_from_slice(word.as_bytes());
+        bytes.extend_from_slice(b"\r\n");
+        bytes
+    }
+
+    /// What the session typed into a stream: read until `count` bytes are in or it is quiet.
+    fn typed_into(terminal: &mut std::os::unix::net::UnixStream, count: usize) -> Vec<u8> {
+        terminal
+            .set_read_timeout(Some(Duration::from_millis(600)))
+            .expect("timeout");
+        let mut typed = Vec::new();
+        let mut buffer = [0u8; 256];
+        while typed.len() < count {
+            match io::Read::read(terminal, &mut buffer) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => typed.extend_from_slice(&buffer[..n]),
+            }
+        }
+        typed
+    }
+
+    #[test]
+    fn a_terminal_shown_again_reads_its_past_without_doing_what_it_did_and_the_rest_as_it_comes() {
+        use std::io::Write as _;
+        let past = Silence::new();
+        let mut terminal = streamed_over(Some(Arc::clone(&past)));
+        assert!(terminal.session.replaying());
+        let before = doings("old_stretch");
+        let after = doings("new_stretch");
+        // The feeder says where the past ends before it writes the bytes it covers, and the
+        // bytes of both stretches arrive in one write: the read that takes them is cut.
+        past.extend(before.len() as u64);
+        past.close();
+        let mut bytes = before.clone();
+        bytes.extend_from_slice(&after);
+        terminal.terminal.write_all(&bytes).expect("written");
+
+        let text = wait_text(&terminal.session, "new_stretch");
+        assert!(text.contains("old_stretch"), "{text}");
+        // The past is on the screen and did nothing: one question answered, one copy, one
+        // notification — the live stretch's.
+        let typed = typed_into(&mut terminal.terminal, 7);
+        assert_eq!(
+            typed
+                .windows(5)
+                .filter(|window| window == b"\x1b[?6c")
+                .count(),
+            1,
+            "{typed:?}"
+        );
+        let state = terminal.wake.state.lock().unwrap();
+        assert_eq!(state.copies, ["x"], "only the live copy");
+        assert_eq!(state.notes, 1);
+        drop(state);
+        // And the past's notification is not kept to be taken with the live one: it would come
+        // again with the next notification the program asks for.
+        let bodies: Vec<String> = terminal
+            .session
+            .take_notifications()
+            .into_iter()
+            .map(|note| note.body)
+            .collect();
+        assert_eq!(bodies, ["note of new_stretch"]);
+        assert!(!terminal.session.replaying());
+    }
+
+    #[test]
+    fn the_past_of_a_terminal_that_says_nothing_after_it_is_read_and_ends_when_it_is_closed() {
+        use std::io::Write as _;
+        let past = Silence::new();
+        let mut terminal = streamed_over(Some(Arc::clone(&past)));
+        let before = doings("only_past");
+        // Written in two parts, the feeder not done after the first.
+        past.extend(5);
+        terminal.terminal.write_all(&before[..5]).expect("written");
+        wait_until("the first part taken", Duration::from_secs(8), || {
+            past.read.load(Ordering::SeqCst) == 5
+        });
+        assert!(terminal.session.replaying(), "the feeder is not done");
+        past.extend(before.len() as u64);
+        past.close();
+        terminal.terminal.write_all(&before[5..]).expect("written");
+        wait_text(&terminal.session, "only_past");
+        wait_until("the past read", Duration::from_secs(8), || {
+            !terminal.session.replaying()
+        });
+        // Nothing of it was answered or done, and nothing arrived to unmute the session: the
+        // first live bytes are what do.
+        assert_eq!(typed_into(&mut terminal.terminal, 1), b"");
+        let state = terminal.wake.state.lock().unwrap();
+        assert!(state.copies.is_empty());
+        assert_eq!(state.notes, 0);
+        drop(state);
+        terminal
+            .terminal
+            .write_all(b"\x1b]9;now\x07live\r\n")
+            .expect("written");
+        wait_text(&terminal.session, "live");
+        wait_until("the live notification", Duration::from_secs(8), || {
+            terminal.wake.state.lock().unwrap().notes == 1
+        });
+    }
+
+    #[test]
+    fn a_past_with_nothing_in_it_is_over_when_it_is_closed() {
+        let past = Silence::new();
+        let terminal = streamed_over(Some(Arc::clone(&past)));
+        assert!(terminal.session.replaying(), "not until the feeder says so");
+        past.close();
+        assert!(!terminal.session.replaying());
+    }
+
+    #[test]
+    fn a_streamed_session_sizes_its_terminal_through_its_owner_and_asks_it_to_end_when_it_goes() {
+        let terminal = streamed();
+        assert!(terminal.session.resize(50, 12, (7, 15)));
+        wait_until(
+            "the size reaching the owner",
+            Duration::from_secs(8),
+            || {
+                lock(&terminal.ops.sizes).last().is_some_and(|size| {
+                    (size.cols, size.rows, size.cell_width, size.cell_height) == (50, 12, 7, 15)
+                })
+            },
+        );
+        assert_eq!(terminal.ops.hangups.load(Ordering::SeqCst), 0);
+        assert_eq!(terminal.session.shutdown(), Teardown::HungUp);
+        assert_eq!(
+            terminal.ops.hangups.load(Ordering::SeqCst),
+            1,
+            "asked once, when the stream was let go of"
+        );
+    }
+
+    #[test]
+    fn the_launch_a_kablo_terminal_gets_is_what_a_spawned_child_gets() {
+        let mut options = test_options(
+            ("/usr/bin/login".into(), vec!["-qflp".into(), "ada".into()]),
+            90,
+        );
+        options.working_directory = Some(PathBuf::from("/tmp"));
+        options.env.insert("EXTRA".into(), "1".into());
+        options.env.insert("TERM".into(), "dumb".into());
+        options.pane_uuid = PaneUuid::parse("0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0");
+        let launch = options.child_launch();
+        assert_eq!(launch.argv, ["/usr/bin/login", "-qflp", "ada"]);
+        assert_eq!(launch.cwd, Some(PathBuf::from("/tmp")));
+        assert_eq!(
+            (launch.size.cols, launch.size.rows),
+            (90, 10),
+            "the size the child starts at"
+        );
+        assert_eq!((launch.size.cell_width, launch.size.cell_height), (9, 18));
+        let env: HashMap<_, _> = launch.env.iter().cloned().collect();
+        // The contract's constants win over the map, the map's own entries stay, the directory
+        // is `PWD`, the identity is the pane's.
+        assert_eq!(env["TERM"], "xterm-256color");
+        assert_eq!(env["COLORTERM"], "truecolor");
+        assert_eq!(env["TERM_PROGRAM"], TERM_PROGRAM);
+        assert_eq!(env["EXTRA"], "1");
+        assert_eq!(env["PWD"], "/tmp");
+        assert!(env.contains_key("TERM_SESSION_ID"), "{env:?}");
+        assert!(launch.env.windows(2).all(|pair| pair[0].0 <= pair[1].0));
+        // No command is the user's login shell.
+        options.command = None;
+        assert!(options.child_launch().argv.is_empty());
     }
 
     /// The fake shell's grid, until `until` is visible (the first-input and offer tests).
@@ -14726,7 +14598,7 @@ mod tests {
 
     /// One frame of ZLE's mirror: the `u` arm, the bodies base64.
     ///
-    /// The same sequence the script's (`assets/shell/zsh/bateri.zsh`)
+    /// The same sequence the script's (`assets/shell/zsh/dock.zsh`)
     /// `__bateri_dock_redraw` prints; `PREDISPLAY`, `POSTDISPLAY` and
     /// `region_highlight` are empty, because the suppression's gate is the
     /// mirror's **state**, not its content.
@@ -15357,85 +15229,6 @@ mod tests {
         assert!(
             cursor.visible,
             "the grid has no cursor on a running command: {cursor:?}"
-        );
-        session.shutdown();
-    }
-
-    /// **The hold really requests a frame.** The guard of the single binding line.
-    ///
-    /// `sooner` and `hold_left` are pinned separately, but had the line that binds
-    /// the two to `Cursor` been deleted neither would go red: the integration
-    /// tests call `frame()` in a loop, so they **skip** the clock. The cost is
-    /// visible in the arm with no running command — `CORRECT`'s `[nyae]`,
-    /// `zle -M`, between `line-finish` and Enter — because there is no other
-    /// deadline there: the clock would never be set, the link would sleep and the
-    /// caret would stay in the dock until the next key.
-    ///
-    /// The ledger is driven **directly**: the hold window is 150 ms and had it
-    /// been left to the PTY's timing the test would be exposed on a loaded machine.
-    #[test]
-    fn a_held_handover_asks_for_a_frame() {
-        let wake = Arc::new(TestWake::default());
-        // The script is silent: so that the reader thread does not slip a marker in between.
-        let session = spawn_docked_session("sleep 5", Arc::clone(&wake));
-
-        // Prompt → input → `line-finish`: the raw answer is `Grid`, the hold starts.
-        {
-            use crate::shell::{DockEvent, Mark, ScanEvent};
-            let mut log = lock(&session.shell);
-            log.apply_scan(ScanEvent::Mark(Mark::PromptStart {
-                id: None,
-                click_events: false,
-            }));
-            log.apply_scan(ScanEvent::Mark(Mark::PromptEnd));
-            log.apply_scan(ScanEvent::Dock(DockEvent::End));
-        }
-        let cursor = session.frame(
-            |_| (),
-            |_| (),
-            &mut Blocks::default(),
-            &mut SelectionRuns::default(),
-            &mut SearchRuns::default(),
-            &mut TrackMarks::default(),
-            &mut Clusters::default(),
-            &mut Pictures::default(),
-            ScrollGlide::default(),
-            BUDGET,
-        );
-        assert!(
-            cursor.caret_in_dock,
-            "the handover hold should have hidden the cursor: {cursor:?}"
-        );
-        let tick = cursor.next_tick.expect("the hold did not request a frame");
-        assert!(
-            tick <= crate::shell::HANDOVER_HOLD && !tick.is_zero(),
-            "the tick must be the hold's remainder, but it is {tick:?}"
-        );
-
-        // The command finished: the raw answer returned to `Dock`, the clock must go out.
-        {
-            use crate::shell::{Mark, ScanEvent};
-            let mut log = lock(&session.shell);
-            log.apply_scan(ScanEvent::Mark(Mark::CommandEnd {
-                exit: Some(0),
-                id: None,
-            }));
-        }
-        let cursor = session.frame(
-            |_| (),
-            |_| (),
-            &mut Blocks::default(),
-            &mut SelectionRuns::default(),
-            &mut SearchRuns::default(),
-            &mut TrackMarks::default(),
-            &mut Clusters::default(),
-            &mut Pictures::default(),
-            ScrollGlide::default(),
-            BUDGET,
-        );
-        assert_eq!(
-            cursor.next_tick, None,
-            "the clock must go out when there is no pending hold: {cursor:?}"
         );
         session.shutdown();
     }
@@ -19264,14 +19057,18 @@ mod tests {
     /// not match); none of these changes its form.
     #[test]
     fn the_previous_widget_still_takes_the_commands() {
-        let script = include_str!("../../../assets/shell/zsh/bateri.zsh");
+        let script = include_str!("../../../assets/shell/zsh/dock.zsh");
         assert!(
             script.contains("bindkey -M $map $'\\e[8133~' __bateri_dock_edit"),
             "the widget's binding moved"
         );
         assert_eq!(DOCK_EDIT_PREFIX, "\x1b[8133~");
+        // The capability is the local wrapper's `ESC ] 8133 ; w BEL` when the shell has no
+        // server identity (the identity is empty there, and in front of the letter otherwise).
         assert!(
-            script.contains("$'\\e]8133;w\\a'"),
+            script.contains(
+                "$'\\e]8133;'${__bateri_rshell:+bt_remote=$__bateri_rshell.$__bateri_block;}$'w\\a'"
+            ),
             "the capability's form moved"
         );
     }
@@ -19860,13 +19657,18 @@ mod tests {
 
     /// The dock's characters as one string (every row, in sink order).
     fn dock_chars(session: &Session) -> String {
+        dock_chars_with(session, 0)
+    }
+
+    /// [`dock_chars`] for a band with `input_rows` input rows.
+    fn dock_chars_with(session: &Session, input_rows: u16) -> String {
         let mut chars = String::new();
         session.dock(
             DockCols {
                 input: 60,
                 context: 60,
             },
-            Some(0),
+            Some(input_rows),
             &mut DockState::default(),
             &mut DockContext::default(),
             false,
@@ -20136,6 +19938,241 @@ mod tests {
             cursor.input_rows, 0,
             "a remote alternate screen keeps the dock as the context row alone"
         );
+    }
+
+    /// A local prompt, `ssh`'s `C`, and — once the test lets it — our remote
+    /// shell's prompt with its line `echo foo bar` and the dock events under its
+    /// identity (`w` and the zsh mirror). The test releases each step with a newline.
+    fn spawn_remote_dock_session(wake: Arc<TestWake>) -> Session {
+        let remote_prompt = "\\033]133;A;bt_remote=1.9.1\\007\
+             \\033]8;;bateri://rblock/1.9.1\\007$ \\033]8;;\\007\
+             \\033]133;B;bt_remote=1.9.1\\007";
+        let remote_events = "\\033]8133;bt_remote=1.9.1;w\\007\
+             \\033]8133;bt_remote=1.9.1;u;12;;ZWNobyBmb28gYmFy;;;bWFpbg==\\007";
+        spawn_docked_session(
+            &format!(
+                "stty -echo; printf '{}'; read _; printf '\\033]133;C\\007'; read _; \
+                 printf '\\r\\n{remote_prompt}echo foo bar{remote_events}'; sleep 5",
+                anchored_prompt(1),
+            ),
+            wake,
+        )
+    }
+
+    /// **A remote shell of ours that took the dock has the dock's input row**:
+    /// the row, the caret and the suppression follow its prompt, as the local
+    /// shell's do, and the line leaves the grid.
+    #[test]
+    fn a_remote_shell_that_took_the_dock_has_its_input_row_and_its_line_leaves_the_grid() {
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_remote_dock_session(Arc::clone(&wake));
+        session.write(b"\n");
+        assert_eq!(wake.wait_commands(1, Duration::from_secs(5)), 1);
+        let command = session.running_command().expect("running after `C`");
+        assert!(session.set_remote(command, Some(&RemoteTarget::ssh("prod"))));
+        assert!(session.set_server(command, true));
+        let (_, cursor) = frame_until(&session, BUDGET, |_, _| true);
+        assert_eq!(cursor.input_rows, 0, "no event yet: the context row alone");
+
+        session.write(b"\n");
+        // The row appears with the widget's word (`w`) and the line leaves the grid with the
+        // mirror (`u`) a moment after: the frame is waited for with both.
+        let (cells, cursor) = frame_until(&session, BUDGET, |cells, cursor| {
+            cursor.input_rows > 0
+                && cursor.caret_in_dock
+                && !(0..cursor.rows).any(|row| row_glyphs(cells, row).contains("echo"))
+        });
+        assert!(
+            !cursor.visible,
+            "the grid's cursor is not drawn: {cursor:?}"
+        );
+        assert!(
+            !(0..cursor.rows).any(|row| row_glyphs(&cells, row).contains("echo")),
+            "the line left the grid"
+        );
+        let (dock, _) = draw_dock(&session);
+        assert!(dock.sigil.is_some(), "the input row has its marker");
+        // Blank cells carry no glyph.
+        let shown = dock_chars_with(&session, cursor.input_rows);
+        assert!(shown.contains("echofoobar"), "{shown:?}");
+        // The dock's selection and its editing keys work on the remote line: the gate is the
+        // local one's, and the widget's command goes out through the pane's PTY.
+        session.dock_select(SelectKind::Word, dock_point(6, CellHalf::Left));
+        assert_eq!(session.selection_text().as_deref(), Some("foo"));
+        let generation = session.key_gen.load(Ordering::Acquire);
+        assert!(
+            session.dock_key(DockKey::Backspace),
+            "the editing gate is open"
+        );
+        assert_ne!(
+            session.key_gen.load(Ordering::Acquire),
+            generation,
+            "the widget's command went to the shell"
+        );
+        session.shutdown();
+    }
+
+    /// **The server's first prompt beats the pane's word that it is a server's
+    /// terminal**: the output of a fast login arrives before the probe's answer
+    /// and the registry's. The prompt's events were the shell's own and only
+    /// early — the dock opens on the prompt that is already on screen, with the line
+    /// that was typed into it.
+    #[test]
+    fn a_prompt_printed_before_the_pane_knows_its_server_gets_the_dock() {
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_remote_dock_session(Arc::clone(&wake));
+        session.write(b"\n");
+        assert_eq!(wake.wait_commands(1, Duration::from_secs(5)), 1);
+        let command = session.running_command().expect("running after `C`");
+        // The remote prompt and its events are on the stream, and the grid shows the
+        // line: nobody has said it is a server's terminal.
+        session.write(b"\n");
+        let (_, cursor) = frame_until(&session, BUDGET, |cells, cursor| {
+            (0..cursor.rows).any(|row| row_glyphs(cells, row).contains("echo"))
+        });
+        assert!(
+            !cursor.caret_in_dock || cursor.input_rows <= 1,
+            "{cursor:?}"
+        );
+
+        assert!(session.set_remote(command, Some(&RemoteTarget::ssh("prod"))));
+        assert!(session.set_server(command, true));
+        let (cells, cursor) = frame_until(&session, BUDGET, |_, cursor| {
+            cursor.input_rows > 0 && cursor.caret_in_dock
+        });
+        assert!(
+            !(0..cursor.rows).any(|row| row_glyphs(&cells, row).contains("echo")),
+            "the line left the grid"
+        );
+        assert!(dock_chars_with(&session, cursor.input_rows).contains("echofoobar"));
+        session.shutdown();
+    }
+
+    /// **Another shell of ours on the server, with no dock to give**, takes over the pane's
+    /// prompt (a dock-less tier, a shell that never printed a mirror): the dock is not
+    /// its — the context row alone, the line where the shell wrote it and the caret in
+    /// the grid — and not the previous shell's empty row with the caret in it.
+    #[test]
+    fn a_new_shell_without_a_dock_does_not_inherit_the_previous_shells_row() {
+        let prompt = |shell: &str| {
+            format!(
+                "\\033]133;A;bt_remote={shell}\\007\
+                 \\033]8;;bateri://rblock/{shell}\\007$ \\033]8;;\\007\
+                 \\033]133;B;bt_remote={shell}\\007"
+            )
+        };
+        let events = "\\033]8133;bt_remote=1.9.1;w\\007\
+             \\033]8133;bt_remote=1.9.1;u;12;;ZWNobyBmb28gYmFy;;;bWFpbg==\\007";
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_docked_session(
+            &format!(
+                "stty -echo; printf '{}'; read _; printf '\\033]133;C\\007'; \
+                 read _; printf '\\r\\n{}echo foo bar{events}'; \
+                 read _; printf '\\r\\n{}echo typed'; sleep 5",
+                anchored_prompt(1),
+                prompt("1.9.1"),
+                prompt("2.9.1"),
+            ),
+            Arc::clone(&wake),
+        );
+        session.write(b"\n");
+        assert_eq!(wake.wait_commands(1, Duration::from_secs(5)), 1);
+        let command = session.running_command().expect("running after `C`");
+        assert!(session.set_remote(command, Some(&RemoteTarget::ssh("prod"))));
+        assert!(session.set_server(command, true));
+        session.write(b"\n");
+        let (_, cursor) = frame_until(&session, BUDGET, |cells, cursor| {
+            cursor.input_rows > 0
+                && cursor.caret_in_dock
+                && !(0..cursor.rows).any(|row| row_glyphs(cells, row).contains("echo"))
+        });
+        assert!(cursor.caret_in_dock, "the first shell has the dock");
+
+        session.write(b"\n");
+        let (cells, cursor) = frame_until(&session, BUDGET, |cells, _| {
+            (0..10).any(|row| row_glyphs(cells, row).contains("typed"))
+        });
+        assert_eq!(cursor.input_rows, 0, "the context row alone: {cursor:?}");
+        assert!(
+            !cursor.caret_in_dock && cursor.visible,
+            "the caret is in the grid, where the line is: {cursor:?}"
+        );
+        assert!(
+            (0..cursor.rows).any(|row| row_glyphs(&cells, row).contains("typed")),
+            "the line is in the grid"
+        );
+        session.shutdown();
+    }
+
+    /// The refresh command goes out where the widget is bound and nowhere else, and
+    /// it is not input: the window stays and the mirror stays the shell's answer.
+    #[test]
+    fn a_server_shells_mirror_is_asked_for_again_only_where_its_widget_listens() {
+        let out = std::env::temp_dir().join(format!("bateri-refresh-{}", std::process::id()));
+        let remote_prompt = "\\033]133;A;bt_remote=1.9.1\\007\
+             \\033]8;;bateri://rblock/1.9.1\\007$ \\033]8;;\\007\
+             \\033]133;B;bt_remote=1.9.1\\007";
+        let remote_events = "\\033]8133;bt_remote=1.9.1;w\\007\
+             \\033]8133;bt_remote=1.9.1;u;12;;ZWNobyBmb28gYmFy;;;bWFpbg==\\007";
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_docked_session(
+            &format!(
+                "stty -echo -icanon min 1; printf '{}'; read _; printf '\\033]133;C\\007'; \
+                 printf '\\r\\n{remote_prompt}echo foo bar{remote_events}'; \
+                 dd bs=1 count=9 of='{}' 2>/dev/null; sleep 5",
+                anchored_prompt(1),
+                out.display(),
+            ),
+            Arc::clone(&wake),
+        );
+        assert!(!session.refresh_dock(), "a local prompt has no remote dock");
+        session.write(b"\n");
+        assert_eq!(wake.wait_commands(1, Duration::from_secs(5)), 1);
+        let command = session.running_command().expect("running after `C`");
+        assert!(session.set_remote(command, Some(&RemoteTarget::ssh("prod"))));
+        assert!(session.set_server(command, true));
+        let (_, cursor) = frame_until(&session, BUDGET, |_, cursor| {
+            cursor.input_rows > 0 && cursor.caret_in_dock
+        });
+        assert!(cursor.input_rows > 0);
+
+        let generation = session.key_gen.load(Ordering::Acquire);
+        assert!(session.refresh_dock());
+        assert_eq!(
+            session.key_gen.load(Ordering::Acquire),
+            generation,
+            "not user input: the mirror that answers it is still the answer to the last key"
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let sent = loop {
+            let sent = std::fs::read(&out).unwrap_or_default();
+            if sent.len() == 9 || Instant::now() > deadline {
+                break sent;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        let _ = std::fs::remove_file(&out);
+        assert_eq!(sent, b"\x1b[8133~r\x07");
+        session.shutdown();
+    }
+
+    /// A plain `ssh` has no remote shell of ours: the same stream changes
+    /// nothing, and the line stays in the grid.
+    #[test]
+    fn a_plain_ssh_keeps_the_context_row_alone_and_the_line_in_the_grid() {
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_remote_dock_session(Arc::clone(&wake));
+        session.write(b"\n");
+        assert_eq!(wake.wait_commands(1, Duration::from_secs(5)), 1);
+        let command = session.running_command().expect("running after `C`");
+        assert!(session.set_remote(command, Some(&RemoteTarget::ssh("prod"))));
+        session.write(b"\n");
+        let (_, cursor) = frame_until(&session, BUDGET, |cells, cursor| {
+            (0..cursor.rows).any(|row| row_glyphs(cells, row).contains("echo"))
+        });
+        assert_eq!(cursor.input_rows, 0, "{cursor:?}");
+        assert!(!cursor.caret_in_dock && cursor.visible, "{cursor:?}");
+        session.shutdown();
     }
 
     /// A program reading the keyboard itself: the PTY's raw modes mark the
@@ -25475,10 +25512,10 @@ e\\314\\201.'; sleep 5";
     }
 
     #[test]
-    fn a_programs_bell_and_notifications_reach_the_wake_and_wait_to_be_taken() {
+    fn a_programs_notifications_reach_the_wake_and_wait_to_be_taken() {
         let wake = Arc::new(TestWake::default());
         let session = spawn_session(
-            "printf '\\007\\033]9;build ready\\007\\033]9;4;1;50\\007             \\033]777;notify;CI;tests passed\\033\\\\'; sleep 5",
+            "printf '\\033]9;build ready\\007\\033]9;4;1;50\\007             \\033]777;notify;CI;tests passed\\033\\\\'; sleep 5",
             Arc::clone(&wake),
         );
         let state = wake
@@ -25486,11 +25523,11 @@ e\\314\\201.'; sleep 5";
             .wait_timeout_while(
                 wake.state.lock().unwrap(),
                 Duration::from_secs(5),
-                |state| state.bells == 0 || state.notes == 0,
+                |state| state.notes == 0,
             )
             .unwrap()
             .0;
-        assert!(state.bells >= 1, "the bell rang");
+        assert!(state.notes >= 1, "a notification came");
         drop(state);
         let deadline = Instant::now() + Duration::from_secs(5);
         let mut notes = Vec::new();
@@ -30333,43 +30370,6 @@ e\\314\\201.'; sleep 5";
         session.shutdown();
     }
 
-    // ─── the journal ────────────────────────────────────────────────────
-
-    use crate::journal::{GATE_ROOM, JournalCut, MemoryStore, Side as Record};
-    use crate::snapshot::tests::readable;
-
-    /// A journal in memory that compacts only when the test says so.
-    fn manual_journal(bytes: usize, stall: Duration) -> Arc<Journal> {
-        Journal::new(Box::new(MemoryStore::new(bytes, 64 << 10, false)), stall)
-    }
-
-    /// The `StopSync` records still in `journal`.
-    fn stop_syncs(journal: &Journal) -> usize {
-        journal
-            .side_records()
-            .into_iter()
-            .filter(|side| *side == Record::StopSync)
-            .count()
-    }
-
-    /// Whether the grid shows `needle` now (one frame).
-    fn shows(session: &Session, needle: &str) -> bool {
-        let mut cells = Vec::new();
-        session.frame(
-            |cell| cells.push(cell),
-            |_| (),
-            &mut Blocks::default(),
-            &mut SelectionRuns::default(),
-            &mut SearchRuns::default(),
-            &mut TrackMarks::default(),
-            &mut Clusters::default(),
-            &mut Pictures::default(),
-            ScrollGlide::default(),
-            BUDGET,
-        );
-        grid_glyphs(&cells).contains(needle)
-    }
-
     /// One frame, damaged or not: the alternate screen's falling edge is
     /// the frame's.
     fn draw(session: &Session) {
@@ -30393,7 +30393,7 @@ e\\314\\201.'; sleep 5";
     impl TempDir {
         fn new(name: &str) -> Self {
             let dir =
-                std::env::temp_dir().join(format!("bateri-journal-{name}-{}", std::process::id()));
+                std::env::temp_dir().join(format!("bateri-session-{name}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).expect("temporary directory");
             Self(dir)
@@ -30406,83 +30406,11 @@ e\\314\\201.'; sleep 5";
         }
     }
 
-    /// A session whose child copies a FIFO to the PTY byte for byte (`stty
-    /// -opost`: no `\n` → `\r\n`) — the test chooses every byte the reader
-    /// reads and, by waiting for the bytes applied, where a read ends.
-    struct Loopback {
-        session: Session,
-        journal: Arc<Journal>,
-        fifo: File,
-        written: u64,
-        _dir: TempDir,
-    }
-
-    impl Loopback {
-        fn new(name: &str, journal: Arc<Journal>, cols: u16, rows: u16, scrollback: usize) -> Self {
-            let dir = TempDir::new(name);
-            let path = dir.0.join("in");
-            let made = std::process::Command::new("mkfifo")
-                .arg(&path)
-                .status()
-                .expect("mkfifo");
-            assert!(made.success());
-            let mut options = test_options(
-                (
-                    "/bin/sh".into(),
-                    vec![
-                        "-c".into(),
-                        "stty -opost; exec cat \"$1\"".into(),
-                        "sh".into(),
-                        path.display().to_string(),
-                    ],
-                ),
-                cols,
-            );
-            options.rows = rows;
-            options.cluster = true;
-            options.terminal.scrollback = scrollback;
-            options.journal = Some(Arc::clone(&journal));
-            let session = Session::spawn(options, Arc::new(TestWake::default())).unwrap();
-            // The open waits for `cat` — after `stty`.
-            let (opened, open) = mpsc::channel();
-            std::thread::spawn(move || {
-                let _ = opened.send(std::fs::OpenOptions::new().write(true).open(path));
-            });
-            let fifo = open
-                .recv_timeout(Duration::from_secs(10))
-                .expect("cat did not open the fifo")
-                .expect("the fifo opens");
-            Self {
-                session,
-                journal,
-                fifo,
-                written: 0,
-                _dir: dir,
-            }
-        }
-
-        /// Writes `bytes` and waits until the reader applied them: the next
-        /// write lands in a later read.
-        fn send(&mut self, bytes: &[u8]) {
-            use std::io::Write as _;
-            self.fifo
-                .write_all(bytes)
-                .expect("the fifo takes the bytes");
-            self.written += bytes.len() as u64;
-            let (journal, target) = (Arc::clone(&self.journal), self.written);
-            wait_until(
-                "the loopback's bytes applied",
-                Duration::from_secs(10),
-                || journal.applied_bytes() >= target,
-            );
-        }
-    }
-
     #[test]
     fn a_region_scroll_while_scrolled_back_still_draws() {
         // A program scrolling a region below a fixed top row (apt's progress
         // bar) while the user looks at the history: the frame after it must
-        // still find the window's rows. No journal — the plain session.
+        // still find the window's rows.
         use std::io::Write as _;
         let dir = TempDir::new("region-scroll");
         let path = dir.0.join("in");
@@ -31715,7 +31643,7 @@ e\\314\\201.'; sleep 5";
         program.session.shutdown();
     }
 
-    /// What a pane that came through a handover does for the program that had a view: the new
+    /// What a pane that shows a terminal again does for the program that had a view: the new
     /// process has none of the conversation, and offers the program a restart — an unsolicited
     /// `welcome` with a fresh token and `restart` — that the program answers by opening its view
     /// again. Nothing is written before it is asked: a pane that had no view gets nothing.
@@ -31752,722 +31680,6 @@ e\\314\\201.'; sleep 5";
         assert!(session.view_entry().is_none());
         session.close_view();
         session.restart_view();
-        session.shutdown();
-    }
-
-    /// xorshift64: the guard's sequences, the same for a seed on every run.
-    struct Rng(u64);
-
-    impl Rng {
-        fn below(&mut self, n: u64) -> u64 {
-            self.0 ^= self.0 << 13;
-            self.0 ^= self.0 >> 7;
-            self.0 ^= self.0 << 17;
-            self.0 % n.max(1)
-        }
-
-        fn pick<'a, T>(&mut self, items: &'a [T]) -> &'a T {
-            &items[self.below(items.len() as u64) as usize]
-        }
-    }
-
-    /// Output that reaches what the snapshot carries: text, wide characters
-    /// and clusters, the pen, cursor moves, erasing, the scrolling region,
-    /// inserting and deleting, tab stops, the character sets, the saved
-    /// cursor, the alternate screen, the modes, titles and their stack, the
-    /// palette, links, the cursor style, and a CSI a line feed interrupts.
-    /// Outside it, by the encoder's named limits: `CSI b` (the journal's),
-    /// RIS, G2/G3 as the active set, and DECSC on the alternate screen (its
-    /// saved cursor does not travel while the primary is shown — the trip
-    /// keeps `ESC 7` off the alternate screen).
-    const PIECES: &[&str] = &[
-        "plain text\r\n",
-        "abcdefghijklmnopqrstuvwxyz0123456789 wraps\r\n",
-        "漢字かな 漢\r\n",
-        "a👍🏽b 🇹🇷 ❤️ 👨\u{200d}👩\u{200d}👧 é\r\n",
-        "\x1b[1;31mred\x1b[0m \x1b[38;2;10;20;30;48;5;200mtrue\x1b[m\r\n",
-        "\x1b[4:3mcurly\x1b[58;5;3m under\x1b[0m \x1b[7m inverse \x1b[27m\r\n",
-        "\x1b[3;5Hcup\x1b[6;2H",
-        "\x1b[2J\x1b[H",
-        "\x1b[K\x1b[1J",
-        "\x1b[2;5r\x1b[5H\n\n\nscrolled\x1b[r",
-        "\x1b[2L\x1b[1M\x1b[3@\x1b[2P",
-        "\tT\x1b[3g\x1b[5G\x1bH\x1b[12G\x1bH\r\n\tx\tu\r\n",
-        "\x1b(0lqqk\x1b(B ok\r\n",
-        "\x1b)0\x0eqqq\x0f back\r\n",
-        "\x1b7\x1b[4;4Hsaved\x1b8",
-        "\x1b[?1049h\x1b[Halt\x1b[2;3Hvim \x1b[1;33m~\x1b[0m",
-        "\x1b[?1049l",
-        "\x1b[?2004h\x1b[?1h\x1b=",
-        "\x1b[?2004l\x1b[?1l\x1b>",
-        "\x1b[?25l\x1b[?1000h\x1b[?1006h\x1b[?1004h",
-        "\x1b[?25h\x1b[?1000l\x1b[?1006l",
-        "\x1b[?7l0123456789012345678901234567890123456789\x1b[?7h\r\n",
-        "\x1b[4hins\x1b[4l",
-        "\x1b]2;one\x07",
-        "\x1b]0;two\x1b\\",
-        "\x1b[22t\x1b]2;pushed\x07",
-        "\x1b[23t",
-        "\x1b]4;3;rgb:11/22/33\x07\x1b]11;rgb:01/02/03\x07",
-        "\x1b]8;id=x;https://bateri.dev\x07link\x1b]8;;\x07 after\r\n",
-        "\x1b[?1016h",
-        "\x1b[?1016l",
-        "\x1b[5 q",
-        "\x1b[2 q\x1b[?12h",
-        "\x1b[0 q\x1b[?12l",
-        "\x1b[3\n1mfed\x1b[0m\r\n",
-        "\u{3042}\u{3099} e\u{301} x\r\n",
-    ];
-
-    /// Feeds a live session random output and random calls of every
-    /// `Session` method that writes `Term`, compacts at random points, and
-    /// checks the journal's copy against the live terminal: replayed into a
-    /// fresh `Term`, what `Term` shows, the encoder's bytes and every probed
-    /// field are the live one's.
-    fn copy_trip(seed: u64) {
-        let journal = manual_journal(64 << 20, Duration::from_secs(60));
-        let mut lo = Loopback::new(&format!("copy-{seed}"), Arc::clone(&journal), 30, 8, 50);
-        let mut rng = Rng(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1);
-        // A title first: a pushed `None` title comes back as `""`.
-        lo.send(b"\x1b]2;start\x07");
-        let mut alternate = false;
-        for _ in 0..80 {
-            match rng.below(14) {
-                0..=5 => {
-                    let text = *rng.pick(PIECES);
-                    if alternate && text.contains("\x1b7") {
-                        continue;
-                    }
-                    if text.contains("\x1b[?1049h") {
-                        alternate = true;
-                    } else if text.contains("\x1b[?1049l") {
-                        alternate = false;
-                    }
-                    let piece = text.as_bytes();
-                    // A read may end anywhere: inside a character, a CSI, an OSC.
-                    let split = rng.below(piece.len() as u64 + 1) as usize;
-                    if rng.below(2) == 0 && split > 0 && split < piece.len() {
-                        lo.send(&piece[..split]);
-                        lo.send(&piece[split..]);
-                    } else {
-                        lo.send(piece);
-                    }
-                }
-                6 => {
-                    // A synchronized update, ended by its own ESU or by the
-                    // timeout — the reader's side record.
-                    if rng.below(2) == 0 {
-                        lo.send(b"\x1b[?2026hin sync\r\n\x1b[1;32mgreen\x1b[0m\x1b[?2026l");
-                    } else {
-                        let before = journal.sides_written();
-                        lo.send(b"\x1b[?2026htimed \x1b[4mout\x1b[0m\r\n");
-                        wait_until("the update's timeout", Duration::from_secs(5), || {
-                            journal.sides_written() > before
-                        });
-                    }
-                }
-                7 => {
-                    let cols = 10 + rng.below(30) as u16;
-                    let rows = 4 + rng.below(7) as u16;
-                    let _ = lo.session.resize(cols, rows, (9, 18));
-                }
-                8 => {
-                    if rng.below(2) == 0 {
-                        lo.session.clear_to_start();
-                    } else {
-                        lo.session.clear_scrollback();
-                    }
-                }
-                9 => lo.session.set_terminal_options(TerminalOptions {
-                    scrollback: 20 + rng.below(180) as usize,
-                    osc52: *rng.pick(&[Osc52::Off, Osc52::Copy]),
-                    cursor: *rng.pick(&[
-                        CaretShape::Block,
-                        CaretShape::Underline,
-                        CaretShape::Beam,
-                    ]),
-                    blink: *rng.pick(&[CursorBlink::Auto, CursorBlink::On, CursorBlink::Off]),
-                }),
-                10 => {
-                    // The content-neutral writers, and the frame whose edge
-                    // resets the cursor style. The view is back at the bottom
-                    // before more output: a scrolling region that scrolls
-                    // while the view is scrolled back pushes alacritty's
-                    // display offset past the history — a separate bug, not
-                    // the journal's.
-                    draw(&lo.session);
-                    let _ = lo.session.scroll_page(1);
-                    lo.session.clear_selection();
-                    draw(&lo.session);
-                    let _ = lo.session.scroll_page(-1);
-                }
-                11 => draw(&lo.session),
-                _ => {
-                    let base = journal.base().expect("seeded");
-                    let applied = journal.applied_bytes();
-                    let limit = base.at.pty + rng.below(applied - base.at.pty + 1);
-                    if let Some(cut) = journal.compact_until(limit) {
-                        journal.release(cut);
-                    }
-                }
-            }
-        }
-        draw(&lo.session);
-        // What a holder would keep: the base before the last compaction and
-        // the journal after it, with the state blob — rebuilt below, as
-        // `bateri compact` rebuilds it after a crash.
-        let (_, kept_base) = journal.current_base().expect("seeded");
-        let kept_records = journal.records();
-        let kept_blob = lo.session.state_blob();
-        if let Some(cut) = journal.compact() {
-            journal.release(cut);
-        }
-        assert!(!journal.is_broken(), "seed {seed}: the journal broke");
-        let base = journal.base().expect("seeded");
-        assert_eq!(
-            base.at.pty,
-            journal.applied_bytes(),
-            "seed {seed}: the last compaction did not reach the last byte"
-        );
-
-        // The copy, as the next process replays it.
-        #[derive(Clone, Default)]
-        struct Titles(Arc<Mutex<Option<String>>>);
-        impl EventListener for Titles {
-            fn send_event(&self, event: Event) {
-                match event {
-                    Event::Title(title) => *lock(&self.0) = Some(title),
-                    Event::ResetTitle => *lock(&self.0) = None,
-                    _ => {}
-                }
-            }
-        }
-        let titles = Titles::default();
-        let mut copy = Term::new(
-            term_config(base.options),
-            &GridSize::for_spawn(base.cols, base.rows),
-            titles.clone(),
-        );
-        let mut parser: ansi::Processor = ansi::Processor::new();
-        let mut last_input = false;
-        let copy_modes = KeptModes::default();
-        parser.advance(
-            &mut ClusterHandler::new(&mut copy, true, &mut last_input).kept_modes(&copy_modes),
-            &base.vt,
-        );
-
-        let slot = &lo.session.adapter.0.title;
-        let live_title = lock(slot).clone();
-        let (live_shown, live_vt, live_probed) = {
-            let mut term = lo.session.term.lock();
-            let shown = readable(&*term);
-            let modes = &lo.session.adapter.0.modes;
-            let (vt, probed) =
-                snapshot::encode_live(&mut *term, &|| lock(slot).clone(), &|| (), modes);
-            (shown, vt, probed)
-        };
-        assert_eq!(readable(&copy), live_shown, "seed {seed}");
-        assert_eq!(lock(&titles.0).clone(), live_title, "seed {seed}");
-        let copy_titles = titles.clone();
-        let (copy_vt, copy_probed) = snapshot::encode_live(
-            &mut copy,
-            &move || lock(&copy_titles.0).clone(),
-            &|| (),
-            &copy_modes,
-        );
-        assert_eq!(
-            String::from_utf8_lossy(&copy_vt),
-            String::from_utf8_lossy(&live_vt),
-            "seed {seed}"
-        );
-        assert_eq!(copy_probed, live_probed, "seed {seed}");
-
-        // The crash's copy: the kept base and journal, rebuilt.
-        let rebuilt =
-            crate::journal::rebuild(&kept_blob, &kept_base, &kept_records).expect("rebuilds");
-        assert_eq!((rebuilt.cols, rebuilt.rows), (base.cols, base.rows));
-        let titles = Titles::default();
-        let mut crash = Term::new(
-            term_config(base.options),
-            &GridSize::for_spawn(rebuilt.cols, rebuilt.rows),
-            titles.clone(),
-        );
-        let mut last_input = false;
-        let crash_modes = KeptModes::default();
-        for bytes in [&rebuilt.vt, &rebuilt.tail] {
-            // A fresh parser for each, the handover's order.
-            let mut parser: ansi::Processor = ansi::Processor::new();
-            parser.advance(
-                &mut ClusterHandler::new(&mut crash, true, &mut last_input)
-                    .kept_modes(&crash_modes),
-                bytes,
-            );
-        }
-        assert_eq!(readable(&crash), live_shown, "seed {seed}: the rebuild");
-        assert_eq!(lock(&titles.0).clone(), live_title, "seed {seed}");
-        let crash_titles = titles.clone();
-        let (crash_vt, crash_probed) = snapshot::encode_live(
-            &mut crash,
-            &move || lock(&crash_titles.0).clone(),
-            &|| (),
-            &crash_modes,
-        );
-        assert_eq!(
-            String::from_utf8_lossy(&crash_vt),
-            String::from_utf8_lossy(&live_vt),
-            "seed {seed}: the rebuild"
-        );
-        assert_eq!(crash_probed, live_probed, "seed {seed}: the rebuild");
-        assert!(
-            rebuilt.history.ends_with(b"\r\n") || rebuilt.history.is_empty(),
-            "seed {seed}: the history is session restore's"
-        );
-    }
-
-    #[test]
-    fn the_journals_copy_is_the_live_terminal() {
-        for seed in [1, 7, 42, 2026, 9001] {
-            copy_trip(seed);
-        }
-    }
-
-    #[test]
-    fn a_session_without_a_journal_records_nothing_and_keeps_its_gate_open() {
-        // The reader's journal paths are all behind the option: nothing is
-        // seeded, no record is written, the read interest never moves.
-        let wake = Arc::new(TestWake::default());
-        let session = spawn_session("printf 'plain'; sleep 5", Arc::clone(&wake));
-        wait_text(&session, "plain");
-        assert!(session.journal.is_none());
-    }
-
-    #[test]
-    fn a_full_journal_stops_the_reader_and_keeps_its_channel() {
-        let dir = TempDir::new("channel");
-        let seen = dir.0.join("seen");
-        let journal = manual_journal(GATE_ROOM + (8 << 10), Duration::from_secs(60));
-        let wake = Arc::new(TestWake::default());
-        let mut options = test_options(
-            sh(&format!(
-                "stty -echo; cat < /dev/tty > '{}' & while :; do printf '%0100d\\n' 0; done",
-                seen.display()
-            )),
-            40,
-        );
-        options.journal = Some(Arc::clone(&journal));
-        let session = Session::spawn(options, Arc::clone(&wake) as Arc<dyn Wake>).unwrap();
-        wait_until("the gate closes", Duration::from_secs(10), || {
-            !journal.gate_open()
-        });
-        // The read that closed the gate is recorded before it is applied, and
-        // the `pty_read` it is part of may read on: the count is taken once
-        // everything recorded is applied and stays so.
-        wait_until(
-            "the last read was not applied",
-            Duration::from_secs(10),
-            || {
-                let settled = || {
-                    let records = journal.records();
-                    journal.applied_bytes() == records.bytes_at + records.bytes.len() as u64
-                };
-                let before = journal.applied_bytes();
-                settled() && {
-                    std::thread::sleep(Duration::from_millis(50));
-                    settled() && journal.applied_bytes() == before
-                }
-            },
-        );
-        // The reader reads no more…
-        let applied = journal.applied_bytes();
-        std::thread::sleep(Duration::from_millis(300));
-        assert_eq!(
-            journal.applied_bytes(),
-            applied,
-            "the reader read through a closed gate"
-        );
-        assert!(!journal.is_broken());
-        // …but its channel turns: input reaches the PTY, ⌃C its program.
-        session.write(b"ping\n");
-        wait_until("the input reaches the PTY", Duration::from_secs(10), || {
-            std::fs::read_to_string(&seen).is_ok_and(|text| text.contains("ping"))
-        });
-        session.write(b"\x03");
-        assert!(
-            wake.wait_exit(Duration::from_secs(10)).is_some(),
-            "⌃C did not end the program behind a closed gate"
-        );
-        session.shutdown();
-    }
-
-    #[test]
-    fn the_shutdown_reaches_a_reader_behind_a_closed_gate() {
-        // `freeze` sends the shutdown and joins the reader without a bound:
-        // it returns only if the closed gate kept the channel turning.
-        let journal = manual_journal(GATE_ROOM + (8 << 10), Duration::from_secs(60));
-        let mut options = test_options(sh("while :; do printf '%0100d\\n' 0; done"), 40);
-        options.journal = Some(Arc::clone(&journal));
-        let session = Arc::new(Session::spawn(options, Arc::new(TestWake::default())).unwrap());
-        wait_until("the gate closes", Duration::from_secs(10), || {
-            !journal.gate_open()
-        });
-        let (done, frozen) = mpsc::channel();
-        {
-            let session = Arc::clone(&session);
-            std::thread::spawn(move || {
-                let _ = done.send(session.freeze().map(|frozen| frozen.pid));
-            });
-        }
-        let pid = frozen
-            .recv_timeout(Duration::from_secs(10))
-            .expect("the reader did not take the shutdown")
-            .expect("the session froze");
-        // The frozen PTY is leaked on purpose; its writer would block on it.
-        let _ = std::process::Command::new("kill")
-            .args(["-9", &pid.to_string()])
-            .status();
-    }
-
-    #[test]
-    fn the_compactions_room_lets_the_reader_read_on() {
-        // A fixed amount of output, larger than the journal: it all arrives
-        // only through compactions.
-        let journal = manual_journal(GATE_ROOM + (64 << 10), Duration::from_secs(60));
-        let mut options = test_options(
-            sh(
-                "i=0; while [ $i -lt 4000 ]; do printf 'line %06d of the output\\n' $i; i=$((i+1)); done; printf END; sleep 30",
-            ),
-            40,
-        );
-        options.journal = Some(Arc::clone(&journal));
-        let session = Session::spawn(options, Arc::new(TestWake::default())).unwrap();
-        wait_until("the gate closes", Duration::from_secs(10), || {
-            !journal.gate_open()
-        });
-        let mut rounds = 0;
-        wait_until(
-            "the output arrives through compactions",
-            Duration::from_secs(30),
-            || {
-                if !journal.gate_open() {
-                    if let Some(cut) = journal.compact() {
-                        journal.release(cut);
-                        rounds += 1;
-                    }
-                }
-                shows(&session, "END")
-            },
-        );
-        assert!(rounds > 0);
-        assert!(!journal.is_broken());
-    }
-
-    #[test]
-    fn a_room_wake_is_not_the_sync_timeout() {
-        // `Msg::Room` is a channel message: an empty wake would be the
-        // DEC 2026 timeout's arm — an early `stop_sync` and a frame per wake.
-        let journal = manual_journal(64 << 20, Duration::from_secs(60));
-        let wake = Arc::new(TestWake::default());
-        let mut options = test_options(sh("printf '\\033[?2026hSYNCED'; sleep 30"), 40);
-        options.journal = Some(Arc::clone(&journal));
-        let session = Session::spawn(options, Arc::clone(&wake) as Arc<dyn Wake>).unwrap();
-        wait_until("the update's bytes", Duration::from_secs(10), || {
-            journal.applied_bytes() >= 14
-        });
-        // A journaled loop's arm also wants the update's own deadline: not
-        // even a wake whose message an earlier round drained ends it.
-        let wakes = lock(&wake.state).wakes;
-        for _ in 0..200 {
-            journal.release(JournalCut::default());
-        }
-        std::thread::sleep(Duration::from_millis(300));
-        assert_eq!(stop_syncs(&journal), 1, "only the update's own timeout");
-        assert!(
-            lock(&wake.state).wakes - wakes < 10,
-            "the room wakes asked for frames"
-        );
-        drop(session);
-    }
-
-    #[test]
-    fn a_gate_closed_inside_an_update_opens_when_the_update_times_out() {
-        // The compaction finds the update open — no cut — and waits for a
-        // new side record: the update's timeout. It must be asked again then,
-        // or the closed gate would wait out the stall and break the journal.
-        let journal = Journal::new(
-            Box::new(MemoryStore::new(GATE_ROOM + (32 << 10), 64 << 10, true)),
-            Duration::from_secs(1),
-        );
-        let mut options = test_options(
-            sh(
-                "printf '\\033[?2026h'; i=0; while [ $i -lt 4000 ]; do printf 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\n'; i=$((i+1)); done; printf END; sleep 30",
-            ),
-            40,
-        );
-        options.journal = Some(Arc::clone(&journal));
-        let session = Session::spawn(options, Arc::new(TestWake::default())).unwrap();
-        wait_until("the output arrives", Duration::from_secs(30), || {
-            shows(&session, "END")
-        });
-        assert!(
-            !journal.is_broken(),
-            "the journal broke waiting for the update's timeout"
-        );
-    }
-
-    #[test]
-    fn the_stall_timer_does_not_end_an_open_sync() {
-        // The gate closes inside a synchronized update; the stall deadline
-        // wakes the loop every few milliseconds while the compaction makes
-        // progress. Only the update's own timeout applies it: once.
-        let journal = manual_journal(GATE_ROOM + (4 << 10), Duration::from_millis(5));
-        let wake = Arc::new(TestWake::default());
-        let mut options = test_options(
-            sh(
-                "printf '\\033[?2026h'; i=0; while [ $i -lt 8000 ]; do printf 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\\n'; i=$((i+1)); done; sleep 30",
-            ),
-            40,
-        );
-        options.journal = Some(Arc::clone(&journal));
-        let session = Session::spawn(options, Arc::clone(&wake) as Arc<dyn Wake>).unwrap();
-        let progressing = Arc::new(AtomicBool::new(true));
-        let stepper = {
-            let (journal, progressing) = (Arc::clone(&journal), Arc::clone(&progressing));
-            std::thread::spawn(move || {
-                while progressing.load(Ordering::Acquire) {
-                    journal.step();
-                    std::thread::sleep(Duration::from_millis(1));
-                }
-            })
-        };
-        wait_until("the gate closes", Duration::from_secs(10), || {
-            !journal.gate_open()
-        });
-        let wakes = lock(&wake.state).wakes;
-        std::thread::sleep(Duration::from_millis(400));
-        assert!(
-            !journal.is_broken(),
-            "a compaction that progresses broke the journal"
-        );
-        assert_eq!(
-            stop_syncs(&journal),
-            1,
-            "the stall deadline ended the update"
-        );
-        assert!(
-            lock(&wake.state).wakes - wakes < 10,
-            "the stall deadline asked for frames"
-        );
-        // Without progress the journal breaks and the reader reads on.
-        progressing.store(false, Ordering::Release);
-        stepper.join().unwrap();
-        wait_until("the journal breaks", Duration::from_secs(5), || {
-            journal.is_broken()
-        });
-        let applied = journal.applied_bytes();
-        wait_until("the reader reads on", Duration::from_secs(5), || {
-            journal.applied_bytes() > applied
-        });
-        drop(session);
-    }
-
-    #[test]
-    fn a_compaction_without_progress_breaks_the_journal() {
-        let journal = manual_journal(GATE_ROOM + (8 << 10), Duration::from_millis(100));
-        let mut options = test_options(sh("while :; do printf '%0100d\\n' 0; done"), 40);
-        options.journal = Some(Arc::clone(&journal));
-        let session = Session::spawn(options, Arc::new(TestWake::default())).unwrap();
-        wait_until("the journal breaks", Duration::from_secs(10), || {
-            journal.is_broken()
-        });
-        assert!(journal.gate_open());
-        let applied = journal.applied_bytes();
-        wait_until("the reader reads on", Duration::from_secs(5), || {
-            journal.applied_bytes() > applied
-        });
-        drop(session);
-    }
-
-    #[test]
-    fn a_full_side_stream_breaks_the_journal_instead_of_waiting() {
-        // The main thread's room is the side stream: when it is full the
-        // journal breaks, nothing waits for a compaction.
-        let journal = Journal::new(
-            Box::new(MemoryStore::new(64 << 20, 40, false)),
-            Duration::from_secs(60),
-        );
-        let mut options = test_options(sh("printf ready; sleep 30"), 40);
-        options.journal = Some(Arc::clone(&journal));
-        let session = Session::spawn(options, Arc::new(TestWake::default())).unwrap();
-        wait_text(&session, "ready");
-        let started = Instant::now();
-        for n in 0..10 {
-            let _ = session.resize(20 + n, 6, (9, 18));
-        }
-        assert!(started.elapsed() < Duration::from_secs(1));
-        assert!(journal.is_broken());
-        assert_eq!(
-            journal.sides_written(),
-            2,
-            "two 17-byte records fit in 40 bytes"
-        );
-    }
-
-    #[test]
-    fn the_prefix_waits_for_room_and_finishes_on_a_quiet_pty() {
-        // More than one read of prefix: the gate closes inside the serial
-        // rounds, the room wakes them and they finish without the PTY ever
-        // becoming readable (the child sleeps).
-        let old = spawn_with_cols(
-            sh("echo READY; sleep 30"),
-            40,
-            Arc::new(TestWake::default()),
-        );
-        wait_text(&old, "READY");
-        let frozen = old.freeze().expect("the session did not freeze");
-        let mut prefix = vec![b'p'; 3 << 19];
-        prefix.extend_from_slice(b"\r\nPREFIXEND");
-        let total = (frozen.tail.len() + prefix.len()) as u64;
-        let journal = manual_journal(GATE_ROOM + (64 << 10), Duration::from_secs(60));
-        let mut options = test_options(sh("unused"), frozen.cols);
-        options.journal = Some(Arc::clone(&journal));
-        let (exit, _alive) = std::os::unix::net::UnixStream::pair().expect("socketpair");
-        let new = Session::adopt(
-            options,
-            Adoption {
-                master: frozen.master,
-                exit: OwnedFd::from(exit),
-                pid: frozen.pid,
-                vt: frozen.vt,
-                blob: frozen.blob,
-                prefix: [frozen.tail.as_slice(), &prefix].concat(),
-                input: frozen.input,
-                ops: Arc::new(RecordingOps::default()),
-                mode: AdoptMode::Update,
-            },
-            Arc::new(TestWake::default()),
-        )
-        .expect("adopted");
-        wait_until(
-            "the gate closes inside the prefix",
-            Duration::from_secs(10),
-            || !journal.gate_open(),
-        );
-        assert!(journal.applied_bytes() < total);
-        wait_until(
-            "the prefix finishes through compactions",
-            Duration::from_secs(20),
-            || {
-                if !journal.gate_open()
-                    && let Some(cut) = journal.compact()
-                {
-                    journal.release(cut);
-                }
-                journal.applied_bytes() >= total
-            },
-        );
-        wait_text(&new, "PREFIXEND");
-        drop(old);
-    }
-
-    #[test]
-    #[ignore = "runs with make test-race"]
-    fn race_journal_copy_and_everything_that_writes_term() {
-        // The reader records and applies, the main thread resizes, clears
-        // and changes options, the in-process body compacts on its own
-        // thread — all at once. The stamps put the side records back in the
-        // order the live `Term` took them: the copy is the live terminal.
-        // Room for the gate and the margin plus 16 KiB: a compaction every
-        // 16 KiB of output, on the body's own thread.
-        let journal = Journal::new(
-            Box::new(MemoryStore::new(2 * GATE_ROOM + (16 << 10), 64 << 10, true)),
-            STALL_FOR_RACE,
-        );
-        let mut options = test_options(
-            sh("i=0; while [ $i -lt 1500 ]; do \
-                printf '\\033[3%dmline %d\\033[0m 漢字 👍🏽 \\033]2;t%d\\007\\n' $((i%8)) $i $i; \
-                if [ $((i%300)) -eq 0 ]; then printf '\\033[?1049hALT\\033[3;3Hv'; printf '\\033[?1049l'; fi; \
-                if [ $((i%170)) -eq 0 ]; then printf '\\033[?2026hSYNC'; fi; \
-                if [ $((i%50)) -eq 0 ]; then sleep 0.05; fi; \
-                i=$((i+1)); done; printf DONE; sleep 30"),
-            30,
-        );
-        options.cluster = true;
-        options.journal = Some(Arc::clone(&journal));
-        let session = Arc::new(Session::spawn(options, Arc::new(TestWake::default())).unwrap());
-        let deadline = Instant::now() + Duration::from_secs(2);
-        let writer = {
-            let session = Arc::clone(&session);
-            std::thread::spawn(move || {
-                let mut n = 0u16;
-                while Instant::now() < deadline {
-                    let _ = session.resize(12 + n % 25, 4 + n % 6, (9, 18));
-                    if n % 7 == 0 {
-                        session.clear_to_start();
-                    }
-                    if n % 11 == 0 {
-                        session.set_terminal_options(TerminalOptions {
-                            scrollback: 30 + usize::from(n % 90),
-                            osc52: Osc52::Copy,
-                            cursor: CaretShape::Block,
-                            blink: CursorBlink::Auto,
-                        });
-                    }
-                    n = n.wrapping_add(1);
-                    std::thread::sleep(Duration::from_millis(2));
-                }
-            })
-        };
-        while Instant::now() < deadline {
-            draw(&session);
-            std::thread::sleep(Duration::from_millis(3));
-        }
-        writer.join().unwrap();
-        // The output ends and every update's timeout passed.
-        wait_until("the output ends", Duration::from_secs(30), || {
-            shows(&session, "DONE")
-        });
-        let mut last = journal.applied_bytes();
-        wait_until("the reader settles", Duration::from_secs(10), || {
-            std::thread::sleep(Duration::from_millis(300));
-            let now = journal.applied_bytes();
-            std::mem::replace(&mut last, now) == now
-        });
-        draw(&session);
-        assert!(
-            journal.base().is_some_and(|base| base.at.pty > 0),
-            "no compaction ran during the race"
-        );
-        if let Some(cut) = journal.compact() {
-            journal.release(cut);
-        }
-        assert!(!journal.is_broken(), "the journal broke in the race");
-        let base = journal.base().expect("seeded");
-        assert_eq!(base.at.pty, journal.applied_bytes());
-        let mut copy = Term::new(
-            term_config(base.options),
-            &GridSize::for_spawn(base.cols, base.rows),
-            VoidListener,
-        );
-        let mut parser: ansi::Processor = ansi::Processor::new();
-        let mut last_input = false;
-        parser.advance(
-            &mut ClusterHandler::new(&mut copy, true, &mut last_input),
-            &base.vt,
-        );
-        let live_shown = readable(&*session.term.lock());
-        assert_eq!(readable(&copy), live_shown);
-        let (copy_vt, _) =
-            snapshot::encode_live(&mut copy, &|| None, &|| (), &KeptModes::default());
-        let (live_vt, _) = snapshot::encode_live(
-            &mut *session.term.lock(),
-            &|| None,
-            &|| (),
-            &KeptModes::default(),
-        );
-        assert_eq!(
-            String::from_utf8_lossy(&copy_vt),
-            String::from_utf8_lossy(&live_vt)
-        );
         session.shutdown();
     }
 
@@ -32794,85 +32006,6 @@ e\\314\\201.'; sleep 5";
     }
 
     #[test]
-    fn a_command_still_arriving_when_the_freeze_gives_up_finishes_on_the_adopting_side() {
-        // The client stalls inside the payload for longer than the freeze
-        // waits: the command so far goes in the tail, and the new side's
-        // reader gets the rest from the master — an image, not text.
-        let old = spawn_session(
-            "printf '\\033_Ga=t,f=32,s=1,v=1,i=8;AAAA'; sleep 1; printf 'AA==\\033\\\\Q'; sleep 8",
-            Arc::new(TestWake::default()),
-        );
-        wait_until("the command opens", Duration::from_secs(8), || {
-            old.adapter.0.graphics.is_open()
-        });
-        let frozen = old.freeze().expect("the session did not freeze");
-        let carried = String::from_utf8_lossy(&frozen.tail).into_owned();
-        assert!(carried.ends_with("i=8;AAAA"), "{carried:?}");
-        let (exit, _alive) = std::os::unix::net::UnixStream::pair().expect("socketpair");
-        let new = Session::adopt(
-            test_options(sh("unused"), frozen.cols),
-            Adoption {
-                master: frozen.master,
-                exit: OwnedFd::from(exit),
-                pid: frozen.pid,
-                vt: frozen.vt,
-                blob: frozen.blob,
-                prefix: frozen.tail,
-                input: frozen.input,
-                ops: Arc::new(RecordingOps::default()),
-                mode: AdoptMode::Update,
-            },
-            Arc::new(TestWake::default()),
-        )
-        .expect("adopted");
-        let text = wait_text(&new, "Q");
-        assert!(!text.contains("AA"), "{text:?}");
-        assert_eq!(stored_ids(&new), (vec![8], vec![]));
-    }
-
-    #[test]
-    fn a_freeze_does_not_wait_for_a_reader_stuck_in_a_decode() {
-        // A decode that reads a file on a stalled mount can take as long as
-        // the mount does; the handover does not wait with it. It fails the way
-        // a session with nothing to hand over does, and the pane is closed the
-        // old way.
-        let session = spawn_session(
-            &format!(
-                "stty -echo; printf a; sleep 0.3; printf '{}READY'; sleep 8",
-                printf_pixel(2)
-            ),
-            Arc::new(TestWake::default()),
-        );
-        let (entered, in_decode) = mpsc::channel::<()>();
-        let (release, released) = mpsc::channel::<()>();
-        session.adapter.0.graphics.on_decode(Box::new(move || {
-            let _ = entered.send(());
-            let _ = released.recv_timeout(Duration::from_secs(20));
-        }));
-        in_decode
-            .recv_timeout(Duration::from_secs(8))
-            .expect("the reader reaches the decode");
-        let started = Instant::now();
-        let result = session.freeze();
-        let waited = started.elapsed();
-        let _ = release.send(());
-        let Err(error) = result else {
-            panic!("the freeze gave a handover although the reader was stuck");
-        };
-        assert_eq!(error.kind(), io::ErrorKind::TimedOut, "{error}");
-        // The session is whole enough to be closed the old way: it still has
-        // its reader, and the shutdown hangs the child up.
-        let closing = session
-            .begin_shutdown()
-            .expect("the session kept its reader and can be shut down");
-        let _ = closing.wait_until(Instant::now() + Duration::from_secs(10));
-        assert!(
-            waited >= FREEZE_GRACE && waited < FREEZE_GRACE * 4,
-            "{waited:?}"
-        );
-    }
-
-    #[test]
     fn a_synchronized_update_applies_its_commands_in_stream_order() {
         // The whole update is one read. Taken out of the stream at once, the
         // two images would both land on the screen the parser was on when the
@@ -33083,65 +32216,6 @@ e\\314\\201.'; sleep 5";
     }
 
     #[test]
-    fn the_journals_copy_of_the_screen_has_the_cursor_where_the_image_left_it() {
-        let journal = manual_journal(64 << 20, Duration::from_secs(60));
-        let mut options = test_options(
-            sh(&format!(
-                "stty -echo; printf 'a\\033[3;5H{}\\033[9;1H{}READY'; sleep 8",
-                printf_cells(1, 2, 3, ""),
-                printf_cells(2, 40, 2, "")
-            )),
-            40,
-        );
-        options.journal = Some(Arc::clone(&journal));
-        let session = Session::spawn(options, Arc::new(TestWake::default())).unwrap();
-        wait_text(&session, "READY");
-        let mut last = journal.applied_bytes();
-        wait_until("the reader settles", Duration::from_secs(10), || {
-            std::thread::sleep(Duration::from_millis(200));
-            let now = journal.applied_bytes();
-            std::mem::replace(&mut last, now) == now
-        });
-        if let Some(cut) = journal.compact() {
-            journal.release(cut);
-        }
-        let base = journal.base().expect("seeded");
-        assert_eq!(base.at.pty, journal.applied_bytes());
-        let mut copy = Term::new(
-            term_config(base.options),
-            &GridSize::for_spawn(base.cols, base.rows),
-            VoidListener,
-        );
-        let mut parser: ansi::Processor = ansi::Processor::new();
-        let mut last_input = false;
-        parser.advance(
-            &mut ClusterHandler::new(&mut copy, true, &mut last_input),
-            &base.vt,
-        );
-        // The second image is as wide as the screen and two rows tall from
-        // line 8: the screen scrolled once, and the cursor ended at the start
-        // of the line after it.
-        assert_eq!(
-            copy.grid().cursor.point,
-            session.term.lock().grid().cursor.point
-        );
-        assert_eq!(readable(&copy), readable(&*session.term.lock()));
-        let (copy_vt, _) =
-            snapshot::encode_live(&mut copy, &|| None, &|| (), &KeptModes::default());
-        let (live_vt, _) = snapshot::encode_live(
-            &mut *session.term.lock(),
-            &|| None,
-            &|| (),
-            &KeptModes::default(),
-        );
-        assert_eq!(
-            String::from_utf8_lossy(&copy_vt),
-            String::from_utf8_lossy(&live_vt)
-        );
-        session.shutdown();
-    }
-
-    #[test]
     fn the_sequence_the_graphics_marker_once_was_does_nothing_when_a_program_writes_it() {
         let wake = Arc::new(TestWake::default());
         let session = spawn_session("printf 'a\\033[?8166hb READY'; sleep 8", wake);
@@ -33170,161 +32244,4 @@ e\\314\\201.'; sleep 5";
         });
         session.shutdown();
     }
-
-    #[test]
-    fn a_stream_of_nothing_but_commands_is_parsed_whole_and_leaves_the_journal_whole() {
-        // Fifty thousand of the shortest commands: each is the parser's where
-        // it ends, however the reads cut the stream, and the journal holds the
-        // bytes as they were read, so a flood cannot make it outgrow its gate.
-        let journal = manual_journal(64 << 20, Duration::from_secs(60));
-        let mut options = test_options(
-            sh("chunk=$(printf '\\033_G\\033\\\\%.0s' $(seq 1 500)); i=0; \
-                 while [ $i -lt 100 ]; do printf '%s' \"$chunk\"; i=$((i+1)); done; \
-                 printf 'READY'; sleep 8"),
-            40,
-        );
-        options.journal = Some(Arc::clone(&journal));
-        let session = Session::spawn(options, Arc::new(TestWake::default())).unwrap();
-        let text = wait_text(&session, "READY");
-        assert!(!text.contains("_G"), "{text:?}");
-        assert!(session.reader_alive());
-        assert!(!journal.is_broken(), "the flood broke the journal");
-        let records = journal.records();
-        assert_eq!(
-            journal.applied_bytes(),
-            records.bytes_at + records.bytes.len() as u64
-        );
-        assert_eq!(records.bytes.len(), 100 * 500 * 5 + "READY".len());
-        session.shutdown();
-    }
-
-    #[test]
-    fn the_journal_records_the_stream_as_the_program_wrote_it() {
-        let journal = manual_journal(64 << 20, Duration::from_secs(60));
-        let mut options = test_options(
-            sh(&format!(
-                "stty -echo; printf 'a{}b READY'; sleep 8",
-                printf_pixel(7)
-            )),
-            40,
-        );
-        options.journal = Some(Arc::clone(&journal));
-        let session = Session::spawn(options, Arc::new(TestWake::default())).unwrap();
-        wait_text(&session, "READY");
-        let records = journal.records();
-        let bytes = String::from_utf8_lossy(&records.bytes).into_owned();
-        // The command is in it, whole, between the text around it.
-        assert!(
-            bytes.contains("a\x1b_Ga=t,f=32,s=1,v=1,i=7;AAAAAA==\x1b\\b READY"),
-            "{bytes:?}"
-        );
-        assert_eq!(
-            journal.applied_bytes(),
-            records.bytes_at + records.bytes.len() as u64
-        );
-        assert_eq!(stored_ids(&session), (vec![7], vec![]));
-        session.shutdown();
-    }
-
-    #[test]
-    fn a_freeze_waits_for_a_command_in_flight_and_does_not_cut_it() {
-        let session = spawn_session(
-            "printf '\\033_Ga=t,f=32,s=1,v=1,i=8;AAAA'; sleep 0.4; printf 'AA==\\033\\\\READY'; sleep 8",
-            Arc::new(TestWake::default()),
-        );
-        wait_until("the command opens", Duration::from_secs(8), || {
-            session.adapter.0.graphics.is_open()
-        });
-        let started = Instant::now();
-        let frozen = session.freeze().expect("the session did not freeze");
-        assert!(
-            started.elapsed() >= Duration::from_millis(100),
-            "it did not wait"
-        );
-        assert!(!session.adapter.0.graphics.is_open());
-        let tail = String::from_utf8_lossy(&frozen.tail).into_owned();
-        let vt = String::from_utf8_lossy(&frozen.vt).into_owned();
-        assert!(
-            !tail.contains("Ga=") && !vt.contains("AAAA"),
-            "{tail:?} {vt:?}"
-        );
-        assert_eq!(
-            stored_ids(&session).0,
-            [8],
-            "the command finished before the stop"
-        );
-    }
-
-    #[test]
-    fn a_freeze_gives_up_on_a_command_that_never_finishes() {
-        let session = spawn_session(
-            "printf '\\033_Ga=t,f=32,s=1,v=1,i=8;AA'; sleep 8",
-            Arc::new(TestWake::default()),
-        );
-        wait_until("the command opens", Duration::from_secs(8), || {
-            session.adapter.0.graphics.is_open()
-        });
-        let started = Instant::now();
-        session.freeze().expect("the session did not freeze");
-        let waited = started.elapsed();
-        assert!(
-            waited >= COMMAND_GRACE && waited < COMMAND_GRACE * 6,
-            "{waited:?}"
-        );
-    }
-
-    #[test]
-    fn a_freeze_carries_the_beginning_of_a_sequence_it_was_in() {
-        for (script, held) in [
-            ("printf 'X\\033'; sleep 8", &b"\x1b"[..]),
-            ("printf 'X\\033_'; sleep 8", &b"\x1b_"[..]),
-        ] {
-            let session = spawn_session(script, Arc::new(TestWake::default()));
-            wait_text(&session, "X");
-            let frozen = session.freeze().expect("the session did not freeze");
-            assert_eq!(frozen.tail, held, "{script}");
-        }
-    }
-
-    #[test]
-    fn a_command_cut_by_an_update_finishes_on_the_adopting_side() {
-        // The old side's parser stood in `ESC _`, hands it over as the prefix
-        // and the new side's parser, given the rest of the command by the
-        // master, ends it: the image is the new side's and nothing prints.
-        let (_old, new, _alive) = adopt_frozen_with(
-            "printf 'P\\033_'; sleep 1; printf 'Ga=t,f=32,s=1,v=1,i=3;AAAAAA==\\033\\\\Q'; sleep 8",
-            "P",
-            AdoptMode::Update,
-            b"",
-            None,
-            Arc::new(RecordingOps::default()),
-            Arc::new(TestWake::default()),
-        )
-        .expect("adopted");
-        let text = wait_text(&new, "Q");
-        assert!(text.contains("PQ"), "{text:?}");
-        assert_eq!(stored_ids(&new), (vec![3], vec![]));
-    }
-
-    #[test]
-    fn a_command_the_old_side_finished_is_not_run_again_by_the_adopting_side() {
-        // A query is answered once, by the side that read its end; the other
-        // one is cut inside a second command, which is the only thing carried.
-        let old = spawn_session(
-            "stty echo echoctl; printf '\\033_Gi=51,a=q,t=d,f=24,s=1,v=1;AAAA\\033\\\\Z'; sleep 1; \
-             printf '\\033_Ga=t,f=32,s=1,v=1,i=52;AAAA'; sleep 8",
-            Arc::new(TestWake::default()),
-        );
-        let text = wait_text(&old, "Gi=51;OK");
-        assert_eq!(text.matches("Gi=51;OK").count(), 1, "{text:?}");
-        wait_until("the second command opens", Duration::from_secs(8), || {
-            old.adapter.0.graphics.is_open()
-        });
-        let frozen = old.freeze().expect("the session did not freeze");
-        let carried = String::from_utf8_lossy(&frozen.tail).into_owned();
-        assert_eq!(carried, "\x1b_Ga=t,f=32,s=1,v=1,i=52;AAAA");
-    }
-
-    /// The race's stall: generous, the race must not break the journal.
-    const STALL_FOR_RACE: Duration = Duration::from_secs(10);
 }

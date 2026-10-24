@@ -1270,6 +1270,223 @@ fn device_number(rdev: u64) -> u64 {
     (major << 8) | (minor & 0xff) | ((minor & !0xff) << 12)
 }
 
+// ─── the terminal of a pane whose PTY this process does not hold ─────────
+
+/// The path of terminal device `device` (in [`controlling_terminal`]'s number): macOS names a
+/// device with `devname`, which answers in a buffer of its own — one caller at a time, the name
+/// copied before the next. Checked against the file the path names: the number of a terminal
+/// that has gone may be a name nobody has, or another terminal's.
+#[cfg(target_os = "macos")]
+fn terminal_path(device: u64) -> Option<std::path::PathBuf> {
+    if device == 0 {
+        return None;
+    }
+    static ONE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let dev = libc::dev_t::from_ne_bytes(u32::try_from(device).ok()?.to_ne_bytes());
+    let name = {
+        let _one = ONE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // SAFETY: `devname` returns null or a NUL-terminated name in a buffer of its own that
+        // stays valid until the next call, copied here under the lock.
+        let name = unsafe { libc::devname(dev, libc::S_IFCHR) };
+        if name.is_null() {
+            return None;
+        }
+        // SAFETY: not null, NUL-terminated, copied while the lock is held.
+        unsafe { std::ffi::CStr::from_ptr(name) }.to_owned()
+    };
+    let path = std::path::Path::new("/dev").join(std::ffi::OsStr::from_bytes(name.to_bytes()));
+    terminal_at(&path, device).then_some(path)
+}
+
+/// [`terminal_path`] on Linux: a pseudo-terminal is `/dev/pts/N`, and `tty_nr` says N as the
+/// minor of a major in the Unix98 range.
+#[cfg(target_os = "linux")]
+fn terminal_path(device: u64) -> Option<std::path::PathBuf> {
+    let major = (device >> 8) & 0xfff;
+    let minor = (device & 0xff) | ((device >> 12) & 0xfff00);
+    if !(136..=143).contains(&major) {
+        return None;
+    }
+    let path = std::path::PathBuf::from(format!("/dev/pts/{}", (major - 136) * 256 + minor));
+    terminal_at(&path, device).then_some(path)
+}
+
+/// Whether `path` is the character device `device`.
+fn terminal_at(path: &std::path::Path, device: u64) -> bool {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    std::fs::metadata(path)
+        .is_ok_and(|meta| meta.file_type().is_char_device() && device_number(meta.rdev()) == device)
+}
+
+/// The two modes of terminal device `device` ([`tty_modes`]), read from the outside: the
+/// device is opened **without becoming anyone's controlling terminal** and without waiting,
+/// read, and closed again before this returns. It must not stay open: a kablo terminal's
+/// end is seen when the last descriptor of its device goes, and a descriptor kept here would
+/// keep a finished program's terminal alive.
+fn terminal_modes(device: u64) -> Option<bt_core::TtyModes> {
+    use std::os::fd::AsFd;
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOCTTY | libc::O_NONBLOCK)
+        .open(terminal_path(device)?)
+        .ok()?;
+    tty_modes(file.as_fd())
+}
+
+/// The process of a pane whose terminal questions are asked, and the terminal's device: the
+/// PTY's child when the kernel lets it be read, else the shell below it. `login(1)` is root's
+/// and its long info reads as nothing ([`ProcessTable::groups`]); a child that is the pane's
+/// own program (`ssh-hold --first`) is the user's and answers.
+fn terminal_process(
+    parent: ShellParent,
+    child: u32,
+    table: &impl ProcessTable,
+) -> Option<(u32, u64)> {
+    [Some(child), shell_pid(parent, child, table)]
+        .into_iter()
+        .flatten()
+        .find_map(|pid| controlling_terminal(pid).map(|device| (pid, device)))
+}
+
+/// The device of the terminal the pane whose PTY child is `child` is on. The question a
+/// stream asks where a spawned pane asks its master ([`pty_device`]): both give the number
+/// [`controlling_terminal`] gives for a process in the pane.
+pub fn pane_terminal(parent: ShellParent, child: u32) -> Option<u64> {
+    terminal_process(parent, child, &SystemTable).map(|(_, device)| device)
+}
+
+/// The terminal of the pane whose PTY child is `child`, read from the outside: its two modes
+/// and its foreground group (the kernel's record of the pane's process, not `tcgetpgrp`,
+/// which a process outside the terminal's session cannot ask). `None` while no process of
+/// the pane has a terminal that can be read.
+pub fn pane_tty(parent: ShellParent, child: u32) -> Option<bt_core::TtyReading> {
+    let (pid, device) = terminal_process(parent, child, &SystemTable)?;
+    Some(bt_core::TtyReading {
+        modes: terminal_modes(device)?,
+        foreground: SystemTable
+            .groups(pid)
+            .map(|groups| groups.foreground)
+            .filter(|&group| group != 0),
+    })
+}
+
+/// The device of the terminal `session`'s program is on: the master's slave where the
+/// session holds the master, [`pane_terminal`] by way of the stream's ops where it does not.
+/// The number a process in the pane gives ([`controlling_terminal`]).
+pub fn session_device(session: &bt_core::Session) -> Option<u64> {
+    if session.is_streamed() {
+        session.terminal_device()
+    } else {
+        session.with_pty_fd(pty_device)
+    }
+}
+
+/// [`bt_core::PtyOps`] of a stream whose program is a child of a kablo terminal: what the
+/// stream's owner does for the size and the end, and the pane's terminal read from the
+/// outside by the program's pid.
+pub struct StreamTty {
+    inner: std::sync::Arc<dyn bt_core::PtyOps>,
+    parent: ShellParent,
+}
+
+impl StreamTty {
+    /// `inner`'s ops, with the terminal read the way `parent` says the shell is found.
+    pub fn new(inner: std::sync::Arc<dyn bt_core::PtyOps>, parent: ShellParent) -> StreamTty {
+        StreamTty { inner, parent }
+    }
+}
+
+impl bt_core::PtyOps for StreamTty {
+    fn resize(&self, master: std::os::fd::BorrowedFd<'_>, size: bt_core::PtySize) {
+        self.inner.resize(master, size);
+    }
+
+    fn hangup(&self, pid: u32, exit: std::os::fd::BorrowedFd<'_>) {
+        self.inner.hangup(pid, exit);
+    }
+
+    fn tty(&self, pid: u32) -> Option<bt_core::TtyReading> {
+        pane_tty(self.parent, pid)
+    }
+
+    fn terminal(&self, pid: u32) -> Option<u64> {
+        pane_terminal(self.parent, pid)
+    }
+}
+
+/// The uid and pid of the process at the other end of `stream`.
+#[cfg(target_os = "macos")]
+pub(crate) fn peer(stream: &std::os::unix::net::UnixStream) -> std::io::Result<(u32, u32)> {
+    use std::os::fd::AsRawFd;
+    // SAFETY: an all-zero `xucred` is valid; the kernel fills it.
+    let mut cred: libc::xucred = unsafe { std::mem::zeroed() };
+    let mut len = size_of::<libc::xucred>() as libc::socklen_t;
+    // SAFETY: `cred` and `len` belong to this frame and `len` is its size.
+    let status = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_LOCAL,
+            libc::LOCAL_PEERCRED,
+            (&raw mut cred).cast(),
+            &raw mut len,
+        )
+    };
+    if status != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    if cred.cr_version != libc::XUCRED_VERSION {
+        return Err(std::io::Error::other("unknown xucred version"));
+    }
+    let mut pid: libc::pid_t = 0;
+    let mut len = size_of::<libc::pid_t>() as libc::socklen_t;
+    // SAFETY: as above.
+    let status = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_LOCAL,
+            libc::LOCAL_PEERPID,
+            (&raw mut pid).cast(),
+            &raw mut len,
+        )
+    };
+    if status != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok((
+        cred.cr_uid,
+        u32::try_from(pid).map_err(std::io::Error::other)?,
+    ))
+}
+
+/// The uid and pid of the process at the other end of `stream`.
+#[cfg(target_os = "linux")]
+pub(crate) fn peer(stream: &std::os::unix::net::UnixStream) -> std::io::Result<(u32, u32)> {
+    use std::os::fd::AsRawFd;
+    // SAFETY: an all-zero `ucred` is valid; the kernel fills it.
+    let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
+    let mut len = size_of::<libc::ucred>() as libc::socklen_t;
+    // SAFETY: `cred` and `len` belong to this frame and `len` is its size.
+    let status = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            (&raw mut cred).cast(),
+            &raw mut len,
+        )
+    };
+    if status != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok((
+        cred.uid,
+        u32::try_from(cred.pid).map_err(std::io::Error::other)?,
+    ))
+}
+
 /// A process's start time, comparable only for equality: what
 /// tells a live pid from a reused one. macOS: `p_starttime` in microseconds
 /// (`sysctl(KERN_PROC_PID)`, readable on root-owned `login(1)` too, where
@@ -1327,8 +1544,8 @@ fn parse_start_time(line: &str) -> Option<u64> {
 /// process that is not our child:
 /// macOS a `kqueue` of its own with only `EVFILT_PROC`/`NOTE_EXIT` on `pid`
 /// (a user process may watch root-owned `login(1)` — measured), Linux a
-/// pidfd. The reader loop registers it in the child-event pipe's place
-/// ([`bt_core::Adoption::exit`]); nobody drains it, so it stays readable.
+/// pidfd. The reader loop registers it in the child-event pipe's place;
+/// nobody drains it, so it stays readable.
 ///
 /// `start` is [`start_time`] taken where the pid was known to be the right
 /// process; it is asked **after** the registration, so a pid that died and
@@ -1386,67 +1603,6 @@ fn watch_exit(pid: u32) -> Option<std::os::fd::OwnedFd> {
 #[cfg(target_os = "linux")]
 fn c_int_from(raw: libc::c_long) -> Option<libc::c_int> {
     libc::c_int::try_from(raw).ok().filter(|&fd| fd >= 0)
-}
-
-/// [`bt_core::PtyOps`]'s body: the syscalls of an adopted PTY.
-pub struct SystemPty;
-
-impl bt_core::PtyOps for SystemPty {
-    fn resize(&self, master: std::os::fd::BorrowedFd<'_>, size: bt_core::PtySize) {
-        use std::os::fd::AsRawFd;
-        let window = libc::winsize {
-            ws_row: size.rows,
-            ws_col: size.cols,
-            ws_xpixel: size.cols.saturating_mul(size.cell_width),
-            ws_ypixel: size.rows.saturating_mul(size.cell_height),
-        };
-        // SAFETY: `master` is open for the call and `window` a valid input.
-        // A failure is left as is: the old size stays (alacritty dies here,
-        // the no-panic rule does not).
-        if unsafe { libc::ioctl(master.as_raw_fd(), libc::TIOCSWINSZ, &raw const window) } != 0 {
-            eprintln!(
-                "bateri: resizing the adopted PTY failed: {}",
-                std::io::Error::last_os_error()
-            );
-        }
-    }
-
-    fn hangup(&self, pid: u32, exit: std::os::fd::BorrowedFd<'_>) {
-        use std::os::fd::AsRawFd;
-        let mut poll = libc::pollfd {
-            fd: exit.as_raw_fd(),
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        // SAFETY: one `pollfd` from this frame, zero timeout.
-        let ready = unsafe { libc::poll(&raw mut poll, 1, 0) };
-        // Exited (or unknowable): the pid may be another process's now.
-        if ready != 0 {
-            return;
-        }
-        let Ok(pid) = libc::pid_t::try_from(pid) else {
-            return;
-        };
-        // SAFETY: a signal to a pid whose exit fd says it is still the
-        // process we adopted.
-        unsafe { libc::kill(pid, libc::SIGHUP) };
-    }
-
-    fn winch(&self, master: std::os::fd::BorrowedFd<'_>) {
-        use std::os::fd::AsRawFd;
-        // SAFETY: `master` is open for the call; the result is checked.
-        let group = unsafe { libc::tcgetpgrp(master.as_raw_fd()) };
-        // `-1`: no foreground group (the session has none yet, or the
-        // terminal is gone). Group 0 and 1 are never a program's: `0` would
-        // be our own group and `1` the system's.
-        if group <= 1 {
-            return;
-        }
-        // SAFETY: a signal to the group the kernel names as the PTY's
-        // foreground right now; a group that ended in between is `ESRCH`,
-        // which is the same as nothing to redraw.
-        unsafe { libc::killpg(group, libc::SIGWINCH) };
-    }
 }
 
 #[cfg(test)]
@@ -2682,344 +2838,6 @@ pub(crate) mod tests {
         assert!(exit_fd(pid, start).is_none());
     }
 
-    /// Records the child's exit news.
-    #[derive(Default)]
-    struct ExitWake(std::sync::Mutex<Option<Option<i32>>>);
-
-    impl bt_core::Wake for ExitWake {
-        fn wake(&self) {}
-        fn child_exit(&self, code: Option<i32>) {
-            *self
-                .0
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(code);
-        }
-        fn copy_to_clipboard(&self, _text: String) {}
-        fn title_changed(&self) {}
-        fn search_changed(&self) {}
-        fn command_started(&self) {}
-        fn remote_up(&self) {}
-        fn remote_typed(&self) {}
-        fn link_hover_lost(&self) {}
-        fn pointer_changed(&self) {}
-        fn phase_edge(&self) {}
-        fn remote_command_edge(&self) {}
-        fn mirror_changed(&self) {}
-        fn environment_changed(&self) {}
-        fn blocks_changed(&self) {}
-        fn unseen_changed(&self) {}
-        fn program_status_changed(&self) {}
-        fn bell(&self) {}
-        fn notification(&self) {}
-    }
-
-    impl ExitWake {
-        fn exited(&self) -> Option<Option<i32>> {
-            *self
-                .0
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-        }
-    }
-
-    fn handover_options(
-        command: Option<(String, Vec<String>)>,
-        cols: u16,
-        rows: u16,
-    ) -> SessionOptions {
-        SessionOptions {
-            command,
-            working_directory: None,
-            home: None,
-            env: HashMap::new(),
-            cols,
-            rows,
-            cell_px: (9, 18),
-            terminal: TerminalOptions {
-                scrollback: 10_000,
-                osc52: Osc52::Off,
-                cursor: CaretShape::default(),
-                blink: CursorBlink::default(),
-            },
-            theme: Theme::BATERI,
-            dock: false,
-            cluster: false,
-            initial_input: None,
-            shell_marks: false,
-            pane_uuid: None,
-            hostname: None,
-            replay: None,
-            journal: None,
-            views: None,
-        }
-    }
-
-    /// The whole scrollback and screen as text.
-    fn all_text(session: &Session) -> String {
-        session.select_all();
-        session.selection_text().unwrap_or_default()
-    }
-
-    /// The `nK` counter lines of `text`, in order.
-    fn counters(text: &str) -> Vec<u64> {
-        text.lines()
-            .filter_map(|line| line.trim().strip_prefix('n')?.parse().ok())
-            .collect()
-    }
-
-    /// Freezes a session running `script` and adopts it into a new one.
-    fn hand_over(
-        script: &str,
-        ready: &str,
-        held: &[u8],
-    ) -> (Session, Session, u32, u64, Arc<ExitWake>) {
-        let old = Session::spawn(
-            handover_options(
-                Some((
-                    "/bin/sh".to_owned(),
-                    vec!["-c".to_owned(), script.to_owned()],
-                )),
-                40,
-                10,
-            ),
-            Arc::new(SilentWake),
-        )
-        .expect("session did not open");
-        wait_until("the script did not start", || {
-            all_text(&old).contains(ready)
-        });
-        let pid = old.child_pid();
-        let start = start_time(pid).expect("the start time not read");
-        let frozen = old.freeze().expect("the session did not freeze");
-        assert_eq!(frozen.pid, pid);
-        assert_eq!((frozen.cols, frozen.rows), (40, 10));
-        // The holder's gap: the child keeps writing into the kernel's buffer.
-        std::thread::sleep(std::time::Duration::from_millis(300));
-        assert_eq!(start_time(pid), Some(start), "the freeze hung the child up");
-        let exit = exit_fd(pid, start).expect("no exit fd");
-        let wake = Arc::new(ExitWake::default());
-        let new = Session::adopt(
-            handover_options(None, frozen.cols, frozen.rows),
-            bt_core::Adoption {
-                master: frozen.master,
-                exit,
-                pid,
-                vt: frozen.vt,
-                blob: frozen.blob,
-                // The holder's buffer stands behind the tail.
-                prefix: [frozen.tail.as_slice(), held].concat(),
-                input: frozen.input,
-                ops: Arc::new(SystemPty),
-                mode: bt_core::AdoptMode::Update,
-            },
-            Arc::clone(&wake) as Arc<dyn bt_core::Wake>,
-        )
-        .expect("the session was not adopted");
-        assert_eq!(new.child_pid(), pid);
-        (old, new, pid, start, wake)
-    }
-
-    /// The handover's acceptance: a live `/bin/sh` crosses from one session to
-    /// another without a `SIGHUP`, its output has no gap, input reaches it and
-    /// its exit is the adopting session's `child_exit(None)`.
-    #[test]
-    fn a_frozen_shell_lives_on_in_the_adopting_session() {
-        let script = "i=0; (while [ $i -lt 2000 ]; do i=$((i+1)); echo n$i; sleep 0.01; done) & bg=$!; \
-            while read line; do echo got:$line; [ \"$line\" = quit ] && { kill $bg; exit 0; }; done";
-        let (old, new, _pid, _start, wake) = hand_over(script, "n3", b"");
-        drop(old);
-        let before = counters(&all_text(&new)).last().copied().unwrap_or(0);
-        wait_until("the output did not continue", || {
-            counters(&all_text(&new))
-                .last()
-                .is_some_and(|&n| n > before + 20)
-        });
-        let seen = counters(&all_text(&new));
-        assert_eq!(
-            seen.first(),
-            Some(&1),
-            "the replayed history lost its start"
-        );
-        for pair in seen.windows(2) {
-            assert_eq!(pair[1], pair[0] + 1, "a gap or a repeat in {seen:?}");
-        }
-        new.write(b"hello\n");
-        wait_until("the input did not reach the shell", || {
-            all_text(&new).contains("got:hello")
-        });
-        new.write(b"quit\n");
-        wait_until("no exit news", || wake.exited().is_some());
-        assert_eq!(wake.exited(), Some(None));
-        wait_until("the reader did not end", || !new.reader_alive());
-    }
-
-    /// A program on the alternate screen crosses on it (vim across the
-    /// update), and the frozen pane's history — what a fallback replays —
-    /// is still the primary screen: read from the frozen VT, since the
-    /// freeze's snapshot drove the live `Term` destructively.
-    #[test]
-    fn the_alternate_screen_crosses_and_the_history_is_the_primary() {
-        let old = Session::spawn(
-            handover_options(
-                Some((
-                    "/bin/sh".to_owned(),
-                    vec![
-                        "-c".to_owned(),
-                        "echo PRIMARY; printf '\\033[?1049hALT'; while :; do sleep 1; done"
-                            .to_owned(),
-                    ],
-                )),
-                40,
-                10,
-            ),
-            Arc::new(SilentWake),
-        )
-        .expect("session did not open");
-        wait_until("the script did not reach the alternate screen", || {
-            all_text(&old).contains("ALT")
-        });
-        let frozen = old.freeze().expect("the session did not freeze");
-        let history = String::from_utf8_lossy(&old.frozen_history(&frozen)).into_owned();
-        assert!(history.contains("PRIMARY"), "{history:?}");
-        assert!(!history.contains("ALT"), "{history:?}");
-        let pid = frozen.pid;
-        let start = start_time(pid).expect("the start time not read");
-        let new = Session::adopt(
-            handover_options(None, frozen.cols, frozen.rows),
-            bt_core::Adoption {
-                master: frozen.master,
-                exit: exit_fd(pid, start).expect("no exit fd"),
-                pid,
-                vt: frozen.vt,
-                blob: frozen.blob,
-                prefix: frozen.tail,
-                input: frozen.input,
-                ops: Arc::new(SystemPty),
-                mode: bt_core::AdoptMode::Update,
-            },
-            Arc::new(SilentWake),
-        )
-        .expect("the session was not adopted");
-        let screen = all_text(&new);
-        assert!(
-            screen.contains("ALT") && !screen.contains("PRIMARY"),
-            "not on the alternate screen: {screen:?}"
-        );
-        drop(old);
-        let _ = new.shutdown();
-    }
-
-    /// A program that asked for pixel pointer reports (DECSET 1016) is
-    /// still asked after the update: the mode crosses in the handover's VT
-    /// and lands in the adopting session's flag, and one that turned it off
-    /// stays off.
-    #[test]
-    fn the_pixel_mouse_mode_crosses_the_handover() {
-        let (_old, new, ..) = hand_over(
-            "printf '\\033[?1016h\\033[?1000h'; echo ready; while :; do sleep 1; done",
-            "ready",
-            b"",
-        );
-        assert!(new.pixel_mouse(), "the mode did not come across");
-        let (_old, new, ..) = hand_over(
-            "printf '\\033[?1016h\\033[?1016l'; echo ready; while :; do sleep 1; done",
-            "ready",
-            b"",
-        );
-        assert!(!new.pixel_mouse(), "a mode turned off came back on");
-        // The held bytes behind the tail go through the reader, which keeps
-        // the flag from there.
-        let (_old, new, ..) = hand_over(
-            "echo ready; while :; do sleep 1; done",
-            "ready",
-            b"\x1b[?1016h",
-        );
-        wait_until("the held bytes did not turn the mode on", || {
-            new.pixel_mouse()
-        });
-    }
-
-    /// DECSET 2048 crosses the same way, held in the same place: a program
-    /// that reads the size from the stream is still told it after the update.
-    #[test]
-    fn the_resize_report_mode_crosses_the_handover() {
-        let (_old, new, ..) = hand_over(
-            "printf '\\033[?2048h'; echo ready; while :; do sleep 1; done",
-            "ready",
-            b"",
-        );
-        assert!(new.resize_reports(), "the mode did not come across");
-        let (_old, new, ..) = hand_over(
-            "printf '\\033[?2048h\\033[?2048l'; echo ready; while :; do sleep 1; done",
-            "ready",
-            b"",
-        );
-        assert!(!new.resize_reports(), "a mode turned off came back on");
-    }
-
-    /// The adopting side asks the foreground program to redraw without
-    /// touching the size: `SIGWINCH` to the PTY's foreground group reaches
-    /// the shell script, and nothing sent it before.
-    #[test]
-    fn winch_reaches_the_foreground_program_of_an_adopted_pane() {
-        let script = "trap 'echo WINCHED' WINCH; echo ready; while :; do sleep 0.05; done";
-        let (_old, new, ..) = hand_over(script, "ready", b"");
-        std::thread::sleep(std::time::Duration::from_millis(300));
-        assert!(
-            !all_text(&new).contains("WINCHED"),
-            "the adoption alone signalled the program"
-        );
-        new.winch();
-        wait_until("the program did not get the signal", || {
-            all_text(&new).contains("WINCHED")
-        });
-    }
-
-    /// Dropping an adopted session hangs its child up and waits for nothing.
-    #[test]
-    fn an_adopted_session_hangs_up_on_shutdown_without_waiting() {
-        use std::os::fd::AsFd;
-        use std::time::{Duration, Instant};
-        // A quiet shell: the held bytes reach the screen with no output
-        // after them (the reader's first read), through the parser.
-        let (_old, new, pid, start, _wake) = hand_over(
-            "echo ready; while :; do sleep 1; done",
-            "ready",
-            b"\x1b]2;handed\x07HELD\r\n",
-        );
-        wait_until("the held bytes were not read", || {
-            all_text(&new).contains("HELD")
-        });
-        assert_eq!(new.title(), "handed");
-        let watch = exit_fd(pid, start).expect("no exit fd");
-        let began = Instant::now();
-        assert_eq!(new.shutdown(), bt_core::Teardown::HungUp);
-        assert!(
-            began.elapsed() < bt_core::SHUTDOWN_GRACE,
-            "the shutdown waited"
-        );
-        assert!(
-            readable(watch.as_fd(), Duration::from_secs(5)),
-            "the adopted shell outlived its session"
-        );
-    }
-
-    /// A program writing without pause (`yes`) across the handover: the
-    /// adopted reader's first reads end with the carried prefix, not when a
-    /// round comes back short — every round is full here, and a reader stuck
-    /// there would never take the shutdown off its channel (found in code review).
-    #[test]
-    fn a_flooding_program_does_not_hold_the_adopted_reader() {
-        use std::time::Instant;
-        let (_old, new, _pid, _start, _wake) = hand_over("exec yes", "y", &[b'y'; 64 * 1024]);
-        let began = Instant::now();
-        assert_eq!(new.shutdown(), bt_core::Teardown::HungUp);
-        assert!(
-            began.elapsed() < bt_core::SHUTDOWN_GRACE,
-            "the shutdown waited on a flooded reader"
-        );
-    }
-
     #[test]
     fn a_process_is_in_a_pane_when_its_controlling_terminal_is_the_panes_pty() {
         let session = stty_session("-echo");
@@ -3075,7 +2893,6 @@ pub(crate) mod tests {
                 pane_uuid: None,
                 hostname: None,
                 replay: None,
-                journal: None,
                 views: None,
             },
             Arc::new(SilentWake),
@@ -3114,6 +2931,163 @@ pub(crate) mod tests {
         }
     }
 
+    /// A pseudo-terminal pair of the test's own: the master, the slave opened through the path
+    /// [`terminal_path`] makes of the device, and that device.
+    fn pty_pair() -> (std::os::fd::OwnedFd, std::os::fd::OwnedFd, u64) {
+        use std::os::fd::{AsFd, FromRawFd, OwnedFd};
+        use std::os::unix::fs::OpenOptionsExt;
+        // SAFETY: `posix_openpt` has no preconditions; the result is checked and owned at once.
+        let master = unsafe { libc::posix_openpt(libc::O_RDWR | libc::O_NOCTTY) };
+        assert!(
+            master >= 0,
+            "no pseudo-terminal: {}",
+            std::io::Error::last_os_error()
+        );
+        // SAFETY: a descriptor just made, owned by nobody else.
+        let master = unsafe { OwnedFd::from_raw_fd(master) };
+        // SAFETY: the master is open for both calls.
+        unsafe {
+            assert_eq!(libc::grantpt(std::os::fd::AsRawFd::as_raw_fd(&master)), 0);
+            assert_eq!(libc::unlockpt(std::os::fd::AsRawFd::as_raw_fd(&master)), 0);
+        }
+        let device = pty_device(master.as_fd()).expect("the master's slave has a device");
+        let slave = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NOCTTY)
+            .open(terminal_path(device).expect("the device has a path"))
+            .expect("the slave");
+        (master, slave.into(), device)
+    }
+
+    /// Sets the line discipline of the terminal `fd` is on to `canonical` and `echo`.
+    fn set_modes(fd: &std::os::fd::OwnedFd, canonical: bool, echo: bool) {
+        use std::os::fd::AsRawFd;
+        // SAFETY: an all-zero `termios` is a valid value; the descriptor is open for the calls.
+        unsafe {
+            let mut modes: libc::termios = std::mem::zeroed();
+            assert_eq!(libc::tcgetattr(fd.as_raw_fd(), &mut modes), 0);
+            for (flag, on) in [(libc::ICANON, canonical), (libc::ECHO, echo)] {
+                if on {
+                    modes.c_lflag |= flag;
+                } else {
+                    modes.c_lflag &= !flag;
+                }
+            }
+            assert_eq!(libc::tcsetattr(fd.as_raw_fd(), libc::TCSANOW, &modes), 0);
+        }
+    }
+
+    /// Reads one byte of `master` without waiting: `None` when it would wait (something still
+    /// holds the slave), `Some(read result)` when the answer is the end.
+    fn master_says_end(master: &std::os::fd::OwnedFd) -> bool {
+        use std::os::fd::AsRawFd;
+        // SAFETY: `fcntl` and `read` on an open descriptor and a buffer of this frame.
+        unsafe {
+            let flags = libc::fcntl(master.as_raw_fd(), libc::F_GETFL);
+            libc::fcntl(master.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK);
+            let mut byte = 0u8;
+            let got = libc::read(master.as_raw_fd(), (&raw mut byte).cast(), 1);
+            if got == 0 {
+                return true;
+            }
+            // The end of a terminal is a hang-up error on Linux, an empty read on macOS; a
+            // read that would wait says someone still has the other side open.
+            got < 0 && std::io::Error::last_os_error().kind() != std::io::ErrorKind::WouldBlock
+        }
+    }
+
+    /// A terminal read from the outside gives its modes as they are set, and holds nothing
+    /// afterwards: the end of the terminal is seen by whoever has the master as soon as the
+    /// program's own descriptors are gone, which is the whole of what a kablo terminal's
+    /// finishing depends on. The control is a descriptor kept open on purpose, which must read
+    /// as "not ended" — without it the end proves nothing.
+    #[test]
+    fn a_terminal_read_from_its_device_is_not_kept_open() {
+        let (master, slave, device) = pty_pair();
+        set_modes(&slave, false, false);
+        assert_eq!(
+            terminal_modes(device),
+            Some(TtyModes {
+                canonical: false,
+                echo: false
+            })
+        );
+        set_modes(&slave, true, true);
+        assert_eq!(
+            terminal_modes(device),
+            Some(TtyModes {
+                canonical: true,
+                echo: true
+            })
+        );
+        // Read again and again, it leaves nothing behind either.
+        for _ in 0..8 {
+            assert!(terminal_modes(device).is_some());
+        }
+        // The control: a second descriptor of the device is open, and the master waits.
+        let kept = std::fs::OpenOptions::new()
+            .read(true)
+            .open(terminal_path(device).expect("path"))
+            .expect("a second slave");
+        drop(slave);
+        assert!(
+            !master_says_end(&master),
+            "the control did not hold the terminal open"
+        );
+        drop(kept);
+        // Not at once: a child another test forks at this moment holds every descriptor of
+        // this process until it execs, the device's among them.
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !master_says_end(&master) && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(
+            master_says_end(&master),
+            "a descriptor of the device was left open"
+        );
+    }
+
+    /// A device that is not there, or is not a terminal, has no path and no modes.
+    #[test]
+    fn a_device_that_is_no_terminal_has_no_path() {
+        // Zero is "no terminal" ([`controlling_terminal`]), and on macOS the name of the console.
+        assert_eq!(terminal_modes(0), None);
+        assert_eq!(terminal_path(0), None);
+        assert_eq!(terminal_path(u64::MAX), None);
+    }
+
+    /// The pane's terminal read by its child's pid — what a stream without a master has — is
+    /// the one the master gives: the device the gate compares, the modes the remote login and
+    /// the raw check read, and the foreground group the view protocol compares with the shell's.
+    #[test]
+    fn a_panes_terminal_by_the_childs_pid_is_the_masters() {
+        let session = stty_session("-icanon -echo");
+        let pid = session.child_pid();
+        let read = || pane_tty(ShellParent::Direct, pid);
+        wait_until("`stty` not seen from the outside", || {
+            read().map(|tty| tty.modes)
+                == Some(TtyModes {
+                    canonical: false,
+                    echo: false,
+                })
+        });
+        assert_eq!(
+            pane_terminal(ShellParent::Direct, pid),
+            session.with_pty_fd(pty_device),
+            "the device a process in the pane is found by"
+        );
+        assert_eq!(
+            read().and_then(|tty| tty.foreground),
+            SystemTable.groups(pid).map(|groups| groups.own),
+            "the shell is in front: its group is the terminal's foreground"
+        );
+        // A pid that is nothing has no terminal.
+        assert_eq!(pane_terminal(ShellParent::Direct, u32::MAX - 1), None);
+        assert_eq!(pane_tty(ShellParent::Direct, u32::MAX - 1), None);
+        session.shutdown();
+    }
+
     #[test]
     fn the_process_table_sees_a_real_foreground_job() {
         // The reader's only witness: a fake table can see neither that login is
@@ -3146,7 +3120,6 @@ pub(crate) mod tests {
                 pane_uuid: None,
                 hostname: None,
                 replay: None,
-                journal: None,
                 views: None,
             },
             Arc::new(SilentWake),

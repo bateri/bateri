@@ -33,9 +33,8 @@
 //! cursor's grid line where its command ends; when the command moves the
 //! cursor (`C=0`, the default) the movement is the command's ([`Motion`]): the
 //! wrapper moves the cursor down, anchors the placement and moves it right.
-//! A stream with no store to place into — the journal's replay, which runs the
-//! same commands over the same bytes — makes the same movement from the same
-//! numbers and nothing else. How placements keep their lines while the content
+//! A stream with no store to place into — a bare replay of the same bytes — makes
+//! the same movement from the same numbers and nothing else. How placements keep their lines while the content
 //! scrolls is [`follow`]'s, and what the frame draws is [`Pictures`].
 //!
 //! **What a program can do with it is what the protocol lets it.** A command
@@ -325,7 +324,7 @@ pub(crate) enum Pending {
     Delete(Command),
     /// An answer that goes where the command was: it failed before it could
     /// be applied. The cursor still moves by `motion`, as it does for the
-    /// command that was meant (the journal's replay, which reads no file,
+    /// command that was meant (a replay with no store, which reads no file,
     /// moves it that way too).
     Reply { reply: Reply, motion: Motion },
 }
@@ -354,7 +353,7 @@ impl Pending {
 ///
 /// The parser's wrapper is made anew for every slice of bytes it is given,
 /// but a command crosses slices, so the state is the owner's of the parser (the
-/// reader loop's, the journal's replay) and is lent to each wrapper. One per
+/// reader loop's) and is lent to each wrapper. One per
 /// stream, never shared between two.
 pub(crate) struct Commands {
     collector: Collector,
@@ -406,6 +405,7 @@ impl Commands {
     }
 
     /// The cell size a stream without a session works with.
+    #[cfg(test)]
     pub(crate) fn set_cell(&mut self, cell: (u16, u16)) {
         self.cell = cell;
     }
@@ -483,16 +483,9 @@ impl Commands {
     }
 
     /// Whether a command is half-received: bytes the parser took that no
-    /// record carries yet. A handover cut here hands the rest to a parser
-    /// that must take it up where this one stood.
+    /// record carries yet.
     pub(crate) fn open(&self) -> bool {
         self.collector.inside() || self.receiver.is_open()
-    }
-
-    /// The transmission waiting for its next chunk, as the chunk that starts it
-    /// ([`Receiver::chain`]).
-    pub(crate) fn chain(&self) -> Option<Vec<u8>> {
-        self.receiver.chain()
     }
 
     /// Whether the parser is to stop where it is ([`Commands::halt`]).
@@ -532,8 +525,8 @@ pub(crate) struct Hub {
     /// Called before each image is decoded (a test sees what is locked then).
     #[cfg(test)]
     decoding: Mutex<Option<Box<dyn Fn() + Send>>>,
-    /// Whether a command is half-received ([`Commands::open`]). A handover
-    /// cut there waits a little for it to end ([`Hub::wait_closed`]).
+    /// Whether a command is half-received ([`Commands::open`]): the next read may
+    /// carry its rest.
     open: AtomicBool,
     /// Whether the pane is in a remote session, asked when a file is about
     /// to be read: the name then belongs to another machine.
@@ -811,16 +804,6 @@ impl Hub {
     /// Whether a command is half-received.
     pub(crate) fn is_open(&self) -> bool {
         self.open.load(Ordering::Acquire)
-    }
-
-    /// Waits, at most `grace`, for no command to be half-received. The
-    /// reader goes on reading meanwhile, so a command in flight finishes.
-    /// A client that stopped mid-command costs the whole grace.
-    pub(crate) fn wait_closed(&self, grace: Duration) {
-        let deadline = Instant::now() + grace;
-        while self.open.load(Ordering::Acquire) && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(2));
-        }
     }
 
     /// Parks a transmission as the parser would: undecoded.

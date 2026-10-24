@@ -17,7 +17,7 @@
 //!
 //! **The delegate** ([`UpdaterDelegate`]) tells one thing: the
 //! coming quit is Sparkle's relaunch (`updaterWillRelaunchApplication:`), so
-//! the running programs are handed over instead of hung up
+//! the terminals kablo keeps are left running instead of ended
 //! ([`take_relaunch`]). An aborted install (`updater:didAbortWithError:`)
 //! clears it, and the quit that reads it consumes it: a ⌘Q after a failed
 //! install is today's quit. While a transfer streams or a password sheet is
@@ -41,8 +41,7 @@ use objc2_foundation::{NSBundle, NSString};
 /// The framework's name in the bundle; its path is under `Contents/Frameworks/`.
 const FRAMEWORK: &str = "Sparkle.framework";
 
-/// "The coming quit is a relaunch": set by Sparkle's delegate (or the
-/// handover test item, `AppDelegate`), cleared by an aborted install,
+/// "The coming quit is a relaunch": set by Sparkle's delegate, cleared by an aborted install,
 /// consumed by the quit that reads it. Process-wide and atomic: Sparkle's
 /// callbacks are not promised a thread.
 static RELAUNCH: AtomicBool = AtomicBool::new(false);

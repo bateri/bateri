@@ -178,8 +178,9 @@ fn info_plist_template_carries_the_updater_keys() {
     );
 }
 
-/// The zsh wrapper's inventory is **exactly** these six files (the ZDOTDIR
-/// swap, `zdotdir.zsh`, joined with remote shell integration).
+/// The zsh wrapper's inventory is **exactly** these seven files (the ZDOTDIR
+/// swap, `zdotdir.zsh`, and the dock's functions, `dock.zsh`, joined with remote
+/// shell integration).
 ///
 /// The "nothing missing" half is also asked by `bt-shell-common` (the test of
 /// `child::zsh_wrapper_dir`); the half this one alone sees is **the excess**.
@@ -221,6 +222,7 @@ fn zsh_wrapper_inventory_is_exactly_what_the_bundle_copies() {
             ".zshenv",
             ".zshrc",
             "bateri.zsh",
+            "dock.zsh",
             "zdotdir.zsh"
         ],
         "the assets/shell/zsh inventory changed; `make bundle`'s copy and cmp \
@@ -228,10 +230,12 @@ fn zsh_wrapper_inventory_is_exactly_what_the_bundle_copies() {
     );
 }
 
-/// The fish wrapper's inventory is **exactly** one file, `vendor_conf.d/bateri.fish`.
+/// The fish wrapper's inventory is **exactly** two files, `vendor_conf.d/bateri.fish` and the
+/// dock's functions it reads, `dock.fish`, one level above `vendor_conf.d` (fish reads every file
+/// of that directory by itself, and this one is for the wrappers alone).
 ///
-/// For the reasons of the zsh test above: `make bundle` copies the file by name
-/// and `cmp`s it, so a second file added to the directory never enters the
+/// For the reasons of the zsh test above: `make bundle` copies the files by name
+/// and `cmp`s them, so a third file added to the directory never enters the
 /// package while everything stays green. fish makes it matter more than zsh
 /// does — the package's `shell/` directory is an `XDG_DATA_DIRS` entry, and fish
 /// reads a `functions/` or `completions/` directory in it just as it reads
@@ -260,17 +264,18 @@ fn fish_wrapper_inventory_is_exactly_what_the_bundle_copies() {
     found.sort();
     assert_eq!(
         found,
-        ["vendor_conf.d/bateri.fish"],
+        ["dock.fish", "vendor_conf.d/bateri.fish"],
         "the assets/shell/fish inventory changed; `make bundle`'s copy and cmp \
          lists must be updated too"
     );
 }
 
-/// The bash wrapper's inventory is **exactly** one file, `bateri.bash`.
+/// The bash wrapper's inventory is **exactly** two files, `bateri.bash` and the dock's functions
+/// it reads, `dock.bash`.
 ///
-/// For the reasons of the zsh test above: `make bundle` copies the file by name and `cmp`s it,
-/// so a second file added to the directory never enters the package while everything stays
-/// green. `ENV` names the one file; nothing else in the directory is ever read.
+/// For the reasons of the zsh test above: `make bundle` copies the files by name and `cmp`s them,
+/// so a third file added to the directory never enters the package while everything stays
+/// green. `ENV` names the first; the second is read by it and by nothing else.
 #[test]
 fn bash_wrapper_inventory_is_exactly_what_the_bundle_copies() {
     let mut found: Vec<String> = std::fs::read_dir(bash_asset_dir())
@@ -287,7 +292,7 @@ fn bash_wrapper_inventory_is_exactly_what_the_bundle_copies() {
     found.sort();
     assert_eq!(
         found,
-        ["bateri.bash"],
+        ["bateri.bash", "dock.bash"],
         "the assets/shell/bash inventory changed; `make bundle`'s copy and cmp \
          lists must be updated too"
     );

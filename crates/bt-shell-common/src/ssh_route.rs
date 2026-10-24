@@ -56,7 +56,7 @@ use std::time::{Duration, Instant};
 use bt_core::RemoteTarget;
 
 use crate::focus::FOCUS_SOCKET;
-use crate::handover::{holder_listening, is_holder_socket_name};
+use crate::retired_holders::{holder_listening, is_holder_socket_name};
 use crate::upload::connection;
 
 // ─── route ───────────────────────────────────────────────────────────────
@@ -1970,37 +1970,6 @@ pub fn prepare_instance(root: &Path, instance: &str) -> io::Result<PathBuf> {
     }
 }
 
-/// Hands an existing instance directory to `to`: the update's holder takes the old bateri's directories
-/// (`from` = its spawner), the new bateri takes them from the holder (`from`
-/// = the holder's pid, from the connection's credentials) — **before** its
-/// sweep, or the sweep of a dead owner's directory would end the live ssh's
-/// `u-<key>` socket and the attempts' files. Admitted only for a private
-/// directory of this user with an owner file whose owner is `to` already,
-/// **dead**, or exactly `from`: a living bateri's directory is never taken
-/// by anyone it did not hand it to. The owner file is written whole (a
-/// hidden name, then renamed), so no reader sees it half written.
-/// [`prepare_instance`]'s contract is unchanged: it takes the directory this
-/// returns as its own.
-pub fn adopt_instance(dir: &Path, from: Option<u32>, to: u32) -> io::Result<()> {
-    let refused = |why: &str| io::Error::new(io::ErrorKind::PermissionDenied, why.to_owned());
-    let Some(current) = owner(dir) else {
-        return Err(refused("not an instance directory of this user"));
-    };
-    if current == to {
-        return Ok(());
-    }
-    if alive(current) && from != Some(current) {
-        return Err(refused("the instance's owner is alive"));
-    }
-    let temp = dir.join(format!(".{OWNER_FILE}-{}", random_hex()?));
-    let written = std::fs::write(&temp, to.to_string())
-        .and_then(|()| std::fs::rename(&temp, dir.join(OWNER_FILE)));
-    if written.is_err() {
-        let _ = std::fs::remove_file(&temp);
-    }
-    written
-}
-
 /// `ssh -O exit` on `socket` without a destination of the user's: `-F
 /// /dev/null` (the user's configuration is not read — a control command
 /// rides the socket), `BatchMode=yes`, a placeholder host.
@@ -2116,9 +2085,8 @@ pub fn sweep(roots: &[PathBuf], own: &str) {
         sweep_flat(root);
     }
     for entry in instance_entries(roots) {
-        // A live holder keeps its directory whoever the owner file
-        // names: a new bateri that adopted it may have died before its ACK,
-        // and the holder still waits for the next one.
+        // A live holder of an older bateri keeps its directory whoever the
+        // owner file names: its socket is the only way to find it.
         if entry.name == own || entry.owner.is_none_or(alive) || holder_listening(&entry.dir) {
             continue;
         }
@@ -2163,6 +2131,14 @@ fn instance_entries(roots: &[PathBuf]) -> Vec<InstanceEntry> {
         }
     }
     found
+}
+
+/// The instance directories under `roots`, whole or half born.
+pub(crate) fn instance_directories(roots: &[PathBuf]) -> Vec<PathBuf> {
+    instance_entries(roots)
+        .into_iter()
+        .map(|entry| entry.dir)
+        .collect()
 }
 
 /// A living bateri instance: its pid and its directories, in the roots' order.
@@ -2230,7 +2206,7 @@ fn sweep_flat(base: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::handover::HANDOVER_SOCKET;
+    const HANDOVER_SOCKET: &str = "handover";
     use std::cell::RefCell;
     use std::thread;
 
@@ -2540,7 +2516,7 @@ mod tests {
     /// Two bastions' `ProxyCommand`s to the same inner address are two
     /// servers: two sockets, or a job rides a master to the other one. A
     /// host without one keeps its pinned name — its master may outlive this
-    /// build (an update's handover finds it by that name).
+    /// build (an update's new bateri finds it by that name).
     #[test]
     fn a_proxy_command_separates_the_key_and_a_direct_host_keeps_its_own() {
         let through = |bastion: &str| {
@@ -3219,6 +3195,7 @@ exit $code
     }
 
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn a_master_opens_through_askpass_end_to_end() {
         let (root, masters) = rig("open", "s3cr3t");
         let target = host_target(&root, "prod");
@@ -3258,6 +3235,7 @@ exit $code
     }
 
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn a_cancelled_question_stops_ssh_before_an_empty_password() {
         let (root, masters) = rig("cancel", "s3cr3t");
         let target = host_target(&root, "prod");
@@ -3274,6 +3252,7 @@ exit $code
     }
 
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn three_wrong_passwords_fail_with_sshs_reason() {
         let (root, masters) = rig("wrong", "s3cr3t");
         let target = host_target(&root, "prod");
@@ -3292,6 +3271,7 @@ exit $code
     }
 
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn an_unknown_host_key_is_refused_with_the_terminal_hint() {
         let (root, masters) = rig("hostkey", "s3cr3t");
         let target = host_target(&root, "stranger");
@@ -3305,6 +3285,7 @@ exit $code
     }
 
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn a_background_job_never_opens_a_master() {
         let (root, masters) = rig("never", "s3cr3t");
         let target = host_target(&root, "prod");
@@ -3357,6 +3338,7 @@ exit $code
 
     /// Another pane's cancelled sheet is not this job's answer: it asks at its own.
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn a_joiner_asks_itself_when_the_owner_is_cancelled() {
         let (root, masters) = rig("rejoin", "s3cr3t");
         let masters = Arc::new(masters);
@@ -3391,6 +3373,7 @@ exit $code
     }
 
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn two_jobs_to_one_host_open_one_master() {
         one_opening_for_two_jobs("flight");
     }
@@ -3412,6 +3395,7 @@ exit $code
     }
 
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn a_saved_password_answers_without_a_sheet() {
         let (root, masters, store) = rig_saved("saved", "s3cr3t", Some("s3cr3t"));
         let target = host_target(&root, "prod");
@@ -3430,6 +3414,7 @@ exit $code
     }
 
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn a_refused_saved_password_asks_at_the_sheet_and_is_replaced_on_success() {
         let (root, masters, store) = rig_saved("stale", "s3cr3t", Some("old"));
         let target = host_target(&root, "prod");
@@ -3454,6 +3439,7 @@ exit $code
     }
 
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn an_unticked_box_saves_nothing_and_drops_a_refused_password() {
         let (root, masters, store) = rig_saved("unticked", "s3cr3t", None);
         let target = host_target(&root, "prod");
@@ -3474,6 +3460,7 @@ exit $code
     }
 
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn a_wrong_password_is_never_saved() {
         let (root, masters, store) = rig_saved("nosave", "s3cr3t", None);
         let target = host_target(&root, "prod");
@@ -3492,6 +3479,7 @@ exit $code
     }
 
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn a_background_job_opens_once_with_the_saved_password() {
         let (root, masters, _) = rig_saved("bgsaved", "s3cr3t", Some("s3cr3t"));
         let target = host_target(&root, "prod");
@@ -3509,6 +3497,7 @@ exit $code
     /// generation, however much later — connects again. Only the user's
     /// successful sign-in clears it.
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn a_refused_saved_password_is_not_retried_in_the_background() {
         let (root, masters, store) = rig_saved("bgstale", "s3cr3t", Some("old"));
         let target = host_target(&root, "prod");
@@ -3544,6 +3533,7 @@ exit $code
     /// A background attempt that the saved password cannot finish (a code
     /// follows it) is not repeated either: one half-login, then the mark.
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn a_background_job_stops_at_a_second_factor_for_good() {
         let (root, masters, store) = rig_saved("bg2fa", "s3cr3t", None);
         let account = Account {
@@ -3559,6 +3549,7 @@ exit $code
     }
 
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn a_user_job_asks_itself_after_a_refused_background_attempt() {
         let (root, masters, _) = rig_saved("bguser", "s3cr3t", Some("old"));
         let target = host_target(&root, "prod");
@@ -3583,6 +3574,7 @@ exit $code
     /// (not as the account's: nothing to remember, nothing stale), the saved
     /// one answers the destination, and the bastion's is never saved over it.
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn the_saved_password_goes_to_the_destination_and_never_to_its_jump_host() {
         let (root, masters, store) = rig_saved("jump", "s3cr3t", None);
         lock(&store.saved).insert(jumped_account(), "s3cr3t".to_owned());
@@ -3606,6 +3598,7 @@ exit $code
     /// saved password there — and without calling it refused: the user's
     /// sign-in then neither hears it is stale nor loses it.
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn a_jump_hosts_question_in_the_background_leaves_the_saved_password_alone() {
         let (root, masters, store) = rig_saved("jumpbg", "s3cr3t", None);
         lock(&store.saved).insert(jumped_account(), "s3cr3t".to_owned());
@@ -3630,6 +3623,7 @@ exit $code
     /// stays). Without the hold every background tick would open another
     /// connection to the bastion. The user's sign-in lifts it.
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn a_jump_hosts_question_stops_the_background_until_the_user_signs_in() {
         let (root, masters, store) = rig_saved("jumphold", "s3cr3t", None);
         lock(&store.saved).insert(jumped_account(), "s3cr3t".to_owned());
@@ -3654,6 +3648,7 @@ exit $code
     }
 
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn forget_removes_the_password_and_stops_our_master() {
         let (root, masters, store) = rig_saved("forget", "s3cr3t", Some("s3cr3t"));
         let target = host_target(&root, "prod");
@@ -3898,52 +3893,24 @@ exit $code
         std::fs::remove_dir_all(&root).unwrap();
     }
 
-    /// A directory passes to a new owner only from a dead owner or
-    /// from the one handing it over — never from any other living bateri —
-    /// and the sweep leaves a live holder's directory alone even when its
-    /// owner file names a dead process.
-    #[test]
-    fn an_instance_is_adopted_only_from_the_dead_or_its_giver() {
-        let root = scratch("adopt");
-        let base = root.join("s");
-        // A living owner that is not this process: a child standing in for
-        // another bateri.
-        let mut other = Command::new("/bin/sleep").arg("30").spawn().expect("sleep");
-        let other_pid = other.id();
-        let living = prepare_instance(&base, "11111111").unwrap();
-        std::fs::write(living.join(OWNER_FILE), other_pid.to_string()).unwrap();
-        let me = std::process::id();
-        assert!(
-            adopt_instance(&living, None, me).is_err(),
-            "a living bateri's directory was taken"
-        );
-        assert!(
-            adopt_instance(&living, Some(me), me).is_err(),
-            "taken by naming oneself the giver"
-        );
-        assert_eq!(owner(&living), Some(other_pid));
-        adopt_instance(&living, Some(other_pid), me).expect("handed over by its owner");
-        assert_eq!(owner(&living), Some(me));
-        adopt_instance(&living, None, me).expect("taking one's own again");
+    /// Waits, up to two seconds, until nobody listens on a holder's socket in `dir`. A test that
+    /// closes its listener does not end the listening at once: a child another test forks at that
+    /// moment holds the socket until it execs, as a holder that ends is gone only once nothing
+    /// holds its socket.
+    fn let_go(dir: &Path) {
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while holder_listening(dir) && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
 
-        // A dead owner's directory, with a user's live session socket in it.
-        let dead = prepare_instance(&base, "22222222").unwrap();
-        std::fs::write(dead.join(OWNER_FILE), dead_pid().to_string()).unwrap();
-        let session = UnixListener::bind(dead.join("u-0123456789abcdef")).unwrap();
-        adopt_instance(&dead, None, me).expect("a dead owner's directory");
-        sweep(std::slice::from_ref(&base), "ffffffff");
-        assert!(
-            dead.join("u-0123456789abcdef").exists(),
-            "the adopted directory was swept"
-        );
-        let left: Vec<String> = std::fs::read_dir(&dead)
-            .unwrap()
-            .flatten()
-            .map(|entry| entry.file_name().to_string_lossy().into_owned())
-            .filter(|name| name.starts_with('.'))
-            .collect();
-        assert!(left.is_empty(), "a temporary owner file stayed: {left:?}");
-        drop(session);
+    /// The sweep leaves a live holder's directory (a holder of the bateri before kablo) alone
+    /// even when its owner file names a dead process, and a directory a user's live session
+    /// socket sits in is kept whole.
+    #[test]
+    fn the_sweep_leaves_a_live_holders_directory_alone() {
+        let root = scratch("holders");
+        let base = root.join("s");
 
         // A dead owner but a live holder: kept; once the holder is gone, swept.
         let held = prepare_instance(&base, "33333333").unwrap();
@@ -3955,6 +3922,7 @@ exit $code
             "a live holder's directory was swept"
         );
         drop(holder);
+        let_go(&held);
         sweep(std::slice::from_ref(&base), "ffffffff");
         assert!(!held.exists(), "a dead holder's directory stays");
 
@@ -3970,16 +3938,10 @@ exit $code
             "a live bound holder's directory was swept"
         );
         drop(holder);
+        let_go(&bound);
         sweep(std::slice::from_ref(&base), "ffffffff");
         assert!(!bound.exists(), "a dead bound holder's directory stays");
 
-        // Not an instance directory at all.
-        let bare = root.join("bare");
-        prepare_dir(&bare).unwrap();
-        assert!(adopt_instance(&bare, None, me).is_err());
-
-        let _ = other.kill();
-        let _ = other.wait();
         std::fs::remove_dir_all(&root).unwrap();
     }
 
@@ -4268,7 +4230,6 @@ exit $code
         fn blocks_changed(&self) {}
         fn unseen_changed(&self) {}
         fn program_status_changed(&self) {}
-        fn bell(&self) {}
         fn notification(&self) {}
     }
 
@@ -4363,7 +4324,6 @@ exit $code
                 pane_uuid: None,
                 hostname: None,
                 replay: None,
-                journal: None,
                 views: None,
             },
             Arc::clone(&wake) as Arc<dyn bt_core::Wake>,
@@ -4504,7 +4464,6 @@ exit $code
                 pane_uuid: None,
                 hostname: None,
                 replay: None,
-                journal: None,
                 views: None,
             },
             Arc::new(crate::child::SilentWake),

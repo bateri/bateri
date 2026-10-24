@@ -60,7 +60,6 @@ impl Wake for CountingWake {
     fn blocks_changed(&self) {}
     fn unseen_changed(&self) {}
     fn program_status_changed(&self) {}
-    fn bell(&self) {}
     fn notification(&self) {}
     fn view_changed(&self) {
         self.changes.fetch_add(1, Ordering::AcqRel);
@@ -771,7 +770,7 @@ fn a_restart_offers_a_new_token_to_the_program_that_had_a_view() {
     let token = open_a_view(&mut pane);
     let desk = pane.rig.desk.as_ref().expect("a desk");
     desk.take_views();
-    // As after a handover: the pane is a program's again, no shell around it.
+    // As after a restart: the pane is a program's again, no shell around it.
     *lock(&seen) = Observed::default();
 
     desk.restart(pane.rig.write());
@@ -794,7 +793,7 @@ fn a_restart_offers_a_new_token_to_the_program_that_had_a_view() {
 
 // ---- a stream with no desk ------------------------------------------------
 
-/// A stream that has no desk — the journal's replay and the handover's VT —
+/// A stream that has no desk — a bare replay of the bytes —
 /// builds the screen the live one builds and writes nothing.
 #[test]
 fn a_replay_with_no_desk_builds_the_same_screen_and_writes_nothing() {
@@ -818,7 +817,7 @@ fn a_replay_with_no_desk_builds_the_same_screen_and_writes_nothing() {
     live.feed(&stream);
     assert!(!lock(&live.rig.input).is_empty(), "the live pane answers");
 
-    // The journal's replay: commands, no sink.
+    // A replay with commands and no sink.
     let input: Input = Arc::default();
     let mut term = Term::new(
         alacritty_terminal::term::Config::default(),
@@ -835,7 +834,7 @@ fn a_replay_with_no_desk_builds_the_same_screen_and_writes_nothing() {
     assert!(lock(&input).is_empty(), "a replay answers nobody");
     assert_eq!(text_of(&term), live.text());
 
-    // The handover's VT: no commands either.
+    // A replay with no commands either.
     let mut term = Term::new(
         alacritty_terminal::term::Config::default(),
         &TermSize::new(40, 6),
@@ -1568,4 +1567,52 @@ fn a_component_over_the_limit_is_refused_before_a_byte_of_it_is_asked_for() {
         "{}",
         closed[0].payload
     );
+}
+
+// ─── the pane's tty, read for a pane that has no master ────────────────
+
+/// A stream's owner that says what the terminal its program is on is.
+struct TtyOps(Mutex<Option<crate::TtyReading>>);
+
+impl PtyOps for TtyOps {
+    fn resize(&self, _: BorrowedFd<'_>, _: crate::PtySize) {}
+    fn hangup(&self, _: u32, _: BorrowedFd<'_>) {}
+    fn tty(&self, _: u32) -> Option<crate::TtyReading> {
+        *lock(&self.0)
+    }
+}
+
+/// The two checks of the hardening rules are made for a pane that runs in a terminal of this
+/// Mac as they are for one that holds a PTY: the shell is in front when its group is the
+/// terminal's foreground, and the modes are the program's. A terminal that cannot be read
+/// leaves both unknown, never "no" (a `hello` is not answered into a line editor on a guess).
+#[test]
+fn the_tty_of_a_streamed_pane_is_read_through_its_owner() {
+    let shell = Arc::new(Mutex::new(ShellLog::new(100)));
+    let ops = Arc::new(TtyOps(Mutex::new(None)));
+    // The child is the shell, a leader of its own group: 4242.
+    let observer = pane_observer(
+        shell,
+        Arc::new(Mutex::new(None)),
+        Some(Arc::clone(&ops) as Arc<dyn PtyOps>),
+        4242,
+        None,
+    );
+    let unread = observer();
+    assert_eq!(unread.shell_in_foreground, None);
+    assert_eq!(unread.tty_canonical_or_echo, None);
+
+    let reading = |foreground, canonical, echo| crate::TtyReading {
+        modes: crate::TtyModes { canonical, echo },
+        foreground,
+    };
+    *lock(&ops.0) = Some(reading(Some(4242), false, false));
+    let at_prompt = observer();
+    assert_eq!(at_prompt.shell_in_foreground, Some(true));
+    assert_eq!(at_prompt.tty_canonical_or_echo, Some(false));
+
+    *lock(&ops.0) = Some(reading(Some(9000), true, false));
+    let program = observer();
+    assert_eq!(program.shell_in_foreground, Some(false));
+    assert_eq!(program.tty_canonical_or_echo, Some(true));
 }

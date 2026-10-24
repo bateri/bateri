@@ -17,9 +17,8 @@
 //! `Wake` and the settings model's `Settings`, `SettingsEdit`, `Parsed`, `Diagnostic`,
 //! `CursorMotion`, `ReduceMotion`, `SmoothScroll`, `ConfirmClose`, `RestoreWindows`,
 //! `KeepRunning`, `Scrollbar` and the tables
-//! of valid values (`NAMES`, `*_RANGE`), the journal's `Journal`,
-//! `JournalStore`, `JournalStream`, `JournalRecords` and `JournalCut` (the full
-//! list is the `pub use` block below) and, in `pencere`, a pane's desk for the view
+//! of valid values (`NAMES`, `*_RANGE`) (the full list is the `pub use` block
+//! below) and, in `pencere`, a pane's desk for the view
 //! protocol — the types of the protocol crate it hands the shell. `Osc52` is the counterpart of
 //! alacritty's type of the same name, not that type itself. The move to our
 //! own grid (00X) is done behind this boundary and does not know the renderer.
@@ -63,7 +62,6 @@ mod handler;
 mod history;
 mod identity;
 mod input;
-mod journal;
 mod link;
 mod notify;
 pub mod pencere;
@@ -81,7 +79,7 @@ mod wake;
 
 pub use cluster::{ClusterId, Clusters};
 pub use color::{LinearRgba, Theme, contrast_ratio};
-pub use commands::{CommandId, CommandNews, CommandPhase, CommandState, news as command_news};
+pub use commands::{CommandId, CommandPhase, CommandState};
 pub use dock::{
     Dock, DockBudget, DockButton, DockCaret, DockCols, DockEdit, EDIT_MAX, EditCells,
     FooterControl, FooterHit, PORTS_GLYPHS, PROGRAM_GLYPHS, STATS_GLYPHS, STATS_THRESHOLDS,
@@ -93,27 +91,22 @@ pub use graphics::{Picture, PictureLayer, Pictures};
 pub use history::{CommandRecord, MEMORY_LIMIT as COMMAND_MEMORY_LIMIT, RecordState};
 pub use identity::{LC_TERMINAL, PaneUuid, TERM_PROGRAM, TERM_PROGRAM_VERSION, pane_env};
 pub use input::{Arrow, FunctionKey, MouseButton, MouseModifiers, TextKey};
-pub use journal::{
-    HEADROOM as JOURNAL_HEADROOM, JOURNAL_FORMAT, Journal, JournalCut, JournalRecords,
-    JournalStore, JournalStream, Rebuilt, STALL as JOURNAL_STALL, due as journal_due,
-    rebuild as journal_rebuild,
-};
 pub use notify::Notification;
 pub use pointer::PointerShape;
-pub use program_status::{ProgramActivity, ProgramRecord, State as ProgramState};
+pub use program_status::{ProgramActivity, State as ProgramState};
 pub use reset::keeping_history as reset_keeping_history;
 pub use search::{
     SearchCover, SearchDirection, SearchQuery, SearchReport, SearchRun, SearchRuns, SearchStatus,
     escape as escape_search,
 };
 pub use session::{
-    Activity, AdoptMode, Adoption, Block, BlockHandle, BlockInfo, BlockReport, Blocks, Cell,
-    CellHalf, Click, Cursor, DirtyFlag, DockKey, Frozen, InitialInput, LinkHit, LinkHover,
-    LinkKind, LinkPoint, LinkSpan, LinkStamp, Osc52, PathCandidate, Pointer, PtyOps, PtySize,
-    SHUTDOWN_GRACE, ScrollGlide, ScrollIntent, ScrollPosition, SelectKind, SelectionPoint,
-    SelectionRun, SelectionRuns, Session, SessionOptions, ShutdownHandle, Teardown,
-    TerminalOptions, TrackBlock, TrackMark, TrackMarks, UnderlineStyle, Wheel, load_shell,
-    smoke_shell,
+    Activity, Block, BlockHandle, BlockInfo, BlockReport, Blocks, Cell, CellHalf, ChildLaunch,
+    Click, Cursor, DirtyFlag, DockKey, InitialInput, LinkHit, LinkHover, LinkKind, LinkPoint,
+    LinkSpan, LinkStamp, Osc52, PathCandidate, Pointer, PtyOps, PtySize, SHUTDOWN_GRACE,
+    ScrollGlide, ScrollIntent, ScrollPosition, SelectKind, SelectionPoint, SelectionRun,
+    SelectionRuns, Session, SessionOptions, ShutdownHandle, Silence, Stream, StreamExit, Teardown,
+    TerminalOptions, TrackBlock, TrackMark, TrackMarks, TtyReading, UnderlineStyle, Wheel,
+    load_shell, smoke_shell,
 };
 pub use settings::{
     CURSOR_BLINK_INTERVAL, CURSOR_BLINK_RANGE, CURSOR_GLOW, CURSOR_GLOW_RANGE, CURSOR_RADIUS,

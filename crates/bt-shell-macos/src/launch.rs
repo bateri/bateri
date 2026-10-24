@@ -1,7 +1,6 @@
 //! What a terminal pane is born with and what its close leaves: the start directory and first
-//! input, its persistent identity, a replayed history or a program handed over by a previous
-//! bateri ([`Launch`], [`Adopted`]), the line a pane says when it does not come back whole
-//! ([`Note`]), and the handle its close returns ([`Closing`]).
+//! input, its persistent identity, a replayed history ([`Launch`]), the line a pane says when it
+//! does not come back whole ([`Note`]), and the handle its close returns ([`Closing`]).
 //!
 //! The pane's own vocabulary, apart from the windows and tabs that hold panes: whoever opens a
 //! pane — bateri's tabs, or an application that embeds one — speaks it.
@@ -40,11 +39,11 @@ pub struct Identity {
     /// dock and the command blocks.
     pub zsh_wrapper_dir: Option<PathBuf>,
     /// The same for fish (bateri's `Resources/shell/fish`, the directory that
-    /// holds `vendor_conf.d`). `None`: a fish pane gets no integration, as a
+    /// holds `vendor_conf.d` and `dock.fish`). `None`: a fish pane gets no integration, as a
     /// zsh pane without [`Self::zsh_wrapper_dir`].
     pub fish_wrapper_dir: Option<PathBuf>,
     /// The same for bash (bateri's `Resources/shell/bash`, the directory that holds
-    /// `bateri.bash`, the file `ENV` is pointed at). `None`: a bash pane gets no integration.
+    /// `bateri.bash`, the file `ENV` is pointed at, and `dock.bash`, which it reads). `None`: a bash pane gets no integration.
     pub bash_wrapper_dir: Option<PathBuf>,
 }
 
@@ -182,7 +181,8 @@ pub(crate) fn integration_env(
     // answer to "is there a dock in this session". The terminal gives the
     // decision, the shell is not asked (`ShellIntegration::wants_dock`). fish
     // and bash are no exception: their docks read the line from the grid, so
-    // they need no mirror, only the script's prompt.
+    // they need no mirror, only the script's prompt. A server's terminal gets the same decision
+    // from the same predicate (`kablo::Backend::dock`, as `BATERI_DOCK=off` in its environment).
     if !setting.wants_dock() {
         env.push(("BATERI_DOCK".to_owned(), "off".to_owned()));
     }
@@ -459,9 +459,6 @@ pub(crate) struct Launch {
     /// A previous session's scrollback, replayed before the shell starts
     /// (`SessionOptions::replay`); `None` → an empty grid.
     pub(crate) replay: Option<Vec<u8>>,
-    /// The update's handover: a running program to carry on
-    /// instead of a new shell; `None` → a shell is born.
-    pub(crate) adopt: Option<Adopted>,
     /// Variables the opener adds to the shell's environment. The locale's and
     /// the shell integration's own win over them on a clash, and `TERM` and
     /// the identity family are never overridden (`Session::spawn`).
@@ -550,50 +547,10 @@ pub(crate) fn held_command(
     Some((program, args))
 }
 
-/// A pane the previous bateri froze and its holder gave, checked to be
-/// adoptable (`AppDelegate`'s arrival): the master, the exit watch of its
-/// child, the pane's state and the bytes to read before the master's.
-#[derive(Debug)]
-pub(crate) struct Adopted {
-    pub(crate) master: std::os::fd::OwnedFd,
-    pub(crate) exit: std::os::fd::OwnedFd,
-    pub(crate) pid: u32,
-    pub(crate) state: crate::handover::PaneState,
-    /// The frozen tail, then what the holder drained (`HeldPane::buffer`).
-    pub(crate) prefix: Vec<u8>,
-    /// The socket of the holder it came from: the pane registers with this
-    /// bateri's own holder unconfirmed until that one is acknowledged.
-    pub(crate) taken_from: Option<std::path::PathBuf>,
-    /// Which kind of holder it came from (`bt_core::AdoptMode`).
-    pub(crate) mode: bt_core::AdoptMode,
-    /// Its screen did not come back whole: the program is nudged to redraw
-    /// it (`Session::nudge_size`).
-    pub(crate) nudge: bool,
-    /// The note if the session cannot be adopted after all and the pane
-    /// falls back to a new shell.
-    pub(crate) note: Note,
-}
-
 /// The dim line a pane says when it does not come back whole — no pane
 /// comes back as a half screen, or as a new shell, without saying so.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Note {
-    /// The program did not cross an update.
-    Update,
-    /// The program was not carried through a crash (its holder did not have
-    /// it, or could not give it).
-    Crash,
-    /// A deliberate handover to a bound holder (a quit, or an update that
-    /// found one) did not carry the program — which of the two it was, the
-    /// holder cannot tell.
-    NotCarried,
-    /// The program ended while bateri was closed.
-    Ended,
-    /// The program runs on, its screen did not come back: it redraws it.
-    Screenless,
-    /// The program runs on, but the output of while bateri was closed lost
-    /// its oldest part.
-    Cut,
     /// The terminal that ran here on a server is no longer kept: it was ended with the
     /// bateri that showed it (`keep_running = "update"` after a crash), or the record
     /// of it is gone.
@@ -603,22 +560,6 @@ pub(crate) enum Note {
 impl Note {
     pub(crate) fn text(self) -> &'static str {
         match self {
-            Note::Update => {
-                "bateri: the program running here did not survive the update; this is a new shell"
-            }
-            Note::Crash => {
-                "bateri: the program running here did not survive the crash; this is a new shell"
-            }
-            Note::NotCarried => {
-                "bateri: the program running here could not be carried over; this is a new shell"
-            }
-            Note::Ended => {
-                "bateri: the program running here ended while bateri was closed; this is a new shell"
-            }
-            Note::Screenless => {
-                "bateri: the screen could not be restored; the program kept running"
-            }
-            Note::Cut => "bateri: output from while bateri was closed was cut short",
             Note::Server => {
                 "bateri: the terminal that ran here on the server is no longer kept; this is a new shell"
             }
@@ -768,43 +709,18 @@ mod tests {
     /// dim, and resets what the history left on.
     #[test]
     fn the_fallback_note_has_a_line_of_its_own() {
-        for kind in [
-            Note::Update,
-            Note::Crash,
-            Note::NotCarried,
-            Note::Ended,
-            Note::Server,
-        ] {
-            let note = format!("\x1b[0m\x1b[2m{}\x1b[0m\r\n", kind.text());
-            assert_eq!(kind.line(), note.as_bytes());
-            assert_eq!(fallen_back(None, kind), note.as_bytes());
-            assert_eq!(fallen_back(Some(Vec::new()), kind), note.as_bytes());
-            assert_eq!(
-                fallen_back(Some(b"$ ls\r\n".to_vec()), kind),
-                [&b"$ ls\r\n"[..], note.as_bytes()].concat()
-            );
-            assert_eq!(
-                fallen_back(Some(b"\x1b[1m$ half".to_vec()), kind),
-                [&b"\x1b[1m$ half\r\n"[..], note.as_bytes()].concat()
-            );
-        }
-        // Every event says its own thing, and the update's is today's text.
+        let kind = Note::Server;
+        let note = format!("\x1b[0m\x1b[2m{}\x1b[0m\r\n", kind.text());
+        assert_eq!(kind.line(), note.as_bytes());
+        assert_eq!(fallen_back(None, kind), note.as_bytes());
+        assert_eq!(fallen_back(Some(Vec::new()), kind), note.as_bytes());
         assert_eq!(
-            Note::Update.text(),
-            "bateri: the program running here did not survive the update; this is a new shell"
+            fallen_back(Some(b"$ ls\r\n".to_vec()), kind),
+            [&b"$ ls\r\n"[..], note.as_bytes()].concat()
         );
-        let texts = [
-            Note::Update,
-            Note::Crash,
-            Note::NotCarried,
-            Note::Ended,
-            Note::Screenless,
-            Note::Cut,
-            Note::Server,
-        ]
-        .map(Note::text);
-        for (index, text) in texts.iter().enumerate() {
-            assert!(!texts[..index].contains(text), "{text}");
-        }
+        assert_eq!(
+            fallen_back(Some(b"\x1b[1m$ half".to_vec()), kind),
+            [&b"\x1b[1m$ half\r\n"[..], note.as_bytes()].concat()
+        );
     }
 }

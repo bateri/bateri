@@ -3,7 +3,7 @@ CARGO ?= cargo
 # Prerequisite order is only guaranteed under serial make; under -j the promises
 # "cheapest gate first" and "version first" break.
 .NOTPARALLEL:
-.PHONY: check prune fmt audit clippy test shader smoke terminfo test-race scan bundle package install release publish ship release-gate sparkle dmgbuild linux embed-swift embed-tag guest guest-test guest-linux luau
+.PHONY: check prune fmt audit clippy test test-heavy test-view test-all gate gate-push hooks linux-server linux-run shader smoke terminfo test-race scan bundle package install release publish ship release-gate sparkle dmgbuild linux guest guest-test guest-linux luau
 
 # Definition of done. Homebrew rustc is not pinned (there is deliberately no
 # rust-toolchain.toml): the version is printed first so a clippy failure that
@@ -84,10 +84,9 @@ fmt:
 # - The pane stands without bateri's application: in bt-shell-macos a module
 #   that is the pane's reaches no application module (app, window, tab, menu,
 #   …) — what it needs comes through its host (`PaneHost`) — and a pane is
-#   opened only in `embed.rs`, bateri's own tabs included. bt-embed, the C
-#   interface, reaches bt-shell-macos only through `embed`. A shortcut past
-#   that door would work in bateri and silently not in an application that
-#   hosts the pane.
+#   opened only in `embed.rs`, bateri's own tabs included. A shortcut past
+#   that door would work in bateri's tabs and silently not in a pane opened
+#   without the application, as its tests open one.
 # - The parser and the emulator are forks: `vte` and `alacritty_terminal` resolve
 #   to kablo's repository, at the commit `[patch.crates-io]` pins (`rev` in
 #   Cargo.toml), through that patch. If a patch stops applying (alacritty_terminal
@@ -141,14 +140,13 @@ audit:
 			|| { echo "audit: unjustified panic path in bt-core ($$f)"; fail=1; }; \
 	done; \
 	if grep -rnE "beginSheet|endSheet|attachedSheet" crates/bt-shell-macos/src --include='*.rs' | grep -v "^crates/bt-shell-macos/src/sheets.rs:" | grep -v "^crates/bt-shell-macos/src/settings_window" | grep -v ":[[:space:]]*//"; then echo "audit: a sheet begun, ended or asked about outside the sheet gate (bt-shell-macos sheets.rs)"; fail=1; fi; \
-	app_mods="agent|app|arrange|hold_service|keeper|menu|palette|pane_drag|settings_window|split_view|tab|tab_bar|tab_drag|tab_group|tab_merge|tab_side|tab_switch|tab_title|updater|window"; \
+	app_mods="agent|app|arrange|hold_service|leaving|menu|palette|pane_drag|settings_window|split_view|tab|tab_bar|tab_drag|tab_group|tab_merge|tab_side|tab_switch|tab_title|updater|window"; \
 	for f in crates/bt-shell-macos/src/*.rs; do \
 		m=$$(basename "$$f" .rs); \
 		if echo "$$m" | grep -qxE "lib|$$app_mods"; then continue; fi; \
 		if grep -nE "crate::($$app_mods)\b|^use crate::\{[^}]*\b($$app_mods)\b" "$$f" | grep -vE "^[0-9]+:[[:space:]]*//"; then echo "audit: $$f is the pane's and reaches an application module (app, window, tab, …): what it needs goes through the pane's host (PaneHost) or comes down to the pane"; fail=1; fi; \
 	done; \
-	if grep -rn "TerminalPane::new(" crates/bt-shell-macos/src --include='*.rs' | grep -v "^crates/bt-shell-macos/src/embed.rs:" | grep -v ":[[:space:]]*//"; then echo "audit: a pane opened outside embed::open — bateri opens its panes the way an embedding application does"; fail=1; fi; \
-	if grep -rnE "bt_shell_macos::" crates/bt-embed --include='*.rs' | grep -vE "bt_shell_macos::embed\b" | grep -v ":[[:space:]]*//"; then echo "audit: bt-embed reaches bt-shell-macos past its embedding door (bt_shell_macos::embed) — what a C host needs comes through embed, as bateri's own panes do"; fail=1; fi; \
+	if grep -rn "TerminalPane::new(" crates/bt-shell-macos/src --include='*.rs' | grep -v "^crates/bt-shell-macos/src/embed.rs:" | grep -v ":[[:space:]]*//"; then echo "audit: a pane opened outside embed::open — every pane, bateri's tabs and the tests' alike, is born at that one door"; fail=1; fi; \
 	if [ -d assets/shell ] && grep -rnE "(>>?|sed -i|tee).*(\.zshenv|\.zprofile|\.zshrc|\.zlogin|\.zlogout|\.bashrc|\.bash_profile|\.profile|config\.fish)" assets/shell; then echo "audit: shell integration writes to the user's rc file"; fail=1; fi; \
 	git diff --quiet HEAD -- Cargo.lock $$(git ls-files '*Cargo.toml') || echo "audit: warning — Cargo.toml/Cargo.lock differs from HEAD; is the dependency decision recorded?"; \
 	test $$fail -eq 0 && echo "audit: clean"
@@ -163,8 +161,48 @@ clippy:
 # The forks of the parser and of the emulator live in kablo's repository (`vendor/vte`
 # and `vendor/alacritty_terminal` there), and their tests, upstream's and ours, run in
 # kablo's gate: the owner of the code owns its tests. Here only the workspace's own.
+# This is the fast tier: the heavy tests — those that start a real shell, program, ssh or
+# kablo, or wait seconds on a clock — are `#[ignore = "heavy: …"]`, and the program view's
+# test (its own `main`) runs only with `BT_HEAVY`. `test-heavy`, `test-view` and `test-all`
+# run them; which of them a change needs, `make gate` and `make gate-push` decide.
 test:
 	$(CARGO) test --workspace --all-targets
+
+# The tests `#[ignore]`d for something else than being heavy, by their paths: the race tier
+# (`make test-race`), the font inventories (`make scan`, `raster_digest`), the frame-loop
+# measurement hook, the askpass child the master tests start themselves and the tests that
+# need a local sshd. A new `#[ignore]` of that kind goes here too, or the heavy runs try it.
+NOT_HEAVY = --skip ::race_ --skip census::tests::census --skip raster_digest \
+	--skip wgpu_tests::offscreen_frame_loop --skip ssh_route::tests::askpass_child \
+	--skip ssh_route::tests::a_real_master_opens --skip ssh_route::tests::password_sshd_
+
+# The libraries' heavy tests: those whose path holds one of AREA's words
+# (`AREA="child:: kablo::"`), every one without it. Nothing is built again: the same test
+# binaries as `test`, the ignored tests taken.
+test-heavy:
+	$(CARGO) test --workspace --lib -- --ignored $(NOT_HEAVY) $(AREA)
+
+# The program view's test, end to end in a real web view (tens of seconds, one at a time).
+test-view:
+	BT_HEAVY=1 $(CARGO) test --workspace --test pencere
+
+# Every test but those `NOT_HEAVY` names: the fast tier and the heavy one together, the push
+# tier's run.
+test-all:
+	BT_HEAVY=1 $(CARGO) test --workspace --all-targets -- --include-ignored $(NOT_HEAVY)
+
+# What a change needs, picked by the files it touched (`tools/gate.sh` says how): `gate` for
+# a commit — the fast tier and the touched areas' heavy tests; `gate-push` before a push —
+# everything once, `make linux` and `make bundle` when their inputs changed. Each stamps the
+# tree that passed; the pre-push hook asks for `gate-push`'s, `make hooks` puts it in place.
+gate:
+	@tools/gate.sh commit
+
+gate-push:
+	@tools/gate.sh push
+
+hooks:
+	ln -sf "$(CURDIR)/tools/pre-push" "$$(git rev-parse --git-path hooks)/pre-push"
 
 # Opens the window, and when BT_RUN_SECONDS expires looks at the number of
 # frames, cells, glyphs, rule lines and atlas slots:
@@ -240,7 +278,7 @@ test:
 # wgpu gives no drawable to an occluded window, and the gate used to fall with
 # `frames=0` when another application was in front.
 smoke:
-	env -u BT_SCROLL_TEST -u BT_FRAME_STATS -u BT_JOURNAL BT_RUN_SECONDS=3 $(CARGO) run -q -p bateri
+	env -u BT_SCROLL_TEST -u BT_FRAME_STATS BT_RUN_SECONDS=3 $(CARGO) run -q -p bateri
 
 # WGSL canary: the shaders are embedded with `include_str!` and have no build
 # step, so the canary is the test that sets up the pipelines — naga validation
@@ -434,19 +472,23 @@ bundle: sparkle
 	@# as long as ZDOTDIR points at our directory, an arm that writes there
 	@# (`/etc/zshrc` once spawned a `.zsh_history` there) or a
 	@# `.DS_Store` would silently enter the product through a recursive copy.
-	@# That the directory's inventory is EXACTLY these six files is tested
-	@# by `bundle_assets`; fish's is the one file below, in the `vendor_conf.d`
+	@# That the directory's inventory is EXACTLY these seven files (the dock's
+	@# functions, `dock.zsh`, among them) is tested
+	@# by `bundle_assets`; fish's is the file below, in the `vendor_conf.d`
 	@# fish reads it from (`shell/` is the `XDG_DATA_DIRS` entry that
-	@# makes fish find it), and bash's is the one file `ENV` points at. The remote wrapper (`assets/shell/remote/`)
-	@# is not copied: `bateri ssh-argv` embeds it at build time.
+	@# makes fish find it) and its dock's functions, `dock.fish`, one level above, where
+	@# fish reads nothing by itself; bash's is the file `ENV` points at and the dock's
+	@# functions it reads, `dock.bash`. The remote wrapper (`assets/shell/remote/`) is not
+	@# copied: the application embeds it (with the three dock files) and writes it to a server.
 	mkdir -p $(STAGE)/Contents/Resources/shell/zsh
 	cp assets/shell/zsh/.zshenv assets/shell/zsh/.zprofile assets/shell/zsh/.zshrc \
-		assets/shell/zsh/.zlogin assets/shell/zsh/bateri.zsh assets/shell/zsh/zdotdir.zsh \
-		$(STAGE)/Contents/Resources/shell/zsh/
+		assets/shell/zsh/.zlogin assets/shell/zsh/bateri.zsh assets/shell/zsh/dock.zsh \
+		assets/shell/zsh/zdotdir.zsh $(STAGE)/Contents/Resources/shell/zsh/
 	mkdir -p $(STAGE)/Contents/Resources/shell/fish/vendor_conf.d
 	cp assets/shell/fish/vendor_conf.d/bateri.fish $(STAGE)/Contents/Resources/shell/fish/vendor_conf.d/
+	cp assets/shell/fish/dock.fish $(STAGE)/Contents/Resources/shell/fish/
 	mkdir -p $(STAGE)/Contents/Resources/shell/bash
-	cp assets/shell/bash/bateri.bash $(STAGE)/Contents/Resources/shell/bash/
+	cp assets/shell/bash/bateri.bash assets/shell/bash/dock.bash $(STAGE)/Contents/Resources/shell/bash/
 	@# kablo's files: the release is checked against its own list, then exactly the
 	@# files the list names are copied (no glob: a second version in the directory
 	@# would be a package with two).
@@ -501,7 +543,7 @@ bundle: sparkle
 	for f in Credits.html THIRD-PARTY-LICENSES.txt; do \
 		cmp -s assets/bundle/$$f $$c/Resources/$$f || fail "$$f is not in the package or differs from the input"; \
 	done; \
-	for f in zsh/.zshenv zsh/.zprofile zsh/.zshrc zsh/.zlogin zsh/bateri.zsh zsh/zdotdir.zsh fish/vendor_conf.d/bateri.fish bash/bateri.bash; do \
+	for f in zsh/.zshenv zsh/.zprofile zsh/.zshrc zsh/.zlogin zsh/bateri.zsh zsh/dock.zsh zsh/zdotdir.zsh fish/vendor_conf.d/bateri.fish fish/dock.fish bash/bateri.bash bash/dock.bash; do \
 		cmp -s assets/shell/$$f $$c/Resources/shell/$$f || fail "shell/$$f is not in the package or differs from the input"; \
 	done; \
 	kd=$$c/Resources/kablo; \
@@ -667,6 +709,7 @@ RELEASE_URL = https://github.com/$(REPO)/releases/download/v$(VERSION)/
 release-gate:
 	@echo '$(VERSION)' | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$$' || { echo "release: version '$(VERSION)' is not x.y.z (Cargo.toml)"; exit 1; }
 	@test -z "$$(git status --porcelain)" || { echo "release: the working tree is not clean, the version must come from a known code"; exit 1; }
+	@tools/gate.sh check-push || { echo "release: run \`make gate-push\` first — a release goes out only from a commit that passed every test"; exit 1; }
 	@! git rev-parse -q --verify 'refs/tags/v$(VERSION)' >/dev/null || { echo "release: tag v$(VERSION) already exists — bump the version in Cargo.toml"; exit 1; }
 	@! git ls-remote --exit-code --tags origin 'refs/tags/v$(VERSION)' >/dev/null || { echo "release: tag v$(VERSION) already exists on origin"; exit 1; }
 	@rm -rf $(RELEASE_DIR) && mkdir -p $(RELEASE_DIR); \
@@ -674,7 +717,7 @@ release-gate:
 		| awk 'NF { p = 1 } p' | awk '{ l[NR] = $$0 } END { n = NR; while (n > 0 && l[n] ~ /^[[:space:]]*$$/) n--; for (i = 1; i <= n; i++) print l[i] }' > $(NOTES); \
 	grep -q '[^[:space:]]' $(NOTES) || { echo "release: CHANGELOG.md has no '## [$(VERSION)]' section or it is empty (turn Unreleased into the version)"; exit 1; }
 
-release: release-gate embed-swift package
+release: release-gate linux package
 	@spctl -a -vv -t exec $(APP) 2>&1 | grep -q 'source=Notarized Developer ID' && xcrun stapler validate -q $(APP) || \
 		{ echo "release: the package is not notarized, it does not enter the release"; exit 1; }
 	@spctl -a -vv -t open --context context:primary-signature $(DMG) 2>&1 | grep -q 'source=Notarized Developer ID' || \
@@ -721,8 +764,8 @@ ship:
 # not destroy the working package. It stops if a bateri is open and does not
 # close it — killing the shells in the user's session is not a build target's
 # decision. Only the application counts: its argv is the binary alone (or
-# with AppKit's `-` options), while `bateri hold …` — the process that keeps
-# the programs running after bateri quits — and the other subcommands carry a
+# with AppKit's `-` options), while `bateri ssh-hold …` — the program of a pane
+# that shows a terminal a server keeps — and the other subcommands carry a
 # word after it and do not block an install.
 INSTALL_DIR ?= /Applications
 INSTALLED = $(INSTALL_DIR)/bateri.app
@@ -746,8 +789,9 @@ terminfo:
 # The rule "bt-core is platformless, the gate is compiling for Linux" is
 # this command.
 # OUTSIDE `make check`, because it needs Docker and its first run builds the
-# image and compiles the whole graph for Linux; run it when a crate that
-# compiles on Linux changed.
+# image and compiles the whole graph for Linux. Two runs share it: `linux`, the
+# whole of it, in the release; `linux-server`, what runs on a server, before a
+# push that touched it (`make gate-push`).
 # The scope grows over time — today bt-core, bt-atlas's FreeType/
 # fontconfig/harfrust backend, bt-gpu (Vulkan; `wgsl_pipelines_build` and the
 # offscreen pixel tests run on lavapipe) and bt-shell-common (`jobs`'s
@@ -766,54 +810,6 @@ terminfo:
 #    bound to `/w`, outputs go to `target/linux` (so they do not mix with the
 #    macOS build; `/target/` is already in .gitignore), crate downloads in a
 #    named volume.
-# The C interface's sample host (`crates/bt-embed`): a Swift application built with swiftc from
-# the hand-written header asks the layout engine a verdict and a plan, then opens a pane with the
-# shell integration, gives its shell a variable, a directory and a command that writes both to a
-# file and fails, and passes when the command's start and end (with its exit code) and the shell's
-# exit reach it as events and the file holds what it gave. Not in `make check` (swiftc and a window); the release runs it.
-# The static library is built here only — in a debug build it is ~400 MB, and nothing else
-# links it. The system libraries are what rustc prints for it (`cargo rustc -p bt-embed --lib
-# --crate-type staticlib -- --print native-static-libs`); one gone missing fails the link loudly.
-EMBED_DIR = target/embed-swift
-EMBED_LIBS = -framework UserNotifications -framework Security -framework AppKit -framework QuartzCore \
-	-framework Metal -framework Foundation -framework CoreText -framework CoreGraphics \
-	-framework CoreFoundation -lobjc -liconv
-
-embed-swift:
-	$(CARGO) rustc -q -p bt-embed --lib --crate-type staticlib
-	@mkdir -p $(EMBED_DIR)
-	xcrun swiftc -swift-version 5 -import-objc-header crates/bt-embed/include/bt_embed.h \
-		crates/bt-embed/examples/swift-host/main.swift target/debug/libbt_embed.a $(EMBED_LIBS) \
-		-o $(EMBED_DIR)/swift-host
-	@if [ "$$(launchctl managername 2>/dev/null)" != Aqua ]; then \
-		echo "embed-swift: SKIPPED (no window server session)"; exit 0; fi; \
-	BT_EMBED_ZSH=$(CURDIR)/assets/shell/zsh BT_EMBED_FISH=$(CURDIR)/assets/shell/fish BT_EMBED_BASH=$(CURDIR)/assets/shell/bash $(EMBED_DIR)/swift-host
-
-# The embedding interface's own release: an annotated `bt-embed-<version>` tag on the commit
-# that turned `crates/bt-embed/CHANGELOG.md`'s Unreleased section into `## [<version>] - <date>`.
-# Its versions run apart from bateri's `v<version>` tags, which `make release` keeps for bateri
-# itself; a product that links the pane builds against one of these. The version is the
-# changelog's topmost one. It stops on a dirty tree, a non-empty Unreleased section (the version
-# was not made yet), a tag that exists here or on origin, and either check not running green — a
-# skipped Swift sample (no window server) is not green. It pushes nothing: that is a person's go,
-# as with `make publish`.
-EMBED_CHANGELOG = crates/bt-embed/CHANGELOG.md
-EMBED_VERSION = $(shell sed -n 's/^\#\# \[\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)\] - [0-9-]*$$/\1/p' $(EMBED_CHANGELOG) | head -1)
-EMBED_ABI = $(shell sed -n 's/^\#define BT_EMBED_ABI_VERSION \([0-9]*\)u$$/\1/p' crates/bt-embed/include/bt_embed.h)
-
-embed-tag:
-	@test -z "$$(git status --porcelain)" || { echo "embed-tag: the working tree is not clean; the tag must name a known code"; exit 1; }
-	@test -n "$(EMBED_VERSION)" || { echo "embed-tag: $(EMBED_CHANGELOG) has no '## [x.y.z] - date' section"; exit 1; }
-	@test -z "$$(awk '/^## \[Unreleased\]/ { on = 1; next } /^## \[/ { if (on) exit } on && NF' $(EMBED_CHANGELOG))" || \
-		{ echo "embed-tag: the Unreleased section of $(EMBED_CHANGELOG) is not empty — turn it into the version and commit first"; exit 1; }
-	@! git rev-parse -q --verify 'refs/tags/bt-embed-$(EMBED_VERSION)' >/dev/null || { echo "embed-tag: tag bt-embed-$(EMBED_VERSION) already exists — the next version goes in $(EMBED_CHANGELOG) first"; exit 1; }
-	@! git ls-remote --exit-code --tags origin 'refs/tags/bt-embed-$(EMBED_VERSION)' >/dev/null 2>&1 || { echo "embed-tag: tag bt-embed-$(EMBED_VERSION) already exists on origin"; exit 1; }
-	@$(MAKE) --no-print-directory check
-	@out=$$($(MAKE) --no-print-directory embed-swift 2>&1); echo "$$out" | tail -1; \
-		echo "$$out" | grep -q '^embed-swift: ok' || { echo "embed-tag: the Swift sample did not run green"; exit 1; }
-	git tag -a 'bt-embed-$(EMBED_VERSION)' -m 'bt-embed $(EMBED_VERSION), ABI $(EMBED_ABI)'
-	@echo "embed-tag: bt-embed-$(EMBED_VERSION) -> $$(git rev-parse --short HEAD); nothing pushed — with a person's go: git push origin main bt-embed-$(EMBED_VERSION)"
-
 # The page modules (`guest/`): pages that run in the application's sandbox, built for
 # `wasm32-unknown-unknown` and turned into components in `guest/dist/`. The application itself is built
 # with Homebrew's rustc, which has no WebAssembly standard library; the modules are built with
@@ -922,7 +918,23 @@ LINUX_CRATES = -p bt-core -p bt-atlas -p bt-gpu -p bt-view -p bt-view-wasm -p bt
 LINUX_GIT_COMMON = $(shell git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
 LINUX_GIT_MOUNT = $(if $(filter-out $(CURDIR)/.git,$(LINUX_GIT_COMMON)),-v "$(LINUX_GIT_COMMON)":"$(LINUX_GIT_COMMON)":ro)
 
-linux:
+# The full gate: every Linux crate's clippy and every test but those `NOT_HEAVY` names. The
+# release runs it, once a version: bateri ships for macOS today, and the gate keeps the crates
+# that are to run on Linux one day from drifting until then.
+linux: LINUX_CMD = cargo clippy $(LINUX_CRATES) --all-targets --locked -- -D warnings && \
+	cargo test $(LINUX_CRATES) --all-targets --locked -- --include-ignored $(NOT_HEAVY)
+linux: linux-run
+
+# What bateri runs on a server, which is Linux far more often than not: the agent's `bateri`
+# script, the remote shells' integration and kablo's install steps, in a Linux shell with
+# Linux's tools. `make gate-push` runs it when their files changed. The same test binaries as
+# `linux` (`--lib`), so neither builds the other's again.
+SERVER_TESTS = agent::script:: ssh_wrap::remote_shells:: kablo::install::
+linux-server: LINUX_CMD = cargo test $(LINUX_CRATES) --lib --locked -- --include-ignored \
+	$(NOT_HEAVY) $(SERVER_TESTS)
+linux-server: linux-run
+
+linux-run:
 	@yerel=$$(rustc --version | sed -n 's/^rustc \([0-9]*\.[0-9]*\).*/\1/p'); \
 	if [ -z "$(LINUX_RUST)" ]; then \
 		echo "linux: could not read the rust version from the FROM line of $(LINUX_DOCKERFILE)"; exit 1; fi; \
@@ -933,6 +945,4 @@ linux:
 	docker build -q -t $(LINUX_IMAGE) -f $(LINUX_DOCKERFILE) tools/linux
 	docker run --rm -v "$(CURDIR)":/w $(LINUX_GIT_MOUNT) -v bateri-linux-cargo:/usr/local/cargo/registry \
 		-v bateri-linux-cargo-git:/usr/local/cargo/git \
-		-e CARGO_TARGET_DIR=/w/target/linux $(LINUX_IMAGE) sh -c '\
-		cargo clippy $(LINUX_CRATES) --all-targets --locked -- -D warnings && \
-		cargo test $(LINUX_CRATES) --all-targets --locked'
+		-e CARGO_TARGET_DIR=/w/target/linux $(LINUX_IMAGE) sh -c '$(LINUX_CMD)'

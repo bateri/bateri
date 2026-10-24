@@ -1,0 +1,22 @@
+#!/bin/bash
+# The pre-push hook (`make hooks` puts it in place): a branch goes out only at a commit whose
+# content passed `make gate-push` — the stamp, in this worktree's git directory, names the git
+# tree that passed. It reads the stamp and runs nothing. A tag goes out freely: it names a
+# commit that went out as a branch. `git push --no-verify` passes it by; say why when you do.
+stamp="$(git rev-parse --git-dir)/bateri-gate"
+zero=0000000000000000000000000000000000000000
+status=0
+while read -r local_ref local_sha _remote_ref _remote_sha; do
+    case $local_ref in refs/heads/*) ;; *) continue ;; esac
+    [ "$local_sha" = "$zero" ] && continue
+    tree=$(git rev-parse "$local_sha^{tree}" 2>/dev/null)
+    if ! { [ -f "$stamp" ] && grep -qx "push $tree" "$stamp"; }; then
+        echo "pre-push: ${local_sha:0:7} (${local_ref#refs/heads/}) has not passed \`make gate-push\`"
+        status=1
+    fi
+done
+if [ $status -ne 0 ]; then
+    echo "pre-push: run \`make gate-push\` and push again. A branch from before the gate (main"
+    echo "pre-push: 672e950) has no \`make gate-push\`: push it with \`git push --no-verify\`."
+fi
+exit $status

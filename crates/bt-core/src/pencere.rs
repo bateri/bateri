@@ -33,12 +33,12 @@
 //! log, the master's modes — is read before the conversation is locked, and the
 //! wake is called after both are released).
 //!
-//! **What does not come in.** A stream with no desk (the journal's replay, the
-//! handover's VT, a session opened without [`ViewOptions`]) skips the frames:
-//! the bytes are still the parser's and the screen is the same, but nothing is
-//! heard or written — a replay must not answer twice. A frame that was cut by a
-//! handover is not carried: the new process offers the program a restart
-//! instead (§10.7), which is what the stream the old process had cannot give.
+//! **What does not come in.** A stream with no desk (a replay into a bare `Term`, a
+//! session opened without [`ViewOptions`]) skips the frames: the bytes are still the
+//! parser's and the screen is the same, but nothing is heard or written — a replay must not
+//! answer twice. The past of a terminal shown again ([`crate::Silence`]) is heard without
+//! being answered, and the program is offered a restart instead (§10.7), which is what the
+//! stream the old process had cannot give.
 //!
 //! **A known limit.** The scanner (OSC 133) has read the whole of a read by the
 //! time the parser reaches a frame in it, so a command's end and a frame written
@@ -73,6 +73,7 @@ pub use ::pencere::session::{
 
 use crate::color::{Theme, srgb_bytes};
 use crate::flow::Flow;
+use crate::session::PtyOps;
 use crate::shell::ShellLog;
 use crate::wake::Wake;
 
@@ -443,13 +444,15 @@ fn observed(editing: bool, remote: bool, tty: Option<Tty>, shell: Option<u32>) -
 }
 
 /// The observer of a pane: the shell's log for the prompt and the remote
-/// session, the master's copy for the tty. Each is read with its own leaf lock
+/// session, the master's copy for the tty (a stream's own reading of it, by the
+/// program's pid, where it has no master). Each is read with its own leaf lock
 /// and none is held while another is taken. `child_pid` is the pid of the
 /// pane's child, which `group` turns into the shell's group where the child is
 /// not the shell (`login(1)` on macOS).
 pub(crate) fn pane_observer(
     shell: Arc<Mutex<ShellLog>>,
     master: Arc<Mutex<Option<File>>>,
+    stream: Option<Arc<dyn PtyOps>>,
     child_pid: u32,
     group: Option<ShellGroup>,
 ) -> Observer {
@@ -461,6 +464,13 @@ pub(crate) fn pane_observer(
         };
         let tty = if remote {
             None
+        } else if let Some(ops) = &stream {
+            // No master: the terminal is read from the outside, by the program's pid. The
+            // frame being heard is the program writing, so the pid is its own.
+            ops.tty(child_pid).map(|reading| Tty {
+                foreground: reading.foreground,
+                canonical_or_echo: reading.modes.canonical || reading.modes.echo,
+            })
         } else {
             lock(&master)
                 .as_ref()

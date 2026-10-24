@@ -140,8 +140,14 @@ impl Server {
 
     /// The bootstrap a new terminal runs, as kablo runs it (an argument vector).
     fn bootstrap(&self) {
-        let argv =
-            crate::ssh_wrap::kablo_argv(None, None, "00c0ffee00c0ffee", None, Some(KABLO_PATH));
+        // The files are on the server before the terminal starts (`install::ensure` wrote them).
+        crate::ssh_wrap::seed_files(
+            &self.home.join("bin/zsh"),
+            &self.home,
+            &[],
+            Some(KABLO_PATH),
+        );
+        let argv = crate::ssh_wrap::kablo_argv(None, None, "00c0ffee00c0ffee", None);
         let words: Vec<String> = argv
             .iter()
             .map(|word| String::from_utf8(word.clone()).expect("text"))
@@ -181,6 +187,18 @@ impl Server {
     }
 
     fn run_file(&self, shell: &Path, file: &Path, here: Option<&str>, args: &[&str]) -> Said {
+        self.run_file_with(shell, file, here, args, &[])
+    }
+
+    /// [`Self::run_file`], with `extra` in the environment the terminal's shell had.
+    fn run_file_with(
+        &self,
+        shell: &Path,
+        file: &Path,
+        here: Option<&str>,
+        args: &[&str],
+        extra: &[(&str, &str)],
+    ) -> Said {
         // The caller has a umask of its own (the script must not keep its owner-only one for
         // what it starts) and stands in a tab (which a terminal it starts is not in).
         let mut command = Command::new("/bin/sh");
@@ -198,6 +216,7 @@ impl Server {
             .env("PATH", std::env::var_os("PATH").unwrap_or_default())
             .env("STUB_DIR", &self.stub)
             .env("LC_TERMINAL_VERSION", VERSION)
+            .envs(extra.iter().copied())
             .current_dir(&self.home)
             .stdin(Stdio::null());
         if let Some(here) = here {
@@ -320,6 +339,7 @@ fn new_call(server: &Server, id: &str, program: &[&str]) -> Vec<String> {
 const PLACED: &str = "bateri 1\nok placed\nlanded as_asked\nnext-to t4\nsqueezed no\nhidden no\n";
 
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn the_bootstrap_writes_the_command_and_the_counter_and_the_bootstrap_itself() {
     let server = Server::new("files");
     let shell = server.shell_dir();
@@ -351,6 +371,7 @@ fn the_bootstrap_writes_the_command_and_the_counter_and_the_bootstrap_itself() {
 }
 
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn a_split_starts_the_terminal_and_tells_the_mac_where_the_pane_goes() {
     for (name, shell) in shells() {
         let server = Server::new(&format!("split-{name}"));
@@ -392,6 +413,7 @@ fn a_split_starts_the_terminal_and_tells_the_mac_where_the_pane_goes() {
 }
 
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn without_a_mac_the_message_waits_on_the_server_and_the_command_still_answers() {
     for (name, shell) in shells() {
         let server = Server::new(&format!("waiting-{name}"));
@@ -449,6 +471,7 @@ fn without_a_mac_the_message_waits_on_the_server_and_the_command_still_answers()
 }
 
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn a_pane_that_did_not_land_as_asked_is_told_on_one_line() {
     let server = Server::new("landing");
     let shell = Path::new("/bin/sh");
@@ -499,6 +522,7 @@ fn a_pane_that_did_not_land_as_asked_is_told_on_one_line() {
 const MADE: &str = "b-0123456789abcdef0123456789abcdef";
 
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn the_callers_own_terminal_is_the_anchor_whatever_it_is_called() {
     for (name, shell) in shells() {
         let server = Server::new(&format!("anchor-{name}"));
@@ -557,6 +581,7 @@ fn the_callers_own_terminal_is_the_anchor_whatever_it_is_called() {
 }
 
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn a_pane_that_waits_for_the_terminal_that_asked_says_so_without_its_long_name() {
     let server = Server::new("anchor-waiting");
     let shell = Path::new("/bin/sh");
@@ -601,6 +626,7 @@ fn a_pane_that_waits_for_the_terminal_that_asked_says_so_without_its_long_name()
 }
 
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn run_in_no_terminal_a_pane_with_no_anchor_leaves_the_terminal_in_the_list() {
     for (name, shell) in shells() {
         let server = Server::new(&format!("cron-{name}"));
@@ -654,6 +680,7 @@ fn run_in_no_terminal_a_pane_with_no_anchor_leaves_the_terminal_in_the_list() {
 }
 
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn a_request_the_mac_refuses_leaves_no_terminal_running() {
     let server = Server::new("refused");
     server.mac_says("bateri 1\nerror refused the user said no\n");
@@ -672,6 +699,7 @@ fn a_request_the_mac_refuses_leaves_no_terminal_running() {
 }
 
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn the_terminal_it_starts_has_the_callers_umask_and_none_of_the_callers_tab() {
     use std::os::unix::fs::PermissionsExt;
     for (name, shell) in shells() {
@@ -694,7 +722,43 @@ fn the_terminal_it_starts_has_the_callers_umask_and_none_of_the_callers_tab() {
     }
 }
 
+/// The dock's tier travels: a terminal the command starts gets `BATERI_DOCK=off` where the
+/// shell it runs in has it (the Mac's `"blocks"`), and nothing of the kind where it has not.
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn the_terminal_it_starts_gets_the_docks_tier_of_the_one_that_asked() {
+    for (name, shell) in shells() {
+        let server = Server::new(&format!("dock-{name}"));
+        server.mac_says(PLACED);
+        let said = server.run_file_with(
+            &shell,
+            &server.script(),
+            Some("t4"),
+            &["split", "--", "make"],
+            &[("BATERI_DOCK", "off")],
+        );
+        assert_eq!(said.status, 0, "{name}: {}", said.err);
+        let mut call = new_call(&server, "t1", &["make"]);
+        call.insert(7, "--env".to_owned());
+        call.insert(8, "BATERI_DOCK=off".to_owned());
+        assert_eq!(server.calls_of("new"), [call], "{name}");
+
+        server.forget_calls();
+        server.mac_says(PLACED);
+        let said = server.run(&shell, Some("t4"), &["split", "--", "make"]);
+        assert_eq!(said.status, 0, "{name}: {}", said.err);
+        assert!(
+            server
+                .calls_of("new")
+                .iter()
+                .all(|call| !call.iter().any(|word| word.contains("BATERI_DOCK"))),
+            "{name}: the tier came from nowhere"
+        );
+    }
+}
+
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn only_a_plain_terminal_number_is_a_target() {
     for (name, shell) in shells() {
         let server = Server::new(&format!("targets-{name}"));
@@ -741,6 +805,7 @@ fn only_a_plain_terminal_number_is_a_target() {
 }
 
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn the_commands_that_are_kablos_own_pass_on_with_their_words_and_their_status() {
     for (name, shell) in shells() {
         let server = Server::new(&format!("passing-{name}"));
@@ -782,6 +847,7 @@ fn the_commands_that_are_kablos_own_pass_on_with_their_words_and_their_status() 
 }
 
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn a_mistake_in_the_command_is_64_before_anything_is_started() {
     for (name, shell) in shells() {
         let server = Server::new(&format!("mistakes-{name}"));
@@ -820,6 +886,7 @@ fn a_mistake_in_the_command_is_64_before_anything_is_started() {
 }
 
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn a_number_is_never_given_twice_and_one_a_hand_made_terminal_holds_is_skipped() {
     for (name, shell) in shells() {
         let server = Server::new(&format!("numbers-{name}"));
@@ -864,6 +931,7 @@ impl crate::kablo::install::Channel for MacChannel {
 /// The terminal the Mac opens itself and the ones an agent opens are numbered by one counter: the
 /// Mac runs the very bytes the command runs, over its connection, on the same file.
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn the_mac_and_the_agents_command_never_give_the_same_number() {
     for (name, shell) in shells() {
         let server = Server::new(&format!("mac-counter-{name}"));
@@ -886,6 +954,7 @@ fn the_mac_and_the_agents_command_never_give_the_same_number() {
 }
 
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn the_counter_gives_each_caller_its_own_number_and_survives_a_dead_lock() {
     for (name, shell) in shells() {
         let server = Server::new(&format!("counter-{name}"));
@@ -960,6 +1029,7 @@ fn the_counter_gives_each_caller_its_own_number_and_survives_a_dead_lock() {
 /// The counter's lock names its holder: one that is gone loses it at once, one that is alive
 /// keeps it however long it takes.
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn a_lock_held_by_a_live_process_is_waited_for_and_one_held_by_a_dead_one_is_not() {
     let server = Server::new("counter-holder");
     let counter = server.shell_dir().join("next.sh");
@@ -1005,6 +1075,7 @@ fn a_lock_held_by_a_live_process_is_waited_for_and_one_held_by_a_dead_one_is_not
 }
 
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn a_terminal_without_a_program_runs_the_bootstrap_from_its_file() {
     for (name, shell) in shells() {
         let server = Server::new(&format!("shell-{name}"));
@@ -1057,6 +1128,7 @@ fn a_terminal_without_a_program_runs_the_bootstrap_from_its_file() {
 }
 
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn close_goes_to_the_mac_and_without_one_ends_what_the_caller_opened() {
     for (name, shell) in shells() {
         let server = Server::new(&format!("close-{name}"));
@@ -1151,6 +1223,7 @@ fn close_goes_to_the_mac_and_without_one_ends_what_the_caller_opened() {
 }
 
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn a_terminal_named_nothing_is_the_callers_own_whatever_it_is_called() {
     let made = format!("b-{}", "0123456789abcdef".repeat(2));
     for (name, shell) in shells() {
@@ -1178,6 +1251,7 @@ fn a_terminal_named_nothing_is_the_callers_own_whatever_it_is_called() {
 }
 
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn ls_prints_what_the_mac_says_and_without_one_what_the_server_has() {
     for (name, shell) in shells() {
         let server = Server::new(&format!("ls-{name}"));
@@ -1227,6 +1301,7 @@ fn ls_prints_what_the_mac_says_and_without_one_what_the_server_has() {
 }
 
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn notify_needs_a_mac_and_sends_one_line() {
     for (name, shell) in shells() {
         let server = Server::new(&format!("notify-{name}"));
@@ -1255,6 +1330,7 @@ fn notify_needs_a_mac_and_sends_one_line() {
 }
 
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn new_prints_the_number_and_waits_with_the_programs_status() {
     for (name, shell) in shells() {
         let server = Server::new(&format!("new-{name}"));

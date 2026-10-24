@@ -29,7 +29,7 @@ use super::{
 use crate::shell::decode_base64;
 
 /// How many images' sizes the receiver remembers: the sizes a placement is
-/// made from where there is no store to ask (the journal's replay) or the store
+/// made from where there is no store to ask (a bare replay) or the store
 /// does not have the image (its transmission failed). A program that keeps more
 /// than this many images at once and places one it sent long ago gets, in a
 /// replay, an image that does not move the cursor.
@@ -116,8 +116,6 @@ struct Known {
 struct Open {
     /// The keys of the first chunk; a chunk after it names none of them.
     command: Command,
-    /// The control data of the first chunk, as it was on the wire.
-    control: Vec<u8>,
     /// The base64 text of the payload so far, chunks joined as they came.
     text: Vec<u8>,
     since: Instant,
@@ -142,23 +140,6 @@ impl Receiver {
     /// Whether a transmission is waiting for its next chunk.
     pub(crate) fn is_open(&self) -> bool {
         self.open.is_some()
-    }
-
-    /// The transmission waiting for its next chunk as the first chunk that
-    /// would start it again: its control data and the head of its text, which
-    /// is all that the movement of the cursor is made from ([`sniff`]). A copy
-    /// of the screen cut between two chunks hands it to the one that goes on,
-    /// whose last chunk then finds the transmission it ends.
-    pub(crate) fn chain(&self) -> Option<Vec<u8>> {
-        let open = self.open.as_ref()?;
-        // Whole groups of four: a chunk's text is, but the last.
-        let head = open.text.len().min(HEAD_COMPRESSED) / 4 * 4;
-        let mut bytes = b"\x1b_G".to_vec();
-        bytes.extend_from_slice(&open.control);
-        bytes.push(b';');
-        bytes.extend_from_slice(&open.text[..head]);
-        bytes.extend_from_slice(b"\x1b\\");
-        Some(bytes)
     }
 
     /// Takes one command; `out` is called for what it comes to, in order.
@@ -221,7 +202,6 @@ impl Receiver {
                 );
                 let mut open = Open {
                     command,
-                    control: apc.control.clone(),
                     text: Vec::new(),
                     since: now,
                 };
@@ -347,7 +327,7 @@ impl Receiver {
         // safe side of a limit.)
         if named && remote() {
             // The cursor moves for the command all the same, by the keys alone
-            // (the replay of the journal cannot know the name was refused, and
+            // (a replay with no store cannot know the name was refused, and
             // moves it so).
             let motion = if query {
                 Motion::NONE

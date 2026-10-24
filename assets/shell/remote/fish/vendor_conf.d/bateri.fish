@@ -33,6 +33,13 @@ if set -q BATERI_RBLOCK
     set -g __bateri_rblock $BATERI_RBLOCK
     set -e BATERI_RBLOCK
 end
+# The dock's tier is the Mac's `[shell] integration`: `off` there is `"blocks"` (no dock), anything
+# else is the dock. It is READ, not taken out: it stays in the environment so that `bateri`, the
+# agent's command, hands it to the terminals it opens (`bin/bateri`).
+set -g __bateri_dock 1
+if test "$BATERI_DOCK" = off
+    set -g __bateri_dock 0
+end
 
 status is-interactive; or exit
 
@@ -61,14 +68,26 @@ end
 # `S` this shell's pid — two shells under one `ssh` command line are two
 # trails — and `n` its counter; `fish_pid` is fish 3's, older fish gets none) — never `bt_block=`, which bateri reads as the local
 # shell's. fish 4's own OSC 133 carries no identity and does not reach our
-# trail. The anchor is printed when the prompt is about to be drawn and closed
-# before the command runs; the user's prompt is not touched; no `B` (its
-# consumers are the local dock's). `D` only after a command we saw start:
-# `fish_postexec` carries its `$status`.
+# trail. WITHOUT A DOCK (`BATERI_DOCK=off`, the Mac's `"blocks"`) the anchor is printed when the
+# prompt is about to be drawn and closed before the command runs; the user's prompt is not
+# touched; no `B`. WITH ONE the prompt is the terminal's, as on the Mac (`dock.fish`): the anchor,
+# the `B` and the dock's events all carry the same identity. `D` only after a command we saw
+# start: `fish_postexec` carries its `$status`.
 if string match -qr '^[0-9]+$' -- "$__bateri_rblock"; and set -q fish_pid
     set -g __bateri_rshell $__bateri_rblock.$fish_pid
     set -g __bateri_block 0
     set -g __bateri_ran 0
+
+    # The dock's prompt (`dock.fish`, one level above this directory, shared with the Mac's own
+    # wrapper). Without the file the shell is as it is without a dock.
+    if test $__bateri_dock = 1
+        set -l __bateri_dock_file (status dirname)/../dock.fish
+        if test -r $__bateri_dock_file
+            source $__bateri_dock_file
+        else
+            set -g __bateri_dock 0
+        end
+    end
 
     function __bateri_end --on-event fish_postexec
         set -l code $status
@@ -88,12 +107,27 @@ if string match -qr '^[0-9]+$' -- "$__bateri_rblock"; and set -q fish_pid
 
     function __bateri_prompt --on-event fish_prompt
         set -g __bateri_block (math $__bateri_block + 1)
-        printf '\e]133;A;bt_remote=%s.%s\a\e]8;;bateri://rblock/%s.%s\a' \
-            $__bateri_rshell $__bateri_block $__bateri_rshell $__bateri_block
+        printf '\e]133;A;bt_remote=%s.%s\a' $__bateri_rshell $__bateri_block
+        if test $__bateri_dock = 1
+            # The anchor is in the prompt itself (`__bateri_take`), so that a prompt fish draws again
+            # from its cache keeps it; the identity of this prompt is set before it is made.
+            set -g __bateri_dock_anchor bateri://rblock/$__bateri_rshell.$__bateri_block
+            set -g __bateri_dock_tag "bt_remote=$__bateri_rshell.$__bateri_block;"
+            set -g __bateri_dock_mark ";bt_remote=$__bateri_rshell.$__bateri_block"
+            __bateri_take
+        else
+            printf '\e]8;;bateri://rblock/%s.%s\a' $__bateri_rshell $__bateri_block
+        end
     end
 
+    # Right before a command runs: with a dock the line is finished first (`8133;e`: Enter has
+    # already moved the cursor down a row, and until `e` arrives the dock would show the new, empty
+    # row), then the anchor closes and output begins (`C`).
     function __bateri_start --on-event fish_preexec
         set -g __bateri_ran 1
+        if test $__bateri_dock = 1
+            printf '\e]8133;bt_remote=%s.%s;e\a' $__bateri_rshell $__bateri_block
+        end
         printf '\e]8;;\a\e]133;C;bt_remote=%s.%s\a\e[22t' $__bateri_rshell $__bateri_block
     end
 end

@@ -21,6 +21,14 @@ fn package(root: &Path, version: &str, body: &str) -> Bundle {
     Bundle::open(&dir).expect("a package")
 }
 
+/// The ids of terminals, as the ledger would hand them over.
+fn ids(names: &[&str]) -> Vec<SessionId> {
+    names
+        .iter()
+        .map(|name| SessionId::new(name).expect("an id"))
+        .collect()
+}
+
 /// A kablo that is a script: it says its version the way the real one does.
 const KABLO: &str = "#!/bin/sh\necho \"version=0.2.0 wire_min=1 wire_max=2\"\n";
 
@@ -79,13 +87,15 @@ impl Channel for Home {
         {
             *first ^= 1;
         }
-        // The server's side: `sh -c <script>` in the home directory.
+        // The server's side: `sh -c <script>` in the home directory, which is the home the script
+        // writes the shells' files to (the test machine's own must never be written to).
         let command = format!("sh -c {}", sq(&format!("{}{script}", self.prefix)));
+        let dir = sq(&self.dir.to_string_lossy());
         let reply = run_command(
             &[
                 "sh".into(),
                 "-c".into(),
-                format!("cd {} && {command}", sq(&self.dir.to_string_lossy())),
+                format!("cd {dir} && HOME={dir} SHELL=/bin/zsh XDG_DATA_HOME= {command}"),
             ],
             &bytes,
             Duration::from_secs(20),
@@ -174,6 +184,7 @@ fn the_version_is_the_names_not_the_one_this_build_links() {
 }
 
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn the_first_connection_writes_kablo_and_the_next_finds_it() {
     let root = TempRoot::new("kablo-install");
     let bundle = package(&root.0, "0.2.0", KABLO);
@@ -208,6 +219,55 @@ fn the_first_connection_writes_kablo_and_the_next_finds_it() {
 }
 
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn the_shells_files_go_with_the_look_for_kablo_and_cost_no_call_of_their_own() {
+    let root = TempRoot::new("kablo-files");
+    let bundle = package(&root.0, "0.2.0", KABLO);
+    let home = Home::new(&root.0.join("home"));
+    std::fs::create_dir_all(&home.dir).expect("home");
+    let shell = home.dir.join(".local/share/bateri/shell");
+    let written = |name: &str| std::fs::read_to_string(shell.join(name)).expect(name);
+
+    // A server that has kablo already: one `uname`, one look — and the files.
+    ensure(&home, &bundle).expect("installed");
+    let calls = home.calls.borrow().len();
+    std::fs::remove_dir_all(&shell).expect("start again");
+    ensure(&home, &bundle).expect("found");
+    assert_eq!(
+        home.calls.borrow().len() - calls,
+        2,
+        "the same two calls (`uname` and the look) when the files are all that was missing"
+    );
+    for name in [
+        "bash/dock.bash",
+        "fish/dock.fish",
+        "zsh/dock.zsh",
+        "boot.sh",
+        "zsh/.zshenv",
+    ] {
+        assert!(!written(name).is_empty(), "{name}");
+    }
+    // The agent's command knows where kablo is: the place `ensure` found.
+    assert!(
+        written("bin/bateri").contains(".local/share/kablo/0.2.0/kablo"),
+        "the agent's command lost kablo's place"
+    );
+    // The command is the one that can be run, the files are the owner's.
+    let mode = |name: &str| {
+        std::fs::metadata(shell.join(name))
+            .expect(name)
+            .permissions()
+            .mode()
+            & 0o777
+    };
+    assert_eq!(mode("bin/bateri"), 0o700);
+    assert_eq!(mode("bash/dock.bash"), 0o600);
+    // The files do not touch the look: kablo is found and not written again.
+    assert_eq!(home.uploads(), 1);
+}
+
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn a_binary_that_is_there_and_is_not_the_packages_is_left_alone() {
     let root = TempRoot::new("kablo-differs");
     let bundle = package(&root.0, "0.2.0", KABLO);
@@ -228,6 +288,7 @@ fn a_binary_that_is_there_and_is_not_the_packages_is_left_alone() {
 }
 
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn a_macos_binary_another_package_signed_is_the_same_kablo() {
     // Two packages of one kablo release sign the macOS binary each its own way,
     // so the sums differ though the file is the same kablo: the version it says
@@ -249,6 +310,7 @@ fn a_macos_binary_another_package_signed_is_the_same_kablo() {
 }
 
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn a_file_that_cannot_run_is_replaced_and_a_write_that_fails_halfway_is_a_bad_moment() {
     let root = TempRoot::new("kablo-halfway");
     let bundle = package(&root.0, "0.2.0", KABLO);
@@ -281,6 +343,7 @@ fn a_file_that_cannot_run_is_replaced_and_a_write_that_fails_halfway_is_a_bad_mo
 }
 
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn a_server_kablo_cannot_be_kept_on_is_told_apart_from_a_bad_moment() {
     let root = TempRoot::new("kablo-impossible");
     let bundle = package(&root.0, "0.2.0", KABLO);
@@ -372,6 +435,7 @@ const KABLO_RENEWING: &str = "#!/bin/sh\ncase $1 in version) echo \"version=0.2.
      upgrade) echo \"$* from $(pwd)\" >>\"$(dirname \"$0\")/upgrades\"; [ -e \"$(dirname \"$0\")/none\" ] && exit 1; exit 0;; esac\n";
 
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn the_terminals_of_the_server_are_renewed_with_the_binary_that_was_written() {
     let root = TempRoot::new("kablo-renew");
     let bundle = package(&root.0, "0.2.0", KABLO_RENEWING);
@@ -381,8 +445,10 @@ fn the_terminals_of_the_server_are_renewed_with_the_binary_that_was_written() {
     assert!(installed.fresh);
 
     // The script is the version's own, run from the home directory the commands
-    // of an ssh start in: kablo makes the relative path absolute from there.
-    assert!(upgrade_sessions(&home, &installed));
+    // of an ssh start in: kablo makes the relative path absolute from there. It names the
+    // terminals it is given and no others.
+    let ledger = ids(&["t1", "b-0123456789abcdef"]);
+    assert!(upgrade_sessions(&home, &installed, &ledger));
     let log = home
         .installed("0.2.0")
         .parent()
@@ -390,11 +456,17 @@ fn the_terminals_of_the_server_are_renewed_with_the_binary_that_was_written() {
         .join("upgrades");
     let said = std::fs::read_to_string(&log).expect("asked");
     assert_eq!(
-        said.trim(),
-        format!(
-            "upgrade --all .local/share/kablo/0.2.0/kablo from {}",
-            home.dir.display()
-        )
+        said.lines().collect::<Vec<_>>(),
+        [
+            format!(
+                "upgrade t1 .local/share/kablo/0.2.0/kablo from {}",
+                home.dir.display()
+            ),
+            format!(
+                "upgrade b-0123456789abcdef .local/share/kablo/0.2.0/kablo from {}",
+                home.dir.display()
+            ),
+        ]
     );
     // Nothing else of the server is touched by it.
     assert_eq!(home.uploads(), 1);
@@ -403,17 +475,25 @@ fn the_terminals_of_the_server_are_renewed_with_the_binary_that_was_written() {
         KABLO_RENEWING.as_bytes()
     );
 
-    // A server with no terminals says so with a failure, and that is not a reason
-    // to do anything: the answer is only that nothing was renewed.
-    std::fs::write(log.with_file_name("none"), "").expect("no terminals");
-    assert!(!upgrade_sessions(&home, &installed));
+    // A terminal that ended meanwhile is not renewed, and that is not a reason to do anything:
+    // the answer is only that not every one was, and the others were still asked.
+    std::fs::write(log.with_file_name("none"), "").expect("ended");
+    assert!(!upgrade_sessions(&home, &installed, &ledger));
     assert_eq!(
         std::fs::read_to_string(&log)
             .expect("asked")
             .lines()
             .count(),
-        2
+        4
     );
+
+    // No terminal of bateri's, nothing asked of the server at all (not even `--all`).
+    let calls = home.calls.borrow().len();
+    assert!(upgrade_sessions(&home, &installed, &[]));
+    assert_eq!(home.calls.borrow().len(), calls);
+    assert_eq!(upgrade_script("0.2.0", &[]), None);
+    // An id that could be read as an option is not handed to kablo.
+    assert_eq!(upgrade_script("0.2.0", &ids(&["-x"])), None);
 }
 
 #[test]
@@ -430,15 +510,18 @@ fn a_renewal_that_cannot_be_asked_is_nothing_more_than_a_no() {
         path: ".local/share/kablo/0.2.0/kablo".into(),
         fresh: true,
     };
-    assert!(!upgrade_sessions(&Failing, &installed));
+    assert!(!upgrade_sessions(&Failing, &installed, &ids(&["t1"])));
 }
 
 #[test]
 fn the_scripts_are_one_line_of_plain_sh_a_login_shell_hands_on_as_it_is() {
     for script in [
         probe_script("0.2.0"),
+        probe_and_files_script("0.2.0"),
         upload_script("0.2.0", &sha256_hex(b"x")),
-        upgrade_script("0.2.0"),
+        upgrade_script("0.2.0", &ids(&["t1", "b-1"])).expect("a script"),
+        census_script("0.2.0"),
+        prune_script(&["0.1.0".to_owned(), "0.2.0-dev+0123456789ab".to_owned()]).expect("a script"),
     ] {
         // `is_inline`'s alphabet: what fish and csh read inside single quotes
         // as the characters they are.
@@ -452,6 +535,7 @@ fn the_scripts_are_one_line_of_plain_sh_a_login_shell_hands_on_as_it_is() {
 }
 
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn the_ssh_channel_sends_the_script_as_one_word_for_sh_and_ends_a_step_that_takes_too_long() {
     let root = TempRoot::new("kablo-channel");
     let log = root.0.join("argv");
@@ -509,6 +593,7 @@ fn counting_home(root: &TempRoot, name: &str) -> (Home, PathBuf) {
 }
 
 #[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn the_servers_counter_gives_each_terminal_the_next_number_and_never_the_same_twice() {
     let root = TempRoot::new("counter");
     let (home, dir) = counting_home(&root, "home");
@@ -577,4 +662,242 @@ fn a_counter_that_cannot_count_gives_no_number_and_a_made_up_one_is_not_taken() 
         }
     }
     assert_eq!(next_number(&Down), None);
+}
+
+// ─── the versions nobody runs ────────────────────────────────────────────
+
+/// What `kablo list --json` says of terminals whose relays and wardens run from these versions
+/// (the other keys of the real listing are left out; none of them names a version).
+fn listing(runs: &[(&str, &str)]) -> String {
+    let objects: Vec<String> = runs
+        .iter()
+        .map(|(relay, warden)| {
+            format!("{{\"id\":\"t1\",\"version\":\"{relay}\",\"warden_version\":\"{warden}\"}}")
+        })
+        .collect();
+    format!("[\n{}\n]\n", objects.join(",\n"))
+}
+
+fn census(status: Option<i32>, dirs: &[&str], json: &str) -> Reply {
+    let dirs: String = dirs
+        .iter()
+        .map(|name| format!(".local/share/kablo/{name}\n"))
+        .collect();
+    Reply {
+        status,
+        out: format!("{dirs}---\n{json}"),
+        err: String::new(),
+    }
+}
+
+#[test]
+fn a_version_is_unused_when_no_terminal_of_the_machine_runs_a_relay_or_a_warden_from_it() {
+    let dirs = [
+        "0.1.0",
+        "0.1.5",
+        "0.1.6",
+        "0.2.0",
+        "0.3.0-dev+0123456789ab",
+        "not a version",
+    ];
+    // 0.1.5 is a warden's, 0.1.6 a relay's: the two halves of a terminal are separate processes
+    // and either keeps its file.
+    let json = listing(&[("0.2.0", "0.1.5"), ("0.1.6", "0.2.0")]);
+    assert_eq!(
+        unused_versions(&census(Some(0), &dirs, &json), "0.2.0"),
+        ["0.1.0", "0.3.0-dev+0123456789ab"]
+    );
+    // No terminal at all: the machine's listing is an empty array, which is an answer.
+    assert_eq!(
+        unused_versions(&census(Some(0), &dirs, "[]\n"), "0.2.0"),
+        ["0.1.0", "0.1.5", "0.1.6", "0.3.0-dev+0123456789ab"]
+    );
+}
+
+#[test]
+fn nothing_is_unused_by_an_answer_that_is_not_a_whole_one() {
+    let dirs = ["0.1.0", "0.2.0"];
+    let json = listing(&[("0.2.0", "0.2.0")]);
+    let whole = census(Some(0), &dirs, &json);
+    assert_eq!(unused_versions(&whole, "0.2.0"), ["0.1.0"], "the control");
+    // The listing failed: not an empty one.
+    assert!(unused_versions(&census(Some(1), &dirs, &json), "0.2.0").is_empty());
+    assert!(unused_versions(&census(None, &dirs, &json), "0.2.0").is_empty());
+    // A listing that is not an array of terminals, or was cut short.
+    for text in ["", "kablo: cannot connect\n", "[\n{\"id\":\"t1\"", "{}"] {
+        assert!(unused_versions(&census(Some(0), &dirs, text), "0.2.0").is_empty());
+    }
+    // Not even the marker between the halves.
+    let unmarked = Reply {
+        status: Some(0),
+        out: format!(".local/share/kablo/0.1.0\n{json}"),
+        err: String::new(),
+    };
+    assert!(unused_versions(&unmarked, "0.2.0").is_empty());
+}
+
+/// A kablo that lists what is in `listing` beside it, or fails when `broken` is there.
+const KABLO_LISTING: &str = "#!/bin/sh\ncase $1 in version) echo \"version=0.2.0 wire_min=1 wire_max=2\";; \
+     list) [ -e \"$(dirname \"$0\")/broken\" ] && exit 1; cat \"$(dirname \"$0\")/listing\";; esac\n";
+
+/// A home whose kablo of the package's version is installed and which holds `others` as versions
+/// of kablo, each a directory with a binary in it, written long ago (`aged`) or just now.
+fn home_with(root: &Path, others: &[(&str, bool)]) -> (Home, Installed) {
+    let bundle = package(root, "0.2.0", KABLO_LISTING);
+    let home = Home::new(&root.join("home"));
+    std::fs::create_dir_all(&home.dir).expect("home");
+    let installed = ensure(&home, &bundle).expect("installed");
+    for (version, aged) in others {
+        let dir = home.dir.join(format!(".local/share/kablo/{version}"));
+        std::fs::create_dir_all(&dir).expect("a version");
+        std::fs::write(dir.join("kablo"), "#!/bin/sh\n").expect("its binary");
+        std::fs::set_permissions(dir.join("kablo"), std::fs::Permissions::from_mode(0o755))
+            .expect("runnable");
+        if *aged {
+            // A directory is as old as the last entry made in it: this is the last thing done.
+            let status = Command::new("touch")
+                .args(["-t", "202001010000"])
+                .arg(&dir)
+                .status()
+                .expect("touch");
+            assert!(status.success());
+        }
+    }
+    (home, installed)
+}
+
+fn kept(home: &Home, version: &str) -> bool {
+    home.dir
+        .join(format!(".local/share/kablo/{version}"))
+        .exists()
+}
+
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn the_versions_nothing_runs_are_removed_and_the_ones_something_runs_stay() {
+    let root = TempRoot::new("kablo-prune");
+    let (home, installed) = home_with(
+        &root.0,
+        &[
+            ("0.1.0", true),
+            ("0.1.5", true),
+            ("0.1.6", true),
+            // Written a moment ago: another build may be about to start a terminal from it.
+            ("0.3.0", false),
+        ],
+    );
+    // A directory that holds no kablo is not a version of it and is not touched.
+    let stray = home.dir.join(".local/share/kablo/notes");
+    std::fs::create_dir_all(&stray).expect("stray");
+    std::fs::write(
+        home.installed("0.2.0").with_file_name("listing"),
+        listing(&[("0.2.0", "0.1.5"), ("0.1.6", "0.1.6")]),
+    )
+    .expect("the machine's terminals");
+
+    let asked = prune_versions(&home, &installed);
+    // Asked to go: what nothing runs from, however young; gone: only what was old enough too.
+    assert_eq!(asked, ["0.1.0", "0.3.0"]);
+    assert!(!kept(&home, "0.1.0"), "nothing runs from it");
+    assert!(kept(&home, "0.1.5"), "a warden runs from it");
+    assert!(kept(&home, "0.1.6"), "a relay and a warden run from it");
+    assert!(kept(&home, "0.2.0"), "it is the version that stays");
+    assert!(kept(&home, "0.3.0"), "it was written a moment ago");
+    assert!(stray.exists());
+    // Nothing of the version that stays is touched.
+    assert_eq!(
+        std::fs::read(home.installed("0.2.0")).expect("the file"),
+        KABLO_LISTING.as_bytes()
+    );
+}
+
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn nothing_is_removed_when_the_machines_terminals_could_not_be_listed() {
+    let root = TempRoot::new("kablo-prune-broken");
+    let (home, installed) = home_with(&root.0, &[("0.1.0", true)]);
+    let listed = home.installed("0.2.0").with_file_name("listing");
+    std::fs::write(&listed, listing(&[("0.2.0", "0.2.0")])).expect("terminals");
+    std::fs::write(listed.with_file_name("broken"), "").expect("a kablo that cannot list");
+    assert!(prune_versions(&home, &installed).is_empty());
+    assert!(kept(&home, "0.1.0"), "a failed listing is not an empty one");
+
+    // And a channel that fails does not remove anything either.
+    struct Failing;
+    impl Channel for Failing {
+        fn run(&self, _: &str, _: &[u8]) -> io::Result<Reply> {
+            Err(io::Error::new(io::ErrorKind::TimedOut, "slow"))
+        }
+    }
+    assert!(prune_versions(&Failing, &installed).is_empty());
+    assert!(kept(&home, "0.1.0"));
+}
+
+#[test]
+fn a_name_that_is_not_a_version_is_never_handed_to_rm() {
+    assert_eq!(prune_script(&[]), None);
+    assert_eq!(
+        prune_script(&["../..".to_owned(), "a b".to_owned(), "x;y".to_owned()]),
+        None
+    );
+    let script = prune_script(&["../..".to_owned(), "0.1.0".to_owned()]).expect("a script");
+    assert!(script.contains(" 0.1.0;"), "{script}");
+    assert!(!script.contains(".."), "{script}");
+}
+
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn this_mac_gets_kablo_by_the_same_steps_without_the_shells_files() {
+    let root = TempRoot::new("kablo-here");
+    let bundle = package(&root.0, "0.2.0", KABLO);
+    let home = root.0.join("mac");
+    std::fs::create_dir_all(&home).expect("home");
+    let channel = super::super::local::LocalChannel::new(home.clone());
+
+    let first = ensure_here(&channel, &bundle).expect("installed");
+    assert!(first.fresh, "written now");
+    assert_eq!(first.path, ".local/share/kablo/0.2.0/kablo");
+    let file = home.join(&first.path);
+    assert_eq!(std::fs::read(&file).expect("the file"), KABLO.as_bytes());
+    assert_eq!(
+        std::fs::metadata(&file)
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o755,
+        0o755,
+        "runnable"
+    );
+    // The Mac's home holds kablo's place and nothing of a server's files (the bootstrap, the
+    // agent's command, the counter).
+    let names: Vec<String> = std::fs::read_dir(&home)
+        .expect("home")
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(names, [".local"]);
+    let share: Vec<String> = std::fs::read_dir(home.join(".local/share"))
+        .expect("share")
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(share, ["kablo"]);
+
+    // The second time finds it.
+    assert!(!ensure_here(&channel, &bundle).expect("found").fresh);
+
+    // A file at the version's place that is not the package's is left alone: terminals may run
+    // from it. (One that does not say the package's version is not "the same kablo, signed by
+    // another package" on a Mac either.)
+    std::fs::write(&file, "#!/bin/sh\necho version=9.9.9\n").expect("another kablo");
+    assert_eq!(
+        ensure_here(&channel, &bundle),
+        Err(Failure::Transient(
+            "the kablo on the server is not the package's".to_owned()
+        ))
+    );
+    assert_eq!(
+        std::fs::read(&file).expect("the file"),
+        b"#!/bin/sh\necho version=9.9.9\n"
+    );
 }

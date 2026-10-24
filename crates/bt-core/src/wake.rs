@@ -114,11 +114,10 @@ pub trait Wake: Send + Sync + 'static {
     fn command_started(&self);
 
     /// The shell's phase moved at the other two edges: our identified `A`
-    /// (a prompt) or a `D` (a command ended) — the edges where the state
-    /// [`crate::Session::state_blob`] carries (the block ledger, the
-    /// command's clock) changes. With [`Wake::command_started`] the receiver
-    /// sees all three, and a copy of the state it keeps elsewhere is never a
-    /// command behind.
+    /// (a prompt) or a `D` (a command ended) — the edges where the shell's
+    /// state (the block ledger, the command's clock) changes. With
+    /// [`Wake::command_started`] the receiver sees all three, and a copy of
+    /// the state it keeps elsewhere is never a command behind.
     ///
     /// **Edge-triggered and payload-free** (the precedent is
     /// [`Wake::command_started`]): the receiver reads the state itself. It
@@ -134,8 +133,8 @@ pub trait Wake: Send + Sync + 'static {
     /// command is `ssh` itself, running throughout. The receiver reads what
     /// it wants with [`crate::Session::activity`].
     ///
-    /// **Separate from [`Wake::phase_edge`]**, whose receiver also sends the
-    /// state to a bound holder: every remote command would add that traffic.
+    /// **Separate from [`Wake::phase_edge`]**, which a remote command's
+    /// start and end do not need: every remote command would add that traffic.
     ///
     /// **Edge-triggered and payload-free** (the precedent is
     /// [`Wake::command_started`]): a second remote `C` in the same command is
@@ -146,12 +145,12 @@ pub trait Wake: Send + Sync + 'static {
     fn remote_command_edge(&self);
 
     /// The dock's mirror or its context changed (OSC 8133: the line, its
-    /// end, a mirror that could not be read, the branch) — the part of
-    /// [`crate::Session::state_blob`] that moves with every keystroke.
+    /// end, a mirror that could not be read, the branch) — the part of the
+    /// shell's state that moves with every keystroke.
     ///
     /// **Payload-free** (the precedent is [`Wake::title_changed`]): once per
-    /// event, i.e. as often as the shell redraws its line; the receiver that
-    /// copies the state elsewhere coalesces — one copy per interval, not per
+    /// event, i.e. as often as the shell redraws its line; a receiver that
+    /// follows the change coalesces — one reaction per interval, not per
     /// key. It arrives on the reader thread after the ledger's leaf lock has
     /// been released; the contract assumes the `Term` lock may be held and
     /// the three prohibitions above apply.
@@ -269,19 +268,9 @@ pub trait Wake: Send + Sync + 'static {
     /// above apply. The implementor posts **at most one** job to its queue.
     fn program_status_changed(&self);
 
-    /// The terminal's bell rang (`BEL` outside a sequence). bateri's own tabs
-    /// ignore it; a host embedding the pane may show it.
-    ///
-    /// **Edge-triggered and payload-free** (the precedent is
-    /// [`Wake::title_changed`]): a program can ring it in a loop, so the
-    /// implementor posts **at most one** job to its queue. It arrives on the
-    /// reader thread **while the `Term` lock is held**; the three prohibitions
-    /// above apply. A bell a bound holder's prefix rang is not passed on.
-    fn bell(&self);
-
     /// A program asked for a notification (`OSC 9 ; text` or `OSC 777 ;
     /// notify ; …`): the receiver takes them with
-    /// [`crate::Session::take_notifications`]. bateri's own tabs show none.
+    /// [`crate::Session::take_notifications`].
     ///
     /// **Edge-triggered and payload-free** (the precedent is
     /// [`Wake::program_status_changed`]): the text waits in the ledger, at most

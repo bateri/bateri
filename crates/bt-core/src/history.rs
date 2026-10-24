@@ -16,7 +16,7 @@
 //!
 //! The reading functions here take the rows they read and nothing else ([`Rows`]: a `Term`, or the
 //! primary screen's grid behind a full screen program), so the caller holds the lock; none of
-//! them writes to it ("Journal-neutral").
+//! them writes to it.
 
 use std::collections::VecDeque;
 use std::path::PathBuf;

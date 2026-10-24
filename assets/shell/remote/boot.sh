@@ -12,10 +12,16 @@
 #
 # THE FIRST LINE IS A MAGIC LINE: the one-liner runs only a decoded text that
 # starts with it — a `base64` that ignored `-d` and printed garbage is never
-# `eval`ed. `ssh_wrap` prepends it, together with `bt_files`, the function that
-# writes the integration's files (each one's content as a single-quoted
-# literal, so no here-document — bash as `sh` would put one in `/tmp`), and
-# `bt_cwd`, the starting directory, when the session has one.
+# `eval`ed. `ssh_wrap` prepends it, together with `bt_cwd`, the starting
+# directory, when the session has one.
+#
+# THE FILES ARE NOT WRITTEN HERE. The shells' files (and this one, for the
+# terminals an agent opens) are written to the server over the ssh connection
+# the user made, by the call that looks for kablo (`kablo::install::ensure`),
+# before the terminal starts: they are too many bytes for the one argument this
+# text travels in (Linux takes 128 KiB for one). This text finds them in place
+# (step 3), and a shell whose files are not there gets a plain login shell and
+# the reason.
 #
 # WHAT IT DOES, IN ORDER:
 #   0. says it runs: `ESC ] 8133 ; i ; up ; {nonce} BEL`, the
@@ -39,11 +45,11 @@
 #      silences sshd's.
 #   2. checks the login shell: zsh, bash and fish get the integration; any
 #      other (sh, csh, BusyBox ash) gets a plain login shell.
-#   3. writes the files under `${XDG_DATA_HOME:-~/.local/share}/bateri/shell/`
-#      — temporary name + `mv`, owner-only, nothing in `/tmp`, no log.
-#      The same fixed path every time: a shell reads its files when it starts,
-#      so rewriting them under a running shell is harmless and nothing piles
-#      up.
+#   3. looks for the files under `${XDG_DATA_HOME:-~/.local/share}/bateri/shell/`
+#      (the same fixed path every time: a shell reads its files when it
+#      starts, so rewriting them under a running shell is harmless and nothing
+#      piles up) — the login shell's own entry file. Missing (nothing could be
+#      written there: no room, a file where the directory goes) is a fault.
 #   4. `exec`s the login shell with the integration (with the blocks'
 #      parent, `$1`, in `BATERI_RBLOCK`): zsh through the
 #      `ZDOTDIR` swap, bash in POSIX mode with `ENV`, fish through
@@ -52,10 +58,9 @@
 #
 # TWO CALLERS, ONE FILE. Besides the one-liner above, `bin/bateri` starts the
 # integrated shell of a terminal an agent opened without a program by running
-# THIS FILE, which step 3 has written to `$bt_dir/boot.sh`: `sh boot.sh '' ''
-# <version> -`. It then runs where the files are (`$0`), finds them in place
-# (`bt_files` is not defined, so it writes nothing), prints no motd and no
-# proof — an empty nonce is no login attempt — and execs the same login shell.
+# THIS FILE, which is among the files written to `$bt_dir/boot.sh`: `sh boot.sh
+# '' '' <version> -`. It then runs where the files are (`$0`), prints no motd and
+# no proof — an empty nonce is no login attempt — and execs the same login shell.
 #
 # EVERY FAILURE IS A PLAIN LOGIN SHELL, never a broken connection: the reason
 # goes to bateri as `ESC ] 8133 ; f ; {code} BEL` (`write`, `shell`; the
@@ -148,7 +153,8 @@ case $bt_shell in
     ;;
 esac
 
-# 3. The files. A relative `XDG_DATA_HOME` is ignored, as the spec says.
+# 3. The files, where the call that wrote them put them. A relative `XDG_DATA_HOME` is ignored,
+# as the spec says.
 bt_data=${XDG_DATA_HOME:-}
 case $bt_data in
   /*) ;;
@@ -160,29 +166,14 @@ case $0 in
   /*/boot.sh) bt_dir=${0%/boot.sh} ;;
 esac
 
-# Run from the file there is nothing to write: the one-liner defines `bt_files`.
-command -v bt_files >/dev/null 2>&1 || bt_files() { :; }
-
-# Writes `$2` to `$bt_dir/$1` under a temporary name, then renames it; a file
-# that is already the same is left as it is (no rename on every connection).
-bt_put() {
-  bt_tmp=$bt_dir/$1.tmp.$$
-  if printf '%s' "$2" > "$bt_tmp"; then
-    if cmp -s "$bt_tmp" "$bt_dir/$1"; then
-      rm -f "$bt_tmp"
-      return 0
-    fi
-    if mv -f "$bt_tmp" "$bt_dir/$1"; then
-      return 0
-    fi
-  fi
-  rm -f "$bt_tmp"
-  return 1
-}
-
-# In a subshell: the owner-only `umask` must not reach the user's shell.
-# `bt_put` writes a file nobody may execute; `bin/bateri` is run by name.
-if ! (umask 077 && mkdir -p "$bt_dir/zsh" "$bt_dir/bash" "$bt_dir/fish/vendor_conf.d" "$bt_dir/bin" && bt_files && { chmod u+x "$bt_dir/bin/bateri" || :; }) 2>/dev/null; then
+# The login shell's entry file, the one thing it cannot start without: a file that is not there
+# is a write that failed (or never was).
+case $bt_shell in
+  zsh) bt_entry=zsh/.zshenv ;;
+  bash) bt_entry=bash/bateri.bash ;;
+  fish) bt_entry=fish/vendor_conf.d/bateri.fish ;;
+esac
+if [ ! -r "$bt_dir/$bt_entry" ]; then
   bt_fault write
   bt_login
 fi

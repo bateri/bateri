@@ -135,73 +135,7 @@ pub enum Kind {
     Root,
 }
 
-impl Kind {
-    /// The kind's word in a handover's pane state (`crate::handover::PaneState`): written by
-    /// one bateri, read by the next, so a word never changes once released — a new kind is a
-    /// new word. No wildcard: a new kind is a decision.
-    pub fn word(self) -> &'static str {
-        match self {
-            Kind::Shell => "shell",
-            Kind::Remote => "remote",
-            Kind::Agent(agent) => match agent {
-                Agent::ClaudeCode => "claude-code",
-                Agent::Codex => "codex",
-                Agent::OpenCode => "opencode",
-                Agent::Antigravity => "antigravity",
-                Agent::GeminiCli => "gemini-cli",
-                Agent::Pi => "pi",
-                Agent::Herdr => "herdr",
-                Agent::CursorCli => "cursor-cli",
-                Agent::CopilotCli => "copilot-cli",
-                Agent::QwenCode => "qwen-code",
-                Agent::KimiCli => "kimi-cli",
-                Agent::Other => "agent",
-            },
-            Kind::Editor => "editor",
-            Kind::Repl => "repl",
-            Kind::Database => "database",
-            Kind::Container => "container",
-            Kind::Monitor => "monitor",
-            Kind::Git => "git",
-            Kind::Task => "task",
-            Kind::Pager => "pager",
-            Kind::Files => "files",
-            Kind::Root => "root",
-        }
-    }
-
-    /// [`Self::word`]'s inverse; `None` for a word this build does not know (a newer
-    /// bateri's kind), which is no kind rather than an error.
-    pub fn from_word(word: &str) -> Option<Kind> {
-        Some(match word {
-            "shell" => Kind::Shell,
-            "remote" => Kind::Remote,
-            "claude-code" => Kind::Agent(Agent::ClaudeCode),
-            "codex" => Kind::Agent(Agent::Codex),
-            "opencode" => Kind::Agent(Agent::OpenCode),
-            "antigravity" => Kind::Agent(Agent::Antigravity),
-            "gemini-cli" => Kind::Agent(Agent::GeminiCli),
-            "pi" => Kind::Agent(Agent::Pi),
-            "herdr" => Kind::Agent(Agent::Herdr),
-            "cursor-cli" => Kind::Agent(Agent::CursorCli),
-            "copilot-cli" => Kind::Agent(Agent::CopilotCli),
-            "qwen-code" => Kind::Agent(Agent::QwenCode),
-            "kimi-cli" => Kind::Agent(Agent::KimiCli),
-            "agent" => Kind::Agent(Agent::Other),
-            "editor" => Kind::Editor,
-            "repl" => Kind::Repl,
-            "database" => Kind::Database,
-            "container" => Kind::Container,
-            "monitor" => Kind::Monitor,
-            "git" => Kind::Git,
-            "task" => Kind::Task,
-            "pager" => Kind::Pager,
-            "files" => Kind::Files,
-            "root" => Kind::Root,
-            _ => return None,
-        })
-    }
-}
+impl Kind {}
 
 /// One kind's names: what a process, a script or a command is called, and what
 /// a program reports as its `app`. The single table — a new program is a name
@@ -1035,20 +969,6 @@ mod tests {
 
     fn agent(agent: Agent) -> Kind {
         Kind::Agent(agent)
-    }
-
-    #[test]
-    fn every_kind_has_a_word_of_its_own_that_reads_back() {
-        let mut words = std::collections::HashSet::new();
-        for kind in crate::icon::KINDS {
-            assert_eq!(Kind::from_word(kind.word()), Some(kind), "{kind:?}");
-            assert!(words.insert(kind.word()), "{kind:?} shares its word");
-        }
-        // The words are a handover's format: the released ones stay as they are.
-        assert_eq!(Kind::Agent(Agent::ClaudeCode).word(), "claude-code");
-        assert_eq!(Kind::Editor.word(), "editor");
-        assert_eq!(Kind::from_word("a-kind-from-a-newer-bateri"), None);
-        assert_eq!(Kind::from_word(""), None);
     }
 
     #[test]

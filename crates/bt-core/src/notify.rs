@@ -1,6 +1,6 @@
 //! Notifications a program asks the terminal to show — iTerm2's `OSC 9 ; text` and urxvt's
-//! `OSC 777 ; notify ; title ; body` — on their way to a host that embeds the pane. bateri's own
-//! tabs show none of them, as they never have; a host hears them and decides.
+//! `OSC 777 ; notify ; title ; body` — on their way to the pane's owner, which marks the tab and,
+//! with bateri behind, shows them as the system's notification.
 //!
 //! **Text from the stream is bounded and cleaned.** A sequence over its bound is dropped whole and
 //! skipped to its terminator; what is kept is read as UTF-8 (a broken byte becomes U+FFFD), loses
@@ -12,7 +12,7 @@
 //! `9 ; 4 ; …` is its progress bar ([`crate::program_status::progress`]), `9 ; 9 ; …` its working
 //! directory — so a payload that starts with a number and a `;` is a command, never a notification.
 //!
-//! **Pending ones are few.** The ledger keeps at most [`PENDING_LIMIT`] until the host takes them
+//! **Pending ones are few.** The ledger keeps at most [`PENDING_LIMIT`] until the owner takes them
 //! ([`crate::Session::take_notifications`]); a program printing them in a loop pushes the oldest out.
 
 use std::collections::VecDeque;
@@ -29,7 +29,7 @@ pub(crate) const NOTIFY_PAYLOAD_LIMIT: usize = 1024;
 const MAX_TITLE: usize = 256;
 const MAX_BODY: usize = 1024;
 
-/// How many notifications wait for the host at most.
+/// How many notifications wait for the owner at most.
 pub(crate) const PENDING_LIMIT: usize = 8;
 
 /// A notification a program asked for.
@@ -97,7 +97,7 @@ fn formatting(c: char) -> bool {
     )
 }
 
-/// The notifications waiting for the host, oldest first.
+/// The notifications waiting for the owner, oldest first.
 #[derive(Debug, Default)]
 pub(crate) struct Pending(VecDeque<Notification>);
 

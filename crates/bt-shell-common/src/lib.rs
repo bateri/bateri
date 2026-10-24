@@ -17,10 +17,9 @@
 //! ssh connection a remote job rides on and the askpass wire (`ssh_route`), the host names of
 //! `~/.ssh/config` (`ssh_hosts`), whether
 //! the user's `ssh` gets the remote shell integration (`ssh_wrap`), what an
-//! outside process may ask about one pane's focus (`focus`), the update's
-//! live handover and its holder process (`handover`), a pane's journal in
-//! shared memory and `bateri compact` (`journal`), the saved
-//! session layout and its file (`restore`), the
+//! outside process may ask about one pane's focus (`focus`), the saved
+//! session layout and its file (`restore`), the holders of the
+//! bateri before kablo, ended once (`retired_holders`), the
 //! process table (`jobs`), which program reads the keyboard and its guide
 //! bar (`program`), the active Python environment and Node version the dock
 //! shows (`environment`), the drawing that stands for a program in a tab (`icon`),
@@ -55,11 +54,9 @@ pub mod focus;
 pub mod gesture;
 pub mod grid;
 pub mod groups;
-pub mod handover;
 pub mod hold;
 pub mod icon;
 pub mod jobs;
-pub mod journal;
 pub mod kablo;
 pub mod keys;
 pub mod links;
@@ -78,6 +75,7 @@ pub mod remote_files;
 pub mod remote_helper;
 pub mod remote_stats;
 pub mod restore;
+pub mod retired_holders;
 pub mod server_card;
 pub mod settings;
 pub mod shortcuts;
@@ -86,7 +84,6 @@ pub mod ssh_hosts;
 pub mod ssh_route;
 pub mod ssh_wrap;
 pub mod tabs;
-pub mod tree_text;
 pub mod undo;
 pub mod upload;
 pub mod view_ask;

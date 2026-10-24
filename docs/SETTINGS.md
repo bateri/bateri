@@ -251,9 +251,7 @@ restore_windows = "all"
 # update, crash also when bateri crashes or is forced to quit, quit also when
 # you quit it — then quitting asks nothing, and Quit and End Programs (⌥⌘Q)
 # ends them. The next bateri takes them back with their screens and
-# scrollback; a pane already open when you switched away from update comes
-# back with its program redrawing the screen. Restarting the Mac or logging
-# out ends them.
+# scrollback. Restarting the Mac or logging out ends them.
 keep_running = "crash"
 
 [appearance]
@@ -924,7 +922,7 @@ The value is read at closing time, so it takes effect the moment you save.
   shown either; it is deleted unread.
 - `"off"` writes nothing and deletes the rest: bateri opens with a single
   empty window — or, when programs were kept running (`keep_running`), with
-  just their panes.
+  the windows they are shown in.
 - After ⌘Q, logging out and restarting, the shells are **new** — unless
   `keep_running` (below) kept their programs: running programs (vim, a build)
   end on closing, and the history that comes back is text only. The history
@@ -933,24 +931,31 @@ The value is read at closing time, so it takes effect the moment you save.
   the history, so after a crash or a power cut the windows come back under
   every `keep_running` value: with their programs where they were kept, with
   new shells where nothing kept them. After a crash a kept program comes back
-  with its screen and history as they were at the crash.
+  with its screen, its history and the blocks of its commands as they were at
+  the crash.
 - **Updates are the exception**: on "Install and Relaunch" the shells and the
   running programs — vim, `npm run dev`, a session over ssh — **do not die**,
-  they move to the new version with their screens; on this path the history
-  is not written to disk either, it is carried in memory. This holds under
-  every `restore_windows` value, `"off"` included: whether programs live on
-  is `keep_running`'s to say, and every value of it covers updates. While a
-  file transfer or a password prompt is in progress, the relaunch waits for
-  them to finish ("Update waits for N transfers" on the status line; ⌘.
-  cancels the transfer and lets the update proceed). A pane whose program
-  cannot be carried over comes back with a new shell and a dim note saying
-  why — under its history with `"all"`, alone with `"layout"`; with `"off"`
-  it does not come back.
-- **A pane in ssh** comes back with a local shell in its old local directory,
-  and the connection's line (such as `ssh prod`) waits on the input line
-  **ready but not run**: ⏎ connects. It does not connect by itself — after an
-  update you do not want every pane asking for a password at the same time,
-  or a production server being connected to without you touching it.
+  they keep running in their terminals and the new version shows them again
+  with their screens; the history is not written to disk on this path, the
+  terminals keep it. This holds under every `restore_windows` value, `"off"`
+  included: whether programs live on is `keep_running`'s to say, and every
+  value of it covers updates. While a file transfer or a password prompt is in
+  progress, the relaunch waits for them to finish ("Update waits for N
+  transfers" on the status line; ⌘. cancels the transfer and lets the update
+  proceed). A pane whose terminal is no longer there — its program ended while
+  bateri was closed — comes back with a new shell, under its history with
+  `"all"`, alone with `"layout"` (and with `"off"`, in the windows kept
+  terminals are shown in; with no kept terminal `"off"` opens one empty window). A pane
+  that showed a terminal on a server which is no longer kept says so in a dim
+  line under its history.
+- **A pane in ssh whose terminal did not survive** (the terminal was ended
+  with bateri, or kablo could not be had for the tab) comes back with a local
+  shell in its old local directory, and the connection's line (such as `ssh
+  prod`) waits on the input line **ready but not run**: ⏎ connects. It does not
+  connect by itself — after an update you do not want every pane asking for a
+  password at the same time, or a production server being connected to without
+  you touching it. A plain `ssh` that was running in a terminal that is kept
+  is still running, and is shown again as it was.
 - The saved state is under
   `~/Library/Application Support/bateri/session/dev.bateri.bateri/` (the
   directory is yours only, the files are `0600`) and is deleted as soon as it
@@ -960,14 +965,13 @@ The value is read at closing time, so it takes effect the moment you save.
   you do not want that, use `"layout"`.
 - If two copies of bateri are open at the same time, only the first one saves
   and restores.
-- Holding **⇧** while bateri opens skips all of this: one empty window opens,
-  nothing saved is read, and from then on this session is the one that gets
-  saved. Programs kept through a crash or a quit (`keep_running`) are left
-  alone and come back at the next launch; programs crossing an update still
-  come back, since they cannot wait.
-- If bateri crashes while it brings programs back, the next launch brings
-  them back without their screens, and if that crashes too, the one after
-  gives them up and opens a single empty window.
+- Holding **⇧** while bateri opens skips all of this: one empty window opens
+  and nothing saved is read. When terminals are kept and waiting (`keep_running`,
+  an update), that session is not saved either, so they and their windows come
+  back at the next launch; otherwise from then on this session is the one that
+  gets saved.
+- If a launch crashes while it brings terminals back, hold ⇧ at the next one to
+  get one empty window; the terminals are left as they are for a later launch.
 
 `keep_running` says when the programs running in bateri — vim, `npm run
 dev`, a session over ssh — outlive it. Each value includes the ones before
@@ -980,11 +984,8 @@ it:
   the next bateri takes them back into their windows, the same processes,
   with the screen and the history as they were at the crash and whatever the
   programs printed while bateri was closed below. ⌘Q still ends them, after
-  the usual question. A pane that was already open when you moved away from
-  `"update"`, or whose record could not be kept (below), comes back with its
-  program redrawing the screen instead: the pane says so in a dim line, a
-  full-screen program (vim, htop) is made to redraw at once, and in a plain
-  shell what was on screen is gone.
+  the usual question. A full-screen program (vim, htop) is made to redraw
+  at once when its terminal is shown again, so the screen is its own.
 - `"quit"` also keeps them when you quit with ⌘Q, which then asks nothing:
   the programs run on with no window until bateri opens again, and then they
   come back with their screens. So that they are not forgotten, a quit that
@@ -1007,31 +1008,29 @@ it:
   cannot be reached when the terminal is to end is asked at the next
   connection to it.
 - If bateri is not opened again, kept programs run until they finish, or
-  until you log out or restart the Mac; the helper exits once none is left.
-  While bateri is closed their output is still read, so a server that logs
-  does not stall — a program that prints without end keeps using the CPU, and
-  past a limit the oldest output is dropped (the pane marks the cut when it
-  comes back).
+  until you log out or restart the Mac. While bateri is closed their output is
+  still read, so a server that logs does not stall — a program that prints
+  without end keeps using the CPU, and past a limit the oldest output is
+  dropped (the screen then comes back from the terminal's own picture of it,
+  with `scrollback` lines of history, and the blocks of older commands come back
+  as plain text).
 - Under every value, closing a pane, a tab or a window (⌘W, the red button)
   and typing `exit` end the programs as before — except a program on a server
   that you answer *Leave Running* to, and a terminal on a server that another
   of your Macs took — and restarting the Mac or logging out ends them.
-- With `"crash"` and `"quit"` a small helper process (`bateri hold`) runs
-  beside bateri and keeps a copy of each terminal, so the programs have
-  somewhere to stay when bateri goes. While bateri runs it reads nothing and
-  wakes for nothing; when no program is left for it to keep, it exits.
-- So that the screen survives a crash, bateri keeps a record of what each
-  pane printed since it last summarized it, in memory shared with the helper
-  — never on disk — and summarizes it from time to time on a thread of its
-  own; the record's room grows with `scrollback`. After a crash the helper
-  rebuilds each screen from the summary and the record with `bateri compact`. A program that prints without pause for a long time may
-  be slowed down to the pace of the summaries; if a summary cannot keep up,
-  that pane's record is dropped and a crash brings it back redrawn by its
-  program.
-- A change applies when you save, in every direction, without restarting
-  bateri: moving away from `"update"` protects the programs that are already
-  running from then on, moving back to it lets them end with bateri again,
-  and between `"crash"` and `"quit"` only the next ⌘Q reads the difference.
+- Every tab's shell runs in a terminal that kablo keeps on this Mac — kablo is
+  bateri's companion program (one file under `~/.local/share/kablo/`, put there
+  by bateri; nothing is installed system-wide and nothing needs root) — and
+  bateri shows it. The terminals are what outlive bateri; no helper process of
+  bateri's own is involved. A terminal costs memory in kablo for as long as it
+  lives: its history is at most the last `scrollback` lines. Clearing the
+  screen or the scrollback (⌘K, ⌥⌘K) forgets the history there too, so what you
+  cleared does not come back after an update. A tab for which kablo cannot be had (the file cannot be
+  written or does not start) is an ordinary terminal: it ends with bateri, and
+  the quit asks about it as usual.
+- A change applies when you save, without restarting bateri: the value in
+  force when bateri quits — or, after a crash, when the next one starts —
+  decides what becomes of the terminals.
 - In Settings it is General ▸ "Keep programs running:" — Only during
   updates, Also after a crash, Also after quitting.
 
@@ -1724,9 +1723,12 @@ does nothing either and the terminal works as it is.
   it off leaves no trace.
 - **Real** OSC 133 marks set up by another tool are read even while it is
   `"off"`: the key means "do not set up the wrapper", not "ignore the marks".
-- When you move to a remote machine over SSH, our script is not there and the
-  marks do not come. This is not a fault; the terminal works in its usual
-  state.
+- When you move to a remote machine over a plain SSH, our script is not there and
+  the marks do not come. This is not a fault; the terminal works in its usual
+  state. A terminal the server keeps (see [Remote shell
+  integration](#remote-shell-integration)) is set up by a script of ours on the
+  server, and this key's choice goes with it: with `"blocks"` or `"off"` the
+  server's shell keeps its own line and prompt.
 
 **This key does not apply when you save, as the other keys do** — it is the
 one exception. Integration is set up when the shell **starts**, and by the
@@ -2060,6 +2062,14 @@ root). The pane shows that terminal as if `ssh` had run in it, so you log in
 the way you always did (the password, the second factor and the question
 whether to trust the server's key are asked in the pane), the dock shows
 `⇄ host`, and the directory (OSC 7) and then command blocks work remotely too.
+The line you type at the server's prompt is in the dock, as in a local tab —
+zsh, bash 4.4 or newer and fish: you click in it, select, edit it with ←, → and
+⌫, paste with ⌘V, and the grid does not show the line twice. The dock's bottom
+line stays what it was — `⇄ rasp  ~/app`, a short warning when the server's load
+passes a threshold — with no branch, no environment and no permanent gauge.
+Where you set `integration = "blocks"` (above), the server's shell keeps its own
+line and prompt, the way a local one does. While a command runs on the server, or
+in a full-screen program, the dock's line steps aside as it does locally.
 Where the connection drops — a Wi-Fi that goes, a laptop that sleeps — the
 terminal and what runs in it stay on the server, and the pane goes on from where
 it was when the connection is back. A second `ssh` to the same account rides
@@ -2098,8 +2108,8 @@ keeps, and where, in `~/Library/Application Support/bateri/session/` beside the
 saved windows; nothing secret is in it (no password, no key).
 
 While the connection is down the pane shows the terminal's last screen under a
-veil (the dock stays clear), without the caret, and the dock's context line says
-what is going on: `⇄ rasp  Reconnecting… · ⏎ try now`. Keys are not sent — the
+veil — the grid and the line you had typed in the dock — without the caret, and
+the dock's bottom line stays clear and says what is going on: `⇄ rasp  Reconnecting… · ⏎ try now`. Keys are not sent — the
 system beeps — except ⏎, which tries again at once instead of waiting out the
 pause (1 s, 2 s, up to 30 s), and scrolling through the screen still works.
 bateri also tries again the moment the Mac wakes up. A key or an agent signs in

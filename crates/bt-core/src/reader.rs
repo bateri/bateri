@@ -17,7 +17,7 @@
 //!   `bt-core`; the branch is unreachable); the re-registration panic was
 //!   kept with its justification;
 //! - the PTY tokens are `pub(crate)` in alacritty, their values were copied
-//!   here (and are `pub(crate)` here too: an adopted PTY registers on them);
+//!   here (and are `pub(crate)` here too: a streamed PTY registers on them);
 //! - comments were translated (first to Turkish, later to English);
 //! - an image a graphics command carries is decoded — and read, when the
 //!   command names a file or shared memory object — with the terminal's lease
@@ -26,17 +26,11 @@
 //!   hold it back. The parser stops right behind such a command
 //!   ([`ansi::Processor::advance_until_halt`]), the decoding is done, and the
 //!   parse goes on from the byte after it: the bytes are parsed in order
-//!   whatever the decoding takes, and the journal counts them as they are;
-//! - the update handover: an opt-in read before the first poll
-//!   ([`EventLoop::read_first`], so a carried prefix reaches the parser on
-//!   a quiet PTY) and, on the loop handed back after `join`, the DEC 2026
-//!   buffer applied through the wrapper ([`EventLoop::stop_sync`]), the
-//!   PTY borrowed ([`EventLoop::pty_mut`]) and the input not yet written taken
-//!   ([`EventLoop::unsent`]); `pty_read` returns the bytes it processed and,
-//!   during that first read, waits for the terminal lock instead of reading
-//!   on (every read is parsed before the next, so a carried prefix and the
-//!   master's bytes never share one `advance` — the adopted session drops
-//!   the prefix's replies, `Session::adopt`).
+//!   whatever the decoding takes;
+//! - a stream that starts with a past ([`EventLoop::silence`]): the reads of
+//!   that past are parsed one by one, each alone, because the session is
+//!   muted for exactly the bytes a read took; `pty_read` returns the bytes
+//!   it processed.
 //!
 //! Why a copy: grapheme clustering has to step **in between** the parser's
 //! `Handler` calls, and alacritty's loop hands `Term` over as a fixed type.
@@ -69,7 +63,7 @@ use polling::{Event as PollingEvent, Events, PollMode, Poller};
 use crate::flow::Flow;
 use crate::graphics::{Commands, Sink};
 use crate::handler::ClusterHandler;
-use crate::journal::{Journal, Side};
+use crate::session::Silence;
 
 /// The most bytes read from the PTY before a forced synchronization.
 pub(crate) const READ_BUFFER_SIZE: usize = 0x10_0000;
@@ -104,12 +98,11 @@ pub(crate) enum Msg {
     /// The PTY must be resized.
     Resize(WindowSize),
 
-    /// The journal's compaction made room (or the journal broke), or the
-    /// module of the pane's view has taken enough of what the program said
+    /// The module of the pane's view has taken enough of what the program said
     /// ([`Flow::taken`]): the read gate is asked again. A channel message, not
     /// a bare poller wake: an empty wake with an empty channel is the DEC 2026
     /// timeout's arm, which would apply a synchronized update early and ask
-    /// for a frame. Sent only to a loop that has a journal or a flow.
+    /// for a frame. Sent only to a loop that has a flow.
     Room,
 }
 
@@ -362,12 +355,6 @@ pub(crate) struct EventLoop<T: tty::EventedPty, U: EventListener> {
     /// Whether clustering is on (`SessionOptions::cluster`); passed to the
     /// wrapper on every call.
     cluster: bool,
-    /// How many carried bytes the thread reads before its first
-    /// `poll.wait` ([`EventLoop::read_first`]); `None`: none.
-    read_first: Option<usize>,
-    /// The session's journal ([`EventLoop::journal`]); `None`: none, and
-    /// the loop runs as alacritty's does.
-    journal: Option<Arc<Journal>>,
     /// The session's graphics ([`EventLoop::graphics`]); `None`: none, and
     /// the graphics commands the stream may carry only move the cursor.
     graphics: Option<Arc<dyn Sink>>,
@@ -380,26 +367,8 @@ pub(crate) struct EventLoop<T: tty::EventedPty, U: EventListener> {
     /// The child has exited and the loop reads what is left: the PTY is read to its end
     /// whatever the module has taken, because there is no program left to slow down.
     draining: bool,
-}
-
-/// The read gate's state between two loop rounds: while closed, since when
-/// the compaction's progress last moved and what it read then.
-#[derive(Default)]
-struct Gate {
-    stalled: Option<(Instant, u64)>,
-}
-
-/// Whether an empty wake with an empty channel is the DEC 2026 timeout.
-/// Without a journal it always is — alacritty's arm, kept as it was (a wake
-/// whose message an earlier round already drained lands here too, and
-/// applies a pending update early). With one, only once the update's own
-/// deadline has passed: the poll also wakes for the read gate's stall
-/// deadline, and every `stop_sync` is a side record — even one with nothing
-/// pending closes the open cluster — so a spurious one would apply what
-/// the application is still writing, ask for a frame and fill the side
-/// stream.
-fn sync_due(sync: Option<Instant>, journaled: bool, now: Instant) -> bool {
-    !journaled || sync.is_some_and(|deadline| deadline <= now)
+    /// The past a stream starts with ([`EventLoop::silence`]); `None`: none.
+    silence: Option<Arc<Silence>>,
 }
 
 impl<T, U> EventLoop<T, U>
@@ -425,12 +394,11 @@ where
             event_proxy,
             drain_on_exit,
             cluster,
-            read_first: None,
-            journal: None,
             graphics: None,
             flow: None,
             module_check: None,
             draining: false,
+            silence: None,
         })
     }
 
@@ -438,13 +406,6 @@ where
     /// the parser's wrapper applies them to `graphics` where they end.
     pub(crate) fn graphics(&mut self, graphics: Arc<dyn Sink>) {
         self.graphics = Some(graphics);
-    }
-
-    /// Records the PTY into `journal`: the bytes `advance` applies are
-    /// counted, the DEC 2026 timeout is recorded, and reading stops while
-    /// the journal has no room for one more read ([`Journal::gate_open`]).
-    pub(crate) fn journal(&mut self, journal: Arc<Journal>) {
-        self.journal = Some(journal);
     }
 
     /// Holds the PTY to what the module of the pane's view takes of what the program says:
@@ -473,64 +434,17 @@ where
         !self.draining && self.flow.as_ref().is_some_and(Flow::inbox_closed)
     }
 
-    /// Whether the journal has room for the next read — always without a
-    /// journal — and the module has taken what the program said.
+    /// Whether the module has taken what the program said: the loop reads on.
     fn gate_open(&self) -> bool {
-        self.journal
-            .as_ref()
-            .is_none_or(|journal| journal.gate_open())
-            && !self.flow_closed()
+        !self.flow_closed()
     }
 
-    /// The read gate, before the next poll: closes the PTY's read interest
-    /// while the journal has no room for a whole `pty_read` (the poll is
-    /// level-triggered — a readable fd left registered would spin the
-    /// loop) and opens it again once it has. While closed it asks the
-    /// compaction to run and watches its progress: none for the journal's
-    /// stall time breaks the journal and opens the gate, so a dead or stuck
-    /// compaction cannot hold the pane. Returns the stall deadline while
-    /// closed. Without a journal nothing happens and `None` comes back.
-    fn gate(
-        &mut self,
-        gate: &mut Gate,
-        interest: &mut PollingEvent,
-        poll_opts: PollMode,
-    ) -> Option<Instant> {
-        let flow_open = !self.flow_closed();
-        let Some(journal) = self.journal.as_ref().map(Arc::clone) else {
-            // No journal: the read interest follows the module alone.
-            if flow_open != interest.readable {
-                interest.readable = flow_open;
-                if let Err(err) = self.pty.reregister(&self.poll, *interest, poll_opts) {
-                    panic!("reader loop re-registration failed: {err}"); // audit: alacritty parity, the crash reaches the shutdown report through join's Err
-                }
-            }
-            return None;
-        };
-        let mut open = journal.gate_open();
-        if open {
-            gate.stalled = None;
-        } else {
-            let now = Instant::now();
-            let progress = journal.progress();
-            match gate.stalled {
-                Some((since, seen)) if seen == progress => {
-                    if now >= since + journal.stall() {
-                        eprintln!(
-                            "bateri: the journal's compaction made no progress, the journal breaks"
-                        );
-                        journal.break_journal();
-                        gate.stalled = None;
-                        open = true;
-                    }
-                }
-                _ => {
-                    gate.stalled = Some((now, progress));
-                    Journal::poke(&journal);
-                }
-            }
-        }
-        let open = open && flow_open;
+    /// The read gate, before the next poll: closes the PTY's read interest while the module of
+    /// the pane's view has not taken what the program said (the poll is level-triggered — a
+    /// readable fd left registered would spin the loop) and opens it again once it has
+    /// ([`Msg::Room`] wakes the loop for it). Without a flow it stays open.
+    fn gate(&mut self, interest: &mut PollingEvent, poll_opts: PollMode) {
+        let open = self.gate_open();
         if open != interest.readable {
             interest.readable = open;
             // The same deliberate panic as the write interest's below.
@@ -538,83 +452,21 @@ where
                 panic!("reader loop re-registration failed: {err}"); // audit: alacritty parity, the crash reaches the shutdown report through join's Err
             }
         }
-        gate.stalled.map(|(since, _)| since + journal.stall())
     }
 
-    /// The carried prefix's serial reads ([`EventLoop::read_first`]): `left`
-    /// counts down as bytes go through and ends at zero when a round reads
-    /// nothing or fails. A closed read gate stops the rounds with `left`
-    /// kept; the loop calls this again once the gate opens — the prefix does
-    /// not make the fd readable, so a quiet PTY would otherwise keep the
-    /// rest until its next output.
-    fn read_prefix(&mut self, state: &mut State, buf: &mut [u8], left: &mut usize) {
-        while *left > 0 {
-            if !self.gate_open() {
-                return;
-            }
-            match self.pty_read(state, buf, true) {
-                Ok(0) => *left = 0,
-                Ok(processed) => *left = left.saturating_sub(processed),
-                Err(err) => {
-                    eprintln!("bateri: the first PTY read failed: {err}");
-                    *left = 0;
-                }
-            }
-        }
-    }
-
-    /// Reads once before the first `poll.wait`: an adopted PTY's
-    /// carried prefix (`TappedPty`) must reach **this** loop's parser — it
-    /// may end inside a sequence — and a quiet PTY gives no readable event
-    /// to carry it. The reads stop once `prefix` bytes went through (a
-    /// round may take some of the fd's too) — **not** when a round comes
-    /// back short: a program writing without pause (`yes`, a build held at
-    /// the holder's limit) fills every round, and the loop would never
-    /// reach the channel (keys, resizes, the shutdown).
-    ///
-    /// These reads wait for the terminal lock rather than reading on while
-    /// it is busy: each read is parsed before the next one, so no `advance`
-    /// mixes the prefix's last bytes with the master's first — what lets the
-    /// reader tell the prefix's replies from the live ones (`TappedPty`).
-    pub(crate) fn read_first(&mut self, prefix: usize) {
-        self.read_first = Some(prefix);
-    }
-
-    /// The PTY the loop owned — after `join`, when nothing reads it.
-    pub(crate) fn pty_mut(&mut self) -> &mut T {
-        &mut self.pty
-    }
-
-    /// Applies a pending DEC 2026 buffer to `Term` through the wrapper.
-    /// Meant for the loop handed back after `join` (the handover's freeze):
-    /// the snapshot must see what the application already sent. Graphics
-    /// commands in the buffer only move the cursor here, as they do in the
-    /// journal's replay: the images do not cross an update, nothing decodes
-    /// while the freeze holds the terminal, and a query in the buffer gets
-    /// no answer (the one thing an update that is still open at the freeze
-    /// loses).
-    pub(crate) fn stop_sync(&mut self, state: &mut State) {
-        if let Some(graphics) = self.graphics.as_deref() {
-            // The cell the movement is made from: the session's, as the
-            // commands of the buffer would have found it.
-            state.commands.set_cell(graphics.cell());
-        }
-        let mut terminal = self.terminal.lock();
-        let mut handler = ClusterHandler::new(&mut terminal, self.cluster, &mut state.last_input)
-            .commands(&mut state.commands);
-        if let Some(graphics) = self.graphics.as_deref() {
-            handler = handler.kept_modes(graphics.kept_modes());
-        }
-        state.parser.stop_sync(&mut handler);
+    /// The stream starts with a past ([`Silence`]): a read of its bytes is parsed alone, before
+    /// the next one is made — the read decides whether the session is muted for the bytes it
+    /// took, and two reads parsed together would be parsed under the second one's answer. The
+    /// reads of live bytes are not held to it.
+    pub(crate) fn silence(&mut self, silence: Arc<Silence>) {
+        self.silence = Some(silence);
     }
 
     /// The DEC 2026 timeout: the parser's buffer applied, through the wrapper
     /// and with the terminal locked — but for the decoding of an image in it,
     /// which is done with the parser halted behind the command, as
-    /// [`EventLoop::pty_read`] does. `journaled` is called in the lock round
-    /// the stop begins in, before any halt: the replay applies the buffer
-    /// after exactly the bytes applied so far.
-    fn stop_timed_out_sync(&self, state: &mut State, journaled: impl FnOnce()) {
+    /// [`EventLoop::pty_read`] does.
+    fn stop_timed_out_sync(&self, state: &mut State) {
         let fair = &*self.terminal;
         let mut lease = Some(fair.lease());
         let mut terminal = None;
@@ -626,7 +478,6 @@ where
                     .commands(&mut state.commands);
             state.parser.stop_sync_until_halt(&mut handler)
         };
-        journaled();
         while halted {
             let Some(graphics) = self.graphics.as_deref() else {
                 break;
@@ -641,7 +492,7 @@ where
                     .graphics(self.graphics.as_deref())
                     .commands(&mut state.commands);
             handler.resume();
-            // What is left of the replay (nothing new is given).
+            // What is left of the buffer (nothing new is given).
             let _ = state.parser.advance_until_halt(&mut handler, &[]);
             halted = handler.halt_requested();
         }
@@ -655,25 +506,10 @@ where
         }
     }
 
-    /// The input bytes the loop never wrote, in order: the buffer being
-    /// written, the queue behind it and the `Input` messages still in the
-    /// channel (the `Shutdown` arm stops draining at itself). Meant for the
-    /// loop handed back after `join`; a resize left in the channel is
-    /// dropped — the adopting side sizes the PTY itself.
-    pub(crate) fn unsent(&mut self, state: &mut State) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        if let Some(writing) = state.writing.take() {
-            bytes.extend_from_slice(writing.remaining_bytes());
-        }
-        for queued in state.write_list.drain(..) {
-            bytes.extend_from_slice(&queued);
-        }
-        while let Some(msg) = self.rx.recv() {
-            if let Msg::Input(input) = msg {
-                bytes.extend_from_slice(&input);
-            }
-        }
-        bytes
+    /// The scripted PTY a test steers while the loop does not run.
+    #[cfg(test)]
+    pub(crate) fn pty_mut(&mut self) -> &mut T {
+        &mut self.pty
     }
 
     /// The loop's channel. Fit the loop's flow first ([`EventLoop::flow`]): the sender counts
@@ -704,10 +540,8 @@ where
         true
     }
 
-    /// `serial`: wait for the terminal lock after a read instead of reading
-    /// on into the same buffer ([`EventLoop::read_first`]'s rounds).
     #[inline]
-    fn pty_read(&mut self, state: &mut State, buf: &mut [u8], serial: bool) -> io::Result<usize> {
+    fn pty_read(&mut self, state: &mut State, buf: &mut [u8]) -> io::Result<usize> {
         let mut unprocessed = 0;
         let mut processed = 0;
 
@@ -740,9 +574,13 @@ where
             // Try to lock the terminal.
             if terminal.is_none() {
                 terminal = match fair.try_lock_unfair() {
-                    // At the buffer limit, take the lock by waiting — and in
-                    // the serial rounds always, so a read is parsed alone.
-                    None if serial || unprocessed >= buf.len() => Some(fair.lock_unfair()),
+                    // At the buffer limit, take the lock by waiting — and while the
+                    // stream's past is being read always, so a read is parsed alone.
+                    None if unprocessed >= buf.len()
+                        || self.silence.as_ref().is_some_and(|past| past.in_past()) =>
+                    {
+                        Some(fair.lock_unfair())
+                    }
                     None => continue,
                     locked => locked,
                 };
@@ -771,20 +609,6 @@ where
                 let halted = handler.halt_requested();
                 drop(handler);
                 at += used;
-                // The journal's applied count, under the terminal lock and by
-                // the bytes the parser took — not the bytes read: the reads
-                // before the lock accumulate into one parse. A side record
-                // the main thread writes while the lock is let go is stamped
-                // by it, and its replay finds it before the byte that ends
-                // the command, where the command's effect on the cursor waits
-                // for it: that last byte (`\`) is counted when the effect is
-                // made. (Not inside a synchronized update's replay, where the
-                // bytes the parser took are the update's, long ago.)
-                let held_back =
-                    usize::from(halted && used > 0 && state.parser.sync_bytes_count() == 0);
-                if let Some(journal) = &self.journal {
-                    journal.applied(used - held_back);
-                }
                 if !halted {
                     break;
                 }
@@ -800,9 +624,6 @@ where
                     .graphics(self.graphics.as_deref())
                     .commands(&mut state.commands)
                     .resume();
-                if let Some(journal) = &self.journal {
-                    journal.applied(held_back);
-                }
             }
             debug_assert_eq!(
                 at, unprocessed,
@@ -825,8 +646,12 @@ where
 
             // Do not hold the terminal locked longer than needed — nor read on when the module of
             // the pane's view has not taken what the program said: the program's `write` waits
-            // in the tty, and the rest is read when the module has made room.
-            if processed >= MAX_LOCKED_READ || self.flow_closed() {
+            // in the tty, and the rest is read when the module has made room. Unless a read of a
+            // stream's past left its live rest behind: nothing about the stream says it is there
+            // to read.
+            if (processed >= MAX_LOCKED_READ || self.flow_closed())
+                && !self.silence.as_ref().is_some_and(|past| past.is_carrying())
+            {
                 break;
             }
         }
@@ -936,33 +761,18 @@ where
                 return (self, state);
             }
 
-            // One `pty_read` stops at `MAX_LOCKED_READ`; a long prefix on a
-            // quiet PTY would wait for the next output, so read rounds until
-            // the prefix went through — bounded by its length, so a program
-            // writing without pause cannot keep the loop from the channel.
-            let mut prefix_left = self.read_first.map_or(0, |prefix| prefix.max(1));
-            self.read_prefix(&mut state, &mut buf, &mut prefix_left);
-
             let mut events = Events::with_capacity(EVENTS_CAPACITY);
-            let mut gate = Gate::default();
 
             'event_loop: loop {
-                // The journal's read gate (nothing without a journal), and the
-                // prefix a closed gate stopped.
-                let stall = self.gate(&mut gate, &mut interest, poll_opts);
-                if prefix_left > 0 && interest.readable {
-                    self.read_prefix(&mut state, &mut buf, &mut prefix_left);
-                }
+                // The read gate: shut while the module of the pane's view has not taken what the
+                // program said.
+                self.gate(&mut interest, poll_opts);
 
-                // Wake at the deadline of a synchronized update (DEC 2026) —
-                // or at the read gate's stall deadline, if sooner.
+                // Wake at the deadline of a synchronized update (DEC 2026).
                 let handler = state.parser.sync_timeout();
-                let sync = handler.sync_timeout();
-                let deadline = match (sync, stall) {
-                    (Some(sync), Some(stall)) => Some(sync.min(stall)),
-                    (sync, stall) => sync.or(stall),
-                };
-                let timeout = deadline.map(|st| st.saturating_duration_since(Instant::now()));
+                let timeout = handler
+                    .sync_timeout()
+                    .map(|st| st.saturating_duration_since(Instant::now()));
 
                 events.clear();
                 if let Err(err) = self.poll.wait(&mut events, timeout) {
@@ -980,22 +790,8 @@ where
                 // to `Term` directly, clustering would be skipped in
                 // this arm.
                 if events.is_empty() && self.rx.peek().is_none() {
-                    if sync_due(sync, self.journal.is_some(), Instant::now()) {
-                        self.stop_timed_out_sync(&mut state, || {
-                            // In the same lock round: the replay applies the
-                            // buffer after exactly the bytes applied so far.
-                            if let Some(journal) = &self.journal {
-                                journal.record(Side::StopSync);
-                            }
-                        });
-                        self.event_proxy.send_event(Event::Wakeup);
-                        // A compaction that found the update open gave up
-                        // until a new side record — this one: ask again, or
-                        // a closed gate would wait for the stall.
-                        if let Some(journal) = &self.journal {
-                            Journal::poke(journal);
-                        }
-                    }
+                    self.stop_timed_out_sync(&mut state);
+                    self.event_proxy.send_event(Event::Wakeup);
                     continue;
                 }
 
@@ -1018,7 +814,7 @@ where
                                 }
                                 if self.drain_on_exit {
                                     self.draining = true;
-                                    let _ = self.pty_read(&mut state, &mut buf, false);
+                                    let _ = self.pty_read(&mut state, &mut buf);
                                 }
                                 self.terminal.lock().exit();
                                 self.event_proxy.send_event(Event::Wakeup);
@@ -1033,12 +829,7 @@ where
                             }
 
                             let read = if event.readable {
-                                let read = self.pty_read(&mut state, &mut buf, false);
-                                // Outside the lease: the compaction may start a thread.
-                                if let Some(journal) = &self.journal {
-                                    Journal::poke(journal);
-                                }
-                                read
+                                self.pty_read(&mut state, &mut buf)
                             } else {
                                 Ok(0)
                             };
@@ -1334,9 +1125,7 @@ mod tests {
 
         let mut state = State::default();
         let mut buf = vec![0; 4096];
-        let processed = event_loop
-            .pty_read(&mut state, &mut buf, true)
-            .expect("read");
+        let processed = event_loop.pty_read(&mut state, &mut buf).expect("read");
         frame.finish("an image was decoded");
 
         assert_eq!(processed, 5 + image.len() + 5, "every byte is the parser's");
@@ -1519,9 +1308,7 @@ mod tests {
 
         let mut state = State::default();
         let mut buf = vec![0; 4096];
-        event_loop
-            .pty_read(&mut state, &mut buf, true)
-            .expect("read");
+        event_loop.pty_read(&mut state, &mut buf).expect("read");
         frame.finish("a file was read");
 
         // The image is one cell: the cursor goes one column right of the
@@ -1546,9 +1333,7 @@ mod tests {
         flow.heard(INBOX_LIMIT);
         let mut state = State::default();
         let mut buf = vec![0; 4096];
-        let read = event_loop
-            .pty_read(&mut state, &mut buf, true)
-            .expect("read");
+        let read = event_loop.pty_read(&mut state, &mut buf).expect("read");
         assert_eq!(read, "one ".len(), "one read, and no more");
         assert_eq!(
             event_loop.pty_mut().steps.len(),
@@ -1559,9 +1344,7 @@ mod tests {
         // The module takes it: the loop reads the rest.
         flow.taken(INBOX_LIMIT);
         assert!(event_loop.gate_open());
-        event_loop
-            .pty_read(&mut state, &mut buf, true)
-            .expect("read");
+        event_loop.pty_read(&mut state, &mut buf).expect("read");
         let row = grid_row(&terminal.lock(), 0);
         assert!(row.starts_with("one two three"), "{row:?}");
     }
@@ -1580,9 +1363,7 @@ mod tests {
         event_loop.draining = true;
         let mut state = State::default();
         let mut buf = vec![0; 4096];
-        event_loop
-            .pty_read(&mut state, &mut buf, true)
-            .expect("read");
+        event_loop.pty_read(&mut state, &mut buf).expect("read");
         let row = grid_row(&terminal.lock(), 0);
         assert!(row.starts_with("abc"), "{row:?}");
     }
@@ -1769,9 +1550,7 @@ mod tests {
         let (mut event_loop, terminal) = scripted_loop(ScriptedPty::new(steps), &sink, false);
         let mut state = State::default();
         let mut buf = vec![0; 4096];
-        event_loop
-            .pty_read(&mut state, &mut buf, true)
-            .expect("read");
+        event_loop.pty_read(&mut state, &mut buf).expect("read");
         // All of it waits in the parser's buffer.
         assert!(all_text(&terminal.lock()).trim().is_empty());
         assert!(
@@ -1781,46 +1560,13 @@ mod tests {
         );
 
         let frame = frame_thread(&terminal, &sink);
-        let mut journaled = false;
-        event_loop.stop_timed_out_sync(&mut state, || journaled = true);
+        event_loop.stop_timed_out_sync(&mut state);
         frame.finish("the image of a timed out update was decoded");
 
-        assert!(journaled, "the stop is journaled in the round it begins in");
         assert_eq!(sink.hub.with_images(|images| images.main().ids()), [1]);
         // One cell across, no row down: the image is a cell big, then the text.
         let row = grid_row(&terminal.lock(), 0);
         assert!(row.starts_with(" after"), "{row:?}");
-    }
-
-    /// The handover applies an update that is still open without the images,
-    /// and moves the cursor as the commands in it would have: by the cell size
-    /// the session has, not one the parser never heard of.
-    #[test]
-    fn an_update_open_at_the_freeze_moves_the_cursor_by_the_sessions_cell() {
-        use crate::graphics::tests::wire;
-        let sink = quiet_sink();
-        let steps = [Step::Wire(
-            [
-                b"\x1b[?2026h\x1b[3;6H".to_vec(),
-                // 20 × 40 pixels are two columns by two rows of the sink's cell.
-                wire("a=T,f=32,s=20,v=40,i=1", &[0; 20 * 40 * 4]),
-            ]
-            .concat(),
-        )];
-        let (mut event_loop, terminal) = scripted_loop(ScriptedPty::new(steps), &sink, false);
-        let mut state = State::default();
-        let mut buf = vec![0; 1 << 16];
-        event_loop
-            .pty_read(&mut state, &mut buf, true)
-            .expect("read");
-        event_loop.stop_sync(&mut state);
-        let point = terminal.lock().grid().cursor.point;
-        assert_eq!((point.line.0, point.column.0), (3, 7));
-        assert!(
-            sink.hub
-                .with_images(|images| images.main().ids())
-                .is_empty()
-        );
     }
 
     /// A name in an update that is still being written is the reads' still:
@@ -1837,22 +1583,18 @@ mod tests {
         let (mut event_loop, _terminal) = scripted_loop(ScriptedPty::new(steps), &sink, false);
         let mut state = State::default();
         let mut buf = vec![0; 4096];
-        event_loop
-            .pty_read(&mut state, &mut buf, true)
-            .expect("read");
+        event_loop.pty_read(&mut state, &mut buf).expect("read");
         // The next read has a name in it, and noted the pane as remote (a
         // session that ended in that read is not remote when it is played).
         let command = wire("a=t,t=t,f=32,s=1,v=1,i=1", file.0.as_os_str().as_bytes());
         event_loop.pty_mut().steps.push_back(Step::Wire(command));
         sink.hub.note_remote();
-        event_loop
-            .pty_read(&mut state, &mut buf, true)
-            .expect("read");
+        event_loop.pty_read(&mut state, &mut buf).expect("read");
         assert!(
             sink.hub.remote_seen(),
             "the update's commands are not played"
         );
-        event_loop.stop_timed_out_sync(&mut state, || ());
+        event_loop.stop_timed_out_sync(&mut state);
         assert!(!sink.hub.remote_seen(), "played: nothing is held back");
         assert!(file.0.exists(), "the name was refused, not read");
         assert!(
@@ -1862,40 +1604,6 @@ mod tests {
         );
     }
 
-    /// The journal counts the bytes the parser took before the terminal is let
-    /// go for a decode, but for the last byte of the command: a side record the
-    /// main thread writes in that gap is stamped by them, and its replay finds
-    /// it before the byte that makes the command's effect on the cursor, where
-    /// the live terminal made that effect after it.
-    #[test]
-    fn the_journal_counts_the_bytes_the_parser_took_before_the_terminal_is_let_go() {
-        use crate::graphics::tests::wire;
-        let sink = quiet_sink();
-        let journal = Journal::in_memory();
-        let image = wire("a=t,f=32,s=1,v=1,i=1", &[0; 4]);
-        let steps = [Step::Wire([&b"hello"[..], &image, b"world"].concat())];
-        let (mut event_loop, terminal) = scripted_loop(ScriptedPty::new(steps), &sink, false);
-        event_loop.journal(Arc::clone(&journal));
-        let seen = Arc::new(Mutex::new(Vec::new()));
-        {
-            let (journal, seen) = (Arc::clone(&journal), Arc::clone(&seen));
-            sink.hub.on_decode(Box::new(move || {
-                seen.lock().expect("lock").push(journal.applied_bytes());
-            }));
-        }
-        let mut state = State::default();
-        let mut buf = vec![0; 4096];
-        let processed = event_loop
-            .pty_read(&mut state, &mut buf, true)
-            .expect("read");
-        assert_eq!(*seen.lock().expect("lock"), [5 + image.len() as u64 - 1]);
-        assert_eq!(journal.applied_bytes(), processed as u64);
-        assert!(grid_row(&terminal.lock(), 0).starts_with("helloworld"));
-    }
-
-    /// The shortest commands there are, a great many of them, in a buffer far
-    /// smaller than the stream: each is parsed where it ends, in order, and
-    /// nothing of what was read is left anywhere.
     #[test]
     fn a_flood_of_short_commands_is_parsed_to_its_end() {
         use crate::graphics::tests::wire;
@@ -1917,9 +1625,7 @@ mod tests {
         let mut buf = vec![0; 512];
         let mut processed = 0;
         for _ in 0..1000 {
-            processed += event_loop
-                .pty_read(&mut state, &mut buf, true)
-                .expect("read");
+            processed += event_loop.pty_read(&mut state, &mut buf).expect("read");
             let pty = event_loop.pty_mut();
             if pty.steps.is_empty() && pty.pending.is_empty() {
                 break;
@@ -1975,9 +1681,7 @@ mod tests {
         let (mut event_loop, terminal) = scripted_loop(ScriptedPty::new(steps), &sink, false);
         let mut state = State::default();
         let mut buf = vec![0u8; 4096];
-        let processed = event_loop
-            .pty_read(&mut state, &mut buf, true)
-            .expect("read");
+        let processed = event_loop.pty_read(&mut state, &mut buf).expect("read");
         assert_eq!(processed, pieces.concat().len());
         // One read for each piece, and one that found nothing more; each was
         // offered the whole buffer.
@@ -2009,39 +1713,10 @@ mod tests {
 
         let mut state = State::default();
         let mut buf = vec![0; 4096];
-        event_loop
-            .pty_read(&mut state, &mut buf, false)
-            .expect("read");
+        event_loop.pty_read(&mut state, &mut buf).expect("read");
 
         assert!(all_text(&terminal.lock()).contains("END"));
         assert_eq!(sink.hub.with_images(|images| images.main().ids()), [1]);
-    }
-
-    /// The same image in a handover's prefix: the rounds that read it stop
-    /// when the prefix is through.
-    #[test]
-    fn a_big_image_in_parts_in_a_carried_prefix_is_read_to_its_end() {
-        let sink = quiet_sink();
-        let mut prefix = chunked_image(100, 1);
-        prefix.extend_from_slice(b"END");
-        let carried = prefix.len();
-        // A pipe that gives 4 KB a read.
-        let pty = ScriptedPty::new([Step::Wire(prefix)]).chunked(4096);
-        let (mut event_loop, terminal) = scripted_loop(pty, &sink, false);
-        let sender = event_loop.channel();
-        event_loop.read_first(carried);
-        let thread = event_loop.spawn();
-
-        let deadline = Instant::now() + Duration::from_secs(10);
-        let mut seen = false;
-        while Instant::now() < deadline && !seen {
-            seen = all_text(&terminal.lock()).contains("END");
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        sender.send(Msg::Shutdown).expect("the loop is there");
-        thread.join().expect("the loop");
-
-        assert!(seen, "the end of the prefix was left unread");
     }
 
     /// And the output a child wrote last before it exited: drained, whatever
@@ -2056,46 +1731,9 @@ mod tests {
 
         let mut state = State::default();
         let mut buf = vec![0; READ_BUFFER_SIZE];
-        event_loop
-            .pty_read(&mut state, &mut buf, false)
-            .expect("read");
+        event_loop.pty_read(&mut state, &mut buf).expect("read");
 
         assert!(all_text(&terminal.lock()).contains("END"));
-    }
-
-    /// A carried prefix is counted in the bytes the parser gets, which are the
-    /// bytes it was carried in: the loop's first rounds stop when the prefix is
-    /// through, and a quiet PTY gives nothing to wake the poller for the rest.
-    #[test]
-    fn a_long_carried_prefix_of_commands_is_read_to_its_end() {
-        use crate::graphics::tests::wire;
-        let sink = quiet_sink();
-        let image = TempFile::new("bt-reader-prefix", &vec![3; 30 * 40 * 4]);
-        let mut prefix =
-            format!("\x1b_Ga=t,t=f,f=32,s=30,v=40,i=1;{}\x1b\\", image.name()).into_bytes();
-        for _ in 0..4000 {
-            prefix.extend_from_slice(&wire("a=p,i=1", &[]));
-        }
-        prefix.extend_from_slice(b"END");
-        let carried = prefix.len();
-        // A pipe that gives a thousand bytes a read: the rounds stop at the
-        // lock's limit long before the prefix is through.
-        let pty = ScriptedPty::new([Step::Wire(prefix)]).chunked(1000);
-        let (mut event_loop, terminal) = scripted_loop(pty, &sink, false);
-        let sender = event_loop.channel();
-        event_loop.read_first(carried);
-        let thread = event_loop.spawn();
-
-        let deadline = Instant::now() + Duration::from_secs(10);
-        let mut seen = false;
-        while Instant::now() < deadline && !seen {
-            seen = all_text(&terminal.lock()).contains("END");
-            std::thread::sleep(Duration::from_millis(5));
-        }
-        sender.send(Msg::Shutdown).expect("the loop is there");
-        thread.join().expect("the loop");
-
-        assert!(seen, "the end of the prefix was left unread");
     }
 
     /// The loop over a script, with the view protocol's rig as its sink and the
@@ -2130,9 +1768,7 @@ mod tests {
         let (mut event_loop, _terminal) = pane_loop(pty, rig);
         let mut state = State::default();
         let mut buf = vec![0; 4096];
-        event_loop
-            .pty_read(&mut state, &mut buf, true)
-            .expect("read");
+        event_loop.pty_read(&mut state, &mut buf).expect("read");
         rig.input.lock().expect("the input is plain data").clone()
     }
 
@@ -2189,9 +1825,7 @@ mod tests {
         let (mut event_loop, terminal) = pane_loop(ScriptedPty::new(steps), &rig);
         let mut state = State::default();
         let mut buf = vec![0; 4096];
-        event_loop
-            .pty_read(&mut state, &mut buf, true)
-            .expect("read");
+        event_loop.pty_read(&mut state, &mut buf).expect("read");
         let term = terminal.lock();
         let row: String = (0..term.columns())
             .map(|column| term.grid()[Line(0)][Column(column)].c)
@@ -2234,9 +1868,7 @@ mod tests {
         *terminal.lock().expect("plain data") = Some(Arc::clone(&term));
         let mut state = State::default();
         let mut buf = vec![0; 4096];
-        event_loop
-            .pty_read(&mut state, &mut buf, true)
-            .expect("read");
+        event_loop.pty_read(&mut state, &mut buf).expect("read");
         assert!(
             free.load(Ordering::Acquire),
             "a frame could not take the terminal while a message was heard"

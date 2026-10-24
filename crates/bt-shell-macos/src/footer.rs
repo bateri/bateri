@@ -236,7 +236,6 @@ impl TerminalPane {
         // The ports take room the load indicator may have had: its popover
         // follows it, the hand cursor's rectangles too.
         self.stats_gauge_changed();
-        self.host().ports_changed(self.id());
     }
 
     /// The ports the dock shows, the server's first and then the pane's own

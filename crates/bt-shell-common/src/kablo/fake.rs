@@ -30,6 +30,9 @@ use kablo_proto::v1::{
 };
 use kablo_proto::{Error, SIGNATURE, SessionId};
 
+/// The process id the bridge says every shell has.
+pub const FAKE_PID: u32 = 4242;
+
 /// Which version of kablo the bridge plays.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Age {
@@ -93,8 +96,12 @@ pub struct Session {
     unavailable: u32,
     /// `terminate` was asked (`Some(force)`).
     terminated: Option<bool>,
+    /// How many times a client asked the terminal to forget its past.
+    forgotten: u32,
     /// The command the terminal was made with.
     argv: Vec<Vec<u8>>,
+    /// The environment it was made with, over the defaults.
+    env: Vec<(Vec<u8>, Vec<u8>)>,
 }
 
 impl Session {
@@ -118,7 +125,9 @@ impl Session {
             views: Vec::new(),
             unavailable: 0,
             terminated: None,
+            forgotten: 0,
             argv: Vec::new(),
+            env: Vec::new(),
         }
     }
 
@@ -605,9 +614,19 @@ impl Bridge {
         self.sessions.get(id).map(|s| s.argv.as_slice())
     }
 
+    /// The environment the terminal was made with, over the defaults.
+    pub fn env_of(&self, id: &SessionId) -> Option<&[(Vec<u8>, Vec<u8>)]> {
+        self.sessions.get(id).map(|s| s.env.as_slice())
+    }
+
     /// How `terminate` was asked for the terminal (`Some(force)`).
     pub fn terminated(&self, id: &SessionId) -> Option<bool> {
         self.sessions.get(id).and_then(|s| s.terminated)
+    }
+
+    /// How many times the terminal was asked to forget its past.
+    pub fn forgotten(&self, id: &SessionId) -> u32 {
+        self.sessions.get(id).map_or(0, |s| s.forgotten)
     }
 
     /// The bytes of the picture of a terminal whose program has written up to
@@ -645,6 +664,7 @@ impl Bridge {
     fn status(&self, id: &SessionId) -> Option<Status> {
         let session = self.sessions.get(id)?;
         let mut status = Status::new(id.clone());
+        status.pid = FAKE_PID;
         status.size = session.size;
         status.clients =
             u32::from(session.attached) + u32::try_from(session.others.len()).unwrap_or(u32::MAX);
@@ -843,6 +863,7 @@ impl Bridge {
         }
         let mut session = Session::new(spec.size.unwrap_or_default());
         session.argv = spec.argv.clone();
+        session.env = spec.env.clone();
         self.sessions.insert(id.clone(), session);
         if let Some(status) = self.status(&id) {
             self.send(&Packet::about(id, Message::Created(status)));
@@ -888,6 +909,19 @@ impl Bridge {
             Message::Status => {
                 if let Some(status) = self.status(&id) {
                     self.send(&Packet::about(id, Message::StatusReply(status)));
+                }
+            }
+            // The past goes: the journal and, with it, the offsets before the present.
+            Message::Forget => {
+                let attached = self.sessions.get(&id).is_some_and(|s| s.attached);
+                if attached {
+                    if let Some(session) = self.sessions.get_mut(&id) {
+                        session.retained_from = session.end();
+                        session.journal.clear();
+                        session.forgotten += 1;
+                    }
+                } else {
+                    self.error(Some(&id), ErrorCode::NOT_ATTACHED, "not attached");
                 }
             }
             _ => {}

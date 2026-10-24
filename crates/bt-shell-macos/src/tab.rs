@@ -54,6 +54,7 @@ use objc2_core_foundation::CFRetained;
 use objc2_core_graphics::CGImage;
 use objc2_foundation::{NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize};
 
+use crate::agent;
 use crate::app;
 use crate::arrange::{self, Entry, Raised, Scene, Status, Wants};
 use crate::embed;
@@ -156,12 +157,33 @@ impl PaneHost for TabHost {
         app::delegate(Self::mtm()).is_some_and(|app| app.keys().kept_from_view(chord))
     }
 
+    fn open_local_terminal(
+        &self,
+        pane: &bt_core::PaneUuid,
+        launch: &bt_core::ChildLaunch,
+        history: u32,
+    ) -> Option<bt_core::Stream> {
+        crate::hold_service::open_local(pane, launch, history)
+    }
+
     fn end_kept_terminal(&self, pane: &bt_core::PaneUuid) {
         crate::hold_service::end(pane);
     }
 
     fn leave_kept_terminal(&self, pane: &bt_core::PaneUuid) {
         crate::hold_service::leave(pane);
+    }
+
+    fn forget_past(&self, pane: &bt_core::PaneUuid) {
+        crate::hold_service::forget_past(pane);
+    }
+
+    fn view_changed(&self, pane: &bt_core::PaneUuid, open: bool) {
+        crate::hold_service::view_changed(pane, open);
+    }
+
+    fn view_was_open(&self, pane: &bt_core::PaneUuid) -> bool {
+        crate::hold_service::view_was_open(pane)
     }
 
     fn retry_kept_terminal(&self, pane: &bt_core::PaneUuid) {
@@ -272,17 +294,23 @@ impl PaneHost for TabHost {
         }
     }
 
-    fn ports_changed(&self, _pane: u64) {
-        // The dock shows the ports itself (`TerminalPane::publish_ports`).
-    }
-
-    fn bell(&self, _pane: u64) {
-        // bateri does not ring or flash: a bell has never shown in its tabs.
-    }
-
-    fn program_notification(&self, _pane: u64, _title: Option<&str>, _body: &str) {
-        // A program's own notification is not shown by bateri's tabs (its
-        // notifications are its own: an upload's end, a lost connection).
+    fn program_notification(&self, pane: u64, title: Option<&str>, body: &str) {
+        // Told as a server's `bateri notify` is (`agent::notice`). One notification per pane,
+        // each replacing the last, so a program that prints them in a loop leaves one, not a
+        // pile. Without a title of its own (`OSC 9`) it is named as the tab is.
+        let Some(tab) = self.tab() else {
+            return;
+        };
+        let Some(shown) = tab.panes().into_iter().find(|p| p.id() == pane) else {
+            return;
+        };
+        let title = title
+            .map(str::to_owned)
+            .or_else(|| tab.name())
+            .or_else(|| shown.session().map(|session| session.title()))
+            .unwrap_or_default();
+        let name = format!("bateri.program.{}", shown.uuid().as_str());
+        agent::notice(Self::mtm(), Some((&tab, pane)), &title, body, Some(&name));
     }
 
     fn questions_changed(&self, _pane: u64) {
@@ -867,7 +895,7 @@ impl TerminalTab {
         self.layout_changed();
     }
 
-    /// A layout edge for the bound holder (`AppDelegate::layout_changed`).
+    /// A layout edge, for the layout on disk (`AppDelegate::layout_changed`).
     pub(crate) fn layout_changed(&self) {
         if let Some(app) = app::delegate(self.mtm()) {
             app.layout_changed();

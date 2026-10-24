@@ -28,7 +28,9 @@
 //!
 //! Its own `main` (`harness = false`): AppKit, the main queue and `WKWebView` want the main
 //! thread. Without a window server session (an ssh login) it says so and passes, as the embed
-//! test does.
+//! test does. It is a heavy test — a real shell, a real web view, tens of seconds — and runs
+//! only when `BT_HEAVY` is set (`make test-heavy`, `make test-all`); `make check` passes it
+//! by, as `#[ignore]` does a heavy test that has the harness.
 
 use std::cell::{Cell, RefCell};
 use std::fs;
@@ -76,8 +78,6 @@ impl Host for Quiet {
     fn files_dragged(&self, _: u64, _: bool) {}
     fn carry_press(&self, _: u64, _: (f64, f64)) {}
     fn questions_changed(&self, _: u64) {}
-    fn ports_changed(&self, _: u64) {}
-    fn bell(&self, _: u64) {}
     fn program_notification(&self, _: u64, _: Option<&str>, _: &str) {}
     fn cover(&self, _: &TerminalPane) -> Option<Rc<dyn Cover>> {
         None
@@ -483,6 +483,10 @@ fn scratch() -> PathBuf {
 }
 
 fn main() {
+    if std::env::var_os("BT_HEAVY").is_none() {
+        println!("pencere: SKIPPED (heavy; make test-heavy)");
+        return;
+    }
     let aqua = Command::new("launchctl")
         .arg("managername")
         .output()
@@ -956,7 +960,7 @@ fn run(dir: &Path) {
     until("the reopened view to go", || !covered(&pane));
 
     // The pane's view started again where the screen came back without its messages (a
-    // handover, a reconnection): the pane that is the user's has the keyboard in the new view
+    // new bateri showing the terminal, a reconnection): the pane that is the user's has the keyboard in the new view
     // as it had in the first, and a keyboard that finds its way into the terminal under the
     // view goes back to the view when the pane is the user's again.
     assert!(pane.focus(), "the keyboard is in the pane's terminal");

@@ -65,9 +65,7 @@ use objc2_app_kit::{
     NSFontWeightRegular, NSForegroundColorAttributeName, NSLineBreakMode, NSMenuItem, NSPasteboard,
     NSPasteboardNameFind, NSPopoverDelegate, NSSearchFieldDelegate, NSTextField,
     NSTextFieldDelegate, NSTitlePosition, NSView, NSViewFrameDidChangeNotification,
-    NSWindowDidBecomeKeyNotification, NSWindowDidChangeBackingPropertiesNotification,
-    NSWindowDidChangeOcclusionStateNotification, NSWindowDidEndSheetNotification,
-    NSWindowDidResignKeyNotification, NSWindowOcclusionState, NSWindowOrderingMode,
+    NSWindowOcclusionState, NSWindowOrderingMode,
 };
 use objc2_core_foundation::CFRetained;
 use objc2_core_graphics::CGImage;
@@ -91,8 +89,7 @@ use bt_shell_common::view_strip;
 use objc2_app_kit::NSEvent;
 
 use crate::jobs::{self, Foreground, Probe, ShellParent, SystemTable};
-use crate::journal::PaneJournal;
-use crate::launch::{Adopted, Closing, Identity, Integration, Launch, Resume};
+use crate::launch::{Closing, Identity, Integration, Launch, Resume};
 use crate::notices::{Source, font_messages};
 use crate::pacer::MacPacer;
 use crate::password_sheet::PasswordSheet;
@@ -117,8 +114,7 @@ use crate::zoom::Zoom;
 use crate::{Run, Workload};
 use crate::{child, locale};
 
-/// Events the pane hands to its owner — today
-/// `tab::TabHost`, tomorrow an embedding application.
+/// Events the pane hands to its owner: `tab::TabHost`, or a test's fake owner.
 ///
 /// All of them are called **on the main thread** and with the pane's id
 /// ([`TerminalPane::id`]): the owner holds several panes (splits) and must
@@ -151,13 +147,13 @@ pub trait PaneHost {
     fn activity_changed(&self, pane: u64);
     /// What the pane runs changed ([`TerminalPane::program_kind`]), or a program's view came or
     /// went ([`TerminalPane::view_face`]): the tab's icon is read again. Nothing for an owner
-    /// that draws no such icon — the embedding interface has no event for it, and
-    /// `activity_changed`'s is a command's or the screen's.
+    /// that draws no such icon (the tests'); `activity_changed`'s is a command's or the
+    /// screen's.
     fn program_changed(&self, _pane: u64) {}
     /// The pane's transfer queue ended, as `finish` says: what the tab's chip plays out and
     /// leaves on the tab while the user is elsewhere. Called **before** the pane tells its
     /// title the transfer is gone, so the tab reads the end together with that news. Nothing for
-    /// an owner that draws no such chip — the embedding interface has no event for it.
+    /// an owner that draws no such chip (the tests').
     fn upload_ended(&self, _pane: u64, _finish: crate::tabs::Finish) {}
     /// Notification to the user (upload finished, failed, connection lost).
     fn notify(&self, pane: u64, title: &str, body: &str);
@@ -185,19 +181,6 @@ pub trait PaneHost {
     /// taken up: a mark the owner shows for a question waiting to be seen
     /// may have changed.
     fn questions_changed(&self, pane: u64);
-    /// The ports the pane's programs listen on — and, in a remote session,
-    /// the server's — changed ([`TerminalPane::listening_ports`]): a scan
-    /// found new ones or a server went. Scans run while `[shell] ports` is on.
-    fn ports_changed(&self, pane: u64);
-    /// The user opened a link (⌘-click, or the link menu's Open): `true` if
-    /// the owner took it — a file shown in its own editor at its line — and
-    /// the pane does nothing more. The default leaves it to the pane, which
-    /// opens it as bateri does (`links::action`'s white list: a URL or a
-    /// document in its default application, the rest revealed, an uncommon
-    /// scheme asked about first).
-    fn open_link(&self, _pane: u64, _link: &LinkRequest) -> bool {
-        false
-    }
     /// Whether `chord`, pressed while a program's view has the keyboard, is the owner's own
     /// shortcut — a tab, a window, a split, the palette — and not the view's: the view never
     /// sees it and the owner's main menu runs it (`pencere_view`). The owner answers from its
@@ -207,8 +190,6 @@ pub trait PaneHost {
     fn keeps_key(&self, _chord: &Chord) -> bool {
         false
     }
-    /// The terminal's bell rang (`BEL`), at most once per main-queue turn.
-    fn bell(&self, pane: u64);
     /// A program asked for a notification (`OSC 9`'s text, `OSC 777`'s
     /// title and body) — not bateri's own ([`Self::notify`]): what the
     /// program wrote, cleaned of control characters and bounded.
@@ -223,6 +204,20 @@ pub trait PaneHost {
     /// bytes, so what is running in front is the server's to say. The default
     /// is an owner that has no such terminals.
     fn kept_terminal(&self, _pane: &PaneUuid) -> Option<Shown> {
+        None
+    }
+    /// A terminal of this Mac for the pane `pane` to show instead of a shell of its own: the
+    /// stream its session reads and writes ([`bt_core::Session::streamed`]), the terminal
+    /// started with what `launch` says and `history` rows of scrollback. `None` — the default,
+    /// an owner that keeps no terminals for its panes — leaves the pane an ordinary one: its
+    /// shell is the session's own child. Asked on the main thread while the pane starts, and
+    /// it may wait there for the terminal.
+    fn open_local_terminal(
+        &self,
+        _pane: &PaneUuid,
+        _launch: &bt_core::ChildLaunch,
+        _history: u32,
+    ) -> Option<bt_core::Stream> {
         None
     }
     /// The terminals the server of `account` keeps that no pane of this Mac shows and no other
@@ -260,6 +255,19 @@ pub trait PaneHost {
     /// is not ended, and nothing keeps a record that a quit or a crash would end it by.
     /// Asked **before** [`TerminalPane::begin_close`], as [`PaneHost::end_kept_terminal`].
     fn leave_kept_terminal(&self, _pane: &PaneUuid) {}
+    /// The user cleared what the pane remembers (Clear Scrollback, Clear to Start): the
+    /// terminals the pane has forget their past too, so that the bateri that finds them again
+    /// does not give back what was cleared. The default is an owner that keeps no terminals.
+    fn forget_past(&self, _pane: &PaneUuid) {}
+    /// A program's view opened or closed in the pane: written beside the terminal of this
+    /// Mac that carries the pane's bytes, so that a bateri that finds the terminal again
+    /// offers the program a restart of it. The default is an owner that keeps no terminals.
+    fn view_changed(&self, _pane: &PaneUuid, _open: bool) {}
+    /// Whether a view was open in the pane when the bateri before this one left, as
+    /// [`PaneHost::view_changed`] wrote it.
+    fn view_was_open(&self, _pane: &PaneUuid) -> bool {
+        false
+    }
     /// ⏎ in a pane that waits for its connection: the account of the terminal it
     /// shows dials now instead of waiting out its pause. The default is an
     /// owner that has no such terminals.
@@ -311,37 +319,6 @@ impl KeptLogin for NoKeptLogin {
     fn raise(&self, _: &PaneUuid) -> bool {
         false
     }
-}
-
-/// A link the user opened, as the pane's owner may take it
-/// ([`PaneHost::open_link`]): the link as found and checked — a path exists
-/// by the time it is asked about.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum LinkRequest {
-    /// A URL as written: plain text, or an OSC 8 link's target. Its scheme
-    /// is anything the program wrote.
-    Url(String),
-    /// A local file or directory, with the line and column a
-    /// `path:line:col` named. `path` is the link as it names it — a symlink
-    /// stays the symlink; `target` is the object it leads to once every
-    /// symlink and Finder alias on it is followed (`links::Resolved::target`).
-    /// An owner that hands the link to the system judges and opens `target`:
-    /// Launch Services follows `path` and would launch an `.app` or run a
-    /// script a harmless-looking name points at.
-    Path {
-        path: std::path::PathBuf,
-        target: std::path::PathBuf,
-        directory: bool,
-        line: Option<u32>,
-        col: Option<u32>,
-    },
-    /// A path on the remote session's server, absolute there.
-    RemotePath {
-        path: String,
-        directory: bool,
-        line: Option<u32>,
-        col: Option<u32>,
-    },
 }
 
 /// Column count of the smallest pane: a split that would drop
@@ -909,42 +886,6 @@ struct WrapProof {
     login: Option<u64>,
 }
 
-/// The delay of a pane's state after its dock mirror moved. The mirror moves
-/// with every keystroke and its copy only serves the dock after a crash, which
-/// marks a carried mirror stale anyway: one copy per second while typing
-/// costs one blob encode a second and loses at most the last second's typing.
-/// The shell's edges (a prompt, a command's start and end) do not wait — a
-/// state behind them would miss a command.
-const MIRROR_DELAY: Duration = Duration::from_secs(1);
-
-/// The bound holder a pane registers with — bateri's own (`keeper::Keeper`),
-/// which keeps the pane's programs through a crash or a quit. A host that
-/// keeps nothing gives none ([`PaneLaunch::keeper`]); the pane then holds its
-/// programs itself, as an unbundled bateri does.
-pub(crate) trait Holder {
-    /// The flag the reader thread reads to know whether a holder keeps the
-    /// pane's journal.
-    fn active_flag(&self) -> Arc<AtomicBool>;
-    /// Whether a holder is bound now.
-    fn is_active(&self) -> bool;
-    /// The pane's program joins the holder; the journal's sink if the
-    /// holder keeps one.
-    fn add(
-        &self,
-        mtm: MainThreadMarker,
-        pane: crate::handover::BoundPane,
-    ) -> Option<Box<dyn crate::journal::BaseSink>>;
-    /// The pane is gone: the holder lets its program go.
-    fn release(&self, pane: &PaneUuid);
-    /// The pane's state now (`Session::state_blob`) and the program it shows
-    /// ([`TerminalPane::program_kind`], the shell and the server left out),
-    /// for a restore after a crash.
-    fn state(&self, pane: &PaneUuid, blob: Vec<u8>, program: Option<Kind>);
-    /// The layout changed: the holder's copy of it is written again once the
-    /// burst settles.
-    fn layout_changed(&self);
-}
-
 /// The pane's birth package: all inputs in a single struct,
 /// from the owner. Live changes go a separate way, through the pane's `set_*`
 /// methods.
@@ -982,10 +923,6 @@ pub(crate) struct PaneLaunch {
     /// pane — one opening per host. `None` in a timed run: the remote jobs
     /// take today's argv.
     pub(crate) masters: Option<Arc<Masters>>,
-    /// The bound holder's driver, the application's: the pane registers
-    /// with it when its session is born and releases at its close. `None` in
-    /// a timed run and an unbundled process.
-    pub(crate) keeper: Option<Rc<dyn Holder>>,
     /// Who the application opening the pane is ([`Identity`]).
     pub(crate) identity: Rc<Identity>,
 }
@@ -1138,23 +1075,10 @@ struct ShellWake {
     /// Whether the "typed after the login" check is waiting on the main queue
     /// ([`TerminalPane::check_remote_typed`]) — at most one job.
     typed_pending: Arc<AtomicBool>,
-    /// Whether a bound holder keeps the programs ([`Keeper::active_flag`]):
-    /// the gate of the two state sends below — without a holder a shell's
-    /// edges and keystrokes post nothing. `None` in a timed run.
-    kept: Option<Arc<AtomicBool>>,
-    /// Whether the state send of a shell edge is waiting on the main queue
-    /// ([`TerminalPane::push_state`]) — at most one job.
-    state_pending: Arc<AtomicBool>,
-    /// Whether the delayed state send of a mirror change is waiting
-    /// ([`MIRROR_DELAY`]) — at most one.
-    mirror_pending: Arc<AtomicBool>,
     /// Whether the activity news ([`PaneHost::activity_changed`]) is waiting
     /// on the main queue — `title_pending`'s twin: at most one job, which
     /// reads the latest activity.
     activity_pending: Arc<AtomicBool>,
-    /// Whether the bell's news ([`PaneHost::bell`]) is waiting on the main
-    /// queue: a program ringing in a loop makes one job.
-    bell_pending: Arc<AtomicBool>,
     /// Whether the notifications' news ([`PaneHost::program_notification`])
     /// is waiting: one job, which takes every notification waiting.
     notes_pending: Arc<AtomicBool>,
@@ -1420,7 +1344,6 @@ impl ShellWake {
             let outcome = pane.probe_identity();
             if outcome.changed {
                 pane.host().program_changed(id);
-                pane.push_state();
             }
             if outcome.undecided {
                 probe.rearm();
@@ -1470,15 +1393,6 @@ impl ShellWake {
         });
     }
 
-    /// Whether a holder keeps this pane's program — one atomic read.
-    fn kept(&self) -> bool {
-        !self.timed
-            && self
-                .kept
-                .as_ref()
-                .is_some_and(|kept| kept.load(Ordering::Acquire))
-    }
-
     /// A command started: the main queue's next turn reads its line into the pane's command
     /// memory ([`bt_core::Session::remember_commands`]) while the rows that carry it are still
     /// on the grid. At most one job waits; a second start folds into it (the memory reads
@@ -1495,48 +1409,6 @@ impl ShellWake {
             let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
             if let Some(pane) = lookup(mtm, id) {
                 pane.remember_commands();
-            }
-        });
-    }
-
-    /// A shell edge: the pane's state goes to the holder on the next
-    /// main-queue turn — `state_blob` takes the ledger's lock and must not
-    /// run here (reader thread, possibly under the `Term` lock).
-    fn push_state_soon(&self) {
-        if !self.kept() || self.state_pending.swap(true, Ordering::AcqRel) {
-            return;
-        }
-        let pending = Arc::clone(&self.state_pending);
-        let (id, lookup) = (self.id, self.lookup);
-        DispatchQueue::main().exec_async(move || {
-            pending.store(false, Ordering::Release);
-            // audit: a block running on the main queue is on the main thread by definition.
-            let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
-            if let Some(pane) = lookup(mtm, id) {
-                pane.push_state();
-            }
-        });
-    }
-
-    /// A mirror change: the pane's state goes after [`MIRROR_DELAY`], once
-    /// per interval however fast the keys come. The flag drops when the job
-    /// runs, before the read: a change after it schedules the next.
-    fn push_state_later(&self) {
-        if !self.kept() || self.mirror_pending.swap(true, Ordering::AcqRel) {
-            return;
-        }
-        let Ok(when) = DispatchTime::try_from(MIRROR_DELAY) else {
-            self.mirror_pending.store(false, Ordering::Release);
-            return;
-        };
-        let pending = Arc::clone(&self.mirror_pending);
-        let (id, lookup) = (self.id, self.lookup);
-        let _ = DispatchQueue::main().after(when, move || {
-            pending.store(false, Ordering::Release);
-            // audit: a block running on the main queue is on the main thread by definition.
-            let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
-            if let Some(pane) = lookup(mtm, id) {
-                pane.push_state();
             }
         });
     }
@@ -1692,7 +1564,6 @@ impl Wake for ShellWake {
         if self.timed {
             return;
         }
-        self.push_state_soon();
         self.remember_soon();
         if self.remote_probe.command_started() {
             self.dispatch_remote_probe();
@@ -1708,9 +1579,7 @@ impl Wake for ShellWake {
 
     fn phase_edge(&self) {
         // Reader thread, lock-free: a prompt or a command's end — the
-        // holder's copy of the state must not lag a command behind, and the
         // tab's ring stops or its "finished" mark comes.
-        self.push_state_soon();
         self.announce_activity();
         // A command's end: its servers stopped listening, or a background
         // one started without a word.
@@ -1731,8 +1600,8 @@ impl Wake for ShellWake {
     }
 
     fn mirror_changed(&self) {
-        // Reader thread, per keystroke: one delayed send per interval.
-        self.push_state_later();
+        // Reader thread, per keystroke: the dock reads the mirror from the session on
+        // its own frames, nobody follows the change.
     }
 
     fn environment_changed(&self) {
@@ -1749,23 +1618,6 @@ impl Wake for ShellWake {
             let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
             if let Some(pane) = lookup(mtm, id) {
                 pane.resolve_environment();
-            }
-        });
-    }
-
-    fn bell(&self) {
-        // Reader thread, under the `Term` lock: one job, no lock taken here.
-        if self.timed || self.bell_pending.swap(true, Ordering::AcqRel) {
-            return;
-        }
-        let pending = Arc::clone(&self.bell_pending);
-        let (id, lookup) = (self.id, self.lookup);
-        DispatchQueue::main().exec_async(move || {
-            pending.store(false, Ordering::Release);
-            // audit: a block running on the main queue is on the main thread by definition.
-            let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
-            if let Some(pane) = lookup(mtm, id) {
-                pane.host().bell(id);
             }
         });
     }
@@ -1796,10 +1648,8 @@ impl Wake for ShellWake {
 
     fn program_status_changed(&self) {
         // Reader thread, lock-free: a program said what it is doing — the
-        // tab's ring, its waiting mark and its finished tick hear it, and the
-        // holder, which carries the program it named on.
+        // tab's ring, its waiting mark and its finished tick hear it.
         self.announce_activity();
-        self.push_state_soon();
     }
 
     fn remote_up(&self) {
@@ -2004,7 +1854,7 @@ fn keep_looking(wait: bool, looks: u16) -> bool {
 
 /// What a look at the process table leaves the identity probe to keep and to do: the program it
 /// named, if it did, and whether to look again at the next output — only while neither it nor the
-/// command's line (or the decision carried over from the bateri before) has named one. A line
+/// command's line has named one. A line
 /// that names a program is enough to rest on: the table would only second it. A shell in the
 /// foreground is no answer and looks again: it is most often a program's launcher in the moment
 /// before it replaces itself with the program (Pi's `sh`, Cursor CLI's `bash`), and kept as one
@@ -2028,14 +1878,6 @@ fn kind_of_end<K: PartialEq>(ran: Option<(K, Kind)>, newest: Option<K>) -> Kind 
         .map_or(Kind::Shell, |(_, kind)| kind)
 }
 
-/// The kind carried over from the bateri before (`carried`: the command it ran then, and the
-/// kind) while `newest` is still that command; any other command is one it never saw.
-fn carried_kind<K: PartialEq>(carried: Option<(K, Kind)>, newest: Option<K>) -> Option<Kind> {
-    carried
-        .filter(|(seen, _)| newest.as_ref() == Some(seen))
-        .map(|(_, kind)| kind)
-}
-
 /// What the pane has read of the program it runs, kept for the tab's icon
 /// ([`TerminalPane::program_kind`]). Main thread only.
 #[derive(Clone, Copy, Debug, Default)]
@@ -2052,10 +1894,6 @@ struct ProgramMemo {
     /// How many times the process table was looked at for the local command of this generation
     /// without naming a program (bounded by [`IDENTITY_LOOKS`]).
     looks: Option<(u64, u16)>,
-    /// What the bateri this pane was carried over from showed it ran, by the command that ran
-    /// then: by now that command's line has mostly scrolled away and the table does not see
-    /// past `ssh`, so the old decision stands in for the line while that command runs.
-    carried: Option<(CommandId, Kind)>,
 }
 
 /// Result of the remote-session probe ([`TerminalPane::probe_remote`]): two
@@ -2244,9 +2082,9 @@ pub struct PaneIvars {
     /// The deadlines set on the conversation with that program's view
     /// ([`TerminalPane::wait_for_view`]).
     view_waits: RefCell<Waits>,
-    /// The terminal a server keeps that this pane showed with a program's view over it when the
-    /// pane was handed over to this process: the restart the adoption offered did not reach it,
-    /// and is offered again once its server says what is in front of it
+    /// The terminal a server keeps that this pane showed with a program's view over it when it
+    /// was shown again by this process: the restart offered then did not reach it, and is
+    /// offered again once its server says what is in front of it
     /// ([`TerminalPane::offer_owed_view`]). `None` when nothing is owed.
     view_owed: RefCell<Option<Resume>>,
     /// The questions the program's view has put to the person and that are up
@@ -2294,22 +2132,12 @@ pub struct PaneIvars {
     password: RefCell<Option<PasswordSheet>>,
     /// The application's ssh masters ([`PaneLaunch::masters`]).
     masters: Option<Arc<Masters>>,
-    /// The bound holder's driver ([`PaneLaunch::keeper`]).
-    keeper: Option<Rc<dyn Holder>>,
     /// Who the application that opened the pane is ([`PaneLaunch::identity`]).
     identity: Rc<Identity>,
-    /// The socket of the holder a carried-on pane was taken from, until
-    /// its registration ([`TerminalPane::register_with_holder`]): the new
-    /// holder must not drain the master while that one still does.
-    taken_from: RefCell<Option<PathBuf>>,
     /// What made the pane a program's, from its start ([`crate::launch::Held`]): it closes when
     /// its terminal ends, and who asked for it. Session restore saves both, so a pane born again
     /// after a restart is still that program's.
     asked_for: RefCell<AskedFor>,
-    /// The session's journal in shared memory, for a pane born while a
-    /// bound holder kept the programs: after a crash the holder rebuilds the
-    /// screen from it. `None` for every other pane.
-    journal: RefCell<Option<PaneJournal>>,
     /// The remote generation this pane reported to the masters' registry
     /// ([`Masters::session_started`]); `None` locally.
     ssh_session: Cell<Option<u64>>,
@@ -2400,54 +2228,6 @@ define_class!(
         #[unsafe(method(viewFrameDidChange:))]
         fn view_frame_did_change(&self, _n: &NSNotification) {
             self.refresh_geometry();
-        }
-
-        /// A window became key — this pane's, if [`TerminalPane::follow_window`]
-        /// set it up: what bateri's window does for the panes of its tab on
-        /// screen. A host hides the pane itself, not a container: hidden, the
-        /// pane is not the user's.
-        #[unsafe(method(hostWindowDidBecomeKey:))]
-        fn host_window_did_become_key(&self, n: &NSNotification) {
-            if self.is_my_window(n) && !self.isHiddenOrHasHiddenAncestor() {
-                self.window_became_key();
-            }
-        }
-
-        /// This pane's window resigned key ([`TerminalPane::follow_window`]).
-        #[unsafe(method(hostWindowDidResignKey:))]
-        fn host_window_did_resign_key(&self, n: &NSNotification) {
-            if self.is_my_window(n) {
-                self.window_resigned_key();
-            }
-        }
-
-        /// This pane's window was covered, uncovered, miniaturized or brought
-        /// back ([`TerminalPane::follow_window`]): a window the compositor may
-        /// have emptied needs a frame, and a covered one draws none.
-        #[unsafe(method(hostWindowDidChangeOcclusionState:))]
-        fn host_window_did_change_occlusion(&self, n: &NSNotification) {
-            if self.is_my_window(n) {
-                self.set_visibility(self.window_seen() && !self.isHiddenOrHasHiddenAncestor());
-            }
-        }
-
-        /// This pane's window moved to a screen of another scale
-        /// ([`TerminalPane::follow_window`]): the size in points did not change,
-        /// so no frame notification comes.
-        #[unsafe(method(hostWindowDidChangeBackingProperties:))]
-        fn host_window_did_change_backing(&self, n: &NSNotification) {
-            if self.is_my_window(n) {
-                self.refresh_geometry();
-            }
-        }
-
-        /// A question on this pane's window ended ([`TerminalPane::follow_window`]):
-        /// one the pane parked behind it opens now.
-        #[unsafe(method(hostWindowDidEndSheet:))]
-        fn host_window_did_end_sheet(&self, n: &NSNotification) {
-            if self.is_my_window(n) {
-                crate::sheets::open_parked(self);
-            }
         }
     }
 
@@ -2893,7 +2673,6 @@ impl TerminalPane {
             scrollbar,
             zoom,
             masters,
-            keeper,
             identity,
         } = launch;
         // The saved identity of a restored pane, a new one otherwise.
@@ -2987,11 +2766,7 @@ impl TerminalPane {
                 unseen_pending: Arc::default(),
                 up_pending: Arc::default(),
                 typed_pending: Arc::default(),
-                kept: keeper.as_ref().map(|keeper| keeper.active_flag()),
-                state_pending: Arc::default(),
-                mirror_pending: Arc::default(),
                 activity_pending: Arc::default(),
-                bell_pending: Arc::default(),
                 notes_pending: Arc::default(),
             }),
             zoom: Cell::new(zoom),
@@ -3027,11 +2802,8 @@ impl TerminalPane {
             upload_stop: RefCell::new(None),
             password: RefCell::new(None),
             masters,
-            keeper,
             identity,
-            taken_from: RefCell::new(None),
             asked_for: RefCell::new(AskedFor::default()),
-            journal: RefCell::new(None),
             ssh_session: Cell::new(None),
             wrap_proof: RefCell::new(WrapProof::default()),
             program_memo: Cell::new(ProgramMemo::default()),
@@ -3126,58 +2898,6 @@ impl TerminalPane {
                 Some(&self.ivars().view),
             );
         }
-    }
-
-    /// The pane follows its window by itself: its focus with the window's
-    /// key state, its drawing with the window's occlusion, its geometry with
-    /// the window's scale, and a question it parked behind the window's own
-    /// question opens when that one ends. bateri's window does all of it for
-    /// its tabs' panes and does not call this; a host that only places the
-    /// pane in a view of its own needs it, or its pane silently keeps the
-    /// state it was born with. Ends with the pane's closing.
-    pub fn follow_window(&self) {
-        let center = NSNotificationCenter::defaultCenter();
-        // SAFETY: each selector is defined on this class and takes a single
-        // `&NSNotification`; the names are constants AppKit exposes. No
-        // object: the pane may change windows, so each handler checks the
-        // notification's window is the pane's own.
-        unsafe {
-            for (selector, name) in [
-                (
-                    sel!(hostWindowDidBecomeKey:),
-                    NSWindowDidBecomeKeyNotification,
-                ),
-                (
-                    sel!(hostWindowDidResignKey:),
-                    NSWindowDidResignKeyNotification,
-                ),
-                (
-                    sel!(hostWindowDidChangeOcclusionState:),
-                    NSWindowDidChangeOcclusionStateNotification,
-                ),
-                (
-                    sel!(hostWindowDidChangeBackingProperties:),
-                    NSWindowDidChangeBackingPropertiesNotification,
-                ),
-                (
-                    sel!(hostWindowDidEndSheet:),
-                    NSWindowDidEndSheetNotification,
-                ),
-            ] {
-                center.addObserver_selector_name_object(self, selector, Some(name), None);
-            }
-        }
-    }
-
-    /// Whether `n` is about the window this pane is in.
-    fn is_my_window(&self, n: &NSNotification) -> bool {
-        let (Some(object), Some(window)) = (n.object(), self.window()) else {
-            return false;
-        };
-        std::ptr::eq(
-            Retained::as_ptr(&object).cast::<u8>(),
-            Retained::as_ptr(&window).cast::<u8>(),
-        )
     }
 
     /// Whether the pane's window can be seen — not covered, not miniaturized.
@@ -3361,6 +3081,12 @@ impl TerminalPane {
     /// Whether this pane shows a terminal a server keeps (rather than its own shell).
     pub(crate) fn shows_kept_terminal(&self) -> bool {
         self.host().kept_terminal(self.uuid()).is_some()
+    }
+
+    /// Whether the pane's shell runs in a terminal of this Mac that kablo keeps
+    /// ([`Session::streamed`]) and not in a child of this process.
+    pub(crate) fn is_streamed(&self) -> bool {
+        self.session().is_some_and(|session| session.is_streamed())
     }
 
     /// The remote session bateri does things on a server for, if the pane has
@@ -3799,6 +3525,36 @@ impl TerminalPane {
         self.start_session(mtm, grid, birth)
     }
 
+    /// The terminal of this Mac the pane's first program runs in: kablo's, started with what
+    /// [`Session::spawn`] would start it with — the shell, or for a pane that shows a terminal
+    /// a server keeps the pipe to it (`ssh-hold --first`), which is then this terminal's
+    /// program and the pane's two terminals are two handles: this one carries the bytes, the
+    /// server's is what the pane shows ([`Self::kept_terminal`]-side questions, [`Shown`]).
+    /// `None` — an ordinary pane, the program is the session's own child — in a timed run
+    /// (its scripts are the result and kablo is not part of it) and where there is no kablo to
+    /// put it in ([`PaneHost::open_local_terminal`]). A pane like that does not outlive its
+    /// session.
+    ///
+    /// The stream's ops read the pane's terminal from the outside, by the program's pid
+    /// ([`jobs::StreamTty`]): `shell_parent` says how the shell is found below it.
+    fn local_terminal(
+        &self,
+        options: &SessionOptions,
+        shell_parent: ShellParent,
+    ) -> Option<bt_core::Stream> {
+        if self.ivars().run.is_some() {
+            return None;
+        }
+        let history = u32::try_from(options.terminal.scrollback).unwrap_or(u32::MAX);
+        let stream =
+            self.host()
+                .open_local_terminal(self.uuid(), &options.child_launch(), history)?;
+        Some(bt_core::Stream {
+            ops: Arc::new(jobs::StreamTty::new(stream.ops, shell_parent)),
+            ..stream
+        })
+    }
+
     /// Opens the session and attaches the link that drives frames. The order
     /// is required: `Session` wants `Wake`, the link wants `Session`, `Waker`
     /// is born from the link.
@@ -3825,13 +3581,12 @@ impl TerminalPane {
             initial_input,
             uuid: _,
             replay,
-            adopt,
             env: extra_env,
             held,
         } = launch;
-        // Whether the pipe is started or a carried-on one goes on, the pane is the program's it
-        // was asked for by: the carried pipe has the flag on its own command line, and the
-        // pane's next save says it again.
+        // Whether the pipe is started or a terminal shown again goes on, the pane is the
+        // program's it was asked for by: the pipe has the flag on its own command line, and
+        // the pane's next save says it again.
         if let Some(held) = &held {
             self.ivars().asked_for.replace(AskedFor {
                 close_at_end: held.close_at_end,
@@ -3943,7 +3698,6 @@ impl TerminalPane {
             hostname: crate::links::hostname(),
             // A restored pane's scrollback; `None` everywhere else.
             replay,
-            journal: self.open_journal(settings.terminal().scrollback),
             // A program that writes pencere frames is answered, and its view is
             // shown, in every pane but a timed run's: there the program is the
             // gate's own script, the pane's reader hears no frame and nothing is
@@ -3951,99 +3705,40 @@ impl TerminalPane {
             views: self.view_options(shell_parent),
         };
         let wake = Arc::clone(&self.ivars().wake) as Arc<dyn Wake>;
-        // The update's handover: the running program is carried
-        // on; if the session cannot be adopted after all (its `bt-core` blob
-        // does not decode) the pane falls back to a new shell here, with the
-        // carried history and the note.
-        let adopting = adopt.is_some();
-        let mut nudge = false;
-        let mut carried_on = false;
-        // The process this one took the pane from had a program's view over it.
-        let mut view_was_open = false;
-        let mut carried = None;
-        let (session, shell_parent) = match adopt {
-            Some(adopted) => {
-                let taken_from = adopted.taken_from.clone();
-                let note = adopted.note;
-                nudge = adopted.nudge;
-                let program = adopted.state.program;
-                let viewed = adopted.state.view;
-                match adopt_session(options.clone(), adopted, grid, &wake) {
-                    Ok((session, parent)) => {
-                        self.ivars().taken_from.replace(taken_from);
-                        carried = program;
-                        carried_on = true;
-                        view_was_open = viewed;
-                        (session, parent)
-                    }
-                    Err((error, history)) => {
-                        eprintln!("bateri: could not carry a pane over: {error}");
-                        nudge = false;
-                        let options = SessionOptions {
-                            replay: Some(crate::launch::fallen_back(history, note)),
-                            ..options
-                        };
-                        (Session::spawn(options, wake)?, shell_parent)
-                    }
-                }
-            }
-            // A terminal window without a shell is an empty box; what to do is
-            // the caller's call (first window: the process exits; later ones:
-            // that window closes).
+        // A terminal window without a shell is an empty box; what to do is the caller's call
+        // (first window: the process exits; later ones: that window closes).
+        let (session, shell_parent) = match self.local_terminal(&options, shell_parent) {
+            // The shell runs in a terminal of kablo's on this Mac and the session reads its
+            // bytes; the child's parent there is what it is for a shell started here.
+            Some(stream) => (Session::streamed(options, wake, stream)?, shell_parent),
             None => (Session::spawn(options, wake)?, shell_parent),
         };
         let session = Arc::new(session);
-        // The program kept running through the handover and its view did not: what the view
-        // lived on (the token, the files, the messages) went with the old process, so the
-        // program is offered a restart and opens the view again. Offered, not forced: the
-        // conversation answers only where a program is in front of the pane (§6.2), and a pane
-        // that had no view gets nothing written.
-        if carried_on && view_was_open {
-            self.restart_view_offered(&session);
-            // A pane that shows a terminal a server keeps wrote that offer into a pipe with no
-            // bridge behind it yet, and what reaches the terminal before its bridge is up is let
-            // go of: the offer is owed to that terminal until its server says again what is in
-            // front of it ([`Self::offer_owed_view`]).
-            self.ivars()
-                .view_owed
-                .replace(held.as_ref().and_then(|held| held.resume.clone()));
-        }
-        if nudge {
+        // A terminal that was running when this bateri came: its screen is being built from its
+        // own past, which also says (the ledger) whether a program's view was open over it. The
+        // program's view did not come and its dock's mirror is the past's: the program is
+        // offered a restart and nudged to redraw.
+        let shown_again = session.is_shown_again();
+        if shown_again {
+            // Offered, not forced: the conversation answers only where a program is in front of
+            // the pane (§6.2), and a pane that had no view gets nothing written.
+            if self.host().view_was_open(self.uuid()) {
+                self.restart_view_offered(&session);
+                // A pane that shows a terminal a server keeps wrote that offer into a pipe with
+                // no bridge behind it yet, and what reaches the terminal before its bridge is up
+                // is let go of: the offer is owed to that terminal until its server says again
+                // what is in front of it ([`Self::offer_owed_view`]).
+                self.ivars()
+                    .view_owed
+                    .replace(held.as_ref().and_then(|held| held.resume.clone()));
+            }
             nudge_program(&session);
-        } else if carried_on {
-            // The text came across and the images did not (they are not
-            // carried): a program that redraws on `SIGWINCH` draws them
-            // again. The size is untouched; a nudged program is already
-            // redrawing, through its size.
-            session.winch();
         }
         // The closing sequence reaches the session from here, not through the
         // link, and the keyboard holds its own copy; all three live on the main
         // thread, so where the last reference drops is clear (see `shutdown`).
         let _ = self.ivars().session.set(Arc::clone(&session));
         let _ = self.ivars().shell_parent.set(shell_parent);
-        // What the pane showed it ran before it was carried over, kept for the command that ran
-        // then (`ProgramMemo::carried`) — before the registration below, which sends it on.
-        if let Some(kind) = carried
-            && let Some(command) = session
-                .last_command()
-                .filter(|command| command.phase == CommandPhase::Running)
-        {
-            let memo = self.ivars().program_memo.get();
-            self.ivars().program_memo.set(ProgramMemo {
-                carried: Some((command.id, kind)),
-                ..memo
-            });
-        }
-        // A pane carried over mid-command (an update, a crash) saw that command start in the
-        // process it came from, and no start comes here to look its program up: it is looked up
-        // now, or the tab would show the shell until the next command.
-        if adopting
-            && session.running_command().is_some()
-            && self.ivars().wake.identity_probe.command_started()
-        {
-            self.ivars().wake.dispatch_identity_probe(None);
-        }
         // The host marks' list at birth; its live change comes
         // from `AppDelegate::reload_settings` ([`Self::set_host_marks`]).
         session.set_host_marks(&settings.remote_hosts);
@@ -4155,13 +3850,13 @@ impl TerminalPane {
             link.set_keyboard_in_terminal(self.view().is_first_responder());
         }
         // **The dock's arrival**, for a shell born here and only that: a pane
-        // that adopted a running session (the update's handover, a crash
-        // recovery) has a shell at its prompt already, and the timed run
+        // that shows a terminal again (an update, a crash recovery) has a
+        // shell at its prompt already, and the timed run
         // (`run`) has no dock. After the focus above: a tab born in a window
         // that is key is still hidden at this point, and the link asks for
         // focus only when the prompt comes. The link itself arms nothing for a
         // pane without a dock or one that is hidden.
-        if !adopting
+        if !shown_again
             && self.ivars().run.is_none()
             && let Some(link) = self.link()
         {
@@ -4170,154 +3865,30 @@ impl TerminalPane {
         // The block marks, for the same ordering: the always-up form wants
         // them from the first frame, and no change will say so.
         self.refresh_marks_wanted();
-        // A carried-on session can be on the alternate screen already (vim
-        // across the update): the link was born seeing it, so no transition
-        // will ever take the dock away — the reserve is matched here, once.
-        if adopting {
-            self.alt_screen_did_change();
-            // The remote target is not carried (the process table is its
-            // source) and a carried `ssh` gives no new `C` edge:
-            // the probe is armed once by hand, so `⇄ host`, the masters'
-            // session and the lazy helper come back without a prompt.
-            if self
-                .session()
-                .is_some_and(|session| session.running_command().is_some())
-            {
-                Wake::command_started(&*self.ivars().wake);
-            }
+        // The past of a terminal shown again is read on the reader's thread, and what the tab and
+        // the probes learn from edges was not told while it was: told once it has been read.
+        if shown_again {
+            self.after_on_main(0, REPLAY_POLL, Self::replay_polled);
         }
-        // Last: the session is in its slot and the pane in its window, so the
-        // layout the registration sends at once places this pane.
-        self.register_with_holder(mtm);
         Ok(())
     }
 
-    /// The session's journal at birth: the timed run's `BT_JOURNAL` in this
-    /// process; a region in shared memory while a bound holder keeps the
-    /// programs (it rebuilds the screen after a crash); none otherwise — under
-    /// `"update"` the journal would cost the reader thread for nothing.
-    fn open_journal(&self, scrollback: usize) -> Option<Arc<bt_core::Journal>> {
-        if let Some(run) = self.ivars().run {
-            return run.journal.then(bt_core::Journal::in_memory);
-        }
-        let keeper = self.ivars().keeper.as_deref()?;
-        if !keeper.is_active() {
-            return None;
-        }
-        match PaneJournal::open(scrollback) {
-            Ok(journal) => {
-                let shared = Arc::clone(journal.journal());
-                self.ivars().journal.replace(Some(journal));
-                Some(shared)
-            }
-            Err(error) => {
-                eprintln!("bateri: no journal for a pane ({error}); a crash loses its screen");
-                None
-            }
-        }
-    }
-
-    /// Breaks this pane's journal ([`PaneJournal::break_journal`]): no holder
-    /// will confirm its bases any more — `"update"`, or a holder that cannot
-    /// be replaced. A crash brings the screen back from its program's
-    /// redraw.
-    pub(crate) fn break_journal(&self) {
-        if let Some(journal) = self.ivars().journal.borrow().as_ref() {
-            journal.break_journal();
-        }
-    }
-
-    /// Registers this pane with the bound holder ([`Keeper::add`]): a copy
-    /// of the master (close-on-exec), the identity, the child and its start
-    /// time, the shell's parent and `bt-core`'s state now — a crash right
-    /// after still leaves a bundle. A carried-on pane goes unconfirmed, named
-    /// by the holder it was taken from, until that holder is acknowledged.
-    /// A journaled pane sends its region and its current base along
-    /// ([`PaneJournal::register`]), and its later bases follow as the
-    /// compaction makes them; a pane without a journal (born under
-    /// `"update"`, or its journal broke) sends none — a stale screen must not
-    /// come back as the whole one.
-    ///
-    /// A no-op without a bound holder, for a closed pane, or when the child's
-    /// start time or the master's copy cannot be read (the program then ends
-    /// with bateri, as before); the journal is then no holder's and frees
-    /// itself ([`PaneJournal::disconnect`]) — a failure of the moment must not
-    /// cost the screen for good, the next registration carries it again.
-    /// Called again for every live pane when a holder is (re)spawned.
-    pub(crate) fn register_with_holder(&self, mtm: MainThreadMarker) {
-        if !self.try_register(mtm)
-            && let Some(journal) = self.ivars().journal.borrow().as_ref()
-        {
-            journal.disconnect();
-        }
-    }
-
-    /// [`TerminalPane::register_with_holder`]'s body; `false` if the pane
-    /// was not registered.
-    fn try_register(&self, mtm: MainThreadMarker) -> bool {
-        let Some(keeper) = self.ivars().keeper.as_deref() else {
-            return false;
-        };
-        if !keeper.is_active() || self.is_closed() {
-            return false;
-        }
-        let Some(session) = self.session() else {
-            return false;
-        };
-        let Some(&parent) = self.ivars().shell_parent.get() else {
-            return false;
-        };
-        let pid = session.child_pid();
-        let Some(start) = jobs::start_time(pid) else {
-            return false;
-        };
-        let Some(master) = session.with_pty_fd(|fd| fd.try_clone_to_owned().ok()) else {
-            return false;
-        };
-        let pane = |journal| crate::handover::BoundPane {
-            tab: self.ivars().uuid.clone(),
-            pid,
-            start,
-            parent,
-            blob: session.state_blob(),
-            program: self.carried_program(),
-            master,
-            taken_from: self.ivars().taken_from.take(),
-            journal,
-        };
-        match self.ivars().journal.borrow().as_ref() {
-            Some(journal) => journal.register(|registration| {
-                let bound = registration.map(|registration| crate::handover::BoundJournal {
-                    registration,
-                    journal: Arc::downgrade(journal.journal()),
-                });
-                keeper.add(mtm, pane(bound))
-            }),
-            None => {
-                keeper.add(mtm, pane(None));
-            }
-        }
-        true
-    }
-
-    /// Sends this pane's current `bt-core` state and program to the bound
-    /// holder — the shell's edges, a program that said what it is or was
-    /// found to be, and, delayed, the mirror's changes ([`ShellWake`]'s
-    /// sends). A no-op without a holder or once closed.
-    pub(crate) fn push_state(&self) {
-        let Some(keeper) = self.ivars().keeper.as_deref() else {
+    /// Whether the past of the terminal this pane shows again has been read, asked every
+    /// [`REPLAY_POLL`] (`tries` is the number of times it was asked) until it has — or for
+    /// [`REPLAY_POLLS`] times, a bound for a connection that never says the past is complete.
+    fn replay_polled(&self, tries: u64) {
+        let Some(session) = self.session().cloned() else {
             return;
         };
-        if self.is_closed() || !keeper.is_active() {
+        if session.replaying() && tries < REPLAY_POLLS {
+            self.after_on_main(tries + 1, REPLAY_POLL, Self::replay_polled);
             return;
         }
-        if let Some(session) = self.session() {
-            keeper.state(
-                &self.ivars().uuid,
-                session.state_blob(),
-                self.carried_program(),
-            );
-        }
+        // The edges the past raised were not told ([`bt_core::Silence`]): a command that runs
+        // now is news to the tab (its ring, its program's icon) and the probes that start from
+        // it — the remote session, the program in front — run once, as for any command that
+        // starts.
+        Wake::command_started(&*self.ivars().wake);
     }
 
     /// The alternate screen changed: the tab's ring is read again and the
@@ -4376,10 +3947,6 @@ impl TerminalPane {
         let zoom = step(self.ivars().zoom.get(), &self.ivars().font.borrow());
         self.ivars().zoom.set(zoom);
         self.apply_font();
-        // The point-size step is part of the layout the bound holder keeps.
-        if let Some(keeper) = self.ivars().keeper.as_deref() {
-            keeper.layout_changed();
-        }
     }
 
     /// The setting's font changed (`AppDelegate::reload_settings`, after the
@@ -4507,14 +4074,33 @@ impl TerminalPane {
         self.ivars().link_veil.setHidden(!link.is_passive());
         self.place_link_veil();
         self.apply_connection();
-        // The screen came back, not the messages a program's view lives on: a view that
-        // is open is offered to the program again. Once per change, like everything above
-        // (`PaneLink::comes_back`): a reconnection's failed attempts are no news.
-        if before.comes_back(link)
-            && self.shows_view()
-            && let Some(session) = self.session().cloned()
-        {
-            self.restart_view_offered(&session);
+        // The screen came back — from a picture or a replay — and not the stream that
+        // drew it. Once per change, like everything above (`PaneLink::comes_back`): a
+        // reconnection's failed attempts are no news.
+        if before.comes_back(link) {
+            // The server shell's mirror of its line is the one of the last event this
+            // pane heard: the shell is asked to say it again. Not of a terminal another
+            // computer had (it may have started a program in it since) and only when the
+            // server itself says the shell is in front — what the session remembers of the
+            // prompt is a picture from before the connection went, and the bytes are
+            // keys to anything but a shell (bash and fish need nothing, their line is read
+            // from the grid at every frame).
+            if before != PaneLink::Taken
+                && let Some(session) = self.session()
+                && self
+                    .host()
+                    .kept_terminal(self.uuid())
+                    .is_some_and(|shown| shown.shell_in_front())
+            {
+                session.refresh_dock();
+            }
+            // Nor are the messages a program's view lives on back: a view that is open
+            // is offered to the program again.
+            if self.shows_view()
+                && let Some(session) = self.session().cloned()
+            {
+                self.restart_view_offered(&session);
+            }
         }
         self.offer_owed_view();
     }
@@ -4550,10 +4136,13 @@ impl TerminalPane {
         );
     }
 
-    /// The veil's frame: the pane without the dock's band, in the pane's own
-    /// (unflipped) points. The band is the grid's reserve for it
-    /// ([`bt_gpu::dock_px`], what "Jump to latest" stands on): the context row
-    /// at the bottom stays clear and keeps saying what is happening.
+    /// The veil's frame: the pane without the dock's context row, in the pane's own
+    /// (unflipped) points. The row is the one thing that stays clear and keeps
+    /// saying what is happening; everything above it is a picture of a moment that
+    /// has passed — the grid and, on a server's terminal that has the dock, the line
+    /// typed into its input row, which is why the frame stops at the context row
+    /// ([`grid::veil_clear_rows`]) and not at the whole share the grid reserves for the
+    /// dock ([`bt_gpu::dock_px`], what "Jump to latest" stands on).
     fn place_link_veil(&self) {
         let ivars = self.ivars();
         if ivars.link_veil.isHidden() {
@@ -4564,7 +4153,7 @@ impl TerminalPane {
         };
         let scale = window.backingScaleFactor();
         let dock = f64::from(bt_gpu::dock_px(
-            ivars.dock_rows.get(),
+            grid::veil_clear_rows(ivars.dock_rows.get()),
             self.cell_metrics(scale),
         )) / scale;
         let bounds = self.bounds();
@@ -5069,8 +4658,7 @@ impl TerminalPane {
     /// Which program the pane runs now, as its tab's icon draws it: what the program said of
     /// itself (`app=` of `OSC 7501`), else — in a pane that shows a terminal a server keeps —
     /// what the server says is in front of it ([`Self::server_kind`]), else what the process
-    /// table named, else what the bateri the pane was carried over from showed for the same
-    /// command, else what the command's line said — the shell when no command runs, the server
+    /// table named, else what the command's line said — the shell when no command runs, the server
     /// in a remote session none of them knows ([`identity::decide`]). Read live from the
     /// sources, so a program that speaks up later is heard on the tab's next refresh; the
     /// readings that cost a screen walk or a syscall are the probe's ([`Self::probe_identity`])
@@ -5082,7 +4670,7 @@ impl TerminalPane {
 
     /// What the pane runs **here**: [`Self::program_kind`] without the server's word. What a
     /// program on a server cannot do is what this Mac has — the clipboard ⌘V pastes an image
-    /// from, a program that is handed to the next bateri.
+    /// from.
     pub(crate) fn local_program_kind(&self) -> Kind {
         // What the pane ran is [`Self::program_kind`]'s to remember: where the server has a
         // word the local reading is another kind than the pane's, and two writers would have
@@ -5129,14 +4717,12 @@ impl TerminalPane {
         let line = command
             .and_then(|id| memo.line.filter(|(seen, _)| *seen == id))
             .and_then(|(_, kind)| kind);
-        // The old process's whole decision, line included: under what is live, over the line.
-        let carried = carried_kind(memo.carried, command);
         let group = memo
             .group
             .filter(|(generation, _)| *generation == running)
             .map(|(_, kind)| kind);
         let remote = session.remote_line().is_some();
-        let kind = identity::decide(app, server, group, carried.or(line), remote);
+        let kind = identity::decide(app, server, group, line, remote);
         if remember
             && let Some(id) = command
             && memo.ran != Some((id, kind))
@@ -5159,13 +4745,6 @@ impl TerminalPane {
         };
         let newest = session.last_command().map(|command| command.id);
         kind_of_end(self.ivars().program_memo.get().ran, newest)
-    }
-
-    /// What a handover carries of [`Self::program_kind`] to the next bateri: a program, not the
-    /// shell or the server — those it tells by itself, and a pane carrying none is written in
-    /// the format a rolled-back bateri still reads (`handover::PaneState`).
-    fn carried_program(&self) -> Option<Kind> {
-        Some(self.local_program_kind()).filter(|kind| !matches!(kind, Kind::Shell | Kind::Remote))
     }
 
     /// The identity probe: reads what [`Self::program_kind`] cannot cheaply — the newest command's
@@ -5205,11 +4784,7 @@ impl TerminalPane {
         if session.remote_line().is_none()
             && memo.group.map(|(generation, _)| generation) != Some(running)
         {
-            let newest = session.last_command().map(|command| command.id);
-            let named = memo
-                .line
-                .and_then(|(_, kind)| kind)
-                .or(carried_kind(memo.carried, newest));
+            let named = memo.line.and_then(|(_, kind)| kind);
             let (group, wait) = after_table(
                 identity::find(parent, session.child_pid(), &SystemTable),
                 named,
@@ -5273,7 +4848,7 @@ impl TerminalPane {
         }
         if session.alt_screen()
             || !session
-                .with_pty_fd(jobs::tty_modes)
+                .tty_modes(jobs::tty_modes)
                 .is_some_and(TtyModes::raw)
             || !jobs::job_in_foreground(parent, session.child_pid(), &SystemTable)
         {
@@ -5527,7 +5102,7 @@ impl TerminalPane {
     /// terminal under a view is nobody's to type in, and something other than [`Self::focus`]
     /// left it there — the window gave it to the pane's terminal before its view started (a
     /// restored window's first responder, a tab shown again) — which is what a view started again
-    /// by a handover found: a pane that is the user's and has its keyboard in the covered
+    /// after a restart found: a pane that is the user's and has its keyboard in the covered
     /// terminal has it in the view from the moment it is the user's.
     fn keep_keyboard_in_view(&self) {
         if self.shows_view() && self.view().is_first_responder() {
@@ -5542,8 +5117,7 @@ impl TerminalPane {
     /// deadline) — and a single pane's closing (`TerminalTab::close_pane`,
     /// the handle drops; if the split could not be born, `add_pane`'s rollback).
     ///
-    /// The order is required: first the bound holder lets its copy of the
-    /// master go ([`Keeper::release`]), then the upload queue is released
+    /// The order is required: the upload queue is released first
     /// (processes are killed and the half file is deleted; there is no dock
     /// left to show the result), **then** the rhythm, the `Waker` and
     /// `SIGHUP` — in the reverse order the cancellation would go after the
@@ -5579,13 +5153,7 @@ impl TerminalPane {
     }
 
     pub(crate) fn begin_close(&self) -> Option<Closing> {
-        // The holder lets its copy go **first**: a program with unread
-        // output cannot finish exiting while an unread copy of its master is
-        // open, and the hang-up below waits for that exit.
-        if let Some(keeper) = self.ivars().keeper.as_deref() {
-            keeper.release(&self.ivars().uuid);
-        }
-        self.quiesce(true);
+        self.quiesce();
         let session = self.ivars().session.get()?;
         Some(match session.begin_shutdown() {
             Some(handle) => Closing::Started(handle),
@@ -5593,73 +5161,9 @@ impl TerminalPane {
         })
     }
 
-    /// Freezes the pane for the update's handover and returns
-    /// what the holder carries: the master, the child's pid and start time,
-    /// the pane's state ([`PaneState`](crate::handover::PaneState): the
-    /// VT, `bt-core`'s blob, the unsent input, the scrollback for a
-    /// fallback, the program it shows) and the tail as the buffer's head.
-    ///
-    /// The second half of the return is the pane's session-restore history
-    /// (`Session::frozen_history`, also inside the state) for the caller's
-    /// save at this quit.
-    ///
-    /// The start time is read **before** the freeze, and so is the pane's
-    /// own quiet-down ([`Self::quiesce`]: no frame may reach the `Term` the
-    /// freeze probed destructively) — but not the remote session's end: the
-    /// ssh master is not closed by a handover. `None` if there is
-    /// nothing to carry (no session, already closed, the child's start time
-    /// unreadable) or the freeze failed — the caller closes the pane today's
-    /// way, which a failed freeze leaves intact.
-    pub(crate) fn freeze_for_handover(&self) -> Option<(crate::handover::HeldPane, Vec<u8>)> {
-        if self.is_closed() {
-            return None;
-        }
-        let session = Arc::clone(self.session()?);
-        let parent = *self.ivars().shell_parent.get()?;
-        let pid = session.child_pid();
-        let start = jobs::start_time(pid)?;
-        let program = self.carried_program();
-        // Before the quiet-down: what the pane shows is what the next process starts again.
-        let view = self.shows_view();
-        self.quiesce(false);
-        let frozen = match session.freeze() {
-            Ok(frozen) => frozen,
-            Err(error) => {
-                eprintln!("bateri: could not freeze a pane for the update: {error}");
-                return None;
-            }
-        };
-        // From the frozen VT: the freeze's snapshot drove the live `Term`
-        // destructively (and a live read before it would have destroyed the
-        // alternate screen the snapshot must carry).
-        let history = session.frozen_history(&frozen);
-        let state = crate::handover::PaneState {
-            cols: frozen.cols,
-            rows: frozen.rows,
-            parent,
-            vt: frozen.vt,
-            core: frozen.blob,
-            input: frozen.input,
-            history: history.clone(),
-            program,
-            view,
-        };
-        let held = crate::handover::HeldPane::new(
-            self.ivars().uuid.clone(),
-            pid,
-            start,
-            state.encode(),
-            frozen.tail,
-            frozen.master,
-        );
-        Some((held, history))
-    }
-
-    /// The pane's side of closing, the session aside — shared by
-    /// [`Self::begin_close`] and [`Self::freeze_for_handover`]; `end_remote`
-    /// tells the ssh registry this pane's remote session ended (not in a
-    /// handover: the master lives on). Idempotent.
-    fn quiesce(&self, end_remote: bool) {
+    /// The pane's side of closing, the session aside; it tells the ssh registry this
+    /// pane's remote session ended. Idempotent.
+    fn quiesce(&self) {
         // First: a job's thread waiting at the password sheet holds the helper's
         // worker too — dropping the sender answers it, then `close` is served.
         self.close_password();
@@ -5674,8 +5178,7 @@ impl TerminalPane {
         self.remote_helper().borrow_mut().close();
         // A remote session closing with the pane is one less session to the
         // host: our master ends with the last one.
-        if end_remote
-            && self.ivars().ssh_session.take().is_some()
+        if self.ivars().ssh_session.take().is_some()
             && let Some(masters) = self.ivars().masters.as_deref()
         {
             masters.session_ended(self.id());
@@ -5687,7 +5190,7 @@ impl TerminalPane {
         // A forward tunnel of ours goes with the pane.
         self.end_remote_ports();
         // A program's view goes with the pane (no teardown to ask: its program
-        // is hung up on next, or carried over, and meets a pane with no view).
+        // is hung up on next, or left running, and meets a pane with no view).
         self.drop_view();
         self.ivars().closed.set(true);
         // SAFETY: the observer is this object, registered in `observe_frame`;
@@ -6507,6 +6010,9 @@ impl TerminalPane {
         }
         // The tab's tile wears the program's icon now (`view_face`).
         self.host().program_changed(ivars.id);
+        // And the terminal that carries the pane's bytes remembers it: a bateri that finds the
+        // terminal again offers the program a restart of its view.
+        self.host().view_changed(self.uuid(), true);
     }
 
     /// Takes the view down: the keyboard goes back to the terminal if the view
@@ -6539,6 +6045,7 @@ impl TerminalPane {
         }
         // And the mark of what runs in the pane again.
         self.host().program_changed(self.ivars().id);
+        self.host().view_changed(self.uuid(), false);
     }
 
     /// The program's view goes with the pane, whatever it was doing: no
@@ -6635,8 +6142,8 @@ impl TerminalPane {
         self.drain_views();
     }
 
-    /// The program is offered a restart (an update's handover; the connection to its terminal
-    /// came back): what the screen restored, the messages a view lives on did not. The offer
+    /// The program is offered a restart (the terminal is shown again by a new bateri; the
+    /// connection to it came back): what the screen restored, the messages a view lives on did not. The offer
     /// is a token the program was handed unasked, so it has a time to be taken up
     /// ([`pencere_view`]'s `wait`), and this is the one way to offer it — a call that does not
     /// set the time leaves the token valid for as long as the pane lives.
@@ -6646,11 +6153,11 @@ impl TerminalPane {
         self.wait_for_view(session);
     }
 
-    /// The restart the adoption owes the program of a terminal a server keeps
+    /// The restart owed to the program of a terminal a server keeps
     /// (`view_owed`), decided by [`owed_offer`] when the server's word can have come: the
     /// connection's edge, the terminal's and its program's. The server says what is in front of
     /// a terminal right after it is attached again and before any of its output, so the word is
-    /// the one thing about the terminal that is not from before the handover.
+    /// the one thing about the terminal that is not from before the restart.
     fn offer_owed_view(&self) {
         let Some(owed) = self.ivars().view_owed.borrow().clone() else {
             return;
@@ -6929,16 +6436,22 @@ impl TerminalPane {
     /// byte goes to the shell; on the alternate screen the item is grey and
     /// the call is a no-op anyway.
     pub(crate) fn clear_to_start(&self) {
-        if let Some(session) = self.session() {
-            session.clear_to_start();
+        if let Some(session) = self.session()
+            && session.clear_to_start()
+        {
+            // The terminals behind the pane forget theirs too: a bateri that finds them again
+            // does not give back the lines that were cleared.
+            self.host().forget_past(self.uuid());
         }
     }
 
     /// Edit ▸ Clear Scrollback (⌥⌘K): scrollback only —
     /// `Session::clear_scrollback`.
     pub(crate) fn clear_scrollback(&self) {
-        if let Some(session) = self.session() {
-            session.clear_scrollback();
+        if let Some(session) = self.session()
+            && session.clear_scrollback()
+        {
+            self.host().forget_past(self.uuid());
         }
     }
 
@@ -7471,60 +6984,6 @@ struct AskedFor {
     opener: Option<String>,
 }
 
-/// [`adopt_session`]'s failure: why, and the carried history for the
-/// fallback's replay.
-type NotAdopted = (std::io::Error, Option<Vec<u8>>);
-
-/// Carries a frozen pane on in this process ([`Session::adopt`]):
-/// born at the frozen grid size (the VT is laid out for it), then resized
-/// to this pane's grid. `Err` gives back the carried history for the
-/// fallback.
-fn adopt_session(
-    options: SessionOptions,
-    adopted: Adopted,
-    grid: Grid,
-    wake: &Arc<dyn Wake>,
-) -> Result<(Session, ShellParent), NotAdopted> {
-    let Adopted {
-        master,
-        exit,
-        pid,
-        mut state,
-        prefix,
-        taken_from: _,
-        mode,
-        nudge: _,
-        note: _,
-    } = adopted;
-    let history = Some(std::mem::take(&mut state.history)).filter(|bytes| !bytes.is_empty());
-    let parent = state.parent;
-    let options = SessionOptions {
-        cols: state.cols,
-        rows: state.rows,
-        ..options
-    };
-    let session = Session::adopt(
-        options,
-        bt_core::Adoption {
-            master,
-            exit,
-            pid,
-            vt: state.vt,
-            blob: state.core,
-            prefix,
-            input: state.input,
-            ops: Arc::new(jobs::SystemPty),
-            mode,
-        },
-        Arc::clone(wake),
-    )
-    .map_err(|error| (error, history))?;
-    // `false` is "nothing to do" (the same size) or a refused one (zero):
-    // the session keeps the frozen size, the next geometry change resizes.
-    let _ = session.resize(grid.cols, grid.rows, grid.cell.cell_px());
-    Ok((session, parent))
-}
-
 /// How long a nudged program sees the narrower size before the real one
 /// comes back ([`nudge_program`]). A program behind ssh redraws only if ssh
 /// **read** the narrower size — it forwards the size it reads, and the remote
@@ -7533,7 +6992,13 @@ fn adopt_session(
 /// machine and is too short to notice the narrower frame. A design constant.
 const NUDGE_GAP: std::time::Duration = std::time::Duration::from_millis(250);
 
-/// Nudges an adopted pane's program to redraw the screen that did not come
+/// How often the pane of a terminal shown again asks whether its past has been read.
+const REPLAY_POLL: Duration = Duration::from_millis(50);
+
+/// How many times it asks at most: a minute.
+const REPLAY_POLLS: u64 = 1200;
+
+/// Nudges the program of a terminal shown again to redraw the screen that did not come
 /// back: the PTY one column narrower now, its own size [`NUDGE_GAP`] later
 /// (`Session::nudge_size`). The second half is skipped once the session's
 /// reader is gone (the pane closed meanwhile).
@@ -7707,6 +7172,46 @@ mod tests {
                 "{signature}"
             );
         }
+        // A terminal of this Mac that carries a pane's bytes is no server: none of the surfaces
+        // that are for servers asks whether the pane is streamed, and the questions that decide
+        // "shows a server's terminal" do not either.
+        for (name, source) in [
+            ("uploader.rs", include_str!("uploader.rs")),
+            ("preview.rs", include_str!("preview.rs")),
+            ("promise.rs", include_str!("promise.rs")),
+            ("stats.rs", include_str!("stats.rs")),
+            ("server_card.rs", include_str!("server_card.rs")),
+            ("hyperlink.rs", include_str!("hyperlink.rs")),
+            ("remote_ports.rs", include_str!("remote_ports.rs")),
+            ("footer.rs", include_str!("footer.rs")),
+            ("password_sheet.rs", include_str!("password_sheet.rs")),
+        ] {
+            let code = &source[..source.find("#[cfg(test)]").unwrap_or(source.len())];
+            assert!(
+                !code.contains("is_streamed"),
+                "{name}: a server surface asks `server_target` or the terminal the pane shows, \
+                 never whether the pane's bytes come from a terminal of this Mac"
+            );
+        }
+        let pane = include_str!("pane.rs");
+        let body = |signature: &str| {
+            let at = pane
+                .find(signature)
+                .unwrap_or_else(|| panic!("{signature}"));
+            let rest = &pane[at..];
+            rest[..rest.find("\n    }\n").expect("its end")].to_owned()
+        };
+        for signature in [
+            "pub(crate) fn shows_kept_terminal(",
+            "pub(crate) fn server_target(",
+            "pub(crate) fn saved_kept(",
+            "pub(crate) fn opener(",
+        ] {
+            assert!(
+                !body(signature).contains("is_streamed"),
+                "{signature}: the terminal a pane shows is the server's, whatever carries its bytes"
+            );
+        }
         // And the pane's half of the connection bateri keeps for them: it is registered
         // and its login is probed for a server pane only.
         let pane = include_str!("pane.rs");
@@ -7729,19 +7234,14 @@ mod tests {
 
     /// The server's word of what is in front of its terminal is for the icon: what a program on
     /// this Mac can do is asked of [`TerminalPane::local_program_kind`] — a program on a server
-    /// reads the server's clipboard, so ⌘V's image key (⌃V) is not sent to it, and the next
-    /// bateri is carried what runs here. A source scan, because the panes need a window server.
+    /// reads the server's clipboard, so ⌘V's image key (⌃V) is not sent to it. A source scan,
+    /// because the panes need a window server.
     #[test]
     fn what_only_a_program_here_can_do_asks_the_kind_of_the_program_here() {
         let paste = include_str!("view.rs");
         let paste = &paste[..paste.find("#[cfg(test)]").unwrap_or(paste.len())];
         assert!(paste.contains("image_paste_key(pane.local_program_kind())"));
         assert!(!paste.contains("image_paste_key(pane.program_kind())"));
-        let pane = include_str!("pane.rs");
-        let at = pane.find("fn carried_program(").expect("carried_program");
-        let body = &pane[at..at + pane[at..].find("\n    }\n").expect("its end")];
-        assert!(body.contains("local_program_kind()"));
-        assert!(!body.contains(" self.program_kind()"));
         // The server's word reaches the pane through its own entry and no other.
         let hold = include_str!("hold_service.rs");
         let at = hold.find("fn program_changed(").expect("program_changed");
@@ -7764,32 +7264,19 @@ mod tests {
     }
 
     /// A program's view is started again at the two places the screen is restored without the
-    /// messages it lives on: the pane that took its program over from an earlier process, and the
-    /// pane whose server terminal's connection came back. The handover's record of the view is
-    /// the one the pane reads (`shows_view`, in front of the quiet-down), and the reconnection's
-    /// one rule is [`PaneLink::comes_back`]. A source scan, because the panes need a window
-    /// server and the first needs a process to hand over from.
+    /// messages it lives on: the pane that shows a terminal again after a bateri before it, and
+    /// the pane whose server terminal's connection came back. The first reads the ledger's
+    /// record of the view (`view_was_open`), and the reconnection's one rule is
+    /// [`PaneLink::comes_back`]. A source scan, because the panes need a window server.
     #[test]
     fn a_view_is_restarted_where_the_screen_comes_back_without_its_messages() {
         let pane = include_str!("pane.rs");
         let pane = &pane[..pane.find("#[cfg(test)]").unwrap_or(pane.len())];
-        let at = pane.find("fn freeze_for_handover(").expect("the freeze");
-        let body = &pane[at..at + pane[at..].find("\n    }\n").expect("its end")];
-        let seen = body
-            .find("self.shows_view()")
-            .expect("the view is recorded");
-        let quiet = body.find("self.quiesce(false)").expect("the quiet-down");
-        assert!(seen < quiet, "recorded before the quiet-down");
-        assert!(
-            body.contains("            view,\n"),
-            "and written into the state"
-        );
         let at = pane
-            .find("let viewed = adopted.state.view;")
-            .expect("the adoption reads it");
+            .find("let shown_again = session.is_shown_again();")
+            .expect("the terminal shown again");
         let body = &pane[at..at + pane[at..].find("nudge_program(&session);").expect("nudge")];
-        assert!(body.contains("view_was_open = viewed;"));
-        assert!(body.contains("carried_on && view_was_open"));
+        assert!(body.contains("self.host().view_was_open(self.uuid())"));
         assert!(body.contains("self.restart_view_offered(&session);"));
         // And owed to the terminal a server keeps that the pane showed, by its name.
         assert!(body.contains(".view_owed"));
@@ -7805,6 +7292,21 @@ mod tests {
         assert!(
             body.find("return;").expect("the return") < body.find("restart_view_offered(").unwrap()
         );
+        // The server shell's mirror is asked for at the same edge and under the same
+        // rule: a screen that is back is not the stream that drew it.
+        assert!(body.contains("session.refresh_dock()"));
+        // And only where the terminal was never another computer's and the server says the
+        // shell is in front: the bytes are keys to a program.
+        assert!(body.contains("before != PaneLink::Taken"));
+        assert!(body.contains("shown.shell_in_front()"));
+        assert!(
+            body.find("return;").expect("the return")
+                < body.find("session.refresh_dock()").unwrap()
+        );
+        assert!(
+            body.find("before.comes_back(link)").unwrap()
+                < body.find("session.refresh_dock()").unwrap()
+        );
         // The owed offer is asked wherever the server's word on the terminal can have come.
         for edge in [
             "pub(crate) fn set_connection(",
@@ -7815,6 +7317,22 @@ mod tests {
             let body = &pane[at..at + pane[at..].find("\n    }\n").expect("its end")];
             assert!(body.contains("self.offer_owed_view();"), "{edge}");
         }
+    }
+
+    /// The connection-lost veil stops at the dock's context row — the line typed into the
+    /// remote dock's input row is a picture of a moment that has passed, like the grid, and
+    /// the context row keeps saying what is going on. The measure is
+    /// [`grid::veil_clear_rows`] (its own test holds the arithmetic); this scan holds that the
+    /// frame asks it and not the dock's whole share. A source scan, because the pane needs a
+    /// window server.
+    #[test]
+    fn the_connection_veil_stops_at_the_context_row() {
+        let pane = include_str!("pane.rs");
+        let pane = &pane[..pane.find("#[cfg(test)]").unwrap_or(pane.len())];
+        let at = pane.find("fn place_link_veil(").expect("the placement");
+        let body = &pane[at..at + pane[at..].find("\n    }\n").expect("its end")];
+        assert!(body.contains("grid::veil_clear_rows(ivars.dock_rows.get())"));
+        assert!(!body.contains("dock_px(\n            ivars.dock_rows.get()"));
     }
 
     /// A pane handed over with a program's view over a terminal a server keeps owes that program
@@ -8104,7 +7622,7 @@ mod tests {
     /// giving the keyboard to a pane (a pane switched to, a tab shown, the name field giving it up)
     /// go through [`TerminalPane::focus`], which knows it: given to the terminal under the view
     /// instead, the keyboard is in a view nobody can see and the program's view takes no key — a
-    /// restored view found that after a handover. The one place that gives it to a terminal
+    /// restored view found that after a restart. The one place that gives it to a terminal
     /// directly is a window's birth, when no pane has a view yet; and a pane that is the user's
     /// with its keyboard in the covered terminal moves it ([`TerminalPane::apply_focus`]). A source
     /// scan, because what it guards needs a window server and a pane with a view in a window.
@@ -8243,12 +7761,6 @@ mod tests {
         fn questions_changed(&self, pane: u64) {
             self.0.borrow_mut().push((pane, "questions".into()));
         }
-        fn ports_changed(&self, pane: u64) {
-            self.0.borrow_mut().push((pane, "ports".into()));
-        }
-        fn bell(&self, pane: u64) {
-            self.0.borrow_mut().push((pane, "bell".into()));
-        }
         fn program_notification(&self, pane: u64, _title: Option<&str>, _body: &str) {
             self.0.borrow_mut().push((pane, "note".into()));
         }
@@ -8359,22 +7871,6 @@ mod tests {
             (None, true),
             "a launcher script before it execs is no answer, and does not hide the line"
         );
-    }
-
-    /// What the bateri before showed stands only for the command it was carried with.
-    #[test]
-    fn a_carried_program_stands_for_the_command_it_came_with_only() {
-        use super::{Kind, carried_kind};
-        use bt_shell_common::program::identity::Agent;
-        let claude = Kind::Agent(Agent::ClaudeCode);
-        assert_eq!(carried_kind(Some((7, claude)), Some(7)), Some(claude));
-        assert_eq!(
-            carried_kind(Some((7, claude)), Some(8)),
-            None,
-            "a command started after the handover is not the one it ran"
-        );
-        assert_eq!(carried_kind(Some((7, claude)), None), None);
-        assert_eq!(carried_kind::<u32>(None, Some(7)), None);
     }
 
     /// What a pane ran is handed over for the command that ended only if it was seen during that

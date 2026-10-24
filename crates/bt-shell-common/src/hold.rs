@@ -20,9 +20,9 @@
 //! for ([`ToHold::Run`]) is read the way a terminal reads it, and what is typed
 //! meanwhile waits for the terminal.
 //!
-//! **Surviving the application.** The pane outlives bateri when the
-//! update or a crash is bridged by the holder (`handover`): this program is
-//! one of the processes it keeps. When the connection to bateri is lost,
+//! **Surviving the application.** The pane outlives bateri when its terminal on
+//! this Mac is kept by kablo (an update, a quit that keeps the programs, a crash): this
+//! program is the terminal's program. When the connection to bateri is lost,
 //! standard input is no longer read (what the user types waits in the
 //! terminal), the socket is tried again with growing pauses, and a bateri that
 //! answers is asked for the terminal it was showing, from the position after
@@ -246,7 +246,7 @@ pub fn ssh_args_in(args: &[String]) -> Option<&[String]> {
 /// A name for a new terminal: `b-` and 128 random bits as hex. Made here, not
 /// by the application, so that asking again after a lost connection names the
 /// same terminal.
-fn new_terminal_name() -> io::Result<SessionId> {
+pub(crate) fn new_terminal_name() -> io::Result<SessionId> {
     let mut bytes = [0u8; 16];
     std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
     let mut name = String::from("b-");

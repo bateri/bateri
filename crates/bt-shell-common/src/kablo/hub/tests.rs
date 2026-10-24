@@ -1073,3 +1073,25 @@ fn an_answer_nobody_asked_for_is_a_holder_out_of_turn_and_a_resume_is_not_run() 
         Err(Declined::WrongKind)
     );
 }
+
+// ─── a raw holder: the pane itself ───────────────────────────────────────
+
+#[test]
+fn a_raw_holder_is_sent_the_words_of_the_wire_as_the_bytes_that_show_them() {
+    let mut hub = Hub::new();
+    let hold = hub.open_raw();
+    // It is bound to nothing yet: what it types has nowhere to go, and it hears a bell.
+    hub.push(hold, b"ls\r");
+    assert_eq!(hub.take_outgoing(hold), [0x07]);
+
+    // A line the hub has for the pane is shown on the pane; an end is the status of the
+    // program, with the note first.
+    assert!(hub.say(hold, "bateri: a line"));
+    assert_eq!(hub.take_outgoing(hold), b"bateri: a line\r\n");
+    hub.end(hold, 3, Some("bateri: over"));
+    assert_eq!(hub.take_outgoing(hold), b"\r\nbateri: over\r\n");
+    assert_eq!(hub.exit_of(hold), Some(Exit::Code(3)));
+    assert!(hub.is_finished(hold));
+    // A raw holder is never greeted, so it never asks out of turn.
+    assert_eq!(hub.version_of(hold), wire::VERSION);
+}

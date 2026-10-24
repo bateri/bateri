@@ -2188,7 +2188,7 @@ impl Frame {
     /// dock's.
     ///
     /// The column the mark sits in is **empty**, because the prompt really is
-    /// two columns wide (`assets/shell/zsh/bateri.zsh` → `__bateri_ps1`, the
+    /// two columns wide (`assets/shell/zsh/dock.zsh` → `__bateri_ps1`, the
     /// same number as `dock::TEXT_COL`). The mark does not cover the command's
     /// letter and the drawing does not lie to the terminal — the alternative
     /// was shifting the command line while drawing it, which would have broken
@@ -2219,7 +2219,7 @@ impl Frame {
         // saw this.
         //
         // The column does not collide with the command, because the prompt is
-        // now **really** two columns wide (`assets/shell/zsh/bateri.zsh` →
+        // now **really** two columns wide (`assets/shell/zsh/dock.zsh` →
         // `__bateri_ps1`): the command text starts at column 2 and the mark
         // falls on top of the gap at 0. The drawing does not lie to the
         // terminal, so the mouse mapping and the line wrapping are left

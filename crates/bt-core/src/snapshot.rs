@@ -4,10 +4,9 @@
 //!
 //! **Two kinds, one row walk.** [`encode`] is session restore's: the primary history, a
 //! finished block's anchor saved, nothing else — byte for byte as it was.
-//! [`encode_live`] is the update handover's: the **whole** terminal state of
-//! a pane whose processes live on — both screens, links as they are, the
-//! cursors, the modes and what only a destructive probe reads; its doc
-//! holds the order. [`Tail`] keeps the sequence a read stopped in. The
+//! `encode_live` (tests only) is the whole-terminal kind, the reset's oracle: both
+//! screens, links as they are, the cursors, the modes and what only a
+//! destructive probe reads. [`Tail`] keeps the sequence a read stopped in. The
 //! paragraphs below describe the restore kind.
 //!
 //! **Bytes, not a grid dump**: the replay goes through the same parser and the same
@@ -38,21 +37,29 @@
 //! because alacritty fills the rows a line feed opens with the cursor's
 //! template (bce) and a background left set would paint the next row.
 
-use alacritty_terminal::event::EventListener;
-use alacritty_terminal::grid::{Charsets, Cursor, Dimensions, Grid};
-use alacritty_terminal::index::{Column, Line, Point};
-use alacritty_terminal::term::cell::{Cell as TermCell, Flags, Hyperlink};
-use alacritty_terminal::term::{Config, Term, TermMode};
-use alacritty_terminal::vte::ansi::{
-    CharsetIndex, ClearMode, Color, CursorShape, CursorStyle, Handler, KeyboardModes, NamedColor,
-    NamedPrivateMode, PrivateMode, Rgb, StandardCharset,
-};
+use alacritty_terminal::grid::Dimensions;
+use alacritty_terminal::index::Line;
+use alacritty_terminal::term::Term;
+use alacritty_terminal::term::cell::{Cell as TermCell, Flags};
+use alacritty_terminal::vte::ansi::{Color, NamedColor};
 use std::collections::HashMap;
 
-use crate::handler::{KeptModes, RESIZE_REPORT_MODE};
-use crate::input::PIXEL_MOUSE_MODE;
-use crate::session::GridSize;
 use crate::shell::{BlockKey, Stripe};
+#[cfg(test)]
+use {
+    crate::handler::{KeptModes, RESIZE_REPORT_MODE},
+    crate::input::PIXEL_MOUSE_MODE,
+    crate::session::GridSize,
+    alacritty_terminal::event::EventListener,
+    alacritty_terminal::grid::{Charsets, Cursor, Grid},
+    alacritty_terminal::index::{Column, Point},
+    alacritty_terminal::term::cell::Hyperlink,
+    alacritty_terminal::term::{Config, TermMode},
+    alacritty_terminal::vte::ansi::{
+        CharsetIndex, ClearMode, CursorShape, CursorStyle, Handler, KeyboardModes,
+        NamedPrivateMode, PrivateMode, Rgb, StandardCharset,
+    },
+};
 
 /// The saved block anchor's prefix — written by [`encode`], read by
 /// [`saved_key`].
@@ -481,19 +488,23 @@ fn color_code(color: Color, layer: Layer) -> String {
 
 /// alacritty's keyboard-mode stack depth (`KEYBOARD_MODE_STACK_MAX_DEPTH`,
 /// private in 0.26.0); [`probe_keyboard`] pops one past it.
+#[cfg(test)]
 const KEYBOARD_DEPTH: usize = 4096;
 
 /// alacritty's title stack depth (`TITLE_STACK_MAX_DEPTH`, private).
+#[cfg(test)]
 const TITLE_DEPTH: usize = 4096;
 
 /// What [`probe_titles`] writes before each pop: a pop from an empty stack
 /// leaves it in place. The parser never produces it — an OSC cannot carry a
 /// control character.
+#[cfg(test)]
 const TITLE_SENTINEL: &str = "\u{1}bateri-title-probe";
 
 /// The mode bits [`encode_live`] writes, each with its set and reset
 /// sequence. The rest of `TermMode` is `MODES_NOT_WRITTEN`; a test pins
 /// that the two cover every bit.
+#[cfg(test)]
 const MODES: [(TermMode, &str, &str); 15] = [
     (TermMode::SHOW_CURSOR, "\x1b[?25h", "\x1b[?25l"),
     (TermMode::APP_CURSOR, "\x1b[?1h", "\x1b[?1l"),
@@ -523,6 +534,7 @@ const MODES_NOT_WRITTEN: TermMode = TermMode::ALT_SCREEN
     .union(TermMode::URGENCY_HINTS);
 
 /// The kitty bits of `TermMode` and the keyboard mode each one is.
+#[cfg(test)]
 const KITTY: [(TermMode, KeyboardModes); 5] = [
     (
         TermMode::DISAMBIGUATE_ESC_CODES,
@@ -547,6 +559,7 @@ const KITTY: [(TermMode, KeyboardModes); 5] = [
 ];
 
 /// The four designations, in index order: `ESC ( 0` designates G0 and so on.
+#[cfg(test)]
 const DESIGNATORS: [(CharsetIndex, u8); 4] = [
     (CharsetIndex::G0, b'('),
     (CharsetIndex::G1, b')'),
@@ -556,10 +569,12 @@ const DESIGNATORS: [(CharsetIndex, u8); 4] = [
 
 /// The highest palette index an OSC sets: 0–255 with OSC 4, then the
 /// foreground, background and cursor colours with OSC 10/11/12.
+#[cfg(test)]
 const LAST_SETTABLE_COLOR: usize = NamedColor::Cursor as usize;
 
 /// What only a **destructive probe** reads from `Term`: alacritty keeps these fields private and no getter exists.
 /// [`encode_live`] writes them; the round-trip tests compare them.
+#[cfg(test)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Probed {
     /// The tab stops a forward tab lands on, ascending; the last column
@@ -588,6 +603,7 @@ pub(crate) struct Probed {
 /// A cursor as written: where it is, the cell to write again when
 /// `input_needs_wrap` is set, its pen, its open link and its four
 /// designations.
+#[cfg(test)]
 struct CursorShot {
     line: i32,
     column: usize,
@@ -598,11 +614,12 @@ struct CursorShot {
     rewrite: Option<(usize, TermCell)>,
     pen: Pen,
     /// The template's link — bateri's prompt anchor is open while the user
-    /// types, and the characters typed after the handover must carry it.
+    /// types, and the characters typed after the replay must carry it.
     link: Option<String>,
     charsets: Charsets,
 }
 
+#[cfg(test)]
 impl CursorShot {
     fn of(grid: &Grid<TermCell>, cursor: &Cursor<TermCell>) -> Self {
         let point = cursor.point;
@@ -662,14 +679,17 @@ impl CursorShot {
 
 /// Back to the state [`CursorShot::write`] expects: no link, the default
 /// pen, ASCII in all four sets.
+#[cfg(test)]
 fn reset_pen(out: &mut Vec<u8>) {
     out.extend_from_slice(b"\x1b]8;;\x07\x1b[0m\x1b(B\x1b)B\x1b*B\x1b+B");
 }
 
+#[cfg(test)]
 fn cup(out: &mut Vec<u8>, row: i32, column: usize) {
     out.extend_from_slice(format!("\x1b[{};{}H", row + 1, column + 1).as_bytes());
 }
 
+#[cfg(test)]
 fn osc8(out: &mut Vec<u8>, body: &str) {
     out.extend_from_slice(b"\x1b]8;");
     out.extend_from_slice(body.as_bytes());
@@ -678,12 +698,14 @@ fn osc8(out: &mut Vec<u8>, body: &str) {
 
 /// A link's OSC 8 body with its `id` — alacritty's own ids (`N_alacritty`)
 /// included, so the replay gives every cell the same link back.
+#[cfg(test)]
 fn live_link(link: &Hyperlink) -> String {
     format!("id={};{}", link.id(), link.uri())
 }
 
 /// The rows from `top` through the bottom of the screen, with links as they
 /// are and no break after the last row.
+#[cfg(test)]
 fn live_rows(grid: &Grid<TermCell>, top: i32, step: &dyn Fn()) -> Vec<u8> {
     let rows: Vec<Vec<&TermCell>> = (top..=grid.bottommost_line().0)
         .map(|line| grid[Line(line)].into_iter().collect())
@@ -695,6 +717,7 @@ fn live_rows(grid: &Grid<TermCell>, top: i32, step: &dyn Fn()) -> Vec<u8> {
 }
 
 /// The kitty bits of `mode` as a keyboard mode.
+#[cfg(test)]
 fn keyboard_bits(mode: TermMode) -> KeyboardModes {
     KITTY
         .iter()
@@ -709,6 +732,7 @@ fn keyboard_bits(mode: TermMode) -> KeyboardModes {
 /// the entry **under** the popped one, and `mode()` may differ from the top
 /// after `CSI = u`), so a dummy is pushed first. With `kitty_keyboard` off
 /// push and pop return at once and the stack reads empty.
+#[cfg(test)]
 fn probe_keyboard<T: EventListener>(term: &mut Term<T>) -> Vec<KeyboardModes> {
     term.push_keyboard_mode(KeyboardModes::NO_MODE);
     let mut stack: Vec<KeyboardModes> = (0..=KEYBOARD_DEPTH)
@@ -730,6 +754,7 @@ fn probe_keyboard<T: EventListener>(term: &mut Term<T>) -> Vec<KeyboardModes> {
 /// `title` reads the listener's title, which `Title`/`ResetTitle` write. A
 /// pop from an empty stack sends no event, so the sentinel written before
 /// each pop stays — that is the stack's bottom.
+#[cfg(test)]
 fn probe_titles<T: EventListener>(
     term: &mut Term<T>,
     title: &dyn Fn() -> Option<String>,
@@ -752,6 +777,7 @@ fn probe_titles<T: EventListener>(
 
 /// The tab stops — **destructive**: a tab writes into a blank cell it
 /// passes (`put_tab`).
+#[cfg(test)]
 fn probe_tabs<T: EventListener>(term: &mut Term<T>) -> Vec<usize> {
     let last = term.columns().saturating_sub(1);
     let cursor = &mut term.grid_mut().cursor;
@@ -774,6 +800,7 @@ fn probe_tabs<T: EventListener>(term: &mut Term<T>) -> Vec<usize> {
 /// resize resets the scrolling region. Nothing is read after it, so both
 /// histories go first — the resize reflows only the screens, not the
 /// scrollback.
+#[cfg(test)]
 fn probe_last_tab<T: EventListener>(term: &mut Term<T>) -> bool {
     let columns = term.columns();
     let (Ok(cols), Ok(rows)) = (
@@ -800,6 +827,7 @@ fn probe_last_tab<T: EventListener>(term: &mut Term<T>) -> bool {
 /// cursor moved. Under origin mode `goto` clamps into the region, so the
 /// home position is its first row and a goto far below its last one; no row
 /// scrolls.
+#[cfg(test)]
 fn probe_region<T: EventListener>(term: &mut Term<T>) -> (usize, usize) {
     let lines = term.screen_lines() as i32;
     term.set_private_mode(PrivateMode::Named(NamedPrivateMode::Origin));
@@ -812,6 +840,7 @@ fn probe_region<T: EventListener>(term: &mut Term<T>) -> (usize, usize) {
 /// The active character set — **destructive**: it writes into the top-left
 /// cell. One set at a time maps `q` to the line-drawing `─`; the active one
 /// is the one that does.
+#[cfg(test)]
 fn probe_charset<T: EventListener>(term: &mut Term<T>) -> CharsetIndex {
     for (index, _) in DESIGNATORS {
         let cursor = &mut term.grid_mut().cursor;
@@ -830,6 +859,7 @@ fn probe_charset<T: EventListener>(term: &mut Term<T>) -> CharsetIndex {
 /// Whether the application set the cursor style — **destructive**: the
 /// config is replaced. `cursor_style()` answers the application's style or
 /// the config's default; with a different default only the former stays.
+#[cfg(test)]
 fn probe_cursor_style<T: EventListener>(term: &mut Term<T>) -> Option<CursorStyle> {
     let before = term.cursor_style();
     let shape = if before.shape == CursorShape::Block {
@@ -849,6 +879,7 @@ fn probe_cursor_style<T: EventListener>(term: &mut Term<T>) -> Option<CursorStyl
 }
 
 /// One screen as read before the probes: its rows and its two cursors.
+#[cfg(test)]
 struct ScreenShot {
     rows: Vec<u8>,
     cursor: CursorShot,
@@ -856,6 +887,7 @@ struct ScreenShot {
     keyboard: Vec<KeyboardModes>,
 }
 
+#[cfg(test)]
 impl ScreenShot {
     /// Reads the active grid from `top` (the history's top on the primary
     /// screen, `0` on the alternate one) and then probes its keyboard stack.
@@ -875,7 +907,7 @@ impl ScreenShot {
     }
 }
 
-/// The pane's **whole** terminal state as VT bytes (the update handover): a
+/// The pane's **whole** terminal state as VT bytes (the reset's oracle): a
 /// fresh `Term` of the **same size** with at least as much `scrolling_history`
 /// that parses them through [`crate::handler::ClusterHandler`] reads back
 /// every field `Term` shows and every field [`Probed`] lists. Resizing is the
@@ -928,6 +960,7 @@ impl ScreenShot {
 /// sequence invokes them); off the alternate screen its saved cursor is not
 /// carried (the next `?1049h` keeps it, invisible until a `DECRC` without a
 /// `DECSC`).
+#[cfg(test)]
 pub(crate) fn encode_live<T: EventListener>(
     term: &mut Term<T>,
     title: &dyn Fn() -> Option<String>,
@@ -1104,6 +1137,7 @@ pub(crate) fn encode_live<T: EventListener>(
 }
 
 /// `CSI > n u` for each entry, bottom first.
+#[cfg(test)]
 fn push_keyboard(out: &mut Vec<u8>, stack: &[KeyboardModes]) {
     for modes in stack {
         out.extend_from_slice(format!("\x1b[>{}u", modes.bits()).as_bytes());
@@ -1111,6 +1145,7 @@ fn push_keyboard(out: &mut Vec<u8>, stack: &[KeyboardModes]) {
 }
 
 /// OSC 2: the title.
+#[cfg(test)]
 fn osc2(out: &mut Vec<u8>, title: &str) {
     out.extend_from_slice(b"\x1b]2;");
     out.extend_from_slice(title.as_bytes());
@@ -1188,7 +1223,7 @@ const PARAMS_KEEP: usize = 1024;
 /// and alacritty acts on all of it, so no shorter OSC can stand in for a
 /// longer one: past the cap the tail gives the OSC up ([`Seq::OscDropped`]).
 ///
-/// **Known limit:** an OSC that long, cut by a handover, comes back
+/// **Known limit:** an OSC that long, cut in a replay, comes back
 /// **ignored** — the copy or the title it carried is lost, never cut short.
 /// The live parser still grows with it: that buffer is vte's (the
 /// `ClipboardStore` arm in `session.rs` names it).
@@ -1197,8 +1232,11 @@ const OSC_KEEP: usize = APC_KEEP;
 /// The bytes since the parser last stood in its **ground state**: a read
 /// that ended inside a CSI/OSC/DCS or inside one character's UTF-8 left
 /// them with no effect on `Term` yet — vte dispatches only at the final
-/// byte — so the new side puts them **before** the bytes that follow and a
-/// fresh parser picks the sequence up where the old one stood.
+/// byte — so a fresh parser given them **before** the bytes that follow
+/// picks the sequence up where the old one stood. The read path asks only
+/// whether the stream stands inside a sequence (the next read may carry the
+/// rest of a graphics command); the bytes themselves are what the tests hold
+/// to the replay.
 ///
 /// vte does not say where it stands; this follows the
 /// same bytes on the read path. The C0 controls vte **executes** inside an
