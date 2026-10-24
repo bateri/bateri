@@ -29,7 +29,7 @@ dependencies = [
 [[package]]
 name = "alacritty_terminal"
 version = "0.26.0"
-source = "git+https://github.com/bateri/kablo?rev=844be3d24a65f8e09e2fcae46252ffec2ccfef39#844be3d24a65f8e09e2fcae46252ffec2ccfef39"
+source = "git+https://github.com/bateri/kablo?rev=297cc8c6d85118669e9db556965da38eb121ff2a#297cc8c6d85118669e9db556965da38eb121ff2a"
 dependencies = [
  "base64",
  "bitflags",
@@ -605,7 +605,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -890,8 +890,8 @@ dependencies = [
 
 [[package]]
 name = "kablo-proto"
-version = "0.3.0"
-source = "git+https://github.com/bateri/kablo?rev=844be3d24a65f8e09e2fcae46252ffec2ccfef39#844be3d24a65f8e09e2fcae46252ffec2ccfef39"
+version = "0.4.0"
+source = "git+https://github.com/bateri/kablo?rev=297cc8c6d85118669e9db556965da38eb121ff2a#297cc8c6d85118669e9db556965da38eb121ff2a"
 
 [[package]]
 name = "leb128fmt"
@@ -1010,7 +1010,7 @@ version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "536bfad37a309d62069485248eeaba1e8d9853aaf951caaeaed0585a95346f08"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1504,7 +1504,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1831,7 +1831,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 [[package]]
 name = "vte"
 version = "0.15.0"
-source = "git+https://github.com/bateri/kablo?rev=844be3d24a65f8e09e2fcae46252ffec2ccfef39#844be3d24a65f8e09e2fcae46252ffec2ccfef39"
+source = "git+https://github.com/bateri/kablo?rev=297cc8c6d85118669e9db556965da38eb121ff2a#297cc8c6d85118669e9db556965da38eb121ff2a"
 dependencies = [
  "arrayvec",
  "bitflags",
@@ -2365,7 +2365,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
