@@ -154,9 +154,9 @@ impl EventLoopSender {
 }
 
 /// The characters that make the tty signal the program's group and flush its input (`ISIG`):
-/// ⌃C (interrupt) and ⌃\ (quit). The terminal's own settings could name others; these are the
-/// ones the pane writes and the ones a person types.
-const SIGNAL_CHARS: [u8; 2] = [0x03, 0x1c];
+/// ⌃C (interrupt), ⌃\ (quit) and ⌃Z (suspend). The terminal's own settings could name others;
+/// these are the ones the pane writes and the ones a person types.
+const SIGNAL_CHARS: [u8; 3] = [0x03, 0x1c, 0x1a];
 
 /// Which queue the buffer being written came from.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -308,6 +308,24 @@ impl State {
         self.dropped += dropped;
     }
 
+    /// The bytes that wait for the tty: what is left of the buffer under way and everything
+    /// queued behind it, keys and the module's frames alike.
+    fn waiting(&self) -> usize {
+        self.writing
+            .as_ref()
+            .map_or(0, |w| w.remaining_bytes().len())
+            + self
+                .write_list
+                .iter()
+                .map(|bytes| bytes.len())
+                .sum::<usize>()
+            + self
+                .module_list
+                .iter()
+                .map(|(_, frame)| frame.len())
+                .sum::<usize>()
+    }
+
     #[inline]
     fn take_current(&mut self) -> Option<Writing> {
         self.writing.take()
@@ -375,6 +393,9 @@ pub(crate) struct EventLoop<T: tty::EventedPty, U: EventListener> {
     /// Asked before the module's words are written: whether the program is still the one that
     /// reads the tty ([`EventLoop::module_check`]); `None`: it is taken to be.
     module_check: Option<Box<dyn Fn() -> bool + Send>>,
+    /// Told how many bytes wait for the tty after a write it could not finish
+    /// ([`EventLoop::backlog`]); `None`: nobody is.
+    backlog: Option<Box<dyn Fn(usize) + Send>>,
     /// The child has exited and the loop reads what is left: the PTY is read to its end
     /// whatever the module has taken, because there is no program left to slow down.
     draining: bool,
@@ -408,6 +429,7 @@ where
             graphics: None,
             flow: None,
             module_check: None,
+            backlog: None,
             draining: false,
             silence: None,
         })
@@ -432,6 +454,22 @@ where
     /// and the shell that took the tty back would otherwise be fed what the page goes on saying.
     pub(crate) fn module_check(&mut self, check: impl Fn() -> bool + Send + 'static) {
         self.module_check = Some(Box::new(check));
+    }
+
+    /// Fits who is told what waits for the tty after a write that could not be finished: the
+    /// bytes of everything the loop has been asked to write and has not (the key queue, the
+    /// frame under way and the module's frames), the tty not taking them because the program
+    /// does not read. A view whose program does not read costs the application memory without
+    /// bound otherwise, and what is told is how it finds out.
+    pub(crate) fn backlog(&mut self, told: impl Fn(usize) + Send + 'static) {
+        self.backlog = Some(Box::new(told));
+    }
+
+    /// After a write the tty did not take whole: how much is left for it, to whoever asked.
+    fn tell_backlog(&self, state: &State) {
+        if let Some(told) = &self.backlog {
+            told(state.waiting());
+        }
     }
 
     /// Whether the module's words may go to the tty now.
@@ -704,6 +742,7 @@ where
                 match self.pty.writer().write(current.remaining_bytes()) {
                     Ok(0) => {
                         state.set_current(Some(current));
+                        self.tell_backlog(state);
                         break 'write_many;
                     }
                     Ok(n) => {
@@ -722,7 +761,10 @@ where
                     Err(err) => {
                         state.set_current(Some(current));
                         match err.kind() {
-                            ErrorKind::Interrupted | ErrorKind::WouldBlock => break 'write_many,
+                            ErrorKind::Interrupted | ErrorKind::WouldBlock => {
+                                self.tell_backlog(state);
+                                break 'write_many;
+                            }
                             _ => return Err(err),
                         }
                     }
@@ -1454,41 +1496,96 @@ mod tests {
 
     /// A signal character goes first: the frame under way is given up where it stands, the ones
     /// that wait are dropped, and not a byte of the module's follows — the character flushes the
-    /// tty's input, and what comes after it is read by whatever reads the tty next.
+    /// tty's input, and what comes after it is read by whatever reads the tty next. All three
+    /// characters of the tty are the program's (specification §4.8): ⌃C, ⌃\ and ⌃Z.
     #[test]
     fn a_signal_character_is_written_ahead_of_the_modules_words_and_none_follows_it() {
+        for signal in [0x03u8, 0x1c, 0x1a] {
+            let (mut event_loop, sender, flow, room, epoch) = laned_loop();
+            let mut state = State::default();
+            sender
+                .send(Msg::Module {
+                    epoch,
+                    bytes: frames(100, b"abc"),
+                })
+                .unwrap();
+            room.give(150);
+            round(&mut event_loop, &mut state);
+            // The sender shuts the gate before it queues the character.
+            sender.send(Msg::Input(Cow::Owned(vec![signal]))).unwrap();
+            assert_eq!(flow.module_ticket(), None, "{signal:#04x}");
+            // Words the module still says, through a gate it has not heard shut, are dropped too.
+            sender
+                .send(Msg::Module {
+                    epoch,
+                    bytes: frames(100, b"d"),
+                })
+                .unwrap();
+            room.give(usize::MAX);
+            round(&mut event_loop, &mut state);
+            round(&mut event_loop, &mut state);
+            let taken = room.taken();
+            let mut expected = frames(100, b"a");
+            expected.extend_from_slice(&frames(100, b"b")[..50]);
+            expected.push(signal);
+            assert_eq!(
+                taken, expected,
+                "the character {signal:#04x}, and nothing of the module's after it"
+            );
+            assert_eq!(
+                flow.pending(),
+                0,
+                "what was given up is not owed to anyone ({signal:#04x})"
+            );
+        }
+    }
+
+    /// A key that is not a signal character is a key: the gate stays open for the module's
+    /// words, ⌃D and the letters among them.
+    #[test]
+    fn a_character_that_is_not_the_ttys_signal_leaves_the_modules_words_alone() {
         let (mut event_loop, sender, flow, room, epoch) = laned_loop();
         let mut state = State::default();
+        for key in [0x04u8, b'z', 0x1b, 0x19, 0x1d] {
+            sender.send(Msg::Input(Cow::Owned(vec![key]))).unwrap();
+            assert_eq!(flow.module_ticket(), Some(epoch), "{key:#04x}");
+        }
+        round(&mut event_loop, &mut state);
+        assert_eq!(room.taken(), [0x04, b'z', 0x1b, 0x19, 0x1d]);
+    }
+
+    /// Whoever asked is told how much waits for the tty after a write the tty did not take whole —
+    /// the key queue, the frame under way and the module's frames together — and after no other
+    /// (specification §4.8).
+    #[test]
+    fn what_waits_for_the_tty_is_told_after_each_write_that_was_held_back() {
+        let (mut event_loop, sender, _flow, room, epoch) = laned_loop();
+        let told = Arc::new(Mutex::new(Vec::new()));
+        event_loop.backlog({
+            let told = Arc::clone(&told);
+            move |waiting| told.lock().unwrap().push(waiting)
+        });
+        let mut state = State::default();
+        // Three frames of 100 bytes and a key; room for 130 of the 301: held back once.
+        sender.send(Msg::Input(Cow::Borrowed(b"k"))).unwrap();
         sender
             .send(Msg::Module {
                 epoch,
                 bytes: frames(100, b"abc"),
             })
             .unwrap();
-        room.give(150);
+        room.give(130);
         round(&mut event_loop, &mut state);
-        // ⌃C: the sender shuts the gate before it queues the character.
-        sender.send(Msg::Input(Cow::Borrowed(b"\x03"))).unwrap();
-        assert_eq!(flow.module_ticket(), None);
-        // Words the module still says, through a gate it has not heard shut, are dropped too.
-        sender
-            .send(Msg::Module {
-                epoch,
-                bytes: frames(100, b"d"),
-            })
-            .unwrap();
+        assert_eq!(*told.lock().unwrap(), [301 - 130]);
+        // No more room: held back again, the same amount waiting.
+        round(&mut event_loop, &mut state);
+        assert_eq!(*told.lock().unwrap(), [171, 171]);
+        // Room for the rest: written whole, nobody is told anything.
         room.give(usize::MAX);
         round(&mut event_loop, &mut state);
-        round(&mut event_loop, &mut state);
-        let taken = room.taken();
-        let mut expected = frames(100, b"a");
-        expected.extend_from_slice(&frames(100, b"b")[..50]);
-        expected.push(0x03);
-        assert_eq!(
-            taken, expected,
-            "the character, and nothing of the module's after it"
-        );
-        assert_eq!(flow.pending(), 0, "what was given up is not owed to anyone");
+        assert_eq!(*told.lock().unwrap(), [171, 171]);
+        assert_eq!(room.taken().len(), 301);
+        assert_eq!(state.waiting(), 0);
     }
 
     /// Any other end of the view: the frame under way is finished, so that the program is not

@@ -68,7 +68,7 @@ pub use ::pencere_host::sandbox::{
     Consent, Declared, Directive, Domain, Grant, Locality, Permission,
 };
 pub use ::pencere_host::session::{
-    Action, MAX_VIEW_MESSAGE, Size, State, ViewKind, ViewStart, WEB_BRIDGE_VERSION,
+    Action, MAX_BACKLOG, MAX_VIEW_MESSAGE, Size, State, ViewKind, ViewStart, WEB_BRIDGE_VERSION,
 };
 
 use crate::color::{Theme, srgb_bytes};
@@ -609,6 +609,9 @@ pub(crate) fn view_theme(theme: &Theme, font_mono: &str) -> ViewTheme {
     let [r, g, b] = theme.separator_srgb();
     view.dim = Some(role(theme.dim));
     view.accent = Some(role(theme.accent));
+    // The theme has a cursor role of its own; a page told none would be given the accent, the
+    // colour of the running command's stripe and not the caret's.
+    view.cursor = Some(role(theme.cursor));
     view.border = Some(Rgb(r, g, b));
     view.success = Some(role(theme.success));
     view.error = Some(role(theme.error));
@@ -982,6 +985,23 @@ impl Desk {
     /// Whether a module that was told its program cannot take more may say again; clears it.
     pub(crate) fn take_room(&self) -> bool {
         mem::take(&mut lock(&self.slots).room)
+    }
+
+    /// The writer could not finish a write: `waiting` bytes of what it was asked to write wait
+    /// for the tty (specification §4.8). Over [`MAX_BACKLOG`] the view is closed as a failure
+    /// and the program is told `closed`; the end of the view takes the module's frames that
+    /// have not been begun off the writer's queue ([`Flow::end`]) before the `closed` goes, and
+    /// the frame under way is finished, so that the program is not left half a frame — a
+    /// signal character is what gives that one up, and none is written here.
+    ///
+    /// **A queue under the bound costs no lock**: this is called from the loop that reads and
+    /// writes the PTY, and the conversation's lock is held for as long as a message takes to
+    /// handle (a file's digest), which that loop does not wait for.
+    pub(crate) fn backlog(&self, waiting: usize, write: impl Fn(Vec<u8>)) {
+        if waiting <= MAX_BACKLOG {
+            return;
+        }
+        self.apply(write, |conversation| conversation.backlog(waiting));
     }
 
     /// The program has read enough for a module that was told *full* to say more

@@ -73,6 +73,25 @@ of every installed copy. A version without a section is not released.
   they were, except that your answer is now remembered for the program run from that place
   (the file it started from, or the script an interpreter runs), so a second program with the
   same name asks again.
+- **⌃\ and ⌃Z reach the program over a view, as ⌃C does.** While a program's view is open, of
+  either kind, the terminal's quit and suspend keys go to the program and not to the view,
+  ahead of anything the view was saying, and nothing the view said follows them into the
+  shell. A program that stops on ⌃Z gives the terminal back and takes it again when it is
+  continued.
+- **A program's web view stays on the page it opened.** Once the view's first page has
+  loaded, nothing takes it anywhere else: a link, a script changing the address, a form —
+  not even another file of the program's own bundle — and a form cannot send the page to
+  any address. The page keeps the policy that says what it may reach as a header on every
+  file it is given. The view still opens addresses in your browser, after you say yes.
+- **A view whose program stops reading is closed.** When more than 16 MiB of what a view said
+  is waiting for a program that does not read, the view ends and the program is told. A view
+  that bateri draws is held back long before that, as it was; this is the bound under a
+  web view, which has no way to wait.
+- **A view written against another version of the interface says which.** The program is
+  told both versions (the one the view was written against and the one bateri opens) when it
+  is closed for it. A view bateri draws names the colour of rules and borders `border`, as a
+  web view's page does (it was `line`); a web view's page is told the cursor's colour in
+  its colours; `raised` levels above 8 draw as 8.
 - **Programs in local tabs outlive an update, a kept quit and a crash the way programs on servers do.**
   Each tab's shell now runs in a terminal kablo keeps on this Mac, and bateri shows it: an
   update, ⌘Q under `keep_running = "quit"` and a crash leave the programs running, and the

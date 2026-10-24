@@ -424,17 +424,39 @@ impl Page {
         }
     }
 
-    /// Whether the web view may navigate to `url`: the shell, once, as the top
-    /// document; in a frame, the view's own origin (and a blank frame, which has
-    /// no origin to leave). Nothing else, whoever asks: a link, a script, a form,
-    /// a redirect.
-    pub(super) fn allows(&self, url: &str, main_frame: bool, shell_loaded: bool) -> bool {
+    /// Whether the web view may navigate to `url`, and the record of it in `loads`: the shell,
+    /// once, as the top document; in the view's frame, the entry of the view, once. **Nothing
+    /// else, whoever asks** (specification §12.3): not a link, a change of `location`, a form,
+    /// a redirect or a script that opens a window, whatever it names — another file of the
+    /// bundle included. A frame that has taken its entry is navigated by no one; a blank frame
+    /// (it has no origin to leave) is let through only before it.
+    pub(super) fn allows(&self, url: &str, main_frame: bool, loads: &mut Loads) -> bool {
         if main_frame {
-            return !shell_loaded && route(&self.instance, url) == Route::Shell;
+            if loads.shell || route(&self.instance, url) != Route::Shell {
+                return false;
+            }
+            loads.shell = true;
+            return true;
         }
-        matches!(route(&self.instance, url), Route::View(_))
-            || url.eq_ignore_ascii_case("about:blank")
+        if loads.entry {
+            return false;
+        }
+        if matches!(route(&self.instance, url), Route::View(_)) {
+            loads.entry = true;
+            return true;
+        }
+        url.eq_ignore_ascii_case("about:blank")
     }
+}
+
+/// What the web view has been let navigate to so far: the shell page as the top document and
+/// the entry of the view in its frame, each once ([`Page::allows`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct Loads {
+    /// The shell was asked for as the top document.
+    pub(super) shell: bool,
+    /// The view's frame was let load its entry.
+    pub(super) entry: bool,
 }
 
 /// The host of a view's origin, from 16 random bytes: lowercase hex, prefixed so

@@ -453,7 +453,7 @@ impl Containers {
             .p(8.0)
             .rounded(8.0)
             .bg(Role::Background.alpha(0.55))
-            .border(1.0, Role::Line)
+            .border(1.0, Role::Border)
             .child(
                 div()
                     .row()
@@ -489,7 +489,7 @@ impl Containers {
                     .child(spacer())
                     .child(engine),
             )
-            .child(div().w(1.0).bg(Role::Line))
+            .child(div().w(1.0).bg(Role::Border))
     }
 
     // --- The section's top -----------------------------------------------------------------
@@ -542,7 +542,7 @@ impl Containers {
             .px(8.0)
             .rounded(6.0)
             .bg(Role::Raised(1))
-            .border(1.0, Role::Line)
+            .border(1.0, Role::Border)
             .press(SEARCH)
             .child(div().id(FIELD).text_field().grow(1.0).min_w(0.0).h(18.0))
             .child(kbd("/", 10.5));
@@ -565,7 +565,7 @@ impl Containers {
                     Role::Dim
                 });
             if active {
-                cell = cell.bg(Role::Raised(2)).border(1.0, Role::Line).shadow(
+                cell = cell.bg(Role::Raised(2)).border(1.0, Role::Border).shadow(
                     0.0,
                     1.0,
                     2.0,
@@ -584,7 +584,7 @@ impl Containers {
             .gap(1.0)
             .rounded(8.0)
             .bg(Role::Raised(1))
-            .border(1.0, Role::Line)
+            .border(1.0, Role::Border)
             .no_shrink()
             .child(option(Status::All, counts.all, None))
             .child(option(Status::Running, counts.running, None))
@@ -695,7 +695,7 @@ impl Containers {
             .min_h(0.0)
             .clip()
             .child(head)
-            .child(div().h(1.0).no_shrink().bg(Role::Line.alpha(0.6)))
+            .child(div().h(1.0).no_shrink().bg(Role::Border.alpha(0.6)))
             .child(body)
     }
 
@@ -1020,7 +1020,7 @@ fn kbd(label: &str, size: f32) -> Element {
         .px(4.0)
         .rounded(4.0)
         .bg(Role::Raised(2))
-        .border(1.0, Role::Line)
+        .border(1.0, Role::Border)
         .no_shrink()
         .child(text(label).text_size(size).color(Role::Dim))
 }
@@ -1079,7 +1079,7 @@ fn status_line(width: f32) -> Element {
         .col()
         .no_shrink()
         .bg(Role::Raised(1))
-        .child(div().h(1.0).bg(Role::Line))
+        .child(div().h(1.0).bg(Role::Border))
         .child(
             div()
                 .row()

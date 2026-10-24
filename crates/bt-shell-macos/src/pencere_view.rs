@@ -22,17 +22,21 @@
 //! is dropped.
 //!
 //! **What the web view is refused**, in one place (the navigation and UI
-//! delegates, [`Bridge`]): navigating anywhere but the one shell load and the
-//! view's own origin in its frame (`serve::Page::allows`); a new window;
+//! delegates, [`Bridge`]): navigating anywhere but the one shell load and the one load
+//! of the view's entry in its frame — after it, every navigation, a link to another file of the
+//! bundle and a form included (`serve::Page::allows`, specification §12.3); a new window;
 //! a file chooser; the media capture the permission policy would not have
 //! stopped; the context menu (it has Reload, which would load the shell again).
 //! A view's web content process that dies closes the view: nothing is left to
 //! answer its teardown.
 //!
 //! **The keyboard is the view's**, with two things the application keeps (the
-//! protocol's §11.3). ⌃C goes to the program as the byte 0x03, wherever the focus
-//! is in the view — the person's one way out of a view that has stopped answering.
-//! And the application's own shortcuts — a tab, a window, a split, the palette,
+//! protocol's §11.3). The tty's signal characters go to the program as the bytes the tty is
+//! set to take for them — ⌃C (0x03), ⌃\ (0x1c) and ⌃Z (0x1a) — wherever the focus is in
+//! the view: ⌃C is the person's one way out of a view that has stopped answering, and the
+//! other two are the program's as for any program (the stop of ⌃Z is the program's to
+//! answer by giving the terminal back). They are written ahead of the view's words, which
+//! the core drops ([`bt_core::Session::write`]). And the application's own shortcuts — a tab, a window, a split, the palette,
 //! settings, quitting — never reach the view: `performKeyEquivalent:` asks the pane's
 //! owner whether the key is one ([`bt_shell_common::shortcuts::Resolved::kept_from_view`],
 //! read from the shortcut table and the person's `[keys]`, so there is no second list of
@@ -114,6 +118,12 @@ pub(crate) use wait::Waits;
 /// The byte a terminal writes for ⌃C: what the tty turns into the interrupt.
 pub(crate) const INTERRUPT: u8 = 0x03;
 
+/// The byte a terminal writes for ⌃\: what the tty turns into SIGQUIT.
+pub(crate) const QUIT: u8 = 0x1c;
+
+/// The byte a terminal writes for ⌃Z: what the tty turns into SIGTSTP.
+pub(crate) const SUSPEND: u8 = 0x1a;
+
 /// The shelf of the files programs' bundles are made of, for every pane of the
 /// process: on disk under the bundle's own cache folder — so a development build
 /// and the installed application keep separate ones — and in memory when the
@@ -150,16 +160,24 @@ pub(crate) fn time_zone_name() -> Option<String> {
     Some(NSTimeZone::localTimeZone().name().to_string())
 }
 
-/// Whether a key is ⌃C and only ⌃C: Control held and no other modifier, and the
-/// character it makes is the interrupt (`characters` gives it with the modifiers
-/// applied, as [`crate::view::BateriView`] reads it).
-pub(crate) fn is_interrupt(flags: NSEventModifierFlags, characters: Option<&str>) -> bool {
+/// The tty's signal character a key is, and only that: Control held and no other modifier, and
+/// the character it makes is ⌃C, ⌃\ or ⌃Z (`characters` gives it with the modifiers applied, as
+/// [`crate::view::BateriView`] reads it). The byte is the one the program is written.
+pub(crate) fn signal_of(flags: NSEventModifierFlags, characters: Option<&str>) -> Option<u8> {
     let held = flags
         & (NSEventModifierFlags::Control
             | NSEventModifierFlags::Command
             | NSEventModifierFlags::Option
             | NSEventModifierFlags::Shift);
-    held == NSEventModifierFlags::Control && characters == Some("\u{3}")
+    if held != NSEventModifierFlags::Control {
+        return None;
+    }
+    match characters {
+        Some("\u{3}") => Some(INTERRUPT),
+        Some("\u{1c}") => Some(QUIT),
+        Some("\u{1a}") => Some(SUSPEND),
+        _ => None,
+    }
 }
 
 /// The modifiers of `flags` among the four a shortcut uses.
@@ -260,15 +278,16 @@ define_class!(
     unsafe impl NSObjectProtocol for PencereView {}
 
     impl PencereView {
-        /// ⌃C goes to the program; every other key is the view's. Before the
-        /// web view's own handling, which would give the keystroke to the page.
+        /// The tty's signal characters (⌃C, ⌃\, ⌃Z) go to the program; every other key is
+        /// the view's. Before the web view's own handling, which would give the keystroke to
+        /// the page.
         #[unsafe(method(keyDown:))]
         fn key_down(&self, event: &NSEvent) {
             let characters = event.characters().map(|text| text.to_string());
-            if is_interrupt(event.modifierFlags(), characters.as_deref())
+            if let Some(character) = signal_of(event.modifierFlags(), characters.as_deref())
                 && let Some(pane) = self.pane()
             {
-                pane.interrupt_program();
+                pane.signal_program(character);
                 return;
             }
             // SAFETY: `NSResponder`'s `keyDown:`, the web view's own.
@@ -384,8 +403,9 @@ struct BridgeIvars {
     /// What is served and what may be loaded ([`serve::Page`]); shared with the file queue,
     /// which makes the answer for a file.
     page: Arc<serve::Page>,
-    /// The shell page was asked for as the top document: it is loaded once.
-    shell_loaded: std::cell::Cell<bool>,
+    /// What the web view has been let navigate to: the shell once, and the view's entry once
+    /// in its frame, and no navigation after ([`serve::Page::allows`]).
+    loads: std::cell::Cell<serve::Loads>,
     /// The tab card's picture of the view, shared with the host: the bridge takes the first
     /// one when the shell has loaded ([`still::first`]).
     shot: still::Shared,
@@ -451,8 +471,9 @@ define_class!(
     }
 
     unsafe impl WKNavigationDelegate for Bridge {
-        /// Every navigation of the web view is asked here: the shell once, the
-        /// view's own origin in its frame, and nothing else.
+        /// Every navigation of the web view is asked here: the shell once, the entry of the
+        /// view in its frame once, and nothing else (specification §12.3: after the entry has
+        /// loaded, every navigation is cancelled, whatever starts it).
         #[unsafe(method(webView:decidePolicyForNavigationAction:decisionHandler:))]
         fn decide(
             &self,
@@ -522,7 +543,7 @@ impl Bridge {
         let this = Self::alloc(mtm).set_ivars(BridgeIvars {
             session,
             page: Arc::new(page),
-            shell_loaded: std::cell::Cell::new(false),
+            loads: std::cell::Cell::new(serve::Loads::default()),
             shot,
         });
         // SAFETY: `NSObject`'s `init`.
@@ -636,10 +657,9 @@ impl Bridge {
         // SAFETY: a plain read.
         let top = unsafe { target.isMainFrame() };
         let ivars = self.ivars();
-        let allowed = ivars.page.allows(&url, top, ivars.shell_loaded.get());
-        if allowed && top {
-            ivars.shell_loaded.set(true);
-        }
+        let mut loads = ivars.loads.get();
+        let allowed = ivars.page.allows(&url, top, &mut loads);
+        ivars.loads.set(loads);
         allowed
     }
 }

@@ -53,9 +53,16 @@ use pencere_view::{
     Size, Source,
 };
 
+/// The greatest level of `raised` that is drawn (the kit's specification, §3.1): the interface
+/// carries a byte and a page may say 255, and a host treats a level above this as this one — a
+/// page that says more gets the same surface, not a tone that runs out of the theme's room
+/// between its ground and its foreground.
+pub const MAX_RAISED: u8 = 8;
+
 /// What `tone` is in `theme`: the nine roles are the theme's own, the sixteen colours of the
 /// ANSI palette and the selection are the ones the grid draws, and the rest are the values it
-/// derives from them (surfaces a step above the ground, the hairline, the shadow's colour).
+/// derives from them (surfaces a step above the ground, up to [`MAX_RAISED`] of them, the
+/// hairline, the shadow's colour).
 pub fn tone_linear(theme: &Theme, tone: Role) -> LinearRgba {
     match tone {
         Role::Background => theme.background_linear(),
@@ -67,9 +74,9 @@ pub fn tone_linear(theme: &Theme, tone: Role) -> LinearRgba {
         Role::Error => theme.error_linear(),
         Role::Info => theme.info_linear(),
         Role::Warning => theme.warning_linear(),
-        Role::Raised(steps) => theme.raised_linear(steps),
+        Role::Raised(steps) => theme.raised_linear(steps.min(MAX_RAISED)),
         Role::Quiet => theme.quiet_linear(),
-        Role::Line => theme.separator_linear(),
+        Role::Border => theme.separator_linear(),
         Role::Shadow => theme.dock_shadow_linear(),
         Role::Selection => theme.selection_linear(),
         // The sixteen of the palette, by their place in it; a tone that is none of the others
@@ -709,8 +716,21 @@ mod tests {
             assert_eq!(tone_linear(&theme, Role::Info), theme.info_linear());
             assert_eq!(tone_linear(&theme, Role::Warning), theme.warning_linear());
             assert_eq!(tone_linear(&theme, Role::Raised(2)), theme.raised_linear(2));
+            // A level above the greatest is the greatest, up to the byte the interface carries.
+            for level in [MAX_RAISED, MAX_RAISED + 1, 100, u8::MAX] {
+                assert_eq!(
+                    tone_linear(&theme, Role::Raised(level)),
+                    theme.raised_linear(MAX_RAISED),
+                    "raised({level})"
+                );
+            }
+            assert_ne!(
+                tone_linear(&theme, Role::Raised(1)),
+                tone_linear(&theme, Role::Raised(MAX_RAISED)),
+                "the levels below it are their own"
+            );
             assert_eq!(tone_linear(&theme, Role::Quiet), theme.quiet_linear());
-            assert_eq!(tone_linear(&theme, Role::Line), theme.separator_linear());
+            assert_eq!(tone_linear(&theme, Role::Border), theme.separator_linear());
             assert_eq!(
                 tone_linear(&theme, Role::Shadow),
                 theme.dock_shadow_linear()
@@ -997,7 +1017,7 @@ mod tests {
             fill: Some(Role::Accent.alpha(0.5)),
             border: Some(Border {
                 width: 2.0,
-                color: Role::Line.solid(),
+                color: Role::Border.solid(),
             }),
             shadow: Some(Shadow {
                 dx: 0.0,
@@ -1011,7 +1031,7 @@ mod tests {
             .radii([1.0, 2.0, 3.0, 4.0])
             .clip(UiRect::new(0.0, 32.0, 100.0, 200.0))
             .fill(resolve(&theme, Role::Accent.alpha(0.5)))
-            .border(2.0, resolve(&theme, Role::Line.solid()))
+            .border(2.0, resolve(&theme, Role::Border.solid()))
             .shadow(0.0, 3.0, 6.0, resolve(&theme, Role::Shadow.alpha(0.4)));
         assert_eq!(quad(&theme, &drawn, (0.0, 32.0)), expected);
     }

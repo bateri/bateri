@@ -5602,7 +5602,8 @@ impl TerminalPane {
 
     /// A key while a page of the kit's is up: ⌃C closes a demo and goes to the program of a
     /// program's view (which ends, and the view with it — the same rule as a web view's, the
-    /// strip's Quit ⌃C), Esc closes the gauge page, and the page reads the rest (⌘ keys are
+    /// strip's Quit ⌃C), as do ⌃\ and ⌃Z (the tty's other signal characters, the program's
+    /// whatever its view shows), Esc closes the gauge page, and the page reads the rest (⌘ keys are
     /// the menu's: its content items are grey, so a key that reaches here is nobody's and is
     /// swallowed). Nothing reaches the hidden terminal. `true` when a page is up and took the
     /// key.
@@ -5612,13 +5613,21 @@ impl TerminalPane {
         }
         let characters = event.characters().map(|text| text.to_string());
         let flags = event.modifierFlags();
-        if pencere_view::is_interrupt(flags, characters.as_deref()) {
-            if self.program_page_up() {
-                self.interrupt_program();
-            } else {
-                self.take_page_down();
+        match pencere_view::signal_of(flags, characters.as_deref()) {
+            Some(pencere_view::INTERRUPT) => {
+                if self.program_page_up() {
+                    self.interrupt_program();
+                } else {
+                    self.take_page_down();
+                }
+                return true;
             }
-            return true;
+            // A demo page has no program behind it for them to reach: they are nobody's.
+            Some(character) if self.program_page_up() => {
+                self.signal_program(character);
+                return true;
+            }
+            _ => {}
         }
         match self.page_handle() {
             None => {
@@ -6299,15 +6308,21 @@ impl TerminalPane {
         }
     }
 
-    /// ⌃C in the view: the interrupt reaches the program, under the same rule as the
-    /// terminal's keys ([`TerminalPane::hold_input`]: a pane waiting for its
-    /// connection holds it).
+    /// ⌃C in the view: the interrupt reaches the program (the strip's "Quit ⌃C" is this).
     pub(crate) fn interrupt_program(&self) {
+        self.signal_program(pencere_view::INTERRUPT);
+    }
+
+    /// A signal character of the tty (⌃C, ⌃\, ⌃Z) in the view: it reaches the program under
+    /// the same rule as the terminal's keys ([`TerminalPane::hold_input`]: a pane waiting for
+    /// its connection holds it). The session writes it ahead of the view's words and drops the
+    /// ones that wait, as the protocol asks (§4.8).
+    pub(crate) fn signal_program(&self, character: u8) {
         if self.hold_input(false) {
             return;
         }
         if let Some(session) = self.session() {
-            session.write(&[pencere_view::INTERRUPT]);
+            session.write(&[character]);
         }
     }
 }
@@ -7649,6 +7664,7 @@ mod tests {
         );
         let key = body("    pub(crate) fn page_key(");
         assert!(key.contains("self.interrupt_program()"), "{key}");
+        assert!(key.contains("self.signal_program(character)"), "{key}");
         let strip = include_str!("native_page.rs");
         let at = strip.find("fn program_strip(").expect("program_strip");
         assert!(strip[at..at + 600].contains("sel!(quitProgram:)"));

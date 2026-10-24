@@ -5740,6 +5740,19 @@ impl Session {
                     .unwrap_or(true)
             }
         });
+        // …and tells what waits for the tty whenever a write could not be finished, so that a
+        // view whose program does not read is closed instead of costing memory without bound.
+        event_loop.backlog({
+            let adapter = Arc::downgrade(&adapter.0);
+            move |waiting| {
+                if let Some(inner) = adapter.upgrade() {
+                    let adapter = Adapter(inner);
+                    if let Some(desk) = &adapter.0.desk {
+                        desk.backlog(waiting, |bytes| adapter.input(bytes));
+                    }
+                }
+            }
+        });
         let sender = event_loop.channel();
         // The channel is born only here; since the adapter's copies share the
         // same body a single `set` binds them all.

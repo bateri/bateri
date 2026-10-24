@@ -699,6 +699,42 @@ mod tests {
         assert_eq!(handle.drain(&mut |_, _| {}).ended, None);
     }
 
+    /// Specification §5.4: a component written against another version of the interface than
+    /// the one the terminal opens cannot run, and its page ends in words that name both versions
+    /// — those words are what the pane hands to the session for the program to read.
+    #[test]
+    fn a_component_of_another_interface_ends_in_words_that_name_both_versions() {
+        // `(component (instance $page) (export "pencere:view/page@0.5.0" (instance $page)))`,
+        // in the binary form: an empty instance, exported under the name the interface had.
+        let name = b"pencere:view/page@0.5.0";
+        let mut old = vec![0x00, 0x61, 0x73, 0x6d, 0x0d, 0x00, 0x01, 0x00];
+        old.extend_from_slice(&[0x05, 0x03, 0x01, 0x01, 0x00]);
+        old.extend_from_slice(&[0x0b, 6 + u8::try_from(name.len()).unwrap(), 0x01, 0x00]);
+        old.push(u8::try_from(name.len()).unwrap());
+        old.extend_from_slice(name);
+        old.extend_from_slice(&[0x05, 0x00, 0x00]);
+        let (told, woken) = channel();
+        let told = std::sync::Mutex::new(told);
+        let (_page, handle) = module_page(
+            old,
+            ModuleLimits::default(),
+            None,
+            32.0,
+            None,
+            None,
+            move || {
+                let _ = told.lock().unwrap().send(());
+            },
+        );
+        assert!(wait(&woken));
+        let why = handle.drain(&mut |_, _| {}).ended.expect("a reason");
+        assert!(
+            why.contains("written against `pencere:view@0.5.0`"),
+            "{why}"
+        );
+        assert!(why.contains("opens `pencere:view@1.0.0`"), "{why}");
+    }
+
     /// A script that makes an error ends its page with the error and the line it is on, which
     /// is what the program is told, once.
     #[test]

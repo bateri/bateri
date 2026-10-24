@@ -421,8 +421,15 @@ fn a_hello_is_answered_with_a_welcome_and_a_token() {
     );
     assert_eq!(token_of(&written[0]).len(), 22, "16 bytes in base64url");
     assert!(written[0].payload.contains("\"bateri-test\""));
+    // Every view arrives as a bundle, so there is no feature to list for it (§5.2): the host
+    // lists what it may or may not do, and closing at the program's request is that.
     assert!(
-        written[0].payload.contains("\"bundle\""),
+        written[0].payload.contains(r#""features":["dismiss"]"#),
+        "{}",
+        written[0].payload
+    );
+    assert!(
+        !written[0].payload.contains("bundle"),
         "{}",
         written[0].payload
     );
@@ -995,6 +1002,9 @@ fn the_view_is_given_the_themes_own_values_and_the_same_dark_or_light() {
         assert_eq!(view.foreground, rgb(theme.foreground), "{name}");
         assert_eq!(view.dim, Some(rgb(theme.dim)), "{name}");
         assert_eq!(view.accent, Some(rgb(theme.accent)), "{name}");
+        // The caret's colour is the theme's `cursor`, not the accent a page would be given
+        // when told none: the two are separate roles of the theme.
+        assert_eq!(view.cursor, Some(rgb(theme.cursor)), "{name}");
         assert_eq!(view.success, Some(rgb(theme.success)), "{name}");
         assert_eq!(view.error, Some(rgb(theme.error)), "{name}");
         assert_eq!(view.warning, Some(rgb(theme.warning)), "{name}");
@@ -1464,7 +1474,7 @@ fn open_a_module_view() -> (Pane, String, Arc<CountingWake>) {
     assert!(
         welcome[0]
             .payload
-            .contains(r#""features":["bundle","dismiss"],"views":[{"kind":"wasm","versions":["1.0"]},{"kind":"web","versions":["1.0"]}]"#),
+            .contains(r#""features":["dismiss"],"views":[{"kind":"wasm","versions":["1.0"]},{"kind":"web","versions":["1.0"]}]"#),
         "{}",
         welcome[0].payload
     );
@@ -1783,6 +1793,98 @@ fn a_message_over_the_limit_ends_the_view_and_the_program_is_told_on_the_keys_la
     assert!(!wrote, "nothing of the module's was written");
     assert!(desk.take_views().contains(&Action::DestroyView));
     told(&lock(&keys), &lock(&lane));
+}
+
+/// Specification §4.8: more than 16 MiB of a view's words waiting for the tty closes the view
+/// as a failure. At the bound is not over it; the words that have not been begun are dropped
+/// (the gate is the end of a view's), the frame under way is finished, and the program is told
+/// on the keys lane, behind none of them.
+#[test]
+fn a_view_with_more_waiting_for_the_tty_than_the_bound_is_closed_as_a_failure() {
+    let told = |wrote: &[Message]| {
+        assert_eq!(wrote.len(), 1, "{wrote:?}");
+        assert_eq!(wrote[0].kind, "closed");
+        assert!(
+            wrote[0].payload.contains(r#""reason":"error""#),
+            "{}",
+            wrote[0].payload
+        );
+        assert!(
+            wrote[0].payload.contains(r#""code":"view""#),
+            "{}",
+            wrote[0].payload
+        );
+    };
+    for web in [true, false] {
+        let pane = if web {
+            let (rig, _, _) = Rig::new(true);
+            let mut pane = Pane::new(rig);
+            open_a_view(&mut pane);
+            pane
+        } else {
+            open_a_module_view().0
+        };
+        let rig = Arc::clone(&pane.rig);
+        let desk = rig.desk.as_ref().expect("a desk");
+        desk.take_views();
+        let epoch = desk
+            .flow
+            .module_ticket()
+            .expect("the view's words are taken");
+
+        // Nothing waiting, and exactly the bound: the view stays.
+        desk.backlog(0, pane.rig.write());
+        desk.backlog(MAX_BACKLOG, pane.rig.write());
+        assert!(pane.rig.written().is_empty(), "web: {web}");
+        assert!(desk.take_views().is_empty(), "web: {web}");
+        assert_eq!(desk.flow.module_ticket(), Some(epoch));
+
+        // A byte over it: the view is closed, the program told, the words not begun dropped.
+        desk.backlog(MAX_BACKLOG + 1, pane.rig.write());
+        told(&pane.rig.written());
+        assert!(
+            desk.take_views().contains(&Action::DestroyView),
+            "web: {web}"
+        );
+        assert_eq!(
+            desk.flow.module_ticket(),
+            None,
+            "no word is queued for an ended view"
+        );
+        assert!(
+            !desk.flow.module_may_write(epoch, false),
+            "a frame that was not begun is dropped"
+        );
+        assert!(
+            desk.flow.module_may_write(epoch, true),
+            "the frame under way is finished, so that the program is not left half a frame"
+        );
+
+        // A view that is not there is not closed again, whatever still waits.
+        desk.backlog(MAX_BACKLOG * 2, pane.rig.write());
+        assert!(pane.rig.written().is_empty(), "web: {web}");
+        assert!(desk.take_views().is_empty(), "web: {web}");
+    }
+}
+
+/// Specification §5.4: the words a view fails with reach the program in `closed`'s `message`
+/// as they were said, a component of another interface's two versions included.
+#[test]
+fn the_words_of_a_component_of_another_interface_name_both_versions_to_the_program() {
+    let (pane, _, _) = open_a_module_view();
+    let rig = Arc::clone(&pane.rig);
+    let desk = rig.desk.as_ref().expect("a desk");
+    let why = "the page could not be loaded: this view is written against `pencere:view@0.5.0`; \
+               this terminal opens `pencere:view@1.0.0`";
+    desk.apply(pane.rig.write(), |conversation| {
+        conversation.view_failed(why)
+    });
+    let wrote = pane.rig.written();
+    assert_eq!(wrote.len(), 1, "{wrote:?}");
+    assert_eq!(wrote[0].kind, "closed");
+    for version in ["`pencere:view@0.5.0`", "`pencere:view@1.0.0`"] {
+        assert!(wrote[0].payload.contains(version), "{}", wrote[0].payload);
+    }
 }
 
 #[test]

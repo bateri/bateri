@@ -24,7 +24,7 @@
 //!
 //! **What the module said is never written once the program can no longer be its reader.** The
 //! module's bytes have a queue of their own in the writer (whole frames, tagged with the view they
-//! belong to), and a gate on it ([`Gate`]). A signal character that goes to the program (⌃C) closes
+//! belong to), and a gate on it ([`Gate`]). A signal character that goes to the program (⌃C, ⌃\ or ⌃Z) closes
 //! the gate at once, before it is queued, and the writer drops the module's frames before it writes
 //! the character: the character flushes the tty's input, and a byte written after it is read by
 //! whatever reads the tty next. Any other end of the view (`bye`, `dismiss`, the person, the
@@ -36,6 +36,12 @@
 //!
 //! Whatever ends the view, [`Flow::end`] lets go of the two bounds at that instant and drops what
 //! was counted: nothing is left waiting for a module that is gone.
+//!
+//! **A view that says more than its program reads is closed** (specification §4.8): a module and
+//! a page are held well under it by the bound above, but what the pane has been asked to write
+//! and the tty has not taken is told to the conversation after every write that was held back
+//! (`Desk::backlog`), and past 16 MiB the view ends as a failure — through [`Flow::end`], so
+//! that the frames not begun are dropped before the program is told.
 
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 

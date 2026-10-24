@@ -298,7 +298,19 @@ send({call:{id:1,method:'hello',params:{mode:m.context.mode,\
 width:m.context.size.width,height:m.context.size.height,\
 background:m.context.colors.background,access:m.context.access||null}}})}\
 else if(m.response&&m.response.id===1){send({subscribe:{id:2,topic:'ticks'}})}\
-else if(m.push&&m.push.id===2){send({call:{id:3,method:'pushed',params:m.push.value}})}});";
+else if(m.push&&m.push.id===2){send({call:{id:3,method:'pushed',params:m.push.value}});\
+setTimeout(escape,0)}});\
+var escape=function(){\
+try{location.href='other.html'}catch(e){}\
+try{var f=document.createElement('form');f.action='other.html';f.method='post';\
+document.body.appendChild(f);f.submit()}catch(e){}\
+try{var a=document.createElement('a');a.href='other.html';document.body.appendChild(a);a.click()}catch(e){}\
+try{window.open('other.html')}catch(e){}\
+setTimeout(function(){send({call:{id:4,method:'checked',params:{path:location.pathname}}})},700)};";
+
+/// The bundle's other file, which a page that navigated would load: it says so to the program.
+const OTHER: &str = "<!doctype html><script>\
+window.parent.postMessage({call:{id:77,method:'moved',params:{}}},'*')</script>";
 
 /// A script that, once told its `context`, asks to open a link, and calls the program with
 /// everything else the host says to it (a page's one way to reach the program, and so the test's
@@ -565,6 +577,7 @@ fn run(dir: &Path) {
     let files = [
         ("index.html", "text/html", PAGE.as_bytes()),
         ("app.js", "text/javascript", SCRIPT.as_bytes()),
+        ("other.html", "text/html", OTHER.as_bytes()),
     ];
     let token = program.hello();
     program.open(&token, &files, None);
@@ -599,30 +612,52 @@ fn run(dir: &Path) {
     let pushed = program.wait_for("\"method\":\"pushed\"");
     assert!(pushed.contains("\"params\":{\"n\":7}"), "{pushed}");
 
-    // ⌃C in the view is the program's interrupt: the byte, written to the tty.
-    let before = program.heard().len();
-    let event = NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
-        NSEventType::KeyDown,
-        NSPoint::new(0.0, 0.0),
-        NSEventModifierFlags::Control,
-        0.0,
-        window.windowNumber(),
-        None,
-        &NSString::from_str("\u{3}"),
-        &NSString::from_str("c"),
-        false,
-        8,
-    )
-    .expect("a key event");
+    // After its entry has loaded the page tries every way there is to go to another document: a
+    // change of `location`, a form posted, a link followed, a window opened. All are cancelled
+    // (specification §12.3): the page that asks is the page still, and what it would have run
+    // there never said a word.
+    let checked = program.wait_for("\"method\":\"checked\"");
+    assert!(
+        checked.contains("\"path\":\"/index.html\""),
+        "the page stays where it loaded: {checked}"
+    );
+    assert!(
+        !program.heard().contains("\"method\":\"moved\""),
+        "a navigation was let through: {}",
+        program.heard()
+    );
+
+    // The tty's signal characters in the view are the program's: ⌃C, ⌃\ and ⌃Z, each the byte
+    // that was set for it, written to the tty (specification §11.3).
     let web = web_view(&pane).expect("the view is a subview of the pane");
-    web.keyDown(&event);
-    until("⌃C to reach the program as 0x03", || {
-        program
-            .heard()
-            .as_bytes()
-            .get(before..)
-            .is_some_and(|new| new.contains(&3))
-    });
+    for (character, plain, code, byte) in [
+        ("\u{3}", "c", 8, 0x03u8),
+        ("\u{1c}", "\\", 42, 0x1c),
+        ("\u{1a}", "z", 6, 0x1a),
+    ] {
+        let before = program.heard().len();
+        let event = NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
+            NSEventType::KeyDown,
+            NSPoint::new(0.0, 0.0),
+            NSEventModifierFlags::Control,
+            0.0,
+            window.windowNumber(),
+            None,
+            &NSString::from_str(character),
+            &NSString::from_str(plain),
+            false,
+            code,
+        )
+        .expect("a key event");
+        web.keyDown(&event);
+        until(&format!("{byte:#04x} to reach the program"), || {
+            program
+                .heard()
+                .as_bytes()
+                .get(before..)
+                .is_some_and(|new| new.contains(&byte))
+        });
+    }
 
     // The strip is the application's own and stands over the view's area: the view is the
     // pane less the strip's height, below it.

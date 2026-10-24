@@ -11,12 +11,12 @@ use objc2_foundation::{NSPoint, NSRect, NSSize};
 
 use super::files::Pending;
 use super::serve::{
-    self, HANDLER, LOADED_HANDLER, Page, Route, SANDBOX, Served, css_color, deliver_script,
+    self, HANDLER, LOADED_HANDLER, Loads, Page, Route, SANDBOX, Served, css_color, deliver_script,
     ground_script, js_string, route,
 };
 use super::still::{self, Capture, PATIENCE, Shared, Still};
 use super::wait::{OFFERED, OPENING, Waits};
-use super::{is_interrupt, modifiers_of, strip_area, view_area};
+use super::{INTERRUPT, QUIT, SUSPEND, modifiers_of, signal_of, strip_area, view_area};
 
 const INSTANCE: &str = "v-0123456789abcdef0123456789abcdef";
 const POLICY: &str = "default-src 'none'; script-src 'self' 'unsafe-inline'; connect-src 'self' https://api.example;";
@@ -145,6 +145,34 @@ fn a_file_of_the_bundle_is_served_with_its_type_and_the_crates_policy() {
         assert_eq!(reply.header("X-Content-Type-Options"), Some("nosniff"));
         assert_eq!(reply.header("Cache-Control"), Some("no-store"));
     }
+}
+
+/// Specification §12.1: the policy is the `Content-Security-Policy` header of the response to
+/// every file served for the page, the entry included — a `<meta>` element is the page's own
+/// writing and stands for nothing. So the policy is on every answer, the bytes of a file are
+/// the program's untouched (no element is added to its entry to carry one), and the shell page
+/// carries its own as a header too.
+#[test]
+fn the_policy_is_a_header_of_every_answer_and_never_an_element_of_a_page() {
+    let page = bundle_page();
+    for path in ["index.html", "app.js", "dir/style.css"] {
+        let reply = page.reply(&url(path), &files);
+        assert_eq!(reply.status, 200, "{path}");
+        assert_eq!(
+            reply.header("Content-Security-Policy"),
+            Some(POLICY),
+            "{path}"
+        );
+        let given = files(path).expect("a file of the bundle").1;
+        assert_eq!(reply.body, given, "{path} is served as the program sent it");
+    }
+    let shell = page.reply(&Page::shell_url(), &files);
+    assert!(shell.header("Content-Security-Policy").is_some());
+    let text = shell_text(&page);
+    assert!(
+        !text.to_ascii_lowercase().contains("http-equiv"),
+        "the shell's policy is its header: {text}"
+    );
 }
 
 #[test]
@@ -364,38 +392,118 @@ fn a_message_is_a_string_in_the_script_and_never_its_code() {
 fn the_shell_loads_once_as_the_top_document_and_nothing_else_does() {
     let page = bundle_page();
     let shell = Page::shell_url();
-    assert!(page.allows(&shell, true, false));
+    let mut loads = Loads::default();
     assert!(
-        !page.allows(&shell, true, true),
-        "a reload is the shell loaded again"
-    );
-    assert!(
-        !page.allows(&url("index.html"), true, false),
+        !page.allows(&url("index.html"), true, &mut loads),
         "the view is not a top document"
     );
-    assert!(!page.allows("https://example.com/", true, false));
-    assert!(!page.allows("file:///etc/passwd", true, false));
-    assert!(!page.allows("about:blank", true, false));
+    assert!(!page.allows("https://example.com/", true, &mut loads));
+    assert!(!page.allows("file:///etc/passwd", true, &mut loads));
+    assert!(!page.allows("about:blank", true, &mut loads));
+    assert_eq!(loads, Loads::default(), "a refusal is not a load");
+    assert!(page.allows(&shell, true, &mut loads));
+    assert!(
+        !page.allows(&shell, true, &mut loads),
+        "a reload is the shell loaded again"
+    );
+    assert!(!page.allows(&url("index.html"), true, &mut loads));
 }
 
 #[test]
-fn a_frame_may_load_the_views_origin_and_a_blank_page_and_nothing_else() {
+fn the_views_frame_loads_its_entry_before_anything_else_and_nothing_else() {
     let page = bundle_page();
-    assert!(page.allows(&url("index.html"), false, true));
-    assert!(page.allows(&url("dir/other.html"), false, true));
-    assert!(page.allows("about:blank", false, true));
+    let mut loads = Loads::default();
     assert!(
-        !page.allows(&Page::shell_url(), false, true),
+        !page.allows(&Page::shell_url(), false, &mut loads),
         "the shell inside the shell"
     );
-    assert!(!page.allows("https://example.com/", false, true));
-    assert!(!page.allows("http://localhost:8080/", false, true));
+    assert!(!page.allows("https://example.com/", false, &mut loads));
+    assert!(!page.allows("http://localhost:8080/", false, &mut loads));
     assert!(!page.allows(
         "bateri-view://v-ffffffffffffffffffffffffffffffff/index.html",
         false,
-        true
+        &mut loads
     ));
-    assert!(!page.allows(&url("../index.html"), false, true));
+    assert!(!page.allows(&url("../index.html"), false, &mut loads));
+    assert_eq!(loads, Loads::default(), "a refusal is not a load");
+    // A blank frame has no origin to leave, and it is not the entry.
+    assert!(page.allows("about:blank", false, &mut loads));
+    assert!(!loads.entry);
+    assert!(page.allows(&url("index.html"), false, &mut loads));
+    assert!(loads.entry && !loads.shell);
+}
+
+/// Specification §12.3: after the load of its entry, every navigation of the web view is
+/// cancelled, whatever starts it — a link, a change of `location`, a form, a reload — and the
+/// bundle's own files are no exception.
+#[test]
+fn after_the_entry_has_loaded_nothing_is_navigated_to_whatever_starts_it() {
+    let page = bundle_page();
+    let mut loads = Loads::default();
+    assert!(page.allows(&Page::shell_url(), true, &mut loads));
+    assert!(page.allows(&url("index.html"), false, &mut loads));
+    for destination in [
+        // A link to the entry again, a reload and a form posted to the page itself.
+        url("index.html"),
+        url("index.html#section"),
+        url("index.html?q=1"),
+        // A link, a `location` and a form that name another file of the bundle.
+        url("dir/other.html"),
+        url("app.js"),
+        // A blank page, the shell, and everything that is not the view's.
+        "about:blank".to_owned(),
+        Page::shell_url(),
+        "https://example.com/".to_owned(),
+        "file:///etc/passwd".to_owned(),
+        "javascript:alert(1)".to_owned(),
+    ] {
+        assert!(
+            !page.allows(&destination, false, &mut loads),
+            "{destination}"
+        );
+        assert!(
+            !page.allows(&destination, true, &mut loads),
+            "{destination}"
+        );
+    }
+    assert_eq!(
+        loads,
+        Loads {
+            shell: true,
+            entry: true
+        },
+        "nothing that was cancelled is recorded as a load"
+    );
+}
+
+/// The decision is the bridge's one question, asked of every navigation, and the shell's
+/// word that its frame has loaded is not what the lock hangs on: a navigation that comes
+/// before the load event (a script that redirects as it parses) is a navigation too.
+#[test]
+fn the_bridge_asks_the_one_question_of_every_navigation_and_keeps_its_answers() {
+    let source = include_str!("../pencere_view.rs");
+    let at = source
+        .find("    fn allows(&self, action: &WKNavigationAction)")
+        .expect("the bridge's allows");
+    let body = source[at..].split("\n    }\n").next().expect("its end");
+    assert!(
+        body.contains("ivars.page.allows(&url, top, &mut loads)"),
+        "{body}"
+    );
+    assert!(body.contains("ivars.loads.set(loads)"), "{body}");
+    // A navigation with no target frame is a new window's, and it is refused.
+    assert!(body.contains("let Some(target) = target else"), "{body}");
+    let decide = source
+        .find("fn decide(")
+        .map(|at| source[at..].split("\n        }\n").next().expect("its end"))
+        .expect("decide");
+    assert!(decide.contains("self.allows(action)"), "{decide}");
+    assert!(
+        decide.contains("WKNavigationActionPolicy::Cancel"),
+        "{decide}"
+    );
+    // The one place that lets anything load is that question: nothing else answers `Allow`.
+    assert_eq!(source.matches("WKNavigationActionPolicy::Allow").count(), 1);
 }
 
 #[test]
@@ -409,27 +517,68 @@ fn an_origin_is_random_hex_that_is_never_the_shells_name() {
 // ---- the key the application keeps ------------------------------------------
 
 #[test]
-fn control_c_alone_is_the_interrupt() {
+fn the_ttys_signal_characters_alone_are_the_programs() {
     let control = NSEventModifierFlags::Control;
-    assert!(is_interrupt(control, Some("\u{3}")));
-    // Caps Lock and the numeric pad's flags are not modifiers that change it.
-    assert!(is_interrupt(
-        control | NSEventModifierFlags::CapsLock,
-        Some("\u{3}")
-    ));
-    for flags in [
-        NSEventModifierFlags::empty(),
-        control | NSEventModifierFlags::Shift,
-        control | NSEventModifierFlags::Command,
-        control | NSEventModifierFlags::Option,
-        NSEventModifierFlags::Command,
-    ] {
-        assert!(!is_interrupt(flags, Some("\u{3}")), "{flags:?}");
+    // ⌃C, ⌃\ and ⌃Z, each as the byte the tty turns into its signal (specification §11.3).
+    for (character, byte) in [("\u{3}", INTERRUPT), ("\u{1c}", QUIT), ("\u{1a}", SUSPEND)] {
+        assert_eq!(signal_of(control, Some(character)), Some(byte));
+        // Caps Lock and the numeric pad's flags are not modifiers that change it.
+        assert_eq!(
+            signal_of(control | NSEventModifierFlags::CapsLock, Some(character)),
+            Some(byte)
+        );
+        for flags in [
+            NSEventModifierFlags::empty(),
+            control | NSEventModifierFlags::Shift,
+            control | NSEventModifierFlags::Command,
+            control | NSEventModifierFlags::Option,
+            NSEventModifierFlags::Command,
+        ] {
+            assert_eq!(signal_of(flags, Some(character)), None, "{flags:?}");
+        }
     }
-    assert!(!is_interrupt(control, Some("c")), "a letter is the view's");
-    assert!(!is_interrupt(control, Some("\u{4}")), "⌃D is not ⌃C");
-    assert!(!is_interrupt(control, None));
-    assert!(!is_interrupt(NSEventModifierFlags::empty(), Some("c")));
+    assert_eq!(
+        (INTERRUPT, QUIT, SUSPEND),
+        (0x03, 0x1c, 0x1a),
+        "the bytes the tty is set to take unless the program changed them"
+    );
+    assert_eq!(
+        signal_of(control, Some("c")),
+        None,
+        "a letter is the view's"
+    );
+    assert_eq!(signal_of(control, Some("z")), None);
+    assert_eq!(signal_of(control, Some("\\")), None);
+    assert_eq!(
+        signal_of(control, Some("\u{4}")),
+        None,
+        "⌃D is not a signal"
+    );
+    assert_eq!(signal_of(control, None), None);
+    assert_eq!(signal_of(NSEventModifierFlags::empty(), Some("c")), None);
+}
+
+/// Both kinds of view send the three characters by the one function and the one writer: the
+/// web view's `keyDown:` and the page's key, and neither names a byte of its own.
+#[test]
+fn both_kinds_of_view_send_a_signal_character_the_one_way() {
+    let view = include_str!("../pencere_view.rs");
+    let at = view.find("fn key_down(").expect("the web view's keyDown:");
+    let key_down = view[at..].split("\n        }\n").next().expect("its end");
+    assert!(key_down.contains("signal_of("), "{key_down}");
+    assert!(
+        key_down.contains("pane.signal_program(character)"),
+        "{key_down}"
+    );
+    let pane = include_str!("../pane.rs");
+    let pane = &pane[..pane.find("#[cfg(test)]").unwrap_or(pane.len())];
+    let at = pane.find("pub(crate) fn page_key(").expect("page_key");
+    let page_key = pane[at..].split("\n    }\n").next().expect("its end");
+    assert!(page_key.contains("pencere_view::signal_of("), "{page_key}");
+    // The three characters are written by one function, which is the gate of the terminal's
+    // own keys; nothing else in either file writes a signal byte.
+    assert_eq!(pane.matches("session.write(&[character])").count(), 1);
+    assert!(!pane.contains("INTERRUPT]"), "no byte is written by name");
 }
 
 // ---- the deadlines ----------------------------------------------------------
