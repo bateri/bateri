@@ -193,9 +193,11 @@ dependencies = [
  "cursor-icon",
  "libc",
  "miniz_oxide 0.8.9",
+ "pencere",
  "pencere-host",
  "png",
  "polling",
+ "serde_json",
  "toml_edit",
  "unicode-width",
 ]
@@ -1298,9 +1300,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "pencere"
+version = "0.2.0"
+source = "git+https://github.com/bateri/pencere?rev=36b942a0cde1c9a9005d91c4f166a6b766beb40c#36b942a0cde1c9a9005d91c4f166a6b766beb40c"
+dependencies = [
+ "libc",
+ "pencere-wire",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "pencere-host"
 version = "0.1.0"
-source = "git+https://github.com/bateri/pencere?rev=e83619a170a509c205795039eb99e9fd2969ecd2#e83619a170a509c205795039eb99e9fd2969ecd2"
+source = "git+https://github.com/bateri/pencere?rev=36b942a0cde1c9a9005d91c4f166a6b766beb40c#36b942a0cde1c9a9005d91c4f166a6b766beb40c"
 dependencies = [
  "pencere-wire",
  "serde",
@@ -1310,9 +1323,10 @@ dependencies = [
 [[package]]
 name = "pencere-sandbox"
 version = "0.1.0"
-source = "git+https://github.com/bateri/pencere?rev=e83619a170a509c205795039eb99e9fd2969ecd2#e83619a170a509c205795039eb99e9fd2969ecd2"
+source = "git+https://github.com/bateri/pencere?rev=36b942a0cde1c9a9005d91c4f166a6b766beb40c#36b942a0cde1c9a9005d91c4f166a6b766beb40c"
 dependencies = [
  "pencere-view",
+ "pencere-wire",
  "png",
  "resvg",
  "wasmtime",
@@ -1323,7 +1337,7 @@ dependencies = [
 [[package]]
 name = "pencere-view"
 version = "0.1.0"
-source = "git+https://github.com/bateri/pencere?rev=e83619a170a509c205795039eb99e9fd2969ecd2#e83619a170a509c205795039eb99e9fd2969ecd2"
+source = "git+https://github.com/bateri/pencere?rev=36b942a0cde1c9a9005d91c4f166a6b766beb40c#36b942a0cde1c9a9005d91c4f166a6b766beb40c"
 dependencies = [
  "taffy",
 ]
@@ -1331,7 +1345,7 @@ dependencies = [
 [[package]]
 name = "pencere-wire"
 version = "0.1.0"
-source = "git+https://github.com/bateri/pencere?rev=e83619a170a509c205795039eb99e9fd2969ecd2#e83619a170a509c205795039eb99e9fd2969ecd2"
+source = "git+https://github.com/bateri/pencere?rev=36b942a0cde1c9a9005d91c4f166a6b766beb40c#36b942a0cde1c9a9005d91c4f166a6b766beb40c"
 dependencies = [
  "serde",
  "serde_json",

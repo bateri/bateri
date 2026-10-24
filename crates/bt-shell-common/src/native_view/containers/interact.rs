@@ -361,7 +361,7 @@ impl Containers {
         };
         if id == SEARCH {
             return Reply {
-                keyboard: Some(Keyboard::Filter),
+                keyboard: Some(Keyboard::Field),
                 ..self.reply(false)
             };
         }
@@ -458,10 +458,10 @@ impl Containers {
         let last = rows.len().saturating_sub(1);
         let move_to = |to: usize| Some(to.min(last));
         let target = match key {
-            Key::Down | Key::Char('j') => move_to(at.map_or(0, |at| at + 1)),
-            Key::Up | Key::Char('k') => move_to(at.map_or(0, |at| at.saturating_sub(1))),
-            Key::Home | Key::Char('g') => move_to(0),
-            Key::End | Key::Char('G') => move_to(last),
+            Key::Down | Key::Character('j') => move_to(at.map_or(0, |at| at + 1)),
+            Key::Up | Key::Character('k') => move_to(at.map_or(0, |at| at.saturating_sub(1))),
+            Key::Home | Key::Character('g') => move_to(0),
+            Key::End | Key::Character('G') => move_to(last),
             Key::PageDown => move_to(at.map_or(0, |at| at + page)),
             Key::PageUp => move_to(at.map_or(0, |at| at.saturating_sub(page))),
             _ => None,
@@ -478,8 +478,8 @@ impl Containers {
                 close: true,
                 ..Reply::none()
             },
-            Key::Tab | Key::Char('/') => Reply {
-                keyboard: Some(Keyboard::Filter),
+            Key::Tab | Key::Character('/') => Reply {
+                keyboard: Some(Keyboard::Field),
                 ..self.reply(false)
             },
             Key::Enter => self.fold_key(&rows, at, None),
@@ -500,7 +500,7 @@ impl Containers {
                 self.reveal_cursor();
                 self.reply(changed)
             }
-            Key::Char(' ') => {
+            Key::Character(' ') => {
                 let Some(row) = at.and_then(|at| rows.get(at)) else {
                     return self.reply(false);
                 };
@@ -514,7 +514,7 @@ impl Containers {
                 }
                 self.reply(changed || at.is_some())
             }
-            Key::Char('a') => {
+            Key::Character('a') => {
                 self.marked = rows
                     .iter()
                     .filter_map(|row| match row.what {
@@ -524,12 +524,12 @@ impl Containers {
                     .collect();
                 self.reply(true)
             }
-            Key::Char('A') => {
+            Key::Character('A') => {
                 let changed = !self.marked.is_empty();
                 self.marked.clear();
                 self.reply(changed)
             }
-            Key::Char('f') => {
+            Key::Character('f') => {
                 let next = Status::ALL[(Status::ALL
                     .iter()
                     .position(|s| *s == self.status)
@@ -541,13 +541,13 @@ impl Containers {
                 self.reveal_cursor();
                 self.reply(true)
             }
-            Key::Char('P') => {
+            Key::Character('P') => {
                 self.grouped = !self.grouped;
                 self.rehome(at);
                 self.reveal_cursor();
                 self.reply(true)
             }
-            Key::Char('.') => {
+            Key::Character('.') => {
                 // Under the row, a little in from its start: where the key's menu opens.
                 let anchor = self
                     .cursor
@@ -560,7 +560,7 @@ impl Containers {
                     ..self.reply(false)
                 }
             }
-            Key::Char(command) => match Self::command(command) {
+            Key::Character(command) => match Self::command(command) {
                 Some(act) => self.run(act, at),
                 None => self.reply(false),
             },

@@ -51,7 +51,10 @@ of every installed copy. A version without a section is not released.
   icon follows the theme. SVGs are drawn again, sharp, when the pane is resized. Files are
   decoded off the screen's thread, so a page never waits for them and a view at rest still
   costs no frames; a file that cannot be shown leaves its box empty, and why is printed to
-  bateri's stderr for the view's author.
+  bateri's stderr for the view's author. A picture drawn far smaller than its file stays
+  still as it moves or the pane is resized, and a cropped one shows nothing from beyond its
+  edge. Faint text (a colour at a low opacity) is held to `minimum_contrast` as it shows on
+  its background, not as the colour alone would.
 
 ### Changed
 

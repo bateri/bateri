@@ -1300,12 +1300,15 @@ impl Gpu {
             min_filter: wgpu::FilterMode::Nearest,
             ..wgpu::SamplerDescriptor::default()
         });
+        // Between levels too: a texture with a chain (a page's image, `ui.wgsl` picks the level)
+        // blends the two nearest ones; one with a single level is not affected.
         let linear = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("atlas, linear"),
             address_mode_u: wgpu::AddressMode::ClampToEdge,
             address_mode_v: wgpu::AddressMode::ClampToEdge,
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
             ..wgpu::SamplerDescriptor::default()
         });
         let ui = ui::Pipelines::new(&device, &plane_layout);
@@ -1389,7 +1392,13 @@ impl Gpu {
     /// frame, and a picture whose bytes are not `4 × width × height` is not
     /// one. Both are left undrawn.
     fn picture_texture(&self, picture: &Picture) -> Option<ImageTexture> {
-        self.rgba_texture("picture", COLOR_FORMAT, picture.size, &picture.pixels)
+        self.rgba_texture(
+            "picture",
+            COLOR_FORMAT,
+            picture.size,
+            &picture.pixels,
+            false,
+        )
     }
 
     /// A texture of `width × height` four-byte pixels, uploaded once and bound with the linear
@@ -1397,12 +1406,17 @@ impl Gpu {
     /// caller's to justify (a picture's is sRGB, decoded by the hardware; a page's image is read
     /// raw and decoded in its shader, see `ui.wgsl`). `None` where the device cannot hold it or
     /// `pixels` is not `4 × width × height` bytes.
+    ///
+    /// `mips`: the texture has its whole chain of levels, made on the GPU ([`Gpu::fill_mips`]),
+    /// for an image that is drawn smaller than the file (the sampler picks the level, see
+    /// `ui.wgsl`). A kitty picture is drawn at its own size or stretched and has none.
     fn rgba_texture(
         &self,
         label: &'static str,
         format: wgpu::TextureFormat,
         (width, height): (u32, u32),
         pixels: &[u8],
+        mips: bool,
     ) -> Option<ImageTexture> {
         let limit = self.device.limits().max_texture_dimension_2d;
         if width == 0 || height == 0 || width > limit || height > limit {
@@ -1416,14 +1430,25 @@ impl Gpu {
             height,
             depth_or_array_layers: 1,
         };
+        let levels = if mips {
+            ui::mip_levels(width, height)
+        } else {
+            1
+        };
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some(label),
             size,
-            mip_level_count: 1,
+            mip_level_count: levels,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            usage: if levels > 1 {
+                wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_DST
+                    | wgpu::TextureUsages::RENDER_ATTACHMENT
+            } else {
+                wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST
+            },
             view_formats: &[],
         });
         // `write_texture` stages the copy on the queue: it lands before the
@@ -1443,6 +1468,7 @@ impl Gpu {
             },
             size,
         );
+        self.fill_mips(&texture, levels);
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some(label),

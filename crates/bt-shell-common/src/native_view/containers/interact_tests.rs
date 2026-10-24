@@ -42,7 +42,7 @@ fn key(page: &mut Containers, key: Key) -> Reply {
 
 fn chars(page: &mut Containers, keys: &str) {
     for c in keys.chars() {
-        key(page, Key::Char(c));
+        key(page, Key::Character(c));
     }
 }
 
@@ -100,21 +100,24 @@ fn the_arrow_keys_and_j_k_g_and_capital_g_move_the_cursor_within_the_list() {
     assert_eq!(cursor(&page), Some(RowKey::Container("api")));
     assert!(key(&mut page, Key::Down).redraw);
     assert_eq!(cursor(&page), Some(RowKey::Container("cache")));
-    key(&mut page, Key::Char('j'));
+    key(&mut page, Key::Character('j'));
     assert_eq!(cursor(&page), Some(RowKey::Container("db")));
     key(&mut page, Key::Up);
-    key(&mut page, Key::Char('k'));
+    key(&mut page, Key::Character('k'));
     assert_eq!(cursor(&page), Some(RowKey::Container("api")));
-    key(&mut page, Key::Char('k'));
+    key(&mut page, Key::Character('k'));
     assert_eq!(cursor(&page), Some(RowKey::Group(Some("shop"))));
     assert!(
         !key(&mut page, Key::Up).redraw,
         "the first row is the end of the list"
     );
-    key(&mut page, Key::Char('G'));
+    key(&mut page, Key::Character('G'));
     assert_eq!(cursor(&page), Some(RowKey::Container("toolbox")));
-    assert!(!key(&mut page, Key::Char('j')).redraw, "and so is the last");
-    key(&mut page, Key::Char('g'));
+    assert!(
+        !key(&mut page, Key::Character('j')).redraw,
+        "and so is the last"
+    );
+    key(&mut page, Key::Character('g'));
     assert_eq!(cursor(&page), Some(RowKey::Group(Some("shop"))));
     key(&mut page, Key::End);
     assert_eq!(cursor(&page), Some(RowKey::Container("toolbox")));
@@ -126,7 +129,7 @@ fn the_arrow_keys_and_j_k_g_and_capital_g_move_the_cursor_within_the_list() {
 #[test]
 fn enter_and_the_arrows_fold_a_project_and_left_goes_back_to_it() {
     let mut page = Containers::fixture();
-    key(&mut page, Key::Char('g'));
+    key(&mut page, Key::Character('g'));
     assert!(names(&page).contains(&"api"));
     assert!(key(&mut page, Key::Enter).redraw);
     assert!(!names(&page).contains(&"api"), "folded");
@@ -142,7 +145,7 @@ fn enter_and_the_arrows_fold_a_project_and_left_goes_back_to_it() {
     key(&mut page, Key::Left);
     assert_eq!(cursor(&page), Some(RowKey::Group(Some("shop"))));
     // The folded project of the fixture opens from its row.
-    key(&mut page, Key::Char('G'));
+    key(&mut page, Key::Character('G'));
     key(&mut page, Key::Up);
     assert_eq!(cursor(&page), Some(RowKey::Group(None)));
     key(&mut page, Key::Up);
@@ -155,23 +158,23 @@ fn enter_and_the_arrows_fold_a_project_and_left_goes_back_to_it() {
 #[test]
 fn space_marks_and_goes_on_and_capital_a_clears() {
     let mut page = Containers::fixture();
-    key(&mut page, Key::Char(' '));
+    key(&mut page, Key::Character(' '));
     assert_eq!(page.marked, vec!["api"]);
     assert_eq!(
         cursor(&page),
         Some(RowKey::Container("cache")),
         "on to the next"
     );
-    key(&mut page, Key::Char(' '));
+    key(&mut page, Key::Character(' '));
     assert_eq!(page.marked, vec!["api", "cache"]);
-    key(&mut page, Key::Char('k'));
-    key(&mut page, Key::Char(' '));
+    key(&mut page, Key::Character('k'));
+    key(&mut page, Key::Character(' '));
     assert_eq!(page.marked, vec!["api"], "marking a marked one clears it");
-    key(&mut page, Key::Char('a'));
+    key(&mut page, Key::Character('a'));
     assert_eq!(page.marked.len(), names(&page).len());
-    assert!(key(&mut page, Key::Char('A')).redraw);
+    assert!(key(&mut page, Key::Character('A')).redraw);
     assert!(page.marked.is_empty());
-    assert!(!key(&mut page, Key::Char('A')).redraw);
+    assert!(!key(&mut page, Key::Character('A')).redraw);
 }
 
 #[test]
@@ -442,7 +445,7 @@ fn the_dot_key_opens_the_menu_under_the_cursors_row() {
     let row = laid.bounds(RowKey::Container("api").id()).unwrap();
     let reply = page.input(
         Input::Key {
-            key: Key::Char('.'),
+            key: Key::Character('.'),
             mods: Mods::default(),
         },
         &laid,
@@ -476,8 +479,8 @@ fn the_command_keys_change_the_list_the_way_the_menu_does() {
     chars(&mut page, "K");
     assert_eq!(state(&page, "api"), State::Exited(137));
     let reply = {
-        key(&mut page, Key::Char('r'));
-        key(&mut page, Key::Char('y'))
+        key(&mut page, Key::Character('r'));
+        key(&mut page, Key::Character('y'))
     };
     assert_eq!(state(&page, "api"), State::Running, "restarted");
     assert_eq!(reply.copy.as_deref().map(str::len), Some(12));
@@ -512,10 +515,10 @@ fn escape_closes_the_slash_and_tab_go_to_the_filter_and_chords_are_not_read() {
     let mut page = Containers::fixture();
     assert!(key(&mut page, Key::Escape).close);
     assert_eq!(
-        key(&mut page, Key::Char('/')).keyboard,
-        Some(Keyboard::Filter)
+        key(&mut page, Key::Character('/')).keyboard,
+        Some(Keyboard::Field)
     );
-    assert_eq!(key(&mut page, Key::Tab).keyboard, Some(Keyboard::Filter));
+    assert_eq!(key(&mut page, Key::Tab).keyboard, Some(Keyboard::Field));
     let laid = lay(&mut page, 600.0);
     for mods in [
         Mods {
@@ -527,13 +530,13 @@ fn escape_closes_the_slash_and_tab_go_to_the_filter_and_chords_are_not_read() {
             ..Mods::default()
         },
         Mods {
-            option: true,
+            alt: true,
             ..Mods::default()
         },
     ] {
         let reply = page.input(
             Input::Key {
-                key: Key::Char('d'),
+                key: Key::Character('d'),
                 mods,
             },
             &laid,
@@ -556,7 +559,7 @@ fn a_press_on_the_filter_box_asks_for_the_keyboard_for_the_field() {
         },
         &laid,
     );
-    assert_eq!(reply.keyboard, Some(Keyboard::Filter));
+    assert_eq!(reply.keyboard, Some(Keyboard::Field));
     // The field has a place inside the box.
     let field = laid.text_field().expect("the field's room");
     let outer = laid.bounds(SEARCH).unwrap();
@@ -610,7 +613,7 @@ fn a_long_list_in_a_short_pane_scrolls_and_stays_within_its_reach() {
 fn the_cursor_is_kept_in_sight_by_the_keys() {
     let mut page = Containers::fixture();
     let _ = lay(&mut page, 330.0);
-    key_in(&mut page, Key::Char('G'), 330.0);
+    key_in(&mut page, Key::Character('G'), 330.0);
     assert!(
         page.ui.scroll_offset(LIST) > 0.0,
         "the last row is below the window"
@@ -619,7 +622,7 @@ fn the_cursor_is_kept_in_sight_by_the_keys() {
     let row = laid.bounds(RowKey::Container("toolbox").id()).unwrap();
     let window = laid.bounds(LIST).unwrap();
     assert!(row.y >= window.y && row.bottom() <= window.bottom() + 0.5);
-    key_in(&mut page, Key::Char('g'), 330.0);
+    key_in(&mut page, Key::Character('g'), 330.0);
     assert_eq!(
         page.ui.scroll_offset(LIST),
         0.0,

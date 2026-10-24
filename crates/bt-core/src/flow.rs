@@ -149,6 +149,20 @@ impl Flow {
         Self::default()
     }
 
+    /// How much of the flow a message of the protocol (the JSON text a program or a module
+    /// says) counts for: its size with the escapes of the wire undone, which is how the
+    /// sandbox counts the same message when the module says it ([`Flow::may_say`]) and when it
+    /// has taken it ([`Flow::taken`]). **Every count of a message goes through this**
+    /// ([`Flow::heard`], [`Flow::said`], what is told to [`Flow::taken`] for a message the
+    /// module does not take): a message counted by its length on the wire on one end and by its
+    /// text on the other never meets itself, and an escaped text (`\u00e9` is six bytes on the
+    /// wire and two as text) leaves the inbox that never drains and the in-transit count that
+    /// only grows.
+    #[must_use]
+    pub fn size(message: &str) -> usize {
+        ::pencere_host::json::unescaped_len(message)
+    }
+
     /// What the shell is told when a module that was told *full* may say more
     /// ([`Session::take_room`](crate::Session::take_room) is where it takes the news). Once.
     pub(crate) fn on_room(&self, tell: impl Fn() + Send + Sync + 'static) {
@@ -634,5 +648,51 @@ mod tests {
         writer.join().unwrap();
         assert!(waits > 0, "the test never made the module wait");
         assert_eq!(flow.pending(), 0);
+    }
+
+    /// A message whose text has escapes (non-ASCII text is `\uXXXX` on the wire) is counted by
+    /// what it says at both ends and in both directions: the sandbox counts it unescaped when
+    /// the module says it and when the module takes it, and so does the pane, or the counts
+    /// never meet — the inbox of a program that writes accents never drains and the reader stays
+    /// shut, the in-transit count of a module that writes them only grows.
+    #[test]
+    fn a_message_with_escapes_drains_completely_counted_as_the_sandbox_counts_it() {
+        let (flow, _room, reader) = counted();
+        let message =
+            r#"{"push":{"id":1,"value":{"text":"\u00e9\u00e9\u2603\ud83d\ude00 caf\u00e9"}}}"#;
+        let sandbox = ::pencere_host::json::unescaped_len(message);
+        assert!(sandbox < message.len(), "the message has escapes");
+        assert_eq!(Flow::size(message), sandbox);
+
+        // Program to module: heard by the pane, taken by the module.
+        let messages = INBOX_LIMIT / sandbox + 2;
+        for _ in 0..messages {
+            flow.heard(Flow::size(message));
+        }
+        assert!(flow.inbox_closed(), "the reader stops over the bound");
+        for _ in 0..messages {
+            flow.taken(sandbox);
+        }
+        assert_eq!(flow.inbox(), 0, "nothing is left for the module to take");
+        assert_eq!(
+            reader.load(Ordering::SeqCst),
+            1,
+            "the reader was woken once"
+        );
+        assert!(!flow.inbox_closed());
+
+        // Module to program: said by the module, handed to the writer by the pane.
+        for _ in 0..messages {
+            assert!(flow.may_say(sandbox));
+            flow.said(Flow::size(message));
+        }
+        assert_eq!(flow.pending(), 0, "nothing is left in transit");
+
+        // What one message gives back is what it took, and not a share of another's: with a
+        // second one in transit the first is subtracted by the count it was added with.
+        assert!(flow.may_say(1000));
+        assert!(flow.may_say(sandbox));
+        flow.said(Flow::size(message));
+        assert_eq!(flow.pending(), 1000, "the other message is still owed");
     }
 }

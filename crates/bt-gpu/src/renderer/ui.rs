@@ -439,11 +439,14 @@ const fn attribute(offset: u64, location: u32) -> wgpu::VertexAttribute {
     }
 }
 
-/// The three pipelines, built with the device ([`Gpu::new`](super::Gpu)).
+/// The pipelines of the UI half, built with the device ([`Gpu::new`](super::Gpu)): the three
+/// a list is drawn with, and the one that makes an image's mip levels.
 pub(super) struct Pipelines {
     quad: wgpu::RenderPipeline,
     glyph: wgpu::RenderPipeline,
     image: wgpu::RenderPipeline,
+    /// One level of an image's chain from the one above it (`mip.wgsl`).
+    mip: wgpu::RenderPipeline,
 }
 
 impl Pipelines {
@@ -491,7 +494,44 @@ impl Pipelines {
             bind_group_layouts: &[Some(plane_layout)],
             immediate_size: size_of::<UiImmediates>() as u32,
         });
+        // The chain's levels are made in the texture's own format, all four channels as the level
+        // above has them: no blending, no vertex buffer, no immediates.
+        let mip_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("mip.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../../shaders/mip.wgsl").into()),
+        });
+        let mip_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("mip"),
+            bind_group_layouts: &[Some(plane_layout)],
+            immediate_size: 0,
+        });
+        let mip = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("mip_fragment"),
+            layout: Some(&mip_layout),
+            vertex: wgpu::VertexState {
+                module: &mip_module,
+                entry_point: Some("mip_vertex"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &mip_module,
+                entry_point: Some("mip_fragment"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: IMAGE_FORMAT,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
         Self {
+            mip,
             quad: pipeline_over(
                 device,
                 &quad_layout,
@@ -549,6 +589,76 @@ enum Kind {
 struct Run {
     kind: Kind,
     range: Range<u32>,
+}
+
+/// How many levels an image of `width × height` has with its whole chain: down to one pixel.
+pub(super) fn mip_levels(width: u32, height: u32) -> u32 {
+    u32::BITS - width.max(height).max(1).leading_zeros()
+}
+
+impl super::Gpu {
+    /// Fills the levels below the first of `texture` (`levels` of them in all, the first
+    /// already written): each from the one above it, on the GPU, in one submission — a large
+    /// image costs the thread that draws no pass over its pixels. They are what an image drawn
+    /// smaller than the file is sampled from (`ui.wgsl`), so that it does not shimmer when it
+    /// moves or the pane is resized.
+    pub(super) fn fill_mips(&self, texture: &wgpu::Texture, levels: u32) {
+        if levels < 2 {
+            return;
+        }
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("image mips"),
+            });
+        let level_view = |level: u32| {
+            texture.create_view(&wgpu::TextureViewDescriptor {
+                base_mip_level: level,
+                mip_level_count: Some(1),
+                ..wgpu::TextureViewDescriptor::default()
+            })
+        };
+        for level in 1..levels {
+            let source = level_view(level - 1);
+            let target = level_view(level);
+            let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("image mip"),
+                layout: &self.plane_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&source),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self.linear),
+                    },
+                ],
+            });
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("image mip"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &target,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.ui.mip);
+            pass.set_bind_group(0, &bind, &[]);
+            pass.draw(0..3, 0..1);
+        }
+        // The first level was staged on the queue: this submission follows it, and the frame
+        // that samples the levels follows this one.
+        self.queue.submit([encoder.finish()]);
+    }
 }
 
 impl Renderer {
@@ -628,6 +738,7 @@ impl Renderer {
                 IMAGE_FORMAT,
                 (bitmap.width, bitmap.height),
                 bitmap.pixels,
+                true,
             ) else {
                 return false;
             };

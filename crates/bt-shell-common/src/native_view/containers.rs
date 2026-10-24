@@ -9,7 +9,7 @@
 //! drops the columns that matter least, the way the list this was drawn from does, and a
 //! narrow one drops the rail too.
 
-use pencere_view::{Align, Element, Id, Rows, Size, Tone, Track, Ui, div, spacer, spark, text};
+use pencere_view::{Align, Element, Id, Role, Rows, Size, Track, Ui, div, spacer, spark, text};
 
 mod interact;
 
@@ -359,9 +359,9 @@ impl Containers {
         div()
             .col()
             .size_full()
-            .bg(Tone::Background)
+            .bg(Role::Background)
             .text_size(12.5)
-            .color(Tone::Foreground)
+            .color(Role::Foreground)
             .child(body)
             .child(status_line(size.w))
     }
@@ -386,12 +386,12 @@ impl Containers {
                 .px(8.0)
                 .rounded(6.0)
                 .no_shrink()
-                .color(if current { Tone::Foreground } else { Tone::Dim })
+                .color(if current { Role::Foreground } else { Role::Dim })
                 .child(text(label).grow(1.0).truncate());
             if current {
                 row = row
-                    .bg(Tone::Accent.alpha(0.13))
-                    .border(1.0, Tone::Accent.alpha(0.24));
+                    .bg(Role::Accent.alpha(0.13))
+                    .border(1.0, Role::Accent.alpha(0.24));
             }
             match (badge, count) {
                 (Some(n), _) => row.child(
@@ -403,15 +403,15 @@ impl Containers {
                         .h(16.0)
                         .px(4.0)
                         .rounded(8.0)
-                        .bg(Tone::Error)
+                        .bg(Role::Error)
                         .child(
                             text(n.to_string())
                                 .text_size(10.0)
                                 .weight(650)
-                                .color(Tone::Background),
+                                .color(Role::Background),
                         ),
                 ),
-                (None, Some(count)) => row.child(text(count).text_size(11.0).color(Tone::Quiet)),
+                (None, Some(count)) => row.child(text(count).text_size(11.0).color(Role::Quiet)),
                 (None, None) => row,
             }
         };
@@ -431,17 +431,17 @@ impl Containers {
             .child(item("System", false, None, None))
             .child(item("Activity", false, None, None));
 
-        let meter = |label: &str, values: &[f32], tone: Tone, value: &str| {
+        let meter = |label: &str, values: &[f32], tone: Role, value: &str| {
             div()
                 .row()
                 .items_center()
                 .gap(6.0)
                 .text_size(10.5)
-                .child(text(label).color(Tone::Quiet).w(26.0))
+                .child(text(label).color(Role::Quiet).w(26.0))
                 .child(spark(values, tone).size(70.0, 14.0))
                 .child(
                     text(value)
-                        .color(Tone::Dim)
+                        .color(Role::Dim)
                         .weight(500)
                         .grow(1.0)
                         .align(Align::End),
@@ -452,24 +452,24 @@ impl Containers {
             .gap(6.0)
             .p(8.0)
             .rounded(8.0)
-            .bg(Tone::Background.alpha(0.55))
-            .border(1.0, Tone::Line)
+            .bg(Role::Background.alpha(0.55))
+            .border(1.0, Role::Line)
             .child(
                 div()
                     .row()
                     .items_center()
                     .gap(7.0)
                     .text_size(11.0)
-                    .color(Tone::Dim)
-                    .child(dot(7.0, Tone::Success, false))
+                    .color(Role::Dim)
+                    .child(dot(7.0, Role::Success, false))
                     .child(text("Alpine Linux v3.24").truncate()),
             )
-            .child(meter("cpu", &wave(29, 30.0, 12.0), Tone::Accent, "39%"))
-            .child(meter("mem", &wave(31, 40.0, 3.0), Tone::Success, "36.8MiB"))
+            .child(meter("cpu", &wave(29, 30.0, 12.0), Role::Accent, "39%"))
+            .child(meter("mem", &wave(31, 40.0, 3.0), Role::Success, "36.8MiB"))
             .child(
                 text(format!("{} running \u{b7} 6 cpu", self.up()))
                     .text_size(10.5)
-                    .color(Tone::Quiet)
+                    .color(Role::Quiet)
                     .truncate(),
             );
         div()
@@ -484,12 +484,12 @@ impl Containers {
                     .px(8.0)
                     .pt(10.0)
                     .pb(8.0)
-                    .bg(Tone::Raised(1))
+                    .bg(Role::Raised(1))
                     .child(nav)
                     .child(spacer())
                     .child(engine),
             )
-            .child(div().w(1.0).bg(Tone::Line))
+            .child(div().w(1.0).bg(Role::Line))
     }
 
     // --- The section's top -----------------------------------------------------------------
@@ -502,7 +502,7 @@ impl Containers {
                 .h(28.0)
                 .px(10.0)
                 .rounded(6.0)
-                .color(Tone::Dim)
+                .color(Role::Dim)
                 .child(text(label))
         };
         div()
@@ -521,7 +521,7 @@ impl Containers {
                     self.containers.len()
                 ))
                 .text_size(11.5)
-                .color(Tone::Quiet)
+                .color(Role::Quiet)
                 .truncate(),
             )
             .child(spacer())
@@ -541,13 +541,13 @@ impl Containers {
             .min_w(120.0)
             .px(8.0)
             .rounded(6.0)
-            .bg(Tone::Raised(1))
-            .border(1.0, Tone::Line)
+            .bg(Role::Raised(1))
+            .border(1.0, Role::Line)
             .press(SEARCH)
             .child(div().id(FIELD).text_field().grow(1.0).min_w(0.0).h(18.0))
             .child(kbd("/", 10.5));
         let counts = self.counts();
-        let option = |status: Status, count: usize, tone: Option<Tone>| {
+        let option = |status: Status, count: usize, tone: Option<Role>| {
             let active = self.status == status;
             let id = status.id();
             let glow = self.glow(id);
@@ -560,21 +560,21 @@ impl Containers {
                 .rounded(6.0)
                 .press(id)
                 .color(if active || glow > 0.0 {
-                    Tone::Foreground
+                    Role::Foreground
                 } else {
-                    Tone::Dim
+                    Role::Dim
                 });
             if active {
-                cell = cell.bg(Tone::Raised(2)).border(1.0, Tone::Line).shadow(
+                cell = cell.bg(Role::Raised(2)).border(1.0, Role::Line).shadow(
                     0.0,
                     1.0,
                     2.0,
-                    Tone::Shadow.alpha(0.5),
+                    Role::Shadow.alpha(0.5),
                 );
             } else if glow > 0.0 {
-                cell = cell.bg(Tone::Foreground.alpha(0.07 * glow));
+                cell = cell.bg(Role::Foreground.alpha(0.07 * glow));
             }
-            let count_color = tone.unwrap_or(if active { Tone::Dim } else { Tone::Quiet });
+            let count_color = tone.unwrap_or(if active { Role::Dim } else { Role::Quiet });
             cell.child(text(status.label()))
                 .child(text(count.to_string()).text_size(10.5).color(count_color))
         };
@@ -583,13 +583,13 @@ impl Containers {
             .p(2.0)
             .gap(1.0)
             .rounded(8.0)
-            .bg(Tone::Raised(1))
-            .border(1.0, Tone::Line)
+            .bg(Role::Raised(1))
+            .border(1.0, Role::Line)
             .no_shrink()
             .child(option(Status::All, counts.all, None))
             .child(option(Status::Running, counts.running, None))
             .child(option(Status::Stopped, counts.stopped, None))
-            .child(option(Status::Issues, counts.issues, Some(Tone::Error)));
+            .child(option(Status::Issues, counts.issues, Some(Role::Error)));
         let button = |label: &str, id: Id, pressed: bool| {
             let glow = self.glow(id);
             let mut button = div()
@@ -600,16 +600,16 @@ impl Containers {
                 .rounded(6.0)
                 .no_shrink()
                 .color(if pressed || glow > 0.0 {
-                    Tone::Foreground
+                    Role::Foreground
                 } else {
-                    Tone::Dim
+                    Role::Dim
                 });
             if pressed {
                 button = button
-                    .bg(Tone::Accent.alpha(0.13))
-                    .border(1.0, Tone::Accent.alpha(0.4));
+                    .bg(Role::Accent.alpha(0.13))
+                    .border(1.0, Role::Accent.alpha(0.4));
             } else if glow > 0.0 {
-                button = button.bg(Tone::Foreground.alpha(0.07 * glow));
+                button = button.bg(Role::Foreground.alpha(0.07 * glow));
             }
             // A button that does nothing does not answer the pointer either.
             button = if id == SORT_BUTTON {
@@ -664,7 +664,7 @@ impl Containers {
             .px(16.0)
             .no_shrink()
             .text_size(10.5)
-            .color(Tone::Quiet)
+            .color(Role::Quiet)
             .children(heads);
 
         // Only the rows in view are made; the rest of the list's length is two spacers.
@@ -695,7 +695,7 @@ impl Containers {
             .min_h(0.0)
             .clip()
             .child(head)
-            .child(div().h(1.0).no_shrink().bg(Tone::Line.alpha(0.6)))
+            .child(div().h(1.0).no_shrink().bg(Role::Line.alpha(0.6)))
             .child(body)
     }
 
@@ -717,11 +717,11 @@ impl Containers {
             .gap(4.0)
             .pt(48.0)
             .no_shrink()
-            .child(text(reason).color(Tone::Dim))
+            .child(text(reason).color(Role::Dim))
             .child(
                 text("Change the filter, or press Esc in the field to leave it.")
                     .text_size(11.0)
-                    .color(Tone::Quiet),
+                    .color(Role::Quiet),
             )
     }
 
@@ -762,10 +762,10 @@ impl Look {
     /// on a faint light.
     fn dress(self, row: Element) -> Element {
         if self.chosen > 0.0 {
-            row.bg(Tone::Accent.alpha(0.13 * self.chosen))
-                .border(1.0, Tone::Accent.alpha(0.55 * self.chosen))
+            row.bg(Role::Accent.alpha(0.13 * self.chosen))
+                .border(1.0, Role::Accent.alpha(0.55 * self.chosen))
         } else if self.hovered > 0.0 {
-            row.bg(Tone::Foreground.alpha(0.055 * self.hovered))
+            row.bg(Role::Foreground.alpha(0.055 * self.hovered))
         } else {
             row
         }
@@ -786,11 +786,11 @@ fn group_row(
         .take(12)
         .fold(div().row().gap(2.0), |row, m| {
             let color = if m.has_issue() {
-                Tone::Error.solid()
+                Role::Error.solid()
             } else if m.is_up() {
-                Tone::Success.solid()
+                Role::Success.solid()
             } else {
-                Tone::Quiet.alpha(0.4)
+                Role::Quiet.alpha(0.4)
             };
             row.child(div().size(5.0, 10.0).rounded(2.0).bg(color))
         });
@@ -810,7 +810,7 @@ fn group_row(
             .rounded(6.0)
             .no_shrink()
             .press(id)
-            .color(Tone::Dim)
+            .color(Role::Dim)
             .child(
                 div()
                     .row()
@@ -821,11 +821,11 @@ fn group_row(
             .child(
                 text(project.unwrap_or("Standalone"))
                     .weight(650)
-                    .color(Tone::Foreground)
+                    .color(Role::Foreground)
                     .no_shrink(),
             )
             .child(stack)
-            .child(text(summary).text_size(11.5).color(Tone::Quiet).truncate()),
+            .child(text(summary).text_size(11.5).color(Role::Quiet).truncate()),
     )
 }
 
@@ -833,17 +833,17 @@ fn group_row(
 fn container_row(id: Id, c: &Container, width: Width, look: Look, marked: bool) -> Element {
     let up = c.is_up();
     let tone = match c.state {
-        State::Running => Tone::Success,
-        State::Starting | State::Paused => Tone::Warning,
-        State::Unhealthy => Tone::Error,
-        State::Exited(code) if code != 0 => Tone::Error,
-        State::Exited(_) => Tone::Quiet,
+        State::Running => Role::Success,
+        State::Starting | State::Paused => Role::Warning,
+        State::Unhealthy => Role::Error,
+        State::Exited(code) if code != 0 => Role::Error,
+        State::Exited(_) => Role::Quiet,
     };
     let state_tag = match c.state {
-        State::Unhealthy => Some(("unhealthy".to_owned(), Tone::Error)),
-        State::Starting => Some(("starting".to_owned(), Tone::Warning)),
-        State::Paused => Some(("paused".to_owned(), Tone::Warning)),
-        State::Exited(code) if code != 0 => Some((format!("exited {code}"), Tone::Error)),
+        State::Unhealthy => Some(("unhealthy".to_owned(), Role::Error)),
+        State::Starting => Some(("starting".to_owned(), Role::Warning)),
+        State::Paused => Some(("paused".to_owned(), Role::Warning)),
+        State::Exited(code) if code != 0 => Some((format!("exited {code}"), Role::Error)),
         _ => None,
     };
     let mut name = div()
@@ -855,7 +855,7 @@ fn container_row(id: Id, c: &Container, width: Width, look: Look, marked: bool) 
         .child(if up {
             text(c.name).weight(600).truncate()
         } else {
-            text(c.name).weight(500).color(Tone::Dim).truncate()
+            text(c.name).weight(500).color(Role::Dim).truncate()
         });
     // Where the name has little room, the state is the dot's colour alone.
     if width != Width::Tiny && width != Width::Narrow {
@@ -873,7 +873,7 @@ fn container_row(id: Id, c: &Container, width: Width, look: Look, marked: bool) 
         name,
     ];
     if width.image() {
-        cells.push(text(c.image).color(Tone::Dim).truncate());
+        cells.push(text(c.image).color(Role::Dim).truncate());
     }
     cells.push(if up {
         div()
@@ -881,7 +881,7 @@ fn container_row(id: Id, c: &Container, width: Width, look: Look, marked: bool) 
             .items_center()
             .justify_between()
             .gap(6.0)
-            .child(spark(&c.history, Tone::Accent).size(44.0, 14.0).no_shrink())
+            .child(spark(&c.history, Role::Accent).size(44.0, 14.0).no_shrink())
             .child(value(format!("{:.1}%", c.cpu)))
     } else {
         dash()
@@ -890,11 +890,11 @@ fn container_row(id: Id, c: &Container, width: Width, look: Look, marked: bool) 
         cells.push(if up {
             let share = c.memory.1.clamp(0.0, 1.0);
             let color = if share > 0.85 {
-                Tone::Error
+                Role::Error
             } else if share > 0.65 {
-                Tone::Warning
+                Role::Warning
             } else {
-                Tone::Quiet
+                Role::Quiet
             };
             div()
                 .row()
@@ -906,7 +906,7 @@ fn container_row(id: Id, c: &Container, width: Width, look: Look, marked: bool) 
                         .grow(1.0)
                         .min_w(0.0)
                         .rounded(2.0)
-                        .bg(Tone::Raised(2))
+                        .bg(Role::Raised(2))
                         .clip()
                         .child(
                             div()
@@ -930,7 +930,7 @@ fn container_row(id: Id, c: &Container, width: Width, look: Look, marked: bool) 
             ports = ports.child(
                 text(format!("+{}", c.ports.len() - 2))
                     .text_size(11.0)
-                    .color(Tone::Quiet),
+                    .color(Role::Quiet),
             );
         }
         cells.push(ports);
@@ -938,7 +938,7 @@ fn container_row(id: Id, c: &Container, width: Width, look: Look, marked: bool) 
     cells.push(
         text(c.age)
             .text_size(11.5)
-            .color(Tone::Dim)
+            .color(Role::Dim)
             .align(Align::End)
             .truncate(),
     );
@@ -961,7 +961,7 @@ fn container_row(id: Id, c: &Container, width: Width, look: Look, marked: bool) 
                 .inset(Some(8.0), None, Some(8.0), Some(1.0))
                 .w(3.0)
                 .rounded(1.5)
-                .bg(Tone::Accent),
+                .bg(Role::Accent),
         );
     }
     look.dress(row)
@@ -972,18 +972,18 @@ fn value(content: String) -> Element {
     div().min_w(42.0).no_shrink().child(
         text(content)
             .text_size(11.5)
-            .color(Tone::Dim)
+            .color(Role::Dim)
             .align(Align::End),
     )
 }
 
 /// A cell with nothing to say: a quiet dash at its end.
 fn dash() -> Element {
-    text("\u{2013}").color(Tone::Quiet).align(Align::End)
+    text("\u{2013}").color(Role::Quiet).align(Align::End)
 }
 
 /// A small label in a tone, on the tone's own faint ground.
-fn tag(label: &str, tone: Tone) -> Element {
+fn tag(label: &str, tone: Role) -> Element {
     let (ink, ground) = (tone.solid(), tone.alpha(0.13));
     div()
         .row()
@@ -1004,9 +1004,9 @@ fn port_chip(port: u16) -> Element {
         .h(20.0)
         .px(6.0)
         .rounded(4.0)
-        .bg(Tone::Info.alpha(0.11))
+        .bg(Role::Info.alpha(0.11))
         .no_shrink()
-        .child(text(format!(":{port}")).text_size(11.0).color(Tone::Info))
+        .child(text(format!(":{port}")).text_size(11.0).color(Role::Info))
 }
 
 /// A key cap.
@@ -1019,14 +1019,14 @@ fn kbd(label: &str, size: f32) -> Element {
         .h(18.0)
         .px(4.0)
         .rounded(4.0)
-        .bg(Tone::Raised(2))
-        .border(1.0, Tone::Line)
+        .bg(Role::Raised(2))
+        .border(1.0, Role::Line)
         .no_shrink()
-        .child(text(label).text_size(size).color(Tone::Dim))
+        .child(text(label).text_size(size).color(Role::Dim))
 }
 
 /// A round dot of `size` points in `tone`; `ring` adds the soft halo of a live one.
-fn dot(size: f32, tone: Tone, ring: bool) -> Element {
+fn dot(size: f32, tone: Role, ring: bool) -> Element {
     let core = div().size(size, size).rounded(size / 2.0).bg(tone);
     if ring {
         let halo = size + 6.0;
@@ -1045,7 +1045,7 @@ fn dot(size: f32, tone: Tone, ring: bool) -> Element {
 
 /// The state's dot: solid with a halo for a container that is up, a hollow ring for one that
 /// has ended (in the error colour when it ended badly).
-fn state_dot(state: State, tone: Tone) -> Element {
+fn state_dot(state: State, tone: Role) -> Element {
     match state {
         State::Exited(_) => div()
             .size(10.0, 10.0)
@@ -1066,7 +1066,7 @@ fn status_line(width: f32) -> Element {
             .px(4.0)
             .no_shrink()
             .child(kbd(key, 10.0).min_w(16.0).h(16.0))
-            .child(text(label).text_size(11.0).color(Tone::Quiet))
+            .child(text(label).text_size(11.0).color(Role::Quiet))
     };
     let keys = if width >= 760.0 {
         6
@@ -1078,8 +1078,8 @@ fn status_line(width: f32) -> Element {
     div()
         .col()
         .no_shrink()
-        .bg(Tone::Raised(1))
-        .child(div().h(1.0).bg(Tone::Line))
+        .bg(Role::Raised(1))
+        .child(div().h(1.0).bg(Role::Line))
         .child(
             div()
                 .row()
@@ -1112,7 +1112,7 @@ fn status_line(width: f32) -> Element {
                 .child(spacer())
                 .child(hint(":", "commands"))
                 .child(hint("?", ""))
-                .child(dot(8.0, Tone::Success, false)),
+                .child(dot(8.0, Role::Success, false)),
         )
 }
 
@@ -1279,12 +1279,12 @@ mod tests {
     fn the_chosen_row_is_told_apart_by_its_border_and_the_dots_by_their_tone() {
         let (_, list) = page(1000.0, 600.0, 2.0);
         let selected = list.items.iter().filter(|item| {
-            matches!(item, Paint::Quad(q) if q.border.is_some_and(|b| b.color == Tone::Accent.alpha(0.55))
-                && q.fill == Some(Tone::Accent.alpha(0.13)))
+            matches!(item, Paint::Quad(q) if q.border.is_some_and(|b| b.color == Role::Accent.alpha(0.55))
+                && q.fill == Some(Role::Accent.alpha(0.13)))
         });
         assert_eq!(selected.count(), 1);
         // A hollow ring for each container that ended: in the error colour when it ended badly.
-        let ring = |tone: Tone| {
+        let ring = |tone: Role| {
             list.items
                 .iter()
                 .filter(|item| {
@@ -1293,8 +1293,8 @@ mod tests {
                 })
                 .count()
         };
-        assert_eq!(ring(Tone::Error), 1, "the mailer ended badly");
-        assert_eq!(ring(Tone::Quiet), 2, "and the blog's two stopped quietly");
+        assert_eq!(ring(Role::Error), 1, "the mailer ended badly");
+        assert_eq!(ring(Role::Quiet), 2, "and the blog's two stopped quietly");
     }
 
     #[test]

@@ -844,7 +844,7 @@ impl Desk {
         let Some(text) = self.page_context() else {
             return;
         };
-        self.flow.heard(text.len());
+        self.flow.heard(Flow::size(&text));
         let notify = {
             let mut slots = lock(&self.slots);
             let first = slots.views.is_empty();
@@ -1020,7 +1020,7 @@ impl Desk {
                 // What the program said for the module is counted from here until the module
                 // takes it; a view that starts or ends counts nothing, whatever was.
                 Action::ToView(text) => {
-                    self.flow.heard(text.len());
+                    self.flow.heard(Flow::size(&text));
                     kept.push(Action::ToView(text));
                 }
                 // A view starts: its module's bytes are written, and nothing counted before is

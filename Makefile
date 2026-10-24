@@ -3,7 +3,7 @@ CARGO ?= cargo
 # Prerequisite order is only guaranteed under serial make; under -j the promises
 # "cheapest gate first" and "version first" break.
 .NOTPARALLEL:
-.PHONY: check prune fmt audit clippy test test-heavy test-view test-all gate gate-push hooks linux-server linux-run shader smoke terminfo test-race scan bundle package install release publish ship release-gate sparkle dmgbuild linux
+.PHONY: check prune fmt audit clippy test guest demopen test-heavy test-view test-all gate gate-push hooks linux-server linux-run shader smoke terminfo test-race scan bundle package install release publish ship release-gate sparkle dmgbuild linux
 
 # Definition of done. Homebrew rustc is not pinned (there is deliberately no
 # rust-toolchain.toml): the version is printed first so a clippy failure that
@@ -107,7 +107,14 @@ fmt:
 #   registry copy of the kit would be a second copy that drifts. They stay out of the kablo
 #   rule above, because it is another repository with its own commits — one hash for the
 #   two would be a coincidence, not a rule. The rules of the kit itself (what the engine and
-#   the sandbox may link) are checked in pencere's own `make check`.
+#   the sandbox may link) are checked in pencere's own `make check`. The program's side of
+#   the protocol (`pencere`, a dev-dependency of bt-core's test program) is pinned by the
+#   same hash and checked the same way, dev edges included.
+# - The WebAssembly runtime and the pictures' decoders come in through `pencere-sandbox`
+#   alone: no crate of bateri's own takes `wasmtime`, `zune-jpeg` or `resvg` (`cargo tree -i`
+#   at depth 1 names a crate's direct dependents), and `png` only in bt-core, for the kitty
+#   protocol's PNG payload. A second consumer would be a second runtime, or a second set of
+#   decoders with limits of their own, beside the one whose limits the sandbox enforces.
 # - It does NOT fail on a dependency change, it warns: a deliberate dependency
 #   decision also changes Cargo.lock; review looks for the decision's record.
 audit:
@@ -127,15 +134,20 @@ audit:
 		elif ! echo "$$kablo_tree" | grep -qE "$$fork v[0-9.]+ \(https://github.com/bateri/kablo\?rev=$$fork_rev#"; then echo "audit: $$fork does not resolve to github.com/bateri/kablo at rev $$fork_rev — for a fork, is [patch.crates-io] in Cargo.toml still used?"; fail=1; fi; \
 	done; \
 	if [ "$$(echo $$kablo_revs | tr ' ' '\n' | sort -u | wc -l | tr -d ' ')" != "1" ]; then echo "audit: vte, alacritty_terminal and kablo-proto are not pinned by one kablo commit (rev):$$kablo_revs"; fail=1; fi; \
-	pencere_revs=""; \
-	for crate in pencere-host pencere-view pencere-sandbox; do \
+	pencere_tree=$$($(CARGO) tree --workspace -e normal,dev); pencere_revs=""; \
+	for crate in pencere-host pencere-view pencere-sandbox pencere; do \
 		pencere_rev=$$(sed -n 's/^'"$$crate"' = { git = "https:\/\/github.com\/bateri\/pencere", rev = "\([0-9a-f]\{40\}\)" }$$/\1/p' Cargo.toml); \
 		pencere_revs="$$pencere_revs $$pencere_rev"; \
 		if [ -z "$$pencere_rev" ]; then echo "audit: Cargo.toml does not pin $$crate with a full commit hash (rev) of github.com/bateri/pencere"; fail=1; \
-		elif ! echo "$$kablo_tree" | grep -qE "$$crate v[0-9.]+ \(https://github.com/bateri/pencere\?rev=$$pencere_rev#"; then echo "audit: $$crate does not resolve to github.com/bateri/pencere at rev $$pencere_rev"; fail=1; fi; \
+		elif ! echo "$$pencere_tree" | grep -qE "(^|[ ─])$$crate v[0-9.]+ \(https://github.com/bateri/pencere\?rev=$$pencere_rev#"; then echo "audit: $$crate does not resolve to github.com/bateri/pencere at rev $$pencere_rev"; fail=1; fi; \
 	done; \
-	if [ "$$(echo $$pencere_revs | tr ' ' '\n' | sort -u | wc -l | tr -d ' ')" != "1" ]; then echo "audit: pencere-host, pencere-view and pencere-sandbox are not pinned by one pencere commit (rev):$$pencere_revs"; fail=1; fi; \
-	if echo "$$kablo_tree" | grep -E "pencere-[a-z]+ v[0-9.]+" | grep -vE "\(https://github.com/bateri/pencere\?rev=[0-9a-f]{40}#"; then echo "audit: a crate of pencere is in the build from somewhere other than github.com/bateri/pencere at a pinned commit — the kit is taken from pencere alone"; fail=1; fi; \
+	if [ "$$(echo $$pencere_revs | tr ' ' '\n' | sort -u | wc -l | tr -d ' ')" != "1" ]; then echo "audit: pencere-host, pencere-view, pencere-sandbox and pencere are not pinned by one pencere commit (rev):$$pencere_revs"; fail=1; fi; \
+	if echo "$$pencere_tree" | grep -E "(^|[ ─])pencere(-[a-z]+)? v[0-9.]+" | grep -vE "\(https://github.com/bateri/pencere\?rev=[0-9a-f]{40}#"; then echo "audit: a crate of pencere is in the build from somewhere other than github.com/bateri/pencere at a pinned commit — the kit is taken from pencere alone"; fail=1; fi; \
+	for heavy in wasmtime zune-jpeg resvg png; do \
+		own=$$($(CARGO) tree --workspace -e normal,dev -i $$heavy --depth 1 2>/dev/null | sed -n -E 's/^.*(├──|└──) (bt-[a-z-]+|bateri) v.*$$/\2/p'); \
+		if [ "$$heavy" = png ]; then own=$$(echo "$$own" | grep -vx bt-core); fi; \
+		if [ -n "$$own" ]; then echo "audit: $$own takes $$heavy directly — the runtime and the pictures' decoders come in through pencere-sandbox alone (bt-core's png is the kitty protocol's)"; fail=1; fi; \
+	done; \
 	if $(CARGO) tree -p bt-gpu -e normal,dev --depth 1 | grep -E "objc2|dispatch2|block2|metal"; then echo "audit: bt-gpu links directly to a platform library"; fail=1; fi; \
 	if grep -rnE "objc2|dispatch2|block2|metal" crates/bt-gpu/src | grep -v ":[[:space:]]*//"; then echo "audit: platform call in bt-gpu source"; fail=1; fi; \
 	for f in crates/bt-core/src/*.rs; do \
@@ -182,8 +194,43 @@ NOT_HEAVY = --skip ::race_ --skip census::tests::census --skip raster_digest \
 # The libraries' heavy tests: those whose path holds one of AREA's words
 # (`AREA="child:: kablo::"`), every one without it. Nothing is built again: the same test
 # binaries as `test`, the ignored tests taken.
-test-heavy:
+test-heavy: guest demopen
 	$(CARGO) test --workspace --lib -- --ignored $(NOT_HEAVY) $(AREA)
+
+# The program the end-to-end tests of a pane run in it (`crates/bt-core/examples/demopen.rs`,
+# written with pencere's library of the program's side). `cargo test --workspace --all-targets`
+# builds it with the tests; `--lib` does not, so the heavy tier builds it first. A test that
+# finds it missing fails, it does not skip.
+demopen:
+	$(CARGO) build -p bt-core --example demopen
+
+# The page modules the tests that run a real one try the sandbox with, and the debug menu's
+# demos: bateri carries none, they are pencere's (`kit/guest`), built from the checkout this
+# build is pinned to (`tools/pencere_checkout.py` asks cargo for it; no folder beside this
+# repository is read) into target/guest/dist, with the container list's script beside them.
+# Needs rustup with the `stable` toolchain and its wasm32-unknown-unknown target, as Homebrew's
+# rustc has no WebAssembly standard library; the first build fetches the modules' crates. A
+# stamp for each pencere `rev`: it runs again when the `rev` moves, and not otherwise.
+GUEST_MODULES = containers broken chatty
+GUEST_OUT = target/guest
+PENCERE_REV = $(shell sed -n 's/^pencere-sandbox = .*rev = "\([0-9a-f]\{40\}\)".*/\1/p' Cargo.toml)
+GUEST_BIN = $(shell dirname "$$(rustup which --toolchain stable cargo 2>/dev/null)" 2>/dev/null)
+GUEST_CARGO = PATH="$(GUEST_BIN):$$PATH" DYLD_FALLBACK_LIBRARY_PATH="$(dir $(GUEST_BIN))lib" $(GUEST_BIN)/cargo
+
+guest: $(GUEST_OUT)/built-$(PENCERE_REV)
+
+$(GUEST_OUT)/built-$(PENCERE_REV):
+	@command -v rustup >/dev/null 2>&1 || { echo "guest: rustup is missing (the modules are built with its stable toolchain)"; exit 1; }
+	@rustup target list --installed --toolchain stable 2>/dev/null | grep -qx wasm32-unknown-unknown || { echo "guest: rustup's stable toolchain has no wasm32-unknown-unknown target — rustup target add wasm32-unknown-unknown --toolchain stable"; exit 1; }
+	@kit=$$(python3 tools/pencere_checkout.py) || exit 1; \
+	echo "guest: building the page modules of $$kit"; \
+	$(GUEST_CARGO) build --locked --manifest-path "$$kit/kit/guest/Cargo.toml" --target-dir $(GUEST_OUT)/build --release --target wasm32-unknown-unknown $(addprefix -p ,$(GUEST_MODULES)) || exit 1; \
+	mkdir -p $(GUEST_OUT)/dist; \
+	for m in $(GUEST_MODULES); do \
+		$(GUEST_CARGO) run -q --locked --manifest-path "$$kit/kit/guest/Cargo.toml" --target-dir $(GUEST_OUT)/build -p componentize -- $(GUEST_OUT)/build/wasm32-unknown-unknown/release/$$m.wasm $(GUEST_OUT)/dist/$$m.wasm || exit 1; \
+	done; \
+	cp "$$kit/kit/luau/examples/containers.lua" $(GUEST_OUT)/dist/containers.lua || exit 1; \
+	touch $@
 
 # The program view's test, end to end in a real web view (tens of seconds, one at a time).
 test-view:
@@ -191,7 +238,7 @@ test-view:
 
 # Every test but those `NOT_HEAVY` names: the fast tier and the heavy one together, the push
 # tier's run.
-test-all:
+test-all: guest
 	BT_HEAVY=1 $(CARGO) test --workspace --all-targets -- --include-ignored $(NOT_HEAVY)
 
 # What a change needs, picked by the files it touched (`tools/gate.sh` says how): `gate` for
@@ -826,10 +873,12 @@ LINUX_GIT_MOUNT = $(if $(filter-out $(CURDIR)/.git,$(LINUX_GIT_COMMON)),-v "$(LI
 
 # The full gate: every Linux crate's clippy and every test but those `NOT_HEAVY` names. The
 # release runs it, once a version: bateri ships for macOS today, and the gate keeps the crates
-# that are to run on Linux one day from drifting until then.
+# that are to run on Linux one day from drifting until then. The page modules the tests that run
+# one read (`target/guest/dist`, in the repository the container mounts) are built first, on
+# the host: they are WebAssembly, the same for either system.
 linux: LINUX_CMD = cargo clippy $(LINUX_CRATES) --all-targets --locked -- -D warnings && \
 	cargo test $(LINUX_CRATES) --all-targets --locked -- --include-ignored $(NOT_HEAVY)
-linux: linux-run
+linux: guest linux-run
 
 # What bateri runs on a server, which is Linux far more often than not: the agent's `bateri`
 # script, the remote shells' integration and kablo's install steps, in a Linux shell with

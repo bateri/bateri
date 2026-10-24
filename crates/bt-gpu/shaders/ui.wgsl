@@ -235,6 +235,9 @@ fn ui_glyph_fragment(in: GlyphOut) -> @location(0) vec4<f32> {
 //
 // A TINT paints the shape: every pixel is the tint's colour with the image's
 // alpha at that pixel (times the tint's own and the opacity).
+//
+// The texture has its whole chain of levels (`mip.wgsl` makes them), and a pixel reads the
+// level that suits the rectangle's size relative to the file, trilinearly.
 
 struct ImageIn {
     @location(0) rect: vec4<f32>,
@@ -290,15 +293,42 @@ fn ui_image_fragment(in: ImageOut) -> @location(0) vec4<f32> {
     if p.x < in.clip.x || p.y < in.clip.y || p.x > in.clip.z || p.y > in.clip.w {
         discard;
     }
+    // A rectangle with no area shows nothing, and the shares below divide by its sides.
+    if !(in.rect.z > 0.0 && in.rect.w > 0.0) {
+        discard;
+    }
     let half_size = in.rect.zw * 0.5;
     let rel = p - (in.rect.xy + half_size);
     let d = rounded_box_sdf(rel, half_size, corner_radius(rel, in.radii));
     let inside = 1.0 - smoothstep(-0.5, 0.5, d);
 
+    // The level of the chain this pixel is read from: the texels of the file one pixel of the
+    // rectangle spans, as a power of two. At one texel a pixel (an image drawn at its own size)
+    // or fewer it is the file itself; an image drawn smaller than its file reads the level that
+    // is about as coarse as the rectangle, and does not shimmer as it moves. Computed from the
+    // rectangle and not by the sampler's derivatives, which would be the neighbouring pixels'
+    // (and the image's edge).
+    let dims = vec2<f32>(textureDimensions(picture, 0));
+    let spanned = abs(in.uv.zw - in.uv.xy) * dims / in.rect.zw;
+    let lod = log2(max(max(spanned.x, spanned.y), 1.0));
+
     // Where in the rectangle this pixel is, held to it: the antialiasing pixel past the edge
-    // must not read beyond the part of the texture the rectangle shows.
+    // must not read beyond the part of the texture the rectangle shows. And the filter does
+    // not read beyond it either: the point it reads is held half a texel of the level it reads
+    // inside the part the rectangle shows (a crop that cuts the file is the part's edge, and a
+    // bilinear read there is half the texel on the other side of it). A rectangle that shows
+    // the file at its own size reads texel centres and is not moved by this.
     let share = clamp((p - in.rect.xy) / in.rect.zw, vec2<f32>(0.0), vec2<f32>(1.0));
-    let texel = textureSampleLevel(picture, picture_sampler, mix(in.uv.xy, in.uv.zw, share), 0.0);
+    let near = min(in.uv.xy, in.uv.zw);
+    let far = max(in.uv.xy, in.uv.zw);
+    let middle = (near + far) * 0.5;
+    let reach = 0.5 * exp2(ceil(lod)) / dims;
+    let at = clamp(
+        mix(in.uv.xy, in.uv.zw, share),
+        min(near + reach, middle),
+        max(far - reach, middle),
+    );
+    let texel = textureSampleLevel(picture, picture_sampler, at, lod);
 
     var rgb = in.tint.rgb;
     var alpha = texel.a * in.params.x * inside;

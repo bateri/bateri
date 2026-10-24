@@ -11860,7 +11860,7 @@ impl Session {
         }) && ticket.is_some();
         // The module said it to the flow's count before it reached here; what was written is
         // in the writer's queue now, and what was not (the view is over) is not owed to anyone.
-        flow.said(text.len());
+        flow.said(Flow::size(text));
         wrote
     }
 
@@ -30745,21 +30745,37 @@ e\\314\\201.'; sleep 5";
         program.session.shutdown();
     }
 
-    /// The demo program (`guest/demopen`, built by `make guest`) against a real pane: it asks
+    /// The program the end-to-end tests below run in a pane (`examples/demopen.rs`, written with
+    /// pencere's library of the program's side): `cargo test` builds it with the tests, and
+    /// `make test-heavy` before them. **One that is not there fails the test**, loudly: these
+    /// are the heavy tier's, the leak guards among them, and a test that returned early for a
+    /// missing program would go green having guarded nothing.
+    fn demopen() -> std::path::PathBuf {
+        let program = std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent()?.parent().map(std::path::Path::to_path_buf))
+            .map(|profile| profile.join("examples").join("demopen"))
+            .expect("the path of the test binary");
+        assert!(
+            program.is_file(),
+            "the test program is not built: {} (`cargo build -p bt-core --example demopen`, which \
+             `make test-heavy` does first)",
+            program.display()
+        );
+        program
+    }
+
+    /// The demo program (`examples/demopen.rs`) against a real pane: it asks
     /// the terminal, sends its module, hears the page's subscription and pushes readings once a
     /// second, and when the view is closed it leaves and the pane's child ends. The session is
     /// the one the application uses, the PTY is real, the program is the one a person runs; only
     /// the sandbox (the page's side) is played by the test.
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn the_demo_program_shows_its_module_pushes_what_the_page_asks_for_and_leaves_when_the_view_closes()
      {
         use crate::pencere::Action;
-        let program =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../guest/dist/demopen");
-        if !program.is_file() {
-            eprintln!("skipped: {} is not built (`make guest`)", program.display());
-            return;
-        }
+        let program = demopen();
         // `set -m` makes the program a job of its own: the tty's foreground group is not the
         // shell's, as for a command a shell started.
         let mut options = test_options(
@@ -30854,14 +30870,10 @@ e\\314\\201.'; sleep 5";
     /// told why and says so on the screen once the terminal is the shell's again. The sandbox
     /// (the script's side) is played by the test.
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn the_demo_program_shows_a_script_when_asked_to_and_says_why_when_its_view_fails() {
         use crate::pencere::Action;
-        let program =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../guest/dist/demopen");
-        if !program.is_file() {
-            eprintln!("skipped: {} is not built (`make guest`)", program.display());
-            return;
-        }
+        let program = demopen();
         let mut options = test_options(
             (
                 "/bin/sh".into(),
@@ -30916,15 +30928,11 @@ e\\314\\201.'; sleep 5";
     /// terminal back and leaves, and the view goes with the program. What the page says after
     /// that writes nothing: the pane's input is not where a late message goes.
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn an_interrupt_ends_the_demo_program_and_its_view_and_a_late_word_of_the_page_writes_nothing()
     {
         use crate::pencere::{Action, State};
-        let program =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../guest/dist/demopen");
-        if !program.is_file() {
-            eprintln!("skipped: {} is not built (`make guest`)", program.display());
-            return;
-        }
+        let program = demopen();
         let mut options = test_options(
             (
                 "/bin/sh".into(),
@@ -30979,14 +30987,10 @@ e\\314\\201.'; sleep 5";
     /// a restart work for programs in general is not the point: it does not hang, it does not
     /// write garbage, and the program that handles it gets its view back.
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn a_restart_closes_the_modules_view_and_the_demo_program_opens_it_again() {
         use crate::pencere::Action;
-        let program =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../guest/dist/demopen");
-        if !program.is_file() {
-            eprintln!("skipped: {} is not built (`make guest`)", program.display());
-            return;
-        }
+        let program = demopen();
         let mut options = test_options(
             (
                 "/bin/sh".into(),
@@ -31037,15 +31041,9 @@ e\\314\\201.'; sleep 5";
         session.shutdown();
     }
 
-    /// A pane running the demo program with `args` (`make guest` builds it; `None` where it is
-    /// not), whose desk opens WebAssembly views when `modules` and web views alone when not.
-    fn demo_pane(args: &[&str], modules: bool) -> Option<(Arc<TestWake>, Session)> {
-        let program =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../guest/dist/demopen");
-        if !program.is_file() {
-            eprintln!("skipped: {} is not built (`make guest`)", program.display());
-            return None;
-        }
+    /// A pane running the demo program with `args`, whose desk opens WebAssembly views when `modules` and web views alone when not.
+    fn demo_pane(args: &[&str], modules: bool) -> (Arc<TestWake>, Session) {
+        let program = demopen();
         // `set -m` makes the program a job of its own: the tty's foreground group is not the
         // shell's, as for a command a shell started.
         let mut command = vec![
@@ -31061,7 +31059,7 @@ e\\314\\201.'; sleep 5";
         options.views = Some(views);
         let wake = Arc::new(TestWake::default());
         let session = Session::spawn(options, Arc::clone(&wake) as Arc<dyn Wake>).unwrap();
-        Some((wake, session))
+        (wake, session)
     }
 
     /// Waits for the view of the demo program to start.
@@ -31088,11 +31086,10 @@ e\\314\\201.'; sleep 5";
     /// program's own write waits and the inbox stays where it is — and ⌃C, which goes the other
     /// way, still reaches the program, which ends and takes its view with it.
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn a_program_that_floods_its_module_waits_for_it_and_an_interrupt_still_reaches_it() {
         use crate::pencere::Action;
-        let Some((wake, session)) = demo_pane(&["--flood"], true) else {
-            return;
-        };
+        let (wake, session) = demo_pane(&["--flood"], true);
         wait_for_the_view(&session);
         let flow = session.flow();
         assert!(session.module_message(r#"{"subscribe":{"id":1,"topic":"stats"}}"#));
@@ -31138,7 +31135,7 @@ e\\314\\201.'; sleep 5";
             || {
                 for action in session.take_view_actions() {
                     match action {
-                        Action::ToView(text) => flow.taken(text.len()),
+                        Action::ToView(text) => flow.taken(Flow::size(&text)),
                         Action::DestroyView => destroyed = true,
                         _ => {}
                     }
@@ -31163,11 +31160,10 @@ e\\314\\201.'; sleep 5";
     /// A program that floods a module that is slow but there gets everything it pushes, and the
     /// module never has more waiting for it than the bound and a read.
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn a_slow_module_is_given_all_that_a_flooding_program_pushes_and_never_more_than_it_can_hold() {
         use crate::pencere::Action;
-        let Some((wake, session)) = demo_pane(&["--flood"], true) else {
-            return;
-        };
+        let (wake, session) = demo_pane(&["--flood"], true);
         wait_for_the_view(&session);
         let flow = session.flow();
         assert!(session.module_message(r#"{"subscribe":{"id":1,"topic":"stats"}}"#));
@@ -31189,7 +31185,7 @@ e\\314\\201.'; sleep 5";
                     text.starts_with(r#"{"push":{"id":1,"value":{"readings":["#),
                     "{text}"
                 );
-                flow.taken(text.len());
+                flow.taken(Flow::size(&text));
                 taken += 1;
                 std::thread::sleep(Duration::from_millis(1));
             }
@@ -31208,7 +31204,7 @@ e\\314\\201.'; sleep 5";
             || {
                 for action in session.take_view_actions() {
                     if let Action::ToView(text) = action {
-                        flow.taken(text.len());
+                        flow.taken(Flow::size(&text));
                     }
                 }
                 left = wake.wait_exit(Duration::from_millis(10));
@@ -31224,11 +31220,10 @@ e\\314\\201.'; sleep 5";
     /// there is room, and goes on. Every byte arrives, the program counts them and says how many
     /// when it leaves.
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn a_page_sends_its_program_a_large_payload_in_chunks_and_the_program_counts_every_byte() {
         use crate::pencere::Action;
-        let Some((wake, session)) = demo_pane(&[], true) else {
-            return;
-        };
+        let (wake, session) = demo_pane(&[], true);
         wait_for_the_view(&session);
         let flow = session.flow();
         let total: usize = 4 << 20;
@@ -31243,7 +31238,7 @@ e\\314\\201.'; sleep 5";
                 "x".repeat(size),
                 seq == chunks
             );
-            while !flow.may_say(text.len()) {
+            while !flow.may_say(Flow::size(&text)) {
                 told_full += 1;
                 // The module waits to be called for room: the shell is told, and takes it.
                 wait_until("room for the page", Duration::from_secs(20), || {
@@ -31253,7 +31248,7 @@ e\\314\\201.'; sleep 5";
             assert!(session.module_message(&text));
             for action in session.take_view_actions() {
                 if let Action::ToView(text) = action {
-                    flow.taken(text.len());
+                    flow.taken(Flow::size(&text));
                     answers.push(text);
                 }
             }
@@ -31265,15 +31260,16 @@ e\\314\\201.'; sleep 5";
         wait_until("the program's answer", Duration::from_secs(20), || {
             for action in session.take_view_actions() {
                 if let Action::ToView(text) = action {
-                    flow.taken(text.len());
+                    flow.taken(Flow::size(&text));
                     answers.push(text);
                 }
             }
-            answers.iter().any(|text| text.contains(r#""response""#))
+            answers.iter().any(|text| text.contains(r#""bytes""#))
         });
+        // Every piece is answered (with nothing, but the last: how much there was).
         let answer = answers
             .iter()
-            .find(|text| text.contains(r#""response""#))
+            .find(|text| text.contains(r#""bytes""#))
             .unwrap();
         assert!(
             answer.contains(&format!(r#""result":{{"bytes":{total}}}"#)),
@@ -31287,6 +31283,57 @@ e\\314\\201.'; sleep 5";
         wait_until("the program's count", Duration::from_secs(10), || {
             the_screen(&session).contains(&line)
         });
+        session.shutdown();
+    }
+
+    /// A page that writes accents says them as `\u00e9`, six bytes on the wire and two as text.
+    /// The sandbox counts a message by its text, the pane has to count the same number at every
+    /// end of it — what the page says (`may_say`, `said`) and what the program says back (`heard`,
+    /// `taken`) — or the count of one never meets the other: what the page said stays owed for
+    /// ever, and the inbox of the page never drains and the reader of the pane stays shut.
+    #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+    fn a_page_that_writes_accents_is_counted_by_what_it_says_and_nothing_is_left_owed() {
+        use crate::pencere::Action;
+        let (wake, session) = demo_pane(&[], true);
+        wait_for_the_view(&session);
+        let flow = session.flow();
+        let accents = 3000_usize;
+        let text = format!(
+            r#"{{"call":{{"id":1,"method":"upload","params":{{"seq":1,"data":"{}","last":true}}}}}}"#,
+            r"\u00e9".repeat(accents)
+        );
+        let counted = Flow::size(&text);
+        assert!(counted < text.len() / 2, "{counted} of {}", text.len());
+        // The module asks as the sandbox does, with the text unescaped; the shell hands the
+        // message to the session as it came.
+        assert!(flow.may_say(counted));
+        assert!(session.module_message(&text));
+        // Written to the program, and no more owed than the writer's queue, which the program
+        // reads: it ends at nothing.
+        wait_until("nothing owed", Duration::from_secs(20), || {
+            flow.pending() == 0
+        });
+        // The program's answer is counted as heard and taken as the sandbox takes it.
+        let mut answer = None;
+        wait_until("the program's answer", Duration::from_secs(20), || {
+            for action in session.take_view_actions() {
+                if let Action::ToView(text) = action {
+                    flow.taken(::pencere_host::json::unescaped_len(&text));
+                    answer = Some(text);
+                }
+            }
+            answer.is_some()
+        });
+        let answer = answer.unwrap();
+        assert!(
+            answer.contains(&format!(r#""result":{{"bytes":{}}}"#, accents * 2)),
+            "{answer}"
+        );
+        assert_eq!(flow.inbox(), 0, "the answer was counted and is taken");
+        assert_eq!(flow.pending(), 0);
+        session.write(&[0x03]);
+        assert_eq!(wake.wait_exit(Duration::from_secs(20)), Some(Some(130)));
         session.shutdown();
     }
 
@@ -31305,13 +31352,8 @@ e\\314\\201.'; sleep 5";
         marks: bool,
         lag: &str,
         shell_reads: bool,
-    ) -> Option<(TempDir, std::path::PathBuf, Arc<TestWake>, Session)> {
-        let program =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../guest/dist/demopen");
-        if !program.is_file() {
-            eprintln!("skipped: {} is not built (`make guest`)", program.display());
-            return None;
-        }
+    ) -> (TempDir, std::path::PathBuf, Arc<TestWake>, Session) {
+        let program = demopen();
         let dir = TempDir::new(name);
         let out = dir.0.join("read-after");
         let begin = if marks {
@@ -31348,7 +31390,7 @@ e\\314\\201.'; sleep 5";
         options.views = Some(views);
         let wake = Arc::new(TestWake::default());
         let session = Session::spawn(options, Arc::clone(&wake) as Arc<dyn Wake>).unwrap();
-        Some((dir, out, wake, session))
+        (dir, out, wake, session)
     }
 
     /// The page of the view, played: it keeps saying chunks of a payload to its program, as a
@@ -31377,7 +31419,7 @@ e\\314\\201.'; sleep 5";
                 let text = format!(
                     r#"{{"call":{{"id":{call},"method":"upload","params":{{"seq":{call},"data":"{data}","last":false}}}}}}"#
                 );
-                if !flow.may_say(text.len()) {
+                if !flow.may_say(Flow::size(&text)) {
                     break;
                 }
                 if self.session.module_message(&text) {
@@ -31391,7 +31433,7 @@ e\\314\\201.'; sleep 5";
         fn take(&self) {
             for action in self.session.take_view_actions() {
                 if let crate::pencere::Action::ToView(text) = action {
-                    self.session.flow().taken(text.len());
+                    self.session.flow().taken(Flow::size(&text));
                 }
             }
         }
@@ -31419,12 +31461,10 @@ e\\314\\201.'; sleep 5";
     /// dropped; the page that goes on saying chunks until it hears the view ended is refused. After
     /// the program has gone, what reads the tty next finds nothing in it.
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn what_the_page_said_never_reaches_what_reads_the_tty_after_an_interrupt() {
-        let Some((_dir, out, _wake, session)) =
-            demo_pane_then_reader("leak-interrupt", &["--flood"], false, "0", false)
-        else {
-            return;
-        };
+        let (_dir, out, _wake, session) =
+            demo_pane_then_reader("leak-interrupt", &["--flood"], false, "0", false);
         wait_for_the_view(&session);
         let flow = session.flow();
         assert!(session.module_message(r#"{"subscribe":{"id":1,"topic":"stats"}}"#));
@@ -31462,12 +31502,10 @@ e\\314\\201.'; sleep 5";
     /// the `bye`; the program reads up to the answer and throws away the rest. What the page
     /// said before the pane knew is behind the answer in the queue, and is read by the program.
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn what_the_page_said_never_reaches_what_reads_the_tty_after_a_bye() {
-        let Some((_dir, out, _wake, session)) =
-            demo_pane_then_reader("leak-bye", &["--flood"], false, "0", false)
-        else {
-            return;
-        };
+        let (_dir, out, _wake, session) =
+            demo_pane_then_reader("leak-bye", &["--flood"], false, "0", false);
         wait_for_the_view(&session);
         let flow = session.flow();
         assert!(session.module_message(r#"{"subscribe":{"id":1,"topic":"stats"}}"#));
@@ -31515,12 +31553,10 @@ e\\314\\201.'; sleep 5";
     /// The pane learns from the shell — the command's end — gives up the rest and throws away
     /// what the program left unread, from the master's side, before the shell reads.
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn what_the_page_said_is_thrown_away_when_the_program_is_killed_from_outside() {
-        let Some((_dir, out, _wake, session)) =
-            demo_pane_then_reader("leak-kill", &["--flood"], true, "0.2", false)
-        else {
-            return;
-        };
+        let (_dir, out, _wake, session) =
+            demo_pane_then_reader("leak-kill", &["--flood"], true, "0.2", false);
         wait_for_the_view(&session);
         let flow = session.flow();
         assert!(session.module_message(r#"{"subscribe":{"id":1,"topic":"stats"}}"#));
@@ -31566,12 +31602,10 @@ e\\314\\201.'; sleep 5";
     /// goes on: without the check before each write the page would feed the shell for as long as
     /// it spoke.
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn what_a_shell_the_pane_learns_nothing_from_can_read_after_a_kill_is_what_the_queue_held() {
-        let Some((_dir, out, wake, session)) =
-            demo_pane_then_reader("leak-kill-quiet", &["--flood"], false, "0.2", true)
-        else {
-            return;
-        };
+        let (_dir, out, wake, session) =
+            demo_pane_then_reader("leak-kill-quiet", &["--flood"], false, "0.2", true);
         wait_for_the_view(&session);
         let flow = session.flow();
         assert!(session.module_message(r#"{"subscribe":{"id":1,"topic":"stats"}}"#));
@@ -31619,11 +31653,10 @@ e\\314\\201.'; sleep 5";
     /// answer, and the program shows its list as text at once, not after the time it would wait
     /// for a terminal that says nothing.
     #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
     fn a_program_whose_kind_of_view_the_pane_does_not_open_shows_text_at_once() {
         use crate::pencere::Action;
-        let Some((_wake, session)) = demo_pane(&[], false) else {
-            return;
-        };
+        let (_wake, session) = demo_pane(&[], false);
         let began = Instant::now();
         while !the_screen(&session).contains("toolbox") {
             assert!(

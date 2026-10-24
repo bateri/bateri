@@ -1590,6 +1590,32 @@ fn what_the_program_says_for_the_module_is_counted_until_the_module_takes_it() {
     assert_eq!(rig.flow.inbox(), 0);
 }
 
+/// The program writes ASCII: an accent is `\u00e9` on the wire. The sandbox counts what it takes
+/// with the escapes undone, so what the pane counts of the same message is the same number, or
+/// the inbox of a program that writes text with accents never drains and the reader stays shut.
+#[test]
+fn what_the_program_says_with_escapes_is_taken_by_the_count_the_sandbox_gives() {
+    let (mut pane, _, _) = open_a_module_view();
+    let rig = Arc::clone(&pane.rig);
+    let desk = rig.desk.as_ref().expect("a desk");
+    desk.take_views();
+    let text = r#"{"push":{"id":1,"value":{"name":"caf\u00e9 \u2603 \ud83d\ude00"}}}"#;
+    pane.feed(&wire("msg", 4, None, None, text));
+    pane.feed(&wire("msg", 5, None, None, text));
+    let heard = desk.take_views();
+    assert_eq!(heard.len(), 2);
+    assert!(rig.flow.inbox() > 0);
+    for action in heard {
+        let Action::ToView(message) = action else {
+            panic!("a message for the module, not {action:?}");
+        };
+        // What the sandbox hands `Program::taken`, from the text it was given.
+        rig.flow
+            .taken(::pencere_host::json::unescaped_len(&message));
+    }
+    assert_eq!(rig.flow.inbox(), 0);
+}
+
 #[test]
 fn the_end_of_the_view_forgets_what_the_module_never_took() {
     let (mut pane, token, _) = open_a_module_view();

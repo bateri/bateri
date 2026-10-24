@@ -15,3 +15,9 @@ png = { workspace = true }
 polling = { workspace = true }
 toml_edit = { workspace = true }
 unicode-width = { workspace = true }
+
+[dev-dependencies]
+# The program the end-to-end tests of a pane run in it (`examples/demopen.rs`), written with
+# pencere's library of the program's side.
+pencere = { workspace = true }
+serde_json = { workspace = true }

@@ -23,8 +23,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use bt_core::Flow;
-use pencere_sandbox::{Assets, ImageLimits, Images, Limits, Module, Program, Unbounded};
-use pencere_view::{Element, Event, Size, Tone, div, text};
+use pencere_sandbox::{Assets, ImageLimits, Images, Module, ModuleLimits, Program, Unbounded};
+use pencere_view::{Element, Event, Role, Size, div, text};
 
 use super::{
     Drained, Input, PageDrive, Rect, Reply, Shaped, Typeset, UiContext, UiList, UiPage, from_pane,
@@ -63,20 +63,23 @@ struct Shared {
 }
 
 impl Shared {
-    /// Takes what the module has put out into what the page and its handle keep.
-    fn sync(&mut self) {
+    /// Takes what the module has put out into what the page and its handle keep. `building`: a
+    /// frame is being laid out and drawn from what is taken, so it is that frame that shows it —
+    /// the pane is not told to draw another for it (the wake that came with it finds nothing new
+    /// to say). The drain, which is not a frame, is the one that says a page is to be drawn.
+    fn sync(&mut self, building: bool) {
         let update = self.module.poll();
         if let Some(frame) = update.frame {
             self.root = Some(frame.root);
             self.animating = frame.animating;
             self.wake_at = frame.wake_at;
-            self.redraw = true;
+            self.redraw |= !building;
         }
         if let Some(images) = &self.images {
             let arrived = images.poll();
             // A size the layout was waiting for, pixels the paint was: either way a frame of the
             // page, the one that lays it out again and draws it.
-            if arrived.relayout || arrived.redraw {
+            if (arrived.relayout || arrived.redraw) && !building {
                 self.redraw = true;
             }
             self.diagnostics
@@ -130,7 +133,7 @@ impl Program for Held {
 /// build. Returns at once: the module is compiled and started on its thread.
 pub fn module_page(
     bytes: Vec<u8>,
-    limits: Limits,
+    limits: ModuleLimits,
     terminal: Option<String>,
     inset: f32,
     flow: Option<Flow>,
@@ -151,7 +154,7 @@ pub fn module_page(
 /// interpreter of the script's language as the module and `script` (its text) as what it runs.
 pub fn script_page(
     script: Vec<u8>,
-    limits: Limits,
+    limits: ModuleLimits,
     terminal: Option<String>,
     inset: f32,
     flow: Option<Flow>,
@@ -269,7 +272,7 @@ impl PageDrive for ModuleHandle {
     fn drain(&self, reply: &mut dyn FnMut(Reply, bool)) -> Drained {
         let (replies, drained) = {
             let mut shared = self.shared.borrow_mut();
-            shared.sync();
+            shared.sync(false);
             let ended = if shared.told_end {
                 None
             } else {
@@ -297,7 +300,7 @@ fn starting_line() -> Element {
         .size_full()
         .items_center()
         .justify_center()
-        .child(text("Starting the page\u{2026}").color(Tone::Dim))
+        .child(text("Starting the page\u{2026}").color(Role::Dim))
 }
 
 /// A module's page as a [`UiPage`]: built from the newest page the module has handed out.
@@ -319,7 +322,7 @@ impl UiPage for ModulePage {
         let size = Size::new(width / scale, height / scale);
         let root = {
             let mut shared = self.shared.borrow_mut();
-            shared.sync();
+            shared.sync(true);
             // A page for this size, the next step of one that is moving and the page whose time
             // has come; a page that is none of these is not asked for.
             let due = shared.wake_at.is_some_and(|at| cx.now >= at);
@@ -399,17 +402,24 @@ mod tests {
     use std::sync::mpsc::{Receiver, channel};
     use std::time::{Duration, Instant};
 
-    /// The container list's module, if `make guest` has built it in the pencere checkout
-    /// ([`guest_dir`]), and a GPU device to draw on.
-    fn rig() -> Option<(Renderer, Vec<u8>)> {
-        let path = guest_dir().join("containers.wasm");
-        let Ok(bytes) = std::fs::read(&path) else {
-            eprintln!(
-                "skipped: {} is not built (`make guest` in the pencere checkout)",
+    /// A file `make guest` leaves in [`guest_dir`] (the page modules of pencere's checkout, and the
+    /// script of the container list). **A test that needs one fails where it is not there**: it
+    /// is a heavy test, `make test-heavy` builds them first, and a test that went green by
+    /// returning early would be a guard that guards nothing.
+    fn guest_file(name: &str) -> Vec<u8> {
+        let path = guest_dir().join(name);
+        std::fs::read(&path).unwrap_or_else(|why| {
+            panic!(
+                "{} is not there ({why}): `make guest` builds the page modules from the pencere \
+                 checkout the build is pinned to",
                 path.display()
-            );
-            return None;
-        };
+            )
+        })
+    }
+
+    /// The container list's module, and a GPU device to draw on.
+    fn rig() -> Option<(Renderer, Vec<u8>)> {
+        let bytes = guest_file("containers.wasm");
         let Ok(renderer) = Renderer::system_default() else {
             eprintln!("skipped: no GPU device");
             return None;
@@ -444,6 +454,7 @@ mod tests {
     /// then the container list; the field's place is told; and a page at rest asks nothing of the
     /// module and wakes nobody.
     #[test]
+    #[ignore = "heavy: needs the page modules of the pencere checkout; make test-heavy (make guest)"]
     fn a_modules_page_is_empty_until_it_arrives_then_drawn_and_then_at_rest() {
         let Some((renderer, bytes)) = rig() else {
             return;
@@ -453,7 +464,7 @@ mod tests {
         let told = std::sync::Mutex::new(told);
         let (mut page, handle) = module_page(
             bytes,
-            Limits::default(),
+            ModuleLimits::default(),
             None,
             32.0,
             None,
@@ -514,6 +525,7 @@ mod tests {
     /// empty until the interpreter has made the page, then the list; a page at rest asks nothing
     /// of the script and wakes nobody; the pointer over a row changes it.
     #[test]
+    #[ignore = "heavy: needs the page modules of the pencere checkout; make test-heavy (make guest)"]
     fn a_scripts_container_list_is_drawn_then_at_rest_and_answers_the_pointer() {
         let Ok(renderer) = Renderer::system_default() else {
             eprintln!("skipped: no GPU device");
@@ -522,21 +534,11 @@ mod tests {
         let theme = Theme::BATERI;
         let (told, woken) = channel();
         let told = std::sync::Mutex::new(told);
-        // The example script of pencere's checkout (`kit/luau/examples`), beside the modules
-        // (`kit/guest/dist`), which need not be built for this.
-        let path = guest_dir()
-            .ancestors()
-            .nth(2)
-            .map_or_else(Default::default, |kit| {
-                kit.join("luau/examples/containers.lua")
-            });
-        let Ok(script) = std::fs::read(&path) else {
-            eprintln!("skipped: {} is not there", path.display());
-            return;
-        };
+        // The example script of pencere's checkout, copied beside the modules by `make guest`.
+        let script = guest_file("containers.lua");
         let (mut page, handle) = script_page(
             script,
-            Limits::default(),
+            ModuleLimits::default(),
             None,
             32.0,
             None,
@@ -581,6 +583,7 @@ mod tests {
     /// The page of a module a program opened: it asks the program for what it shows, takes
     /// what the program pushes, redraws once for it, and a page at rest after that wakes nobody.
     #[test]
+    #[ignore = "heavy: needs the page modules of the pencere checkout; make test-heavy (make guest)"]
     fn a_page_asks_its_program_for_readings_takes_them_and_is_at_rest_after() {
         let Some((renderer, bytes)) = rig() else {
             return;
@@ -590,7 +593,7 @@ mod tests {
         let told = std::sync::Mutex::new(told);
         let (mut page, handle) = module_page(
             bytes,
-            Limits::default(),
+            ModuleLimits::default(),
             None,
             32.0,
             None,
@@ -668,7 +671,7 @@ mod tests {
     #[test]
     fn a_message_to_the_program_is_held_to_the_protocols_limit() {
         assert_eq!(
-            Limits::default().message,
+            ModuleLimits::default().message,
             bt_core::pencere::MAX_VIEW_MESSAGE
         );
     }
@@ -680,7 +683,7 @@ mod tests {
         let told = std::sync::Mutex::new(told);
         let (_page, handle) = module_page(
             b"not a component".to_vec(),
-            Limits::default(),
+            ModuleLimits::default(),
             None,
             32.0,
             None,
@@ -704,7 +707,7 @@ mod tests {
         let told = std::sync::Mutex::new(told);
         let (_page, handle) = script_page(
             b"local ok = 1\nerror('no page for you', 0)".to_vec(),
-            Limits::default(),
+            ModuleLimits::default(),
             None,
             32.0,
             None,
@@ -722,7 +725,7 @@ mod tests {
         let told = std::sync::Mutex::new(told);
         let (_page, handle) = script_page(
             b"local x = 1\nlocal y = = 2".to_vec(),
-            Limits::default(),
+            ModuleLimits::default(),
             None,
             32.0,
             None,
@@ -753,7 +756,7 @@ mod tests {
                     pencere.div():size(20, 20):bg("accent"))
             end }"#
                 .to_vec(),
-            Limits::default(),
+            ModuleLimits::default(),
             None,
             32.0,
             None,
@@ -848,12 +851,12 @@ mod tests {
         });
         let script = format!(
             r#"return {{ render = function()
-                return pencere.div():p(8):child(pencere.image {{ src = "{file}" }})
+                return pencere.div():p(8):child(pencere.image("{file}"))
             end }}"#
         );
         let (mut page, handle) = script_page(
             script.into_bytes(),
-            Limits::default(),
+            ModuleLimits::default(),
             None,
             32.0,
             None,
@@ -943,6 +946,38 @@ mod tests {
             "a page at rest woke the application"
         );
         assert_eq!(assets.reads.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    /// A frame that is built between the file's arrival and the drain of the wake that came with
+    /// it is the frame that shows the picture; the drain after it has no other frame to ask for.
+    #[test]
+    fn a_frame_built_before_the_drain_shows_the_arrived_image_and_no_other_is_asked_for() {
+        let Ok(renderer) = Renderer::system_default() else {
+            eprintln!("skipped: no GPU device");
+            return;
+        };
+        let theme = Theme::BATERI;
+        let (
+            Rig {
+                mut page,
+                handle,
+                woken,
+                open,
+                ..
+            },
+            _,
+        ) = image_rig(&renderer, &theme, "dot.png", PNG.to_vec());
+        open.send(()).unwrap();
+        assert!(wait(&woken), "the decoded image woke nobody");
+        // The frame comes first, for a reason of its own (a pointer move, a tick).
+        let list = build(&mut page, &renderer, &theme, 0.4);
+        assert_eq!(pictures(&list), 1, "the frame has the picture");
+        let drained = handle.drain(&mut |_, _| {});
+        assert!(
+            !drained.redraw,
+            "the wake of an image a frame already drew asked for one more: {drained:?}"
+        );
+        assert!(woken.recv_timeout(Duration::from_millis(300)).is_err());
     }
 
     /// An SVG is two arrivals — its size, which lays the page out again, then its pixels at that

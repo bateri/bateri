@@ -99,6 +99,9 @@ while IFS= read -r f; do
         m=${m%%/*}
         areas="$areas ${m%.rs}::"
         ;;
+    # The pane's session against a real program (the end-to-end tests that run `demopen`).
+    crates/bt-core/src/session* | crates/bt-core/src/flow* | crates/bt-core/src/reader* | \
+        crates/bt-core/src/pencere* | crates/bt-core/examples/*) areas="$areas session::tests::" ;;
     assets/shell/*) areas="$areas child:: ssh_wrap:: agent::" ;;
     esac
     case $f in

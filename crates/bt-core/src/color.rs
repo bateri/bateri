@@ -939,9 +939,9 @@ impl Theme {
     /// cyan, white, then the bright eight), **linear** RGBA — the value a program's text in
     /// that color is drawn in, for a surface that names the palette by its place in it. The
     /// index is taken modulo sixteen.
-    pub const fn ansi_linear(&self, index: u8) -> LinearRgba {
-        // audit: masked to 0..=15, the palette has sixteen entries.
-        linear_rgba(rgb(self.ansi[(index & 15) as usize]))
+    pub fn ansi_linear(&self, index: u8) -> LinearRgba {
+        // The palette's number is the dock's too, and one function turns it into a colour.
+        self.indexed_linear(index & 15)
     }
 
     /// The **linear** RGBA of the palette's color number `index`.

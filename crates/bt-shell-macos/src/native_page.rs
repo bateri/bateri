@@ -20,7 +20,7 @@
 use std::rc::Rc;
 
 use bt_core::Theme;
-use bt_shell_common::native_view::{Key, Mods, PageDrive, Rect, Tone, tone_linear};
+use bt_shell_common::native_view::{Key, Mods, PageDrive, Rect, Role, tone_linear};
 use bt_shell_common::view_strip::Strip;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
@@ -80,9 +80,9 @@ pub(crate) fn strip(
     strip
 }
 
-/// Where the page modules are: `BT_VIEW_GUEST_DIR`, else the `kit/guest/dist` of the pencere
-/// checkout beside this one (`make guest` there builds them; bateri carries none of its own). A
-/// development convenience of the debug menu's demos.
+/// Where the page modules are: `BT_VIEW_GUEST_DIR`, else `target/guest/dist`, where `make guest`
+/// builds them from the pencere checkout the build is pinned to (bateri carries none of its
+/// own). A development convenience of the debug menu's demos.
 #[cfg(debug_assertions)]
 pub(crate) fn component_path(name: &str) -> std::path::PathBuf {
     bt_shell_common::native_view::guest_dir().join(format!("{name}.wasm"))
@@ -112,7 +112,7 @@ pub(crate) struct Page {
 }
 
 /// A colour of the theme as AppKit's: the engine's tone in the theme, as sRGB.
-fn ink(theme: &Theme, tone: Tone) -> Retained<NSColor> {
+fn ink(theme: &Theme, tone: Role) -> Retained<NSColor> {
     let [r, g, b, _] = tone_linear(theme, tone).to_srgb().map(f64::from);
     NSColor::colorWithSRGBRed_green_blue_alpha(r, g, b, 1.0)
 }
@@ -136,7 +136,7 @@ pub(crate) fn filter_field(
         .unwrap_or_else(|| NSFont::monospacedSystemFontOfSize_weight(size, 0.0));
     field.setFont(Some(&font));
     field.setPlaceholderString(Some(ns_string!("Filter by name, image, port\u{2026}")));
-    field.setTextColor(Some(&ink(theme, Tone::Foreground)));
+    field.setTextColor(Some(&ink(theme, Role::Foreground)));
     field.setAutoresizingMask(NSAutoresizingMaskOptions::empty());
     // SAFETY: the pane implements the text field's delegate methods it is given (`impl
     // NSTextFieldDelegate for TerminalPane`) and outlives the field, which it removes with the page.
@@ -146,7 +146,7 @@ pub(crate) fn filter_field(
 
 /// The theme changed: the field's ink with it.
 pub(crate) fn paint(field: &NSTextField, theme: &Theme) {
-    field.setTextColor(Some(&ink(theme, Tone::Foreground)));
+    field.setTextColor(Some(&ink(theme, Role::Foreground)));
 }
 
 /// Puts the field where the page's box for it is (`place`, the pane's points from its top,
@@ -212,7 +212,7 @@ pub(crate) fn key_of(characters: &str) -> Option<Key> {
         '\u{1b}' => Key::Escape,
         '\t' => Key::Tab,
         other if other.is_control() || ('\u{f700}'..='\u{f8ff}').contains(&other) => return None,
-        other => Key::Char(other),
+        other => Key::Character(other),
     })
 }
 
@@ -221,7 +221,7 @@ pub(crate) fn mods_of(flags: NSEventModifierFlags) -> Mods {
     Mods {
         shift: flags.contains(NSEventModifierFlags::Shift),
         control: flags.contains(NSEventModifierFlags::Control),
-        option: flags.contains(NSEventModifierFlags::Option),
+        alt: flags.contains(NSEventModifierFlags::Option),
         command: flags.contains(NSEventModifierFlags::Command),
     }
 }
@@ -237,9 +237,9 @@ mod tests {
         assert_eq!(key_of("\r"), Some(Key::Enter));
         assert_eq!(key_of("\u{1b}"), Some(Key::Escape));
         assert_eq!(key_of("\t"), Some(Key::Tab));
-        assert_eq!(key_of(" "), Some(Key::Char(' ')));
-        assert_eq!(key_of("G"), Some(Key::Char('G')));
-        assert_eq!(key_of("/"), Some(Key::Char('/')));
+        assert_eq!(key_of(" "), Some(Key::Character(' ')));
+        assert_eq!(key_of("G"), Some(Key::Character('G')));
+        assert_eq!(key_of("/"), Some(Key::Character('/')));
         // A function key the page has no use for, a control character, an empty or composed text.
         assert_eq!(key_of("\u{f704}"), None);
         assert_eq!(key_of("\u{7f}"), None);

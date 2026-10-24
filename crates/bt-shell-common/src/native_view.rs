@@ -6,7 +6,7 @@
 //! - **Text** is shaped and measured by the renderer ([`bt_gpu::Renderer::ui_shape`]) — the
 //!   object that measures is the object that draws, so the width the layout was given is the
 //!   width of the glyphs on screen. The terminal's own face is the pane's font family.
-//! - **Colours** are the theme's: the engine names a [`Tone`], the theme says what it is
+//! - **Colours** are the theme's: the engine names a [`Role`], the theme says what it is
 //!   ([`tone_linear`]) — the arithmetic of colours stays in `bt_core::Theme`, a page keeps
 //!   none, and a theme change is a new list and nothing else. A colour the page gives as a
 //!   value takes the form that goes with the theme's brightness ([`resolve`]). **The words of
@@ -44,9 +44,9 @@ mod containers;
 mod module;
 pub use module::{ModuleHandle, module_page, script_page};
 use pencere_sandbox::Images;
-pub use pencere_sandbox::{Assets, ImageLimits, Limits};
+pub use pencere_sandbox::{Assets, ImageLimits, ModuleLimits};
 pub use pencere_view::{
-    Button, Cursor, Input, Key, Keyboard, Menu, MenuEntry, Mods, Point, Rect, Reply, Tone,
+    Button, Cursor, Input, Key, Keyboard, Menu, MenuEntry, Mods, Point, Rect, Reply, Role,
 };
 use pencere_view::{
     Color, DrawList, Element, Family, Font, Laid, Measure, Metrics, Paint, Picture, Quad, Run,
@@ -56,22 +56,22 @@ use pencere_view::{
 /// What `tone` is in `theme`: the nine roles are the theme's own, the sixteen colours of the
 /// ANSI palette and the selection are the ones the grid draws, and the rest are the values it
 /// derives from them (surfaces a step above the ground, the hairline, the shadow's colour).
-pub fn tone_linear(theme: &Theme, tone: Tone) -> LinearRgba {
+pub fn tone_linear(theme: &Theme, tone: Role) -> LinearRgba {
     match tone {
-        Tone::Background => theme.background_linear(),
-        Tone::Foreground => theme.foreground_linear(),
-        Tone::Dim => theme.dim_linear(),
-        Tone::Accent => theme.accent_linear(),
-        Tone::Cursor => theme.cursor_linear(),
-        Tone::Success => theme.success_linear(),
-        Tone::Error => theme.error_linear(),
-        Tone::Info => theme.info_linear(),
-        Tone::Warning => theme.warning_linear(),
-        Tone::Raised(steps) => theme.raised_linear(steps),
-        Tone::Quiet => theme.quiet_linear(),
-        Tone::Line => theme.separator_linear(),
-        Tone::Shadow => theme.dock_shadow_linear(),
-        Tone::Selection => theme.selection_linear(),
+        Role::Background => theme.background_linear(),
+        Role::Foreground => theme.foreground_linear(),
+        Role::Dim => theme.dim_linear(),
+        Role::Accent => theme.accent_linear(),
+        Role::Cursor => theme.cursor_linear(),
+        Role::Success => theme.success_linear(),
+        Role::Error => theme.error_linear(),
+        Role::Info => theme.info_linear(),
+        Role::Warning => theme.warning_linear(),
+        Role::Raised(steps) => theme.raised_linear(steps),
+        Role::Quiet => theme.quiet_linear(),
+        Role::Line => theme.separator_linear(),
+        Role::Shadow => theme.dock_shadow_linear(),
+        Role::Selection => theme.selection_linear(),
         // The sixteen of the palette, by their place in it; a tone that is none of the others
         // would be the foreground, the colour a theme always has.
         palette => palette.ansi_index().map_or_else(
@@ -121,12 +121,22 @@ fn ground(theme: &Theme, run: &Run) -> LinearRgba {
 /// ([`LinearRgba::legible_on`], the rule the program's words in the grid, the fill band and
 /// the dock are drawn by). Lines, fills and borders are not text and are drawn as they are
 /// said ([`resolve`]).
+///
+/// **What is held to the floor is the colour as it shows**, the word's colour at its own opacity
+/// laid on the ground it stands on: a word that is clear enough to vanish into its ground is
+/// not a word that reads because the colour it was said in does. A word that reads as it shows
+/// is drawn as it was said, opacity and all; one that does not is moved as it shows (the blend,
+/// moved only as far as it takes) and drawn solid, because moving only the colour under the
+/// opacity would take a fraction of the way the word needs to go.
 pub fn ink(theme: &Theme, run: &Run, minimum_contrast: f64) -> [f32; 4] {
     let (colour, alpha) = parts(theme, run.color);
-    tint(
-        colour.legible_on(ground(theme, run), minimum_contrast),
-        alpha,
-    )
+    let under = ground(theme, run);
+    let shown = colour.over(alpha, under);
+    let held = shown.legible_on(under, minimum_contrast);
+    if held == shown {
+        return tint(colour, alpha);
+    }
+    tint(held, 1.0)
 }
 
 /// The engine's box as the renderer's, moved to `origin` pixels.
@@ -197,13 +207,15 @@ impl Assets for BundleAssets {
 }
 
 /// Where the page modules the sandbox is tried with are, in a development tree: the
-/// `BT_VIEW_GUEST_DIR` folder, else `kit/guest/dist` of the pencere checkout that sits beside this
-/// one, where `make guest` builds them (bateri carries no module of its own). The debug menu's
-/// demos and the tests that need a real module read it; one that is not there is skipped.
+/// `BT_VIEW_GUEST_DIR` folder, else `target/guest/dist`, where `make guest` builds them from the
+/// pencere checkout the build is pinned to (bateri carries no module of its own, and no
+/// checkout of pencere is expected to sit beside this one). `containers.lua`, the container
+/// list as a script, is copied there with them. The debug menu's demos and the tests that need
+/// a real module read it; the tests that do fail where it is not there, they do not skip.
 #[cfg(any(test, debug_assertions))]
 pub fn guest_dir() -> std::path::PathBuf {
     std::env::var_os("BT_VIEW_GUEST_DIR").map_or_else(
-        || std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../pencere/kit/guest/dist"),
+        || std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/guest/dist"),
         std::path::PathBuf::from,
     )
 }
@@ -682,25 +694,25 @@ mod tests {
     fn every_tone_is_the_themes_own_value() {
         for theme in THEMES {
             assert_eq!(
-                tone_linear(&theme, Tone::Background),
+                tone_linear(&theme, Role::Background),
                 theme.background_linear()
             );
             assert_eq!(
-                tone_linear(&theme, Tone::Foreground),
+                tone_linear(&theme, Role::Foreground),
                 theme.foreground_linear()
             );
-            assert_eq!(tone_linear(&theme, Tone::Dim), theme.dim_linear());
-            assert_eq!(tone_linear(&theme, Tone::Accent), theme.accent_linear());
-            assert_eq!(tone_linear(&theme, Tone::Cursor), theme.cursor_linear());
-            assert_eq!(tone_linear(&theme, Tone::Success), theme.success_linear());
-            assert_eq!(tone_linear(&theme, Tone::Error), theme.error_linear());
-            assert_eq!(tone_linear(&theme, Tone::Info), theme.info_linear());
-            assert_eq!(tone_linear(&theme, Tone::Warning), theme.warning_linear());
-            assert_eq!(tone_linear(&theme, Tone::Raised(2)), theme.raised_linear(2));
-            assert_eq!(tone_linear(&theme, Tone::Quiet), theme.quiet_linear());
-            assert_eq!(tone_linear(&theme, Tone::Line), theme.separator_linear());
+            assert_eq!(tone_linear(&theme, Role::Dim), theme.dim_linear());
+            assert_eq!(tone_linear(&theme, Role::Accent), theme.accent_linear());
+            assert_eq!(tone_linear(&theme, Role::Cursor), theme.cursor_linear());
+            assert_eq!(tone_linear(&theme, Role::Success), theme.success_linear());
+            assert_eq!(tone_linear(&theme, Role::Error), theme.error_linear());
+            assert_eq!(tone_linear(&theme, Role::Info), theme.info_linear());
+            assert_eq!(tone_linear(&theme, Role::Warning), theme.warning_linear());
+            assert_eq!(tone_linear(&theme, Role::Raised(2)), theme.raised_linear(2));
+            assert_eq!(tone_linear(&theme, Role::Quiet), theme.quiet_linear());
+            assert_eq!(tone_linear(&theme, Role::Line), theme.separator_linear());
             assert_eq!(
-                tone_linear(&theme, Tone::Shadow),
+                tone_linear(&theme, Role::Shadow),
                 theme.dock_shadow_linear()
             );
         }
@@ -710,14 +722,14 @@ mod tests {
     fn a_tone_with_an_opacity_is_the_themes_colour_with_that_alpha() {
         let theme = Theme::BATERI;
         let [r, g, b, _] = theme.accent_linear().to_array();
-        assert_eq!(resolve(&theme, Tone::Accent.alpha(0.13)), [r, g, b, 0.13]);
-        assert_eq!(resolve(&theme, Tone::Accent.solid())[3], 1.0);
+        assert_eq!(resolve(&theme, Role::Accent.alpha(0.13)), [r, g, b, 0.13]);
+        assert_eq!(resolve(&theme, Role::Accent.solid())[3], 1.0);
     }
 
     #[test]
     fn the_palette_and_the_selection_are_the_grids_own_colours() {
         for theme in THEMES {
-            for (index, tone) in Tone::ANSI.into_iter().enumerate() {
+            for (index, tone) in Role::ANSI.into_iter().enumerate() {
                 let [r, g, b] = [16, 8, 0].map(|shift| {
                     u8::try_from((theme.ansi[index] >> shift) & 0xff).expect("a byte")
                 });
@@ -728,19 +740,19 @@ mod tests {
                 );
             }
             assert_eq!(
-                tone_linear(&theme, Tone::Selection),
+                tone_linear(&theme, Role::Selection),
                 theme.selection_linear()
             );
         }
         // The sixteen are different colours, so a tone is not answered by a neighbour's.
         let theme = Theme::BATERI;
         assert_ne!(
-            tone_linear(&theme, Tone::Red),
-            tone_linear(&theme, Tone::BrightRed)
+            tone_linear(&theme, Role::Red),
+            tone_linear(&theme, Role::BrightRed)
         );
         assert_ne!(
-            tone_linear(&theme, Tone::Red),
-            tone_linear(&theme, Tone::Green)
+            tone_linear(&theme, Role::Red),
+            tone_linear(&theme, Role::Green)
         );
     }
 
@@ -832,15 +844,15 @@ mod tests {
             },
             Rgba::rgb(0, 0, 0).solid(),
         ];
-        let seen = ground(&theme, &run(Tone::Foreground.solid(), grounds));
+        let seen = ground(&theme, &run(Role::Foreground.solid(), grounds));
         let mix = LinearRgba::from_srgb(0xff, 0xff, 0xff).over(0.5, LinearRgba::from_srgb(0, 0, 0));
         assert_eq!(seen, mix);
         // With no fill at all the ground is the pane's; a clear fill leaves it as it was.
-        let bare = ground(&theme, &run(Tone::Foreground.solid(), Vec::new()));
+        let bare = ground(&theme, &run(Role::Foreground.solid(), Vec::new()));
         assert_eq!(bare, theme.background_linear());
         let clear = ground(
             &theme,
-            &run(Tone::Foreground.solid(), vec![Tone::Accent.alpha(0.0)]),
+            &run(Role::Foreground.solid(), vec![Role::Accent.alpha(0.0)]),
         );
         assert_eq!(clear, theme.background_linear());
     }
@@ -860,13 +872,69 @@ mod tests {
         laid.paint(&mut Mono)
     }
 
-    /// WCAG 2's ratio between the colour a word is drawn in and what it stands on.
+    /// WCAG 2's ratio between a word as it shows — the colour it is drawn in, at the opacity it
+    /// is drawn with, laid on what it stands on — and what it stands on. A guard that read the
+    /// colour alone would call a word that fades into its ground legible.
     fn read_against(theme: &Theme, run: &Run, drawn: [f32; 4]) -> f64 {
+        let under = ground(theme, run);
+        let [r, g, b, a] = drawn;
+        // Straight RGBA: the colour comes out as its share of the colour and the rest of the ground.
+        let seen = {
+            let [ur, ug, ub, _] = under.to_array();
+            let mix = |top: f32, below: f32| top * a + below * (1.0 - a);
+            [mix(r, ur), mix(g, ug), mix(b, ub), 1.0]
+        };
         let weigh = |c: [f32; 4]| {
             0.2126 * f64::from(c[0]) + 0.7152 * f64::from(c[1]) + 0.0722 * f64::from(c[2])
         };
-        let (word, under) = (weigh(drawn), f64::from(ground(theme, run).luminance()));
+        let (word, under) = (weigh(seen), f64::from(under.luminance()));
         (word.max(under) + 0.05) / (word.min(under) + 0.05)
+    }
+
+    #[test]
+    fn a_word_that_is_clear_enough_to_vanish_is_held_to_the_floor_as_it_shows() {
+        use pencere_view::Rgba;
+        let theme = Theme::BATERI;
+        // White is far from the black ground, a fifth of it is not: the colour passes the floor
+        // and the word does not.
+        let faint = Color {
+            alpha: 0.05,
+            ..Rgba::rgb(0xff, 0xff, 0xff).solid()
+        };
+        let word = run(faint, Vec::new());
+        let said = resolve(&theme, faint);
+        assert!(
+            read_against(&theme, &word, said) < 3.0,
+            "the word as said does not read"
+        );
+        let held = ink(&theme, &word, 3.0);
+        assert_eq!(held[3], 1.0, "drawn solid, in the colour it shows");
+        assert!(
+            read_against(&theme, &word, held) >= 3.0 - 1e-3,
+            "and it reads"
+        );
+        assert!(
+            read_against(&theme, &word, held) < 3.0 + 1e-2,
+            "only as far as it takes"
+        );
+        // One that reads as it shows keeps its colour and its opacity.
+        let firm = Color {
+            alpha: 0.8,
+            ..Rgba::rgb(0xff, 0xff, 0xff).solid()
+        };
+        let word = run(firm, Vec::new());
+        assert_eq!(ink(&theme, &word, 3.0), resolve(&theme, firm));
+        // On a light ground too, where the clear colour fades toward white.
+        let light = Theme::BATERI_LIGHT;
+        let faint = Color {
+            alpha: 0.15,
+            ..Rgba::rgb(0, 0, 0).solid()
+        };
+        let word = run(faint, Vec::new());
+        let held = ink(&light, &word, 3.0);
+        assert!(read_against(&light, &word, held) >= 3.0 - 1e-3, "{held:?}");
+        // The rule is off at 1.
+        assert_eq!(ink(&light, &word, 1.0), resolve(&light, faint));
     }
 
     #[test]
@@ -916,7 +984,7 @@ mod tests {
 
     #[test]
     fn a_page_follows_the_theme_it_is_painted_in() {
-        let on = |theme: &Theme| resolve(theme, Tone::Raised(1).solid());
+        let on = |theme: &Theme| resolve(theme, Role::Raised(1).solid());
         assert_ne!(on(&Theme::BATERI), on(&Theme::BATERI_LIGHT));
     }
 
@@ -926,25 +994,25 @@ mod tests {
         let drawn = Quad {
             rect: Rect::new(10.0, 20.0, 30.0, 40.0),
             radii: [1.0, 2.0, 3.0, 4.0],
-            fill: Some(Tone::Accent.alpha(0.5)),
+            fill: Some(Role::Accent.alpha(0.5)),
             border: Some(Border {
                 width: 2.0,
-                color: Tone::Line.solid(),
+                color: Role::Line.solid(),
             }),
             shadow: Some(Shadow {
                 dx: 0.0,
                 dy: 3.0,
                 blur: 6.0,
-                color: Tone::Shadow.alpha(0.4),
+                color: Role::Shadow.alpha(0.4),
             }),
             clip: Rect::new(0.0, 0.0, 100.0, 200.0),
         };
         let expected = UiQuad::new(UiRect::new(10.0, 52.0, 30.0, 40.0))
             .radii([1.0, 2.0, 3.0, 4.0])
             .clip(UiRect::new(0.0, 32.0, 100.0, 200.0))
-            .fill(resolve(&theme, Tone::Accent.alpha(0.5)))
-            .border(2.0, resolve(&theme, Tone::Line.solid()))
-            .shadow(0.0, 3.0, 6.0, resolve(&theme, Tone::Shadow.alpha(0.4)));
+            .fill(resolve(&theme, Role::Accent.alpha(0.5)))
+            .border(2.0, resolve(&theme, Role::Line.solid()))
+            .shadow(0.0, 3.0, 6.0, resolve(&theme, Role::Shadow.alpha(0.4)));
         assert_eq!(quad(&theme, &drawn, (0.0, 32.0)), expected);
     }
 
@@ -1094,7 +1162,7 @@ mod tests {
             button: pencere_view::Button::Left,
             mods: pencere_view::Mods::default(),
         });
-        assert_eq!(press.keyboard, Some(pencere_view::Keyboard::Filter));
+        assert_eq!(press.keyboard, Some(pencere_view::Keyboard::Field));
 
         // The pointer over a row: one frame's worth of change, then fades until they end.
         let over_a_row = Point::new(300.0, 32.0 + 150.0);

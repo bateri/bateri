@@ -5358,7 +5358,7 @@ impl TerminalPane {
         // A program may open a view that is a module or a script: it is run in the sandbox and
         // drawn as a page of the kit, up to the size the sandbox compiles.
         options.native_entry_limit =
-            Some(bt_shell_common::native_view::Limits::default().component as u64);
+            Some(bt_shell_common::native_view::ModuleLimits::default().component as u64);
         options.shell_group = Some(ShellGroup::new(move |child| {
             jobs::shell_group(shell_parent, child, &SystemTable)
         }));
@@ -5442,7 +5442,7 @@ impl TerminalPane {
 
     /// Debug ▸ Show Container List Demo (WASM) and Show Broken Page Demo (WASM): the same page
     /// ([`TerminalPane::toggle_container_demo`]) made by a module in the sandbox (built by
-    /// `make guest` in the pencere checkout, [`bt_shell_common::native_view::guest_dir`]), or the
+    /// `make guest`, [`bt_shell_common::native_view::guest_dir`]), or the
     /// module that goes wrong on purpose. Whatever ends the module — a
     /// loop that never returns, memory without end, a trap — the pane is the terminal's again.
     #[cfg(debug_assertions)]
@@ -5486,7 +5486,7 @@ impl TerminalPane {
                     Ok(bytes) => Some(bytes),
                     Err(why) => {
                         eprintln!(
-                            "bateri: the page module {} could not be read ({why}); `make guest` in the pencere checkout builds it",
+                            "bateri: the page module {} could not be read ({why}); `make guest` builds it",
                             path.display()
                         );
                         return;
@@ -5533,7 +5533,7 @@ impl TerminalPane {
                 // The engine's own page: no program opened it, so none holds it to anything.
                 let (page, handle) = bt_shell_common::native_view::module_page(
                     bytes,
-                    bt_shell_common::native_view::Limits::default(),
+                    bt_shell_common::native_view::ModuleLimits::default(),
                     family.clone(),
                     inset,
                     None,
@@ -5730,7 +5730,7 @@ impl TerminalPane {
                 PageCursor::Arrow => NSCursor::arrowCursor().set(),
             }
         }
-        if let Some(Keyboard::Filter) = reply.keyboard {
+        if let Some(Keyboard::Field) = reply.keyboard {
             let field = self
                 .ivars()
                 .page_up
@@ -5871,7 +5871,7 @@ impl TerminalPane {
                             host.deliver(&message);
                         }
                         // No module takes it, so the program is not made to wait for one.
-                        session.flow().taken(message.len());
+                        session.flow().taken(bt_core::Flow::size(&message));
                     }
                 }
                 Action::DestroyView => self.end_view(),
@@ -5964,7 +5964,7 @@ impl TerminalPane {
         };
         // Held to the program that opened it: what it says is what the program has the room
         // for, and what it takes of the program's words lets the program say more.
-        let limits = bt_shell_common::native_view::Limits::default();
+        let limits = bt_shell_common::native_view::ModuleLimits::default();
         let flow = self.session().map(|session| session.flow());
         // The images of the page are files of the bundle the program sent, read from the session
         // that keeps them. The `wake` is the one the module has: it only hops to the main queue,

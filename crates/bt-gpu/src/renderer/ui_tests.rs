@@ -638,3 +638,119 @@ fn pixels_that_are_not_a_texture_are_left_out_of_the_list() {
     ));
     assert!(list.is_empty());
 }
+
+#[test]
+fn a_crop_blown_up_reads_nothing_beyond_its_edge() {
+    let r = renderer();
+    // Four texels across, the rectangle cut to the middle two and drawn eight pixels to a texel:
+    // the filter at its ends is half a texel from the red and the cream on the other side of the
+    // cut, and must not take any of them.
+    let image = bitmap(
+        10,
+        4,
+        &[opaque(RED), opaque(GREEN), opaque(BLUE), opaque(CREAM)],
+    );
+    let mut list = UiList::new();
+    assert!(put(
+        &r,
+        &mut list,
+        &image,
+        UiImage::new(UiRect::new(8.0, 8.0, 16.0, 2.0)).crop(UiRect::new(0.25, 0.0, 0.5, 1.0))
+    ));
+    let pixels = r.render_ui_offscreen(EDGE as u32, MIDTONE, &list);
+    assert!(near(at(&pixels, 8, 8), GREEN, 1), "{:?}", at(&pixels, 8, 8));
+    assert!(
+        near(at(&pixels, 23, 8), BLUE, 1),
+        "{:?}",
+        at(&pixels, 23, 8)
+    );
+    // Across the cut's middle the two blend, and the colours of the file's ends are in none.
+    for x in 8..24 {
+        let (red, _, blue) = at(&pixels, x, 8);
+        assert!(
+            red <= GREEN.0 + 1 || blue >= GREEN.2,
+            "({x}) leans toward the red end: {:?}",
+            at(&pixels, x, 8)
+        );
+        assert!(
+            at(&pixels, x, 8).0 <= RED.0.min(0xa0),
+            "({x}) took the cream: {:?}",
+            at(&pixels, x, 8)
+        );
+    }
+}
+
+#[test]
+fn an_image_drawn_far_smaller_than_its_file_is_its_average_and_not_a_sample_of_it() {
+    let r = renderer();
+    // One-pixel black and white checks, 63 to a side, drawn 9 to a side: seven texels a pixel,
+    // and every pixel's centre is a texel's centre, so read at the file's finest level each
+    // pixel would be one check — black or white, and the other when the image moves by a
+    // pixel. Its average is grey.
+    let black = opaque((0, 0, 0));
+    let white = opaque((255, 255, 255));
+    let side = 63u32;
+    let mut pixels = Vec::new();
+    for y in 0..side {
+        for x in 0..side {
+            pixels.push(if (x + y) % 2 == 0 { black } else { white });
+        }
+    }
+    let image = bitmap(11, side, &pixels);
+    let mut list = UiList::new();
+    assert!(put(
+        &r,
+        &mut list,
+        &image,
+        UiImage::new(UiRect::new(8.0, 8.0, 9.0, 9.0))
+    ));
+    let painted = r.render_ui_offscreen(EDGE as u32, MIDTONE, &list);
+    for y in 8..17 {
+        for x in 8..17 {
+            // About half black and half white, which the shader decodes and the target
+            // encodes again.
+            assert!(
+                near(at(&painted, x, y), (0x80, 0x80, 0x80), 24),
+                "({x}, {y}): {:?}",
+                at(&painted, x, y)
+            );
+        }
+    }
+    // At its own size the same file is the checks themselves: the chain is not read.
+    let mut list = UiList::new();
+    assert!(put(
+        &r,
+        &mut list,
+        &image,
+        UiImage::new(UiRect::new(0.0, 0.0, 63.0, 63.0))
+    ));
+    let painted = r.render_ui_offscreen(EDGE as u32, MIDTONE, &list);
+    assert_eq!(at(&painted, 10, 10), (0, 0, 0));
+    assert_eq!(at(&painted, 11, 10), (255, 255, 255));
+}
+
+#[test]
+fn a_rectangle_with_no_area_paints_nothing_and_harms_nothing() {
+    let r = renderer();
+    let image = bitmap(12, 1, &[opaque(RED)]);
+    for rect in [
+        UiRect::new(20.0, 20.0, 0.0, 8.0),
+        UiRect::new(20.0, 20.0, 8.0, 0.0),
+        UiRect::new(20.0, 20.0, 0.0, 0.0),
+    ] {
+        let mut list = UiList::new();
+        assert!(put(&r, &mut list, &image, UiImage::new(rect)));
+        // A real one after it, to see that the empty one broke nothing.
+        assert!(put(
+            &r,
+            &mut list,
+            &image,
+            UiImage::new(UiRect::new(40.0, 40.0, 4.0, 4.0))
+        ));
+        let pixels = r.render_ui_offscreen(EDGE as u32, MIDTONE, &list);
+        for (x, y) in [(19, 20), (20, 20), (20, 24), (21, 21), (28, 28)] {
+            assert!(near(at(&pixels, x, y), GROUND, 1), "{rect:?} ({x}, {y})");
+        }
+        assert!(near(at(&pixels, 42, 42), RED, 1));
+    }
+}
