@@ -4,11 +4,11 @@
 //! A view is a web page the program wrote, running on this Mac. It asks two things the
 //! person decides, and both come from the program and not from the application:
 //!
-//! * **Access** ([`consent`]): the addresses it declared (`connectDomains` and the other
-//!   lists) and the browser features it wants (camera, microphone, location, the clipboard).
-//!   The view starts with only what the person allowed.
-//! * **A link** ([`link`]): `ui/open-link`, which the view may ask for and the person's
-//!   browser, on this Mac, opens.
+//! * **Access** ([`consent`]): the addresses it declared (the `access` of its `open`) and the
+//!   browser features it wants (camera, microphone, location, the clipboard). The view starts
+//!   with only what the person allowed.
+//! * **A link** ([`link`]): the page's `link` message, which the page may send and the
+//!   person's browser, on this Mac, opens.
 //!
 //! The words of both questions are made here, from the facts, so that they are tested and
 //! no toolkit writes its own: **where the program runs** (the server's name, or this Mac)
@@ -17,30 +17,29 @@
 //! ([`Locality`]).
 //!
 //! Every name in a question is **cleaned and bounded** the way the strip's are
-//! ([`view_strip`]): the program's name, the tool's, the server's and every address come
+//! ([`view_strip`]): the program's name, the view's title, the server's and every address come
 //! from the program or from the machine it runs on, and a question must not be made to read
 //! as the application's own words by a line break, a direction override or a quotation mark.
 //! A link is checked harder, because what the person sees must be what opens
 //! ([`web_target`]).
 //!
 //! **What is remembered** ([`Memory`]): an answer to the first question, by *where* the
-//! program runs (this Mac or the server), *which* program, *which* tool and *which* set —
-//! the addresses and features, in any order — and until the application quits; it is not
-//! written anywhere. Another program, another server or another set asks again: what a
-//! person allows one program is not allowed to another (§12.2 of the protocol). Both answers
-//! are remembered: a tool that is opened often does not ask each time, and a person who
-//! said no is not asked again either. An answer for a tool whose name could not be read
-//! is not remembered.
+//! program runs (this Mac or the server), *which* program and *which* set — the addresses
+//! and features, in any order — and until the application quits; it is not written anywhere.
+//! Another program, another server or another set asks again: what a person allows one
+//! program is not allowed to another (§12.2 of the protocol). Both answers are remembered: a
+//! program that opens its view often does not ask each time, and a person who said no is not
+//! asked again either. An answer for a program that cannot be told from another is not
+//! remembered.
 //!
 //! **Two panes that ask the same at the same time are asked once** ([`Waiting`]): a session
-//! restored with several panes of one tool puts the same question up in each, and the
+//! restored with several panes of one program puts the same question up in each, and the
 //! answer to the first is the answer to the others, which go with it. Memory alone does not
 //! do this: it is read when a question is about to be put up, and the second was up by then.
-//! Which program is asking is the application's own reading of the pane ([`Origin::program`]);
-//! the words the program gives for itself and for its tool ([`Consent::program`],
+//! Which program is asking is the application's own reading of the pane ([`Origin::identity`]);
+//! the words the program gives for itself and for its view ([`Consent::program`],
 //! [`Consent::title`]) are only what the question quotes, since a program can say anything it
-//! likes about itself. The tool the answer is kept by is the crate's, as the `open` named it
-//! ([`Consent::tool`]).
+//! likes about itself.
 //!
 //! Platform-free: the toolkit shows a [`Question`] and says what the person pressed.
 
@@ -83,7 +82,7 @@ pub struct Origin {
     /// `ssh`, a terminal a server keeps) and an answer is then not kept: the question is
     /// asked again.
     pub identity: Option<String>,
-    /// What the program calls itself (`serverInfo`'s title or name), when it said: the words
+    /// What the program calls itself (`program` of its `open`), when it said: the words
     /// a question quotes in the program's place. The program wrote it and it is the one
     /// thing here that says nothing about which program it is, so no answer is kept by it.
     pub said: Option<String>,
@@ -194,18 +193,13 @@ pub fn consent(origin: &Origin, consent: &Consent, app: &str) -> Question {
         format!("Allow this view to {}?", joined(&wants))
     };
 
-    // The tool as the person would call it: the title the program gave it, else its name.
+    // The view as the person would call it: the title the program gave it, if it gave one.
     let opened = match consent
         .title
         .as_deref()
         .and_then(|t| quotable(t, TITLE_LIMIT))
-        .or_else(|| {
-            consent
-                .tool
-                .as_deref()
-                .and_then(|t| quotable(t, TITLE_LIMIT))
-        }) {
-        Some(tool) => format!("opened a view of its tool “{tool}”"),
+    {
+        Some(title) => format!("opened the view “{title}”"),
         None => "opened a view".to_owned(),
     };
     let mut text = format!(
@@ -350,24 +344,21 @@ pub fn web_target(url: &str) -> Option<&str> {
 }
 
 /// What an answer is remembered by ([`key`]): the same program in the same place with the
-/// same tool and the same set, whatever the order the set was declared in.
+/// same set, whatever the order the set was declared in.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Key {
     place: Option<String>,
     identity: String,
-    tool: String,
     domains: Vec<(&'static str, String)>,
     permissions: Vec<&'static str>,
 }
 
-/// The key of `consent` as `origin` asks it; `None` when the tool is not known (the crate left
-/// nothing of its name) or the program cannot be told from another ([`Origin::identity`]), and
-/// an answer is then not remembered: asking again is the way to be wrong that costs a
-/// question. The tool is the crate's reading of the `open` ([`Consent::tool`]) and the program
-/// wrote it, so it names nothing; the identity is the application's.
+/// The key of `consent` as `origin` asks it; `None` when the program cannot be told from
+/// another ([`Origin::identity`]), and an answer is then not remembered: asking again is the
+/// way to be wrong that costs a question. What the program says about itself or its view
+/// ([`Consent::program`], [`Consent::title`]) names nothing; the identity is the application's.
 pub fn key(origin: &Origin, consent: &Consent) -> Option<Key> {
     let identity = origin.identity.clone().filter(|name| !name.is_empty())?;
-    let tool = consent.tool.clone().filter(|tool| !tool.is_empty())?;
     let mut domains: Vec<(&'static str, String)> = consent
         .domains
         .iter()
@@ -390,7 +381,6 @@ pub fn key(origin: &Origin, consent: &Consent) -> Option<Key> {
     Some(Key {
         place: origin.place.clone(),
         identity,
-        tool,
         domains,
         permissions,
     })
@@ -434,8 +424,8 @@ impl Memory {
 /// the others that ask the same ([`Key`]). `T` is whatever the toolkit finds a question by (a
 /// pane and the number of its question).
 ///
-/// Only a question that has a key is kept here: one about a tool with no name is not the same
-/// as any other, and is asked every time.
+/// Only a question that has a key is kept here: one about a program that cannot be told from
+/// another is not the same as any other, and is asked every time.
 #[derive(Debug)]
 pub struct Waiting<T> {
     questions: Vec<(Key, T)>,
@@ -500,7 +490,6 @@ mod tests {
     fn consent_of(domains: &[(Directive, &str)], permissions: &[Permission]) -> Consent {
         Consent {
             id: 0,
-            tool: None,
             title: None,
             program: None,
             domains: domains
@@ -511,13 +500,13 @@ mod tests {
         }
     }
 
-    /// `consent`, for the tool the `open` named `name`.
-    fn tool(mut consent: Consent, name: &str) -> Consent {
-        consent.tool = Some(name.to_owned());
+    /// `consent`, for the view the program called `title`.
+    fn titled(mut consent: Consent, title: &str) -> Consent {
+        consent.title = Some(title.to_owned());
         consent
     }
 
-    /// `consent`, with the words the program gave for its tool and for itself.
+    /// `consent`, with the words the program gave for its view and for itself.
     fn said(mut consent: Consent, title: Option<&str>, program: Option<&str>) -> Consent {
         consent.title = title.map(str::to_owned);
         consent.program = program.map(str::to_owned);
@@ -536,10 +525,7 @@ mod tests {
 
     #[test]
     fn a_program_that_cannot_be_told_from_another_has_no_answer_kept() {
-        let set = tool(
-            consent_of(&[(Directive::Connect, "https://api.example.com")], &[]),
-            "show",
-        );
+        let set = consent_of(&[(Directive::Connect, "https://api.example.com")], &[]);
         // `node` is every script's name: the pane read the interpreter, and no script.
         let interpreter = Origin {
             identity: None,
@@ -564,7 +550,7 @@ mod tests {
     fn one_address_on_this_mac() {
         let ask = consent(
             &origin(None, Some("docker-ui")),
-            &tool(
+            &titled(
                 consent_of(&[(Directive::Connect, "https://api.example.com")], &[]),
                 "list_containers",
             ),
@@ -573,7 +559,7 @@ mod tests {
         assert_eq!(ask.title, "Allow this view to reach other sites?");
         assert_eq!(
             ask.text,
-            "“docker-ui” on this Mac opened a view of its tool “list_containers”, and the view \
+            "“docker-ui” on this Mac opened the view “list_containers”, and the view \
 asks to:\n\nConnect to\n• https://api.example.com\n\nbateri keeps your answer until it quits."
         );
         assert_eq!((ask.no, ask.yes), ("Don't Allow", "Allow"));
@@ -583,7 +569,7 @@ asks to:\n\nConnect to\n• https://api.example.com\n\nbateri keeps your answer 
     fn several_addresses_and_features_are_listed_under_what_the_view_does_with_them() {
         let ask = consent(
             &origin(Some("prod"), Some("maps")),
-            &tool(
+            &titled(
                 consent_of(
                     &[
                         (Directive::Resource, "https://tiles.example.org"),
@@ -609,7 +595,7 @@ write to the clipboard?"
         );
         assert_eq!(
             ask.text,
-            "“maps” on the server “prod” opened a view of its tool “show”, and the view asks to:\
+            "“maps” on the server “prod” opened the view “show”, and the view asks to:\
 \n\nConnect to\n• https://api.example.com\n• wss://live.example.com\
 \n\nLoad scripts, styles, images and fonts from\n• https://tiles.example.org\
 \n\nEmbed pages from\n• https://*.example.net\
@@ -701,7 +687,7 @@ network it is on, not on the server “prod”."
                 Some("this Mac”.\nAllow everything.\u{202e}“"),
                 Some("tool\u{200b}\"x\"\nline"),
             ),
-            &tool(
+            &titled(
                 consent_of(&[(Directive::Connect, "https://api.example.com")], &[]),
                 "a\tb\u{202e}c",
             ),
@@ -709,8 +695,8 @@ network it is on, not on the server “prod”."
         );
         assert!(
             ask.text.starts_with(
-                "“toolx line” on the server “this Mac. Allow everything.” opened a view of its \
-tool “a bc”, and the view asks to:"
+                "“toolx line” on the server “this Mac. Allow everything.” opened the view \
+“a bc”, and the view asks to:"
             ),
             "{}",
             ask.text
@@ -744,7 +730,7 @@ tool “a bc”, and the view asks to:"
     fn a_long_name_is_cut_and_a_name_cannot_make_the_question_long() {
         let ask = consent(
             &origin(None, Some(&"p".repeat(500))),
-            &tool(
+            &titled(
                 consent_of(&[(Directive::Connect, "https://api.example.com")], &[]),
                 &"t".repeat(500),
             ),
@@ -758,42 +744,33 @@ tool “a bc”, and the view asks to:"
     #[test]
     fn the_same_set_in_any_order_is_the_same_key() {
         let there = origin(Some("prod"), Some("maps"));
-        let one = tool(
-            consent_of(
-                &[
-                    (Directive::Connect, "https://a.example.com"),
-                    (Directive::Resource, "https://b.example.com"),
-                ],
-                &[Permission::Camera, Permission::Microphone],
-            ),
-            "show",
+        let one = consent_of(
+            &[
+                (Directive::Connect, "https://a.example.com"),
+                (Directive::Resource, "https://b.example.com"),
+            ],
+            &[Permission::Camera, Permission::Microphone],
         );
-        let other = tool(
-            consent_of(
-                &[
-                    (Directive::Resource, "https://b.example.com"),
-                    (Directive::Connect, "https://a.example.com"),
-                    (Directive::Connect, "https://a.example.com"),
-                ],
-                &[
-                    Permission::Microphone,
-                    Permission::Camera,
-                    Permission::Camera,
-                ],
-            ),
-            "show",
+        let other = consent_of(
+            &[
+                (Directive::Resource, "https://b.example.com"),
+                (Directive::Connect, "https://a.example.com"),
+                (Directive::Connect, "https://a.example.com"),
+            ],
+            &[
+                Permission::Microphone,
+                Permission::Camera,
+                Permission::Camera,
+            ],
         );
         assert_eq!(key(&there, &one), key(&there, &other));
         assert!(key(&there, &one).is_some());
     }
 
     #[test]
-    fn another_program_server_tool_or_set_is_another_key() {
+    fn another_program_server_or_set_is_another_key() {
         let base = origin(Some("prod"), Some("maps"));
-        let set = tool(
-            consent_of(&[(Directive::Connect, "https://a.example.com")], &[]),
-            "show",
-        );
+        let set = consent_of(&[(Directive::Connect, "https://a.example.com")], &[]);
         let reference = key(&base, &set);
         for changed in [
             origin(Some("staging"), Some("maps")),
@@ -804,27 +781,13 @@ tool “a bc”, and the view asks to:"
             assert_ne!(key(&changed, &set), reference, "{changed:?}");
         }
         for other in [
-            tool(
-                consent_of(&[(Directive::Connect, "https://b.example.com")], &[]),
-                "show",
+            consent_of(&[(Directive::Connect, "https://b.example.com")], &[]),
+            consent_of(&[(Directive::Resource, "https://a.example.com")], &[]),
+            consent_of(
+                &[(Directive::Connect, "https://a.example.com")],
+                &[Permission::Camera],
             ),
-            tool(
-                consent_of(&[(Directive::Resource, "https://a.example.com")], &[]),
-                "show",
-            ),
-            tool(
-                consent_of(
-                    &[(Directive::Connect, "https://a.example.com")],
-                    &[Permission::Camera],
-                ),
-                "show",
-            ),
-            tool(consent_of(&[], &[]), "show"),
-            // Another tool.
-            tool(
-                consent_of(&[(Directive::Connect, "https://a.example.com")], &[]),
-                "list",
-            ),
+            consent_of(&[], &[]),
         ] {
             assert_ne!(key(&base, &other), reference);
         }
@@ -836,18 +799,28 @@ tool “a bc”, and the view asks to:"
     }
 
     #[test]
-    fn a_tool_that_could_not_be_read_has_no_key() {
+    fn the_title_a_program_gives_its_view_is_not_part_of_a_key() {
         let set = consent_of(&[(Directive::Connect, "https://a.example.com")], &[]);
-        assert_eq!(key(&origin(None, Some("maps")), &set), None);
-        assert_eq!(key(&origin(None, Some("maps")), &tool(set, "")), None);
+        let at = origin(None, Some("maps"));
+        assert_eq!(
+            key(&at, &titled(set.clone(), "Containers")),
+            key(&at, &titled(set, "Something else"))
+        );
     }
 
     #[test]
     fn memory_gives_back_both_answers_and_the_latest_for_a_key() {
-        let set = consent_of(&[(Directive::Connect, "https://a.example.com")], &[]);
         let at = origin(None, Some("maps"));
-        let yes = key(&at, &tool(set.clone(), "show")).expect("a key");
-        let no = key(&at, &tool(set, "list")).expect("a key");
+        let yes = key(
+            &at,
+            &consent_of(&[(Directive::Connect, "https://a.example.com")], &[]),
+        )
+        .expect("a key");
+        let no = key(
+            &at,
+            &consent_of(&[(Directive::Connect, "https://b.example.com")], &[]),
+        )
+        .expect("a key");
         let mut memory = Memory::new();
         assert_eq!(memory.recall(&yes), None);
         memory.remember(yes.clone(), true);
@@ -860,12 +833,14 @@ tool “a bc”, and the view asks to:"
 
     #[test]
     fn memory_forgets_the_oldest_at_its_limit() {
-        let set = consent_of(&[(Directive::Connect, "https://a.example.com")], &[]);
         let keys: Vec<Key> = (0..=MEMORY_LIMIT)
             .map(|at| {
                 key(
                     &origin(None, Some("maps")),
-                    &tool(set.clone(), &format!("tool{at}")),
+                    &consent_of(
+                        &[(Directive::Connect, &format!("https://site{at}.example.com"))],
+                        &[],
+                    ),
                 )
             })
             .collect::<Option<_>>()
@@ -880,11 +855,8 @@ tool “a bc”, and the view asks to:"
     }
 
     #[test]
-    fn the_question_quotes_the_tools_title_and_the_programs_own_name_before_what_the_pane_read() {
-        let set = tool(
-            consent_of(&[(Directive::Connect, "https://api.example.com")], &[]),
-            "list_containers",
-        );
+    fn the_question_quotes_the_views_title_and_the_programs_own_name_before_what_the_pane_read() {
+        let set = consent_of(&[(Directive::Connect, "https://api.example.com")], &[]);
         let at = origin(None, Some("node"));
         // The program's own words are what the person is shown.
         let titled = consent(
@@ -894,17 +866,17 @@ tool “a bc”, and the view asks to:"
         );
         assert!(
             titled.text.starts_with(
-                "“Docker UI” on this Mac opened a view of its tool “Containers”, and the view asks to:"
+                "“Docker UI” on this Mac opened the view “Containers”, and the view asks to:"
             ),
             "{}",
             titled.text
         );
-        // No title is the tool's name; no name of its own is what the pane read.
+        // No title is just a view; no name of its own is what the pane read.
         let plain = consent(&at, &said(set.clone(), None, None), "bateri");
         assert!(
-            plain.text.starts_with(
-                "“node” on this Mac opened a view of its tool “list_containers”, and the view asks to:"
-            ),
+            plain
+                .text
+                .starts_with("“node” on this Mac opened a view, and the view asks to:"),
             "{}",
             plain.text
         );
@@ -915,7 +887,7 @@ tool “a bc”, and the view asks to:"
             "bateri",
         );
         let first = hostile.text.lines().next().expect("a line");
-        assert!(first.contains("its tool “abc d”"), "{first}");
+        assert!(first.contains("the view “abc d”"), "{first}");
         assert!(first.chars().count() < 200, "{first}");
         assert!(!hostile.text.contains('\u{202e}'));
     }
@@ -923,12 +895,9 @@ tool “a bc”, and the view asks to:"
     #[test]
     fn what_a_program_says_about_itself_does_not_make_an_answer_another_one() {
         // A program can call itself anything: the key is by what the application read in the
-        // pane and by the tool the crate took from the `open`, and not by these.
+        // pane, and not by these.
         let at = origin(None, Some("node"));
-        let set = tool(
-            consent_of(&[(Directive::Connect, "https://a.example.com")], &[]),
-            "show",
-        );
+        let set = consent_of(&[(Directive::Connect, "https://a.example.com")], &[]);
         assert_eq!(
             key(&at, &said(set.clone(), Some("A"), Some("B"))),
             key(&at, &said(set.clone(), None, None))
@@ -947,19 +916,19 @@ tool “a bc”, and the view asks to:"
 
     #[test]
     fn two_panes_that_ask_the_same_are_asked_once_and_a_different_question_is_still_asked() {
-        let set =
-            |domain: &str, name: &str| tool(consent_of(&[(Directive::Connect, domain)], &[]), name);
+        let set = |domain: &str| consent_of(&[(Directive::Connect, domain)], &[]);
         let at = origin(None, Some("maps"));
-        let maps = key(&at, &set("https://a.example.com", "show")).expect("a key");
-        let other_set = key(&at, &set("https://b.example.com", "show")).expect("a key");
-        let other_tool = key(&at, &set("https://a.example.com", "list")).expect("a key");
+        let maps = key(&at, &set("https://a.example.com")).expect("a key");
+        let other_set = key(&at, &set("https://b.example.com")).expect("a key");
+        let other_program =
+            key(&origin(None, Some("tiles")), &set("https://a.example.com")).expect("a key");
 
         // Four panes asked at once, as a restored session does: two the same, two not.
         let mut waiting = Waiting::new();
         waiting.up(maps.clone(), 1);
         waiting.up(other_set.clone(), 2);
         waiting.up(maps.clone(), 3);
-        waiting.up(other_tool.clone(), 4);
+        waiting.up(other_program.clone(), 4);
 
         // The person answers the first (which is up no longer): the other that asks the same
         // goes with it, and the two that ask something else stay up for their own answers.
@@ -968,17 +937,14 @@ tool “a bc”, and the view asks to:"
         waiting.gone(|who| *who == 2);
         assert_eq!(waiting.answered(&other_set), Vec::<i32>::new());
         waiting.gone(|who| *who == 4);
-        assert_eq!(waiting.answered(&other_tool), Vec::<i32>::new());
+        assert_eq!(waiting.answered(&other_program), Vec::<i32>::new());
         // Nothing is left to settle.
         assert_eq!(waiting.answered(&maps), Vec::<i32>::new());
     }
 
     #[test]
     fn a_question_that_went_before_the_answer_is_not_settled_by_it() {
-        let set = tool(
-            consent_of(&[(Directive::Connect, "https://a.example.com")], &[]),
-            "show",
-        );
+        let set = consent_of(&[(Directive::Connect, "https://a.example.com")], &[]);
         let maps = key(&origin(None, Some("maps")), &set).expect("a key");
         let mut waiting = Waiting::new();
         for who in [1, 2, 3] {

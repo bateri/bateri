@@ -11758,18 +11758,22 @@ impl Session {
             .unwrap_or_default()
     }
 
-    /// A message from the view, as JSON text ([`pencere::Action::StartView`]'s
-    /// bridge). The crate drops what is not JSON-RPC or is over its limit.
-    ///
-    /// Whether it made the pane write to the program: a request of the view was passed
-    /// on, and until the program answers it the shell's clock runs
-    /// ([`Session::view_requests_overdue`]).
-    pub fn view_message(&self, text: &str) -> bool {
-        self.adapter
-            .0
-            .desk
-            .as_ref()
-            .is_some_and(|desk| desk.view_message(text, |bytes| self.adapter.input(bytes)))
+    /// A message from a web page, as JSON text ([`pencere::Action::StartView`]'s bridge): one
+    /// of the six view messages goes to the program unread and one of the host's own
+    /// (`context`, `close`, `link`) is handled by the crate. The crate drops what is not an
+    /// object or is over its limit. Nothing waits for the program's answer: a call it does not
+    /// answer is the page's to give up.
+    pub fn view_message(&self, text: &str) {
+        if let Some(desk) = &self.adapter.0.desk {
+            desk.view_message(text, |bytes| self.adapter.input(bytes));
+        }
+    }
+
+    /// The `context` a web page is told now, as JSON text, if one is open: what
+    /// [`pencere::ViewStart::context`] was, brought up to date. The shell delivers it once the
+    /// page has loaded; a page that starts listening later asks for it again itself.
+    pub fn view_page_context(&self) -> Option<String> {
+        self.adapter.0.desk.as_ref()?.page_context()
     }
 
     /// A message of the component of a WebAssembly view (a JSON object, as the component
@@ -11837,20 +11841,10 @@ impl Session {
         self.adapter.view(pencere::Conversing::close_view);
     }
 
-    /// A wait the shell chose has run out: the files of an open, the program's
-    /// start-up or the person's answer (the open ends in `timeout`), the view's
-    /// answer to its teardown, or the program's `open` after a restart.
+    /// A wait the shell chose has run out: the files of an open or the person's
+    /// answer (the open ends in `timeout`), or the program's `open` after a restart.
     pub fn view_wait_over(&self) {
         self.adapter.view(pencere::Conversing::timed_out);
-    }
-
-    /// The wait for the program's answers to the view's requests ran out: they
-    /// fail the way MCP defines. The shell sets it when
-    /// [`Session::view_message`] says a request went out, and calls this when it
-    /// runs out; the requests that are out then are all given up, the ones that
-    /// went out last with the rest.
-    pub fn view_requests_overdue(&self) {
-        self.adapter.view(pencere::Conversing::requests_timed_out);
     }
 
     /// The pane's content area, in CSS pixels, changed: the view is told if it
@@ -11858,6 +11852,13 @@ impl Session {
     pub fn set_view_size(&self, size: pencere::Size) {
         self.adapter
             .view(|conversation| conversation.set_size(size));
+    }
+
+    /// The person's setting for less motion changed (the resolved one): a web view is told
+    /// if it runs.
+    pub fn set_view_reduce_motion(&self, reduce: bool) {
+        self.adapter
+            .view(|conversation| conversation.set_reduce_motion(reduce));
     }
 
     /// The font family changed (`[font] family`; `None` is the system's): the
@@ -30585,21 +30586,13 @@ e\\314\\201.'; sleep 5";
 
     #[test]
     fn a_program_opens_a_view_in_its_pane_and_the_shell_is_told_of_the_wait_and_the_view() {
-        use crate::pencere::tests::{
-            bundle_open, hello, initialize_answer, is_request, page_file, token_of, tools_answer,
-        };
+        use crate::pencere::tests::{bundle_open, hello, page_file, token_of};
         let mut program = Playing::new("view-open");
         program.write(&hello());
         let token = token_of(&program.wait_written(1)[0]);
         program.write(&bundle_open(&token));
         assert_eq!(program.wait_written(2)[1].kind, "need");
         program.write(&page_file());
-        let initialize = program.wait_written(3);
-        assert!(is_request(&initialize[2], "initialize"), "{initialize:?}");
-        program.write(&initialize_answer(&initialize[2]));
-        let tools = program.wait_written(5);
-        assert!(is_request(&tools[4], "tools/list"), "{tools:?}");
-        program.write(&tools_answer(&tools[4]));
         program.wait_state(crate::pencere::State::Open);
 
         assert!(program.session.hosts_views());
@@ -31530,10 +31523,7 @@ e\\314\\201.'; sleep 5";
     /// settles nothing — not that open, not the next one's question, which has a number of its own.
     #[test]
     fn an_answer_to_a_question_taken_back_settles_no_other() {
-        use crate::pencere::tests::{
-            bundle_open_declaring, hello, initialize_answer, is_request, page_file, token_of,
-            tools_answer, wire,
-        };
+        use crate::pencere::tests::{bundle_open_declaring, hello, page_file, token_of, wire};
         use crate::pencere::{Action, Consent, State};
         use ::pencere::frame::Message;
 
@@ -31547,8 +31537,8 @@ e\\314\\201.'; sleep 5";
             found.expect("waited for")
         }
 
-        /// The program says hello, opens a view that declares an address and answers the host's
-        /// start-up; returns its token and the question the person is asked.
+        /// The program says hello and opens a view that declares an address; returns its token
+        /// and the question the person is asked.
         fn open_asking(program: &mut Playing) -> (String, Consent) {
             let from = program.written().len();
             program.write(&hello());
@@ -31559,10 +31549,6 @@ e\\314\\201.'; sleep 5";
             if !need.payload.contains("\"missing\":[]") {
                 program.write(&page_file());
             }
-            let initialize = next(program, from, |frame| is_request(frame, "initialize"));
-            program.write(&initialize_answer(&initialize));
-            let tools = next(program, from, |frame| is_request(frame, "tools/list"));
-            program.write(&tools_answer(&tools));
             let mut asked = None;
             wait_until("the question", Duration::from_secs(10), || {
                 for action in program.session.take_view_actions() {

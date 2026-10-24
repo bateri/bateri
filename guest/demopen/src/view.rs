@@ -44,11 +44,15 @@ const ANSWER_TO_BYE: Duration = Duration::from_millis(500);
 /// How often the made-up host reports.
 const EVERY: Duration = Duration::from_secs(1);
 
-/// A kind of view this program can show (specification §5.5), and the file it is the bundle of.
+/// A kind of view this program can show (specification §5.5), the version of its interface the
+/// program is written against, and the file it is the bundle of.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Kind {
     /// What the `hello` lists and the `open` names.
     pub name: &'static str,
+    /// The version of the kind's interface: what the `hello` lists under the name and the `open`
+    /// names.
+    version: &'static str,
     /// The name of the file in the bundle.
     entry: &'static str,
     /// Its media type.
@@ -59,6 +63,7 @@ impl Kind {
     /// The view is a WebAssembly component.
     pub const WASM: Self = Self {
         name: "wasm",
+        version: "0.5",
         entry: "containers.wasm",
         media_type: pencere::bundle::WASM_MEDIA_TYPE,
     };
@@ -66,6 +71,7 @@ impl Kind {
     /// The view is a script in the Lua language.
     pub const LUA: Self = Self {
         name: "lua",
+        version: "1.0",
         entry: "containers.lua",
         media_type: pencere::bundle::LUA_MEDIA_TYPE,
     };
@@ -75,6 +81,7 @@ impl Kind {
 struct Open<'a> {
     token: &'a str,
     view: &'a str,
+    version: &'a str,
     program: &'a str,
     title: &'a str,
     bundle: Bundle<'a>,
@@ -275,6 +282,7 @@ impl Conversation<'_> {
         let open = Open {
             token,
             view: self.kind.name,
+            version: self.kind.version,
             program: "demopen",
             title: "Containers",
             bundle: Bundle {
@@ -546,34 +554,35 @@ impl Conversation<'_> {
     }
 }
 
-/// The `hello`: the versions this program speaks and the kinds of view it can show (the one it
-/// carries).
+/// The `hello`: the versions of the wire this program speaks and the kinds of view it can show
+/// (the one it carries), each with the versions of its interface the program is written against.
 fn hello_payload(kind: Kind) -> String {
-    json::to_wire(&json!({ "versions": [1], "views": [kind.name] })).unwrap_or_default()
+    json::to_wire(&json!({
+        "versions": [1],
+        "views": [{ "kind": kind.name, "versions": [kind.version] }],
+    }))
+    .unwrap_or_default()
 }
 
-/// The token of a `welcome` that offers one for a host that shows this program's kind of view:
-/// a version and a token, `bundle` among the features and the program's kind among the views.
-/// `None` for any other — a host that shares no version, takes no bundles, or whose `views` is
-/// empty or has no kind of this program's: the list is shown as text at once.
+/// The token of a `welcome` that offers one for a host that shows this program's kind of view at
+/// the version the program is written against: a version and a token, `bundle` among the
+/// features and the program's kind among the views with that version listed. `None` for any
+/// other — a host that shares no version, takes no bundles, or whose `views` is empty or has no
+/// kind of this program's, or not at its version: the list is shown as text at once.
 fn offer_of(message: &Frame, kind: Kind) -> Option<String> {
     let welcome: Value = serde_json::from_str(&message.payload).ok()?;
     welcome.get("version")?;
     let token = welcome.get("token")?.as_str()?.to_owned();
-    let names = |member: &str| -> Option<Vec<String>> {
-        Some(
-            welcome
-                .get(member)?
-                .as_array()?
-                .iter()
-                .filter_map(|name| name.as_str().map(str::to_owned))
-                .collect(),
-        )
-    };
-    let features = names("features")?;
-    let views = names("views")?;
-    (features.iter().any(|f| f == "bundle") && views.iter().any(|v| v == kind.name))
-        .then_some(token)
+    let features = welcome.get("features")?.as_array()?;
+    let views = welcome.get("views")?.as_array()?;
+    let shows = views.iter().any(|view| {
+        view.get("kind").and_then(Value::as_str) == Some(kind.name)
+            && view
+                .get("versions")
+                .and_then(Value::as_array)
+                .is_some_and(|versions| versions.iter().any(|v| v.as_str() == Some(kind.version)))
+    });
+    (features.iter().any(|f| f.as_str() == Some("bundle")) && shows).then_some(token)
 }
 
 /// The words a `closed` gives for a view that failed (`reason` `error` with a `message`), made fit
@@ -618,16 +627,20 @@ mod tests {
     fn a_terminal_that_shows_components_offers_its_token_and_no_other_does() {
         let host = r#""host":{"name":"t","version":"0"}"#;
         let wasm = format!(
-            r#"{{"version":1,"token":"abc",{host},"features":["bundle","dismiss"],"views":["wasm","web"]}}"#
+            r#"{{"version":1,"token":"abc",{host},"features":["bundle","dismiss"],"views":[{{"kind":"wasm","versions":["0.5"]}},{{"kind":"web","versions":["1.0"]}}]}}"#
         );
         let web = format!(
-            r#"{{"version":1,"token":"abc",{host},"features":["bundle","dismiss"],"views":["web"]}}"#
+            r#"{{"version":1,"token":"abc",{host},"features":["bundle","dismiss"],"views":[{{"kind":"web","versions":["1.0"]}}]}}"#
         );
         let nothing = format!(
             r#"{{"version":1,"token":"abc",{host},"features":["bundle","dismiss"],"views":[]}}"#
         );
         let no_bundles = format!(
-            r#"{{"version":1,"token":"abc",{host},"features":["dismiss"],"views":["wasm"]}}"#
+            r#"{{"version":1,"token":"abc",{host},"features":["dismiss"],"views":[{{"kind":"wasm","versions":["0.5"]}}]}}"#
+        );
+        // The kind, but not at the version this program is written against.
+        let other_version = format!(
+            r#"{{"version":1,"token":"abc",{host},"features":["bundle","dismiss"],"views":[{{"kind":"wasm","versions":["0.4"]}}]}}"#
         );
         let none = format!(r#"{{"supported":[2],{host}}}"#);
         let wasm_only = Kind::WASM;
@@ -635,12 +648,13 @@ mod tests {
         assert_eq!(offer_of(&welcome(&web), wasm_only), None);
         assert_eq!(offer_of(&welcome(&nothing), wasm_only), None);
         assert_eq!(offer_of(&welcome(&no_bundles), wasm_only), None);
+        assert_eq!(offer_of(&welcome(&other_version), wasm_only), None);
         assert_eq!(offer_of(&welcome(&none), wasm_only), None);
         assert_eq!(offer_of(&welcome("not json"), wasm_only), None);
         // A terminal that runs components and not scripts does not offer a token for a script.
         assert_eq!(offer_of(&welcome(&wasm), Kind::LUA), None);
         let lua = format!(
-            r#"{{"version":1,"token":"abc",{host},"features":["bundle","dismiss"],"views":["lua","web"]}}"#
+            r#"{{"version":1,"token":"abc",{host},"features":["bundle","dismiss"],"views":[{{"kind":"lua","versions":["1.0"]}},{{"kind":"web","versions":["1.0"]}}]}}"#
         );
         assert_eq!(offer_of(&welcome(&lua), Kind::LUA).as_deref(), Some("abc"));
     }
@@ -656,14 +670,14 @@ mod tests {
     }
 
     #[test]
-    fn the_hello_lists_the_one_kind_of_view_this_program_shows() {
+    fn the_hello_lists_the_one_kind_of_view_this_program_shows_with_its_version() {
         assert_eq!(
             hello_payload(Kind::WASM),
-            r#"{"versions":[1],"views":["wasm"]}"#
+            r#"{"versions":[1],"views":[{"kind":"wasm","versions":["0.5"]}]}"#
         );
         assert_eq!(
             hello_payload(Kind::LUA),
-            r#"{"versions":[1],"views":["lua"]}"#
+            r#"{"versions":[1],"views":[{"kind":"lua","versions":["1.0"]}]}"#
         );
     }
 

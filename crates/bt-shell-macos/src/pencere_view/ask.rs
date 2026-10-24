@@ -27,11 +27,11 @@
 //!   no question to give it back.
 //!
 //! **What is remembered** is [`Memory`]'s rule, kept here for the whole process on the main
-//! thread and written nowhere: an answer is for a program in a place with a tool and a set.
-//! A question whose tool could not be read is asked every time.
+//! thread and written nowhere: an answer is for a program in a place with a set. A question
+//! about a program that cannot be told from another is asked every time.
 //!
 //! **Questions that ask the same are one question** ([`Waiting`]): panes restored together
-//! that open the same tool each put the question up before anyone has answered the first, so
+//! that open the same program's view each put the question up before anyone has answered the first, so
 //! the memory has nothing yet when they ask. The person's answer to one is then the answer to
 //! the others that are up, and their sheets go with it (`answer_same`): asking twice for one
 //! answer is what the person would call a bug. Only an answer the person gave does this —
@@ -480,7 +480,7 @@ mod tests {
         assert!(drop.contains("self.view_gone()"));
         let gone =
             &source[at("    fn view_gone(")..at("    /// Sets the deadline the conversation")];
-        assert!(gone.contains("ask::view_ended(self)") && gone.contains("requests_over()"));
+        assert!(gone.contains("ask::view_ended(self)"));
     }
 
     #[test]
@@ -509,11 +509,10 @@ mod tests {
         assert!(asking.finish(4));
     }
 
-    /// A question about `tool` that asks for nothing in particular, numbered `id`.
-    fn question(id: u32, tool: &str) -> Consent {
+    /// A question that asks for nothing in particular, numbered `id`.
+    fn question(id: u32) -> Consent {
         Consent {
             id,
-            tool: Some(tool.to_owned()),
             title: None,
             program: None,
             domains: Vec::new(),
@@ -527,23 +526,23 @@ mod tests {
             identity: Some("maps".to_owned()),
             ..Origin::default()
         };
-        let first = question(1, "show");
-        let key = view_ask::key(&origin, &first).expect("a tool is named");
+        let first = question(1);
+        let key = view_ask::key(&origin, &first).expect("a program is named");
         let ask = |pane: u64, consent: Consent| {
             WAITING.with(|waiting| waiting.borrow_mut().up(key.clone(), Up { pane, consent }));
         };
         // Two panes ask the same, each of its own conversation's numbers, and the first pane's
         // question is taken back: the person's answer to the other is for it alone.
         ask(10, first);
-        ask(20, question(1, "show"));
+        ask(20, question(1));
         gone(10, 1);
         let answered = WAITING.with(|waiting| waiting.borrow_mut().answered(&key));
         assert_eq!(answered.len(), 1);
         assert!(answered[0].is(20, 1));
         // A number is the question's within its own pane: taking back the pane 10's question 2
         // leaves the pane 20's question 2 where it is, and so does a number nobody asked.
-        ask(10, question(2, "show"));
-        ask(20, question(2, "show"));
+        ask(10, question(2));
+        ask(20, question(2));
         gone(10, 2);
         gone(20, 9);
         let answered = WAITING.with(|waiting| waiting.borrow_mut().answered(&key));

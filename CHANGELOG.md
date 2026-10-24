@@ -38,6 +38,15 @@ of every installed copy. A version without a section is not released.
 
 ### Changed
 
+- **A program's web view speaks pencere's one protocol; MCP is gone.** A program that shows a
+  web view now opens it from a bundle with the same messages a view bateri draws itself uses
+  (calls and answers, subscriptions and pushes), asks for the addresses and browser features
+  its page needs in the `open` itself, and the page is told the terminal's colours, size,
+  language, time zone and Reduce Motion setting as they change. bateri offers each kind of
+  view with the version of its interface, so a program can say which one it was written
+  against. Closing a view is immediate for every kind. Programs written for the previous
+  draft have to be updated; the strip, the questions to you and the Quit ⌃C button are as
+  they were.
 - **Programs in local tabs outlive an update, a kept quit and a crash the way programs on servers do.**
   Each tab's shell now runs in a terminal kablo keeps on this Mac, and bateri shows it: an
   update, ⌘Q under `keep_running = "quit"` and a crash leave the programs running, and the

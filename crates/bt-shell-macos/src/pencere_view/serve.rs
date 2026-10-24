@@ -6,22 +6,21 @@
 //! file):
 //!
 //! * **the shell**, `bateri-view://shell/`: a page of ours with the one
-//!   `<iframe>` the view lives in, and the script that carries the JSON-RPC
-//!   messages between that frame and the application (`window.postMessage` ↔
-//!   the script-message handler). Its policy lets it frame the view's origin and
-//!   nothing else;
+//!   `<iframe>` the view lives in, and the script that carries the bridge's
+//!   messages (one JSON object with one member each, specification §9.4) between
+//!   that frame and the application (`window.postMessage` ↔ the script-message
+//!   handler). Its policy lets it frame the view's origin and nothing else;
 //! * **the view**, `bateri-view://<instance>/…`: the entry document and the
-//!   other files of the bundle — or the one document the program's
-//!   `resources/read` gave — each with the policy the crate built from what the
+//!   other files of the bundle, each with the policy the crate built from what the
 //!   person allowed. `<instance>` is random and belongs to this one start of one
 //!   view (§8.6): never the shell's, never another view's.
 //!
 //! A view therefore sits one origin away from the page that holds the bridge,
 //! which is what keeps it from reaching it: it has `window.parent` and
 //! `postMessage`, nothing of the shell's script or of the application. (Why not
-//! the view as the top document: MCP Apps views write to `window.parent`, so an
-//! unmodified view would have to be adapted by a script of ours inside its own
-//! page.)
+//! the view as the top document: the bridge of a page is `window.parent`'s
+//! `postMessage`, so a view as the top document would need a script of ours inside
+//! its own page to be given the same two things.)
 //!
 //! Everything here is a pure function of strings and bytes, so what a request
 //! may reach, which headers it gets and what the shell page says are tested
@@ -33,15 +32,19 @@ use std::sync::Arc;
 /// `WKURLSchemeHandler` for the web view of one view and for no other.
 pub(super) const SCHEME: &str = "bateri-view";
 
+/// The name of the script-message handler the page's messages go to: the one the shell script
+/// posts every message of the view to.
+pub(super) const HANDLER: &str = "pencere";
+
+/// The name of the handler the shell script tells that the view's frame has loaded, with nothing
+/// but that: the view's own messages never go to it.
+pub(super) const LOADED_HANDLER: &str = "pencereLoaded";
+
 /// The shell's host name: fixed, since it is the application's own page and each
 /// web view has its own handler that serves one view's instance only.
 const SHELL_HOST: &str = "shell";
 
-/// The path the document of a view that came as HTML (with no bundle) is served
-/// at. It has no other file: everything else it asks for is a 404.
-pub(super) const DOCUMENT_PATH: &str = "view.html";
-
-/// The `sandbox` attribute of the view's frame. MCP Apps' own: scripts, and the
+/// The `sandbox` attribute of the view's frame: scripts, and the
 /// view's own origin (so it has storage of its own, which never outlives the
 /// web view — the data store is not persistent) — and nothing that leaves the
 /// frame: no navigation of the top page, no popups, no modals, no downloads.
@@ -52,8 +55,7 @@ pub(super) const SANDBOX: &str = "allow-scripts allow-same-origin allow-forms";
 pub(super) enum Route {
     /// The shell page.
     Shell,
-    /// A file of the view, by the path the manifest names it with (or the
-    /// document's [`DOCUMENT_PATH`]).
+    /// A file of the view, by the path the manifest names it with.
     View(String),
     /// Anything else: another scheme, another host, another instance's origin,
     /// a path that is not one.
@@ -223,7 +225,10 @@ pub(super) fn ground_script(color: &str) -> String {
 /// it serialises to (a value JSON cannot hold is dropped); it hands the
 /// application's messages to the frame with `postMessage`. A message is never
 /// built from anything but `JSON.stringify` / `JSON.parse`, so nothing the view
-/// sends is ever code here.
+/// sends is ever code here. When the frame has loaded, the script says so to the
+/// application on its own handler ([`LOADED_HANDLER`]) — a thing the view cannot
+/// say for it, since its messages only ever go to the other — and the application
+/// answers with the first `context` (specification §9.5).
 fn shell_html(view_url: &str, allow: &str, ground: &str) -> String {
     format!(
         r#"<!doctype html>
@@ -240,11 +245,16 @@ iframe {{ display: block; border: 0; width: 100%; height: 100%; background: tran
 <script>
 (function () {{
   var frame = document.getElementById("view");
-  var host = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.pencere;
+  var handlers = window.webkit && window.webkit.messageHandlers;
+  var host = handlers && handlers.{handler};
+  var loaded = handlers && handlers.{loaded_handler};
   function focusView() {{
     try {{ frame.focus(); frame.contentWindow.focus(); }} catch (error) {{}}
   }}
-  frame.addEventListener("load", focusView);
+  frame.addEventListener("load", function () {{
+    focusView();
+    if (loaded) loaded.postMessage("loaded");
+  }});
   window.addEventListener("focus", focusView);
   window.addEventListener("message", function (event) {{
     if (!host || event.source !== frame.contentWindow) return;
@@ -272,18 +282,10 @@ iframe {{ display: block; border: 0; width: 100%; height: 100%; background: tran
         ground = escape_attribute(ground),
         src = escape_attribute(view_url),
         sandbox = SANDBOX,
+        handler = HANDLER,
+        loaded_handler = LOADED_HANDLER,
         allow = escape_attribute(allow),
     )
-}
-
-/// Where the view's document comes from.
-#[derive(Clone, Debug)]
-pub(super) enum Document {
-    /// The entry of the bundle: a path of its manifest. The files are the
-    /// crate's to give (`Session::serve_view_file`).
-    Bundle(String),
-    /// The one HTML document the program's `resources/read` returned.
-    Html(Arc<[u8]>),
 }
 
 /// A file of the bundle as the crate's file service gives it: its media type and its
@@ -340,7 +342,6 @@ fn not_found() -> Reply {
 pub(super) struct Page {
     /// The random host of the view's origin.
     instance: String,
-    document: Document,
     /// The crate's policy, from what the person allowed: on every file of the
     /// view, as the response header.
     policy: String,
@@ -356,20 +357,15 @@ impl Page {
     /// `ground` is the pane's background as a CSS colour.
     pub(super) fn new(
         instance: String,
-        document: Document,
+        entry: String,
         policy: String,
         allow: &str,
         ground: &str,
     ) -> Self {
-        let entry = match &document {
-            Document::Bundle(entry) => entry.as_str(),
-            Document::Html(_) => DOCUMENT_PATH,
-        };
-        let view_url = format!("{SCHEME}://{instance}/{}", percent_encode_path(entry));
+        let view_url = format!("{SCHEME}://{instance}/{}", percent_encode_path(&entry));
         let shell = shell_html(&view_url, allow, ground).into_bytes().into();
         Self {
             instance,
-            document,
             policy,
             shell,
         }
@@ -391,13 +387,13 @@ impl Page {
     }
 
     /// The path of the bundle file a request for `url` is for, or `None` when the answer
-    /// is not a file of the bundle's — the shell page, the one document a program handed,
-    /// anything refused — which [`Page::reply`] gives from memory. Asking for a file is
-    /// what takes time (the file service waits for the conversation and reads and checks up
-    /// to 8 MiB), so only these are served off the main thread.
+    /// is not a file of the bundle's — the shell page, anything refused — which
+    /// [`Page::reply`] gives from memory. Asking for a file is what takes time (the file
+    /// service waits for the conversation and reads and checks up to 8 MiB), so only these
+    /// are served off the main thread.
     pub(super) fn file_of(&self, url: &str) -> Option<String> {
-        match (route(&self.instance, url), &self.document) {
-            (Route::View(path), Document::Bundle(_)) => Some(path),
+        match route(&self.instance, url) {
+            Route::View(path) => Some(path),
             _ => None,
         }
     }
@@ -416,23 +412,14 @@ impl Page {
                 ),
                 body: Arc::clone(&self.shell),
             },
-            Route::View(path) => {
-                let served = match &self.document {
-                    Document::Bundle(_) => files(&path),
-                    Document::Html(html) if path == DOCUMENT_PATH => {
-                        Some(("text/html; charset=utf-8".to_owned(), Arc::clone(html)))
-                    }
-                    Document::Html(_) => None,
-                };
-                match served {
-                    Some((media, bytes)) => Reply {
-                        status: 200,
-                        headers: headers(&media, &self.policy, bytes.len()),
-                        body: bytes,
-                    },
-                    None => not_found(),
-                }
-            }
+            Route::View(path) => match files(&path) {
+                Some((media, bytes)) => Reply {
+                    status: 200,
+                    headers: headers(&media, &self.policy, bytes.len()),
+                    body: bytes,
+                },
+                None => not_found(),
+            },
             Route::Refused => not_found(),
         }
     }

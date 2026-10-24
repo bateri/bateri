@@ -253,16 +253,16 @@ taffy = { version = "0.10", default-features = false, features = [
 # bateri (GPL-3.0-or-later); `make audit` fails if the three do not resolve to one commit.
 kablo-proto = { git = "https://github.com/bateri/kablo", rev = "222309ff909078aa8af4ec4519d5467b91a0a09d" }
 
-# pencere: the protocol a program in a pane speaks to show its web view there (frames,
-# messages, the session's rules, bundles, the content security policy and the theme as
-# styling), as a crate with no I/O. Taken from its own repository by a pinned commit, like
+# pencere: the protocol a program in a pane speaks to show its view there (frames,
+# messages, the session's rules, bundles, the content security policy and the context a
+# page is told), as a crate with no I/O. Taken from its own repository by a pinned commit, like
 # `kablo-proto`: the rules are written once, in the protocol's repository, and bateri is a
 # host of it; rewriting them here would be a second copy that drifts. `rev` must be a commit
 # at or after the relicensing to Apache-2.0 (`75a78e3`): the commit before it is GPL-3.0 and
 # the protocol is meant to be embedded by closed products too. User-approved dependency
 # decision (2026-10-21); it brings `serde`, `serde_json` and `sha2` into the graph, all
 # MIT/Apache-2.0. `make audit` fails if `rev` is not a full hash or does not resolve.
-pencere = { git = "https://github.com/bateri/pencere", rev = "6caacce006bd5522fbe7f29a11a1571ffd767b25" }
+pencere = { git = "https://github.com/bateri/pencere", rev = "53f0f3bbe2bc12767e9b5bcf143dd1c97fba291e" }
 
 bt-core = { path = "crates/bt-core" }
 bt-atlas = { path = "crates/bt-atlas" }

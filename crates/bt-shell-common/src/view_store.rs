@@ -3,7 +3,7 @@
 //!
 //! A program sends every file of its bundle at every `open` it makes unless the
 //! host says it has the file already, so what lasts between opens is what makes
-//! the second open of a tool send nothing. Files are **content addressed**: a
+//! the second open of a view send nothing. Files are **content addressed**: a
 //! file is named by its SHA-256, in lowercase hex, and a name says what is in the
 //! file — a program cannot put one thing under another's name, and two
 //! programs that ship the same file share it.

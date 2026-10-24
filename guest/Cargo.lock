@@ -238,7 +238,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 [[package]]
 name = "pencere"
 version = "0.1.0"
-source = "git+https://github.com/bateri/pencere?rev=6caacce006bd5522fbe7f29a11a1571ffd767b25#6caacce006bd5522fbe7f29a11a1571ffd767b25"
+source = "git+https://github.com/bateri/pencere?rev=53f0f3bbe2bc12767e9b5bcf143dd1c97fba291e#53f0f3bbe2bc12767e9b5bcf143dd1c97fba291e"
 dependencies = [
  "serde",
  "serde_json",

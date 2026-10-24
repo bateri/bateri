@@ -58,29 +58,18 @@ pub struct Strip {
     pub quit_tip: String,
 }
 
-/// The strip's text for a view of a tool (the one whose result the view shows) that the
-/// program called `title` in its list of tools, if it did. `tool_label` is the tool's name as
-/// the protocol's host library gives it for drawing (`None` when nothing is left of the name
-/// once it is cleaned): the name the view calls the tool by, as the program wrote it, is not
-/// for drawing and is not taken here. `place` is the server the program runs on, `None` on
-/// this Mac; `program` is the program's own name, `None` when nothing here knows it (a plain
-/// `ssh`, a server that has not said).
+/// The strip's text for a view the program called `title` in its `open`, if it did. `place` is
+/// the server the program runs on, `None` on this Mac; `program` is the program's own name,
+/// `None` when nothing here knows it (a plain `ssh`, a server that has not said).
 ///
-/// A title the program did not give is the tool's label; a title or a label with nothing left
-/// after cleaning is as if there were none, and so is one that is the program's name in other
-/// letters (`Containers` from `containers`).
-pub fn strip(
-    title: Option<&str>,
-    tool_label: Option<&str>,
-    place: Option<&str>,
-    program: Option<&str>,
-) -> Strip {
+/// A title with nothing left after cleaning is as if there were none, and so is one that is the
+/// program's name in other letters (`Containers` from `containers`).
+pub fn strip(title: Option<&str>, place: Option<&str>, program: Option<&str>) -> Strip {
     let named = |text: &str, limit: usize| Some(clean(text, limit)).filter(|text| !text.is_empty());
     let place = place.and_then(|text| named(text, NAME_LIMIT));
     let program = program.and_then(|text| named(text, NAME_LIMIT));
     let title = title
         .and_then(|text| named(text, TITLE_LIMIT))
-        .or_else(|| tool_label.and_then(|text| named(text, TITLE_LIMIT)))
         .filter(|title| {
             program
                 .as_ref()
@@ -102,8 +91,8 @@ pub fn strip(
     }
 }
 
-/// The name the strip calls the program by: what the program calls itself (`said`: its
-/// `serverInfo`'s title or name), as long as something is left of it once it is cleaned, else
+/// The name the strip calls the program by: what the program calls itself (`said`: the
+/// `program` of its `open`), as long as something is left of it once it is cleaned, else
 /// what the application reads in the pane (`read`: the process in front, the server's word for
 /// a terminal it keeps). The program's own words are the ones a person knows it by (“Docker UI”
 /// where the process is `node`); the questions to the person name it the same way.
@@ -314,7 +303,7 @@ mod tests {
 
     #[test]
     fn a_view_on_this_mac_names_the_program_once_and_its_title_beside_it() {
-        let strip = strip(Some("Table"), Some("show_table"), None, Some("tablepen"));
+        let strip = strip(Some("Table"), None, Some("tablepen"));
         assert_eq!(strip.place, None);
         assert_eq!(strip.program.as_deref(), Some("tablepen"));
         assert_eq!(strip.title.as_deref(), Some("Table"));
@@ -326,12 +315,7 @@ mod tests {
 
     #[test]
     fn a_view_on_a_server_says_where_the_program_runs_with_the_docks_mark() {
-        let strip = strip(
-            Some("Containers"),
-            Some("list_containers"),
-            Some("prod"),
-            Some("Docker UI"),
-        );
+        let strip = strip(Some("Containers"), Some("prod"), Some("Docker UI"));
         assert_eq!(strip.place.as_deref(), Some("⇄ prod"));
         assert_eq!(strip.program.as_deref(), Some("Docker UI"));
         assert_eq!(strip.title.as_deref(), Some("Containers"));
@@ -339,19 +323,15 @@ mod tests {
 
     #[test]
     fn a_title_that_only_says_the_programs_name_again_is_left_out() {
-        let strip = strip(Some("Containers"), Some("list"), None, Some("containers"));
+        let strip = strip(Some("Containers"), None, Some("containers"));
         assert_eq!(strip.program.as_deref(), Some("containers"));
-        assert_eq!(strip.title, None);
-        // The tool's label stands in for a title the program did not give, and is left out the
-        // same way.
-        let strip = super::strip(None, Some("TablePen"), None, Some("tablepen"));
         assert_eq!(strip.title, None);
     }
 
     #[test]
     fn a_program_nobody_here_can_name_is_not_given_a_name() {
         // A plain `ssh`: the place is known, the program is not.
-        let strip = strip(None, Some("list"), Some("prod"), None);
+        let strip = strip(Some("list"), Some("prod"), None);
         assert_eq!(strip.place.as_deref(), Some("⇄ prod"));
         assert_eq!(strip.program, None);
         assert_eq!(strip.title.as_deref(), Some("list"));
@@ -362,36 +342,26 @@ mod tests {
     }
 
     #[test]
-    fn a_view_with_no_title_is_named_by_the_tools_label_and_a_strip_is_never_blank() {
-        let strip = strip(None, Some("list_containers"), None, Some("docker-ui"));
-        assert_eq!(strip.title.as_deref(), Some("list_containers"));
-        // A title of nothing is none.
-        assert_eq!(
-            super::strip(Some("  \n "), Some("list"), None, None)
-                .title
-                .as_deref(),
-            Some("list")
-        );
-        // No title and no label: the program alone.
-        let strip = super::strip(None, None, None, Some("tablepen"));
+    fn a_strip_is_never_blank() {
+        // A title of nothing is none: the program alone.
+        let strip = super::strip(Some("  \n "), None, Some("tablepen"));
         assert_eq!(strip.title, None);
         assert_eq!(strip.program.as_deref(), Some("tablepen"));
-        // Nothing at all names it, on this Mac: the strip still says what is under it. The name
-        // the view calls the tool by is not drawn in its place.
-        for label in [None, Some(" \u{200b}")] {
-            let strip = super::strip(None, label, None, None);
+        // Nothing at all names it, on this Mac: the strip still says what is under it.
+        for title in [None, Some(" \u{200b}")] {
+            let strip = super::strip(title, None, None);
             assert_eq!(strip.title.as_deref(), Some("A program's view"));
         }
         // On a server the place says it.
-        assert_eq!(super::strip(None, None, Some("prod"), None).title, None);
+        assert_eq!(super::strip(None, Some("prod"), None).title, None);
     }
 
     #[test]
-    fn the_strip_names_the_program_as_it_names_itself_and_the_tool_as_it_titles_it() {
+    fn the_strip_names_the_program_as_it_names_itself_and_the_view_as_it_titles_it() {
         // `node` is the process; “Docker UI” is what the program says it is, and “Containers” is
-        // what it calls the tool whose result the view shows.
+        // what it calls the view.
         let program = program_name(Some("Docker UI"), Some("node"));
-        let strip = strip(Some("Containers"), Some("list_containers"), None, program);
+        let strip = strip(Some("Containers"), None, program);
         assert_eq!(strip.program.as_deref(), Some("Docker UI"));
         assert_eq!(strip.title.as_deref(), Some("Containers"));
         assert_eq!(
@@ -412,12 +382,7 @@ mod tests {
     #[test]
     fn a_long_name_is_cut_and_a_title_that_imitates_the_application_is_cleaned() {
         let long = "x".repeat(200);
-        let strip = strip(
-            Some(&format!("t{long}")),
-            Some("t"),
-            Some(&long),
-            Some(&long),
-        );
+        let strip = strip(Some(&format!("t{long}")), Some(&long), Some(&long));
         let title = strip.title.expect("a title");
         assert_eq!(title.chars().count(), TITLE_LIMIT);
         assert!(title.ends_with('…'));
@@ -430,7 +395,6 @@ mod tests {
         // order of what follows it or fill the strip with what does not show.
         let strip = super::strip(
             Some("\u{202e}Quit\n\tbateri\u{200b}   now\u{7}"),
-            Some("t"),
             Some("pro\u{0}d"),
             Some("a\u{2066}b"),
         );

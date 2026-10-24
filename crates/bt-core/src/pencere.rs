@@ -57,18 +57,16 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use ::pencere::frame::Message;
-use ::pencere::session::{Config, Observed, Session as Conversation};
+use ::pencere::session::{Config, Observed, Offer, Session as Conversation};
 use ::pencere::theme::{Rgb, Theme as ViewTheme};
 use ::pencere::token::Entropy;
 
 pub use ::pencere::bundle::{Digest, Store, Verified};
 pub use ::pencere::icon;
 pub use ::pencere::message::HostInfo;
-pub use ::pencere::sandbox::{
-    Consent, Declared, Directive, Domain, Grant, Locality, Permission, UiMeta,
-};
+pub use ::pencere::sandbox::{Consent, Declared, Directive, Domain, Grant, Locality, Permission};
 pub use ::pencere::session::{
-    Action, MAX_VIEW_MESSAGE, Size, State, ViewKind, ViewSource, ViewStart,
+    Action, MAX_VIEW_MESSAGE, Size, State, ViewKind, ViewStart, WEB_BRIDGE_VERSION,
 };
 
 use crate::color::{Theme, srgb_bytes};
@@ -84,6 +82,13 @@ pub(crate) type Discard = Box<dyn Fn() + Send + Sync>;
 /// The monospaced font list a view is given when the person named no family
 /// (`[font] family`): the system's, as a CSS `font-family`.
 pub const DEFAULT_FONT_MONO: &str = "\"SF Mono\", Menlo, monospace";
+
+/// The version of the component interface a `wasm` view is written against: the semver line of
+/// the `bateri:view` package (`0.5` stands for `0.5.x`).
+pub const WASM_VERSION: &str = "0.5";
+
+/// The version of the Lua API a `lua` view is written against: the prelude's `bateri.version`.
+pub const LUA_VERSION: &str = "1.0";
 
 /// The bytes the in-memory shelf keeps before the oldest go. A view's bundle is
 /// at most 64 MiB (the protocol's limit), so one bundle always fits; the number is a
@@ -116,8 +121,7 @@ pub fn font_stack(family: Option<&str>) -> String {
 /// back to what it does when nothing answers.
 #[derive(Clone, Debug)]
 pub struct ViewOptions {
-    /// The application's name and version: in the `welcome`, as the MCP client
-    /// of the program and as the host of the view.
+    /// The application's name and version: in the `welcome`.
     pub host: HostInfo,
     /// Where verified bundle files are kept, by digest.
     pub store: Shelf,
@@ -127,6 +131,8 @@ pub struct ViewOptions {
     pub locale: Option<String>,
     /// The person's time zone (IANA), when known.
     pub time_zone: Option<String>,
+    /// Whether the person asked for less motion (the resolved setting), as a page is told.
+    pub reduce_motion: bool,
     /// The pane's content area as the application knows it, in CSS pixels, which are
     /// points — the unit a view is told its container in. This crate has no scale to
     /// turn the grid's device pixels into them, so the application says; a pane it does
@@ -156,6 +162,7 @@ impl ViewOptions {
             font_mono: font_stack(None),
             locale: None,
             time_zone: None,
+            reduce_motion: false,
             size: Size {
                 width: 0,
                 height: 0,
@@ -527,12 +534,11 @@ pub(crate) fn view_theme(theme: &Theme, font_mono: &str) -> ViewTheme {
 }
 
 /// Whether the conversation is somewhere the shell must put a deadline on: an
-/// `open` that waits for its files, the MCP start-up or the person, and a view
-/// that was told to go and has not answered. The crate has no clock
+/// `open` that waits for its files or the person. The crate has no clock
 /// ([`crate::Session::view_wait_over`] is what the shell calls when the wait it
 /// chose runs out), so it is the shell that has to know a wait has begun.
 fn waits(state: State) -> bool {
-    matches!(state, State::Opening | State::Closing)
+    matches!(state, State::Opening)
 }
 
 /// The slot a pane's conversation is kept in. See the module's documentation.
@@ -600,21 +606,28 @@ impl Desk {
             font_mono,
             locale,
             time_zone,
+            reduce_motion,
             size,
             // The observer's: how it finds the shell is [`pane_observer`]'s.
             shell_group: _,
             native_entry_limit,
         } = options;
         let mut config = Config::new(host, view_theme(&theme, &font_mono), size);
-        // The kinds of view this pane opens: the page of a WebAssembly module or of a script,
-        // when the application can run one, and the web view. The program's `hello` lists what
-        // it can show and the `welcome` keeps the ones of these it listed, in its order.
+        // The kinds of view this pane opens, each with the versions of its interface the
+        // application speaks: the page of a WebAssembly module or of a script, when the
+        // application can run one, and the web view. The program's `hello` lists what it can
+        // show and the `welcome` keeps what both sides have, in the program's order.
         if let Some(limit) = native_entry_limit {
-            config.views = vec![ViewKind::Wasm, ViewKind::Lua, ViewKind::Web];
+            config.views = vec![
+                Offer::new(ViewKind::Wasm, &[WASM_VERSION]),
+                Offer::new(ViewKind::Lua, &[LUA_VERSION]),
+                Offer::new(ViewKind::Web, &[WEB_BRIDGE_VERSION]),
+            ];
             config.native_entry_limit = limit;
         }
         config.view.locale = locale;
         config.view.time_zone = time_zone;
+        config.view.reduce_motion = reduce_motion;
         let entropy = SystemEntropy {
             failed: Arc::clone(&failed),
         };
@@ -690,22 +703,18 @@ impl Desk {
         result
     }
 
-    /// Hands the view's message to the conversation; whether the pane wrote anything to
-    /// the program for it. What is written for a message of the view is a request of the
-    /// view passed on (or the call of the tool the view is for): it is out until the
-    /// program answers, and the shell is the one with a clock to give up waiting
-    /// ([`crate::Session::view_requests_overdue`]). The bytes are the crate's own word
-    /// that a request went out, so nothing of the message is read here.
-    pub(crate) fn view_message(&self, text: &str, write: impl Fn(Vec<u8>)) -> bool {
-        let wrote = Cell::new(false);
-        self.apply(
-            |bytes| {
-                wrote.set(true);
-                write(bytes);
-            },
-            |conversation| conversation.view_message(text),
-        );
-        wrote.get()
+    /// Hands the message of a web page to the conversation (the page's bridge, specification
+    /// §9.4): one of the six view messages is written to the program as a `msg`, unread, and
+    /// one of the host's own — `context`, `close`, `link` — is answered here. Nothing is
+    /// waited for after it: a call the program does not answer is the page's to give up.
+    pub(crate) fn view_message(&self, text: &str, write: impl Fn(Vec<u8>)) {
+        self.apply(write, |conversation| conversation.view_message(text));
+    }
+
+    /// The `context` a web page is told now, as JSON text, if a page is open
+    /// ([`Conversing::page_context`]).
+    pub(crate) fn page_context(&self) -> Option<String> {
+        lock(&self.inner).conversation.page_context()
     }
 
     /// A message of the component of a WebAssembly view, for the program: written only while

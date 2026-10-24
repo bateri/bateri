@@ -224,7 +224,7 @@ pub(crate) fn hello() -> Vec<u8> {
         1,
         None,
         None,
-        r#"{"versions":[1],"views":["wasm","web"]}"#,
+        r#"{"versions":[1],"views":[{"kind":"wasm","versions":["0.5"]},{"kind":"web","versions":["1.0"]}]}"#,
     )
 }
 
@@ -239,13 +239,6 @@ pub(crate) fn token_of(welcome: &Message) -> String {
     let rest = after(&welcome.payload, "token").expect("a token");
     let rest = rest.strip_prefix('"').expect("a string");
     rest[..rest.find('"').expect("its end")].to_owned()
-}
-
-/// The id of a JSON-RPC request or response in `text`.
-fn rpc_id(text: &str) -> u32 {
-    let rest = after(text, "id").expect("an id");
-    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
-    digits.parse().expect("a number")
 }
 
 /// A pane as the reader has it: `Term`, the parser, the stream's commands and the
@@ -328,33 +321,35 @@ pub(crate) const ALTERNATE_SCREEN: &[u8] = b"\x1b[?1049h";
 /// are written on the alternate screen, as a program that shows a view has taken
 /// the pane's, as vim does.
 pub(crate) fn bundle_open(token: &str) -> Vec<u8> {
-    open_of_bundle(token, "")
+    [ALTERNATE_SCREEN, &open_of_bundle(token, "")].concat()
 }
 
-/// The same, for a bundle whose manifest declares `domain` as an address the view connects to:
-/// the person is asked before the view starts.
+/// The same, for a page that asks for the address `domain` to connect to: the person is asked
+/// before the view starts.
 pub(crate) fn bundle_open_declaring(token: &str, domain: &str) -> Vec<u8> {
-    open_of_bundle(
-        token,
-        &format!(r#","meta":{{"csp":{{"connectDomains":["{domain}"]}}}}"#),
-    )
+    [
+        ALTERNATE_SCREEN,
+        &open_of_bundle(token, &format!(r#","access":{{"connect":["{domain}"]}}"#)),
+    ]
+    .concat()
 }
 
-/// The `open` of the one-file bundle with `meta` (the manifest's own member, or nothing).
-fn open_of_bundle(token: &str, meta: &str) -> Vec<u8> {
+/// The `open` frame of the one-file bundle, with `extra` (members of the `open` after `title`, or
+/// nothing), written wherever the pane is.
+fn open_of_bundle(token: &str, extra: &str) -> Vec<u8> {
     let digest = Digest::of(PAGE).to_string();
     let open = format!(
         concat!(
-            r#"{{"token":"{token}","view":"web","tool":{{"name":"list_containers","arguments":{{}}}},"#,
-            r#""bundle":{{"entry":"index.html","files":[{{"path":"index.html","sha256":"{digest}","#,
-            r#""size":{size},"type":"text/html"}}]{meta}}}}}"#
+            r#"{{"token":"{token}","view":"web","version":"1.0","program":"containers","#,
+            r#""title":"Containers"{extra},"bundle":{{"entry":"index.html","files":"#,
+            r#"[{{"path":"index.html","sha256":"{digest}","size":{size},"type":"text/html"}}]}}}}"#
         ),
         token = token,
         digest = digest,
         size = PAGE.len(),
-        meta = meta
+        extra = extra
     );
-    [ALTERNATE_SCREEN, &wire("open", 2, None, None, &open)].concat()
+    wire("open", 2, None, None, &open)
 }
 
 /// The program's `file` of the page.
@@ -368,43 +363,8 @@ pub(crate) fn page_file() -> Vec<u8> {
     )
 }
 
-/// The program's answer to the host's MCP `initialize`.
-pub(crate) fn initialize_answer(request: &Message) -> Vec<u8> {
-    let id = rpc_id(&request.payload);
-    let answer = format!(
-        concat!(
-            r#"{{"jsonrpc":"2.0","id":{id},"result":{{"protocolVersion":"2025-11-25","#,
-            r#""capabilities":{{"tools":{{}}}},"serverInfo":{{"name":"containers","version":"0"}}}}}}"#
-        ),
-        id = id
-    );
-    wire("msg", 4, None, None, &answer)
-}
-
-/// The program's answer to the host's MCP `tools/list`: one tool with a view.
-pub(crate) fn tools_answer(request: &Message) -> Vec<u8> {
-    let id = rpc_id(&request.payload);
-    let tools = format!(
-        concat!(
-            r#"{{"jsonrpc":"2.0","id":{id},"result":{{"tools":[{{"name":"list_containers","#,
-            r#""inputSchema":{{"type":"object"}},"_meta":{{"ui":{{"resourceUri":"ui://containers/view"}}}}}}]}}}}"#
-        ),
-        id = id
-    );
-    wire("msg", 5, None, None, &tools)
-}
-
-/// Whether `message` is the host's MCP request for `method`.
-pub(crate) fn is_request(message: &Message, method: &str) -> bool {
-    message.kind == "msg"
-        && message
-            .payload
-            .contains(&format!("\"method\":\"{method}\""))
-}
-
 /// The path to a started view: the program says `hello`, opens a view of a
-/// one-file bundle, sends the file, and answers the MCP start-up. Returns the
-/// token the view was opened with.
+/// one-file bundle and sends the file. Returns the token the view was opened with.
 fn open_a_view(pane: &mut Pane) -> String {
     pane.feed(&hello());
     let welcome = pane.rig.written();
@@ -423,32 +383,14 @@ fn open_a_view(pane: &mut Pane) -> String {
         need[0].payload
     );
 
+    // No session to start up: the page is there to start as soon as its file is.
     pane.feed(&page_file());
-    let initialize = pane.rig.written();
-    assert_eq!(initialize.len(), 1, "{initialize:?}");
-    assert!(is_request(&initialize[0], "initialize"), "{initialize:?}");
-    pane.feed(&initialize_answer(&initialize[0]));
-    let next = pane.rig.written();
-    assert_eq!(next.len(), 2, "{next:?}");
-    assert!(next[0].payload.contains("notifications/initialized"));
-    assert!(is_request(&next[1], "tools/list"), "{next:?}");
-    pane.feed(&tools_answer(&next[1]));
+    assert!(pane.rig.written().is_empty());
     token
 }
 
 fn wake_count(wake: &CountingWake) -> usize {
     wake.changes.load(Ordering::Acquire)
-}
-
-/// An `open` of a tool with no bundle, with `token`.
-fn bare_open(token: &str) -> Vec<u8> {
-    wire(
-        "open",
-        2,
-        None,
-        None,
-        &format!(r#"{{"token":"{token}","view":"web","tool":{{"name":"t","arguments":{{}}}}}}"#),
-    )
 }
 
 // ---- the stream -----------------------------------------------------------
@@ -504,13 +446,24 @@ fn the_full_opening_ends_with_a_view_for_the_shell_and_two_events() {
     let Action::StartView(start) = &views[0] else {
         panic!("a view to start, not {:?}", views[0]);
     };
-    assert_eq!(start.source, ViewSource::Bundle);
-    assert_eq!(start.tool, "list_containers");
+    assert_eq!(start.kind, ViewKind::Web);
+    assert_eq!(start.version, WEB_BRIDGE_VERSION);
+    assert_eq!(start.program.as_deref(), Some("containers"));
+    assert_eq!(start.title.as_deref(), Some("Containers"));
     assert!(
         start.policy.contains("default-src 'none'"),
         "{}",
         start.policy
     );
+    // The first `context` the page is told is the crate's, at the area the application gave
+    // and in the roles of the theme.
+    let context = start.context.as_deref().expect("a context for a page");
+    assert!(context.starts_with(r#"{"context":{"mode":"dark","colors":{"background":""#));
+    assert!(
+        context.contains(r#""size":{"width":800,"height":600}"#),
+        "{context}"
+    );
+    assert!(!context.contains("access"), "{context}");
     assert!(desk.take_views().is_empty(), "taken once");
     // The bytes of the bundle's page are served from the store.
     let served = desk.apply(|_| {}, |conversation| conversation.serve("index.html"));
@@ -532,9 +485,8 @@ fn a_burst_for_the_shell_is_one_event() {
     open_a_view(&mut pane);
     assert_eq!(wake_count(&wake), 2);
     let desk = pane.rig.desk.as_ref().expect("a desk");
-    // Two things for the view in a row, nobody has taken the first yet. (The
-    // view has not initialized, so it is told nothing: what is asked of the
-    // shell is the view's start, which is already there.)
+    // Two things for the view in a row, nobody has taken the first yet (the view's start is
+    // still there, and what the page is told of the theme and the font comes after it).
     desk.set_theme(
         Theme {
             background: 0x102030,
@@ -560,11 +512,11 @@ fn the_alternate_screen_is_the_one_where_the_open_ended() {
     let mut pane = Pane::new(rig);
     pane.feed(&hello());
     let token = token_of(&pane.rig.written()[0]);
-    pane.feed(&[ALTERNATE_SCREEN, &bare_open(&token)].concat());
+    pane.feed(&bundle_open(&token));
     let written = pane.rig.written();
     assert_eq!(written.len(), 1, "{written:?}");
-    assert!(
-        written[0].payload.contains("\"method\":\"initialize\""),
+    assert_eq!(
+        written[0].kind, "need",
         "an open on the alternate screen is accepted: {written:?}"
     );
 
@@ -573,7 +525,7 @@ fn the_alternate_screen_is_the_one_where_the_open_ended() {
     let mut pane = Pane::new(rig);
     pane.feed(&hello());
     let token = token_of(&pane.rig.written()[0]);
-    pane.feed(&bare_open(&token));
+    pane.feed(&open_of_bundle(&token, ""));
     let written = pane.rig.written();
     assert_eq!(written.len(), 1, "{written:?}");
     assert_eq!(
@@ -598,18 +550,13 @@ fn the_screen_of_the_moment_is_the_frames_and_not_a_later_one() {
     pane.feed(
         &[
             b"\x1b[?1049h".as_slice(),
-            &bare_open(&token),
+            &open_of_bundle(&token, ""),
             b"\x1b[?1049l",
         ]
         .concat(),
     );
     let written = pane.rig.written();
-    assert!(
-        written
-            .iter()
-            .any(|m| m.payload.contains("\"method\":\"initialize\"")),
-        "{written:?}"
-    );
+    assert!(written.iter().any(|m| m.kind == "need"), "{written:?}");
 }
 
 #[test]
@@ -774,8 +721,8 @@ fn a_restart_offers_a_new_token_to_the_program_that_had_a_view() {
     *lock(&seen) = Observed::default();
 
     desk.restart(pane.rig.write());
-    // The view is torn down first; the program is offered the restart once that
-    // is done (the view has not initialized, so it is torn down at once).
+    // The view is torn down first (at once, whatever its kind); the program is offered the
+    // restart after it.
     let written = pane.rig.written();
     let offer = written
         .iter()
@@ -801,13 +748,7 @@ fn a_replay_with_no_desk_builds_the_same_screen_and_writes_nothing() {
         b"one\r\n".as_slice(),
         &hello(),
         b"two\r\n",
-        &wire(
-            "msg",
-            2,
-            None,
-            None,
-            r#"{"jsonrpc":"2.0","method":"ping","id":9}"#,
-        ),
+        &wire("msg", 2, None, None, r#"{"call":{"id":9,"method":"ping"}}"#),
         b"three",
     ]
     .concat();
@@ -865,7 +806,7 @@ fn a_token_source_that_fails_opens_no_view() {
         .store(true, Ordering::Release);
     pane.feed(&hello());
     let token = token_of(&pane.rig.written()[0]);
-    pane.feed(&[ALTERNATE_SCREEN, &bare_open(&token)].concat());
+    pane.feed(&bundle_open(&token));
     let written = pane.rig.written();
     assert_eq!(written.len(), 1, "{written:?}");
     assert!(
@@ -1124,40 +1065,144 @@ fn the_systems_random_bytes_are_one_helper_for_the_token_and_the_views_origin() 
     assert_ne!(one, [0u8; 16]);
 }
 
-// ---- the area the view is told ---------------------------------------------
+// ---- what a page is told and what it says ---------------------------------
 
-/// The view's `ui/initialize`, which comes first.
-const INITIALIZE: &str = r#"{"jsonrpc":"2.0","id":1,"method":"ui/initialize","params":{"protocolVersion":"2025-11-21","appCapabilities":{},"appInfo":{"name":"t","version":"0"}}}"#;
-
-/// What the view is told its container is: the host context of its `ui/initialize`
-/// answer, from a started view.
-fn container_of(pane: &mut Pane) -> String {
+/// The page asks for its `context` again, which the host answers whenever it is asked: the
+/// context of a started view, as a page is told it.
+fn context_of(pane: &Pane) -> String {
     let desk = pane.rig.desk.as_ref().expect("a desk");
     desk.take_views();
-    desk.apply(|_| {}, |conversation| conversation.view_message(INITIALIZE));
+    desk.view_message(r#"{"context":{}}"#, |_| {});
     let told = desk.take_views();
     let Some(Action::ToView(answer)) = told.first() else {
-        panic!("an answer for the view, not {told:?}");
+        panic!("an answer for the page, not {told:?}");
     };
     answer.clone()
 }
 
 #[test]
-fn the_view_is_told_the_area_the_application_gave_and_not_a_guess_in_another_unit() {
+fn the_page_is_told_the_area_the_application_gave_and_not_a_guess_in_another_unit() {
     let (rig, _, _) = Rig::new(true);
     let mut pane = Pane::new(rig);
     open_a_view(&mut pane);
-    let answer = container_of(&mut pane);
+    let answer = context_of(&pane);
     // The rig's options say 800 × 600 points. The grid's device pixels, which this crate
     // used to multiply out, are twice that on a Retina display.
-    assert!(answer.contains("\"width\":800"), "{answer}");
-    assert!(answer.contains("\"height\":600"), "{answer}");
+    assert!(
+        answer.contains(r#""size":{"width":800,"height":600}"#),
+        "{answer}"
+    );
 }
 
-// ---- the requests a view has out ------------------------------------------
+#[test]
+fn what_the_person_set_reaches_the_page_in_its_context_and_again_when_it_changes() {
+    let (rig, _, _) = Rig::new(true);
+    let mut pane = Pane::new(rig);
+    open_a_view(&mut pane);
+    let desk = pane.rig.desk.as_ref().expect("a desk");
+    let first = context_of(&pane);
+    assert!(first.contains(r#""reduceMotion":false"#), "{first}");
+    assert!(!first.contains("locale"), "{first}");
+
+    // Each change is a `context` for the page, in the crate's words.
+    desk.apply(|_| {}, |conversation| conversation.set_reduce_motion(true));
+    desk.apply(
+        |_| {},
+        |conversation| {
+            conversation.set_locale(Some("tr-TR".to_owned()), Some("Europe/Istanbul".to_owned()));
+        },
+    );
+    let told = desk.take_views();
+    let [Action::ToView(motion), Action::ToView(locale)] = told.as_slice() else {
+        panic!("a context for each change, got {told:?}");
+    };
+    assert!(motion.contains(r#""reduceMotion":true"#), "{motion}");
+    assert!(
+        locale.contains(r#""locale":"tr-TR","timeZone":"Europe/Istanbul""#),
+        "{locale}"
+    );
+    // The same value again is nothing to tell.
+    desk.apply(|_| {}, |conversation| conversation.set_reduce_motion(true));
+    assert!(desk.take_views().is_empty());
+}
 
 #[test]
-fn a_message_of_the_view_that_goes_to_the_program_says_so() {
+fn the_six_messages_pass_between_the_page_and_the_program_unread() {
+    let (rig, _, _) = Rig::new(true);
+    let mut pane = Pane::new(rig);
+    open_a_view(&mut pane);
+    let rig = Arc::clone(&pane.rig);
+    let desk = rig.desk.as_ref().expect("a desk");
+    desk.take_views();
+    let input = Arc::clone(&pane.rig.input);
+    let write = |bytes: Vec<u8>| lock(&input).extend_from_slice(&bytes);
+
+    // The page's call is the program's, as it was written.
+    let call = r#"{"call":{"id":8,"method":"list","params":{"all":true}}}"#;
+    desk.view_message(call, write);
+    let sent = decoded(&mem::take(&mut *lock(&input)));
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert_eq!(
+        (sent[0].kind.as_str(), sent[0].payload.as_str()),
+        ("msg", call)
+    );
+    // So is a message the host has no name for: it is the program's business to ignore it.
+    let odd = r#"{"unheard-of":{"x":1}}"#;
+    desk.view_message(odd, write);
+    assert_eq!(decoded(&mem::take(&mut *lock(&input))).len(), 1);
+    // What is not an object is nobody's.
+    for nothing in ["[1]", "\"call\"", "42", "not json", ""] {
+        desk.view_message(nothing, write);
+    }
+    assert!(lock(&input).is_empty());
+
+    // The program's answers and pushes reach the page as they were written.
+    for text in [
+        r#"{"response":{"id":8,"result":{"containers":[]}}}"#,
+        r#"{"push":{"id":1,"value":{"state":"exited"}}}"#,
+        r#"{"progress":{"id":8,"done":1,"total":2}}"#,
+    ] {
+        pane.feed(&wire("msg", 4, None, None, text));
+        assert_eq!(desk.take_views(), [Action::ToView(text.to_owned())]);
+    }
+    // A program does not speak as the host: a `context` of its own never reaches the page.
+    pane.feed(&wire(
+        "msg",
+        5,
+        None,
+        None,
+        r#"{"context":{"mode":"light"}}"#,
+    ));
+    assert!(desk.take_views().is_empty());
+}
+
+#[test]
+fn a_page_closes_itself_and_the_program_is_told_the_view_did() {
+    let (rig, _, _) = Rig::new(true);
+    let mut pane = Pane::new(rig);
+    open_a_view(&mut pane);
+    let desk = pane.rig.desk.as_ref().expect("a desk");
+    desk.take_views();
+    let input = Arc::clone(&pane.rig.input);
+    desk.view_message(r#"{"close":{}}"#, |bytes| {
+        lock(&input).extend_from_slice(&bytes);
+    });
+    assert_eq!(desk.take_views(), [Action::DestroyView]);
+    let told = decoded(&mem::take(&mut *lock(&input)));
+    assert_eq!(told.len(), 1, "{told:?}");
+    assert_eq!(
+        (told[0].kind.as_str(), told[0].payload.as_str()),
+        ("closed", r#"{"reason":"view"}"#)
+    );
+    // Closed at once: nothing the page says now is the program's.
+    desk.view_message(r#"{"call":{"id":9,"method":"late"}}"#, |bytes| {
+        lock(&input).extend_from_slice(&bytes);
+    });
+    assert!(lock(&input).is_empty());
+}
+
+#[test]
+fn a_link_the_page_asks_for_is_put_to_the_person_and_the_page_is_never_answered() {
     let (rig, _, _) = Rig::new(true);
     let mut pane = Pane::new(rig);
     open_a_view(&mut pane);
@@ -1165,30 +1210,126 @@ fn a_message_of_the_view_that_goes_to_the_program_says_so() {
     desk.take_views();
     let input = Arc::clone(&pane.rig.input);
     let write = |bytes: Vec<u8>| lock(&input).extend_from_slice(&bytes);
-    // The view's start-up and a `ping` are the host's own to answer.
-    assert!(!desk.view_message(INITIALIZE, write));
-    assert!(!desk.view_message(r#"{"jsonrpc":"2.0","id":7,"method":"ping"}"#, write));
-    // A request for a tool is the program's: it is out until the program answers.
-    assert!(desk.view_message(
-        r#"{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"list_containers","arguments":{}}}"#,
-        write,
+
+    // A link that is not http or https is dropped: nobody is asked.
+    desk.view_message(r#"{"link":{"url":"file:///etc/passwd"}}"#, write);
+    assert!(desk.take_views().is_empty());
+
+    desk.view_message(r#"{"link":{"url":"https://example.com/docs"}}"#, write);
+    let asked = desk.take_views();
+    let [Action::OpenLink { link, url }] = asked.as_slice() else {
+        panic!("one link to ask about, got {asked:?}");
+    };
+    assert_eq!(url, "https://example.com/docs");
+    desk.apply(write, |conversation| {
+        conversation.link_decision(*link, true)
+    });
+    // Whether the person agreed is not the page's to learn, and not the program's either.
+    assert!(desk.take_views().is_empty());
+    assert!(lock(&input).is_empty(), "{:?}", decoded(&lock(&input)));
+    // An answer that comes again settles nothing.
+    desk.apply(write, |conversation| {
+        conversation.link_decision(*link, true)
+    });
+    assert!(lock(&input).is_empty());
+}
+
+#[test]
+fn a_page_that_asks_for_an_address_waits_for_the_person_and_is_told_what_was_allowed() {
+    let (rig, _, _) = Rig::new(true);
+    let mut pane = Pane::new(rig);
+    pane.feed(&hello());
+    let token = token_of(&pane.rig.written()[0]);
+    pane.feed(&bundle_open_declaring(&token, "https://api.example.com"));
+    assert_eq!(pane.rig.written()[0].kind, "need");
+    pane.feed(&page_file());
+    let desk = pane.rig.desk.as_ref().expect("a desk");
+    let asked = desk.take_views();
+    let [Action::Consent(consent)] = asked.as_slice() else {
+        panic!("one question for the person, got {asked:?}");
+    };
+    // The question is about the page's own words and nothing else.
+    assert_eq!(consent.title.as_deref(), Some("Containers"));
+    assert_eq!(consent.program.as_deref(), Some("containers"));
+    assert_eq!(consent.domains.len(), 1);
+    assert_eq!(
+        desk.apply(|_| {}, |conversation| conversation.state()),
+        State::Opening
+    );
+
+    desk.apply(pane.rig.write(), |conversation| {
+        conversation.consent(consent.id, consent.grant_all());
+    });
+    let started = desk.take_views();
+    let [Action::StartView(start)] = started.as_slice() else {
+        panic!("the view starts with the answer, got {started:?}");
+    };
+    assert!(
+        start
+            .policy
+            .contains("connect-src 'self' https://api.example.com"),
+        "{}",
+        start.policy
+    );
+    let context = start.context.as_deref().expect("a context");
+    assert!(
+        context.contains(r#""access":{"connect":["https://api.example.com"]}"#),
+        "{context}"
+    );
+}
+
+#[test]
+fn the_kinds_and_versions_offered_are_what_the_application_can_open_in_the_programs_order() {
+    // A pane that shows no components offers the web view alone, at the bridge's version.
+    let (rig, _, _) = Rig::new(true);
+    let mut pane = Pane::new(rig);
+    pane.feed(&hello());
+    let welcome = pane.rig.written();
+    assert!(
+        welcome[0]
+            .payload
+            .contains(r#""views":[{"kind":"web","versions":["1.0"]}]"#),
+        "{}",
+        welcome[0].payload
+    );
+
+    // One that does offers the three, at the versions of the interfaces it speaks, and the
+    // `welcome` follows the program's order and leaves out a kind with no version in common.
+    let (rig, _) = Rig::with_modules(1 << 20);
+    let mut pane = Pane::new(rig);
+    pane.feed(&wire(
+        "hello",
+        1,
+        None,
+        None,
+        concat!(
+            r#"{"versions":[1],"views":[{"kind":"web","versions":["2.0","1.0"]},"#,
+            r#"{"kind":"lua","versions":["9.9"]},{"kind":"wasm","versions":["0.4","0.5"]}]}"#
+        ),
     ));
-    let sent = decoded(&mem::take(&mut *lock(&input)));
+    let welcome = pane.rig.written();
     assert!(
-        sent.iter().any(|message| is_request(message, "tools/call")),
-        "{sent:?}"
+        welcome[0].payload.contains(
+            r#""views":[{"kind":"web","versions":["1.0"]},{"kind":"wasm","versions":["0.5"]}]"#
+        ),
+        "{}",
+        welcome[0].payload
     );
-    // Given up on, the view hears that it failed.
-    desk.take_views();
-    desk.apply(|_| {}, Conversing::requests_timed_out);
-    let told = desk.take_views();
+    // A restart offers everything the application opens, with the versions, in its own order.
+    let desk = pane.rig.desk.as_ref().expect("a desk");
+    desk.restart(pane.rig.write());
+    let offer = pane.rig.written();
     assert!(
-        told.iter().any(|action| matches!(
-            action,
-            Action::ToView(text) if text.contains("did not answer in time")
+        offer[0].payload.contains(concat!(
+            r#""views":[{"kind":"wasm","versions":["0.5"]},{"kind":"lua","versions":["1.0"]},"#,
+            r#"{"kind":"web","versions":["1.0"]}]"#
         )),
-        "{told:?}"
+        "{}",
+        offer[0].payload
     );
+    // The versions are the application's constants, and the Lua API's is the prelude's.
+    assert_eq!((WASM_VERSION, LUA_VERSION), ("0.5", "1.0"));
+    assert_eq!(WEB_BRIDGE_VERSION, "1.0");
 }
 
 // ---- the shelf ------------------------------------------------------------
@@ -1265,7 +1406,7 @@ const COMPONENT: &[u8] = b"\0asm\x01\0\0\0";
 fn module_open(token: &str) -> Vec<u8> {
     let open = format!(
         concat!(
-            r#"{{"token":"{token}","view":"wasm","program":"demopen","title":"Containers","#,
+            r#"{{"token":"{token}","view":"wasm","version":"0.5","program":"demopen","title":"Containers","#,
             r#""bundle":{{"entry":"view.wasm","files":[{{"path":"view.wasm","sha256":"{digest}","#,
             r#""size":{size},"type":"application/wasm"}}]}}}}"#
         ),
@@ -1296,7 +1437,7 @@ fn open_a_module_view() -> (Pane, String, Arc<CountingWake>) {
     assert!(
         welcome[0]
             .payload
-            .contains(r#""features":["bundle","dismiss"],"views":["wasm","web"]"#),
+            .contains(r#""features":["bundle","dismiss"],"views":[{"kind":"wasm","versions":["0.5"]},{"kind":"web","versions":["1.0"]}]"#),
         "{}",
         welcome[0].payload
     );
@@ -1352,17 +1493,19 @@ fn a_script_opens_a_view_of_its_kind_and_its_failure_reaches_the_program_with_it
         1,
         None,
         None,
-        r#"{"versions":[1],"views":["lua","web"]}"#,
+        r#"{"versions":[1],"views":[{"kind":"lua","versions":["1.0"]},{"kind":"web","versions":["1.0"]}]}"#,
     ));
     let welcome = pane.rig.written();
     assert!(
-        welcome[0].payload.contains(r#""views":["lua","web"]"#),
+        welcome[0].payload.contains(
+            r#""views":[{"kind":"lua","versions":["1.0"]},{"kind":"web","versions":["1.0"]}]"#
+        ),
         "{}",
         welcome[0].payload
     );
     let open = format!(
         concat!(
-            r#"{{"token":"{token}","view":"lua","program":"demopen","#,
+            r#"{{"token":"{token}","view":"lua","version":"1.0","program":"demopen","#,
             r#""bundle":{{"entry":"view.lua","files":[{{"path":"view.lua","sha256":"{digest}","#,
             r#""size":{size},"type":"text/x-lua"}}]}}}}"#
         ),

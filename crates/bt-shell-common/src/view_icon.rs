@@ -3,7 +3,7 @@
 //! measures: the tile's size, corners, face, deck and badges stay the application's, and only the
 //! picture is the program's.
 //!
-//! A program gives a picture and nothing about how it is meant to stand (MCP's `icons`: bytes, a
+//! A program gives a picture and nothing about how it is meant to stand (an `open`'s `icons`: bytes, a
 //! theme it suits, sizes), so how it stands is read from the picture itself ([`lay`]): an icon
 //! whose edges are opaque at their middles brings its own ground — a square application icon, its
 //! own corners rounded or not — and becomes the tile, cut to the tile's corners; one that is clear

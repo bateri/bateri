@@ -4397,6 +4397,10 @@ impl TerminalPane {
         if let Some(link) = self.ivars().link.get() {
             link.set_reduce_motion(reduce);
         }
+        // A program's web view is told too: its `context` carries the person's setting.
+        if let Some(session) = self.session() {
+            session.set_view_reduce_motion(reduce);
+        }
     }
 
     /// Gives the pane the scroll bar's **resolved** form
@@ -5327,6 +5331,7 @@ impl TerminalPane {
         options.font_mono = font_stack(ivars.font.borrow().family.as_deref());
         options.locale = pencere_view::locale_tag();
         options.time_zone = pencere_view::time_zone_name();
+        options.reduce_motion = ivars.reduce_motion.get();
         options.size = pencere_view::content_size(self.bounds());
         // A program may open a view that is a module or a script: it is run in the sandbox and
         // drawn as a page of the kit, up to the size the sandbox compiles.
@@ -5808,7 +5813,7 @@ impl TerminalPane {
     /// **A question for the person and a link to open are asked** ([`pencere_view::ask`]),
     /// each on the pane's seat in the sheet gate, and the answer goes back to the
     /// conversation: what the person allowed is what the view starts with, and a link
-    /// opens only if they agree. The log of the view is dropped.
+    /// opens only if they agree.
     pub(crate) fn drain_views(&self) {
         if self.is_closed() {
             return;
@@ -5863,8 +5868,7 @@ impl TerminalPane {
 
     /// Who a program's view is asking for: where its program runs and what it is called
     /// ([`TerminalPane::view_whereabouts`]), and what it calls itself once its view is up. The
-    /// tool the view is of is the question's own ([`bt_core::pencere::Consent::tool`]), not read
-    /// here.
+    /// view's own title is the question's ([`bt_core::pencere::Consent::title`]), not read here.
     fn view_origin(&self) -> bt_shell_common::view_ask::Origin {
         let (place, program) = self.view_whereabouts();
         bt_shell_common::view_ask::Origin {
@@ -6075,11 +6079,9 @@ impl TerminalPane {
         }
     }
 
-    /// What was the view's goes with it: the requests it had out are not waited for, and the
-    /// question it asked about a link is taken down — its answer would open a link for a view
-    /// that is not there and shut the next view's out.
+    /// What was the view's goes with it: the question it asked about a link is taken down — its
+    /// answer would open a link for a view that is not there and shut the next view's out.
     fn view_gone(&self) {
-        self.ivars().view_waits.borrow_mut().requests_over();
         pencere_view::ask::view_ended(self);
     }
 
@@ -6125,34 +6127,6 @@ impl TerminalPane {
             return;
         }
         session.view_wait_over();
-        self.drain_views();
-    }
-
-    /// The view's message made the pane write to the program ([`Session::view_message`]): a
-    /// request is out, and the program has until the time of the wait to answer it. The first
-    /// of a burst sets the wait; the others are in it.
-    pub(crate) fn view_requests_out(&self) {
-        let plan = self.ivars().view_waits.borrow_mut().requests_out();
-        if let Some((number, delay)) = plan {
-            self.after_on_main(number, delay, Self::view_requests_ended);
-        }
-    }
-
-    /// The time for the program's answers ran out: if it is still the wait that is set, the
-    /// requests that are out fail the way MCP defines, and the view hears it at once.
-    fn view_requests_ended(&self, number: u64) {
-        let Some(session) = self.session().cloned() else {
-            return;
-        };
-        if !self
-            .ivars()
-            .view_waits
-            .borrow_mut()
-            .requests_expired(number)
-        {
-            return;
-        }
-        session.view_requests_overdue();
         self.drain_views();
     }
 
@@ -6217,13 +6191,11 @@ impl TerminalPane {
     /// What the strip over the view of `start` says: where the program runs
     /// ([`TerminalPane::view_whereabouts`]) and what it is called — what the program calls
     /// itself, else what the pane read —, with the view's title: what the program calls the
-    /// tool, else the tool's label (`view_strip::strip`). Both words are the crate's, cleaned;
-    /// the tool's own name (`ViewStart::tool`) is what the view calls it by and is not drawn.
+    /// view (`view_strip::strip`). Both words are the crate's, cleaned.
     fn view_strip(&self, start: &bt_core::pencere::ViewStart) -> view_strip::Strip {
         let (place, program) = self.view_whereabouts();
         view_strip::strip(
             start.title.as_deref(),
-            start.tool_label.as_deref(),
             place.as_deref(),
             view_strip::program_name(pencere_view::said_program(start), program.as_deref()),
         )
@@ -7405,7 +7377,6 @@ mod tests {
         for view in [
             Some(State::Opening),
             Some(State::Open),
-            Some(State::Closing),
             Some(State::Ended),
             None,
         ] {
@@ -7443,35 +7414,6 @@ mod tests {
         let body = &pane[at..at + pane[at..].find("\n    }\n").expect("its end")];
         assert!(body.contains(".restart_view()"));
         assert!(body.contains("restart_offered()") && body.contains("wait_for_view("));
-    }
-
-    /// The requests a view has out are given up when their time runs out: the bridge says when a
-    /// message of the view made the pane write to the program (`view_message` returns it), the
-    /// pane sets the wait, and when it is up the conversation fails them and the view is told at
-    /// once. `Session::view_requests_overdue` had no caller: the wait was never set. A source scan,
-    /// because the panes need a window server and the time is a minute.
-    #[test]
-    fn the_requests_a_view_has_out_are_given_up_when_their_time_runs_out() {
-        let bridge = include_str!("pencere_view.rs");
-        let at = bridge.find("fn receive(").expect("the message handler");
-        let body = &bridge[at..at + bridge[at..].find("\n        }\n").expect("its end")];
-        assert!(
-            body.contains(".view_message(") && body.contains("view_requests_out()"),
-            "a message that went to the program sets the wait"
-        );
-        let pane = include_str!("pane.rs");
-        let pane = &pane[..pane.find("#[cfg(test)]").unwrap_or(pane.len())];
-        let at = pane
-            .find("fn view_requests_ended(")
-            .expect("the wait's end");
-        let body = &pane[at..at + pane[at..].find("\n    }\n").expect("its end")];
-        assert!(body.contains("requests_expired(number)"));
-        assert!(body.contains("session.view_requests_overdue()") && body.contains("drain_views()"));
-        let at = pane
-            .find("fn view_requests_out(")
-            .expect("the wait's start");
-        let body = &pane[at..at + pane[at..].find("\n    }\n").expect("its end")];
-        assert!(body.contains("requests_out()") && body.contains("Self::view_requests_ended"));
     }
 
     /// A session is opened to host views with how its shell is found from its child (`login(1)`

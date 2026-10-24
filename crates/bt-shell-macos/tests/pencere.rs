@@ -5,26 +5,29 @@
 //! The program is this test. The shell runs a script that puts the tty in raw mode and is a
 //! cable: what the test appends to `in` is written to the pane as the program's output, and
 //! what the pane writes to the program's input arrives in `out`. The test says `hello`, opens
-//! a view whose document is one HTML page, and from there the only thing that can make the
-//! program receive the next message is the whole chain working — the shell page served by the
-//! application's scheme handler, the view's document inside its sandboxed frame under the
-//! policy the crate built, the view's `postMessage` carried through the script-message
-//! handler into the session, and the session's answer carried back by `evaluateJavaScript`.
-//! The page then asks nothing of the host beyond the handshake, so the message that proves it
-//! is the host calling the tool the view is for (`tools/call`), which the host does when the
-//! view says it is initialised.
+//! a view of a bundle whose page speaks the bridge of a page (a script of the bundle), and
+//! from there the only thing that can make the program receive the next message is the whole
+//! chain working — the shell page served by the application's scheme handler, the page's
+//! script served from the bundle to the view's own origin under the policy the crate built,
+//! the host's first `context` delivered once the frame has loaded, the page's `postMessage`
+//! carried through the script-message handler into the session and written to the program as
+//! a `msg`, and the program's `msg` (a response, a push) carried back by `evaluateJavaScript`.
+//! The page calls the program once it has been told its `context`, so the call that proves it
+//! is the first thing the program hears of a started page; the program answers it, and the
+//! page then subscribes, hears a push, and calls the program once more with what it heard.
 //!
 //! Then ⌃C typed in the view arrives at the program as the byte 0x03, a key that is the
 //! application's shortcut (⌘T) goes to the main menu and not to the view, the application's
-//! strip stands over the view's area, and the program's `bye` takes the view down.
+//! strip stands over the view's area, and the program's `bye` takes the view down. A page can
+//! ask to close itself (`close`, and the program is told `closed` with reason `view`).
 //!
-//! A bundle that declares an address makes the pane ask the person, with a sheet on the
+//! A bundle that asks for an address makes the pane ask the person, with a sheet on the
 //! window: the test reads the sheet's words and presses its buttons the way a person's
 //! click would (`performClick` on the button, in this process; the one button it never
 //! presses is the one that opens a link in the user's browser). The view does not start
-//! before the answer, an answer is not asked for again by the same program, tool and set, and
-//! another set asks. A link the view asks to open is asked about and, refused, is refused to
-//! the view.
+//! before the answer, the page is told what was allowed in its `context`, an answer is not
+//! asked for again by the same program and set, and another set asks. A link the page asks to
+//! open is asked about and, refused, nothing is said to the page.
 //!
 //! Its own `main` (`harness = false`): AppKit, the main queue and `WKWebView` want the main
 //! thread. Without a window server session (an ssh login) it says so and passes, as the embed
@@ -172,7 +175,7 @@ impl Program {
     fn hello(&mut self) -> String {
         let id = self.take_id();
         self.say(&format!(
-            "{ESC}_pencere;hello;id={id};{{\"versions\":[1],\"views\":[\"web\"]}}{ESC}\\{ESC}[c"
+            "{ESC}_pencere;hello;id={id};{{\"versions\":[1],\"views\":[{{\"kind\":\"web\",\"versions\":[\"1.0\"]}}]}}{ESC}\\{ESC}[c"
         ));
         let welcome = self.wait_for("pencere;welcome");
         assert!(
@@ -183,6 +186,10 @@ impl Program {
             welcome.contains("\"dismiss\""),
             "the host closes a view the program dismisses, and says so: {welcome}"
         );
+        assert!(
+            welcome.contains("\"views\":[{\"kind\":\"web\",\"versions\":[\"1.0\"]}]"),
+            "the host opens the page at the version of its bridge: {welcome}"
+        );
         welcome
             .split("\"token\":\"")
             .nth(1)
@@ -191,74 +198,50 @@ impl Program {
             .to_owned()
     }
 
-    /// The open of a view of the tool `show`: with a bundle of `files` (path, type, bytes),
-    /// or with none.
-    fn open(&mut self, token: &str, files: Option<&[(&str, &str, &[u8])]>) {
-        self.open_declaring(token, files, "https://api.example.com");
-    }
-
-    /// The same, for a bundle whose manifest declares `domain` as one it connects to.
-    fn open_declaring(&mut self, token: &str, files: Option<&[(&str, &str, &[u8])]>, domain: &str) {
-        let bundle = files.map_or_else(String::new, |files| {
-            let list: Vec<String> = files
-                .iter()
-                .map(|(path, kind, bytes)| {
-                    format!(
-                        "{{\"path\":\"{path}\",\"sha256\":\"{}\",\"size\":{},\"type\":\"{kind}\"}}",
-                        bt_core::pencere::Digest::of(bytes),
-                        bytes.len()
-                    )
-                })
-                .collect();
-            format!(
-                ",\"bundle\":{{\"entry\":\"index.html\",\"files\":[{}],\"meta\":{{\"csp\":\
-{{\"connectDomains\":[\"{domain}\"]}}}}}}",
-                list.join(",")
-            )
+    /// The open of a view of `files` (path, type, bytes), asking for the address `domain` if it
+    /// names one. The program calls itself “Pencere Test”, the view “Show things”, and gives
+    /// its icon.
+    fn open(&mut self, token: &str, files: &[(&str, &str, &[u8])], domain: Option<&str>) {
+        let list: Vec<String> = files
+            .iter()
+            .map(|(path, kind, bytes)| {
+                format!(
+                    "{{\"path\":\"{path}\",\"sha256\":\"{}\",\"size\":{},\"type\":\"{kind}\"}}",
+                    bt_core::pencere::Digest::of(bytes),
+                    bytes.len()
+                )
+            })
+            .collect();
+        let access = domain.map_or_else(String::new, |domain| {
+            format!(",\"access\":{{\"connect\":[\"{domain}\"]}}")
         });
         self.send(
             "open",
             &format!(
-                "{{\"token\":\"{token}\",\"view\":\"web\",\"tool\":{{\"name\":\"show\",\"arguments\":{{}}}}{bundle}}}"
+                "{{\"token\":\"{token}\",\"view\":\"web\",\"version\":\"1.0\",\"program\":\"Pencere Test\",\
+\"title\":\"Show things\",\"icons\":[{{\"src\":\"{ICON}\"}}]{access},\
+\"bundle\":{{\"entry\":\"index.html\",\"files\":[{}]}}}}",
+                list.join(",")
             ),
         );
     }
 
-    /// The MCP start-up the host runs as a client of the program: `initialize`, the tool list
-    /// and, for a view with no bundle, the document (`html`).
-    fn start_up(&mut self, html: Option<&str>) {
-        let initialize = self.wait_for("\"method\":\"initialize\"");
-        let id = rpc_id(&initialize);
-        self.send(
-            "msg",
-            &format!(
-                "{{\"jsonrpc\":\"2.0\",\"id\":{id},\"result\":{{\"protocolVersion\":\"2025-11-25\",\
-\"capabilities\":{{\"tools\":{{}}}},\"serverInfo\":{{\"name\":\"show\",\"title\":\"Pencere Test\",\
-\"version\":\"0\",\"icons\":[{{\"src\":\"{ICON}\"}}]}}}}}}"
-            ),
-        );
-        let tools = self.wait_for("\"method\":\"tools/list\"");
-        let id = rpc_id(&tools);
-        self.send(
-            "msg",
-            &format!(
-                "{{\"jsonrpc\":\"2.0\",\"id\":{id},\"result\":{{\"tools\":[{{\"name\":\"show\",\"title\":\"Show things\",\
-\"inputSchema\":{{\"type\":\"object\"}},\"_meta\":{{\"ui\":{{\"resourceUri\":\"ui://show/view\"}}}}}}]}}}}"
-            ),
-        );
-        let Some(html) = html else {
-            return;
-        };
-        let read = self.wait_for("\"method\":\"resources/read\"");
-        let id = rpc_id(&read);
-        self.send(
-            "msg",
-            &format!(
-                "{{\"jsonrpc\":\"2.0\",\"id\":{id},\"result\":{{\"contents\":[{{\"uri\":\"ui://show/view\",\
-\"mimeType\":\"text/html;profile=mcp-app\",\"text\":{},\"_meta\":{{\"ui\":{{}}}}}}]}}}}",
-                json_string(html)
-            ),
-        );
+    /// The host asks for the files it does not hold (`need`): sends those of `files`, and returns
+    /// what it asked for.
+    fn supply(&mut self, files: &[(&str, &str, &[u8])]) -> String {
+        let missing = self.wait_for("pencere;need");
+        for (_, _, bytes) in files {
+            let digest = bt_core::pencere::Digest::of(bytes).to_string();
+            if missing.contains(&digest) {
+                let id = self.take_id();
+                self.say(&frame(
+                    "file",
+                    &format!("id={id},d={digest}"),
+                    &base64(bytes),
+                ));
+            }
+        }
+        missing
     }
 
     /// The program ends its view.
@@ -298,58 +281,43 @@ impl Program {
     }
 }
 
-/// The JSON-RPC id of the request the last waited-for frame holds.
-fn rpc_id(frame: &str) -> u32 {
-    let at = frame.rfind("\"id\":").expect("a request has an id") + "\"id\":".len();
-    frame[at..]
-        .chars()
-        .take_while(char::is_ascii_digit)
-        .collect::<String>()
-        .parse()
-        .expect("a number")
-}
+/// The bundle's page: it loads the script of its bundle, which only runs if the script was
+/// served to the view's own origin (a `<script src>` the policy's `'self'` allows).
+const PAGE: &str = "<!doctype html><html><head><meta charset=utf-8><title>t</title></head>\
+<body><p id=p>view</p><script src=app.js></script></body></html>";
 
-/// The view's document: one page that says it is initialised when the host has answered
-/// `ui/initialize`. Printable ASCII and no quote of the kind JSON would escape twice.
-const VIEW: &str = "<!doctype html><html><head><meta charset=utf-8><title>t</title></head>\
-<body><p id=p>view</p><script>\
-var send=function(m){window.parent.postMessage(Object.assign({jsonrpc:'2.0'},m),'*')};\
+/// The page's script. The page speaks the bridge: when it is told its `context` it calls the
+/// program once and says what it was told; the program's response makes it subscribe; a push
+/// makes it call again with what it heard. (Once: the host may tell the context again.)
+const SCRIPT: &str = "var send=function(m){window.parent.postMessage(m,'*')};\
+var started=false;\
 window.addEventListener('message',function(e){\
 if(e.source!==window.parent)return;var m=e.data;\
-if(m&&m.id===1&&m.result){send({method:'ui/notifications/initialized'})}});\
-send({id:1,method:'ui/initialize',params:{protocolVersion:'2026-01-26',\
-appInfo:{name:'t',version:'0'},appCapabilities:{experimental:{'pencere/pane':{}}}}});\
-</script></body></html>";
+if(m.context){if(started)return;started=true;\
+send({call:{id:1,method:'hello',params:{mode:m.context.mode,\
+width:m.context.size.width,height:m.context.size.height,\
+background:m.context.colors.background,access:m.context.access||null}}})}\
+else if(m.response&&m.response.id===1){send({subscribe:{id:2,topic:'ticks'}})}\
+else if(m.push&&m.push.id===2){send({call:{id:3,method:'pushed',params:m.push.value}})}});";
 
-/// A document that, once the host has answered `ui/initialize`, asks to open a link and tells
-/// the program how that went by calling its tool with the answer (a view's one way to reach the
-/// program, and so the test's way to see what the view was told).
-const LINK_VIEW: &str = "<!doctype html><html><head><meta charset=utf-8><title>t</title></head>\
-<body><p id=p>view</p><script>\
-var send=function(m){window.parent.postMessage(Object.assign({jsonrpc:'2.0'},m),'*')};\
+/// A script that, once told its `context`, asks to open a link, and calls the program with
+/// everything else the host says to it (a page's one way to reach the program, and so the test's
+/// way to see what the page was told).
+const LINK_SCRIPT: &str = "var send=function(m){window.parent.postMessage(m,'*')};\
+var started=false;\
 window.addEventListener('message',function(e){\
 if(e.source!==window.parent)return;var m=e.data;\
-if(m&&m.id===1&&m.result){send({method:'ui/notifications/initialized'});\
-send({id:2,method:'ui/open-link',params:{url:'https://example.com/docs'}})}\
-else if(m&&m.id===2){send({id:3,method:'tools/call',params:{name:'show',\
-arguments:{link:m.error?'denied':'opened'}}})}});\
-send({id:1,method:'ui/initialize',params:{protocolVersion:'2026-01-26',\
-appInfo:{name:'t',version:'0'},appCapabilities:{experimental:{'pencere/pane':{}}}}});\
-</script></body></html>";
+if(m.context){if(started)return;started=true;\
+send({call:{id:1,method:'hello',params:{}}});\
+send({link:{url:'https://example.com/docs'}})}\
+else{send({call:{id:9,method:'told',params:m}})}});";
 
-/// The same handshake as [`VIEW`]'s, as a bundle's two files: a page that loads a script.
-const BUNDLE_PAGE: &str = "<!doctype html><html><head><meta charset=utf-8></head>\
-<body><p>bundle</p><script src=app.js></script></body></html>";
-
-/// The bundle's script: the handshake of [`VIEW`], which only runs if the script was served
-/// from the bundle to the view's own origin.
-const BUNDLE_SCRIPT: &str = "var send=function(m){window.parent.postMessage(\
-Object.assign({jsonrpc:'2.0'},m),'*')};\
+/// A script that asks to be closed as soon as it is told its `context`.
+const CLOSE_SCRIPT: &str = "var send=function(m){window.parent.postMessage(m,'*')};\
+var started=false;\
 window.addEventListener('message',function(e){\
 if(e.source!==window.parent)return;var m=e.data;\
-if(m&&m.id===1&&m.result){send({method:'ui/notifications/initialized'})}});\
-send({id:1,method:'ui/initialize',params:{protocolVersion:'2026-01-26',\
-appInfo:{name:'t',version:'0'},appCapabilities:{experimental:{'pencere/pane':{}}}}});";
+if(m.context&&!started){started=true;send({close:{}})}});";
 
 /// Whether a view covers the pane, as a host can see it: a subview of the view's class (the
 /// name may carry KVO's prefix, which AppKit adds once something observes the instance).
@@ -396,7 +364,7 @@ fn strip_view(pane: &TerminalPane) -> Option<Retained<NSView>> {
     })
 }
 
-/// The test program's icon (`serverInfo.icons`): a 64-pixel PNG of three stacked boxes, as a
+/// The test program's icon (the `icons` of its `open`): a 64-pixel PNG of three stacked boxes, as a
 /// `data:` URI, the only kind a terminal takes.
 const ICON: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAAy0lEQVR42u3YsQ3CMBBG4QzowhJTsIMrClgD0dEyAYUHSEXrUYwcKR1VSOP4e9JJVqr4j+zcvWkCAAD4QUg5hpRLSLl2Wu3d4z+brwepuCWAcqAAypYA6pFqtwBOt3c9P19LtfVQAbQNX+ZHvX7uS7V1LyHsEkD76uvm12rPBOAIuATHCWCk3+DwjdDYrfDwwxDAB/ABfAAfoBU2DBmHBeAIuAT5AD6AD+ADwAfwAXwAH8AH8AF8AB/AB/ABfAAfwAfwAXwAAAAAOucLnVucWIVm/igAAAAASUVORK5CYII=";
 
@@ -592,11 +560,44 @@ fn run(dir: &Path) {
     // The view is for the alternate screen (§6.5).
     program.say(&format!("{ESC}[?1049h"));
 
-    // A view whose document is the one page the program's `resources/read` gives.
+    // A view of a bundle that asks for nothing: no question, the files go to the host once, and
+    // the page is told its context, calls the program, hears the answer and a push.
+    let files = [
+        ("index.html", "text/html", PAGE.as_bytes()),
+        ("app.js", "text/javascript", SCRIPT.as_bytes()),
+    ];
     let token = program.hello();
-    program.open(&token, None);
-    program.start_up(Some(VIEW));
-    watch_it_start(&pane, &mut program);
+    program.open(&token, &files, None);
+    let missing = program.supply(&files);
+    for (_, _, bytes) in &files {
+        let digest = bt_core::pencere::Digest::of(bytes).to_string();
+        assert!(
+            missing.contains(&digest),
+            "the host holds none of them yet: {missing}"
+        );
+    }
+    let hello = watch_it_start(&pane, &mut program);
+    // The context the page was told: the theme's own roles, the pane's area less the strip, and
+    // nothing allowed (no `access`).
+    for needle in [
+        "\"mode\":\"dark\"",
+        "\"background\":\"#",
+        "\"width\":640,\"height\":368",
+        "\"access\":null",
+    ] {
+        assert!(hello.contains(needle), "{needle:?} is not in: {hello}");
+    }
+    assert!(
+        window.attachedSheet().is_none(),
+        "the page asked for nothing"
+    );
+    // The program's answer reaches the page, which subscribes; a push reaches it, and it calls
+    // the program with what it heard: the six messages cross the web view both ways.
+    program.send("msg", "{\"response\":{\"id\":1,\"result\":{\"ok\":true}}}");
+    program.wait_for("\"subscribe\":{\"id\":2,\"topic\":\"ticks\"}");
+    program.send("msg", "{\"push\":{\"id\":2,\"value\":{\"n\":7}}}");
+    let pushed = program.wait_for("\"method\":\"pushed\"");
+    assert!(pushed.contains("\"params\":{\"n\":7}"), "{pushed}");
 
     // ⌃C in the view is the program's interrupt: the byte, written to the tty.
     let before = program.heard().len();
@@ -628,9 +629,9 @@ fn run(dir: &Path) {
     let strip = strip_view(&pane).expect("the strip is a subview of the pane");
     let (area, bounds) = (web.frame(), pane.bounds());
     assert_eq!(strip.frame().size.height, view_strip::HEIGHT);
-    // It says what the program calls the tool and itself, in the words the program gave
-    // (`tools/list`'s title, `serverInfo`'s), and not the tool's name and the process's; on
-    // this Mac it names no place. (The strip's own fields: the button's label is AppKit's.)
+    // It says what the program calls the view and itself, in the words the program gave (the
+    // `title` and `program` of its `open`), and not the process's; on this Mac it names no
+    // place. (The strip's own fields: the button's label is AppKit's.)
     let words: Vec<String> = strip
         .subviews()
         .iter()
@@ -766,33 +767,15 @@ fn run(dir: &Path) {
     program.bye(&token);
     until("the view to go", || !covered(&pane));
 
-    // A view of a bundle: its files go to the host once, the page loads its script from the
-    // bundle's own origin (a `<script src>` the policy's `'self'` allows), and a manifest that
-    // declares a domain makes a question the pane refuses for now — the view still starts.
-    let files = [
-        ("index.html", "text/html", BUNDLE_PAGE.as_bytes()),
-        ("app.js", "text/javascript", BUNDLE_SCRIPT.as_bytes()),
-    ];
+    // A view whose page asks for an address: the person is asked before the view starts, and
+    // the page is told what was allowed.
     let token = program.hello();
-    program.open(&token, Some(&files));
-    let missing = program.wait_for("pencere;need");
-    for (_, _, bytes) in &files {
-        let digest = bt_core::pencere::Digest::of(bytes).to_string();
-        assert!(
-            missing.contains(&digest),
-            "the host holds none of them yet: {missing}"
-        );
-    }
-    for (_, _, bytes) in &files {
-        let digest = bt_core::pencere::Digest::of(bytes).to_string();
-        let id = program.take_id();
-        program.say(&frame(
-            "file",
-            &format!("id={id},d={digest}"),
-            &base64(bytes),
-        ));
-    }
-    program.start_up(None);
+    program.open(&token, &files, Some("https://api.example.com"));
+    let missing = program.supply(&files);
+    assert!(
+        missing.ends_with("{\"missing\":[]}"),
+        "the host holds the files of the first view still: {missing}"
+    );
     // The manifest declares an address, so the person is asked before the view starts: the
     // question says who asks, what and where the program runs, and no view stands while it is up.
     let sheet = sheet_of(&window);
@@ -800,8 +783,8 @@ fn run(dir: &Path) {
     for needle in [
         "Allow this view to reach other sites?",
         "Connect to\n• https://api.example.com",
-        "of its tool “Show things”",
-        "“Pencere Test” on this Mac opened a view",
+        "opened the view “Show things”",
+        "“Pencere Test” on this Mac opened",
         "pencere-test keeps your answer until it quits.",
     ] {
         assert!(text.contains(needle), "{needle:?} is not in:\n{text}");
@@ -809,20 +792,23 @@ fn run(dir: &Path) {
     assert_eq!(sheet_buttons(&sheet), ["Allow", "Don't Allow"]);
     assert!(!covered(&pane), "the view waits for the answer");
     press(&window, &sheet, "Allow");
-    watch_it_start(&pane, &mut program);
+    let hello = watch_it_start(&pane, &mut program);
+    assert!(
+        hello.contains("\"access\":{\"connect\":[\"https://api.example.com\"]}"),
+        "the page is told what was allowed: {hello}"
+    );
     program.bye(&token);
     until("the bundle's view to go", || !covered(&pane));
 
     // The same bundle again: the host has every file, and says so; the person has answered
-    // this program's tool for this set, and is not asked again.
+    // this program for this set, and is not asked again.
     let token = program.hello();
-    program.open(&token, Some(&files));
-    let missing = program.wait_for("pencere;need");
+    program.open(&token, &files, Some("https://api.example.com"));
+    let missing = program.supply(&files);
     assert!(
         missing.ends_with("{\"missing\":[]}"),
         "the second open sends no file: {missing}"
     );
-    program.start_up(None);
     watch_it_start(&pane, &mut program);
     assert!(
         window.attachedSheet().is_none(),
@@ -835,9 +821,8 @@ fn run(dir: &Path) {
     // is an answer: the view starts all the same, with nothing allowed, and the question is
     // not asked again for that set either.
     let token = program.hello();
-    program.open_declaring(&token, Some(&files), "http://localhost:8080");
-    program.wait_for("pencere;need");
-    program.start_up(None);
+    program.open(&token, &files, Some("http://localhost:8080"));
+    program.supply(&files);
     let sheet = sheet_of(&window);
     let text = sheet_text(&sheet);
     assert!(
@@ -849,13 +834,16 @@ fn run(dir: &Path) {
         "{text}"
     );
     press(&window, &sheet, "Don't Allow");
-    watch_it_start(&pane, &mut program);
+    let hello = watch_it_start(&pane, &mut program);
+    assert!(
+        hello.contains("\"access\":null"),
+        "what the person refused is not allowed: {hello}"
+    );
     program.bye(&token);
     until("the refused view to go", || !covered(&pane));
     let token = program.hello();
-    program.open_declaring(&token, Some(&files), "http://localhost:8080");
-    program.wait_for("pencere;need");
-    program.start_up(None);
+    program.open(&token, &files, Some("http://localhost:8080"));
+    program.supply(&files);
     watch_it_start(&pane, &mut program);
     assert!(
         window.attachedSheet().is_none(),
@@ -867,9 +855,8 @@ fn run(dir: &Path) {
     // A program that gives up while the person is being asked takes the question with it, and
     // since nobody answered it, the same set is asked again the next time.
     let token = program.hello();
-    program.open_declaring(&token, Some(&files), "https://late.example.com");
-    program.wait_for("pencere;need");
-    program.start_up(None);
+    program.open(&token, &files, Some("https://late.example.com"));
+    program.supply(&files);
     let sheet = sheet_of(&window);
     assert!(sheet_text(&sheet).contains("https://late.example.com"));
     program.bye(&token);
@@ -877,20 +864,23 @@ fn run(dir: &Path) {
         window.attachedSheet().is_none()
     });
     let token = program.hello();
-    program.open_declaring(&token, Some(&files), "https://late.example.com");
-    program.wait_for("pencere;need");
-    program.start_up(None);
+    program.open(&token, &files, Some("https://late.example.com"));
+    program.supply(&files);
     let sheet = sheet_of(&window);
     press(&window, &sheet, "Allow");
     watch_it_start(&pane, &mut program);
     program.bye(&token);
     until("the view of the second try to go", || !covered(&pane));
 
-    // A link the view asks to open: asked about, with where the program runs, and a refusal
-    // reaches the view as the error the protocol defines.
+    // A link the page asks to open: asked about, with where the program runs. A refusal is
+    // nothing the page is told: the next thing it hears is the program's.
+    let link_files = [
+        ("index.html", "text/html", PAGE.as_bytes()),
+        ("app.js", "text/javascript", LINK_SCRIPT.as_bytes()),
+    ];
     let token = program.hello();
-    program.open(&token, None);
-    program.start_up(Some(LINK_VIEW));
+    program.open(&token, &link_files, None);
+    program.supply(&link_files);
     watch_it_start(&pane, &mut program);
     let sheet = sheet_of(&window);
     let text = sheet_text(&sheet);
@@ -903,7 +893,12 @@ fn run(dir: &Path) {
     }
     assert_eq!(sheet_buttons(&sheet), ["Cancel", "Open"]);
     press(&window, &sheet, "Cancel");
-    program.wait_for("\"link\":\"denied\"");
+    program.send("msg", "{\"push\":{\"id\":5,\"value\":\"probe\"}}");
+    let told = program.wait_for("\"method\":\"told\"");
+    assert!(
+        told.contains("\"probe\""),
+        "the page was told nothing of the person's answer before the program's push: {told}"
+    );
     program.bye(&token);
     until("the link view to go", || !covered(&pane));
 
@@ -911,8 +906,8 @@ fn run(dir: &Path) {
     // Open would open a link for a view that is not there, and its being up would refuse the next
     // view's link. The next view's link is asked about.
     let token = program.hello();
-    program.open(&token, None);
-    program.start_up(Some(LINK_VIEW));
+    program.open(&token, &link_files, None);
+    program.supply(&link_files);
     watch_it_start(&pane, &mut program);
     let _left_up = sheet_of(&window);
     program.bye(&token);
@@ -921,8 +916,8 @@ fn run(dir: &Path) {
     });
     until("the view that ended to go", || !covered(&pane));
     let token = program.hello();
-    program.open(&token, None);
-    program.start_up(Some(LINK_VIEW));
+    program.open(&token, &link_files, None);
+    program.supply(&link_files);
     watch_it_start(&pane, &mut program);
     let sheet = sheet_of(&window);
     assert!(
@@ -930,30 +925,40 @@ fn run(dir: &Path) {
         "the next view's link is asked about"
     );
     press(&window, &sheet, "Cancel");
-    program.wait_for("\"link\":\"denied\"");
     program.bye(&token);
     until("the next link view to go", || !covered(&pane));
+
+    // A page that asks to be closed: the program is told the view closed (reason `view`) and the
+    // pane is the terminal's again, at once.
+    let close_files = [
+        ("index.html", "text/html", PAGE.as_bytes()),
+        ("app.js", "text/javascript", CLOSE_SCRIPT.as_bytes()),
+    ];
+    let token = program.hello();
+    program.open(&token, &close_files, None);
+    program.supply(&close_files);
+    let closed = program.wait_for("pencere;closed");
+    assert!(closed.contains("\"reason\":\"view\""), "{closed}");
+    until("the page that closed itself to go", || !covered(&pane));
 
     // The program closes its view and keeps running (`dismiss`), and opens the tool again: the
     // pane is the terminal's between, the host still has every file of the bundle, so the second
     // open sends none, and the person is not asked again for what they have answered.
     let token = program.hello();
-    program.open(&token, Some(&files));
-    program.wait_for("pencere;need");
-    program.start_up(None);
+    program.open(&token, &files, None);
+    program.supply(&files);
     watch_it_start(&pane, &mut program);
     program.send("dismiss", &format!("{{\"token\":\"{token}\"}}"));
     let closed = program.wait_for("pencere;closed");
     assert!(closed.contains("\"reason\":\"program\""), "{closed}");
     until("the dismissed view to go", || !covered(&pane));
     let token = program.hello();
-    program.open(&token, Some(&files));
-    let missing = program.wait_for("pencere;need");
+    program.open(&token, &files, None);
+    let missing = program.supply(&files);
     assert!(
         missing.ends_with("{\"missing\":[]}"),
         "the second open after a dismiss sends no file: {missing}"
     );
-    program.start_up(None);
     watch_it_start(&pane, &mut program);
     assert!(window.attachedSheet().is_none(), "nothing is asked again");
     program.bye(&token);
@@ -974,8 +979,8 @@ fn run(dir: &Path) {
         .and_then(|rest| rest.split('"').next())
         .expect("a token in the restart")
         .to_owned();
-    program.open(&token, Some(&files));
-    program.start_up(None);
+    program.open(&token, &files, None);
+    program.supply(&files);
     watch_it_start(&pane, &mut program);
     assert!(
         holds_keyboard(&window, &pane),
@@ -1003,16 +1008,14 @@ fn run(dir: &Path) {
     ] {
         let same = first_domain == second_domain;
         let first = program.hello();
-        program.open_declaring(&first, Some(&files), first_domain);
-        program.wait_for("pencere;need");
-        program.start_up(None);
+        program.open(&first, &files, Some(first_domain));
+        program.supply(&files);
         let sheet = sheet_of(&window);
         assert!(sheet_text(&sheet).contains(first_domain));
         // The first pane's question is up; the second pane asks while it is.
         let second = twin_program.hello();
-        twin_program.open_declaring(&second, Some(&files), second_domain);
-        twin_program.wait_for("pencere;need");
-        twin_program.start_up(None);
+        twin_program.open(&second, &files, Some(second_domain));
+        twin_program.supply(&files);
         spin(0.5);
         assert!(
             !covered(&twin),
@@ -1044,9 +1047,9 @@ fn run(dir: &Path) {
 }
 
 /// The view covers the pane, and everything that took was the chain: the shell page and the
-/// frame loaded, the view said `ui/initialize`, the host answered it, the view said it was
-/// initialised, and the host called the tool the view is for.
-fn watch_it_start(pane: &TerminalPane, program: &mut Program) {
+/// frame loaded, the page's script ran, the host told the page its `context`, and the page called
+/// the program. Returns that call (`hello`), which says what the page was told.
+fn watch_it_start(pane: &TerminalPane, program: &mut Program) -> String {
     let deadline = Instant::now() + Duration::from_secs(30);
     while !covered(pane) && Instant::now() < deadline {
         spin(0.05);
@@ -1064,8 +1067,9 @@ fn watch_it_start(pane: &TerminalPane, program: &mut Program) {
         );
         panic!("the view never covered the pane");
     }
-    let call = program.wait_for("\"method\":\"tools/call\"");
-    assert!(call.contains("\"name\":\"show\""), "{call}");
+    let call = program.wait_for("\"method\":\"hello\"");
+    assert!(call.contains("\"call\":{\"id\":1,"), "{call}");
+    call
 }
 
 /// Standard base64 with padding.
@@ -1086,20 +1090,5 @@ fn base64(bytes: &[u8]) -> String {
             }
         }
     }
-    out
-}
-
-/// `text` as a JSON string of printable ASCII, the way the protocol writes one.
-fn json_string(text: &str) -> String {
-    let mut out = String::from("\"");
-    for c in text.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            c if (' '..='~').contains(&c) => out.push(c),
-            c => out.push_str(&format!("\\u{:04x}", u32::from(c))),
-        }
-    }
-    out.push('"');
     out
 }

@@ -16,7 +16,7 @@
 //! The names are of two sizes and sit on one baseline, the one that centres the program's
 //! capitals on the strip: centring each field's box would set them at two heights.
 //!
-//! The icon is the program's own (its MCP `icons`, as the protocol's host library took them: a
+//! The icon is the program's own (the `icons` of its `open`, as the protocol's host library took them: a
 //! still PNG, JPEG or WebP it checked and bounded, never fetched), the face for the theme's
 //! ground ([`super::face`]) each time the strip is painted, so a theme that turns from dark to
 //! light takes the program's light picture. One that brings its own ground has its corners cut

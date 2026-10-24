@@ -11,11 +11,11 @@ use objc2_foundation::{NSPoint, NSRect, NSSize};
 
 use super::files::Pending;
 use super::serve::{
-    self, DOCUMENT_PATH, Document, Page, Route, SANDBOX, Served, css_color, deliver_script,
+    self, HANDLER, LOADED_HANDLER, Page, Route, SANDBOX, Served, css_color, deliver_script,
     ground_script, js_string, route,
 };
 use super::still::{self, Capture, PATIENCE, Shared, Still};
-use super::wait::{OFFERED, OPENING, REQUESTS, TEARDOWN, Waits};
+use super::wait::{OFFERED, OPENING, Waits};
 use super::{is_interrupt, modifiers_of, strip_area, view_area};
 
 const INSTANCE: &str = "v-0123456789abcdef0123456789abcdef";
@@ -28,7 +28,7 @@ fn url(path: &str) -> String {
 fn bundle_page() -> Page {
     Page::new(
         INSTANCE.to_owned(),
-        Document::Bundle("index.html".to_owned()),
+        "index.html".to_owned(),
         POLICY.to_owned(),
         "camera; microphone",
         "#101010",
@@ -169,37 +169,6 @@ fn what_the_manifest_does_not_name_is_a_404_and_so_is_every_other_origin() {
 }
 
 #[test]
-fn a_view_that_came_as_html_has_one_document_and_nothing_else() {
-    let html: Arc<[u8]> = Arc::from(&b"<p>hello</p>"[..]);
-    let page = Page::new(
-        INSTANCE.to_owned(),
-        Document::Html(Arc::clone(&html)),
-        POLICY.to_owned(),
-        "",
-        "#000000",
-    );
-    let reply = page.reply(&url(DOCUMENT_PATH), &files);
-    assert_eq!(reply.status, 200);
-    assert_eq!(&*reply.body, &*html);
-    assert_eq!(
-        reply.header("Content-Type"),
-        Some("text/html; charset=utf-8")
-    );
-    assert_eq!(reply.header("Content-Security-Policy"), Some(POLICY));
-    // The bundle's files are not this view's, even when the service has them.
-    for other in ["index.html", "app.js", "other.html"] {
-        assert_eq!(page.reply(&url(other), &files).status, 404, "{other}");
-    }
-    // Its frame is at the document's path.
-    let shell = String::from_utf8(page.reply(&Page::shell_url(), &files).body.to_vec())
-        .expect("the shell is text");
-    assert!(
-        shell.contains(&format!("src=\"{}\"", url(DOCUMENT_PATH))),
-        "{shell}"
-    );
-}
-
-#[test]
 fn the_shell_frames_the_views_origin_and_nothing_else() {
     let page = bundle_page();
     let reply = page.reply(&Page::shell_url(), &files);
@@ -269,7 +238,7 @@ fn the_sandbox_lets_the_view_run_and_leave_nothing_of_the_frame() {
 fn what_the_frame_is_given_cannot_end_its_attribute() {
     let page = Page::new(
         INSTANCE.to_owned(),
-        Document::Bundle("a\"><script>x()</script>.html".to_owned()),
+        "a\"><script>x()</script>.html".to_owned(),
         POLICY.to_owned(),
         "camera\" onload=\"x()",
         "#000000\"><script>",
@@ -303,9 +272,27 @@ fn the_shell_takes_a_message_only_from_its_frames_window() {
     assert!(text.contains("JSON.stringify(event.data)"), "{text}");
     assert!(text.contains("JSON.parse(text)"), "{text}");
     assert!(
-        text.contains("window.webkit.messageHandlers.pencere"),
-        "the one handler the application registers: {text}"
+        text.contains(&format!("handlers.{HANDLER};")),
+        "the handler every message goes to: {text}"
     );
+}
+
+#[test]
+fn the_shell_tells_the_application_when_the_frame_has_loaded_and_nothing_else_does() {
+    let text = shell_text(&bundle_page());
+    // On the frame's own load, on a handler of its own: the view's messages go to the other.
+    assert!(
+        text.contains(&format!("handlers.{LOADED_HANDLER};")),
+        "{text}"
+    );
+    assert!(
+        text.contains("frame.addEventListener(\"load\""),
+        "the frame's load: {text}"
+    );
+    assert!(text.contains("loaded.postMessage(\"loaded\")"), "{text}");
+    assert_ne!(HANDLER, LOADED_HANDLER);
+    // The only call that posts what the view sent is the message listener's.
+    assert_eq!(text.matches("host.postMessage(").count(), 1, "{text}");
 }
 
 #[test]
@@ -445,12 +432,10 @@ fn a_wait_is_set_once_for_the_state_that_waits_and_for_no_other() {
         None,
         "news in the same state does not push the time out"
     );
-    let (closing, delay) = waits
-        .observe(Some(State::Closing))
-        .expect("a teardown waits");
-    assert_eq!(delay, TEARDOWN);
-    assert_ne!(opening, closing);
-    assert_eq!(waits.observe(Some(State::Closing)), None);
+    let (offered, delay) = waits.observe(Some(State::Offered)).expect("an offer waits");
+    assert_eq!(delay, OFFERED);
+    assert_ne!(opening, offered);
+    assert_eq!(waits.observe(Some(State::Offered)), None);
 }
 
 #[test]
@@ -464,23 +449,23 @@ fn a_wait_that_is_not_the_one_set_is_nothing_when_it_wakes() {
         "the open was over; its time is nothing"
     );
 
-    // A later teardown has its own number; the old one still means nothing.
-    let (closing, _) = waits.observe(Some(State::Closing)).expect("set");
+    // A later open has its own number; the old one still means nothing.
+    let (again, _) = waits.observe(Some(State::Opening)).expect("set");
     assert!(!waits.expired(opening));
-    assert!(waits.expired(closing), "the one that is set ends the wait");
-    assert!(!waits.expired(closing), "and only once");
+    assert!(waits.expired(again), "the one that is set ends the wait");
+    assert!(!waits.expired(again), "and only once");
 }
 
 #[test]
 fn a_state_that_still_waits_after_its_time_sets_the_wait_again() {
     let mut waits = Waits::default();
-    let (first, _) = waits.observe(Some(State::Closing)).expect("set");
+    let (first, _) = waits.observe(Some(State::Opening)).expect("set");
     assert!(waits.expired(first));
-    // The conversation did not leave `Closing` (the news that follows says so):
+    // The conversation did not leave `Opening` (the news that follows says so):
     // the next look sets another, with a number of its own.
-    let (second, delay) = waits.observe(Some(State::Closing)).expect("set again");
+    let (second, delay) = waits.observe(Some(State::Opening)).expect("set again");
     assert_ne!(first, second);
-    assert_eq!(delay, TEARDOWN);
+    assert_eq!(delay, OPENING);
     assert!(!waits.expired(first));
     assert!(waits.expired(second));
 }
@@ -488,15 +473,13 @@ fn a_state_that_still_waits_after_its_time_sets_the_wait_again() {
 #[test]
 fn the_deadlines_are_policy_values_in_the_order_their_reasons_give() {
     assert!(
-        OPENING > TEARDOWN,
-        "files cross a link; a view that answers does not"
+        OPENING >= Duration::from_secs(10),
+        "files cross a link, and the person is asked"
     );
-    assert!(TEARDOWN >= Duration::from_secs(1));
     assert!(
-        OFFERED > TEARDOWN,
+        OFFERED >= Duration::from_secs(10),
         "a program opens again at once, or is busy"
     );
-    assert!(REQUESTS >= OPENING, "a tool call is not a start-up");
 }
 
 #[test]
@@ -553,37 +536,6 @@ fn an_offer_made_again_while_the_first_is_waited_for_has_a_time_of_its_own() {
         "the first offer's time is not the new one's"
     );
     assert!(waits.expired(second));
-}
-
-#[test]
-fn the_requests_of_a_view_are_waited_for_once_for_a_burst() {
-    let mut waits = Waits::default();
-    let (first, delay) = waits.requests_out().expect("a request waits");
-    assert_eq!(delay, REQUESTS);
-    assert_eq!(
-        waits.requests_out(),
-        None,
-        "the burst's wait is the first's"
-    );
-    assert!(waits.requests_expired(first));
-    assert!(!waits.requests_expired(first), "once");
-    // The next request sets a wait of its own.
-    let (second, _) = waits.requests_out().expect("again");
-    assert_ne!(first, second);
-    // The view went: the wait that is set wakes for nothing.
-    waits.requests_over();
-    assert!(!waits.requests_expired(second));
-    let (third, _) = waits.requests_out().expect("the next view's");
-    assert!(
-        !waits.requests_expired(second),
-        "and the old number stays nothing"
-    );
-    assert!(waits.requests_expired(third));
-    // The wait of a state and the wait of the requests are two: neither's number is the other's.
-    let (opening, _) = waits.observe(Some(State::Opening)).expect("set");
-    let (request, _) = waits.requests_out().expect("set");
-    assert!(waits.expired(opening));
-    assert!(waits.requests_expired(request));
 }
 
 // ---- the strip and the view's area ------------------------------------------
@@ -834,16 +786,7 @@ fn only_the_files_of_a_bundle_are_read_off_the_main_thread() {
         page.file_of("bateri-view://v-ffffffffffffffffffffffffffffffff/index.html"),
         None
     );
-    // The one document a program handed is held by the page.
-    let document = Page::new(
-        INSTANCE.to_owned(),
-        Document::Html(Arc::from(&b"<html></html>"[..])),
-        POLICY.to_owned(),
-        "",
-        "#101010",
-    );
-    assert_eq!(document.file_of(&url(DOCUMENT_PATH)), None);
-    // And a reply that is not a file's never asks the file service.
+    // A reply that is not a file's never asks the file service.
     let asked = std::cell::Cell::new(false);
     for text in [Page::shell_url(), url("../x")] {
         page.reply(&text, &|_| {
@@ -851,10 +794,6 @@ fn only_the_files_of_a_bundle_are_read_off_the_main_thread() {
             None
         });
     }
-    document.reply(&url(DOCUMENT_PATH), &|_| {
-        asked.set(true);
-        None
-    });
     assert!(!asked.get());
 }
 

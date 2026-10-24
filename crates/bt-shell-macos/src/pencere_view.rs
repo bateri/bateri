@@ -11,13 +11,15 @@
 //! bundle is read off the main thread (`files`): the handler holds the web view's task, and
 //! answers it on the main queue when the file is ready.
 //!
-//! What crosses between the view and the application is JSON-RPC text, both ways:
-//! the view's `postMessage` reaches the shell page, which passes it to the
-//! script-message handler, which gives it to the session (`view_message`); the
-//! session's messages for the view come back as one `evaluateJavaScript` call
-//! each (`deliver`). Nothing else is a message, and a script message that does
-//! not come from the top frame — a view can reach the handler's name too — is
-//! dropped.
+//! What crosses between the view and the application is the bridge of a page
+//! (specification §9.4): one JSON object with one member per message, both ways. The
+//! view's `postMessage` reaches the shell page, which passes it to the script-message
+//! handler, which gives it to the session (`view_message`); the session's messages for the
+//! view — the program's own and the host's `context` — come back as one
+//! `evaluateJavaScript` call each (`deliver`). The first `context` is delivered when the
+//! shell tells the application its frame has loaded. Nothing else is a message, and a script
+//! message that does not come from the top frame — a view can reach the handler's name too —
+//! is dropped.
 //!
 //! **What the web view is refused**, in one place (the navigation and UI
 //! delegates, [`Bridge`]): navigating anywhere but the one shell load and the
@@ -73,7 +75,7 @@ use std::time::Instant;
 
 use block2::DynBlock;
 use bt_core::pencere::icon::Icon;
-use bt_core::pencere::{Shelf, Size as ViewSize, ViewSource, ViewStart, system_random};
+use bt_core::pencere::{Shelf, Size as ViewSize, ViewStart, system_random};
 use bt_core::{Session, Theme};
 use bt_shell_common::palette::{Modifiers, menu_item_id};
 use bt_shell_common::shortcuts::{by_id, chord_of};
@@ -108,10 +110,6 @@ use crate::child;
 use crate::pane::TerminalPane;
 
 pub(crate) use wait::Waits;
-
-/// The name the shell page's script posts to ([`serve`]'s `host`): the one
-/// script-message handler.
-const HANDLER: &str = "pencere";
 
 /// The byte a terminal writes for ⌃C: what the tty turns into the interrupt.
 pub(crate) const INTERRUPT: u8 = 0x03;
@@ -186,7 +184,7 @@ pub(crate) fn is_content_item(item: &NSMenuItem) -> bool {
     by_id(&id).is_some_and(|command| command.content)
 }
 
-/// What the program calls itself, as its view's start says (`serverInfo`'s title or name);
+/// What the program calls itself, as its view's start says (`program` of its `open`);
 /// `None` when it gave none, or nothing is left of it. These are the words for the program in
 /// the strip and in the questions, before what the pane read (`TerminalPane::view_strip`).
 pub(crate) fn said_program(start: &ViewStart) -> Option<&str> {
@@ -197,15 +195,9 @@ pub(crate) fn said_program(start: &ViewStart) -> Option<&str> {
 }
 
 /// The icons the application draws for the program — by its name on the strip, on its tab's
-/// tile: the program's own (`serverInfo`'s), else those of the tool the view is for. Both name
-/// the program, so its picture comes first; a program that gave only its tool one still has a
-/// face.
+/// tile: the ones the program gave in its `open`.
 fn strip_icons(start: &ViewStart) -> &[Icon] {
-    if start.program_icons.is_empty() {
-        &start.tool_icons
-    } else {
-        &start.program_icons
-    }
+    &start.icons
 }
 
 /// The view's area in a pane of `bounds` (the pane's unflipped points): all of it under the
@@ -432,31 +424,25 @@ define_class!(
     }
 
     unsafe impl WKScriptMessageHandler for Bridge {
-        /// A message of the view, as the text the shell page serialised it to.
-        /// Only the top frame's: the handler's name is reachable from the view's
-        /// own frame too, and what it posts is not the shell's.
+        /// A message of the view, as the text the shell page serialised it to, or the shell
+        /// page's own word that its frame has loaded. Only the top frame's: the handlers'
+        /// names are reachable from the view's own frame too, and what it posts is not the
+        /// shell's.
         #[unsafe(method(userContentController:didReceiveScriptMessage:))]
         fn receive(&self, _controller: &WKUserContentController, message: &WKScriptMessage) {
             // SAFETY: plain reads of a message the web view just delivered.
-            let top = unsafe { message.frameInfo().isMainFrame() };
+            let (top, name) = unsafe { (message.frameInfo().isMainFrame(), message.name()) };
             if !top {
+                return;
+            }
+            if name.to_string() == serve::LOADED_HANDLER {
+                self.tell_context(message);
                 return;
             }
             // SAFETY: as above.
             let body = unsafe { message.body() };
-            if let Some(text) = body.downcast_ref::<NSString>()
-                && self.ivars().session.view_message(&text.to_string())
-            {
-                // A request was passed on to the program: the pane's clock runs until it
-                // answers.
-                // SAFETY: a plain read of the message the web view just delivered.
-                let web = unsafe { message.webView() };
-                if let Some(pane) = web
-                    .and_then(|web| web.downcast::<PencereView>().ok())
-                    .and_then(|view| view.pane())
-                {
-                    pane.view_requests_out();
-                }
+            if let Some(text) = body.downcast_ref::<NSString>() {
+                self.ivars().session.view_message(&text.to_string());
             }
         }
     }
@@ -487,13 +473,10 @@ define_class!(
             still::first(web_view, self.mtm(), &self.ivars().shot);
         }
 
-        /// The web content process died: a view that cannot answer its teardown
-        /// is closed now and not after the wait for an answer.
+        /// The web content process died: the view is closed now.
         #[unsafe(method(webViewWebContentProcessDidTerminate:))]
         fn process_terminated(&self, _web_view: &WKWebView) {
-            let session = &self.ivars().session;
-            session.close_view();
-            session.view_wait_over();
+            self.ivars().session.close_view();
         }
     }
 
@@ -541,6 +524,26 @@ impl Bridge {
         });
         // SAFETY: `NSObject`'s `init`.
         unsafe { msg_send![super(this), init] }
+    }
+
+    /// The shell page says its frame has loaded: the page is told the `context` it starts with
+    /// (specification §9.5) — the current one, which is the start's brought up to date. A page
+    /// that starts listening later asks for it again itself.
+    fn tell_context(&self, message: &WKScriptMessage) {
+        let Some(context) = self.ivars().session.view_page_context() else {
+            return;
+        };
+        // SAFETY: a plain read of the message the web view just delivered.
+        let web = unsafe { message.webView() };
+        if let Some(web) = web {
+            // SAFETY: main thread; no completion handler, so nothing comes back.
+            unsafe {
+                web.evaluateJavaScript_completionHandler(
+                    &NSString::from_str(&serve::deliver_script(&context)),
+                    None,
+                );
+            }
+        }
     }
 
     /// The URL of a request, as text.
@@ -722,17 +725,12 @@ impl ViewHost {
         text: &Strip,
     ) -> Option<Self> {
         let ground = theme.background_srgb();
-        let document = match &start.source {
-            ViewSource::Bundle => serve::Document::Bundle(session.view_entry()?),
-            ViewSource::Document(html) => {
-                serve::Document::Html(Arc::from(html.as_bytes().to_vec()))
-            }
-        };
+        let entry = session.view_entry()?;
         // The same source the token of an `open` comes from, and the same refusal when it fails.
         let random = system_random()?;
         let page = serve::Page::new(
             serve::instance(random),
-            document,
+            entry,
             start.policy.clone(),
             &start.allow,
             &serve::css_color(ground),
@@ -754,7 +752,13 @@ impl ViewHost {
                 .userContentController()
                 .addScriptMessageHandler_name(
                     ProtocolObject::from_ref(&*bridge),
-                    &NSString::from_str(HANDLER),
+                    &NSString::from_str(serve::HANDLER),
+                );
+            configuration
+                .userContentController()
+                .addScriptMessageHandler_name(
+                    ProtocolObject::from_ref(&*bridge),
+                    &NSString::from_str(serve::LOADED_HANDLER),
                 );
             configuration
         };
@@ -904,10 +908,10 @@ impl ViewHost {
             self.web.stopLoading();
             self.web.setNavigationDelegate(None);
             self.web.setUIDelegate(None);
-            self.web
-                .configuration()
-                .userContentController()
-                .removeScriptMessageHandlerForName(&NSString::from_str(HANDLER));
+            let controller = self.web.configuration().userContentController();
+            controller.removeScriptMessageHandlerForName(&NSString::from_str(serve::HANDLER));
+            controller
+                .removeScriptMessageHandlerForName(&NSString::from_str(serve::LOADED_HANDLER));
         }
         self.web.removeFromSuperview();
         self.strip.removeFromSuperview();
