@@ -981,6 +981,10 @@ struct Core {
     /// (`Session::set_theme`), so the next frame is a content frame and the
     /// copy is refreshed there.
     theme: Cell<Theme>,
+    /// The contrast floor the shown page was last built with
+    /// ([`UiContext::minimum_contrast`]); a change is a reason to build it again, like a new
+    /// theme.
+    page_contrast: Cell<f64>,
     /// The absolute time of the next **content** tick `bt-core` asked for.
     ///
     /// It has two sources and `bt-core` gives the nearer
@@ -1662,7 +1666,11 @@ impl Core {
             return false;
         };
         let theme = self.session.theme();
-        if !self.page_frames.take(self.theme.get() != theme, now) {
+        // Read beside the theme and changed like it: the session is told, the page is not, and
+        // a page drawn with the old floor is no longer what it should show.
+        let minimum_contrast = self.session.minimum_contrast();
+        let changed = self.theme.get() != theme || self.page_contrast.get() != minimum_contrast;
+        if !self.page_frames.take(changed, now) {
             self.arm_page_clock(now);
             self.waker.pacer().set_running(false);
             return true;
@@ -1672,6 +1680,7 @@ impl Core {
             return true;
         };
         self.theme.set(theme);
+        self.page_contrast.set(minimum_contrast);
         let size_px = self.surface.size().unwrap_or((0, 0));
         let cx = UiContext {
             renderer: &self.renderer,
@@ -1680,6 +1689,7 @@ impl Core {
             theme: &theme,
             now,
             reduce_motion: self.motion.get().reduce(),
+            minimum_contrast,
         };
         let mut list = page.build(&cx);
         // The text atlas filled and was cleared while the list was built:
@@ -2849,6 +2859,7 @@ impl DisplayLink {
         // born on the alternate screen.
         let alt_screen = session.alt_screen();
         let theme = session.theme();
+        let minimum_contrast = session.minimum_contrast();
         pacer.set_running(false);
         let waker = Waker {
             inner: Arc::new(WakerInner {
@@ -2911,6 +2922,7 @@ impl DisplayLink {
             // draws when `Motion` has a position, and the only place filling
             // it is the content frame — which refreshes the theme too.
             theme: Cell::new(theme),
+            page_contrast: Cell::new(minimum_contrast),
             content_deadline: Cell::new(None),
             blink: Cell::new(Blink::default()),
             // Hidden, and no layout until the first content frame says where

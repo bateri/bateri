@@ -80,15 +80,12 @@ pub(crate) fn strip(
     strip
 }
 
-/// Where the page modules (`guest/`, built by `make guest`) are: `BT_VIEW_GUEST_DIR`, else the
-/// build tree this binary came from. A development convenience of the debug menu's demos.
+/// Where the page modules are: `BT_VIEW_GUEST_DIR`, else the `kit/guest/dist` of the pencere
+/// checkout beside this one (`make guest` there builds them; bateri carries none of its own). A
+/// development convenience of the debug menu's demos.
 #[cfg(debug_assertions)]
 pub(crate) fn component_path(name: &str) -> std::path::PathBuf {
-    let dir = std::env::var_os("BT_VIEW_GUEST_DIR").map_or_else(
-        || std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../guest/dist"),
-        std::path::PathBuf::from,
-    );
-    dir.join(format!("{name}.wasm"))
+    bt_shell_common::native_view::guest_dir().join(format!("{name}.wasm"))
 }
 
 /// The height of the filter field, points: a line of the page's text, centred in the box.

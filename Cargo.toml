@@ -4,16 +4,10 @@ members = [
     "crates/bt-core",
     "crates/bt-atlas",
     "crates/bt-gpu",
-    "crates/bt-view",
-    "crates/bt-view-wasm",
     "crates/bt-shell-common",
     "crates/bt-shell-macos",
     "crates/bateri",
 ]
-
-# The page modules (`guest/`) are built for another target with another toolchain and have
-# their own workspace and lockfile; the host workspace never builds them.
-exclude = ["guest"]
 
 [workspace.package]
 version = "0.22.0"
@@ -110,20 +104,6 @@ objc2-web-kit = { version = "0.3", default-features = false, features = [
 # (`pencere_view::still`) — the rectangle and the width of what it gives back;
 # its rectangle is a `CGRect`, behind the `objc2-core-foundation` flag.
     "WKSnapshotConfiguration", "objc2-core-foundation",
-] }
-# The sandbox a page module runs in (`bt-view-wasm`): the WebAssembly runtime, with the
-# component model for the interface the module sees. User-approved dependency decision
-# (2026-10-23), with the `allow-jit` entitlement it needs under the hardened runtime (the
-# runtime compiles the module with Cranelift). Pure Rust except a small C helper its build
-# compiles; Apache-2.0 WITH LLVM-exception (GPL-3 compatible). The default set is cut to what
-# runs a component: no async, cache, GC, profiling, coredump or pooling allocator. The
-# version is the newest that builds with the toolchain pinned by `rust-version` (a newer
-# release asks for a newer rustc); a toolchain bump is the time to move it. `gc` and
-# `gc-drc` are what the runtime's exceptions need (an exception is an object on its collected
-# heap): the interpreter of the scripting language (`bt-view-wasm`'s `luau`) reports a script's
-# errors with C++ exceptions, and a module that throws needs the runtime to catch.
-wasmtime = { version = "38", default-features = false, features = [
-    "runtime", "cranelift", "component-model", "std", "gc", "gc-drc",
 ] }
 # The main queue (`bt-shell-macos`) and vnode sources (`bt-shell-common`'s
 # `watch`). User-approved dependency decision.
@@ -233,16 +213,6 @@ yeslogic-fontconfig-sys = { version = "6", default-features = false }
 # bitflags, once_cell, already in the graph).
 harfrust = { version = "0.13", default-features = false, features = ["std"] }
 
-# The layout of the UI kit's pages (`bt-view`): flexbox and grid, the same boxes a style
-# sheet would describe, computed in pixels. MIT; pure Rust, no I/O, no platform library.
-# User-approved dependency decision (2026-10-23). Trimmed to what the engine uses: the
-# tree (`taffy_tree`), flexbox and grid, and the scroll extents (`content_size`); the
-# block and float layouts, `calc` and the style parser stay out. It brings `slotmap`
-# (Zlib), `grid` (MIT) and `arrayvec` (MIT/Apache-2.0) into the graph.
-taffy = { version = "0.10", default-features = false, features = [
-    "std", "taffy_tree", "flexbox", "grid", "content_size",
-] }
-
 # The kablo protocol: the wire format `bt-shell-common::kablo` speaks to a server's relay
 # (frames, handshake, messages, and the rules for installing the binary there). Taken from
 # kablo's repository by the same pinned commit as the two forks below, so that one `rev`
@@ -253,21 +223,33 @@ taffy = { version = "0.10", default-features = false, features = [
 # bateri (GPL-3.0-or-later); `make audit` fails if the three do not resolve to one commit.
 kablo-proto = { git = "https://github.com/bateri/kablo", rev = "297cc8c6d85118669e9db556965da38eb121ff2a" }
 
-# pencere: the protocol a program in a pane speaks to show its view there (frames,
-# messages, the session's rules, bundles, the content security policy and the context a
-# page is told), as a crate with no I/O. Taken from its own repository by a pinned commit, like
-# `kablo-proto`: the rules are written once, in the protocol's repository, and bateri is a
-# host of it; rewriting them here would be a second copy that drifts. `rev` must be a commit
-# at or after the relicensing to Apache-2.0 (`75a78e3`): the commit before it is GPL-3.0 and
-# the protocol is meant to be embedded by closed products too. User-approved dependency
-# decision (2026-10-21); it brings `serde`, `serde_json` and `sha2` into the graph, all
-# MIT/Apache-2.0. `make audit` fails if `rev` is not a full hash or does not resolve.
-pencere = { git = "https://github.com/bateri/pencere", rev = "a2b77514e5f86bf16b837f3c118f9b050bd69de2" }
+# pencere: the protocol a program in a pane speaks to show its view there, and the kit its
+# native views are made with, from its own repository and one pinned commit, like
+# `kablo-proto`: the rules and the engine are written once, in pencere, and bateri is a host of
+# them; rewriting them here would be a second copy that drifts. Three crates, one `rev`:
+#
+# - `pencere-host`: frames, messages, the session's rules, bundles, the content security
+#   policy and the context a page is told, as a crate with no I/O. It brings `serde`,
+#   `serde_json` and `sha2` into the graph (user-approved dependency decision, 2026-10-21).
+# - `pencere-view`: the page engine of a native view (tree of boxes and text, layout as
+#   flexbox and grid, draw list). Its only dependency is `taffy` (MIT; slotmap, grid and
+#   arrayvec behind it).
+# - `pencere-sandbox`: the WebAssembly runtime and the Lua interpreter a native view runs in,
+#   and the decoders of the pictures a page shows (PNG, JPEG, SVG). It brings `wasmtime`,
+#   `png`, `zune-jpeg` and `resvg` into the graph. User-approved dependency decisions: the
+#   runtime on 2026-10-23, with the `allow-jit` entitlement it needs under the hardened
+#   runtime; the three picture formats on 2026-10-24.
+#
+# All of pencere is Apache-2.0 (GPL-3 compatible), and `rev` must be a commit at or after the
+# relicensing (`75a78e3`). `make audit` fails if `rev` is not a full hash or does not resolve,
+# and if any of the three comes from anywhere else.
+pencere-host = { git = "https://github.com/bateri/pencere", rev = "e83619a170a509c205795039eb99e9fd2969ecd2" }
+pencere-view = { git = "https://github.com/bateri/pencere", rev = "e83619a170a509c205795039eb99e9fd2969ecd2" }
+pencere-sandbox = { git = "https://github.com/bateri/pencere", rev = "e83619a170a509c205795039eb99e9fd2969ecd2" }
 
 bt-core = { path = "crates/bt-core" }
 bt-atlas = { path = "crates/bt-atlas" }
 bt-gpu = { path = "crates/bt-gpu" }
-bt-view = { path = "crates/bt-view" }
 bt-shell-common = { path = "crates/bt-shell-common" }
 bt-shell-macos = { path = "crates/bt-shell-macos" }
 

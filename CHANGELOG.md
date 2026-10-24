@@ -34,7 +34,17 @@ of every installed copy. A version without a section is not released.
   the messages between it and its program. A view that hangs, asks for too much memory or
   has an error closes, and its program is told why — a script's error with its line.
   Control-C reaches the program at once even while the view is busy talking to it, and
-  nothing the view said is typed into the shell afterwards.
+  nothing the view said is typed into the shell afterwards. The kit these views are made
+  with is [pencere](https://github.com/bateri/pencere)'s (Apache-2.0, so other terminals
+  can show the same views), and bateri offers the two kinds it draws as version 1.0:
+  `wasm` is `pencere:view@1.0.0` and a script's global is `pencere`.
+- **A view can use the terminal's whole palette.** Beside its nine roles, a view names the
+  sixteen ANSI colours and the selection by the theme's own values, or gives a colour of
+  its own as `#rrggbb[aa]` with, if it wants one, another for dark themes. Its words keep
+  the **minimum contrast** of Appearance settings against what they stand on, like a
+  program's in the grid: a quiet word on a card is a shade stronger than the theme says
+  where it would be hard to read, and changing the setting redraws the view. A web view is
+  told the palette and the selection in its colours too.
 
 ### Changed
 

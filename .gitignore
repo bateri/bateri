@@ -1,8 +1,5 @@
 # build outputs
 /target/
-# the page modules (`make guest`): their build tree and their components
-/guest/target/
-/guest/dist/
 *.metallib
 *.air
 *.dSYM/

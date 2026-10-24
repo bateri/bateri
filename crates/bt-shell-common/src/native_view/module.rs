@@ -1,4 +1,4 @@
-//! A page of the kit that is a module in a sandbox ([`bt_view_wasm`]), in a pane.
+//! A page of the kit that is a module in a sandbox ([`pencere_sandbox`]), in a pane.
 //!
 //! The module runs on a thread of its own and **the frame never waits for it**: a build takes the
 //! newest page the module has handed out, lays it out, paints it, tells the module how it stands
@@ -16,8 +16,8 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use bt_core::Flow;
-use bt_view::{Element, Event, Size, Tone, div, text};
-use bt_view_wasm::{Limits, Module, Program, Unbounded};
+use pencere_sandbox::{Limits, Module, Program, Unbounded};
+use pencere_view::{Element, Event, Size, Tone, div, text};
 
 use super::{
     Drained, Input, PageDrive, Rect, Reply, Shaped, Typeset, UiContext, UiList, UiPage, from_pane,
@@ -299,14 +299,21 @@ impl UiPage for ModulePage {
             terminal: &self.terminal,
             shaped: &mut self.shaped,
         };
-        let laid = Arc::new(bt_view::layout(
+        let laid = Arc::new(pencere_view::layout(
             root,
             Size::new(width, height),
             scale,
             &mut typeset,
         ));
         let draws = laid.paint(&mut typeset);
-        let list = to_list(cx.renderer, cx.theme, &mut typeset, &draws, (0.0, inset));
+        let list = to_list(
+            cx.renderer,
+            cx.theme,
+            cx.minimum_contrast,
+            &mut typeset,
+            &draws,
+            (0.0, inset),
+        );
         let told = {
             let mut shared = self.shared.borrow_mut();
             // The module may ask of this layout from now on, and brings what depends on it back
@@ -343,18 +350,22 @@ impl UiPage for ModulePage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bt_core::Theme;
+    use crate::native_view::guest_dir;
+    use bt_core::{MINIMUM_CONTRAST, Theme};
     use bt_gpu::{Renderer, UiItem};
-    use bt_view::Point;
+    use pencere_view::Point;
     use std::sync::mpsc::{Receiver, channel};
     use std::time::{Duration, Instant};
 
-    /// The container list's module, if `make guest` has built it, and a GPU device to draw on.
+    /// The container list's module, if `make guest` has built it in the pencere checkout
+    /// ([`guest_dir`]), and a GPU device to draw on.
     fn rig() -> Option<(Renderer, Vec<u8>)> {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../guest/dist/containers.wasm");
+        let path = guest_dir().join("containers.wasm");
         let Ok(bytes) = std::fs::read(&path) else {
-            eprintln!("skipped: {} is not built (`make guest`)", path.display());
+            eprintln!(
+                "skipped: {} is not built (`make guest` in the pencere checkout)",
+                path.display()
+            );
             return None;
         };
         let Ok(renderer) = Renderer::system_default() else {
@@ -372,6 +383,7 @@ mod tests {
             theme,
             now,
             reduce_motion: false,
+            minimum_contrast: MINIMUM_CONTRAST,
         })
     }
 
@@ -461,7 +473,18 @@ mod tests {
         let theme = Theme::BATERI;
         let (told, woken) = channel();
         let told = std::sync::Mutex::new(told);
-        let script = include_bytes!("../../../../guest/luau/examples/containers.lua").to_vec();
+        // The example script of pencere's checkout (`kit/luau/examples`), beside the modules
+        // (`kit/guest/dist`), which need not be built for this.
+        let path = guest_dir()
+            .ancestors()
+            .nth(2)
+            .map_or_else(Default::default, |kit| {
+                kit.join("luau/examples/containers.lua")
+            });
+        let Ok(script) = std::fs::read(&path) else {
+            eprintln!("skipped: {} is not there", path.display());
+            return;
+        };
         let (mut page, handle) =
             script_page(script, Limits::default(), None, 32.0, None, move || {
                 let _ = told.lock().unwrap().send(());
@@ -660,8 +683,8 @@ mod tests {
         let told = std::sync::Mutex::new(told);
         let (mut page, handle) = script_page(
             br#"return { render = function()
-                return bateri.div():bg("raised1"):p(8):child(bateri.text("hello")):child(
-                    bateri.div():size(20, 20):bg("accent"))
+                return pencere.div():bg("raised1"):p(8):child(pencere.text("hello")):child(
+                    pencere.div():size(20, 20):bg("accent"))
             end }"#
                 .to_vec(),
             Limits::default(),

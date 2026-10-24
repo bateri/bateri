@@ -7,7 +7,9 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use ::pencere::frame::{Direction, Event as FrameEvent, Outgoing, Split, StreamDecoder, encode};
+use ::pencere_host::frame::{
+    Direction, Event as FrameEvent, Outgoing, Split, StreamDecoder, encode,
+};
 use alacritty_terminal::event::{Event as TermEvent, EventListener};
 use alacritty_terminal::grid::Dimensions as _;
 use alacritty_terminal::index::{Column, Line};
@@ -235,7 +237,7 @@ pub(crate) fn hello() -> Vec<u8> {
         1,
         None,
         None,
-        r#"{"versions":[1],"views":[{"kind":"wasm","versions":["0.5"]},{"kind":"web","versions":["1.0"]}]}"#,
+        r#"{"versions":[1],"views":[{"kind":"wasm","versions":["1.0"]},{"kind":"web","versions":["1.0"]}]}"#,
     )
 }
 
@@ -370,7 +372,7 @@ pub(crate) fn page_file() -> Vec<u8> {
         3,
         None,
         Some(&Digest::of(PAGE).to_string()),
-        &::pencere::base64::encode(PAGE),
+        &::pencere_host::base64::encode(PAGE),
     )
 }
 
@@ -997,6 +999,10 @@ fn the_view_is_given_the_themes_own_values_and_the_same_dark_or_light() {
         assert_eq!(view.error, Some(rgb(theme.error)), "{name}");
         assert_eq!(view.warning, Some(rgb(theme.warning)), "{name}");
         assert_eq!(view.info, Some(rgb(theme.info)), "{name}");
+        // The palette and the selection are the grid's: a page that draws in the terminal's
+        // red gets the red a program's red text has.
+        assert_eq!(view.selection, Some(rgb(theme.selection)), "{name}");
+        assert_eq!(view.ansi, Some(theme.ansi.map(rgb)), "{name}");
         let [r, g, b] = theme.background_srgb();
         assert_eq!(view.background, Rgb(r, g, b), "{name}");
         // The pane's dividers are the view's borders: one step, one rule.
@@ -1325,13 +1331,13 @@ fn the_kinds_and_versions_offered_are_what_the_application_can_open_in_the_progr
         None,
         concat!(
             r#"{"versions":[1],"views":[{"kind":"web","versions":["2.0","1.0"]},"#,
-            r#"{"kind":"lua","versions":["9.9"]},{"kind":"wasm","versions":["0.4","0.5"]}]}"#
+            r#"{"kind":"lua","versions":["9.9"]},{"kind":"wasm","versions":["0.4","1.0"]}]}"#
         ),
     ));
     let welcome = pane.rig.written();
     assert!(
         welcome[0].payload.contains(
-            r#""views":[{"kind":"web","versions":["1.0"]},{"kind":"wasm","versions":["0.5"]}]"#
+            r#""views":[{"kind":"web","versions":["1.0"]},{"kind":"wasm","versions":["1.0"]}]"#
         ),
         "{}",
         welcome[0].payload
@@ -1342,14 +1348,14 @@ fn the_kinds_and_versions_offered_are_what_the_application_can_open_in_the_progr
     let offer = pane.rig.written();
     assert!(
         offer[0].payload.contains(concat!(
-            r#""views":[{"kind":"wasm","versions":["0.5"]},{"kind":"lua","versions":["1.0"]},"#,
+            r#""views":[{"kind":"wasm","versions":["1.0"]},{"kind":"lua","versions":["1.0"]},"#,
             r#"{"kind":"web","versions":["1.0"]}]"#
         )),
         "{}",
         offer[0].payload
     );
     // The versions are the application's constants, and the Lua API's is the prelude's.
-    assert_eq!((WASM_VERSION, LUA_VERSION), ("0.5", "1.0"));
+    assert_eq!((WASM_VERSION, LUA_VERSION), ("1.0", "1.0"));
     assert_eq!(WEB_BRIDGE_VERSION, "1.0");
 }
 
@@ -1427,7 +1433,7 @@ const COMPONENT: &[u8] = b"\0asm\x01\0\0\0";
 fn module_open(token: &str) -> Vec<u8> {
     let open = format!(
         concat!(
-            r#"{{"token":"{token}","view":"wasm","version":"0.5","program":"demopen","title":"Containers","#,
+            r#"{{"token":"{token}","view":"wasm","version":"1.0","program":"demopen","title":"Containers","#,
             r#""bundle":{{"entry":"view.wasm","files":[{{"path":"view.wasm","sha256":"{digest}","#,
             r#""size":{size},"type":"application/wasm"}}]}}}}"#
         ),
@@ -1444,7 +1450,7 @@ fn module_file() -> Vec<u8> {
         3,
         None,
         Some(&Digest::of(COMPONENT).to_string()),
-        &::pencere::base64::encode(COMPONENT),
+        &::pencere_host::base64::encode(COMPONENT),
     )
 }
 
@@ -1458,7 +1464,7 @@ fn open_a_module_view() -> (Pane, String, Arc<CountingWake>) {
     assert!(
         welcome[0]
             .payload
-            .contains(r#""features":["bundle","dismiss"],"views":[{"kind":"wasm","versions":["0.5"]},{"kind":"web","versions":["1.0"]}]"#),
+            .contains(r#""features":["bundle","dismiss"],"views":[{"kind":"wasm","versions":["1.0"]},{"kind":"web","versions":["1.0"]}]"#),
         "{}",
         welcome[0].payload
     );
@@ -1541,7 +1547,7 @@ fn a_script_opens_a_view_of_its_kind_and_its_failure_reaches_the_program_with_it
         3,
         None,
         Some(&Digest::of(SCRIPT).to_string()),
-        &::pencere::base64::encode(SCRIPT),
+        &::pencere_host::base64::encode(SCRIPT),
     ));
     let rig = Arc::clone(&pane.rig);
     let desk = rig.desk.as_ref().expect("a desk");

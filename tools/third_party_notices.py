@@ -34,11 +34,12 @@ Choices:
   the package: it gets no entry here. The check is both halves, so a GPL crate
   from anywhere else still stops the script.
 - Sparkle's LICENSE (MIT + external notices such as bsdiff/sais/ed25519) as is.
-- The scripting language's interpreter (`crates/bt-view-wasm/luau/luau.wasm`, built from
-  `guest/luau`) is not a crate: it is Luau, and statically the C and C++ runtimes of the
-  toolchain that built it (wasi-libc with its musl, libc++, libc++abi, libunwind and
-  compiler-rt of LLVM). Their texts are kept beside the sources it is built from
-  (`guest/luau/licenses/`), and are given as they are.
+- The scripting language's interpreter (`luau.wasm`, built in pencere from its `kit/luau`
+  and carried by the `pencere-sandbox` crate) is not a crate of its own: it is Luau, and
+  statically the C and C++ runtimes of the toolchain that built it (wasi-libc with its musl,
+  libc++, libc++abi, libunwind and compiler-rt of LLVM). Their texts are kept beside the
+  sources it is built from and travel in the crate (`pencere-sandbox`'s `licenses/`), and
+  are given as they are.
 - The color schemes bateri adapts (`tools/import_themes.py`, the one list a
   theme is added to): the collection the values are read from and each
   project the schemes come from, with its copyright line and license — MIT
@@ -59,9 +60,14 @@ TARGET = "aarch64-apple-darwin"
 # Licenses without an MIT option that are accepted, each a recorded decision
 # (all GPL-3 compatible): Apache-2.0 (alacritty_terminal; codespan-reporting
 # via wgpu), Zlib (foldhash via wgpu) and ISC (libloading via wgpu) — user
-# decision 2026-09-30. Anything
-# else without an MIT option stops the script.
-OWN_LICENSES = {"Apache-2.0", "Zlib", "ISC", "Apache-2.0 WITH LLVM-exception"}
+# decision 2026-09-30 — and BSD-2-Clause and BSD-3-Clause (the pictures' decoders pencere's
+# sandbox brings: tiny-skia under the SVG renderer, arrayref), which the Free Software
+# Foundation lists as GPL-compatible and which ask only for the notice, given as the crate
+# has it. Anything else without an MIT option stops the script.
+OWN_LICENSES = {
+    "Apache-2.0", "Zlib", "ISC", "BSD-2-Clause", "BSD-3-Clause",
+    "Apache-2.0 WITH LLVM-exception",
+}
 # The license of the WebAssembly runtime's crates (user decision 2026-10-23, with the runtime):
 # Apache-2.0 plus exceptions that only relax it (the object code of a compiled work need not
 # carry the notices), so GPL-3 compatible. Its crates share one text.
@@ -74,10 +80,12 @@ OWN_PROJECT_LICENSE = "GPL-3.0-or-later"
 OWN_PROJECT_SOURCE = "git+https://github.com/bateri/"
 # pencere's LICENSE is the Apache text as it is published and names no holder (the
 # lines in it that begin with "copyright" are the license's own sentences); its
-# NOTICE does, and this is that line.
+# NOTICE does, and this is that line. Four crates of its repository are in the build: the
+# host's rules, the wire they share with the program, the page engine and the sandbox.
 COPYRIGHT = {
     "alacritty_terminal": ["Copyright 2020 The Alacritty Project"],
-    "pencere": ["Copyright 2026 The pencere Authors"],
+    **{name: ["Copyright 2026 The pencere Authors"]
+       for name in ("pencere-host", "pencere-wire", "pencere-view", "pencere-sandbox")},
 }
 MIT_TEXT = """Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -207,7 +215,7 @@ def main():
                     "Licensed under the Apache License, Version 2.0; full text below.",
                     RULE, "", *([notice, ""] if notice else []), text, "", ""]
         else:
-            # Zlib and ISC: the crate's own license file, which carries its
+            # Zlib, ISC and BSD: the crate's own license file, which carries its
             # copyright line; the license requires the notice verbatim.
             text = read_first(root, ("LICENSE", "LICENSE.md", "LICENSE.txt", "COPYING",
                                      f"LICENSE-{license.upper()}"))
@@ -241,24 +249,35 @@ def main():
             "Licensed under the MIT License, with the external notices it carries;",
             "full text below.", RULE, "", sparkle, ""]
 
-    out += module_notices()
+    out += module_notices(pkgs)
 
     out += theme_notices("Version 2.0" in "\n".join(out))
     sys.stdout.write("\n".join(out))
 
 
-LICENSES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "guest", "luau", "licenses")
+def licenses_of(pkgs):
+    """The folder of license texts the sandbox crate carries beside the interpreter it ships:
+    Luau's and the toolchain's, given as they are. The crate is the one in the build, so the
+    texts are the ones of the very interpreter that is."""
+    found = [p for (name, _), p in pkgs.items() if name == "pencere-sandbox"]
+    if len(found) != 1:
+        sys.exit(f"pencere-sandbox: expected one version in the build, found {len(found)}")
+    folder = os.path.join(os.path.dirname(found[0]["manifest_path"]), "licenses")
+    if not os.path.isdir(folder):
+        sys.exit(f"pencere-sandbox carries no licenses/ folder at {folder}")
+    return folder
 
 
-def licensed(name):
-    with open(os.path.join(LICENSES, name), encoding="utf-8") as f:
-        return f.read().rstrip()
-
-
-def module_notices():
+def module_notices(pkgs):
     """The notices of what the interpreter module is made of besides our own code: Luau
     (MIT, with the Lua notice it keeps), and the runtimes of the toolchain that are linked
     into it, each with the text it comes with."""
+    folder = licenses_of(pkgs)
+
+    def licensed(name):
+        with open(os.path.join(folder, name), encoding="utf-8") as f:
+            return f.read().rstrip()
+
     return [
         RULE, "Luau", "https://luau.org", "https://github.com/luau-lang/luau",
         "Licensed under the MIT License, with the notice of Lua it derives from; full text",

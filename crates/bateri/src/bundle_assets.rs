@@ -340,8 +340,16 @@ fn third_party_license_ships_with_attribution() {
         "MIT License",
         "Sparkle",
         "iTerm2-Color-Schemes",
+        // The kit native views are made with comes from pencere (Apache-2.0), and the pictures
+        // they show are decoded by libraries under BSD licenses (the SVG renderer's
+        // rasteriser): both are given with their own texts.
+        "pencere-sandbox",
+        "pencere-view",
+        "tiny-skia",
+        "BSD-3-Clause",
         // The interpreter of the scripting language is built into the binary with the C and
-        // C++ runtimes of the toolchain that made it: their notices travel with it.
+        // C++ runtimes of the toolchain that made it: their notices travel with it (the texts
+        // come from the sandbox crate that carries the interpreter).
         "Luau",
         "Roblox Corporation",
         "wasi-libc",

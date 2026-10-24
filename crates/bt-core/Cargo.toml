@@ -10,7 +10,7 @@ alacritty_terminal = { workspace = true }
 cursor-icon = { workspace = true }
 libc = { workspace = true }
 miniz_oxide = { workspace = true }
-pencere = { workspace = true }
+pencere-host = { workspace = true }
 png = { workspace = true }
 polling = { workspace = true }
 toml_edit = { workspace = true }

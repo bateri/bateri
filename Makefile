@@ -3,7 +3,7 @@ CARGO ?= cargo
 # Prerequisite order is only guaranteed under serial make; under -j the promises
 # "cheapest gate first" and "version first" break.
 .NOTPARALLEL:
-.PHONY: check prune fmt audit clippy test test-heavy test-view test-all gate gate-push hooks linux-server linux-run shader smoke terminfo test-race scan bundle package install release publish ship release-gate sparkle dmgbuild linux guest guest-test guest-linux luau
+.PHONY: check prune fmt audit clippy test test-heavy test-view test-all gate gate-push hooks linux-server linux-run shader smoke terminfo test-race scan bundle package install release publish ship release-gate sparkle dmgbuild linux
 
 # Definition of done. Homebrew rustc is not pinned (there is deliberately no
 # rust-toolchain.toml): the version is printed first so a clippy failure that
@@ -37,7 +37,6 @@ prune:
 
 fmt:
 	$(CARGO) fmt --all -- --check
-	$(CARGO) fmt --manifest-path guest/Cargo.toml --all -- --check
 
 # The mechanical half of the project rules: agentless and done in seconds, on
 # every `make check`. The checks that need judgment stay in code review.
@@ -99,11 +98,16 @@ fmt:
 #   Two commits would put two kablo versions in one build — the parser bateri
 #   decodes the stream with and the format it speaks to the relay would no longer
 #   come from the same source — and nothing but this line would say so.
-# - `pencere` (the protocol a program speaks to show a web view in its pane) is a crate
-#   of its own repository, not kablo's: Cargo.toml pins it by a full commit hash and it
-#   resolves to github.com/bateri/pencere at that hash. It stays out of the kablo rule
-#   above, because it is another repository with its own commits — one hash for the two
-#   would be a coincidence, not a rule.
+# - `pencere-host`, `pencere-view` and `pencere-sandbox` (the protocol a program speaks to
+#   show a view in its pane, and the kit its native views are made with) are crates of
+#   their own repository, not kablo's: Cargo.toml pins each by a full commit hash and they
+#   resolve to github.com/bateri/pencere at that hash. The three share one `rev` (one
+#   pencere, one protocol, one engine), and every crate of that repository in the build
+#   (`pencere-wire` too, which the host and the sandbox bring) comes from it: a path or a
+#   registry copy of the kit would be a second copy that drifts. They stay out of the kablo
+#   rule above, because it is another repository with its own commits — one hash for the
+#   two would be a coincidence, not a rule. The rules of the kit itself (what the engine and
+#   the sandbox may link) are checked in pencere's own `make check`.
 # - It does NOT fail on a dependency change, it warns: a deliberate dependency
 #   decision also changes Cargo.lock; review looks for the decision's record.
 audit:
@@ -114,13 +118,6 @@ audit:
 	if $(CARGO) tree -p bt-gpu -e normal | grep -E "bt-shell"; then echo "audit: bt-gpu links upward, to the shell layer (bt-shell-*)"; fail=1; fi; \
 	if $(CARGO) tree -p bt-shell-common -e normal --depth 1 | grep -E "(^|[ ─])objc2 v|objc2-app-kit|objc2-quartz-core|objc2-foundation|objc2-user-notifications|block2|bt-shell-(macos|linux)"; then echo "audit: bt-shell-common links to a platform shell or the AppKit family"; fail=1; fi; \
 	if grep -rnE "objc2|dispatch2|block2" crates/bt-shell-common/src | grep -v "^crates/bt-shell-common/src/watch/dispatch.rs:" | grep -v ":[[:space:]]*//"; then echo "audit: platform call in bt-shell-common outside watch's macOS body (watch/dispatch.rs)"; fail=1; fi; \
-	if $(CARGO) tree -p bt-view -e normal --prefix none | tail -n +2 | grep -E "^(bt-|objc2|dispatch2|block2|metal|wgpu)"; then echo "audit: bt-view links to a crate of this workspace or a platform library — the page engine depends on its layout crate alone"; fail=1; fi; \
-	if grep -rnE "objc2|dispatch2|block2|wgpu|bt_(core|atlas|gpu|shell|embed)" crates/bt-view/src | grep -v ":[[:space:]]*//"; then echo "audit: platform call or a workspace crate named in bt-view source"; fail=1; fi; \
-	if $(CARGO) tree -p bt-view-wasm -e normal --prefix none | tail -n +2 | grep -E "^(bt-(core|atlas|gpu|shell|embed)|objc2|dispatch2|block2|metal|wgpu)"; then echo "audit: bt-view-wasm links to a crate of this workspace past the page engine or to a platform library — the sandbox depends on the engine and the runtime alone"; fail=1; fi; \
-	if grep -rnE "objc2|dispatch2|block2|wgpu|bt_(core|atlas|gpu|shell|embed)" crates/bt-view-wasm/src | grep -v ":[[:space:]]*//"; then echo "audit: platform call or a workspace crate named in bt-view-wasm source"; fail=1; fi; \
-	if $(CARGO) tree --workspace -e normal -i wasmtime --depth 1 --prefix none | tail -n +2 | grep -vE "^bt-view-wasm "; then echo "audit: the WebAssembly runtime is linked by a crate other than bt-view-wasm — one door to it"; fail=1; fi; \
-	if grep -nE "^(bt-(core|atlas|gpu|shell|embed)[a-z-]*|bt-view-wasm) *=" guest/*/Cargo.toml guest/Cargo.toml; then echo "audit: a page module depends on a crate of the application — a module is written with the SDK and the engine's builder (bt-view) alone"; fail=1; fi; \
-	if [ "$$(sh guest/luau/inputs.sh)" != "$$(cat crates/bt-view-wasm/luau/inputs.sha256 2>/dev/null)" ]; then echo "audit: crates/bt-view-wasm/luau/luau.wasm is not built from the sources of guest/luau and the interface in view.wit as they are now — make luau rebuilds it"; fail=1; fi; \
 	if grep -rn "objc2\|core_text\|core_graphics" crates/bt-core/src | grep -v ":[[:space:]]*//"; then echo "audit: platform call in bt-core source"; fail=1; fi; \
 	kablo_tree=$$($(CARGO) tree --workspace -e normal); kablo_revs=""; \
 	for fork in vte alacritty_terminal kablo-proto; do \
@@ -130,9 +127,15 @@ audit:
 		elif ! echo "$$kablo_tree" | grep -qE "$$fork v[0-9.]+ \(https://github.com/bateri/kablo\?rev=$$fork_rev#"; then echo "audit: $$fork does not resolve to github.com/bateri/kablo at rev $$fork_rev — for a fork, is [patch.crates-io] in Cargo.toml still used?"; fail=1; fi; \
 	done; \
 	if [ "$$(echo $$kablo_revs | tr ' ' '\n' | sort -u | wc -l | tr -d ' ')" != "1" ]; then echo "audit: vte, alacritty_terminal and kablo-proto are not pinned by one kablo commit (rev):$$kablo_revs"; fail=1; fi; \
-	pencere_rev=$$(sed -n 's/^pencere = { git = "https:\/\/github.com\/bateri\/pencere", rev = "\([0-9a-f]\{40\}\)" }$$/\1/p' Cargo.toml); \
-	if [ -z "$$pencere_rev" ]; then echo "audit: Cargo.toml does not pin pencere with a full commit hash (rev) of github.com/bateri/pencere"; fail=1; \
-	elif ! echo "$$kablo_tree" | grep -qE "pencere v[0-9.]+ \(https://github.com/bateri/pencere\?rev=$$pencere_rev#"; then echo "audit: pencere does not resolve to github.com/bateri/pencere at rev $$pencere_rev"; fail=1; fi; \
+	pencere_revs=""; \
+	for crate in pencere-host pencere-view pencere-sandbox; do \
+		pencere_rev=$$(sed -n 's/^'"$$crate"' = { git = "https:\/\/github.com\/bateri\/pencere", rev = "\([0-9a-f]\{40\}\)" }$$/\1/p' Cargo.toml); \
+		pencere_revs="$$pencere_revs $$pencere_rev"; \
+		if [ -z "$$pencere_rev" ]; then echo "audit: Cargo.toml does not pin $$crate with a full commit hash (rev) of github.com/bateri/pencere"; fail=1; \
+		elif ! echo "$$kablo_tree" | grep -qE "$$crate v[0-9.]+ \(https://github.com/bateri/pencere\?rev=$$pencere_rev#"; then echo "audit: $$crate does not resolve to github.com/bateri/pencere at rev $$pencere_rev"; fail=1; fi; \
+	done; \
+	if [ "$$(echo $$pencere_revs | tr ' ' '\n' | sort -u | wc -l | tr -d ' ')" != "1" ]; then echo "audit: pencere-host, pencere-view and pencere-sandbox are not pinned by one pencere commit (rev):$$pencere_revs"; fail=1; fi; \
+	if echo "$$kablo_tree" | grep -E "pencere-[a-z]+ v[0-9.]+" | grep -vE "\(https://github.com/bateri/pencere\?rev=[0-9a-f]{40}#"; then echo "audit: a crate of pencere is in the build from somewhere other than github.com/bateri/pencere at a pinned commit — the kit is taken from pencere alone"; fail=1; fi; \
 	if $(CARGO) tree -p bt-gpu -e normal,dev --depth 1 | grep -E "objc2|dispatch2|block2|metal"; then echo "audit: bt-gpu links directly to a platform library"; fail=1; fi; \
 	if grep -rnE "objc2|dispatch2|block2|metal" crates/bt-gpu/src | grep -v ":[[:space:]]*//"; then echo "audit: platform call in bt-gpu source"; fail=1; fi; \
 	for f in crates/bt-core/src/*.rs; do \
@@ -810,107 +813,10 @@ terminfo:
 #    bound to `/w`, outputs go to `target/linux` (so they do not mix with the
 #    macOS build; `/target/` is already in .gitignore), crate downloads in a
 #    named volume.
-# The page modules (`guest/`): pages that run in the application's sandbox, built for
-# `wasm32-unknown-unknown` and turned into components in `guest/dist/`. The application itself is built
-# with Homebrew's rustc, which has no WebAssembly standard library; the modules are built with
-# rustup's `stable` (`rustup target add wasm32-unknown-unknown --toolchain stable`). Its linker
-# finds its LLVM through the toolchain's library directory, which rustup's own proxies put in
-# the environment and a PATH that Homebrew's rustc comes first in does not: it is put there
-# here. `make check` never builds them (it needs no WebAssembly toolchain); the tests that use
-# the built components stand down where they are missing and run after `make guest`.
-GUEST_MODULES = containers broken chatty
-GUEST_BIN = $(shell dirname "$$(rustup which --toolchain stable cargo 2>/dev/null)" 2>/dev/null)
-GUEST_CARGO = PATH="$(GUEST_BIN):$$PATH" DYLD_FALLBACK_LIBRARY_PATH="$(dir $(GUEST_BIN))lib" $(GUEST_BIN)/cargo
-guest:
-	@command -v rustup >/dev/null 2>&1 || { echo "guest: rustup is missing (the modules are built with its stable toolchain)"; exit 1; }
-	@rustup target list --installed --toolchain stable 2>/dev/null | grep -qx wasm32-unknown-unknown || { echo "guest: rustup's stable toolchain has no wasm32-unknown-unknown target — rustup target add wasm32-unknown-unknown --toolchain stable"; exit 1; }
-	$(GUEST_CARGO) build --manifest-path guest/Cargo.toml --release --target wasm32-unknown-unknown $(addprefix -p ,$(GUEST_MODULES))
-	mkdir -p guest/dist
-	@for m in $(GUEST_MODULES); do \
-		$(GUEST_CARGO) run -q --manifest-path guest/Cargo.toml -p componentize -- guest/target/wasm32-unknown-unknown/release/$$m.wasm guest/dist/$$m.wasm || exit 1; \
-	done
-	@ls -l $(addprefix guest/dist/,$(addsuffix .wasm,$(GUEST_MODULES)))
-	$(GUEST_CARGO) build --manifest-path guest/Cargo.toml --release -p demopen
-	# A new file, not the old one written over: macOS kills a signed binary whose file changed
-	# under its cached signature (a demopen still running in a pane, the next test's exec).
-	rm -f guest/dist/demopen
-	cp guest/target/release/demopen guest/dist/demopen
-	@ls -l guest/dist/demopen
-
-# The demo program (`guest/demopen`) for the servers it is shown on: static musl builds of both
-# Linux architectures, made in containers of their own architecture the way kablo's `make dist`
-# makes its binaries (the other architecture than the machine's runs emulated: slow the first
-# time and exact), into `guest/dist/`. They carry the container list's module (`make guest`
-# builds it first), so one file is all a server needs. Nothing is copied anywhere: putting a
-# binary on a server is a person's to do.
-GUEST_LINUX_TARGETS = aarch64-unknown-linux-musl x86_64-unknown-linux-musl
-GUEST_DOCKERFILE = guest/Dockerfile
-guest-linux: guest
-	@if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then \
-		echo "SKIPPED: Docker is missing or the daemon does not answer — make guest-linux could not run"; exit 78; fi
-	@set -e; for target in $(GUEST_LINUX_TARGETS); do \
-		arch=$${target%%-*}; \
-		case $$arch in x86_64) platform=linux/amd64 want='x86-64';; aarch64) platform=linux/arm64 want='ARM aarch64';; esac; \
-		image="bateri-guest-linux-$$arch"; \
-		echo "==> $$target, in a $$platform container"; \
-		docker build -q --platform $$platform -t $$image -f $(GUEST_DOCKERFILE) guest >/dev/null; \
-		docker run --rm --platform $$platform -v "$(CURDIR)":/w -v bateri-guest-cargo:/usr/local/cargo/registry \
-			-v bateri-guest-cargo-git:/usr/local/cargo/git \
-			-e CARGO_TARGET_DIR=/w/guest/target/linux-$$arch $$image \
-			cargo build --release --locked --manifest-path guest/Cargo.toml -p demopen --target $$target; \
-		cp "guest/target/linux-$$arch/$$target/release/demopen" "guest/dist/demopen-$$target"; \
-		described=$$(docker run --rm --platform $$platform -v "$(CURDIR)/guest/dist":/dist:ro $$image file "/dist/demopen-$$target"); \
-		echo "$$described"; \
-		echo "$$described" | grep -Eq "statically linked|static-pie linked" || { echo "guest-linux: demopen-$$target is not statically linked"; exit 1; }; \
-		echo "$$described" | grep -q "$$want" || { echo "guest-linux: demopen-$$target is not a $$arch binary"; exit 1; }; \
-		docker run --rm --platform $$platform -v "$(CURDIR)/guest/dist":/dist:ro $$image "/dist/demopen-$$target" --json | head -n 2; \
-	done
-	@ls -l guest/dist/demopen-*
-
-# The sandbox against the real modules and the demo program in a real pane: what `make check` takes
-# on faith.
-guest-test: guest
-	$(CARGO) test -p bt-view-wasm guests_tests
-	$(CARGO) test -p bt-shell-common native_view::module
-	$(CARGO) test -p bt-core -- the_demo_program an_interrupt_ends_the_demo a_restart_closes_the_modules a_program_that_floods a_slow_module a_page_sends a_program_whose_kind what_the_page_said what_a_shell_the_pane
-	$(CARGO) test --manifest-path guest/Cargo.toml -p demopen -p bateri-view-messages
-
-# The interpreter of the scripting language (`crates/bt-view-wasm/luau/luau.wasm`): Luau, the bridge
-# that gives a script the page interface, and the preludes that are the language's side of it
-# (`guest/luau`), as a component. It is built in wasi-sdk's own container (the image, the
-# release of Luau and its digest are pinned in `guest/luau/pins`; nothing is installed on this
-# machine but Docker) and kept in the repository, so that building the application and
-# `make check` need no toolchain for WebAssembly. Whenever the interface (`view.wit`) or any of
-# what the module is built from changes, it is built again here — `make audit` fails, naming
-# this target, while it is not — and the scripts people wrote do not: they run on whatever the
-# interpreter has become.
-LUAU_WORK = guest/target/luau
-LUAU_OUT = crates/bt-view-wasm/luau
-luau:
-	@command -v rustup >/dev/null 2>&1 || { echo "luau: rustup is missing (the tools that make the component are built with its stable toolchain)"; exit 1; }
-	@if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then \
-		echo "SKIPPED: Docker is missing or the daemon does not answer — make luau could not run"; exit 78; fi
-	@set -e; . ./guest/luau/pins; \
-	mkdir -p $(LUAU_WORK); \
-	archive=$(LUAU_WORK)/luau-$$LUAU_VERSION.tar.gz; \
-	digest() { shasum -a 256 "$$1" | cut -d' ' -f1; }; \
-	if [ ! -f "$$archive" ] || [ "$$(digest "$$archive")" != "$$LUAU_SHA256" ]; then \
-		curl -fsSL -o "$$archive" "https://github.com/luau-lang/luau/archive/refs/tags/$$LUAU_VERSION.tar.gz"; fi; \
-	[ "$$(digest "$$archive")" = "$$LUAU_SHA256" ] || { echo "luau: the archive of Luau $$LUAU_VERSION is not the one pinned in guest/luau/pins (sha256 $$LUAU_SHA256)"; exit 1; }; \
-	rm -rf $(LUAU_WORK)/src $(LUAU_WORK)/out $(LUAU_WORK)/bindings; \
-	mkdir -p $(LUAU_WORK)/src; \
-	tar -xzf "$$archive" -C $(LUAU_WORK)/src --strip-components=1; \
-	$(GUEST_CARGO) run -q --manifest-path guest/Cargo.toml -p cbindgen -- crates/bt-view-wasm/wit view $(LUAU_WORK)/bindings; \
-	docker run --rm --user "$$(id -u):$$(id -g)" -v "$(CURDIR)/guest/luau":/luau:ro -v "$(CURDIR)/$(LUAU_WORK)":/work \
-		"$$WASI_SDK_IMAGE" sh /luau/build.sh /work/src /work/bindings /work/out; \
-	$(GUEST_CARGO) run -q --manifest-path guest/Cargo.toml -p componentize -- $(LUAU_WORK)/out/luau-core.wasm $(LUAU_OUT)/luau.wasm; \
-	sh guest/luau/inputs.sh >$(LUAU_OUT)/inputs.sha256; \
-	ls -l $(LUAU_OUT)/luau.wasm
-
 LINUX_DOCKERFILE = tools/linux/Dockerfile
 LINUX_RUST = $(shell sed -n 's/^FROM rust:\([0-9]*\.[0-9]*\)-.*/\1/p' $(LINUX_DOCKERFILE))
 LINUX_IMAGE = bateri-linux:$(LINUX_RUST)
-LINUX_CRATES = -p bt-core -p bt-atlas -p bt-gpu -p bt-view -p bt-view-wasm -p bt-shell-common
+LINUX_CRATES = -p bt-core -p bt-atlas -p bt-gpu -p bt-shell-common
 # In a linked worktree `.git` is a file naming the main repository's git directory by its
 # absolute path, which the container does not have: the tests that read the repository would
 # find none. The common git directory is mounted read-only at that same path; in the main

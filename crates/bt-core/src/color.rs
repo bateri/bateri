@@ -94,6 +94,18 @@ impl LinearRgba {
         weigh(r as f64, g as f64, b as f64) as f32
     }
 
+    /// This colour at `alpha` of its opacity laid over `ground`, which is taken for solid: the
+    /// colour the two come to on the screen (blending in linear space, as the renderer does).
+    /// What a surface that names the fills under a line of text asks to find the ground the
+    /// text is read against ([`LinearRgba::legible_on`]); the result is solid.
+    pub fn over(self, alpha: f32, ground: LinearRgba) -> LinearRgba {
+        let alpha = alpha.clamp(0.0, 1.0);
+        let [r, g, b, _] = self.0;
+        let [gr, gg, gb, _] = ground.0;
+        let mix = |top: f32, below: f32| top * alpha + below * (1.0 - alpha);
+        Self([mix(r, gr), mix(g, gg), mix(b, gb), 1.0])
+    }
+
     /// This colour as **ink on `ground`**, moved just far enough that the two
     /// stand at least `minimum` apart ([`ratio`], WCAG 2); unchanged when they
     /// already do, or when `minimum` is `1` or less (the rule is off).
@@ -116,7 +128,7 @@ impl LinearRgba {
     /// Not a second constructor in the sense [`Self::from_srgb`] closes off:
     /// the input is already a linear colour and the result is derived from it
     /// inside the type, so no sRGB float can get in this way.
-    pub(crate) fn legible_on(self, ground: LinearRgba, minimum: f64) -> LinearRgba {
+    pub fn legible_on(self, ground: LinearRgba, minimum: f64) -> LinearRgba {
         let [r, g, b, alpha] = self.0;
         let ink = weigh(r as f64, g as f64, b as f64);
         let [gr, gg, gb, _] = ground.0;
@@ -921,6 +933,15 @@ impl Theme {
 
     const fn separator_rgb(&self) -> Rgb {
         dim_toward(self.quiet_rgb(), self.background_rgb())
+    }
+
+    /// The theme's ANSI color number `index` (`0..=15`: black, red, green, yellow, blue, magenta,
+    /// cyan, white, then the bright eight), **linear** RGBA — the value a program's text in
+    /// that color is drawn in, for a surface that names the palette by its place in it. The
+    /// index is taken modulo sixteen.
+    pub const fn ansi_linear(&self, index: u8) -> LinearRgba {
+        // audit: masked to 0..=15, the palette has sixteen entries.
+        linear_rgba(rgb(self.ansi[(index & 15) as usize]))
     }
 
     /// The **linear** RGBA of the palette's color number `index`.
@@ -2286,6 +2307,39 @@ mod tests {
 
     fn linear(hex: u32) -> LinearRgba {
         linear_hex(hex)
+    }
+
+    #[test]
+    fn a_colour_laid_over_a_ground_is_the_blend_in_linear_space_and_solid() {
+        let (white, black) = (linear(0xffffff), linear(0x000000));
+        // Opaque covers the ground; clear leaves it; half is the linear middle (not sRGB's).
+        assert_eq!(white.over(1.0, black), white);
+        assert_eq!(white.over(0.0, black), black);
+        let [r, g, b, a] = white.over(0.5, black).to_array();
+        assert_eq!([r, g, b, a], [0.5, 0.5, 0.5, 1.0]);
+        // An opacity out of range is the nearest one that is in it.
+        assert_eq!(white.over(2.0, black), white);
+        assert_eq!(white.over(-1.0, black), black);
+        // The ground's own opacity is not read: it is the page's solid ground.
+        let [_, _, _, a] = white.over(0.5, LinearRgba([0.0, 0.0, 0.0, 0.2])).to_array();
+        assert_eq!(a, 1.0);
+    }
+
+    #[test]
+    fn the_ansi_palette_by_number_is_the_themes_own_sixteen() {
+        for theme in [Theme::BATERI, Theme::BATERI_LIGHT, Theme::LINEN] {
+            for index in 0..16u8 {
+                assert_eq!(
+                    theme.ansi_linear(index),
+                    linear(theme.ansi[usize::from(index)]),
+                    "{index}"
+                );
+                // The dock names the same colour by the same number.
+                assert_eq!(theme.ansi_linear(index), theme.indexed_linear(index));
+            }
+            // Past the sixteen it wraps, it does not reach into anything else.
+            assert_eq!(theme.ansi_linear(16), theme.ansi_linear(0));
+        }
     }
 
     #[test]

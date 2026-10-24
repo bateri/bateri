@@ -100,7 +100,6 @@ while IFS= read -r f; do
         areas="$areas ${m%.rs}::"
         ;;
     assets/shell/*) areas="$areas child:: ssh_wrap:: agent::" ;;
-    crates/bt-view/* | crates/bt-view-wasm/* | guest/*) areas="$areas luau_ guests_tests::" ;;
     esac
     case $f in
     crates/bt-shell-macos/src/pencere_view* | crates/bt-core/src/pencere* | \

@@ -1,6 +1,6 @@
-//! A page of the UI kit in a pane: `bt-view`'s draw list on `bt-gpu`'s renderer.
+//! A page of the UI kit in a pane: `pencere-view`'s draw list on `bt-gpu`'s renderer.
 //!
-//! The engine (`bt-view`) writes a page as boxes and lines of text and knows neither the
+//! The engine (`pencere-view`) writes a page as boxes and lines of text and knows neither the
 //! terminal's fonts, nor its colours, nor its renderer. This is where the three meet:
 //!
 //! - **Text** is shaped and measured by the renderer ([`bt_gpu::Renderer::ui_shape`]) — the
@@ -8,7 +8,11 @@
 //!   width of the glyphs on screen. The terminal's own face is the pane's font family.
 //! - **Colours** are the theme's: the engine names a [`Tone`], the theme says what it is
 //!   ([`tone_linear`]) — the arithmetic of colours stays in `bt_core::Theme`, a page keeps
-//!   none, and a theme change is a new list and nothing else.
+//!   none, and a theme change is a new list and nothing else. A colour the page gives as a
+//!   value takes the form that goes with the theme's brightness ([`resolve`]). **The words of
+//!   a page are held to the contrast floor of the program's words in the grid**
+//!   ([`ink`]): the page is the program's, and what it writes is read against the fills under
+//!   it, not against the pane's ground alone.
 //! - **The list** is the renderer's ([`bt_gpu::UiList`]), in pixels, drawn in place of the
 //!   terminal's grid while the page is up ([`bt_gpu::DisplayLink::set_page`]).
 //!
@@ -26,17 +30,21 @@ use bt_gpu::{
     Renderer, ShapedText, TextFamily, TextFontId, TextStyle, UiContext, UiList, UiPage, UiQuad,
     UiRect, tint,
 };
-use bt_view::demo::Containers;
+use containers::Containers;
 
+mod containers;
 mod module;
-pub use bt_view::{
+pub use module::{ModuleHandle, module_page, script_page};
+pub use pencere_sandbox::Limits;
+pub use pencere_view::{
     Button, Cursor, Input, Key, Keyboard, Menu, MenuEntry, Mods, Point, Rect, Reply, Tone,
 };
-use bt_view::{Color, DrawList, Element, Family, Font, Laid, Measure, Metrics, Paint, Quad, Size};
-pub use bt_view_wasm::Limits;
-pub use module::{ModuleHandle, module_page, script_page};
+use pencere_view::{
+    Color, DrawList, Element, Family, Font, Laid, Measure, Metrics, Paint, Quad, Run, Size, Source,
+};
 
-/// What `tone` is in `theme`: the nine roles are the theme's own, the rest are the values it
+/// What `tone` is in `theme`: the nine roles are the theme's own, the sixteen colours of the
+/// ANSI palette and the selection are the ones the grid draws, and the rest are the values it
 /// derives from them (surfaces a step above the ground, the hairline, the shadow's colour).
 pub fn tone_linear(theme: &Theme, tone: Tone) -> LinearRgba {
     match tone {
@@ -53,18 +61,67 @@ pub fn tone_linear(theme: &Theme, tone: Tone) -> LinearRgba {
         Tone::Quiet => theme.quiet_linear(),
         Tone::Line => theme.separator_linear(),
         Tone::Shadow => theme.dock_shadow_linear(),
+        Tone::Selection => theme.selection_linear(),
+        // The sixteen of the palette, by their place in it; a tone that is none of the others
+        // would be the foreground, the colour a theme always has.
+        palette => palette.ansi_index().map_or_else(
+            || theme.foreground_linear(),
+            |index| theme.ansi_linear(index),
+        ),
+    }
+}
+
+/// A colour as the page said it, in `theme`: the colour (solid) and the share of it that shows.
+/// A role is the theme's; a value is the form that goes with the theme's brightness
+/// ([`Theme::is_dark`]) and its own opacity goes with the page's.
+fn parts(theme: &Theme, color: Color) -> (LinearRgba, f32) {
+    match color.source {
+        Source::Role(tone) => (tone_linear(theme, tone), color.alpha),
+        Source::Rgba { .. } => match color.source.value(theme.is_dark()) {
+            Some(value) => (
+                LinearRgba::from_srgb(value.r, value.g, value.b),
+                color.alpha * f32::from(value.a) / 255.0,
+            ),
+            None => (theme.foreground_linear(), color.alpha),
+        },
     }
 }
 
 /// `color` as the renderer takes it: linear straight RGBA.
 pub fn resolve(theme: &Theme, color: Color) -> [f32; 4] {
-    tint(tone_linear(theme, color.tone), color.alpha)
+    let (colour, alpha) = parts(theme, color);
+    tint(colour, alpha)
+}
+
+/// What a line of text is read against: the fills under it laid over each other from the
+/// farthest to the nearest, on the pane's ground — the engine names them nearest first and
+/// stops at the first solid one, so the ground shows only where none is.
+fn ground(theme: &Theme, run: &Run) -> LinearRgba {
+    run.grounds
+        .iter()
+        .rev()
+        .fold(theme.background_linear(), |below, under| {
+            let (colour, alpha) = parts(theme, *under);
+            colour.over(alpha, below)
+        })
+}
+
+/// The colour a line of text is drawn in: the one the page said, moved only as far as it takes
+/// to stand `minimum_contrast` (`[appearance] minimum_contrast`) apart from what it is on
+/// ([`LinearRgba::legible_on`], the rule the program's words in the grid, the fill band and
+/// the dock are drawn by). Lines, fills and borders are not text and are drawn as they are
+/// said ([`resolve`]).
+pub fn ink(theme: &Theme, run: &Run, minimum_contrast: f64) -> [f32; 4] {
+    let (colour, alpha) = parts(theme, run.color);
+    tint(
+        colour.legible_on(ground(theme, run), minimum_contrast),
+        alpha,
+    )
 }
 
 /// The engine's box as the renderer's, moved to `origin` pixels.
 pub fn quad(theme: &Theme, quad: &Quad, origin: (f32, f32)) -> UiQuad {
-    let at =
-        |rect: bt_view::Rect| UiRect::new(rect.x + origin.0, rect.y + origin.1, rect.w, rect.h);
+    let at = |rect: Rect| UiRect::new(rect.x + origin.0, rect.y + origin.1, rect.w, rect.h);
     let mut out = UiQuad::new(at(quad.rect))
         .radii(quad.radii)
         .clip(at(quad.clip));
@@ -83,6 +140,18 @@ pub fn quad(theme: &Theme, quad: &Quad, origin: (f32, f32)) -> UiQuad {
         );
     }
     out
+}
+
+/// Where the page modules the sandbox is tried with are, in a development tree: the
+/// `BT_VIEW_GUEST_DIR` folder, else `kit/guest/dist` of the pencere checkout that sits beside this
+/// one, where `make guest` builds them (bateri carries no module of its own). The debug menu's
+/// demos and the tests that need a real module read it; one that is not there is skipped.
+#[cfg(any(test, debug_assertions))]
+pub fn guest_dir() -> std::path::PathBuf {
+    std::env::var_os("BT_VIEW_GUEST_DIR").map_or_else(
+        || std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../pencere/kit/guest/dist"),
+        std::path::PathBuf::from,
+    )
 }
 
 /// What a pane drives a page of the kit by, whatever the page is made of: one that lives in this
@@ -181,10 +250,12 @@ impl Measure for Typeset<'_> {
     }
 }
 
-/// The draw list on the renderer's, at `origin` pixels of the surface.
+/// The draw list on the renderer's, at `origin` pixels of the surface, its words held to
+/// `minimum_contrast` ([`ink`]).
 fn to_list(
     renderer: &Renderer,
     theme: &Theme,
+    minimum_contrast: f64,
     typeset: &mut Typeset<'_>,
     draws: &DrawList,
     origin: (f32, f32),
@@ -207,10 +278,16 @@ fn to_list(
                     &mut list,
                     line,
                     [run.origin.x + origin.0, run.origin.y + origin.1],
-                    resolve(theme, run.color),
+                    ink(theme, run, minimum_contrast),
                     clip,
                 );
             }
+            // A picture has its box laid out (`Measure::image` knows none, so it is the room
+            // its style gives it) and nothing drawn in it: the renderer has no textured
+            // rectangle yet. Its twin of `Paint::Quad` will take the file's decoded pixels
+            // (`pencere_sandbox::Images`, which is also what sizes the file for the layout),
+            // the tint through `resolve` and the corners and the clip as a box has them.
+            Paint::Image(_) => {}
         }
     }
     list
@@ -256,9 +333,16 @@ impl<F: FnMut(Size) -> Element> UiPage for EnginePage<F> {
             terminal: &self.terminal,
             shaped: &mut self.shaped,
         };
-        let laid = bt_view::layout(root, Size::new(width, height), scale, &mut typeset);
+        let laid = pencere_view::layout(root, Size::new(width, height), scale, &mut typeset);
         let draws = laid.paint(&mut typeset);
-        to_list(cx.renderer, cx.theme, &mut typeset, &draws, (0.0, inset))
+        to_list(
+            cx.renderer,
+            cx.theme,
+            cx.minimum_contrast,
+            &mut typeset,
+            &draws,
+            (0.0, inset),
+        )
     }
 }
 
@@ -278,7 +362,7 @@ pub fn containers_demo(
 ) -> (Box<dyn UiPage>, ContainersHandle) {
     let shared = Rc::new(RefCell::new(Shared {
         page: Containers::fixture(),
-        laid: bt_view::layout(bt_view::div(), Size::new(1.0, 1.0), 1.0, &mut NoText),
+        laid: pencere_view::layout(pencere_view::div(), Size::new(1.0, 1.0), 1.0, &mut NoText),
         inset,
         field: None,
         on_field: None,
@@ -454,7 +538,7 @@ impl UiPage for ContainersPage {
         let (list, told) = {
             let mut shared = self.shared.borrow_mut();
             shared.page.advance(cx.now, cx.reduce_motion);
-            let mut laid = bt_view::layout(
+            let mut laid = pencere_view::layout(
                 shared.page.view(size),
                 Size::new(width, height),
                 scale,
@@ -464,7 +548,7 @@ impl UiPage for ContainersPage {
                 if !shared.page.settle(&laid) {
                     break;
                 }
-                laid = bt_view::layout(
+                laid = pencere_view::layout(
                     shared.page.view(size),
                     Size::new(width, height),
                     scale,
@@ -472,7 +556,14 @@ impl UiPage for ContainersPage {
                 );
             }
             let draws = laid.paint(&mut typeset);
-            let list = to_list(cx.renderer, cx.theme, &mut typeset, &draws, (0.0, inset));
+            let list = to_list(
+                cx.renderer,
+                cx.theme,
+                cx.minimum_contrast,
+                &mut typeset,
+                &draws,
+                (0.0, inset),
+            );
             // The field's room, in the pane's points: the strip's room above the page is added.
             let field = laid
                 .text_field()
@@ -499,7 +590,8 @@ impl UiPage for ContainersPage {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bt_view::{Border, Rect, Shadow};
+    use bt_core::MINIMUM_CONTRAST;
+    use pencere_view::{Border, Rect, Shadow};
 
     const THEMES: [Theme; 3] = [Theme::BATERI, Theme::BATERI_LIGHT, Theme::LINEN];
 
@@ -537,6 +629,206 @@ mod tests {
         let [r, g, b, _] = theme.accent_linear().to_array();
         assert_eq!(resolve(&theme, Tone::Accent.alpha(0.13)), [r, g, b, 0.13]);
         assert_eq!(resolve(&theme, Tone::Accent.solid())[3], 1.0);
+    }
+
+    #[test]
+    fn the_palette_and_the_selection_are_the_grids_own_colours() {
+        for theme in THEMES {
+            for (index, tone) in Tone::ANSI.into_iter().enumerate() {
+                let [r, g, b] = [16, 8, 0].map(|shift| {
+                    u8::try_from((theme.ansi[index] >> shift) & 0xff).expect("a byte")
+                });
+                assert_eq!(
+                    tone_linear(&theme, tone),
+                    LinearRgba::from_srgb(r, g, b),
+                    "{tone:?}"
+                );
+            }
+            assert_eq!(
+                tone_linear(&theme, Tone::Selection),
+                theme.selection_linear()
+            );
+        }
+        // The sixteen are different colours, so a tone is not answered by a neighbour's.
+        let theme = Theme::BATERI;
+        assert_ne!(
+            tone_linear(&theme, Tone::Red),
+            tone_linear(&theme, Tone::BrightRed)
+        );
+        assert_ne!(
+            tone_linear(&theme, Tone::Red),
+            tone_linear(&theme, Tone::Green)
+        );
+    }
+
+    #[test]
+    fn a_value_takes_the_form_that_goes_with_the_themes_brightness_and_keeps_its_own_opacity() {
+        use pencere_view::Rgba;
+        let colour = Rgba::rgb(0x10, 0x20, 0x30).or_dark(Rgba::new(0xe0, 0xd0, 0xc0, 0x80));
+        // The dark form on a dark theme, with the value's opacity under the page's.
+        let dark = resolve(&Theme::BATERI, colour);
+        let [r, g, b, _] = LinearRgba::from_srgb(0xe0, 0xd0, 0xc0).to_array();
+        assert_eq!(dark[..3], [r, g, b]);
+        assert!((dark[3] - 128.0 / 255.0).abs() < 1e-6, "{dark:?}");
+        // The light form on a light theme, solid.
+        let light = resolve(&Theme::BATERI_LIGHT, colour);
+        let [r, g, b, _] = LinearRgba::from_srgb(0x10, 0x20, 0x30).to_array();
+        assert_eq!(light, [r, g, b, 1.0]);
+        // A page's alpha on top of a value's.
+        let faded = resolve(
+            &Theme::BATERI,
+            Color {
+                alpha: 0.5,
+                ..Rgba::new(1, 2, 3, 128).solid()
+            },
+        );
+        assert!((faded[3] - 0.5 * 128.0 / 255.0).abs() < 1e-6, "{faded:?}");
+        // A value that gives no dark form is the same on a dark theme.
+        let same = Rgba::rgb(9, 9, 9).solid();
+        assert_eq!(
+            resolve(&Theme::BATERI, same)[..3],
+            resolve(&Theme::BATERI_LIGHT, same)[..3]
+        );
+    }
+
+    /// A line of `text` in `color` standing on `grounds`, nearest first.
+    fn run(color: Color, grounds: Vec<Color>) -> Run {
+        Run {
+            origin: Point::new(0.0, 0.0),
+            text: "text".to_owned(),
+            font: Font {
+                family: Family::System,
+                size: 13.0,
+                weight: 400,
+            },
+            color,
+            grounds,
+            clip: Rect::new(0.0, 0.0, 100.0, 20.0),
+        }
+    }
+
+    #[test]
+    fn a_word_is_held_to_the_floor_against_the_fill_it_stands_on_and_not_the_panes_ground() {
+        use pencere_view::Rgba;
+        let theme = Theme::BATERI;
+        // Text that reads on the pane's ground stands too close to a fill of its own colour.
+        let text = Rgba::rgb(0xe0, 0xe0, 0xe0).solid();
+        let on_ground = run(text, Vec::new());
+        assert_eq!(
+            ink(&theme, &on_ground, 3.0),
+            resolve(&theme, text),
+            "it reads on the ground"
+        );
+        let on_fill = run(text, vec![Rgba::rgb(0xe8, 0xe8, 0xe8).solid()]);
+        let moved = ink(&theme, &on_fill, 3.0);
+        assert_ne!(moved, resolve(&theme, text), "it does not read on its fill");
+        let fill = LinearRgba::from_srgb(0xe8, 0xe8, 0xe8);
+        let [r, g, b, a] = moved;
+        assert_eq!(a, 1.0, "the colour moves, its opacity does not");
+        // The moved colour is the grid's rule applied to the same two colours.
+        assert_eq!([r, g, b], {
+            let [r, g, b, _] = LinearRgba::from_srgb(0xe0, 0xe0, 0xe0)
+                .legible_on(fill, 3.0)
+                .to_array();
+            [r, g, b]
+        });
+        // The rule is off at 1.
+        assert_eq!(ink(&theme, &on_fill, 1.0), resolve(&theme, text));
+    }
+
+    #[test]
+    fn the_fills_under_a_word_are_laid_over_each_other_from_the_farthest_to_the_nearest() {
+        use pencere_view::Rgba;
+        let theme = Theme::BATERI;
+        // A half-clear white over a solid black card is a grey; the card over the ground
+        // would be black. Red text reads against the grey, not against either.
+        let grounds = vec![
+            Color {
+                alpha: 0.5,
+                ..Rgba::rgb(0xff, 0xff, 0xff).solid()
+            },
+            Rgba::rgb(0, 0, 0).solid(),
+        ];
+        let seen = ground(&theme, &run(Tone::Foreground.solid(), grounds));
+        let mix = LinearRgba::from_srgb(0xff, 0xff, 0xff).over(0.5, LinearRgba::from_srgb(0, 0, 0));
+        assert_eq!(seen, mix);
+        // With no fill at all the ground is the pane's; a clear fill leaves it as it was.
+        let bare = ground(&theme, &run(Tone::Foreground.solid(), Vec::new()));
+        assert_eq!(bare, theme.background_linear());
+        let clear = ground(
+            &theme,
+            &run(Tone::Foreground.solid(), vec![Tone::Accent.alpha(0.0)]),
+        );
+        assert_eq!(clear, theme.background_linear());
+    }
+
+    /// The container list, laid out and painted with a stand-in for the renderer's text.
+    fn container_list(size: Size) -> DrawList {
+        struct Mono;
+        impl Measure for Mono {
+            fn measure(&mut self, font: &Font, text: &str) -> Metrics {
+                Metrics {
+                    width: text.chars().count() as f32 * font.size * 0.55,
+                    height: font.size * 1.3,
+                }
+            }
+        }
+        let laid = pencere_view::layout(Containers::fixture().view(size), size, 1.0, &mut Mono);
+        laid.paint(&mut Mono)
+    }
+
+    /// WCAG 2's ratio between the colour a word is drawn in and what it stands on.
+    fn read_against(theme: &Theme, run: &Run, drawn: [f32; 4]) -> f64 {
+        let weigh = |c: [f32; 4]| {
+            0.2126 * f64::from(c[0]) + 0.7152 * f64::from(c[1]) + 0.0722 * f64::from(c[2])
+        };
+        let (word, under) = (weigh(drawn), f64::from(ground(theme, run).luminance()));
+        (word.max(under) + 0.05) / (word.min(under) + 0.05)
+    }
+
+    #[test]
+    fn every_word_of_the_container_list_reads_at_the_floor_in_every_theme() {
+        let sizes = [Size::new(1400.0, 800.0), Size::new(700.0, 600.0)];
+        let mut words = 0;
+        for name in Theme::embedded_names() {
+            let theme = Theme::embedded(name).expect("an embedded theme");
+            for size in sizes {
+                for item in &container_list(size).items {
+                    let Paint::Text(run) = item else { continue };
+                    words += 1;
+                    let ratio = read_against(&theme, run, ink(&theme, run, MINIMUM_CONTRAST));
+                    assert!(
+                        ratio >= MINIMUM_CONTRAST - 1e-3,
+                        "{name}: {:?} on {:?} reads at {ratio:.2}",
+                        run.color.source,
+                        run.grounds.first().map(|g| g.source)
+                    );
+                }
+            }
+        }
+        assert!(words > 1000, "the themes' pages had words: {words}");
+    }
+
+    #[test]
+    fn the_floor_moves_a_word_only_where_it_cannot_be_read_and_only_as_far_as_it_takes() {
+        let theme = Theme::BATERI_LIGHT;
+        let mut moved = 0;
+        for item in &container_list(Size::new(1400.0, 800.0)).items {
+            let Paint::Text(run) = item else { continue };
+            let said = resolve(&theme, run.color);
+            let held = ink(&theme, run, MINIMUM_CONTRAST);
+            if read_against(&theme, run, said) >= MINIMUM_CONTRAST {
+                assert_eq!(held, said, "a word that reads is drawn as it is said");
+            } else {
+                moved += 1;
+                let ratio = read_against(&theme, run, held);
+                assert!(
+                    (ratio - MINIMUM_CONTRAST).abs() < 1e-2,
+                    "just far enough: {ratio:.3}"
+                );
+            }
+        }
+        assert!(moved > 0, "the light theme's quiet ink is below the floor");
     }
 
     #[test]
@@ -589,6 +881,7 @@ mod tests {
             theme: &theme,
             now: 0.0,
             reduce_motion: false,
+            minimum_contrast: MINIMUM_CONTRAST,
         };
         let (mut page, _) = containers_demo(None, 32.0);
         let list = page.build(&cx);
@@ -611,7 +904,7 @@ mod tests {
 
     #[test]
     fn the_strips_room_is_not_the_pages_and_a_menu_comes_back_in_the_panes_points() {
-        use bt_view::{Button, Menu, Mods};
+        use pencere_view::{Button, Menu, Mods};
         let moved = into_page(Input::Move(Point::new(10.0, 50.0)), 32.0);
         assert_eq!(moved, Input::Move(Point::new(10.0, 18.0)));
         let pressed = into_page(
@@ -641,8 +934,8 @@ mod tests {
     fn the_keyboard_is_answered_before_the_first_frame() {
         let (_page, handle) = containers_demo(None, 32.0);
         let escape = Input::Key {
-            key: bt_view::Key::Escape,
-            mods: bt_view::Mods::default(),
+            key: pencere_view::Key::Escape,
+            mods: pencere_view::Mods::default(),
         };
         assert!(handle.input(escape).close);
         assert_eq!(handle.field(), None, "no frame, no place for the field");
@@ -656,8 +949,8 @@ mod tests {
         let drive: &dyn PageDrive = &handle;
         drive.send_input(Input::Move(Point::new(5.0, 50.0)));
         drive.send_input(Input::Key {
-            key: bt_view::Key::Escape,
-            mods: bt_view::Mods::default(),
+            key: pencere_view::Key::Escape,
+            mods: pencere_view::Mods::default(),
         });
         drive.send_query("api");
         let mut said = Vec::new();
@@ -693,6 +986,7 @@ mod tests {
                 theme: &theme,
                 now,
                 reduce_motion,
+                minimum_contrast: MINIMUM_CONTRAST,
             })
         };
         let (mut page, handle) = containers_demo(None, 32.0);
@@ -714,10 +1008,10 @@ mod tests {
         let middle = Point::new(field.x + field.w / 2.0, field.y + field.h / 2.0);
         let press = handle.input(Input::Press {
             at: middle,
-            button: bt_view::Button::Left,
-            mods: bt_view::Mods::default(),
+            button: pencere_view::Button::Left,
+            mods: pencere_view::Mods::default(),
         });
-        assert_eq!(press.keyboard, Some(bt_view::Keyboard::Filter));
+        assert_eq!(press.keyboard, Some(pencere_view::Keyboard::Filter));
 
         // The pointer over a row: one frame's worth of change, then fades until they end.
         let over_a_row = Point::new(300.0, 32.0 + 150.0);

@@ -11970,6 +11970,14 @@ impl Session {
         self.adapter.view(|conversation| conversation.state())
     }
 
+    /// The least contrast ratio a program's text keeps against its own ground
+    /// (`[appearance] minimum_contrast`; `1` = off), as it was last set
+    /// ([`Session::set_minimum_contrast`]): what a surface that draws the program's text
+    /// itself, a view over the grid, holds the text to.
+    pub fn minimum_contrast(&self) -> f64 {
+        f64::from_bits(self.minimum_contrast.load(Ordering::Relaxed))
+    }
+
     /// Sets the least contrast ratio a program's text keeps against its own
     /// ground (`[appearance] minimum_contrast`; `1` = off) and requests a
     /// frame — the next frame's grid, fill band and dock are drawn with it.
@@ -30658,12 +30666,12 @@ e\\314\\201.'; sleep 5";
         }
 
         /// The frames among it.
-        fn written(&self) -> Vec<::pencere::frame::Message> {
+        fn written(&self) -> Vec<::pencere_host::frame::Message> {
             crate::pencere::tests::decoded(&self.input())
         }
 
         /// Waits until the session has written `count` frames; returns them.
-        fn wait_written(&self, count: usize) -> Vec<::pencere::frame::Message> {
+        fn wait_written(&self, count: usize) -> Vec<::pencere_host::frame::Message> {
             let mut frames = Vec::new();
             wait_until("the session's frames", Duration::from_secs(10), || {
                 frames = self.written();
@@ -31646,7 +31654,7 @@ e\\314\\201.'; sleep 5";
     fn an_answer_to_a_question_taken_back_settles_no_other() {
         use crate::pencere::tests::{bundle_open_declaring, hello, page_file, token_of, wire};
         use crate::pencere::{Action, Consent, State};
-        use ::pencere::frame::Message;
+        use ::pencere_host::frame::Message;
 
         /// The first frame from `from` on that `wanted` takes.
         fn next(program: &Playing, from: usize, wanted: impl Fn(&Message) -> bool) -> Message {

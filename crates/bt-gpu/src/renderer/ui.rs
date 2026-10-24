@@ -238,6 +238,10 @@ pub struct UiContext<'a> {
     pub now: f64,
     /// Reduce Motion is on: a page that animates snaps instead.
     pub reduce_motion: bool,
+    /// The least contrast ratio the text of a page keeps against what it stands on
+    /// (`[appearance] minimum_contrast`; `1` = off): the page is a program's, and its words are
+    /// held to the same floor the program's words in the grid are.
+    pub minimum_contrast: f64,
 }
 
 /// Something that fills a pane's surface with a [`UiList`] instead of the

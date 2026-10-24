@@ -3,7 +3,7 @@
 //! the host's text.
 
 use super::*;
-use crate::{
+use pencere_view::{
     Button, Cursor, Font, Input, Key, Keyboard, Laid, Measure, MenuEntry, Metrics, Mods, Point,
     Reply, layout,
 };
@@ -199,7 +199,7 @@ fn the_filter_narrows_the_list_and_the_cursor_goes_to_the_nearest_row_left() {
     assert_eq!(cursor(&page), None);
     let laid = lay(&mut page, 600.0);
     assert!(
-        crate::layout::layout(
+        pencere_view::layout(
             page.view(Size::new(1000.0, 600.0)),
             Size::new(1000.0, 600.0),
             1.0,
@@ -208,7 +208,7 @@ fn the_filter_narrows_the_list_and_the_cursor_goes_to_the_nearest_row_left() {
         .paint(&mut Mono)
         .items
         .iter()
-        .any(|item| matches!(item, crate::Paint::Text(run) if run.text.contains("zzz")))
+        .any(|item| matches!(item, pencere_view::Paint::Text(run) if run.text.contains("zzz")))
     );
     let _ = laid;
     // The same words again change nothing, and clearing brings the list back.

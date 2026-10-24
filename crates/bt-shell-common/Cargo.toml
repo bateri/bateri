@@ -19,9 +19,9 @@ bt-core = { workspace = true }
 bt-gpu = { workspace = true }
 # The UI kit's page engine (`native_view`): the bridge that puts its draw list on the
 # renderer. No platform library, no other crate of the workspace.
-bt-view = { workspace = true }
+pencere-view = { workspace = true }
 # The sandbox a page module runs in (`native_view::module`): platformless, like the engine.
-bt-view-wasm = { path = "../bt-view-wasm" }
+pencere-sandbox = { workspace = true }
 # The passwd entry (`child`, `getpwuid_r`), the process table (`jobs`: the
 # `libproc` half and `sysctl(KERN_PROCARGS2)` on macOS), `upload`'s
 # `kill`/`waitid` and `watch` (`O_EVTONLY` on macOS; inotify, `eventfd`

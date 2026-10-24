@@ -237,7 +237,7 @@ impl<'a, U: EventListener> ClusterHandler<'a, U> {
     /// it — not where the frame path's atomic says, which is the last drawn
     /// frame's — and the parser stops right behind it, for the answer is not
     /// for the terminal's lock ([`ClusterHandler::resume`]).
-    fn park_message(&mut self, message: ::pencere::frame::Message) {
+    fn park_message(&mut self, message: ::pencere_host::frame::Message) {
         let Some(desk) = self.graphics.and_then(|graphics| graphics.desk()) else {
             return;
         };

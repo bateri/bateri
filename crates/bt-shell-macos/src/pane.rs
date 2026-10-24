@@ -5441,8 +5441,9 @@ impl TerminalPane {
     }
 
     /// Debug ▸ Show Container List Demo (WASM) and Show Broken Page Demo (WASM): the same page
-    /// ([`TerminalPane::toggle_container_demo`]) made by a module in the sandbox (`guest/`, built
-    /// by `make guest`), or the module that goes wrong on purpose. Whatever ends the module — a
+    /// ([`TerminalPane::toggle_container_demo`]) made by a module in the sandbox (built by
+    /// `make guest` in the pencere checkout, [`bt_shell_common::native_view::guest_dir`]), or the
+    /// module that goes wrong on purpose. Whatever ends the module — a
     /// loop that never returns, memory without end, a trap — the pane is the terminal's again.
     #[cfg(debug_assertions)]
     pub(crate) fn toggle_module_demo(&self, module: &'static str) {
@@ -5485,7 +5486,7 @@ impl TerminalPane {
                     Ok(bytes) => Some(bytes),
                     Err(why) => {
                         eprintln!(
-                            "bateri: the page module {} could not be read ({why}); `make guest` builds it",
+                            "bateri: the page module {} could not be read ({why}); `make guest` in the pencere checkout builds it",
                             path.display()
                         );
                         return;

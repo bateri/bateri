@@ -56,16 +56,18 @@ use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use ::pencere::frame::Message;
-use ::pencere::session::{Config, Observed, Offer, Session as Conversation};
-use ::pencere::theme::{Rgb, Theme as ViewTheme};
-use ::pencere::token::Entropy;
+use ::pencere_host::frame::Message;
+use ::pencere_host::session::{Config, Observed, Offer, Session as Conversation};
+use ::pencere_host::theme::{Rgb, Theme as ViewTheme};
+use ::pencere_host::token::Entropy;
 
-pub use ::pencere::bundle::{Digest, Store, Verified};
-pub use ::pencere::icon;
-pub use ::pencere::message::HostInfo;
-pub use ::pencere::sandbox::{Consent, Declared, Directive, Domain, Grant, Locality, Permission};
-pub use ::pencere::session::{
+pub use ::pencere_host::bundle::{Digest, Store, Verified};
+pub use ::pencere_host::icon;
+pub use ::pencere_host::message::HostInfo;
+pub use ::pencere_host::sandbox::{
+    Consent, Declared, Directive, Domain, Grant, Locality, Permission,
+};
+pub use ::pencere_host::session::{
     Action, MAX_VIEW_MESSAGE, Size, State, ViewKind, ViewStart, WEB_BRIDGE_VERSION,
 };
 
@@ -136,10 +138,11 @@ impl fmt::Debug for DropShown {
 pub const DEFAULT_FONT_MONO: &str = "\"SF Mono\", Menlo, monospace";
 
 /// The version of the component interface a `wasm` view is written against: the semver line of
-/// the `bateri:view` package (`0.5` stands for `0.5.x`).
-pub const WASM_VERSION: &str = "0.5";
+/// the `pencere:view` package (`1.0` stands for `1.0.x`).
+pub const WASM_VERSION: &str = "1.0";
 
-/// The version of the Lua API a `lua` view is written against: the prelude's `bateri.version`.
+/// The version of the Lua API a `lua` view is written against: the prelude's `pencere.version`
+/// (`1` is `1.0`).
 pub const LUA_VERSION: &str = "1.0";
 
 /// The bytes the in-memory shelf keeps before the oldest go. A view's bundle is
@@ -611,6 +614,10 @@ pub(crate) fn view_theme(theme: &Theme, font_mono: &str) -> ViewTheme {
     view.error = Some(role(theme.error));
     view.warning = Some(role(theme.warning));
     view.info = Some(role(theme.info));
+    // The sixteen colours of the palette and the selection are the theme's own too: a page
+    // that draws a syntax or a status in the terminal's colours gets the ones the grid does.
+    view.selection = Some(role(theme.selection));
+    view.ansi = Some(theme.ansi.map(role));
     view
 }
 

@@ -68,7 +68,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
-use ::pencere::frame::{BodyDecoder, Direction, Event, Message};
+use ::pencere_host::frame::{BodyDecoder, Direction, Event, Message};
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::term::Term;
 

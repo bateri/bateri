@@ -4,18 +4,16 @@
 //! title, the filter, the tabs of what to show; beside it the sections' rail; below it the
 //! line of keys.
 //!
-//! The data is fixed (`Containers::fixture`) — the page is the gauge of the engine, not a
+//! The data is fixed (`Containers::fixture`) — the page is a sample of what the engine does, not a
 //! client of anything — and the page is a function of the size it is given: a narrower pane
 //! drops the columns that matter least, the way the list this was drawn from does, and a
 //! narrow one drops the rail too.
 
-use crate::{Align, Element, Id, Rows, Size, Tone, Track, Ui, div, spacer, spark, text};
+use pencere_view::{Align, Element, Id, Rows, Size, Tone, Track, Ui, div, spacer, spark, text};
 
 mod interact;
-mod live;
 
 use interact::{Row, RowKey, Status, What};
-pub use live::{Reading, readings};
 
 /// The rail folds away under this page width, points.
 const RAIL_BELOW: f32 = 780.0;
@@ -172,14 +170,14 @@ pub struct Containers {
     ui: Ui,
     /// Where the pointer last was over the page, points: the hover is asked again where it
     /// stands when the page moves under it.
-    pointer: Option<crate::Point>,
+    pointer: Option<pencere_view::Point>,
     /// How tall the list's window was when the page was last laid out, points.
     list_view: f32,
     /// What the entries of the menu that is up do, by entry; and the containers they do it to.
     menu: interact::MenuState,
     /// The modifiers held when the last button went down: a click on a project's row folds it
     /// unless it was a click that marks.
-    press_mods: crate::Mods,
+    press_mods: pencere_view::Mods,
     /// Reduce Motion, as of the last frame: a change snaps.
     reduce_motion: bool,
 }
@@ -328,7 +326,7 @@ impl Containers {
             pointer: None,
             list_view: 400.0,
             menu: interact::MenuState::default(),
-            press_mods: crate::Mods::default(),
+            press_mods: pencere_view::Mods::default(),
             reduce_motion: false,
         };
         // The choice starts shown, not fading in.
@@ -336,11 +334,6 @@ impl Containers {
             page.ui.fades.snap(key.id().role(CHOSEN), 1.0);
         }
         page
-    }
-
-    /// The containers of the list, in the order the page keeps them.
-    pub fn containers(&self) -> &[Container] {
-        &self.containers
     }
 
     /// The page for a pane of `size` points.
@@ -1144,7 +1137,7 @@ mod interact_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Family, Font, Measure, Metrics, Paint, layout};
+    use pencere_view::{Family, Font, Measure, Metrics, Paint, layout};
 
     /// A stand-in for the host's text: every character `0.55 × size` wide.
     struct Mono;
@@ -1158,7 +1151,7 @@ mod tests {
         }
     }
 
-    fn page(width: f32, height: f32, scale: f32) -> (crate::Laid, crate::DrawList) {
+    fn page(width: f32, height: f32, scale: f32) -> (pencere_view::Laid, pencere_view::DrawList) {
         let view = Containers::fixture().view(Size::new(width, height));
         let laid = layout(
             view,
@@ -1170,12 +1163,12 @@ mod tests {
         (laid, list)
     }
 
-    fn words(list: &crate::DrawList) -> Vec<String> {
+    fn words(list: &pencere_view::DrawList) -> Vec<String> {
         list.items
             .iter()
             .filter_map(|item| match item {
                 Paint::Text(run) => Some(run.text.clone()),
-                Paint::Quad(_) => None,
+                Paint::Quad(_) | Paint::Image(_) => None,
             })
             .collect()
     }
@@ -1262,9 +1255,11 @@ mod tests {
                 for item in &list.items {
                     let (rect, clip) = match item {
                         Paint::Quad(q) => (q.rect, q.clip),
-                        Paint::Text(r) => {
-                            (crate::Rect::new(r.origin.x, r.origin.y, 1.0, 1.0), r.clip)
-                        }
+                        Paint::Image(p) => (p.rect, p.clip),
+                        Paint::Text(r) => (
+                            pencere_view::Rect::new(r.origin.x, r.origin.y, 1.0, 1.0),
+                            r.clip,
+                        ),
                     };
                     // What is drawn is what the clip lets through.
                     let seen = rect.intersect(clip);
@@ -1294,7 +1289,7 @@ mod tests {
                 .iter()
                 .filter(|item| {
                     matches!(item, Paint::Quad(q) if q.fill.is_none()
-                        && q.border.is_some_and(|b| b.color.tone == tone && b.width == 3.0))
+                        && q.border.is_some_and(|b| b.color.role() == Some(tone) && b.width == 3.0))
                 })
                 .count()
         };
@@ -1307,7 +1302,7 @@ mod tests {
         let (_, list) = page(1000.0, 600.0, 2.0);
         assert!(list.items.iter().all(|item| match item {
             Paint::Text(run) => run.font.family == Family::Terminal,
-            Paint::Quad(_) => true,
+            Paint::Quad(_) | Paint::Image(_) => true,
         }));
     }
 }
