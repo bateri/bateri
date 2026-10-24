@@ -27,6 +27,7 @@
 //! [`Chain`], allocated once for a (picture, tile) pair and kept for as many
 //! snapshots as it fits; dropping the chain gives them back.
 
+use super::ui::UiList;
 use super::*;
 
 /// The most halvings a chain will make: `2¹²` is far past any picture the
@@ -366,6 +367,42 @@ impl Renderer {
         size: (u32, u32),
         tile: (u32, u32),
     ) -> Result<Vec<u8>, GpuError> {
+        self.snapshot_of(chain, size, tile, |full| {
+            self.encode(full, clear, frame, None).map(drop)
+        })
+    }
+
+    /// A page's `list` as a `tile`-sized picture: [`Renderer::snapshot`] for a pane that shows a
+    /// page in place of its grid. `list` is in pixels of a `size` surface, as the page built it.
+    ///
+    /// **A reading of the last frame, not a frame of its own**: the image textures the list
+    /// names are the live ones (made when the page handed their pixels over, kept while the
+    /// lists drawn name them), used where they stand and never made, replaced or let go of here
+    /// — `list` is the one the last frame drew, so what it needs is already held, and a texture
+    /// that is not is left out of the picture. The text atlas is read the same way. The sizes,
+    /// the errors and the counters are [`Renderer::snapshot`]'s.
+    pub(crate) fn snapshot_ui(
+        &self,
+        chain: &mut Option<Chain>,
+        clear: LinearRgba,
+        list: &UiList,
+        size: (u32, u32),
+        tile: (u32, u32),
+    ) -> Result<Vec<u8>, GpuError> {
+        self.snapshot_of(chain, size, tile, |full| {
+            self.encode_ui(full, clear, list, false).map(drop)
+        })
+    }
+
+    /// The error scopes and the chain of a snapshot, around `draw` — what puts the picture into
+    /// the chain's full-size target.
+    fn snapshot_of(
+        &self,
+        chain: &mut Option<Chain>,
+        size: (u32, u32),
+        tile: (u32, u32),
+        draw: impl FnOnce(&Target) -> Result<(), GpuError>,
+    ) -> Result<Vec<u8>, GpuError> {
         if size.0 == 0 || size.1 == 0 || tile.0 == 0 || tile.1 == 0 {
             return Err(GpuError::Wgpu("a snapshot of nothing".into()));
         }
@@ -377,7 +414,7 @@ impl Renderer {
             .gpu
             .device
             .push_error_scope(wgpu::ErrorFilter::Validation);
-        let result = self.snapshot_in(chain, clear, frame, size, tile);
+        let result = self.snapshot_in(chain, size, tile, draw);
         let errors = [block_on(validation.pop()), block_on(memory.pop())];
         if let Some(error) = errors.into_iter().flatten().next() {
             *chain = None;
@@ -389,20 +426,19 @@ impl Renderer {
         result
     }
 
-    /// [`Renderer::snapshot`] inside its error scopes.
+    /// [`Renderer::snapshot_of`] inside its error scopes.
     fn snapshot_in(
         &self,
         chain: &mut Option<Chain>,
-        clear: LinearRgba,
-        frame: &Frame,
         size: (u32, u32),
         tile: (u32, u32),
+        draw: impl FnOnce(&Target) -> Result<(), GpuError>,
     ) -> Result<Vec<u8>, GpuError> {
         if !chain.as_ref().is_some_and(|chain| chain.fits(size, tile)) {
             *chain = None;
         }
         let chain = chain.get_or_insert_with(|| Chain::new(self.gpu, size, tile));
-        self.encode(&chain.full, clear, frame, None)?;
+        draw(&chain.full)?;
         chain.reduce(self.gpu)
     }
 }

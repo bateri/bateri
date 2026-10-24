@@ -3169,7 +3169,10 @@ impl TerminalPane {
     /// the web view's own, asked for and kept (`pencere_view::still`). The view takes its first
     /// picture when it has loaded, so there is one almost always; for the call or two before
     /// any has come (or after the card let go of them) the pane's terminal is what the tile
-    /// shows, below, since a tile is never empty.
+    /// shows, below, since a tile is never empty. **A page of the kit's own** (a view bateri
+    /// draws, `crate::native_page`) is its last drawn picture, images among it, kept by the
+    /// link for the purpose: the page is not asked to build or move, and until it has drawn
+    /// the terminal is the picture, as for the web view.
     pub fn snapshot(&self, size: (f64, f64), scale: f64) -> Option<CFRetained<CGImage>> {
         let tile = |points: f64| (points * scale).round().max(1.0) as u32;
         if let Some(host) = self.view_host()

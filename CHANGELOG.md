@@ -55,6 +55,10 @@ of every installed copy. A version without a section is not released.
   still as it moves or the pane is resized, and a cropped one shows nothing from beyond its
   edge. Faint text (a colour at a low opacity) is held to `minimum_contrast` as it shows on
   its background, not as the colour alone would.
+- **A tab's card shows a view that bateri draws.** Hovering over a tab, or opening the
+  overview, shows a pane whose program has opened a view of its own (a WebAssembly module or
+  a Lua script) as that view, images included, not the terminal behind it. The card shows the
+  view as it is on screen; a view that has not drawn yet shows the terminal for a moment.
 
 ### Changed
 
