@@ -300,6 +300,16 @@ impl Flow {
         lock(&self.0.state).gate = Gate::Closed;
     }
 
+    /// A signal character is on its way to the program: as [`Flow::interrupt`], and what the
+    /// module wrote before it is the tty's to throw away — the character flushes the tty's input
+    /// as it signals the program — so the program's end has nothing of the module's left to
+    /// discard, and the keys typed after the character are the shell's.
+    pub(crate) fn signal(&self) {
+        let mut state = lock(&self.0.state);
+        state.gate = Gate::Closed;
+        state.wrote = false;
+    }
+
     /// The number of the view the module may say something for now, if it may: what a frame is
     /// tagged with when it is queued.
     pub(crate) fn module_ticket(&self) -> Option<u64> {

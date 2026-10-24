@@ -4,8 +4,10 @@
 #   gate.sh commit      the fast tier (`make check`) every time, and the heavy tests of the
 #                       areas the change touched: a module of bt-shell-common names its own
 #                       tests (`kablo/…` → `kablo::`), the shell scripts name the shells', the
-#                       agent's and the remote scripts' tests, the program view's files its
-#                       test; a manifest, the Makefile or this script names every heavy test.
+#                       agent's and the remote scripts' tests, the page engine, the sandbox
+#                       and the page modules name the sandbox's (the script against the
+#                       engine's page among them), the program view's files its test; a
+#                       manifest, the Makefile or this script names every heavy test.
 #   gate.sh push        everything once, on a clean tree: the fast tier, every heavy test and
 #                       the program view (`make test-all`), `make linux-server` when what
 #                       bateri runs on a server changed, `make bundle` when what goes in the
@@ -98,6 +100,7 @@ while IFS= read -r f; do
         areas="$areas ${m%.rs}::"
         ;;
     assets/shell/*) areas="$areas child:: ssh_wrap:: agent::" ;;
+    crates/bt-view/* | crates/bt-view-wasm/* | guest/*) areas="$areas luau_ guests_tests::" ;;
     esac
     case $f in
     crates/bt-shell-macos/src/pencere_view* | crates/bt-core/src/pencere* | \

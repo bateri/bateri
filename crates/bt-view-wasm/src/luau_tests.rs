@@ -215,6 +215,7 @@ fn a_tree_that_is_not_a_page_is_closed_with_what_is_wrong_in_it() {
 }
 
 #[test]
+#[ignore = "heavy: compiles the interpreter or a module and drives it for seconds; make test-heavy"]
 fn a_script_that_never_returns_is_cut_off() {
     let limits = Limits {
         call: Duration::from_millis(200),
@@ -502,6 +503,7 @@ fn the_compiled_interpreter_is_kept_and_the_next_page_starts_from_it() {
 }
 
 #[test]
+#[ignore = "heavy: compiles the interpreter or a module and drives it for seconds; make test-heavy"]
 fn errors_a_script_catches_are_not_kept() {
     // An error is an exception in the interpreter, an object on the runtime's collected heap:
     // a script that catches them by the hundred thousand does not run the heap out.
@@ -567,4 +569,62 @@ fn the_example_page_counts_clicks() {
     assert_eq!(redraws, [true, false, true]);
     let frame = page.seen.frame.clone().expect("the page after the click");
     assert_eq!(words(&frame.root), ["Clicked 1 times", "Click me"]);
+}
+
+/// What an event asks of the program past what one call may say goes out in the frames after it,
+/// with nothing else asking than the host's own frames: twenty calls, eight a call, and all of
+/// them said, in order.
+#[test]
+fn what_an_event_asks_past_a_calls_share_goes_out_in_the_frames_after_it() {
+    let mut page = open_script(
+        "return {\n\
+           render = function() return bateri.div() end,\n\
+           handle = function() for i = 1, 20 do bateri.call('ping', { n = i }) end end,\n\
+         }",
+        Limits::default(),
+    );
+    page.module.render(SIZE, 0.0, false);
+    until_seen(&mut page, Duration::from_secs(20), |seen| {
+        seen.frame.is_some()
+    });
+    page.module.event(Event::Input(Input::Key {
+        key: Key::Enter,
+        mods: Mods::default(),
+    }));
+    // The host's side: a page that says it is moving is rendered again, frame after frame.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut now = 0.0;
+    while page.seen.sent.len() < 20 && Instant::now() < deadline {
+        page.take(Duration::from_millis(50));
+        if page
+            .seen
+            .frame
+            .as_ref()
+            .is_some_and(|frame| frame.animating)
+        {
+            now += 0.016;
+            page.seen.frame = None;
+            page.module.render(SIZE, now, false);
+        }
+    }
+    let numbers: Vec<_> = page
+        .seen
+        .sent
+        .iter()
+        .filter_map(|message| {
+            let at = message.find("\"n\":")? + 4;
+            message[at..]
+                .split(|c: char| !c.is_ascii_digit())
+                .next()?
+                .parse::<u32>()
+                .ok()
+        })
+        .collect();
+    assert_eq!(
+        numbers,
+        (1..=20).collect::<Vec<_>>(),
+        "{:?}",
+        page.seen.sent
+    );
+    assert!(page.seen.closed.is_none());
 }

@@ -48,8 +48,10 @@ local PER_CALL = 8
 local page = nil
 -- The page has been rendered: it has been laid out only after that.
 local rendered = false
--- What is waiting to be said, in order; `head` is the next.
-local queue, head = {}, 1
+-- What is waiting to be said, in order: `head` is the next, `tail` the last. Counted, not
+-- measured with `#`: the queue is emptied from the front, and the length of a table with holes is
+-- any of its borders.
+local queue, head, tail = {}, 1, 0
 -- The program had no room for the next message: nothing is said until it has (`room`).
 local full = false
 -- The program has said something.
@@ -70,14 +72,15 @@ function bateri.heard()
 end
 
 local function enqueue(message)
-	queue[#queue + 1] = json.encode(message)
+	tail += 1
+	queue[tail] = json.encode(message)
 end
 
 -- Says what is waiting, as far as the program has the room and a call may say. True when there
 -- is more that only a later call will say.
 local function flush()
 	local said = 0
-	while head <= #queue do
+	while head <= tail do
 		if full then
 			return false
 		end
@@ -93,8 +96,18 @@ local function flush()
 			return false
 		end
 	end
-	queue, head = {}, 1
+	queue, head, tail = {}, 1, 0
 	return false
+end
+
+-- `reply`, asking for the next frame as well: there is more to say than one call may, and a
+-- render says it on (and asks for the frame after it while there is more still).
+local function with_frame(reply)
+	if type(reply) == "table" then
+		reply.redraw = true
+		return reply
+	end
+	return true
 end
 
 -- Asks the program to do `method` (with `params`, a value) and answer once: `done(result, err)`
@@ -163,7 +176,9 @@ function bateri.handle(event)
 	if page.handle then
 		reply = page.handle(event)
 	end
-	flush()
+	if flush() then
+		reply = with_frame(reply)
+	end
 	return reply
 end
 
@@ -215,7 +230,9 @@ function bateri.message(text)
 	if not taken and page.message then
 		reply = page.message(message)
 	end
-	flush()
+	if flush() then
+		reply = with_frame(reply)
+	end
 	return reply
 end
 
@@ -226,6 +243,8 @@ function bateri.room()
 	if page.room then
 		reply = page.room()
 	end
-	flush()
+	if flush() then
+		reply = with_frame(reply)
+	end
 	return reply
 end

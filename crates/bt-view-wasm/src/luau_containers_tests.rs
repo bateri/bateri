@@ -467,6 +467,7 @@ fn shifted() -> Mods {
 // --- At rest ---------------------------------------------------------------------------------
 
 #[test]
+#[ignore = "heavy: compiles the interpreter or a module and drives it for seconds; make test-heavy"]
 fn the_script_draws_the_page_the_engine_draws_and_asks_its_program_for_readings() {
     let mut pair = Pair::open(SIZE);
     assert!(!pair.animating);
@@ -496,6 +497,7 @@ fn the_script_draws_the_page_the_engine_draws_and_asks_its_program_for_readings(
 // --- The keys --------------------------------------------------------------------------------
 
 #[test]
+#[ignore = "heavy: compiles the interpreter or a module and drives it for seconds; make test-heavy"]
 fn two_keys_down_move_the_cursor_and_the_highlight_comes_to_rest() {
     let mut pair = Pair::open(SIZE);
     for _ in 0..2 {
@@ -513,6 +515,7 @@ fn two_keys_down_move_the_cursor_and_the_highlight_comes_to_rest() {
 }
 
 #[test]
+#[ignore = "heavy: compiles the interpreter or a module and drives it for seconds; make test-heavy"]
 fn the_keys_of_the_list_move_fold_mark_and_filter_it_as_the_engines_page_does() {
     let mut pair = Pair::open(SIZE);
     let keys = [
@@ -576,6 +579,7 @@ fn the_keys_of_the_list_move_fold_mark_and_filter_it_as_the_engines_page_does() 
 }
 
 #[test]
+#[ignore = "heavy: compiles the interpreter or a module and drives it for seconds; make test-heavy"]
 fn the_commands_of_the_list_act_on_the_cursor_row_and_on_the_marked_ones() {
     let mut pair = Pair::open(SIZE);
     // On `api`: stop it (a stopped one, `s` starts it), restart, pause and resume, its id.
@@ -618,6 +622,7 @@ fn the_commands_of_the_list_act_on_the_cursor_row_and_on_the_marked_ones() {
 }
 
 #[test]
+#[ignore = "heavy: compiles the interpreter or a module and drives it for seconds; make test-heavy"]
 fn the_keys_of_the_application_are_not_the_lists() {
     let mut pair = Pair::open(SIZE);
     // ⌘, ⌃ and ⌥ are the application's: the list reads none of them.
@@ -644,6 +649,7 @@ fn the_keys_of_the_application_are_not_the_lists() {
 // --- The filter ------------------------------------------------------------------------------
 
 #[test]
+#[ignore = "heavy: compiles the interpreter or a module and drives it for seconds; make test-heavy"]
 fn what_is_typed_in_the_filter_narrows_the_list_and_what_finds_nothing_says_so() {
     let mut pair = Pair::open(SIZE);
     let before = pair.tree.fold().len();
@@ -689,6 +695,7 @@ fn what_is_typed_in_the_filter_narrows_the_list_and_what_finds_nothing_says_so()
 // --- The wheel -------------------------------------------------------------------------------
 
 #[test]
+#[ignore = "heavy: compiles the interpreter or a module and drives it for seconds; make test-heavy"]
 fn the_wheel_scrolls_the_list_and_the_keys_keep_the_cursor_in_view() {
     let mut pair = Pair::open(Size::new(1000.0, 300.0));
     let over = pair.middle("containers list");
@@ -738,6 +745,7 @@ fn the_wheel_scrolls_the_list_and_the_keys_keep_the_cursor_in_view() {
 // --- The pointer -----------------------------------------------------------------------------
 
 #[test]
+#[ignore = "heavy: compiles the interpreter or a module and drives it for seconds; make test-heavy"]
 fn the_pointer_lights_the_row_it_is_over_and_the_light_comes_and_goes_with_time() {
     let mut pair = Pair::open(SIZE);
     let db = pair.middle("containers container db");
@@ -777,6 +785,7 @@ fn the_pointer_lights_the_row_it_is_over_and_the_light_comes_and_goes_with_time(
 }
 
 #[test]
+#[ignore = "heavy: compiles the interpreter or a module and drives it for seconds; make test-heavy"]
 fn a_page_that_moves_under_the_pointer_lights_the_row_that_comes_under_it() {
     let mut pair = Pair::open(Size::new(1000.0, 300.0));
     let at = Point::new(600.0, 150.0);
@@ -793,6 +802,7 @@ fn a_page_that_moves_under_the_pointer_lights_the_row_that_comes_under_it() {
 /// Under Reduce Motion a highlight does not fade: it is at its end at once, and the page never
 /// says it is moving.
 #[test]
+#[ignore = "heavy: compiles the interpreter or a module and drives it for seconds; make test-heavy"]
 fn under_reduce_motion_a_highlight_is_at_its_end_at_once() {
     let mut pair = Pair::open(SIZE);
     // A highlight on its way when the setting is turned on is put at its end.
@@ -825,6 +835,7 @@ fn under_reduce_motion_a_highlight_is_at_its_end_at_once() {
 // --- The clicks ------------------------------------------------------------------------------
 
 #[test]
+#[ignore = "heavy: compiles the interpreter or a module and drives it for seconds; make test-heavy"]
 fn a_click_folds_a_project_and_chooses_the_status_the_grouping_and_a_row() {
     let mut pair = Pair::open(SIZE);
     // A project's row folds, and unfolds, and the project that was folded away opens.
@@ -908,6 +919,7 @@ fn a_click_folds_a_project_and_chooses_the_status_the_grouping_and_a_row() {
 }
 
 #[test]
+#[ignore = "heavy: compiles the interpreter or a module and drives it for seconds; make test-heavy"]
 fn a_click_with_a_modifier_marks_and_does_not_fold() {
     let mut pair = Pair::open(SIZE);
     pair.click("containers container cache", command());
@@ -935,6 +947,7 @@ fn a_click_with_a_modifier_marks_and_does_not_fold() {
 }
 
 #[test]
+#[ignore = "heavy: compiles the interpreter or a module and drives it for seconds; make test-heavy"]
 fn a_right_click_opens_the_menu_of_the_row_and_what_is_picked_is_done() {
     let mut pair = Pair::open(SIZE);
     let press = |at| Input::Press {
@@ -1005,6 +1018,7 @@ fn a_right_click_opens_the_menu_of_the_row_and_what_is_picked_is_done() {
 // --- What the program says ---------------------------------------------------------------------
 
 #[test]
+#[ignore = "heavy: compiles the interpreter or a module and drives it for seconds; make test-heavy"]
 fn the_script_shows_what_its_program_pushes() {
     let mut pair = Pair::open(SIZE);
     // The program pushes a reading; the page that comes is the engine's own page with it.
@@ -1106,6 +1120,7 @@ fn the_script_shows_what_its_program_pushes() {
 /// The readings stop: until five seconds have passed the page asks to be woken then, and then it
 /// says that none is coming; the next reading takes the note away.
 #[test]
+#[ignore = "heavy: compiles the interpreter or a module and drives it for seconds; make test-heavy"]
 fn the_script_says_when_the_readings_stop_and_asks_to_be_woken_for_it() {
     let mut pair = Pair::open(SIZE);
     let push = r#"{"push":{"id":1,"value":{"readings":[]}}}"#;
@@ -1129,6 +1144,7 @@ fn the_script_says_when_the_readings_stop_and_asks_to_be_woken_for_it() {
 }
 
 #[test]
+#[ignore = "heavy: compiles the interpreter or a module and drives it for seconds; make test-heavy"]
 fn the_pushed_numbers_show_in_the_rows_of_every_width() {
     let mut pair = Pair::open(SIZE);
     pair.reading(
@@ -1287,6 +1303,7 @@ fn upload_key() -> Event {
 /// byte is said once, in order, the last chunk saying so; the program counts it and the page
 /// says so.
 #[test]
+#[ignore = "heavy: compiles the interpreter or a module and drives it for seconds; make test-heavy"]
 fn the_script_sends_its_payload_as_fast_as_its_program_has_room_and_loses_none() {
     let program = Room::with(1 /* the subscription */ + 3);
     let mut page = open_script(program.clone());
@@ -1399,6 +1416,7 @@ fn the_script_sends_its_payload_as_fast_as_its_program_has_room_and_loses_none()
 /// A program with room for everything is told 8 chunks in a call (the page's own limit for one
 /// call) and the page asks for the next frame itself until it has told it all.
 #[test]
+#[ignore = "heavy: compiles the interpreter or a module and drives it for seconds; make test-heavy"]
 fn a_program_with_room_is_told_a_few_chunks_in_each_frame() {
     let mut page = open_script(Arc::new(Unbounded));
     settled(&mut page, 0.0);
@@ -1439,6 +1457,7 @@ fn a_program_with_room_is_told_a_few_chunks_in_each_frame() {
 
 /// A subscription the program had no room for is said when it has.
 #[test]
+#[ignore = "heavy: compiles the interpreter or a module and drives it for seconds; make test-heavy"]
 fn a_subscription_the_program_had_no_room_for_is_said_when_it_has() {
     let program = Room::with(0);
     let mut page = open_script(program.clone());

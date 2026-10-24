@@ -5731,7 +5731,8 @@ impl Session {
         // same body a single `set` binds them all.
         let _ = adapter.0.sender.set(sender.clone());
         flow.on_reader({
-            let sender = sender.clone();
+            // Not the counted sender: the flow would hold itself through it.
+            let sender = sender.uncounted();
             move || {
                 let _ = sender.send(Msg::Room);
             }

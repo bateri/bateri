@@ -131,21 +131,46 @@ impl std::fmt::Display for Fault {
 
 impl std::error::Error for Fault {}
 
-/// Refuses what the module may not have, and remembers that it did.
+/// Refuses what the module may not have, and remembers that it did. What it may have is one
+/// sum over every memory and table it holds (a module may hold several of each): each one under
+/// the limit on its own would add up past it.
 pub(crate) struct Limiter {
     memory: usize,
+    /// Bytes of memory and of tables the module holds now.
+    held: usize,
     pub(crate) exceeded: bool,
+}
+
+impl Limiter {
+    pub(crate) fn new(memory: usize) -> Self {
+        Self {
+            memory,
+            held: 0,
+            exceeded: false,
+        }
+    }
+
+    /// Whether growing a memory or a table from `current` to `desired` bytes keeps the sum
+    /// within the limit; the sum counts it if so.
+    fn grow(&mut self, current: usize, desired: usize) -> bool {
+        let held = self.held.saturating_sub(current).saturating_add(desired);
+        if held > self.memory {
+            self.exceeded = true;
+            return false;
+        }
+        self.held = held;
+        true
+    }
 }
 
 impl ResourceLimiter for Limiter {
     fn memory_growing(
         &mut self,
-        _current: usize,
+        current: usize,
         desired: usize,
         _maximum: Option<usize>,
     ) -> wasmtime::Result<bool> {
-        if desired > self.memory {
-            self.exceeded = true;
+        if !self.grow(current, desired) {
             // A trap and not a refusal: a module that is told "no" would go on asking.
             return Err(wasmtime::Error::msg("the module's memory limit"));
         }
@@ -154,13 +179,12 @@ impl ResourceLimiter for Limiter {
 
     fn table_growing(
         &mut self,
-        _current: usize,
+        current: usize,
         desired: usize,
         _maximum: Option<usize>,
     ) -> wasmtime::Result<bool> {
         // A table's elements are pointers; their share of the memory is counted as eight bytes.
-        if desired.saturating_mul(8) > self.memory {
-            self.exceeded = true;
+        if !self.grow(current.saturating_mul(8), desired.saturating_mul(8)) {
             return Err(wasmtime::Error::msg("the module's table limit"));
         }
         Ok(true)
@@ -201,10 +225,7 @@ pub(crate) struct Host {
 impl Host {
     pub(crate) fn new(limits: &Limits, program: Arc<dyn Program>) -> Self {
         Self {
-            limiter: Limiter {
-                memory: limits.memory,
-                exceeded: false,
-            },
+            limiter: Limiter::new(limits.memory),
             laid: None,
             sent: Vec::new(),
             allowed: (limits.messages, limits.message),

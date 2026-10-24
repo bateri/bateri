@@ -70,6 +70,22 @@ impl LinearRgba {
         self.0
     }
 
+    /// The colour sRGB-encoded again, `0..=1` a channel, alpha as it is: for a surface that
+    /// takes sRGB (a native control drawn by the platform) and a tone the theme derives in
+    /// linear space (a raised ground, the quiet text), which has no stored sRGB value to read.
+    pub fn to_srgb(self) -> [f32; 4] {
+        let encode = |linear: f32| {
+            let linear = linear.clamp(0.0, 1.0);
+            if linear <= 0.003_130_8 {
+                linear * 12.92
+            } else {
+                1.055 * linear.powf(1.0 / 2.4) - 0.055
+            }
+        };
+        let [r, g, b, a] = self.0;
+        [encode(r), encode(g), encode(b), a]
+    }
+
     /// Its relative luminance (WCAG 2), `0..=1` — [`luminance`]'s measure of a
     /// color already linear, so a drawing that weighs colors by how bright they
     /// look weighs them as the theme's choices are made.
@@ -2383,6 +2399,16 @@ mod tests {
         }
         for c in ['a', 'W', '→', '✻', '·', '…', ' ', 'ş'] {
             assert!(!is_drawing(c), "{c:?}");
+        }
+    }
+    #[test]
+    fn a_colour_made_from_srgb_is_the_same_srgb_again() {
+        for hex in [0x000000_u32, 0xffffff, 0x1a1c21, 0x5a5d65, 0xe8a33d] {
+            let [r, g, b] = [(hex >> 16) as u8, (hex >> 8) as u8, hex as u8];
+            let back = LinearRgba::from_srgb(r, g, b).to_srgb();
+            for (channel, want) in back.iter().zip([r, g, b]) {
+                assert_eq!((channel * 255.0).round() as u8, want, "{hex:06x}");
+            }
         }
     }
 }

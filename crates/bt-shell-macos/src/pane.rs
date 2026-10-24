@@ -2432,10 +2432,7 @@ define_class!(
         fn validate_menu_item(&self, item: &NSMenuItem) -> bool {
             let action = item.action();
             // No `return`: `define_class!` converts the `bool` at the end of the body.
-            if (self.shows_view() || self.shows_page()) && pencere_view::is_content_item(item) {
-                // A program's view is the pane's content: Edit, scrolling and the text size
-                // are the view's while it is shown (the shortcut table's mark), so these
-                // items are grey and a key the view did not handle does not run them here.
+            if self.view_owns_item(item) {
                 false
             } else if action.is_some_and(is_scrollback_action) {
                 self.session()
@@ -5354,6 +5351,15 @@ impl TerminalPane {
         self.page_is_up()
     }
 
+    /// Whether `item` is a view's while one is the pane's content: Edit, scrolling and the text
+    /// size are the view's while it is shown (the shortcut table's mark), so the item is grey and
+    /// a key the view did not handle does not run it here. Asked by the pane and by the terminal
+    /// view, which is the first responder over a page — a Paste it ran would write the
+    /// pasteboard to the program between its view's frames.
+    pub(crate) fn view_owns_item(&self, item: &NSMenuItem) -> bool {
+        (self.shows_view() || self.shows_page()) && pencere_view::is_content_item(item)
+    }
+
     /// Whether a page of the kit is over the terminal (the link paints it in place of the grid).
     pub(crate) fn page_is_up(&self) -> bool {
         self.link().is_some_and(DisplayLink::shows_page)
@@ -5646,8 +5652,12 @@ impl TerminalPane {
                 // The program is told the view failed, not that the person closed it, and
                 // why: it is the one that can say so on the screen once the shell has it back.
                 session.view_failed(&why);
+                // And down the way every end of a program's view goes: its questions and
+                // requests with it, the tab's mark and the terminal's record.
+                self.end_view();
+            } else {
+                self.take_page_down();
             }
-            self.take_page_down();
             return;
         }
         if drained.redraw
@@ -5964,6 +5974,9 @@ impl TerminalPane {
         link.set_page(Some(page));
         // The mark of what runs in the pane (the tab's tile).
         self.host().program_changed(ivars.id);
+        // And the terminal that carries the pane's bytes remembers it, as for a web view: a
+        // bateri that finds the terminal again offers the program a restart of its view.
+        self.host().view_changed(self.uuid(), true);
     }
 
     /// Puts the view over the terminal, with the application's strip above it: over the
@@ -6026,6 +6039,7 @@ impl TerminalPane {
             self.view_gone();
             self.take_page_down();
             self.host().program_changed(self.ivars().id);
+            self.host().view_changed(self.uuid(), false);
             return;
         }
         let Some(host) = self.ivars().pencere.take() else {

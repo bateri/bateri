@@ -116,16 +116,8 @@ pub(crate) struct Page {
 
 /// A colour of the theme as AppKit's: the engine's tone in the theme, as sRGB.
 fn ink(theme: &Theme, tone: Tone) -> Retained<NSColor> {
-    let [r, g, b, _] = tone_linear(theme, tone).to_array();
-    let encode = |linear: f32| {
-        let linear = linear.clamp(0.0, 1.0);
-        f64::from(if linear <= 0.003_130_8 {
-            linear * 12.92
-        } else {
-            1.055 * linear.powf(1.0 / 2.4) - 0.055
-        })
-    };
-    NSColor::colorWithSRGBRed_green_blue_alpha(encode(r), encode(g), encode(b), 1.0)
+    let [r, g, b, _] = tone_linear(theme, tone).to_srgb().map(f64::from);
+    NSColor::colorWithSRGBRed_green_blue_alpha(r, g, b, 1.0)
 }
 
 /// The filter's field for `pane`: no border and no ground (the page draws the box), the

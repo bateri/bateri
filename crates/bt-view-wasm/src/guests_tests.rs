@@ -116,6 +116,7 @@ fn the_container_list_asks_for_nothing_the_page_interface_does_not_give() {
 }
 
 #[test]
+#[ignore = "heavy: compiles the interpreter or a module and drives it for seconds; make test-heavy"]
 fn the_container_list_is_drawn_laid_out_and_used_through_the_sandbox() {
     let Some(mut page) = open("containers", Limits::default()) else {
         return;
@@ -417,6 +418,7 @@ fn numbers(sent: &[String]) -> Vec<u64> {
 /// *full* to, says nothing more until it is called, and says that one first when it is. It is
 /// called once for each time, and nothing is lost or said twice.
 #[test]
+#[ignore = "heavy: compiles the interpreter or a module and drives it for seconds; make test-heavy"]
 fn a_module_told_full_keeps_what_it_meant_to_say_and_goes_on_when_it_is_called_for_room() {
     let program = Room::with(10);
     let Some(mut page) = open_for("chatty", Limits::default(), program.clone()) else {

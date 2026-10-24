@@ -849,8 +849,9 @@ define_class!(
 
         /// A menu item's enablement: once `validateMenuItem:` is defined
         /// AppKit asks about **every** item, so the default answer is `true` -
-        /// Copy, Paste and Select All are always enabled as today. Two
-        /// exceptions: Cut is grey if the dock has no selection or the editing
+        /// Copy, Paste and Select All are always enabled as today, except while
+        /// a program's view is over the terminal ([`TerminalPane::view_owns_item`]).
+        /// Two more exceptions: Cut is grey if the dock has no selection or the editing
         /// gate is closed (`vicmd`, stale mirror, a command running); Paste
         /// Escaped Text is grey if there is no text on the pasteboard -
         /// Paste itself is always enabled as today and silent on an empty pasteboard.
@@ -859,7 +860,11 @@ define_class!(
             // No `return`: `define_class!` converts the `bool` to `Bool` at the
             // **end** of the body, an early return does not compile.
             let action = item.action();
-            if action == Some(sel!(cut:)) {
+            if self.pane().is_some_and(|pane| pane.view_owns_item(item)) {
+                // A view over the terminal owns Edit: the terminal under it is not what is copied
+                // or pasted into.
+                false
+            } else if action == Some(sel!(cut:)) {
                 self.ivars()
                     .session
                     .get()

@@ -118,6 +118,17 @@ pub(crate) struct EventLoopSender {
 }
 
 impl EventLoopSender {
+    /// The same channel without the flow: for what the flow itself holds (its wake of the
+    /// reader), which would otherwise hold the flow that holds it, and neither would ever go.
+    /// What it sends is not counted — fit it only for messages that carry no bytes.
+    pub(crate) fn uncounted(&self) -> Self {
+        Self {
+            sender: self.sender.clone(),
+            poller: Arc::clone(&self.poller),
+            flow: None,
+        }
+    }
+
     /// `Err` if the receiver dropped or the poller could not be woken; the
     /// caller's only question is "did it go through", no detail is carried.
     pub(crate) fn send(&self, msg: Msg) -> Result<(), ()> {
@@ -128,7 +139,7 @@ impl EventLoopSender {
                     // is written after it is read by whatever reads the tty next: the module's
                     // bytes stop before it is queued, and the writer finds the gate shut.
                     if bytes.iter().any(|byte| SIGNAL_CHARS.contains(byte)) {
-                        flow.interrupt();
+                        flow.signal();
                     }
                     // Before it is queued: the loop that writes it finds it counted.
                     flow.queued(bytes.len());

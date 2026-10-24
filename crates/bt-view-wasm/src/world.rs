@@ -295,9 +295,15 @@ fn align_out(align: wit::Align) -> Align {
 fn text_style_out(text: &wit::TextStyle) -> TextStyle {
     TextStyle {
         family: text.family.map(family_out),
-        // A line of text set in a size that is not one is not drawn at all.
-        size: text.size.map(|size| pt(size).clamp(1.0, 512.0)),
-        weight: text.weight,
+        // A line of text set in a size that is not one is not drawn at all. Sizes go in half
+        // points and weights in fifties: each new pair opens a font on the application's thread
+        // and is kept, so a page that said a new one every frame would open fonts without end.
+        size: text
+            .size
+            .map(|size| (pt(size).clamp(1.0, 256.0) * 2.0).round() / 2.0),
+        weight: text
+            .weight
+            .map(|weight| (weight.clamp(100, 900) + 25) / 50 * 50),
         color: text.color.as_ref().map(color_out),
         align: text.align.map(align_out),
     }
@@ -347,7 +353,11 @@ fn style_out(style: &wit::Style, limits: &Limits) -> Result<Style, Fault> {
         }),
         columns: tracks_out(&style.columns, limits)?,
         rows: tracks_out(&style.rows, limits)?,
-        column_span: style.column_span,
+        // A span past the tracks a grid may have would make the layout build an implicit grid
+        // that wide, on the application's thread and outside the module's time.
+        column_span: style
+            .column_span
+            .min(u16::try_from(limits.tracks).unwrap_or(u16::MAX)),
         overflow: match style.overflow {
             wit::Overflow::Visible => Overflow::Visible,
             wit::Overflow::Hidden => Overflow::Hidden,

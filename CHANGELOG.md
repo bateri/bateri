@@ -27,6 +27,14 @@ of every installed copy. A version without a section is not released.
   unless you are looking at it, and while bateri is in the background it comes as a macOS
   notification with the program's title, or the tab's. A program that sends them in a loop
   leaves one notification per pane, the latest.
+- **A program can show a view that bateri draws itself.** Beside the web view, a program
+  that speaks [pencere](https://github.com/bateri/pencere) can now open a view that is a
+  small WebAssembly module or a Lua script. bateri runs it in a sandbox with no files,
+  network or clock of its own, draws it in the terminal's own font and theme, and carries
+  the messages between it and its program. A view that hangs, asks for too much memory or
+  has an error closes, and its program is told why — a script's error with its line.
+  Control-C reaches the program at once even while the view is busy talking to it, and
+  nothing the view said is typed into the shell afterwards.
 
 ### Changed
 
