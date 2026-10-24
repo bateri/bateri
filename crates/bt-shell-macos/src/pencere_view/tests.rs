@@ -433,29 +433,37 @@ fn the_views_frame_loads_its_entry_before_anything_else_and_nothing_else() {
     assert!(loads.entry && !loads.shell);
 }
 
-/// Specification §12.3: after the load of its entry, every navigation of the web view is
-/// cancelled, whatever starts it — a link, a change of `location`, a form, a reload — and the
-/// bundle's own files are no exception.
+/// Specification §12.3: after the load of its entry, every navigation of the web view to
+/// another document is cancelled, whatever starts it — a link, a change of `location`, a form,
+/// a reload — and the bundle's own files are no exception.
 #[test]
-fn after_the_entry_has_loaded_nothing_is_navigated_to_whatever_starts_it() {
+fn after_the_entry_has_loaded_no_other_document_is_navigated_to_whatever_starts_it() {
     let page = bundle_page();
     let mut loads = Loads::default();
     assert!(page.allows(&Page::shell_url(), true, &mut loads));
     assert!(page.allows(&url("index.html"), false, &mut loads));
     for destination in [
-        // A link to the entry again, a reload and a form posted to the page itself.
+        // The entry again: a reload, and a form posted to the page itself.
         url("index.html"),
-        url("index.html#section"),
         url("index.html?q=1"),
-        // A link, a `location` and a form that name another file of the bundle.
+        // With a query before the fragment it is another document, however it ends.
+        url("index.html?q=1#section"),
+        // A link, a `location` and a form that name another file of the bundle, a fragment
+        // on it included.
         url("dir/other.html"),
+        url("dir/other.html#section"),
         url("app.js"),
+        url("app.js#top"),
         // A blank page, the shell, and everything that is not the view's.
         "about:blank".to_owned(),
+        "about:blank#top".to_owned(),
         Page::shell_url(),
+        format!("{}#top", Page::shell_url()),
         "https://example.com/".to_owned(),
+        "https://example.com/#top".to_owned(),
         "file:///etc/passwd".to_owned(),
         "javascript:alert(1)".to_owned(),
+        "bateri-view://v-ffffffffffffffffffffffffffffffff/index.html#top".to_owned(),
     ] {
         assert!(
             !page.allows(&destination, false, &mut loads),
@@ -474,6 +482,53 @@ fn after_the_entry_has_loaded_nothing_is_navigated_to_whatever_starts_it() {
         },
         "nothing that was cancelled is recorded as a load"
     );
+}
+
+/// A page that routes by the `#` of its address keeps working: a navigation that changes only
+/// the fragment of the page's own address loads nothing and reaches nothing, so it is not what
+/// the lock is for — a link to `#section`, a `location.hash`, whatever the fragment holds.
+#[test]
+fn a_change_of_the_fragment_of_the_page_itself_is_let_through_and_loads_nothing() {
+    let page = bundle_page();
+    let mut loads = Loads::default();
+    assert!(page.allows(&Page::shell_url(), true, &mut loads));
+    // Before the entry it is the entry, as any address of it is.
+    assert!(page.allows(&url("index.html#first"), false, &mut loads));
+    let loaded = loads;
+    for destination in [
+        url("index.html#section"),
+        url("index.html#"),
+        url("index.html#/route/a?b=1&c=d"),
+        url("index.html#a#b"),
+        // The address as the web view spells it: the scheme and host in any case.
+        format!("BATERI-VIEW://{INSTANCE}/index.html#section"),
+        // A fragment that looks like another address is still only a fragment.
+        url("index.html#../secret.txt"),
+        url("index.html#https://example.com/"),
+    ] {
+        assert!(
+            page.allows(&destination, false, &mut loads),
+            "{destination}"
+        );
+    }
+    assert_eq!(loads, loaded, "a fragment is not a load");
+    // Only the page's frame: the top document is the shell's, and it never moves.
+    assert!(!page.allows(&url("index.html#section"), true, &mut loads));
+    // And a view with an entry in a directory, its path spelled with escapes.
+    let nested = Page::new(
+        INSTANCE.to_owned(),
+        "dir/a b.html".to_owned(),
+        POLICY.to_owned(),
+        "",
+        "#101010",
+    );
+    let mut loads = Loads::default();
+    assert!(nested.allows(&Page::shell_url(), true, &mut loads));
+    assert!(nested.allows(&url("dir/a%20b.html"), false, &mut loads));
+    assert!(nested.allows(&url("dir/a%20b.html#x"), false, &mut loads));
+    assert!(!nested.allows(&url("dir/a%20b.html"), false, &mut loads));
+    assert!(!nested.allows(&url("dir/other.html#x"), false, &mut loads));
+    assert!(!nested.allows(&url("index.html#x"), false, &mut loads));
 }
 
 /// The decision is the bridge's one question, asked of every navigation, and the shell's

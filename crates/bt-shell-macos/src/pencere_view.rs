@@ -23,8 +23,10 @@
 //!
 //! **What the web view is refused**, in one place (the navigation and UI
 //! delegates, [`Bridge`]): navigating anywhere but the one shell load and the one load
-//! of the view's entry in its frame — after it, every navigation, a link to another file of the
-//! bundle and a form included (`serve::Page::allows`, specification §12.3); a new window;
+//! of the view's entry in its frame — after it, every navigation to another document, a link
+//! to another file of the bundle, a reload and a form included, while a change of the address's
+//! `#` part, which loads nothing, is the page's (`serve::Page::allows`, specification §12.3);
+//! a new window;
 //! a file chooser; the media capture the permission policy would not have
 //! stopped; the context menu (it has Reload, which would load the shell again).
 //! A view's web content process that dies closes the view: nothing is left to
@@ -472,8 +474,9 @@ define_class!(
 
     unsafe impl WKNavigationDelegate for Bridge {
         /// Every navigation of the web view is asked here: the shell once, the entry of the
-        /// view in its frame once, and nothing else (specification §12.3: after the entry has
-        /// loaded, every navigation is cancelled, whatever starts it).
+        /// view in its frame once, and no other document (specification §12.3: after the entry
+        /// has loaded, every navigation to another document is cancelled, whatever starts it;
+        /// one that changes only the fragment of the page is not to another document).
         #[unsafe(method(webView:decidePolicyForNavigationAction:decisionHandler:))]
         fn decide(
             &self,

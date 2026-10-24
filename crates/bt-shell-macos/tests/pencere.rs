@@ -301,12 +301,14 @@ else if(m.response&&m.response.id===1){send({subscribe:{id:2,topic:'ticks'}})}\
 else if(m.push&&m.push.id===2){send({call:{id:3,method:'pushed',params:m.push.value}});\
 setTimeout(escape,0)}});\
 var escape=function(){\
+try{var h=document.createElement('a');h.href='#section';document.body.appendChild(h);h.click()}catch(e){}\
+try{location.hash='routed'}catch(e){}\
 try{location.href='other.html'}catch(e){}\
 try{var f=document.createElement('form');f.action='other.html';f.method='post';\
 document.body.appendChild(f);f.submit()}catch(e){}\
 try{var a=document.createElement('a');a.href='other.html';document.body.appendChild(a);a.click()}catch(e){}\
 try{window.open('other.html')}catch(e){}\
-setTimeout(function(){send({call:{id:4,method:'checked',params:{path:location.pathname}}})},700)};";
+setTimeout(function(){send({call:{id:4,method:'checked',params:{path:location.pathname,hash:location.hash}}})},700)};";
 
 /// The bundle's other file, which a page that navigated would load: it says so to the program.
 const OTHER: &str = "<!doctype html><script>\
@@ -612,14 +614,19 @@ fn run(dir: &Path) {
     let pushed = program.wait_for("\"method\":\"pushed\"");
     assert!(pushed.contains("\"params\":{\"n\":7}"), "{pushed}");
 
-    // After its entry has loaded the page tries every way there is to go to another document: a
-    // change of `location`, a form posted, a link followed, a window opened. All are cancelled
-    // (specification §12.3): the page that asks is the page still, and what it would have run
-    // there never said a word.
+    // After its entry has loaded the page follows a link to `#section` and sets `location.hash`:
+    // both stay on the page and take effect (a page may route by its fragment). Then it tries
+    // every way there is to go to another document: a change of `location`, a form posted, a
+    // link followed, a window opened. All are cancelled (specification §12.3): the page that
+    // asks is the page still, and what it would have run there never said a word.
     let checked = program.wait_for("\"method\":\"checked\"");
     assert!(
         checked.contains("\"path\":\"/index.html\""),
         "the page stays where it loaded: {checked}"
+    );
+    assert!(
+        checked.contains("\"hash\":\"#routed\""),
+        "a change of the fragment is the page's own: {checked}"
     );
     assert!(
         !program.heard().contains("\"method\":\"moved\""),

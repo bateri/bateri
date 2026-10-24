@@ -342,6 +342,8 @@ fn not_found() -> Reply {
 pub(super) struct Page {
     /// The random host of the view's origin.
     instance: String,
+    /// The path of the view's entry: the one document its frame loads.
+    entry: String,
     /// The crate's policy, from what the person allowed: on every file of the
     /// view, as the response header.
     policy: String,
@@ -366,6 +368,7 @@ impl Page {
         let shell = shell_html(&view_url, allow, ground).into_bytes().into();
         Self {
             instance,
+            entry,
             policy,
             shell,
         }
@@ -425,11 +428,14 @@ impl Page {
     }
 
     /// Whether the web view may navigate to `url`, and the record of it in `loads`: the shell,
-    /// once, as the top document; in the view's frame, the entry of the view, once. **Nothing
-    /// else, whoever asks** (specification §12.3): not a link, a change of `location`, a form,
-    /// a redirect or a script that opens a window, whatever it names — another file of the
-    /// bundle included. A frame that has taken its entry is navigated by no one; a blank frame
-    /// (it has no origin to leave) is let through only before it.
+    /// once, as the top document; in the view's frame, the entry of the view, once. **No other
+    /// document, whoever asks** (specification §12.3): not a link, a change of `location`, a
+    /// form, a redirect or a script that opens a window, whatever it names — another file of the
+    /// bundle, the entry again (a reload) and a blank page included. What a frame that has taken
+    /// its entry is let do is move within it: a navigation that changes only the fragment
+    /// ([`Page::is_fragment_of_entry`]) loads nothing and reaches nothing, and a page that
+    /// routes by it keeps working. A blank frame (it has no origin to leave) is let through only
+    /// before the entry.
     pub(super) fn allows(&self, url: &str, main_frame: bool, loads: &mut Loads) -> bool {
         if main_frame {
             if loads.shell || route(&self.instance, url) != Route::Shell {
@@ -439,13 +445,25 @@ impl Page {
             return true;
         }
         if loads.entry {
-            return false;
+            return self.is_fragment_of_entry(url);
         }
         if matches!(route(&self.instance, url), Route::View(_)) {
             loads.entry = true;
             return true;
         }
         url.eq_ignore_ascii_case("about:blank")
+    }
+
+    /// Whether `url` is the entry's own address with a fragment (`#`) on it, and nothing else
+    /// different: the same path, no query. The document is the same one and nothing is loaded;
+    /// without the `#` it is the document again (a reload), and with a query or another path
+    /// it is another document. The fragment itself is the page's, whatever it holds.
+    fn is_fragment_of_entry(&self, url: &str) -> bool {
+        let Some((document, _)) = url.split_once('#') else {
+            return false;
+        };
+        !document.contains('?')
+            && route(&self.instance, document) == Route::View(self.entry.clone())
     }
 }
 
