@@ -987,21 +987,28 @@ impl Desk {
         mem::take(&mut lock(&self.slots).room)
     }
 
-    /// The writer could not finish a write: `waiting` bytes of what it was asked to write wait
-    /// for the tty (specification §4.8). Over [`MAX_BACKLOG`] the view is closed as a failure
-    /// and the program is told `closed`; the end of the view takes the module's frames that
-    /// have not been begun off the writer's queue ([`Flow::end`]) before the `closed` goes, and
-    /// the frame under way is finished, so that the program is not left half a frame — a
-    /// signal character is what gives that one up, and none is written here.
+    /// The writer is asked whether it may hold the words of the view it has just been given:
+    /// `waiting` is the bytes of the view's words that wait for the tty, **the ones it is about
+    /// to hold included** (specification §4.8). `true`: hold them. `false`: a view whose program
+    /// does not read has said more than a pane keeps ([`MAX_BACKLOG`]); the view is closed as a
+    /// failure and the program is told `closed`, and the writer holds none of these words and
+    /// drops the ones it holds that it has not begun. The end of the view does that — it takes the
+    /// module's frames that have not been begun off the writer's queue ([`Flow::end`]) before the
+    /// `closed` goes — and the frame under way is finished, so that the program is not left half
+    /// a frame; a signal character is what gives that one up, and none is written here.
+    ///
+    /// **Only the view's words count**: the keys a person types and the host's own frames are
+    /// not the view's, and a program that does not read is no reason to close a view because
+    /// someone pasted into it.
     ///
     /// **A queue under the bound costs no lock**: this is called from the loop that reads and
     /// writes the PTY, and the conversation's lock is held for as long as a message takes to
     /// handle (a file's digest), which that loop does not wait for.
-    pub(crate) fn backlog(&self, waiting: usize, write: impl Fn(Vec<u8>)) {
+    pub(crate) fn backlog(&self, waiting: usize, write: impl Fn(Vec<u8>)) -> bool {
         if waiting <= MAX_BACKLOG {
-            return;
+            return true;
         }
-        self.apply(write, |conversation| conversation.backlog(waiting));
+        self.apply(write, |conversation| conversation.backlog(waiting))
     }
 
     /// The program has read enough for a module that was told *full* to say more
@@ -1037,6 +1044,10 @@ impl Desk {
         for action in inner.conversation.take_actions() {
             match action {
                 Action::Write(bytes) => writes.push(bytes),
+                // What a view says is written as the host's own words are: the lane it takes is
+                // the caller's (`view_message`, `module_message`), and what a writer holds of it
+                // is bounded where it is held (`Desk::backlog`).
+                Action::WriteView(bytes) => writes.push(bytes),
                 // What the program said for the module is counted from here until the module
                 // takes it; a view that starts or ends counts nothing, whatever was.
                 Action::ToView(text) => {

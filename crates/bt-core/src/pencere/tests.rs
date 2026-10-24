@@ -378,7 +378,7 @@ pub(crate) fn page_file() -> Vec<u8> {
 
 /// The path to a started view: the program says `hello`, opens a view of a
 /// one-file bundle and sends the file. Returns the token the view was opened with.
-fn open_a_view(pane: &mut Pane) -> String {
+pub(crate) fn open_a_view(pane: &mut Pane) -> String {
     pane.feed(&hello());
     let welcome = pane.rig.written();
     assert_eq!(welcome.len(), 1, "{welcome:?}");
@@ -1234,6 +1234,36 @@ fn a_page_closes_itself_and_the_program_is_told_the_view_did() {
     assert!(lock(&input).is_empty() && lock(&said).is_empty());
 }
 
+/// What a view says is written as the host's own words are, in the order they were said, and is
+/// not left for the shell: [`Action::WriteView`] is not [`Action::Write`] to the writer, and the
+/// shell has nothing to do with either.
+#[test]
+fn what_a_view_says_is_written_like_the_hosts_own_words_and_none_is_left_for_the_shell() {
+    let (rig, _, _) = Rig::new(true);
+    let mut pane = Pane::new(rig);
+    open_a_view(&mut pane);
+    let desk = pane.rig.desk.as_ref().expect("a desk");
+    desk.take_views();
+    let call = r#"{"call":{"id":8,"method":"list","params":{"all":true}}}"#;
+    desk.apply(pane.rig.write(), |conversation| {
+        conversation.view_message(call);
+        // …then the view ends, and the host says so in its own words.
+        conversation.view_message(r#"{"close":{}}"#);
+    });
+    let written = pane.rig.written();
+    let kinds: Vec<&str> = written.iter().map(|frame| frame.kind.as_str()).collect();
+    assert_eq!(kinds, ["msg", "closed"], "{written:?}");
+    assert_eq!(written[0].payload, call, "the view's word, as it was said");
+    let views = desk.take_views();
+    assert!(
+        views
+            .iter()
+            .all(|action| !matches!(action, Action::Write(_) | Action::WriteView(_))),
+        "bytes for the program were left for the shell: {views:?}"
+    );
+    assert_eq!(views, [Action::DestroyView]);
+}
+
 #[test]
 fn a_link_the_page_asks_for_is_put_to_the_person_and_the_page_is_never_answered() {
     let (rig, _, _) = Rig::new(true);
@@ -1832,15 +1862,19 @@ fn a_view_with_more_waiting_for_the_tty_than_the_bound_is_closed_as_a_failure() 
             .module_ticket()
             .expect("the view's words are taken");
 
-        // Nothing waiting, and exactly the bound: the view stays.
-        desk.backlog(0, pane.rig.write());
-        desk.backlog(MAX_BACKLOG, pane.rig.write());
+        // Nothing waiting, and exactly the bound: the view stays, and the words may be held.
+        assert!(desk.backlog(0, pane.rig.write()), "web: {web}");
+        assert!(desk.backlog(MAX_BACKLOG, pane.rig.write()), "web: {web}");
         assert!(pane.rig.written().is_empty(), "web: {web}");
         assert!(desk.take_views().is_empty(), "web: {web}");
         assert_eq!(desk.flow.module_ticket(), Some(epoch));
 
-        // A byte over it: the view is closed, the program told, the words not begun dropped.
-        desk.backlog(MAX_BACKLOG + 1, pane.rig.write());
+        // A byte over it: the words are not held, the view is closed, the program told, and
+        // the words not begun dropped.
+        assert!(
+            !desk.backlog(MAX_BACKLOG + 1, pane.rig.write()),
+            "web: {web}"
+        );
         told(&pane.rig.written());
         assert!(
             desk.take_views().contains(&Action::DestroyView),
@@ -1860,8 +1894,12 @@ fn a_view_with_more_waiting_for_the_tty_than_the_bound_is_closed_as_a_failure() 
             "the frame under way is finished, so that the program is not left half a frame"
         );
 
-        // A view that is not there is not closed again, whatever still waits.
-        desk.backlog(MAX_BACKLOG * 2, pane.rig.write());
+        // A view that is not there is not closed again, whatever still waits, and its words
+        // are of no consequence: they may be held (and are dropped by the gate).
+        assert!(
+            desk.backlog(MAX_BACKLOG * 2, pane.rig.write()),
+            "web: {web}"
+        );
         assert!(pane.rig.written().is_empty(), "web: {web}");
         assert!(desk.take_views().is_empty(), "web: {web}");
     }

@@ -38,10 +38,11 @@
 //! was counted: nothing is left waiting for a module that is gone.
 //!
 //! **A view that says more than its program reads is closed** (specification §4.8): a module and
-//! a page are held well under it by the bound above, but what the pane has been asked to write
-//! and the tty has not taken is told to the conversation after every write that was held back
-//! (`Desk::backlog`), and past 16 MiB the view ends as a failure — through [`Flow::end`], so
-//! that the frames not begun are dropped before the program is told.
+//! a page are held well under it by the bound above, but the words of the view that wait in the
+//! writer's queue are put to the conversation before the writer holds more of them
+//! (`Desk::backlog`), and past 16 MiB the view ends as a failure — through [`Flow::end`], so that
+//! the frames not begun are dropped before the program is told. Only the view's words are
+//! counted for it: the keys a person pastes into a program that does not read are not the view's.
 
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 

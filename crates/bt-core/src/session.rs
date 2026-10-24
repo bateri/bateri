@@ -5740,17 +5740,21 @@ impl Session {
                     .unwrap_or(true)
             }
         });
-        // …and tells what waits for the tty whenever a write could not be finished, so that a
-        // view whose program does not read is closed instead of costing memory without bound.
+        // …and asks whether the words of the view that wait for the tty may be more, before it
+        // holds the ones it has been given, so that a view whose program does not read is closed
+        // instead of costing memory without bound.
         event_loop.backlog({
             let adapter = Arc::downgrade(&adapter.0);
             move |waiting| {
-                if let Some(inner) = adapter.upgrade() {
-                    let adapter = Adapter(inner);
-                    if let Some(desk) = &adapter.0.desk {
-                        desk.backlog(waiting, |bytes| adapter.input(bytes));
-                    }
-                }
+                let Some(inner) = adapter.upgrade() else {
+                    return true;
+                };
+                let adapter = Adapter(inner);
+                adapter
+                    .0
+                    .desk
+                    .as_ref()
+                    .is_none_or(|desk| desk.backlog(waiting, |bytes| adapter.input(bytes)))
             }
         });
         let sender = event_loop.channel();
@@ -31939,6 +31943,94 @@ e\\314\\201.'; sleep 5";
         assert!(flow.pending() <= 16);
         // SAFETY: as above.
         unsafe { libc::kill(reader, libc::SIGCONT) };
+        program.session.shutdown();
+    }
+
+    /// What a person pastes into a program that does not read is not the view's: a paste of
+    /// more than the bound the specification gives a view (§4.8) waits for the tty with the
+    /// view open, and the view is not closed for it.
+    #[test]
+    fn a_paste_into_a_program_that_does_not_read_does_not_close_its_view() {
+        let mut program = Playing::new("page-paste");
+        open_a_page(&mut program);
+        let flow = program.session.flow();
+        let reader = program.reader_pid();
+        // SAFETY: a signal to the process this test's pane started, by number.
+        assert_eq!(unsafe { libc::kill(reader, libc::SIGSTOP) }, 0);
+        program.session.take_view_actions();
+
+        let paste = vec![b'v'; crate::pencere::MAX_BACKLOG + (2 << 20)];
+        program.session.write(&paste);
+        // The loop has written what the tty took and been held back: the writer was told, in
+        // the days it was told what the key queue held.
+        wait_until("the writer held back", Duration::from_secs(20), || {
+            flow.pending() < paste.len()
+        });
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(flow.pending() > crate::pencere::MAX_BACKLOG);
+        assert_eq!(program.state(), Some(crate::pencere::State::Open));
+        assert!(
+            !program
+                .session
+                .take_view_actions()
+                .contains(&crate::pencere::Action::DestroyView),
+            "the paste closed the view"
+        );
+
+        // SAFETY: as above.
+        unsafe { libc::kill(reader, libc::SIGCONT) };
+        wait_until("the paste read", Duration::from_secs(30), || {
+            flow.pending() == 0
+        });
+        assert_eq!(program.state(), Some(crate::pencere::State::Open));
+        program.session.shutdown();
+    }
+
+    /// A page that says more than the bound to a program that does not read is closed as a
+    /// failure, through the hook the session fits to its writer, and the program is told once it
+    /// reads. The soft bound a page is held to is held off here, by counting what the writer was
+    /// given as written, so that the page can say what it is not allowed to.
+    #[test]
+    fn a_page_that_says_more_than_the_bound_to_a_program_that_does_not_read_is_closed() {
+        let mut program = Playing::new("page-flood");
+        open_a_page(&mut program);
+        let flow = program.session.flow();
+        let reader = program.reader_pid();
+        // SAFETY: a signal to the process this test's pane started, by number.
+        assert_eq!(unsafe { libc::kill(reader, libc::SIGSTOP) }, 0);
+
+        let says = (crate::pencere::MAX_VIEW_MESSAGE * 9) / 10;
+        let wanted = crate::pencere::MAX_BACKLOG / says + 2;
+        for id in 0..wanted {
+            program
+                .session
+                .view_message(&page_call(id as u32, says - 128));
+            flow.written(flow.pending());
+        }
+        wait_until("the view closed", Duration::from_secs(30), || {
+            program.state() != Some(crate::pencere::State::Open)
+        });
+
+        // SAFETY: as above.
+        unsafe { libc::kill(reader, libc::SIGCONT) };
+        let mut told = Vec::new();
+        wait_until("the program told", Duration::from_secs(30), || {
+            told = program
+                .written()
+                .into_iter()
+                .filter(|frame| frame.kind == "closed")
+                .collect();
+            !told.is_empty()
+        });
+        assert_eq!(told.len(), 1, "{told:?}");
+        assert!(told[0].payload.contains(r#""reason":"error""#));
+        assert!(told[0].payload.contains(r#""code":"view""#));
+        assert!(
+            program
+                .session
+                .take_view_actions()
+                .contains(&crate::pencere::Action::DestroyView)
+        );
         program.session.shutdown();
     }
 

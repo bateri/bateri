@@ -217,6 +217,9 @@ pub(crate) struct State {
     /// The module's words, a frame at a time, each with the view it was said for. Behind
     /// `write_list`: the person's keys never wait for them.
     module_list: VecDeque<(u64, Vec<u8>)>,
+    /// The bytes in `module_list`: kept as the frames come and go, because it is asked for each
+    /// message of a view that floods and a sum over the list would grow with the flood.
+    module_bytes: usize,
     /// Bytes of the module's the writer gave up since the flow was last told.
     dropped: usize,
     writing: Option<Writing>,
@@ -249,6 +252,7 @@ impl State {
             return;
         }
         while let Some((epoch, frame)) = self.module_list.pop_front() {
+            self.module_bytes -= frame.len();
             if flow.is_none_or(|flow| flow.module_may_write(epoch, false)) {
                 self.writing = Some(Writing::module(epoch, frame));
                 return;
@@ -268,8 +272,7 @@ impl State {
         let mut at = 0;
         while at + 1 < bytes.len() {
             if bytes[at] == 0x1b && bytes[at + 1] == b'\\' {
-                self.module_list
-                    .push_back((epoch, bytes[start..at + 2].to_vec()));
+                self.push_module(epoch, bytes[start..at + 2].to_vec());
                 start = at + 2;
                 at += 2;
             } else {
@@ -277,8 +280,13 @@ impl State {
             }
         }
         if start < bytes.len() {
-            self.module_list.push_back((epoch, bytes[start..].to_vec()));
+            self.push_module(epoch, bytes[start..].to_vec());
         }
+    }
+
+    fn push_module(&mut self, epoch: u64, frame: Vec<u8>) {
+        self.module_bytes += frame.len();
+        self.module_list.push_back((epoch, frame));
     }
 
     /// Gives up the module's words the flow no longer lets be written: the frames that wait, and
@@ -292,6 +300,7 @@ impl State {
             }
             keep
         });
+        self.module_bytes -= dropped;
         if let Some(Writing {
             lane: Lane::Module(epoch),
             written,
@@ -308,22 +317,16 @@ impl State {
         self.dropped += dropped;
     }
 
-    /// The bytes that wait for the tty: what is left of the buffer under way and everything
-    /// queued behind it, keys and the module's frames alike.
-    fn waiting(&self) -> usize {
-        self.writing
+    /// The bytes of the module's words that wait for the tty: the frames queued and what is left
+    /// of the one under way if it is one of theirs. The keys and the protocol's own frames are
+    /// not the view's and are not counted.
+    fn waiting_module(&self) -> usize {
+        let under_way = self
+            .writing
             .as_ref()
-            .map_or(0, |w| w.remaining_bytes().len())
-            + self
-                .write_list
-                .iter()
-                .map(|bytes| bytes.len())
-                .sum::<usize>()
-            + self
-                .module_list
-                .iter()
-                .map(|(_, frame)| frame.len())
-                .sum::<usize>()
+            .filter(|writing| writing.lane != Lane::Keys)
+            .map_or(0, |writing| writing.remaining_bytes().len());
+        under_way + self.module_bytes
     }
 
     #[inline]
@@ -393,9 +396,9 @@ pub(crate) struct EventLoop<T: tty::EventedPty, U: EventListener> {
     /// Asked before the module's words are written: whether the program is still the one that
     /// reads the tty ([`EventLoop::module_check`]); `None`: it is taken to be.
     module_check: Option<Box<dyn Fn() -> bool + Send>>,
-    /// Told how many bytes wait for the tty after a write it could not finish
-    /// ([`EventLoop::backlog`]); `None`: nobody is.
-    backlog: Option<Box<dyn Fn(usize) + Send>>,
+    /// Asked whether the module's words may be held, before they are
+    /// ([`EventLoop::backlog`]); `None`: they may.
+    backlog: Option<Box<dyn Fn(usize) -> bool + Send>>,
     /// The child has exited and the loop reads what is left: the PTY is read to its end
     /// whatever the module has taken, because there is no program left to slow down.
     draining: bool,
@@ -456,20 +459,38 @@ where
         self.module_check = Some(Box::new(check));
     }
 
-    /// Fits who is told what waits for the tty after a write that could not be finished: the
-    /// bytes of everything the loop has been asked to write and has not (the key queue, the
-    /// frame under way and the module's frames), the tty not taking them because the program
-    /// does not read. A view whose program does not read costs the application memory without
-    /// bound otherwise, and what is told is how it finds out.
-    pub(crate) fn backlog(&mut self, told: impl Fn(usize) + Send + 'static) {
-        self.backlog = Some(Box::new(told));
+    /// Fits who is asked, before the loop holds words of the module's that its program may not
+    /// read, whether it may: the bytes of the module's words that wait for the tty **with the ones
+    /// about to be held**, and nothing else — not the keys, not the protocol's own frames. A view
+    /// whose program does not read costs the application memory without bound otherwise. `false`
+    /// is the end of the view (the asked closes it, which takes the frames not begun off the
+    /// queue): the words asked about are not held.
+    pub(crate) fn backlog(&mut self, ask: impl Fn(usize) -> bool + Send + 'static) {
+        self.backlog = Some(Box::new(ask));
     }
 
-    /// After a write the tty did not take whole: how much is left for it, to whoever asked.
-    fn tell_backlog(&self, state: &State) {
-        if let Some(told) = &self.backlog {
-            told(state.waiting());
+    /// Holds the module's words as [`State::queue_module`] does, once the one who keeps the
+    /// bound has been asked whether they may be: a view past it is closed, and its words are
+    /// given up with the frames behind them that were not begun. Words the flow would not let be
+    /// written are not asked about; the view they were for is over.
+    fn hold_module(&self, state: &mut State, epoch: u64, bytes: Vec<u8>) {
+        let heard = self
+            .flow
+            .as_ref()
+            .is_none_or(|flow| flow.module_may_write(epoch, false));
+        if heard
+            && !self
+                .backlog
+                .as_ref()
+                .is_none_or(|ask| ask(state.waiting_module() + bytes.len()))
+        {
+            state.dropped += bytes.len();
+            if let Some(flow) = &self.flow {
+                state.drop_module(flow);
+            }
+            return;
         }
+        state.queue_module(self.flow.as_ref(), epoch, bytes);
     }
 
     /// Whether the module's words may go to the tty now.
@@ -576,9 +597,7 @@ where
         while let Some(msg) = self.rx.recv() {
             match msg {
                 Msg::Input(input) => state.write_list.push_back(input),
-                Msg::Module { epoch, bytes } => {
-                    state.queue_module(self.flow.as_ref(), epoch, bytes)
-                }
+                Msg::Module { epoch, bytes } => self.hold_module(state, epoch, bytes),
                 Msg::Resize(window_size) => self.pty.on_resize(window_size),
                 // Only a wake: the gate is asked at the top of the round.
                 Msg::Room => {}
@@ -742,7 +761,6 @@ where
                 match self.pty.writer().write(current.remaining_bytes()) {
                     Ok(0) => {
                         state.set_current(Some(current));
-                        self.tell_backlog(state);
                         break 'write_many;
                     }
                     Ok(n) => {
@@ -761,10 +779,7 @@ where
                     Err(err) => {
                         state.set_current(Some(current));
                         match err.kind() {
-                            ErrorKind::Interrupted | ErrorKind::WouldBlock => {
-                                self.tell_backlog(state);
-                                break 'write_many;
-                            }
+                            ErrorKind::Interrupted | ErrorKind::WouldBlock => break 'write_many,
                             _ => return Err(err),
                         }
                     }
@@ -1456,7 +1471,10 @@ mod tests {
     }
 
     /// One round of the loop's writing: what the channel holds, the gate, the write.
-    fn round(event_loop: &mut EventLoop<ScriptedPty, VoidListener>, state: &mut State) {
+    fn round<U: EventListener + Send + 'static>(
+        event_loop: &mut EventLoop<ScriptedPty, U>,
+        state: &mut State,
+    ) {
         assert!(event_loop.drain_recv_channel(state));
         event_loop.apply_module_gate(state);
         event_loop.pty_write(state).expect("write");
@@ -1554,38 +1572,193 @@ mod tests {
         assert_eq!(room.taken(), [0x04, b'z', 0x1b, 0x19, 0x1d]);
     }
 
-    /// Whoever asked is told how much waits for the tty after a write the tty did not take whole —
-    /// the key queue, the frame under way and the module's frames together — and after no other
-    /// (specification §4.8).
+    /// The module's words are asked about before they are held, with the ones about to be held
+    /// counted, and only they are: the keys that wait for the tty, however many, are not the
+    /// view's (specification §4.8).
     #[test]
-    fn what_waits_for_the_tty_is_told_after_each_write_that_was_held_back() {
-        let (mut event_loop, sender, _flow, room, epoch) = laned_loop();
-        let told = Arc::new(Mutex::new(Vec::new()));
+    fn the_words_of_a_view_are_asked_about_before_they_are_held_and_the_keys_are_not_counted() {
+        let (mut event_loop, sender, flow, room, epoch) = laned_loop();
+        let asked = Arc::new(Mutex::new(Vec::new()));
         event_loop.backlog({
-            let told = Arc::clone(&told);
-            move |waiting| told.lock().unwrap().push(waiting)
+            let asked = Arc::clone(&asked);
+            move |waiting| {
+                asked.lock().unwrap().push(waiting);
+                true
+            }
         });
         let mut state = State::default();
-        // Three frames of 100 bytes and a key; room for 130 of the 301: held back once.
-        sender.send(Msg::Input(Cow::Borrowed(b"k"))).unwrap();
+        // A paste of 16 MiB and a byte, and nothing taken; then four frames of the view's.
+        let keys = (16 << 20) + 1;
+        room.give(0);
+        sender
+            .send(Msg::Input(Cow::Owned(vec![b'k'; keys])))
+            .unwrap();
         sender
             .send(Msg::Module {
                 epoch,
                 bytes: frames(100, b"abc"),
             })
             .unwrap();
-        room.give(130);
+        sender
+            .send(Msg::Module {
+                epoch,
+                bytes: frames(100, b"d"),
+            })
+            .unwrap();
         round(&mut event_loop, &mut state);
-        assert_eq!(*told.lock().unwrap(), [301 - 130]);
-        // No more room: held back again, the same amount waiting.
+        assert_eq!(*asked.lock().unwrap(), [300, 400], "the view's words alone");
+        assert_eq!(state.waiting_module(), 400);
+
+        // The keys are written and half of the first frame: what is left of the frame under
+        // way is the view's, and counts with the ones behind it and the new one.
+        room.give(keys + 50);
         round(&mut event_loop, &mut state);
-        assert_eq!(*told.lock().unwrap(), [171, 171]);
-        // Room for the rest: written whole, nobody is told anything.
+        assert_eq!(state.waiting_module(), 350);
+        sender
+            .send(Msg::Module {
+                epoch,
+                bytes: frames(100, b"e"),
+            })
+            .unwrap();
+        round(&mut event_loop, &mut state);
+        assert_eq!(asked.lock().unwrap().last(), Some(&450));
+
+        // The rest is written: nothing of the view's waits, and the flow agrees.
         room.give(usize::MAX);
         round(&mut event_loop, &mut state);
-        assert_eq!(*told.lock().unwrap(), [171, 171]);
-        assert_eq!(room.taken().len(), 301);
-        assert_eq!(state.waiting(), 0);
+        round(&mut event_loop, &mut state);
+        assert_eq!(state.waiting_module(), 0);
+        assert_eq!(flow.pending(), 0);
+        assert_eq!(room.taken().len(), keys + 500);
+    }
+
+    /// A view that is refused loses the words asked about and the frames behind the one under
+    /// way, which is finished, so that the program is not left half a frame; and what the view
+    /// says after that is not asked about, the view being over.
+    #[test]
+    fn a_view_that_is_refused_holds_none_of_the_words_asked_about_and_finishes_the_frame_under_way()
+    {
+        let (mut event_loop, sender, flow, room, epoch) = laned_loop();
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        event_loop.backlog({
+            let (asked, flow) = (Arc::clone(&asked), flow.clone());
+            move |waiting| {
+                asked.lock().unwrap().push(waiting);
+                // The conversation closes the view, which ends the flow's.
+                if waiting > 350 {
+                    flow.end();
+                    return false;
+                }
+                true
+            }
+        });
+        let mut state = State::default();
+        // Three frames, room for the first and half of the second.
+        sender
+            .send(Msg::Module {
+                epoch,
+                bytes: frames(100, b"abc"),
+            })
+            .unwrap();
+        room.give(150);
+        round(&mut event_loop, &mut state);
+        // 50 left of the second, the third behind it: three more frames are one too many.
+        sender
+            .send(Msg::Module {
+                epoch,
+                bytes: frames(100, b"def"),
+            })
+            .unwrap();
+        round(&mut event_loop, &mut state);
+        assert_eq!(*asked.lock().unwrap(), [300, 450]);
+        assert_eq!(state.waiting_module(), 50, "the frame under way only");
+
+        // More from the view that is over: dropped without being asked about.
+        sender
+            .send(Msg::Module {
+                epoch,
+                bytes: frames(100, b"g"),
+            })
+            .unwrap();
+        room.give(usize::MAX);
+        round(&mut event_loop, &mut state);
+        round(&mut event_loop, &mut state);
+        assert_eq!(asked.lock().unwrap().len(), 2);
+        assert_eq!(room.taken(), frames(100, b"ab"), "two whole frames");
+        assert_eq!(state.waiting_module(), 0);
+        assert_eq!(flow.pending(), 0);
+    }
+
+    /// Specification §4.8 through the loop that holds the words and the desk that keeps the
+    /// bound: a view that says more than 16 MiB to a program that does not read is closed as a
+    /// failure and the program is told, and a paste of as many keys is nobody's failure.
+    #[test]
+    fn a_flood_of_a_views_words_closes_the_view_and_a_flood_of_keys_does_not() {
+        use crate::pencere::tests::{Pane, Rig, open_a_view};
+        use crate::pencere::{Action, MAX_BACKLOG};
+        let (rig, _, _) = Rig::new(true);
+        let mut pane = Pane::new(Arc::clone(&rig));
+        open_a_view(&mut pane);
+        let desk = rig.desk.as_ref().expect("a desk");
+        desk.take_views();
+        rig.written();
+        let epoch = rig.flow.module_ticket().expect("a view is up");
+        let (mut event_loop, _terminal) = pane_loop(ScriptedPty::new([]), &rig);
+        event_loop.flow(rig.flow.clone());
+        event_loop.backlog({
+            let rig = Arc::clone(&rig);
+            move |waiting| {
+                rig.desk
+                    .as_ref()
+                    .is_none_or(|desk| desk.backlog(waiting, rig.write()))
+            }
+        });
+        let sender = event_loop.channel();
+        let room = event_loop.pty_mut().room.clone();
+        room.give(0);
+        let mut state = State::default();
+
+        // More keys than the bound, and the view's words up to it: the view stays.
+        let keys = MAX_BACKLOG + (1 << 20);
+        sender
+            .send(Msg::Input(Cow::Owned(vec![b'k'; keys])))
+            .unwrap();
+        for _ in 0..16 {
+            sender
+                .send(Msg::Module {
+                    epoch,
+                    bytes: frames(1 << 20, b"a"),
+                })
+                .unwrap();
+            round(&mut event_loop, &mut state);
+        }
+        assert_eq!(state.waiting_module(), MAX_BACKLOG);
+        assert!(rig.written().is_empty(), "the view was told nothing");
+        assert_eq!(rig.flow.module_ticket(), Some(epoch));
+
+        // A byte over it: the view is closed, its words are not held and the program is told, on
+        // the keys' lane.
+        sender
+            .send(Msg::Module {
+                epoch,
+                bytes: frames(1 << 20, b"b"),
+            })
+            .unwrap();
+        round(&mut event_loop, &mut state);
+        let told = rig.written();
+        assert_eq!(told.len(), 1, "{told:?}");
+        assert_eq!(told[0].kind, "closed");
+        assert!(told[0].payload.contains(r#""reason":"error""#));
+        assert!(told[0].payload.contains(r#""code":"view""#));
+        assert_eq!(rig.flow.module_ticket(), None);
+        assert_eq!(state.waiting_module(), 0, "none of it was begun");
+        assert!(desk.take_views().contains(&Action::DestroyView));
+
+        // The tty takes what is left: the keys, and none of the view's words.
+        room.give(usize::MAX);
+        round(&mut event_loop, &mut state);
+        assert_eq!(room.taken().len(), keys);
+        assert_eq!(rig.flow.pending(), 0);
     }
 
     /// Any other end of the view: the frame under way is finished, so that the program is not
