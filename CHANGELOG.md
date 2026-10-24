@@ -45,6 +45,13 @@ of every installed copy. A version without a section is not released.
   program's in the grid: a quiet word on a card is a shade stronger than the theme says
   where it would be hard to read, and changing the setting redraws the view. A web view is
   told the palette and the selection in its colours too.
+- **Views that bateri draws show images.** A view can put a PNG, a JPEG or an SVG from its
+  own bundle on the page, fitted to its box (`contain`) or filling it and cropped (`cover`),
+  with rounded corners and opacity, or painted in one of the theme's colours so that an
+  icon follows the theme. SVGs are drawn again, sharp, when the pane is resized. Files are
+  decoded off the screen's thread, so a page never waits for them and a view at rest still
+  costs no frames; a file that cannot be shown leaves its box empty, and why is printed to
+  bateri's stderr for the view's author.
 
 ### Changed
 

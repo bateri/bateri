@@ -1389,12 +1389,26 @@ impl Gpu {
     /// frame, and a picture whose bytes are not `4 × width × height` is not
     /// one. Both are left undrawn.
     fn picture_texture(&self, picture: &Picture) -> Option<ImageTexture> {
-        let (width, height) = picture.size;
+        self.rgba_texture("picture", COLOR_FORMAT, picture.size, &picture.pixels)
+    }
+
+    /// A texture of `width × height` four-byte pixels, uploaded once and bound with the linear
+    /// sampler: what a kitty picture and a UI page's image are both drawn from. `format` is the
+    /// caller's to justify (a picture's is sRGB, decoded by the hardware; a page's image is read
+    /// raw and decoded in its shader, see `ui.wgsl`). `None` where the device cannot hold it or
+    /// `pixels` is not `4 × width × height` bytes.
+    fn rgba_texture(
+        &self,
+        label: &'static str,
+        format: wgpu::TextureFormat,
+        (width, height): (u32, u32),
+        pixels: &[u8],
+    ) -> Option<ImageTexture> {
         let limit = self.device.limits().max_texture_dimension_2d;
         if width == 0 || height == 0 || width > limit || height > limit {
             return None;
         }
-        if picture.pixels.len() as u64 != u64::from(width) * u64::from(height) * 4 {
+        if pixels.len() as u64 != u64::from(width) * u64::from(height) * 4 {
             return None;
         }
         let size = wgpu::Extent3d {
@@ -1403,12 +1417,12 @@ impl Gpu {
             depth_or_array_layers: 1,
         };
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("picture"),
+            label: Some(label),
             size,
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: COLOR_FORMAT,
+            format,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
@@ -1421,7 +1435,7 @@ impl Gpu {
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
-            &picture.pixels,
+            pixels,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(width * 4),
@@ -1431,7 +1445,7 @@ impl Gpu {
         );
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("picture"),
+            label: Some(label),
             layout: &self.plane_layout,
             entries: &[
                 wgpu::BindGroupEntry {

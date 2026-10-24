@@ -3103,6 +3103,9 @@ impl DisplayLink {
     /// valid. Main thread, like every call here.
     pub fn set_page(&self, page: Option<Box<dyn UiPage>>) {
         *self.core.page.borrow_mut() = page;
+        // The old page's images are not the new one's: their textures go now, not with the
+        // first list the new page draws (a pane that takes its page down draws none).
+        self.core.renderer.ui_release_images();
         self.core.page_frames.ask();
         self.waker.wake();
     }

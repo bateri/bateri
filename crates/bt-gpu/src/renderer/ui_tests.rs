@@ -11,7 +11,7 @@ use bt_atlas::{Family, TextStyle};
 use bt_core::LinearRgba;
 
 use super::tests::{BACKGROUND, MIDTONE, WHITE, pixel_at, renderer};
-use super::ui::{UiList, UiQuad, UiRect, tint};
+use super::ui::{UiBitmap, UiImage, UiList, UiQuad, UiRect, tint};
 use crate::Renderer;
 
 const EDGE: usize = 64;
@@ -392,4 +392,249 @@ fn a_heavier_weight_paints_more_ink() {
     };
     let (light, bold) = (ink(300), ink(800));
     assert!(bold > light, "bold {bold} against light {light}");
+}
+
+// ---------------------------------------------------------------------------
+// Images
+// ---------------------------------------------------------------------------
+
+/// One pixel as a decoder hands it over: sRGB, premultiplied by alpha.
+fn texel(r: u8, g: u8, b: u8, a: u8) -> [u8; 4] {
+    let times = |c: u8| ((u16::from(c) * u16::from(a) + 127) / 255) as u8;
+    [times(r), times(g), times(b), a]
+}
+
+fn bitmap(id: u64, width: u32, pixels: &[[u8; 4]]) -> (u64, u32, u32, Vec<u8>) {
+    (id, width, pixels.len() as u32 / width, pixels.concat())
+}
+
+/// Puts `(id, width, height, pixels)` into `list` as `image`.
+fn put(r: &Renderer, list: &mut UiList, bitmap: &(u64, u32, u32, Vec<u8>), image: UiImage) -> bool {
+    r.ui_image(
+        list,
+        &UiBitmap {
+            id: bitmap.0,
+            width: bitmap.1,
+            height: bitmap.2,
+            pixels: &bitmap.3,
+        },
+        image,
+    )
+}
+
+const RED: (u8, u8, u8) = (0xc8, 0x40, 0x40);
+const GREEN: (u8, u8, u8) = (0x40, 0xa0, 0x50);
+const BLUE: (u8, u8, u8) = (0x40, 0x60, 0xd0);
+const CREAM: (u8, u8, u8) = (0xe0, 0xd0, 0x90);
+const GROUND: (u8, u8, u8) = (0x1a, 0x1c, 0x21);
+
+fn opaque((r, g, b): (u8, u8, u8)) -> [u8; 4] {
+    texel(r, g, b, 255)
+}
+
+#[test]
+fn an_image_lands_in_its_rectangle_in_its_own_colours() {
+    // Mid-tones throughout: a missing sRGB decode (or a double one) moves every one of them.
+    let r = renderer();
+    let image = bitmap(
+        1,
+        2,
+        &[opaque(RED), opaque(GREEN), opaque(BLUE), opaque(CREAM)],
+    );
+    let mut list = UiList::new();
+    // Pixel for texel: each pixel centre is a texel centre, so nothing is filtered.
+    assert!(put(
+        &r,
+        &mut list,
+        &image,
+        UiImage::new(UiRect::new(10.0, 12.0, 2.0, 2.0))
+    ));
+    let pixels = r.render_ui_offscreen(EDGE as u32, MIDTONE, &list);
+    assert!(
+        near(at(&pixels, 10, 12), RED, 1),
+        "{:?}",
+        at(&pixels, 10, 12)
+    );
+    assert!(near(at(&pixels, 11, 12), GREEN, 1));
+    assert!(near(at(&pixels, 10, 13), BLUE, 1));
+    assert!(near(at(&pixels, 11, 13), CREAM, 1));
+    // And only there.
+    for (x, y) in [(9, 12), (12, 12), (10, 11), (11, 14), (40, 40)] {
+        assert!(near(at(&pixels, x, y), GROUND, 1), "({x}, {y})");
+    }
+}
+
+#[test]
+fn an_image_that_is_half_transparent_blends_in_linear_light_not_darker() {
+    // Premultiplied sRGB: the stored colour is `encoded × alpha`. Read as an sRGB texture it
+    // would be decoded as if it were an encoded colour and every soft edge would come out
+    // dark; the blend must be the colour at half alpha over the ground, in linear light.
+    let r = renderer();
+    let half = texel(RED.0, RED.1, RED.2, 0x80);
+    let image = bitmap(2, 1, &[half]);
+    let mut list = UiList::new();
+    assert!(put(
+        &r,
+        &mut list,
+        &image,
+        UiImage::new(UiRect::new(8.0, 8.0, 8.0, 8.0))
+    ));
+    let pixels = r.render_ui_offscreen(EDGE as u32, MIDTONE, &list);
+    let expected = bytes(LinearRgba::from_srgb(RED.0, RED.1, RED.2).over(128.0 / 255.0, MIDTONE));
+    let got = at(&pixels, 12, 12);
+    assert!(near(got, expected, 3), "got {got:?}, expected {expected:?}");
+    // The wrong reading (decode the product) is further than that from the right one.
+    let wrong =
+        bytes(LinearRgba::from_srgb(half[0], half[1], half[2]).over(128.0 / 255.0, MIDTONE));
+    assert!(!near(wrong, expected, 8), "the guard cannot tell {wrong:?}");
+}
+
+#[test]
+fn a_tint_paints_the_shape_with_the_images_alpha() {
+    let r = renderer();
+    // Opaque, clear, half, opaque: the colours the file had are of no matter.
+    let image = bitmap(
+        3,
+        4,
+        &[
+            opaque(RED),
+            texel(0, 0, 0, 0),
+            texel(GREEN.0, GREEN.1, GREEN.2, 0x80),
+            opaque(BLUE),
+        ],
+    );
+    let paint_in = LinearRgba::from_srgb(CREAM.0, CREAM.1, CREAM.2);
+    let mut list = UiList::new();
+    assert!(put(
+        &r,
+        &mut list,
+        &image,
+        UiImage::new(UiRect::new(8.0, 8.0, 4.0, 1.0)).tint(tint(paint_in, 1.0))
+    ));
+    let pixels = r.render_ui_offscreen(EDGE as u32, MIDTONE, &list);
+    assert!(near(at(&pixels, 8, 8), CREAM, 1), "{:?}", at(&pixels, 8, 8));
+    assert!(
+        near(at(&pixels, 9, 8), GROUND, 1),
+        "a clear texel paints nothing"
+    );
+    let half = bytes(paint_in.over(128.0 / 255.0, MIDTONE));
+    assert!(
+        near(at(&pixels, 10, 8), half, 3),
+        "{:?}",
+        at(&pixels, 10, 8)
+    );
+    assert!(near(at(&pixels, 11, 8), CREAM, 1));
+}
+
+#[test]
+fn a_cover_crop_shows_the_middle_of_the_image_and_leaves_the_rest_out() {
+    let r = renderer();
+    // Four texels across; the rectangle is two pixels, cut to the middle two.
+    let image = bitmap(
+        4,
+        4,
+        &[opaque(RED), opaque(GREEN), opaque(BLUE), opaque(CREAM)],
+    );
+    let mut list = UiList::new();
+    assert!(put(
+        &r,
+        &mut list,
+        &image,
+        UiImage::new(UiRect::new(8.0, 8.0, 2.0, 1.0)).crop(UiRect::new(0.25, 0.0, 0.5, 1.0))
+    ));
+    let pixels = r.render_ui_offscreen(EDGE as u32, MIDTONE, &list);
+    assert!(near(at(&pixels, 8, 8), GREEN, 1), "{:?}", at(&pixels, 8, 8));
+    assert!(near(at(&pixels, 9, 8), BLUE, 1), "{:?}", at(&pixels, 9, 8));
+    // Neither end of the file is anywhere: not in the rectangle, not at its antialiased edge.
+    assert!(near(at(&pixels, 7, 8), GROUND, 1));
+    assert!(near(at(&pixels, 10, 8), GROUND, 1));
+}
+
+#[test]
+fn an_image_has_the_corners_clip_and_opacity_of_a_box() {
+    let r = renderer();
+    let white = bitmap(5, 1, &[opaque((255, 255, 255))]);
+    let rounded = |image: UiImage| {
+        let mut list = UiList::new();
+        assert!(put(&r, &mut list, &white, image));
+        r.render_ui_offscreen(EDGE as u32, MIDTONE, &list)
+    };
+    // Corners: the square corner's pixel is outside, the middle of a side and the centre in.
+    let pixels = rounded(UiImage::new(UiRect::new(8.0, 8.0, 32.0, 32.0)).radii([12.0; 4]));
+    assert!(
+        near(at(&pixels, 8, 8), GROUND, 1),
+        "{:?}",
+        at(&pixels, 8, 8)
+    );
+    assert!(near(at(&pixels, 39, 39), GROUND, 1));
+    assert_eq!(at(&pixels, 24, 8), (255, 255, 255));
+    assert_eq!(at(&pixels, 24, 24), (255, 255, 255));
+    // Clip: nothing past it.
+    let pixels = rounded(
+        UiImage::new(UiRect::new(8.0, 8.0, 32.0, 32.0)).clip(UiRect::new(0.0, 0.0, 20.0, 64.0)),
+    );
+    assert_eq!(at(&pixels, 19, 24), (255, 255, 255));
+    assert!(near(at(&pixels, 21, 24), GROUND, 1));
+    // Opacity: half of white over the ground, in linear light.
+    let pixels = rounded(UiImage::new(UiRect::new(8.0, 8.0, 32.0, 32.0)).opacity(0.5));
+    let expected = bytes(WHITE.over(0.5, MIDTONE));
+    assert!(
+        near(at(&pixels, 24, 24), expected, 2),
+        "{:?}",
+        at(&pixels, 24, 24)
+    );
+}
+
+#[test]
+fn an_images_texture_lives_with_the_lists_that_name_it() {
+    let r = renderer();
+    let held = |r: &Renderer| r.ui_images_held();
+    let one = bitmap(6, 1, &[opaque(RED)]);
+    let other = bitmap(7, 1, &[opaque(GREEN)]);
+    let rect = UiRect::new(8.0, 8.0, 4.0, 4.0);
+
+    let mut list = UiList::new();
+    assert!(put(&r, &mut list, &one, UiImage::new(rect)));
+    assert!(put(&r, &mut list, &other, UiImage::new(rect)));
+    r.render_ui_offscreen(EDGE as u32, MIDTONE, &list);
+    assert_eq!(held(&r), 2);
+
+    // A frame that names one of them lets the other go (an SVG at a new size is a new id).
+    let mut list = UiList::new();
+    assert!(put(&r, &mut list, &other, UiImage::new(rect)));
+    r.render_ui_offscreen(EDGE as u32, MIDTONE, &list);
+    assert_eq!(held(&r), 1);
+
+    // The page going away lets go of the rest, drawn or not.
+    r.ui_release_images();
+    assert_eq!(held(&r), 0);
+}
+
+#[test]
+fn pixels_that_are_not_a_texture_are_left_out_of_the_list() {
+    let r = renderer();
+    let mut list = UiList::new();
+    let short = UiBitmap {
+        id: 8,
+        width: 2,
+        height: 2,
+        pixels: &[0; 12],
+    };
+    assert!(!r.ui_image(
+        &mut list,
+        &short,
+        UiImage::new(UiRect::new(0.0, 0.0, 4.0, 4.0))
+    ));
+    let empty = UiBitmap {
+        id: 9,
+        width: 0,
+        height: 0,
+        pixels: &[],
+    };
+    assert!(!r.ui_image(
+        &mut list,
+        &empty,
+        UiImage::new(UiRect::new(0.0, 0.0, 4.0, 4.0))
+    ));
+    assert!(list.is_empty());
 }

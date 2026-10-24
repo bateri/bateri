@@ -5537,6 +5537,8 @@ impl TerminalPane {
                     family.clone(),
                     inset,
                     None,
+                    // No bundle: a debug page has no files to draw.
+                    None,
                     wake,
                 );
                 (page, Rc::new(handle))
@@ -5671,6 +5673,11 @@ impl TerminalPane {
                 return;
             }
             self.apply_page_reply(reply, pointer);
+        }
+        // Images the page named that could not be shown: the page goes on without them, and
+        // the one who wrote it reads why where a page's failures are read.
+        for diagnostic in &drained.diagnostics {
+            eprintln!("bateri: the page's {diagnostic}");
         }
         if let Some(why) = drained.ended {
             eprintln!("bateri: {why}; the terminal is back");
@@ -5959,6 +5966,11 @@ impl TerminalPane {
         // for, and what it takes of the program's words lets the program say more.
         let limits = bt_shell_common::native_view::Limits::default();
         let flow = self.session().map(|session| session.flow());
+        // The images of the page are files of the bundle the program sent, read from the session
+        // that keeps them. The `wake` is the one the module has: it only hops to the main queue,
+        // so the images' decoder may call it from inside a build.
+        let assets: Arc<dyn bt_shell_common::native_view::Assets> =
+            Arc::new(bt_shell_common::native_view::BundleAssets::new(session));
         let (page, handle) = if start.kind == bt_core::pencere::ViewKind::Lua {
             bt_shell_common::native_view::script_page(
                 bytes.to_vec(),
@@ -5966,6 +5978,7 @@ impl TerminalPane {
                 family.clone(),
                 inset,
                 flow,
+                Some(assets),
                 wake,
             )
         } else {
@@ -5975,6 +5988,7 @@ impl TerminalPane {
                 family.clone(),
                 inset,
                 flow,
+                Some(assets),
                 wake,
             )
         };

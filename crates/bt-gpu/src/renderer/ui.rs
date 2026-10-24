@@ -13,6 +13,13 @@
 //! from one font, one size and one scale. [`Renderer::ui_shape`] shapes and
 //! measures a line, [`Renderer::ui_text`] puts it into a list.
 //!
+//! A page's images are a third kind of item ([`UiImage`], [`Renderer::ui_image`]): a textured
+//! rounded rectangle over pixels the page's decoder made. The renderer keeps a texture for each
+//! image **while a list it drew names it** and no longer: it is made the first time a page
+//! hands the pixels over and goes with the first list drawn without it, so a page that stopped
+//! showing an image — or an SVG that is drawn at a new size — gives its pixels back, and an idle
+//! pane holds no more than what its last frame drew.
+//!
 //! This module knows nothing of terminals and nothing of any engine that
 //! decides what the list contains: a [`UiPage`] does, and the link calls it
 //! whenever the surface needs a frame.
@@ -22,17 +29,30 @@
 //! fills, cleared as a whole — [`Renderer::ui_flushed`] tells whoever holds a
 //! list built across the clear to build it again.
 
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::ops::Range;
 
 use bt_atlas::{FontId, ShapedText, TextAtlas, TextStyle, subpixel};
 use bt_core::{LinearRgba, Theme};
 
-use super::{GpuBytes, Pending, PlaneTexture, Renderer, Target, block_on, bytes_of, pipeline_over};
+use super::{
+    GpuBytes, ImageTexture, Pending, PlaneTexture, Renderer, Target, block_on, bytes_of,
+    pipeline_over,
+};
 use crate::GpuError;
 
 /// The text texture's edge, pixels: 4 MB of `R8`, room for several thousand
 /// glyphs at text sizes. A device's texture ceiling is never below it.
 const TEXT_EDGE: u16 = 2048;
+
+/// The format of a page's image textures: plain `Rgba8Unorm`, **not** the sRGB format the colour
+/// plane and the kitty pictures have (`renderer::COLOR_FORMAT` says why those must be). The
+/// pixels of a page's image arrive premultiplied by alpha in sRGB (`encoded(c) × a`), and the
+/// hardware's decode of them would take that product for an encoded colour and darken every
+/// soft edge; the shader divides alpha out and decodes ([`ui.wgsl`](../../shaders/ui.wgsl)), after
+/// the sampler has filtered the premultiplied bytes.
+const IMAGE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
 /// A rectangle in surface pixels: the top-left corner, then the size.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -187,11 +207,110 @@ const _: () = assert!(std::mem::offset_of!(UiGlyph, src) == 48);
 // 64 is asserted.
 unsafe impl GpuBytes for UiGlyph {}
 
+/// The pixels of an image a page draws, as its decoder made them: what [`Renderer::ui_image`]
+/// keeps a texture of.
+#[derive(Clone, Copy, Debug)]
+pub struct UiBitmap<'a> {
+    /// Names these pixels and no other: the renderer keeps the texture under it, and a bitmap
+    /// whose id it has is not read again.
+    pub id: u64,
+    pub width: u32,
+    pub height: u32,
+    /// `4 × width × height` bytes, rows from the top: RGBA, eight bits a channel, in sRGB,
+    /// **premultiplied** by alpha.
+    pub pixels: &'a [u8],
+}
+
+/// An image: `ui.wgsl`'s `ImageIn` and its Rust twin. A textured rectangle, with the corners and
+/// the clip a [`UiQuad`] has, drawn by [`Renderer::ui_image`].
+///
+/// `#[repr(C)]`, six `[f32; 4]`, stride 96, no padding.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct UiImage {
+    rect: [f32; 4],
+    /// What the rectangle shows of the texture: u0, v0, u1, v1, shares of it.
+    uv: [f32; 4],
+    tint: [f32; 4],
+    radii: [f32; 4],
+    clip: [f32; 4],
+    /// Opacity, tinted (`1.0` or `0.0`), then two unused.
+    params: [f32; 4],
+}
+
+const _: () = assert!(size_of::<UiImage>() == 96);
+const _: () = assert!(std::mem::offset_of!(UiImage, uv) == 16);
+const _: () = assert!(std::mem::offset_of!(UiImage, tint) == 32);
+const _: () = assert!(std::mem::offset_of!(UiImage, radii) == 48);
+const _: () = assert!(std::mem::offset_of!(UiImage, clip) == 64);
+const _: () = assert!(std::mem::offset_of!(UiImage, params) == 80);
+
+// SAFETY: `repr(C)`, `f32` fields only; its size is the sum of its fields (the asserts above:
+// 96, no gaps).
+unsafe impl GpuBytes for UiImage {}
+
+impl UiImage {
+    /// The whole image in `rect`, as it is, square cornered, opaque.
+    pub const fn new(rect: UiRect) -> Self {
+        Self {
+            rect: [rect.x, rect.y, rect.w, rect.h],
+            uv: [0.0, 0.0, 1.0, 1.0],
+            tint: [0.0; 4],
+            radii: [0.0; 4],
+            clip: UiRect::UNBOUNDED.corners(),
+            params: [1.0, 0.0, 0.0, 0.0],
+        }
+    }
+
+    /// The part of the image the rectangle shows, as shares of it (`UiRect::new(0.0, 0.0, 1.0,
+    /// 1.0)` is all of it): where a `cover` image is cut.
+    #[must_use]
+    pub const fn crop(mut self, share: UiRect) -> Self {
+        self.uv = share.corners();
+        self
+    }
+
+    /// Paints the image's shape in `color` (linear straight RGBA, [`tint`]): every pixel is that
+    /// colour with the image's alpha there, times the colour's own.
+    #[must_use]
+    pub const fn tint(mut self, color: [f32; 4]) -> Self {
+        self.tint = color;
+        self.params[1] = 1.0;
+        self
+    }
+
+    /// How much of the image shows, `0.0..=1.0`.
+    #[must_use]
+    pub const fn opacity(mut self, opacity: f32) -> Self {
+        self.params[0] = opacity;
+        self
+    }
+
+    /// A radius per corner, pixels: top-left, top-right, bottom-right, bottom-left.
+    #[must_use]
+    pub const fn radii(mut self, radii: [f32; 4]) -> Self {
+        self.radii = radii;
+        self
+    }
+
+    /// Nothing is drawn outside `clip`.
+    #[must_use]
+    pub const fn clip(mut self, clip: UiRect) -> Self {
+        self.clip = clip.corners();
+        self
+    }
+}
+
 /// One thing the list draws.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum UiItem {
     Quad(UiQuad),
     Glyph(UiGlyph),
+    /// An image over the texture of [`UiBitmap::id`] `texture`.
+    Image {
+        texture: u64,
+        image: UiImage,
+    },
 }
 
 /// A draw list in painter's order: later items cover earlier ones.
@@ -293,6 +412,16 @@ const QUAD_ATTRIBUTES: [wgpu::VertexAttribute; 7] = [
     attribute(96, 6),
 ];
 
+/// The image's six attributes, one `vec4` each, at the offsets of `UiImage`'s fields.
+const IMAGE_ATTRIBUTES: [wgpu::VertexAttribute; 6] = [
+    attribute(0, 0),
+    attribute(16, 1),
+    attribute(32, 2),
+    attribute(48, 3),
+    attribute(64, 4),
+    attribute(80, 5),
+];
+
 /// The glyph's four attributes: rect@0, colour@16, clip@32, src@48 (read as a
 /// `vec4`: the explicit pad is its tail).
 const GLYPH_ATTRIBUTES: [wgpu::VertexAttribute; 4] = [
@@ -310,10 +439,11 @@ const fn attribute(offset: u64, location: u32) -> wgpu::VertexAttribute {
     }
 }
 
-/// The two pipelines, built with the device ([`Gpu::new`](super::Gpu)).
+/// The three pipelines, built with the device ([`Gpu::new`](super::Gpu)).
 pub(super) struct Pipelines {
     quad: wgpu::RenderPipeline,
     glyph: wgpu::RenderPipeline,
+    image: wgpu::RenderPipeline,
 }
 
 impl Pipelines {
@@ -339,6 +469,11 @@ impl Pipelines {
             step_mode: wgpu::VertexStepMode::Instance,
             attributes: &GLYPH_ATTRIBUTES,
         };
+        let images = wgpu::VertexBufferLayout {
+            array_stride: size_of::<UiImage>() as u64,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &IMAGE_ATTRIBUTES,
+        };
         let quad_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("ui quad"),
             bind_group_layouts: &[],
@@ -346,6 +481,13 @@ impl Pipelines {
         });
         let glyph_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("ui glyph"),
+            bind_group_layouts: &[Some(plane_layout)],
+            immediate_size: size_of::<UiImmediates>() as u32,
+        });
+        // The glyphs' layout again: an image reads its texture and sampler from the same two
+        // slots of group 0 an atlas plane has.
+        let image_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("ui image"),
             bind_group_layouts: &[Some(plane_layout)],
             immediate_size: size_of::<UiImmediates>() as u32,
         });
@@ -366,12 +508,20 @@ impl Pipelines {
                 "ui_glyph_vertex",
                 "ui_glyph_fragment",
             ),
+            image: pipeline_over(
+                device,
+                &image_layout,
+                &module,
+                &[Some(images)],
+                "ui_image_vertex",
+                "ui_image_fragment",
+            ),
         }
     }
 }
 
-/// This renderer's UI half: the text atlas with its texture, and the two
-/// instance buffers.
+/// This renderer's UI half: the text atlas with its texture, the textures of the page's images,
+/// and the three instance buffers.
 #[derive(Default)]
 pub(super) struct UiState {
     /// Opened with the first font: a renderer that never paints a page never
@@ -380,11 +530,24 @@ pub(super) struct UiState {
     texture: Option<PlaneTexture>,
     quads: Option<wgpu::Buffer>,
     glyphs: Option<wgpu::Buffer>,
+    pictures: Option<wgpu::Buffer>,
+    /// The textures of the images the last list named, by [`UiBitmap::id`] (and the ones a page
+    /// has handed over since, which the list being built is about to name).
+    images: HashMap<u64, ImageTexture>,
+}
+
+/// What a run of the list draws.
+#[derive(Clone, Copy, PartialEq)]
+enum Kind {
+    Quads,
+    Glyphs,
+    /// Images over the texture of this id.
+    Images(u64),
 }
 
 /// A run of one kind of item in the list, drawn with one call.
 struct Run {
-    glyphs: bool,
+    kind: Kind,
     range: Range<u32>,
 }
 
@@ -451,6 +614,41 @@ impl Renderer {
         }
         self.write_text(&mut ui);
         line.width as f32
+    }
+
+    /// Puts an image into `list`: `bitmap`'s pixels drawn as `image` says. The renderer makes a
+    /// texture of the pixels the first time it sees `bitmap.id` and reads them no more after
+    /// that; the texture stays while the lists drawn name it ([`UiBitmap`]). `false`, and
+    /// nothing in the list, where the bitmap cannot be a texture here: a side past what the
+    /// device holds, or pixels that are not `4 × width × height` bytes.
+    pub fn ui_image(&self, list: &mut UiList, bitmap: &UiBitmap<'_>, image: UiImage) -> bool {
+        if let Entry::Vacant(slot) = self.ui.borrow_mut().images.entry(bitmap.id) {
+            let Some(texture) = self.gpu.rgba_texture(
+                "ui image",
+                IMAGE_FORMAT,
+                (bitmap.width, bitmap.height),
+                bitmap.pixels,
+            ) else {
+                return false;
+            };
+            slot.insert(texture);
+        }
+        list.items.push(UiItem::Image {
+            texture: bitmap.id,
+            image,
+        });
+        true
+    }
+
+    /// Lets go of every image texture: the page they were for is gone.
+    pub fn ui_release_images(&self) {
+        self.ui.borrow_mut().images.clear();
+    }
+
+    /// How many image textures the renderer holds.
+    #[cfg(test)]
+    pub(crate) fn ui_images_held(&self) -> usize {
+        self.ui.borrow().images.len()
     }
 
     /// Whether the text atlas filled up and was cleared since the last call:
@@ -548,31 +746,41 @@ impl Renderer {
 
         let mut quads: Vec<UiQuad> = Vec::new();
         let mut glyphs: Vec<UiGlyph> = Vec::new();
+        let mut pictures: Vec<UiImage> = Vec::new();
         let mut runs: Vec<Run> = Vec::new();
         for item in &list.items {
-            let (is_glyph, count) = match item {
+            let (kind, count) = match item {
                 UiItem::Quad(quad) => {
                     quads.push(*quad);
-                    (false, quads.len())
+                    (Kind::Quads, quads.len())
                 }
                 UiItem::Glyph(glyph) => {
                     glyphs.push(*glyph);
-                    (true, glyphs.len())
+                    (Kind::Glyphs, glyphs.len())
+                }
+                UiItem::Image { texture, image } => {
+                    pictures.push(*image);
+                    (Kind::Images(*texture), pictures.len())
                 }
             };
             let end = u32::try_from(count).unwrap_or(u32::MAX);
             match runs.last_mut() {
-                Some(run) if run.glyphs == is_glyph => run.range.end = end,
+                Some(run) if run.kind == kind => run.range.end = end,
                 _ => runs.push(Run {
-                    glyphs: is_glyph,
+                    kind,
                     range: end - 1..end,
                 }),
             }
         }
+        // What this list does not name goes: the textures are the last frame's, no more.
+        ui.images
+            .retain(|id, _| runs.iter().any(|run| run.kind == Kind::Images(*id)));
         self.gpu
             .fill_buffer(&mut ui.quads, "ui quads", bytes_of(&quads));
         self.gpu
             .fill_buffer(&mut ui.glyphs, "ui glyphs", bytes_of(&glyphs));
+        self.gpu
+            .fill_buffer(&mut ui.pictures, "ui images", bytes_of(&pictures));
 
         let imm = UiImmediates {
             viewport_px: [
@@ -607,26 +815,38 @@ impl Renderer {
                 ..wgpu::RenderPassDescriptor::default()
             });
             for run in &runs {
-                if run.glyphs {
-                    // A glyph exists only after the atlas did.
-                    let (Some(buffer), Some(plane)) = (ui.glyphs.as_ref(), ui.texture.as_ref())
-                    else {
-                        continue;
-                    };
-                    pass.set_pipeline(&self.gpu.ui.glyph);
-                    pass.set_bind_group(0, &plane.bind, &[]);
-                    pass.set_vertex_buffer(0, buffer.slice(..));
-                    pass.set_immediates(0, bytes_of(std::slice::from_ref(&imm)));
-                    pass.draw(0..4, run.range.clone());
-                } else {
-                    let Some(buffer) = ui.quads.as_ref() else {
-                        continue;
-                    };
-                    pass.set_pipeline(&self.gpu.ui.quad);
-                    pass.set_vertex_buffer(0, buffer.slice(..));
-                    pass.set_immediates(0, bytes_of(std::slice::from_ref(&imm)));
-                    pass.draw(0..4, run.range.clone());
+                match run.kind {
+                    Kind::Glyphs => {
+                        // A glyph exists only after the atlas did.
+                        let (Some(buffer), Some(plane)) = (ui.glyphs.as_ref(), ui.texture.as_ref())
+                        else {
+                            continue;
+                        };
+                        pass.set_pipeline(&self.gpu.ui.glyph);
+                        pass.set_bind_group(0, &plane.bind, &[]);
+                        pass.set_vertex_buffer(0, buffer.slice(..));
+                    }
+                    Kind::Quads => {
+                        let Some(buffer) = ui.quads.as_ref() else {
+                            continue;
+                        };
+                        pass.set_pipeline(&self.gpu.ui.quad);
+                        pass.set_vertex_buffer(0, buffer.slice(..));
+                    }
+                    Kind::Images(id) => {
+                        // A texture exists only after a page handed its pixels over.
+                        let (Some(buffer), Some(texture)) =
+                            (ui.pictures.as_ref(), ui.images.get(&id))
+                        else {
+                            continue;
+                        };
+                        pass.set_pipeline(&self.gpu.ui.image);
+                        pass.set_bind_group(0, &texture.bind, &[]);
+                        pass.set_vertex_buffer(0, buffer.slice(..));
+                    }
                 }
+                pass.set_immediates(0, bytes_of(std::slice::from_ref(&imm)));
+                pass.draw(0..4, run.range.clone());
             }
         }
         Ok(self.gpu.queue.submit([encoder.finish()]))

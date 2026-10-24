@@ -7,6 +7,13 @@
 //! ([`PageDrive::drain`]) and draws a frame. A page that does not change costs nothing: nothing
 //! is asked, nothing is woken, no frame is drawn.
 //!
+//! **The page's images come the same way.** A file of the bundle is decoded on a thread of its
+//! own ([`Images`]); the layout asks for its size, the paint for its pixels, and what is not there
+//! yet is a box with nothing in it. The decoder wakes the application through the page's own
+//! `wake` — once for everything that arrived since it last looked — and the drain reads what
+//! came ([`Images::poll`]): a size is a page laid out again, pixels a page drawn again, a refusal
+//! a word for the page's author ([`Drained::diagnostics`]).
+//!
 //! Until the module has handed out its first page — it is compiled first, which takes a moment —
 //! the pane shows a line saying so, laid out like any page but not told to the module. A module
 //! that goes wrong is gone: the pane is told why ([`Drained::ended`]) and takes the page down.
@@ -16,7 +23,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use bt_core::Flow;
-use pencere_sandbox::{Limits, Module, Program, Unbounded};
+use pencere_sandbox::{Assets, ImageLimits, Images, Limits, Module, Program, Unbounded};
 use pencere_view::{Element, Event, Size, Tone, div, text};
 
 use super::{
@@ -27,6 +34,10 @@ use super::{
 /// What the page and its handle share.
 struct Shared {
     module: Module,
+    /// The page's images, if it has a bundle to read them from.
+    images: Option<Rc<Images>>,
+    /// Refused images the pane has not been told of.
+    diagnostics: Vec<String>,
     /// The page as the module last handed it out.
     root: Option<Element>,
     /// The page is moving: it is asked for again at every frame, until it says it is not.
@@ -60,6 +71,16 @@ impl Shared {
             self.animating = frame.animating;
             self.wake_at = frame.wake_at;
             self.redraw = true;
+        }
+        if let Some(images) = &self.images {
+            let arrived = images.poll();
+            // A size the layout was waiting for, pixels the paint was: either way a frame of the
+            // page, the one that lays it out again and draws it.
+            if arrived.relayout || arrived.redraw {
+                self.redraw = true;
+            }
+            self.diagnostics
+                .extend(arrived.diagnostics.iter().map(ToString::to_string));
         }
         let inset = self.inset;
         self.replies.extend(
@@ -101,16 +122,19 @@ impl Program for Held {
 ///
 /// `bytes` is the component (binary or text) and `limits` what it is held to. `terminal` is the
 /// pane's font family and `inset` the points at the top the application keeps for its strip.
-/// `flow` is the flow of the program that opened the page, if one did. `wake` is called from the
-/// module's thread when it has put something out; it hops to the main thread and has the pane
-/// drain the handle ([`PageDrive::drain`]). Returns at once: the module is compiled and started
-/// on its thread.
+/// `flow` is the flow of the program that opened the page, if one did. `assets` is where the
+/// files of its bundle are read from, if it has one: a page without them draws no image.
+/// `wake` is called from the module's thread — and from the images' — when something is put
+/// out; it hops to the main thread and has the pane drain the handle ([`PageDrive::drain`]),
+/// **and never lays out or draws itself**: the images' decoder may call it from inside a
+/// build. Returns at once: the module is compiled and started on its thread.
 pub fn module_page(
     bytes: Vec<u8>,
     limits: Limits,
     terminal: Option<String>,
     inset: f32,
     flow: Option<Flow>,
+    assets: Option<Arc<dyn Assets>>,
     wake: impl Fn() + Send + Sync + 'static,
 ) -> (Box<dyn UiPage>, ModuleHandle) {
     page_around(
@@ -118,6 +142,7 @@ pub fn module_page(
         terminal,
         inset,
         flow,
+        assets,
         wake,
     )
 }
@@ -130,6 +155,7 @@ pub fn script_page(
     terminal: Option<String>,
     inset: f32,
     flow: Option<Flow>,
+    assets: Option<Arc<dyn Assets>>,
     wake: impl Fn() + Send + Sync + 'static,
 ) -> (Box<dyn UiPage>, ModuleHandle) {
     page_around(
@@ -137,6 +163,7 @@ pub fn script_page(
         terminal,
         inset,
         flow,
+        assets,
         wake,
     )
 }
@@ -146,14 +173,24 @@ fn page_around(
     terminal: Option<String>,
     inset: f32,
     flow: Option<Flow>,
+    assets: Option<Arc<dyn Assets>>,
     wake: impl Fn() + Send + Sync + 'static,
 ) -> (Box<dyn UiPage>, ModuleHandle) {
     let program: Arc<dyn Program> = match flow {
         Some(flow) => Arc::new(Held(flow)),
         None => Arc::new(Unbounded),
     };
+    // One way to the main queue for the module and for the images.
+    let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(wake);
+    let images = assets.map(|assets| {
+        let wake = Arc::clone(&wake);
+        Rc::new(Images::new(assets, ImageLimits::default(), move || wake()))
+    });
+    let module_wake = Arc::clone(&wake);
     let shared = Rc::new(RefCell::new(Shared {
-        module: start(program, Box::new(wake)),
+        module: start(program, Box::new(move || module_wake())),
+        images: images.clone(),
+        diagnostics: Vec::new(),
         root: None,
         animating: false,
         wake_at: None,
@@ -171,6 +208,7 @@ fn page_around(
         terminal,
         inset,
         shaped: Shaped::default(),
+        images,
         shared: Rc::clone(&shared),
     };
     (Box::new(page), ModuleHandle { shared })
@@ -239,6 +277,7 @@ impl PageDrive for ModuleHandle {
             };
             let drained = Drained {
                 redraw: std::mem::take(&mut shared.redraw),
+                diagnostics: std::mem::take(&mut shared.diagnostics),
                 ended,
                 sent: std::mem::take(&mut shared.sent),
             };
@@ -266,6 +305,8 @@ struct ModulePage {
     terminal: Option<String>,
     inset: f32,
     shaped: Shaped,
+    /// The page's images; the handle polls the same ones ([`Shared::sync`]).
+    images: Option<Rc<Images>>,
     shared: Rc<RefCell<Shared>>,
 }
 
@@ -298,6 +339,7 @@ impl UiPage for ModulePage {
             renderer: cx.renderer,
             terminal: &self.terminal,
             shaped: &mut self.shaped,
+            images: self.images.as_deref(),
         };
         let laid = Arc::new(pencere_view::layout(
             root,
@@ -409,10 +451,17 @@ mod tests {
         let theme = Theme::BATERI;
         let (told, woken) = channel();
         let told = std::sync::Mutex::new(told);
-        let (mut page, handle) =
-            module_page(bytes, Limits::default(), None, 32.0, None, move || {
+        let (mut page, handle) = module_page(
+            bytes,
+            Limits::default(),
+            None,
+            32.0,
+            None,
+            None,
+            move || {
                 let _ = told.lock().unwrap().send(());
-            });
+            },
+        );
         let places: Rc<RefCell<Vec<Option<Rect>>>> = Rc::default();
         {
             let places = Rc::clone(&places);
@@ -485,10 +534,17 @@ mod tests {
             eprintln!("skipped: {} is not there", path.display());
             return;
         };
-        let (mut page, handle) =
-            script_page(script, Limits::default(), None, 32.0, None, move || {
+        let (mut page, handle) = script_page(
+            script,
+            Limits::default(),
+            None,
+            32.0,
+            None,
+            None,
+            move || {
                 let _ = told.lock().unwrap().send(());
-            });
+            },
+        );
         assert_eq!(boxes(&build(&mut page, &renderer, &theme, 0.0)), 0);
         assert!(wait(&woken), "the script handed out no page");
         let drained = handle.drain(&mut |_, _| {});
@@ -532,10 +588,17 @@ mod tests {
         let theme = Theme::BATERI;
         let (told, woken) = channel();
         let told = std::sync::Mutex::new(told);
-        let (mut page, handle) =
-            module_page(bytes, Limits::default(), None, 32.0, None, move || {
+        let (mut page, handle) = module_page(
+            bytes,
+            Limits::default(),
+            None,
+            32.0,
+            None,
+            None,
+            move || {
                 let _ = told.lock().unwrap().send(());
-            });
+            },
+        );
         build(&mut page, &renderer, &theme, 0.0);
         assert!(wait(&woken));
         let drained = handle.drain(&mut |_, _| {});
@@ -621,6 +684,7 @@ mod tests {
             None,
             32.0,
             None,
+            None,
             move || {
                 let _ = told.lock().unwrap().send(());
             },
@@ -644,6 +708,7 @@ mod tests {
             None,
             32.0,
             None,
+            None,
             move || {
                 let _ = told.lock().unwrap().send(());
             },
@@ -660,6 +725,7 @@ mod tests {
             Limits::default(),
             None,
             32.0,
+            None,
             None,
             move || {
                 let _ = told.lock().unwrap().send(());
@@ -691,6 +757,7 @@ mod tests {
             None,
             32.0,
             None,
+            None,
             move || {
                 let _ = told.lock().unwrap().send(());
             },
@@ -701,5 +768,251 @@ mod tests {
         assert!(drained.redraw && drained.ended.is_none(), "{drained:?}");
         let list = build(&mut page, &renderer, &theme, 0.1);
         assert!(boxes(&list) >= 2, "the two boxes of the page");
+    }
+
+    /// A 2 × 2 PNG: red, green, blue, cream.
+    const PNG: [u8; 84] = [
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x02, 0x08, 0x06, 0x00, 0x00, 0x00, 0x72,
+        0xb6, 0x0d, 0x24, 0x00, 0x00, 0x00, 0x1b, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0x38,
+        0xe1, 0xe0, 0xf0, 0xdf, 0x61, 0x41, 0xc0, 0x7f, 0x06, 0x87, 0x84, 0x0b, 0xff, 0x1f, 0x5c,
+        0x98, 0xf0, 0x1f, 0x00, 0x51, 0xbc, 0x0a, 0x25, 0x0f, 0x57, 0x03, 0xad, 0x00, 0x00, 0x00,
+        0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+    ];
+
+    const SVG: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12"><rect width="12" height="12" fill="#c84040"/></svg>"##;
+
+    /// The files of a bundle that are read only when the test lets them be: the images' worker
+    /// waits at the gate, so the test knows what the page was before a file came and what it
+    /// is after, and counts what the application was woken for in between.
+    struct Gated {
+        files: Vec<(&'static str, Vec<u8>)>,
+        gate: std::sync::Mutex<Receiver<()>>,
+        /// Told, from the worker, that a file is wanted and the worker is at the gate.
+        asked: std::sync::Mutex<std::sync::mpsc::Sender<()>>,
+        reads: std::sync::atomic::AtomicUsize,
+    }
+
+    impl Assets for Gated {
+        fn read(&self, path: &str) -> Option<Arc<[u8]>> {
+            self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let _ = self.asked.lock().unwrap().send(());
+            let _ = self
+                .gate
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(30));
+            self.files
+                .iter()
+                .find(|(name, _)| *name == path)
+                .map(|(_, bytes)| Arc::from(bytes.as_slice()))
+        }
+    }
+
+    fn pictures(list: &UiList) -> usize {
+        list.items()
+            .iter()
+            .filter(|item| matches!(item, UiItem::Image { .. }))
+            .count()
+    }
+
+    /// What a page of a pane with a bundle is driven by in these tests.
+    struct Rig {
+        page: Box<dyn UiPage>,
+        handle: ModuleHandle,
+        /// What woke the application.
+        woken: Receiver<()>,
+        /// Lets the decoder have the file.
+        open: std::sync::mpsc::Sender<()>,
+        assets: Arc<Gated>,
+    }
+
+    /// A script that shows one file of its bundle, up in a pane, **with the decoder held at its
+    /// gate**: the page has been laid out, the file asked for, and nothing more is to come until
+    /// the test opens the gate. Returns what the page is until then.
+    fn image_rig(
+        renderer: &Renderer,
+        theme: &Theme,
+        file: &'static str,
+        bytes: Vec<u8>,
+    ) -> (Rig, UiList) {
+        let (told, woken) = channel();
+        let told = std::sync::Mutex::new(told);
+        let (open, gate) = channel();
+        let (asked, was_asked) = channel();
+        let assets = Arc::new(Gated {
+            files: vec![(file, bytes)],
+            gate: std::sync::Mutex::new(gate),
+            asked: std::sync::Mutex::new(asked),
+            reads: 0.into(),
+        });
+        let script = format!(
+            r#"return {{ render = function()
+                return pencere.div():p(8):child(pencere.image {{ src = "{file}" }})
+            end }}"#
+        );
+        let (mut page, handle) = script_page(
+            script.into_bytes(),
+            Limits::default(),
+            None,
+            32.0,
+            None,
+            Some(Arc::clone(&assets) as Arc<dyn Assets>),
+            move || {
+                let _ = told.lock().unwrap().send(());
+            },
+        );
+        // The script's page comes, is laid out, and its image is asked for.
+        build(&mut page, renderer, theme, 0.0);
+        assert!(wait(&woken), "the script handed out no page");
+        let _ = handle.drain(&mut |_, _| {});
+        build(&mut page, renderer, theme, 0.1);
+        assert!(
+            was_asked.recv_timeout(Duration::from_secs(30)).is_ok(),
+            "the page did not ask for its image"
+        );
+        // And what the script says after its page, if anything, is said before the test goes on.
+        let mut list = build(&mut page, renderer, theme, 0.2);
+        while woken.recv_timeout(Duration::from_millis(300)).is_ok() {
+            let _ = handle.drain(&mut |_, _| {});
+            list = build(&mut page, renderer, theme, 0.3);
+        }
+        (
+            Rig {
+                page,
+                handle,
+                woken,
+                open,
+                assets,
+            },
+            list,
+        )
+    }
+
+    /// A decoded PNG wakes the application once, the drain says the page is to be drawn again,
+    /// that draw has the picture, and after it the page at rest asks for and wakes nothing.
+    #[test]
+    fn a_decoded_image_wakes_the_page_once_and_a_page_at_rest_not_at_all() {
+        let Ok(renderer) = Renderer::system_default() else {
+            eprintln!("skipped: no GPU device");
+            return;
+        };
+        let theme = Theme::BATERI;
+        // The page is up and the file is asked for (the decoder is at its gate): a box with
+        // nothing in it, and nothing more to come until the file does.
+        let (
+            Rig {
+                mut page,
+                handle,
+                woken,
+                open,
+                assets,
+            },
+            list,
+        ) = image_rig(&renderer, &theme, "dot.png", PNG.to_vec());
+        assert_eq!(
+            pictures(&list),
+            0,
+            "nothing to draw before the file is read"
+        );
+        assert_eq!(assets.reads.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // The file arrives: one wake for it, one drain that says the page is to be laid out and
+        // drawn again, and that frame has the picture.
+        open.send(()).unwrap();
+        assert!(wait(&woken), "the decoded image woke nobody");
+        let drained = handle.drain(&mut |_, _| {});
+        assert!(drained.redraw, "{drained:?}");
+        assert!(drained.diagnostics.is_empty(), "{drained:?}");
+        let list = build(&mut page, &renderer, &theme, 0.4);
+        assert_eq!(pictures(&list), 1, "the image is in the list");
+        assert!(
+            woken.recv_timeout(Duration::from_millis(300)).is_err(),
+            "one image woke the application more than once"
+        );
+
+        // At rest: the frames that follow ask nothing, and the drain has nothing to say.
+        for step in 0..3 {
+            let list = build(&mut page, &renderer, &theme, 1.0 + f64::from(step));
+            assert_eq!(pictures(&list), 1);
+        }
+        let drained = handle.drain(&mut |_, _| {});
+        assert!(!drained.redraw, "{drained:?}");
+        assert!(
+            woken.recv_timeout(Duration::from_millis(300)).is_err(),
+            "a page at rest woke the application"
+        );
+        assert_eq!(assets.reads.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    /// An SVG is two arrivals — its size, which lays the page out again, then its pixels at that
+    /// size — and a page at rest after them wakes nobody.
+    #[test]
+    fn a_vector_image_wakes_the_page_for_its_size_then_for_its_pixels() {
+        let Ok(renderer) = Renderer::system_default() else {
+            eprintln!("skipped: no GPU device");
+            return;
+        };
+        let theme = Theme::BATERI;
+        let (
+            Rig {
+                mut page,
+                handle,
+                woken,
+                open,
+                ..
+            },
+            list,
+        ) = image_rig(&renderer, &theme, "dot.svg", SVG.as_bytes().to_vec());
+        assert_eq!(pictures(&list), 0);
+
+        open.send(()).unwrap();
+        // Its size: the page is laid out again, and the frame asks for the pixels at the size
+        // the page gave it.
+        assert!(wait(&woken), "the size of the image woke nobody");
+        assert!(handle.drain(&mut |_, _| {}).redraw);
+        let list = build(&mut page, &renderer, &theme, 0.4);
+        assert_eq!(pictures(&list), 0, "no pixels at this size yet");
+        // Its pixels.
+        assert!(wait(&woken), "the pixels of the image woke nobody");
+        assert!(handle.drain(&mut |_, _| {}).redraw);
+        let list = build(&mut page, &renderer, &theme, 0.5);
+        assert_eq!(pictures(&list), 1, "the image is in the list");
+        assert!(
+            woken.recv_timeout(Duration::from_millis(300)).is_err(),
+            "the image woke the application a third time"
+        );
+        let drained = handle.drain(&mut |_, _| {});
+        assert!(!drained.redraw, "{drained:?}");
+    }
+
+    /// A file the decoder refuses is a box with nothing in it and a word for the page's author,
+    /// told once; the page goes on.
+    #[test]
+    fn an_image_that_is_not_one_is_left_out_with_a_word_for_the_author() {
+        let Ok(renderer) = Renderer::system_default() else {
+            eprintln!("skipped: no GPU device");
+            return;
+        };
+        let theme = Theme::BATERI;
+        let (
+            Rig {
+                mut page,
+                handle,
+                woken,
+                open,
+                ..
+            },
+            list,
+        ) = image_rig(&renderer, &theme, "dot.png", b"not an image".to_vec());
+        assert_eq!(pictures(&list), 0);
+        open.send(()).unwrap();
+        assert!(wait(&woken), "a refused image told nobody");
+        let drained = handle.drain(&mut |_, _| {});
+        assert_eq!(drained.diagnostics.len(), 1, "{drained:?}");
+        assert!(drained.diagnostics[0].contains("dot.png"), "{drained:?}");
+        assert_eq!(drained.ended, None);
+        assert_eq!(pictures(&build(&mut page, &renderer, &theme, 0.4)), 0);
+        assert!(handle.drain(&mut |_, _| {}).diagnostics.is_empty());
     }
 }

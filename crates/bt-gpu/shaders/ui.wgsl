@@ -1,5 +1,6 @@
-// The UI kit's two pipelines: `ui_quad_*` (a box: fill, border, soft shadow,
-// per-corner radii) and `ui_glyph_*` (one glyph of the proportional text atlas).
+// The UI kit's three pipelines: `ui_quad_*` (a box: fill, border, soft shadow,
+// per-corner radii), `ui_glyph_*` (one glyph of the proportional text atlas) and
+// `ui_image_*` (a page's image: a textured rounded rectangle).
 // Read by `crate::renderer::ui`; `rounded_box_sdf` (`sdf.wgsl`) is appended at
 // compile time, as to `cell_bg.wgsl`, so the corner curve has one copy.
 //
@@ -11,7 +12,7 @@
 // There is one immediate block: the surface's size, for the NDC scale. Its
 // Rust twin is `crate::renderer::ui::UiImmediates` (8 bytes, no padding).
 //
-// Both draws are instanced triangle strips over the unit square, 4 vertices
+// All three draws are instanced triangle strips over the unit square, 4 vertices
 // per instance, like the grid's quads.
 
 struct Immediates {
@@ -202,4 +203,109 @@ fn ui_glyph_fragment(in: GlyphOut) -> @location(0) vec4<f32> {
     }
     let coverage = textureLoad(atlas, vec2<i32>(floor(in.texel)), 0).r;
     return vec4<f32>(in.color.rgb, in.color.a * coverage);
+}
+
+// ---------------------------------------------------------------------------
+// Images
+// ---------------------------------------------------------------------------
+//
+// Rust twin: `UiImage`, #[repr(C)], six `[f32; 4]`, stride 96:
+//   rect@0   x, y, width, height of the rectangle the image is drawn in
+//   uv@16    u0, v0, u1, v1: the part of the texture the rectangle shows,
+//            shares of it (rows run top down, like the window's)
+//   tint@32  linear straight RGBA; used where params.y is 1
+//   radii@48 top-left, top-right, bottom-right, bottom-left
+//   clip@64  x0, y0, x1, y1
+//   params@80 opacity, tinted (0 or 1), unused, unused
+//
+// One draw per run of instances over ONE texture (each has its own bind group;
+// group 0 is the same layout the atlas planes have: texture @0, sampler @1).
+// The `atlas` of the glyphs sits at the same slot, and an entry point's
+// resources are those it uses: the glyph draw never names `picture`, this one
+// never names `atlas`.
+//
+// THE TEXTURE IS NOT sRGB-FORMATTED. Its bytes are `Rgba8Unorm`: sRGB,
+// premultiplied by alpha (a decoder's output: `pencere-sandbox`'s bitmaps),
+// that is the stored colour is `encoded(c) * a`. The hardware's sRGB decode
+// would take `encoded(c) * a` for an encoded colour and darken every soft
+// edge, so the sampler filters the premultiplied bytes as they are (the right
+// order for a filter: a transparent texel contributes no colour), and this
+// shader divides alpha out and decodes by hand. Then it is linear straight
+// RGBA like every other colour here.
+//
+// A TINT paints the shape: every pixel is the tint's colour with the image's
+// alpha at that pixel (times the tint's own and the opacity).
+
+struct ImageIn {
+    @location(0) rect: vec4<f32>,
+    @location(1) uv: vec4<f32>,
+    @location(2) tint: vec4<f32>,
+    @location(3) radii: vec4<f32>,
+    @location(4) clip: vec4<f32>,
+    @location(5) params: vec4<f32>,
+}
+
+struct ImageOut {
+    @builtin(position) position: vec4<f32>,
+    @location(0) @interpolate(flat) rect: vec4<f32>,
+    @location(1) @interpolate(flat) uv: vec4<f32>,
+    @location(2) @interpolate(flat) tint: vec4<f32>,
+    @location(3) @interpolate(flat) radii: vec4<f32>,
+    @location(4) @interpolate(flat) clip: vec4<f32>,
+    @location(5) @interpolate(flat) params: vec4<f32>,
+}
+
+@group(0) @binding(0) var picture: texture_2d<f32>;
+@group(0) @binding(1) var picture_sampler: sampler;
+
+@vertex
+fn ui_image_vertex(@builtin(vertex_index) vid: u32, it: ImageIn) -> ImageOut {
+    let corner = vec2<f32>(f32(vid & 1u), f32(vid >> 1u));
+    // The rectangle grown by a pixel: the rounded edge's antialiasing.
+    let lo = it.rect.xy - 1.0;
+    let hi = it.rect.xy + it.rect.zw + 1.0;
+    let at = mix(lo, hi, corner);
+    let ndc = at / imm.viewport_px * 2.0 - 1.0;
+    var o: ImageOut;
+    o.position = vec4<f32>(ndc.x, -ndc.y, 0.0, 1.0);
+    o.rect = it.rect;
+    o.uv = it.uv;
+    o.tint = it.tint;
+    o.radii = it.radii;
+    o.clip = it.clip;
+    o.params = it.params;
+    return o;
+}
+
+// The sRGB transfer function's inverse: encoded 0..1 to linear light.
+fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
+    let low = c / 12.92;
+    let high = pow((c + 0.055) / 1.055, vec3<f32>(2.4));
+    return select(high, low, c <= vec3<f32>(0.04045));
+}
+
+@fragment
+fn ui_image_fragment(in: ImageOut) -> @location(0) vec4<f32> {
+    let p = in.position.xy;
+    if p.x < in.clip.x || p.y < in.clip.y || p.x > in.clip.z || p.y > in.clip.w {
+        discard;
+    }
+    let half_size = in.rect.zw * 0.5;
+    let rel = p - (in.rect.xy + half_size);
+    let d = rounded_box_sdf(rel, half_size, corner_radius(rel, in.radii));
+    let inside = 1.0 - smoothstep(-0.5, 0.5, d);
+
+    // Where in the rectangle this pixel is, held to it: the antialiasing pixel past the edge
+    // must not read beyond the part of the texture the rectangle shows.
+    let share = clamp((p - in.rect.xy) / in.rect.zw, vec2<f32>(0.0), vec2<f32>(1.0));
+    let texel = textureSampleLevel(picture, picture_sampler, mix(in.uv.xy, in.uv.zw, share), 0.0);
+
+    var rgb = in.tint.rgb;
+    var alpha = texel.a * in.params.x * inside;
+    if in.params.y > 0.5 {
+        alpha = alpha * in.tint.a;
+    } else {
+        rgb = srgb_to_linear(texel.rgb / max(texel.a, 0.00001));
+    }
+    return vec4<f32>(rgb, alpha);
 }

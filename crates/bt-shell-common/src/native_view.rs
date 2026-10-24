@@ -13,6 +13,12 @@
 //!   a page are held to the contrast floor of the program's words in the grid**
 //!   ([`ink`]): the page is the program's, and what it writes is read against the fills under
 //!   it, not against the pane's ground alone.
+//! - **Images** are files of the program's bundle, decoded off the thread that draws by
+//!   `pencere-sandbox` ([`Images`]) and drawn as textured rectangles ([`bt_gpu::UiImage`]):
+//!   the layout asks the decoder for a file's size ([`Measure::image`]) and the list gives the
+//!   renderer its pixels ([`image`]). A file that is not decoded yet is a box with nothing in
+//!   it; the decoder wakes the pane **once** for what it learned, and a page at rest is asked
+//!   for nothing and wakes nothing.
 //! - **The list** is the renderer's ([`bt_gpu::UiList`]), in pixels, drawn in place of the
 //!   terminal's grid while the page is up ([`bt_gpu::DisplayLink::set_page`]).
 //!
@@ -25,22 +31,26 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use bt_core::{LinearRgba, Theme};
+use std::sync::{Arc, Weak};
+
+use bt_core::{LinearRgba, Session, Theme};
 use bt_gpu::{
-    Renderer, ShapedText, TextFamily, TextFontId, TextStyle, UiContext, UiList, UiPage, UiQuad,
-    UiRect, tint,
+    Renderer, ShapedText, TextFamily, TextFontId, TextStyle, UiBitmap, UiContext, UiImage, UiList,
+    UiPage, UiQuad, UiRect, tint,
 };
 use containers::Containers;
 
 mod containers;
 mod module;
 pub use module::{ModuleHandle, module_page, script_page};
-pub use pencere_sandbox::Limits;
+use pencere_sandbox::Images;
+pub use pencere_sandbox::{Assets, ImageLimits, Limits};
 pub use pencere_view::{
     Button, Cursor, Input, Key, Keyboard, Menu, MenuEntry, Mods, Point, Rect, Reply, Tone,
 };
 use pencere_view::{
-    Color, DrawList, Element, Family, Font, Laid, Measure, Metrics, Paint, Quad, Run, Size, Source,
+    Color, DrawList, Element, Family, Font, Laid, Measure, Metrics, Paint, Picture, Quad, Run,
+    Size, Source,
 };
 
 /// What `tone` is in `theme`: the nine roles are the theme's own, the sixteen colours of the
@@ -142,6 +152,50 @@ pub fn quad(theme: &Theme, quad: &Quad, origin: (f32, f32)) -> UiQuad {
     out
 }
 
+/// The engine's image as the renderer's, moved to `origin` pixels: the part of the file the
+/// rectangle shows, its corners and its clip as a box has them, its opacity, and the tint — a
+/// colour the page said, resolved in the theme like a fill ([`resolve`]) and not held to the
+/// contrast floor: it paints a shape, not words.
+pub fn image(theme: &Theme, picture: &Picture, origin: (f32, f32)) -> UiImage {
+    let at = |rect: Rect| UiRect::new(rect.x + origin.0, rect.y + origin.1, rect.w, rect.h);
+    let crop = picture.crop;
+    let mut out = UiImage::new(at(picture.rect))
+        .crop(UiRect::new(crop.x, crop.y, crop.w, crop.h))
+        .opacity(picture.opacity)
+        .radii(picture.radii)
+        .clip(at(picture.clip));
+    if let Some(color) = picture.tint {
+        out = out.tint(resolve(theme, color));
+    }
+    out
+}
+
+/// The files of the open view's bundle, as a program sent them and the session keeps them
+/// ([`Session::serve_view_file`]): what a page's images are read from. Holds the session
+/// weakly — the images of a page that outlives its program's view find no file, and are
+/// refused with a word for the page's author, not read from a session that is gone.
+///
+/// Read on the images' worker thread ([`Assets::read`]), never the one that draws: the
+/// session's lock and the disk are both waited for.
+pub struct BundleAssets {
+    session: Weak<Session>,
+}
+
+impl BundleAssets {
+    pub fn new(session: &Arc<Session>) -> Self {
+        Self {
+            session: Arc::downgrade(session),
+        }
+    }
+}
+
+impl Assets for BundleAssets {
+    fn read(&self, path: &str) -> Option<Arc<[u8]>> {
+        let (_, bytes) = self.session.upgrade()?.serve_view_file(path)?;
+        Some(bytes)
+    }
+}
+
 /// Where the page modules the sandbox is tried with are, in a development tree: the
 /// `BT_VIEW_GUEST_DIR` folder, else `kit/guest/dist` of the pencere checkout that sits beside this
 /// one, where `make guest` builds them (bateri carries no module of its own). The debug menu's
@@ -189,6 +243,9 @@ pub trait PageDrive {
 pub struct Drained {
     /// The page has something new to show: a frame of it is worth drawing.
     pub redraw: bool,
+    /// Images the page named that could not be shown, each once, a sentence for the page's
+    /// author (`image "x" is …`). The page goes on without them.
+    pub diagnostics: Vec<String>,
     /// Why the page is gone, the first time it is told: the pane takes it down.
     pub ended: Option<String>,
     /// What the page said to its program since the last call, in order: JSON objects, as it
@@ -217,6 +274,8 @@ struct Typeset<'a> {
     /// The terminal's face: what `Family::Terminal` is.
     terminal: &'a Option<String>,
     shaped: &'a mut Shaped,
+    /// The page's images; a page that has no bundle has none and its pictures are boxes.
+    images: Option<&'a Images>,
 }
 
 impl Typeset<'_> {
@@ -247,6 +306,13 @@ impl Measure for Typeset<'_> {
                 width: line.width as f32,
                 height: line.height() as f32,
             })
+    }
+
+    /// The size of the file in its own pixels, once the decoder knows it. The first time a file
+    /// is asked for it does not: it starts to be decoded, and the page is laid out again when
+    /// it is known.
+    fn image(&mut self, src: &str) -> Option<Size> {
+        self.images.and_then(|images| images.size(src))
     }
 }
 
@@ -282,12 +348,27 @@ fn to_list(
                     clip,
                 );
             }
-            // A picture has its box laid out (`Measure::image` knows none, so it is the room
-            // its style gives it) and nothing drawn in it: the renderer has no textured
-            // rectangle yet. Its twin of `Paint::Quad` will take the file's decoded pixels
-            // (`pencere_sandbox::Images`, which is also what sizes the file for the layout),
-            // the tint through `resolve` and the corners and the clip as a box has them.
-            Paint::Image(_) => {}
+            // The file's pixels, drawn at the size the page gave them (an SVG is drawn at it).
+            // None yet — being decoded, or an SVG not yet drawn at its first size — is a box with
+            // nothing in it until the decoder wakes the pane; one it refused stays so.
+            Paint::Image(picture) => {
+                let Some(bitmap) = typeset
+                    .images
+                    .and_then(|images| images.bitmap(&picture.src, picture.full()))
+                else {
+                    continue;
+                };
+                renderer.ui_image(
+                    &mut list,
+                    &UiBitmap {
+                        id: bitmap.id,
+                        width: bitmap.width,
+                        height: bitmap.height,
+                        pixels: bitmap.pixels(),
+                    },
+                    image(theme, picture, origin),
+                );
+            }
         }
     }
     list
@@ -332,6 +413,7 @@ impl<F: FnMut(Size) -> Element> UiPage for EnginePage<F> {
             renderer: cx.renderer,
             terminal: &self.terminal,
             shaped: &mut self.shaped,
+            images: None,
         };
         let laid = pencere_view::layout(root, Size::new(width, height), scale, &mut typeset);
         let draws = laid.paint(&mut typeset);
@@ -534,6 +616,7 @@ impl UiPage for ContainersPage {
             renderer: cx.renderer,
             terminal: &self.terminal,
             shaped: &mut self.shaped,
+            images: None,
         };
         let (list, told) = {
             let mut shared = self.shared.borrow_mut();
