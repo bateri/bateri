@@ -632,6 +632,20 @@ impl PtyOps for LocalOps {
     /// ([`Msg::HoldEof`]), and the terminal is let go of: detached, and shown again by the next
     /// bateri that finds it in the ledger.
     fn hangup(&self, _pid: u32, _exit: BorrowedFd<'_>) {}
+
+    /// The pane's program ended without reading what the pane sent it: the terminal that
+    /// holds it is asked to drop it ([`Client::drop_input`]) — the terminal of this Mac, or,
+    /// when the program ran on a server the pane shows, that server's. The request is not
+    /// ordered with the bytes the pane wrote a moment before: they reach the service from the
+    /// stream's reader thread and the request from this one, so a byte still on its way
+    /// follows the request and is not dropped. The window is narrow, for the end of the program
+    /// that triggers the request comes back from the terminal after a round trip.
+    fn drop_input(&self, remote: bool) {
+        let _ = self.tx.send(Msg::DropInput {
+            hold: self.hold,
+            remote,
+        });
+    }
 }
 
 /// What the loop is told, from the threads that carry bytes and do the slow
@@ -679,6 +693,12 @@ enum Msg {
     Resize {
         hold: HoldId,
         size: Size,
+    },
+    /// The program of the pane of a holder ended with input unread ([`PtyOps::drop_input`]);
+    /// `remote`: it ran on the server the pane shows.
+    DropInput {
+        hold: HoldId,
+        remote: bool,
     },
     /// kablo was put on this Mac, or could not be.
     HereMade {
@@ -1603,6 +1623,7 @@ impl Core {
             Msg::Local(ask) => self.local(ask, now),
             Msg::LocalAccount(outcome) => self.local_account(&outcome, now),
             Msg::Resize { hold, size } => self.hub.resize(hold, size),
+            Msg::DropInput { hold, remote } => self.drop_input(hold, remote),
             Msg::HereMade { outcome, pending } => self.here_made(outcome, &pending, now),
             Msg::Survey { account, done } => self.survey(account, done, now),
             Msg::Recorded { id, records } => {
@@ -2108,6 +2129,34 @@ impl Core {
             .filter_map(|(hold, _)| self.hub.terminal_of(*hold))
             .map(|(account, terminal)| (account.to_owned(), terminal.clone()))
             .collect()
+    }
+
+    /// The program of the pane `hold` belongs to ended with input unread: the terminal it ran
+    /// in is asked to drop it. A program of this Mac ran in the terminal that carries the
+    /// pane's bytes. A program of a server ran in the terminal the pane shows there, and only
+    /// that one is asked: the pipe in the terminal of this Mac ([`crate::hold`]) reads it as
+    /// soon as anything is typed and passes it on, so nothing waits there for the program, and
+    /// a drop there could only take keys the person is typing for the shell on the server. A
+    /// pane in a remote session that shows no server's terminal (a plain `ssh`) has nothing to
+    /// ask.
+    fn drop_input(&mut self, hold: HoldId, remote: bool) {
+        let terminals = if remote {
+            self.panes
+                .get(&hold)
+                .map(|pane| self.shown_terminals_of(pane))
+                .unwrap_or_default()
+        } else {
+            self.hub
+                .terminal_of(hold)
+                .map(|(account, terminal)| (account.to_owned(), terminal.clone()))
+                .into_iter()
+                .collect()
+        };
+        for (account, terminal) in terminals {
+            if let Some(client) = self.hub.client_mut(&account) {
+                client.drop_input(&terminal);
+            }
+        }
     }
 
     /// The terminals `pane` shows that a server keeps: the account of this Mac is not one

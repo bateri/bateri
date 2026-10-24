@@ -251,7 +251,7 @@ taffy = { version = "0.10", default-features = false, features = [
 # written once, in kablo, and bateri is a client of it; rewriting it here would be a second
 # copy that drifts. The crate has no dependencies of its own and the same license as
 # bateri (GPL-3.0-or-later); `make audit` fails if the three do not resolve to one commit.
-kablo-proto = { git = "https://github.com/bateri/kablo", rev = "222309ff909078aa8af4ec4519d5467b91a0a09d" }
+kablo-proto = { git = "https://github.com/bateri/kablo", rev = "297cc8c6d85118669e9db556965da38eb121ff2a" }
 
 # pencere: the protocol a program in a pane speaks to show its view there (frames,
 # messages, the session's rules, bundles, the content security policy and the context a
@@ -293,8 +293,8 @@ bt-shell-macos = { path = "crates/bt-shell-macos" }
 # dependency decision (2026-10-17, the command palette): the same care as vte's — `make audit`
 # fails if the patch stops applying, and a newer upstream release is merged by hand.
 [patch.crates-io]
-vte = { git = "https://github.com/bateri/kablo", rev = "222309ff909078aa8af4ec4519d5467b91a0a09d" }
-alacritty_terminal = { git = "https://github.com/bateri/kablo", rev = "222309ff909078aa8af4ec4519d5467b91a0a09d" }
+vte = { git = "https://github.com/bateri/kablo", rev = "297cc8c6d85118669e9db556965da38eb121ff2a" }
+alacritty_terminal = { git = "https://github.com/bateri/kablo", rev = "297cc8c6d85118669e9db556965da38eb121ff2a" }
 
 # On macOS the default development profile keeps full debug info in object files beside every
 # build ("unpacked") and never removes the ones a rebuild replaces: each edit at the bottom

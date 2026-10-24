@@ -75,8 +75,9 @@ use crate::session::PtyOps;
 use crate::shell::ShellLog;
 use crate::wake::Wake;
 
-/// What the pane does to throw away what its program left unread in the tty: from the master, and
-/// only where the system lets the master do it ([`pane_discard`]).
+/// What the pane does to throw away what its program left unread in the tty: from the master where
+/// the system lets the master do it, by the terminal's owner where the pane has none
+/// ([`pane_discard`]).
 pub(crate) type Discard = Box<dyn Fn() + Send + Sync>;
 
 /// The monospaced font list a view is given when the person named no family
@@ -487,17 +488,29 @@ pub(crate) fn pane_observer(
     })
 }
 
-/// Throws away what the pane's program left unread in the tty, from the master's side, where
-/// the system lets it (macOS: the master's `TCIFLUSH` is the input queue the program reads).
-/// Nowhere else: a tty whose queue the master cannot reach is left as it is, and what the
+/// Throws away what the pane's program left unread in the tty, wherever the system lets it.
+///
+/// A pane that holds the master does it there (macOS: the master's `TCIFLUSH` is the input
+/// queue the program reads; nowhere else is the master's flush the program's input). A pane
+/// whose terminal is another process's — a stream of a terminal kablo keeps — holds no master
+/// and asks the owner to drop the input of the terminal instead ([`PtyOps::drop_input`]),
+/// which also reaches the server's terminal when the program ran on a server the pane shows.
+/// Only a stream's owner is asked: a pane that holds a master of its own and shows a server's
+/// terminal asks nobody. A tty whose queue none of this reaches is left as it is, and what the
 /// module said and was not read stays a bound written down, not a promise.
 pub(crate) fn pane_discard(
     shell: Arc<Mutex<ShellLog>>,
     master: Arc<Mutex<Option<File>>>,
+    stream: Option<Arc<dyn PtyOps>>,
 ) -> Discard {
     Box::new(move || {
+        let remote = lock(&shell).in_remote_session();
+        if let Some(ops) = &stream {
+            ops.drop_input(remote);
+            return;
+        }
         // A pane in a remote session has `ssh`'s tty: the program is elsewhere.
-        if lock(&shell).in_remote_session() {
+        if remote {
             return;
         }
         #[cfg(target_os = "macos")]

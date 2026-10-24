@@ -3147,6 +3147,14 @@ pub trait PtyOps: Send + Sync {
     fn terminal(&self, _pid: u32) -> Option<u64> {
         None
     }
+    /// The program of the session ended, or can no longer be the reader, with the input its
+    /// pane sent it (a view's words) not read: the owner has the terminal drop what waits in it
+    /// for the program, so that the shell that reads the terminal next does not find it and
+    /// type it at its prompt. The session holds no master to flush, so only the owner can.
+    /// `remote` says where the program ran: on the server the pane shows (a remote session) or
+    /// in the terminal the stream carries. Nothing else is touched, and what is typed after
+    /// the owner has the request is kept. The default does nothing.
+    fn drop_input(&self, _remote: bool) {}
 }
 
 /// What the terminal a streamed session's program is on says: the two readings the pane's
@@ -5630,9 +5638,13 @@ impl Session {
                     group,
                 ),
                 flow.clone(),
-                // A stream has no master either: what its program left unread stays in the
-                // terminal kablo keeps (the same as a remote session's, where it is elsewhere).
-                pencere::pane_discard(Arc::clone(&shell), Arc::clone(&master)),
+                // A stream has no master to flush: its owner is asked to drop the input the
+                // terminal it keeps holds for the program.
+                pencere::pane_discard(
+                    Arc::clone(&shell),
+                    Arc::clone(&master),
+                    ops.clone().filter(|_| streamed),
+                ),
             )
         });
         let adapter = Adapter::new(
@@ -13921,6 +13933,8 @@ mod tests {
         device: Mutex<Option<u64>>,
         /// The pids the terminal was asked about.
         asked: Mutex<Vec<u32>>,
+        /// Each time the owner was asked to drop the program's input: where the program ran.
+        drops: Mutex<Vec<bool>>,
     }
 
     impl PtyOps for StreamOps {
@@ -13937,6 +13951,9 @@ mod tests {
         fn terminal(&self, pid: u32) -> Option<u64> {
             lock(&self.asked).push(pid);
             *lock(&self.device)
+        }
+        fn drop_input(&self, remote: bool) {
+            lock(&self.drops).push(remote);
         }
     }
 
@@ -13958,6 +13975,11 @@ mod tests {
 
     /// [`streamed`] over a stream that starts with a past, or not.
     fn streamed_over(silence: Option<Arc<Silence>>) -> Streamed {
+        streamed_with(test_options(sh("unused"), 40), silence)
+    }
+
+    /// [`streamed_over`] with the options of the pane.
+    fn streamed_with(options: SessionOptions, silence: Option<Arc<Silence>>) -> Streamed {
         use std::os::unix::net::UnixStream;
         let (terminal, master) = UnixStream::pair().expect("socketpair");
         master.set_nonblocking(true).expect("non-blocking");
@@ -13966,7 +13988,7 @@ mod tests {
         let ops = Arc::new(StreamOps::default());
         let wake = Arc::new(TestWake::default());
         let session = Session::streamed(
-            test_options(sh("unused"), 40),
+            options,
             Arc::clone(&wake) as Arc<dyn Wake>,
             Stream {
                 master: OwnedFd::from(master),
@@ -14109,6 +14131,30 @@ mod tests {
         );
         // What was written before the end is on the screen: the end is read after the bytes.
         wait_text(&terminal.session, "bye");
+    }
+
+    /// The program of a streamed pane ends having been sent a view's words (the pane has no
+    /// master to flush): the owner of the terminal is asked to drop what the program did not
+    /// read. A pane whose program was sent none asks nothing.
+    #[test]
+    fn the_end_of_a_streamed_program_that_was_sent_a_views_words_asks_the_owner_to_drop_them() {
+        let with_views = || {
+            let mut options = test_options(sh("unused"), 40);
+            options.views = Some(ViewOptions::new("bateri-test", "0.0.0"));
+            streamed_with(options, None)
+        };
+        let mut sent = with_views();
+        sent.session.flow().wrote_module();
+        sent.status.code(0);
+        sent.exit = None;
+        assert_eq!(sent.wake.wait_exit(Duration::from_secs(8)), Some(Some(0)));
+        assert_eq!(*lock(&sent.ops.drops), [false]);
+
+        let mut quiet = with_views();
+        quiet.status.code(0);
+        quiet.exit = None;
+        assert_eq!(quiet.wake.wait_exit(Duration::from_secs(8)), Some(Some(0)));
+        assert!(lock(&quiet.ops.drops).is_empty(), "nothing was sent it");
     }
 
     #[test]

@@ -1415,6 +1415,10 @@ impl bt_core::PtyOps for StreamTty {
     fn terminal(&self, pid: u32) -> Option<u64> {
         pane_terminal(self.parent, pid)
     }
+
+    fn drop_input(&self, remote: bool) {
+        self.inner.drop_input(remote);
+    }
 }
 
 /// The uid and pid of the process at the other end of `stream`.
@@ -3141,5 +3145,31 @@ pub(crate) mod tests {
         });
         session.shutdown();
         assert!(!session.reader_alive(), "session did not close");
+    }
+
+    /// The stream's owner whose answers the pane's reads wrap: what it is asked besides the
+    /// reads still reaches it.
+    #[test]
+    fn what_the_owner_of_a_stream_is_asked_to_drop_reaches_it_through_the_pane_reads() {
+        use std::os::fd::BorrowedFd;
+        use std::sync::Mutex;
+
+        #[derive(Default)]
+        struct Owner(Mutex<Vec<bool>>);
+        impl bt_core::PtyOps for Owner {
+            fn resize(&self, _: BorrowedFd<'_>, _: bt_core::PtySize) {}
+            fn hangup(&self, _: u32, _: BorrowedFd<'_>) {}
+            fn drop_input(&self, remote: bool) {
+                self.0.lock().expect("a lock").push(remote);
+            }
+        }
+        let owner = Arc::new(Owner::default());
+        let ops = StreamTty::new(
+            Arc::clone(&owner) as Arc<dyn bt_core::PtyOps>,
+            ShellParent::Direct,
+        );
+        bt_core::PtyOps::drop_input(&ops, false);
+        bt_core::PtyOps::drop_input(&ops, true);
+        assert_eq!(*owner.0.lock().expect("a lock"), [false, true]);
     }
 }
