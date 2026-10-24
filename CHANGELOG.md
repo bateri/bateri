@@ -52,6 +52,10 @@ of every installed copy. A version without a section is not released.
   decoded off the screen's thread, so a page never waits for them and a view at rest still
   costs no frames; a file that cannot be shown leaves its box empty, and why is printed to
   bateri's stderr for the view's author.
+- **A tab's card shows a view that bateri draws.** Hovering over a tab, or opening the
+  overview, shows a pane whose program has opened a view of its own (a WebAssembly module or
+  a Lua script) as that view, images included, not the terminal behind it. The card shows the
+  view as it is on screen; a view that has not drawn yet shows the terminal for a moment.
 
 ### Changed
 

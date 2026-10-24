@@ -36,15 +36,29 @@
 //!   own hit-test window is written by `Session::dock` with the very numbers
 //!   the content frame writes.
 //!
+//! **A pane that shows a page is the page's picture**, not the grid under it: the link keeps the
+//! list the page's last frame drew ([`PageStills`], written by the frame path when a frame
+//! reaches the screen) and a still draws that — at the size it was built for, over the colour it
+//! was drawn over — instead of composing the terminal. The page is not asked for anything:
+//! `UiPage::build` takes `&mut self` and moves the page's own state (what it asked for, when it
+//! wants a frame, what it lays out), which is a frame's business, so a still reads what the
+//! frame left. It is therefore the page as it is *on screen*, an animation in flight at the
+//! step it was drawn at, and a page that has not drawn yet has no picture of its own: the
+//! terminal's is what the tile shows until it has. The image textures the list names are the
+//! live ones, used where they stand ([`Renderer::snapshot_ui`](crate::Renderer)).
+//!
 //! **Known limit**: `Session::dock` also reads the window it last recorded to
 //! shift the typing effects of an input that scrolls inside its box; a still
 //! made between two content frames of such an input moves that reference
 //! by a row for one frame. Nothing else is shared.
 
+use std::cell::RefCell;
+
 use bt_core::ScrollGlide;
 
 use super::*;
 use crate::renderer::shrink::Chain;
+use crate::renderer::ui::UiList;
 
 /// What a still keeps between calls: the frame and the buffers that composing
 /// it fills, and the textures the reduction runs through ([`Chain`]).
@@ -85,6 +99,9 @@ impl DisplayLink {
     /// the CPU. When the tile's shape is not the pane's, the picture fills
     /// the tile and keeps its left edge and its bottom.
     ///
+    /// A pane that shows a page that has drawn is the page's last picture
+    /// ([`PageStills`]), whatever the terminal under it did.
+    ///
     /// `None` when there is nothing to show: the surface has no size yet, the
     /// tile is empty or the GPU said no. A still is a courtesy, so a failure
     /// is not reported to the frame path's policy — the owner shows the last
@@ -97,12 +114,76 @@ impl DisplayLink {
     }
 }
 
+/// The picture a page's last frame left on the surface, kept to be shown again: the list it drew
+/// and what the list is in. Written by the page's frames (`Core::page_tick`), read by stills.
+#[derive(Default)]
+pub(super) struct PageStills {
+    drawn: RefCell<Option<Drawn>>,
+}
+
+/// A list as the frame drew it.
+struct Drawn {
+    list: UiList,
+    /// The surface the list was built for, pixels: the list is in them.
+    size: (u32, u32),
+    /// What the pass cleared to under the list.
+    clear: LinearRgba,
+}
+
+impl PageStills {
+    /// A frame of the page reached the screen: `list`, built for a `size` surface and drawn over
+    /// `clear`, is what is shown from now on. Frame path (main thread).
+    pub(super) fn drew(&self, list: UiList, size: (u32, u32), clear: LinearRgba) {
+        if size.0 == 0 || size.1 == 0 {
+            return self.forget();
+        }
+        *self.drawn.borrow_mut() = Some(Drawn { list, size, clear });
+    }
+
+    /// What is on screen is not a page's frame any more, or no longer to be trusted as one.
+    pub(super) fn forget(&self) {
+        self.drawn.replace(None);
+    }
+
+    /// Whether a page has drawn and a still of the pane is its picture.
+    pub(super) fn held(&self) -> bool {
+        self.drawn.try_borrow().is_ok_and(|drawn| drawn.is_some())
+    }
+
+    /// The kept picture as a `tile`-sized one, through `chain` ([`Renderer::snapshot_ui`]):
+    /// reads the list and draws it, changes nothing of it. `None` when the GPU said no.
+    pub(super) fn snapshot(
+        &self,
+        renderer: &Renderer,
+        chain: &mut Option<Chain>,
+        tile: (u32, u32),
+    ) -> Option<Snapshot> {
+        let held = self.drawn.try_borrow().ok()?;
+        let drawn = held.as_ref()?;
+        let rgba = renderer
+            .snapshot_ui(chain, drawn.clear, &drawn.list, drawn.size, tile)
+            .ok()?;
+        Some(Snapshot {
+            width: tile.0,
+            height: tile.1,
+            rgba,
+        })
+    }
+}
+
 impl Core {
     fn snapshot(&self, shot: &mut Shot, tile: (u32, u32)) -> Option<Snapshot> {
-        let size = self.surface.size()?;
         if tile.0 == 0 || tile.1 == 0 {
             return None;
         }
+        // A pane that shows a page that has drawn is that page, not the terminal under it. A GPU
+        // that declines gives none rather than the grid the page covers.
+        if self.page_still.held() {
+            return self
+                .page_still
+                .snapshot(&self.renderer, &mut shot.chain, tile);
+        }
+        let size = self.surface.size()?;
         let clear = compose_still(shot, &self.session, &self.view(), size);
         let rgba = self
             .renderer
@@ -218,10 +299,12 @@ mod tests {
     use std::collections::HashMap;
     use std::time::Instant;
 
+    use bt_atlas::{Family, TextStyle};
     use bt_core::{CaretShape, CursorBlink, Osc52, SessionOptions, TerminalOptions, Wake};
 
     use super::*;
-    use crate::renderer::tests::{grid, pixel_at};
+    use crate::renderer::tests::{WHITE, grid, pixel_at};
+    use crate::renderer::ui::{UiBitmap, UiImage, UiQuad, UiRect, tint};
 
     /// A `Wake` that hears everything and does nothing.
     struct QuietWake;
@@ -427,6 +510,220 @@ mod tests {
         assert!(!renderer.poll(|_| ()), "a still left a frame in flight");
     }
 
+    /// A page's list: a box, a two-by-two image drawn texel for pixel, and a line of text where
+    /// the platform has proportional text. The surface is 128 pixels square.
+    fn page_list(renderer: &Renderer, image: &UiBitmap<'_>) -> UiList {
+        let mut list = UiList::new();
+        list.quad(UiQuad::new(UiRect::new(40.0, 40.0, 30.0, 20.0)).fill(tint(WHITE, 1.0)));
+        assert!(renderer.ui_image(
+            &mut list,
+            image,
+            UiImage::new(UiRect::new(10.0, 12.0, 2.0, 2.0))
+        ));
+        if Renderer::ui_text_supported() {
+            let font = renderer
+                .ui_font(&TextStyle {
+                    family: Family::System,
+                    size_px: 24.0,
+                    weight: 400,
+                })
+                .expect("the system face opens");
+            let line = renderer.ui_shape(font, "HHHH").expect("shapes");
+            renderer.ui_text(
+                &mut list,
+                &line,
+                [10.0, 80.0],
+                tint(WHITE, 1.0),
+                UiRect::UNBOUNDED,
+            );
+        }
+        list
+    }
+
+    /// Premultiplied sRGB texels, mid-tones: a missing decode moves each of them.
+    const RED: [u8; 4] = [0xc8, 0x40, 0x40, 0xff];
+    const GREEN: [u8; 4] = [0x40, 0xa0, 0x50, 0xff];
+    const BLUE: [u8; 4] = [0x40, 0x60, 0xd0, 0xff];
+    const CREAM: [u8; 4] = [0xe0, 0xd0, 0x90, 0xff];
+
+    /// **A pane that shows a page is the page's last drawn picture**, boxes, images and text
+    /// among it: the still is what the frame drew, pixel for pixel, and it is made without the
+    /// page — the list is all it has.
+    #[test]
+    fn a_page_that_has_drawn_is_the_picture_a_still_makes_with_its_images() {
+        let renderer = Renderer::new();
+        let pixels: Vec<u8> = [RED, GREEN, BLUE, CREAM].concat();
+        let image = UiBitmap {
+            id: 1,
+            width: 2,
+            height: 2,
+            pixels: &pixels,
+        };
+        let list = page_list(&renderer, &image);
+        // The frame: drawn once, the texture is the live one.
+        let clear = Theme::BATERI.background_linear();
+        let drawn = renderer.render_ui_offscreen(128, clear, &list);
+        assert_eq!(renderer.ui_images_held(), 1);
+        let counts = (
+            renderer.frames(),
+            renderer.last_bg_count(),
+            renderer.last_glyph_count(),
+        );
+
+        let stills = PageStills::default();
+        assert!(!stills.held(), "a page that has not drawn has no picture");
+        stills.drew(list, (128, 128), clear);
+        assert!(stills.held());
+
+        let mut chain = None;
+        let still = stills
+            .snapshot(&renderer, &mut chain, (128, 128))
+            .expect("the page's still");
+        assert_eq!((still.width, still.height), (128, 128));
+        for (index, rgba) in still.rgba.chunks_exact(4).enumerate() {
+            let at = index * 4;
+            // Bgra in the frame, rgba in the still.
+            let want = [drawn[at + 2], drawn[at + 1], drawn[at], drawn[at + 3]];
+            for (got, want) in rgba.iter().zip(want) {
+                assert!(
+                    got.abs_diff(want) <= 1,
+                    "pixel {index} differs: {rgba:?} against {want:?}"
+                );
+            }
+        }
+        let rgba = |x: usize, y: usize| {
+            let at = (y * 128 + x) * 4;
+            (still.rgba[at], still.rgba[at + 1], still.rgba[at + 2])
+        };
+        // The image's four texels are in their own colours, each on its pixel, and the box's
+        // white is where the box is.
+        for (texel, (x, y)) in [
+            (RED, (10, 12)),
+            (GREEN, (11, 12)),
+            (BLUE, (10, 13)),
+            (CREAM, (11, 13)),
+        ] {
+            let got = rgba(x, y);
+            assert!(
+                got.0.abs_diff(texel[0]) <= 1
+                    && got.1.abs_diff(texel[1]) <= 1
+                    && got.2.abs_diff(texel[2]) <= 1,
+                "the image's pixel ({x}, {y}) is {got:?}, not {texel:?}"
+            );
+        }
+        assert_eq!(rgba(50, 50), (255, 255, 255));
+        if Renderer::ui_text_supported() {
+            let ink = (10..90)
+                .flat_map(|x| (80..110).map(move |y| (x, y)))
+                .filter(|&(x, y)| rgba(x, y).0 > 200)
+                .count();
+            assert!(
+                ink > 20,
+                "the line of text is not in the still: {ink} white pixels"
+            );
+        }
+
+        // **It reads, it does not move**: the texture the frame made is still the frame's, no
+        // frame was counted and none is left in flight.
+        assert_eq!(renderer.ui_images_held(), 1);
+        assert_eq!(
+            counts,
+            (
+                renderer.frames(),
+                renderer.last_bg_count(),
+                renderer.last_glyph_count()
+            ),
+            "a page's still moved the frame counters"
+        );
+        assert!(
+            !renderer.poll(|_| ()),
+            "a page's still left a frame in flight"
+        );
+        // And a tile of another size is the same picture brought to it.
+        let small = stills
+            .snapshot(&renderer, &mut chain, (32, 32))
+            .expect("a smaller still");
+        assert_eq!(small.rgba.len(), 32 * 32 * 4);
+    }
+
+    /// **A still does not run the frame path's rule for textures**: the frame lets go of the
+    /// textures its list does not name, a still of a list that names fewer leaves them where
+    /// they are for the page's next frame.
+    #[test]
+    fn a_still_of_a_page_leaves_the_live_textures_as_the_last_frame_held_them() {
+        let renderer = Renderer::new();
+        let one: Vec<u8> = RED.to_vec();
+        let other: Vec<u8> = GREEN.to_vec();
+        let bitmaps = [
+            UiBitmap {
+                id: 11,
+                width: 1,
+                height: 1,
+                pixels: &one,
+            },
+            UiBitmap {
+                id: 12,
+                width: 1,
+                height: 1,
+                pixels: &other,
+            },
+        ];
+        let rect = UiRect::new(8.0, 8.0, 4.0, 4.0);
+        let mut both = UiList::new();
+        for bitmap in &bitmaps {
+            assert!(renderer.ui_image(&mut both, bitmap, UiImage::new(rect)));
+        }
+        let clear = Theme::BATERI.background_linear();
+        renderer.render_ui_offscreen(32, clear, &both);
+        assert_eq!(renderer.ui_images_held(), 2);
+
+        // The list a still is made of names one of them.
+        let mut names_one = UiList::new();
+        assert!(renderer.ui_image(&mut names_one, &bitmaps[0], UiImage::new(rect)));
+        let stills = PageStills::default();
+        stills.drew(names_one, (32, 32), clear);
+        let mut chain = None;
+        let still = stills
+            .snapshot(&renderer, &mut chain, (32, 32))
+            .expect("the still");
+        let red = &still.rgba[(10 * 32 + 10) * 4..][..3];
+        assert!(
+            red[0] > 150 && red[1] < 100,
+            "the named image is not in the still: {red:?}"
+        );
+        assert_eq!(
+            renderer.ui_images_held(),
+            2,
+            "a still let go of a texture the last frame held"
+        );
+    }
+
+    /// A page's picture is the page's while it is up and drawn, the terminal's otherwise.
+    #[test]
+    fn a_pages_picture_is_kept_from_its_frame_until_it_is_forgotten() {
+        let renderer = Renderer::new();
+        let clear = Theme::BATERI.background_linear();
+        let stills = PageStills::default();
+        let mut chain = None;
+        assert!(stills.snapshot(&renderer, &mut chain, (16, 16)).is_none());
+
+        stills.drew(UiList::new(), (64, 64), clear);
+        assert!(stills.held());
+        // An empty list is a page that drew nothing: the ground, not the terminal's picture.
+        let ground = stills
+            .snapshot(&renderer, &mut chain, (16, 16))
+            .expect("an empty page has a picture");
+        assert_eq!(ground.rgba.len(), 16 * 16 * 4);
+
+        // A surface of no size has no frame to remember.
+        stills.drew(UiList::new(), (0, 64), clear);
+        assert!(!stills.held());
+        stills.drew(UiList::new(), (64, 64), clear);
+        stills.forget();
+        assert!(!stills.held());
+        assert!(stills.snapshot(&renderer, &mut chain, (16, 16)).is_none());
+    }
+
     /// **Structure as a guard**: a still is an extension of `Core` that may only read — it takes
     /// `&self` and its code (comments aside) never names the cells and counters a frame moves.
     /// The runtime guards above show the session's damage and the renderer's counters stay; this
@@ -460,6 +757,13 @@ mod tests {
             "content_frames",
             "motion_frames",
             "slide_frames",
+            "self.page_frames",
+            "self.page_contrast",
+            "self.page.",
+            ".build(",
+            ".draw_ui(",
+            "ui_release_images",
+            "ui_flushed",
             "take_damage",
             "request_frame",
             "set_grid_top",

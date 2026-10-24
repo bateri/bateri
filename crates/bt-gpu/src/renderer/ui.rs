@@ -721,7 +721,7 @@ impl Renderer {
             .gpu
             .device
             .push_error_scope(wgpu::ErrorFilter::Validation);
-        let submitted = self.encode_ui(target, clear, list);
+        let submitted = self.encode_ui(target, clear, list, true);
         let errors = [block_on(validation.pop()), block_on(memory.pop())];
         let index = submitted?;
         if let Some(error) = errors.into_iter().flatten().next() {
@@ -735,11 +735,16 @@ impl Renderer {
         Ok(())
     }
 
-    fn encode_ui(
+    /// Encodes and submits `list` into `target`. `keep_only_named` is the frame path's rule:
+    /// the textures the list does not name go ([`UiBitmap`]). A **still** of a list that was
+    /// drawn (`Renderer::snapshot_ui`) passes `false`: it is a reading of what the last frame
+    /// drew and must not move what that frame's textures live by.
+    pub(super) fn encode_ui(
         &self,
         target: &Target,
         clear: LinearRgba,
         list: &UiList,
+        keep_only_named: bool,
     ) -> Result<wgpu::SubmissionIndex, GpuError> {
         let mut ui = self.ui.borrow_mut();
         self.write_text(&mut ui);
@@ -773,8 +778,10 @@ impl Renderer {
             }
         }
         // What this list does not name goes: the textures are the last frame's, no more.
-        ui.images
-            .retain(|id, _| runs.iter().any(|run| run.kind == Kind::Images(*id)));
+        if keep_only_named {
+            ui.images
+                .retain(|id, _| runs.iter().any(|run| run.kind == Kind::Images(*id)));
+        }
         self.gpu
             .fill_buffer(&mut ui.quads, "ui quads", bytes_of(&quads));
         self.gpu
@@ -866,7 +873,7 @@ impl Renderer {
             .device
             .push_error_scope(wgpu::ErrorFilter::Validation);
         let target = self.gpu.target(edge);
-        self.encode_ui(&target, clear, list)
+        self.encode_ui(&target, clear, list, true)
             .expect("the list could not be encoded");
         let pixels = self.gpu.read_back(&target.texture);
         if let Some(error) = block_on(scope.pop()) {

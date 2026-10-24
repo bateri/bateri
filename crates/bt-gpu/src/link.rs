@@ -727,6 +727,9 @@ struct Core {
     /// What asks for the page's frames, apart from the terminal's damage
     /// ([`page::PageFrames`]).
     page_frames: page::PageFrames,
+    /// The list the page's last frame drew: what a still of a pane that shows a page is made
+    /// from ([`still::PageStills`]), so the still reads it and never asks the page to build.
+    page_still: still::PageStills,
     /// The window's surface; `bt-shell` sizes it, the tick acquires from it.
     surface: Rc<Surface>,
     session: Arc<Session>,
@@ -1709,12 +1712,18 @@ impl Core {
             self.page_frames.wake_at(page.wake_at());
         }
         let target = surface::target(&texture);
-        match self
-            .renderer
-            .draw_ui(&target, theme.background_linear(), &list)
-        {
-            Ok(()) => self.renderer.present(texture),
+        let clear = theme.background_linear();
+        match self.renderer.draw_ui(&target, clear, &list) {
+            Ok(()) => {
+                self.renderer.present(texture);
+                // What is on screen now, kept for the still of the pane (a move: the list was
+                // built for this frame and is done with).
+                self.page_still.drew(list, size_px, clear);
+            }
             Err(e) => {
+                // The text atlas may have been cleared while this list was built: the list the
+                // still holds points at glyphs that are no longer where it says.
+                self.page_still.forget();
                 self.page_frames.ask();
                 self.retry.draw_failed(&e);
             }
@@ -2880,6 +2889,7 @@ impl DisplayLink {
             renderer,
             page: RefCell::new(None),
             page_frames: page::PageFrames::default(),
+            page_still: still::PageStills::default(),
             surface,
             session,
             retry,
@@ -3103,6 +3113,9 @@ impl DisplayLink {
     /// valid. Main thread, like every call here.
     pub fn set_page(&self, page: Option<Box<dyn UiPage>>) {
         *self.core.page.borrow_mut() = page;
+        // And the old page's picture: a still of this pane is the terminal's until the new page
+        // has drawn.
+        self.core.page_still.forget();
         // The old page's images are not the new one's: their textures go now, not with the
         // first list the new page draws (a pane that takes its page down draws none).
         self.core.renderer.ui_release_images();
