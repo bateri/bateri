@@ -900,6 +900,28 @@ impl Client {
         true
     }
 
+    /// The server is asked to drop the input the terminal's program has not read: what was
+    /// typed to the terminal and still waits, in the terminal or in the relay that holds back
+    /// what the terminal does not take yet. For the end of a program that was sent more than it
+    /// read (a view's words, answers to its questions), so that the shell that reads the
+    /// terminal next does not find them and type them at its prompt. Nothing else is touched:
+    /// not the output, the screen, the offsets, and the program is not signalled. What is typed
+    /// after the server has the message is kept. `false` when nothing was asked: the connection
+    /// is not live or the terminal is not one this client attached or is attaching (like
+    /// [`Client::input`], whose bytes it comes after: the server serves the two in the order
+    /// they were sent). A server from before the message skips it, and nothing is dropped.
+    pub fn drop_input(&mut self, id: &SessionId) -> bool {
+        let streaming = self
+            .terminals
+            .get(id)
+            .is_some_and(|t| matches!(t.phase, Phase::Asked | Phase::Attached));
+        if !streaming || !self.link.is_live() {
+            return false;
+        }
+        self.queue(Packet::about(id.clone(), Message::DropInput));
+        true
+    }
+
     // What is known
 
     /// The offset of the next byte of output owed for a terminal: what an

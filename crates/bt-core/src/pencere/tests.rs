@@ -1616,3 +1616,115 @@ fn the_tty_of_a_streamed_pane_is_read_through_its_owner() {
     assert_eq!(program.shell_in_foreground, Some(false));
     assert_eq!(program.tty_canonical_or_echo, Some(true));
 }
+
+// ─── what the program left unread, thrown away ─────────────────────────
+
+/// A stream's owner that records where it was asked to drop the program's input.
+#[derive(Default)]
+struct DropOps(Mutex<Vec<bool>>);
+
+impl PtyOps for DropOps {
+    fn resize(&self, _: BorrowedFd<'_>, _: crate::PtySize) {}
+    fn hangup(&self, _: u32, _: BorrowedFd<'_>) {}
+    fn drop_input(&self, remote: bool) {
+        lock(&self.0).push(remote);
+    }
+}
+
+/// A pane with no master holds no queue to flush: its owner is asked, and told whether the
+/// program ran here or on the server the pane is in a session with. Nothing is asked of a
+/// pane that has a master, and nothing is flushed for the stream.
+#[test]
+fn a_pane_with_no_master_asks_the_owner_of_its_terminal_to_drop_the_input() {
+    let shell = Arc::new(Mutex::new(ShellLog::new(100)));
+    let ops = Arc::new(DropOps::default());
+    let discard = pane_discard(
+        Arc::clone(&shell),
+        Arc::new(Mutex::new(None)),
+        Some(Arc::clone(&ops) as Arc<dyn PtyOps>),
+    );
+    discard();
+    assert_eq!(
+        *lock(&ops.0),
+        [false],
+        "the program ran in the terminal of the stream"
+    );
+
+    lock(&shell).set_remote(Some(&crate::RemoteTarget::ssh("rasp")));
+    discard();
+    assert_eq!(*lock(&ops.0), [false, true], "and now on the server");
+
+    lock(&shell).set_remote(None);
+    discard();
+    assert_eq!(*lock(&ops.0), [false, true, false]);
+
+    // A pane that holds the master flushes it and asks nobody.
+    let held = Arc::new(Mutex::new(None));
+    pane_discard(shell, held, None)();
+    assert_eq!(lock(&ops.0).len(), 3);
+}
+
+/// The pane that holds the master still flushes the program's input from it, and leaves the
+/// tty alone when the program ran on another machine: the tty is `ssh`'s then.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_pane_with_a_master_flushes_what_the_program_left_unread_unless_it_is_elsewhere() {
+    use std::os::fd::{FromRawFd as _, OwnedFd};
+
+    let (mut master, mut slave) = (0, 0);
+    // SAFETY: `openpty` fills the two descriptors; null name, termios and winsize are allowed.
+    let opened = unsafe {
+        libc::openpty(
+            &raw mut master,
+            &raw mut slave,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    assert_eq!(opened, 0, "a pty");
+    // SAFETY: both descriptors are open and ours alone.
+    let (master, slave) = unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
+    // No line discipline: what the master writes is at once what the program can read.
+    // SAFETY: `termios` is plain data; the calls take the descriptors they were given.
+    unsafe {
+        let mut modes: libc::termios = std::mem::zeroed();
+        assert_eq!(libc::tcgetattr(slave.as_raw_fd(), &raw mut modes), 0);
+        libc::cfmakeraw(&raw mut modes);
+        assert_eq!(
+            libc::tcsetattr(slave.as_raw_fd(), libc::TCSANOW, &raw const modes),
+            0
+        );
+    }
+    let unread = || {
+        let mut count: libc::c_int = 0;
+        // SAFETY: `FIONREAD` writes one `int`.
+        let status = unsafe { libc::ioctl(slave.as_raw_fd(), libc::FIONREAD, &raw mut count) };
+        assert_eq!(status, 0);
+        count
+    };
+    let write = |bytes: &[u8]| {
+        // SAFETY: the buffer is valid for its length.
+        let n = unsafe { libc::write(master.as_raw_fd(), bytes.as_ptr().cast(), bytes.len()) };
+        assert_eq!(usize::try_from(n), Ok(bytes.len()));
+    };
+    let shell = Arc::new(Mutex::new(ShellLog::new(100)));
+    let held = Arc::new(Mutex::new(Some(File::from(
+        master.try_clone().expect("a second descriptor"),
+    ))));
+    let discard = pane_discard(Arc::clone(&shell), held, None);
+
+    write(b"what the page said");
+    assert_eq!(unread(), 18);
+    discard();
+    assert_eq!(unread(), 0, "the program's input is gone");
+
+    write(b"typed at the ssh");
+    lock(&shell).set_remote(Some(&crate::RemoteTarget::ssh("rasp")));
+    discard();
+    assert_eq!(
+        unread(),
+        16,
+        "the program is on another machine: not this tty's to flush"
+    );
+}

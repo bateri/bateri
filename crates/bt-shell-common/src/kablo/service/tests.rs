@@ -3755,6 +3755,42 @@ fn clearing_the_scrollback_of_a_pane_is_asked_of_its_terminals_too() {
     until("the terminal told", || world.bridge().forgotten(&id) == 1);
 }
 
+/// The program of a pane of this Mac ended with what the pane sent it unread: the terminal
+/// that carries the pane's bytes is asked to drop it, after what was typed to it, once for each
+/// time the pane asks. What is typed after is not touched, and a pane that is in a remote
+/// session and shows no server's terminal (a plain `ssh`) asks nothing of any terminal.
+#[test]
+fn the_input_a_program_of_a_pane_of_this_mac_left_unread_is_dropped_from_its_terminal() {
+    let ledger = Arc::new(Ledger::memory());
+    let world = Fake::new(Bridge::new(Age::Current));
+    let rig = Rig::kept("local-drop-input", world.clone(), ledger.clone(), END_GRACE);
+    let pane = a_pane();
+    let mut mac = Pane::of(open_local(&rig, &pane).expect("a terminal"));
+    let id = ledger.terminals_of(local::ACCOUNT).remove(0);
+    // The words of a view, typed to the program: the request comes after them.
+    mac.master.write_all(b"the page said").expect("typed");
+    until("the words typed", || {
+        world.bridge().typed(&id) == b"the page said"
+    });
+    mac.ops.drop_input(false);
+    until("the terminal told", || {
+        world.bridge().input_dropped(&id) == [13]
+    });
+    // The keys typed after are the shell's.
+    mac.master.write_all(b"ls\r").expect("typed");
+    until("the keys typed", || {
+        world.bridge().typed(&id) == b"the page saidls\r"
+    });
+    mac.ops.drop_input(false);
+    until("asked again", || {
+        world.bridge().input_dropped(&id) == [13, 16]
+    });
+    // The program ran on a server this pane does not show: nobody has anything to drop.
+    mac.ops.drop_input(true);
+    rig.service.refresh_background();
+    assert_eq!(world.bridge().input_dropped(&id), [13, 16]);
+}
+
 // ─── a pane with two terminals: the one of this Mac and a server's ──────
 
 /// A pane whose program is the pipe to a terminal a server keeps, running in a terminal of this
@@ -3827,6 +3863,39 @@ fn a_pane_that_runs_in_a_terminal_of_this_mac_and_shows_a_servers_is_a_server_pa
     let _plain = Pane::of(open_local(&rig, &plain).expect("a terminal"));
     thread::sleep(Duration::from_millis(100));
     assert_eq!(rig.service.shown(&plain), None);
+}
+
+/// The program of a pane that shows a server's terminal ended with what was sent it unread:
+/// if it ran on the server, the server's terminal is asked to drop it and the terminal of this
+/// Mac is not — the pipe in it passes on what is typed as it comes, so nothing waits there for
+/// the program, and a drop there could only take keys the person is typing for the shell on
+/// the server. If the program ran in the terminal of this Mac (the session is not a remote one
+/// now), that one is asked and the server's is not.
+#[test]
+fn the_input_a_program_on_a_server_left_unread_is_dropped_from_the_terminal_the_pane_shows() {
+    let (rig, _pane, mac, mut holder, carrier, server, _ledger) =
+        a_pane_with_two_terminals("two-handles-drop-input", END_GRACE);
+    holder.typed.write_all(b"the page said").expect("typed");
+    until("the words reach the server", || {
+        rig.world.bridge().typed(&server) == b"the page said"
+    });
+
+    mac.ops.drop_input(true);
+    until("the server's terminal told", || {
+        rig.world.bridge().input_dropped(&server) == [13]
+    });
+    rig.service.refresh_background();
+    assert!(
+        rig.world.mac().input_dropped(&carrier).is_empty(),
+        "the pipe in the terminal of this Mac holds nothing for the program"
+    );
+
+    mac.ops.drop_input(false);
+    until("the terminal of this Mac told", || {
+        rig.world.mac().input_dropped(&carrier) == [0]
+    });
+    rig.service.refresh_background();
+    assert_eq!(rig.world.bridge().input_dropped(&server), [13]);
 }
 
 /// The session's stream being let go of ends neither of the pane's terminals: what becomes of

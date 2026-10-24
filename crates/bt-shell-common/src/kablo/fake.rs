@@ -98,6 +98,9 @@ pub struct Session {
     terminated: Option<bool>,
     /// How many times a client asked the terminal to forget its past.
     forgotten: u32,
+    /// Every time a client asked the terminal to drop the input its program had not read: how
+    /// many bytes the client had typed by then.
+    input_dropped: Vec<usize>,
     /// The command the terminal was made with.
     argv: Vec<Vec<u8>>,
     /// The environment it was made with, over the defaults.
@@ -126,6 +129,7 @@ impl Session {
             unavailable: 0,
             terminated: None,
             forgotten: 0,
+            input_dropped: Vec::new(),
             argv: Vec::new(),
             env: Vec::new(),
         }
@@ -629,6 +633,14 @@ impl Bridge {
         self.sessions.get(id).map_or(0, |s| s.forgotten)
     }
 
+    /// Each time the terminal was asked to drop the input its program had not read: the number
+    /// of bytes typed to it by then, so that a test can tell what the request came after.
+    pub fn input_dropped(&self, id: &SessionId) -> Vec<usize> {
+        self.sessions
+            .get(id)
+            .map_or_else(Vec::new, |s| s.input_dropped.clone())
+    }
+
     /// The bytes of the picture of a terminal whose program has written up to
     /// `end`: what a client writes to a freshly reset terminal to see the screen.
     pub fn picture_of(end: u64) -> Vec<u8> {
@@ -919,6 +931,18 @@ impl Bridge {
                         session.retained_from = session.end();
                         session.journal.clear();
                         session.forgotten += 1;
+                    }
+                } else {
+                    self.error(Some(&id), ErrorCode::NOT_ATTACHED, "not attached");
+                }
+            }
+            // The unread input goes; nothing else does. Only an attached connection may ask.
+            Message::DropInput => {
+                let attached = self.sessions.get(&id).is_some_and(|s| s.attached);
+                if attached {
+                    if let Some(session) = self.sessions.get_mut(&id) {
+                        let typed = session.typed.len();
+                        session.input_dropped.push(typed);
                     }
                 } else {
                     self.error(Some(&id), ErrorCode::NOT_ATTACHED, "not attached");
