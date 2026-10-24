@@ -199,7 +199,8 @@ test-heavy: guest demopen
 
 # The program the end-to-end tests of a pane run in it (`crates/bt-core/examples/demopen.rs`,
 # written with pencere's library of the program's side). `cargo test --workspace --all-targets`
-# builds it with the tests; `--lib` does not, so the heavy tier builds it first. A test that
+# builds it as a test target, not where the tests look for it, and `--lib` not at all, so the
+# heavy tier and `test-all` build it first. A test that
 # finds it missing fails, it does not skip.
 demopen:
 	$(CARGO) build -p bt-core --example demopen
@@ -238,7 +239,7 @@ test-view:
 
 # Every test but those `NOT_HEAVY` names: the fast tier and the heavy one together, the push
 # tier's run.
-test-all: guest
+test-all: guest demopen
 	BT_HEAVY=1 $(CARGO) test --workspace --all-targets -- --include-ignored $(NOT_HEAVY)
 
 # What a change needs, picked by the files it touched (`tools/gate.sh` says how): `gate` for
