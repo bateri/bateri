@@ -37,6 +37,9 @@ void forget_ids();
 struct FrameJob {
     bateri_view_types_frame_t* out;
     bool animating;
+    // When the page at rest wants to be rendered again (`has_wake_at`), on render's clock.
+    bool has_wake_at;
+    double wake_at;
 };
 int frame_call(lua_State* L);  // (root element, FrameJob*) -> nothing
 

@@ -2,10 +2,13 @@
 --
 -- A script returns the page, a table of the functions the application calls:
 --
---   render(size, now, reduce_motion) -> element[, animating]
+--   render(size, now, reduce_motion) -> element[, animating[, wake_at]]
 --       The page for a viewport `size` ({ w =, h = } points) at time `now` (seconds on the
 --       application's clock). `reduce_motion` is the person's setting. `animating` true asks
---       for the next frame at once; a page at rest costs no frames.
+--       for the next frame at once; a page at rest costs no frames. `wake_at`, a time on the
+--       same clock (`now + 5`: in five seconds), asks a page at rest to be rendered again once
+--       then, if nothing does before: what a page needs to show that what it waits for has not
+--       come (a reading that stopped).
 --   settle() -> boolean            (optional)
 --       The page was laid out: bring what depends on the layout back within it. True when
 --       something changed and the page should be rendered again.
@@ -134,13 +137,16 @@ function bateri.start(returned)
 end
 
 function bateri.render(width, height, now, reduce_motion)
-	local root, animating = page.render({ w = width, h = height }, now, reduce_motion)
+	local root, animating, wake_at = page.render({ w = width, h = height }, now, reduce_motion)
 	if type(root) ~= "table" then
 		error("render must return an element, not a " .. type(root), 0)
 	end
+	if wake_at ~= nil and type(wake_at) ~= "number" then
+		error("render's third value, when to render again, must be a time (a number), not a " .. type(wake_at), 0)
+	end
 	rendered = true
 	local more = flush()
-	return root, (animating or more) and true or false
+	return root, (animating or more) and true or false, wake_at
 end
 
 function bateri.settle()

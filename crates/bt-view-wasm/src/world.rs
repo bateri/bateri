@@ -439,6 +439,8 @@ fn frame_out(frame: wit::Frame, limits: &Limits) -> Result<Frame, Fault> {
     Ok(Frame {
         root,
         animating: frame.animating,
+        // A time that is not one (NaN, an infinity) asks for nothing.
+        wake_at: frame.wake_at.filter(|at| at.is_finite()),
     })
 }
 
@@ -738,6 +740,7 @@ mod tests {
         wit::Frame {
             nodes,
             animating: false,
+            wake_at: None,
         }
     }
 

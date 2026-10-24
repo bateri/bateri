@@ -560,6 +560,8 @@ int frame_call(lua_State* L) {
     Flat flat = {job->out, 0};
     flatten(L, 1, flat, 1);
     job->out->animating = job->animating;
+    job->out->wake_at.is_some = job->has_wake_at;
+    job->out->wake_at.val = job->wake_at;
     return 0;
 }
 

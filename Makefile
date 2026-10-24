@@ -835,6 +835,9 @@ guest:
 	done
 	@ls -l $(addprefix guest/dist/,$(addsuffix .wasm,$(GUEST_MODULES)))
 	$(GUEST_CARGO) build --manifest-path guest/Cargo.toml --release -p demopen
+	# A new file, not the old one written over: macOS kills a signed binary whose file changed
+	# under its cached signature (a demopen still running in a pane, the next test's exec).
+	rm -f guest/dist/demopen
 	cp guest/target/release/demopen guest/dist/demopen
 	@ls -l guest/dist/demopen
 

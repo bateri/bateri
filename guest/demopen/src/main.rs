@@ -12,6 +12,7 @@
 //! demopen --lua      the same, with the page as a Lua script
 //! demopen --script F the view is the Lua script in the file F (to try a script of one's own)
 //! demopen --flood    the view, with the readings pushed as fast as the terminal takes them
+//! demopen --stall N  the view, with the readings stopping after N seconds (a Docker that hangs)
 //! demopen --text     the list as text, whatever the terminal is
 //! demopen --json     the list as JSON, a line for each container
 //! ```
@@ -28,6 +29,7 @@ mod terminal;
 mod view;
 
 use std::process::ExitCode;
+use std::time::Duration;
 
 /// The view's module: built by `make guest`, which builds it before this program.
 const VIEW: &[u8] = include_bytes!("../../dist/containers.wasm");
@@ -38,6 +40,7 @@ const SCRIPT: &[u8] = include_bytes!("../../luau/examples/containers.lua");
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut flood = false;
+    let mut stall = None;
     let mut lua = false;
     let mut script = None;
     let mut text = false;
@@ -46,6 +49,16 @@ fn main() -> ExitCode {
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--flood" => flood = true,
+            "--stall" => match args
+                .next()
+                .map(|s| s.parse::<f64>().map(Duration::try_from_secs_f64))
+            {
+                Some(Ok(Ok(after))) => stall = Some(after),
+                _ => {
+                    eprintln!("{USAGE}");
+                    return ExitCode::from(64);
+                }
+            },
             "--lua" => lua = true,
             "--script" => match args.next().map(std::fs::read) {
                 Some(Ok(bytes)) => script = Some(bytes),
@@ -87,16 +100,17 @@ fn main() -> ExitCode {
             view::Kind::LUA,
             script.as_deref().unwrap_or_default(),
             flood,
+            stall,
         ),
-        (false, false) if lua => shown(view::Kind::LUA, SCRIPT, flood),
-        (false, false) => shown(view::Kind::WASM, VIEW, flood),
+        (false, false) if lua => shown(view::Kind::LUA, SCRIPT, flood, stall),
+        (false, false) => shown(view::Kind::WASM, VIEW, flood, stall),
     }
 }
 
 /// The view if the terminal shows one, and the list as text if not.
-fn shown(kind: view::Kind, file: &[u8], flood: bool) -> ExitCode {
+fn shown(kind: view::Kind, file: &[u8], flood: bool, stall: Option<Duration>) -> ExitCode {
     if terminal::is_terminal() {
-        let (outcome, uploaded, failure) = view::run(kind, file, flood);
+        let (outcome, uploaded, failure) = view::run(kind, file, flood, stall);
         if uploaded > 0 {
             println!("demopen: the view sent {uploaded} bytes");
         }
@@ -114,10 +128,11 @@ fn shown(kind: view::Kind, file: &[u8], flood: bool) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-const USAGE: &str = "usage: demopen [--lua | --script FILE] [--flood] | --text | --json\n\n  \
+const USAGE: &str = "usage: demopen [--lua | --script FILE] [--flood] [--stall N] | --text | --json\n\n  \
     (no option)  a view in a terminal that shows one, the list as text in one that does not\n  \
     --lua        the view as a Lua script, not a WebAssembly component\n  \
     --script F   the view as the Lua script in the file F\n  \
     --flood      the view, with the readings pushed as fast as the terminal takes them\n  \
+    --stall N    the view, with the readings stopping after N seconds\n  \
     --text       the list as text\n  \
     --json       the list as JSON, a line for each container";

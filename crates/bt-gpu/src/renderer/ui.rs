@@ -255,6 +255,14 @@ pub trait UiPage {
     fn animating(&self) -> bool {
         false
     }
+
+    /// When the page at rest wants a frame although nothing asks for one, on the clock of
+    /// [`UiContext::now`]: the link wakes once at that time (one delayed wakeup, as the cursor's
+    /// blink has), so a page that shows how old what it shows is costs one frame, not a frame at
+    /// every tick. Not read while [`UiPage::animating`].
+    fn wake_at(&self) -> Option<f64> {
+        None
+    }
 }
 
 /// `ui.wgsl`'s `Immediates`: the surface's size, for the NDC scale. 8 bytes,

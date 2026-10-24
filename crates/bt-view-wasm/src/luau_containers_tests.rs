@@ -23,6 +23,10 @@ use crate::{Limits, Module, Program, Unbounded, Update};
 
 const SCRIPT: &str = include_str!("../../../guest/luau/examples/containers.lua");
 
+/// The script's: seconds without a reading after which it says none is coming, and what it says.
+const STALE_AFTER: f64 = 5.0;
+const STALE_NOTE: &str = "No new readings from demopen";
+
 /// How long a step may take before the test gives up on it.
 const PATIENCE: Duration = Duration::from_secs(60);
 
@@ -202,6 +206,8 @@ struct Pair {
     reduce_motion: bool,
     /// How many of the module's answers to events have been looked at.
     looked: usize,
+    /// When the program's newest reading came: the page says so when none has for a while.
+    last_reading: Option<f64>,
 }
 
 impl Pair {
@@ -224,6 +230,7 @@ impl Pair {
             query: String::new(),
             reduce_motion: false,
             looked: 0,
+            last_reading: None,
         };
         // (The first frame waits for the interpreter to be compiled.)
         pair.wait_for_frame();
@@ -271,6 +278,27 @@ impl Pair {
             frame.animating, self.animating,
             "{what}: the script and the page differ in whether the page is still moving"
         );
+        assert_eq!(
+            frame.wake_at.is_some(),
+            !self.animating && self.last_reading.is_some() && !self.stale(),
+            "{what}: the script asks to be woken when no reading has come, and only then"
+        );
+    }
+
+    /// No reading has come for a while (the script's `STALE_AFTER`).
+    fn stale(&self) -> bool {
+        self.last_reading
+            .is_some_and(|at| self.now >= at + STALE_AFTER)
+    }
+
+    /// The engine's page for `size`, with the script's note over it when the readings stopped.
+    fn view(&self, size: Size) -> Element {
+        let list = self.native.view(size);
+        if self.stale() {
+            with_note(list, STALE_NOTE)
+        } else {
+            list
+        }
     }
 
     /// The page was made anew: the application lays it out and tells the module, which settles
@@ -290,7 +318,7 @@ impl Pair {
     /// The page again, for the time of the last frame.
     fn again(&mut self) {
         self.native.advance(self.now, self.reduce_motion);
-        self.tree = self.native.view(self.size);
+        self.tree = self.view(self.size);
         self.animating = self.native.animating();
     }
 
@@ -304,7 +332,7 @@ impl Pair {
         self.now = now;
         self.lua.module.render(size, now, self.reduce_motion);
         self.native.advance(now, self.reduce_motion);
-        self.tree = self.native.view(size);
+        self.tree = self.view(size);
         self.animating = self.native.animating();
         self.lay_out();
         self.check(&format!("the page at {now} s, {} pt wide", size.w));
@@ -405,6 +433,19 @@ impl Pair {
             assert!(update.frame.is_none(), "{message} made a page");
             self.lua.seen.frame = before;
         }
+        self.check(message);
+    }
+
+    /// The program pushes to the page's subscription: whatever it carries, it is a frame — the
+    /// page learns that readings are still coming — with `readings` told to the engine's page.
+    fn reading(&mut self, message: &str, readings: &[Reading]) {
+        self.lua.seen.frame = None;
+        self.lua.module.message(message.to_owned());
+        self.native.live(readings);
+        self.last_reading = Some(self.now);
+        self.wait_for_frame();
+        self.again();
+        self.lay_out();
         self.check(message);
     }
 }
@@ -973,12 +1014,12 @@ fn the_script_shows_what_its_program_pushes() {
         memory: "130MiB".into(),
         share: 0.3,
     };
-    pair.message(
+    pair.reading(
         r#"{"push":{"id":1,"value":{"readings":[{"name":"api","cpu":42.5,"memory":"130MiB","share":0.3}]}}}"#,
         std::slice::from_ref(&reading),
     );
     // Several at once, one of a stopped container and one of none, and one that is not shaped so.
-    pair.message(
+    pair.reading(
         concat!(
             r#"{"push":{"id":1,"value":{"readings":["#,
             r#"{"name":"db","cpu":7,"memory":"0.5GiB","share":0.9},"#,
@@ -1006,7 +1047,7 @@ fn the_script_shows_what_its_program_pushes() {
     // What a program makes up is kept within what the page can hold.
     let long = "x".repeat(10_000);
     let accents = r"ç".repeat(18);
-    pair.message(
+    pair.reading(
         &format!(
             r#"{{"push":{{"id":1,"value":{{"readings":[{{"name":"api","cpu":1e30,"memory":"{long}","share":7}},{{"name":"web","cpu":-3,"memory":"{accents}","share":-1}}]}}}}}}"#
         ),
@@ -1028,7 +1069,7 @@ fn the_script_shows_what_its_program_pushes() {
     // The line keeps thirty samples: a reading each second for a while.
     for tick in 0..32_u32 {
         let cpu = f64::from(tick) * 1.37 + 0.2;
-        pair.message(
+        pair.reading(
             &format!(
                 r#"{{"push":{{"id":1,"value":{{"readings":[{{"name":"worker","cpu":{cpu},"memory":"936KiB","share":0.01}}]}}}}}}"#
             ),
@@ -1040,12 +1081,18 @@ fn the_script_shows_what_its_program_pushes() {
             }],
         );
     }
-    // A push for another subscription, what is not shaped as readings, what is not a message, and
-    // a response: all of it changes nothing and makes no page.
-    for noise in [
-        r#"{"push":{"id":7,"value":{"readings":[]}}}"#,
+    // A push of the page's own that carries no readings changes no row, but it is a frame: the
+    // program is still speaking.
+    for empty in [
         r#"{"push":{"id":1,"value":{"readings":"api"}}}"#,
         r#"{"push":{"id":1}}"#,
+    ] {
+        pair.reading(empty, &[]);
+    }
+    // A push for another subscription, what is not a message, and a response: all of it changes
+    // nothing and makes no page.
+    for noise in [
+        r#"{"push":{"id":7,"value":{"readings":[]}}}"#,
         r#"{"cancel":{"id":1}}"#,
         "[]",
         "not json",
@@ -1056,10 +1103,35 @@ fn the_script_shows_what_its_program_pushes() {
     assert_eq!(pair.lua.seen.sent.len(), 1, "and it said nothing back");
 }
 
+/// The readings stop: until five seconds have passed the page asks to be woken then, and then it
+/// says that none is coming; the next reading takes the note away.
+#[test]
+fn the_script_says_when_the_readings_stop_and_asks_to_be_woken_for_it() {
+    let mut pair = Pair::open(SIZE);
+    let push = r#"{"push":{"id":1,"value":{"readings":[]}}}"#;
+    pair.at(1.0);
+    pair.reading(push, &[]);
+    let woken = pair.lua.seen.frame.as_ref().and_then(|frame| frame.wake_at);
+    assert!(
+        woken.is_some_and(|at| (at - (1.0 + STALE_AFTER)).abs() < 0.5),
+        "{woken:?}"
+    );
+    pair.at(5.9);
+    assert!(!pair.stale());
+    pair.at(6.1);
+    assert!(
+        pair.stale(),
+        "the note is on, and the script asks for nothing more"
+    );
+    pair.at(30.0);
+    pair.reading(push, &[]);
+    assert!(!pair.stale());
+}
+
 #[test]
 fn the_pushed_numbers_show_in_the_rows_of_every_width() {
     let mut pair = Pair::open(SIZE);
-    pair.message(
+    pair.reading(
         r#"{"push":{"id":1,"value":{"readings":[{"name":"search","cpu":88.88,"memory":"990MiB","share":0.93},{"name":"cache","cpu":0.15,"memory":"8MiB","share":0.7}]}}}"#,
         &[
             Reading {
@@ -1238,7 +1310,7 @@ fn the_script_sends_its_payload_as_fast_as_its_program_has_room_and_loses_none()
 
     // This one is told its program is there by its first word.
     page.module
-        .message(r#"{"push":{"id":1,"value":{"readings":[]}}}"#.to_owned());
+        .message(r#"{"response":{"id":9,"result":{}}}"#.to_owned());
     page.module.event(upload_key());
     until_sent(&mut page, "three chunks, then told full", |sent| {
         chunks(sent).len() >= 3
@@ -1331,7 +1403,7 @@ fn a_program_with_room_is_told_a_few_chunks_in_each_frame() {
     let mut page = open_script(Arc::new(Unbounded));
     settled(&mut page, 0.0);
     page.module
-        .message(r#"{"push":{"id":1,"value":{"readings":[]}}}"#.to_owned());
+        .message(r#"{"response":{"id":9,"result":{}}}"#.to_owned());
     page.module.event(upload_key());
     let mut now = 0.0;
     let mut frames = 0;

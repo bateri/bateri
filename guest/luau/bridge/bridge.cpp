@@ -316,9 +316,13 @@ void exports_bateri_view_page_render(exports_bateri_view_page_size_t* size, doub
     lua_pushnumber(L, size->h);
     lua_pushnumber(L, now);
     lua_pushboolean(L, reduce_motion);
-    if (!entry("render", 4, 2)) return;
-    bridge::FrameJob job = {ret, lua_toboolean(L, -1) != 0};
-    lua_pop(L, 1);
+    if (!entry("render", 4, 3)) return;
+    // The prelude hands back the element, whether it moves and when it wants to be asked again
+    // (a number or nil: it checked).
+    bool has_wake_at = lua_type(L, -1) == LUA_TNUMBER;
+    double wake_at = has_wake_at ? lua_tonumber(L, -1) : 0.0;
+    bridge::FrameJob job = {ret, lua_toboolean(L, -2) != 0, has_wake_at, wake_at};
+    lua_pop(L, 2);
     lua_pushcfunction(L, bridge::frame_call, "frame");
     lua_insert(L, -2);
     lua_pushlightuserdata(L, &job);

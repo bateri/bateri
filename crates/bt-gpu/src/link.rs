@@ -1662,7 +1662,8 @@ impl Core {
             return false;
         };
         let theme = self.session.theme();
-        if !self.page_frames.take(self.theme.get() != theme) {
+        if !self.page_frames.take(self.theme.get() != theme, now) {
+            self.arm_page_clock(now);
             self.waker.pacer().set_running(false);
             return true;
         }
@@ -1688,9 +1689,14 @@ impl Core {
             let _ = self.renderer.ui_flushed();
         }
         // A page that is still moving asks for the next frame itself; the
-        // pacer keeps running until one passes with nothing to say.
+        // pacer keeps running until one passes with nothing to say. One at
+        // rest may name the time of its next frame instead, armed when the
+        // link goes to sleep.
         if page.animating() {
             self.page_frames.ask();
+            self.page_frames.wake_at(None);
+        } else {
+            self.page_frames.wake_at(page.wake_at());
         }
         let target = surface::target(&texture);
         match self
@@ -1704,6 +1710,32 @@ impl Core {
             }
         }
         true
+    }
+
+    /// The page's clock: the one delayed wakeup, armed when a link that shows
+    /// a page goes to sleep, at the time the page asked for its next frame
+    /// ([`UiPage::wake_at`]). It shares [`Core::arm_clock`]'s generation, so
+    /// whichever sleep came last owns the wakeup — the terminal's path arms
+    /// its own again when the page comes down, and a page that no longer asks
+    /// voids the one before. It plants no damage: the terminal did not change.
+    fn arm_page_clock(&self, now: f64) {
+        let generation = self.clock_generation.fetch_add(1, Ordering::Relaxed) + 1;
+        let Some(due) = self.page_frames.due() else {
+            return;
+        };
+        let Ok(delay) = Duration::try_from_secs_f64((due - now).max(0.0)) else {
+            return;
+        };
+        let token = Arc::clone(&self.clock_generation);
+        let waker = self.waker.clone();
+        self.waker.pacer().after(
+            delay,
+            Box::new(move || {
+                if token.load(Ordering::Relaxed) == generation {
+                    waker.resume();
+                }
+            }),
+        );
     }
 
     /// The "no damage" branch of [`Core::tick`]: two possibilities left and

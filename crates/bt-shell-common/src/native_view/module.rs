@@ -31,6 +31,8 @@ struct Shared {
     root: Option<Element>,
     /// The page is moving: it is asked for again at every frame, until it says it is not.
     animating: bool,
+    /// The time the page at rest wants to be asked for again, on the frames' clock.
+    wake_at: Option<f64>,
     /// The viewport (points) and the scale the module was last asked for a page for.
     asked: Option<(Size, f32)>,
     /// Points at the top of the pane the application keeps.
@@ -56,6 +58,7 @@ impl Shared {
         if let Some(frame) = update.frame {
             self.root = Some(frame.root);
             self.animating = frame.animating;
+            self.wake_at = frame.wake_at;
             self.redraw = true;
         }
         let inset = self.inset;
@@ -153,6 +156,7 @@ fn page_around(
         module: start(program, Box::new(wake)),
         root: None,
         animating: false,
+        wake_at: None,
         asked: None,
         inset,
         field: None,
@@ -275,10 +279,12 @@ impl UiPage for ModulePage {
         let root = {
             let mut shared = self.shared.borrow_mut();
             shared.sync();
-            // A page for this size, and the next step of one that is moving; a page that is
-            // neither is not asked for.
-            if shared.asked != Some((size, scale)) || shared.animating {
+            // A page for this size, the next step of one that is moving and the page whose time
+            // has come; a page that is none of these is not asked for.
+            let due = shared.wake_at.is_some_and(|at| cx.now >= at);
+            if shared.asked != Some((size, scale)) || shared.animating || due {
                 shared.asked = Some((size, scale));
+                shared.wake_at = None;
                 shared.module.render(size, cx.now, cx.reduce_motion);
             }
             shared.root.clone()
@@ -327,6 +333,10 @@ impl UiPage for ModulePage {
 
     fn animating(&self) -> bool {
         self.shared.borrow().animating
+    }
+
+    fn wake_at(&self) -> Option<f64> {
+        self.shared.borrow().wake_at
     }
 }
 

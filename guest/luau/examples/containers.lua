@@ -1709,6 +1709,13 @@ local upload = nil
 local counted = nil
 -- There is more of the payload to say and nothing but the next frame calls the page.
 local more = false
+-- Seconds without a reading after which the page says none is coming: the program pushes one a
+-- second, so five missed is a program that stopped, not one that is late.
+local STALE_AFTER = 5
+-- A reading came since the page was last rendered; when the newest came; none has for a while.
+local fresh = false
+local last_reading = nil
+local stale = false
 
 -- The program counted the payload: it says how much it got.
 local function on_last(result)
@@ -1730,22 +1737,29 @@ local function pump_upload()
 	more = upload:pump()
 end
 
--- What the page says of the payload, if it has anything to say: how far it has got while the
--- program is being told, what the program counted when it has said.
+-- What the page says over the list, if it has anything to say: how far the payload has got while
+-- the program is being told, that the readings stopped, what the program counted of the payload
+-- when it has said.
 local function note()
 	if upload and upload.waiting then
 		return string.format("Sending 4 MiB to demopen... %d%% (it has not read the last yet)", upload:percent())
 	elseif upload then
 		return string.format("Sending 4 MiB to demopen... %d%%", upload:percent())
+	elseif stale then
+		return "No new readings from demopen"
 	elseif counted then
 		return string.format("Sent 4 MiB - demopen counted %d bytes", counted)
 	end
 	return nil
 end
 
--- The program pushes the numbers of the running containers once a second.
+-- The program pushes the numbers of the running containers once a second. Every reading is a
+-- frame, even one that changes nothing on the list: it is when the page learns that readings are
+-- still coming.
 bateri.subscribe("stats", nil, function(pushed)
-	return list:live(readings_of(pushed))
+	list:live(readings_of(pushed))
+	fresh = true
+	return true
 end)
 
 return {
@@ -1753,6 +1767,14 @@ return {
 		if more then
 			pump_upload()
 		end
+		-- The page learns the time only here: a reading that came is stamped with the frame it
+		-- asked for, and the page asks to be rendered once more when the next one is late.
+		if fresh then
+			fresh = false
+			last_reading = now
+		end
+		local stale_at = last_reading and last_reading + STALE_AFTER
+		stale = stale_at ~= nil and now >= stale_at
 		list:advance(now, reduce_motion)
 		local view = list:view(size)
 		local words = note()
@@ -1764,7 +1786,11 @@ return {
 					:text_size(12.5):color("foreground"):child(text(words))
 			)
 		end
-		return root, list:animating() or more
+		local wake_at = nil
+		if not stale then
+			wake_at = stale_at
+		end
+		return root, list:animating() or more, wake_at
 	end,
 
 	settle = function()

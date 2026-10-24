@@ -21,7 +21,7 @@
 /// (`page.room`); it does not ask again and again, and it is not closed for being fast. What the
 /// program says to the page is held to what the page has taken (the program's own `write` slows
 /// down), so a page is never handed more than it can read.
-package bateri:view@0.4.0;
+package bateri:view@0.5.0;
 
 interface types {
     /// A name for an element, so that what is kept about it between frames (a scroll position,
@@ -284,6 +284,11 @@ interface types {
         /// The page is still moving: the application asks for the next frame itself until this
         /// says no, so a page at rest costs no frames.
         animating: bool,
+        /// When the page wants to be asked for again even if nothing happens before then, in
+        /// seconds on the clock `render` was given: a page that shows how old what it shows is (a
+        /// reading that stopped coming) is woken once at that time, not drawn at every frame
+        /// until then. Not read while the page is `animating`; a time already past is now.
+        wake-at: option<f64>,
     }
 
     enum button {

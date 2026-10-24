@@ -16,6 +16,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use bt_view::{Element, Event, Input, Laid, Reply, Size};
 
@@ -29,6 +30,9 @@ pub struct Frame {
     /// The page is still moving: the application asks for the next frame itself until this
     /// says no.
     pub animating: bool,
+    /// When the page wants to be asked for again if nothing happens before then, seconds on the
+    /// clock `render` was given; always a finite time.
+    pub wake_at: Option<f64>,
 }
 
 /// What a module can be asked, whatever it is made of. The sandbox is one; the tests have a
@@ -300,6 +304,26 @@ impl Post<'_> {
     }
 }
 
+/// What the page was last asked for, and when. A page the module makes again by itself is made
+/// for the same viewport. What the person did is answered at the time of the last frame, the one
+/// the person saw; what the program said, at the time that has passed since — a program speaks on
+/// its own clock, long after any frame, and a page that tells the time by `now` (how long ago a
+/// reading came) is not handed the time of a frame long gone.
+#[derive(Clone, Copy)]
+struct Asked {
+    size: Size,
+    now: f64,
+    reduce_motion: bool,
+    at: Instant,
+}
+
+impl Asked {
+    /// The time on the application's clock now: the time it gave, and what has passed since.
+    fn since(&self) -> f64 {
+        self.now + self.at.elapsed().as_secs_f64()
+    }
+}
+
 /// The module's life: made, then asked until it is stopped or gone.
 fn serve<R: Runner>(
     make: impl FnOnce() -> Result<R, Fault>,
@@ -309,7 +333,7 @@ fn serve<R: Runner>(
 ) -> Result<(), Fault> {
     let mut runner = make()?;
     // What the page was last made for: what an event that changed it makes it again for.
-    let mut last: Option<(Size, f64, bool)> = None;
+    let mut last: Option<Asked> = None;
     // How many times in a row a settle has asked for the page again without anyone else asking
     // for anything: a module that always wants another page does not make an endless chain of them.
     let mut settled = 0_u8;
@@ -338,7 +362,12 @@ fn serve<R: Runner>(
                     now,
                     reduce_motion,
                 } => {
-                    last = Some((*size, *now, *reduce_motion));
+                    last = Some(Asked {
+                        size: *size,
+                        now: *now,
+                        reduce_motion: *reduce_motion,
+                        at: Instant::now(),
+                    });
                     settled = 0;
                     let frame = runner.render(*size, *now, *reduce_motion)?;
                     post.say(runner.take_sent());
@@ -348,10 +377,10 @@ fn serve<R: Runner>(
                 Command::Settle => {
                     if runner.settle()?
                         && settled < SETTLES
-                        && let Some((size, now, reduce_motion)) = last
+                        && let Some(asked) = last
                     {
                         settled += 1;
-                        let frame = runner.render(size, now, reduce_motion)?;
+                        let frame = runner.render(asked.size, asked.now, asked.reduce_motion)?;
                         post.put(Some(frame), None);
                     }
                     post.say(runner.take_sent());
@@ -367,8 +396,9 @@ fn serve<R: Runner>(
                     let reply = runner.handle(event.clone())?;
                     post.say(runner.take_sent());
                     let frame = match (reply.redraw, last) {
-                        (true, Some((size, now, reduce_motion))) => {
-                            let frame = runner.render(size, now, reduce_motion)?;
+                        (true, Some(asked)) => {
+                            let frame =
+                                runner.render(asked.size, asked.now, asked.reduce_motion)?;
                             post.say(runner.take_sent());
                             Some(frame)
                         }
@@ -404,8 +434,8 @@ fn serve<R: Runner>(
                 }
             }
         }
-        if owed && let Some((size, now, reduce_motion)) = last {
-            let frame = runner.render(size, now, reduce_motion)?;
+        if owed && let Some(asked) = last {
+            let frame = runner.render(asked.size, asked.since(), asked.reduce_motion)?;
             post.say(runner.take_sent());
             post.put(Some(frame), None);
         }
@@ -474,6 +504,7 @@ mod tests {
             Ok(Frame {
                 root: div().child(text(format!("{now}"))),
                 animating: false,
+                wake_at: None,
             })
         }
 
@@ -845,6 +876,7 @@ mod tests {
                 Ok(Frame {
                     root: div(),
                     animating: false,
+                    wake_at: None,
                 })
             }
             fn settle(&mut self) -> Result<bool, Fault> {

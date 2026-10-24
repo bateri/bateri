@@ -118,6 +118,8 @@ struct Conversation<'a> {
     next_push: Instant,
     /// Push as fast as the terminal takes it, not once a second.
     flood: bool,
+    /// Stop pushing at this time, as a Docker that hangs would.
+    stall: Option<Instant>,
     /// Bytes of data the view's `upload` calls have carried so far.
     uploaded: u64,
     /// Why the view failed, in the words the terminal gave when it told the program.
@@ -125,10 +127,16 @@ struct Conversation<'a> {
 }
 
 /// Shows the view (`module` is the file of a view of `kind`) and serves it until it is over. With
-/// `flood` the readings come as fast as the terminal takes them. The bytes the view sent with its
-/// `upload` calls come back with how it ended, and the words the terminal gave if the view
-/// failed: they are for the person once the terminal is given back.
-pub fn run(kind: Kind, module: &[u8], flood: bool) -> (Outcome, u64, Option<String>) {
+/// `flood` the readings come as fast as the terminal takes them, with `stall` they stop after that
+/// long. The bytes the view sent with its `upload` calls come back with how it ended, and the
+/// words the terminal gave if the view failed: they are for the person once the terminal is given
+/// back.
+pub fn run(
+    kind: Kind,
+    module: &[u8],
+    flood: bool,
+    stall: Option<Duration>,
+) -> (Outcome, u64, Option<String>) {
     let Ok(tty) = Tty::take() else {
         return (Outcome::NoView, 0, None);
     };
@@ -144,6 +152,7 @@ pub fn run(kind: Kind, module: &[u8], flood: bool) -> (Outcome, u64, Option<Stri
         tick: 0,
         next_push: Instant::now(),
         flood,
+        stall: stall.map(|after| Instant::now() + after),
         uploaded: 0,
         failure: None,
     };
@@ -479,6 +488,9 @@ impl Conversation<'_> {
             return Ok(());
         };
         if !self.flood && Instant::now() < self.next_push {
+            return Ok(());
+        }
+        if self.stall.is_some_and(|at| Instant::now() >= at) {
             return Ok(());
         }
         let readings: Vec<Value> = bt_view::demo::readings(self.tick)

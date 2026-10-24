@@ -178,6 +178,7 @@ pub fn to_wit_frame(frame: Frame) -> wit::Frame {
     wit::Frame {
         nodes: frame.root.fold().into_iter().map(node).collect(),
         animating: frame.animating,
+        wake_at: frame.wake_at,
     }
 }
 

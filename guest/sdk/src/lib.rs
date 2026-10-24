@@ -69,6 +69,11 @@ pub struct Frame {
     /// The page is still moving (a highlight on its way): the application asks for the next frame
     /// itself until this says no, so a page at rest costs no frames.
     pub animating: bool,
+    /// When the page at rest wants to be rendered again if nothing happens before then, seconds
+    /// on the clock [`Page::render`] is given (`now + 5.0`: in five seconds). It is rendered once
+    /// at that time, not at every frame until then: what a page needs to show that something it
+    /// waits for has not come (a reading that stopped). Not read while `animating`.
+    pub wake_at: Option<f64>,
 }
 
 impl Frame {
@@ -77,6 +82,7 @@ impl Frame {
         Self {
             root,
             animating: false,
+            wake_at: None,
         }
     }
 }

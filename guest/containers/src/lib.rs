@@ -26,6 +26,13 @@ use serde_json::{Value, json};
 /// The number the page gives its one subscription.
 const STATS: u64 = 1;
 
+/// Seconds without a reading after which the page says none is coming: the program pushes one a
+/// second, so five missed is a program that stopped, not one that is late.
+const STALE_AFTER: f64 = 5.0;
+
+/// What the page says when the readings stopped.
+const STALE_NOTE: &str = "No new readings from demopen";
+
 /// The key that sends the large payload.
 const UPLOAD_KEY: char = 'U';
 
@@ -122,6 +129,12 @@ struct ContainerList {
     counted: Option<u64>,
     /// There is more of the payload to say and nothing but the next frame calls the page.
     more: bool,
+    /// A reading came since the page was last rendered.
+    fresh: bool,
+    /// When the newest reading came, on the clock `render` is given.
+    last_reading: Option<f64>,
+    /// No reading has come for [`STALE_AFTER`]: the page says so.
+    stale: bool,
 }
 
 impl ContainerList {
@@ -138,8 +151,9 @@ impl ContainerList {
         self.more = upload.pump();
     }
 
-    /// What the page says of the payload, if it has anything to say: how far it has got while
-    /// the program is being told, what the program counted when it has said.
+    /// What the page says over the list, if it has anything to say: how far the payload has got
+    /// while the program is being told, that the readings stopped, what the program counted of
+    /// the payload when it has said.
     fn note(&self) -> Option<String> {
         match (&self.upload, self.counted) {
             (Some(upload), _) if upload.waiting => Some(format!(
@@ -147,6 +161,7 @@ impl ContainerList {
                 upload.percent()
             )),
             (Some(upload), _) => Some(format!("Sending 4 MiB to demopen... {}%", upload.percent())),
+            (None, _) if self.stale => Some(STALE_NOTE.to_owned()),
             (None, Some(bytes)) => Some(format!("Sent 4 MiB - demopen counted {bytes} bytes")),
             (None, None) => None,
         }
@@ -164,6 +179,9 @@ impl Page for ContainerList {
             heard: false,
             counted: None,
             more: false,
+            fresh: false,
+            last_reading: None,
+            stale: false,
         }
     }
 
@@ -171,6 +189,14 @@ impl Page for ContainerList {
         if self.more {
             self.pump_upload();
         }
+        // The page learns the time only here: a reading that came is stamped with the frame it
+        // asked for, and the page asks to be rendered once more when the next one is late.
+        if self.fresh {
+            self.fresh = false;
+            self.last_reading = Some(now);
+        }
+        let stale_at = self.last_reading.map(|at| at + STALE_AFTER);
+        self.stale = stale_at.is_some_and(|at| now >= at);
         self.list.advance(now, reduce_motion);
         let list = self.list.view(size);
         // The payload says how it is doing over the list, above its status line.
@@ -193,6 +219,7 @@ impl Page for ContainerList {
         Frame {
             root,
             animating: self.list.animating() || self.more,
+            wake_at: stale_at.filter(|_| !self.stale),
         }
     }
 
@@ -255,12 +282,11 @@ impl Page for ContainerList {
         if push.id != STATS {
             return Reply::none();
         }
-        let readings = readings_of(&push.value);
-        if self.list.live(&readings) {
-            Reply::redraw()
-        } else {
-            Reply::none()
-        }
+        // Every reading is a frame, even one that changes nothing on the list: it is when the
+        // page learns that readings are still coming.
+        self.list.live(&readings_of(&push.value));
+        self.fresh = true;
+        Reply::redraw()
     }
 }
 
