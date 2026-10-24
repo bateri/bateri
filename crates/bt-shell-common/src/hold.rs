@@ -639,6 +639,22 @@ fn serve(
                     ToHold::Bell => {
                         let _ = write_all(config.output, b"\x07");
                     }
+                    ToHold::Sync => {
+                        // What was typed before the request is sent before the answer: the
+                        // application orders what it does next behind it.
+                        if state.committed() {
+                            match pass_on_what_waits(config, stream, &mut buffer) {
+                                Ok(()) => {}
+                                Err(Passing::Gone) => {
+                                    return Served::Done(Finish::quiet(Outcome::Exit(1)));
+                                }
+                                Err(Passing::Lost) => return lost(welcomed),
+                            }
+                        }
+                        if send(stream, &ToApp::Synced).is_err() {
+                            return lost(welcomed);
+                        }
+                    }
                 }
             }
         }
@@ -655,6 +671,41 @@ fn serve(
             }
         }
     }
+}
+
+/// Why [`pass_on_what_waits`] stopped.
+enum Passing {
+    /// The pane's terminal is gone (hung up).
+    Gone,
+    /// The connection to the application broke.
+    Lost,
+}
+
+/// The most reads one request to answer may make: what a terminal holds for a program that does
+/// not read is small, and a writer that keeps filling it must not keep the answer for ever.
+const PASS_ON_LIMIT: usize = 64;
+
+/// Reads what waits in the pane's terminal and sends it, without waiting for more: the pipe
+/// reads it as it is typed, and this is the same read, made before an answer so that everything
+/// written to the terminal before the request is ahead of it.
+fn pass_on_what_waits(
+    config: &Config,
+    stream: &mut UnixStream,
+    buffer: &mut [u8],
+) -> Result<(), Passing> {
+    for _ in 0..PASS_ON_LIMIT {
+        let mut input = [poll_in(config.input)];
+        if poll(&mut input, 0).map_err(|_| Passing::Lost)? == 0 || !ready(&input[0]) {
+            return Ok(());
+        }
+        match read_fd(config.input, buffer) {
+            Ok(0) | Err(_) => return Err(Passing::Gone),
+            Ok(n) => {
+                send(stream, &ToApp::Input(buffer[..n].to_vec())).map_err(|_| Passing::Lost)?
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The status of a command the user interrupted, as a shell reads it.

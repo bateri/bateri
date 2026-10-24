@@ -259,6 +259,13 @@ pub trait PaneHost {
     /// terminals the pane has forget their past too, so that the bateri that finds them again
     /// does not give back what was cleared. The default is an owner that keeps no terminals.
     fn forget_past(&self, _pane: &PaneUuid) {}
+    /// How the pane asks for the unread input of the server terminal it shows to be dropped,
+    /// when the program of a view ended on that server ([`bt_core::pencere::ViewOptions::drop_shown`]):
+    /// a request that may be made from any thread and that does nothing where the pane shows no
+    /// such terminal. The default is an owner that keeps no terminals.
+    fn shown_dropper(&self, _pane: &PaneUuid) -> Option<bt_core::pencere::DropShown> {
+        None
+    }
     /// A program's view opened or closed in the pane: written beside the terminal of this
     /// Mac that carries the pane's bytes, so that a bateri that finds the terminal again
     /// offers the program a restart of it. The default is an owner that keeps no terminals.
@@ -4117,6 +4124,10 @@ impl TerminalPane {
             return;
         };
         let link = self.ivars().connection.get();
+        // A terminal that is not there is not written to, for a page and a module as it is
+        // not for a key ([`TerminalPane::hold_input`]): their words are held at the lane
+        // they take. The view is offered to the program again when the screen is back.
+        session.set_view_held(link.is_passive());
         // Who took the terminal is the service's to say; the word and the name land together.
         let by = (link == PaneLink::Taken)
             .then(|| self.host().kept_terminal(self.uuid()))
@@ -4400,6 +4411,16 @@ impl TerminalPane {
         // A program's web view is told too: its `context` carries the person's setting.
         if let Some(session) = self.session() {
             session.set_view_reduce_motion(reduce);
+        }
+    }
+
+    /// The person's language or time zone changed (`None` is not known): the program's view
+    /// is told if it runs ([`bt_core::Session::set_view_locale`]; a value that did not change is
+    /// nothing to tell). A pane opened later reads both when it opens
+    /// ([`TerminalPane::view_options`]).
+    pub(crate) fn set_locale(&self, locale: Option<String>, time_zone: Option<String>) {
+        if let Some(session) = self.session() {
+            session.set_view_locale(locale, time_zone);
         }
     }
 
@@ -5332,6 +5353,7 @@ impl TerminalPane {
         options.locale = pencere_view::locale_tag();
         options.time_zone = pencere_view::time_zone_name();
         options.reduce_motion = ivars.reduce_motion.get();
+        options.drop_shown = self.host().shown_dropper(self.uuid());
         options.size = pencere_view::content_size(self.bounds());
         // A program may open a view that is a module or a script: it is run in the sandbox and
         // drawn as a page of the kit, up to the size the sandbox compiles.
@@ -5875,6 +5897,7 @@ impl TerminalPane {
             place,
             program,
             identity: self.view_identity(),
+            path: self.view_path(),
             said: self
                 .view_host()
                 .and_then(|host| host.program().map(str::to_owned)),
@@ -6208,14 +6231,32 @@ impl TerminalPane {
     /// server keeps or a plain `ssh` (the process table there is `ssh`'s), and a program that
     /// is an interpreter running no script. An answer is then not kept.
     fn view_identity(&self) -> Option<String> {
+        let (parent, child) = self.view_program()?;
+        identity::kept_name(parent, child, &SystemTable)
+    }
+
+    /// Where that program was run from, as full paths from the process table (the file it
+    /// executed; for `node` and `python` the script): what an answer is kept by with its name
+    /// ([`TerminalPane::view_identity`]), because a name is not who a program is — two
+    /// `node index.js` in two directories, or a `containers` earlier in `PATH`, share one.
+    /// `None` where the name is not known, and where the table gives no full path.
+    fn view_path(&self) -> Option<String> {
+        let (parent, child) = self.view_program()?;
+        identity::kept_path(parent, child, &SystemTable)
+    }
+
+    /// The pane's shell and child, where the process table is the program's: not a pane that
+    /// shows a terminal a server keeps or a plain `ssh` (the table there is `ssh`'s).
+    fn view_program(&self) -> Option<(ShellParent, u32)> {
         if self.host().kept_terminal(self.uuid()).is_some()
             || self.session()?.remote_target().is_some()
         {
             return None;
         }
-        let parent = *self.ivars().shell_parent.get()?;
-        let child = self.session()?.child_pid();
-        identity::kept_name(parent, child, &SystemTable)
+        Some((
+            *self.ivars().shell_parent.get()?,
+            self.session()?.child_pid(),
+        ))
     }
 
     /// Where the program that showed the view runs (the server's name; `None` on this Mac)
@@ -7303,6 +7344,86 @@ mod tests {
             let body = &pane[at..at + pane[at..].find("\n    }\n").expect("its end")];
             assert!(body.contains("self.offer_owed_view();"), "{edge}");
         }
+    }
+
+    /// What a page or a module says is held where a key is: a pane whose terminal is not there
+    /// (`PaneLink::is_passive`, the rule `hold_input` takes its keys by) writes nothing for its
+    /// view, and the view is offered to the program again when the screen is back. The rule is
+    /// told to the session wherever the connection is written (`apply_connection`), and the
+    /// session holds the lane the words of both take. A source scan, because the panes need a
+    /// window server.
+    #[test]
+    fn a_pane_waiting_for_its_connection_holds_the_words_of_its_view_as_it_holds_a_key() {
+        let pane = include_str!("pane.rs");
+        let pane = &pane[..pane.find("#[cfg(test)]").unwrap_or(pane.len())];
+        let at = pane.find("fn apply_connection(").expect("apply_connection");
+        let body = &pane[at..at + pane[at..].find("\n    }\n").expect("its end")];
+        assert!(body.contains("session.set_view_held(link.is_passive());"));
+        // The rule of the keys is the same predicate.
+        let at = pane.find("fn on_wait(").expect("on_wait");
+        let body = &pane[at..at + pane[at..].find("\n}\n").expect("its end")];
+        assert!(body.contains("link.is_passive()"));
+        // And it is told before the connection's edge restarts the view: a view offered again
+        // must not find its lane held.
+        let at = pane
+            .find("pub(crate) fn set_connection(")
+            .expect("set_connection");
+        let body = &pane[at..at + pane[at..].find("\n    }\n").expect("its end")];
+        assert!(
+            body.find("self.apply_connection();").expect("applied")
+                < body.find("restart_view_offered(").expect("restarted")
+        );
+    }
+
+    /// A program's view is told the person's language and time zone when they change, from
+    /// the default centre's two notifications; a pane that opens later reads both when it opens.
+    /// A source scan, because the panes need a window server.
+    #[test]
+    fn a_view_is_told_when_the_persons_language_or_time_zone_changes() {
+        let app = include_str!("app.rs");
+        let app = &app[..app.find("#[cfg(test)]").unwrap_or(app.len())];
+        let at = app.find("fn observe_locale(").expect("observe_locale");
+        let body = &app[at..at + app[at..].find("\n    }\n").expect("its end")];
+        assert!(body.contains("NSCurrentLocaleDidChangeNotification"));
+        assert!(body.contains("NSSystemTimeZoneDidChangeNotification"));
+        assert!(body.contains("NSNotificationCenter::defaultCenter()"));
+        assert!(
+            app.contains("self.observe_locale();"),
+            "it is watched from the launch"
+        );
+        let at = app.find("fn apply_locale(").expect("apply_locale");
+        let body = &app[at..at + app[at..].find("\n    }\n").expect("its end")];
+        assert!(body.contains("pane.set_locale("));
+        let pane = include_str!("pane.rs");
+        let pane = &pane[..pane.find("#[cfg(test)]").unwrap_or(pane.len())];
+        let at = pane.find("pub(crate) fn set_locale(").expect("set_locale");
+        let body = &pane[at..at + pane[at..].find("\n    }\n").expect("its end")];
+        assert!(body.contains("session.set_view_locale("));
+        let at = pane.find("fn view_options(").expect("view_options");
+        let body = &pane[at..at + pane[at..].find("\n    }\n").expect("its end")];
+        assert!(body.contains("pencere_view::locale_tag()"));
+        assert!(body.contains("pencere_view::time_zone_name()"));
+    }
+
+    /// What an answer about a view is kept by is the application's reading of the pane — the
+    /// name and the file (or script) the program was run from — and a pane that asks the keeper of the
+    /// server terminal it shows to drop the unread input does it by the owner, never by the
+    /// service directly. A source scan, because the panes need a window server.
+    #[test]
+    fn the_origin_of_a_question_has_the_place_of_the_program_and_the_owner_is_asked_to_drop() {
+        let pane = include_str!("pane.rs");
+        let pane = &pane[..pane.find("#[cfg(test)]").unwrap_or(pane.len())];
+        let at = pane.find("fn view_origin(").expect("view_origin");
+        let body = &pane[at..at + pane[at..].find("\n    }\n").expect("its end")];
+        assert!(body.contains("identity: self.view_identity(),"));
+        assert!(body.contains("path: self.view_path(),"));
+        let at = pane.find("fn view_options(").expect("view_options");
+        let body = &pane[at..at + pane[at..].find("\n    }\n").expect("its end")];
+        assert!(body.contains("self.host().shown_dropper(self.uuid())"));
+        assert!(
+            !pane.contains("hold_service::"),
+            "the pane's modules do not bind to the application's"
+        );
     }
 
     /// The connection-lost veil stops at the dock's context row — the line typed into the

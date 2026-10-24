@@ -635,11 +635,12 @@ impl PtyOps for LocalOps {
 
     /// The pane's program ended without reading what the pane sent it: the terminal that
     /// holds it is asked to drop it ([`Client::drop_input`]) — the terminal of this Mac, or,
-    /// when the program ran on a server the pane shows, that server's. The request is not
-    /// ordered with the bytes the pane wrote a moment before: they reach the service from the
-    /// stream's reader thread and the request from this one, so a byte still on its way
-    /// follows the request and is not dropped. The window is narrow, for the end of the program
-    /// that triggers the request comes back from the terminal after a round trip.
+    /// when the program ran on a server the pane shows, that server's, **behind what the
+    /// pipe to it had passed on** ([`Core::drop_shown`]). The request is not ordered with the
+    /// bytes the pane wrote a moment before: they reach the service from the stream's reader
+    /// thread and the request from this one, so a byte still on its way follows the request
+    /// and is not dropped. The window is narrow, for the end of the program that triggers the
+    /// request comes back from the terminal after a round trip.
     fn drop_input(&self, remote: bool) {
         let _ = self.tx.send(Msg::DropInput {
             hold: self.hold,
@@ -700,6 +701,9 @@ enum Msg {
         hold: HoldId,
         remote: bool,
     },
+    /// The program of a pane that holds a terminal of its own ended on the server it shows
+    /// ([`Service::drop_shown`]).
+    DropShown(PaneUuid),
     /// kablo was put on this Mac, or could not be.
     HereMade {
         outcome: Result<Installed, Refusal>,
@@ -1120,6 +1124,16 @@ impl Service {
     /// signalled, as [`Service::end`] must be said: the holder's going is what loses the pane.
     pub fn leave(&self, pane: &PaneUuid) {
         let _ = self.tx.send(Msg::Leave(pane.clone()));
+    }
+
+    /// The program of a view in the pane `pane` ended on the server the pane shows, with what
+    /// it was sent unread, and the pane holds a terminal of its own that runs the pipe to the
+    /// server's terminal (it has no stream to ask by, [`PtyOps::drop_input`]): the server's
+    /// terminal is asked to drop what its program has not read, **behind what the pipe had
+    /// passed on** ([`crate::kablo::hub::Hub::drop_input`]). A pane that shows no terminal a
+    /// server keeps asks nothing of anything.
+    pub fn drop_shown(&self, pane: &PaneUuid) {
+        let _ = self.tx.send(Msg::DropShown(pane.clone()));
     }
 
     /// The first windows of a launch are built, and `panes` are the panes they have: the
@@ -1624,6 +1638,7 @@ impl Core {
             Msg::LocalAccount(outcome) => self.local_account(&outcome, now),
             Msg::Resize { hold, size } => self.hub.resize(hold, size),
             Msg::DropInput { hold, remote } => self.drop_input(hold, remote),
+            Msg::DropShown(pane) => self.drop_shown(&pane),
             Msg::HereMade { outcome, pending } => self.here_made(outcome, &pending, now),
             Msg::Survey { account, done } => self.survey(account, done, now),
             Msg::Recorded { id, records } => {
@@ -2134,28 +2149,41 @@ impl Core {
     /// The program of the pane `hold` belongs to ended with input unread: the terminal it ran
     /// in is asked to drop it. A program of this Mac ran in the terminal that carries the
     /// pane's bytes. A program of a server ran in the terminal the pane shows there, and only
-    /// that one is asked: the pipe in the terminal of this Mac ([`crate::hold`]) reads it as
-    /// soon as anything is typed and passes it on, so nothing waits there for the program, and
-    /// a drop there could only take keys the person is typing for the shell on the server. A
-    /// pane in a remote session that shows no server's terminal (a plain `ssh`) has nothing to
-    /// ask.
+    /// that one is asked ([`Core::drop_shown`]): the pipe in the terminal of this Mac
+    /// ([`crate::hold`]) reads what is typed as soon as it comes and passes it on, so nothing
+    /// waits there for the program, and a drop there could only take keys the person is typing
+    /// for the shell on the server. A pane in a remote session that shows no server's terminal
+    /// (a plain `ssh`) has nothing to ask.
+    ///
+    /// The request for the server's terminal is ordered behind what the pipe had passed on; the
+    /// one for the terminal of this Mac is made at once. What the pane wrote a moment before
+    /// reaches the service from the stream's reader thread, and the request from this one, so a
+    /// byte still on its way between the two follows the request and is not dropped; the window
+    /// is the hand-off of a socket to the service's thread, and the end of the program that
+    /// triggers the request comes back from the terminal after a round trip.
     fn drop_input(&mut self, hold: HoldId, remote: bool) {
-        let terminals = if remote {
-            self.panes
-                .get(&hold)
-                .map(|pane| self.shown_terminals_of(pane))
-                .unwrap_or_default()
-        } else {
-            self.hub
-                .terminal_of(hold)
-                .map(|(account, terminal)| (account.to_owned(), terminal.clone()))
-                .into_iter()
-                .collect()
-        };
-        for (account, terminal) in terminals {
-            if let Some(client) = self.hub.client_mut(&account) {
-                client.drop_input(&terminal);
+        if remote {
+            if let Some(pane) = self.panes.get(&hold).cloned() {
+                self.drop_shown(&pane);
             }
+            return;
+        }
+        let local = self
+            .hub
+            .terminal_of(hold)
+            .map(|(account, terminal)| (account.to_owned(), terminal.clone()));
+        if let Some((account, terminal)) = local
+            && let Some(client) = self.hub.client_mut(&account)
+        {
+            client.drop_input(&terminal);
+        }
+    }
+
+    /// The server terminals `pane` shows are asked to drop the input their programs have not
+    /// read, each behind what its holder had read of what was typed ([`Hub::drop_input`]).
+    fn drop_shown(&mut self, pane: &PaneUuid) {
+        for (account, terminal) in self.shown_terminals_of(pane) {
+            self.hub.drop_input(&account, &terminal);
         }
     }
 

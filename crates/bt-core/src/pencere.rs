@@ -78,7 +78,58 @@ use crate::wake::Wake;
 /// What the pane does to throw away what its program left unread in the tty: from the master where
 /// the system lets the master do it, by the terminal's owner where the pane has none
 /// ([`pane_discard`]).
-pub(crate) type Discard = Box<dyn Fn() + Send + Sync>;
+///
+/// **Where the program ran is read when its view opens and kept**: by the time the discard
+/// comes the shell has often said the command ended (`D` clears the remote session before the
+/// view hears of it), and a program that ran on a server would be taken for one that ran here.
+pub(crate) struct Discard {
+    /// Whether the program of the pane runs on another machine, as the pane knows it now.
+    elsewhere: Box<dyn Fn() -> bool + Send + Sync>,
+    /// Throws the input away; `remote` is where the program ran.
+    throw: Box<dyn Fn(bool) + Send + Sync>,
+}
+
+impl Discard {
+    pub(crate) fn new(
+        elsewhere: impl Fn() -> bool + Send + Sync + 'static,
+        throw: impl Fn(bool) + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            elsewhere: Box::new(elsewhere),
+            throw: Box::new(throw),
+        }
+    }
+
+    /// A discard of a pane whose program is always here and has nothing to throw away.
+    #[cfg(test)]
+    pub(crate) fn nothing() -> Self {
+        Self::new(|| false, |_| {})
+    }
+}
+
+/// What a pane asks of whoever keeps the server terminal it shows, to drop the input that
+/// terminal's program has not read ([`ViewOptions::drop_shown`]). Called from the thread that
+/// writes the pane's input, never blocks, and may be called when the pane shows no terminal a
+/// server keeps (the owner then does nothing).
+#[derive(Clone)]
+pub struct DropShown(Arc<dyn Fn() + Send + Sync>);
+
+impl DropShown {
+    /// A request that calls `ask`.
+    pub fn new(ask: impl Fn() + Send + Sync + 'static) -> Self {
+        Self(Arc::new(ask))
+    }
+
+    fn ask(&self) {
+        (self.0)();
+    }
+}
+
+impl fmt::Debug for DropShown {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("DropShown(..)")
+    }
+}
 
 /// The monospaced font list a view is given when the person named no family
 /// (`[font] family`): the system's, as a CSS `font-family`.
@@ -148,6 +199,12 @@ pub struct ViewOptions {
     /// pane then offers the kinds `wasm` and `lua` as well as `web` in its `welcome`. `None` for
     /// one that does not, whose panes leave them out of it and refuse such an `open`.
     pub native_entry_limit: Option<u64>,
+    /// How the pane asks the keeper of the server terminal it shows to drop what that
+    /// terminal's program has not read, when the program of a view ended on that server and the
+    /// pane holds a terminal of its own that carries the bytes (a pane whose child is the pipe to
+    /// the terminal). A pane that has no terminal of its own asks its owner through the stream
+    /// ([`crate::PtyOps::drop_input`]); `None` for an application with no keeper.
+    pub drop_shown: Option<DropShown>,
 }
 
 impl ViewOptions {
@@ -170,6 +227,7 @@ impl ViewOptions {
             },
             shell_group: None,
             native_entry_limit: None,
+            drop_shown: None,
         }
     }
 }
@@ -495,33 +553,43 @@ pub(crate) fn pane_observer(
 /// whose terminal is another process's — a stream of a terminal kablo keeps — holds no master
 /// and asks the owner to drop the input of the terminal instead ([`PtyOps::drop_input`]),
 /// which also reaches the server's terminal when the program ran on a server the pane shows.
-/// Only a stream's owner is asked: a pane that holds a master of its own and shows a server's
-/// terminal asks nobody. A tty whose queue none of this reaches is left as it is, and what the
-/// module said and was not read stays a bound written down, not a promise.
+///
+/// A program that ran on a server is not in the tty this pane holds: the tty is the pipe's,
+/// which passes on what it reads. A pane that holds a master of its own and shows a server's
+/// terminal asks the keeper of that terminal to drop it (`drop_shown`), which the keeper does
+/// behind what the pipe has passed on; one that cannot ask (a plain `ssh`, a pane with no
+/// keeper) leaves it as it is. A tty whose queue none of this reaches is left as it is, and
+/// what the module said and was not read stays a bound written down, not a promise.
 pub(crate) fn pane_discard(
     shell: Arc<Mutex<ShellLog>>,
     master: Arc<Mutex<Option<File>>>,
     stream: Option<Arc<dyn PtyOps>>,
+    drop_shown: Option<DropShown>,
 ) -> Discard {
-    Box::new(move || {
-        let remote = lock(&shell).in_remote_session();
-        if let Some(ops) = &stream {
-            ops.drop_input(remote);
-            return;
-        }
-        // A pane in a remote session has `ssh`'s tty: the program is elsewhere.
-        if remote {
-            return;
-        }
-        #[cfg(target_os = "macos")]
-        if let Some(file) = lock(&master).as_ref() {
-            // SAFETY: `tcflush` takes an open descriptor and nothing else; the file is held
-            // open for the call by the lock.
-            unsafe { libc::tcflush(file.as_raw_fd(), libc::TCIFLUSH) };
-        }
-        #[cfg(not(target_os = "macos"))]
-        let _ = &master;
-    })
+    Discard::new(
+        move || lock(&shell).in_remote_session(),
+        move |remote| {
+            if let Some(ops) = &stream {
+                ops.drop_input(remote);
+                return;
+            }
+            // A pane in a remote session has `ssh`'s tty: the program is elsewhere.
+            if remote {
+                if let Some(drop) = &drop_shown {
+                    drop.ask();
+                }
+                return;
+            }
+            #[cfg(target_os = "macos")]
+            if let Some(file) = lock(&master).as_ref() {
+                // SAFETY: `tcflush` takes an open descriptor and nothing else; the file is held
+                // open for the call by the lock.
+                unsafe { libc::tcflush(file.as_raw_fd(), libc::TCIFLUSH) };
+            }
+            #[cfg(not(target_os = "macos"))]
+            let _ = &master;
+        },
+    )
 }
 
 /// The terminal's look as the view is given it: the roles come from the
@@ -575,6 +643,9 @@ pub(crate) struct Desk {
     flow: Flow,
     /// Throws away the input the program of the pane left unread.
     discard: Discard,
+    /// The program of the view runs on another machine: read when the view opened
+    /// ([`Discard`]).
+    elsewhere: AtomicBool,
 }
 
 struct Inner {
@@ -624,6 +695,8 @@ impl Desk {
             // The observer's: how it finds the shell is [`pane_observer`]'s.
             shell_group: _,
             native_entry_limit,
+            // The pane's discard: the session gives it to [`pane_discard`].
+            drop_shown: _,
         } = options;
         let mut config = Config::new(host, view_theme(&theme, &font_mono), size);
         // The kinds of view this pane opens, each with the versions of its interface the
@@ -661,6 +734,7 @@ impl Desk {
             entropy_failed: failed,
             flow,
             discard,
+            elsewhere: AtomicBool::new(false),
         }
     }
 
@@ -720,8 +794,33 @@ impl Desk {
     /// §9.4): one of the six view messages is written to the program as a `msg`, unread, and
     /// one of the host's own — `context`, `close`, `link` — is answered here. Nothing is
     /// waited for after it: a call the program does not answer is the page's to give up.
-    pub(crate) fn view_message(&self, text: &str, write: impl Fn(Vec<u8>)) {
-        self.apply(write, |conversation| conversation.view_message(text));
+    ///
+    /// **What the page said goes to `module`, the lane the words of a module take; what the
+    /// conversation says of its own goes to `keys`.** The page's `msg` is written while the view is
+    /// open and nothing else the conversation writes for a page message is: `close` ends the
+    /// view and the program is told `closed`, which is the protocol's word and not the page's.
+    /// A word of the page after the view has ended would be typed at the shell that reads the tty
+    /// next, so it must be refused by the same gate as a module's.
+    pub(crate) fn view_message(
+        &self,
+        text: &str,
+        keys: impl Fn(Vec<u8>),
+        module: impl Fn(Vec<u8>),
+    ) {
+        let said = Cell::new(false);
+        self.apply(
+            |bytes| {
+                if said.get() {
+                    module(bytes);
+                } else {
+                    keys(bytes);
+                }
+            },
+            |conversation| {
+                conversation.view_message(text);
+                said.set(conversation.state() == State::Open);
+            },
+        );
     }
 
     /// The `context` a web page is told now, as JSON text, if a page is open
@@ -730,17 +829,53 @@ impl Desk {
         lock(&self.inner).conversation.page_context()
     }
 
+    /// The shell page's frame has loaded: the page is told the `context` it starts with
+    /// (specification §9.5), the current one, **as one more thing for it to take**, behind
+    /// what is already waiting and counted as the rest is — not a call that goes round the
+    /// queue, which a message told a moment before could pass.
+    pub(crate) fn page_loaded(&self) {
+        let Some(text) = self.page_context() else {
+            return;
+        };
+        self.flow.heard(text.len());
+        let notify = {
+            let mut slots = lock(&self.slots);
+            let first = slots.views.is_empty();
+            slots.views.push(Action::ToView(text));
+            first
+        };
+        if notify {
+            self.wake.view_changed();
+        }
+    }
+
     /// A message of the component of a WebAssembly view, for the program: written only while
-    /// that view is open ([`Conversing::module_message`]), through the same gate as every
-    /// other word to the program. Whether it was written.
-    pub(crate) fn module_message(&self, text: &str, write: impl Fn(Vec<u8>)) -> bool {
+    /// that view is open ([`Conversing::module_message`]), to `module`, the lane the words of a
+    /// module take and the same gate as every other word to the program. What the conversation
+    /// says of its own goes to `keys`: a message over the size one may have ends the view as a
+    /// failure and the program is told `closed`, a word of the protocol and not of the module,
+    /// which the lane the module's words take would drop with the view's own. Whether the
+    /// message was written.
+    pub(crate) fn module_message(
+        &self,
+        text: &str,
+        keys: impl Fn(Vec<u8>),
+        module: impl Fn(Vec<u8>),
+    ) -> bool {
         let wrote = Cell::new(false);
+        let said = Cell::new(false);
         self.apply(
             |bytes| {
-                wrote.set(true);
-                write(bytes);
+                if said.get() {
+                    module(bytes);
+                } else {
+                    keys(bytes);
+                }
             },
-            |conversation| conversation.module_message(text),
+            |conversation| {
+                wrote.set(conversation.module_message(text));
+                said.set(conversation.state() == State::Open);
+            },
         );
         wrote.get()
     }
@@ -766,9 +901,14 @@ impl Desk {
         }
         self.flow.interrupt();
         if self.flow.module_was_written() {
-            (self.discard)();
+            self.throw_away();
         }
         false
+    }
+
+    /// Throws away what the program left unread, where it ran.
+    fn throw_away(&self) {
+        (self.discard.throw)(self.elsewhere.load(Ordering::Acquire));
     }
 
     /// The program ended (§10.3): the command's `D`, or the child's exit.
@@ -782,7 +922,7 @@ impl Desk {
         self.flow.interrupt();
         self.apply(write, Conversing::program_ended);
         if self.flow.module_was_written() {
-            (self.discard)();
+            self.throw_away();
         }
     }
 
@@ -881,6 +1021,11 @@ impl Desk {
                 // the module's frames that wait are dropped (the one under way is finished).
                 Action::StartView(_) => {
                     self.flow.begin();
+                    // Where the program is **now**: the discard that follows its end is told
+                    // this, whatever the shell has forgotten of the session by then. The shell's
+                    // log is a leaf lock.
+                    self.elsewhere
+                        .store((self.discard.elsewhere)(), Ordering::Release);
                     kept.push(action);
                 }
                 Action::DestroyView => {

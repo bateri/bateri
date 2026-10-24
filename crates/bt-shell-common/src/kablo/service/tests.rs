@@ -3825,6 +3825,11 @@ fn a_pane_with_two_terminals(
         .shown(&pane)
         .map(|shown| shown.terminal)
         .expect("shown");
+    // The pane shows the terminal as soon as it is asked for; what a test does to it (a word
+    // written, an end asked for) is for a terminal the server has made.
+    until("the server's terminal exists", || {
+        rig.world.bridge().has(&server)
+    });
     (rig, pane, mac, holder, carrier, server, ledger)
 }
 
@@ -3875,10 +3880,11 @@ fn a_pane_that_runs_in_a_terminal_of_this_mac_and_shows_a_servers_is_a_server_pa
 fn the_input_a_program_on_a_server_left_unread_is_dropped_from_the_terminal_the_pane_shows() {
     let (rig, _pane, mac, mut holder, carrier, server, _ledger) =
         a_pane_with_two_terminals("two-handles-drop-input", END_GRACE);
+    // The program is on the pane's screen: the terminal is up. The request is made as soon as
+    // the words are typed: it is not waited for them, and it must still come after them.
+    rig.world.bridge().write(&server, b"ready");
+    until("the screen", || !holder.shown.bytes().is_empty());
     holder.typed.write_all(b"the page said").expect("typed");
-    until("the words reach the server", || {
-        rig.world.bridge().typed(&server) == b"the page said"
-    });
 
     mac.ops.drop_input(true);
     until("the server's terminal told", || {
@@ -3894,6 +3900,34 @@ fn the_input_a_program_on_a_server_left_unread_is_dropped_from_the_terminal_the_
     until("the terminal of this Mac told", || {
         rig.world.mac().input_dropped(&carrier) == [0]
     });
+    rig.service.refresh_background();
+    assert_eq!(rig.world.bridge().input_dropped(&server), [13]);
+}
+
+/// A pane that holds a terminal of its own and runs the pipe in it (no stream) asks the service
+/// by the pane it is: the server's terminal it shows is asked to drop what its program has not
+/// read, behind what the pipe had passed on; a pane that shows none, or that nobody knows, is
+/// nobody's to ask about.
+#[test]
+fn a_pane_that_shows_a_servers_terminal_asks_the_service_to_drop_what_the_program_has_not_read() {
+    let (rig, pane, _mac, mut holder, carrier, server, _ledger) =
+        a_pane_with_two_terminals("two-handles-drop-shown", END_GRACE);
+    rig.world.bridge().write(&server, b"ready");
+    until("the screen", || !holder.shown.bytes().is_empty());
+    holder.typed.write_all(b"the page said").expect("typed");
+    rig.service.drop_shown(&pane);
+    until("the server's terminal told", || {
+        rig.world.bridge().input_dropped(&server) == [13]
+    });
+    assert_eq!(rig.world.bridge().typed(&server), b"the page said");
+    rig.service.refresh_background();
+    assert!(
+        rig.world.mac().input_dropped(&carrier).is_empty(),
+        "the terminal of this Mac holds nothing for the program"
+    );
+    // A pane the service does not know shows nothing to ask about.
+    let stranger = PaneUuid::parse("7b8c9d0e-1f2a-4b3c-8d4e-5f6a7b8c9d0e").expect("a uuid");
+    rig.service.drop_shown(&stranger);
     rig.service.refresh_background();
     assert_eq!(rig.world.bridge().input_dropped(&server), [13]);
 }

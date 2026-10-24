@@ -295,6 +295,23 @@ fn the_shell_tells_the_application_when_the_frame_has_loaded_and_nothing_else_do
     assert_eq!(text.matches("host.postMessage(").count(), 1, "{text}");
 }
 
+/// The page's first `context` is not a call of the bridge's own: it is one more thing the page
+/// is told and goes in their order, taken where the rest of them are (`drain_views`). A source
+/// scan, because the bridge needs a window server.
+#[test]
+fn the_first_context_of_a_page_goes_in_the_order_of_what_the_page_is_told() {
+    let source = include_str!("../pencere_view.rs");
+    let at = source
+        .find("if name.to_string() == serve::LOADED_HANDLER")
+        .expect("the loaded handler");
+    let body = &source[at..at + source[at..].find("return;").expect("its end")];
+    assert!(body.contains("session.view_page_loaded()"), "{body}");
+    assert!(!body.contains("evaluateJavaScript"), "{body}");
+    // The one call of the shell page's script that hands the page a message is `deliver`'s.
+    assert_eq!(source.matches("serve::deliver_script(").count(), 1);
+    assert!(!source.contains("view_page_context"));
+}
+
 #[test]
 fn a_css_colour_is_the_themes_bytes() {
     assert_eq!(css_color([0, 0, 0]), "#000000");

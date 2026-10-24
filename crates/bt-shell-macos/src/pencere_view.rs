@@ -436,7 +436,10 @@ define_class!(
                 return;
             }
             if name.to_string() == serve::LOADED_HANDLER {
-                self.tell_context(message);
+                // The page's first `context` is one more thing the page is told, and goes in
+                // their order (`ToView`, taken in `TerminalPane::drain_views`): not a call of
+                // this handler's own that a message told a moment before could pass.
+                self.ivars().session.view_page_loaded();
                 return;
             }
             // SAFETY: as above.
@@ -524,26 +527,6 @@ impl Bridge {
         });
         // SAFETY: `NSObject`'s `init`.
         unsafe { msg_send![super(this), init] }
-    }
-
-    /// The shell page says its frame has loaded: the page is told the `context` it starts with
-    /// (specification §9.5) — the current one, which is the start's brought up to date. A page
-    /// that starts listening later asks for it again itself.
-    fn tell_context(&self, message: &WKScriptMessage) {
-        let Some(context) = self.ivars().session.view_page_context() else {
-            return;
-        };
-        // SAFETY: a plain read of the message the web view just delivered.
-        let web = unsafe { message.webView() };
-        if let Some(web) = web {
-            // SAFETY: main thread; no completion handler, so nothing comes back.
-            unsafe {
-                web.evaluateJavaScript_completionHandler(
-                    &NSString::from_str(&serve::deliver_script(&context)),
-                    None,
-                );
-            }
-        }
     }
 
     /// The URL of a request, as text.

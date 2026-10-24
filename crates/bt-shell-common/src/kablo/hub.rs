@@ -185,6 +185,9 @@ struct Hold {
     /// The holder was asked to run a program and has not said it ended.
     running: bool,
     bound: Option<Binding>,
+    /// Requests to drop the terminal's unread input that wait for the holder's answer
+    /// ([`Hub::drop_input`]): it answers each, in order, behind the input it had read.
+    syncing: u32,
     /// What a terminal the application numbered was asked with, until the server has made it:
     /// the name may be taken by one a person made, and then it is asked for again
     /// ([`HubEvent::Collided`]).
@@ -213,6 +216,7 @@ impl Hold {
             pending: None,
             running: false,
             bound: None,
+            syncing: 0,
             renumber: None,
             finished: false,
             silence: None,
@@ -259,7 +263,7 @@ impl Hold {
                 }
                 self.exit.get_or_insert(Exit::Code(1));
             }
-            ToHold::Welcome { .. } | ToHold::Bound { .. } | ToHold::Run { .. } => {}
+            ToHold::Welcome { .. } | ToHold::Bound { .. } | ToHold::Run { .. } | ToHold::Sync => {}
         }
     }
 
@@ -766,6 +770,26 @@ impl Hub {
             }
             ToApp::Input(bytes) => self.typed(hold, &bytes),
             ToApp::Resize(size) => self.resize(hold, size),
+            ToApp::Synced => {
+                if entry.syncing == 0 {
+                    return self.fail(
+                        hold,
+                        "bateri: the terminal's connection answered out of turn",
+                    );
+                }
+                entry.syncing -= 1;
+                // Everything the holder had read is in the client's queue ahead of this: the
+                // server serves them in the order they were sent.
+                let asked = entry
+                    .bound
+                    .as_ref()
+                    .map(|binding| (binding.account.clone(), binding.terminal.clone()));
+                if let Some((account, terminal)) = asked
+                    && let Some(client) = self.clients.get_mut(&account)
+                {
+                    client.drop_input(&terminal);
+                }
+            }
         }
     }
 
@@ -1182,6 +1206,34 @@ impl Hub {
             .get(&hold)
             .and_then(|entry| entry.bound.as_ref())
             .map(|binding| (binding.account.as_str(), &binding.terminal))
+    }
+
+    /// The terminal `terminal` of `account` is to drop the input its program has not read,
+    /// **behind everything the holder that shows it had read of what was typed**.
+    ///
+    /// The holder reads what is typed to its pane as it comes and sends it on, so words it has
+    /// read are in its hands, on the socket or in the hub's reader when the program ends — and a
+    /// request to the terminal that went at once would overtake them: they would reach the
+    /// terminal after it, and be typed at the shell that reads it next. A holder that speaks
+    /// version 4 ([`wire::SYNCED`]) is asked to say when what it had read is sent
+    /// ([`ToHold::Sync`]), and the terminal is asked when it does ([`ToApp::Synced`]): the
+    /// answer comes after every input frame it had, on the same socket, and the client sends
+    /// what it is given in order. A holder of an earlier version skips a frame it does not know
+    /// and cannot answer it, and a terminal no holder shows has nobody to wait for: both are
+    /// asked at once, unordered, as it was before the holder could answer.
+    pub fn drop_input(&mut self, account: &str, terminal: &SessionId) {
+        let ordered = self
+            .hold_of(account, terminal)
+            .and_then(|hold| self.holds.get_mut(&hold))
+            .filter(|entry| !entry.raw && !entry.finished && entry.version >= wire::SYNCED);
+        if let Some(entry) = ordered {
+            entry.syncing += 1;
+            entry.send(&ToHold::Sync);
+            return;
+        }
+        if let Some(client) = self.clients.get_mut(account) {
+            client.drop_input(terminal);
+        }
     }
 
     /// The holder that shows a terminal.

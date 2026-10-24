@@ -16,8 +16,8 @@
 //! reads **the version it was shipped with and the one before it**
 //! ([`OLDEST`]..=[`VERSION`]); a version leaves that range only when the
 //! one after it has been shipped for a release. Every version's bytes are
-//! frozen in the tests (`V1_FIXTURE`, `V2_FIXTURE`, `V3_FIXTURE`), so a change to the wire
-//! adds a version and keeps the fixtures reading.
+//! frozen in the tests (`V1_FIXTURE`, `V2_FIXTURE`, `V3_FIXTURE`, `V4_FIXTURE`), so a change to
+//! the wire adds a version and keeps the fixtures reading.
 //!
 //! **Version 2** lets the application ask the holder to do something on the
 //! pane's terminal before the terminal is shown ([`ToHold::Run`], answered by
@@ -36,6 +36,16 @@
 //! holder of version 2 or 1 is never sent a name: it keeps its own, and the terminal it asked for
 //! is started under it.
 //!
+//! **Version 4** lets the application ask the holder to say when everything it has read of what
+//! was typed has been sent ([`ToHold::Sync`], answered by [`ToApp::Synced`]). The holder reads the
+//! pane's terminal as fast as it is typed to and sends it on, so what the application asks of the
+//! terminal behind it — to drop the input its program has not read — would otherwise overtake
+//! the words still in the terminal's queue, the holder's hands and the socket. A frame under
+//! version 4 is ordered with the input frames before it: the answer comes after every `Input`
+//! the holder had read when it got the request, and what the application does on the answer comes
+//! after them. A holder of an earlier version is never sent the request: it skips a kind it does
+//! not know, and the application asks it unordered ([`SYNCED`]).
+//!
 //! **What the offsets mean.** A terminal's output has a position, the
 //! number of bytes the program wrote before it ([`ToHold::Output::end`] is the position
 //! after the bytes it carries). The holder keeps only the last `end` it was
@@ -49,7 +59,11 @@ use kablo_proto::SessionId;
 use kablo_proto::v1::{Exit, Size};
 
 /// The newest wire version this build speaks.
-pub const VERSION: u8 = 3;
+pub const VERSION: u8 = 4;
+
+/// The first wire version whose holder answers [`ToHold::Sync`] with [`ToApp::Synced`]; a holder
+/// of an earlier one is never sent it.
+pub const SYNCED: u8 = 4;
 
 /// The first wire version whose holder is told the name its terminal was started under
 /// ([`ToHold::Bound::terminal`]); a holder of an earlier one keeps the name it made.
@@ -77,6 +91,7 @@ mod kind {
     pub const INPUT: u8 = 0x03;
     pub const RESIZE: u8 = 0x04;
     pub const RAN: u8 = 0x05;
+    pub const SYNCED: u8 = 0x06;
 
     pub const WELCOME: u8 = 0x81;
     pub const REFUSED: u8 = 0x82;
@@ -86,6 +101,7 @@ mod kind {
     pub const BELL: u8 = 0x86;
     pub const RUN: u8 = 0x87;
     pub const NOTE: u8 = 0x88;
+    pub const SYNC: u8 = 0x89;
 }
 
 /// Why bytes are not a conversation this build can have.
@@ -157,6 +173,9 @@ pub enum ToApp {
         /// The status.
         status: u8,
     },
+    /// Everything typed that the holder had read when it got [`ToHold::Sync`] has been sent
+    /// (version 4): the frames before this one are the input, and it comes after them.
+    Synced,
 }
 
 /// What the application says to the holder.
@@ -217,6 +236,9 @@ pub enum ToHold {
         /// The text, one line, without a line break.
         text: String,
     },
+    /// Send everything that was typed and is waiting to be read, then answer [`ToApp::Synced`]
+    /// (version 4). Only sent to a holder that speaks version 4 ([`SYNCED`]).
+    Sync,
 }
 
 /// The version both sides speak, or none.
@@ -303,6 +325,7 @@ impl ToApp {
                 frame(out, kind::RESIZE, &payload);
             }
             ToApp::Ran { status } => frame(out, kind::RAN, &[*status]),
+            ToApp::Synced => frame(out, kind::SYNCED, &[]),
         }
     }
 
@@ -358,6 +381,10 @@ impl ToApp {
                 let status = at.u8()?;
                 at.done()?;
                 ToApp::Ran { status }
+            }
+            kind::SYNCED => {
+                at.done()?;
+                ToApp::Synced
             }
             _ => return Ok(None),
         };
@@ -420,6 +447,7 @@ impl ToHold {
                 frame(out, kind::RUN, &payload);
             }
             ToHold::Note { text } => frame(out, kind::NOTE, clip(text).as_bytes()),
+            ToHold::Sync => frame(out, kind::SYNC, &[]),
         }
     }
 
@@ -478,6 +506,10 @@ impl ToHold {
             kind::NOTE => ToHold::Note {
                 text: at.rest_text(),
             },
+            kind::SYNC => {
+                at.done()?;
+                ToHold::Sync
+            }
             _ => return Ok(None),
         };
         Ok(Some(message))

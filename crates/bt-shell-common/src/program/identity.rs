@@ -591,6 +591,43 @@ pub fn find(parent: ShellParent, child: u32, table: &impl ProcessTable) -> Seen 
 /// **Only a name is taken from an argv** (the module's rule); nothing else of the record is
 /// kept and no variable is asked for.
 pub fn kept_name(parent: ShellParent, child: u32, table: &impl ProcessTable) -> Option<String> {
+    let leaf = kept_leaf(parent, child, table)?;
+    kept_name_of(&Process::read(leaf, table)?)
+}
+
+/// Where the program [`kept_name`] names was run from, as a full path: the file it executed
+/// and, for `node` and `python`, the script it runs (a `-m` module of Python's is told by the
+/// directory it was run from). **The name is not enough to tell a program from another** — two
+/// `node index.js` in two directories, or a `containers` somebody put earlier in `PATH`, are
+/// two programs — so an answer is kept by the name and this together
+/// (`view_ask::key`), read from the process table by the application and never from what the
+/// program says of itself.
+///
+/// `None` wherever [`kept_name`] has no name, and where the table gives no full path: a file
+/// it could not read, a script path that is relative and a process whose directory it could not
+/// read. The answer is then not kept, as for a program that has no name.
+pub fn kept_path(parent: ShellParent, child: u32, table: &impl ProcessTable) -> Option<String> {
+    let leaf = kept_leaf(parent, child, table)?;
+    let process = Process::read(leaf, table)?;
+    kept_name_of(&process)?;
+    let record = table.procargs(leaf, &[])?;
+    let args = record.args.get(1..).unwrap_or_default();
+    match Family::of_name(&process.name) {
+        Some(Family::Node) => {
+            let (script, _) = node_script(args)?;
+            full_path(script, table.cwd(leaf))
+        }
+        Some(Family::Python) => match python_line(args).1 {
+            PythonRuns::Script(script, _) => full_path(script, table.cwd(leaf)),
+            PythonRuns::Module(module, _) => full_path(module, table.cwd(leaf)),
+            PythonRuns::Nothing | PythonRuns::Code => None,
+        },
+        _ => full_path(&record.exec, None),
+    }
+}
+
+/// The program at the end of the pane's foreground group: its first leaf.
+fn kept_leaf(parent: ShellParent, child: u32, table: &impl ProcessTable) -> Option<u32> {
     let shell = jobs::shell_pid(parent, child, table)?;
     let groups = table
         .groups(shell)
@@ -598,11 +635,36 @@ pub fn kept_name(parent: ShellParent, child: u32, table: &impl ProcessTable) -> 
     let mut pids = table.members(groups.foreground);
     pids.sort_unstable();
     let parents: Vec<Option<u32>> = pids.iter().map(|&pid| table.parent(pid)).collect();
-    let leaf = pids
-        .iter()
+    pids.iter()
         .copied()
-        .find(|pid| !parents.contains(&Some(*pid)))?;
-    kept_name_of(&Process::read(leaf, table)?)
+        .find(|pid| !parents.contains(&Some(*pid)))
+}
+
+/// `path` as an absolute path with no `.` or `..` in it, against `dir` where it is relative.
+/// Lexical: a link is not followed, so the same file named two ways is two places, which asks
+/// again and never answers for the wrong one. `None` where a relative path has no absolute
+/// directory to be against, and for an empty path.
+fn full_path(path: &str, dir: Option<String>) -> Option<String> {
+    let joined = if path.starts_with('/') {
+        path.to_owned()
+    } else {
+        let dir = dir.filter(|dir| dir.starts_with('/'))?;
+        if path.is_empty() {
+            return None;
+        }
+        format!("{dir}/{path}")
+    };
+    let mut parts: Vec<&str> = Vec::new();
+    for part in joined.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            part => parts.push(part),
+        }
+    }
+    (!parts.is_empty()).then(|| format!("/{}", parts.join("/")))
 }
 
 /// [`kept_name`] of one process.
@@ -896,6 +958,10 @@ mod tests {
         kept_name(ShellParent::Login, 100, table)
     }
 
+    fn kept_at(table: &Table) -> Option<String> {
+        kept_path(ShellParent::Login, 100, table)
+    }
+
     #[test]
     fn two_scripts_of_one_interpreter_are_two_programs_to_keep_an_answer_by() {
         let node = |script: &'static str| {
@@ -925,6 +991,109 @@ mod tests {
         assert_eq!(
             kept(&login_shell(200).run(200, 101, 200, &["/usr/local/bin/containers"])).as_deref(),
             Some("containers")
+        );
+    }
+
+    /// The name alone is not who a program is: two programs of one name in two places are two
+    /// programs, and an answer kept for the first is not the second's. The place is the file
+    /// the process executed, and for an interpreter the script it runs, as full paths from the
+    /// process table.
+    #[test]
+    fn a_program_is_told_from_one_of_its_name_by_where_it_was_run_from() {
+        // A program that is its own name: the file it executed.
+        let at = |exec: &'static str| {
+            login_shell(200).exec(200, 101, 200, ("containers", exec), &["containers"], &[])
+        };
+        assert_eq!(
+            kept_at(&at("/usr/local/bin/containers")).as_deref(),
+            Some("/usr/local/bin/containers")
+        );
+        assert_ne!(
+            kept_at(&at("/usr/local/bin/containers")),
+            kept_at(&at("/tmp/evil/containers"))
+        );
+        // The installer's link: the name is the one it was started by, the file the versioned one.
+        let versioned = login_shell(200).exec(
+            200,
+            101,
+            200,
+            ("2.1.296", "/Users/me/.local/share/claude/versions/2.1.296"),
+            &["claude"],
+            &[],
+        );
+        assert_eq!(kept(&versioned).as_deref(), Some("claude"));
+        assert_eq!(
+            kept_at(&versioned).as_deref(),
+            Some("/Users/me/.local/share/claude/versions/2.1.296")
+        );
+
+        // An interpreter: the script, whichever the interpreter is.
+        let node = |script: &'static str, dir: &'static str| {
+            login_shell(200)
+                .exec(
+                    200,
+                    101,
+                    200,
+                    ("node", "/usr/local/bin/node"),
+                    &["node", script],
+                    &[],
+                )
+                .in_dir(200, dir)
+        };
+        assert_eq!(
+            kept_at(&node("/home/me/tools/index.js", "/")).as_deref(),
+            Some("/home/me/tools/index.js")
+        );
+        // Two `node index.js` in two directories are two programs.
+        assert_eq!(
+            kept_at(&node("index.js", "/home/me/a")).as_deref(),
+            Some("/home/me/a/index.js")
+        );
+        assert_eq!(
+            kept_at(&node("./src/../index.js", "/home/me/b/")).as_deref(),
+            Some("/home/me/b/index.js")
+        );
+        assert_ne!(
+            kept_at(&node("index.js", "/home/me/a")),
+            kept_at(&node("index.js", "/home/me/b"))
+        );
+        let python = |argv: &[&'static str]| {
+            login_shell(200)
+                .exec(200, 101, 200, ("python3", "/usr/bin/python3"), argv, &[])
+                .in_dir(200, "/home/me/proj")
+        };
+        assert_eq!(
+            kept_at(&python(&["python3", "-u", "tools/db.py", "--dsn", "x"])).as_deref(),
+            Some("/home/me/proj/tools/db.py")
+        );
+        assert_eq!(
+            kept_at(&python(&["python3", "-m", "tools.db"])).as_deref(),
+            Some("/home/me/proj/tools.db"),
+            "a module is told by the directory it was run from"
+        );
+
+        // Not an absolute file: not told apart, so not kept.
+        let unknown_dir = login_shell(200).exec(
+            200,
+            101,
+            200,
+            ("node", "/usr/local/bin/node"),
+            &["node", "index.js"],
+            &[],
+        );
+        assert_eq!(
+            kept_at(&unknown_dir),
+            None,
+            "a relative script, no directory"
+        );
+        let unreadable =
+            login_shell(200).exec(200, 101, 200, ("containers", ""), &["containers"], &[]);
+        assert_eq!(kept_at(&unreadable), None, "a file the table did not give");
+        // What has no name has no place either.
+        assert_eq!(kept_at(&login_shell(101)), None);
+        assert_eq!(
+            kept_at(&login_shell(200).run(200, 101, 200, &["bash", "tool.sh"])),
+            None
         );
     }
 

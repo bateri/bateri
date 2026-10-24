@@ -46,7 +46,9 @@ of every installed copy. A version without a section is not released.
   view with the version of its interface, so a program can say which one it was written
   against. Closing a view is immediate for every kind. Programs written for the previous
   draft have to be updated; the strip, the questions to you and the Quit ⌃C button are as
-  they were.
+  they were, except that your answer is now remembered for the program run from that place
+  (the file it started from, or the script an interpreter runs), so a second program with the
+  same name asks again.
 - **Programs in local tabs outlive an update, a kept quit and a crash the way programs on servers do.**
   Each tab's shell now runs in a terminal kablo keeps on this Mac, and bateri shows it: an
   update, ⌘Q under `keep_running = "quit"` and a crash leave the programs running, and the

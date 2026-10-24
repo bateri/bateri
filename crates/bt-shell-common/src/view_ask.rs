@@ -82,6 +82,12 @@ pub struct Origin {
     /// `ssh`, a terminal a server keeps) and an answer is then not kept: the question is
     /// asked again.
     pub identity: Option<String>,
+    /// Where it was run from, as full paths from the process table: the file it executed and,
+    /// for an interpreter, the script it runs (`program::identity::kept_path`). **The name
+    /// alone is not who a program is** — two programs of one name run from two places are two
+    /// — so an answer is kept by [`Self::identity`] and this together, and a program whose
+    /// place is not known has no answer kept.
+    pub path: Option<String>,
     /// What the program calls itself (`program` of its `open`), when it said: the words
     /// a question quotes in the program's place. The program wrote it and it is the one
     /// thing here that says nothing about which program it is, so no answer is kept by it.
@@ -349,6 +355,7 @@ pub fn web_target(url: &str) -> Option<&str> {
 pub struct Key {
     place: Option<String>,
     identity: String,
+    path: String,
     domains: Vec<(&'static str, String)>,
     permissions: Vec<&'static str>,
 }
@@ -359,6 +366,7 @@ pub struct Key {
 /// ([`Consent::program`], [`Consent::title`]) names nothing; the identity is the application's.
 pub fn key(origin: &Origin, consent: &Consent) -> Option<Key> {
     let identity = origin.identity.clone().filter(|name| !name.is_empty())?;
+    let path = origin.path.clone().filter(|path| !path.is_empty())?;
     let mut domains: Vec<(&'static str, String)> = consent
         .domains
         .iter()
@@ -381,6 +389,7 @@ pub fn key(origin: &Origin, consent: &Consent) -> Option<Key> {
     Some(Key {
         place: origin.place.clone(),
         identity,
+        path,
         domains,
         permissions,
     })
@@ -513,12 +522,14 @@ mod tests {
         consent
     }
 
-    /// An origin whose program is told from others by the name it is called by.
+    /// An origin whose program is told from others by the name it is called by and the file
+    /// it was run from (`/usr/bin/<name>`).
     fn origin(place: Option<&str>, program: Option<&str>) -> Origin {
         Origin {
             place: place.map(str::to_owned),
             program: program.map(str::to_owned),
             identity: program.map(str::to_owned),
+            path: program.map(|name| format!("/usr/bin/{name}")),
             said: None,
         }
     }
@@ -544,6 +555,38 @@ mod tests {
             key(&script("evil.js"), &set)
         );
         assert!(key(&script("containers.js"), &set).is_some());
+    }
+
+    /// A name is not who a program is: two programs of one name run from two places are two
+    /// programs, and the answer to the first is not the second's. The same program in the same
+    /// place keeps its answer, and a program whose place is not known is asked every time.
+    #[test]
+    fn two_programs_of_one_name_in_two_places_are_asked_separately() {
+        let set = consent_of(&[(Directive::Connect, "https://api.example.com")], &[]);
+        let at = |path: &str| Origin {
+            path: Some(path.to_owned()),
+            ..origin(None, Some("index.js"))
+        };
+        let (mine, other) = (at("/home/me/a/index.js"), at("/tmp/evil/index.js"));
+        assert_ne!(key(&mine, &set), key(&other, &set));
+        assert_eq!(key(&mine, &set), key(&at("/home/me/a/index.js"), &set));
+        assert!(key(&mine, &set).is_some());
+
+        let mut memory = Memory::new();
+        memory.remember(key(&mine, &set).expect("a key"), true);
+        assert_eq!(
+            memory.recall(&key(&at("/home/me/a/index.js"), &set).unwrap()),
+            Some(true)
+        );
+        assert_eq!(memory.recall(&key(&other, &set).unwrap()), None);
+
+        for path in [None, Some(String::new())] {
+            let unplaced = Origin {
+                path,
+                ..origin(None, Some("index.js"))
+            };
+            assert_eq!(key(&unplaced, &set), None, "no place, no kept answer");
+        }
     }
 
     #[test]

@@ -97,6 +97,10 @@ struct State {
     gate: Gate,
     /// The writer has written a byte of the module's in this view.
     wrote: bool,
+    /// The pane's terminal is not there to be written to (a pane waiting for its connection):
+    /// the module's words are not taken, whatever the gate says. A property of the pane, not of
+    /// the view, so a view that starts does not clear it.
+    held: bool,
 }
 
 impl State {
@@ -314,7 +318,7 @@ impl Flow {
     /// tagged with when it is queued.
     pub(crate) fn module_ticket(&self) -> Option<u64> {
         let state = lock(&self.0.state);
-        (state.gate == Gate::Open).then_some(state.epoch)
+        (state.gate == Gate::Open && !state.held).then_some(state.epoch)
     }
 
     /// Whether the writer may write (more of) a frame of the module's from view `epoch`:
@@ -323,10 +327,19 @@ impl Flow {
         let state = lock(&self.0.state);
         state.epoch == epoch
             && match state.gate {
-                Gate::Open => true,
+                Gate::Open => started || !state.held,
                 Gate::Draining => started,
                 Gate::Closed => false,
             }
+    }
+
+    /// The pane's terminal is not there to be written to, or is back (`held` / not): while it is
+    /// not, the module's words are not taken and the ones that wait are not written — the frame
+    /// under way is finished, so that the program is not left half a frame — exactly as for a
+    /// view that has ended. The view itself goes on: when the screen comes back the application
+    /// offers the program its view again, and what was said meanwhile has nobody to read it.
+    pub(crate) fn hold_words(&self, held: bool) {
+        lock(&self.0.state).held = held;
     }
 
     /// The writer wrote a byte of the module's.
@@ -529,6 +542,32 @@ mod tests {
         );
         flow.end();
         assert_eq!(reads.load(Ordering::SeqCst), 1, "the loop drops what waits");
+    }
+
+    #[test]
+    fn a_pane_whose_terminal_is_not_there_takes_no_word_of_the_module_and_lets_a_frame_under_way_end()
+     {
+        let flow = Flow::new();
+        flow.begin();
+        let epoch = flow.module_ticket().expect("the view is up");
+        flow.hold_words(true);
+        assert_eq!(flow.module_ticket(), None, "no word is queued");
+        assert!(
+            !flow.module_may_write(epoch, false),
+            "none that waits is written"
+        );
+        assert!(
+            flow.module_may_write(epoch, true),
+            "the program is not left half a frame"
+        );
+        // The terminal is back: the same view says on.
+        flow.hold_words(false);
+        assert_eq!(flow.module_ticket(), Some(epoch));
+        assert!(flow.module_may_write(epoch, false));
+        // A view that starts is a fresh one, and does not unhold what the pane holds.
+        flow.hold_words(true);
+        flow.begin();
+        assert_eq!(flow.module_ticket(), None);
     }
 
     #[test]

@@ -198,16 +198,17 @@ fn version_one_is_frozen_byte_for_byte() {
 fn the_versions_read_are_the_shipped_one_and_the_one_before() {
     assert_eq!(
         (OLDEST, VERSION),
-        (1, 3),
-        "nothing of version 1 or 2 has been shipped in a release, so both are still read"
+        (1, 4),
+        "nothing of version 1, 2 or 3 has been shipped in a release, so all are still read"
     );
     // A holder of the same age, the one before, and one that also speaks later versions.
-    assert_eq!(agree(3, 1), Some(3));
+    assert_eq!(agree(4, 1), Some(4));
+    assert_eq!(agree(3, 1), Some(3), "a pane that outlived an update");
     assert_eq!(agree(2, 1), Some(2), "a pane that outlived an update");
     assert_eq!(agree(1, 1), Some(1), "a pane that outlived an update");
     assert_eq!(agree(7, 1), Some(VERSION), "the newest both speak");
     // A holder that has dropped everything this build speaks.
-    assert_eq!(agree(9, 4), None);
+    assert_eq!(agree(9, 5), None);
     // A holder older than anything read (there is none yet; the rule is the range).
     assert_eq!(agree(0, 0), None);
 }
@@ -323,6 +324,75 @@ fn version_three_is_frozen_byte_for_byte() {
         let parsed = ToHold::parse(bytes[0], &bytes[5..]).expect("reads");
         assert_eq!(parsed.as_ref(), Some(message), "reads {name}");
     }
+}
+
+/// Version 4 of the wire, frozen: what it added to the earlier versions' messages. **Never
+/// edited**; the next change is a version 5 and a fixture of its own.
+const V4_FIXTURE: &[(&str, &[u8])] = &[
+    ("hello of version 4", &[0x01, 0, 0, 0, 2, 4, 1]),
+    ("welcome of version 4", &[0x81, 0, 0, 0, 1, 4]),
+    // The application asks the holder to say when everything it has read of what was typed is
+    // sent, and the holder says it.
+    ("sync", &[0x89, 0, 0, 0, 0]),
+    ("synced", &[0x06, 0, 0, 0, 0]),
+];
+
+#[test]
+fn version_four_is_frozen_byte_for_byte() {
+    let to_app = [
+        (
+            ToApp::Hello {
+                newest: 4,
+                oldest: 1,
+            },
+            "hello of version 4",
+        ),
+        (ToApp::Synced, "synced"),
+    ];
+    for (message, name) in &to_app {
+        let bytes = V4_FIXTURE
+            .iter()
+            .find(|(n, _)| n == name)
+            .expect("a fixture")
+            .1;
+        assert_eq!(&encoded(message), bytes, "writes {name}");
+        let parsed = ToApp::parse(bytes[0], &bytes[5..]).expect("reads");
+        assert_eq!(parsed.as_ref(), Some(message), "reads {name}");
+    }
+    let to_hold = [
+        (ToHold::Welcome { version: 4 }, "welcome of version 4"),
+        (ToHold::Sync, "sync"),
+    ];
+    for (message, name) in &to_hold {
+        let bytes = V4_FIXTURE
+            .iter()
+            .find(|(n, _)| n == name)
+            .expect("a fixture")
+            .1;
+        assert_eq!(&encoded_back(message), bytes, "writes {name}");
+        let parsed = ToHold::parse(bytes[0], &bytes[5..]).expect("reads");
+        assert_eq!(parsed.as_ref(), Some(message), "reads {name}");
+    }
+}
+
+/// A frame that carries nothing carries nothing: a payload is a broken peer. A holder of version
+/// 3 skips the kind it does not know, which is why the application sends it to a holder of
+/// version 4 or later only.
+#[test]
+fn the_ordering_frames_carry_no_payload_and_the_version_that_has_them_is_named() {
+    assert!(ToApp::parse(0x06, &[1]).is_err());
+    assert!(ToHold::parse(0x89, &[1]).is_err());
+    assert_eq!(SYNCED, 4);
+    assert_eq!(
+        agree(NAMED, 1),
+        Some(NAMED),
+        "a holder of version 3 is read"
+    );
+    assert_ne!(
+        agree(NAMED, 1),
+        Some(SYNCED),
+        "and does not answer the request"
+    );
 }
 
 #[test]

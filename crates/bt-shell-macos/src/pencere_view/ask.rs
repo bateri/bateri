@@ -524,6 +524,7 @@ mod tests {
     fn a_question_taken_back_is_not_among_those_a_person_answers_for_others() {
         let origin = Origin {
             identity: Some("maps".to_owned()),
+            path: Some("/usr/local/bin/maps".to_owned()),
             ..Origin::default()
         };
         let first = question(1);

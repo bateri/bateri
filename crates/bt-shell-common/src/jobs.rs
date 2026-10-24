@@ -151,6 +151,12 @@ pub trait ProcessTable {
     /// a guide bar names is known by its name and this alone
     /// ([`crate::program`]). `None` if the process is gone.
     fn uid(&self, pid: u32) -> Option<u32>;
+    /// The process's working directory, as an absolute path. `None` if unreadable (another
+    /// user's process, one that is gone). Asked only to make a relative path the process was
+    /// given absolute ([`crate::program::identity::kept_path`]).
+    fn cwd(&self, _pid: u32) -> Option<String> {
+        None
+    }
 }
 
 /// One process's exec record ([`ProcessTable::procargs`]).
@@ -877,6 +883,19 @@ impl ProcessTable for Libproc {
         short_info(pid).map(|info| info.pbsi_uid)
     }
 
+    /// `PROC_PIDVNODEPATHINFO`'s current directory: readable for the user's own processes.
+    fn cwd(&self, pid: u32) -> Option<String> {
+        // SAFETY: `proc_vnodepathinfo` is a plain C struct holding only integers and `c_char`
+        // arrays; all zero bytes is a valid value of it.
+        let info: libc::proc_vnodepathinfo = unsafe { pid_info(pid, libc::PROC_PIDVNODEPATHINFO)? };
+        let path = info.pvi_cdir.vip_path;
+        // SAFETY: `vip_path` is an array of `c_char` the kernel filled, NUL-terminated within
+        // the array (a path longer than `MAXPATHLEN` is not given at all).
+        let path = unsafe { std::ffi::CStr::from_ptr(path.as_ptr().cast()) };
+        let path = path.to_string_lossy().into_owned();
+        (!path.is_empty()).then_some(path)
+    }
+
     fn procargs(&self, pid: u32, keys: &[&str]) -> Option<ProcArgs> {
         let mut record = process_args(pid, keys)?;
         // The kernel keeps the path `execve` was given; a relative one
@@ -1099,6 +1118,13 @@ impl ProcessTable for Procfs {
     /// (the remote probe finds `sudo ssh host` by its argv, as it did before
     /// the record had an executable). An empty `cmdline` (a zombie, a kernel
     /// thread) is `None` — there is no argv to read.
+    /// `/proc/<pid>/cwd`: readable for the user's own processes.
+    fn cwd(&self, pid: u32) -> Option<String> {
+        std::fs::read_link(format!("/proc/{pid}/cwd"))
+            .ok()
+            .map(|dir| dir.to_string_lossy().into_owned())
+    }
+
     fn procargs(&self, pid: u32, keys: &[&str]) -> Option<ProcArgs> {
         let exec = match std::fs::read_link(format!("/proc/{pid}/exe")) {
             Ok(exec) => exec.to_string_lossy().into_owned(),
@@ -1633,6 +1659,8 @@ pub(crate) mod tests {
         env: Vec<(&'static str, &'static str)>,
         /// The effective user: [`USER`] unless [`Table::owned_by`] says.
         uid: u32,
+        /// The working directory ([`Table::in_dir`]).
+        cwd: Option<&'static str>,
     }
 
     /// The fake table's user: every process is theirs unless
@@ -1677,6 +1705,7 @@ pub(crate) mod tests {
                     exec: None,
                     env: Vec::new(),
                     uid: USER,
+                    cwd: None,
                 },
             );
             self
@@ -1702,6 +1731,7 @@ pub(crate) mod tests {
                     exec: None,
                     env: Vec::new(),
                     uid: USER,
+                    cwd: None,
                 },
             );
             self
@@ -1728,8 +1758,17 @@ pub(crate) mod tests {
                     exec: Some(exec),
                     env: env.to_vec(),
                     uid: USER,
+                    cwd: None,
                 },
             );
+            self
+        }
+
+        /// `pid` runs in the directory `dir`.
+        pub(crate) fn in_dir(mut self, pid: u32, dir: &'static str) -> Self {
+            if let Some(proc) = self.procs.get_mut(&pid) {
+                proc.cwd = Some(dir);
+            }
             self
         }
 
@@ -1816,6 +1855,10 @@ pub(crate) mod tests {
 
         fn uid(&self, pid: u32) -> Option<u32> {
             self.procs.get(&pid).map(|proc| proc.uid)
+        }
+
+        fn cwd(&self, pid: u32) -> Option<String> {
+            self.procs.get(&pid)?.cwd.map(str::to_owned)
         }
     }
 

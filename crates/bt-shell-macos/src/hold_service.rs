@@ -120,6 +120,16 @@ pub(crate) fn forget_past(pane: &PaneUuid) {
     }
 }
 
+/// The program of a view in the pane ended on the server the pane shows with what it was sent
+/// unread: the server's terminal is asked to drop it, behind what the pipe had passed on
+/// ([`Service::drop_shown`]). From the thread that writes the pane's input; a pane that shows
+/// no such terminal is nothing to do.
+pub(crate) fn drop_shown(pane: &PaneUuid) {
+    if let Some(service) = SERVICE.get() {
+        service.drop_shown(pane);
+    }
+}
+
 /// A view opened or closed in the pane: said beside the terminal of this Mac that carries its
 /// bytes ([`Ledger::set_view`]).
 pub(crate) fn view_changed(pane: &PaneUuid, open: bool) {

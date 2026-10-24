@@ -178,6 +178,13 @@ impl PaneHost for TabHost {
         crate::hold_service::forget_past(pane);
     }
 
+    fn shown_dropper(&self, pane: &bt_core::PaneUuid) -> Option<bt_core::pencere::DropShown> {
+        let pane = pane.clone();
+        Some(bt_core::pencere::DropShown::new(move || {
+            crate::hold_service::drop_shown(&pane);
+        }))
+    }
+
     fn view_changed(&self, pane: &bt_core::PaneUuid, open: bool) {
         crate::hold_service::view_changed(pane, open);
     }

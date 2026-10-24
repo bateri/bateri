@@ -5625,6 +5625,7 @@ impl Session {
             // How the shell is found (`login(1)` forks it on macOS) goes to the observer; the
             // content area is the application's word, in the unit a view is told it in.
             let group = views.shell_group.clone();
+            let drop_shown = views.drop_shown.clone();
             Desk::new(
                 views,
                 options.theme,
@@ -5644,6 +5645,7 @@ impl Session {
                     Arc::clone(&shell),
                     Arc::clone(&master),
                     ops.clone().filter(|_| streamed),
+                    drop_shown,
                 ),
             )
         });
@@ -11775,17 +11777,60 @@ impl Session {
     /// (`context`, `close`, `link`) is handled by the crate. The crate drops what is not an
     /// object or is over its limit. Nothing waits for the program's answer: a call it does not
     /// answer is the page's to give up.
+    ///
+    /// **What the page says takes the lane the words of a module take** ([`Flow`]): refused
+    /// once a signal character is on its way to the program, once the view has ended and while
+    /// the pane's terminal is not there ([`Self::set_view_held`]); written behind every key and
+    /// dropped when the program can no longer be its reader; and held to the bound on what waits
+    /// for a program that does not read — a page has no thread to wait on, so what it says over
+    /// the bound is dropped, and the page's call goes unanswered like any other the program
+    /// does not answer. The page's `close` and the other words of the protocol itself are not
+    /// the page's and go the way every key goes.
     pub fn view_message(&self, text: &str) {
+        let Some(desk) = &self.adapter.0.desk else {
+            return;
+        };
+        let flow = &self.adapter.0.flow;
+        let ticket = flow.module_ticket();
+        desk.view_message(
+            text,
+            |bytes| self.adapter.input(bytes),
+            |bytes| {
+                // Counted as in transit until it is in the writer's queue, as for a module
+                // ([`Flow::may_say`]): the queue counts it from there.
+                if let Some(epoch) = ticket
+                    && flow.may_say(bytes.len())
+                {
+                    let size = bytes.len();
+                    self.adapter.module_input(epoch, bytes);
+                    flow.said(size);
+                }
+            },
+        );
+    }
+
+    /// The shell page of a web view has loaded its frame: the page is told its first `context`
+    /// ([`pencere::Action::ToView`], in the order of everything else it is told).
+    pub fn view_page_loaded(&self) {
         if let Some(desk) = &self.adapter.0.desk {
-            desk.view_message(text, |bytes| self.adapter.input(bytes));
+            desk.page_loaded();
         }
     }
 
-    /// The `context` a web page is told now, as JSON text, if one is open: what
-    /// [`pencere::ViewStart::context`] was, brought up to date. The shell delivers it once the
-    /// page has loaded; a page that starts listening later asks for it again itself.
-    pub fn view_page_context(&self) -> Option<String> {
-        self.adapter.0.desk.as_ref()?.page_context()
+    /// The pane's terminal is not there to be written to (`held`: a pane that shows a terminal a
+    /// server keeps while the connection to the server is gone), or is back. While it is not, the
+    /// words of a page or a module are not written ([`Flow::hold_words`]): a screen that
+    /// comes back does not bring the messages its view lives on, and the application offers the
+    /// program its view again ([`Self::restart_view`]).
+    pub fn set_view_held(&self, held: bool) {
+        self.adapter.0.flow.hold_words(held);
+    }
+
+    /// The person's language or time zone changed (`None` is not known): a web view is told if
+    /// it runs, in a `context`.
+    pub fn set_view_locale(&self, locale: Option<String>, time_zone: Option<String>) {
+        self.adapter
+            .view(|conversation| conversation.set_locale(locale, time_zone));
     }
 
     /// A message of the component of a WebAssembly view (a JSON object, as the component
@@ -11798,12 +11843,21 @@ impl Session {
         let flow = &self.adapter.0.flow;
         // The gate on the module's words: shut by a signal character on its way to the program
         // and by the end of the view, before the pane has heard of either. Nothing is queued
-        // through a shut gate, and what is queued carries the number of the view.
-        let wrote = flow.module_ticket().is_some_and(|epoch| {
-            self.adapter.0.desk.as_ref().is_some_and(|desk| {
-                desk.module_message(text, |bytes| self.adapter.module_input(epoch, bytes))
-            })
-        });
+        // through a shut gate, and what is queued carries the number of the view. The
+        // conversation hears the message all the same: a message over the size one may have ends
+        // the view, gate or not.
+        let ticket = flow.module_ticket();
+        let wrote = self.adapter.0.desk.as_ref().is_some_and(|desk| {
+            desk.module_message(
+                text,
+                |bytes| self.adapter.input(bytes),
+                |bytes| {
+                    if let Some(epoch) = ticket {
+                        self.adapter.module_input(epoch, bytes);
+                    }
+                },
+            )
+        }) && ticket.is_some();
         // The module said it to the flow's count before it reached here; what was written is
         // in the writer's queue now, and what was not (the view is over) is not owed to anyone.
         flow.said(text.len());
@@ -30522,6 +30576,8 @@ e\\314\\201.'; sleep 5";
         wake: Arc<TestWake>,
         fifo: File,
         captured: PathBuf,
+        /// The process that copies the pane's input to `captured`: the reader of the tty.
+        reader: PathBuf,
         _dir: TempDir,
     }
 
@@ -30530,6 +30586,7 @@ e\\314\\201.'; sleep 5";
             let dir = TempDir::new(name);
             let fifo_path = dir.0.join("out");
             let captured = dir.0.join("in");
+            let reader = dir.0.join("reader");
             let made = std::process::Command::new("mkfifo")
                 .arg(&fifo_path)
                 .status()
@@ -30541,10 +30598,15 @@ e\\314\\201.'; sleep 5";
                     "/bin/sh".into(),
                     vec![
                         "-c".into(),
-                        "set -m; stty -opost -icanon -echo; cat \"$1\" & cat > \"$2\"".into(),
+                        // `-isig`: a ⌃C written to the pane is a byte for the reader, not
+                        // the signal that would end it.
+                        "set -m; stty -opost -icanon -echo -isig; cat \"$1\" & \
+                         sh -c 'echo $$ > \"$3\"; exec cat > \"$2\"' sh \"$1\" \"$2\" \"$3\""
+                            .into(),
                         "sh".into(),
                         fifo_path.display().to_string(),
                         captured.display().to_string(),
+                        reader.display().to_string(),
                     ],
                 ),
                 40,
@@ -30565,8 +30627,21 @@ e\\314\\201.'; sleep 5";
                 wake,
                 fifo,
                 captured,
+                reader,
                 _dir: dir,
             }
+        }
+
+        /// The process that reads the pane's input, once it is running.
+        fn reader_pid(&self) -> i32 {
+            let mut pid = None;
+            wait_until("the reader's pid", Duration::from_secs(10), || {
+                pid = std::fs::read_to_string(&self.reader)
+                    .ok()
+                    .and_then(|text| text.trim().parse::<i32>().ok());
+                pid.is_some()
+            });
+            pid.expect("a pid")
         }
 
         /// The program writes.
@@ -31700,6 +31775,205 @@ e\\314\\201.'; sleep 5";
         program.write(&bundle_open(&token_of(&offer)));
         assert_eq!(program.wait_written(2)[1].kind, "need");
         program.wait_state(State::Opening);
+        program.session.shutdown();
+    }
+
+    // ─── what a web page says to its program ───────────────────────────
+
+    /// The program opens a web view and it is up.
+    fn open_a_page(program: &mut Playing) {
+        use crate::pencere::tests::{bundle_open, hello, page_file, token_of};
+        program.write(&hello());
+        let token = token_of(&program.wait_written(1)[0]);
+        program.write(&bundle_open(&token));
+        assert_eq!(program.wait_written(2)[1].kind, "need");
+        program.write(&page_file());
+        program.wait_state(crate::pencere::State::Open);
+    }
+
+    /// A call of the page, `padding` bytes of data long.
+    fn page_call(id: u32, padding: usize) -> String {
+        let data = "x".repeat(padding);
+        format!(r#"{{"call":{{"id":{id},"method":"m","params":{{"data":"{data}"}}}}}}"#)
+    }
+
+    /// How many `msg` frames of the page the program has been sent.
+    fn page_words(program: &Playing) -> usize {
+        program
+            .written()
+            .iter()
+            .filter(|frame| frame.kind == "msg")
+            .count()
+    }
+
+    /// Waits until the pane's input holds `mark`, which was written after everything before it.
+    fn wait_for_mark(program: &Playing, mark: u8) {
+        wait_until("the mark in the input", Duration::from_secs(10), || {
+            program.input().contains(&mark)
+        });
+    }
+
+    /// What a page says goes to its program through the lane the module's words take, so a signal
+    /// character that is on its way shuts it: a message of the page after ⌃C is the next reader
+    /// of the tty's input, and the page is told nothing.
+    #[test]
+    fn a_page_message_takes_the_lane_of_the_modules_words_and_a_signal_character_shuts_it() {
+        let mut program = Playing::new("page-lane");
+        open_a_page(&mut program);
+        let flow = program.session.flow();
+
+        program.session.view_message(&page_call(1, 10));
+        wait_until("the page's word", Duration::from_secs(10), || {
+            page_words(&program) == 1
+        });
+        wait_until("the word written", Duration::from_secs(10), || {
+            flow.pending() == 0
+        });
+        // A word of the page that reached the tty is one the end of its program throws away
+        // what is left of: the program that ends having been sent a page's words is as one
+        // that was sent a module's.
+        assert!(
+            flow.module_was_written(),
+            "the end of a web view's program has nothing to throw away"
+        );
+
+        program.session.write(&[0x03]);
+        wait_for_mark(&program, 0x03);
+        program.session.view_message(&page_call(2, 10));
+        program.session.write(b"Z");
+        wait_for_mark(&program, b'Z');
+        // The marks are counted as written a moment after the reader has them.
+        wait_until("nothing waits", Duration::from_secs(10), || {
+            flow.pending() == 0
+        });
+        assert_eq!(
+            page_words(&program),
+            1,
+            "the page's second word reached the tty after ⌃C"
+        );
+        program.session.shutdown();
+    }
+
+    /// A page that says more than its program reads waits for it, as a module does: the bytes
+    /// that wait are bounded, and ⌃C drops the ones that do.
+    #[test]
+    fn a_page_that_says_more_than_its_program_reads_is_held_to_the_bound_and_an_interrupt_drops_it()
+    {
+        let mut program = Playing::new("page-backlog");
+        open_a_page(&mut program);
+        let flow = program.session.flow();
+        let reader = program.reader_pid();
+        // SAFETY: a signal to the process this test's pane started, by number.
+        assert_eq!(unsafe { libc::kill(reader, libc::SIGSTOP) }, 0);
+
+        for id in 0..60 {
+            program.session.view_message(&page_call(id, 20 << 10));
+        }
+        let waiting = flow.pending();
+        assert!(
+            waiting <= crate::flow::BACKLOG_LIMIT + (24 << 10),
+            "{waiting} bytes of the page wait for a program that does not read"
+        );
+        assert!(waiting > 100 << 10, "the test never made the page wait");
+
+        program.session.write(&[0x03]);
+        wait_until("the page's words dropped", Duration::from_secs(10), || {
+            flow.pending() <= 16
+        });
+        // And a word after it is refused.
+        program.session.view_message(&page_call(99, 10));
+        assert!(flow.pending() <= 16);
+        // SAFETY: as above.
+        unsafe { libc::kill(reader, libc::SIGCONT) };
+        program.session.shutdown();
+    }
+
+    /// A pane that waits for its connection writes nothing for the page: it has no terminal to
+    /// say it to, and what it said would sit in the pipe until the screen came back.
+    #[test]
+    fn a_pane_waiting_for_its_connection_writes_nothing_for_the_page() {
+        let mut program = Playing::new("page-held");
+        open_a_page(&mut program);
+        program.session.set_view_held(true);
+        program.session.view_message(&page_call(1, 10));
+        program.session.write(b"Y");
+        wait_for_mark(&program, b'Y');
+        assert_eq!(page_words(&program), 0, "a word reached the passive pane");
+
+        program.session.set_view_held(false);
+        program.session.view_message(&page_call(2, 10));
+        wait_until("the page's word", Duration::from_secs(10), || {
+            page_words(&program) == 1
+        });
+        program.session.shutdown();
+    }
+
+    /// The page's `close` is the host's own and ends the view: the program is told, on the
+    /// lane every other protocol word takes, whatever the gate on the page's own words says.
+    #[test]
+    fn a_page_that_closes_its_view_is_heard_even_where_its_words_are_refused() {
+        let mut program = Playing::new("page-close");
+        open_a_page(&mut program);
+        program.session.set_view_held(true);
+        program.session.view_message(r#"{"close":{}}"#);
+        wait_until("the program told", Duration::from_secs(10), || {
+            program.written().iter().any(|frame| frame.kind == "closed")
+        });
+        program.session.shutdown();
+    }
+
+    /// The person's language and time zone changed: the page is told in a `context`, in the
+    /// order the rest of what it is told goes.
+    #[test]
+    fn a_page_is_told_when_the_persons_language_or_time_zone_changes() {
+        let mut program = Playing::new("page-locale");
+        open_a_page(&mut program);
+        program.session.take_view_actions();
+        program
+            .session
+            .set_view_locale(Some("tr-TR".to_owned()), Some("Europe/Istanbul".to_owned()));
+        let told = program.session.take_view_actions();
+        let [crate::pencere::Action::ToView(context)] = told.as_slice() else {
+            panic!("a context for the change, got {told:?}");
+        };
+        assert!(
+            context.contains(r#""locale":"tr-TR","timeZone":"Europe/Istanbul""#),
+            "{context}"
+        );
+        program.session.shutdown();
+    }
+
+    /// The first `context` of a page is told in the order of everything else the page is told:
+    /// when the shell says the page has loaded it is one more thing for the page to take, behind
+    /// what was already waiting, and not a call that goes round the queue.
+    #[test]
+    fn the_first_context_of_a_page_goes_in_the_order_of_what_the_page_is_told() {
+        let mut program = Playing::new("page-loaded");
+        open_a_page(&mut program);
+        program.session.take_view_actions();
+        program
+            .session
+            .set_view_locale(Some("tr-TR".to_owned()), None);
+        program.session.view_page_loaded();
+        let told = program.session.take_view_actions();
+        let [
+            crate::pencere::Action::ToView(changed),
+            crate::pencere::Action::ToView(first),
+        ] = told.as_slice()
+        else {
+            panic!("the change, then the first context, got {told:?}");
+        };
+        assert!(changed.contains(r#""locale":"tr-TR""#), "{changed}");
+        assert!(first.starts_with(r#"{"context":"#), "{first}");
+        assert!(
+            first.contains(r#""locale":"tr-TR""#),
+            "the current one: {first}"
+        );
+        // Each is counted as the module is to take it.
+        assert!(
+            program.session.flow().inbox() > 0,
+            "what the page is told is counted until it takes it"
+        );
         program.session.shutdown();
     }
 

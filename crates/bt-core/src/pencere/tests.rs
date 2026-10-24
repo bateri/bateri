@@ -118,24 +118,35 @@ impl Rig {
         let (rig, wake) = Self::build(
             views.then(|| -> Observer { Box::new(move || *lock(&observed)) }),
             None,
+            Discard::nothing(),
         );
         (rig, seen, wake)
+    }
+
+    /// A rig whose desk throws the program's leftovers away with `discard`.
+    pub(crate) fn with_discard(discard: Discard) -> (Arc<Self>, Arc<CountingWake>) {
+        Self::build(Some(Box::new(Observed::default)), None, discard)
     }
 
     /// A rig with a desk whose observer is `observer`: for a test that looks at
     /// what is held when the desk reads the pane.
     pub(crate) fn with_observer(observer: Observer) -> (Arc<Self>, Arc<CountingWake>) {
-        Self::build(Some(observer), None)
+        Self::build(Some(observer), None, Discard::nothing())
     }
 
     /// A rig whose desk shows WebAssembly views of up to `limit` bytes.
     pub(crate) fn with_modules(limit: u64) -> (Arc<Self>, Arc<CountingWake>) {
-        Self::build(Some(Box::new(Observed::default)), Some(limit))
+        Self::build(
+            Some(Box::new(Observed::default)),
+            Some(limit),
+            Discard::nothing(),
+        )
     }
 
     fn build(
         observer: Option<Observer>,
         wasm_entry_limit: Option<u64>,
+        discard: Discard,
     ) -> (Arc<Self>, Arc<CountingWake>) {
         let wake = Arc::new(CountingWake::default());
         let flow = crate::flow::Flow::new();
@@ -152,7 +163,7 @@ impl Rig {
                 wake.clone(),
                 observer,
                 flow.clone(),
-                Box::new(|| {}),
+                discard,
             )
         });
         let rig = Arc::new(Self {
@@ -1072,7 +1083,7 @@ fn the_systems_random_bytes_are_one_helper_for_the_token_and_the_views_origin() 
 fn context_of(pane: &Pane) -> String {
     let desk = pane.rig.desk.as_ref().expect("a desk");
     desk.take_views();
-    desk.view_message(r#"{"context":{}}"#, |_| {});
+    desk.view_message(r#"{"context":{}}"#, |_| {}, |_| {});
     let told = desk.take_views();
     let Some(Action::ToView(answer)) = told.first() else {
         panic!("an answer for the page, not {told:?}");
@@ -1136,25 +1147,29 @@ fn the_six_messages_pass_between_the_page_and_the_program_unread() {
     desk.take_views();
     let input = Arc::clone(&pane.rig.input);
     let write = |bytes: Vec<u8>| lock(&input).extend_from_slice(&bytes);
+    // The page's own words go to the lane of the module's, apart from the keys.
+    let said = Arc::new(Mutex::new(Vec::new()));
+    let page = |bytes: Vec<u8>| lock(&said).extend_from_slice(&bytes);
 
     // The page's call is the program's, as it was written.
     let call = r#"{"call":{"id":8,"method":"list","params":{"all":true}}}"#;
-    desk.view_message(call, write);
-    let sent = decoded(&mem::take(&mut *lock(&input)));
+    desk.view_message(call, write, page);
+    let sent = decoded(&mem::take(&mut *lock(&said)));
     assert_eq!(sent.len(), 1, "{sent:?}");
     assert_eq!(
         (sent[0].kind.as_str(), sent[0].payload.as_str()),
         ("msg", call)
     );
+    assert!(lock(&input).is_empty(), "a page's word took the keys' lane");
     // So is a message the host has no name for: it is the program's business to ignore it.
     let odd = r#"{"unheard-of":{"x":1}}"#;
-    desk.view_message(odd, write);
-    assert_eq!(decoded(&mem::take(&mut *lock(&input))).len(), 1);
+    desk.view_message(odd, write, page);
+    assert_eq!(decoded(&mem::take(&mut *lock(&said))).len(), 1);
     // What is not an object is nobody's.
     for nothing in ["[1]", "\"call\"", "42", "not json", ""] {
-        desk.view_message(nothing, write);
+        desk.view_message(nothing, write, page);
     }
-    assert!(lock(&input).is_empty());
+    assert!(lock(&input).is_empty() && lock(&said).is_empty());
 
     // The program's answers and pushes reach the page as they were written.
     for text in [
@@ -1184,10 +1199,14 @@ fn a_page_closes_itself_and_the_program_is_told_the_view_did() {
     let desk = pane.rig.desk.as_ref().expect("a desk");
     desk.take_views();
     let input = Arc::clone(&pane.rig.input);
-    desk.view_message(r#"{"close":{}}"#, |bytes| {
-        lock(&input).extend_from_slice(&bytes);
-    });
+    let said = Arc::new(Mutex::new(Vec::new()));
+    let keys = |bytes: Vec<u8>| lock(&input).extend_from_slice(&bytes);
+    let page = |bytes: Vec<u8>| lock(&said).extend_from_slice(&bytes);
+    desk.view_message(r#"{"close":{}}"#, keys, page);
     assert_eq!(desk.take_views(), [Action::DestroyView]);
+    // The program is told by the protocol's own word, on the lane every key takes: the page's
+    // lane is shut the moment the view is over.
+    assert!(lock(&said).is_empty());
     let told = decoded(&mem::take(&mut *lock(&input)));
     assert_eq!(told.len(), 1, "{told:?}");
     assert_eq!(
@@ -1195,10 +1214,8 @@ fn a_page_closes_itself_and_the_program_is_told_the_view_did() {
         ("closed", r#"{"reason":"view"}"#)
     );
     // Closed at once: nothing the page says now is the program's.
-    desk.view_message(r#"{"call":{"id":9,"method":"late"}}"#, |bytes| {
-        lock(&input).extend_from_slice(&bytes);
-    });
-    assert!(lock(&input).is_empty());
+    desk.view_message(r#"{"call":{"id":9,"method":"late"}}"#, keys, page);
+    assert!(lock(&input).is_empty() && lock(&said).is_empty());
 }
 
 #[test]
@@ -1212,10 +1229,14 @@ fn a_link_the_page_asks_for_is_put_to_the_person_and_the_page_is_never_answered(
     let write = |bytes: Vec<u8>| lock(&input).extend_from_slice(&bytes);
 
     // A link that is not http or https is dropped: nobody is asked.
-    desk.view_message(r#"{"link":{"url":"file:///etc/passwd"}}"#, write);
+    desk.view_message(r#"{"link":{"url":"file:///etc/passwd"}}"#, write, write);
     assert!(desk.take_views().is_empty());
 
-    desk.view_message(r#"{"link":{"url":"https://example.com/docs"}}"#, write);
+    desk.view_message(
+        r#"{"link":{"url":"https://example.com/docs"}}"#,
+        write,
+        write,
+    );
     let asked = desk.take_views();
     let [Action::OpenLink { link, url }] = asked.as_slice() else {
         panic!("one link to ask about, got {asked:?}");
@@ -1472,7 +1493,7 @@ fn a_component_opens_a_view_of_its_kind_and_messages_go_between_it_and_the_progr
 
     // The view says something to the program: it is written through the pane's input.
     let said = r#"{"subscribe":{"id":1,"topic":"stats"}}"#;
-    assert!(desk.module_message(said, pane.rig.write()));
+    assert!(desk.module_message(said, pane.rig.write(), pane.rig.write()));
     let wrote = pane.rig.written();
     assert_eq!(wrote.len(), 1, "{wrote:?}");
     assert_eq!(
@@ -1649,7 +1670,7 @@ fn a_message_the_module_sends_after_its_view_ended_writes_nothing_to_the_pane() 
         let desk = rig.desk.as_ref().expect("a desk");
         desk.take_views();
         assert!(
-            desk.module_message(said, pane.rig.write()),
+            desk.module_message(said, pane.rig.write(), pane.rig.write()),
             "{name}: while it is open"
         );
         pane.rig.written();
@@ -1663,13 +1684,73 @@ fn a_message_the_module_sends_after_its_view_ended_writes_nothing_to_the_pane() 
         // what the late message adds.
         lock(&pane.rig.input).clear();
 
-        assert!(!desk.module_message(said, pane.rig.write()), "{name}");
+        assert!(
+            !desk.module_message(said, pane.rig.write(), pane.rig.write()),
+            "{name}"
+        );
         assert!(
             lock(&pane.rig.input).is_empty(),
             "{name}: a late message reached the pane's input: {:?}",
             pane.rig.written()
         );
     }
+}
+
+/// A message of a view over the size one may have ends the view as a failure and the program is
+/// told by the protocol's own word, which takes the lane every key takes: the view's lane is
+/// shut by the end of the view, and a `closed` queued on it would be dropped with the view's own
+/// words — the program would never be told. Whatever the view is.
+#[test]
+fn a_message_over_the_limit_ends_the_view_and_the_program_is_told_on_the_keys_lane() {
+    let huge = format!(
+        r#"{{"call":{{"id":1,"method":"m","params":"{}"}}}}"#,
+        "x".repeat(MAX_VIEW_MESSAGE)
+    );
+    let told = |keys: &[u8], lane: &[u8]| {
+        let closed = decoded(keys);
+        assert_eq!(closed.len(), 1, "{closed:?}");
+        assert_eq!(closed[0].kind, "closed");
+        assert!(
+            closed[0].payload.contains(r#""reason":"error""#),
+            "{}",
+            closed[0].payload
+        );
+        assert!(
+            lane.is_empty(),
+            "the view's own lane carried a word of the protocol"
+        );
+    };
+
+    // A web page.
+    let (rig, _, _) = Rig::new(true);
+    let mut pane = Pane::new(rig);
+    open_a_view(&mut pane);
+    let rig = Arc::clone(&pane.rig);
+    let desk = rig.desk.as_ref().expect("a desk");
+    desk.take_views();
+    let (keys, lane) = (Mutex::new(Vec::new()), Mutex::new(Vec::new()));
+    desk.view_message(
+        &huge,
+        |bytes| lock(&keys).extend_from_slice(&bytes),
+        |bytes| lock(&lane).extend_from_slice(&bytes),
+    );
+    assert!(desk.take_views().contains(&Action::DestroyView));
+    told(&lock(&keys), &lock(&lane));
+
+    // A component.
+    let (pane, _, _) = open_a_module_view();
+    let rig = Arc::clone(&pane.rig);
+    let desk = rig.desk.as_ref().expect("a desk");
+    desk.take_views();
+    let (keys, lane) = (Mutex::new(Vec::new()), Mutex::new(Vec::new()));
+    let wrote = desk.module_message(
+        &huge,
+        |bytes| lock(&keys).extend_from_slice(&bytes),
+        |bytes| lock(&lane).extend_from_slice(&bytes),
+    );
+    assert!(!wrote, "nothing of the module's was written");
+    assert!(desk.take_views().contains(&Action::DestroyView));
+    told(&lock(&keys), &lock(&lane));
 }
 
 #[test]
@@ -1785,26 +1866,99 @@ fn a_pane_with_no_master_asks_the_owner_of_its_terminal_to_drop_the_input() {
         Arc::clone(&shell),
         Arc::new(Mutex::new(None)),
         Some(Arc::clone(&ops) as Arc<dyn PtyOps>),
+        None,
     );
-    discard();
+    (discard.throw)(false);
     assert_eq!(
         *lock(&ops.0),
         [false],
         "the program ran in the terminal of the stream"
     );
-
-    lock(&shell).set_remote(Some(&crate::RemoteTarget::ssh("rasp")));
-    discard();
+    (discard.throw)(true);
     assert_eq!(*lock(&ops.0), [false, true], "and now on the server");
 
+    // Where the program is, as the pane knows it: the session the shell is in.
+    assert!(!(discard.elsewhere)());
+    lock(&shell).set_remote(Some(&crate::RemoteTarget::ssh("rasp")));
+    assert!((discard.elsewhere)());
     lock(&shell).set_remote(None);
-    discard();
-    assert_eq!(*lock(&ops.0), [false, true, false]);
+    assert!(!(discard.elsewhere)());
 
     // A pane that holds the master flushes it and asks nobody.
     let held = Arc::new(Mutex::new(None));
-    pane_discard(shell, held, None)();
-    assert_eq!(lock(&ops.0).len(), 3);
+    (pane_discard(shell, held, None, None).throw)(false);
+    assert_eq!(lock(&ops.0).len(), 2);
+}
+
+/// A pane that holds a master of its own and shows a server's terminal: the program that ran on
+/// the server is not in this tty, so the keeper of the server's terminal is asked to drop what it
+/// has not read; a program that ran here is flushed from the master, and nobody is asked.
+#[test]
+fn a_pane_with_a_master_that_shows_a_servers_terminal_asks_the_keeper_to_drop_the_input() {
+    let asked = Arc::new(AtomicUsize::new(0));
+    let drop_shown = DropShown::new({
+        let asked = Arc::clone(&asked);
+        move || {
+            asked.fetch_add(1, Ordering::SeqCst);
+        }
+    });
+    let shell = Arc::new(Mutex::new(ShellLog::new(100)));
+    let held = Arc::new(Mutex::new(None));
+    let discard = pane_discard(
+        Arc::clone(&shell),
+        Arc::clone(&held),
+        None,
+        Some(drop_shown),
+    );
+    (discard.throw)(true);
+    assert_eq!(
+        asked.load(Ordering::SeqCst),
+        1,
+        "the program ran on the server"
+    );
+    (discard.throw)(false);
+    assert_eq!(
+        asked.load(Ordering::SeqCst),
+        1,
+        "this tty is where the program ran"
+    );
+    // No keeper: there is nobody to ask, and the tty of the pipe is left alone.
+    (pane_discard(shell, held, None, None).throw)(true);
+}
+
+/// Where the program ran is read when its view opens and kept: by the time the discard comes the
+/// shell has said the command ended, and `D` has cleared the remote session with it, so a
+/// program that ran on a server would be taken for one that ran here and its leftovers thrown
+/// away from the wrong terminal.
+#[test]
+fn what_a_program_on_a_server_left_unread_is_thrown_away_where_it_ran_after_the_session_is_forgotten()
+ {
+    for (opened_on_a_server, thrown_where) in [(true, true), (false, false)] {
+        let elsewhere = Arc::new(AtomicBool::new(opened_on_a_server));
+        let thrown = Arc::new(Mutex::new(Vec::new()));
+        let discard = Discard::new(
+            {
+                let elsewhere = Arc::clone(&elsewhere);
+                move || elsewhere.load(Ordering::SeqCst)
+            },
+            {
+                let thrown = Arc::clone(&thrown);
+                move |remote| lock(&thrown).push(remote)
+            },
+        );
+        let (rig, _) = Rig::with_discard(discard);
+        let mut pane = Pane::new(Arc::clone(&rig));
+        open_a_view(&mut pane);
+        // The module's bytes reached the tty, then the local command ended (`D`): the pane
+        // has forgotten the session when the view hears the program is gone.
+        rig.flow.wrote_module();
+        elsewhere.store(!opened_on_a_server, Ordering::SeqCst);
+        rig.desk
+            .as_ref()
+            .expect("a desk")
+            .program_ended(rig.write());
+        assert_eq!(*lock(&thrown), [thrown_where]);
+    }
 }
 
 /// The pane that holds the master still flushes the program's input from it, and leaves the
@@ -1855,16 +2009,15 @@ fn a_pane_with_a_master_flushes_what_the_program_left_unread_unless_it_is_elsewh
     let held = Arc::new(Mutex::new(Some(File::from(
         master.try_clone().expect("a second descriptor"),
     ))));
-    let discard = pane_discard(Arc::clone(&shell), held, None);
+    let discard = pane_discard(Arc::clone(&shell), held, None, None);
 
     write(b"what the page said");
     assert_eq!(unread(), 18);
-    discard();
+    (discard.throw)(false);
     assert_eq!(unread(), 0, "the program's input is gone");
 
     write(b"typed at the ssh");
-    lock(&shell).set_remote(Some(&crate::RemoteTarget::ssh("rasp")));
-    discard();
+    (discard.throw)(true);
     assert_eq!(
         unread(),
         16,

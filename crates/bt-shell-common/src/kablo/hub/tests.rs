@@ -691,8 +691,9 @@ fn the_versions_are_agreed_or_refused() {
         (1, 1, Some(1)),
         (2, 1, Some(2)),
         (3, 1, Some(3)),
-        (7, 1, Some(3)),
-        (9, 4, None),
+        (4, 1, Some(4)),
+        (7, 1, Some(4)),
+        (9, 5, None),
         (0, 0, None),
     ] {
         let hold = rig.hold();
@@ -1072,6 +1073,93 @@ fn an_answer_nobody_asked_for_is_a_holder_out_of_turn_and_a_resume_is_not_run() 
         rig.hub.run(hold, &[b"ssh".to_vec()]),
         Err(Declined::WrongKind)
     );
+}
+
+// ─── dropping the input a program has not read, behind what was typed ─────
+
+/// The holder reads what is typed to its pane as it comes and sends it on, so the words of a
+/// view that are still in its hands or on the socket when the program ends are not yet in the
+/// hub: a request to the terminal that went at once would overtake them, and they would be
+/// typed at the shell that reads the terminal next. The request goes to the holder first, and
+/// the terminal is asked when the holder has said everything it had read.
+#[test]
+fn the_input_a_program_has_not_read_is_dropped_behind_what_the_holder_had_sent() {
+    let mut rig = Rig::new();
+    let (hold, terminal) = rig.started("b-1");
+    rig.hub.drop_input(ACCOUNT, &terminal);
+    rig.pump();
+    assert!(
+        rig.heard_by(hold).contains(&ToHold::Sync),
+        "the holder is asked"
+    );
+    assert!(
+        rig.bridge.input_dropped(&terminal).is_empty(),
+        "the terminal is not asked before the holder has answered"
+    );
+    // What the holder had read comes first, then its answer.
+    rig.say(hold, &ToApp::Input(b"what the page said".to_vec()));
+    assert!(rig.bridge.input_dropped(&terminal).is_empty());
+    rig.say(hold, &ToApp::Synced);
+    assert_eq!(rig.bridge.input_dropped(&terminal), [18]);
+    // What is typed after it is the shell's.
+    rig.say(hold, &ToApp::Input(b"ls\r".to_vec()));
+    assert_eq!(rig.bridge.input_dropped(&terminal), [18]);
+    assert_eq!(rig.bridge.typed(&terminal), b"what the page saidls\r");
+    // One answer for each request, and an answer nobody asked for is a holder out of turn.
+    rig.say(hold, &ToApp::Synced);
+    assert!(rig.hub.is_finished(hold));
+}
+
+/// Two requests are two answers, each ordered after what came before it.
+#[test]
+fn each_request_to_drop_is_answered_in_its_turn() {
+    let mut rig = Rig::new();
+    let (hold, terminal) = rig.started("b-1");
+    rig.hub.drop_input(ACCOUNT, &terminal);
+    rig.say(hold, &ToApp::Input(b"one".to_vec()));
+    rig.hub.drop_input(ACCOUNT, &terminal);
+    rig.say(hold, &ToApp::Synced);
+    rig.say(hold, &ToApp::Input(b"two".to_vec()));
+    rig.say(hold, &ToApp::Synced);
+    assert_eq!(rig.bridge.input_dropped(&terminal), [3, 6]);
+    assert!(!rig.hub.is_finished(hold));
+}
+
+/// A pane that outlived an update has a holder of version 3 or earlier: it skips a frame it does
+/// not know, so it is never sent one, and its terminal is asked at once as it was before the
+/// holder could answer — unordered, but not left with the words.
+#[test]
+fn a_holder_of_an_earlier_version_is_not_asked_to_answer_and_its_terminal_is_asked_at_once() {
+    for version in [1, 2, 3] {
+        let mut rig = Rig::new();
+        let hold = rig.hold();
+        rig.say(
+            hold,
+            &ToApp::Hello {
+                newest: version,
+                oldest: 1,
+            },
+        );
+        rig.say(hold, &ToApp::Open(new_request("b-1")));
+        rig.requests();
+        rig.hub
+            .start(hold, ACCOUNT, NewSession::default(), None)
+            .expect("started");
+        rig.pump();
+        let terminal = id("b-1");
+        rig.say(hold, &ToApp::Input(b"typed".to_vec()));
+        rig.hub.drop_input(ACCOUNT, &terminal);
+        rig.pump();
+        assert_eq!(
+            rig.bridge.input_dropped(&terminal),
+            [5],
+            "version {version}"
+        );
+        assert!(
+            !rig.heard_by(hold).contains(&ToHold::Sync),
+            "version {version}"
+        );
+    }
 }
 
 // ─── a raw holder: the pane itself ───────────────────────────────────────

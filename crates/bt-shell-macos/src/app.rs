@@ -39,10 +39,11 @@ use objc2_app_kit::{
     NSWorkspaceWillPowerOffNotification,
 };
 use objc2_foundation::{
-    NSArray, NSBundle, NSDictionary, NSKeyValueObservingOptions, NSNotification,
-    NSNotificationCenter, NSNumber, NSObject, NSObjectNSDelayedPerforming,
-    NSObjectNSKeyValueObserverRegistration, NSObjectProtocol, NSPoint, NSRect,
-    NSRunLoopCommonModes, NSSize, NSString, NSURL, NSUserDefaults, ns_string,
+    NSArray, NSBundle, NSCurrentLocaleDidChangeNotification, NSDictionary,
+    NSKeyValueObservingOptions, NSNotification, NSNotificationCenter, NSNumber, NSObject,
+    NSObjectNSDelayedPerforming, NSObjectNSKeyValueObserverRegistration, NSObjectProtocol, NSPoint,
+    NSRect, NSRunLoopCommonModes, NSSize, NSString, NSSystemTimeZoneDidChangeNotification, NSURL,
+    NSUserDefaults, ns_string,
 };
 
 use crate::arrange::{self, HOLD_DELAY, Hold, Tool};
@@ -1183,6 +1184,8 @@ define_class!(
             // The scroll bar's system preference likewise; the panes were born
             // with the resolved form (their grid's first `TIOCSWINSZ` sees it).
             self.observe_scroller_style();
+            // And the person's language and time zone, which a program's view is told.
+            self.observe_locale();
             // The light/dark appearance is also app-wide and once; the first
             // window's theme was already chosen from the appearance (`open_window` → `resolve_theme`).
             self.observe_appearance();
@@ -1449,6 +1452,25 @@ define_class!(
                     && let Some(app) = delegate(mtm)
                 {
                     app.scroller_style_changed();
+                }
+            });
+        }
+
+        /// The person's language or time zone changed; the sender is the **default** centre
+        /// ([`AppDelegate::observe_locale`]). Every pane with a view is told, which tells the
+        /// view in its `context`. Hops to the main queue when the centre posted from another
+        /// thread, as the scroll bar's notification does.
+        #[unsafe(method(localeDidChange:))]
+        fn locale_did_change(&self, _note: Option<&AnyObject>) {
+            if MainThreadMarker::new().is_some() {
+                self.apply_locale();
+                return;
+            }
+            DispatchQueue::main().exec_async(|| {
+                if let Some(mtm) = MainThreadMarker::new()
+                    && let Some(app) = delegate(mtm)
+                {
+                    app.apply_locale();
                 }
             });
         }
@@ -6771,6 +6793,47 @@ impl AppDelegate {
             );
         }
         self.apply_scrollbar();
+    }
+
+    /// Starts watching the person's language and time zone — **only in a user session**
+    /// ([`Inputs`]). Both notifications come from the **default** centre, and a view that is
+    /// open is told in its `context` (specification §9.5) the moment either changes: a pane
+    /// opened later reads them itself ([`TerminalPane::view_options`]). Not removed: the
+    /// [`AppDelegate::observe_scroller_style`] precedent.
+    fn observe_locale(&self) {
+        let Inputs::User { .. } = self.inputs() else {
+            return;
+        };
+        let center = NSNotificationCenter::defaultCenter();
+        // SAFETY: `localeDidChange:` is defined on this class and takes a single
+        // `Option<&AnyObject>` argument; `self` lives for the process's lifetime, so the
+        // centre's non-owning reference does not dangle. The constants are names Foundation
+        // exposes.
+        unsafe {
+            for name in [
+                NSCurrentLocaleDidChangeNotification,
+                NSSystemTimeZoneDidChangeNotification,
+            ] {
+                center.addObserver_selector_name_object(
+                    self,
+                    sel!(localeDidChange:),
+                    Some(name),
+                    None,
+                );
+            }
+        }
+    }
+
+    /// Gives every pane the language and time zone the system has now. A zone read after the
+    /// notification is the new one: Foundation drops its own cache before it posts it.
+    fn apply_locale(&self) {
+        let (locale, zone) = (
+            crate::pencere_view::locale_tag(),
+            crate::pencere_view::time_zone_name(),
+        );
+        for pane in self.all_panes() {
+            pane.set_locale(locale.clone(), zone.clone());
+        }
     }
 
     /// The system's scroll bar preference changed (main thread): the form is

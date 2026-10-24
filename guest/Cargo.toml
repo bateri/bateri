@@ -22,7 +22,7 @@ bateri-view-sdk = { path = "sdk" }
 bateri-view-messages = { path = "messages" }
 # The wire the program half of a view speaks: frames, bundles, digests. Its host half is the
 # terminal's; the program uses the same crate to write what the terminal reads.
-pencere = { git = "https://github.com/bateri/pencere", rev = "53f0f3bbe2bc12767e9b5bcf143dd1c97fba291e" }
+pencere = { git = "https://github.com/bateri/pencere", rev = "a2b77514e5f86bf16b837f3c118f9b050bd69de2" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # The bindings of the interface in `crates/bt-view-wasm/wit`, and the tool that turns a module

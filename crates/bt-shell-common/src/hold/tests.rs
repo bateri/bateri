@@ -367,6 +367,86 @@ fn the_pipe_carries_the_bytes_and_the_keys_and_ends_with_the_programs_status() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The pipe has read the words of a view and sent them before the application asks the terminal
+/// to drop what its program has not read: the request is ordered behind them by the pipe
+/// itself, whatever the application is doing when it is made. Without the order the terminal is
+/// asked before the words reach it, and they are typed at the shell.
+#[test]
+fn a_drop_of_the_unread_input_comes_after_the_words_the_pipe_had_already_sent() {
+    let dir = scratch("drop-order");
+    let socket = dir.join("hold");
+    let mut app = App::new(&socket, Bridge::new(Age::Current), Policy::Serve);
+    let mut hold = run_on_pipes(&socket, new_target(), false);
+    let terminal = app.terminal();
+    app.bridge.write(&terminal, b"ready");
+    app.until("the terminal shown", |_| hold.shown.bytes() == b"ready");
+
+    // The words are read and sent by the pipe; the application has not looked at the socket.
+    hold.typed.write_all(b"what the page said").expect("typed");
+    std::thread::sleep(Duration::from_millis(300));
+    app.hub.drop_input(ACCOUNT, &terminal);
+
+    app.until("the terminal asked to drop", |app| {
+        !app.bridge.input_dropped(&terminal).is_empty()
+    });
+    assert_eq!(app.bridge.typed(&terminal), b"what the page said");
+    assert_eq!(app.bridge.input_dropped(&terminal), [18]);
+
+    // What is typed after it is the shell's, and the pipe goes on.
+    hold.typed.write_all(b"ls\r").expect("typed");
+    app.until("the keys typed", |app| {
+        app.bridge.typed(&terminal) == b"what the page saidls\r"
+    });
+    assert_eq!(app.bridge.input_dropped(&terminal), [18]);
+    app.bridge.exit(&terminal, Exit::Code(0));
+    app.until("the pipe ended", |_| {
+        hold.handle.as_ref().is_some_and(JoinHandle::is_finished)
+    });
+    let _ = hold.outcome();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The pipe answers a request after it has read what waits in the pane's terminal: the words
+/// written to the terminal before the request are ahead of the answer even when the pipe had not
+/// got to them yet. Nothing more is waited for, and what it finds is sent as it was typed.
+#[test]
+fn the_pipe_reads_what_waits_in_its_terminal_and_nothing_more_before_it_answers() {
+    let (read, write) = pipe();
+    let (app, mut pipe_end) = UnixStream::pair().expect("a socket pair");
+    let config = config(
+        Path::new("unused"),
+        new_target(),
+        false,
+        read.as_raw_fd(),
+        1,
+    );
+    let mut typed = File::from(write);
+    let mut buffer = vec![0u8; 4096];
+
+    // An empty terminal: nothing is sent and nothing is waited for.
+    assert!(pass_on_what_waits(&config, &mut pipe_end, &mut buffer).is_ok());
+    app.set_nonblocking(true).expect("non-blocking");
+    let mut reader = wire::AppReader::new();
+    let mut got = [0u8; 4096];
+    assert!((&app).read(&mut got).is_err(), "nothing was sent");
+
+    typed.write_all(b"words").expect("typed");
+    assert!(pass_on_what_waits(&config, &mut pipe_end, &mut buffer).is_ok());
+    let n = (&app).read(&mut got).expect("the words");
+    reader.push(&got[..n]);
+    assert_eq!(
+        reader.read().expect("whole frames"),
+        Some(ToApp::Input(b"words".to_vec()))
+    );
+
+    // The terminal hung up: there is nobody to answer for.
+    drop(typed);
+    assert!(matches!(
+        pass_on_what_waits(&config, &mut pipe_end, &mut buffer),
+        Err(Passing::Gone)
+    ));
+}
+
 #[test]
 fn without_an_application_the_plain_ssh_runs() {
     let dir = scratch("alone");
