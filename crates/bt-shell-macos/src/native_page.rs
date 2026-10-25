@@ -20,16 +20,16 @@
 use std::rc::Rc;
 
 use bt_core::Theme;
-use bt_shell_common::native_view::{Key, Mods, PageDrive, Rect, Role, tone_linear};
+use bt_shell_common::native_view::{Field, Key, Mods, PageDrive, Role, tone_linear};
 use bt_shell_common::view_strip::Strip;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2::{AllocAnyThread, MainThreadOnly, sel};
 use objc2_app_kit::{
-    NSAutoresizingMaskOptions, NSColor, NSEventModifierFlags, NSFocusRingType, NSFont, NSTextField,
-    NSTrackingArea, NSTrackingAreaOptions, NSView,
+    NSAutoresizingMaskOptions, NSColor, NSEventModifierFlags, NSFocusRingType, NSFont,
+    NSLineBreakMode, NSTextField, NSTrackingArea, NSTrackingAreaOptions, NSView,
 };
-use objc2_foundation::{NSPoint, NSRect, NSSize, NSString, ns_string};
+use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
 
 use crate::pane::TerminalPane;
 use crate::pencere_view::face::Faces;
@@ -118,8 +118,10 @@ fn ink(theme: &Theme, tone: Role) -> Retained<NSColor> {
 }
 
 /// The filter's field for `pane`: no border and no ground (the page draws the box), the
-/// terminal's face at the size of the page's text, the theme's ink. The pane is its delegate
-/// (`TerminalPane::page_field_changed`, `page_field_command`).
+/// terminal's face at the size of the page's text, the theme's ink, one line that scrolls as it
+/// is typed and a hint cut with "…" where it does not fit (it says the page's hint: see
+/// [`place_field`]). The pane is its delegate (`TerminalPane::page_field_changed`,
+/// `page_field_command`).
 pub(crate) fn filter_field(
     pane: &TerminalPane,
     theme: &Theme,
@@ -135,7 +137,13 @@ pub(crate) fn filter_field(
         .and_then(|name| NSFont::fontWithName_size(&NSString::from_str(name), size))
         .unwrap_or_else(|| NSFont::monospacedSystemFontOfSize_weight(size, 0.0));
     field.setFont(Some(&font));
-    field.setPlaceholderString(Some(ns_string!("Filter by name, image, port\u{2026}")));
+    // One line: a hint that is too long for the room is cut, not wrapped onto a line below it
+    // that the room does not show (which leaves the first line high in the box).
+    if let Some(cell) = field.cell() {
+        cell.setUsesSingleLineMode(true);
+        cell.setScrollable(true);
+    }
+    field.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
     field.setTextColor(Some(&ink(theme, Role::Foreground)));
     field.setAutoresizingMask(NSAutoresizingMaskOptions::empty());
     // SAFETY: the pane implements the text field's delegate methods it is given (`impl
@@ -150,13 +158,17 @@ pub(crate) fn paint(field: &NSTextField, theme: &Theme) {
 }
 
 /// Puts the field where the page's box for it is (`place`, the pane's points from its top,
-/// `None`: the page has none now, so the field is hidden). The pane's own coordinates grow
-/// upward, the page's downward.
-pub(crate) fn place_field(field: &NSTextField, place: Option<Rect>) {
-    let (Some(place), Some(pane)) = (place, unsafe { field.superview() }) else {
+/// `None`: the page has none now, so the field is hidden), saying the page's hint while it is
+/// empty (none where the page gives none). The pane's own coordinates grow upward, the page's
+/// downward.
+pub(crate) fn place_field(field: &NSTextField, place: Option<Field>) {
+    let (Some(Field { rect: place, hint }), Some(pane)) = (place, unsafe { field.superview() })
+    else {
         field.setHidden(true);
         return;
     };
+    let hint = hint.as_deref().map(NSString::from_str);
+    field.setPlaceholderString(hint.as_deref());
     let height = f64::from(place.h).min(FIELD_HEIGHT);
     let middle = f64::from(place.y + place.h / 2.0);
     let top = middle - height / 2.0;

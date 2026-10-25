@@ -53,6 +53,26 @@ use pencere_view::{
     Size, Source,
 };
 
+/// The text field the host puts over a page: where the room the page leaves for it stands, in the
+/// pane's points, and what the field says while it is empty — the words the page put in that room
+/// (`pencere_view::Laid::text_field_hint`), or none.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Field {
+    pub rect: Rect,
+    pub hint: Option<String>,
+}
+
+impl Field {
+    /// The field of `laid`, its room moved down by `inset` (the strip's room above the page).
+    pub(crate) fn of(laid: &Laid, inset: f32) -> Option<Self> {
+        let room = laid.text_field()?;
+        Some(Self {
+            rect: Rect::new(room.x, room.y + inset, room.w, room.h),
+            hint: laid.text_field_hint().map(str::to_owned),
+        })
+    }
+}
+
 /// The greatest level of `raised` that is drawn (the kit's specification, §3.1): the interface
 /// carries a byte and a page may say 255, and a host treats a level above this as this one — a
 /// page that says more gets the same surface, not a tone that runs out of the theme's room
@@ -255,10 +275,11 @@ pub trait PageDrive {
     /// The program has read enough that the page may say what it was told the program had no
     /// room for. A page that no program opened is never told.
     fn send_room(&self) {}
-    /// `told` is called, on the thread that builds the frame, when the place of the text field the
-    /// page leaves room for changes (the pane resized, the page laid out another way): the host
-    /// moves its field to it. Called once with the place the page has now, if it has one.
-    fn watch_field(&self, told: Box<dyn Fn(Option<Rect>)>);
+    /// `told` is called, on the thread that builds the frame, when the text field the page leaves
+    /// room for changes (the pane resized, the page laid out another way, its hint changed): the
+    /// host moves its field to it and shows its hint. Called once with the field the page has
+    /// now, if it has one.
+    fn watch_field(&self, told: Box<dyn Fn(Option<Field>)>);
     /// Hands over what the page has said since the last call: each reply, in order, with whether
     /// the event it answers was the pointer's (the pointer's shape after a key is nobody's to
     /// set). Never waits.
@@ -502,9 +523,9 @@ struct Shared {
     laid: Laid,
     /// Points at the top of the pane the application keeps.
     inset: f32,
-    /// Where the filter's field was last said to stand, in the pane's points.
-    field: Option<Rect>,
-    on_field: Option<Rc<dyn Fn(Option<Rect>)>>,
+    /// Where the filter's field was last said to stand, in the pane's points, and its hint.
+    field: Option<Field>,
+    on_field: Option<Rc<dyn Fn(Option<Field>)>>,
     /// What the page said that the pane has not taken ([`PageDrive::drain`]).
     replies: Vec<(Reply, bool)>,
 }
@@ -542,18 +563,18 @@ impl ContainersHandle {
 
     /// Where the filter's text field stands, in the pane's points, as of the last frame.
     pub fn field(&self) -> Option<Rect> {
-        self.shared.borrow().field
+        self.shared.borrow().field.as_ref().map(|field| field.rect)
     }
 
-    /// `told` is called, on the thread that builds the frame, when the filter field's place
-    /// changes (the pane resized, the page laid out another way): the host moves its field to
-    /// it. Called once with the place the page has now, if it has one.
-    pub fn on_field(&self, told: impl Fn(Option<Rect>) + 'static) {
+    /// `told` is called, on the thread that builds the frame, when the filter field changes (the
+    /// pane resized, the page laid out another way): the host moves its field to it. Called once
+    /// with the field the page has now, if it has one.
+    pub fn on_field(&self, told: impl Fn(Option<Field>) + 'static) {
         let (field, told) = {
             let mut shared = self.shared.borrow_mut();
-            let told: Rc<dyn Fn(Option<Rect>)> = Rc::new(told);
+            let told: Rc<dyn Fn(Option<Field>)> = Rc::new(told);
             shared.on_field = Some(Rc::clone(&told));
-            (shared.field, told)
+            (shared.field.clone(), told)
         };
         if field.is_some() {
             told(field);
@@ -578,7 +599,7 @@ impl PageDrive for ContainersHandle {
         self.shared.borrow_mut().replies.push((reply, false));
     }
 
-    fn watch_field(&self, told: Box<dyn Fn(Option<Rect>)>) {
+    fn watch_field(&self, told: Box<dyn Fn(Option<Field>)>) {
         self.on_field(told);
     }
 
@@ -675,11 +696,9 @@ impl UiPage for ContainersPage {
                 (0.0, inset),
             );
             // The field's room, in the pane's points: the strip's room above the page is added.
-            let field = laid
-                .text_field()
-                .map(|r| Rect::new(r.x, r.y + shared.inset, r.w, r.h));
+            let field = Field::of(&laid, shared.inset);
             let told = (field != shared.field)
-                .then(|| shared.on_field.clone().map(|told| (told, field)))
+                .then(|| shared.on_field.clone().map(|told| (told, field.clone())))
                 .flatten();
             shared.field = field;
             shared.laid = laid;
@@ -1110,6 +1129,55 @@ mod tests {
     }
 
     #[test]
+    fn the_field_is_the_room_the_page_leaves_moved_below_the_strip_with_the_words_in_it() {
+        struct Fixed;
+        impl Measure for Fixed {
+            fn measure(&mut self, font: &Font, text: &str) -> Metrics {
+                #[allow(clippy::cast_precision_loss)]
+                let width = text.chars().count() as f32 * font.size * 0.5;
+                Metrics {
+                    width,
+                    height: font.size * 1.25,
+                }
+            }
+        }
+        let page = |hint: Option<&str>| {
+            let room = pencere_view::div().text_field().w(120.0).h(18.0);
+            let room = match hint {
+                Some(hint) => room.child(pencere_view::text(hint)),
+                None => room,
+            };
+            pencere_view::div().p(10.0).child(room)
+        };
+        let laid = pencere_view::layout(
+            page(Some("Filter images")),
+            Size::new(400.0, 100.0),
+            1.0,
+            &mut Fixed,
+        );
+        assert_eq!(
+            Field::of(&laid, 32.0),
+            Some(Field {
+                rect: Rect::new(10.0, 42.0, 120.0, 18.0),
+                hint: Some("Filter images".to_owned()),
+            })
+        );
+        let laid = pencere_view::layout(page(None), Size::new(400.0, 100.0), 1.0, &mut Fixed);
+        assert_eq!(
+            Field::of(&laid, 0.0).and_then(|field| field.hint),
+            None,
+            "no words, no hint"
+        );
+        let laid = pencere_view::layout(
+            pencere_view::div(),
+            Size::new(400.0, 100.0),
+            1.0,
+            &mut Fixed,
+        );
+        assert_eq!(Field::of(&laid, 0.0), None, "no room, no field");
+    }
+
+    #[test]
     fn the_keyboard_is_answered_before_the_first_frame() {
         let (_page, handle) = containers_demo(None, 32.0);
         let escape = Input::Key {
@@ -1169,14 +1237,21 @@ mod tests {
             })
         };
         let (mut page, handle) = containers_demo(None, 32.0);
-        let told: Rc<RefCell<Vec<Option<Rect>>>> = Rc::default();
+        let told: Rc<RefCell<Vec<Option<Field>>>> = Rc::default();
         {
             let told = Rc::clone(&told);
             handle.on_field(move |field| told.borrow_mut().push(field));
         }
         build(&mut page, 1.0, false);
         let field = handle.field().expect("the filter's field has a place");
-        assert_eq!(told.borrow().as_slice(), &[Some(field)]);
+        assert_eq!(
+            told.borrow().as_slice(),
+            &[Some(Field {
+                rect: field,
+                hint: Some(containers::FIELD_HINT.to_owned()),
+            })],
+            "its place, and what the page says the field says while it is empty"
+        );
         assert!(field.y >= 32.0, "below the strip: {field:?}");
         // Laid out again the same way, the host is not told again.
         build(&mut page, 1.1, false);

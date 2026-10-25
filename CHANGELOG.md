@@ -123,6 +123,14 @@ of every installed copy. A version without a section is not released.
 
 ### Fixed
 
+- **A view's filter field says what the view says, on one line.** The field bateri puts
+  over a native view (dockerpen's, pickpen's, any kit page's) used to say dockerpen's "Filter by
+  name, image, port…" whatever the view was, and a hint too long for the box wrapped onto a line
+  the box did not show, so the first line sat high. It now says the view's own hint (the words
+  the page puts in the field's room), and a hint that does not fit ends in "…" in the middle of
+  the box. A native view's text can also wrap now (pencere's `wrap()` on a text), where a page
+  asks for it.
+
 - **A server reached through a `ProxyCommand` stays reachable after its
   connection drops.** With bateri opened from the Dock, the ssh that bateri
   starts itself — to bring a kept terminal back, to move files, to forward a
