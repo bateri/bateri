@@ -11,6 +11,7 @@
 //! ```text
 //! demopen            a view of the kind `wasm`, readings pushed once a second
 //! demopen --lua      the same, with a script as the view
+//! demopen --lua-files  the same, with a script of two files: the page, and a script it requires
 //! demopen --flood    the readings pushed as fast as the terminal takes them
 //! demopen --stall N  the readings stop after N seconds (a Docker that hangs)
 //! ```
@@ -27,7 +28,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use pencere::{
-    Bundle, Call, EndedBy, Kind, NoViewReason, Options, Outcome, Subscription, View, ViewError,
+    Bundle, Call, EndedBy, File, Kind, NoViewReason, Options, Outcome, Subscription, View,
+    ViewError,
 };
 use serde_json::{Value, json};
 
@@ -37,6 +39,10 @@ const COMPONENT: &[u8] = b"\0asm\x0d\0\x01\0";
 /// A script that says whose it is.
 const SCRIPT: &[u8] =
     b"-- a page of bateri's tests\nreturn { render = function() return pencere.div() end }\n";
+
+/// A page of two files, for `--lua-files`: this one, and `parts/box.luau`, which it requires.
+const PAGE: &[u8] = b"-- a page of bateri's tests, of two files\nlocal box = require(\"./parts/box\")\nreturn { render = function()\n\treturn pencere.div():bg(\"raised1\"):p(8):child(pencere.text(\"two files\")):child(box())\nend }\n";
+const BOX: &[u8] = b"return function() return pencere.div():size(20, 20):bg(\"accent\") end\n";
 
 /// The version of the interface of the views the terminal draws itself that this is written
 /// against.
@@ -52,11 +58,16 @@ fn main() -> ExitCode {
     let mut flood = false;
     let mut stall = None;
     let mut lua = false;
+    let mut files = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--flood" => flood = true,
             "--lua" => lua = true,
+            "--lua-files" => {
+                lua = true;
+                files = true;
+            }
             "--stall" => match args
                 .next()
                 .and_then(|seconds| seconds.parse::<f64>().ok())
@@ -73,7 +84,18 @@ fn main() -> ExitCode {
     } else {
         (Kind::Wasm, "containers.wasm", COMPONENT)
     };
-    let Ok(bundle) = Bundle::single(name, file) else {
+    let bundle = if files {
+        Bundle::new(
+            "page.lua",
+            [
+                File::new("page.lua", PAGE),
+                File::new("parts/box.luau", BOX),
+            ],
+        )
+    } else {
+        Bundle::single(name, file)
+    };
+    let Ok(bundle) = bundle else {
         return ExitCode::from(66);
     };
     let upload = Arc::new(Upload::default());
@@ -122,7 +144,7 @@ fn main() -> ExitCode {
 }
 
 fn usage() -> ExitCode {
-    say("usage: demopen [--lua] [--flood] [--stall SECONDS]\n");
+    say("usage: demopen [--lua | --lua-files] [--flood] [--stall SECONDS]\n");
     ExitCode::from(64)
 }
 

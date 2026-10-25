@@ -23,7 +23,9 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use bt_core::Flow;
-use pencere_sandbox::{Assets, ImageLimits, Images, Module, ModuleLimits, Program, Unbounded};
+use pencere_sandbox::{
+    Assets, ImageLimits, Images, Module, ModuleLimits, Program, Script, Unbounded,
+};
 use pencere_view::{Element, Event, Role, Size, div, text};
 
 use super::{
@@ -151,16 +153,19 @@ pub fn module_page(
 }
 
 /// The page of a script as a pane's [`UiPage`]: the same as [`module_page`], with the
-/// interpreter of the script's language as the module and `script` (its text) as what it runs.
+/// interpreter of the script's language as the module and `script` as what it runs: its text, its
+/// path in its bundle (what its errors name and what a `require` of it is relative to) and the
+/// bundle. The other scripts of the bundle it can load are the ones that say they are of the type
+/// `text/x-lua`, and it can load no other file; the bundle is where its images come from too.
 pub fn script_page(
-    script: Vec<u8>,
+    script: Script,
     limits: ModuleLimits,
     terminal: Option<String>,
     inset: f32,
     flow: Option<Flow>,
-    assets: Option<Arc<dyn Assets>>,
     wake: impl Fn() + Send + Sync + 'static,
 ) -> (Box<dyn UiPage>, ModuleHandle) {
+    let assets = script.bundle.clone();
     page_around(
         |program, wake| Module::from_script(script, limits, program, wake),
         terminal,
@@ -537,11 +542,14 @@ mod tests {
         // The example script of pencere's checkout, copied beside the modules by `make guest`.
         let script = guest_file("containers.lua");
         let (mut page, handle) = script_page(
-            script,
+            Script {
+                path: "page.lua".to_owned(),
+                source: script,
+                bundle: None,
+            },
             ModuleLimits::default(),
             None,
             32.0,
-            None,
             None,
             move || {
                 let _ = told.lock().unwrap().send(());
@@ -742,11 +750,14 @@ mod tests {
         let (told, woken) = channel();
         let told = std::sync::Mutex::new(told);
         let (_page, handle) = script_page(
-            b"local ok = 1\nerror('no page for you', 0)".to_vec(),
+            Script {
+                path: "page.lua".to_owned(),
+                source: b"local ok = 1\nerror('no page for you', 0)".to_vec(),
+                bundle: None,
+            },
             ModuleLimits::default(),
             None,
             32.0,
-            None,
             None,
             move || {
                 let _ = told.lock().unwrap().send(());
@@ -760,11 +771,14 @@ mod tests {
         let (told, woken) = channel();
         let told = std::sync::Mutex::new(told);
         let (_page, handle) = script_page(
-            b"local x = 1\nlocal y = = 2".to_vec(),
+            Script {
+                path: "page.lua".to_owned(),
+                source: b"local x = 1\nlocal y = = 2".to_vec(),
+                bundle: None,
+            },
             ModuleLimits::default(),
             None,
             32.0,
-            None,
             None,
             move || {
                 let _ = told.lock().unwrap().send(());
@@ -772,7 +786,7 @@ mod tests {
         );
         assert!(wait(&woken));
         let why = handle.drain(&mut |_, _| {}).ended.expect("a reason");
-        assert!(why.starts_with("script:2:"), "{why}");
+        assert!(why.starts_with("page.lua:2:"), "{why}");
     }
 
     /// A script's page through the pane's page, like a module's: drawn once the interpreter has
@@ -787,15 +801,18 @@ mod tests {
         let (told, woken) = channel();
         let told = std::sync::Mutex::new(told);
         let (mut page, handle) = script_page(
-            br#"return { render = function()
+            Script {
+                path: "page.lua".to_owned(),
+                source: br#"return { render = function()
                 return pencere.div():bg("raised1"):p(8):child(pencere.text("hello")):child(
                     pencere.div():size(20, 20):bg("accent"))
             end }"#
-                .to_vec(),
+                    .to_vec(),
+                bundle: None,
+            },
             ModuleLimits::default(),
             None,
             32.0,
-            None,
             None,
             move || {
                 let _ = told.lock().unwrap().send(());
@@ -807,6 +824,225 @@ mod tests {
         assert!(drained.redraw && drained.ended.is_none(), "{drained:?}");
         let list = build(&mut page, &renderer, &theme, 0.1);
         assert!(boxes(&list) >= 2, "the two boxes of the page");
+    }
+
+    /// The files of a bundle as a manifest types them: a path, a media type and the text.
+    struct Typed(Vec<(&'static str, &'static str, &'static str)>);
+
+    impl Assets for Typed {
+        fn read(&self, path: &str) -> Option<Arc<[u8]>> {
+            self.0
+                .iter()
+                .find(|(name, _, _)| *name == path)
+                .map(|(_, _, text)| Arc::from(text.as_bytes()))
+        }
+
+        fn media_type(&self, path: &str) -> Option<String> {
+            self.0
+                .iter()
+                .find(|(name, _, _)| *name == path)
+                .map(|(_, media, _)| (*media).to_owned())
+        }
+    }
+
+    const LUA: &str = "text/x-lua";
+
+    /// The page of the script `page.lua` of a bundle of `files`, started.
+    fn several_files(
+        files: Vec<(&'static str, &'static str, &'static str)>,
+    ) -> (Box<dyn UiPage>, ModuleHandle, Receiver<()>) {
+        let page = files
+            .iter()
+            .find(|(path, _, _)| *path == "page.lua")
+            .map(|(_, _, text)| text.as_bytes().to_vec())
+            .expect("a page among the files");
+        let (told, woken) = channel();
+        let told = std::sync::Mutex::new(told);
+        let (page, handle) = script_page(
+            Script {
+                path: "page.lua".to_owned(),
+                source: page,
+                bundle: Some(Arc::new(Typed(files)) as Arc<dyn Assets>),
+            },
+            ModuleLimits::default(),
+            None,
+            32.0,
+            None,
+            move || {
+                let _ = told.lock().unwrap().send(());
+            },
+        );
+        (page, handle, woken)
+    }
+
+    const SPLIT_PAGE: &str = "local box = require('./parts/box')\nreturn { render = function()\n  return pencere.div():bg('raised1'):p(8):child(pencere.text('two files')):child(box())\nend }";
+    const SPLIT_BOX: &str = "return function() return pencere.div():size(20, 20):bg('accent') end";
+
+    /// A script of several files through the pane's page, like one of a single file: the script
+    /// it requires is read from the bundle the pane holds, and what it makes is drawn.
+    #[test]
+    fn a_scripts_page_of_several_files_is_drawn_through_the_pane() {
+        let Ok(renderer) = Renderer::system_default() else {
+            eprintln!("skipped: no GPU device");
+            return;
+        };
+        let theme = Theme::BATERI;
+        let (mut page, handle, woken) = several_files(vec![
+            ("page.lua", LUA, SPLIT_PAGE),
+            ("parts/box.lua", LUA, SPLIT_BOX),
+        ]);
+        assert_eq!(boxes(&build(&mut page, &renderer, &theme, 0.0)), 0);
+        assert!(wait(&woken), "the script handed out no page");
+        let drained = handle.drain(&mut |_, _| {});
+        assert!(drained.redraw && drained.ended.is_none(), "{drained:?}");
+        let list = build(&mut page, &renderer, &theme, 0.1);
+        // The page's own box, and the small one the other file made.
+        assert!(boxes(&list) >= 2, "the two boxes of the page");
+    }
+
+    /// What the page requires that the bundle does not have ends the page, with the path the
+    /// page wrote and the line it wrote it on.
+    #[test]
+    fn a_script_that_requires_what_the_bundle_lacks_ends_with_the_path_and_the_line() {
+        let (_page, handle, woken) = several_files(vec![(
+            "page.lua",
+            LUA,
+            "local ok = 1\nrequire('./parts/missing')\nreturn {}",
+        )]);
+        assert!(wait(&woken));
+        let why = handle.drain(&mut |_, _| {}).ended.expect("a reason");
+        assert!(why.starts_with("page.lua:2:"), "{why}");
+        assert!(why.contains("\"./parts/missing\""), "{why}");
+    }
+
+    /// An error in the script that is required says that script's file and line, and a file the
+    /// bundle holds that its manifest does not call a script is not one to require.
+    #[test]
+    fn a_required_scripts_error_says_its_file_and_a_file_that_is_not_a_script_is_not_one() {
+        let (_page, handle, woken) = several_files(vec![
+            ("page.lua", LUA, "require('./parts/box')\nreturn {}"),
+            ("parts/box.lua", LUA, "local x = nil\n\nreturn x.y"),
+        ]);
+        assert!(wait(&woken));
+        let why = handle.drain(&mut |_, _| {}).ended.expect("a reason");
+        assert!(why.starts_with("parts/box.lua:3:"), "{why}");
+
+        let (_page, handle, woken) = several_files(vec![
+            ("page.lua", LUA, "require('./parts/box')\nreturn {}"),
+            ("parts/box.lua", "text/plain", "return {}"),
+        ]);
+        assert!(wait(&woken));
+        let why = handle.drain(&mut |_, _| {}).ended.expect("a reason");
+        assert!(
+            why.contains("the bundle has no script at \"parts/box\""),
+            "{why}"
+        );
+    }
+
+    /// The page of a real pane: a program (`demopen --lua-files`) opens a view of two files in a
+    /// session of the application, and the page is made from what the session holds — the
+    /// script it requires is read through `BundleAssets`, with the type the program gave it.
+    #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+    fn a_script_of_several_files_from_a_real_session_is_drawn_through_the_pane() {
+        use crate::child::{SilentWake, wait_until};
+        use bt_core::pencere::{Action, ViewOptions};
+        use bt_core::{CaretShape, CursorBlink, Osc52, Session, SessionOptions, TerminalOptions};
+        use std::collections::HashMap;
+
+        let program = std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent()?.parent().map(std::path::Path::to_path_buf))
+            .map(|profile| profile.join("examples").join("demopen"))
+            .expect("the path of the test binary");
+        assert!(
+            program.is_file(),
+            "the test program is not built: {} (`cargo build -p bt-core --example demopen`, which \
+             `make test-heavy` does first)",
+            program.display()
+        );
+        let mut views = ViewOptions::new("bateri-test", "0.0.0");
+        views.native_entry_limit = Some(ModuleLimits::default().component as u64);
+        let session = Arc::new(
+            Session::spawn(
+                SessionOptions {
+                    command: Some((
+                        "/bin/sh".to_owned(),
+                        vec![
+                            "-c".to_owned(),
+                            "set -m; \"$1\" --lua-files".to_owned(),
+                            "sh".to_owned(),
+                            program.display().to_string(),
+                        ],
+                    )),
+                    working_directory: None,
+                    home: None,
+                    env: HashMap::new(),
+                    cols: 80,
+                    rows: 10,
+                    cell_px: (9, 18),
+                    terminal: TerminalOptions {
+                        scrollback: 100,
+                        osc52: Osc52::Off,
+                        cursor: CaretShape::default(),
+                        blink: CursorBlink::default(),
+                    },
+                    theme: Theme::BATERI,
+                    dock: false,
+                    cluster: false,
+                    initial_input: None,
+                    shell_marks: false,
+                    pane_uuid: None,
+                    hostname: None,
+                    replay: None,
+                    views: Some(views),
+                },
+                Arc::new(SilentWake),
+            )
+            .expect("a session"),
+        );
+        let mut started = false;
+        wait_until("the view to start", || {
+            for action in session.take_view_actions() {
+                started |= matches!(action, Action::StartView(_));
+            }
+            started
+        });
+        // What the pane does with the view it is shown (`TerminalPane::start_view`).
+        let entry = session.view_entry().expect("an entry");
+        let (_, bytes) = session.serve_view_file(&entry).expect("the entry is held");
+        let assets: Arc<dyn Assets> = Arc::new(crate::native_view::BundleAssets::new(&session));
+        let (told, woken) = channel();
+        let told = std::sync::Mutex::new(told);
+        let (mut page, handle) = script_page(
+            Script {
+                path: entry,
+                source: bytes.to_vec(),
+                bundle: Some(assets),
+            },
+            ModuleLimits::default(),
+            None,
+            32.0,
+            Some(session.flow()),
+            move || {
+                let _ = told.lock().unwrap().send(());
+            },
+        );
+        // Asked for a frame (a GPU, if the machine has one, draws it; the module makes the page
+        // either way, from the two files).
+        if let Ok(renderer) = Renderer::system_default() {
+            let theme = Theme::BATERI;
+            assert_eq!(boxes(&build(&mut page, &renderer, &theme, 0.0)), 0);
+            assert!(wait(&woken), "the script handed out no page");
+            let drained = handle.drain(&mut |_, _| {});
+            assert!(drained.redraw && drained.ended.is_none(), "{drained:?}");
+            assert!(boxes(&build(&mut page, &renderer, &theme, 0.1)) >= 2);
+        } else {
+            eprintln!("no GPU device: the page is not drawn, only started");
+            let drained = handle.drain(&mut |_, _| {});
+            assert_eq!(drained.ended, None);
+        }
+        session.shutdown();
     }
 
     /// A 2 × 2 PNG: red, green, blue, cream.
@@ -845,6 +1081,13 @@ mod tests {
                 .iter()
                 .find(|(name, _)| *name == path)
                 .map(|(_, bytes)| Arc::from(bytes.as_slice()))
+        }
+
+        fn media_type(&self, path: &str) -> Option<String> {
+            self.files
+                .iter()
+                .any(|(name, _)| *name == path)
+                .then(|| "application/octet-stream".to_owned())
         }
     }
 
@@ -891,12 +1134,15 @@ mod tests {
             end }}"#
         );
         let (mut page, handle) = script_page(
-            script.into_bytes(),
+            Script {
+                path: "page.lua".to_owned(),
+                source: script.into_bytes(),
+                bundle: Some(Arc::clone(&assets) as Arc<dyn Assets>),
+            },
             ModuleLimits::default(),
             None,
             32.0,
             None,
-            Some(Arc::clone(&assets) as Arc<dyn Assets>),
             move || {
                 let _ = told.lock().unwrap().send(());
             },

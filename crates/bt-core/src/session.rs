@@ -11970,6 +11970,20 @@ impl Session {
             .flatten()
     }
 
+    /// The media type the manifest of the open view's bundle gives the file at `path`, or `None`
+    /// where it lists no such file. Answered from the manifest, not by reading the file: a Lua
+    /// view may load the files it types `text/x-lua`, and asks it of every path it might require.
+    pub fn view_file_type(&self, path: &str) -> Option<String> {
+        self.adapter
+            .view(|conversation| {
+                conversation
+                    .bundle()
+                    .and_then(|bundle| bundle.file(path))
+                    .map(|file| file.media_type.clone())
+            })
+            .flatten()
+    }
+
     /// The entry document of the bundle of the view that is opening or open.
     pub fn view_entry(&self) -> Option<String> {
         self.adapter
@@ -30937,6 +30951,67 @@ e\\314\\201.'; sleep 5";
                 .contains("demopen: the view failed: script:12: attempt to index nil with 'x'")
         });
         assert!(!session.module_message(r#"{"call":{"id":1,"method":"x"}}"#));
+        session.shutdown();
+    }
+
+    /// A script of several files: the pane holds them all, with the page as the entry, and serves
+    /// each by the path the bundle lists it by and the type the program gave it. That is what a
+    /// script that requires another is run over (`BundleAssets`).
+    #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+    fn the_demo_program_shows_a_script_of_several_files_and_the_pane_serves_each() {
+        use crate::pencere::Action;
+        let program = demopen();
+        let mut options = test_options(
+            (
+                "/bin/sh".into(),
+                vec![
+                    "-c".into(),
+                    "set -m; \"$1\" --lua-files".into(),
+                    "sh".into(),
+                    program.display().to_string(),
+                ],
+            ),
+            80,
+        );
+        let mut views = ViewOptions::new("bateri-test", "0.0.0");
+        views.native_entry_limit = Some(4 << 20);
+        options.views = Some(views);
+        let wake = Arc::new(TestWake::default());
+        let session = Session::spawn(options, Arc::clone(&wake) as Arc<dyn Wake>).unwrap();
+
+        let mut started = None;
+        wait_until("the view to start", Duration::from_secs(20), || {
+            for action in session.take_view_actions() {
+                if let Action::StartView(start) = action {
+                    started = Some(start);
+                }
+            }
+            started.is_some()
+        });
+        assert_eq!(started.unwrap().kind, crate::pencere::ViewKind::Lua);
+        assert_eq!(session.view_entry().as_deref(), Some("page.lua"));
+        let (media, page) = session
+            .serve_view_file("page.lua")
+            .expect("the page is held");
+        assert_eq!(media, "text/x-lua");
+        assert!(std::str::from_utf8(&page).is_ok_and(|text| text.contains("./parts/box")));
+        // The script it requires is in the bundle by its path, typed as a script by either of
+        // Luau's extensions; what the bundle does not list is not served.
+        let (media, part) = session
+            .serve_view_file("parts/box.luau")
+            .expect("the script it requires is held");
+        assert_eq!(media, "text/x-lua");
+        assert!(std::str::from_utf8(&part).is_ok_and(|text| text.contains("accent")));
+        // The manifest's word on a file, without reading it.
+        assert_eq!(
+            session.view_file_type("parts/box.luau").as_deref(),
+            Some("text/x-lua")
+        );
+        for outside in ["parts/box", "../page.lua", "/page.lua", "parts/"] {
+            assert!(session.serve_view_file(outside).is_none(), "{outside}");
+            assert!(session.view_file_type(outside).is_none(), "{outside}");
+        }
         session.shutdown();
     }
 

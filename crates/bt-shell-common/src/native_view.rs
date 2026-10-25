@@ -44,7 +44,7 @@ mod containers;
 mod module;
 pub use module::{ModuleHandle, module_page, script_page};
 use pencere_sandbox::Images;
-pub use pencere_sandbox::{Assets, ImageLimits, ModuleLimits};
+pub use pencere_sandbox::{Assets, ImageLimits, ModuleLimits, Script};
 pub use pencere_view::{
     Button, Cursor, Input, Key, Keyboard, Menu, MenuEntry, Mods, Point, Rect, Reply, Role,
 };
@@ -188,12 +188,13 @@ pub fn image(theme: &Theme, picture: &Picture, origin: (f32, f32)) -> UiImage {
 }
 
 /// The files of the open view's bundle, as a program sent them and the session keeps them
-/// ([`Session::serve_view_file`]): what a page's images are read from. Holds the session
+/// ([`Session::serve_view_file`]): what a page's images, and the scripts a Lua page requires,
+/// are read from. Holds the session
 /// weakly — the images of a page that outlives its program's view find no file, and are
 /// refused with a word for the page's author, not read from a session that is gone.
 ///
-/// Read on the images' worker thread ([`Assets::read`]), never the one that draws: the
-/// session's lock and the disk are both waited for.
+/// Read on the images' worker thread ([`Assets::read`]) and on a script's own, for the scripts it
+/// requires, never the one that draws: the session's lock and the disk are both waited for.
 pub struct BundleAssets {
     session: Weak<Session>,
 }
@@ -210,6 +211,13 @@ impl Assets for BundleAssets {
     fn read(&self, path: &str) -> Option<Arc<[u8]>> {
         let (_, bytes) = self.session.upgrade()?.serve_view_file(path)?;
         Some(bytes)
+    }
+
+    fn media_type(&self, path: &str) -> Option<String> {
+        // The type is the manifest's word on the file: the scripts a Lua page requires are the
+        // files it types `text/x-lua`, and the sandbox asks it of every path the page might name,
+        // so it is not read from the store (`serve_view_file` reads the file).
+        self.session.upgrade()?.view_file_type(path)
     }
 }
 

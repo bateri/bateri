@@ -5943,10 +5943,10 @@ impl TerminalPane {
             session.view_failed("the pane cannot draw a view");
             return;
         };
-        let Some((_, bytes)) = session
-            .view_entry()
-            .and_then(|entry| session.serve_view_file(&entry))
-        else {
+        let Some((entry, bytes)) = session.view_entry().and_then(|entry| {
+            let (_, bytes) = session.serve_view_file(&entry)?;
+            Some((entry, bytes))
+        }) else {
             eprintln!("bateri: the program's view has nothing to run; the terminal stays");
             session.view_failed("the view's file is not there to run");
             return;
@@ -5985,12 +5985,15 @@ impl TerminalPane {
             Arc::new(bt_shell_common::native_view::BundleAssets::new(session));
         let (page, handle) = if start.kind == bt_core::pencere::ViewKind::Lua {
             bt_shell_common::native_view::script_page(
-                bytes.to_vec(),
+                bt_shell_common::native_view::Script {
+                    path: entry,
+                    source: bytes.to_vec(),
+                    bundle: Some(assets),
+                },
                 limits,
                 family.clone(),
                 inset,
                 flow,
-                Some(assets),
                 wake,
             )
         } else {

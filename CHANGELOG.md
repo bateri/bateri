@@ -38,6 +38,11 @@ of every installed copy. A version without a section is not released.
   with is [pencere](https://github.com/bateri/pencere)'s (Apache-2.0, so other terminals
   can show the same views), and bateri offers the two kinds it draws as version 1.0:
   `wasm` is `pencere:view@1.0.0` and a script's global is `pencere`.
+- **A Lua view can be several files.** The script of a view that bateri draws may load the
+  other Lua files of its bundle with `require("./screens/logs")` (Luau's own rules, so
+  editors that know Luau understand the paths), and nothing else: a path that leaves the
+  bundle, a file that is not a script and a name the bundle lacks are errors that say the
+  path, and an error in any of the files says that file and line.
 - **A view can use the terminal's whole palette.** Beside its nine roles, a view names the
   sixteen ANSI colours and the selection by the theme's own values, or gives a colour of
   its own as `#rrggbb[aa]` with, if it wants one, another for dark themes. Its words keep
