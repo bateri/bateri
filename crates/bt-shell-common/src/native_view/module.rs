@@ -29,8 +29,8 @@ use pencere_sandbox::{
 use pencere_view::{Element, Event, Role, Size, div, text};
 
 use super::{
-    Drained, Input, PageDrive, Rect, Reply, Shaped, Typeset, UiContext, UiList, UiPage, from_pane,
-    into_page, to_list,
+    Drained, Field, Input, PageDrive, Rect, Reply, Shaped, Typeset, UiContext, UiList, UiPage,
+    from_pane, into_page, to_list,
 };
 
 /// What the page and its handle share.
@@ -51,8 +51,8 @@ struct Shared {
     /// Points at the top of the pane the application keeps.
     inset: f32,
     /// Where the text field's room was last said to stand, in the pane's points.
-    field: Option<Rect>,
-    on_field: Option<Rc<dyn Fn(Option<Rect>)>>,
+    field: Option<Field>,
+    on_field: Option<Rc<dyn Fn(Option<Field>)>>,
     /// A page arrived that the pane has not been told of.
     redraw: bool,
     /// What the module said that the pane has not taken.
@@ -232,7 +232,7 @@ pub struct ModuleHandle {
 impl ModuleHandle {
     /// Where the text field's room stands, in the pane's points, as of the last frame.
     pub fn field(&self) -> Option<Rect> {
-        self.shared.borrow().field
+        self.shared.borrow().field.as_ref().map(|field| field.rect)
     }
 }
 
@@ -262,12 +262,12 @@ impl PageDrive for ModuleHandle {
         self.shared.borrow().module.room();
     }
 
-    fn watch_field(&self, told: Box<dyn Fn(Option<Rect>)>) {
+    fn watch_field(&self, told: Box<dyn Fn(Option<Field>)>) {
         let (field, told) = {
             let mut shared = self.shared.borrow_mut();
-            let told: Rc<dyn Fn(Option<Rect>)> = Rc::from(told);
+            let told: Rc<dyn Fn(Option<Field>)> = Rc::from(told);
             shared.on_field = Some(Rc::clone(&told));
-            (shared.field, told)
+            (shared.field.clone(), told)
         };
         if field.is_some() {
             told(field);
@@ -372,11 +372,9 @@ impl UiPage for ModulePage {
             if !starting {
                 shared.module.lay_out(Arc::clone(&laid));
             }
-            let field = laid
-                .text_field()
-                .map(|r| Rect::new(r.x, r.y + shared.inset, r.w, r.h));
+            let field = Field::of(&laid, shared.inset);
             let told = (field != shared.field)
-                .then(|| shared.on_field.clone().map(|told| (told, field)))
+                .then(|| shared.on_field.clone().map(|told| (told, field.clone())))
                 .flatten();
             shared.field = field;
             told
@@ -478,7 +476,7 @@ mod tests {
                 let _ = told.lock().unwrap().send(());
             },
         );
-        let places: Rc<RefCell<Vec<Option<Rect>>>> = Rc::default();
+        let places: Rc<RefCell<Vec<Option<Field>>>> = Rc::default();
         {
             let places = Rc::clone(&places);
             handle.watch_field(Box::new(move |place| places.borrow_mut().push(place)));
@@ -498,7 +496,14 @@ mod tests {
         assert!(boxes(&list) > 100, "the rows and dots of the list");
         let field = handle.field().expect("room for the filter's field");
         assert!(field.y >= 32.0, "below the strip: {field:?}");
-        assert_eq!(places.borrow().as_slice(), &[Some(field)]);
+        assert_eq!(
+            places
+                .borrow()
+                .iter()
+                .map(|place| place.as_ref().map(|p| p.rect))
+                .collect::<Vec<_>>(),
+            [Some(field)]
+        );
 
         // The page that was laid out is settled, and nothing wakes the application for it.
         while woken.recv_timeout(Duration::from_millis(300)).is_ok() {

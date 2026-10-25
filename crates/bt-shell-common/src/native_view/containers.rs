@@ -36,6 +36,8 @@ pub(crate) const LIST: Id = Id::named("containers list");
 /// The filter's box, and the room inside it the host's text field takes.
 pub(crate) const SEARCH: Id = Id::named("containers filter");
 pub(crate) const FIELD: Id = Id::named("containers filter field");
+/// What the host's field says while it is empty: the text in its room.
+pub(crate) const FIELD_HINT: &str = "Filter by name, image, port\u{2026}";
 /// The button that groups the list by project.
 const GROUP_BUTTON: Id = Id::named("containers group");
 /// The button that would sort it: there is one order in the fixed list, so it only looks it.
@@ -544,7 +546,15 @@ impl Containers {
             .bg(Role::Raised(1))
             .border(1.0, Role::Border)
             .press(SEARCH)
-            .child(div().id(FIELD).text_field().grow(1.0).min_w(0.0).h(18.0))
+            .child(
+                div()
+                    .id(FIELD)
+                    .text_field()
+                    .grow(1.0)
+                    .min_w(0.0)
+                    .h(18.0)
+                    .child(text(FIELD_HINT)),
+            )
             .child(kbd("/", 10.5));
         let counts = self.counts();
         let option = |status: Status, count: usize, tone: Option<Role>| {
