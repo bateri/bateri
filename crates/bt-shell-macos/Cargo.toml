@@ -199,10 +199,14 @@ objc2-app-kit = { workspace = true, features = [
 # of an existing dependency; wgpu already enables the same ones in the graph.
 # `CAAnimation`, `CAMediaTiming`, `CATransaction` and `CATransform3D`: a card's
 # slide and lift play as layer animations and transforms (`card`), so the
-# pane is laid out once; header flags too.
+# pane is laid out once; header flags too. `objc2-core-graphics`: the layer's
+# ground is the theme's background (`CALayer.backgroundColor`, a `CGColor`), what
+# shows beside a picture of another size; wgpu already turns it on in the graph,
+# so `Cargo.lock` does not move.
 objc2-quartz-core = { workspace = true, features = [
     "CABase", "CADisplayLink", "CALayer", "CAMediaTimingFunction", "CAMetalLayer",
     "CAAnimation", "CAMediaTiming", "CATransaction", "CATransform3D", "objc2-core-foundation",
+    "objc2-core-graphics",
 ] }
 # The upload's notification: `UNUserNotificationCenter`. A new crate,
 # user-approved; the rationale for the flags is in the workspace manifest.

@@ -23,7 +23,7 @@ use std::rc::{Rc, Weak};
 use bt_core::Theme;
 use bt_shell_common::native_view::{
     Accessible, AccessibleRole, Field, FieldKind, Id, Key, Mods, Outline, PageDrive, Point, Role,
-    tone_linear,
+    Tip, tone_linear,
 };
 use bt_shell_common::view_strip::Strip;
 use objc2::rc::{Retained, Weak as WeakId};
@@ -132,10 +132,17 @@ pub(crate) struct PageFields {
     family: Option<String>,
     zoom: Cell<f32>,
     fields: RefCell<Vec<PageField>>,
+    /// The outline the fields were last put by: where they go again when the pane's height
+    /// changes and the page's outline does not ([`PageFields::place_again`]).
+    outline: RefCell<Option<Outline>>,
     accessible: RefCell<Vec<Accessible>>,
     /// What a screen reader is given for each of `accessible`, in order: an element for a button
     /// or words, the field itself for a field.
     elements: RefCell<Vec<Retained<AnyObject>>>,
+    /// The page's tooltips as its outline last said, and the ones put on the pane's view for
+    /// them: AppKit's tag of each and the words it shows (the view does not keep them).
+    tips: RefCell<Vec<Tip>>,
+    tip_tags: RefCell<Vec<(isize, Retained<NSString>)>>,
     /// The field the keyboard was last known to be in.
     focused: Cell<Option<Id>>,
     /// The page's own reply is moving the keyboard: the field that takes it does not tell the
@@ -156,8 +163,11 @@ impl PageFields {
             family,
             zoom: Cell::new(zoom),
             fields: RefCell::new(Vec::new()),
+            outline: RefCell::new(None),
             accessible: RefCell::new(Vec::new()),
             elements: RefCell::new(Vec::new()),
+            tips: RefCell::new(Vec::new()),
+            tip_tags: RefCell::new(Vec::new()),
             focused: Cell::new(None),
             moving: Cell::new(false),
         })
@@ -213,6 +223,11 @@ impl PageFields {
             }
         }
         drop(fields);
+        if *self.tips.borrow() != outline.tips {
+            self.tips.replace(outline.tips.clone());
+            self.put_tips(&pane);
+        }
+        self.outline.replace(Some(outline.clone()));
         if *self.accessible.borrow() != outline.accessible {
             self.accessible.replace(outline.accessible.clone());
             let elements = outline
@@ -227,6 +242,62 @@ impl PageFields {
                 NSAccessibilityPostNotification(&pane, NSAccessibilityLayoutChangedNotification)
             };
         }
+    }
+
+    /// The pane changed size: each field is put again where the last outline says. The page's
+    /// rooms are measured from the pane's top and AppKit's frames from its bottom, so a pane
+    /// that grows or shrinks moves the frames even when the outline stays the same. The fields
+    /// are pinned to the top as the pane resizes ([`text_field`]); this settles what the
+    /// rounding of that leaves. Nothing is made or taken away here.
+    pub(crate) fn place_again(&self) {
+        if let Some(pane) = self.pane.load() {
+            self.put_tips(&pane);
+        }
+        let outline = self.outline.borrow();
+        let Some(outline) = outline.as_ref() else {
+            return;
+        };
+        let fields = self.fields.borrow();
+        for said in &outline.fields {
+            if let Some(field) = fields
+                .iter()
+                .find(|field| field.id == said.id && field.kind == said.kind)
+            {
+                place_field(&field.view, said, self.zoom.get(), self.family.as_deref());
+            }
+        }
+    }
+
+    /// Puts the page's tooltips on the pane's view, where the last outline says, in place of the
+    /// ones it had: AppKit shows each while the pointer rests in its rectangle, as the system's own.
+    fn put_tips(&self, pane: &TerminalPane) {
+        let view = pane.view();
+        for (tag, _) in self.tip_tags.take() {
+            view.removeToolTip(tag);
+        }
+        let height = pane.bounds().size.height;
+        let tags = self
+            .tips
+            .borrow()
+            .iter()
+            .map(|tip| {
+                // The page's rooms are from the pane's top, the pane's frames from its bottom.
+                let rect = tip.rect;
+                let in_pane = NSRect::new(
+                    NSPoint::new(f64::from(rect.x), height - f64::from(rect.y + rect.h)),
+                    NSSize::new(f64::from(rect.w), f64::from(rect.h)),
+                );
+                let words = NSString::from_str(&tip.words);
+                let at = view.convertRect_fromView(in_pane, Some(pane));
+                // SAFETY: an owner that does not answer `view:stringForToolTip:point:userData:`
+                // is shown by its description, which a string's is; it is kept in `tip_tags` for
+                // as long as the tooltip is on the view, and the data is null.
+                let tag =
+                    unsafe { view.addToolTipRect_owner_userData(at, &words, std::ptr::null_mut()) };
+                (tag, words)
+            })
+            .collect();
+        self.tip_tags.replace(tags);
     }
 
     /// What a screen reader is given for `item`: the field itself for a field (it reads and edits
@@ -318,8 +389,15 @@ impl PageFields {
         for field in self.fields.take() {
             field.view.removeFromSuperview();
         }
+        self.outline.take();
         self.accessible.take();
         self.elements.take();
+        self.tips.take();
+        if let Some(pane) = self.pane.load() {
+            for (tag, _) in self.tip_tags.take() {
+                pane.view().removeToolTip(tag);
+            }
+        }
     }
 
     /// The theme changed: the fields' ink with it.
@@ -520,7 +598,10 @@ fn text_field(
         NSLineBreakMode::ByTruncatingTail
     });
     field.setTextColor(Some(&ink(theme, Role::Foreground)));
-    field.setAutoresizingMask(NSAutoresizingMaskOptions::empty());
+    // Pinned to the pane's top, where the page's rooms are measured from: the pane's own
+    // coordinates grow upward, so a field with a fixed bottom margin would slide with the
+    // pane's bottom edge while it is resized, until the next outline put it back.
+    field.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinYMargin);
     // SAFETY: the pane implements the text field's delegate methods it is given (`impl
     // NSTextFieldDelegate for TerminalPane`) and outlives the field, which it removes with the page.
     unsafe { field.setDelegate(Some(ProtocolObject::from_ref(pane))) };

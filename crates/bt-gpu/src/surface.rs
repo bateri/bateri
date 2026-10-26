@@ -144,8 +144,9 @@ impl Surface {
     }
 
     /// The configured size in pixels, `None` before one is known — what a
-    /// still of the pane is drawn at, so it has the layout the surface has.
-    pub(crate) fn size(&self) -> Option<(u32, u32)> {
+    /// still of the pane is drawn at, so it has the layout the surface has; and what tells the
+    /// shell a geometry change moved the drawable (a resize's page is drawn at once).
+    pub fn size(&self) -> Option<(u32, u32)> {
         self.size.get()
     }
 
