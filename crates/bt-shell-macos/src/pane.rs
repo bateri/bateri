@@ -86,7 +86,7 @@ use crate::focus::Moment;
 use crate::grid::{self, Grid, split_into_grid};
 use bt_shell_common::kablo::roster::Background;
 use bt_shell_common::kablo::service::{PaneLink, Shown};
-use bt_shell_common::native_view::{Cursor as PageCursor, Input, Key, Keyboard, PageDrive, Reply};
+use bt_shell_common::native_view::{Cursor as PageCursor, Input, Keyboard, PageDrive, Reply};
 use bt_shell_common::view_strip;
 use objc2_app_kit::NSEvent;
 
@@ -5780,24 +5780,11 @@ impl TerminalPane {
         if !self.page_is_up() {
             return false;
         }
+        if self.page_signal(event) {
+            return true;
+        }
         let characters = event.characters().map(|text| text.to_string());
         let flags = event.modifierFlags();
-        match pencere_view::signal_of(flags, characters.as_deref()) {
-            Some(pencere_view::INTERRUPT) => {
-                if self.program_page_up() {
-                    self.interrupt_program();
-                } else {
-                    self.take_page_down();
-                }
-                return true;
-            }
-            // A demo page has no program behind it for them to reach: they are nobody's.
-            Some(character) if self.program_page_up() => {
-                self.signal_program(character);
-                return true;
-            }
-            _ => {}
-        }
         match self.page_handle() {
             None => {
                 if matches!(characters.as_deref(), Some("\u{1b}")) {
@@ -5813,6 +5800,30 @@ impl TerminalPane {
             }
         }
         true
+    }
+
+    /// ⌃C, ⌃\ and ⌃Z while a page of the kit's is up, wherever the keyboard is on it (the page, or
+    /// one of its fields): the tty's signal characters, the program's whatever its view shows. ⌃C
+    /// goes to the program of a program's view (which ends, and the view with it: the same rule as
+    /// a web view's, the strip's Quit ⌃C) and closes a demo, which has no program; the other two go
+    /// to the program, and are nobody's under a demo. `true` when the key was one of them.
+    fn page_signal(&self, event: &NSEvent) -> bool {
+        let characters = event.characters().map(|text| text.to_string());
+        match pencere_view::signal_of(event.modifierFlags(), characters.as_deref()) {
+            Some(pencere_view::INTERRUPT) => {
+                if self.program_page_up() {
+                    self.interrupt_program();
+                } else {
+                    self.take_page_down();
+                }
+                true
+            }
+            Some(character) if self.program_page_up() => {
+                self.signal_program(character);
+                true
+            }
+            _ => false,
+        }
     }
 
     /// The pointer or the wheel over a page of the kit's, in the view's points. `true` when a
@@ -5999,6 +6010,11 @@ impl TerminalPane {
             return true;
         }
         let event = NSApplication::sharedApplication(self.mtm()).currentEvent();
+        // ⌃C in a field ends the program as it does on the page: the field has no use for it, and
+        // AppKit names it `noop:` here rather than giving it to the terminal's `keyDown:`.
+        if event.as_ref().is_some_and(|event| self.page_signal(event)) {
+            return true;
+        }
         let mut mods = event
             .as_ref()
             .map(|event| crate::native_page::mods_of(event.modifierFlags()))
@@ -7883,8 +7899,13 @@ mod tests {
             pane.matches("module_message(").count() == 1,
             "nothing else writes a module's words"
         );
+        // On the page or in one of its fields: ⌃C is the program's wherever the keyboard is.
+        let signal = body("    fn page_signal(");
+        assert!(signal.contains("self.interrupt_program()"), "{signal}");
         let key = body("    pub(crate) fn page_key(");
-        assert!(key.contains("self.interrupt_program()"), "{key}");
+        assert!(key.contains("self.page_signal(event)"), "{key}");
+        let field = body("    fn page_field_command(");
+        assert!(field.contains("self.page_signal(event)"), "{field}");
         assert!(key.contains("self.signal_program(character)"), "{key}");
         let strip = include_str!("native_page.rs");
         let at = strip.find("fn program_strip(").expect("program_strip");
