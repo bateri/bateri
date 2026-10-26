@@ -4074,10 +4074,11 @@ impl TerminalPane {
         fields
     }
 
-    /// Puts a field of the page's over the page, under the veil links are opened from.
-    pub(crate) fn add_page_field(&self, field: &crate::native_page::PageTextField) {
+    /// Puts the view the page's fields stand in over the page, under the veil links are opened
+    /// from.
+    pub(crate) fn add_page_fields_host(&self, host: &crate::native_page::FieldsHost) {
         self.addSubview_positioned_relativeTo(
-            field,
+            host,
             NSWindowOrderingMode::Below,
             Some(&self.ivars().link_veil),
         );

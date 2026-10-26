@@ -36,7 +36,7 @@ use objc2_app_kit::{
     NSEventModifierFlags, NSFocusRingType, NSFont, NSLineBreakMode, NSResponder,
     NSSecureTextFieldCell, NSTextField, NSTrackingArea, NSTrackingAreaOptions, NSView,
 };
-use objc2_foundation::{NSObject, NSPoint, NSRect, NSSize, NSString};
+use objc2_foundation::{NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
 
 use crate::pane::TerminalPane;
 use crate::pencere_view::face::Faces;
@@ -115,6 +115,63 @@ pub(crate) struct Page {
     pub area: Retained<NSTrackingArea>,
 }
 
+define_class!(
+    // SAFETY: NSView is designed for subclassing; the host implements no `Drop` and is born with
+    // `initWithFrame:`.
+    #[unsafe(super(NSView))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "BateriPageFieldsHost"]
+    #[ivars = ()]
+    pub(crate) struct FieldsHost;
+
+    unsafe impl NSObjectProtocol for FieldsHost {}
+
+    impl FieldsHost {
+        /// The page's own axis: y from the top, as the page's rooms are measured. A field's frame
+        /// is its room, whatever the pane's height.
+        #[unsafe(method(isFlipped))]
+        fn is_flipped(&self) -> bool {
+            true
+        }
+
+        /// Only the fields take a press; everywhere else the page under the host is hit.
+        #[unsafe(method_id(hitTest:))]
+        fn hit_test(&self, point: NSPoint) -> Option<Retained<NSView>> {
+            // SAFETY: reading the superview; we are on the main thread.
+            let local = match unsafe { self.superview() } {
+                Some(parent) => self.convertPoint_fromView(point, Some(&parent)),
+                None => point,
+            };
+            let fields: Vec<_> = self.subviews().iter().collect();
+            fields.into_iter().rev().find_map(|field| {
+                let frame = field.frame();
+                let inside = local.x >= frame.origin.x
+                    && local.y >= frame.origin.y
+                    && local.x < frame.origin.x + frame.size.width
+                    && local.y < frame.origin.y + frame.size.height;
+                if inside && !field.isHidden() {
+                    field.hitTest(local)
+                } else {
+                    None
+                }
+            })
+        }
+    }
+);
+
+impl FieldsHost {
+    fn new(pane: &TerminalPane) -> Retained<Self> {
+        let this = Self::alloc(pane.mtm()).set_ivars(());
+        // SAFETY: `initWithFrame:` is NSView's designated initializer.
+        let host: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: pane.bounds()] };
+        host.setAutoresizingMask(
+            NSAutoresizingMaskOptions::ViewWidthSizable
+                | NSAutoresizingMaskOptions::ViewHeightSizable,
+        );
+        host
+    }
+}
+
 /// One text field of the page's: its name, its kind, the field of AppKit's that stands in its
 /// room.
 pub(crate) struct PageField {
@@ -128,6 +185,10 @@ pub(crate) struct PageField {
 /// large as the page is drawn.
 pub(crate) struct PageFields {
     pane: WeakId<TerminalPane>,
+    /// The view the fields stand in: over the whole pane, on the page's axis (y from the top),
+    /// so a field's frame is the room the page laid out for it and nothing of AppKit's moves it
+    /// when the pane changes size or place: the fields are where the page is drawn, always.
+    host: Retained<FieldsHost>,
     theme: Cell<Theme>,
     family: Option<String>,
     zoom: Cell<f32>,
@@ -157,8 +218,11 @@ impl PageFields {
         family: Option<String>,
         zoom: f32,
     ) -> Rc<Self> {
+        let host = FieldsHost::new(pane);
+        pane.add_page_fields_host(&host);
         Rc::new(Self {
             pane: WeakId::new(pane),
+            host,
             theme: Cell::new(theme),
             family,
             zoom: Cell::new(zoom),
@@ -180,6 +244,7 @@ impl PageFields {
         let Some(pane) = self.pane.load() else {
             return;
         };
+        self.cover(&pane);
         let mut fields = self.fields.borrow_mut();
         let kept: Vec<(Id, FieldKind)> = outline.fields.iter().map(|f| (f.id, f.kind)).collect();
         fields.retain(|field| {
@@ -209,7 +274,7 @@ impl PageFields {
                         self,
                     );
                     view.ivars().id.set(Some(said.id));
-                    pane.add_page_field(&view);
+                    self.host.addSubview(&view);
                     fields.push(PageField {
                         id: said.id,
                         kind: said.kind,
@@ -220,6 +285,7 @@ impl PageFields {
             };
             if let Some(field) = fields.get(index) {
                 place_field(&field.view, said, self.zoom.get(), self.family.as_deref());
+                trace(&pane, &self.host, &field.view, said, "outline");
             }
         }
         drop(fields);
@@ -244,15 +310,16 @@ impl PageFields {
         }
     }
 
-    /// The pane changed size: each field is put again where the last outline says. The page's
-    /// rooms are measured from the pane's top and AppKit's frames from its bottom, so a pane
-    /// that grows or shrinks moves the frames even when the outline stays the same. The fields
-    /// are pinned to the top as the pane resizes ([`text_field`]); this settles what the
-    /// rounding of that leaves. Nothing is made or taken away here.
+    /// The pane changed size or place: the host covers it again and each field stands where the
+    /// last outline says. The host's axis is the page's, so a field's frame does not depend on the
+    /// pane's height; this only settles a host whose frame was set while the pane was out of its
+    /// window. Nothing is made or taken away here.
     pub(crate) fn place_again(&self) {
-        if let Some(pane) = self.pane.load() {
-            self.put_tips(&pane);
-        }
+        let Some(pane) = self.pane.load() else {
+            return;
+        };
+        self.cover(&pane);
+        self.put_tips(&pane);
         let outline = self.outline.borrow();
         let Some(outline) = outline.as_ref() else {
             return;
@@ -263,8 +330,19 @@ impl PageFields {
                 .iter()
                 .find(|field| field.id == said.id && field.kind == said.kind)
             {
+                trace(&pane, &self.host, &field.view, said, "geometry, before");
                 place_field(&field.view, said, self.zoom.get(), self.family.as_deref());
+                trace(&pane, &self.host, &field.view, said, "geometry");
             }
+        }
+    }
+
+    /// The host over the whole pane, as the pane is now (its autoresizing keeps it so; this
+    /// settles what a frame set while the pane was out of its window left).
+    fn cover(&self, pane: &TerminalPane) {
+        let bounds = pane.bounds();
+        if self.host.frame() != bounds {
+            self.host.setFrame(bounds);
         }
     }
 
@@ -389,6 +467,7 @@ impl PageFields {
         for field in self.fields.take() {
             field.view.removeFromSuperview();
         }
+        self.host.removeFromSuperview();
         self.outline.take();
         self.accessible.take();
         self.elements.take();
@@ -601,7 +680,9 @@ fn text_field(
     // Pinned to the pane's top, where the page's rooms are measured from: the pane's own
     // coordinates grow upward, so a field with a fixed bottom margin would slide with the
     // pane's bottom edge while it is resized, until the next outline put it back.
-    field.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinYMargin);
+    // The host is on the page's axis and covers the pane: a field keeps the frame its room gives
+    // it, and AppKit moves nothing.
+    field.setAutoresizingMask(NSAutoresizingMaskOptions::empty());
     // SAFETY: the pane implements the text field's delegate methods it is given (`impl
     // NSTextFieldDelegate for TerminalPane`) and outlives the field, which it removes with the page.
     unsafe { field.setDelegate(Some(ProtocolObject::from_ref(pane))) };
@@ -619,12 +700,13 @@ fn face(family: Option<&str>, size: f64) -> Retained<NSFont> {
 /// page's hint while it is empty, and what it is to a screen reader. A line is as tall as its
 /// own line (its font's, which AppKit draws from the top of the frame), so it is that line that
 /// is centred in the room, not a taller frame with the text at its top; lines take the whole
-/// room. The text is as large as the page is drawn (`zoom`). The pane's own coordinates grow
-/// upward, the page's downward.
+/// room. The text is as large as the page is drawn (`zoom`). The field stands in the host
+/// ([`FieldsHost`]), whose axis is the page's: its frame is its room, from the top.
 fn place_field(field: &PageTextField, place: &Field, zoom: f32, family: Option<&str>) {
-    let Some(pane) = (unsafe { field.superview() }) else {
+    // SAFETY: reading the superview; we are on the main thread.
+    if unsafe { field.superview() }.is_none() {
         return;
-    };
+    }
     let size = FIELD_TEXT * f64::from(zoom);
     if field
         .font()
@@ -648,11 +730,14 @@ fn place_field(field: &PageTextField, place: &Field, zoom: f32, family: Option<&
         let middle = f64::from(room.y + room.h / 2.0);
         ((middle - height / 2.0).round(), height)
     };
-    let y = pane.bounds().size.height - (top + height);
-    field.setFrame(NSRect::new(
-        NSPoint::new(f64::from(room.x), y),
+    // The host's y is the page's, from the top.
+    let frame = NSRect::new(
+        NSPoint::new(f64::from(room.x), top),
         NSSize::new(f64::from(room.w), height),
-    ));
+    );
+    if field.frame() != frame {
+        field.setFrame(frame);
+    }
     field.setHidden(false);
 }
 
@@ -671,6 +756,43 @@ fn line_height(field: &PageTextField) -> f64 {
         .map(|cell| cell.cellSize().height)
         .filter(|height| height.is_finite() && *height > 0.0)
         .map_or_else(font_line, f64::ceil)
+}
+
+/// Whether bateri was started with `BATERI_TRACE_FIELDS` set: then each placing of a page's
+/// field is written to the standard error, with the geometry it was placed in, to find a field
+/// that is not where its page draws its box.
+fn tracing() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("BATERI_TRACE_FIELDS").is_some())
+}
+
+/// One line of the trace ([`tracing`]): why the field was placed, its room in the page, its frame
+/// in the host and in the window, and the host's, the pane's and the pane's bounds.
+fn trace(pane: &TerminalPane, host: &FieldsHost, field: &PageTextField, said: &Field, why: &str) {
+    if !tracing() {
+        return;
+    }
+    let rect = |r: NSRect| {
+        format!(
+            "({:.1},{:.1} {:.1}x{:.1})",
+            r.origin.x, r.origin.y, r.size.width, r.size.height
+        )
+    };
+    let room = said.rect;
+    let in_window = field.convertRect_toView(field.bounds(), None);
+    eprintln!(
+        "bateri fields [{why}] room=({:.1},{:.1} {:.1}x{:.1}) field={} in_window={} host={} pane={} pane_bounds={} in_window={}",
+        room.x,
+        room.y,
+        room.w,
+        room.h,
+        rect(field.frame()),
+        rect(in_window),
+        rect(host.frame()),
+        rect(pane.frame()),
+        rect(pane.bounds()),
+        pane.window().is_some(),
+    );
 }
 
 /// The tracking area that tells `view` where the pointer is over its whole visible rectangle,
