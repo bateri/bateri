@@ -761,7 +761,7 @@ fn line_height(field: &PageTextField) -> f64 {
 /// Whether bateri was started with `BATERI_TRACE_FIELDS` set: then each placing of a page's
 /// field is written to the standard error, with the geometry it was placed in, to find a field
 /// that is not where its page draws its box.
-fn tracing() -> bool {
+pub(crate) fn tracing() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("BATERI_TRACE_FIELDS").is_some())
 }
