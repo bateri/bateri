@@ -29,8 +29,8 @@ use pencere_sandbox::{
 use pencere_view::{Element, Event, Role, Size, div, text};
 
 use super::{
-    Drained, Field, Input, PageDrive, Rect, Reply, Shaped, Typeset, UiContext, UiList, UiPage,
-    from_pane, into_page, to_list,
+    Drained, Field, Id, Input, OnOutline, Outline, PageDrive, Placement, Reply, Shaped, Typeset,
+    UiContext, UiList, UiPage, from_pane, into_page, to_list,
 };
 
 /// What the page and its handle share.
@@ -48,11 +48,11 @@ struct Shared {
     wake_at: Option<f64>,
     /// The viewport (points) and the scale the module was last asked for a page for.
     asked: Option<(Size, f32)>,
-    /// Points at the top of the pane the application keeps.
-    inset: f32,
-    /// Where the text field's room was last said to stand, in the pane's points.
-    field: Option<Field>,
-    on_field: Option<Rc<dyn Fn(Option<Field>)>>,
+    /// Where the page stands in the pane.
+    place: Placement,
+    /// The fields and what a screen reader says, as last told, in the pane's points.
+    outline: Outline,
+    on_outline: Option<OnOutline>,
     /// A page arrived that the pane has not been told of.
     redraw: bool,
     /// What the module said that the pane has not taken.
@@ -87,12 +87,12 @@ impl Shared {
             self.diagnostics
                 .extend(arrived.diagnostics.iter().map(ToString::to_string));
         }
-        let inset = self.inset;
+        let place = self.place;
         self.replies.extend(
             update
                 .replies
                 .into_iter()
-                .map(|answer| (from_pane(answer.reply, inset), answer.pointer)),
+                .map(|answer| (from_pane(answer.reply, place), answer.pointer)),
         );
         // How much the module may say is not decided here: it was told *full* by the flow when
         // the program had no room, and what it said is what the program has room for.
@@ -203,9 +203,9 @@ fn page_around(
         animating: false,
         wake_at: None,
         asked: None,
-        inset,
-        field: None,
-        on_field: None,
+        place: Placement { inset, zoom: 1.0 },
+        outline: Outline::default(),
+        on_outline: None,
         redraw: false,
         replies: Vec::new(),
         ended: None,
@@ -230,24 +230,28 @@ pub struct ModuleHandle {
 }
 
 impl ModuleHandle {
-    /// Where the text field's room stands, in the pane's points, as of the last frame.
-    pub fn field(&self) -> Option<Rect> {
-        self.shared.borrow().field.as_ref().map(|field| field.rect)
+    /// The page's fields, in the pane's points, as of the last frame.
+    pub fn fields(&self) -> Vec<Field> {
+        self.shared.borrow().outline.fields.clone()
     }
 }
 
 impl PageDrive for ModuleHandle {
     fn send_input(&self, input: Input) {
         let shared = self.shared.borrow();
-        let input = into_page(input, shared.inset);
+        let input = into_page(input, shared.place);
         shared.module.event(Event::Input(input));
     }
 
-    fn send_query(&self, text: &str) {
-        self.shared
-            .borrow()
-            .module
-            .event(Event::Text(text.to_owned()));
+    fn send_text(&self, field: Id, text: &str) {
+        self.shared.borrow().module.event(Event::Text {
+            field,
+            text: text.to_owned(),
+        });
+    }
+
+    fn send_focus(&self, field: Option<Id>) {
+        self.shared.borrow().module.event(Event::Focus(field));
     }
 
     fn send_pick(&self, index: usize) {
@@ -262,15 +266,22 @@ impl PageDrive for ModuleHandle {
         self.shared.borrow().module.room();
     }
 
-    fn watch_field(&self, told: Box<dyn Fn(Option<Field>)>) {
-        let (field, told) = {
+    fn watch_outline(&self, told: Box<dyn Fn(&Outline)>) {
+        let (outline, told) = {
             let mut shared = self.shared.borrow_mut();
-            let told: Rc<dyn Fn(Option<Field>)> = Rc::from(told);
-            shared.on_field = Some(Rc::clone(&told));
-            (shared.field.clone(), told)
+            let told: Rc<dyn Fn(&Outline)> = Rc::from(told);
+            shared.on_outline = Some(Rc::clone(&told));
+            (shared.outline.clone(), told)
         };
-        if field.is_some() {
-            told(field);
+        told(&outline);
+    }
+
+    fn set_zoom(&self, zoom: f32) {
+        let mut shared = self.shared.borrow_mut();
+        if shared.place.zoom != zoom {
+            shared.place.zoom = zoom;
+            // Laid out again at the size it now has.
+            shared.redraw = true;
         }
     }
 
@@ -320,8 +331,9 @@ struct ModulePage {
 
 impl UiPage for ModulePage {
     fn build(&mut self, cx: &UiContext<'_>) -> UiList {
-        let scale = cx.scale as f32;
-        let inset = (self.inset * scale).round();
+        let zoom = self.shared.borrow().place.zoom;
+        let inset = (self.inset * cx.scale as f32).round();
+        let scale = cx.scale as f32 * zoom;
         let width = cx.size_px.0 as f32;
         let height = (cx.size_px.1 as f32 - inset).max(0.0);
         let size = Size::new(width / scale, height / scale);
@@ -372,16 +384,21 @@ impl UiPage for ModulePage {
             if !starting {
                 shared.module.lay_out(Arc::clone(&laid));
             }
-            let field = Field::of(&laid, shared.inset);
-            let told = (field != shared.field)
-                .then(|| shared.on_field.clone().map(|told| (told, field.clone())))
+            let outline = Outline::of(&laid, shared.place);
+            let told = (outline != shared.outline)
+                .then(|| {
+                    shared
+                        .on_outline
+                        .clone()
+                        .map(|told| (told, outline.clone()))
+                })
                 .flatten();
-            shared.field = field;
+            shared.outline = outline;
             told
         };
-        // After the page is let go of: the host moves its field in this call.
-        if let Some((told, field)) = told {
-            told(field);
+        // After the page is let go of: the host moves its fields in this call.
+        if let Some((told, outline)) = told {
+            told(&outline);
         }
         list
     }
@@ -476,10 +493,12 @@ mod tests {
                 let _ = told.lock().unwrap().send(());
             },
         );
-        let places: Rc<RefCell<Vec<Option<Field>>>> = Rc::default();
+        let places: Rc<RefCell<Vec<Vec<Field>>>> = Rc::default();
         {
             let places = Rc::clone(&places);
-            handle.watch_field(Box::new(move |place| places.borrow_mut().push(place)));
+            handle.watch_outline(Box::new(move |outline| {
+                places.borrow_mut().push(outline.fields.clone());
+            }));
         }
 
         // A line instead of a page yet, and the first frame does not wait for the module.
@@ -494,15 +513,19 @@ mod tests {
         assert_eq!(drained.ended, None);
         let list = build(&mut page, &renderer, &theme, 0.1);
         assert!(boxes(&list) > 100, "the rows and dots of the list");
-        let field = handle.field().expect("room for the filter's field");
+        let field = handle
+            .fields()
+            .first()
+            .expect("room for the filter's field")
+            .rect;
         assert!(field.y >= 32.0, "below the strip: {field:?}");
         assert_eq!(
             places
                 .borrow()
                 .iter()
-                .map(|place| place.as_ref().map(|p| p.rect))
+                .map(|fields| fields.iter().map(|f| f.rect).collect::<Vec<_>>())
                 .collect::<Vec<_>>(),
-            [Some(field)]
+            [Vec::new(), vec![field]]
         );
 
         // The page that was laid out is settled, and nothing wakes the application for it.
@@ -567,7 +590,11 @@ mod tests {
         assert_eq!(drained.ended, None);
         let list = build(&mut page, &renderer, &theme, 0.1);
         assert!(boxes(&list) > 100, "the rows and dots of the list");
-        let field = handle.field().expect("room for the filter's field");
+        let field = handle
+            .fields()
+            .first()
+            .expect("room for the filter's field")
+            .rect;
         assert!(field.y >= 32.0, "below the strip: {field:?}");
 
         // Laid out and settled, the page is at rest: nothing wakes the application for it.

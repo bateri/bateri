@@ -63,6 +63,7 @@ impl Sheet<'_, '_> {
             family: family.clone(),
             size_px: f64::from(size_pt) * f64::from(self.scale),
             weight,
+            italic: false,
         };
         let Some(font) = self.cx.renderer.ui_font(&style) else {
             return (0.0, 0.0);

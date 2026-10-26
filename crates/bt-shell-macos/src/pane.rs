@@ -70,9 +70,9 @@ use objc2_app_kit::{
 use objc2_core_foundation::CFRetained;
 use objc2_core_graphics::CGImage;
 use objc2_foundation::{
-    NSAttributedString, NSAttributedStringKey, NSDate, NSDateFormatter, NSDateFormatterStyle,
-    NSDictionary, NSMutableAttributedString, NSNotification, NSNotificationCenter,
-    NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSUUID, ns_string,
+    NSArray, NSAttributedString, NSAttributedStringKey, NSDate, NSDateFormatter,
+    NSDateFormatterStyle, NSDictionary, NSMutableAttributedString, NSNotification,
+    NSNotificationCenter, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSUUID, ns_string,
 };
 use objc2_quartz_core::CAMetalLayer;
 
@@ -84,7 +84,7 @@ use crate::focus::Moment;
 use crate::grid::{self, Grid, split_into_grid};
 use bt_shell_common::kablo::roster::Background;
 use bt_shell_common::kablo::service::{PaneLink, Shown};
-use bt_shell_common::native_view::{Cursor as PageCursor, Input, Keyboard, PageDrive, Reply};
+use bt_shell_common::native_view::{Cursor as PageCursor, Input, Key, Keyboard, PageDrive, Reply};
 use bt_shell_common::view_strip;
 use objc2_app_kit::NSEvent;
 
@@ -2384,6 +2384,19 @@ define_class!(
 
         /// The text of a field this pane is the delegate of changed: a page's filter (the
         /// search field has its action, `searchFieldChanged:`).
+        #[unsafe(method_id(accessibilityChildren))]
+        fn accessibility_children(&self) -> Option<Retained<NSArray>> {
+            // What the screen reader is given of the pane: a page of the kit's elements and fields
+            // in place of the terminal's view while one is up.
+            // SAFETY: NSView's own answer, which takes nothing.
+            let below: Option<Retained<NSArray>> =
+                unsafe { msg_send![super(self), accessibilityChildren] };
+            match self.page_accessibility(below.clone()) {
+                Some(page) => Some(page),
+                None => below,
+            }
+        }
+
         #[unsafe(method(controlTextDidChange:))]
         fn control_text_did_change(&self, notification: &NSNotification) {
             self.page_field_changed(notification);
@@ -2400,15 +2413,15 @@ define_class!(
         fn control_do_command(
             &self,
             control: &AnyObject,
-            _text_view: &AnyObject,
+            text_view: &AnyObject,
             command: Sel,
         ) -> bool {
             self.note_interaction();
-            // A page's filter field has this pane for its delegate too: its keys are not the
+            // A page's fields have this pane for their delegate too: their keys are not the
             // search bar's.
             let page_field = self
-                .is_page_field(control)
-                .then(|| self.page_field_command(command));
+                .page_field_of(control)
+                .map(|(_, kind)| self.page_field_command(kind, text_view, command));
             // No `return`: `define_class!` converts the `bool` at the end of the body.
             if let Some(handled) = page_field {
                 handled
@@ -3981,6 +3994,103 @@ impl TerminalPane {
         if self.ivars().renderer.set_font(&font) {
             self.refresh_geometry();
         }
+        // A page of the kit is as large as the terminal's text, Bigger and Smaller with it.
+        if let Some(page) = self.ivars().page_up.borrow().as_ref() {
+            let zoom = self.page_zoom();
+            page.fields.set_zoom(zoom);
+            page.handle.set_zoom(zoom);
+            if let Some(link) = self.link() {
+                link.poke_page();
+            }
+        }
+    }
+
+    /// How much larger than its own size a page of the kit is drawn: as the terminal's text is
+    /// to the kit's ([`bt_shell_common::native_view::Placement::zoom_for`]).
+    fn page_zoom(&self) -> f32 {
+        let font = self.ivars().zoom.get().apply(&self.ivars().font.borrow());
+        bt_shell_common::native_view::Placement::zoom_for(font.size)
+    }
+
+    /// The fields of the page `handle` drives: made and moved as its outline says, the size of
+    /// the terminal's text, and the page told how large it is drawn.
+    fn page_fields(
+        &self,
+        handle: &Rc<dyn PageDrive>,
+        theme: &bt_core::Theme,
+        family: Option<String>,
+    ) -> Rc<crate::native_page::PageFields> {
+        let zoom = self.page_zoom();
+        let fields = crate::native_page::PageFields::new(self, *theme, family, zoom);
+        handle.set_zoom(zoom);
+        {
+            // The page says where its fields are whenever it is laid out another way.
+            let fields = Rc::clone(&fields);
+            handle.watch_outline(Box::new(move |outline| fields.apply(outline)));
+        }
+        fields
+    }
+
+    /// Puts a field of the page's over the page, under the veil links are opened from.
+    pub(crate) fn add_page_field(&self, field: &crate::native_page::PageTextField) {
+        self.addSubview_positioned_relativeTo(
+            field,
+            NSWindowOrderingMode::Below,
+            Some(&self.ivars().link_veil),
+        );
+    }
+
+    /// A press and a release on the page at `at` (the pane's points from its top): what a screen
+    /// reader's press on a button of it is.
+    pub(crate) fn press_page_at(&self, at: bt_shell_common::native_view::Point) {
+        let Some(handle) = self.page_handle() else {
+            return;
+        };
+        let button = bt_shell_common::native_view::Button::Left;
+        handle.send_input(Input::Press {
+            at,
+            button,
+            mods: bt_shell_common::native_view::Mods::default(),
+            count: 1,
+        });
+        handle.send_input(Input::Release { at, button });
+        self.drain_page();
+    }
+
+    /// What the screen reader is given of the pane while a page of the kit is up: the page's own
+    /// elements and fields in the order it reads them, after the pane's other views (the strip)
+    /// but in place of the terminal's view, which the page covers. `None` while no page is up.
+    pub(crate) fn page_accessibility(
+        &self,
+        below: Option<Retained<NSArray>>,
+    ) -> Option<Retained<NSArray>> {
+        let page = self.ivars().page_up.borrow();
+        let page = page.as_ref()?;
+        let elements = page.fields.elements();
+        let terminal: &AnyObject = self.view();
+        let mut children: Vec<Retained<AnyObject>> = below
+            .map(|below| below.to_vec())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|child| {
+                let child: &AnyObject = child;
+                !std::ptr::eq(child, terminal)
+                    && !elements
+                        .iter()
+                        .any(|element| std::ptr::eq(child, &**element))
+            })
+            .collect();
+        children.extend(elements);
+        Some(NSArray::from_retained_slice(&children))
+    }
+
+    /// The person clicked into the page's field named `field` (or the keyboard left the fields
+    /// of itself): the page is told.
+    pub(crate) fn page_field_focused(&self, field: Option<bt_shell_common::native_view::Id>) {
+        if let Some(handle) = self.page_handle() {
+            handle.send_focus(field);
+            self.drain_page();
+        }
     }
 
     /// `[remote]` changed — the `hosts` pattern list goes to the session; the
@@ -4028,7 +4138,7 @@ impl TerminalPane {
             strip.paint(&theme);
         }
         if let Some(page) = self.ivars().page_up.borrow().as_ref() {
-            crate::native_page::paint(&page.field, &theme);
+            page.fields.paint(&theme);
         }
         if let Some(bar) = self.ivars().search.get() {
             bar.paint(&theme, theme.is_dark());
@@ -5547,24 +5657,12 @@ impl TerminalPane {
                 (page, Rc::new(handle))
             }
         };
-        let field = crate::native_page::filter_field(self, &theme, family.as_deref());
-        self.addSubview_positioned_relativeTo(
-            &field,
-            NSWindowOrderingMode::Below,
-            Some(&ivars.link_veil),
-        );
-        {
-            // The page says where its box for the field is whenever it is laid out another way.
-            let field = field.clone();
-            handle.watch_field(Box::new(move |place| {
-                crate::native_page::place_field(&field, place);
-            }));
-        }
+        let fields = self.page_fields(&handle, &theme, family);
         let area = crate::native_page::pointer_area(self.view());
         ivars.page_up.replace(Some(crate::native_page::Page {
             owner: crate::native_page::Owner::Demo,
             handle,
-            field,
+            fields,
             area,
         }));
         link.set_page(Some(page));
@@ -5580,11 +5678,11 @@ impl TerminalPane {
             strip.removeFromSuperview();
         }
         if let Some(page) = self.ivars().page_up.take() {
-            // The keyboard was in the field: it goes back to the terminal.
-            let typing = page.field.currentEditor().is_some();
+            // The keyboard was in a field: it goes back to the terminal.
+            let typing = page.fields.typing();
             self.view().removeTrackingArea(&page.area);
             self.view().forget_page_pointer();
-            page.field.removeFromSuperview();
+            page.fields.clear();
             if typing && let Some(window) = self.window() {
                 window.makeFirstResponder(Some(self.view()));
             }
@@ -5651,6 +5749,17 @@ impl TerminalPane {
     pub(crate) fn page_input(&self, input: Input) -> bool {
         if !self.page_is_up() {
             return false;
+        }
+        // A click on the page took the keyboard out of a field: the page hears it first.
+        let left = matches!(input, Input::Press { .. })
+            && self
+                .ivars()
+                .page_up
+                .borrow()
+                .as_ref()
+                .is_some_and(|page| page.fields.left_of_itself());
+        if left {
+            self.page_field_focused(None);
         }
         if let Some(handle) = self.page_handle() {
             handle.send_input(input);
@@ -5740,17 +5849,30 @@ impl TerminalPane {
                 PageCursor::Pointer => NSCursor::pointingHandCursor().set(),
                 PageCursor::Text => NSCursor::IBeamCursor().set(),
                 PageCursor::Arrow => NSCursor::arrowCursor().set(),
+                // Their replacements are macOS 15's; bateri runs on 14.
+                #[allow(deprecated)]
+                PageCursor::ResizeHorizontal => NSCursor::resizeLeftRightCursor().set(),
+                #[allow(deprecated)]
+                PageCursor::ResizeVertical => NSCursor::resizeUpDownCursor().set(),
+                PageCursor::NotAllowed => NSCursor::operationNotAllowedCursor().set(),
+                PageCursor::Grab => NSCursor::openHandCursor().set(),
+                PageCursor::Grabbing => NSCursor::closedHandCursor().set(),
+                PageCursor::Crosshair => NSCursor::crosshairCursor().set(),
             }
         }
-        if let Some(Keyboard::Field) = reply.keyboard {
-            let field = self
-                .ivars()
-                .page_up
-                .borrow()
-                .as_ref()
-                .map(|p| p.field.clone());
-            if let (Some(field), Some(window)) = (field, self.window()) {
-                window.makeFirstResponder(Some(&field));
+        let fields = self
+            .ivars()
+            .page_up
+            .borrow()
+            .as_ref()
+            .map(|page| Rc::clone(&page.fields));
+        if let Some(fields) = fields {
+            // The texts first, so that a field the keyboard goes to holds what it is to edit.
+            fields.fill(&reply.fill);
+            match reply.keyboard {
+                Some(Keyboard::Field(id)) => fields.send_keyboard(Some(id)),
+                Some(Keyboard::Page) => fields.send_keyboard(None),
+                None => {}
             }
         }
         if let Some(text) = reply.copy {
@@ -5770,42 +5892,71 @@ impl TerminalPane {
         }
     }
 
-    /// Whether `control` is the demo page's filter field.
-    fn is_page_field(&self, control: &AnyObject) -> bool {
-        self.ivars().page_up.borrow().as_ref().is_some_and(|page| {
-            std::ptr::eq(
-                std::ptr::from_ref(control).cast::<()>(),
-                std::ptr::from_ref(&*page.field).cast::<()>(),
-            )
-        })
+    /// The name and the kind of the page's field `control` is, if it is one.
+    fn page_field_of(
+        &self,
+        control: &AnyObject,
+    ) -> Option<(
+        bt_shell_common::native_view::Id,
+        bt_shell_common::native_view::FieldKind,
+    )> {
+        self.ivars()
+            .page_up
+            .borrow()
+            .as_ref()
+            .and_then(|page| page.fields.of(control))
     }
 
-    /// A key of the filter field's: ⏎, ↓, Tab and Esc leave it (the text stays) and give the
-    /// keyboard back to the page, where a further Esc closes it. The rest is the field's.
-    fn page_field_command(&self, command: Sel) -> bool {
-        let leaves = [
-            sel!(cancelOperation:),
-            sel!(insertNewline:),
-            sel!(moveDown:),
-            sel!(insertTab:),
-        ];
-        if !leaves.contains(&command) {
-            return false;
+    /// A key of a page's field that is the page's (the kit's specification, §4): in a line,
+    /// ⏎, Esc, Tab, ⇧Tab, ↑ and ↓; in lines, Esc and Tab, and ⏎ breaks the line. The page reads
+    /// it as a key and says in its reply where the keyboard goes; the field keeps it until then.
+    /// The rest is the field's.
+    fn page_field_command(
+        &self,
+        kind: bt_shell_common::native_view::FieldKind,
+        text_view: &AnyObject,
+        command: Sel,
+    ) -> bool {
+        use bt_shell_common::native_view::FieldKind;
+        let lines = kind == FieldKind::Lines;
+        if lines && command == sel!(insertNewline:) {
+            // SAFETY: the field editor is an `NSTextView`, which answers this with the newline
+            // it would put in a text view that is not a field's.
+            let _: () = unsafe {
+                msg_send![text_view, insertNewlineIgnoringFieldEditor: None::<&AnyObject>]
+            };
+            return true;
         }
-        if let Some(window) = self.window() {
-            window.makeFirstResponder(Some(self.view()));
+        let key = match command {
+            c if c == sel!(cancelOperation:) => Key::Escape,
+            c if c == sel!(insertTab:) || c == sel!(insertBacktab:) => Key::Tab,
+            c if c == sel!(insertNewline:) => Key::Enter,
+            c if c == sel!(moveUp:) && !lines => Key::Up,
+            c if c == sel!(moveDown:) && !lines => Key::Down,
+            _ => return false,
+        };
+        let mut mods = NSApplication::sharedApplication(self.mtm())
+            .currentEvent()
+            .map(|event| crate::native_page::mods_of(event.modifierFlags()))
+            .unwrap_or_default();
+        if command == sel!(insertBacktab:) {
+            mods.shift = true;
+        }
+        if let Some(handle) = self.page_handle() {
+            handle.send_input(Input::Key { key, mods });
+            self.drain_page();
         }
         true
     }
 
-    /// The text of the demo page's filter field changed: the list narrows to it.
+    /// The text of a page's field changed: the page is told which field and what it holds.
     fn page_field_changed(&self, notification: &NSNotification) {
         let Some(object) = notification.object() else {
             return;
         };
-        if !self.is_page_field(&object) {
+        let Some((id, _)) = self.page_field_of(&object) else {
             return;
-        }
+        };
         let Some(handle) = self.page_handle() else {
             return;
         };
@@ -5814,9 +5965,10 @@ impl TerminalPane {
             .page_up
             .borrow()
             .as_ref()
-            .map(|page| page.field.stringValue().to_string())
+            .and_then(|page| page.fields.field(id))
+            .map(|field| field.stringValue().to_string())
             .unwrap_or_default();
-        handle.send_query(&text);
+        handle.send_text(id, &text);
         self.drain_page();
     }
 
@@ -6008,24 +6160,12 @@ impl TerminalPane {
             )
         };
         let handle: Rc<dyn PageDrive> = Rc::new(handle);
-        let field = crate::native_page::filter_field(self, &theme, family.as_deref());
-        self.addSubview_positioned_relativeTo(
-            &field,
-            NSWindowOrderingMode::Below,
-            Some(&ivars.link_veil),
-        );
-        {
-            // The page says where its box for the field is whenever it is laid out another way.
-            let field = field.clone();
-            handle.watch_field(Box::new(move |place| {
-                crate::native_page::place_field(&field, place);
-            }));
-        }
+        let fields = self.page_fields(&handle, &theme, family);
         let area = crate::native_page::pointer_area(self.view());
         ivars.page_up.replace(Some(crate::native_page::Page {
             owner: crate::native_page::Owner::Program,
             handle,
-            field,
+            fields,
             area,
         }));
         link.set_page(Some(page));

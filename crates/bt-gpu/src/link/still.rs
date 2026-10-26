@@ -526,6 +526,7 @@ mod tests {
                     family: Family::System,
                     size_px: 24.0,
                     weight: 400,
+                    italic: false,
                 })
                 .expect("the system face opens");
             let line = renderer.ui_shape(font, "HHHH").expect("shapes");

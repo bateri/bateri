@@ -121,8 +121,9 @@ pub(crate) trait FontSystem {
     const PROPORTIONAL: bool = false;
 
     /// Opens `family` at `size` pixels and `weight` (CSS scale, 100–900;
-    /// 400 is regular). `None`: the backend has no proportional text.
-    fn open_text(_family: &Family, _size: f64, _weight: u16) -> Option<Self::Font> {
+    /// 400 is regular), its italic if `italic`. `None`: the backend has no
+    /// proportional text.
+    fn open_text(_family: &Family, _size: f64, _weight: u16, _italic: bool) -> Option<Self::Font> {
         None
     }
 

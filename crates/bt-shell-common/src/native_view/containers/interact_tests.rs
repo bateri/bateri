@@ -62,6 +62,7 @@ fn click(page: &mut Containers, laid: &Laid, id: Id, button: Button) -> Reply {
             at,
             button,
             mods: Mods::default(),
+            count: 1,
         },
         laid,
     );
@@ -303,6 +304,7 @@ fn a_click_chooses_the_row_and_a_click_on_a_project_folds_it() {
                 command: true,
                 ..Mods::default()
             },
+            count: 1,
         },
         &laid,
     );
@@ -390,6 +392,7 @@ fn a_right_click_chooses_the_row_and_opens_its_menu_whose_entries_act_on_the_lis
             at,
             button: Button::Right,
             mods: Mods::default(),
+            count: 1,
         },
         &laid,
     );
@@ -516,9 +519,12 @@ fn escape_closes_the_slash_and_tab_go_to_the_filter_and_chords_are_not_read() {
     assert!(key(&mut page, Key::Escape).close);
     assert_eq!(
         key(&mut page, Key::Character('/')).keyboard,
-        Some(Keyboard::Field)
+        Some(Keyboard::Field(FIELD))
     );
-    assert_eq!(key(&mut page, Key::Tab).keyboard, Some(Keyboard::Field));
+    assert_eq!(
+        key(&mut page, Key::Tab).keyboard,
+        Some(Keyboard::Field(FIELD))
+    );
     let laid = lay(&mut page, 600.0);
     for mods in [
         Mods {
@@ -556,12 +562,13 @@ fn a_press_on_the_filter_box_asks_for_the_keyboard_for_the_field() {
             at,
             button: Button::Left,
             mods: Mods::default(),
+            count: 1,
         },
         &laid,
     );
-    assert_eq!(reply.keyboard, Some(Keyboard::Field));
+    assert_eq!(reply.keyboard, Some(Keyboard::Field(FIELD)));
     // The field has a place inside the box.
-    let field = laid.text_field().expect("the field's room");
+    let field = laid.fields().first().expect("the field's room").rect;
     let outer = laid.bounds(SEARCH).unwrap();
     assert!(field.x >= outer.x && field.right() <= outer.right());
     assert!(field.y >= outer.y && field.bottom() <= outer.bottom());
@@ -574,19 +581,27 @@ fn a_long_list_in_a_short_pane_scrolls_and_stays_within_its_reach() {
     let laid = lay(&mut page, 330.0);
     let extent = laid.scroll_extent(LIST).expect("the list scrolls");
     assert!(
-        extent.content > extent.view,
+        extent.content.h > extent.view.h,
         "{extent:?}: the list is longer than its window"
     );
     let over = center(&laid, RowKey::Container("api").id());
     assert!(
-        page.input(Input::Scroll { at: over, dy: 60.0 }, &laid)
-            .redraw
+        page.input(
+            Input::Scroll {
+                at: over,
+                dx: 0.0,
+                dy: 60.0
+            },
+            &laid
+        )
+        .redraw
     );
     assert_eq!(page.ui.scroll_offset(LIST), 60.0);
     // To the end: no further.
     assert!(
         page.input(
             Input::Scroll {
+                dx: 0.0,
                 at: over,
                 dy: 10_000.0
             },
@@ -598,7 +613,14 @@ fn a_long_list_in_a_short_pane_scrolls_and_stays_within_its_reach() {
     let at_end = lay(&mut page, 330.0);
     assert!(
         !page
-            .input(Input::Scroll { at: over, dy: 10.0 }, &at_end)
+            .input(
+                Input::Scroll {
+                    at: over,
+                    dx: 0.0,
+                    dy: 10.0
+                },
+                &at_end
+            )
             .redraw
     );
     // The last row is seen at the end.
@@ -648,6 +670,7 @@ fn a_list_that_shrinks_under_a_scrolled_window_comes_back_into_reach() {
     let over = center(&laid, RowKey::Container("api").id());
     page.input(
         Input::Scroll {
+            dx: 0.0,
             at: over,
             dy: 10_000.0,
         },
@@ -671,7 +694,7 @@ fn only_the_rows_in_view_are_built_however_long_the_list_is() {
     let laid = layout(page.view(size), size, 1.0, &mut Mono);
     let extent = laid.scroll_extent(LIST).unwrap();
     assert!(
-        extent.content > 300_000.0,
+        extent.content.h > 300_000.0,
         "the list is as long as its rows: {extent:?}"
     );
     page.ui.set_scroll(LIST, 150_000.0);
@@ -695,6 +718,7 @@ fn only_the_rows_in_view_are_built_however_long_the_list_is() {
     assert!(
         page.input(
             Input::Scroll {
+                dx: 0.0,
                 at: over,
                 dy: 1.0e9
             },

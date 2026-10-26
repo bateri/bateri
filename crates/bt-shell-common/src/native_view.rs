@@ -46,30 +46,104 @@ pub use module::{ModuleHandle, module_page, script_page};
 use pencere_sandbox::Images;
 pub use pencere_sandbox::{Assets, ImageLimits, ModuleLimits, Script};
 pub use pencere_view::{
-    Button, Cursor, Input, Key, Keyboard, Menu, MenuEntry, Mods, Point, Rect, Reply, Role,
+    Accessible, AccessibleRole, Button, Cursor, FieldKind, Id, Input, Key, Keyboard, Menu,
+    MenuEntry, Mods, Point, Rect, Reply, Role,
 };
 use pencere_view::{
     Color, DrawList, Element, Family, Font, Laid, Measure, Metrics, Paint, Picture, Quad, Run,
     Size, Source,
 };
 
-/// The text field the host puts over a page: where the room the page leaves for it stands, in the
-/// pane's points, and what the field says while it is empty — the words the page put in that room
-/// (`pencere_view::Laid::text_field_hint`), or none.
+/// A text field the host puts over a page: its name (the id of the element that is its room), its
+/// kind, where its room stands in the pane's points, what it says while it is empty — the words
+/// the page put in that room — and what it is to a screen reader.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Field {
+    pub id: Id,
+    pub kind: FieldKind,
     pub rect: Rect,
     pub hint: Option<String>,
+    pub label: Option<String>,
 }
 
-impl Field {
-    /// The field of `laid`, its room moved down by `inset` (the strip's room above the page).
-    pub(crate) fn of(laid: &Laid, inset: f32) -> Option<Self> {
-        let room = laid.text_field()?;
-        Some(Self {
-            rect: Rect::new(room.x, room.y + inset, room.w, room.h),
-            hint: laid.text_field_hint().map(str::to_owned),
-        })
+/// Where a page stands in its pane: below the strip's `inset` points, and `zoom` of the pane's
+/// points to one of the page's — the page is drawn as large as the terminal's text is to the
+/// kit's own size (`ZOOM_TEXT`), so its words are the size of the terminal's.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Placement {
+    pub inset: f32,
+    pub zoom: f32,
+}
+
+/// The size of the kit's text where a page does not say one (`pencere-view`'s default, 12.5
+/// points): a terminal whose text is this size draws a page at its own size.
+pub const ZOOM_TEXT: f32 = 12.5;
+
+/// The least and the most a page is drawn at, against its own size: a terminal set in a tiny or a
+/// huge face keeps a page that can still be laid out in its pane.
+const ZOOM_RANGE: (f32, f32) = (0.5, 4.0);
+
+impl Placement {
+    /// `zoom` for a terminal whose text is `points` large ([`ZOOM_TEXT`]); 1 for one that is
+    /// not a size.
+    pub fn zoom_for(points: f64) -> f32 {
+        #[allow(clippy::cast_possible_truncation)]
+        let zoom = (points as f32) / ZOOM_TEXT;
+        if zoom.is_finite() && zoom > 0.0 {
+            zoom.clamp(ZOOM_RANGE.0, ZOOM_RANGE.1)
+        } else {
+            1.0
+        }
+    }
+
+    /// A box of the page in the pane's points.
+    pub fn to_pane(self, rect: Rect) -> Rect {
+        let z = self.zoom;
+        Rect::new(rect.x * z, rect.y * z + self.inset, rect.w * z, rect.h * z)
+    }
+
+    /// A point of the pane as the page's.
+    pub fn to_page(self, at: Point) -> Point {
+        Point::new(at.x / self.zoom, (at.y - self.inset) / self.zoom)
+    }
+}
+
+/// What is called when a page's outline changes ([`PageDrive::watch_outline`]).
+pub(crate) type OnOutline = Rc<dyn Fn(&Outline)>;
+
+/// What the host keeps of a page besides its pixels, in the pane's points: the fields it puts
+/// over it and what a screen reader says of it. Told to the host when it changes
+/// ([`PageDrive::watch_outline`]).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Outline {
+    pub fields: Vec<Field>,
+    pub accessible: Vec<Accessible>,
+}
+
+impl Outline {
+    /// The outline of `laid`, placed in the pane as `at` says.
+    pub(crate) fn of(laid: &Laid, at: Placement) -> Self {
+        Self {
+            fields: laid
+                .fields()
+                .into_iter()
+                .map(|field| Field {
+                    id: field.id,
+                    kind: field.kind,
+                    rect: at.to_pane(field.rect),
+                    hint: field.hint,
+                    label: field.label,
+                })
+                .collect(),
+            accessible: laid
+                .accessible()
+                .into_iter()
+                .map(|item| Accessible {
+                    rect: at.to_pane(item.rect),
+                    ..item
+                })
+                .collect(),
+        }
     }
 }
 
@@ -108,20 +182,42 @@ pub fn tone_linear(theme: &Theme, tone: Role) -> LinearRgba {
     }
 }
 
-/// A colour as the page said it, in `theme`: the colour (solid) and the share of it that shows.
-/// A role is the theme's; a value is the form that goes with the theme's brightness
-/// ([`Theme::is_dark`]) and its own opacity goes with the page's.
-fn parts(theme: &Theme, color: Color) -> (LinearRgba, f32) {
-    match color.source {
-        Source::Role(tone) => (tone_linear(theme, tone), color.alpha),
-        Source::Rgba { .. } => match color.source.value(theme.is_dark()) {
+/// A source of a colour in `theme`: the colour (solid) and its own opacity. A role is the theme's;
+/// a value is the form that goes with the theme's brightness ([`Theme::is_dark`]).
+fn source_parts(theme: &Theme, source: Source) -> (LinearRgba, f32) {
+    match source {
+        Source::Role(tone) => (tone_linear(theme, tone), 1.0),
+        Source::Rgba { .. } => match source.value(theme.is_dark()) {
             Some(value) => (
                 LinearRgba::from_srgb(value.r, value.g, value.b),
-                color.alpha * f32::from(value.a) / 255.0,
+                f32::from(value.a) / 255.0,
             ),
-            None => (theme.foreground_linear(), color.alpha),
+            None => (theme.foreground_linear(), 1.0),
         },
     }
+}
+
+/// A colour as the page said it, in `theme`: the colour (solid) and the share of it that shows.
+/// A mix is made in sRGB, channel by channel and the opacity with them, each channel rounded to
+/// the nearest of the 256 (the kit's specification, §3); the page's opacity goes on top.
+fn parts(theme: &Theme, color: Color) -> (LinearRgba, f32) {
+    let (colour, own) = source_parts(theme, color.source);
+    let Some(mix) = color.mix else {
+        return (colour, color.alpha * own);
+    };
+    let (toward, toward_own) = source_parts(theme, mix.toward);
+    let t = mix.amount.clamp(0.0, 1.0);
+    let (from, to) = (colour.to_srgb(), toward.to_srgb());
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let channel = |at: usize| {
+        ((from[at] + (to[at] - from[at]) * t) * 255.0)
+            .round()
+            .clamp(0.0, 255.0) as u8
+    };
+    (
+        LinearRgba::from_srgb(channel(0), channel(1), channel(2)),
+        color.alpha * (own + (toward_own - own) * t),
+    )
 }
 
 /// `color` as the renderer takes it: linear straight RGBA.
@@ -265,8 +361,11 @@ pub trait PageDrive {
     /// The person did something with the pointer, the wheel or a key, in the pane's points (the
     /// top-left corner of the pane is the origin; the strip's room is included).
     fn send_input(&self, input: Input);
-    /// The filter field's text changed.
-    fn send_query(&self, text: &str);
+    /// The text of the field named `field` changed: the person typed, pasted or deleted.
+    fn send_text(&self, field: Id, text: &str);
+    /// The person clicked into the field named `field`, or the keyboard went back to the page of
+    /// itself (`None`); not told when it went where the page's reply sent it.
+    fn send_focus(&self, field: Option<Id>);
     /// The person picked the `index`th entry of the menu the last reply asked for.
     fn send_pick(&self, index: usize);
     /// The program that opened the page said something: one JSON object, as it wrote it. A page
@@ -275,11 +374,14 @@ pub trait PageDrive {
     /// The program has read enough that the page may say what it was told the program had no
     /// room for. A page that no program opened is never told.
     fn send_room(&self) {}
-    /// `told` is called, on the thread that builds the frame, when the text field the page leaves
-    /// room for changes (the pane resized, the page laid out another way, its hint changed): the
-    /// host moves its field to it and shows its hint. Called once with the field the page has
-    /// now, if it has one.
-    fn watch_field(&self, told: Box<dyn Fn(Option<Field>)>);
+    /// `told` is called, on the thread that builds the frame, when the page's outline changes
+    /// (the pane resized, the page laid out another way, a field or a label came or went): the
+    /// host puts its fields where the page leaves room for them and tells the screen reader.
+    /// Called once with the outline the page has now.
+    fn watch_outline(&self, told: Box<dyn Fn(&Outline)>);
+    /// The terminal's text is this much larger than the kit's own (`Placement::zoom_for`): the
+    /// page is drawn that much larger, and laid out again.
+    fn set_zoom(&self, zoom: f32);
     /// Hands over what the page has said since the last call: each reply, in order, with whether
     /// the event it answers was the pointer's (the pointer's shape after a key is nobody's to
     /// set). Never waits.
@@ -337,6 +439,7 @@ impl Typeset<'_> {
                 },
                 size_px: f64::from(font.size),
                 weight: font.weight,
+                italic: font.italic,
             })
         }))?;
         self.shaped
@@ -388,13 +491,13 @@ fn to_list(
                     run.clip.w,
                     run.clip.h,
                 );
-                renderer.ui_text(
-                    &mut list,
-                    line,
-                    [run.origin.x + origin.0, run.origin.y + origin.1],
-                    ink(theme, run, minimum_contrast),
-                    clip,
-                );
+                let color = ink(theme, run, minimum_contrast);
+                let at = [run.origin.x + origin.0, run.origin.y + origin.1];
+                renderer.ui_text(&mut list, line, at, color, clip);
+                for rule in decorations(run, line) {
+                    let rule = UiRect::new(rule.x + at[0], rule.y + at[1], rule.w, rule.h);
+                    list.quad(UiQuad::new(rule).fill(color).clip(clip));
+                }
             }
             // The file's pixels, drawn at the size the page gave them (an SVG is drawn at it).
             // None yet — being decoded, or an SVG not yet drawn at its first size — is a box with
@@ -420,6 +523,34 @@ fn to_list(
         }
     }
     list
+}
+
+/// The lines a run asks for under and through its words, relative to the line's top-left, pixels:
+/// as wide as the words, as thick as a twelfth of the line's ascent (a pixel at least), under the
+/// baseline by a third of the descent, and through the middle of the lower-case letters (about
+/// half the height of an `x`, which is about half the ascent).
+fn decorations(run: &Run, line: &ShapedText) -> Vec<Rect> {
+    #[allow(clippy::cast_possible_truncation)]
+    let (width, ascent, descent) = (line.width as f32, line.ascent as f32, line.descent as f32);
+    let thick = (ascent / 12.0).round().max(1.0);
+    let mut rules = Vec::new();
+    if run.underline {
+        rules.push(Rect::new(
+            0.0,
+            (ascent + descent / 3.0).round(),
+            width,
+            thick,
+        ));
+    }
+    if run.strike {
+        rules.push(Rect::new(
+            0.0,
+            (ascent * 0.7 - thick / 2.0).round(),
+            width,
+            thick,
+        ));
+    }
+    rules
 }
 
 /// A page written with the engine, shown as a pane's [`UiPage`].
@@ -493,9 +624,9 @@ pub fn containers_demo(
     let shared = Rc::new(RefCell::new(Shared {
         page: Containers::fixture(),
         laid: pencere_view::layout(pencere_view::div(), Size::new(1.0, 1.0), 1.0, &mut NoText),
-        inset,
-        field: None,
-        on_field: None,
+        place: Placement { inset, zoom: 1.0 },
+        outline: Outline::default(),
+        on_outline: None,
         replies: Vec::new(),
     }));
     let page = ContainersPage {
@@ -521,11 +652,11 @@ struct Shared {
     page: Containers,
     /// The page as it was last laid out: what the pointer is asked against.
     laid: Laid,
-    /// Points at the top of the pane the application keeps.
-    inset: f32,
-    /// Where the filter's field was last said to stand, in the pane's points, and its hint.
-    field: Option<Field>,
-    on_field: Option<Rc<dyn Fn(Option<Field>)>>,
+    /// Where the page stands in the pane.
+    place: Placement,
+    /// The fields and what a screen reader says, as last told, in the pane's points.
+    outline: Outline,
+    on_outline: Option<OnOutline>,
     /// What the page said that the pane has not taken ([`PageDrive::drain`]).
     replies: Vec<(Reply, bool)>,
 }
@@ -542,43 +673,41 @@ impl ContainersHandle {
     /// origin; the strip's room is included). The reply's points are the pane's too.
     pub fn input(&self, input: Input) -> Reply {
         let mut shared = self.shared.borrow_mut();
-        let inset = shared.inset;
+        let place = shared.place;
         let Shared { page, laid, .. } = &mut *shared;
-        from_pane(page.input(into_page(input, inset), laid), inset)
+        from_pane(page.input(into_page(input, place), laid), place)
     }
 
-    /// The filter field's text changed.
+    /// The filter field's text changed (the page has the one field).
     pub fn set_query(&self, text: &str) -> Reply {
         let mut shared = self.shared.borrow_mut();
-        let inset = shared.inset;
-        from_pane(shared.page.set_query(text), inset)
+        let place = shared.place;
+        from_pane(shared.page.set_query(text), place)
     }
 
     /// The person picked the `index`th entry of the menu the last reply asked for.
     pub fn pick(&self, index: usize) -> Reply {
         let mut shared = self.shared.borrow_mut();
-        let inset = shared.inset;
-        from_pane(shared.page.pick(index), inset)
+        let place = shared.place;
+        from_pane(shared.page.pick(index), place)
     }
 
-    /// Where the filter's text field stands, in the pane's points, as of the last frame.
-    pub fn field(&self) -> Option<Rect> {
-        self.shared.borrow().field.as_ref().map(|field| field.rect)
+    /// The page's fields, in the pane's points, as of the last frame.
+    pub fn fields(&self) -> Vec<Field> {
+        self.shared.borrow().outline.fields.clone()
     }
 
-    /// `told` is called, on the thread that builds the frame, when the filter field changes (the
-    /// pane resized, the page laid out another way): the host moves its field to it. Called once
-    /// with the field the page has now, if it has one.
-    pub fn on_field(&self, told: impl Fn(Option<Field>) + 'static) {
-        let (field, told) = {
+    /// `told` is called, on the thread that builds the frame, when the outline changes (the pane
+    /// resized, the page laid out another way): the host moves its fields to it. Called once
+    /// with the outline the page has now.
+    pub fn on_outline(&self, told: impl Fn(&Outline) + 'static) {
+        let (outline, told) = {
             let mut shared = self.shared.borrow_mut();
-            let told: Rc<dyn Fn(Option<Field>)> = Rc::new(told);
-            shared.on_field = Some(Rc::clone(&told));
-            (shared.field.clone(), told)
+            let told: Rc<dyn Fn(&Outline)> = Rc::new(told);
+            shared.on_outline = Some(Rc::clone(&told));
+            (shared.outline.clone(), told)
         };
-        if field.is_some() {
-            told(field);
-        }
+        told(&outline);
     }
 }
 
@@ -589,18 +718,24 @@ impl PageDrive for ContainersHandle {
         self.shared.borrow_mut().replies.push((reply, pointer));
     }
 
-    fn send_query(&self, text: &str) {
+    fn send_text(&self, _field: Id, text: &str) {
         let reply = self.set_query(text);
         self.shared.borrow_mut().replies.push((reply, false));
     }
+
+    fn send_focus(&self, _field: Option<Id>) {}
 
     fn send_pick(&self, index: usize) {
         let reply = self.pick(index);
         self.shared.borrow_mut().replies.push((reply, false));
     }
 
-    fn watch_field(&self, told: Box<dyn Fn(Option<Field>)>) {
-        self.on_field(told);
+    fn watch_outline(&self, told: Box<dyn Fn(&Outline)>) {
+        self.on_outline(told);
+    }
+
+    fn set_zoom(&self, zoom: f32) {
+        self.shared.borrow_mut().place.zoom = zoom;
     }
 
     fn drain(&self, reply: &mut dyn FnMut(Reply, bool)) -> Drained {
@@ -613,26 +748,41 @@ impl PageDrive for ContainersHandle {
     }
 }
 
-/// An input in the pane's points as the page's: the strip's room is not the page's.
-fn into_page(input: Input, inset: f32) -> Input {
-    let up = |at: Point| Point::new(at.x, at.y - inset);
+/// An input in the pane's points as the page's: the strip's room is not the page's, and a page
+/// drawn larger has fewer points.
+fn into_page(input: Input, place: Placement) -> Input {
+    let at = |at: Point| place.to_page(at);
     match input {
-        Input::Move(at) => Input::Move(up(at)),
-        Input::Press { at, button, mods } => Input::Press {
-            at: up(at),
+        Input::Move(here) => Input::Move(at(here)),
+        Input::Press {
+            at: here,
             button,
             mods,
+            count,
+        } => Input::Press {
+            at: at(here),
+            button,
+            mods,
+            count,
         },
-        Input::Release { at, button } => Input::Release { at: up(at), button },
-        Input::Scroll { at, dy } => Input::Scroll { at: up(at), dy },
+        Input::Release { at: here, button } => Input::Release {
+            at: at(here),
+            button,
+        },
+        Input::Scroll { at: here, dx, dy } => Input::Scroll {
+            at: at(here),
+            dx: dx / place.zoom,
+            dy: dy / place.zoom,
+        },
         other @ (Input::Leave | Input::Key { .. }) => other,
     }
 }
 
 /// A reply of the page with its points in the pane's.
-fn from_pane(mut reply: Reply, inset: f32) -> Reply {
+fn from_pane(mut reply: Reply, place: Placement) -> Reply {
     if let Some(menu) = &mut reply.menu {
-        menu.at.y += inset;
+        let at = place.to_pane(Rect::new(menu.at.x, menu.at.y, 0.0, 0.0));
+        menu.at = Point::new(at.x, at.y);
     }
     reply
 }
@@ -652,8 +802,9 @@ const BUILDS: usize = 3;
 
 impl UiPage for ContainersPage {
     fn build(&mut self, cx: &UiContext<'_>) -> UiList {
-        let scale = cx.scale as f32;
-        let inset = (self.inset * scale).round();
+        let zoom = self.shared.borrow().place.zoom;
+        let inset = (self.inset * cx.scale as f32).round();
+        let scale = cx.scale as f32 * zoom;
         let width = cx.size_px.0 as f32;
         let height = (cx.size_px.1 as f32 - inset).max(0.0);
         let size = Size::new(width / scale, height / scale);
@@ -695,18 +846,23 @@ impl UiPage for ContainersPage {
                 &draws,
                 (0.0, inset),
             );
-            // The field's room, in the pane's points: the strip's room above the page is added.
-            let field = Field::of(&laid, shared.inset);
-            let told = (field != shared.field)
-                .then(|| shared.on_field.clone().map(|told| (told, field.clone())))
+            // The fields and what a screen reader says, in the pane's points.
+            let outline = Outline::of(&laid, shared.place);
+            let told = (outline != shared.outline)
+                .then(|| {
+                    shared
+                        .on_outline
+                        .clone()
+                        .map(|told| (told, outline.clone()))
+                })
                 .flatten();
-            shared.field = field;
+            shared.outline = outline;
             shared.laid = laid;
             (list, told)
         };
-        // After the page is let go of: the host moves its field in this call.
-        if let Some((told, field)) = told {
-            told(field);
+        // After the page is let go of: the host moves its fields in this call.
+        if let Some((told, outline)) = told {
+            told(&outline);
         }
         list
     }
@@ -842,10 +998,13 @@ mod tests {
                 family: Family::System,
                 size: 13.0,
                 weight: 400,
+                italic: false,
             },
             color,
             grounds,
             clip: Rect::new(0.0, 0.0, 100.0, 20.0),
+            underline: false,
+            strike: false,
         }
     }
 
@@ -1103,18 +1262,26 @@ mod tests {
     #[test]
     fn the_strips_room_is_not_the_pages_and_a_menu_comes_back_in_the_panes_points() {
         use pencere_view::{Button, Menu, Mods};
-        let moved = into_page(Input::Move(Point::new(10.0, 50.0)), 32.0);
+        let place = Placement {
+            inset: 32.0,
+            zoom: 1.0,
+        };
+        let moved = into_page(Input::Move(Point::new(10.0, 50.0)), place);
         assert_eq!(moved, Input::Move(Point::new(10.0, 18.0)));
         let pressed = into_page(
             Input::Press {
                 at: Point::new(1.0, 40.0),
                 button: Button::Right,
                 mods: Mods::default(),
+                count: 2,
             },
-            32.0,
+            place,
         );
-        assert!(matches!(pressed, Input::Press { at, .. } if at == Point::new(1.0, 8.0)));
-        assert_eq!(into_page(Input::Leave, 32.0), Input::Leave);
+        assert!(matches!(
+            pressed,
+            Input::Press { at, count: 2, .. } if at == Point::new(1.0, 8.0)
+        ));
+        assert_eq!(into_page(Input::Leave, place), Input::Leave);
         let reply = Reply {
             menu: Some(Menu {
                 at: Point::new(4.0, 8.0),
@@ -1123,8 +1290,104 @@ mod tests {
             ..Reply::default()
         };
         assert_eq!(
-            from_pane(reply, 32.0).menu.map(|menu| menu.at),
+            from_pane(reply, place).menu.map(|menu| menu.at),
             Some(Point::new(4.0, 40.0))
+        );
+    }
+
+    #[test]
+    fn a_page_drawn_as_large_as_the_terminals_text_has_fewer_points_in_the_same_pane() {
+        use pencere_view::Menu;
+        // A terminal at 15 points draws the kit's 12.5 at 1.2.
+        let place = Placement {
+            inset: 32.0,
+            zoom: Placement::zoom_for(15.0),
+        };
+        assert!((place.zoom - 1.2).abs() < 1e-6);
+        assert_eq!(Placement::zoom_for(f64::NAN), 1.0);
+        assert_eq!(Placement::zoom_for(1000.0), 4.0, "within the range");
+        let moved = into_page(Input::Move(Point::new(12.0, 32.0 + 24.0)), place);
+        assert_eq!(moved, Input::Move(Point::new(10.0, 20.0)));
+        let wheel = into_page(
+            Input::Scroll {
+                at: Point::new(0.0, 32.0),
+                dx: 6.0,
+                dy: 12.0,
+            },
+            place,
+        );
+        assert!(matches!(wheel, Input::Scroll { dx, dy, .. } if (dx, dy) == (5.0, 10.0)));
+        let reply = Reply {
+            menu: Some(Menu {
+                at: Point::new(10.0, 20.0),
+                entries: Vec::new(),
+            }),
+            ..Reply::default()
+        };
+        let at = from_pane(reply, place).menu.map(|menu| menu.at).unwrap();
+        assert!(
+            (at.x - 12.0).abs() < 1e-4 && (at.y - 56.0).abs() < 1e-4,
+            "{at:?}"
+        );
+        let room = place.to_pane(Rect::new(10.0, 10.0, 100.0, 20.0));
+        let near = |a: f32, b: f32| (a - b).abs() < 1e-3;
+        assert!(
+            near(room.x, 12.0) && near(room.y, 44.0) && near(room.w, 120.0) && near(room.h, 24.0),
+            "{room:?}"
+        );
+    }
+
+    #[test]
+    fn a_colour_taken_toward_another_is_mixed_in_srgb_in_the_theme() {
+        let theme = Theme::BATERI;
+        let dim = resolve(&theme, Role::Dim.solid());
+        let fore = resolve(&theme, Role::Foreground.solid());
+        assert_eq!(
+            resolve(&theme, Role::Dim.solid().toward(Role::Foreground, 0.0)),
+            dim
+        );
+        let whole = resolve(&theme, Role::Dim.solid().toward(Role::Foreground, 1.0));
+        for at in 0..3 {
+            assert!((whole[at] - fore[at]).abs() < 0.01, "{whole:?} {fore:?}");
+        }
+        let half = resolve(&theme, Role::Dim.alpha(0.5).toward(Role::Foreground, 0.5));
+        assert!(
+            (half[3] - 0.5).abs() < 1e-6,
+            "the opacity is on top of the mix"
+        );
+        for at in 0..3 {
+            let (low, high) = (dim[at].min(fore[at]), dim[at].max(fore[at]));
+            assert!(
+                half[at] >= low && half[at] <= high,
+                "between the two: {half:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_lines_under_and_through_words_are_as_wide_as_the_words_and_below_and_across_them() {
+        let line = ShapedText {
+            glyphs: Vec::new(),
+            width: 80.0,
+            ascent: 24.0,
+            descent: 6.0,
+            leading: 0.0,
+        };
+        let mut said = run(Role::Foreground.solid(), Vec::new());
+        assert!(decorations(&said, &line).is_empty());
+        said.underline = true;
+        said.strike = true;
+        let rules = decorations(&said, &line);
+        assert_eq!(rules.len(), 2);
+        let (under, through) = (rules[0], rules[1]);
+        assert_eq!((under.w, under.h), (80.0, 2.0));
+        assert!(
+            under.y > 24.0 && under.y < 30.0,
+            "under the baseline: {under:?}"
+        );
+        assert!(
+            through.y > 6.0 && through.y < 24.0,
+            "across the letters: {through:?}"
         );
     }
 
@@ -1142,7 +1405,10 @@ mod tests {
             }
         }
         let page = |hint: Option<&str>| {
-            let room = pencere_view::div().text_field().w(120.0).h(18.0);
+            let room = pencere_view::div()
+                .text_field(Id::named("filter"))
+                .w(120.0)
+                .h(18.0);
             let room = match hint {
                 Some(hint) => room.child(pencere_view::text(hint)),
                 None => room,
@@ -1155,16 +1421,20 @@ mod tests {
             1.0,
             &mut Fixed,
         );
+        let at = |inset| Placement { inset, zoom: 1.0 };
         assert_eq!(
-            Field::of(&laid, 32.0),
-            Some(Field {
+            Outline::of(&laid, at(32.0)).fields,
+            [Field {
+                id: Id::named("filter"),
+                kind: FieldKind::Line,
                 rect: Rect::new(10.0, 42.0, 120.0, 18.0),
                 hint: Some("Filter images".to_owned()),
-            })
+                label: None,
+            }]
         );
         let laid = pencere_view::layout(page(None), Size::new(400.0, 100.0), 1.0, &mut Fixed);
         assert_eq!(
-            Field::of(&laid, 0.0).and_then(|field| field.hint),
+            Outline::of(&laid, at(0.0)).fields[0].hint,
             None,
             "no words, no hint"
         );
@@ -1174,7 +1444,10 @@ mod tests {
             1.0,
             &mut Fixed,
         );
-        assert_eq!(Field::of(&laid, 0.0), None, "no room, no field");
+        assert!(
+            Outline::of(&laid, at(0.0)).fields.is_empty(),
+            "no room, no field"
+        );
     }
 
     #[test]
@@ -1185,7 +1458,10 @@ mod tests {
             mods: pencere_view::Mods::default(),
         };
         assert!(handle.input(escape).close);
-        assert_eq!(handle.field(), None, "no frame, no place for the field");
+        assert!(
+            handle.fields().is_empty(),
+            "no frame, no place for the field"
+        );
         // A pointer over a page that was never laid out is over nothing.
         assert!(!handle.input(Input::Move(Point::new(5.0, 50.0))).redraw);
     }
@@ -1199,7 +1475,7 @@ mod tests {
             key: pencere_view::Key::Escape,
             mods: pencere_view::Mods::default(),
         });
-        drive.send_query("api");
+        drive.send_text(containers::FIELD, "api");
         let mut said = Vec::new();
         let drained = drive.drain(&mut |reply, pointer| said.push((reply, pointer)));
         assert_eq!(drained, Drained::default());
@@ -1237,25 +1513,37 @@ mod tests {
             })
         };
         let (mut page, handle) = containers_demo(None, 32.0);
-        let told: Rc<RefCell<Vec<Option<Field>>>> = Rc::default();
+        let told: Rc<RefCell<Vec<Vec<Field>>>> = Rc::default();
         {
             let told = Rc::clone(&told);
-            handle.on_field(move |field| told.borrow_mut().push(field));
+            handle.on_outline(move |outline| told.borrow_mut().push(outline.fields.clone()));
         }
-        build(&mut page, 1.0, false);
-        let field = handle.field().expect("the filter's field has a place");
         assert_eq!(
             told.borrow().as_slice(),
-            &[Some(Field {
+            &[Vec::<Field>::new()],
+            "told at once"
+        );
+        build(&mut page, 1.0, false);
+        let field = handle
+            .fields()
+            .first()
+            .expect("the filter's field has a place")
+            .rect;
+        assert_eq!(
+            told.borrow().last().cloned(),
+            Some(vec![Field {
+                id: containers::FIELD,
+                kind: FieldKind::Line,
                 rect: field,
                 hint: Some(containers::FIELD_HINT.to_owned()),
-            })],
+                label: None,
+            }]),
             "its place, and what the page says the field says while it is empty"
         );
         assert!(field.y >= 32.0, "below the strip: {field:?}");
         // Laid out again the same way, the host is not told again.
         build(&mut page, 1.1, false);
-        assert_eq!(told.borrow().len(), 1);
+        assert_eq!(told.borrow().len(), 2);
         assert!(!page.animating());
 
         // A press on the field's box asks for the keyboard for the host's field.
@@ -1264,8 +1552,12 @@ mod tests {
             at: middle,
             button: pencere_view::Button::Left,
             mods: pencere_view::Mods::default(),
+            count: 1,
         });
-        assert_eq!(press.keyboard, Some(pencere_view::Keyboard::Field));
+        assert_eq!(
+            press.keyboard,
+            Some(pencere_view::Keyboard::Field(containers::FIELD))
+        );
 
         // The pointer over a row: one frame's worth of change, then fades until they end.
         let over_a_row = Point::new(300.0, 32.0 + 150.0);

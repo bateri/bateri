@@ -185,7 +185,7 @@ objc2-app-kit = { workspace = true, features = [
     "NSToolbar", "NSBezierPath", "NSAccessibilityConstants", "NSAccessibilityProtocols",
     "NSGradient", "NSPasteboardItem", "NSStringDrawing", "NSVisualEffectView",
     "NSGraphicsContext", "NSAffineTransform", "objc2-core-graphics", "NSGraphics", "NSImageRep",
-    "NSBitmapImageRep",
+    "NSBitmapImageRep", "NSAccessibilityElement",
 ] }
 # Only for the CALayer type: NSView::setLayer(Option<&CALayer>) wants it.
 # The layer rules record this as "only attaching a CALayer".

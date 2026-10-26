@@ -39,13 +39,14 @@ pub enum Family {
     Terminal(Option<String>),
 }
 
-/// A font request: family, size in pixels and weight on the CSS scale
-/// (100–900, 400 regular, 700 bold).
+/// A font request: family, size in pixels, weight on the CSS scale
+/// (100–900, 400 regular, 700 bold) and whether it is the italic.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TextStyle {
     pub family: Family,
     pub size_px: f64,
     pub weight: u16,
+    pub italic: bool,
 }
 
 /// An opened font of the [`TextAtlas`] that opened it. Numbered in the order
@@ -245,7 +246,7 @@ impl ShelfPacker {
 type GlyphKey = (FontId, u32, u8);
 
 /// The style registry's key. `f64` has no `Hash`; the bits do.
-type StyleKey = (Family, u64, u16);
+type StyleKey = (Family, u64, u16, bool);
 
 /// The UI text atlas: the font registry, the glyph cache and the packer,
 /// without a texture. See the module documentation.
@@ -288,11 +289,16 @@ impl TextAtlas {
     /// Opens `style`; `None` when the platform has no proportional text.
     /// The same style opens the same [`FontId`].
     pub fn open(&mut self, style: &TextStyle) -> Option<FontId> {
-        let key = (style.family.clone(), style.size_px.to_bits(), style.weight);
+        let key = (
+            style.family.clone(),
+            style.size_px.to_bits(),
+            style.weight,
+            style.italic,
+        );
         if let Some(known) = self.opened.get(&key) {
             return *known;
         }
-        let id = Backend::open_text(&style.family, style.size_px, style.weight)
+        let id = Backend::open_text(&style.family, style.size_px, style.weight, style.italic)
             .map(|font| self.intern(font));
         self.opened.insert(key, id);
         id
@@ -484,6 +490,7 @@ mod tests {
             family,
             size_px,
             weight,
+            italic: false,
         }
     }
 

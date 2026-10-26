@@ -14,6 +14,16 @@ of every installed copy. A version without a section is not released.
 
 ### Added
 
+- **A program's native view is as large as your text, and more of it works.** A view a
+  program draws with the pencere kit (dockerpen's, for one) is drawn as large as the
+  terminal's text and grows and shrinks with ⌘+ and ⌘−. It can have as many text fields as
+  it needs (one line, several lines, or a password), and the keys that are the page's in a
+  field (⏎, Esc, Tab, ↑ ↓) go to it; it hears a double click, the trackpad scrolling sideways,
+  ⌫, ⌦ and the function keys; its words can be italic, underlined or struck through; its
+  colours can blend into each other and its parts fade; and the pointer takes the shape it
+  asks for (resize, not allowed, grab, crosshair). VoiceOver reads the view: its buttons, its
+  fields and its words, and a button can be pressed from it.
+
 - **The line you type on a server is in the dock.** In a terminal the server keeps
   (the one a plain `ssh` opens when remote shell integration is on), the line at the
   server's prompt now sits in the dock like it does in a local tab, in zsh, bash and
