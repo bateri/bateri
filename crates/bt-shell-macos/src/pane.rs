@@ -5978,10 +5978,10 @@ impl TerminalPane {
             .and_then(|page| page.fields.of(control))
     }
 
-    /// A key of a page's field that is the page's (the kit's specification, §4): in a line,
-    /// ⏎, Esc, Tab, ⇧Tab, ↑ and ↓; in lines, Esc and Tab, and ⏎ breaks the line. The page reads
-    /// it as a key and says in its reply where the keyboard goes; the field keeps it until then.
-    /// The rest is the field's.
+    /// A key of a page's field that is the page's (the kit's specification, §4): in a line, the
+    /// keys that do not edit one line of text ([`crate::native_page::field_key`]); in lines, Esc and
+    /// Tab, and ⏎ breaks the line. The page reads it as a key and says in its reply where the
+    /// keyboard goes; the field keeps it until then. The rest is the field's.
     fn page_field_command(
         &self,
         kind: bt_shell_common::native_view::FieldKind,
@@ -5998,18 +5998,25 @@ impl TerminalPane {
             };
             return true;
         }
-        let key = match command {
-            c if c == sel!(cancelOperation:) => Key::Escape,
-            c if c == sel!(insertTab:) || c == sel!(insertBacktab:) => Key::Tab,
-            c if c == sel!(insertNewline:) => Key::Enter,
-            c if c == sel!(moveUp:) && !lines => Key::Up,
-            c if c == sel!(moveDown:) && !lines => Key::Down,
-            _ => return false,
-        };
-        let mut mods = NSApplication::sharedApplication(self.mtm())
-            .currentEvent()
+        let event = NSApplication::sharedApplication(self.mtm()).currentEvent();
+        let mut mods = event
+            .as_ref()
             .map(|event| crate::native_page::mods_of(event.modifierFlags()))
             .unwrap_or_default();
+        // The key itself, for a command that does not say it (`noop:`, which AppKit names for a
+        // key its text has no binding for): without the modifiers, so that ⌃1 is `1`.
+        let pressed = event
+            .as_ref()
+            .and_then(|event| event.charactersIgnoringModifiers())
+            .and_then(|characters| crate::native_page::key_of(&characters.to_string()));
+        let Some(key) = crate::native_page::field_key(
+            command.name().to_str().unwrap_or(""),
+            lines,
+            pressed,
+            mods,
+        ) else {
+            return false;
+        };
         if command == sel!(insertBacktab:) {
             mods.shift = true;
         }

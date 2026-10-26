@@ -809,6 +809,53 @@ pub(crate) fn key_of(characters: &str) -> Option<Key> {
     })
 }
 
+/// The key a command of a page's field is, when it is the page's and not the field's (the kit's
+/// specification, §4), from the selector AppKit's text names for it, `pressed` (the key of the
+/// event, without its modifiers) and the modifiers held.
+///
+/// In both kinds, Esc and Tab (and ⇧Tab). In a line, besides: ⏎; ↑ and ↓ with whatever modifier
+/// (⇧↑ and ⌘↑ would only take the caret to an end of the one line); page up and down; and a key
+/// the line has no use for, which AppKit names `noop:` — a function key, or ⌘ or ⌃ with a key that
+/// is not one of the field's own (⌘A, ⌘C, ⌘V and ⌘X are the Edit menu's, and never come here; ⌘C
+/// with nothing selected does, and is the page's). Characters, ← →, ⌫ and the field's editing
+/// keys stay the field's.
+pub(crate) fn field_key(
+    command: &str,
+    lines: bool,
+    pressed: Option<Key>,
+    mods: Mods,
+) -> Option<Key> {
+    match command {
+        "cancelOperation:" => return Some(Key::Escape),
+        "insertTab:" | "insertBacktab:" => return Some(Key::Tab),
+        _ => {}
+    }
+    if lines {
+        return None;
+    }
+    match command {
+        "insertNewline:" => Some(Key::Enter),
+        "moveUp:"
+        | "moveUpAndModifySelection:"
+        | "moveToBeginningOfDocument:"
+        | "moveToBeginningOfDocumentAndModifySelection:"
+        | "moveParagraphBackwardAndModifySelection:" => Some(Key::Up),
+        "moveDown:"
+        | "moveDownAndModifySelection:"
+        | "moveToEndOfDocument:"
+        | "moveToEndOfDocumentAndModifySelection:"
+        | "moveParagraphForwardAndModifySelection:" => Some(Key::Down),
+        "scrollPageUp:" | "pageUp:" | "pageUpAndModifySelection:" => Some(Key::PageUp),
+        "scrollPageDown:" | "pageDown:" | "pageDownAndModifySelection:" => Some(Key::PageDown),
+        "noop:" => match pressed? {
+            key @ (Key::Function(_) | Key::PageUp | Key::PageDown) => Some(key),
+            key if mods.command || mods.control => Some(key),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// The modifiers held, as the page reads them.
 pub(crate) fn mods_of(flags: NSEventModifierFlags) -> Mods {
     Mods {
@@ -822,6 +869,69 @@ pub(crate) fn mods_of(flags: NSEventModifierFlags) -> Mods {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_line_gives_the_page_the_keys_that_do_not_edit_it() {
+        let none = Mods::default();
+        let command = Mods {
+            command: true,
+            ..Mods::default()
+        };
+        let control = Mods {
+            control: true,
+            ..Mods::default()
+        };
+        let shift = Mods {
+            shift: true,
+            ..Mods::default()
+        };
+        for (selector, key) in [
+            ("insertNewline:", Key::Enter),
+            ("cancelOperation:", Key::Escape),
+            ("insertBacktab:", Key::Tab),
+            ("moveUp:", Key::Up),
+            ("moveDownAndModifySelection:", Key::Down),
+            ("moveToBeginningOfDocument:", Key::Up),
+            ("scrollPageDown:", Key::PageDown),
+            ("pageUp:", Key::PageUp),
+        ] {
+            assert_eq!(
+                field_key(selector, false, None, shift),
+                Some(key),
+                "{selector}"
+            );
+        }
+        // Keys the line has no binding for: a function key, ⌘K, ⌃1, ⌘C with nothing selected.
+        assert_eq!(
+            field_key("noop:", false, Some(Key::Function(1)), none),
+            Some(Key::Function(1))
+        );
+        assert_eq!(
+            field_key("noop:", false, Some(Key::Character('k')), command),
+            Some(Key::Character('k'))
+        );
+        assert_eq!(
+            field_key("noop:", false, Some(Key::Character('1')), control),
+            Some(Key::Character('1'))
+        );
+        // What edits the line stays the line's, and a key that types is never the page's.
+        for selector in [
+            "moveLeft:",
+            "deleteBackward:",
+            "moveToBeginningOfLine:",
+            "selectAll:",
+        ] {
+            assert_eq!(field_key(selector, false, None, none), None, "{selector}");
+        }
+        assert_eq!(
+            field_key("noop:", false, Some(Key::Character('é')), none),
+            None
+        );
+        // Lines keep their arrows and their enter.
+        assert_eq!(field_key("moveUp:", true, None, none), None);
+        assert_eq!(field_key("insertNewline:", true, None, none), None);
+        assert_eq!(field_key("insertTab:", true, None, none), Some(Key::Tab));
+    }
 
     #[test]
     fn the_keys_of_the_page_come_from_the_characters_appkit_makes() {
