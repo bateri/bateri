@@ -138,6 +138,11 @@ of every installed copy. A version without a section is not released.
 
 ### Fixed
 
+- **A native view's boxes stand in the middle of their padding at any text size.** At a size
+  of the terminal's text that makes a point of the page a fraction of pixels, a box inside
+  another (the chosen tab of a segmented control) stood a pixel higher than lower; each length is
+  now whole pixels.
+
 - **A native view no longer flickers while its pane or window is resized.** The page of the
   new size now comes with the resize itself, instead of a frame or more after it — in between,
   the old page was shown stretched to the new size, or laid out for the size the pane had been —
