@@ -5449,8 +5449,27 @@ impl TerminalPane {
         }
         let layer = &self.ivars().layer;
         layer.setPresentsWithTransaction(true);
-        link.draw_page_now();
+        let drew = link.draw_page_now();
         layer.setPresentsWithTransaction(false);
+        // And a frame of the pacer's after it, whatever came of this one: a frame that was not
+        // drawn here (the page busy, the surface not ready) or not shown (presented while the pane
+        // was being moved into a split) would leave the old picture pinned in the new bounds until
+        // something else asked for a frame; the request this one spent is asked for again.
+        link.poke_page();
+        if crate::native_page::tracing() {
+            let bounds = layer.bounds();
+            let drawable = layer.drawableSize();
+            eprintln!(
+                "bateri fields [draw] drew={drew} layer=({:.1}x{:.1}) drawable=({:.0}x{:.0}) scale={:.1} flipped={} gravity={}",
+                bounds.size.width,
+                bounds.size.height,
+                drawable.width,
+                drawable.height,
+                layer.contentsScale(),
+                layer.contentsAreFlipped(),
+                layer.contentsGravity(),
+            );
+        }
     }
 
     /// Matches the layer's drawable size to the view's backing geometry **and**
