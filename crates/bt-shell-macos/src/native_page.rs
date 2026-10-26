@@ -88,9 +88,6 @@ pub(crate) fn component_path(name: &str) -> std::path::PathBuf {
     bt_shell_common::native_view::guest_dir().join(format!("{name}.wasm"))
 }
 
-/// The height of the filter field, points: a line of the page's text, centred in the box.
-const FIELD_HEIGHT: f64 = 18.0;
-
 /// Whose a page is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Owner {
@@ -159,7 +156,9 @@ pub(crate) fn paint(field: &NSTextField, theme: &Theme) {
 
 /// Puts the field where the page's box for it is (`place`, the pane's points from its top,
 /// `None`: the page has none now, so the field is hidden), saying the page's hint while it is
-/// empty (none where the page gives none). The pane's own coordinates grow upward, the page's
+/// empty (none where the page gives none). The field is as tall as its own line (its font's, which
+/// AppKit draws from the top of the frame), so it is that line that is centred in the box, not a
+/// taller frame with the text at its top. The pane's own coordinates grow upward, the page's
 /// downward.
 pub(crate) fn place_field(field: &NSTextField, place: Option<Field>) {
     let (Some(Field { rect: place, hint }), Some(pane)) = (place, unsafe { field.superview() })
@@ -169,9 +168,9 @@ pub(crate) fn place_field(field: &NSTextField, place: Option<Field>) {
     };
     let hint = hint.as_deref().map(NSString::from_str);
     field.setPlaceholderString(hint.as_deref());
-    let height = f64::from(place.h).min(FIELD_HEIGHT);
+    let height = field.fittingSize().height.ceil().min(f64::from(place.h));
     let middle = f64::from(place.y + place.h / 2.0);
-    let top = middle - height / 2.0;
+    let top = (middle - height / 2.0).round();
     let y = pane.bounds().size.height - (top + height);
     field.setFrame(NSRect::new(
         NSPoint::new(f64::from(place.x), y),
