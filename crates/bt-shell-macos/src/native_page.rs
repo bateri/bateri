@@ -644,7 +644,7 @@ fn place_field(field: &PageTextField, place: &Field, zoom: f32, family: Option<&
     let (top, height) = if place.kind == FieldKind::Lines {
         (f64::from(room.y), f64::from(room.h))
     } else {
-        let height = field.fittingSize().height.ceil().min(f64::from(room.h));
+        let height = line_height(field).min(f64::from(room.h));
         let middle = f64::from(room.y + room.h / 2.0);
         ((middle - height / 2.0).round(), height)
     };
@@ -654,6 +654,23 @@ fn place_field(field: &PageTextField, place: &Field, zoom: f32, family: Option<&
         NSSize::new(f64::from(room.w), height),
     ));
     field.setHidden(false);
+}
+
+/// The height of one line of `field`, as its cell draws it: its font's line and the cell's
+/// margins. Asked of the cell, not of Auto Layout (`fittingSize`), which answers for a field out
+/// of its window with a height of nothing: a pane moved into a split (⌘D) is out of its window for
+/// a moment, and a field placed then stood half a line low until the page's outline changed.
+fn line_height(field: &PageTextField) -> f64 {
+    let font_line = || {
+        field.font().map_or(0.0, |font| {
+            (font.ascender() - font.descender() + font.leading()).ceil()
+        })
+    };
+    field
+        .cell()
+        .map(|cell| cell.cellSize().height)
+        .filter(|height| height.is_finite() && *height > 0.0)
+        .map_or_else(font_line, f64::ceil)
 }
 
 /// The tracking area that tells `view` where the pointer is over its whole visible rectangle,
