@@ -22,21 +22,24 @@ use std::rc::{Rc, Weak};
 
 use bt_core::Theme;
 use bt_shell_common::native_view::{
-    Accessible, AccessibleRole, Field, FieldKind, Id, Key, Mods, Outline, PageDrive, Point, Role,
-    Tip, tone_linear,
+    Accessible, AccessibleRole, Command, Field, FieldKind, Id, Key, Mods, Outline, PageDrive,
+    Point, Role, Tip, tone_linear,
 };
 use bt_shell_common::view_strip::Strip;
 use objc2::rc::{Retained, Weak as WeakId};
 use objc2::runtime::{AnyObject, ProtocolObject};
 use objc2::{AllocAnyThread, DefinedClass, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSAccessibility, NSAccessibilityButtonRole, NSAccessibilityElement,
-    NSAccessibilityLayoutChangedNotification, NSAccessibilityPostNotification,
-    NSAccessibilityStaticTextRole, NSAutoresizingMaskOptions, NSColor, NSControl,
-    NSEventModifierFlags, NSFocusRingType, NSFont, NSLineBreakMode, NSResponder,
-    NSSecureTextFieldCell, NSTextField, NSTrackingArea, NSTrackingAreaOptions, NSView,
+    NSAccessibility, NSAccessibilityButtonRole, NSAccessibilityCheckBoxRole,
+    NSAccessibilityElement, NSAccessibilityImageRole, NSAccessibilityLayoutChangedNotification,
+    NSAccessibilityLinkRole, NSAccessibilityMenuItemRole, NSAccessibilityPostNotification,
+    NSAccessibilityProgressIndicatorRole, NSAccessibilityRadioButtonRole, NSAccessibilityRole,
+    NSAccessibilitySliderRole, NSAccessibilityStaticTextRole, NSAccessibilitySubrole,
+    NSAccessibilitySwitchSubrole, NSAccessibilityTabButtonSubrole, NSAutoresizingMaskOptions,
+    NSColor, NSControl, NSEventModifierFlags, NSFocusRingType, NSFont, NSLineBreakMode,
+    NSResponder, NSSecureTextFieldCell, NSTextField, NSTrackingArea, NSTrackingAreaOptions, NSView,
 };
-use objc2_foundation::{NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
+use objc2_foundation::{NSNumber, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
 
 use crate::pane::TerminalPane;
 use crate::pencere_view::face::Faces;
@@ -376,7 +379,9 @@ impl PageFields {
     }
 
     /// What a screen reader is given for `item`: the field itself for a field (it reads and edits
-    /// it as AppKit's), an element of the pane for the rest, where it stands in the pane.
+    /// it as AppKit's), an element of the pane for the rest, where it stands in the pane, as what
+    /// the page says it is ([`accessibility_role`]) and with its state: checked, chosen, open, of
+    /// no use now, the value it shows.
     fn element_of(&self, pane: &TerminalPane, item: &Accessible) -> Option<Retained<AnyObject>> {
         if let AccessibleRole::Field(_) = item.role {
             let field = self.field(item.id?)?;
@@ -386,8 +391,9 @@ impl PageFields {
                 ))),
             )));
         }
+        let state = &item.state;
         let element = PageElement::alloc(pane.mtm()).set_ivars(PageElementIvars {
-            press: Cell::new((item.role == AccessibleRole::Button).then(|| {
+            press: Cell::new((pressed_by_role(item.role) && !state.disabled).then(|| {
                 let rect = item.rect;
                 (rect.x + rect.w / 2.0, rect.y + rect.h / 2.0)
             })),
@@ -396,21 +402,40 @@ impl PageFields {
         // SAFETY: `init` is NSObject's designated initializer and the ivars are set.
         let element: Retained<PageElement> = unsafe { msg_send![super(element), init] };
         let words = NSString::from_str(&item.words);
+        let (role, subrole) = accessibility_role(item.role);
         // SAFETY: the roles are AppKit's own constants; the parent is the pane, a view that
         // outlives the element (the element goes with the page's outline).
         unsafe {
-            element.setAccessibilityRole(Some(if item.role == AccessibleRole::Button {
-                NSAccessibilityButtonRole
-            } else {
-                NSAccessibilityStaticTextRole
-            }));
+            element.setAccessibilityRole(Some(role));
+            if let Some(subrole) = subrole {
+                element.setAccessibilitySubrole(Some(subrole));
+            }
             element.setAccessibilityParent(Some(pane));
         }
         element.setAccessibilityLabel(Some(&words));
-        if item.role == AccessibleRole::Text {
-            // SAFETY: a string is a value static text has.
-            unsafe { element.setAccessibilityValue(Some(&words)) };
+        if let AccessibleRole::Heading(level) = item.role {
+            // AppKit has no role for a heading: static text that says it is one, and its level.
+            let said = NSString::from_str(&format!("heading, level {level}"));
+            element.setAccessibilityRoleDescription(Some(&said));
         }
+        // SAFETY: the values are those AppKit's own controls of each role have: a number for what
+        // is checked (0 or 1), a string for words and what a progress or a slider shows.
+        unsafe {
+            if let Some(checked) = state.checked {
+                element.setAccessibilityValue(Some(&NSNumber::new_i32(i32::from(checked))));
+            } else if let Some(value) = &state.value {
+                element.setAccessibilityValue(Some(&NSString::from_str(value)));
+            } else if matches!(item.role, AccessibleRole::Text | AccessibleRole::Heading(_)) {
+                element.setAccessibilityValue(Some(&words));
+            }
+        }
+        if state.selected {
+            element.setAccessibilitySelected(true);
+        }
+        if let Some(open) = state.expanded {
+            element.setAccessibilityExpanded(open);
+        }
+        element.setAccessibilityEnabled(!state.disabled);
         // The pane's own coordinates grow upward, the page's downward.
         let rect = item.rect;
         let height = pane.bounds().size.height;
@@ -421,6 +446,16 @@ impl PageFields {
         Some(Retained::into_super(Retained::into_super(
             Retained::into_super(element),
         )))
+    }
+
+    /// What the page can be told to do now, as its outline last said: the nearest the keyboard
+    /// first (Page Commands ▸, and the palette that lists the menu).
+    pub(crate) fn commands(&self) -> Vec<Command> {
+        self.outline
+            .borrow()
+            .as_ref()
+            .map(|outline| outline.commands.clone())
+            .unwrap_or_default()
     }
 
     /// What a screen reader is given of the page, in the order it reads it.
@@ -612,6 +647,53 @@ define_class!(
         }
     }
 );
+
+/// AppKit's role, and subrole where one says more, for what the page says an element is.
+fn accessibility_role(
+    role: AccessibleRole,
+) -> (
+    &'static NSAccessibilityRole,
+    Option<&'static NSAccessibilitySubrole>,
+) {
+    // SAFETY: AppKit's own constants, read once each.
+    unsafe {
+        match role {
+            AccessibleRole::Button => (NSAccessibilityButtonRole, None),
+            AccessibleRole::Link => (NSAccessibilityLinkRole, None),
+            AccessibleRole::Checkbox => (NSAccessibilityCheckBoxRole, None),
+            AccessibleRole::Switch => (
+                NSAccessibilityCheckBoxRole,
+                Some(NSAccessibilitySwitchSubrole),
+            ),
+            AccessibleRole::Radio => (NSAccessibilityRadioButtonRole, None),
+            AccessibleRole::Tab => (
+                NSAccessibilityRadioButtonRole,
+                Some(NSAccessibilityTabButtonSubrole),
+            ),
+            AccessibleRole::MenuItem => (NSAccessibilityMenuItemRole, None),
+            AccessibleRole::Image => (NSAccessibilityImageRole, None),
+            AccessibleRole::Progress => (NSAccessibilityProgressIndicatorRole, None),
+            AccessibleRole::Slider => (NSAccessibilitySliderRole, None),
+            AccessibleRole::Text | AccessibleRole::Heading(_) | AccessibleRole::Field(_) => {
+                (NSAccessibilityStaticTextRole, None)
+            }
+        }
+    }
+}
+
+/// Whether a screen reader presses an element of this role: what a click does to it.
+fn pressed_by_role(role: AccessibleRole) -> bool {
+    matches!(
+        role,
+        AccessibleRole::Button
+            | AccessibleRole::Link
+            | AccessibleRole::Checkbox
+            | AccessibleRole::Switch
+            | AccessibleRole::Radio
+            | AccessibleRole::Tab
+            | AccessibleRole::MenuItem
+    )
+}
 
 /// A colour of the theme as AppKit's: the engine's tone in the theme, as sRGB.
 fn ink(theme: &Theme, tone: Role) -> Retained<NSColor> {

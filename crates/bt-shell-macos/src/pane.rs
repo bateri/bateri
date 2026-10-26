@@ -2509,6 +2509,12 @@ define_class!(
             } else if action == Some(sel!(forgetPassword:)) {
                 // A remote tab with a saved password.
                 self.can_forget_password()
+            } else if action == Some(sel!(pageCommand:)) {
+                // View ▸ Page Commands ▸: the command of the item's tag can be done now.
+                usize::try_from(item.tag())
+                    .ok()
+                    .and_then(|index| self.page_commands().into_iter().nth(index))
+                    .is_some_and(|command| command.enabled)
             } else if action == Some(sel!(copyLastCommand:)) || action == Some(sel!(copyLastOutput:))
             {
                 // Something has run in this pane.
@@ -2552,6 +2558,17 @@ define_class!(
         #[unsafe(method(cancelUpload:))]
         fn cancel_upload(&self, _sender: Option<&AnyObject>) {
             self.cancel_uploads();
+        }
+
+        /// View ▸ Page Commands ▸ (and the palette, which lists it): the command of the page up
+        /// whose place in the list is the item's tag.
+        #[unsafe(method(pageCommand:))]
+        fn page_command(&self, sender: Option<&AnyObject>) {
+            if let Some(item) = sender.and_then(|sender| sender.downcast_ref::<NSMenuItem>())
+                && let Ok(index) = usize::try_from(item.tag())
+            {
+                self.do_page_command(index);
+            }
         }
 
         /// Shell ▸ Forget Password for “{host}”: this pane's remote
@@ -5961,6 +5978,68 @@ impl TerminalPane {
             handle.send_pick(index);
             self.drain_page();
         }
+    }
+
+    /// What the page up can be told to do now, the nearest the keyboard first: View ▸ Page
+    /// Commands ▸ lists them, and the palette with it. Empty with no page up.
+    pub(crate) fn page_commands(&self) -> Vec<bt_shell_common::native_view::Command> {
+        self.ivars()
+            .page_up
+            .borrow()
+            .as_ref()
+            .map(|page| page.fields.commands())
+            .unwrap_or_default()
+    }
+
+    /// The person asked for the `index`th of the page's commands ([`TerminalPane::page_commands`])
+    /// from the menu or the palette: the page is told it, if it can be done now.
+    fn do_page_command(&self, index: usize) {
+        let Some(command) = self.page_commands().into_iter().nth(index) else {
+            return;
+        };
+        if !command.enabled {
+            return;
+        }
+        if let Some(handle) = self.page_handle() {
+            handle.send_command(command.id);
+            self.drain_page();
+        }
+    }
+
+    /// A key went up while a page of the kit's is up and has the keyboard (not one of its
+    /// fields): the page is told, as it is told the key that went down. `true` when a page took
+    /// it.
+    pub(crate) fn page_key_up(&self, event: &NSEvent) -> bool {
+        if !self.page_is_up() {
+            return false;
+        }
+        let characters = event.characters().map(|text| text.to_string());
+        if let (Some(handle), Some(key)) = (
+            self.page_handle(),
+            characters.as_deref().and_then(crate::native_page::key_of),
+        ) {
+            let mods = crate::native_page::mods_of(event.modifierFlags());
+            handle.send_input(Input::KeyUp { key, mods });
+            self.drain_page();
+        }
+        true
+    }
+
+    /// Files dropped on the page up, at `at` in the view's points: the page is told their paths,
+    /// and nothing is written to the program's line or uploaded. `true` when a page took them.
+    pub(crate) fn page_files(
+        &self,
+        at: bt_shell_common::native_view::Point,
+        paths: Vec<String>,
+    ) -> bool {
+        if !self.page_is_up() {
+            return false;
+        }
+        if let Some(handle) = self.page_handle() {
+            handle.send_files(at, paths);
+            self.drain_page();
+        }
+        true
     }
 
     /// The name and the kind of the page's field `control` is, if it is one.

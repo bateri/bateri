@@ -23,6 +23,15 @@ of every installed copy. A version without a section is not released.
   colours can blend into each other and its parts fade; and the pointer takes the shape it
   asks for (resize, not allowed, grab, crosshair). VoiceOver reads the view: its buttons, its
   fields and its words, and a button can be pressed from it.
+- **Native views of the pencere kit 2.0.** A program's native view can open menus and dialogs
+  over the rest of the page, write paragraphs of more than one look (bold words, a coloured
+  name, a link you click), draw charts and rings, and fill a box from one colour to another.
+  What the page can be told to do is listed under View ▸ Page Commands ▸ and in the command
+  palette, and its keys do it. You can drag things on the page and drop files from Finder on
+  it, the middle button, a key let go and a modifier held alone reach it, and VoiceOver reads
+  its checkboxes, switches, tabs, links, headings and progress as what they are, with their
+  state. A view written for the kit's 1.0 is no longer opened: the program is told so in
+  words that name both versions.
 - **A native view moves as its page says, and shows its tooltips.** A page can say how a change
   of a part of it moves (a colour that comes in, a field that widens, a row that slides to its
   new place, comes in or goes out), and bateri moves it at the display's rate without asking the

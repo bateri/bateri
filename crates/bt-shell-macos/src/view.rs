@@ -615,6 +615,12 @@ pub(crate) struct ViewIvars {
     /// handle of a divider between panes, the tab column) would set the shape over the
     /// cursor rects of the view that is there.
     page_over: Cell<bool>,
+    /// The buttons pressed on the page of this pane and not yet let go (a bit each: left,
+    /// right, middle). While one is held the page is told where the pointer goes and the release,
+    /// wherever they are — over the page or not, in the window or out of it — and not that the
+    /// pointer left it (the kit's specification, Section 4): a drag that leaves the page and comes
+    /// back, or ends outside it, is followed to its end.
+    page_held: Cell<u8>,
     /// The mouse's gesture ledger: the selection drag, the presses reported to
     /// the application and the motion report's notch - the rules and
     /// rationales are in [`Gesture`], a tested struct. `Cell` + `Copy`: every
@@ -989,17 +995,26 @@ define_class!(
         /// one it would move the previous selection's end.
         #[unsafe(method(mouseDragged:))]
         fn mouse_dragged(&self, event: &NSEvent) {
+            if self.page_drag(event) {
+                return;
+            }
             self.drag_event(event, MouseButton::Left);
         }
 
         #[unsafe(method(rightMouseDragged:))]
         fn right_mouse_dragged(&self, event: &NSEvent) {
+            if self.page_drag(event) {
+                return;
+            }
             self.drag_event(event, MouseButton::Right);
         }
 
         #[unsafe(method(otherMouseDragged:))]
         fn other_mouse_dragged(&self, event: &NSEvent) {
             if event.buttonNumber() != 2 {
+                return;
+            }
+            if self.page_drag(event) {
                 return;
             }
             self.drag_event(event, MouseButton::Middle);
@@ -1056,7 +1071,10 @@ define_class!(
             if let Some(pane) = self.pane()
                 && pane.page_is_up()
             {
-                self.page_pointer_left(&pane);
+                // A button held on the page keeps the pointer the page's: it is not told it left.
+                if self.ivars().page_held.get() == 0 {
+                    self.page_pointer_left(&pane);
+                }
                 return;
             }
             if self.is_strip_event(event) {
@@ -1075,6 +1093,12 @@ define_class!(
         /// passes the event along the chain.
         #[unsafe(method(flagsChanged:))]
         fn flags_changed(&self, event: &NSEvent) {
+            // A page of the kit hears the modifiers alone: what shows while ⌥ is held.
+            if let Some(pane) = self.pane()
+                && pane.page_is_up()
+            {
+                pane.page_input(Input::Mods(crate::native_page::mods_of(event.modifierFlags())));
+            }
             self.link_flags(event);
             // SAFETY: `NSResponder`'s `flagsChanged:` takes an `NSEvent`, returns nothing.
             let _: () = unsafe { msg_send![super(self), flagsChanged: event] };
@@ -1365,6 +1389,19 @@ define_class!(
         ///    event ([`ViewIvars::consumed`]), or committed text and also named
         ///    a command for it ([`ViewIvars::commanded`]), it falls to
         ///    `encode_key` anyway.
+        /// A key went up: a page of the kit's is told, as it was told the key that went down;
+        /// the terminal has no use for it (`NSResponder`'s own, which passes it along the chain).
+        #[unsafe(method(keyUp:))]
+        fn key_up(&self, event: &NSEvent) {
+            if let Some(pane) = self.pane()
+                && pane.page_key_up(event)
+            {
+                return;
+            }
+            // SAFETY: `NSResponder`'s `keyUp:` takes an `NSEvent`, returns nothing.
+            let _: () = unsafe { msg_send![super(self), keyUp: event] };
+        }
+
         #[unsafe(method(keyDown:))]
         fn key_down(&self, event: &NSEvent) {
             self.note_interaction();
@@ -1787,7 +1824,10 @@ define_class!(
             if let Some(pane) = self.pane() {
                 pane.host().files_dragged(pane.id(), true);
             }
-            if self.pane().is_none_or(|pane| pane.accepts_drop()) {
+            // Files over a page of the kit are the page's: it takes them whatever the session.
+            if self.pane().is_some_and(|pane| pane.page_is_up())
+                || self.pane().is_none_or(|pane| pane.accepts_drop())
+            {
                 NSDragOperation::Copy
             } else {
                 NSDragOperation::None
@@ -1842,16 +1882,24 @@ define_class!(
                 pane.host().files_dragged(pane.id(), false);
             }
             let paths = dropped_paths(&sender.draggingPasteboard());
-            match self.ivars().session.get() {
-                Some(session) if !paths.is_empty() && session.remote_target().is_some() => self
-                    .pane()
-                    .is_some_and(|pane| pane.upload_drop(paths)),
-                Some(session) if !paths.is_empty() => {
-                    session.paste(shell_quote(&paths).into_bytes());
-                    true
+            // Over a page of the kit the paths are the page's, told where they were let go:
+            // nothing is written to the program's line or uploaded.
+            let at = self.convertPoint_fromView(sender.draggingLocation(), None);
+            let page_took = !paths.is_empty()
+                && self.pane().is_some_and(|pane| {
+                    pane.page_files(PagePoint::new(at.x as f32, at.y as f32), paths.clone())
+                });
+            page_took
+                || match self.ivars().session.get() {
+                    Some(session) if !paths.is_empty() && session.remote_target().is_some() => self
+                        .pane()
+                        .is_some_and(|pane| pane.upload_drop(paths)),
+                    Some(session) if !paths.is_empty() => {
+                        session.paste(shell_quote(&paths).into_bytes());
+                        true
+                    }
+                    _ => false,
                 }
-                _ => false,
-            }
         }
     }
 
@@ -1967,6 +2015,7 @@ impl BateriView {
         let this = Self::alloc(mtm).set_ivars(ViewIvars {
             session: OnceCell::new(),
             page_over: Cell::new(false),
+            page_held: Cell::new(0),
             gesture: Cell::new(Gesture::default()),
             consumed: Cell::new(false),
             commanded: Cell::new(false),
@@ -2555,24 +2604,28 @@ impl BateriView {
             && pane.page_is_up()
         {
             let at = self.page_point(event);
-            let button = match button {
-                MouseButton::Left => Some(PageButton::Left),
-                MouseButton::Right => Some(PageButton::Right),
-                _ => None,
+            // The buttons held on the page: while one is, the page follows the pointer wherever
+            // it goes ([`ViewIvars::page_held`]).
+            let (button, bit) = match button {
+                MouseButton::Left => (PageButton::Left, 1),
+                MouseButton::Right => (PageButton::Right, 2),
+                MouseButton::Middle => (PageButton::Middle, 4),
             };
-            if let Some(button) = button {
-                pane.page_input(if pressed {
-                    Input::Press {
-                        at,
-                        button,
-                        mods: crate::native_page::mods_of(event.modifierFlags()),
-                        // The system's own count of a quick run of presses: 2 is a double click.
-                        count: u32::try_from(event.clickCount()).unwrap_or(1).max(1),
-                    }
-                } else {
-                    Input::Release { at, button }
-                });
-            }
+            let held = self.ivars().page_held.get();
+            self.ivars()
+                .page_held
+                .set(if pressed { held | bit } else { held & !bit });
+            pane.page_input(if pressed {
+                Input::Press {
+                    at,
+                    button,
+                    mods: crate::native_page::mods_of(event.modifierFlags()),
+                    // The system's own count of a quick run of presses: 2 is a double click.
+                    count: u32::try_from(event.clickCount()).unwrap_or(1).max(1),
+                }
+            } else {
+                Input::Release { at, button }
+            });
             return;
         }
         let Some(session) = self.ivars().session.get() else {
@@ -2929,16 +2982,30 @@ impl BateriView {
             .is_some_and(|hit| hit.isDescendantOf(pane))
     }
 
-    /// A move of the pointer, for the page of the pane if it is over it. Leaving the page is
-    /// told to it once, and then it hears nothing and sets no pointer ([`BateriView::page_over`]):
+    /// A move of the pointer, for the page of the pane if it is over it (or a button pressed on
+    /// it is held). Leaving the page is told to it once, and then it hears nothing and sets no pointer ([`BateriView::page_over`]):
     /// the cursor rects of what the pointer is over decide the shape.
     fn page_pointer(&self, pane: &TerminalPane, event: &NSEvent) {
-        if self.over_page(pane, event) {
+        // A button held on the page keeps the pointer the page's: it is told where the pointer
+        // goes, over the page or not ([`ViewIvars::page_held`]).
+        let held = self.ivars().page_held.get() != 0;
+        if held || self.over_page(pane, event) {
             self.ivars().page_over.set(true);
             pane.page_input(Input::Move(self.page_point(event)));
         } else {
             self.page_pointer_left(pane);
         }
+    }
+
+    /// A move with a button held, for the page of the pane if one is up ([`BateriView::page_pointer`],
+    /// which follows a press of the page's wherever the pointer goes). `true` when a page is up:
+    /// nothing of the drag is the grid's.
+    fn page_drag(&self, event: &NSEvent) -> bool {
+        let Some(pane) = self.pane().filter(|pane| pane.page_is_up()) else {
+            return false;
+        };
+        self.page_pointer(&pane, event);
+        true
     }
 
     /// The pointer is not over the page any more: it is told once, and its answer sets no pointer.
@@ -2957,6 +3024,7 @@ impl BateriView {
     /// The page is gone: the pointer is over nothing of it, whatever it was last over.
     pub(crate) fn forget_page_pointer(&self) {
         self.ivars().page_over.set(false);
+        self.ivars().page_held.set(0);
     }
 
     /// Pops up the menu a debug page asked for, where it said (the view's points). Items are

@@ -2969,6 +2969,14 @@ impl AppDelegate {
             .unwrap_or_default()
     }
 
+    /// What the page of the kit up in the key tab's focused pane can be told to do now: the input
+    /// of View ▸ Page Commands ▸ (and so of the palette); empty with no page or no key window.
+    pub(crate) fn key_page_commands(&self) -> Vec<bt_shell_common::native_view::Command> {
+        self.key_tab()
+            .map(|tab| tab.focused_pane().page_commands())
+            .unwrap_or_default()
+    }
+
     /// The ports of the key tab's focused pane — its programs' and, in a
     /// remote session, the server's: the input of Shell ▸ Open Port ▸; empty
     /// when no terminal window is key.
