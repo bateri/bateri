@@ -21,6 +21,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
 
 use bt_core::Flow;
 use pencere_sandbox::{
@@ -329,6 +330,9 @@ struct ModulePage {
     shared: Rc<RefCell<Shared>>,
 }
 
+/// How long a resized pane waits for the page of its new size: under a frame at 60 Hz.
+const RESIZE_WAIT: Duration = Duration::from_millis(12);
+
 impl UiPage for ModulePage {
     fn build(&mut self, cx: &UiContext<'_>) -> UiList {
         let zoom = self.shared.borrow().place.zoom;
@@ -343,10 +347,16 @@ impl UiPage for ModulePage {
             // A page for this size, the next step of one that is moving and the page whose time
             // has come; a page that is none of these is not asked for.
             let due = shared.wake_at.is_some_and(|at| cx.now >= at);
+            let resized = shared.asked.is_some_and(|asked| asked != (size, scale));
             if shared.asked != Some((size, scale)) || shared.animating || due {
                 shared.asked = Some((size, scale));
                 shared.wake_at = None;
                 shared.module.render(size, cx.now, cx.reduce_motion);
+            }
+            // A resized pane waits a little for the page of its size rather than draw, for a
+            // frame, the one laid out for the size it was: that frame is what flickers.
+            if resized && shared.module.wait_for_frame(RESIZE_WAIT) {
+                shared.sync(true);
             }
             shared.root.clone()
         };

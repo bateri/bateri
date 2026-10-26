@@ -657,9 +657,9 @@ mod tests {
         assert_eq!(key_of("\u{f728}"), Some(Key::Delete));
         assert_eq!(key_of("\u{f704}"), Some(Key::Function(1)));
         assert_eq!(key_of("\u{f717}"), Some(Key::Function(20)));
-        // A function key the page has no use for, a control character, an empty or composed text.
-        assert_eq!(key_of("\u{f704}"), None);
-        assert_eq!(key_of("\u{7f}"), None);
+        // A function key past F20, a control character, an empty or composed text.
+        assert_eq!(key_of("\u{f718}"), None);
+        assert_eq!(key_of("\u{1}"), None);
         assert_eq!(key_of(""), None);
         assert_eq!(key_of("ab"), None);
     }
