@@ -118,6 +118,16 @@ pub(crate) type OnOutline = Rc<dyn Fn(&Outline)>;
 pub struct Outline {
     pub fields: Vec<Field>,
     pub accessible: Vec<Accessible>,
+    /// What the page says of a part of it while the pointer rests there, innermost last.
+    pub tips: Vec<Tip>,
+}
+
+/// A tooltip of the page: where it is in the pane, and what it says (the keys that do the same in
+/// brackets, as the system's own tooltips write a shortcut).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Tip {
+    pub rect: Rect,
+    pub words: String,
 }
 
 impl Outline {
@@ -141,6 +151,17 @@ impl Outline {
                 .map(|item| Accessible {
                     rect: at.to_pane(item.rect),
                     ..item
+                })
+                .collect(),
+            tips: laid
+                .tips()
+                .into_iter()
+                .map(|(rect, tip)| Tip {
+                    rect: at.to_pane(rect),
+                    words: match tip.keys {
+                        Some(keys) if !keys.is_empty() => format!("{} ({keys})", tip.words),
+                        _ => tip.words,
+                    },
                 })
                 .collect(),
         }

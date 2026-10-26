@@ -23,6 +23,11 @@ of every installed copy. A version without a section is not released.
   colours can blend into each other and its parts fade; and the pointer takes the shape it
   asks for (resize, not allowed, grab, crosshair). VoiceOver reads the view: its buttons, its
   fields and its words, and a button can be pressed from it.
+- **A native view moves as its page says, and shows its tooltips.** A page can say how a change
+  of a part of it moves (a colour that comes in, a field that widens, a row that slides to its
+  new place, comes in or goes out), and bateri moves it at the display's rate without asking the
+  page for each frame; under Reduce Motion nothing moves. A part with a tip shows it as a
+  system tooltip while the pointer rests on it.
 
 - **The line you type on a server is in the dock.** In a terminal the server keeps
   (the one a plain `ssh` opens when remote shell integration is on), the line at the
