@@ -138,9 +138,9 @@ of every installed copy. A version without a section is not released.
 
 ### Fixed
 
-- **A native view's text field stays in its box when a pane is split beside it.** Opening a pane
-  next to one with a native view (⌘D) put the view's field half a line low, saying its hint under
-  its box, until the pointer moved over the page.
+- **A native view's text field stays in its box when the pane jumps in size.** Opening a pane
+  beside one with a native view (⌘D) or making the window full screen left the view's field off
+  its box, saying its hint above or below it, until the pointer moved over the page.
 
 - **A native view's boxes stand in the middle of their padding at any text size.** At a size
   of the terminal's text that makes a point of the page a fraction of pixels, a box inside

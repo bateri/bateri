@@ -5392,9 +5392,11 @@ impl TerminalPane {
     /// object. If the pane is not attached to a window there is no scale and
     /// nothing is done ([`TerminalPane::sync_geometry`]).
     ///
-    /// **A page of the kit is drawn here, at once, when the surface changed size**
-    /// ([`TerminalPane::draw_page_in_transaction`]): left to the pacer its frame of the new size
-    /// would come a vsync or more after the layer took the new bounds.
+    /// **A page of the kit is asked for a frame when the surface changed size**, the pacer's,
+    /// as the terminal's is. It is not drawn here, inside the resize: a frame presented with the
+    /// layer's new bounds is seen before AppKit has put the page's fields in their new place,
+    /// and after a jump in size (a split, full screen) they stood off their boxes. The layer
+    /// keeps the old picture pinned to its top-left corner meanwhile ([`pin_picture`]).
     pub(crate) fn refresh_geometry(&self) {
         // The view's container is the pane, not the grid: told on its own.
         self.sync_view_size();
@@ -5415,8 +5417,8 @@ impl TerminalPane {
                 grid.dock_cols,
                 grid.context,
             );
-            if resized {
-                self.draw_page_in_transaction(link);
+            if resized && link.shows_page() {
+                link.poke_page();
             }
         }
         // The page's fields stand where its last outline says, in the pane's new height (one
@@ -5434,42 +5436,6 @@ impl TerminalPane {
         self.refresh_jump();
         // So does the veil over a grid that waits for its connection.
         self.place_link_veil();
-    }
-
-    /// The frame of a page of the kit at the size the pane just took, drawn now and presented
-    /// in the Core Animation transaction that carries the layer's new bounds
-    /// (`presentsWithTransaction`, which wgpu reads when it acquires the drawable): the layer
-    /// never shows the old picture in the new bounds. On only for this one frame — every other
-    /// frame, the terminal's grid among them, is presented by the pacer as before, and nothing
-    /// here starts a tick. A pane with no page, a hidden one, a background tab draw nothing
-    /// ([`DisplayLink::draw_page_now`]).
-    fn draw_page_in_transaction(&self, link: &DisplayLink) {
-        if !link.shows_page() {
-            return;
-        }
-        let layer = &self.ivars().layer;
-        layer.setPresentsWithTransaction(true);
-        let drew = link.draw_page_now();
-        layer.setPresentsWithTransaction(false);
-        // And a frame of the pacer's after it, whatever came of this one: a frame that was not
-        // drawn here (the page busy, the surface not ready) or not shown (presented while the pane
-        // was being moved into a split) would leave the old picture pinned in the new bounds until
-        // something else asked for a frame; the request this one spent is asked for again.
-        link.poke_page();
-        if crate::native_page::tracing() {
-            let bounds = layer.bounds();
-            let drawable = layer.drawableSize();
-            eprintln!(
-                "bateri fields [draw] drew={drew} layer=({:.1}x{:.1}) drawable=({:.0}x{:.0}) scale={:.1} flipped={} gravity={}",
-                bounds.size.width,
-                bounds.size.height,
-                drawable.width,
-                drawable.height,
-                layer.contentsScale(),
-                layer.contentsAreFlipped(),
-                layer.contentsGravity(),
-            );
-        }
     }
 
     /// Matches the layer's drawable size to the view's backing geometry **and**
