@@ -8,7 +8,8 @@
 //! changes the list itself, so a menu does something the person can see.
 
 use super::{
-    CHOSEN, Container, Containers, GROUP_BUTTON, GROUP_GAP, HOVERED, LIST, ROW, SEARCH, State, wave,
+    CHOSEN, Container, Containers, FIELD, GROUP_BUTTON, GROUP_GAP, HOVERED, LIST, ROW, SEARCH,
+    State, wave,
 };
 use pencere_view::{
     Button, Cursor, Id, Input, Key, Keyboard, Menu, MenuEntry, Mods, Point, Queries, Reply,
@@ -262,7 +263,7 @@ impl Containers {
     /// out again (the rows in view depend on how far the list is scrolled).
     pub fn settle(&mut self, laid: &dyn Queries) -> bool {
         if let Some(extent) = laid.scroll_extent(LIST) {
-            self.list_view = extent.view;
+            self.list_view = extent.view.h;
         }
         let moved = self.ui.settle(laid);
         if let Some(at) = self.pointer {
@@ -335,14 +336,16 @@ impl Containers {
                 let changed = self.hover_to(laid, None);
                 self.reply(changed)
             }
-            Input::Press { at, button, mods } => self.press(laid, at, button, mods),
+            Input::Press {
+                at, button, mods, ..
+            } => self.press(laid, at, button, mods),
             Input::Release { at, button } => match button {
                 Button::Left => self.release(laid, at),
                 Button::Right => self.reply(false),
             },
-            Input::Scroll { at, dy } => {
+            Input::Scroll { at, dx, dy } => {
                 self.pointer = Some(at);
-                let moved = self.ui.scroll_by(laid, at, dy);
+                let moved = self.ui.scroll_by(laid, at, dx, dy);
                 self.reply(moved)
             }
             Input::Key { key, mods } => self.key(key, mods, laid),
@@ -361,7 +364,7 @@ impl Containers {
         };
         if id == SEARCH {
             return Reply {
-                keyboard: Some(Keyboard::Field),
+                keyboard: Some(Keyboard::Field(FIELD)),
                 ..self.reply(false)
             };
         }
@@ -479,7 +482,7 @@ impl Containers {
                 ..Reply::none()
             },
             Key::Tab | Key::Character('/') => Reply {
-                keyboard: Some(Keyboard::Field),
+                keyboard: Some(Keyboard::Field(FIELD)),
                 ..self.reply(false)
             },
             Key::Enter => self.fold_key(&rows, at, None),

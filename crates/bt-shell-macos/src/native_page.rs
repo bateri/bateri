@@ -17,19 +17,26 @@
 //! Show Container List Demo`), whose button and ⌃C close it, or the view a program opened — a
 //! module the program sent — whose ⌃C and button go to the program, which ends it.
 
-use std::rc::Rc;
+use std::cell::{Cell, RefCell};
+use std::rc::{Rc, Weak};
 
 use bt_core::Theme;
-use bt_shell_common::native_view::{Field, Key, Mods, PageDrive, Role, tone_linear};
-use bt_shell_common::view_strip::Strip;
-use objc2::rc::Retained;
-use objc2::runtime::ProtocolObject;
-use objc2::{AllocAnyThread, MainThreadOnly, sel};
-use objc2_app_kit::{
-    NSAutoresizingMaskOptions, NSColor, NSEventModifierFlags, NSFocusRingType, NSFont,
-    NSLineBreakMode, NSTextField, NSTrackingArea, NSTrackingAreaOptions, NSView,
+use bt_shell_common::native_view::{
+    Accessible, AccessibleRole, Field, FieldKind, Id, Key, Mods, Outline, PageDrive, Point, Role,
+    tone_linear,
 };
-use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
+use bt_shell_common::view_strip::Strip;
+use objc2::rc::{Retained, Weak as WeakId};
+use objc2::runtime::{AnyObject, ProtocolObject};
+use objc2::{AllocAnyThread, DefinedClass, MainThreadOnly, define_class, msg_send, sel};
+use objc2_app_kit::{
+    NSAccessibility, NSAccessibilityButtonRole, NSAccessibilityElement,
+    NSAccessibilityLayoutChangedNotification, NSAccessibilityPostNotification,
+    NSAccessibilityStaticTextRole, NSAutoresizingMaskOptions, NSColor, NSControl,
+    NSEventModifierFlags, NSFocusRingType, NSFont, NSLineBreakMode, NSResponder,
+    NSSecureTextFieldCell, NSTextField, NSTrackingArea, NSTrackingAreaOptions, NSView,
+};
+use objc2_foundation::{NSObject, NSPoint, NSRect, NSSize, NSString};
 
 use crate::pane::TerminalPane;
 use crate::pencere_view::face::Faces;
@@ -99,14 +106,358 @@ pub(crate) enum Owner {
     Program,
 }
 
-/// What is up while the container-list page is: the handle the pane's input goes to the page
-/// by, the filter's field, the tracking area over the pane, whose page it is.
+/// What is up while a page of the kit is: the handle the pane's input goes to the page by, the
+/// fields the page has, the tracking area over the pane, whose page it is.
 pub(crate) struct Page {
     pub owner: Owner,
     pub handle: Rc<dyn PageDrive>,
-    pub field: Retained<NSTextField>,
+    pub fields: Rc<PageFields>,
     pub area: Retained<NSTrackingArea>,
 }
+
+/// One text field of the page's: its name, its kind, the field of AppKit's that stands in its
+/// room.
+pub(crate) struct PageField {
+    pub id: Id,
+    pub kind: FieldKind,
+    pub view: Retained<PageTextField>,
+}
+
+/// The page's fields and what a screen reader says of it, as its outline last said
+/// ([`PageFields::apply`]), and how they are to look: the theme's ink, the terminal's face, as
+/// large as the page is drawn.
+pub(crate) struct PageFields {
+    pane: WeakId<TerminalPane>,
+    theme: Cell<Theme>,
+    family: Option<String>,
+    zoom: Cell<f32>,
+    fields: RefCell<Vec<PageField>>,
+    accessible: RefCell<Vec<Accessible>>,
+    /// What a screen reader is given for each of `accessible`, in order: an element for a button
+    /// or words, the field itself for a field.
+    elements: RefCell<Vec<Retained<AnyObject>>>,
+    /// The field the keyboard was last known to be in.
+    focused: Cell<Option<Id>>,
+    /// The page's own reply is moving the keyboard: the field that takes it does not tell the
+    /// page it was clicked into.
+    moving: Cell<bool>,
+}
+
+impl PageFields {
+    pub(crate) fn new(
+        pane: &TerminalPane,
+        theme: Theme,
+        family: Option<String>,
+        zoom: f32,
+    ) -> Rc<Self> {
+        Rc::new(Self {
+            pane: WeakId::new(pane),
+            theme: Cell::new(theme),
+            family,
+            zoom: Cell::new(zoom),
+            fields: RefCell::new(Vec::new()),
+            accessible: RefCell::new(Vec::new()),
+            elements: RefCell::new(Vec::new()),
+            focused: Cell::new(None),
+            moving: Cell::new(false),
+        })
+    }
+
+    /// The page's outline changed: a field for each the page names, of its kind, where its room
+    /// is, saying its hint; the fields it no longer names are taken away (the keyboard in one
+    /// goes back to the page). What a screen reader says is kept for when it asks.
+    pub(crate) fn apply(self: &Rc<Self>, outline: &Outline) {
+        let Some(pane) = self.pane.load() else {
+            return;
+        };
+        let mut fields = self.fields.borrow_mut();
+        let kept: Vec<(Id, FieldKind)> = outline.fields.iter().map(|f| (f.id, f.kind)).collect();
+        fields.retain(|field| {
+            let stays = kept.contains(&(field.id, field.kind));
+            if !stays {
+                if field.view.currentEditor().is_some()
+                    && let Some(window) = pane.window()
+                {
+                    window.makeFirstResponder(Some(pane.view()));
+                }
+                field.view.removeFromSuperview();
+            }
+            stays
+        });
+        for said in &outline.fields {
+            let at = fields
+                .iter()
+                .position(|field| field.id == said.id && field.kind == said.kind);
+            let index = match at {
+                Some(index) => index,
+                None => {
+                    let view = text_field(
+                        &pane,
+                        said.kind,
+                        &self.theme.get(),
+                        self.family.as_deref(),
+                        self,
+                    );
+                    view.ivars().id.set(Some(said.id));
+                    pane.add_page_field(&view);
+                    fields.push(PageField {
+                        id: said.id,
+                        kind: said.kind,
+                        view,
+                    });
+                    fields.len() - 1
+                }
+            };
+            if let Some(field) = fields.get(index) {
+                place_field(&field.view, said, self.zoom.get(), self.family.as_deref());
+            }
+        }
+        drop(fields);
+        if *self.accessible.borrow() != outline.accessible {
+            self.accessible.replace(outline.accessible.clone());
+            let elements = outline
+                .accessible
+                .iter()
+                .filter_map(|item| self.element_of(&pane, item))
+                .collect();
+            self.elements.replace(elements);
+            // SAFETY: the pane is an element of the accessibility tree (a view), and the name is
+            // one of AppKit's own.
+            unsafe {
+                NSAccessibilityPostNotification(&pane, NSAccessibilityLayoutChangedNotification)
+            };
+        }
+    }
+
+    /// What a screen reader is given for `item`: the field itself for a field (it reads and edits
+    /// it as AppKit's), an element of the pane for the rest, where it stands in the pane.
+    fn element_of(&self, pane: &TerminalPane, item: &Accessible) -> Option<Retained<AnyObject>> {
+        if let AccessibleRole::Field(_) = item.role {
+            let field = self.field(item.id?)?;
+            return Some(Retained::into_super(Retained::into_super(
+                Retained::into_super(Retained::into_super(Retained::into_super(
+                    Retained::into_super(field),
+                ))),
+            )));
+        }
+        let element = PageElement::alloc(pane.mtm()).set_ivars(PageElementIvars {
+            press: Cell::new((item.role == AccessibleRole::Button).then(|| {
+                let rect = item.rect;
+                (rect.x + rect.w / 2.0, rect.y + rect.h / 2.0)
+            })),
+            pane: WeakId::new(pane),
+        });
+        // SAFETY: `init` is NSObject's designated initializer and the ivars are set.
+        let element: Retained<PageElement> = unsafe { msg_send![super(element), init] };
+        let words = NSString::from_str(&item.words);
+        // SAFETY: the roles are AppKit's own constants; the parent is the pane, a view that
+        // outlives the element (the element goes with the page's outline).
+        unsafe {
+            element.setAccessibilityRole(Some(if item.role == AccessibleRole::Button {
+                NSAccessibilityButtonRole
+            } else {
+                NSAccessibilityStaticTextRole
+            }));
+            element.setAccessibilityParent(Some(pane));
+        }
+        element.setAccessibilityLabel(Some(&words));
+        if item.role == AccessibleRole::Text {
+            // SAFETY: a string is a value static text has.
+            unsafe { element.setAccessibilityValue(Some(&words)) };
+        }
+        // The pane's own coordinates grow upward, the page's downward.
+        let rect = item.rect;
+        let height = pane.bounds().size.height;
+        element.setAccessibilityFrameInParentSpace(NSRect::new(
+            NSPoint::new(f64::from(rect.x), height - f64::from(rect.y + rect.h)),
+            NSSize::new(f64::from(rect.w), f64::from(rect.h)),
+        ));
+        Some(Retained::into_super(Retained::into_super(
+            Retained::into_super(element),
+        )))
+    }
+
+    /// What a screen reader is given of the page, in the order it reads it.
+    pub(crate) fn elements(&self) -> Vec<Retained<AnyObject>> {
+        self.elements.borrow().clone()
+    }
+
+    /// The field named `id`.
+    pub(crate) fn field(&self, id: Id) -> Option<Retained<PageTextField>> {
+        self.fields
+            .borrow()
+            .iter()
+            .find(|field| field.id == id)
+            .map(|field| field.view.clone())
+    }
+
+    /// The name and the kind of the field `control` is, if it is one of the page's.
+    pub(crate) fn of(&self, control: &AnyObject) -> Option<(Id, FieldKind)> {
+        self.fields
+            .borrow()
+            .iter()
+            .find(|field| {
+                std::ptr::eq(
+                    std::ptr::from_ref(control).cast::<()>(),
+                    std::ptr::from_ref(&*field.view).cast::<()>(),
+                )
+            })
+            .map(|field| (field.id, field.kind))
+    }
+
+    /// Whether the keyboard is in one of the page's fields.
+    pub(crate) fn typing(&self) -> bool {
+        self.fields
+            .borrow()
+            .iter()
+            .any(|field| field.view.currentEditor().is_some())
+    }
+
+    /// Every field is taken away (the page goes down).
+    pub(crate) fn clear(&self) {
+        for field in self.fields.take() {
+            field.view.removeFromSuperview();
+        }
+        self.accessible.take();
+        self.elements.take();
+    }
+
+    /// The theme changed: the fields' ink with it.
+    pub(crate) fn paint(&self, theme: &Theme) {
+        self.theme.set(*theme);
+        for field in self.fields.borrow().iter() {
+            field.view.setTextColor(Some(&ink(theme, Role::Foreground)));
+        }
+    }
+
+    /// The page is drawn `zoom` times its own size now: the fields' text with it (they are put
+    /// where the next outline says).
+    pub(crate) fn set_zoom(&self, zoom: f32) {
+        self.zoom.set(zoom);
+    }
+
+    /// The keyboard went into the field named `id`: the page is told, unless its own reply sent
+    /// it there.
+    fn focused_by_person(&self, id: Id) {
+        self.focused.set(Some(id));
+        if self.moving.get() {
+            return;
+        }
+        if let Some(pane) = self.pane.load() {
+            pane.page_field_focused(Some(id));
+        }
+    }
+
+    /// Whether the keyboard left the fields of itself since it was last looked at (the person
+    /// clicked on the page): the page is to be told, and is from now on taken to know.
+    pub(crate) fn left_of_itself(&self) -> bool {
+        if self.focused.get().is_some() && !self.typing() {
+            self.focused.set(None);
+            return true;
+        }
+        false
+    }
+
+    /// Puts the keyboard where the page's reply says: in its field `id`, or back in the page.
+    /// The page is not told of a move it asked for.
+    pub(crate) fn send_keyboard(&self, to: Option<Id>) {
+        let Some(pane) = self.pane.load() else {
+            return;
+        };
+        let Some(window) = pane.window() else {
+            return;
+        };
+        self.moving.set(true);
+        match to.and_then(|id| self.field(id)) {
+            Some(field) => {
+                window.makeFirstResponder(Some(&field));
+                self.focused.set(to);
+            }
+            None => {
+                window.makeFirstResponder(Some(pane.view()));
+                self.focused.set(None);
+            }
+        }
+        self.moving.set(false);
+    }
+
+    /// The texts a reply puts in fields, by their names; a name that is not a field is passed
+    /// over. The page is not told of a text it put in itself (setting the value sends no change).
+    pub(crate) fn fill(&self, texts: &[(Id, String)]) {
+        for (id, text) in texts {
+            if let Some(field) = self.field(*id) {
+                field.setStringValue(&NSString::from_str(text));
+            }
+        }
+    }
+}
+
+/// What a page's field keeps: its name, and the fields it belongs to (told when the person
+/// clicks into it).
+pub(crate) struct PageTextFieldIvars {
+    id: Cell<Option<Id>>,
+    fields: RefCell<Weak<PageFields>>,
+}
+
+define_class!(
+    // SAFETY: NSTextField is designed for subclassing; PageTextField implements no `Drop` and is
+    // born with `initWithFrame:`.
+    #[unsafe(super(NSTextField, NSControl, NSView, NSResponder, NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "BateriPageTextField"]
+    #[ivars = PageTextFieldIvars]
+    pub(crate) struct PageTextField;
+
+    impl PageTextField {
+        /// The keyboard comes to the field (the person clicked into it, or the page sent it):
+        /// the page's fields are told which.
+        #[unsafe(method(becomeFirstResponder))]
+        fn become_first_responder(&self) -> bool {
+            // SAFETY: the superclass's own `becomeFirstResponder`, which takes nothing and
+            // answers whether the field took the keyboard.
+            let took: bool = unsafe { msg_send![super(self), becomeFirstResponder] };
+            if took
+                && let (Some(id), Some(fields)) = (self.ivars().id.get(), self.ivars().fields.borrow().upgrade())
+            {
+                fields.focused_by_person(id);
+            }
+            took
+        }
+    }
+);
+
+/// What an element a screen reader is given keeps: where a press on it lands (a button's middle,
+/// in the pane's points from its top), and the pane it presses.
+pub(crate) struct PageElementIvars {
+    press: Cell<Option<(f32, f32)>>,
+    pane: WeakId<TerminalPane>,
+}
+
+define_class!(
+    // SAFETY: NSAccessibilityElement is designed for subclassing; PageElement implements no `Drop`
+    // and is born with `init`.
+    #[unsafe(super(NSAccessibilityElement, NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "BateriPageElement"]
+    #[ivars = PageElementIvars]
+    pub(crate) struct PageElement;
+
+    impl PageElement {
+        /// The screen reader presses a button of the page: a click on its middle, as the
+        /// pointer's would be.
+        #[unsafe(method(accessibilityPerformPress))]
+        fn accessibility_press(&self) -> bool {
+            // No `return`: `define_class!` converts the `bool` at the end of the body.
+            match (self.ivars().press.get(), self.ivars().pane.load()) {
+                (Some((x, y)), Some(pane)) => {
+                    pane.press_page_at(Point::new(x, y));
+                    true
+                }
+                _ => false,
+            }
+        }
+    }
+);
 
 /// A colour of the theme as AppKit's: the engine's tone in the theme, as sRGB.
 fn ink(theme: &Theme, tone: Role) -> Retained<NSColor> {
@@ -114,33 +465,60 @@ fn ink(theme: &Theme, tone: Role) -> Retained<NSColor> {
     NSColor::colorWithSRGBRed_green_blue_alpha(r, g, b, 1.0)
 }
 
-/// The filter's field for `pane`: no border and no ground (the page draws the box), the
-/// terminal's face at the size of the page's text, the theme's ink, one line that scrolls as it
-/// is typed and a hint cut with "…" where it does not fit (it says the page's hint: see
-/// [`place_field`]). The pane is its delegate (`TerminalPane::page_field_changed`,
-/// `page_field_command`).
-pub(crate) fn filter_field(
+/// The size of a field's text at the page's own size, points: the kit's text.
+const FIELD_TEXT: f64 = 12.5;
+
+/// A field of `kind` for `pane`: no border and no ground (the page draws the box), the
+/// terminal's face, the theme's ink. One line scrolls as it is typed and cuts a hint that does
+/// not fit with "…"; lines wrap; a secret shows no characters. The pane is its delegate
+/// (`TerminalPane::page_field_changed`, `page_field_command`).
+fn text_field(
     pane: &TerminalPane,
+    kind: FieldKind,
     theme: &Theme,
     family: Option<&str>,
-) -> Retained<NSTextField> {
-    let field = NSTextField::new(pane.mtm());
+    fields: &Rc<PageFields>,
+) -> Retained<PageTextField> {
+    let mtm = pane.mtm();
+    let this = PageTextField::alloc(mtm).set_ivars(PageTextFieldIvars {
+        id: Cell::new(None),
+        fields: RefCell::new(Rc::downgrade(fields)),
+    });
+    // SAFETY: `initWithFrame:` is NSTextField's designated initializer and the ivars are set.
+    let field: Retained<PageTextField> =
+        unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] };
+    if kind == FieldKind::Secret {
+        // A secret's cell draws dots for the characters, and its field editor copies nothing.
+        let cell = NSSecureTextFieldCell::new(mtm);
+        field.setCell(Some(&cell));
+    }
     field.setBordered(false);
     field.setBezeled(false);
     field.setDrawsBackground(false);
+    field.setEditable(true);
+    field.setSelectable(true);
     field.setFocusRingType(NSFocusRingType::None);
-    let size = 12.5;
-    let font = family
-        .and_then(|name| NSFont::fontWithName_size(&NSString::from_str(name), size))
-        .unwrap_or_else(|| NSFont::monospacedSystemFontOfSize_weight(size, 0.0));
-    field.setFont(Some(&font));
-    // One line: a hint that is too long for the room is cut, not wrapped onto a line below it
-    // that the room does not show (which leaves the first line high in the box).
+    field.setFont(Some(&face(family, FIELD_TEXT)));
     if let Some(cell) = field.cell() {
-        cell.setUsesSingleLineMode(true);
-        cell.setScrollable(true);
+        match kind {
+            // One line: a hint that is too long for the room is cut, not wrapped onto a line
+            // below it that the room does not show (which leaves the first line high in the box).
+            FieldKind::Line | FieldKind::Secret => {
+                cell.setUsesSingleLineMode(true);
+                cell.setScrollable(true);
+            }
+            FieldKind::Lines => {
+                cell.setUsesSingleLineMode(false);
+                cell.setWraps(true);
+                cell.setScrollable(false);
+            }
+        }
     }
-    field.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
+    field.setLineBreakMode(if kind == FieldKind::Lines {
+        NSLineBreakMode::ByWordWrapping
+    } else {
+        NSLineBreakMode::ByTruncatingTail
+    });
     field.setTextColor(Some(&ink(theme, Role::Foreground)));
     field.setAutoresizingMask(NSAutoresizingMaskOptions::empty());
     // SAFETY: the pane implements the text field's delegate methods it is given (`impl
@@ -149,32 +527,50 @@ pub(crate) fn filter_field(
     field
 }
 
-/// The theme changed: the field's ink with it.
-pub(crate) fn paint(field: &NSTextField, theme: &Theme) {
-    field.setTextColor(Some(&ink(theme, Role::Foreground)));
+/// The terminal's face (the system's monospaced one where it has none) at `size` points.
+fn face(family: Option<&str>, size: f64) -> Retained<NSFont> {
+    family
+        .and_then(|name| NSFont::fontWithName_size(&NSString::from_str(name), size))
+        .unwrap_or_else(|| NSFont::monospacedSystemFontOfSize_weight(size, 0.0))
 }
 
-/// Puts the field where the page's box for it is (`place`, the pane's points from its top,
-/// `None`: the page has none now, so the field is hidden), saying the page's hint while it is
-/// empty (none where the page gives none). The field is as tall as its own line (its font's, which
-/// AppKit draws from the top of the frame), so it is that line that is centred in the box, not a
-/// taller frame with the text at its top. The pane's own coordinates grow upward, the page's
-/// downward.
-pub(crate) fn place_field(field: &NSTextField, place: Option<Field>) {
-    let (Some(Field { rect: place, hint }), Some(pane)) = (place, unsafe { field.superview() })
-    else {
-        field.setHidden(true);
+/// Puts the field where the page's room for it is (the pane's points from its top), saying the
+/// page's hint while it is empty, and what it is to a screen reader. A line is as tall as its
+/// own line (its font's, which AppKit draws from the top of the frame), so it is that line that
+/// is centred in the room, not a taller frame with the text at its top; lines take the whole
+/// room. The text is as large as the page is drawn (`zoom`). The pane's own coordinates grow
+/// upward, the page's downward.
+fn place_field(field: &PageTextField, place: &Field, zoom: f32, family: Option<&str>) {
+    let Some(pane) = (unsafe { field.superview() }) else {
         return;
     };
-    let hint = hint.as_deref().map(NSString::from_str);
+    let size = FIELD_TEXT * f64::from(zoom);
+    if field
+        .font()
+        .is_none_or(|font| (font.pointSize() - size).abs() > 0.01)
+    {
+        field.setFont(Some(&face(family, size)));
+    }
+    let hint = place.hint.as_deref().map(NSString::from_str);
     field.setPlaceholderString(hint.as_deref());
-    let height = field.fittingSize().height.ceil().min(f64::from(place.h));
-    let middle = f64::from(place.y + place.h / 2.0);
-    let top = (middle - height / 2.0).round();
+    let said = place
+        .label
+        .as_deref()
+        .or(place.hint.as_deref())
+        .unwrap_or_default();
+    field.setAccessibilityLabel(Some(&NSString::from_str(said)));
+    let room = place.rect;
+    let (top, height) = if place.kind == FieldKind::Lines {
+        (f64::from(room.y), f64::from(room.h))
+    } else {
+        let height = field.fittingSize().height.ceil().min(f64::from(room.h));
+        let middle = f64::from(room.y + room.h / 2.0);
+        ((middle - height / 2.0).round(), height)
+    };
     let y = pane.bounds().size.height - (top + height);
     field.setFrame(NSRect::new(
-        NSPoint::new(f64::from(place.x), y),
-        NSSize::new(f64::from(place.w), height),
+        NSPoint::new(f64::from(room.x), y),
+        NSSize::new(f64::from(room.w), height),
     ));
     field.setHidden(false);
 }
@@ -222,6 +618,12 @@ pub(crate) fn key_of(characters: &str) -> Option<Key> {
         '\r' | '\n' | '\u{3}' => Key::Enter,
         '\u{1b}' => Key::Escape,
         '\t' => Key::Tab,
+        // ⌫ makes DEL in AppKit's text; ⌦ (fn-⌫) is `NSDeleteFunctionKey`.
+        '\u{7f}' | '\u{8}' => Key::Backspace,
+        '\u{f728}' => Key::Delete,
+        // `NSF1FunctionKey` to `NSF20FunctionKey`, one after the other.
+        #[allow(clippy::cast_possible_truncation)]
+        f @ '\u{f704}'..='\u{f717}' => Key::Function((u32::from(f) - 0xf704 + 1) as u8),
         other if other.is_control() || ('\u{f700}'..='\u{f8ff}').contains(&other) => return None,
         other => Key::Character(other),
     })
@@ -251,6 +653,10 @@ mod tests {
         assert_eq!(key_of(" "), Some(Key::Character(' ')));
         assert_eq!(key_of("G"), Some(Key::Character('G')));
         assert_eq!(key_of("/"), Some(Key::Character('/')));
+        assert_eq!(key_of("\u{7f}"), Some(Key::Backspace));
+        assert_eq!(key_of("\u{f728}"), Some(Key::Delete));
+        assert_eq!(key_of("\u{f704}"), Some(Key::Function(1)));
+        assert_eq!(key_of("\u{f717}"), Some(Key::Function(20)));
         // A function key the page has no use for, a control character, an empty or composed text.
         assert_eq!(key_of("\u{f704}"), None);
         assert_eq!(key_of("\u{7f}"), None);

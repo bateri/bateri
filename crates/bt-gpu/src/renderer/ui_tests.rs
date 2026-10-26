@@ -253,6 +253,7 @@ fn style(family: Family, size_px: f64, weight: u16) -> TextStyle {
         family,
         size_px,
         weight,
+        italic: false,
     }
 }
 

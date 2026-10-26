@@ -12,7 +12,7 @@ use std::ptr::{self, NonNull};
 
 use objc2_core_foundation::{
     CFAttributedString, CFDictionary, CFIndex, CFNumber, CFRange, CFRetained, CFString, CFType,
-    CGPoint, CGRect, CGSize,
+    CGAffineTransform, CGPoint, CGRect, CGSize,
 };
 use objc2_core_graphics::{
     CGBitmapContextCreate, CGColorSpace, CGContext, CGGlyph, CGImageAlphaInfo, kCGColorSpaceSRGB,
@@ -549,7 +549,7 @@ impl FontSystem for CoreText {
     /// the terminal family goes through the grid's own opening rules: the
     /// named family if the machine has it, the default chain's otherwise —
     /// so the UI can be set in the very font the grid uses.
-    fn open_text(family: &Family, size: f64, weight: u16) -> Option<Self::Font> {
+    fn open_text(family: &Family, size: f64, weight: u16, italic: bool) -> Option<Self::Font> {
         let base = match family {
             // SAFETY: a named UI constant; a null language asks for the
             // system's own; the return is checked.
@@ -566,7 +566,8 @@ impl FontSystem for CoreText {
             }
             Family::Terminal(None) => Self::open_default(size).0,
         };
-        Some(with_weight(base, weight))
+        let weighted = with_weight(base, weight);
+        Some(if italic { slanted(weighted) } else { weighted })
     }
 
     /// `CFEqual` on the two fonts: it sees the size and the variation axes
@@ -774,6 +775,32 @@ fn with_weight(font: CFRetained<CTFont>, weight: u16) -> CFRetained<CTFont> {
         }
     }
     heavier
+}
+
+/// `font`'s italic: the family's own italic face where it has one, else the same face slanted
+/// as an oblique is (a terminal's face often has no italic, and an italic asked for must
+/// still look it).
+fn slanted(font: CFRetained<CTFont>) -> CFRetained<CTFont> {
+    let italic = CTFontSymbolicTraits::TraitItalic;
+    // SAFETY: `font` is alive; a null matrix keeps its matrix and size 0.0 its size.
+    if let Some(derived) = unsafe { font.copy_with_symbolic_traits(0.0, ptr::null(), italic, italic) }
+        // SAFETY: `derived` was just created and is alive in this scope.
+        && unsafe { derived.symbolic_traits() }.contains(italic)
+    {
+        return derived;
+    }
+    // About twelve degrees, as an oblique leans.
+    let lean = CGAffineTransform {
+        a: 1.0,
+        b: 0.0,
+        c: 0.21,
+        d: 1.0,
+        tx: 0.0,
+        ty: 0.0,
+    };
+    // SAFETY: `font` is alive; the matrix is a plain affine transform that lives for the call,
+    // and no attributes are added.
+    unsafe { font.copy_with_attributes(0.0, &lean, None) }
 }
 
 /// Sample characters and family names for the platformless tests: a test body

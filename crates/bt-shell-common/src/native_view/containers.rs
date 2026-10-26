@@ -548,8 +548,7 @@ impl Containers {
             .press(SEARCH)
             .child(
                 div()
-                    .id(FIELD)
-                    .text_field()
+                    .text_field(FIELD)
                     .grow(1.0)
                     .min_w(0.0)
                     .h(18.0)

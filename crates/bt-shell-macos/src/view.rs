@@ -1244,14 +1244,13 @@ define_class!(
             if let Some(pane) = self.pane()
                 && pane.page_is_up()
             {
-                let raw = event.scrollingDeltaY() as f32;
-                let dy = -if event.hasPreciseScrollingDeltas() {
-                    raw
-                } else {
-                    raw * 12.0
-                };
+                // A wheel's line is a dozen points; a trackpad says its points.
+                let step = if event.hasPreciseScrollingDeltas() { 1.0 } else { 12.0 };
+                let dx = -(event.scrollingDeltaX() as f32) * step;
+                let dy = -(event.scrollingDeltaY() as f32) * step;
                 pane.page_input(Input::Scroll {
                     at: self.page_point(event),
+                    dx,
                     dy,
                 });
                 return;
@@ -2567,6 +2566,8 @@ impl BateriView {
                         at,
                         button,
                         mods: crate::native_page::mods_of(event.modifierFlags()),
+                        // The system's own count of a quick run of presses: 2 is a double click.
+                        count: u32::try_from(event.clickCount()).unwrap_or(1).max(1),
                     }
                 } else {
                     Input::Release { at, button }
