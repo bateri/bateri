@@ -133,6 +133,10 @@ of every installed copy. A version without a section is not released.
 
 ### Fixed
 
+- **A native view no longer flickers while its pane is resized.** For a frame it showed the
+  page laid out for the size the pane had been; the pane now waits a few milliseconds for the
+  page of its new size.
+
 - **A view's filter field says what the view says, on one line.** The field bateri puts
   over a native view (dockerpen's, pickpen's, any kit page's) used to say dockerpen's "Filter by
   name, image, port…" whatever the view was, and a hint too long for the box wrapped onto a line
