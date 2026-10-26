@@ -1302,7 +1302,7 @@ dependencies = [
 [[package]]
 name = "pencere"
 version = "0.2.0"
-source = "git+https://github.com/bateri/pencere?rev=8e955509fff4482f6d0c489ace947abb61425674#8e955509fff4482f6d0c489ace947abb61425674"
+source = "git+https://github.com/bateri/pencere?rev=503c2c7e750b37607b6c71e6eb4db54bd546272a#503c2c7e750b37607b6c71e6eb4db54bd546272a"
 dependencies = [
  "libc",
  "pencere-wire",
@@ -1313,7 +1313,7 @@ dependencies = [
 [[package]]
 name = "pencere-host"
 version = "0.2.0"
-source = "git+https://github.com/bateri/pencere?rev=8e955509fff4482f6d0c489ace947abb61425674#8e955509fff4482f6d0c489ace947abb61425674"
+source = "git+https://github.com/bateri/pencere?rev=503c2c7e750b37607b6c71e6eb4db54bd546272a#503c2c7e750b37607b6c71e6eb4db54bd546272a"
 dependencies = [
  "pencere-wire",
  "serde",
@@ -1323,7 +1323,7 @@ dependencies = [
 [[package]]
 name = "pencere-sandbox"
 version = "0.2.0"
-source = "git+https://github.com/bateri/pencere?rev=8e955509fff4482f6d0c489ace947abb61425674#8e955509fff4482f6d0c489ace947abb61425674"
+source = "git+https://github.com/bateri/pencere?rev=503c2c7e750b37607b6c71e6eb4db54bd546272a#503c2c7e750b37607b6c71e6eb4db54bd546272a"
 dependencies = [
  "pencere-view",
  "pencere-wire",
@@ -1337,7 +1337,7 @@ dependencies = [
 [[package]]
 name = "pencere-view"
 version = "0.2.0"
-source = "git+https://github.com/bateri/pencere?rev=8e955509fff4482f6d0c489ace947abb61425674#8e955509fff4482f6d0c489ace947abb61425674"
+source = "git+https://github.com/bateri/pencere?rev=503c2c7e750b37607b6c71e6eb4db54bd546272a#503c2c7e750b37607b6c71e6eb4db54bd546272a"
 dependencies = [
  "taffy",
 ]
@@ -1345,7 +1345,7 @@ dependencies = [
 [[package]]
 name = "pencere-wire"
 version = "0.2.0"
-source = "git+https://github.com/bateri/pencere?rev=8e955509fff4482f6d0c489ace947abb61425674#8e955509fff4482f6d0c489ace947abb61425674"
+source = "git+https://github.com/bateri/pencere?rev=503c2c7e750b37607b6c71e6eb4db54bd546272a#503c2c7e750b37607b6c71e6eb4db54bd546272a"
 dependencies = [
  "serde",
  "serde_json",

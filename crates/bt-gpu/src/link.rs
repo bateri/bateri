@@ -3107,6 +3107,31 @@ impl DisplayLink {
         self.waker.resume();
     }
 
+    /// Draws the shown page **now**, on the caller's stack, instead of at the pacer's next
+    /// tick: the frame of a resize, which the caller presents in the same Core Animation
+    /// transaction as the layer's new bounds (`CAMetalLayer.presentsWithTransaction`, which
+    /// wgpu reads when the drawable is acquired). Left to the pacer it lands one to three
+    /// vsyncs later, and in between the old picture is shown in the new bounds.
+    ///
+    /// `false`, and nothing done, where the tick would draw nothing either: no page, the gate
+    /// closed (a hidden pane, a background tab, a stopped link), no surface size yet — or the
+    /// page already borrowed (a call from inside a tick). The request is the page's own, so a
+    /// pacer started by the same resize ([`DisplayLink::resize`]) finds it spent and goes back
+    /// to sleep: the frame is drawn once, not twice, and nothing keeps ticking at rest. The
+    /// terminal's damage is not read here; the grid's path never runs through this.
+    pub fn draw_page_now(&self) -> bool {
+        let core = &self.core;
+        if !self.waker.gate().is_open() || !core.surface.is_configured() {
+            return false;
+        }
+        match core.page.try_borrow() {
+            Ok(page) if page.is_some() => {}
+            _ => return false,
+        }
+        core.page_frames.ask();
+        core.page_tick(self.waker.pacer().now())
+    }
+
     /// Shows `page` over the terminal — its list is painted in place of the
     /// grid — or, with `None`, takes it down and the terminal's frames come
     /// back. Either way a frame is asked for: what was drawn is no longer

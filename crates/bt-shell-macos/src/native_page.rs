@@ -132,6 +132,9 @@ pub(crate) struct PageFields {
     family: Option<String>,
     zoom: Cell<f32>,
     fields: RefCell<Vec<PageField>>,
+    /// The outline the fields were last put by: where they go again when the pane's height
+    /// changes and the page's outline does not ([`PageFields::place_again`]).
+    outline: RefCell<Option<Outline>>,
     accessible: RefCell<Vec<Accessible>>,
     /// What a screen reader is given for each of `accessible`, in order: an element for a button
     /// or words, the field itself for a field.
@@ -156,6 +159,7 @@ impl PageFields {
             family,
             zoom: Cell::new(zoom),
             fields: RefCell::new(Vec::new()),
+            outline: RefCell::new(None),
             accessible: RefCell::new(Vec::new()),
             elements: RefCell::new(Vec::new()),
             focused: Cell::new(None),
@@ -213,6 +217,7 @@ impl PageFields {
             }
         }
         drop(fields);
+        self.outline.replace(Some(outline.clone()));
         if *self.accessible.borrow() != outline.accessible {
             self.accessible.replace(outline.accessible.clone());
             let elements = outline
@@ -226,6 +231,27 @@ impl PageFields {
             unsafe {
                 NSAccessibilityPostNotification(&pane, NSAccessibilityLayoutChangedNotification)
             };
+        }
+    }
+
+    /// The pane changed size: each field is put again where the last outline says. The page's
+    /// rooms are measured from the pane's top and AppKit's frames from its bottom, so a pane
+    /// that grows or shrinks moves the frames even when the outline stays the same. The fields
+    /// are pinned to the top as the pane resizes ([`text_field`]); this settles what the
+    /// rounding of that leaves. Nothing is made or taken away here.
+    pub(crate) fn place_again(&self) {
+        let outline = self.outline.borrow();
+        let Some(outline) = outline.as_ref() else {
+            return;
+        };
+        let fields = self.fields.borrow();
+        for said in &outline.fields {
+            if let Some(field) = fields
+                .iter()
+                .find(|field| field.id == said.id && field.kind == said.kind)
+            {
+                place_field(&field.view, said, self.zoom.get(), self.family.as_deref());
+            }
         }
     }
 
@@ -318,6 +344,7 @@ impl PageFields {
         for field in self.fields.take() {
             field.view.removeFromSuperview();
         }
+        self.outline.take();
         self.accessible.take();
         self.elements.take();
     }
@@ -520,7 +547,10 @@ fn text_field(
         NSLineBreakMode::ByTruncatingTail
     });
     field.setTextColor(Some(&ink(theme, Role::Foreground)));
-    field.setAutoresizingMask(NSAutoresizingMaskOptions::empty());
+    // Pinned to the pane's top, where the page's rooms are measured from: the pane's own
+    // coordinates grow upward, so a field with a fixed bottom margin would slide with the
+    // pane's bottom edge while it is resized, until the next outline put it back.
+    field.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinYMargin);
     // SAFETY: the pane implements the text field's delegate methods it is given (`impl
     // NSTextFieldDelegate for TerminalPane`) and outlives the field, which it removes with the page.
     unsafe { field.setDelegate(Some(ProtocolObject::from_ref(pane))) };

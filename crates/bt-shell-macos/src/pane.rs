@@ -74,7 +74,9 @@ use objc2_foundation::{
     NSDateFormatterStyle, NSDictionary, NSMutableAttributedString, NSNotification,
     NSNotificationCenter, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSUUID, ns_string,
 };
-use objc2_quartz_core::CAMetalLayer;
+use objc2_quartz_core::{
+    CAMetalLayer, CATransaction, kCAGravityBottomLeft, kCAGravityResize, kCAGravityTopLeft,
+};
 
 use crate::card::{self, FrameBox};
 use crate::environment::Wants;
@@ -637,6 +639,44 @@ impl BlockTipParts {
 fn paint_surface(surface: &NSBox, theme: &Theme) {
     surface.setFillColor(&srgb_color(theme.background_srgb()));
     surface.setBorderColor(&srgb_color(theme.separator_srgb()));
+}
+
+/// The terminal layer's ground: the theme's background, what shows where a picture smaller
+/// than the layer does not reach (a resize's frame that has not come yet, [`pin_picture`]).
+/// Without an animation: the layer is the view's own and a ground that fades would show.
+fn paint_layer(layer: &CAMetalLayer, theme: &Theme) {
+    let ground = srgb_color(theme.background_srgb()).CGColor();
+    CATransaction::begin();
+    CATransaction::setDisableActions(true);
+    layer.setBackgroundColor(Some(&ground));
+    CATransaction::commit();
+}
+
+/// How the layer fits a picture of another size than its bounds (`contentsGravity`): the old
+/// picture, while a resize's frame has not come yet. Under a page of the kit (`page`) it is
+/// pinned to the top left, the corner the page is laid out from, over the theme's ground
+/// ([`paint_layer`]); stretched, the page's text would swell and shrink with the drag. The
+/// terminal keeps Core Animation's default (`resize`): its grid sits on the pane's bottom edge,
+/// and a picture pinned to the top would jump for that frame instead.
+///
+/// Core Animation's "top" is the layer's greatest Y, which is the top on screen only in an
+/// unflipped geometry: in a flipped one (`contentsAreFlipped`, which counts the superlayers
+/// too) the visible top is "bottom". Set again only when it changes.
+fn pin_picture(layer: &CAMetalLayer, page: bool) {
+    // SAFETY: constant strings Core Animation exposes; they live for the whole process and are
+    // only read.
+    let gravity = unsafe {
+        if !page {
+            kCAGravityResize
+        } else if layer.contentsAreFlipped() {
+            kCAGravityBottomLeft
+        } else {
+            kCAGravityTopLeft
+        }
+    };
+    if !layer.contentsGravity().isEqualToString(gravity) {
+        layer.setContentsGravity(gravity);
+    }
 }
 
 /// An sRGB `NSColor` from three bytes, opaque — the theme's colours cross
@@ -2707,6 +2747,9 @@ impl TerminalPane {
         // AppKit build its own layer and the CAMetalLayer is dropped.
         view.setLayer(Some(&layer));
         view.setWantsLayer(true);
+        // The ground a page's picture is pinned over while a resize's frame has not come
+        // ([`pin_picture`]).
+        paint_layer(&layer, &theme);
         let font = settings.font.clone();
         let content_edge = settings.content_edge;
         let remote_files = settings.remote_files.clone();
@@ -4143,6 +4186,7 @@ impl TerminalPane {
         if let Some(bar) = self.ivars().search.get() {
             bar.paint(&theme, theme.is_dark());
         }
+        paint_layer(&self.ivars().layer, &theme);
         self.ivars().dim.paint(&theme);
         self.ivars().link_veil.paint_with(&theme, LINK_VEIL_ALPHA);
         self.ivars().card_frame.paint(&theme);
@@ -5346,12 +5390,18 @@ impl TerminalPane {
     /// `PaneIvars.view` as a `Retained<BateriView>` and goes with the pane
     /// object. If the pane is not attached to a window there is no scale and
     /// nothing is done ([`TerminalPane::sync_geometry`]).
+    ///
+    /// **A page of the kit is drawn here, at once, when the surface changed size**
+    /// ([`TerminalPane::draw_page_in_transaction`]): left to the pacer its frame of the new size
+    /// would come a vsync or more after the layer took the new bounds.
     pub(crate) fn refresh_geometry(&self) {
         // The view's container is the pane, not the grid: told on its own.
         self.sync_view_size();
+        let before = self.ivars().surface.size();
         let Some(grid) = self.sync_geometry() else {
             return;
         };
+        let resized = self.ivars().surface.size() != before;
         self.ivars()
             .view
             .set_metrics(grid, self.ivars().dock_rows.get());
@@ -5364,11 +5414,42 @@ impl TerminalPane {
                 grid.dock_cols,
                 grid.context,
             );
+            if resized {
+                self.draw_page_in_transaction(link);
+            }
+        }
+        // The page's fields stand where its last outline says, in the pane's new height (one
+        // the resize did not change is not told again).
+        let fields = self
+            .ivars()
+            .page_up
+            .borrow()
+            .as_ref()
+            .map(|page| Rc::clone(&page.fields));
+        if let Some(fields) = fields {
+            fields.place_again();
         }
         // "Jump to latest" stands on the reserves that just moved.
         self.refresh_jump();
         // So does the veil over a grid that waits for its connection.
         self.place_link_veil();
+    }
+
+    /// The frame of a page of the kit at the size the pane just took, drawn now and presented
+    /// in the Core Animation transaction that carries the layer's new bounds
+    /// (`presentsWithTransaction`, which wgpu reads when it acquires the drawable): the layer
+    /// never shows the old picture in the new bounds. On only for this one frame — every other
+    /// frame, the terminal's grid among them, is presented by the pacer as before, and nothing
+    /// here starts a tick. A pane with no page, a hidden one, a background tab draw nothing
+    /// ([`DisplayLink::draw_page_now`]).
+    fn draw_page_in_transaction(&self, link: &DisplayLink) {
+        if !link.shows_page() {
+            return;
+        }
+        let layer = &self.ivars().layer;
+        layer.setPresentsWithTransaction(true);
+        link.draw_page_now();
+        layer.setPresentsWithTransaction(false);
     }
 
     /// Matches the layer's drawable size to the view's backing geometry **and**
@@ -5400,6 +5481,10 @@ impl TerminalPane {
         // The scale is the layer owner's; the pixel size is the surface's
         // configuration.
         self.ivars().layer.setContentsScale(scale);
+        // Before the new bounds are committed: how the picture of the old size is fitted into
+        // them, by whether a page is up; in a window now, so which way is up on screen is known
+        // ([`pin_picture`]).
+        pin_picture(&self.ivars().layer, self.page_is_up());
         self.ivars().surface.set_size(width_px, height_px);
 
         // The cell size comes from `bt-atlas`'s font metrics through `bt-gpu`

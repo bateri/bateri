@@ -330,8 +330,12 @@ struct ModulePage {
     shared: Rc<RefCell<Shared>>,
 }
 
-/// How long a resized pane waits for the page of its new size: under a frame at 60 Hz.
-const RESIZE_WAIT: Duration = Duration::from_millis(12);
+/// How long a resized pane waits, at most, for the page of its new size: two frames at 60 Hz.
+/// The wait ends as soon as that page comes (a module answers in a millisecond or two), and the
+/// frame it is drawn into is presented with the resize itself, so a longer wait costs a slow
+/// module's drag some smoothness and never a picture of the wrong size. Bounded, so a module
+/// that does not answer cannot hold the window.
+const RESIZE_WAIT: Duration = Duration::from_millis(32);
 
 impl UiPage for ModulePage {
     fn build(&mut self, cx: &UiContext<'_>) -> UiList {
@@ -353,9 +357,10 @@ impl UiPage for ModulePage {
                 shared.wake_at = None;
                 shared.module.render(size, cx.now, cx.reduce_motion);
             }
-            // A resized pane waits a little for the page of its size rather than draw, for a
-            // frame, the one laid out for the size it was: that frame is what flickers.
-            if resized && shared.module.wait_for_frame(RESIZE_WAIT) {
+            // A resized pane waits a little for the page made for its size rather than draw,
+            // for a frame, the one laid out for the size it was: that frame is what flickers.
+            // A page that comes meanwhile for another size (one asked before) does not end it.
+            if resized && shared.module.wait_for_frame(size, RESIZE_WAIT) {
                 shared.sync(true);
             }
             shared.root.clone()
