@@ -138,12 +138,12 @@ impl fmt::Debug for DropShown {
 pub const DEFAULT_FONT_MONO: &str = "\"SF Mono\", Menlo, monospace";
 
 /// The version of the component interface a `wasm` view is written against: the semver line of
-/// the `pencere:view` package (`1.0` stands for `1.0.x`).
-pub const WASM_VERSION: &str = "1.0";
+/// the `pencere:view` package (`2.0` stands for `2.0.x`).
+pub const WASM_VERSION: &str = "2.0";
 
 /// The version of the Lua API a `lua` view is written against: the prelude's `pencere.version`
-/// (`1` is `1.0`).
-pub const LUA_VERSION: &str = "1.0";
+/// (`2` is `2.0`).
+pub const LUA_VERSION: &str = "2.0";
 
 /// The bytes the in-memory shelf keeps before the oldest go. A view's bundle is
 /// at most 64 MiB (the protocol's limit), so one bundle always fits; the number is a

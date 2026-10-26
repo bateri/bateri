@@ -27,11 +27,11 @@ use bt_core::Flow;
 use pencere_sandbox::{
     Assets, ImageLimits, Images, Module, ModuleLimits, Program, Script, Unbounded,
 };
-use pencere_view::{Element, Event, Motions, Role, Size, div, text};
+use pencere_view::{Element, Event, Laid, Motions, Role, Size, div, text};
 
 use super::{
-    Drained, Field, Id, Input, OnOutline, Outline, PageDrive, Placement, Reply, Shaped, Typeset,
-    UiContext, UiList, UiPage, from_pane, into_page, to_list,
+    Drained, Field, Id, Input, OnOutline, Outline, PageDrive, Placement, Point, Reply, Shaped,
+    Typeset, UiContext, UiList, UiPage, from_pane, into_page, to_list,
 };
 
 /// What the page and its handle share.
@@ -43,6 +43,8 @@ struct Shared {
     diagnostics: Vec<String>,
     /// The page as the module last handed it out.
     root: Option<Element>,
+    /// The page as it was last laid out: what a key is asked against, for the command it does.
+    laid: Option<Arc<Laid>>,
     /// The page is moving: it is asked for again at every frame, until it says it is not.
     animating: bool,
     /// The time the page at rest wants to be asked for again, on the frames' clock.
@@ -201,6 +203,7 @@ fn page_around(
         images: images.clone(),
         diagnostics: Vec::new(),
         root: None,
+        laid: None,
         animating: false,
         wake_at: None,
         asked: None,
@@ -239,10 +242,31 @@ impl ModuleHandle {
 }
 
 impl PageDrive for ModuleHandle {
+    /// A key that does one of the commands the page can be told to do now is that command, and the
+    /// page is told the command and not the key (the kit's specification, Section 4).
     fn send_input(&self, input: Input) {
         let shared = self.shared.borrow();
+        if let Input::Key { key, mods } = input
+            && let Some(command) = shared
+                .laid
+                .as_ref()
+                .and_then(|laid| laid.command_for(key, mods))
+        {
+            shared.module.event(Event::Command(command));
+            return;
+        }
         let input = into_page(input, shared.place);
         shared.module.event(Event::Input(input));
+    }
+
+    fn send_command(&self, id: Id) {
+        self.shared.borrow().module.event(Event::Command(id));
+    }
+
+    fn send_files(&self, at: Point, paths: Vec<String>) {
+        let shared = self.shared.borrow();
+        let at = shared.place.to_page(at);
+        shared.module.event(Event::Files { at, paths });
     }
 
     fn send_text(&self, field: Id, text: &str) {
@@ -404,6 +428,7 @@ impl UiPage for ModulePage {
             // in for a page is not the module's.
             if !starting {
                 shared.module.lay_out(Arc::clone(&laid));
+                shared.laid = Some(Arc::clone(&laid));
             }
             let outline = Outline::of(&laid, shared.place);
             let told = (outline != shared.outline)
@@ -793,7 +818,7 @@ mod tests {
             why.contains("written against `pencere:view@0.5.0`"),
             "{why}"
         );
-        assert!(why.contains("opens `pencere:view@1.0.0`"), "{why}");
+        assert!(why.contains("opens `pencere:view@2.0.0`"), "{why}");
     }
 
     /// A script that makes an error ends its page with the error and the line it is on, which
@@ -877,6 +902,107 @@ mod tests {
         assert!(drained.redraw && drained.ended.is_none(), "{drained:?}");
         let list = build(&mut page, &renderer, &theme, 0.1);
         assert!(boxes(&list) >= 2, "the two boxes of the page");
+    }
+
+    /// A key that does a command of the page is told to it as the command, and so is a command
+    /// picked from the host's list; the page's commands are in its outline, and a figure it draws
+    /// reaches the renderer as an image.
+    #[test]
+    fn a_key_that_does_a_command_is_the_command_and_a_canvas_is_an_image() {
+        let Ok(renderer) = Renderer::system_default() else {
+            eprintln!("skipped: no GPU device");
+            return;
+        };
+        let theme = Theme::BATERI;
+        let (told, woken) = channel();
+        let told = std::sync::Mutex::new(told);
+        let (mut page, handle) = script_page(
+            Script {
+                path: "page.lua".to_owned(),
+                source: br#"local said = "nothing"
+                return {
+                    render = function()
+                        return pencere.div()
+                            :command("find", "Find", "cmd+f")
+                            :child(pencere.text(said))
+                            :child(pencere.canvas({ pencere.path():circle(10, 10, 8):fill("accent") }):size(20, 20))
+                    end,
+                    handle = function(event)
+                        said = event.type .. " " .. tostring(event.id or event.key)
+                        return true
+                    end,
+                }"#
+                .to_vec(),
+                bundle: None,
+            },
+            ModuleLimits::default(),
+            None,
+            32.0,
+            None,
+            move || {
+                let _ = told.lock().unwrap().send(());
+            },
+        );
+        let outline = Rc::new(RefCell::new(Outline::default()));
+        let seen = Rc::clone(&outline);
+        handle.watch_outline(Box::new(move |now| *seen.borrow_mut() = now.clone()));
+        build(&mut page, &renderer, &theme, 0.0);
+        assert!(wait(&woken), "the script handed out no page");
+        handle.drain(&mut |_, _| {});
+        let list = build(&mut page, &renderer, &theme, 0.1);
+        assert_eq!(
+            list.items()
+                .iter()
+                .filter(|item| matches!(item, UiItem::Image { .. }))
+                .count(),
+            1,
+            "the canvas is drawn as an image"
+        );
+        let commands = outline.borrow().commands.clone();
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].title, "Find");
+
+        // What the page says after it is told something: the frame that follows its answer.
+        let text_of = |handle: &ModuleHandle, was: &str| {
+            let deadline = Instant::now() + Duration::from_secs(30);
+            loop {
+                let _ = woken.recv_timeout(Duration::from_millis(200));
+                handle.drain(&mut |_, _| {});
+                let words = handle
+                    .shared
+                    .borrow()
+                    .root
+                    .as_ref()
+                    .map(|root| {
+                        root.fold()
+                            .into_iter()
+                            .find_map(|node| match node.kind {
+                                pencere_view::wire::Kind::Text(words) => Some(words),
+                                _ => None,
+                            })
+                            .unwrap_or_default()
+                    })
+                    .unwrap_or_default();
+                if words != was || Instant::now() > deadline {
+                    return words;
+                }
+            }
+        };
+        handle.send_input(Input::Key {
+            key: pencere_view::Key::Character('f'),
+            mods: pencere_view::Mods {
+                command: true,
+                ..pencere_view::Mods::default()
+            },
+        });
+        assert_eq!(text_of(&handle, "nothing"), "command find");
+        handle.send_input(Input::Key {
+            key: pencere_view::Key::Character('g'),
+            mods: pencere_view::Mods::default(),
+        });
+        assert_eq!(text_of(&handle, "command find"), "key g");
+        handle.send_command(Id::named("find"));
+        assert_eq!(text_of(&handle, "key g"), "command find");
     }
 
     /// The files of a bundle as a manifest types them: a path, a media type and the text.

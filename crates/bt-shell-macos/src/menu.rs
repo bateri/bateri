@@ -5,7 +5,8 @@
 //! Finder, Split
 //! Right, Split Down, Close Tab/Close, Close Window), Edit (Undo Move, Cut, Copy, Paste, Paste
 //! Escaped Text, Select All, Copy Last Command, Copy Last Output, Command History…, Clear to Start, Clear Scrollback, Find ▸
-//! Find…/Find Next/Find Previous/Use Selection for Find), View (Themes…, Theme ▸, Tabs ▸,
+//! Find…/Find Next/Find Previous/Use Selection for Find), View (Command Palette…, Page Commands ▸
+//! — the commands of the page of the kit up, filled on opening — Themes…, Theme ▸, Tabs ▸,
 //! Bigger, Smaller, Actual Size, Scroll to Top, Scroll to Bottom, Page Up,
 //! Page Down) and Window (Minimize,
 //! Zoom, Show Previous/Next Tab, Go to Tab…, Jump to Command…, Select Tab ▸, Show All Tabs, Rename Tab…, splits — Select Previous/Next
@@ -120,6 +121,11 @@ pub(crate) mod keys;
 /// menu ([`ShellMenuDelegate`]): the list is the key window's other tabs, built
 /// on opening.
 const MOVE_TO_TAB_TITLE: &str = "Move Split to Tab";
+
+/// The title of View ▸ Page Commands ▸ — also how its delegate knows the menu
+/// ([`ShellMenuDelegate`]): the commands of the page of the kit up in the key tab's focused pane,
+/// filled on opening (and when the palette reads the menu, which opens it the same way).
+const PAGE_COMMANDS_TITLE: &str = "Page Commands";
 /// The title that tells Window ▸ Move Tab to Group ▸ from the other submenus
 /// ([`ShellMenuDelegate`] fills it on opening).
 const MOVE_TO_GROUP_TITLE: &str = "Move Tab to Group";
@@ -284,6 +290,11 @@ define_class!(
                 fill_move_targets(self.mtm(), menu, &targets.unwrap_or_default());
                 return;
             }
+            if menu.title().to_string() == PAGE_COMMANDS_TITLE {
+                let commands = app.as_ref().map(|app| app.key_page_commands());
+                fill_page_commands(self.mtm(), menu, &commands.unwrap_or_default());
+                return;
+            }
             if menu.title().to_string() == MOVE_TO_GROUP_TITLE {
                 let targets = app.as_ref().map(|app| app.key_group_targets());
                 fill_group_targets(self.mtm(), menu, &targets.unwrap_or_default());
@@ -346,6 +357,31 @@ fn fill_move_targets(mtm: MainThreadMarker, menu: &NSMenu, targets: &[(u64, Stri
         // No tab tag: the window's validation greys it too, but this menu is
         // filled as it opens, so it is said here as well.
         let none = item(mtm, "No Other Tabs", sel!(movePaneToTab:));
+        none.setEnabled(false);
+        menu.addItem(&none);
+    }
+}
+
+/// Fills View ▸ Page Commands ▸ with what the page up can be told to do: one item each, by its
+/// title, its `tag` its place in the list (the pane's `pageCommand:` reads it and its
+/// `validateMenuItem:` greys one that cannot be done now). **No item has a key**: a command's keys
+/// are the page's, and a key that reaches the page is the command it does
+/// (`bt_shell_common::native_view`); written here they would take the key from a field of the
+/// page. With no page, or a page with no command, a grey placeholder.
+fn fill_page_commands(
+    mtm: MainThreadMarker,
+    menu: &NSMenu,
+    commands: &[bt_shell_common::native_view::Command],
+) {
+    menu.removeAllItems();
+    for (index, command) in commands.iter().enumerate() {
+        let entry = item(mtm, &command.title, sel!(pageCommand:));
+        entry.setTag(isize::try_from(index).unwrap_or(isize::MAX));
+        menu.addItem(&entry);
+    }
+    if commands.is_empty() {
+        let none = item(mtm, "No Page Commands", sel!(pageCommand:));
+        none.setTag(-1);
         none.setEnabled(false);
         menu.addItem(&none);
     }
@@ -476,6 +512,13 @@ pub(crate) fn install(
     if let Some(menu) = theme_menu.submenu() {
         menu.setDelegate(Some(themes));
     }
+    // The commands of the page up are filled when the menu opens ([`ShellMenuDelegate`]); the
+    // placeholder is what a menu that never opened would show.
+    let page_commands = submenu(
+        mtm,
+        PAGE_COMMANDS_TITLE,
+        &[item(mtm, "No Page Commands", sel!(pageCommand:))],
+    );
     let view_menu = submenu(
         mtm,
         "View",
@@ -484,6 +527,7 @@ pub(crate) fn install(
             // here. Handled by the app delegate, which opens the key window's palette; its
             // validation is the delegate's too.
             item(mtm, "Command Palette\u{2026}", sel!(toggleCommandPalette:)),
+            page_commands.clone(),
             NSMenuItem::separatorItem(mtm),
             // The palette's themes page, opened from here (the app delegate's, listed by the
             // palette as that page); Theme ▸ is the list itself.
@@ -738,6 +782,9 @@ pub(crate) fn install(
         menu.setDelegate(Some(ProtocolObject::from_ref(&*shell_delegate)));
     }
     if let Some(menu) = move_to_group.submenu() {
+        menu.setDelegate(Some(ProtocolObject::from_ref(&*shell_delegate)));
+    }
+    if let Some(menu) = page_commands.submenu() {
         menu.setDelegate(Some(ProtocolObject::from_ref(&*shell_delegate)));
     }
     shell_delegate

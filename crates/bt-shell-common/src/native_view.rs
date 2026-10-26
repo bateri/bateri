@@ -13,6 +13,10 @@
 //!   a page are held to the contrast floor of the program's words in the grid**
 //!   ([`ink`]): the page is the program's, and what it writes is read against the fills under
 //!   it, not against the pane's ground alone.
+//! - **Figures** — the paths of a canvas — are drawn into pixels by `pencere-sandbox`
+//!   ([`draw_figure`], the one rasteriser every host of the kit draws them with) in the theme's
+//!   colours, and drawn as an image is ([`figure`]); a figure that changes is another texture,
+//!   and the one it was goes with the list that last named it.
 //! - **Images** are files of the program's bundle, decoded off the thread that draws by
 //!   `pencere-sandbox` ([`Images`]) and drawn as textured rectangles ([`bt_gpu::UiImage`]):
 //!   the layout asks the decoder for a file's size ([`Measure::image`]) and the list gives the
@@ -43,15 +47,15 @@ use containers::Containers;
 mod containers;
 mod module;
 pub use module::{ModuleHandle, module_page, script_page};
-use pencere_sandbox::Images;
 pub use pencere_sandbox::{Assets, ImageLimits, ModuleLimits, Script};
+use pencere_sandbox::{Images, draw_figure};
 pub use pencere_view::{
-    Accessible, AccessibleRole, Button, Cursor, FieldKind, Id, Input, Key, Keyboard, Menu,
-    MenuEntry, Mods, Point, Rect, Reply, Role,
+    Accessible, AccessibleRole, Button, Command, Cursor, FieldKind, Id, Input, Key, Keyboard, Menu,
+    MenuEntry, Mods, Point, Rect, Reply, Role, Shortcut, State,
 };
 use pencere_view::{
-    Color, DrawList, Element, Family, Font, Laid, Measure, Metrics, Paint, Picture, Quad, Run,
-    Size, Source,
+    Color, DrawList, Element, Family, Figure, Font, Laid, Measure, Metrics, Paint, Picture, Quad,
+    Run, Size, Source,
 };
 
 /// A text field the host puts over a page: its name (the id of the element that is its room), its
@@ -120,6 +124,10 @@ pub struct Outline {
     pub accessible: Vec<Accessible>,
     /// What the page says of a part of it while the pointer rests there, innermost last.
     pub tips: Vec<Tip>,
+    /// What the page can be told to do now (`Laid::commands`), the nearest the keyboard first:
+    /// what the host lists where a person looks for what can be done, and tells the page of
+    /// ([`PageDrive::send_command`]).
+    pub commands: Vec<Command>,
 }
 
 /// A tooltip of the page: where it is in the pane, and what it says (the keys that do the same in
@@ -164,6 +172,7 @@ impl Outline {
                     },
                 })
                 .collect(),
+            commands: laid.commands(),
         }
     }
 }
@@ -292,6 +301,13 @@ pub fn quad(theme: &Theme, quad: &Quad, origin: (f32, f32)) -> UiQuad {
     if let Some(fill) = quad.fill {
         out = out.fill(resolve(theme, fill));
     }
+    if let Some(gradient) = quad.gradient {
+        out = out.gradient(
+            gradient.angle,
+            resolve(theme, gradient.from),
+            resolve(theme, gradient.to),
+        );
+    }
     if let Some(border) = quad.border {
         out = out.border(border.width, resolve(theme, border.color));
     }
@@ -322,6 +338,34 @@ pub fn image(theme: &Theme, picture: &Picture, origin: (f32, f32)) -> UiImage {
         out = out.tint(resolve(theme, color));
     }
     out
+}
+
+/// The paths of a canvas as the renderer's image: drawn into pixels in `theme`'s colours by the kit's
+/// own rasteriser ([`draw_figure`]: a colour resolved as a fill is, in sRGB, the figure's
+/// opacity on it), placed at the figure's box moved to `origin` pixels and cut at its clip.
+/// `None` for a figure with no room or nothing drawn.
+pub fn figure(
+    theme: &Theme,
+    figure: &Figure,
+    origin: (f32, f32),
+) -> Option<(pencere_sandbox::Bitmap, UiImage)> {
+    let bitmap = draw_figure(figure, |color| {
+        let (colour, alpha) = parts(theme, color);
+        let [r, g, b, _] = colour.to_srgb();
+        [r, g, b, alpha]
+    })?;
+    let at = |rect: Rect| UiRect::new(rect.x + origin.0, rect.y + origin.1, rect.w, rect.h);
+    // The pixels are the box's, whole pixels rounded up: drawn at their own size, a pixel to a
+    // pixel.
+    #[allow(clippy::cast_precision_loss)]
+    let rect = Rect::new(
+        figure.rect.x,
+        figure.rect.y,
+        bitmap.width as f32,
+        bitmap.height as f32,
+    );
+    let image = UiImage::new(at(rect)).clip(at(figure.clip));
+    Some((bitmap, image))
 }
 
 /// The files of the open view's bundle, as a program sent them and the session keeps them
@@ -395,6 +439,12 @@ pub trait PageDrive {
     /// The program has read enough that the page may say what it was told the program had no
     /// room for. A page that no program opened is never told.
     fn send_room(&self) {}
+    /// The person asked for the command named `id`, from the host's list of what the page can be
+    /// told to do ([`Outline::commands`]). The keys of a command are not told here: the drive
+    /// tells the page the command in place of a key it is told that does one.
+    fn send_command(&self, _id: Id) {}
+    /// Files were dropped on the page at `at`, in the pane's points: their paths.
+    fn send_files(&self, _at: Point, _paths: Vec<String>) {}
     /// `told` is called, on the thread that builds the frame, when the page's outline changes
     /// (the pane resized, the page laid out another way, a field or a label came or went): the
     /// host puts its fields where the page leaves room for them and tells the screen reader.
@@ -539,6 +589,21 @@ fn to_list(
                         pixels: bitmap.pixels(),
                     },
                     image(theme, picture, origin),
+                );
+            }
+            Paint::Figure(drawn) => {
+                let Some((bitmap, image)) = figure(theme, drawn, origin) else {
+                    continue;
+                };
+                renderer.ui_image(
+                    &mut list,
+                    &UiBitmap {
+                        id: bitmap.id,
+                        width: bitmap.width,
+                        height: bitmap.height,
+                        pixels: bitmap.pixels(),
+                    },
+                    image,
                 );
             }
         }
@@ -734,7 +799,10 @@ impl ContainersHandle {
 
 impl PageDrive for ContainersHandle {
     fn send_input(&self, input: Input) {
-        let pointer = !matches!(input, Input::Key { .. });
+        let pointer = !matches!(
+            input,
+            Input::Key { .. } | Input::KeyUp { .. } | Input::Mods(_)
+        );
         let reply = ContainersHandle::input(self, input);
         self.shared.borrow_mut().replies.push((reply, pointer));
     }
@@ -795,7 +863,7 @@ fn into_page(input: Input, place: Placement) -> Input {
             dx: dx / place.zoom,
             dy: dy / place.zoom,
         },
-        other @ (Input::Leave | Input::Key { .. }) => other,
+        other @ (Input::Leave | Input::Key { .. } | Input::KeyUp { .. } | Input::Mods(_)) => other,
     }
 }
 
@@ -897,7 +965,7 @@ impl UiPage for ContainersPage {
 mod tests {
     use super::*;
     use bt_core::MINIMUM_CONTRAST;
-    use pencere_view::{Border, Rect, Shadow};
+    use pencere_view::{Border, Gradient, Rect, Shadow, path};
 
     const THEMES: [Theme; 3] = [Theme::BATERI, Theme::BATERI_LIGHT, Theme::LINEN];
 
@@ -1233,14 +1301,68 @@ mod tests {
                 color: Role::Shadow.alpha(0.4),
             }),
             clip: Rect::new(0.0, 0.0, 100.0, 200.0),
+            gradient: Some(Gradient {
+                angle: 90.0,
+                from: Role::Accent.solid(),
+                to: Role::Background.alpha(0.5),
+            }),
         };
         let expected = UiQuad::new(UiRect::new(10.0, 52.0, 30.0, 40.0))
             .radii([1.0, 2.0, 3.0, 4.0])
             .clip(UiRect::new(0.0, 32.0, 100.0, 200.0))
             .fill(resolve(&theme, Role::Accent.alpha(0.5)))
+            .gradient(
+                90.0,
+                resolve(&theme, Role::Accent.solid()),
+                resolve(&theme, Role::Background.alpha(0.5)),
+            )
             .border(2.0, resolve(&theme, Role::Border.solid()))
             .shadow(0.0, 3.0, 6.0, resolve(&theme, Role::Shadow.alpha(0.4)));
         assert_eq!(quad(&theme, &drawn, (0.0, 32.0)), expected);
+    }
+
+    #[test]
+    fn a_figure_is_drawn_in_the_themes_colours_at_its_box_a_pixel_to_a_pixel() {
+        let theme = Theme::BATERI;
+        let ring = path().circle(10.0, 10.0, 8.0).stroke(2.0, Role::Accent);
+        let drawn = Figure {
+            rect: Rect::new(4.0, 6.0, 39.5, 40.0),
+            scale: 2.0,
+            paths: vec![ring],
+            clip: Rect::new(0.0, 0.0, 30.0, 30.0),
+        };
+        let (bitmap, image) = figure(&theme, &drawn, (0.0, 32.0)).expect("drawn");
+        // Whole pixels, the box's rounded up.
+        assert_eq!((bitmap.width, bitmap.height), (40, 40));
+        assert_eq!(
+            image,
+            UiImage::new(UiRect::new(4.0, 38.0, 40.0, 40.0))
+                .clip(UiRect::new(0.0, 32.0, 30.0, 30.0))
+        );
+        // The ring is the accent, as the theme says it, in sRGB: at its top, (20, 4) pixels.
+        let at = |x: u32, y: u32| {
+            let i = ((y * bitmap.width + x) * 4) as usize;
+            [
+                bitmap.pixels()[i],
+                bitmap.pixels()[i + 1],
+                bitmap.pixels()[i + 2],
+                bitmap.pixels()[i + 3],
+            ]
+        };
+        let [r, g, b, _] = theme.accent_linear().to_srgb();
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let srgb = |c: f32| (c * 255.0).round() as u8;
+        let ink = at(20, 4);
+        assert_eq!(ink[3], 255);
+        assert!(
+            ink[0].abs_diff(srgb(r)) <= 1
+                && ink[1].abs_diff(srgb(g)) <= 1
+                && ink[2].abs_diff(srgb(b)) <= 1
+        );
+        assert_eq!(at(20, 20), [0, 0, 0, 0]);
+        // In another theme, another bitmap.
+        let (other, _) = figure(&Theme::BATERI_LIGHT, &drawn, (0.0, 0.0)).expect("drawn");
+        assert_ne!(other.id, bitmap.id);
     }
 
     /// The demo through the bridge and the real renderer: boxes and, where the platform has

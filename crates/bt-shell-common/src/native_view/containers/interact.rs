@@ -341,7 +341,7 @@ impl Containers {
             } => self.press(laid, at, button, mods),
             Input::Release { at, button } => match button {
                 Button::Left => self.release(laid, at),
-                Button::Right => self.reply(false),
+                Button::Right | Button::Middle => self.reply(false),
             },
             Input::Scroll { at, dx, dy } => {
                 self.pointer = Some(at);
@@ -349,6 +349,8 @@ impl Containers {
                 self.reply(moved)
             }
             Input::Key { key, mods } => self.key(key, mods, laid),
+            // The list reads no key that goes up, nor the modifiers alone.
+            Input::KeyUp { .. } | Input::Mods(_) => self.reply(false),
         }
     }
 

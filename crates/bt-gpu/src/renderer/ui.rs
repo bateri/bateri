@@ -92,7 +92,7 @@ pub fn tint(color: LinearRgba, alpha: f32) -> [f32; 4] {
 /// below; a box with only a rectangle draws nothing (transparent, no border,
 /// no shadow).
 ///
-/// `#[repr(C)]`, seven `[f32; 4]`, stride 112, no padding.
+/// `#[repr(C)]`, ten `[f32; 4]`, stride 160, no padding.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct UiQuad {
@@ -104,9 +104,18 @@ pub struct UiQuad {
     clip: [f32; 4],
     /// Border width, shadow blur, shadow dx, shadow dy.
     params: [f32; 4],
+    /// The colours a fill that runs from one to the other starts and ends with: linear straight
+    /// RGBA each.
+    gradient_start: [f32; 4],
+    gradient_end: [f32; 4],
+    /// The way it runs, a unit vector (x, y; y down), and whether there is one (`z` 1).
+    gradient: [f32; 4],
 }
 
-const _: () = assert!(size_of::<UiQuad>() == 112);
+const _: () = assert!(size_of::<UiQuad>() == 160);
+const _: () = assert!(std::mem::offset_of!(UiQuad, gradient_start) == 112);
+const _: () = assert!(std::mem::offset_of!(UiQuad, gradient_end) == 128);
+const _: () = assert!(std::mem::offset_of!(UiQuad, gradient) == 144);
 const _: () = assert!(std::mem::offset_of!(UiQuad, fill) == 16);
 const _: () = assert!(std::mem::offset_of!(UiQuad, border_color) == 32);
 const _: () = assert!(std::mem::offset_of!(UiQuad, shadow_color) == 48);
@@ -115,7 +124,7 @@ const _: () = assert!(std::mem::offset_of!(UiQuad, clip) == 80);
 const _: () = assert!(std::mem::offset_of!(UiQuad, params) == 96);
 
 // SAFETY: `repr(C)`, `f32` fields only; its size is the sum of its fields
-// (the `size_of`/`offset_of` asserts above: 112, no gaps).
+// (the `size_of`/`offset_of` asserts above: 160, no gaps).
 unsafe impl GpuBytes for UiQuad {}
 
 impl UiQuad {
@@ -129,7 +138,24 @@ impl UiQuad {
             radii: [0.0; 4],
             clip: UiRect::UNBOUNDED.corners(),
             params: [0.0; 4],
+            gradient_start: [0.0; 4],
+            gradient_end: [0.0; 4],
+            gradient: [0.0; 4],
         }
+    }
+
+    /// A fill that runs from `start` to `end` (linear straight RGBA each) along a line at `angle`
+    /// degrees, as a style sheet's `linear-gradient(angle, start, end)`: `180` from the top down,
+    /// `90` from the left to the right; the line is as long as it takes for its ends to be the
+    /// box's corners, and the colours are mixed in sRGB, as a style sheet mixes them. Drawn over
+    /// the plain fill and under the border.
+    #[must_use]
+    pub fn gradient(mut self, angle: f32, start: [f32; 4], end: [f32; 4]) -> Self {
+        let radians = angle.to_radians();
+        self.gradient_start = start;
+        self.gradient_end = end;
+        self.gradient = [radians.sin(), -radians.cos(), 1.0, 0.0];
+        self
     }
 
     /// The background: linear straight RGBA ([`tint`]).
@@ -402,7 +428,7 @@ const _: () = assert!(size_of::<UiImmediates>() as u32 <= super::IMMEDIATE_BUDGE
 // SAFETY: `repr(C)`, two `f32`s, size 8 asserted.
 unsafe impl GpuBytes for UiImmediates {}
 
-const QUAD_ATTRIBUTES: [wgpu::VertexAttribute; 7] = [
+const QUAD_ATTRIBUTES: [wgpu::VertexAttribute; 10] = [
     attribute(0, 0),
     attribute(16, 1),
     attribute(32, 2),
@@ -410,6 +436,9 @@ const QUAD_ATTRIBUTES: [wgpu::VertexAttribute; 7] = [
     attribute(64, 4),
     attribute(80, 5),
     attribute(96, 6),
+    attribute(112, 7),
+    attribute(128, 8),
+    attribute(144, 9),
 ];
 
 /// The image's six attributes, one `vec4` each, at the offsets of `UiImage`'s fields.

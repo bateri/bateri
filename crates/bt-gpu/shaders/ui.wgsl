@@ -31,14 +31,21 @@ var<immediate> imm: Immediates;
 // Boxes
 // ---------------------------------------------------------------------------
 //
-// Rust twin: `UiQuad`, #[repr(C)], seven `[f32; 4]`, stride 112:
-//   rect@0          x, y, width, height of the box
-//   fill@16         the background; straight alpha
-//   border_color@32 the border; straight alpha
-//   shadow_color@48 the shadow; straight alpha, alpha 0 = none
-//   radii@64        top-left, top-right, bottom-right, bottom-left
-//   clip@80         x0, y0, x1, y1: nothing is drawn outside
-//   params@96       border width, shadow blur, shadow dx, shadow dy
+// Rust twin: `UiQuad`, #[repr(C)], ten `[f32; 4]`, stride 160:
+//   rect@0            x, y, width, height of the box
+//   fill@16           the background; straight alpha
+//   border_color@32   the border; straight alpha
+//   shadow_color@48   the shadow; straight alpha, alpha 0 = none
+//   radii@64          top-left, top-right, bottom-right, bottom-left
+//   clip@80           x0, y0, x1, y1: nothing is drawn outside
+//   params@96         border width, shadow blur, shadow dx, shadow dy
+//   gradient_start@112 where a fill from one colour to another starts; straight alpha
+//   gradient_end@128  and where it ends
+//   gradient@144      the way it runs (x, y: a unit vector, y down), and z 1 where there is one
+//
+// A fill from one colour to another is a style sheet's `linear-gradient`: the line runs through
+// the middle of the box, as long as it takes for its ends to be the corners it points at, and the
+// colours are mixed in sRGB (premultiplied), as a style sheet mixes them. It lies over the fill.
 //
 // The border is drawn INSIDE the rect, over the fill (the fill runs under it,
 // as CSS's `background-clip: border-box`). The shadow is the box's silhouette
@@ -53,6 +60,9 @@ struct QuadIn {
     @location(4) radii: vec4<f32>,
     @location(5) clip: vec4<f32>,
     @location(6) params: vec4<f32>,
+    @location(7) gradient_start: vec4<f32>,
+    @location(8) gradient_end: vec4<f32>,
+    @location(9) gradient: vec4<f32>,
 }
 
 struct QuadOut {
@@ -65,6 +75,9 @@ struct QuadOut {
     @location(4) @interpolate(flat) radii: vec4<f32>,
     @location(5) @interpolate(flat) clip: vec4<f32>,
     @location(6) @interpolate(flat) params: vec4<f32>,
+    @location(7) @interpolate(flat) gradient_start: vec4<f32>,
+    @location(8) @interpolate(flat) gradient_end: vec4<f32>,
+    @location(9) @interpolate(flat) gradient: vec4<f32>,
 }
 
 @vertex
@@ -96,7 +109,30 @@ fn ui_quad_vertex(@builtin(vertex_index) vid: u32, it: QuadIn) -> QuadOut {
     o.radii = it.radii;
     o.clip = it.clip;
     o.params = it.params;
+    o.gradient_start = it.gradient_start;
+    o.gradient_end = it.gradient_end;
+    o.gradient = it.gradient;
     return o;
+}
+
+// sRGB's curve, each way, for the mixing of a gradient.
+fn to_srgb(c: vec3<f32>) -> vec3<f32> {
+    return select(1.055 * pow(c, vec3<f32>(1.0 / 2.4)) - 0.055, c * 12.92, c <= vec3<f32>(0.0031308));
+}
+
+fn from_srgb(c: vec3<f32>) -> vec3<f32> {
+    return select(pow((c + 0.055) / 1.055, vec3<f32>(2.4)), c / 12.92, c <= vec3<f32>(0.04045));
+}
+
+// The colour of the gradient at `rel` (from the box's middle), straight alpha, linear.
+fn gradient_at(rel: vec2<f32>, half_size: vec2<f32>, way: vec2<f32>, start: vec4<f32>, end: vec4<f32>) -> vec4<f32> {
+    // Half the length of the line: the reach of the corner it points at along it.
+    let reach = abs(half_size.x * way.x) + abs(half_size.y * way.y);
+    let t = clamp(dot(rel, way) / max(reach, 0.0001) * 0.5 + 0.5, 0.0, 1.0);
+    // Premultiplied, in sRGB.
+    let a = mix(start.a, end.a, t);
+    let rgb = mix(to_srgb(start.rgb) * start.a, to_srgb(end.rgb) * end.a, t);
+    return vec4<f32>(from_srgb(rgb / max(a, 0.00001)), a);
 }
 
 // The corner radius of the quadrant `p` (relative to the centre) is in.
@@ -134,6 +170,12 @@ fn ui_quad_fragment(in: QuadOut) -> @location(0) vec4<f32> {
     let fill_a = in.fill.a * outer;
     var rgb = in.fill.rgb * fill_a;
     var a = fill_a;
+    if in.gradient.z > 0.0 {
+        let g = gradient_at(rel, half_size, in.gradient.xy, in.gradient_start, in.gradient_end);
+        let g_a = g.a * outer;
+        rgb = g.rgb * g_a + rgb * (1.0 - g_a);
+        a = g_a + a * (1.0 - g_a);
+    }
     let ring_a = in.border_color.a * max(outer - inner, 0.0);
     rgb = in.border_color.rgb * ring_a + rgb * (1.0 - ring_a);
     a = ring_a + a * (1.0 - ring_a);

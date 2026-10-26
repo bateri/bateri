@@ -237,7 +237,7 @@ pub(crate) fn hello() -> Vec<u8> {
         1,
         None,
         None,
-        r#"{"versions":[1],"views":[{"kind":"wasm","versions":["1.0"]},{"kind":"web","versions":["1.0"]}]}"#,
+        r#"{"versions":[1],"views":[{"kind":"wasm","versions":["2.0"]},{"kind":"web","versions":["1.0"]}]}"#,
     )
 }
 
@@ -1371,13 +1371,13 @@ fn the_kinds_and_versions_offered_are_what_the_application_can_open_in_the_progr
         None,
         concat!(
             r#"{"versions":[1],"views":[{"kind":"web","versions":["2.0","1.0"]},"#,
-            r#"{"kind":"lua","versions":["9.9"]},{"kind":"wasm","versions":["0.4","1.0"]}]}"#
+            r#"{"kind":"lua","versions":["9.9"]},{"kind":"wasm","versions":["0.4","2.0"]}]}"#
         ),
     ));
     let welcome = pane.rig.written();
     assert!(
         welcome[0].payload.contains(
-            r#""views":[{"kind":"web","versions":["1.0"]},{"kind":"wasm","versions":["1.0"]}]"#
+            r#""views":[{"kind":"web","versions":["1.0"]},{"kind":"wasm","versions":["2.0"]}]"#
         ),
         "{}",
         welcome[0].payload
@@ -1388,14 +1388,14 @@ fn the_kinds_and_versions_offered_are_what_the_application_can_open_in_the_progr
     let offer = pane.rig.written();
     assert!(
         offer[0].payload.contains(concat!(
-            r#""views":[{"kind":"wasm","versions":["1.0"]},{"kind":"lua","versions":["1.0"]},"#,
+            r#""views":[{"kind":"wasm","versions":["2.0"]},{"kind":"lua","versions":["2.0"]},"#,
             r#"{"kind":"web","versions":["1.0"]}]"#
         )),
         "{}",
         offer[0].payload
     );
     // The versions are the application's constants, and the Lua API's is the prelude's.
-    assert_eq!((WASM_VERSION, LUA_VERSION), ("1.0", "1.0"));
+    assert_eq!((WASM_VERSION, LUA_VERSION), ("2.0", "2.0"));
     assert_eq!(WEB_BRIDGE_VERSION, "1.0");
 }
 
@@ -1473,7 +1473,7 @@ const COMPONENT: &[u8] = b"\0asm\x01\0\0\0";
 fn module_open(token: &str) -> Vec<u8> {
     let open = format!(
         concat!(
-            r#"{{"token":"{token}","view":"wasm","version":"1.0","program":"demopen","title":"Containers","#,
+            r#"{{"token":"{token}","view":"wasm","version":"2.0","program":"demopen","title":"Containers","#,
             r#""bundle":{{"entry":"view.wasm","files":[{{"path":"view.wasm","sha256":"{digest}","#,
             r#""size":{size},"type":"application/wasm"}}]}}}}"#
         ),
@@ -1504,7 +1504,7 @@ fn open_a_module_view() -> (Pane, String, Arc<CountingWake>) {
     assert!(
         welcome[0]
             .payload
-            .contains(r#""features":["dismiss"],"views":[{"kind":"wasm","versions":["1.0"]},{"kind":"web","versions":["1.0"]}]"#),
+            .contains(r#""features":["dismiss"],"views":[{"kind":"wasm","versions":["2.0"]},{"kind":"web","versions":["1.0"]}]"#),
         "{}",
         welcome[0].payload
     );
@@ -1560,19 +1560,19 @@ fn a_script_opens_a_view_of_its_kind_and_its_failure_reaches_the_program_with_it
         1,
         None,
         None,
-        r#"{"versions":[1],"views":[{"kind":"lua","versions":["1.0"]},{"kind":"web","versions":["1.0"]}]}"#,
+        r#"{"versions":[1],"views":[{"kind":"lua","versions":["2.0"]},{"kind":"web","versions":["1.0"]}]}"#,
     ));
     let welcome = pane.rig.written();
     assert!(
         welcome[0].payload.contains(
-            r#""views":[{"kind":"lua","versions":["1.0"]},{"kind":"web","versions":["1.0"]}]"#
+            r#""views":[{"kind":"lua","versions":["2.0"]},{"kind":"web","versions":["1.0"]}]"#
         ),
         "{}",
         welcome[0].payload
     );
     let open = format!(
         concat!(
-            r#"{{"token":"{token}","view":"lua","version":"1.0","program":"demopen","#,
+            r#"{{"token":"{token}","view":"lua","version":"2.0","program":"demopen","#,
             r#""bundle":{{"entry":"view.lua","files":[{{"path":"view.lua","sha256":"{digest}","#,
             r#""size":{size},"type":"text/x-lua"}}]}}}}"#
         ),
@@ -1913,14 +1913,14 @@ fn the_words_of_a_component_of_another_interface_name_both_versions_to_the_progr
     let rig = Arc::clone(&pane.rig);
     let desk = rig.desk.as_ref().expect("a desk");
     let why = "the page could not be loaded: this view is written against `pencere:view@0.5.0`; \
-               this terminal opens `pencere:view@1.0.0`";
+               this terminal opens `pencere:view@2.0.0`";
     desk.apply(pane.rig.write(), |conversation| {
         conversation.view_failed(why)
     });
     let wrote = pane.rig.written();
     assert_eq!(wrote.len(), 1, "{wrote:?}");
     assert_eq!(wrote[0].kind, "closed");
-    for version in ["`pencere:view@0.5.0`", "`pencere:view@1.0.0`"] {
+    for version in ["`pencere:view@0.5.0`", "`pencere:view@2.0.0`"] {
         assert!(wrote[0].payload.contains(version), "{}", wrote[0].payload);
     }
 }

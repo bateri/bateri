@@ -46,7 +46,7 @@ const BOX: &[u8] = b"return function() return pencere.div():size(20, 20):bg(\"ac
 
 /// The version of the interface of the views the terminal draws itself that this is written
 /// against.
-const VERSION: &str = "1.0";
+const VERSION: &str = "2.0";
 
 /// How often the made-up host reports.
 const EVERY: Duration = Duration::from_secs(1);

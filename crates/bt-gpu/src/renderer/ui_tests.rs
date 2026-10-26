@@ -75,6 +75,38 @@ fn a_translucent_fill_blends_in_linear_space() {
 }
 
 #[test]
+fn a_fill_from_one_colour_to_another_runs_along_its_angle_and_mixes_in_srgb() {
+    // Black to white from the left to the right (90 degrees), over a red fill it covers.
+    let black = LinearRgba::from_srgb(0, 0, 0);
+    let red = LinearRgba::from_srgb(0xff, 0, 0);
+    let mut list = UiList::new();
+    list.quad(
+        UiQuad::new(UiRect::new(0.0, 0.0, 64.0, 16.0))
+            .fill(tint(red, 1.0))
+            .gradient(90.0, tint(black, 1.0), tint(WHITE, 1.0)),
+    );
+    let pixels = paint(MIDTONE, &list);
+    let left = at(&pixels, 0, 8);
+    let middle = at(&pixels, 32, 8);
+    let right = at(&pixels, 63, 8);
+    assert!(near(left, (2, 2, 2), 3), "left {left:?}");
+    assert!(near(right, (253, 253, 253), 3), "right {right:?}");
+    // Half way is half of sRGB's white, as a style sheet mixes: 0x80, not the 0xbc a mix in
+    // linear light would come to.
+    assert!(near(middle, (0x80, 0x80, 0x80), 3), "middle {middle:?}");
+    // From the top down (180), the same at every point of a row.
+    let mut list = UiList::new();
+    list.quad(UiQuad::new(UiRect::new(0.0, 0.0, 64.0, 64.0)).gradient(
+        180.0,
+        tint(black, 1.0),
+        tint(WHITE, 1.0),
+    ));
+    let pixels = paint(MIDTONE, &list);
+    assert_eq!(at(&pixels, 4, 32), at(&pixels, 60, 32));
+    assert!(at(&pixels, 4, 4).0 < at(&pixels, 4, 60).0);
+}
+
+#[test]
 fn a_rounded_corner_cuts_the_corner_and_keeps_the_edges() {
     let mut list = UiList::new();
     list.quad(
