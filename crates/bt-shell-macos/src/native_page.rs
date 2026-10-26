@@ -285,7 +285,6 @@ impl PageFields {
             };
             if let Some(field) = fields.get(index) {
                 place_field(&field.view, said, self.zoom.get(), self.family.as_deref());
-                trace(&pane, &self.host, &field.view, said, "outline");
             }
         }
         drop(fields);
@@ -330,9 +329,7 @@ impl PageFields {
                 .iter()
                 .find(|field| field.id == said.id && field.kind == said.kind)
             {
-                trace(&pane, &self.host, &field.view, said, "geometry, before");
                 place_field(&field.view, said, self.zoom.get(), self.family.as_deref());
-                trace(&pane, &self.host, &field.view, said, "geometry");
             }
         }
     }
@@ -756,43 +753,6 @@ fn line_height(field: &PageTextField) -> f64 {
         .map(|cell| cell.cellSize().height)
         .filter(|height| height.is_finite() && *height > 0.0)
         .map_or_else(font_line, f64::ceil)
-}
-
-/// Whether bateri was started with `BATERI_TRACE_FIELDS` set: then each placing of a page's
-/// field is written to the standard error, with the geometry it was placed in, to find a field
-/// that is not where its page draws its box.
-pub(crate) fn tracing() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("BATERI_TRACE_FIELDS").is_some())
-}
-
-/// One line of the trace ([`tracing`]): why the field was placed, its room in the page, its frame
-/// in the host and in the window, and the host's, the pane's and the pane's bounds.
-fn trace(pane: &TerminalPane, host: &FieldsHost, field: &PageTextField, said: &Field, why: &str) {
-    if !tracing() {
-        return;
-    }
-    let rect = |r: NSRect| {
-        format!(
-            "({:.1},{:.1} {:.1}x{:.1})",
-            r.origin.x, r.origin.y, r.size.width, r.size.height
-        )
-    };
-    let room = said.rect;
-    let in_window = field.convertRect_toView(field.bounds(), None);
-    eprintln!(
-        "bateri fields [{why}] room=({:.1},{:.1} {:.1}x{:.1}) field={} in_window={} host={} pane={} pane_bounds={} in_window={}",
-        room.x,
-        room.y,
-        room.w,
-        room.h,
-        rect(field.frame()),
-        rect(in_window),
-        rect(host.frame()),
-        rect(pane.frame()),
-        rect(pane.bounds()),
-        pane.window().is_some(),
-    );
 }
 
 /// The tracking area that tells `view` where the pointer is over its whole visible rectangle,
