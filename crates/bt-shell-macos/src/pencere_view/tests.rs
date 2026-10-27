@@ -715,9 +715,18 @@ fn both_kinds_of_view_send_a_signal_character_the_one_way() {
     );
     let pane = include_str!("../pane.rs");
     let pane = &pane[..pane.find("#[cfg(test)]").unwrap_or(pane.len())];
-    let at = pane.find("pub(crate) fn page_key(").expect("page_key");
-    let page_key = pane[at..].split("\n    }\n").next().expect("its end");
-    assert!(page_key.contains("pencere_view::signal_of("), "{page_key}");
+    let body = |name: &str| {
+        let at = pane.find(name).expect(name);
+        pane[at..].split("\n    }\n").next().expect("its end")
+    };
+    // The page's key goes by the one place that reads a signal, as a page's field's command does.
+    let page_key = body("pub(crate) fn page_key(");
+    assert!(page_key.contains("self.page_signal(event)"), "{page_key}");
+    let page_signal = body("fn page_signal(");
+    assert!(
+        page_signal.contains("pencere_view::signal_of("),
+        "{page_signal}"
+    );
     // The three characters are written by one function, which is the gate of the terminal's
     // own keys; nothing else in either file writes a signal byte.
     assert_eq!(pane.matches("session.write(&[character])").count(), 1);
