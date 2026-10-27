@@ -310,11 +310,13 @@ fn undo_is_not_ours(editing: bool, content_in_view: bool) -> bool {
     editing || content_in_view
 }
 
-fn decide_inputs(run: Option<Run>, home: Option<PathBuf>) -> Inputs {
+fn decide_inputs(run: Option<Run>, home: Option<PathBuf>, profile: Option<&str>) -> Inputs {
     match run {
         Some(_) => Inputs::Hermetic,
         None => Inputs::User {
-            config_root: home.as_deref().map(settings::config_root),
+            config_root: home
+                .as_deref()
+                .map(|home| settings::profile_root(home, profile)),
         },
     }
 }
@@ -6915,7 +6917,7 @@ impl AppDelegate {
 
     /// The decision on the entry points that open onto the user's world ([`Inputs`]).
     fn inputs(&self) -> Inputs {
-        decide_inputs(self.ivars().run, child::home())
+        decide_inputs(self.ivars().run, child::home(), crate::profile().as_deref())
     }
 
     /// The **only** writer of the window subtitle: refreshes the source's slot,
@@ -8187,16 +8189,26 @@ mod tests {
                 workload,
                 stats_since: None,
             };
-            assert_eq!(decide_inputs(Some(run), home.clone()), Inputs::Hermetic);
+            assert_eq!(
+                decide_inputs(Some(run), home.clone(), Some("dev")),
+                Inputs::Hermetic
+            );
         }
         assert_eq!(
-            decide_inputs(None, home),
+            decide_inputs(None, home.clone(), None),
             Inputs::User {
                 config_root: Some(PathBuf::from("/Users/someone/.config/bateri"))
             }
         );
+        // A development copy (`make dev`) reads settings of its own, not the installed bateri's.
         assert_eq!(
-            decide_inputs(None, None),
+            decide_inputs(None, home, Some("dev")),
+            Inputs::User {
+                config_root: Some(PathBuf::from("/Users/someone/.config/bateri-dev"))
+            }
+        );
+        assert_eq!(
+            decide_inputs(None, None, None),
             Inputs::User { config_root: None }
         );
     }

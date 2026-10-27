@@ -111,6 +111,17 @@ pub use bt_gpu::GpuError;
 /// work. Re-exported here so the binary gains no new crate edge.
 pub use bt_shell_common::ssh_route::askpass_main as askpass;
 
+/// The profile this copy of the application names in its `Info.plist` (`BateriProfile`): a
+/// development copy's (`make dev`) settings are its own
+/// ([`bt_shell_common::settings::profile_root`]). `None` for the application itself, and for a
+/// process with no bundle (`cargo run`).
+pub(crate) fn profile() -> Option<String> {
+    let value = objc2_foundation::NSBundle::mainBundle()
+        .objectForInfoDictionaryKey(objc2_foundation::ns_string!("BateriProfile"))?;
+    let name = value.downcast::<objc2_foundation::NSString>().ok()?;
+    Some(name.to_string())
+}
+
 /// The remote shell integration's state file on macOS:
 /// `~/Library/Application Support/bateri/remote-hosts` — bateri's own file,
 /// not the user's `settings.toml`.

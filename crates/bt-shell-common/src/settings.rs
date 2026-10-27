@@ -41,6 +41,20 @@ pub fn config_root(home: &Path) -> PathBuf {
     home.join(".config").join("bateri")
 }
 
+/// The root of a copy that names a profile of its own (a development copy beside the installed
+/// application, `make dev`): `{home}/.config/bateri-{profile}/`, so that its settings are not the
+/// installed bateri's. No profile, or a name that is not a plain word (letters, digits, `-`), is
+/// the application's root ([`config_root`]).
+pub fn profile_root(home: &Path, profile: Option<&str>) -> PathBuf {
+    let plain = |name: &&str| {
+        !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+    };
+    match profile.filter(plain) {
+        Some(profile) => home.join(".config").join(format!("bateri-{profile}")),
+        None => config_root(home),
+    }
+}
+
 /// The root's watched paths (`watch`): the root itself, `themes/` and `settings.toml`. The
 /// active theme file is separate ([`theme_path`]): its name derives from the settings and the
 /// appearance, it is set up and refreshed separately.
@@ -551,6 +565,23 @@ impl Drop for TempRoot {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_profile_has_a_root_of_its_own_beside_the_applications() {
+        let home = Path::new("/Users/someone");
+        assert_eq!(profile_root(home, None), config_root(home));
+        assert_eq!(
+            profile_root(home, Some("dev")),
+            PathBuf::from("/Users/someone/.config/bateri-dev")
+        );
+        for name in ["", "../x", "a/b", "dev "] {
+            assert_eq!(
+                profile_root(home, Some(name)),
+                config_root(home),
+                "{name:?}"
+            );
+        }
+    }
 
     #[test]
     fn config_root_is_under_dot_config() {

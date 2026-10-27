@@ -565,7 +565,7 @@ pub(crate) fn serve(
     let Some(home) = child::home() else {
         return;
     };
-    let root = settings::config_root(&home);
+    let root = settings::profile_root(&home, crate::profile().as_deref());
     let settings_of = {
         let root = root.clone();
         move || settings::load(&root).at_launch().0

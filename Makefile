@@ -3,7 +3,7 @@ CARGO ?= cargo
 # Prerequisite order is only guaranteed under serial make; under -j the promises
 # "cheapest gate first" and "version first" break.
 .NOTPARALLEL:
-.PHONY: check prune fmt audit clippy test guest demopen test-heavy test-view test-all gate gate-push hooks linux-server linux-run shader smoke terminfo test-race scan bundle package install release publish ship release-gate sparkle dmgbuild linux
+.PHONY: check prune fmt audit clippy test guest demopen test-heavy test-view test-all gate gate-push hooks linux-server linux-run shader smoke terminfo test-race scan bundle package install dev release publish ship release-gate sparkle dmgbuild linux
 
 # Definition of done. Homebrew rustc is not pinned (there is deliberately no
 # rust-toolchain.toml): the version is printed first so a clippy failure that
@@ -830,6 +830,34 @@ install: bundle
 	rm -rf $(INSTALLED)
 	mv $(INSTALLED).new $(INSTALLED)
 	@echo "install: $(INSTALLED)"
+
+# A development copy beside the installed bateri, which it does not touch: this tree packaged as
+# `bundle` packages it, made another application — `bateri-dev`, `dev.bateri.dev`, in
+# `target/dev/` — and opened. Its session is its own (`restore_dir` names it by the bundle), its
+# settings too (`BateriProfile`: `~/.config/bateri-dev/`, a copy of the installed bateri's the
+# first time). It never updates itself (no Sparkle) and does not answer `bateri://` links (the
+# installed bateri does). A copy that is open is not quit for you: ⌘Q ends its terminals unless
+# `keep_running = "quit"`, so quit it yourself and run this again.
+DEV_APP = $(TARGET_DIR)/dev/bateri-dev.app
+DEV_ID = dev.bateri.dev
+DEV_SETTINGS = $(HOME)/.config/bateri-dev
+dev:
+	@if pgrep -f '^$(DEV_APP)/Contents/MacOS/bateri( -.*)?$$' >/dev/null; then \
+		echo "dev: bateri-dev is open — quit it first (⌘Q), then retry"; exit 1; fi
+	$(MAKE) --no-print-directory bundle APP=$(DEV_APP) SIGN_ID=-
+	@p=$(DEV_APP)/Contents/Info.plist; \
+	plutil -replace CFBundleIdentifier -string $(DEV_ID) $$p && \
+	plutil -replace CFBundleName -string bateri-dev $$p && \
+	plutil -replace CFBundleDisplayName -string bateri-dev $$p && \
+	plutil -insert BateriProfile -string dev $$p && \
+	for k in CFBundleURLTypes SUFeedURL SUPublicEDKey SUEnableAutomaticChecks; do plutil -remove $$k $$p || exit 1; done
+	rm -rf $(DEV_APP)/Contents/Frameworks/Sparkle.framework
+	codesign --force --deep --sign - --entitlements assets/bundle/bateri.entitlements $(DEV_APP)
+	codesign --verify --deep --strict $(DEV_APP)
+	@test -d $(DEV_SETTINGS) || { mkdir -p $(DEV_SETTINGS) && \
+		if test -d $(HOME)/.config/bateri; then cp -R $(HOME)/.config/bateri/. $(DEV_SETTINGS)/; fi && \
+		echo "dev: the copy's settings are $(DEV_SETTINGS), from the installed bateri's this once"; }
+	open $(DEV_APP)
 
 terminfo:
 	$(call not_yet,assets/terminfo comes with a shell/TERM set)
