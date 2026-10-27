@@ -1093,11 +1093,14 @@ mod tests {
                 let _ = told.lock().unwrap().send(());
             },
         );
-        let places: Rc<RefCell<Vec<Vec<Field>>>> = Rc::default();
+        // Each outline told: where its fields are, and what a screen reader says of it.
+        type Told = Vec<(Vec<Field>, Vec<String>)>;
+        let told: Rc<RefCell<Told>> = Rc::default();
         {
-            let places = Rc::clone(&places);
+            let told = Rc::clone(&told);
             handle.watch_outline(Box::new(move |outline| {
-                places.borrow_mut().push(outline.fields.clone());
+                let words = outline.accessible.iter().map(|a| a.words.clone()).collect();
+                told.borrow_mut().push((outline.fields.clone(), words));
             }));
         }
 
@@ -1119,13 +1122,24 @@ mod tests {
             .expect("room for the filter's field")
             .rect;
         assert!(field.y >= 32.0, "below the strip: {field:?}");
-        assert_eq!(
-            places
+        // The host is told where the fields are as they change: none before the page, the filter's
+        // once it comes. In between, the line that stands for the page is read out, and has none.
+        let fields_told = || {
+            let mut places: Vec<Vec<Rect>> = told
                 .borrow()
                 .iter()
-                .map(|fields| fields.iter().map(|f| f.rect).collect::<Vec<_>>())
-                .collect::<Vec<_>>(),
-            [Vec::new(), vec![field]]
+                .map(|(fields, _)| fields.iter().map(|f| f.rect).collect())
+                .collect();
+            places.dedup();
+            places
+        };
+        assert_eq!(fields_told(), [Vec::new(), vec![field]]);
+        assert!(
+            told.borrow().iter().any(|(fields, words)| {
+                fields.is_empty() && words.iter().any(|w| w == "Starting the page…")
+            }),
+            "the line that stands for the page is told to a screen reader: {:?}",
+            told.borrow()
         );
 
         // The page that was laid out is settled, and nothing wakes the application for it.
@@ -1141,7 +1155,11 @@ mod tests {
             woken.recv_timeout(Duration::from_millis(300)).is_err(),
             "a page at rest woke the application"
         );
-        assert_eq!(places.borrow().len(), 1, "the field's place is told once");
+        assert_eq!(
+            fields_told(),
+            [Vec::new(), vec![field]],
+            "the field's place is told once"
+        );
 
         // The pointer over a row: the module answers, the page changes, the pane is told.
         handle.send_input(Input::Move(Point::new(300.0, 32.0 + 150.0)));
