@@ -327,6 +327,15 @@ impl TextAtlas {
         })
     }
 
+    /// Where a caret stands at each of the places `at` (byte offsets of
+    /// `text`, in order) of `text` shaped as one line in `font`, pixels from
+    /// the line's start. `None` where the backend has no proportional text,
+    /// or `font` is not this atlas's.
+    pub fn carets(&self, font: FontId, text: &str, at: &[usize]) -> Option<Vec<f64>> {
+        let base = self.fonts.get(font.0 as usize)?;
+        Backend::caret_offsets(base, text, at)
+    }
+
     /// The glyph's place in the texture at sub-pixel bucket `sub`, drawing and
     /// placing it on first use. `None` for a glyph with no ink (a space) and
     /// for one that could not be drawn or does not fit the texture at all.

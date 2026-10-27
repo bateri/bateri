@@ -427,6 +427,39 @@ fn a_heavier_weight_paints_more_ink() {
     assert!(bold > light, "bold {bold} against light {light}");
 }
 
+#[test]
+fn the_carets_of_a_line_are_where_its_shaping_puts_its_characters() {
+    if !proportional() {
+        return;
+    }
+    let r = renderer();
+    let font = r
+        .ui_font(&style(Family::System, 20.0, 400))
+        .expect("the system face opens");
+    // Before each character and at the end; a character of two UTF-16 units and one of three
+    // bytes are counted as the line counts them.
+    let text = "Ab😀ç";
+    let at = [0, 1, 2, 6, text.len()];
+    let carets = r.ui_carets(font, text, &at).expect("carets");
+    let whole = r.ui_shape(font, text).expect("shapes").width;
+    assert_eq!(carets.len(), at.len());
+    assert!(carets[0].abs() < 0.01, "{carets:?}");
+    assert!(
+        carets.windows(2).all(|pair| pair[0] < pair[1]),
+        "{carets:?}"
+    );
+    assert!(
+        (carets[4] - whole).abs() < 0.5,
+        "{carets:?} against {whole}"
+    );
+    // The caret after `A` is where the line of `A` alone ends (no kerning across one letter).
+    let one = r.ui_shape(font, "A").expect("shapes").width;
+    assert!((carets[1] - one).abs() < 0.5, "{carets:?} against {one}");
+    // A place inside a character is not one: the line's end.
+    let inside = r.ui_carets(font, text, &[3]).expect("carets");
+    assert!((inside[0] - whole).abs() < 0.5, "{inside:?}");
+}
+
 // ---------------------------------------------------------------------------
 // Images
 // ---------------------------------------------------------------------------

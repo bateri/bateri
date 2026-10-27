@@ -45,9 +45,11 @@ use bt_gpu::{
 use containers::Containers;
 
 mod containers;
+mod editing;
 mod module;
 mod scrolling;
-pub use module::{ModuleHandle, module_page, script_page};
+pub use editing::Route;
+pub use module::{ModuleHandle, PageEditors, module_page, script_page};
 pub use pencere_sandbox::{Assets, ImageLimits, ModuleLimits, Script};
 use pencere_sandbox::{Images, draw_figure};
 pub use pencere_view::{
@@ -467,6 +469,18 @@ pub trait PageDrive {
     /// The terminal's text is this much larger than the kit's own (`Placement::zoom_for`): the
     /// page is drawn that much larger, and laid out again.
     fn set_zoom(&self, zoom: f32);
+    /// What measures the page's text between frames, where the pane's keys, input method and
+    /// pointer are done to its editors: the renderer its frames are drawn with (the object that
+    /// measures is the object that draws).
+    fn set_renderer(&self, _renderer: Rc<Renderer>) {}
+    /// Whether the pane's keyboard is in the page (not one of its fields, not another pane) of the
+    /// person's window: an editor's caret is drawn, and blinks, only then.
+    fn set_active(&self, _active: bool) {}
+    /// The page's editors, as the pane's keys, input method, pasteboard and screen reader reach
+    /// them; `None` for a page that has none (the engine's own, in this process).
+    fn editors(&self) -> Option<PageEditors> {
+        None
+    }
     /// Hands over what the page has said since the last call: each reply, in order, with whether
     /// the event it answers was the pointer's (the pointer's shape after a key is nobody's to
     /// set). Never waits.
@@ -514,9 +528,10 @@ struct Typeset<'a> {
 }
 
 impl Typeset<'_> {
-    fn shaped(&mut self, font: &Font, text: &str) -> Option<&ShapedText> {
+    /// The renderer's font for `font`, opened the first time it is asked for.
+    fn font(&mut self, font: &Font) -> Option<TextFontId> {
         let (renderer, terminal) = (self.renderer, self.terminal);
-        let id = (*self.shaped.fonts.entry(*font).or_insert_with(|| {
+        *self.shaped.fonts.entry(*font).or_insert_with(|| {
             renderer.ui_font(&TextStyle {
                 family: match font.family {
                     Family::System => TextFamily::System,
@@ -526,7 +541,12 @@ impl Typeset<'_> {
                 weight: font.weight,
                 italic: font.italic,
             })
-        }))?;
+        })
+    }
+
+    fn shaped(&mut self, font: &Font, text: &str) -> Option<&ShapedText> {
+        let renderer = self.renderer;
+        let id = self.font(font)?;
         self.shaped
             .lines
             .entry((*font, text.to_owned()))
@@ -549,6 +569,20 @@ impl Measure for Typeset<'_> {
     /// it is known.
     fn image(&mut self, src: &str) -> Option<Size> {
         self.images.and_then(|images| images.size(src))
+    }
+
+    /// Where an editor's carets stand in a line: the renderer's own carets of the line shaped once
+    /// ([`Renderer::ui_carets`], inside a ligature too), not each start of it shaped and kept in
+    /// the cache of lines — an editor asks this of every line it lays out, with every place in it.
+    fn offsets(&mut self, font: &Font, text: &str, at: &[usize]) -> Vec<f32> {
+        let renderer = self.renderer;
+        #[allow(clippy::cast_possible_truncation)]
+        self.font(font)
+            .and_then(|id| renderer.ui_carets(id, text, at))
+            .map_or_else(
+                || vec![0.0; at.len()],
+                |carets| carets.into_iter().map(|x| x as f32).collect(),
+            )
     }
 }
 
@@ -620,6 +654,9 @@ fn to_list(
                     image,
                 );
             }
+            // An editor's place that no editor filled (`module`'s editors fill every one they
+            // have): its room's fill, under it, is what shows.
+            Paint::Editor(_) => {}
         }
     }
     list

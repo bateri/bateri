@@ -858,6 +858,10 @@ define_class!(
         /// is from `selection_text()` - the selection's single text path.
         #[unsafe(method(copy:))]
         fn copy_selection(&self, _sender: Option<&AnyObject>) {
+            // An editor of the page with the keyboard copies what it has selected.
+            if self.pane().is_some_and(|pane| pane.page_editor_menu('c')) {
+                return;
+            }
             if let Some(session) = self.ivars().session.get() {
                 clipboard::copy(&NSPasteboard::generalPasteboard(), session.selection_text());
             }
@@ -871,6 +875,9 @@ define_class!(
         /// There is nothing to cut in the grid.
         #[unsafe(method(cut:))]
         fn cut_selection(&self, _sender: Option<&AnyObject>) {
+            if self.pane().is_some_and(|pane| pane.page_editor_menu('x')) {
+                return;
+            }
             if let Some(session) = self.ivars().session.get()
                 && let Some(text) = session.dock_cut()
             {
@@ -891,7 +898,15 @@ define_class!(
             // No `return`: `define_class!` converts the `bool` to `Bool` at the
             // **end** of the body, an early return does not compile.
             let action = item.action();
-            if self.pane().is_some_and(|pane| pane.view_owns_item(item)) {
+            let editing = self.pane().is_some_and(|pane| pane.page_editing().is_some());
+            if editing
+                && [sel!(cut:), sel!(copy:), sel!(paste:), sel!(selectAll:)]
+                    .into_iter()
+                    .any(|edit| action == Some(edit))
+            {
+                // An editor of the page has the keyboard: these four are its.
+                true
+            } else if self.pane().is_some_and(|pane| pane.view_owns_item(item)) {
                 // A view over the terminal owns Edit: the terminal under it is not what is copied
                 // or pasted into.
                 false
@@ -924,6 +939,9 @@ define_class!(
         /// no text - it would paste nothing and hide the image.
         #[unsafe(method(paste:))]
         fn paste_clipboard(&self, _sender: Option<&AnyObject>) {
+            if self.pane().is_some_and(|pane| pane.page_editor_menu('v')) {
+                return;
+            }
             let Some(session) = self.ivars().session.get() else {
                 return;
             };
@@ -975,6 +993,9 @@ define_class!(
         /// `keyDown:`'s Cmd allow list does not change (the tab shortcuts' path).
         #[unsafe(method(selectAll:))]
         fn select_all(&self, _sender: Option<&AnyObject>) {
+            if self.pane().is_some_and(|pane| pane.page_editor_menu('a')) {
+                return;
+            }
             if let Some(session) = self.ivars().session.get() {
                 session.select_all();
             }
@@ -1621,7 +1642,26 @@ define_class!(
         /// half** of the symptom (the noisy half being that a held key does
         /// not repeat).
         #[unsafe(method(insertText:replacementRange:))]
-        fn insert_text(&self, string: &AnyObject, _replacement_range: NSRange) {
+        fn insert_text(&self, string: &AnyObject, replacement_range: NSRange) {
+            // An editor of the page with the keyboard is where the text goes — from a key, an
+            // input method's commit, the character viewer, dictation — in place of the range
+            // the system names, where it names one and nothing is composed.
+            if let Some(pane) = self.pane()
+                && let Some(editors) = pane.page_editing()
+            {
+                if let Some(text) = resolve_text(string) {
+                    match range_of(replacement_range) {
+                        Some(replace) if editors.marked().is_none() => {
+                            let end = text.encode_utf16().count();
+                            editors.compose(&text, (end, 0), Some(replace));
+                            editors.unmark();
+                        }
+                        _ => editors.type_text(&text),
+                    }
+                }
+                pane.page_edited();
+                return;
+            }
             // The composition is cleared **before the decoding rule**: even if
             // a type we do not recognise arrives the stack has finished that
             // composition, and had the state stayed there `hasMarkedText` would
@@ -1664,6 +1704,13 @@ define_class!(
         /// ([`stack_kept_the_key`]).
         #[unsafe(method(doCommandBySelector:))]
         fn do_command_by_selector(&self, _selector: Sel) {
+            // In an editor of the page, the key the system's text did not take is the editor's.
+            if let Some(pane) = self.pane()
+                && pane.page_editing().is_some()
+            {
+                pane.page_editor_command();
+                return;
+            }
             self.ivars().commanded.set(true);
         }
 
@@ -1677,9 +1724,21 @@ define_class!(
         fn set_marked_text(
             &self,
             string: &AnyObject,
-            _selected_range: NSRange,
-            _replacement_range: NSRange,
+            selected_range: NSRange,
+            replacement_range: NSRange,
         ) {
+            // An editor of the page draws what is composed, in its document, the part of it the
+            // input method selects with it.
+            if let Some(pane) = self.pane()
+                && let Some(editors) = pane.page_editing()
+            {
+                if let Some(text) = resolve_text(string) {
+                    let selected = (selected_range.location, selected_range.length);
+                    editors.compose(&text, selected, range_of(replacement_range));
+                }
+                pane.page_edited();
+                return;
+            }
             let Some(text) = resolve_text(string) else {
                 return;
             };
@@ -1701,6 +1760,15 @@ define_class!(
         /// ghostty do the same thing in the same place.
         #[unsafe(method(unmarkText))]
         fn unmark_text(&self) {
+            // In an editor of the page what was composed is a document's text: it stays, as
+            // Apple's contract says, typed.
+            if let Some(pane) = self.pane()
+                && let Some(editors) = pane.page_editing()
+            {
+                editors.unmark();
+                pane.page_edited();
+                return;
+            }
             self.ivars().marked_text.borrow_mut().clear();
         }
 
@@ -1710,6 +1778,12 @@ define_class!(
         /// it is `bt-core`'s selection and not a text the stack could edit.
         #[unsafe(method(selectedRange))]
         fn selected_range(&self) -> NSRange {
+            // An editor of the page is a document: its main selection.
+            if let Some(editors) = self.pane().and_then(|pane| pane.page_editing()) {
+                return editors
+                    .selected()
+                    .map_or(EMPTY_RANGE, |(start, len)| NSRange::new(start, len));
+            }
             NSRange::new(self.marked_utf16_len(), 0)
         }
 
@@ -1717,6 +1791,11 @@ define_class!(
         /// contract's counterpart of "nothing is marked", not a zero-length range.
         #[unsafe(method(markedRange))]
         fn marked_range(&self) -> NSRange {
+            if let Some(editors) = self.pane().and_then(|pane| pane.page_editing()) {
+                return editors
+                    .marked()
+                    .map_or(EMPTY_RANGE, |(start, len)| NSRange::new(start, len));
+            }
             match self.marked_utf16_len() {
                 0 => EMPTY_RANGE,
                 len => NSRange::new(0, len),
@@ -1725,7 +1804,11 @@ define_class!(
 
         #[unsafe(method(hasMarkedText))]
         fn has_marked_text(&self) -> bool {
-            !self.ivars().marked_text.borrow().is_empty()
+            // No `return`: `define_class!` converts the `bool` at the end of the body.
+            match self.pane().and_then(|pane| pane.page_editing()) {
+                Some(editors) => editors.marked().is_some(),
+                None => !self.ivars().marked_text.borrow().is_empty(),
+            }
         }
 
         /// There is **no** document the stack could read back: everything
@@ -1737,10 +1820,11 @@ define_class!(
         #[unsafe(method_id(attributedSubstringForProposedRange:actualRange:))]
         fn attributed_substring(
             &self,
-            _range: NSRange,
-            _actual_range: NSRangePointer,
+            range: NSRange,
+            actual_range: NSRangePointer,
         ) -> Option<Retained<NSAttributedString>> {
-            None
+            // An editor of the page has a document to read back.
+            self.editor_substring(range, actual_range)
         }
 
         /// The attributes marked text can carry: **none**. The empty array
@@ -1782,6 +1866,15 @@ define_class!(
                     *actual = range;
                 }
             }
+            // An editor of the page: the box of the place the range starts at.
+            if let Some(pane) = self.pane()
+                && let Some(editors) = pane.page_editing()
+            {
+                return editors
+                    .rect(range.location)
+                    .and_then(|rect| pane.page_rect_on_screen(rect))
+                    .unwrap_or(NSRect::ZERO);
+            }
             let Some(window) = self.window() else {
                 return NSRect::ZERO;
             };
@@ -1798,8 +1891,14 @@ define_class!(
         /// grid's selection is our own path (`mouseDragged:`), not the
         /// stack's. `NSNotFound` is the contract's "I have no character at this point".
         #[unsafe(method(characterIndexForPoint:))]
-        fn character_index_for_point(&self, _point: NSPoint) -> NSUInteger {
-            NOT_FOUND
+        fn character_index_for_point(&self, point: NSPoint) -> NSUInteger {
+            // An editor of the page has an answer: the place of its text under the point.
+            self.pane()
+                .and_then(|pane| {
+                    let editors = pane.page_editing()?;
+                    editors.index_at(pane.page_point_from_screen(point)?)
+                })
+                .unwrap_or(NOT_FOUND)
         }
     }
 
@@ -2018,6 +2117,12 @@ const NOT_FOUND: NSUInteger = NSNotFound as NSUInteger;
 
 /// "Nothing is marked" - `markedRange`'s answer with no composition.
 const EMPTY_RANGE: NSRange = NSRange::new(NOT_FOUND, 0);
+
+/// A range the text system names, where it names one (`NSNotFound` names none): where it starts
+/// and how long it is, units of UTF-16.
+fn range_of(range: NSRange) -> Option<(usize, usize)> {
+    (range.location != NOT_FOUND).then_some((range.location, range.length))
+}
 
 /// Reduces the text object the stack gave to a string - the **single**
 /// decoding rule ([`NSTextInputClient::insertText_replacementRange`] and
@@ -3045,6 +3150,37 @@ impl BateriView {
     /// pointer's shape.
     pub(crate) fn page_pointer_is_over(&self) -> bool {
         self.ivars().page_over.get()
+    }
+
+    /// The text of `range` of the editor of the page with the keyboard, cut to its document, and
+    /// the range it came to in `actual_range`: what an input method reads back around the caret.
+    fn editor_substring(
+        &self,
+        range: NSRange,
+        actual_range: NSRangePointer,
+    ) -> Option<Retained<NSAttributedString>> {
+        let editors = self.pane().and_then(|pane| pane.page_editing())?;
+        let length = editors.length()?;
+        let start = range.location.min(length);
+        let len = range.length.min(length - start);
+        let text = editors.text(start, len)?;
+        // SAFETY: the pointer is either null or a valid `NSRange` on the caller's stack; that is
+        // AppKit's contract.
+        unsafe {
+            if let Some(actual) = actual_range.as_mut() {
+                *actual = NSRange::new(start, len);
+            }
+        }
+        Some(NSAttributedString::from_nsstring(&NSString::from_str(
+            &text,
+        )))
+    }
+
+    /// A key an editor of the page gives to the system's handling of text: an input method, a
+    /// dead key, a character. What it makes comes back through this view's text input, which hands
+    /// it to the editor ([`TerminalPane::page_editing`]).
+    pub(crate) fn type_into_editor(&self, event: &NSEvent) {
+        self.interpretKeyEvents(&NSArray::from_slice(&[event]));
     }
 
     /// The page is gone: the pointer is over nothing of it, whatever it was last over.

@@ -714,6 +714,14 @@ impl Renderer {
         self.ui.borrow_mut().text.as_mut()?.shape(font, text)
     }
 
+    /// Where a caret stands at each of the places `at` (byte offsets of
+    /// `text`, in order) of `text` shaped as one line in `font`, pixels from
+    /// the line's start: one line shaped for all of them, inside a ligature
+    /// too. `None` where there is no proportional text.
+    pub fn ui_carets(&self, font: FontId, text: &str, at: &[usize]) -> Option<Vec<f64>> {
+        self.ui.borrow().text.as_ref()?.carets(font, text, at)
+    }
+
     /// Puts a shaped line into `list`: its line box starts at `at` (the top
     /// left), glyphs are placed at their fractional pen positions in the
     /// atlas's sub-pixel buckets and the baseline sits on a whole pixel.

@@ -17,6 +17,11 @@
 //! Until the module has handed out its first page — it is compiled first, which takes a moment —
 //! the pane shows a line saying so, laid out like any page but not told to the module. A module
 //! that goes wrong is gone: the pane is told why ([`Drained::ended`]) and takes the page down.
+//!
+//! **A page's editors are the pane's** ([`super::editing`]): the frame makes them for the rooms
+//! the page laid out, does what its replies asked of them and draws them, and the pane's keys,
+//! input method, pasteboard and pointer reach them between frames ([`PageEditors`]), measured by
+//! the renderer the frames are drawn with ([`PageDrive::set_renderer`]).
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -24,11 +29,17 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bt_core::Flow;
+use bt_gpu::Renderer;
+use pencere_editor::Editors;
 use pencere_sandbox::{
     Assets, ImageLimits, Images, Module, ModuleLimits, Program, Script, Unbounded,
 };
-use pencere_view::{Element, Event, Laid, Motions, Phase, Role, ScrollTo, Size, div, text};
+use pencere_view::{
+    Button, DrawList, Element, Event, Key, Laid, Measure, Mods, Motions, Phase, Place, Rect, Role,
+    ScrollTo, Size, div, text,
+};
 
+use super::editing::{Editing, Route, Told, in_a_room};
 use super::{
     Drained, Field, HostScrolls, Id, Input, OnOutline, Outline, PageDrive, Placement, Point, Reply,
     Scrolling, Shaped, Typeset, UiContext, UiList, UiPage, from_pane, into_page, to_list,
@@ -75,6 +86,25 @@ struct Shared {
     told_end: bool,
     /// What the module said to its program that the pane has not carried.
     sent: Vec<String>,
+    /// The page's editors.
+    editing: Editing,
+    /// What measures the page's text between frames.
+    measure_with: MeasureWith,
+    /// The frame just drawn left something for the next (a scroll an editor asked, a layout): the
+    /// link is asked for it.
+    again: bool,
+    /// When the caret of the editor with the keyboard next blinks, on the frames' clock.
+    blink_at: Option<f64>,
+}
+
+/// What measures a page's text between frames ([`PageDrive::set_renderer`]).
+enum MeasureWith {
+    /// Nothing yet: the pane has not given the renderer, and nothing is done to the editors.
+    Nothing,
+    Renderer(Rc<Renderer>),
+    /// The tests' stand-in ([`super::editing::Even`]).
+    #[cfg(test)]
+    Even,
 }
 
 impl Shared {
@@ -104,12 +134,15 @@ impl Shared {
                 .extend(arrived.diagnostics.iter().map(ToString::to_string));
         }
         let place = self.place;
-        self.replies.extend(
-            update
-                .replies
-                .into_iter()
-                .map(|answer| (from_pane(answer.reply, place), answer.pointer)),
-        );
+        for mut answer in update.replies {
+            // What it asks of the editors is done at the next frame, once they are made for the
+            // page it came with: a frame is worth drawing.
+            if self.editing.take_reply(&mut answer.reply) && !building {
+                self.redraw = true;
+            }
+            self.replies
+                .push((from_pane(answer.reply, place), answer.pointer));
+        }
         // How much the module may say is not decided here: it was told *full* by the flow when
         // the program had no room, and what it said is what the program has room for.
         if self.ended.is_none() {
@@ -131,6 +164,29 @@ impl Shared {
         let moved = self.scrolls.scrolls.take_moved();
         if !moved.is_empty() {
             self.module.event(Event::Scrolled(moved));
+        }
+    }
+
+    /// What came of something done to the editors: told the module (the texts first, so that it
+    /// reads the version the events tell of), the scrolls they ask for done by the next frame, the
+    /// page laid out again there where they want it. `building`: a frame is being drawn, and a
+    /// next one is asked of the link if there is anything for it; otherwise the pane is to draw
+    /// one ([`Drained::redraw`]) where anything came of it, or `drawn` says the editors changed.
+    fn tell(&mut self, told: Told, building: bool, drawn: bool) {
+        let more = !told.scrolls.is_empty() || told.relayout;
+        let anything = !told.is_empty();
+        if !told.events.is_empty() {
+            self.module.texts(told.texts);
+            for event in told.events {
+                self.module.event(event);
+            }
+        }
+        self.asks.extend(told.scrolls);
+        self.fresh |= told.relayout;
+        if building {
+            self.again |= more;
+        } else if anything || drawn {
+            self.redraw = true;
         }
     }
 }
@@ -212,6 +268,19 @@ fn page_around(
     assets: Option<Arc<dyn Assets>>,
     wake: impl Fn() + Send + Sync + 'static,
 ) -> (Box<dyn UiPage>, ModuleHandle) {
+    let (page, handle) = parts(start, terminal, inset, flow, assets, wake);
+    (Box::new(page), handle)
+}
+
+/// The page and its handle, the page as what it is.
+fn parts(
+    start: impl FnOnce(Arc<dyn Program>, Box<dyn Fn() + Send + Sync>) -> Module,
+    terminal: Option<String>,
+    inset: f32,
+    flow: Option<Flow>,
+    assets: Option<Arc<dyn Assets>>,
+    wake: impl Fn() + Send + Sync + 'static,
+) -> (ModulePage, ModuleHandle) {
     let program: Arc<dyn Program> = match flow {
         Some(flow) => Arc::new(Held(flow)),
         None => Arc::new(Unbounded),
@@ -223,6 +292,7 @@ fn page_around(
         Rc::new(Images::new(assets, ImageLimits::default(), move || wake()))
     });
     let module_wake = Arc::clone(&wake);
+    let shaped = Rc::new(RefCell::new(Shaped::default()));
     let shared = Rc::new(RefCell::new(Shared {
         module: start(program, Box::new(move || module_wake())),
         images: images.clone(),
@@ -244,16 +314,25 @@ fn page_around(
         ended: None,
         told_end: false,
         sent: Vec::new(),
+        editing: Editing::new(),
+        measure_with: MeasureWith::Nothing,
+        again: false,
+        blink_at: None,
     }));
     let page = ModulePage {
-        terminal,
+        terminal: terminal.clone(),
         inset,
-        shaped: Shaped::default(),
+        shaped: Rc::clone(&shaped),
         images,
         shared: Rc::clone(&shared),
         motions: Motions::default(),
     };
-    (Box::new(page), ModuleHandle { shared })
+    let handle = ModuleHandle {
+        shared,
+        shaped,
+        terminal,
+    };
+    (page, handle)
 }
 
 /// The drive of a module's page: the pane's input in, what the module says out. Cloned freely;
@@ -261,12 +340,112 @@ fn page_around(
 #[derive(Clone)]
 pub struct ModuleHandle {
     shared: Rc<RefCell<Shared>>,
+    /// The lines the page's frames shaped, which measuring between frames finds too.
+    shaped: Rc<RefCell<Shaped>>,
+    /// The pane's font family: what `Family::Terminal` is.
+    terminal: Option<String>,
 }
 
 impl ModuleHandle {
     /// The page's fields, in the pane's points, as of the last frame.
     pub fn fields(&self) -> Vec<Field> {
         self.shared.borrow().outline.fields.clone()
+    }
+
+    /// Does `run` to the page's editors, on the page as it was last laid out, measuring as its
+    /// frames do; and tells the page and the pane what came of it — a frame where anything did, or
+    /// always where `drawn` (a key, the input method). `None` (and nothing done) before the page is
+    /// laid out or anything measures it.
+    fn edit<T>(
+        &self,
+        drawn: bool,
+        run: impl FnOnce(&mut Editors, &Laid, &mut dyn Measure, f64) -> T,
+    ) -> Option<T> {
+        let mut shared = self.shared.borrow_mut();
+        let laid = shared.laid.clone()?;
+        let now = shared.editing.now();
+        let out = {
+            let Shared {
+                editing,
+                measure_with,
+                ..
+            } = &mut *shared;
+            let editors = &mut editing.editors;
+            match measure_with {
+                MeasureWith::Nothing => return None,
+                MeasureWith::Renderer(renderer) => {
+                    let mut shaped = self.shaped.try_borrow_mut().ok()?;
+                    let mut typeset = Typeset {
+                        renderer,
+                        terminal: &self.terminal,
+                        shaped: &mut shaped,
+                        images: None,
+                    };
+                    run(editors, &laid, &mut typeset, now)
+                }
+                #[cfg(test)]
+                MeasureWith::Even => run(editors, &laid, &mut super::editing::Even, now),
+            }
+        };
+        let told = shared.editing.told();
+        shared.tell(told, false, drawn);
+        Some(out)
+    }
+
+    /// A pointer input (the page's points) over the page's editors: a left press in one is the
+    /// editor's (it puts the caret, and the editor has the keyboard), a move with it held drags,
+    /// the release ends it; a left press outside every editor's room takes the keyboard from the
+    /// one that had it, back to the page, as a press outside a field does. The place under the
+    /// pointer, where it is over an editor, and whether the page is to be told the keyboard left.
+    fn pointer_in_editors(&self, input: &Input) -> (Option<Place>, bool) {
+        if !matches!(
+            input,
+            Input::Press { .. } | Input::Move(_) | Input::Release { .. }
+        ) {
+            return (None, false);
+        }
+        let done = self.edit(false, |editors, laid, measure, _| {
+            let mut left = false;
+            let at = match *input {
+                Input::Press {
+                    at,
+                    button: Button::Left,
+                    mods,
+                    count,
+                } => {
+                    let took = editors.press(laid, at, mods, count, measure);
+                    if !took && editors.focused().is_some() && !in_a_room(laid, at) {
+                        editors.set_focus(None);
+                        left = true;
+                    }
+                    at
+                }
+                Input::Press { at, .. } => at,
+                Input::Move(at) => {
+                    editors.drag_to(laid, at, measure);
+                    at
+                }
+                Input::Release { at, button } => {
+                    if button == Button::Left {
+                        editors.release();
+                    }
+                    at
+                }
+                Input::Scroll { .. }
+                | Input::Leave
+                | Input::Key { .. }
+                | Input::KeyUp { .. }
+                | Input::Mods(_) => return (None, false),
+            };
+            let place = editors
+                .place_at(laid, at, measure)
+                .map(|(editor, at)| Place { editor, at });
+            (place, left)
+        });
+        if matches!(input, Input::Press { .. }) {
+            self.shared.borrow_mut().editing.person_moved_keyboard();
+        }
+        done.unwrap_or((None, false))
     }
 }
 
@@ -292,7 +471,18 @@ impl PageDrive for ModuleHandle {
             return;
         }
         let input = into_page(input, shared.place);
-        shared.module.event(Event::Input(input));
+        drop(shared);
+        // Over an editor, the pointer is the editor's as well, and the page is told the place
+        // under it; after what the editor told (the keyboard it took, the caret it put).
+        let (place, left) = self.pointer_in_editors(&input);
+        let shared = self.shared.borrow();
+        if left {
+            shared.module.event(Event::Focus(None));
+        }
+        shared.module.event(match place {
+            Some(place) => Event::Pointer { input, place },
+            None => Event::Input(input),
+        });
     }
 
     fn send_wheel(&self, at: Point, dx: f32, dy: f32, phase: Phase) {
@@ -343,7 +533,14 @@ impl PageDrive for ModuleHandle {
     }
 
     fn send_focus(&self, field: Option<Id>) {
-        self.shared.borrow().module.event(Event::Focus(field));
+        let mut shared = self.shared.borrow_mut();
+        // The person clicked into a field: the keyboard is not an editor's any more.
+        if field.is_some() {
+            shared.editing.editors.set_focus(None);
+            shared.editing.person_moved_keyboard();
+            shared.redraw = true;
+        }
+        shared.module.event(Event::Focus(field));
     }
 
     fn send_pick(&self, index: usize) {
@@ -377,6 +574,25 @@ impl PageDrive for ModuleHandle {
         }
     }
 
+    fn set_renderer(&self, renderer: Rc<Renderer>) {
+        self.shared.borrow_mut().measure_with = MeasureWith::Renderer(renderer);
+    }
+
+    fn set_active(&self, active: bool) {
+        let mut shared = self.shared.borrow_mut();
+        let was = shared.editing.blink;
+        shared.editing.blink.set_active(active);
+        if shared.editing.blink != was && shared.editing.editors.focused().is_some() {
+            shared.redraw = true;
+        }
+    }
+
+    fn editors(&self) -> Option<PageEditors> {
+        Some(PageEditors {
+            handle: self.clone(),
+        })
+    }
+
     fn drain(&self, reply: &mut dyn FnMut(Reply, bool)) -> Drained {
         let (replies, drained) = {
             let mut shared = self.shared.borrow_mut();
@@ -402,6 +618,144 @@ impl PageDrive for ModuleHandle {
     }
 }
 
+/// The editors of a module's page, as the pane's keys, input method, pasteboard and screen reader
+/// reach them ([`PageDrive::editors`]). What is done is done to the editor with the keyboard, on the
+/// page as it was last laid out, and what comes of it is told the page at once; the pane drains the
+/// page after it ([`PageDrive::drain`]) and draws the frame that shows it. The ranges an input
+/// method speaks of are in units of UTF-16, as macOS counts them; the points are the pane's.
+#[derive(Clone)]
+pub struct PageEditors {
+    handle: ModuleHandle,
+}
+
+impl PageEditors {
+    /// The editor with the keyboard.
+    pub fn focused(&self) -> Option<Id> {
+        self.handle.shared.borrow().editing.editors.focused()
+    }
+
+    /// A key pressed while an editor has the keyboard, and where it went (`Route`): the page's
+    /// command for it first, then the editor's own, then the text. A command, or a key that is the
+    /// page's, is told the page here, and what the editor does is done. The rest is the pane's:
+    /// `Type`, the key to its system's handling of text (an input method, which says what is
+    /// typed: [`PageEditors::type_text`], [`PageEditors::compose`]); `Copy` and `Cut`, the text to
+    /// its pasteboard; `Paste`, its pasteboard's text to [`PageEditors::paste`]. `NotEditor`: no
+    /// editor has the keyboard, or the page is not laid out yet.
+    pub fn key(&self, key: Key, mods: Mods) -> Route {
+        let route = self
+            .handle
+            .edit(true, |editors, laid, measure, now| {
+                editors.key(laid, key, mods, measure, now)
+            })
+            .unwrap_or(Route::NotEditor);
+        let shared = self.handle.shared.borrow();
+        match route {
+            Route::Command(id) => shared.module.event(Event::Command(id)),
+            Route::Page => shared.module.event(Event::Input(Input::Key { key, mods })),
+            _ => {}
+        }
+        route
+    }
+
+    /// Text typed, from the system's handling of text: in place of what an input method composed,
+    /// where it did.
+    pub fn type_text(&self, text: &str) {
+        self.handle.edit(true, |editors, laid, measure, now| {
+            editors.type_text(laid, text, measure, now);
+        });
+    }
+
+    /// The pasteboard's text, pasted.
+    pub fn paste(&self, text: &str) {
+        self.handle.edit(true, |editors, laid, measure, now| {
+            editors.paste(laid, text, measure, now);
+        });
+    }
+
+    /// An input method composes `text`: the part of it selected (where it starts, how long), and
+    /// the range of the document it replaces (`None`: what it composed before, else the selection).
+    pub fn compose(&self, text: &str, selected: (usize, usize), replace: Option<(usize, usize)>) {
+        self.handle.edit(true, |editors, laid, measure, now| {
+            editors.set_marked_utf16(laid, text, selected, replace, measure, now);
+        });
+    }
+
+    /// The input method is done: what it composed stays, as typed.
+    pub fn unmark(&self) {
+        self.handle.edit(true, |editors, laid, measure, _| {
+            editors.unmark(laid, measure);
+        });
+    }
+
+    /// The main selection of the editor with the keyboard: where it starts and how long it is.
+    pub fn selected(&self) -> Option<(usize, usize)> {
+        self.handle.shared.borrow().editing.editors.selected_utf16()
+    }
+
+    /// What the input method composes there, likewise.
+    pub fn marked(&self) -> Option<(usize, usize)> {
+        self.handle.shared.borrow().editing.editors.marked_utf16()
+    }
+
+    /// The text of a range of it (cut to the document).
+    pub fn text(&self, start: usize, len: usize) -> Option<String> {
+        self.handle
+            .shared
+            .borrow()
+            .editing
+            .editors
+            .text_utf16(start, len)
+    }
+
+    /// How long its text is.
+    pub fn length(&self) -> Option<usize> {
+        let shared = self.handle.shared.borrow();
+        let editors = &shared.editing.editors;
+        let buffer = editors.buffer(editors.focused()?)?;
+        buffer.utf16_of(buffer.len_chars())
+    }
+
+    /// The box, in the pane's points, of the place `units` into its text: where an input method
+    /// opens its window.
+    pub fn rect(&self, units: usize) -> Option<Rect> {
+        let rect = self
+            .handle
+            .edit(false, |editors, laid, measure, _| {
+                editors.rect_utf16(laid, units, measure)
+            })
+            .flatten()?;
+        Some(self.handle.shared.borrow().place.to_pane(rect))
+    }
+
+    /// The place of its text under `at` (the pane's points), where `at` is over it.
+    pub fn index_at(&self, at: Point) -> Option<usize> {
+        let at = self.handle.shared.borrow().place.to_page(at);
+        let (id, place) = self
+            .handle
+            .edit(false, |editors, laid, measure, _| {
+                editors.place_at(laid, at, measure)
+            })
+            .flatten()?;
+        let shared = self.handle.shared.borrow();
+        let editors = &shared.editing.editors;
+        if editors.focused() != Some(id) {
+            return None;
+        }
+        editors.buffer(id)?.utf16_of(place)
+    }
+
+    /// What a screen reader is told of the editor named `id`, whether it has the keyboard or not:
+    /// its text, and its main selection (where it starts, how long).
+    pub fn contents(&self, id: Id) -> Option<(String, (usize, usize))> {
+        let shared = self.handle.shared.borrow();
+        let buffer = shared.editing.editors.buffer(id)?;
+        let main = buffer.main();
+        let start = buffer.utf16_of(main.start())?;
+        let end = buffer.utf16_of(main.end())?;
+        Some((buffer.text(), (start, end - start)))
+    }
+}
+
 /// What stands where the page will be until the module has handed out its first.
 fn starting_line() -> Element {
     div()
@@ -415,7 +769,8 @@ fn starting_line() -> Element {
 struct ModulePage {
     terminal: Option<String>,
     inset: f32,
-    shaped: Shaped,
+    /// The lines shaped so far; the handle measures with them between frames.
+    shaped: Rc<RefCell<Shaped>>,
     /// The page's images; the handle polls the same ones ([`Shared::sync`]).
     images: Option<Rc<Images>>,
     shared: Rc<RefCell<Shared>>,
@@ -431,25 +786,49 @@ struct ModulePage {
 /// that does not answer cannot hold the window.
 const RESIZE_WAIT: Duration = Duration::from_millis(32);
 
-impl UiPage for ModulePage {
-    fn build(&mut self, cx: &UiContext<'_>) -> UiList {
+/// How many times a frame lays the page out again for its editors (a caret an overlay stands by
+/// moved, an editor's content grew): the overlay stands by the caret after one. What is left after
+/// the last is the next frame's.
+const RELAYOUTS: usize = 2;
+
+/// What a frame is asked for: the surface (pixels), its pixels to a point, the frame's time on the
+/// link's clock, and whether Reduce Motion is on.
+#[derive(Clone, Copy, Debug)]
+struct FrameAt {
+    size_px: (u32, u32),
+    scale: f64,
+    now: f64,
+    reduce_motion: bool,
+}
+
+impl ModulePage {
+    /// The page for the frame `at`, laid out and painted measuring with `measure`, its editors in
+    /// their places: the draw list (pixels, from the top of the page's area, below the strip), and
+    /// the outline to tell the host where it changed.
+    fn frame(
+        &mut self,
+        at: FrameAt,
+        measure: &mut dyn Measure,
+    ) -> (DrawList, Option<(OnOutline, Outline)>) {
         let zoom = self.shared.borrow().place.zoom;
-        let inset = (self.inset * cx.scale as f32).round();
-        let scale = cx.scale as f32 * zoom;
-        let width = cx.size_px.0 as f32;
-        let height = (cx.size_px.1 as f32 - inset).max(0.0);
+        let inset = (self.inset * at.scale as f32).round();
+        let scale = at.scale as f32 * zoom;
+        let width = at.size_px.0 as f32;
+        let height = (at.size_px.1 as f32 - inset).max(0.0);
         let size = Size::new(width / scale, height / scale);
+        let viewport = Size::new(width, height);
         let (root, cached) = {
             let mut shared = self.shared.borrow_mut();
+            shared.again = false;
             shared.sync(true);
             // A page for this size, the next step of one that is moving and the page whose time
             // has come; a page that is none of these is not asked for.
-            let due = shared.wake_at.is_some_and(|at| cx.now >= at);
+            let due = shared.wake_at.is_some_and(|wake| at.now >= wake);
             let resized = shared.asked.is_some_and(|asked| asked != (size, scale));
             if shared.asked != Some((size, scale)) || shared.animating || due {
                 shared.asked = Some((size, scale));
                 shared.wake_at = None;
-                shared.module.render(size, cx.now, cx.reduce_motion);
+                shared.module.render(size, at.now, at.reduce_motion);
             }
             // A resized pane waits a little for the page made for its size rather than draw,
             // for a frame, the one laid out for the size it was: that frame is what flickers.
@@ -457,7 +836,7 @@ impl UiPage for ModulePage {
             if resized && shared.module.wait_for_frame(size, RESIZE_WAIT) {
                 shared.sync(true);
             }
-            shared.scrolls.frame(cx.now);
+            shared.scrolls.frame(at.now);
             let asks = std::mem::take(&mut shared.asks);
             shared.scrolls.ask(asks);
             // Only the scrolling changed: the boxes move on the page as it was laid out.
@@ -467,39 +846,141 @@ impl UiPage for ModulePage {
             (shared.root.clone(), cached)
         };
         let starting = root.is_none();
-        if self.shaped.lines.len() > super::SHAPED_LIMIT {
-            self.shaped.lines.clear();
-        }
-        let mut typeset = Typeset {
-            renderer: cx.renderer,
-            terminal: &self.terminal,
-            shaped: &mut self.shaped,
-            images: self.images.as_deref(),
-        };
         let mut laid = match cached {
-            Some(laid) if !starting => (*laid).clone(),
-            _ => {
-                let mut root = root.unwrap_or_else(starting_line);
-                self.shared.borrow().scrolls.scrolls.apply(&mut root);
-                self.motions.layout(
-                    root,
-                    Size::new(width, height),
-                    scale,
-                    &mut typeset,
-                    cx.now,
-                    cx.reduce_motion,
-                )
+            Some(laid) if !starting => {
+                let mut laid = (*laid).clone();
+                self.shared
+                    .borrow_mut()
+                    .scrolls
+                    .scrolls
+                    .place(&mut laid, at.now, at.reduce_motion);
+                laid
             }
+            _ => self.lay(root.clone(), viewport, scale, at, measure),
+        };
+        let mut told = Told::default();
+        let mut caret = false;
+        if !starting {
+            // The editors made for the rooms there, and what the page asked of them done; where a
+            // caret an overlay stands by moved (an edit, the scrolling), the same tree is laid out
+            // again, the page asked nothing.
+            for pass in 0..=RELAYOUTS {
+                let again = {
+                    let mut shared = self.shared.borrow_mut();
+                    shared.editing.settle(&laid, measure);
+                    shared.editing.editors.wants_layout() || laid.wants_layout()
+                };
+                if !again {
+                    break;
+                }
+                if pass == RELAYOUTS {
+                    // What is left is the next frame's, which lays the page out again.
+                    self.shared.borrow_mut().again = true;
+                    break;
+                }
+                laid = self.lay(root.clone(), viewport, scale, at, measure);
+            }
+            let mut shared = self.shared.borrow_mut();
+            told = shared.editing.told();
+            let shown = shared.editing.editors.focused().is_some();
+            let (lit, next) = shared.editing.blink.at(at.now, at.reduce_motion, shown);
+            caret = lit;
+            shared.blink_at = next;
+        }
+        let laid = Arc::new(laid);
+        let draws = laid.paint(measure);
+        let draws = self
+            .shared
+            .borrow_mut()
+            .editing
+            .editors
+            .paint(draws, measure, caret);
+        let mut shared = self.shared.borrow_mut();
+        // The module may ask of this layout from now on, and brings what depends on it back
+        // within it; a page that was already within it answers nothing. The line that stands in
+        // for a page is not the module's.
+        if !starting {
+            shared.module.lay_out(Arc::clone(&laid));
+            shared.laid = Some(Arc::clone(&laid));
+            shared.laid_for = Some((size, scale));
+            shared.fresh = false;
+            // Where the boxes went (a spring, a glide, an ask, a list that got shorter): the
+            // page builds what came into view.
+            shared.tell_scrolled();
+            // And what the editors have for it, read against this layout.
+            shared.tell(told, true, false);
+        }
+        let outline = Outline::of(&laid, shared.place);
+        let changed = (outline != shared.outline)
+            .then(|| {
+                shared
+                    .on_outline
+                    .clone()
+                    .map(|told| (told, outline.clone()))
+            })
+            .flatten();
+        shared.outline = outline;
+        (draws, changed)
+    }
+
+    /// `root` (the line that stands in for a page, where there is none yet) laid out where the pane
+    /// has its boxes scrolled, measuring with the page's editors, and the boxes placed.
+    fn lay(
+        &mut self,
+        root: Option<Element>,
+        viewport: Size,
+        scale: f32,
+        at: FrameAt,
+        measure: &mut dyn Measure,
+    ) -> Laid {
+        let starting = root.is_none();
+        let mut root = root.unwrap_or_else(starting_line);
+        let mut laid = {
+            let shared = self.shared.borrow();
+            shared.scrolls.scrolls.apply(&mut root);
+            let mut measured = shared.editing.editors.measure(measure);
+            self.motions.layout(
+                root,
+                viewport,
+                scale,
+                &mut measured,
+                at.now,
+                at.reduce_motion,
+            )
         };
         if !starting {
             self.shared
                 .borrow_mut()
                 .scrolls
                 .scrolls
-                .place(&mut laid, cx.now, cx.reduce_motion);
+                .place(&mut laid, at.now, at.reduce_motion);
         }
-        let laid = Arc::new(laid);
-        let draws = laid.paint(&mut typeset);
+        laid
+    }
+}
+
+impl UiPage for ModulePage {
+    fn build(&mut self, cx: &UiContext<'_>) -> UiList {
+        let inset = (self.inset * cx.scale as f32).round();
+        let shaped = Rc::clone(&self.shaped);
+        let mut shaped = shaped.borrow_mut();
+        if shaped.lines.len() > super::SHAPED_LIMIT {
+            shaped.lines.clear();
+        }
+        let (terminal, images) = (self.terminal.clone(), self.images.clone());
+        let mut typeset = Typeset {
+            renderer: cx.renderer,
+            terminal: &terminal,
+            shaped: &mut shaped,
+            images: images.as_deref(),
+        };
+        let at = FrameAt {
+            size_px: cx.size_px,
+            scale: cx.scale,
+            now: cx.now,
+            reduce_motion: cx.reduce_motion,
+        };
+        let (draws, told) = self.frame(at, &mut typeset);
         let list = to_list(
             cx.renderer,
             cx.theme,
@@ -508,32 +989,7 @@ impl UiPage for ModulePage {
             &draws,
             (0.0, inset),
         );
-        let told = {
-            let mut shared = self.shared.borrow_mut();
-            // The module may ask of this layout from now on, and brings what depends on it back
-            // within it; a page that was already within it answers nothing. The line that stands
-            // in for a page is not the module's.
-            if !starting {
-                shared.module.lay_out(Arc::clone(&laid));
-                shared.laid = Some(Arc::clone(&laid));
-                shared.laid_for = Some((size, scale));
-                shared.fresh = false;
-                // Where the boxes went (a spring, a glide, an ask, a list that got shorter): the
-                // page builds what came into view.
-                shared.tell_scrolled();
-            }
-            let outline = Outline::of(&laid, shared.place);
-            let told = (outline != shared.outline)
-                .then(|| {
-                    shared
-                        .on_outline
-                        .clone()
-                        .map(|told| (told, outline.clone()))
-                })
-                .flatten();
-            shared.outline = outline;
-            told
-        };
+        drop(shaped);
         // After the page is let go of: the host moves its fields in this call.
         if let Some((told, outline)) = told {
             told(&outline);
@@ -543,15 +999,15 @@ impl UiPage for ModulePage {
 
     fn animating(&self) -> bool {
         let shared = self.shared.borrow();
-        shared.animating || self.motions.moving() || shared.scrolls.moving()
+        shared.animating || self.motions.moving() || shared.scrolls.moving() || shared.again
     }
 
     fn wake_at(&self) -> Option<f64> {
         let shared = self.shared.borrow();
-        match (shared.wake_at, shared.scrolls.wake_at()) {
-            (Some(page), Some(bars)) => Some(page.min(bars)),
-            (page, bars) => page.or(bars),
-        }
+        [shared.wake_at, shared.scrolls.wake_at(), shared.blink_at]
+            .into_iter()
+            .flatten()
+            .reduce(f64::min)
     }
 }
 
@@ -562,6 +1018,7 @@ mod tests {
     use bt_core::{MINIMUM_CONTRAST, Theme};
     use bt_gpu::{Renderer, UiItem};
     use pencere_view::Point;
+    use pencere_view::{Button, Key, Mods, Rect};
     use std::sync::mpsc::{Receiver, channel};
     use std::time::{Duration, Instant};
 
@@ -1100,6 +1557,459 @@ mod tests {
         assert_eq!(text_of(&handle, "command find"), "key g");
         handle.send_command(Id::named("find"));
         assert_eq!(text_of(&handle, "key g"), "command find");
+    }
+
+    /// A script's page, its handle, and what woke the application: measured by the tests'
+    /// stand-in ([`super::editing::Even`]), frames and editors alike, so that no GPU is needed.
+    fn editor_rig(source: &str) -> (ModulePage, ModuleHandle, Receiver<()>) {
+        let (told, woken) = channel();
+        let told = std::sync::Mutex::new(told);
+        let script = Script {
+            path: "page.lua".to_owned(),
+            source: source.as_bytes().to_vec(),
+            bundle: None,
+        };
+        let (page, handle) = parts(
+            |program, wake| Module::from_script(script, ModuleLimits::default(), program, wake),
+            None,
+            32.0,
+            None,
+            None,
+            move || {
+                let _ = told.lock().unwrap().send(());
+            },
+        );
+        handle.shared.borrow_mut().measure_with = MeasureWith::Even;
+        (page, handle, woken)
+    }
+
+    /// A frame of 800 × 600 pixels at one pixel to a point, at `now`.
+    fn frame_at(now: f64) -> FrameAt {
+        FrameAt {
+            size_px: (800, 600),
+            scale: 1.0,
+            now,
+            reduce_motion: false,
+        }
+    }
+
+    /// Frames and drains, as the pane does, until the page has nothing more to say: the last
+    /// frame's list.
+    fn settle(page: &mut ModulePage, handle: &ModuleHandle, woken: &Receiver<()>) -> DrawList {
+        settle_at(page, handle, woken, frame_at(0.0))
+    }
+
+    /// The same, with the frames `at` asks for.
+    fn settle_at(
+        page: &mut ModulePage,
+        handle: &ModuleHandle,
+        woken: &Receiver<()>,
+        at: FrameAt,
+    ) -> DrawList {
+        let mut list = page.frame(at, &mut super::super::editing::Even).0;
+        for _ in 0..100 {
+            let woke = woken.recv_timeout(Duration::from_millis(300)).is_ok();
+            let drained = handle.drain(&mut |_, _| {});
+            if !woke && !drained.redraw && !page.animating() {
+                return list;
+            }
+            list = page.frame(at, &mut super::super::editing::Even).0;
+        }
+        panic!("the page never came to rest");
+    }
+
+    /// The words of the page as the module last made it.
+    fn page_words(handle: &ModuleHandle) -> Vec<String> {
+        handle
+            .shared
+            .borrow()
+            .root
+            .as_ref()
+            .map(|root| {
+                root.fold()
+                    .into_iter()
+                    .filter_map(|node| match node.kind {
+                        pencere_view::wire::Kind::Text(words) => Some(words),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The words drawn in `list`.
+    fn drawn(list: &DrawList) -> Vec<String> {
+        list.items
+            .iter()
+            .filter_map(|item| match item {
+                pencere_view::Paint::Text(run) => Some(run.text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn editor_text(handle: &ModuleHandle) -> String {
+        handle
+            .shared
+            .borrow()
+            .editing
+            .editors
+            .buffer(Id::named("e"))
+            .map(pencere_editor::Buffer::text)
+            .unwrap_or_default()
+    }
+
+    /// A page with an editor 200 points high below 40 of its own, and a line of what it was told:
+    /// `l` loads the editor and gives it the keyboard; an edit is read back from the text the host
+    /// posted; ⌘⏎ is a command of the page's.
+    const EDITOR_PAGE: &str = r#"local said = {}
+local function note(words) said[#said + 1] = words end
+return {
+    render = function()
+        return pencere.div():size_full()
+            :command("run", "Run", "cmd+enter")
+            :child(pencere.div():h(40))
+            :child(pencere.editor("e", { gutter = false }):h(200):w(400))
+            :child(pencere.text(table.concat(said, "|")))
+    end,
+    handle = function(event)
+        if event.type == "key" and event.key == "l" then
+            note("load")
+            return { redraw = true, keyboard = { field = "e" }, editor = { e = { load = "hello\nworld" } } }
+        elseif event.type == "edit" then
+            note("edit " .. event.origin .. " " .. pencere.layout.editor_text("e", 0, pencere.layout.editor_length("e")))
+        elseif event.type == "focus" then
+            note("focus " .. tostring(event.field))
+        elseif event.type == "press" then
+            note("press " .. (event.place and (event.place.editor .. "@" .. event.place.at) or "page"))
+        elseif event.type == "command" then
+            note("command " .. event.id)
+        elseif event.type == "key" then
+            note("key " .. event.key)
+        end
+        return true
+    end,
+}"#;
+
+    /// The page's editor through the pane's page: a reply loads it and gives it the keyboard, the
+    /// frame draws its lines in its room; the pane's keys and text reach it, the page reads the
+    /// edit from the text posted before it is told; the page's command comes first.
+    #[test]
+    fn a_pages_editor_is_loaded_by_its_reply_drawn_and_typed_into() {
+        let (mut page, handle, woken) = editor_rig(EDITOR_PAGE);
+        // The first frame asks the script for its page.
+        page.frame(frame_at(0.0), &mut super::super::editing::Even);
+        assert!(wait(&woken), "the script handed out no page");
+        settle(&mut page, &handle, &woken);
+        let editors = handle.editors().expect("a module's page has editors");
+        assert_eq!(editors.focused(), None);
+        // `l` is the page's while no editor has the keyboard.
+        handle.send_input(Input::Key {
+            key: Key::Character('l'),
+            mods: Mods::default(),
+        });
+        let list = settle(&mut page, &handle, &woken);
+        assert_eq!(editor_text(&handle), "hello\nworld");
+        assert_eq!(editors.focused(), Some(Id::named("e")));
+        let words = drawn(&list);
+        assert!(words.iter().any(|w| w == "hello"), "{words:?}");
+        assert!(words.iter().any(|w| w == "world"), "{words:?}");
+        assert!(
+            list.items
+                .iter()
+                .all(|item| !matches!(item, pencere_view::Paint::Editor(_))),
+            "every editor's place is filled"
+        );
+        // A character types (the pane's system says what), and the page reads it back.
+        assert_eq!(
+            editors.key(Key::Character('x'), Mods::default()),
+            Route::Type
+        );
+        editors.type_text("x");
+        settle(&mut page, &handle, &woken);
+        assert_eq!(editor_text(&handle), "xhello\nworld");
+        let said = page_words(&handle).join(" ");
+        assert!(said.contains("edit person xhello\nworld"), "{said}");
+        // ⌥ types what it makes (⌥Q on a Turkish keyboard).
+        let alt = Mods {
+            alt: true,
+            ..Mods::default()
+        };
+        assert_eq!(editors.key(Key::Character('@'), alt), Route::Type);
+        // The editor's own keys; the pasteboard is the pane's.
+        let command = Mods {
+            command: true,
+            ..Mods::default()
+        };
+        assert_eq!(editors.key(Key::Character('a'), command), Route::Done);
+        assert_eq!(
+            editors.key(Key::Character('c'), command),
+            Route::Copy("xhello\nworld".into())
+        );
+        assert_eq!(editors.key(Key::Character('v'), command), Route::Paste);
+        editors.paste("pasted");
+        settle(&mut page, &handle, &woken);
+        assert_eq!(editor_text(&handle), "pasted");
+        assert_eq!(editors.key(Key::Character('z'), command), Route::Done);
+        settle(&mut page, &handle, &woken);
+        assert_eq!(editor_text(&handle), "xhello\nworld");
+        // The page's command for a key comes before the editor's.
+        assert_eq!(
+            editors.key(Key::Enter, command),
+            Route::Command(Id::named("run"))
+        );
+        settle(&mut page, &handle, &woken);
+        assert!(page_words(&handle).join(" ").contains("command run"));
+        // Esc with one caret is the page's, told as a key.
+        assert_eq!(editors.key(Key::Escape, Mods::default()), Route::Page);
+        settle(&mut page, &handle, &woken);
+        assert!(page_words(&handle).join(" ").contains("key escape"));
+    }
+
+    /// What an input method composes is in the document until it is done, and it asks where the
+    /// caret is in the pane's points and what is around it, in units of UTF-16.
+    #[test]
+    fn an_input_method_composes_in_the_editor_and_is_answered_in_units_of_utf16() {
+        let (mut page, handle, woken) = editor_rig(EDITOR_PAGE);
+        // The first frame asks the script for its page.
+        page.frame(frame_at(0.0), &mut super::super::editing::Even);
+        assert!(wait(&woken), "the script handed out no page");
+        settle(&mut page, &handle, &woken);
+        handle.send_input(Input::Key {
+            key: Key::Character('l'),
+            mods: Mods::default(),
+        });
+        settle(&mut page, &handle, &woken);
+        let editors = handle.editors().expect("editors");
+        assert_eq!(editors.selected(), Some((0, 0)));
+        editors.compose("k", (1, 0), None);
+        assert_eq!(editors.marked(), Some((0, 1)));
+        assert_eq!(editors.key(Key::Down, Mods::default()), Route::Type);
+        editors.compose("か", (1, 0), None);
+        editors.type_text("か");
+        settle(&mut page, &handle, &woken);
+        assert_eq!(editors.marked(), None);
+        assert_eq!(editor_text(&handle), "かhello\nworld");
+        assert_eq!(editors.selected(), Some((1, 0)));
+        assert_eq!(editors.text(0, 3).as_deref(), Some("かhe"));
+        assert_eq!(editors.length(), Some(12));
+        // The caret's box: in the editor's room, below the strip and the page's own 40 points.
+        let caret = editors.rect(1).expect("a caret");
+        assert!(
+            caret.y >= 32.0 + 40.0 && caret.y < 32.0 + 240.0,
+            "{caret:?}"
+        );
+        assert!(caret.h > 0.0, "{caret:?}");
+        // What is under a point of the pane, there.
+        let under = Point::new(caret.x + 0.5, caret.y + caret.h / 2.0);
+        assert_eq!(editors.index_at(under), Some(1));
+        let (text, selected) = editors.contents(Id::named("e")).expect("contents");
+        assert_eq!((text.as_str(), selected), ("かhello\nworld", (1, 0)));
+    }
+
+    /// A press in the editor is the editor's — it takes the keyboard and puts the caret — and the
+    /// page hears it with the place under it; a press elsewhere on the page gives the keyboard back
+    /// to the page.
+    #[test]
+    fn a_press_in_an_editor_puts_its_caret_and_one_elsewhere_takes_the_keyboard_back() {
+        let (mut page, handle, woken) = editor_rig(EDITOR_PAGE);
+        // The first frame asks the script for its page.
+        page.frame(frame_at(0.0), &mut super::super::editing::Even);
+        assert!(wait(&woken), "the script handed out no page");
+        settle(&mut page, &handle, &woken);
+        handle.send_input(Input::Key {
+            key: Key::Character('l'),
+            mods: Mods::default(),
+        });
+        settle(&mut page, &handle, &woken);
+        handle.send_input(Input::Key {
+            key: Key::Character('l'),
+            mods: Mods::default(),
+        });
+        settle(&mut page, &handle, &woken);
+        let editors = handle.editors().expect("editors");
+        // The keyboard back to the page by a press below the editor, then into it by one on the
+        // second line (the pane's points: the strip is 32 high, the room starts 40 below it).
+        let press = |at: Point| {
+            handle.send_input(Input::Press {
+                at,
+                button: Button::Left,
+                mods: Mods::default(),
+                count: 1,
+            });
+            handle.send_input(Input::Release {
+                at,
+                button: Button::Left,
+            });
+        };
+        press(Point::new(500.0, 32.0 + 300.0));
+        settle(&mut page, &handle, &woken);
+        assert_eq!(editors.focused(), None);
+        let said = page_words(&handle).join(" ");
+        assert!(said.contains("focus nil|press page"), "{said}");
+        let line = editors_line_height(&handle);
+        press(Point::new(390.0, 32.0 + 40.0 + line * 1.5 + 4.0));
+        settle(&mut page, &handle, &woken);
+        assert_eq!(editors.focused(), Some(Id::named("e")));
+        // At the end of the second line: "hello\n" is 6, "world" 5.
+        assert_eq!(editors.selected(), Some((11, 0)));
+        let said = page_words(&handle).join(" ");
+        assert!(said.contains("focus e|press e@11"), "{said}");
+    }
+
+    /// A caret moved out of the room is brought into view by the pane's scrolling of the room, and
+    /// the page is told the lines in view; the caret blinks on the frames' clock, which is all a
+    /// page at rest with an editor that has the keyboard wakes for.
+    #[test]
+    fn the_caret_is_kept_in_view_by_the_rooms_scrolling_and_blinks_at_rest() {
+        let long: String = (0..60).map(|n| format!("line {n}\n")).collect();
+        let source = EDITOR_PAGE
+            .replace(r#"load = "hello\nworld""#, &format!("load = {long:?}"))
+            .replace(
+                r#"elseif event.type == "command" then"#,
+                r#"elseif event.type == "viewport" then
+            note("viewport " .. event.first .. "-" .. event.last)
+        elseif event.type == "command" then"#,
+            );
+        let (mut page, handle, woken) = editor_rig(&source);
+        page.frame(frame_at(0.0), &mut super::super::editing::Even);
+        assert!(wait(&woken), "the script handed out no page");
+        settle(&mut page, &handle, &woken);
+        handle.send_input(Input::Key {
+            key: Key::Character('l'),
+            mods: Mods::default(),
+        });
+        settle(&mut page, &handle, &woken);
+        let editors = handle.editors().expect("editors");
+        let command = Mods {
+            command: true,
+            ..Mods::default()
+        };
+        assert_eq!(editors.key(Key::Down, command), Route::Done);
+        settle(&mut page, &handle, &woken);
+        let offset = handle
+            .shared
+            .borrow()
+            .laid
+            .as_ref()
+            .and_then(|laid| laid.scroll_extent(Id::named("e")))
+            .map(|extent| extent.offset.y)
+            .expect("the room scrolls");
+        assert!(offset > 0.0, "the room is scrolled to the caret: {offset}");
+        let said = page_words(&handle).join(" ");
+        let told = said
+            .rsplit("viewport ")
+            .next()
+            .and_then(|lines| lines.split(['-', '|']).nth(1))
+            .and_then(|last| last.trim().parse::<usize>().ok());
+        assert!(told.is_some_and(|last| last >= 59), "{said}");
+        // At rest: no frame is asked for but the caret's next blink.
+        assert!(!page.animating());
+        assert_eq!(page.wake_at(), Some(0.5));
+    }
+
+    /// On a screen of two pixels to a point, the page drawn half as large again as its own size:
+    /// the caret's box an input method is told and the place under a point are each other's, a
+    /// press there puts the caret there, and a press below the room gives the keyboard back.
+    #[test]
+    fn an_editor_answers_in_the_panes_points_at_any_scale_and_zoom() {
+        let (mut page, handle, woken) = editor_rig(EDITOR_PAGE);
+        handle.set_zoom(1.5);
+        let at = FrameAt {
+            size_px: (1600, 1200),
+            scale: 2.0,
+            now: 0.0,
+            reduce_motion: false,
+        };
+        page.frame(at, &mut super::super::editing::Even);
+        assert!(wait(&woken), "the script handed out no page");
+        settle_at(&mut page, &handle, &woken, at);
+        handle.send_input(Input::Key {
+            key: Key::Character('l'),
+            mods: Mods::default(),
+        });
+        settle_at(&mut page, &handle, &woken, at);
+        let editors = handle.editors().expect("editors");
+        assert_eq!(editors.focused(), Some(Id::named("e")));
+        let middle = |rect: Rect| Point::new(rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
+        for k in [0, 3, 6, 8, 11] {
+            let caret = editors.rect(k).expect("a caret");
+            assert!(
+                caret.y >= 32.0 + 40.0 * 1.5,
+                "below the strip and 40 points: {caret:?}"
+            );
+            assert_eq!(editors.index_at(middle(caret)), Some(k), "{caret:?}");
+        }
+        let press = |at: Point| {
+            handle.send_input(Input::Press {
+                at,
+                button: Button::Left,
+                mods: Mods::default(),
+                count: 1,
+            });
+            handle.send_input(Input::Release {
+                at,
+                button: Button::Left,
+            });
+        };
+        press(middle(editors.rect(8).expect("a caret")));
+        settle_at(&mut page, &handle, &woken, at);
+        assert_eq!(editors.selected(), Some((8, 0)));
+        let room = {
+            let shared = handle.shared.borrow();
+            let laid = shared.laid.clone().expect("laid out");
+            let room = laid.editors().into_iter().next().expect("the room").rect;
+            shared.place.to_pane(room)
+        };
+        press(Point::new(room.x + 10.0, room.y + room.h + 5.0));
+        settle_at(&mut page, &handle, &woken, at);
+        assert_eq!(editors.focused(), None, "{room:?}");
+    }
+
+    /// An editor whose long lines wrap comes to rest like any page: its room's width is what its
+    /// rows are, and nothing is laid out again for ever.
+    #[test]
+    fn an_editor_of_wrapped_lines_comes_to_rest() {
+        let long: String = (0..40)
+            .map(|n| format!("{n} {}\n", "word ".repeat(60)))
+            .collect();
+        let source = EDITOR_PAGE
+            .replace("{ gutter = false }", "{ gutter = false, wrap = true }")
+            .replace(r#"load = "hello\nworld""#, &format!("load = {long:?}"));
+        let (mut page, handle, woken) = editor_rig(&source);
+        page.frame(frame_at(0.0), &mut super::super::editing::Even);
+        assert!(wait(&woken), "the script handed out no page");
+        settle(&mut page, &handle, &woken);
+        handle.send_input(Input::Key {
+            key: Key::Character('l'),
+            mods: Mods::default(),
+        });
+        settle(&mut page, &handle, &woken);
+        assert!(editor_text(&handle).starts_with("0 word"));
+        let extent = handle
+            .shared
+            .borrow()
+            .laid
+            .as_ref()
+            .and_then(|laid| laid.scroll_extent(Id::named("e")))
+            .expect("the room scrolls");
+        assert!(extent.content.w <= extent.view.w + 0.5, "{extent:?}");
+        assert!(extent.content.h > extent.view.h, "{extent:?}");
+        for step in 0..3 {
+            page.frame(
+                frame_at(0.1 * f64::from(step)),
+                &mut super::super::editing::Even,
+            );
+            assert!(!page.animating(), "frame {step} asked for another");
+        }
+    }
+
+    /// The height of a line of the editor, points (one pixel to a point in these tests).
+    fn editors_line_height(handle: &ModuleHandle) -> f32 {
+        let shared = handle.shared.borrow();
+        let laid = shared.laid.clone().expect("laid out");
+        let room = laid.editors().into_iter().next().expect("the room");
+        room.font.size * 1.25
     }
 
     /// The files of a bundle as a manifest types them: a path, a media type and the text.

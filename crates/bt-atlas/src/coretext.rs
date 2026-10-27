@@ -77,6 +77,23 @@ fn cg_glyph(glyph: u32) -> CGGlyph {
     CGGlyph::try_from(glyph).unwrap_or(CGGlyph::MAX)
 }
 
+/// `text` as one `CTLine` in `font`: what a line is shaped and its carets
+/// are placed by.
+fn line_of(font: &CTFont, text: &str) -> Option<CFRetained<CTLine>> {
+    let string = CFString::from_str(text);
+    // SAFETY: the key is a constant CoreText exports, alive for the whole
+    // program.
+    let font_key = unsafe { kCTFontAttributeName };
+    let attributes = CFDictionary::from_slices(&[font_key], &[font]);
+    // SAFETY: the allocator is the default (`None`), the string and the
+    // dictionary are alive; the dictionary has the shape CoreText expects
+    // — `kCTFontAttributeName` → `CTFont`.
+    let attributed =
+        unsafe { CFAttributedString::new(None, Some(&string), Some(attributes.as_opaque())) }?;
+    // SAFETY: `attributed` is alive; the line copies it.
+    Some(unsafe { CTLine::with_attributed_string(&attributed) })
+}
+
 impl FontSystem for CoreText {
     type Font = CFRetained<CTFont>;
 
@@ -582,18 +599,10 @@ impl FontSystem for CoreText {
     /// and each run reports the font it used, so the glyph numbers are
     /// always read with the right font.
     fn shape_line(font: &Self::Font, text: &str) -> Option<ShapedLine<Self::Font>> {
-        let string = CFString::from_str(text);
         // SAFETY: the key is a constant CoreText exports, alive for the whole
         // program.
         let font_key = unsafe { kCTFontAttributeName };
-        let attributes = CFDictionary::from_slices(&[font_key], &[&**font]);
-        // SAFETY: the allocator is the default (`None`), the string and the
-        // dictionary are alive; the dictionary has the shape CoreText expects
-        // — `kCTFontAttributeName` → `CTFont`.
-        let attributed =
-            unsafe { CFAttributedString::new(None, Some(&string), Some(attributes.as_opaque())) }?;
-        // SAFETY: `attributed` is alive; the line copies it.
-        let line = unsafe { CTLine::with_attributed_string(&attributed) };
+        let line = line_of(font, text)?;
         let (mut ascent, mut descent, mut leading) = (0.0, 0.0, 0.0);
         // SAFETY: three valid out pointers, alive for the call.
         let width = unsafe { line.typographic_bounds(&mut ascent, &mut descent, &mut leading) };
@@ -659,6 +668,37 @@ impl FontSystem for CoreText {
             descent,
             leading,
         })
+    }
+
+    /// The line's own carets (`CTLineGetOffsetForStringIndex`), at the
+    /// UTF-16 index of each place: a place inside a ligature is where the
+    /// line puts a caret in it, not an end of the glyph, and one line is
+    /// shaped for all of them. A place that is not a character's boundary
+    /// is the line's end. The places come in order from an editor; one that
+    /// goes back is counted from the start again.
+    fn caret_offsets(font: &Self::Font, text: &str, at: &[usize]) -> Option<Vec<f64>> {
+        let line = line_of(font, text)?;
+        // SAFETY: `line` is alive; the three out pointers may be null.
+        let width =
+            unsafe { line.typographic_bounds(ptr::null_mut(), ptr::null_mut(), ptr::null_mut()) };
+        let (mut byte, mut unit) = (0, 0);
+        let offsets = at
+            .iter()
+            .map(|&place| {
+                if place < byte {
+                    (byte, unit) = (0, 0);
+                }
+                let Some(between) = text.get(byte..place) else {
+                    return width;
+                };
+                unit += between.encode_utf16().count();
+                byte = place;
+                let index = CFIndex::try_from(unit).unwrap_or(CFIndex::MAX);
+                // SAFETY: `line` is alive; the secondary offset may be null.
+                unsafe { line.offset_for_string_index(index, ptr::null_mut()) }
+            })
+            .collect();
+        Some(offsets)
     }
 
     /// The bitmap is the glyph's ink box widened to whole pixels at the

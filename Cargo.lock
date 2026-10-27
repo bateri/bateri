@@ -220,6 +220,7 @@ dependencies = [
  "dispatch2",
  "kablo-proto",
  "libc",
+ "pencere-editor",
  "pencere-sandbox",
  "pencere-view",
 ]
@@ -1296,7 +1297,7 @@ dependencies = [
 [[package]]
 name = "pencere"
 version = "0.3.1"
-source = "git+https://github.com/bateri/pencere?rev=262a9a3a576398bb31d609309facefecf944ca10#262a9a3a576398bb31d609309facefecf944ca10"
+source = "git+https://github.com/bateri/pencere?rev=af115852ac89530413ac00807b51841d3cfff715#af115852ac89530413ac00807b51841d3cfff715"
 dependencies = [
  "libc",
  "pencere-wire",
@@ -1305,9 +1306,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "pencere-editor"
+version = "0.3.1"
+source = "git+https://github.com/bateri/pencere?rev=af115852ac89530413ac00807b51841d3cfff715#af115852ac89530413ac00807b51841d3cfff715"
+dependencies = [
+ "pencere-view",
+ "regex",
+ "ropey",
+ "unicode-segmentation",
+]
+
+[[package]]
 name = "pencere-host"
 version = "0.3.1"
-source = "git+https://github.com/bateri/pencere?rev=262a9a3a576398bb31d609309facefecf944ca10#262a9a3a576398bb31d609309facefecf944ca10"
+source = "git+https://github.com/bateri/pencere?rev=af115852ac89530413ac00807b51841d3cfff715#af115852ac89530413ac00807b51841d3cfff715"
 dependencies = [
  "pencere-wire",
  "serde",
@@ -1317,7 +1329,7 @@ dependencies = [
 [[package]]
 name = "pencere-sandbox"
 version = "0.3.1"
-source = "git+https://github.com/bateri/pencere?rev=262a9a3a576398bb31d609309facefecf944ca10#262a9a3a576398bb31d609309facefecf944ca10"
+source = "git+https://github.com/bateri/pencere?rev=af115852ac89530413ac00807b51841d3cfff715#af115852ac89530413ac00807b51841d3cfff715"
 dependencies = [
  "pencere-view",
  "pencere-wire",
@@ -1331,7 +1343,7 @@ dependencies = [
 [[package]]
 name = "pencere-view"
 version = "0.3.1"
-source = "git+https://github.com/bateri/pencere?rev=262a9a3a576398bb31d609309facefecf944ca10#262a9a3a576398bb31d609309facefecf944ca10"
+source = "git+https://github.com/bateri/pencere?rev=af115852ac89530413ac00807b51841d3cfff715#af115852ac89530413ac00807b51841d3cfff715"
 dependencies = [
  "taffy",
 ]
@@ -1339,7 +1351,7 @@ dependencies = [
 [[package]]
 name = "pencere-wire"
 version = "0.3.1"
-source = "git+https://github.com/bateri/pencere?rev=262a9a3a576398bb31d609309facefecf944ca10#262a9a3a576398bb31d609309facefecf944ca10"
+source = "git+https://github.com/bateri/pencere?rev=af115852ac89530413ac00807b51841d3cfff715#af115852ac89530413ac00807b51841d3cfff715"
 dependencies = [
  "serde",
  "serde_json",
@@ -1544,6 +1556,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "regex"
+version = "1.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f020237b6c8eed93db2e2cb53c00c60a8e1bc73da7d073199a1180401450218d"
+dependencies = [
+ "aho-corasick",
+ "memchr",
+ "regex-automata",
+ "regex-syntax",
+]
+
+[[package]]
 name = "regex-automata"
 version = "0.4.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1588,6 +1612,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47b34b781b31e5d73e9fbc8689c70551fd1ade9a19e3e28cfec8580a79290cc4"
 dependencies = [
  "bytemuck",
+]
+
+[[package]]
+name = "ropey"
+version = "1.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "93411e420bcd1a75ddd1dc3caf18c23155eda2c090631a85af21ba19e97093b5"
+dependencies = [
+ "smallvec",
+ "str_indices",
 ]
 
 [[package]]
@@ -1810,6 +1844,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 
 [[package]]
+name = "str_indices"
+version = "0.4.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d08889ec5408683408db66ad89e0e1f93dff55c73a4ccc71c427d5b277ee47e6"
+
+[[package]]
 name = "strict-num"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1979,6 +2019,12 @@ name = "unicode-ident"
 version = "1.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
+
+[[package]]
+name = "unicode-segmentation"
+version = "1.13.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c6f5d3c3b1bf09027a88a6bc961fc00497d651009560b5463668dc81b0fa87a8"
 
 [[package]]
 name = "unicode-width"

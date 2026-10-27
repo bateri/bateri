@@ -14,6 +14,15 @@ of every installed copy. A version without a section is not released.
 
 ### Added
 
+- **A native view can have an editor for code.** A program's native view can put an editor of
+  text in it, the pencere kit's own, which bateri keeps and draws: as many carets and selections
+  as you make (⌘-click, ⌥-drag for a column), undo and redo, the Mac's editing keys (⌥ and ⌘
+  with the arrows and ⌫, ⌃A, ⌃E, ⌃K) and an editor's (⌘/ comments, ⌥↑ moves lines, ⇥ and ⇧⇥
+  indent), finding, folding and the colours and marks the page gives it. Your input method
+  composes in it (dead keys, Japanese, Korean, Chinese), its window stands by the caret, and
+  what ⌥ types on your keyboard (`@`, `[`, `{`, `|`) is typed. Cut, Copy, Paste, Select All and
+  Undo are the editor's while it has the keyboard; the caret blinks, and stops after a while as
+  the terminal's does. VoiceOver reads the editor as a text area: its text and what is selected.
 - **A program's native view is as large as your text, and more of it works.** A view a
   program draws with the pencere kit (dockerpen's, for one) is drawn as large as the
   terminal's text and grows and shrinks with ⌘+ and ⌘−. It can have as many text fields as

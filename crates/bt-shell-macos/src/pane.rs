@@ -88,11 +88,11 @@ use crate::grid::{self, Grid, split_into_grid};
 use bt_shell_common::kablo::roster::Background;
 use bt_shell_common::kablo::service::{PaneLink, Shown};
 use bt_shell_common::native_view::{
-    Bars, Cursor as PageCursor, Input, Keyboard, PageDrive, Phase, Point as PagePoint, Reply,
-    Scrolling,
+    Bars, Cursor as PageCursor, Input, Key as PageKey, Keyboard, Mods as PageMods, PageDrive,
+    PageEditors, Phase, Point as PagePoint, Rect as PageRect, Reply, Route, Scrolling,
 };
 use bt_shell_common::view_strip;
-use objc2_app_kit::NSEvent;
+use objc2_app_kit::{NSEvent, NSEventType};
 
 use crate::jobs::{self, Foreground, Probe, ShellParent, SystemTable};
 use crate::launch::{Closing, Identity, Integration, Launch, Resume};
@@ -4087,6 +4087,10 @@ impl TerminalPane {
         let zoom = self.page_zoom();
         let fields = crate::native_page::PageFields::new(self, *theme, family, zoom);
         handle.set_zoom(zoom);
+        // Its editors are measured between frames as its frames are, and blink only where the
+        // keyboard is.
+        handle.set_renderer(Rc::clone(&self.ivars().renderer));
+        handle.set_active(self.is_active() && self.keyboard_here());
         {
             // The page says where its fields are whenever it is laid out another way.
             let fields = Rc::clone(&fields);
@@ -4689,6 +4693,24 @@ impl TerminalPane {
         self.report_focus(self.is_active(), here);
         if here {
             self.host().focused(self.ivars().id);
+        }
+        self.tell_page_active();
+    }
+
+    /// Tells the page up whether the keyboard is in it, in the person's window: an editor's caret
+    /// is drawn, and blinks, only then. A frame shows it; the page is not drained here, since the
+    /// keyboard moves while a reply of the page is being done ([`TerminalPane::apply_page_reply`]).
+    fn tell_page_active(&self) {
+        let Some(handle) = self.page_handle() else {
+            return;
+        };
+        handle.set_active(self.is_active() && self.keyboard_here());
+        if handle
+            .editors()
+            .is_some_and(|editors| editors.focused().is_some())
+            && let Some(link) = self.link()
+        {
+            link.poke_page();
         }
     }
 
@@ -5302,6 +5324,7 @@ impl TerminalPane {
             link.set_focused(focused);
         }
         self.report_focus(focused, self.keyboard_here());
+        self.tell_page_active();
     }
 
     /// The keyboard is in the terminal that a program's view covers: it goes to the view. The
@@ -5810,6 +5833,9 @@ impl TerminalPane {
         if self.page_signal(event) {
             return true;
         }
+        if self.page_editor_key(event) {
+            return true;
+        }
         let characters = event.characters().map(|text| text.to_string());
         let flags = event.modifierFlags();
         match self.page_handle() {
@@ -5853,11 +5879,162 @@ impl TerminalPane {
         }
     }
 
+    /// The editors of the page up, if it has any: what a screen reader reads of them.
+    pub(crate) fn page_editors(&self) -> Option<PageEditors> {
+        self.page_handle()?.editors()
+    }
+
+    /// The page's editors while one of them has the keyboard: the terminal's view hands that one
+    /// its keys, its system's handling of text and the pasteboard.
+    pub(crate) fn page_editing(&self) -> Option<PageEditors> {
+        self.page_editors()
+            .filter(|editors| editors.focused().is_some())
+    }
+
+    /// A key while an editor of the page has the keyboard: the page's command for it first, then
+    /// the editor's own, then the text ([`PageEditors::key`]), and the pane's part of where it went
+    /// done here — the text to the system's handling of it (`interpretKeyEvents:`, an input method
+    /// and the dead keys, which come back through the view's text input to the editor), a copy or
+    /// a cut to the pasteboard, the pasteboard to a paste. A key that makes no key of the page's
+    /// (a dead key's first stroke has no characters) is the system's text too. `false` when no
+    /// editor has the keyboard.
+    fn page_editor_key(&self, event: &NSEvent) -> bool {
+        let Some(editors) = self.page_editing() else {
+            return false;
+        };
+        let route = match crate::native_page::editor_key_of(event) {
+            Some((key, mods)) => editors.key(key, mods),
+            None => Route::Type,
+        };
+        match route {
+            Route::NotEditor => return false,
+            Route::Type => self.view().type_into_editor(event),
+            route => self.page_editor_route(&editors, route),
+        }
+        self.page_edited();
+        true
+    }
+
+    /// The pane's part of where a key went in an editor: the pasteboard's.
+    fn page_editor_route(&self, editors: &PageEditors, route: Route) {
+        match route {
+            Route::Copy(text) | Route::Cut(text) => {
+                clipboard::copy(&NSPasteboard::generalPasteboard(), Some(text));
+            }
+            Route::Paste => {
+                if let Some(text) = clipboard::read(&NSPasteboard::generalPasteboard()) {
+                    editors.paste(&text);
+                }
+            }
+            Route::NotEditor | Route::Command(_) | Route::Page | Route::Done | Route::Type => {}
+        }
+    }
+
+    /// A command the system's handling of text names for a key it did not take (an arrow after
+    /// the Korean syllable it committed, ⏎ after a dead key): the key is the editor's, as if it
+    /// came now that nothing is composed. One that is text again is not typed twice; while the
+    /// input method still composes, the key was its own.
+    pub(crate) fn page_editor_command(&self) {
+        let Some(editors) = self.page_editing() else {
+            return;
+        };
+        if editors.marked().is_some() {
+            return;
+        }
+        let Some(event) = NSApplication::sharedApplication(self.mtm()).currentEvent() else {
+            return;
+        };
+        if event.r#type() != NSEventType::KeyDown {
+            return;
+        }
+        let Some((key, mods)) = crate::native_page::editor_key_of(&event) else {
+            return;
+        };
+        let route = editors.key(key, mods);
+        self.page_editor_route(&editors, route);
+        self.page_edited();
+    }
+
+    /// Edit ▸ Cut, Copy, Paste and Select All while an editor of the page has the keyboard: the
+    /// editor's, as their keys (⌘X, ⌘C, ⌘V, ⌘A) are. `true` when one had it.
+    pub(crate) fn page_editor_menu(&self, key: char) -> bool {
+        let Some(editors) = self.page_editing() else {
+            return false;
+        };
+        let command = PageMods {
+            command: true,
+            ..PageMods::default()
+        };
+        let route = editors.key(PageKey::Character(key), command);
+        self.page_editor_route(&editors, route);
+        self.page_edited();
+        true
+    }
+
+    /// Something was done to the editor with the keyboard (a key, the input method, the
+    /// pasteboard): the input method's window follows its caret, a screen reader is told of its
+    /// text and selection, and a frame shows it. The page was told at once; what it answers wakes
+    /// the pane as any answer does. Nothing is drained here: the input method also speaks while a
+    /// reply of the page moves the keyboard ([`TerminalPane::apply_page_reply`]).
+    pub(crate) fn page_edited(&self) {
+        if let Some(focused) = self.page_editing().and_then(|editors| editors.focused()) {
+            if let Some(context) = self.view().inputContext() {
+                context.invalidateCharacterCoordinates();
+            }
+            if let Some(page) = self.ivars().page_up.borrow().as_ref() {
+                page.fields.editor_changed(focused);
+            }
+        }
+        if let Some(link) = self.link() {
+            link.poke_page();
+        }
+    }
+
+    /// A box of the page's (the pane's points from its top) on the screen: where an input method
+    /// opens its window by an editor's caret. `None` out of a window.
+    pub(crate) fn page_rect_on_screen(&self, rect: PageRect) -> Option<NSRect> {
+        let window = self.window()?;
+        let bounds = self.bounds();
+        // The pane's own coordinates grow upward, the page's downward.
+        let in_pane = NSRect::new(
+            NSPoint::new(
+                bounds.origin.x + f64::from(rect.x),
+                bounds.origin.y + bounds.size.height - f64::from(rect.y + rect.h),
+            ),
+            NSSize::new(f64::from(rect.w), f64::from(rect.h)),
+        );
+        Some(window.convertRectToScreen(self.convertRect_toView(in_pane, None)))
+    }
+
+    /// A point of the screen as the page's (the pane's points from its top). `None` out of a
+    /// window.
+    pub(crate) fn page_point_from_screen(&self, at: NSPoint) -> Option<PagePoint> {
+        let window = self.window()?;
+        let in_pane = self.convertPoint_fromView(window.convertPointFromScreen(at), None);
+        let bounds = self.bounds();
+        #[allow(clippy::cast_possible_truncation)]
+        Some(PagePoint::new(
+            (in_pane.x - bounds.origin.x) as f32,
+            (bounds.origin.y + bounds.size.height - in_pane.y) as f32,
+        ))
+    }
+
     /// The pointer or the wheel over a page of the kit's, in the view's points. `true` when a
     /// page is up: nothing of it is the grid's.
     pub(crate) fn page_input(&self, input: Input) -> bool {
         if !self.page_is_up() {
             return false;
+        }
+        // A press ends what an input method composes in an editor, as it does in a text view:
+        // what it composed stays, and the system forgets it.
+        if matches!(input, Input::Press { .. })
+            && let Some(editors) = self.page_editing()
+            && editors.marked().is_some()
+        {
+            editors.unmark();
+            if let Some(context) = self.view().inputContext() {
+                context.discardMarkedText();
+            }
         }
         // A click on the page took the keyboard out of a field: the page hears it first.
         let left = matches!(input, Input::Press { .. })
@@ -6065,6 +6242,11 @@ impl TerminalPane {
     pub(crate) fn page_key_up(&self, event: &NSEvent) -> bool {
         if !self.page_is_up() {
             return false;
+        }
+        // An editor with the keyboard took the keys that went down: the page heard none of
+        // them go down, and hears none go up.
+        if self.page_editing().is_some() {
+            return true;
         }
         let characters = event.characters().map(|text| text.to_string());
         if let (Some(handle), Some(key)) = (
@@ -8028,7 +8210,10 @@ mod tests {
         assert!(key.contains("self.page_signal(event)"), "{key}");
         let field = body("    fn page_field_command(");
         assert!(field.contains("self.page_signal(event)"), "{field}");
-        assert!(key.contains("self.signal_program(character)"), "{key}");
+        assert!(
+            signal.contains("self.signal_program(character)"),
+            "{signal}"
+        );
         let strip = include_str!("native_page.rs");
         let at = strip.find("fn program_strip(").expect("program_strip");
         assert!(strip[at..at + 600].contains("sel!(quitProgram:)"));
