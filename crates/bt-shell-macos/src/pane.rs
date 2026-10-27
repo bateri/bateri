@@ -72,7 +72,8 @@ use objc2_core_graphics::CGImage;
 use objc2_foundation::{
     NSArray, NSAttributedString, NSAttributedStringKey, NSDate, NSDateFormatter,
     NSDateFormatterStyle, NSDictionary, NSMutableAttributedString, NSNotification,
-    NSNotificationCenter, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSUUID, ns_string,
+    NSNotificationCenter, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSUUID,
+    NSUserDefaults, ns_string,
 };
 use objc2_quartz_core::{
     CAMetalLayer, CATransaction, kCAGravityBottomLeft, kCAGravityResize, kCAGravityTopLeft,
@@ -86,7 +87,10 @@ use crate::focus::Moment;
 use crate::grid::{self, Grid, split_into_grid};
 use bt_shell_common::kablo::roster::Background;
 use bt_shell_common::kablo::service::{PaneLink, Shown};
-use bt_shell_common::native_view::{Cursor as PageCursor, Input, Keyboard, PageDrive, Reply};
+use bt_shell_common::native_view::{
+    Bars, Cursor as PageCursor, Input, Keyboard, PageDrive, Phase, Point as PagePoint, Reply,
+    Scrolling,
+};
 use bt_shell_common::view_strip;
 use objc2_app_kit::NSEvent;
 
@@ -4619,6 +4623,11 @@ impl TerminalPane {
         if let Some(link) = self.ivars().link.get() {
             link.set_scrollbar_mode(mode);
         }
+        // A page's bars are drawn as the pane's own is.
+        if let Some(handle) = self.page_handle() {
+            handle.set_scrolling(self.page_scrolling());
+            self.drain_page();
+        }
         if before.reserves() != mode.reserves() {
             self.refresh_geometry();
         }
@@ -5746,6 +5755,7 @@ impl TerminalPane {
             }
         };
         let fields = self.page_fields(&handle, &theme, family);
+        handle.set_scrolling(self.page_scrolling());
         let area = crate::native_page::pointer_area(self.view());
         ivars.page_up.replace(Some(crate::native_page::Page {
             owner: crate::native_page::Owner::Demo,
@@ -5865,6 +5875,38 @@ impl TerminalPane {
             self.drain_page();
         }
         true
+    }
+
+    /// The wheel or the trackpad over a page of the kit's, in the view's points, with the part of
+    /// the gesture AppKit says it is: the pane scrolls the page's box under the pointer
+    /// ([`PageDrive::send_wheel`]). `true` when a page is up.
+    pub(crate) fn page_wheel(&self, at: PagePoint, dx: f32, dy: f32, phase: Phase) -> bool {
+        if !self.page_is_up() {
+            return false;
+        }
+        if let Some(handle) = self.page_handle() {
+            handle.send_wheel(at, dx, dy, phase);
+            self.drain_page();
+        }
+        true
+    }
+
+    /// How a page's boxes scroll here: their bars as the pane's own scroll bar is (the setting, or
+    /// the system's overlay or legacy scrollers), pulled past their ends as AppKit's views are, and
+    /// a click in a bar's track doing what the system's "Click in the scroll bar to" says.
+    fn page_scrolling(&self) -> Scrolling {
+        let bars = match self.ivars().scrollbar.get() {
+            ScrollbarMode::Auto => Bars::Overlay,
+            ScrollbarMode::Always => Bars::Always,
+            ScrollbarMode::Never => Bars::Hidden,
+        };
+        let track_jumps = NSUserDefaults::standardUserDefaults()
+            .boolForKey(ns_string!("AppleScrollerPagingBehavior"));
+        Scrolling {
+            bars,
+            elastic: true,
+            track_jumps,
+        }
     }
 
     /// Takes what the page has said since the last time and does it ([`TerminalPane::apply_page_reply`]):
@@ -6334,6 +6376,7 @@ impl TerminalPane {
         };
         let handle: Rc<dyn PageDrive> = Rc::new(handle);
         let fields = self.page_fields(&handle, &theme, family);
+        handle.set_scrolling(self.page_scrolling());
         let area = crate::native_page::pointer_area(self.view());
         ivars.page_up.replace(Some(crate::native_page::Page {
             owner: crate::native_page::Owner::Program,

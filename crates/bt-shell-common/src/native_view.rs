@@ -46,17 +46,20 @@ use containers::Containers;
 
 mod containers;
 mod module;
+mod scrolling;
 pub use module::{ModuleHandle, module_page, script_page};
 pub use pencere_sandbox::{Assets, ImageLimits, ModuleLimits, Script};
 use pencere_sandbox::{Images, draw_figure};
 pub use pencere_view::{
-    Accessible, AccessibleRole, Button, Command, Cursor, FieldKind, Id, Input, Key, Keyboard, Menu,
-    MenuEntry, Mods, Point, Rect, Reply, Role, Shortcut, State,
+    Accessible, AccessibleRole, Bars, Button, Command, Cursor, FieldKind, Id, Input, Key, Keyboard,
+    Menu, MenuEntry, Mods, Phase, Point, Rect, Reply, Role, Shortcut, State,
 };
 use pencere_view::{
     Color, DrawList, Element, Family, Figure, Font, Laid, Measure, Metrics, Paint, Picture, Quad,
     Run, Size, Source,
 };
+use scrolling::HostScrolls;
+pub use scrolling::Scrolling;
 
 /// A text field the host puts over a page: its name (the id of the element that is its room), its
 /// kind, where its room stands in the pane's points, what it says while it is empty — the words
@@ -424,8 +427,19 @@ pub fn guest_dir() -> std::path::PathBuf {
 /// right after it tells; a module answers when it has, and the pane drains when it is woken.
 pub trait PageDrive {
     /// The person did something with the pointer, the wheel or a key, in the pane's points (the
-    /// top-left corner of the pane is the origin; the strip's room is included).
+    /// top-left corner of the pane is the origin; the strip's room is included). A pointer input
+    /// over a box's scroll bar is the bar's, not the page's.
     fn send_input(&self, input: Input);
+    /// The wheel or the trackpad over `at`, in the pane's points, by `dx` and `dy` (positive: the
+    /// content moves left and up), `phase` the part of the gesture the system says it is. The
+    /// pane scrolls the box under the pointer itself, on the page as it was last laid out
+    /// ([`Scrolling`]); a turn no box took is the page's, as [`Input::Scroll`].
+    fn send_wheel(&self, at: Point, dx: f32, dy: f32, _phase: Phase) {
+        self.send_input(Input::Scroll { at, dx, dy });
+    }
+    /// How the page's boxes scroll on this system: their bars as the pane's scroll bar is, whether
+    /// a gesture pulls a box past its end, what a click in a bar's track does.
+    fn set_scrolling(&self, _scrolling: Scrolling) {}
     /// The text of the field named `field` changed: the person typed, pasted or deleted.
     fn send_text(&self, field: Id, text: &str);
     /// The person clicked into the field named `field`, or the keyboard went back to the page of
@@ -714,6 +728,8 @@ pub fn containers_demo(
         outline: Outline::default(),
         on_outline: None,
         replies: Vec::new(),
+        scrolls: HostScrolls::new(),
+        redraw: false,
     }));
     let page = ContainersPage {
         terminal,
@@ -745,6 +761,10 @@ struct Shared {
     on_outline: Option<OnOutline>,
     /// What the page said that the pane has not taken ([`PageDrive::drain`]).
     replies: Vec<(Reply, bool)>,
+    /// How far the pane has the page's boxes scrolled.
+    scrolls: HostScrolls,
+    /// A box was scrolled, or its bars changed: a frame is worth drawing.
+    redraw: bool,
 }
 
 /// The drive of the container-list page: the pane's input in, the page's reply out. Cloned
@@ -799,12 +819,47 @@ impl ContainersHandle {
 
 impl PageDrive for ContainersHandle {
     fn send_input(&self, input: Input) {
+        {
+            let mut shared = self.shared.borrow_mut();
+            let place = shared.place;
+            let (took, redraw) = shared.scrolls.pointer(&into_page(input, place));
+            shared.redraw |= redraw;
+            if took {
+                return;
+            }
+        }
         let pointer = !matches!(
             input,
             Input::Key { .. } | Input::KeyUp { .. } | Input::Mods(_)
         );
         let reply = ContainersHandle::input(self, input);
         self.shared.borrow_mut().replies.push((reply, pointer));
+    }
+
+    fn send_wheel(&self, at: Point, dx: f32, dy: f32, phase: Phase) {
+        let left = {
+            let mut shared = self.shared.borrow_mut();
+            let place = shared.place;
+            let Shared { scrolls, laid, .. } = &mut *shared;
+            let (page_at, zoom) = (place.to_page(at), place.zoom);
+            let wheel = scrolls.wheel(laid, page_at, dx / zoom, dy / zoom, phase);
+            shared.redraw |= wheel.took;
+            // What no box took is the page's, in the pane's points as every input is told.
+            Point::new(wheel.left.x * zoom, wheel.left.y * zoom)
+        };
+        if left.x != 0.0 || left.y != 0.0 {
+            self.send_input(Input::Scroll {
+                at,
+                dx: left.x,
+                dy: left.y,
+            });
+        }
+    }
+
+    fn set_scrolling(&self, scrolling: Scrolling) {
+        let mut shared = self.shared.borrow_mut();
+        shared.scrolls.set(scrolling);
+        shared.redraw = true;
     }
 
     fn send_text(&self, _field: Id, text: &str) {
@@ -829,11 +884,20 @@ impl PageDrive for ContainersHandle {
 
     fn drain(&self, reply: &mut dyn FnMut(Reply, bool)) -> Drained {
         // Taken before they are handed over: the pane may take the page down in the middle.
-        let replies = std::mem::take(&mut self.shared.borrow_mut().replies);
+        let (replies, redraw) = {
+            let mut shared = self.shared.borrow_mut();
+            (
+                std::mem::take(&mut shared.replies),
+                std::mem::take(&mut shared.redraw),
+            )
+        };
         for (said, pointer) in replies {
             reply(said, pointer);
         }
-        Drained::default()
+        Drained {
+            redraw,
+            ..Drained::default()
+        }
     }
 }
 
@@ -889,6 +953,25 @@ struct ContainersPage {
 /// scrolled, and what the scroll comes to depends on the rows — a second build settles it.
 const BUILDS: usize = 3;
 
+/// The page laid out where the pane has its boxes scrolled, what it asked for done first: in
+/// `viewport` pixels at `scale`, for the frame at `now`.
+fn lay_scrolled(
+    shared: &mut Shared,
+    size: Size,
+    viewport: Size,
+    scale: f32,
+    measure: &mut dyn Measure,
+    (now, reduce_motion): (f64, bool),
+) -> Laid {
+    let asks = shared.page.take_asks();
+    shared.scrolls.ask(asks);
+    let mut root = shared.page.view(size);
+    shared.scrolls.scrolls.apply(&mut root);
+    let mut laid = pencere_view::layout(root, viewport, scale, measure);
+    shared.scrolls.scrolls.place(&mut laid, now, reduce_motion);
+    laid
+}
+
 impl UiPage for ContainersPage {
     fn build(&mut self, cx: &UiContext<'_>) -> UiList {
         let zoom = self.shared.borrow().place.zoom;
@@ -908,23 +991,20 @@ impl UiPage for ContainersPage {
         };
         let (list, told) = {
             let mut shared = self.shared.borrow_mut();
+            shared.scrolls.frame(cx.now);
             shared.page.advance(cx.now, cx.reduce_motion);
-            let mut laid = pencere_view::layout(
-                shared.page.view(size),
-                Size::new(width, height),
-                scale,
-                &mut typeset,
-            );
+            let viewport = Size::new(width, height);
+            let frame = (cx.now, cx.reduce_motion);
+            let mut laid = lay_scrolled(&mut shared, size, viewport, scale, &mut typeset, frame);
             for _ in 1..BUILDS {
-                if !shared.page.settle(&laid) {
+                // Where the boxes went, and what depends on the layout: either may change the
+                // rows in view.
+                let moved = shared.scrolls.scrolls.take_moved();
+                let told = !moved.is_empty() && shared.page.scrolled(&moved).redraw;
+                if !shared.page.settle(&laid) && !told {
                     break;
                 }
-                laid = pencere_view::layout(
-                    shared.page.view(size),
-                    Size::new(width, height),
-                    scale,
-                    &mut typeset,
-                );
+                laid = lay_scrolled(&mut shared, size, viewport, scale, &mut typeset, frame);
             }
             let draws = laid.paint(&mut typeset);
             let list = to_list(
@@ -957,7 +1037,12 @@ impl UiPage for ContainersPage {
     }
 
     fn animating(&self) -> bool {
-        self.shared.borrow().page.animating()
+        let shared = self.shared.borrow();
+        shared.page.animating() || shared.scrolls.moving()
+    }
+
+    fn wake_at(&self) -> Option<f64> {
+        self.shared.borrow().scrolls.wake_at()
     }
 }
 
@@ -968,6 +1053,125 @@ mod tests {
     use pencere_view::{Border, Gradient, Rect, Shadow, path};
 
     const THEMES: [Theme; 3] = [Theme::BATERI, Theme::BATERI_LIGHT, Theme::LINEN];
+
+    /// Text measured with no GPU: each character half its font's size wide.
+    struct Half;
+
+    impl Measure for Half {
+        fn measure(&mut self, font: &Font, text: &str) -> Metrics {
+            Metrics {
+                width: text.chars().count() as f32 * font.size * 0.5,
+                height: font.size * 1.25,
+            }
+        }
+    }
+
+    /// The demo's page laid out as a frame lays it out at `now` ([`ContainersPage::build`]):
+    /// where the pane has its boxes scrolled, the page told where they went and settled.
+    fn lay_demo(handle: &ContainersHandle, now: f64) {
+        let size = Size::new(1000.0, 330.0);
+        let mut shared = handle.shared.borrow_mut();
+        shared.scrolls.frame(now);
+        let mut laid = lay_scrolled(&mut shared, size, size, 1.0, &mut Half, (now, false));
+        for _ in 1..BUILDS {
+            let moved = shared.scrolls.scrolls.take_moved();
+            let told = !moved.is_empty() && shared.page.scrolled(&moved).redraw;
+            if !shared.page.settle(&laid) && !told {
+                break;
+            }
+            laid = lay_scrolled(&mut shared, size, size, 1.0, &mut Half, (now, false));
+        }
+        shared.laid = laid;
+    }
+
+    #[test]
+    fn the_pane_scrolls_the_page_s_list_itself_and_the_page_builds_where_it_went() {
+        let (_page, handle) = containers_demo(None, 0.0);
+        lay_demo(&handle, 0.0);
+        let list = handle
+            .shared
+            .borrow()
+            .laid
+            .bounds(containers::LIST)
+            .expect("the list");
+        let over = Point::new(list.x + list.w / 2.0, list.y + list.h / 2.0);
+        handle.send_wheel(over, 0.0, 120.0, Phase::Wheel);
+        let drained = handle.drain(&mut |_, _| panic!("the page is not asked"));
+        assert!(drained.redraw, "a frame is worth drawing");
+        let offset = |handle: &ContainersHandle| {
+            handle
+                .shared
+                .borrow()
+                .laid
+                .scroll_extent(containers::LIST)
+                .map(|extent| extent.offset.y)
+        };
+        lay_demo(&handle, 0.1);
+        assert_eq!(
+            offset(&handle),
+            Some(120.0),
+            "the list is where the wheel took it"
+        );
+        // The keys move the cursor to the end: the page asks for its row to be shown, and the
+        // next frame shows it.
+        handle.send_input(Input::Key {
+            key: Key::End,
+            mods: Mods::default(),
+        });
+        lay_demo(&handle, 0.2);
+        let extent = handle
+            .shared
+            .borrow()
+            .laid
+            .scroll_extent(containers::LIST)
+            .expect("the list");
+        assert_eq!(extent.offset.y, extent.max_offset());
+        // A wheel over what does not scroll is the page's.
+        handle.send_wheel(Point::new(2.0, 2.0), 0.0, 10.0, Phase::Wheel);
+        let mut told = 0;
+        handle.drain(&mut |_, _| told += 1);
+        assert_eq!(told, 2, "the key's reply, and the wheel's");
+    }
+
+    #[test]
+    fn a_press_on_the_bar_is_the_bar_s_and_not_the_page_s() {
+        let (_page, handle) = containers_demo(None, 0.0);
+        handle.set_scrolling(Scrolling {
+            bars: Bars::Always,
+            elastic: true,
+            track_jumps: false,
+        });
+        lay_demo(&handle, 0.0);
+        let list = handle
+            .shared
+            .borrow()
+            .laid
+            .bounds(containers::LIST)
+            .expect("the list");
+        // Low in the track, below the knob at the top: a page down, over a glide.
+        let track = Point::new(list.right() - 4.0, list.bottom() - 6.0);
+        handle.send_input(Input::Press {
+            at: track,
+            button: Button::Left,
+            mods: Mods::default(),
+            count: 1,
+        });
+        handle.send_input(Input::Release {
+            at: track,
+            button: Button::Left,
+        });
+        let drained = handle.drain(&mut |_, _| panic!("the page heard the bar's press"));
+        assert!(drained.redraw);
+        lay_demo(&handle, 1.0);
+        let offset = handle
+            .shared
+            .borrow()
+            .laid
+            .scroll_extent(containers::LIST)
+            .map(|extent| extent.offset.y)
+            .unwrap_or_default();
+        assert!(offset > 0.0, "{offset}");
+    }
 
     #[test]
     fn every_tone_is_the_themes_own_value() {

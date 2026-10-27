@@ -168,13 +168,17 @@ pub struct Containers {
     status: Status,
     /// Whether the list is grouped by project.
     grouped: bool,
-    /// What the page remembers between builds: the hover, the scroll, the fades.
+    /// What the page remembers between builds: the hover, the focus, the fades.
     ui: Ui,
     /// Where the pointer last was over the page, points: the hover is asked again where it
     /// stands when the page moves under it.
     pointer: Option<pencere_view::Point>,
     /// How tall the list's window was when the page was last laid out, points.
     list_view: f32,
+    /// How far the host has the list scrolled, as it last said (or the page asked since), points.
+    list_offset: f32,
+    /// The scrolls the page asks of the host, not yet taken ([`Containers::take_asks`]).
+    asks: Vec<pencere_view::ScrollTo>,
     /// What the entries of the menu that is up do, by entry; and the containers they do it to.
     menu: interact::MenuState,
     /// The modifiers held when the last button went down: a click on a project's row folds it
@@ -327,6 +331,8 @@ impl Containers {
             ui: Ui::default(),
             pointer: None,
             list_view: 400.0,
+            list_offset: 0.0,
+            asks: Vec::new(),
             menu: interact::MenuState::default(),
             press_mods: pencere_view::Mods::default(),
             reduce_motion: false,
@@ -679,8 +685,7 @@ impl Containers {
         // Only the rows in view are made; the rest of the list's length is two spacers.
         let rows = self.rows();
         let places = Self::places(&rows);
-        let offset = self.ui.scroll_offset(LIST);
-        let window = places.window(offset, view, 2.0 * ROW);
+        let window = places.window(self.list_offset, view, 2.0 * ROW);
         let mut body = div()
             .col()
             .id(LIST)
@@ -688,7 +693,7 @@ impl Containers {
             .grow(1.0)
             .min_h(0.0)
             .px(8.0)
-            .scroll_y(offset)
+            .scroll()
             .child(div().h(places.top(window.start)).no_shrink());
         if rows.is_empty() {
             body = body.child(self.nothing());
