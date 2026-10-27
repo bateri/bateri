@@ -258,18 +258,43 @@ impl Containers {
     }
 
     /// The page was laid out as `laid`: what depends on where things stand is brought up to
-    /// date — the scrolled list kept within its reach, the window's height, what the pointer is
-    /// over now that the page moved under it. Returns whether the page has to be built and laid
-    /// out again (the rows in view depend on how far the list is scrolled).
+    /// date — the list's window and how far it is scrolled, what the pointer is over now that the
+    /// page moved under it. Returns whether the page has to be built and laid out again (the rows
+    /// in view depend on both).
     pub fn settle(&mut self, laid: &dyn Queries) -> bool {
+        let mut moved = false;
         if let Some(extent) = laid.scroll_extent(LIST) {
+            moved = extent.view.h != self.list_view;
             self.list_view = extent.view.h;
+            // What the page asked and the host has not done yet stands until it is done.
+            if self.asks.is_empty() {
+                moved |= extent.offset.y != self.list_offset;
+                self.list_offset = extent.offset.y;
+            }
         }
-        let moved = self.ui.settle(laid);
         if let Some(at) = self.pointer {
             self.hover_to(laid, Some(at));
         }
         moved
+    }
+
+    /// The host scrolled boxes of the page: how far each is now. The rows in view are the ones
+    /// at the list's new place.
+    pub fn scrolled(&mut self, boxes: &[(Id, pencere_view::Point)]) -> Reply {
+        let mut moved = false;
+        for (id, offset) in boxes {
+            if *id == LIST && offset.y != self.list_offset {
+                self.list_offset = offset.y;
+                moved = true;
+            }
+        }
+        self.reply(moved)
+    }
+
+    /// The scrolls the page asks of the host since the last taking: the host does them before
+    /// it next lays the page out ([`pencere_view::Scrolls::ask`]).
+    pub fn take_asks(&mut self) -> Vec<pencere_view::ScrollTo> {
+        std::mem::take(&mut self.asks)
     }
 
     // --- The cursor --------------------------------------------------------------------
@@ -299,10 +324,15 @@ impl Containers {
             return;
         };
         let places = Self::places(&rows);
-        let offset = self.ui.scroll_offset(LIST);
-        let to = places.reveal(at, offset, self.list_view);
-        if to != offset {
-            self.ui.set_scroll(LIST, to);
+        let to = places.reveal(at, self.list_offset, self.list_view);
+        if to != self.list_offset {
+            self.list_offset = to;
+            self.asks.push(pencere_view::ScrollTo {
+                id: LIST,
+                x: None,
+                y: Some(to),
+                animate: false,
+            });
         }
     }
 
@@ -343,10 +373,10 @@ impl Containers {
                 Button::Left => self.release(laid, at),
                 Button::Right | Button::Middle => self.reply(false),
             },
-            Input::Scroll { at, dx, dy } => {
+            // The host scrolls the list; a wheel it did not use is nothing to the page.
+            Input::Scroll { at, .. } => {
                 self.pointer = Some(at);
-                let moved = self.ui.scroll_by(laid, at, dx, dy);
-                self.reply(moved)
+                self.reply(false)
             }
             Input::Key { key, mods } => self.key(key, mods, laid),
             // The list reads no key that goes up, nor the modifiers alone.

@@ -3,9 +3,11 @@
 //! the host's text.
 
 use super::*;
+use std::cell::RefCell;
+
 use pencere_view::{
-    Button, Cursor, Font, Input, Key, Keyboard, Laid, Measure, MenuEntry, Metrics, Mods, Point,
-    Reply, layout,
+    Button, Cursor, Font, Input, Key, Keyboard, Laid, Measure, MenuEntry, Metrics, Mods, Phase,
+    Point, Reply, Scrolls, layout,
 };
 
 struct Mono;
@@ -19,14 +21,43 @@ impl Measure for Mono {
     }
 }
 
-/// The page laid out as a pane of 1000 × `height` points would have it, and settled.
+thread_local! {
+    /// How far the host has the page's boxes scrolled: the host's, kept across the frames of a
+    /// test (each test runs on a thread of its own).
+    static SCROLLS: RefCell<Scrolls> = RefCell::new(Scrolls::new());
+}
+
+/// The page laid out as a pane of 1000 × `height` points would have it, as a host does it: the
+/// scrolls it asked for done, the boxes where the host has them, the page told where they went,
+/// and settled.
 fn lay(page: &mut Containers, height: f32) -> Laid {
     let size = Size::new(1000.0, height);
-    let mut laid = layout(page.view(size), size, 1.0, &mut Mono);
-    while page.settle(&laid) {
-        laid = layout(page.view(size), size, 1.0, &mut Mono);
-    }
-    laid
+    SCROLLS.with_borrow_mut(|scrolls| {
+        loop {
+            for ask in page.take_asks() {
+                scrolls.ask(ask);
+            }
+            let mut root = page.view(size);
+            scrolls.apply(&mut root);
+            let mut laid = layout(root, size, 1.0, &mut Mono);
+            scrolls.place(&mut laid, 0.0, true);
+            let moved = scrolls.take_moved();
+            let told = !moved.is_empty() && page.scrolled(&moved).redraw;
+            if !page.settle(&laid) && !told {
+                return laid;
+            }
+        }
+    })
+}
+
+/// A turn of the wheel over `at` on the page `laid`, as the host takes it: whether a box moved.
+fn wheel(laid: &Laid, at: Point, dy: f32) -> bool {
+    SCROLLS.with_borrow_mut(|scrolls| scrolls.wheel(laid, at, 0.0, dy, Phase::Wheel, 0.0).took)
+}
+
+/// How far the host has the list scrolled.
+fn list_offset() -> f32 {
+    SCROLLS.with_borrow(|scrolls| scrolls.offset(LIST).y)
 }
 
 fn key(page: &mut Containers, key: Key) -> Reply {
@@ -585,44 +616,13 @@ fn a_long_list_in_a_short_pane_scrolls_and_stays_within_its_reach() {
         "{extent:?}: the list is longer than its window"
     );
     let over = center(&laid, RowKey::Container("api").id());
-    assert!(
-        page.input(
-            Input::Scroll {
-                at: over,
-                dx: 0.0,
-                dy: 60.0
-            },
-            &laid
-        )
-        .redraw
-    );
-    assert_eq!(page.ui.scroll_offset(LIST), 60.0);
+    assert!(wheel(&laid, over, 60.0));
+    assert_eq!(list_offset(), 60.0);
     // To the end: no further.
-    assert!(
-        page.input(
-            Input::Scroll {
-                dx: 0.0,
-                at: over,
-                dy: 10_000.0
-            },
-            &laid
-        )
-        .redraw
-    );
-    assert_eq!(page.ui.scroll_offset(LIST), extent.max_offset());
+    assert!(wheel(&laid, over, 10_000.0));
+    assert_eq!(list_offset(), extent.max_offset());
     let at_end = lay(&mut page, 330.0);
-    assert!(
-        !page
-            .input(
-                Input::Scroll {
-                    at: over,
-                    dx: 0.0,
-                    dy: 10.0
-                },
-                &at_end
-            )
-            .redraw
-    );
+    assert!(!wheel(&at_end, over, 10.0));
     // The last row is seen at the end.
     let last = at_end
         .bounds(RowKey::Container("toolbox").id())
@@ -636,20 +636,15 @@ fn the_cursor_is_kept_in_sight_by_the_keys() {
     let mut page = Containers::fixture();
     let _ = lay(&mut page, 330.0);
     key_in(&mut page, Key::Character('G'), 330.0);
-    assert!(
-        page.ui.scroll_offset(LIST) > 0.0,
-        "the last row is below the window"
-    );
+    let _ = lay(&mut page, 330.0);
+    assert!(list_offset() > 0.0, "the last row is below the window");
     let laid = lay(&mut page, 330.0);
     let row = laid.bounds(RowKey::Container("toolbox").id()).unwrap();
     let window = laid.bounds(LIST).unwrap();
     assert!(row.y >= window.y && row.bottom() <= window.bottom() + 0.5);
     key_in(&mut page, Key::Character('g'), 330.0);
-    assert_eq!(
-        page.ui.scroll_offset(LIST),
-        0.0,
-        "the first row, with its room above"
-    );
+    let _ = lay(&mut page, 330.0);
+    assert_eq!(list_offset(), 0.0, "the first row, with its room above");
 }
 
 fn key_in(page: &mut Containers, key: Key, height: f32) -> Reply {
@@ -668,18 +663,13 @@ fn a_list_that_shrinks_under_a_scrolled_window_comes_back_into_reach() {
     let mut page = Containers::fixture();
     let laid = lay(&mut page, 330.0);
     let over = center(&laid, RowKey::Container("api").id());
-    page.input(
-        Input::Scroll {
-            dx: 0.0,
-            at: over,
-            dy: 10_000.0,
-        },
-        &laid,
-    );
-    assert!(page.ui.scroll_offset(LIST) > 0.0);
+    assert!(wheel(&laid, over, 10_000.0));
+    let _ = lay(&mut page, 330.0);
+    assert!(list_offset() > 0.0);
     page.set_query("redis");
     let laid = lay(&mut page, 330.0);
-    assert_eq!(page.ui.scroll_offset(LIST), 0.0);
+    assert_eq!(list_offset(), 0.0);
+    assert_eq!(page.list_offset, 0.0, "and the page was told");
     assert!(laid.bounds(RowKey::Container("cache").id()).is_some());
 }
 
@@ -697,8 +687,16 @@ fn only_the_rows_in_view_are_built_however_long_the_list_is() {
         extent.content.h > 300_000.0,
         "the list is as long as its rows: {extent:?}"
     );
-    page.ui.set_scroll(LIST, 150_000.0);
-    let deep = layout(page.view(size), size, 1.0, &mut Mono);
+    SCROLLS.with_borrow_mut(|scrolls| {
+        scrolls.ask(pencere_view::ScrollTo {
+            id: LIST,
+            x: None,
+            y: Some(150_000.0),
+            animate: false,
+        });
+    });
+    let deep = lay(&mut page, 600.0);
+    assert_eq!(page.list_offset, 150_000.0, "the page was told");
     assert!(deep.len() < 600);
     let rows = page.rows();
     let places = Containers::places(&rows);
@@ -715,17 +713,9 @@ fn only_the_rows_in_view_are_built_however_long_the_list_is() {
     assert!(at.y <= window.y + window.h && at.bottom() >= window.y - ROW * 3.0);
     // The wheel, and the end of the list.
     let over = Point::new(500.0, 400.0);
-    assert!(
-        page.input(
-            Input::Scroll {
-                dx: 0.0,
-                at: over,
-                dy: 1.0e9
-            },
-            &deep
-        )
-        .redraw
-    );
+    let _ = lay(&mut page, 600.0);
+    let laid = lay(&mut page, 600.0);
+    assert!(wheel(&laid, over, 1.0e9));
     let end = lay(&mut page, 600.0);
     let last = rows.last().unwrap().key.id();
     assert!(end.bounds(last).is_some());

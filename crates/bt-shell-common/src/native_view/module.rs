@@ -27,11 +27,11 @@ use bt_core::Flow;
 use pencere_sandbox::{
     Assets, ImageLimits, Images, Module, ModuleLimits, Program, Script, Unbounded,
 };
-use pencere_view::{Element, Event, Laid, Motions, Role, Size, div, text};
+use pencere_view::{Element, Event, Laid, Motions, Phase, Role, ScrollTo, Size, div, text};
 
 use super::{
-    Drained, Field, Id, Input, OnOutline, Outline, PageDrive, Placement, Point, Reply, Shaped,
-    Typeset, UiContext, UiList, UiPage, from_pane, into_page, to_list,
+    Drained, Field, HostScrolls, Id, Input, OnOutline, Outline, PageDrive, Placement, Point, Reply,
+    Scrolling, Shaped, Typeset, UiContext, UiList, UiPage, from_pane, into_page, to_list,
 };
 
 /// What the page and its handle share.
@@ -43,8 +43,18 @@ struct Shared {
     diagnostics: Vec<String>,
     /// The page as the module last handed it out.
     root: Option<Element>,
-    /// The page as it was last laid out: what a key is asked against, for the command it does.
+    /// The page as it was last laid out: what a key is asked against, for the command it does,
+    /// and what the wheel moves a box on.
     laid: Option<Arc<Laid>>,
+    /// The viewport (points) and scale `laid` is for.
+    laid_for: Option<(Size, f32)>,
+    /// The page has to be laid out again (a new page, an image's size): until it is, a frame for
+    /// what only the scrolling changed moves the boxes of the page last laid out.
+    fresh: bool,
+    /// How far the pane has the page's boxes scrolled.
+    scrolls: HostScrolls,
+    /// The scrolls the module asked for that the next frame does.
+    asks: Vec<ScrollTo>,
     /// The page is moving: it is asked for again at every frame, until it says it is not.
     animating: bool,
     /// The time the page at rest wants to be asked for again, on the frames' clock.
@@ -78,8 +88,10 @@ impl Shared {
             self.root = Some(frame.root);
             self.animating = frame.animating;
             self.wake_at = frame.wake_at;
+            self.fresh = true;
             self.redraw |= !building;
         }
+        self.asks.extend(update.asks);
         if let Some(images) = &self.images {
             let arrived = images.poll();
             // A size the layout was waiting for, pixels the paint was: either way a frame of the
@@ -87,6 +99,7 @@ impl Shared {
             if (arrived.relayout || arrived.redraw) && !building {
                 self.redraw = true;
             }
+            self.fresh |= arrived.relayout || arrived.redraw;
             self.diagnostics
                 .extend(arrived.diagnostics.iter().map(ToString::to_string));
         }
@@ -204,6 +217,10 @@ fn page_around(
         diagnostics: Vec::new(),
         root: None,
         laid: None,
+        laid_for: None,
+        fresh: true,
+        scrolls: HostScrolls::new(),
+        asks: Vec::new(),
         animating: false,
         wake_at: None,
         asked: None,
@@ -245,7 +262,13 @@ impl PageDrive for ModuleHandle {
     /// A key that does one of the commands the page can be told to do now is that command, and the
     /// page is told the command and not the key (the kit's specification, Section 4).
     fn send_input(&self, input: Input) {
-        let shared = self.shared.borrow();
+        let mut shared = self.shared.borrow_mut();
+        let place = shared.place;
+        let (took, redraw) = shared.scrolls.pointer(&into_page(input, place));
+        shared.redraw |= redraw;
+        if took {
+            return;
+        }
         if let Input::Key { key, mods } = input
             && let Some(command) = shared
                 .laid
@@ -257,6 +280,35 @@ impl PageDrive for ModuleHandle {
         }
         let input = into_page(input, shared.place);
         shared.module.event(Event::Input(input));
+    }
+
+    fn send_wheel(&self, at: Point, dx: f32, dy: f32, phase: Phase) {
+        let mut shared = self.shared.borrow_mut();
+        let place = shared.place;
+        let (page_at, zoom) = (place.to_page(at), place.zoom);
+        let (dx, dy) = (dx / zoom, dy / zoom);
+        let left = match shared.laid.clone() {
+            Some(laid) => {
+                let wheel = shared.scrolls.wheel(&laid, page_at, dx, dy, phase);
+                shared.redraw |= wheel.took;
+                wheel.left
+            }
+            None => Point::new(dx, dy),
+        };
+        // What no box took is the page's.
+        if left.x != 0.0 || left.y != 0.0 {
+            shared.module.event(Event::Input(Input::Scroll {
+                at: page_at,
+                dx: left.x,
+                dy: left.y,
+            }));
+        }
+    }
+
+    fn set_scrolling(&self, scrolling: Scrolling) {
+        let mut shared = self.shared.borrow_mut();
+        shared.scrolls.set(scrolling);
+        shared.redraw = true;
     }
 
     fn send_command(&self, id: Id) {
@@ -373,7 +425,7 @@ impl UiPage for ModulePage {
         let width = cx.size_px.0 as f32;
         let height = (cx.size_px.1 as f32 - inset).max(0.0);
         let size = Size::new(width / scale, height / scale);
-        let root = {
+        let (root, cached) = {
             let mut shared = self.shared.borrow_mut();
             shared.sync(true);
             // A page for this size, the next step of one that is moving and the page whose time
@@ -391,10 +443,16 @@ impl UiPage for ModulePage {
             if resized && shared.module.wait_for_frame(size, RESIZE_WAIT) {
                 shared.sync(true);
             }
-            shared.root.clone()
+            shared.scrolls.frame(cx.now);
+            let asks = std::mem::take(&mut shared.asks);
+            shared.scrolls.ask(asks);
+            // Only the scrolling changed: the boxes move on the page as it was laid out.
+            let still =
+                !shared.fresh && shared.laid_for == Some((size, scale)) && !self.motions.moving();
+            let cached = shared.laid.clone().filter(|_| still);
+            (shared.root.clone(), cached)
         };
         let starting = root.is_none();
-        let root = root.unwrap_or_else(starting_line);
         if self.shaped.lines.len() > super::SHAPED_LIMIT {
             self.shaped.lines.clear();
         }
@@ -404,14 +462,29 @@ impl UiPage for ModulePage {
             shaped: &mut self.shaped,
             images: self.images.as_deref(),
         };
-        let laid = Arc::new(self.motions.layout(
-            root,
-            Size::new(width, height),
-            scale,
-            &mut typeset,
-            cx.now,
-            cx.reduce_motion,
-        ));
+        let mut laid = match cached {
+            Some(laid) if !starting => (*laid).clone(),
+            _ => {
+                let mut root = root.unwrap_or_else(starting_line);
+                self.shared.borrow().scrolls.scrolls.apply(&mut root);
+                self.motions.layout(
+                    root,
+                    Size::new(width, height),
+                    scale,
+                    &mut typeset,
+                    cx.now,
+                    cx.reduce_motion,
+                )
+            }
+        };
+        if !starting {
+            self.shared
+                .borrow_mut()
+                .scrolls
+                .scrolls
+                .place(&mut laid, cx.now, cx.reduce_motion);
+        }
+        let laid = Arc::new(laid);
         let draws = laid.paint(&mut typeset);
         let list = to_list(
             cx.renderer,
@@ -429,6 +502,13 @@ impl UiPage for ModulePage {
             if !starting {
                 shared.module.lay_out(Arc::clone(&laid));
                 shared.laid = Some(Arc::clone(&laid));
+                shared.laid_for = Some((size, scale));
+                shared.fresh = false;
+                // Where the boxes went: the page builds what came into view.
+                let moved = shared.scrolls.scrolls.take_moved();
+                if !moved.is_empty() {
+                    shared.module.event(Event::Scrolled(moved));
+                }
             }
             let outline = Outline::of(&laid, shared.place);
             let told = (outline != shared.outline)
@@ -450,11 +530,16 @@ impl UiPage for ModulePage {
     }
 
     fn animating(&self) -> bool {
-        self.shared.borrow().animating || self.motions.moving()
+        let shared = self.shared.borrow();
+        shared.animating || self.motions.moving() || shared.scrolls.moving()
     }
 
     fn wake_at(&self) -> Option<f64> {
-        self.shared.borrow().wake_at
+        let shared = self.shared.borrow();
+        match (shared.wake_at, shared.scrolls.wake_at()) {
+            (Some(page), Some(bars)) => Some(page.min(bars)),
+            (page, bars) => page.or(bars),
+        }
     }
 }
 

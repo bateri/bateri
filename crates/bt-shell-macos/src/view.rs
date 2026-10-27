@@ -58,7 +58,8 @@ use objc2_foundation::{
 };
 
 use bt_shell_common::native_view::{
-    Button as PageButton, Input, Menu as PageMenu, MenuEntry as PageMenuEntry, Point as PagePoint,
+    Button as PageButton, Input, Menu as PageMenu, MenuEntry as PageMenuEntry, Phase,
+    Point as PagePoint,
 };
 use objc2_app_kit::NSMenu;
 
@@ -362,6 +363,30 @@ fn cell_half(x_px: f64, cell_w: f64) -> CellHalf {
         CellHalf::Right
     } else {
         CellHalf::Left
+    }
+}
+
+/// What part of a gesture a wheel event is, for a page of the kit's: the pane scrolls the page's
+/// boxes as AppKit does its views ([`bt_shell_common::native_view::Scrolls`]). The fingers coming
+/// down (`MayBegin`, or `Began` with no touch before it) start a gesture — `Began` carries the
+/// first move too, so it is a start **and** a move; `Changed` and `Stationary` move; `Ended` and
+/// `Cancelled` lift; the momentum AppKit gives after is coasting until it ends; a wheel with no
+/// phase at all steps. Pure, testable.
+pub(crate) fn page_wheel_phases(phase: NSEventPhase, momentum: NSEventPhase) -> &'static [Phase] {
+    if momentum.intersects(NSEventPhase::Ended | NSEventPhase::Cancelled) {
+        &[Phase::Stop]
+    } else if !momentum.is_empty() {
+        &[Phase::Coast]
+    } else if phase.contains(NSEventPhase::Began) {
+        &[Phase::Begin, Phase::Move]
+    } else if phase.contains(NSEventPhase::MayBegin) {
+        &[Phase::Begin]
+    } else if phase.intersects(NSEventPhase::Ended | NSEventPhase::Cancelled) {
+        &[Phase::Lift]
+    } else if phase.is_empty() {
+        &[Phase::Wheel]
+    } else {
+        &[Phase::Move]
     }
 }
 
@@ -1263,8 +1288,9 @@ define_class!(
         #[unsafe(method(scrollWheel:))]
         fn scroll_wheel(&self, event: &NSEvent) {
             self.note_interaction();
-            // A debug page covers the terminal: the wheel is the page's, with AppKit's
-            // momentum (the events keep coming after the fingers lift), none of our own.
+            // A page of the kit's covers the terminal: the pane scrolls its boxes, with AppKit's
+            // deltas (the person's speed, direction and momentum are in them: the events keep
+            // coming after the fingers lift) and the part of the gesture each is.
             if let Some(pane) = self.pane()
                 && pane.page_is_up()
             {
@@ -1272,11 +1298,11 @@ define_class!(
                 let step = if event.hasPreciseScrollingDeltas() { 1.0 } else { 12.0 };
                 let dx = -(event.scrollingDeltaX() as f32) * step;
                 let dy = -(event.scrollingDeltaY() as f32) * step;
-                pane.page_input(Input::Scroll {
-                    at: self.page_point(event),
-                    dx,
-                    dy,
-                });
+                let at = self.page_point(event);
+                for phase in page_wheel_phases(event.phase(), event.momentumPhase()) {
+                    let (dx, dy) = if *phase == Phase::Begin { (0.0, 0.0) } else { (dx, dy) };
+                    pane.page_wheel(at, dx, dy, *phase);
+                }
                 return;
             }
             let Some(session) = self.ivars().session.get() else {
@@ -3492,6 +3518,44 @@ mod tests {
     use super::*;
 
     use objc2_foundation::ns_string;
+
+    #[test]
+    fn a_page_is_told_the_part_of_the_gesture_each_wheel_event_is() {
+        let none = NSEventPhase::None;
+        assert_eq!(
+            page_wheel_phases(none, none),
+            [Phase::Wheel],
+            "a mouse's wheel"
+        );
+        assert_eq!(
+            page_wheel_phases(NSEventPhase::MayBegin, none),
+            [Phase::Begin]
+        );
+        assert_eq!(
+            page_wheel_phases(NSEventPhase::Began, none),
+            [Phase::Begin, Phase::Move],
+            "the first move of a gesture starts it"
+        );
+        assert_eq!(
+            page_wheel_phases(NSEventPhase::Changed, none),
+            [Phase::Move]
+        );
+        assert_eq!(
+            page_wheel_phases(NSEventPhase::Stationary, none),
+            [Phase::Move]
+        );
+        assert_eq!(page_wheel_phases(NSEventPhase::Ended, none), [Phase::Lift]);
+        assert_eq!(
+            page_wheel_phases(NSEventPhase::Cancelled, none),
+            [Phase::Lift]
+        );
+        assert_eq!(page_wheel_phases(none, NSEventPhase::Began), [Phase::Coast]);
+        assert_eq!(
+            page_wheel_phases(none, NSEventPhase::Changed),
+            [Phase::Coast]
+        );
+        assert_eq!(page_wheel_phases(none, NSEventPhase::Ended), [Phase::Stop]);
+    }
 
     #[test]
     fn only_a_bare_return_is_the_waits_key() {
