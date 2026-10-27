@@ -156,6 +156,13 @@ of every installed copy. A version without a section is not released.
 
 ### Fixed
 
+- **The words of a native view fade with what they are in.** A row that goes out of a list (a
+  folded group in dockerpen) or comes into it took its words only part of the way: they faded to
+  the lowest contrast `[appearance] minimum_contrast` keeps and stayed there, then went at once,
+  which looked like the view dropping frames. The opacity a page gives a part, and what a motion
+  fades, is now laid over the colour held to that floor, so words fade all the way with their
+  part, and a page can make words fainter than the floor on purpose.
+
 - **A native view's text field stays in its box when the pane jumps in size.** Opening a pane
   beside one with a native view (⌘D) or making the window full screen left the view's field off
   its box, saying its hint above or below it, until the pointer moved over the page.

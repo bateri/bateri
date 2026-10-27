@@ -286,15 +286,21 @@ fn ground(theme: &Theme, run: &Run) -> LinearRgba {
 /// is drawn as it was said, opacity and all; one that does not is moved as it shows (the blend,
 /// moved only as far as it takes) and drawn solid, because moving only the colour under the
 /// opacity would take a fraction of the way the word needs to go.
+///
+/// **The opacity of its element is laid over what is held** ([`Run::opacity`]: the page's
+/// `opacity` on it and the boxes that hold it, and what a motion fades): a word fades with its
+/// box all the way, as the box's fill does, instead of stopping at the floor and vanishing at
+/// once, and a page can make words fainter than the floor.
 pub fn ink(theme: &Theme, run: &Run, minimum_contrast: f64) -> [f32; 4] {
     let (colour, alpha) = parts(theme, run.color);
     let under = ground(theme, run);
     let shown = colour.over(alpha, under);
     let held = shown.legible_on(under, minimum_contrast);
+    let opacity = run.opacity.clamp(0.0, 1.0);
     if held == shown {
-        return tint(colour, alpha);
+        return tint(colour, alpha * opacity);
     }
-    tint(held, 1.0)
+    tint(held, opacity)
 }
 
 /// The engine's box as the renderer's, moved to `origin` pixels.
@@ -1331,6 +1337,7 @@ mod tests {
                 italic: false,
             },
             color,
+            opacity: 1.0,
             grounds,
             clip: Rect::new(0.0, 0.0, 100.0, 20.0),
             underline: false,
@@ -1365,6 +1372,37 @@ mod tests {
         });
         // The rule is off at 1.
         assert_eq!(ink(&theme, &on_fill, 1.0), resolve(&theme, text));
+    }
+
+    #[test]
+    fn a_word_fades_with_its_element_past_the_floor() {
+        use pencere_view::Rgba;
+        let theme = Theme::BATERI;
+        let fill = vec![Rgba::rgb(0xe8, 0xe8, 0xe8).solid()];
+        // Held to the floor or not, the word is drawn as faint as its element is: a row that
+        // goes takes its words all the way with it.
+        for (text, held) in [
+            (Rgba::rgb(0xe0, 0xe0, 0xe0).solid(), true),
+            (Rgba::rgb(0x20, 0x20, 0x20).solid(), false),
+        ] {
+            let whole = ink(&theme, &run(text, fill.clone()), 3.0);
+            let faint = ink(
+                &theme,
+                &Run {
+                    opacity: 0.25,
+                    ..run(text, fill.clone())
+                },
+                3.0,
+            );
+            assert_eq!(faint[..3], whole[..3], "its colour, held or not");
+            assert_eq!(faint[3], whole[3] * 0.25, "held: {held}");
+            assert_ne!(whole == resolve(&theme, text), held);
+        }
+        let gone = Run {
+            opacity: 0.0,
+            ..run(Rgba::rgb(0xe0, 0xe0, 0xe0).solid(), fill)
+        };
+        assert_eq!(ink(&theme, &gone, 3.0)[3], 0.0, "nothing of it at nothing");
     }
 
     #[test]
