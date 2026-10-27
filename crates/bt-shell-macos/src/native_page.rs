@@ -1106,23 +1106,24 @@ pub(crate) fn mods_of(flags: NSEventModifierFlags) -> Mods {
     }
 }
 
-/// The key `event` is for an editor of a page, and the modifiers held ([`editor_key`]). `None` for
-/// a key that makes none (the first stroke of a dead key has no characters): it is the system's
-/// handling of text's.
-pub(crate) fn editor_key_of(event: &NSEvent) -> Option<(Key, Mods)> {
+/// The key `event` is for a page, or for an editor of it, and the modifiers held ([`event_key`]).
+/// `None` for a key that makes none (the first stroke of a dead key has no characters): in an
+/// editor it is the system's handling of text's.
+pub(crate) fn event_key_of(event: &NSEvent) -> Option<(Key, Mods)> {
     let mods = mods_of(event.modifierFlags());
     let characters = event.characters().map(|text| text.to_string());
     let ignoring = event
         .charactersIgnoringModifiers()
         .map(|text| text.to_string());
-    let key = editor_key(characters.as_deref(), ignoring.as_deref(), mods)?;
+    let key = event_key(characters.as_deref(), ignoring.as_deref(), mods)?;
     Some((key, mods))
 }
 
-/// The key `characters` make for an editor ([`key_of`]), with `mods` held: ⇧⇥ makes the backtab
-/// character, which is ⌃Y's too, and is the tab with ⇧; where ⌃ makes a control character (⌃A,
-/// ⌃K), the key is the one without the modifiers (`ignoring`).
-fn editor_key(characters: Option<&str>, ignoring: Option<&str>, mods: Mods) -> Option<Key> {
+/// The key `characters` make for a page or an editor of it ([`key_of`]), with `mods` held: ⇧⇥
+/// makes the backtab character, which is ⌃Y's too, and is the tab with ⇧; where ⌃ makes a control
+/// character (⌃W, ⌃K), the key is the one without the modifiers (`ignoring`), so that a page's
+/// command on `ctrl+w` is done wherever the keyboard is on the page.
+fn event_key(characters: Option<&str>, ignoring: Option<&str>, mods: Mods) -> Option<Key> {
     let key = match characters {
         Some("\u{19}") if mods.shift && !mods.control => Some(Key::Tab),
         other => other.and_then(key_of),
@@ -1219,7 +1220,7 @@ mod tests {
     }
 
     #[test]
-    fn an_editor_reads_shift_tab_and_the_control_letters_as_their_keys() {
+    fn a_page_and_its_editors_read_shift_tab_and_the_control_letters_as_their_keys() {
         let shift = Mods {
             shift: true,
             ..Mods::default()
@@ -1229,21 +1230,18 @@ mod tests {
             ..Mods::default()
         };
         // ⇧⇥ is the tab with ⇧; ⌃Y, which makes the same character, is not.
+        assert_eq!(event_key(Some("\u{19}"), Some("\t"), shift), Some(Key::Tab));
         assert_eq!(
-            editor_key(Some("\u{19}"), Some("\t"), shift),
-            Some(Key::Tab)
-        );
-        assert_eq!(
-            editor_key(Some("\u{19}"), Some("y"), control),
+            event_key(Some("\u{19}"), Some("y"), control),
             Some(Key::Character('y'))
         );
         // ⌃A and ⌃K are their letters; what ⌥ makes is itself.
         assert_eq!(
-            editor_key(Some("\u{1}"), Some("a"), control),
+            event_key(Some("\u{1}"), Some("a"), control),
             Some(Key::Character('a'))
         );
         assert_eq!(
-            editor_key(Some("\u{b}"), Some("k"), control),
+            event_key(Some("\u{b}"), Some("k"), control),
             Some(Key::Character('k'))
         );
         let alt = Mods {
@@ -1251,13 +1249,13 @@ mod tests {
             ..Mods::default()
         };
         assert_eq!(
-            editor_key(Some("@"), Some("q"), alt),
+            event_key(Some("@"), Some("q"), alt),
             Some(Key::Character('@'))
         );
         // A dead key's first stroke makes nothing: the system's text has it.
-        assert_eq!(editor_key(Some(""), Some("e"), alt), None);
+        assert_eq!(event_key(Some(""), Some("e"), alt), None);
         assert_eq!(
-            editor_key(Some("\u{7f}"), Some("\u{7f}"), alt),
+            event_key(Some("\u{7f}"), Some("\u{7f}"), alt),
             Some(Key::Backspace)
         );
     }

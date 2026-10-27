@@ -5836,17 +5836,15 @@ impl TerminalPane {
         if self.page_editor_key(event) {
             return true;
         }
-        let characters = event.characters().map(|text| text.to_string());
-        let flags = event.modifierFlags();
         match self.page_handle() {
             None => {
+                let characters = event.characters().map(|text| text.to_string());
                 if matches!(characters.as_deref(), Some("\u{1b}")) {
                     self.take_page_down();
                 }
             }
             Some(handle) => {
-                if let Some(key) = characters.as_deref().and_then(crate::native_page::key_of) {
-                    let mods = crate::native_page::mods_of(flags);
+                if let Some((key, mods)) = crate::native_page::event_key_of(event) {
                     handle.send_input(Input::Key { key, mods });
                     self.drain_page();
                 }
@@ -5902,7 +5900,7 @@ impl TerminalPane {
         let Some(editors) = self.page_editing() else {
             return false;
         };
-        let route = match crate::native_page::editor_key_of(event) {
+        let route = match crate::native_page::event_key_of(event) {
             Some((key, mods)) => editors.key(key, mods),
             None => Route::Type,
         };
@@ -5947,7 +5945,7 @@ impl TerminalPane {
         if event.r#type() != NSEventType::KeyDown {
             return;
         }
-        let Some((key, mods)) = crate::native_page::editor_key_of(&event) else {
+        let Some((key, mods)) = crate::native_page::event_key_of(&event) else {
             return;
         };
         let route = editors.key(key, mods);
@@ -6248,12 +6246,9 @@ impl TerminalPane {
         if self.page_editing().is_some() {
             return true;
         }
-        let characters = event.characters().map(|text| text.to_string());
-        if let (Some(handle), Some(key)) = (
-            self.page_handle(),
-            characters.as_deref().and_then(crate::native_page::key_of),
-        ) {
-            let mods = crate::native_page::mods_of(event.modifierFlags());
+        if let (Some(handle), Some((key, mods))) =
+            (self.page_handle(), crate::native_page::event_key_of(event))
+        {
             handle.send_input(Input::KeyUp { key, mods });
             self.drain_page();
         }
@@ -8208,6 +8203,10 @@ mod tests {
         assert!(signal.contains("self.interrupt_program()"), "{signal}");
         let key = body("    pub(crate) fn page_key(");
         assert!(key.contains("self.page_signal(event)"), "{key}");
+        // The page reads ⌃ with a letter, and ⇧⇥, as its editors do, going down and going up.
+        assert!(key.contains("event_key_of(event)"), "{key}");
+        let up = body("    pub(crate) fn page_key_up(");
+        assert!(up.contains("event_key_of(event)"), "{up}");
         let field = body("    fn page_field_command(");
         assert!(field.contains("self.page_signal(event)"), "{field}");
         assert!(
