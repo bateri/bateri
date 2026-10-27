@@ -238,7 +238,9 @@ kablo-proto = { git = "https://github.com/bateri/kablo", rev = "297cc8c6d8511866
 #   and the decoders of the pictures a page shows (PNG, JPEG, SVG). It brings `wasmtime`,
 #   `png`, `zune-jpeg` and `resvg` into the graph. User-approved dependency decisions: the
 #   runtime on 2026-10-23, with the `allow-jit` entitlement it needs under the hardened
-#   runtime; the three picture formats on 2026-10-24.
+#   runtime; the three picture formats on 2026-10-24. It takes `regex` as well, the one the
+#   editor brings (below), to refuse a page whose editor's rules are not patterns where both
+#   kinds of page pass; no crate comes into the graph with it.
 # - `pencere-editor`: the editor of text a page puts in its room (`Element::editor`) — the
 #   document, its selections and history, what an input method composes, laid out and drawn
 #   by the host. It brings `ropey` (MIT; `str_indices` behind it), `unicode-segmentation` (MIT
@@ -249,15 +251,15 @@ kablo-proto = { git = "https://github.com/bateri/kablo", rev = "297cc8c6d8511866
 # All of pencere is Apache-2.0 (GPL-3 compatible), and `rev` must be a commit at or after the
 # relicensing (`75a78e3`). `make audit` fails if `rev` is not a full hash or does not resolve,
 # and if any of the four comes from anywhere else.
-pencere-host = { git = "https://github.com/bateri/pencere", rev = "bf6f8018fce9a62a3b395de64fd0e8a5d479374a" }
-pencere-view = { git = "https://github.com/bateri/pencere", rev = "bf6f8018fce9a62a3b395de64fd0e8a5d479374a" }
-pencere-sandbox = { git = "https://github.com/bateri/pencere", rev = "bf6f8018fce9a62a3b395de64fd0e8a5d479374a" }
-pencere-editor = { git = "https://github.com/bateri/pencere", rev = "bf6f8018fce9a62a3b395de64fd0e8a5d479374a" }
+pencere-host = { git = "https://github.com/bateri/pencere", rev = "75ddf4fab6c27dbbb150d427a66379f9c8add89b" }
+pencere-view = { git = "https://github.com/bateri/pencere", rev = "75ddf4fab6c27dbbb150d427a66379f9c8add89b" }
+pencere-sandbox = { git = "https://github.com/bateri/pencere", rev = "75ddf4fab6c27dbbb150d427a66379f9c8add89b" }
+pencere-editor = { git = "https://github.com/bateri/pencere", rev = "75ddf4fab6c27dbbb150d427a66379f9c8add89b" }
 # And the program's side of the same protocol (`pencere`, the library of pencere's `program/`),
 # at the same `rev`, as a **dev**-dependency of `bt-core` alone: the program the end-to-end tests
 # of a pane run in it (`crates/bt-core/examples/demopen.rs`). It ships nowhere. It brings no crate
 # the build does not have already (`serde`, `serde_json`, `libc` and `pencere-wire`).
-pencere = { git = "https://github.com/bateri/pencere", rev = "bf6f8018fce9a62a3b395de64fd0e8a5d479374a" }
+pencere = { git = "https://github.com/bateri/pencere", rev = "75ddf4fab6c27dbbb150d427a66379f9c8add89b" }
 serde_json = "1"
 
 bt-core = { path = "crates/bt-core" }

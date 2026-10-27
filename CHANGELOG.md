@@ -18,7 +18,11 @@ of every installed copy. A version without a section is not released.
   text in it, the pencere kit's own, which bateri keeps and draws: as many carets and selections
   as you make (⌘-click, ⌥-drag for a column), undo and redo, the Mac's editing keys (⌥ and ⌘
   with the arrows and ⌫, ⌃A, ⌃E, ⌃K) and an editor's (⌘/ comments, ⌥↑ moves lines, ⇥ and ⇧⇥
-  indent), finding, folding and the colours and marks the page gives it. Your input method
+  indent), finding, folding and the colours and marks the page gives it. A page can search it
+  as a find bar does (whole words, how many it found and which one you are on, replace and
+  replace all, select every match), tell it how its language comments, indents and folds (a
+  block comment for CSS, the line after `then` indented and `end` brought back, folds by
+  indent), and show its spaces and tabs and the guides of its indent. Your input method
   composes in it (dead keys, Japanese, Korean, Chinese), its window stands by the caret, and
   what ⌥ types on your keyboard (`@`, `[`, `{`, `|`) is typed. Cut, Copy, Paste, Select All and
   Undo are the editor's while it has the keyboard; the caret blinks, and stops after a while as
