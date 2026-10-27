@@ -874,7 +874,7 @@ impl ModulePage {
                     break;
                 }
                 if pass == RELAYOUTS {
-                    self.shared.borrow_mut().fresh = true;
+                    // What is left is the next frame's, which lays the page out again.
                     self.shared.borrow_mut().again = true;
                     break;
                 }
@@ -1018,7 +1018,7 @@ mod tests {
     use bt_core::{MINIMUM_CONTRAST, Theme};
     use bt_gpu::{Renderer, UiItem};
     use pencere_view::Point;
-    use pencere_view::{Button, Key, Mods};
+    use pencere_view::{Button, Key, Mods, Rect};
     use std::sync::mpsc::{Receiver, channel};
     use std::time::{Duration, Instant};
 
@@ -1596,18 +1596,24 @@ mod tests {
     /// Frames and drains, as the pane does, until the page has nothing more to say: the last
     /// frame's list.
     fn settle(page: &mut ModulePage, handle: &ModuleHandle, woken: &Receiver<()>) -> DrawList {
-        let mut list = page
-            .frame(frame_at(0.0), &mut super::super::editing::Even)
-            .0;
+        settle_at(page, handle, woken, frame_at(0.0))
+    }
+
+    /// The same, with the frames `at` asks for.
+    fn settle_at(
+        page: &mut ModulePage,
+        handle: &ModuleHandle,
+        woken: &Receiver<()>,
+        at: FrameAt,
+    ) -> DrawList {
+        let mut list = page.frame(at, &mut super::super::editing::Even).0;
         for _ in 0..100 {
             let woke = woken.recv_timeout(Duration::from_millis(300)).is_ok();
             let drained = handle.drain(&mut |_, _| {});
             if !woke && !drained.redraw && !page.animating() {
                 return list;
             }
-            list = page
-                .frame(frame_at(0.0), &mut super::super::editing::Even)
-                .0;
+            list = page.frame(at, &mut super::super::editing::Even).0;
         }
         panic!("the page never came to rest");
     }
@@ -1900,6 +1906,102 @@ return {
         // At rest: no frame is asked for but the caret's next blink.
         assert!(!page.animating());
         assert_eq!(page.wake_at(), Some(0.5));
+    }
+
+    /// On a screen of two pixels to a point, the page drawn half as large again as its own size:
+    /// the caret's box an input method is told and the place under a point are each other's, a
+    /// press there puts the caret there, and a press below the room gives the keyboard back.
+    #[test]
+    fn an_editor_answers_in_the_panes_points_at_any_scale_and_zoom() {
+        let (mut page, handle, woken) = editor_rig(EDITOR_PAGE);
+        handle.set_zoom(1.5);
+        let at = FrameAt {
+            size_px: (1600, 1200),
+            scale: 2.0,
+            now: 0.0,
+            reduce_motion: false,
+        };
+        page.frame(at, &mut super::super::editing::Even);
+        assert!(wait(&woken), "the script handed out no page");
+        settle_at(&mut page, &handle, &woken, at);
+        handle.send_input(Input::Key {
+            key: Key::Character('l'),
+            mods: Mods::default(),
+        });
+        settle_at(&mut page, &handle, &woken, at);
+        let editors = handle.editors().expect("editors");
+        assert_eq!(editors.focused(), Some(Id::named("e")));
+        let middle = |rect: Rect| Point::new(rect.x + rect.w / 2.0, rect.y + rect.h / 2.0);
+        for k in [0, 3, 6, 8, 11] {
+            let caret = editors.rect(k).expect("a caret");
+            assert!(
+                caret.y >= 32.0 + 40.0 * 1.5,
+                "below the strip and 40 points: {caret:?}"
+            );
+            assert_eq!(editors.index_at(middle(caret)), Some(k), "{caret:?}");
+        }
+        let press = |at: Point| {
+            handle.send_input(Input::Press {
+                at,
+                button: Button::Left,
+                mods: Mods::default(),
+                count: 1,
+            });
+            handle.send_input(Input::Release {
+                at,
+                button: Button::Left,
+            });
+        };
+        press(middle(editors.rect(8).expect("a caret")));
+        settle_at(&mut page, &handle, &woken, at);
+        assert_eq!(editors.selected(), Some((8, 0)));
+        let room = {
+            let shared = handle.shared.borrow();
+            let laid = shared.laid.clone().expect("laid out");
+            let room = laid.editors().into_iter().next().expect("the room").rect;
+            shared.place.to_pane(room)
+        };
+        press(Point::new(room.x + 10.0, room.y + room.h + 5.0));
+        settle_at(&mut page, &handle, &woken, at);
+        assert_eq!(editors.focused(), None, "{room:?}");
+    }
+
+    /// An editor whose long lines wrap comes to rest like any page: its room's width is what its
+    /// rows are, and nothing is laid out again for ever.
+    #[test]
+    fn an_editor_of_wrapped_lines_comes_to_rest() {
+        let long: String = (0..40)
+            .map(|n| format!("{n} {}\n", "word ".repeat(60)))
+            .collect();
+        let source = EDITOR_PAGE
+            .replace("{ gutter = false }", "{ gutter = false, wrap = true }")
+            .replace(r#"load = "hello\nworld""#, &format!("load = {long:?}"));
+        let (mut page, handle, woken) = editor_rig(&source);
+        page.frame(frame_at(0.0), &mut super::super::editing::Even);
+        assert!(wait(&woken), "the script handed out no page");
+        settle(&mut page, &handle, &woken);
+        handle.send_input(Input::Key {
+            key: Key::Character('l'),
+            mods: Mods::default(),
+        });
+        settle(&mut page, &handle, &woken);
+        assert!(editor_text(&handle).starts_with("0 word"));
+        let extent = handle
+            .shared
+            .borrow()
+            .laid
+            .as_ref()
+            .and_then(|laid| laid.scroll_extent(Id::named("e")))
+            .expect("the room scrolls");
+        assert!(extent.content.w <= extent.view.w + 0.5, "{extent:?}");
+        assert!(extent.content.h > extent.view.h, "{extent:?}");
+        for step in 0..3 {
+            page.frame(
+                frame_at(0.1 * f64::from(step)),
+                &mut super::super::editing::Even,
+            );
+            assert!(!page.animating(), "frame {step} asked for another");
+        }
     }
 
     /// The height of a line of the editor, points (one pixel to a point in these tests).
