@@ -22,6 +22,11 @@
 //! the page laid out, does what its replies asked of them and draws them, and the pane's keys,
 //! input method, pasteboard and pointer reach them between frames ([`PageEditors`]), measured by
 //! the renderer the frames are drawn with ([`PageDrive::set_renderer`]).
+//!
+//! **A page can ask to be woken** ([`super::waking`]): the sandbox keeps the time, the drain tells
+//! the pane when it changed ([`Drained::wake`]), and the first frame at or after it wakes the page
+//! before it asks for the page; a pane that is not seen wakes it itself
+//! ([`PageDrive::wake_unseen`]).
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -40,6 +45,7 @@ use pencere_view::{
 };
 
 use super::editing::{Editing, Route, Told, in_a_room};
+use super::waking::Wakes;
 use super::{
     Drained, Field, HostScrolls, Id, Input, OnOutline, Outline, PageDrive, Placement, Point, Reply,
     Scrolling, Shaped, Typeset, UiContext, UiList, UiPage, from_pane, into_page, to_list,
@@ -70,6 +76,10 @@ struct Shared {
     animating: bool,
     /// The time the page at rest wants to be asked for again, on the frames' clock.
     wake_at: Option<f64>,
+    /// The time the page asked to be woken at, and the wakes it was given.
+    wakes: Wakes,
+    /// That time changed in a drain, which the pane has not been told of ([`Drained::wake`]).
+    rewake: bool,
     /// The viewport (points) and the scale the module was last asked for a page for.
     asked: Option<(Size, f32)>,
     /// Where the page stands in the pane.
@@ -122,6 +132,12 @@ impl Shared {
             self.redraw |= !building;
         }
         self.asks.extend(update.asks);
+        // The time the page asked to be woken at, told at every taking while it stands: one a
+        // frame takes is read with that frame's (`UiPage::wake_at`), one a drain takes is the
+        // pane's to arm its clock for, with no frame drawn for it.
+        if self.wakes.told(update.wake) && !building {
+            self.rewake = true;
+        }
         if let Some(images) = &self.images {
             let arrived = images.poll();
             // A size the layout was waiting for, pixels the paint was: either way a frame of the
@@ -305,6 +321,8 @@ fn parts(
         asks: Vec::new(),
         animating: false,
         wake_at: None,
+        wakes: Wakes::default(),
+        rewake: false,
         asked: None,
         place: Placement { inset, zoom: 1.0 },
         outline: Outline::default(),
@@ -593,6 +611,14 @@ impl PageDrive for ModuleHandle {
         })
     }
 
+    fn wake_unseen(&self, now: f64) -> Option<f64> {
+        let mut shared = self.shared.borrow_mut();
+        if shared.wakes.unseen(now) {
+            shared.module.wake(now);
+        }
+        shared.wakes.unseen_at()
+    }
+
     fn drain(&self, reply: &mut dyn FnMut(Reply, bool)) -> Drained {
         let (replies, drained) = {
             let mut shared = self.shared.borrow_mut();
@@ -607,6 +633,7 @@ impl PageDrive for ModuleHandle {
                 diagnostics: std::mem::take(&mut shared.diagnostics),
                 ended,
                 sent: std::mem::take(&mut shared.sent),
+                wake: std::mem::take(&mut shared.rewake),
             };
             (std::mem::take(&mut shared.replies), drained)
         };
@@ -821,6 +848,13 @@ impl ModulePage {
             let mut shared = self.shared.borrow_mut();
             shared.again = false;
             shared.sync(true);
+            // The time the page asked to be woken at has come: it is woken at this frame's time,
+            // before its page is asked for, and once a frame however often it asks (the kit's
+            // specification, §4). Its answer comes as any reply does, and a frame with it where it
+            // changed the page: none is asked for the wake itself.
+            if shared.wakes.frame(at.now) {
+                shared.module.wake(at.now);
+            }
             // A page for this size, the next step of one that is moving and the page whose time
             // has come; a page that is none of these is not asked for.
             let due = shared.wake_at.is_some_and(|wake| at.now >= wake);
@@ -1004,10 +1038,17 @@ impl UiPage for ModulePage {
 
     fn wake_at(&self) -> Option<f64> {
         let shared = self.shared.borrow();
-        [shared.wake_at, shared.scrolls.wake_at(), shared.blink_at]
-            .into_iter()
-            .flatten()
-            .reduce(f64::min)
+        // Of the time the page wants to be drawn at and the one it asked to be woken at, the
+        // earliest: a wake is given from a frame.
+        [
+            shared.wake_at,
+            shared.wakes.waiting(),
+            shared.scrolls.wake_at(),
+            shared.blink_at,
+        ]
+        .into_iter()
+        .flatten()
+        .reduce(f64::min)
     }
 }
 
@@ -1924,6 +1965,206 @@ return {
         // At rest: no frame is asked for but the caret's next blink.
         assert!(!page.animating());
         assert_eq!(page.wake_at(), Some(0.5));
+    }
+
+    /// A page that notes each wake it is given (`woke` and the time), drawn as one line of what it
+    /// noted: `w` asks to be woken in 2 seconds and `f` in 20, `a` asks for 0 and every wake after
+    /// asks for 0 again; `d` and `e` have the page ask to be drawn again at 500 and at 250 (`render`'s
+    /// own time, not a wake).
+    const WAKE_PAGE: &str = r#"local said = {}
+local again = nil
+local draw_at = nil
+return {
+    render = function()
+        return pencere.text(table.concat(said, "|")), false, draw_at
+    end,
+    handle = function(event)
+        if event.type == "key" then
+            if event.key == "w" then return { wake = 2 } end
+            if event.key == "f" then return { wake = 20 } end
+            if event.key == "a" then again = 0; return { wake = 0 } end
+            if event.key == "d" then draw_at = 500; return true end
+            if event.key == "e" then draw_at = 250; return true end
+        elseif event.type == "wake" then
+            said[#said + 1] = "woke " .. event.now
+            return { redraw = true, wake = again }
+        end
+        return false
+    end,
+}"#;
+
+    fn press_key(handle: &ModuleHandle, key: char) {
+        handle.send_input(Input::Key {
+            key: Key::Character(key),
+            mods: Mods::default(),
+        });
+    }
+
+    /// Drains, as the pane does when it is woken, until `what` holds of a drain: that drain.
+    fn drain_until(
+        handle: &ModuleHandle,
+        woken: &Receiver<()>,
+        what: impl Fn(&Drained) -> bool,
+    ) -> Drained {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let _ = woken.recv_timeout(Duration::from_millis(100));
+            let drained = handle.drain(&mut |_, _| {});
+            if what(&drained) {
+                return drained;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "what was waited for never came: {drained:?}"
+            );
+        }
+    }
+
+    /// The wakes the page noted, in order.
+    fn wakes_noted(handle: &ModuleHandle) -> Vec<String> {
+        page_words(handle)
+            .join("|")
+            .split('|')
+            .filter(|said| !said.is_empty())
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// A page at rest that asks nothing has no time to be drawn or woken at, and its drain has none
+    /// to tell. A reply that asks to be woken is told by the drain though nothing is to be drawn;
+    /// the frames before the time do not wake the page, and the first at or after it does, once.
+    /// The module counts the seconds from its own clock (the frame's time and what passed since),
+    /// so the times the frames are given are well before and well after the one asked.
+    #[test]
+    fn a_wake_a_reply_asks_is_given_at_the_first_frame_at_its_time_and_a_page_at_rest_asks_none() {
+        let (mut page, handle, woken) = editor_rig(WAKE_PAGE);
+        page.frame(frame_at(0.0), &mut super::super::editing::Even);
+        assert!(wait(&woken), "the script handed out no page");
+        settle(&mut page, &handle, &woken);
+        assert_eq!(page.wake_at(), None, "a page at rest asks for no frame");
+        assert!(!page.animating());
+        let drained = handle.drain(&mut |_, _| {});
+        assert!(!drained.wake && !drained.redraw, "{drained:?}");
+
+        press_key(&handle, 'w');
+        let drained = drain_until(&handle, &woken, |drained| drained.wake);
+        assert!(!drained.redraw, "a wake alone is not a frame: {drained:?}");
+        assert!(page.wake_at().is_some(), "the time to wake the page at");
+        // The kit's timers count a wake asked outside a wake from the next one, which it asks
+        // for at once: the frame at 50 wakes the kit, and it asks for the page's time from there.
+        settle_at(&mut page, &handle, &woken, frame_at(50.0));
+        assert!(
+            wakes_noted(&handle).is_empty(),
+            "{:?}",
+            wakes_noted(&handle)
+        );
+        let due = page.wake_at().expect("the page's own time");
+        assert!((51.9..52.1).contains(&due), "{due}");
+        settle_at(&mut page, &handle, &woken, frame_at(51.0));
+        assert!(wakes_noted(&handle).is_empty(), "not before its time");
+        settle_at(&mut page, &handle, &woken, frame_at(100.0));
+        assert_eq!(wakes_noted(&handle), ["woke 100"]);
+        // The wake that came is gone, and the page asked no other.
+        assert_eq!(page.wake_at(), None);
+        let drained = handle.drain(&mut |_, _| {});
+        assert!(!drained.wake, "{drained:?}");
+    }
+
+    /// Of the time the page asks to be drawn at and the one it asks to be woken at, the earliest is
+    /// the one its frame is asked at, whichever of the two it is.
+    #[test]
+    fn of_the_time_a_page_is_drawn_at_and_the_one_it_is_woken_at_the_earliest_is_asked() {
+        let (mut page, handle, woken) = editor_rig(WAKE_PAGE);
+        page.frame(frame_at(0.0), &mut super::super::editing::Even);
+        assert!(wait(&woken), "the script handed out no page");
+        settle(&mut page, &handle, &woken);
+        press_key(&handle, 'd');
+        settle(&mut page, &handle, &woken);
+        assert_eq!(page.wake_at(), Some(500.0));
+        // A wake in 2 seconds is before it (counted from the wake the kit asks for at once, at 100).
+        press_key(&handle, 'w');
+        drain_until(&handle, &woken, |drained| drained.wake);
+        settle_at(&mut page, &handle, &woken, frame_at(100.0));
+        let due = page.wake_at().expect("a time");
+        assert!((101.9..102.1).contains(&due), "{due}");
+        settle_at(&mut page, &handle, &woken, frame_at(200.0));
+        assert_eq!(wakes_noted(&handle), ["woke 200"]);
+        assert_eq!(
+            page.wake_at(),
+            Some(500.0),
+            "the wake is gone, the frame's time stays"
+        );
+        // A frame's time at 250 is before a wake in 20 seconds from 240.
+        press_key(&handle, 'e');
+        settle_at(&mut page, &handle, &woken, frame_at(200.0));
+        assert_eq!(page.wake_at(), Some(250.0));
+        press_key(&handle, 'f');
+        drain_until(&handle, &woken, |drained| drained.wake);
+        settle_at(&mut page, &handle, &woken, frame_at(240.0));
+        assert_eq!(page.wake_at(), Some(250.0));
+        assert_eq!(wakes_noted(&handle), ["woke 200"]);
+    }
+
+    /// A page that asks to be woken again at once each time it is woken is woken once a frame: its
+    /// answer asks for the time of the wake itself, which the next frame is after; the same frame
+    /// built again does not wake it again.
+    #[test]
+    fn a_page_that_asks_again_at_once_is_woken_once_a_frame() {
+        let (mut page, handle, woken) = editor_rig(WAKE_PAGE);
+        page.frame(frame_at(0.0), &mut super::super::editing::Even);
+        assert!(wait(&woken), "the script handed out no page");
+        settle(&mut page, &handle, &woken);
+        press_key(&handle, 'a');
+        drain_until(&handle, &woken, |drained| drained.wake);
+        page.frame(frame_at(100.0), &mut super::super::editing::Even);
+        drain_until(&handle, &woken, |_| page.wake_at() == Some(100.0));
+        page.frame(frame_at(100.0), &mut super::super::editing::Even);
+        settle_at(&mut page, &handle, &woken, frame_at(100.0));
+        assert_eq!(wakes_noted(&handle), ["woke 100"]);
+        settle_at(&mut page, &handle, &woken, frame_at(100.5));
+        assert_eq!(wakes_noted(&handle), ["woke 100", "woke 100.5"]);
+        assert_eq!(
+            page.wake_at(),
+            Some(100.5),
+            "it waits for the next frame again"
+        );
+    }
+
+    /// While its pane is not seen, a page is woken by the pane's clock, at its time and a second
+    /// after its last wake at the soonest, and the wake held back is given, not lost; seen again,
+    /// the frames wake it. A page that waits for no wake gives the pane's clock nothing to do.
+    #[test]
+    fn a_page_whose_pane_is_not_seen_is_woken_a_second_apart_and_loses_no_wake() {
+        let (mut page, handle, woken) = editor_rig(WAKE_PAGE);
+        page.frame(frame_at(0.0), &mut super::super::editing::Even);
+        assert!(wait(&woken), "the script handed out no page");
+        settle(&mut page, &handle, &woken);
+        assert_eq!(
+            handle.wake_unseen(50.0),
+            None,
+            "nothing asked, nothing armed"
+        );
+
+        press_key(&handle, 'a');
+        drain_until(&handle, &woken, |drained| drained.wake);
+        assert_eq!(
+            handle.wake_unseen(50.0),
+            None,
+            "woken now, and nothing asked after"
+        );
+        // The wake's answer asks again at once: held back to a second after it. (The time it asks
+        // is told before the page it drew for the wake comes.)
+        drain_until(&handle, &woken, |_| {
+            handle.wake_unseen(50.25) == Some(51.0) && !wakes_noted(&handle).is_empty()
+        });
+        assert_eq!(wakes_noted(&handle), ["woke 50"]);
+        assert_eq!(handle.wake_unseen(51.0), None);
+        drain_until(&handle, &woken, |_| wakes_noted(&handle).len() == 2);
+        assert_eq!(wakes_noted(&handle), ["woke 50", "woke 51"]);
+        // Seen again: the next frame wakes it, with no second to wait.
+        drain_until(&handle, &woken, |_| page.wake_at() == Some(51.0));
+        settle_at(&mut page, &handle, &woken, frame_at(51.25));
+        assert_eq!(wakes_noted(&handle), ["woke 50", "woke 51", "woke 51.25"]);
     }
 
     /// On a screen of two pixels to a point, the page drawn half as large again as its own size:

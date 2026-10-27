@@ -48,6 +48,7 @@ mod containers;
 mod editing;
 mod module;
 mod scrolling;
+mod waking;
 pub use editing::Route;
 pub use module::{ModuleHandle, PageEditors, module_page, script_page};
 pub use pencere_sandbox::{Assets, ImageLimits, ModuleLimits, Script};
@@ -487,6 +488,13 @@ pub trait PageDrive {
     fn editors(&self) -> Option<PageEditors> {
         None
     }
+    /// The pane is not seen and draws no frames, and it is `now` on the frames' clock: the page is
+    /// woken if the time it asked to be woken at has come and a second has passed since it was
+    /// last woken (the frames wake it while the pane is seen). When to ask again, if the page
+    /// waits for a wake; `None` for a page that asks none (the engine's own, in this process).
+    fn wake_unseen(&self, _now: f64) -> Option<f64> {
+        None
+    }
     /// Hands over what the page has said since the last call: each reply, in order, with whether
     /// the event it answers was the pointer's (the pointer's shape after a key is nobody's to
     /// set). Never waits.
@@ -508,6 +516,10 @@ pub struct Drained {
     /// open (`bt_core::Session::module_message`). Told before `ended`: what a page said before
     /// it went is said.
     pub sent: Vec<String>,
+    /// The time the page waits to be woken at changed, and no frame took it: the pane arms its
+    /// clock for the time the page names now (`bt_gpu::DisplayLink::rearm_page`), with no frame
+    /// drawn for it. A page that asks nothing never says so.
+    pub wake: bool,
 }
 
 /// The fonts opened and the lines shaped so far. They outlive a build: a page is laid out

@@ -76,7 +76,8 @@ use objc2_foundation::{
     NSUserDefaults, ns_string,
 };
 use objc2_quartz_core::{
-    CAMetalLayer, CATransaction, kCAGravityBottomLeft, kCAGravityResize, kCAGravityTopLeft,
+    CACurrentMediaTime, CAMetalLayer, CATransaction, kCAGravityBottomLeft, kCAGravityResize,
+    kCAGravityTopLeft,
 };
 
 use crate::card::{self, FrameBox};
@@ -2130,6 +2131,10 @@ pub struct PaneIvars {
     /// program opened: whose it is, the handle its input goes by, the filter's text field, the
     /// pointer's tracking area (`crate::native_page`).
     page_up: RefCell<Option<crate::native_page::Page>>,
+    /// The clock that wakes the page up while the pane is not seen and draws no frames
+    /// ([`TerminalPane::wake_unseen_page`]): the number of the delayed block that is the one, and
+    /// the time it was armed for (`None`: none is armed).
+    unseen_wake: Cell<(u64, Option<f64>)>,
     /// The deadlines set on the conversation with that program's view
     /// ([`TerminalPane::wait_for_view`]).
     view_waits: RefCell<Waits>,
@@ -2866,6 +2871,7 @@ impl TerminalPane {
             pencere: RefCell::new(None),
             page_strip: RefCell::new(None),
             page_up: RefCell::new(None),
+            unseen_wake: Cell::new((0, None)),
             view_waits: RefCell::new(Waits::default()),
             view_owed: RefCell::new(None),
             view_asking: pencere_view::ask::Asking::default(),
@@ -3020,6 +3026,9 @@ impl TerminalPane {
             link.set_visible(visible && !self.shows_web_view());
         }
         self.set_visible(visible);
+        // A page up that waits for a wake is woken from the pane's own clock now that its frames
+        // stop.
+        self.wake_unseen_page();
     }
 
     /// Gives the keyboard to the pane: its terminal view becomes its window's
@@ -6136,7 +6145,55 @@ impl TerminalPane {
             && let Some(link) = self.link()
         {
             link.poke_page();
+        } else if drained.wake
+            && let Some(link) = self.link()
+        {
+            // A reply asked the page to be woken and nothing is to be drawn now: the link's
+            // clock is armed for the time, and the frame it comes at wakes the page.
+            link.rearm_page();
         }
+        self.wake_unseen_page();
+    }
+
+    /// A pane that is not seen draws no frames, so the page up is woken from here instead: at the
+    /// time it asked to be woken at, a second after its last wake at the soonest, and by the frames
+    /// again once the pane is seen (the kit's specification, §4: held, never dropped). One delayed
+    /// block on the main queue, for the time the page names now, and none while it waits for no
+    /// wake: a covered page that asks nothing costs nothing.
+    fn wake_unseen_page(&self) {
+        if self.ivars().seen.get() || self.is_closed() {
+            return;
+        }
+        let Some(handle) = self.page_handle() else {
+            return;
+        };
+        // The frames' clock: the base of the link's tick stamps.
+        let now = CACurrentMediaTime();
+        let Some(at) = handle.wake_unseen(now) else {
+            return;
+        };
+        let (number, armed) = self.ivars().unseen_wake.get();
+        if armed == Some(at) {
+            return;
+        }
+        let Ok(delay) = Duration::try_from_secs_f64((at - now).max(0.0)) else {
+            return;
+        };
+        let number = number.wrapping_add(1);
+        self.ivars().unseen_wake.set((number, Some(at)));
+        self.after_on_main(number, delay, Self::unseen_wake_due);
+    }
+
+    /// The clock [`TerminalPane::wake_unseen_page`] armed ran out: if it is still the one, what the
+    /// page said meanwhile is taken and the page woken if its time has come — and the next armed,
+    /// where it waits for one.
+    fn unseen_wake_due(&self, number: u64) {
+        let (armed, _) = self.ivars().unseen_wake.get();
+        if armed != number {
+            return;
+        }
+        self.ivars().unseen_wake.set((number, None));
+        self.drain_page();
     }
 
     /// Does what a page said back: a frame of it when it changed, the menu it asked for, the
@@ -8220,6 +8277,58 @@ mod tests {
         let reply = body("    fn apply_page_reply(");
         assert!(reply.contains("if !self.program_page_up() {"), "{reply}");
         assert!(!reply.contains("close_view"), "{reply}");
+    }
+
+    /// A page's wakes come from the frames while its pane is seen and from the pane's own clock
+    /// while it is not (the kit's specification, §4): a wake a reply asks between frames arms the
+    /// link's clock and draws nothing, a pane that is covered wakes the page itself on the frames'
+    /// clock and arms nothing for a page that waits for no wake, and a pane that becomes covered
+    /// takes over from its frames at once. A source scan: what it guards needs a window server and
+    /// a pane that is covered with a page up.
+    #[test]
+    fn a_pages_wakes_come_from_the_frames_while_it_is_seen_and_the_panes_clock_while_it_is_not() {
+        let pane = include_str!("pane.rs");
+        let pane = &pane[..pane.find("#[cfg(test)]").unwrap_or(pane.len())];
+        let body = |signature: &str| {
+            let at = pane.find(signature).expect(signature);
+            &pane[at..at + pane[at..].find("\n    }\n").expect("its end")]
+        };
+        let drain = body("    pub(crate) fn drain_page(");
+        let redraw = drain
+            .find("if drained.redraw")
+            .expect("a frame for what changed");
+        let wake = drain
+            .find("} else if drained.wake")
+            .expect("a wake that is no frame");
+        assert!(redraw < wake, "{drain}");
+        let (frame, armed) = drain[redraw..].split_at(wake - redraw);
+        assert!(frame.contains("link.poke_page()"), "{drain}");
+        assert!(armed.contains("link.rearm_page()"), "{drain}");
+        assert!(
+            !armed.contains("poke_page"),
+            "a wake alone is not a frame: {drain}"
+        );
+        assert!(drain.contains("self.wake_unseen_page();"), "{drain}");
+        let unseen = body("    fn wake_unseen_page(");
+        assert!(unseen.contains("if self.ivars().seen.get()"), "{unseen}");
+        assert!(unseen.contains("handle.wake_unseen(now)"), "{unseen}");
+        assert!(unseen.contains("CACurrentMediaTime()"), "{unseen}");
+        assert!(
+            unseen.contains("let Some(at) = handle.wake_unseen(now) else {\n            return;"),
+            "nothing is armed for a page that waits for no wake: {unseen}"
+        );
+        assert!(unseen.contains("Self::unseen_wake_due"), "{unseen}");
+        let due = body("    fn unseen_wake_due(");
+        assert!(due.contains("if armed != number {"), "{due}");
+        assert!(due.contains("self.drain_page()"), "{due}");
+        let visibility = body("    pub fn set_visibility(");
+        let seen = visibility
+            .find("self.set_visible(visible)")
+            .expect("the pane's seen");
+        let woken = visibility
+            .find("self.wake_unseen_page()")
+            .expect("the clock takes over");
+        assert!(seen < woken, "{visibility}");
     }
 
     /// A page sets the pointer's shape only while the pointer is over the page itself. The window

@@ -27,6 +27,11 @@ of every installed copy. A version without a section is not released.
   what ⌥ types on your keyboard (`@`, `[`, `{`, `|`) is typed. Cut, Copy, Paste, Select All and
   Undo are the editor's while it has the keyboard; the caret blinks, and stops after a while as
   the terminal's does. VoiceOver reads the editor as a text area: its text and what is selected.
+- **A native view goes on working when you do nothing.** A page can ask to be woken after a
+  while, and set timers on it: a long file is coloured to its end without a key pressed, a save
+  waits for the typing to stop, a clock ticks. bateri wakes it when it asks and no more often than
+  it draws a frame; in a tab you are not looking at, or a window that is covered, at most once a
+  second, and no wake is lost. A page that asks for nothing still costs nothing.
 - **A program's native view is as large as your text, and more of it works.** A view a
   program draws with the pencere kit (dockerpen's, for one) is drawn as large as the
   terminal's text and grows and shrinks with ⌘+ and ⌘−. It can have as many text fields as

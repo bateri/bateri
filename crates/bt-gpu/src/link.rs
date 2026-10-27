@@ -3107,6 +3107,33 @@ impl DisplayLink {
         self.waker.resume();
     }
 
+    /// The shown page at rest names another time for its next frame than
+    /// the frame it last drew did, and nothing of it is to be drawn now: what
+    /// it learned between frames (its module asked to be woken, in a reply
+    /// to something done). The link keeps the time the page names now
+    /// ([`UiPage::wake_at`]) and arms its clock for it, as the frame would
+    /// have; **no frame is asked for**, so a page that asks to be woken costs
+    /// the frame it is woken at and no other. A page that is moving asks for
+    /// every frame and reads the time itself when it comes to rest; a call
+    /// from inside the page's own build is the build's, which reads it when it
+    /// is done. Main thread, like every call here.
+    pub fn rearm_page(&self) {
+        let core = &self.core;
+        let due = {
+            let Ok(slot) = core.page.try_borrow() else {
+                return;
+            };
+            match slot.as_ref() {
+                Some(page) if !page.animating() => page.wake_at(),
+                _ => return,
+            }
+        };
+        core.page_frames.wake_at(due);
+        // It voids the wakeup armed before (the same generation), and arms none for a page
+        // that names no time.
+        core.arm_page_clock(self.waker.pacer().now());
+    }
+
     /// Shows `page` over the terminal — its list is painted in place of the
     /// grid — or, with `None`, takes it down and the terminal's frames come
     /// back. Either way a frame is asked for: what was drawn is no longer
