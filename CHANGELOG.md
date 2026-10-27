@@ -32,6 +32,9 @@ of every installed copy. A version without a section is not released.
   waits for the typing to stop, a clock ticks. bateri wakes it when it asks and no more often than
   it draws a frame; in a tab you are not looking at, or a window that is covered, at most once a
   second, and no wake is lost. A page that asks for nothing still costs nothing.
+- **A native view can open a link in your browser.** As a web view can: bateri asks you first,
+  with the same question, opens only `http` and `https` addresses, and the page is not told what
+  you answered.
 - **A program's native view is as large as your text, and more of it works.** A view a
   program draws with the pencere kit (dockerpen's, for one) is drawn as large as the
   terminal's text and grows and shrinks with ⌘+ and ⌘−. It can have as many text fields as

@@ -1299,6 +1299,53 @@ fn a_link_the_page_asks_for_is_put_to_the_person_and_the_page_is_never_answered(
         conversation.link_decision(*link, true)
     });
     assert!(lock(&input).is_empty());
+    // A web page's link is its message, not a view the terminal draws asking.
+    desk.apply(write, |conversation| {
+        conversation.module_link("https://example.com/other")
+    });
+    assert!(desk.take_views().is_empty());
+}
+
+/// The link of a native page's reply is put to the person as a web page's link is, by the same
+/// rule and the same question, and the shell hears of it as of every view's news; the program
+/// is written nothing and the page told nothing. What the session does with a page's reply
+/// (`Session::module_link`) is this, on the pane's desk.
+#[test]
+fn a_link_a_native_view_asks_for_is_put_to_the_person_as_a_web_pages_is() {
+    let (pane, _, wake) = open_a_module_view();
+    let desk = pane.rig.desk.as_ref().expect("a desk");
+    desk.take_views();
+    let write = pane.rig.write();
+    let before = wake_count(&wake);
+
+    // Not an address a page may open: nobody is asked, and the shell hears of nothing.
+    for url in ["file:///etc/passwd", "javascript:alert(1)", "https://a b"] {
+        desk.apply(&write, |conversation| conversation.module_link(url));
+        assert!(desk.take_views().is_empty(), "{url}");
+    }
+    assert_eq!(wake_count(&wake), before);
+
+    desk.apply(&write, |conversation| {
+        conversation.module_link("https://example.com/docs")
+    });
+    assert_eq!(wake_count(&wake), before + 1, "the shell is told");
+    let asked = desk.take_views();
+    let [Action::OpenLink { link, url }] = asked.as_slice() else {
+        panic!("one link to ask about, got {asked:?}");
+    };
+    assert_eq!(url, "https://example.com/docs");
+    desk.apply(&write, |conversation| {
+        conversation.link_decision(*link, true)
+    });
+    assert!(desk.take_views().is_empty());
+    assert!(pane.rig.written().is_empty(), "the program hears nothing");
+    // A web page's link message is not a native view's to send.
+    desk.view_message(
+        r#"{"link":{"url":"https://example.com/docs"}}"#,
+        &write,
+        &write,
+    );
+    assert!(desk.take_views().is_empty());
 }
 
 #[test]

@@ -11919,6 +11919,17 @@ impl Session {
             .view(|conversation| conversation.link_decision(link, allow));
     }
 
+    /// A link a view the terminal draws itself asks to open: the `link` of its page's reply,
+    /// which is the host's and not one of the messages to the program. It is held to the rule a
+    /// web page's `link` is held to and asked about the same way ([`pencere::Action::OpenLink`],
+    /// answered with [`Self::view_link_decision`]): an `http` or `https` address while such a
+    /// view is open and not too many questions are; anything else is dropped. Nothing reaches the
+    /// program, and the view is never answered.
+    pub fn module_link(&self, url: &str) {
+        self.adapter
+            .view(|conversation| conversation.module_link(url));
+    }
+
     /// The person closes the view; the program is told once it is gone.
     pub fn close_view(&self) {
         self.adapter.view(pencere::Conversing::close_view);

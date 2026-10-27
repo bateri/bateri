@@ -6197,7 +6197,7 @@ impl TerminalPane {
     }
 
     /// Does what a page said back: a frame of it when it changed, the menu it asked for, the
-    /// keyboard in its field, text on the pasteboard, the pointer's shape, its end.
+    /// keyboard in its field, text on the pasteboard, the pointer's shape, a link to open, its end.
     fn apply_page_reply(&self, reply: Reply, pointer: bool) {
         if reply.close {
             // A debug demo is the person's to close (Esc is its key for it). A program's view
@@ -6250,6 +6250,16 @@ impl TerminalPane {
         }
         if let Some(text) = reply.copy {
             clipboard::copy(&NSPasteboard::generalPasteboard(), Some(text));
+        }
+        // A link the page asks to open goes the way a web view's goes: to the session that holds
+        // the program's view, which holds it to the same rule and asks the person the same
+        // question (`Action::OpenLink`, `drain_views`), and opens it in the same browser. A debug
+        // demo has no program's view to ask for it.
+        if let Some(url) = &reply.link
+            && self.program_page_up()
+            && let Some(session) = self.session()
+        {
+            session.module_link(url);
         }
         // Last: the menu holds this call until the person has chosen.
         if let Some(menu) = reply.menu {
@@ -8329,6 +8339,49 @@ mod tests {
             .find("self.wake_unseen_page()")
             .expect("the clock takes over");
         assert!(seen < woken, "{visibility}");
+    }
+
+    /// A link a page of the kit asks to open takes a web view's way: the session holds it to the
+    /// same rule and raises the same question (`Action::OpenLink`), which the pane puts to the
+    /// person by the one path a web view's link takes, and only for the program's page; the web
+    /// view's own link still goes to the session as its message. A source scan: what it guards
+    /// needs a window server and a program's view.
+    #[test]
+    fn a_link_a_page_asks_to_open_is_asked_about_and_opened_as_a_web_views_is() {
+        let pane = include_str!("pane.rs");
+        let pane = &pane[..pane.find("#[cfg(test)]").unwrap_or(pane.len())];
+        let body = |signature: &str| {
+            let at = pane.find(signature).expect(signature);
+            &pane[at..at + pane[at..].find("\n    }\n").expect("its end")]
+        };
+        let reply = body("    fn apply_page_reply(");
+        let asked = reply
+            .find("session.module_link(url)")
+            .expect("the page's link");
+        assert!(reply.contains("if let Some(url) = &reply.link"), "{reply}");
+        assert!(
+            reply[..asked].contains("&& self.program_page_up()"),
+            "{reply}"
+        );
+        // Before the menu, which holds the call until the person has chosen.
+        assert!(
+            asked < reply.find("show_page_menu").expect("the menu"),
+            "{reply}"
+        );
+        assert_eq!(
+            pane.matches("module_link(").count(),
+            1,
+            "nothing else asks for a page's link"
+        );
+        // One question for both kinds of view.
+        let views = body("    pub(crate) fn drain_views(");
+        assert!(
+            views.contains("pencere_view::ask::link(self, &session, link, &url, &origin)"),
+            "{views}"
+        );
+        assert_eq!(pane.matches("ask::link(").count(), 1);
+        let web = include_str!("pencere_view.rs");
+        assert!(web.contains("self.ivars().session.view_message(&text.to_string())"));
     }
 
     /// A page sets the pointer's shape only while the pointer is over the page itself. The window
