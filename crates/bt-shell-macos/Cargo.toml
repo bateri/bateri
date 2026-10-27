@@ -168,6 +168,10 @@ objc2-foundation = { workspace = true, features = [
 # the shortcut recorder draws with `NSBezierPath` and hears `NSEvent`s already on above, and
 # a table's rows are laid out by their own height (`usesAutomaticRowHeights`) with the
 # `NSTableView` flags the sidebar has. Only header flags; `Cargo.lock` did not move.
+# An editor of a page has the terminal view's input method (`native_page`, `view`): a click ends
+# what it composes and the system forgets it (`discardMarkedText`), and a caret that moved moves
+# the input method's window (`invalidateCharacterCoordinates`), both `NSTextInputContext`'s. Only
+# a header flag over headers already in the set; `Cargo.lock` did not move.
 objc2-app-kit = { workspace = true, features = [
     "NSSegmentedControl", "NSSegmentedCell", "NSAccessibility", "NSAlert", "NSAppearance", "NSBox", "NSButton", "NSCell", "NSClipView",
     "NSColor", "NSControl", "NSDragging", "NSFont", "NSFontDescriptor", "NSGridView", "NSImage",
@@ -185,7 +189,7 @@ objc2-app-kit = { workspace = true, features = [
     "NSToolbar", "NSBezierPath", "NSAccessibilityConstants", "NSAccessibilityProtocols",
     "NSGradient", "NSPasteboardItem", "NSStringDrawing", "NSVisualEffectView",
     "NSGraphicsContext", "NSAffineTransform", "objc2-core-graphics", "NSGraphics", "NSImageRep",
-    "NSBitmapImageRep", "NSAccessibilityElement",
+    "NSBitmapImageRep", "NSAccessibilityElement", "NSTextInputContext",
 ] }
 # Only for the CALayer type: NSView::setLayer(Option<&CALayer>) wants it.
 # The layer rules record this as "only attaching a CALayer".

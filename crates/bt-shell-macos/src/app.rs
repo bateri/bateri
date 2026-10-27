@@ -3776,9 +3776,10 @@ impl AppDelegate {
         };
         // A field being edited (the search panel, a tab's name) has ⌘Z to
         // itself: typing never moves a split. So has a program's view that has the
-        // keyboard: Undo is Edit's, and Edit is the content's. Where the keyboard is,
-        // not which pane is focused: a pane that shows a view while the keyboard is
-        // elsewhere (the tab bar, a field of the window) has no ⌘Z of its own to keep.
+        // keyboard, and an editor of a page that has it: Undo is Edit's, and Edit is
+        // the content's. Where the keyboard is, not which pane is focused: a pane that
+        // shows a view while the keyboard is elsewhere (the tab bar, a field of the
+        // window) has no ⌘Z of its own to keep.
         let window = key.ns_window();
         let editing = window
             .firstResponder()
@@ -3787,10 +3788,9 @@ impl AppDelegate {
         // view is kept from.
         let content =
             bt_shell_common::shortcuts::by_id("undoMove").is_some_and(|command| command.content);
-        if undo_is_not_ours(
-            editing,
-            content && crate::pencere_view::keyboard_in_view(window),
-        ) {
+        let in_content = crate::pencere_view::keyboard_in_view(window)
+            || crate::native_page::keyboard_in_page_editor(window);
+        if undo_is_not_ours(editing, content && in_content) {
             return false;
         }
         let stale = match self.ivars().undo.borrow().as_ref() {

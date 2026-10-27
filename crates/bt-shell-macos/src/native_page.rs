@@ -16,6 +16,11 @@
 //! A page is up for one of two owners ([`Owner`]): a debug build's demo of the kit (`Debug ▸
 //! Show Container List Demo`), whose button and ⌃C close it, or the view a program opened — a
 //! module the program sent — whose ⌃C and button go to the program, which ends it.
+//!
+//! **A page's editors are drawn by the page** (`bt_shell_common::native_view`), not by AppKit: the
+//! keyboard stays in the terminal's view, which hands the editor with the keyboard its keys, its
+//! input method and its pasteboard (`TerminalPane::page_editor_key`, the view's text input), and a
+//! screen reader reads each editor as a text area ([`PageEditorElement`]).
 
 use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
@@ -34,12 +39,16 @@ use objc2_app_kit::{
     NSAccessibilityElement, NSAccessibilityImageRole, NSAccessibilityLayoutChangedNotification,
     NSAccessibilityLinkRole, NSAccessibilityMenuItemRole, NSAccessibilityPostNotification,
     NSAccessibilityProgressIndicatorRole, NSAccessibilityRadioButtonRole, NSAccessibilityRole,
-    NSAccessibilitySliderRole, NSAccessibilityStaticTextRole, NSAccessibilitySubrole,
-    NSAccessibilitySwitchSubrole, NSAccessibilityTabButtonSubrole, NSAutoresizingMaskOptions,
-    NSColor, NSControl, NSEventModifierFlags, NSFocusRingType, NSFont, NSLineBreakMode,
-    NSResponder, NSSecureTextFieldCell, NSTextField, NSTrackingArea, NSTrackingAreaOptions, NSView,
+    NSAccessibilitySelectedTextChangedNotification, NSAccessibilitySliderRole,
+    NSAccessibilityStaticTextRole, NSAccessibilitySubrole, NSAccessibilitySwitchSubrole,
+    NSAccessibilityTabButtonSubrole, NSAccessibilityTextAreaRole,
+    NSAccessibilityValueChangedNotification, NSAutoresizingMaskOptions, NSColor, NSControl,
+    NSEvent, NSEventModifierFlags, NSFocusRingType, NSFont, NSLineBreakMode, NSResponder,
+    NSSecureTextFieldCell, NSTextField, NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow,
 };
-use objc2_foundation::{NSNumber, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
+use objc2_foundation::{
+    NSInteger, NSNumber, NSObject, NSObjectProtocol, NSPoint, NSRange, NSRect, NSSize, NSString,
+};
 
 use crate::pane::TerminalPane;
 use crate::pencere_view::face::Faces;
@@ -383,6 +392,9 @@ impl PageFields {
     /// the page says it is ([`accessibility_role`]) and with its state: checked, chosen, open, of
     /// no use now, the value it shows.
     fn element_of(&self, pane: &TerminalPane, item: &Accessible) -> Option<Retained<AnyObject>> {
+        if item.role == AccessibleRole::Editor {
+            return editor_element(pane, item);
+        }
         if let AccessibleRole::Field(_) = item.role {
             let field = self.field(item.id?)?;
             return Some(Retained::into_super(Retained::into_super(
@@ -461,6 +473,27 @@ impl PageFields {
     /// What a screen reader is given of the page, in the order it reads it.
     pub(crate) fn elements(&self) -> Vec<Retained<AnyObject>> {
         self.elements.borrow().clone()
+    }
+
+    /// The editor named `id` may have changed its text or moved its selection: a screen reader is
+    /// told, of the text area it reads it as.
+    pub(crate) fn editor_changed(&self, id: Id) {
+        let elements = self.elements.borrow();
+        let Some(element) = elements.iter().find_map(|element| {
+            element
+                .downcast_ref::<PageEditorElement>()
+                .filter(|element| element.ivars().id == id)
+        }) else {
+            return;
+        };
+        // SAFETY: the element is one of the accessibility tree's, and the names are AppKit's.
+        unsafe {
+            NSAccessibilityPostNotification(element, NSAccessibilityValueChangedNotification);
+            NSAccessibilityPostNotification(
+                element,
+                NSAccessibilitySelectedTextChangedNotification,
+            );
+        }
     }
 
     /// The field named `id`.
@@ -648,6 +681,130 @@ define_class!(
     }
 );
 
+/// What a text area a screen reader is given for an editor keeps: the editor's name, and the pane
+/// whose page has it.
+pub(crate) struct PageEditorElementIvars {
+    id: Id,
+    pane: WeakId<TerminalPane>,
+}
+
+define_class!(
+    // SAFETY: NSAccessibilityElement is designed for subclassing; PageEditorElement implements no
+    // `Drop` and is born with `init`.
+    #[unsafe(super(NSAccessibilityElement, NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "BateriPageEditorElement"]
+    #[ivars = PageEditorElementIvars]
+    pub(crate) struct PageEditorElement;
+
+    impl PageEditorElement {
+        /// The editor's text, as it is now (the page's editor keeps it, not the element).
+        #[unsafe(method_id(accessibilityValue))]
+        fn accessibility_value(&self) -> Option<Retained<NSString>> {
+            self.contents()
+                .map(|(text, _)| NSString::from_str(&text))
+        }
+
+        /// How long the text is, in the units of UTF-16 the ranges below count.
+        #[unsafe(method(accessibilityNumberOfCharacters))]
+        fn accessibility_number_of_characters(&self) -> NSInteger {
+            NSInteger::try_from(self.length()).unwrap_or(NSInteger::MAX)
+        }
+
+        /// The main selection: where it starts and how long it is.
+        #[unsafe(method(accessibilitySelectedTextRange))]
+        fn accessibility_selected_text_range(&self) -> NSRange {
+            self.contents()
+                .map_or(NSRange::new(0, 0), |(_, (start, len))| NSRange::new(start, len))
+        }
+
+        /// What is selected.
+        #[unsafe(method_id(accessibilitySelectedText))]
+        fn accessibility_selected_text(&self) -> Option<Retained<NSString>> {
+            self.selected_text()
+        }
+
+        /// What of it the screen reader may read as shown: all of it (the editor scrolls it).
+        #[unsafe(method(accessibilityVisibleCharacterRange))]
+        fn accessibility_visible_character_range(&self) -> NSRange {
+            NSRange::new(0, self.length())
+        }
+
+        /// Whether the editor has the keyboard.
+        #[unsafe(method(isAccessibilityFocused))]
+        fn accessibility_focused(&self) -> bool {
+            // No `return`: `define_class!` converts the `bool` at the end of the body.
+            self.ivars()
+                .pane
+                .load()
+                .and_then(|pane| pane.page_editing())
+                .is_some_and(|editors| editors.focused() == Some(self.ivars().id))
+        }
+    }
+);
+
+impl PageEditorElement {
+    /// The editor's text and its main selection (units of UTF-16), from the page's editors.
+    fn contents(&self) -> Option<(String, (usize, usize))> {
+        let pane = self.ivars().pane.load()?;
+        pane.page_editors()?.contents(self.ivars().id)
+    }
+
+    /// How long its text is, units of UTF-16.
+    fn length(&self) -> usize {
+        self.contents()
+            .map_or(0, |(text, _)| text.encode_utf16().count())
+    }
+
+    /// What it has selected.
+    fn selected_text(&self) -> Option<Retained<NSString>> {
+        let (text, (start, len)) = self.contents()?;
+        let units: Vec<u16> = text.encode_utf16().skip(start).take(len).collect();
+        Some(NSString::from_str(&String::from_utf16_lossy(&units)))
+    }
+}
+
+/// The text area a screen reader is given for the editor `item` is: where it stands in the pane,
+/// what the page says of it (its hint), and its text and selection read from the editor when asked.
+fn editor_element(pane: &TerminalPane, item: &Accessible) -> Option<Retained<AnyObject>> {
+    let id = item.id?;
+    let element = PageEditorElement::alloc(pane.mtm()).set_ivars(PageEditorElementIvars {
+        id,
+        pane: WeakId::new(pane),
+    });
+    // SAFETY: `init` is NSObject's designated initializer and the ivars are set.
+    let element: Retained<PageEditorElement> = unsafe { msg_send![super(element), init] };
+    // SAFETY: the role is AppKit's own constant; the parent is the pane, a view that outlives the
+    // element (the element goes with the page's outline).
+    unsafe {
+        element.setAccessibilityRole(Some(NSAccessibilityTextAreaRole));
+        element.setAccessibilityParent(Some(pane));
+    }
+    element.setAccessibilityLabel(Some(&NSString::from_str(&item.words)));
+    element.setAccessibilityEnabled(!item.state.disabled);
+    // The pane's own coordinates grow upward, the page's downward.
+    let rect = item.rect;
+    let height = pane.bounds().size.height;
+    element.setAccessibilityFrameInParentSpace(NSRect::new(
+        NSPoint::new(f64::from(rect.x), height - f64::from(rect.y + rect.h)),
+        NSSize::new(f64::from(rect.w), f64::from(rect.h)),
+    ));
+    Some(Retained::into_super(Retained::into_super(
+        Retained::into_super(element),
+    )))
+}
+
+/// Whether the keyboard of `window` is in an editor of a page of the kit: in the terminal's view of
+/// a pane whose page has an editor with the keyboard. Edit's Undo is the editor's then, not the
+/// application's undoing of a move.
+pub(crate) fn keyboard_in_page_editor(window: &NSWindow) -> bool {
+    window
+        .firstResponder()
+        .and_then(|responder| responder.downcast::<crate::view::BateriView>().ok())
+        .and_then(|view| view.pane())
+        .is_some_and(|pane| pane.page_editing().is_some())
+}
+
 /// AppKit's role, and subrole where one says more, for what the page says an element is.
 fn accessibility_role(
     role: AccessibleRole,
@@ -674,6 +831,7 @@ fn accessibility_role(
             AccessibleRole::Image => (NSAccessibilityImageRole, None),
             AccessibleRole::Progress => (NSAccessibilityProgressIndicatorRole, None),
             AccessibleRole::Slider => (NSAccessibilitySliderRole, None),
+            AccessibleRole::Editor => (NSAccessibilityTextAreaRole, None),
             AccessibleRole::Text | AccessibleRole::Heading(_) | AccessibleRole::Field(_) => {
                 (NSAccessibilityStaticTextRole, None)
             }
@@ -948,6 +1106,30 @@ pub(crate) fn mods_of(flags: NSEventModifierFlags) -> Mods {
     }
 }
 
+/// The key `event` is for an editor of a page, and the modifiers held ([`editor_key`]). `None` for
+/// a key that makes none (the first stroke of a dead key has no characters): it is the system's
+/// handling of text's.
+pub(crate) fn editor_key_of(event: &NSEvent) -> Option<(Key, Mods)> {
+    let mods = mods_of(event.modifierFlags());
+    let characters = event.characters().map(|text| text.to_string());
+    let ignoring = event
+        .charactersIgnoringModifiers()
+        .map(|text| text.to_string());
+    let key = editor_key(characters.as_deref(), ignoring.as_deref(), mods)?;
+    Some((key, mods))
+}
+
+/// The key `characters` make for an editor ([`key_of`]), with `mods` held: ⇧⇥ makes the backtab
+/// character, which is ⌃Y's too, and is the tab with ⇧; where ⌃ makes a control character (⌃A,
+/// ⌃K), the key is the one without the modifiers (`ignoring`).
+fn editor_key(characters: Option<&str>, ignoring: Option<&str>, mods: Mods) -> Option<Key> {
+    let key = match characters {
+        Some("\u{19}") if mods.shift && !mods.control => Some(Key::Tab),
+        other => other.and_then(key_of),
+    };
+    key.or_else(|| mods.control.then(|| ignoring.and_then(key_of)).flatten())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1034,6 +1216,50 @@ mod tests {
         assert_eq!(key_of("\u{1}"), None);
         assert_eq!(key_of(""), None);
         assert_eq!(key_of("ab"), None);
+    }
+
+    #[test]
+    fn an_editor_reads_shift_tab_and_the_control_letters_as_their_keys() {
+        let shift = Mods {
+            shift: true,
+            ..Mods::default()
+        };
+        let control = Mods {
+            control: true,
+            ..Mods::default()
+        };
+        // ⇧⇥ is the tab with ⇧; ⌃Y, which makes the same character, is not.
+        assert_eq!(
+            editor_key(Some("\u{19}"), Some("\t"), shift),
+            Some(Key::Tab)
+        );
+        assert_eq!(
+            editor_key(Some("\u{19}"), Some("y"), control),
+            Some(Key::Character('y'))
+        );
+        // ⌃A and ⌃K are their letters; what ⌥ makes is itself.
+        assert_eq!(
+            editor_key(Some("\u{1}"), Some("a"), control),
+            Some(Key::Character('a'))
+        );
+        assert_eq!(
+            editor_key(Some("\u{b}"), Some("k"), control),
+            Some(Key::Character('k'))
+        );
+        let alt = Mods {
+            alt: true,
+            ..Mods::default()
+        };
+        assert_eq!(
+            editor_key(Some("@"), Some("q"), alt),
+            Some(Key::Character('@'))
+        );
+        // A dead key's first stroke makes nothing: the system's text has it.
+        assert_eq!(editor_key(Some(""), Some("e"), alt), None);
+        assert_eq!(
+            editor_key(Some("\u{7f}"), Some("\u{7f}"), alt),
+            Some(Key::Backspace)
+        );
     }
 
     #[test]
