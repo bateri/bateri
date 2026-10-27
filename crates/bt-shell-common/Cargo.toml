@@ -22,6 +22,9 @@ bt-gpu = { workspace = true }
 pencere-view = { workspace = true }
 # The sandbox a page module runs in (`native_view::module`): platformless, like the engine.
 pencere-sandbox = { workspace = true }
+# The editor of text a page puts in its room (`native_view::editing`): platformless, like the
+# engine it is written on.
+pencere-editor = { workspace = true }
 # The passwd entry (`child`, `getpwuid_r`), the process table (`jobs`: the
 # `libproc` half and `sysctl(KERN_PROCARGS2)` on macOS), `upload`'s
 # `kill`/`waitid` and `watch` (`O_EVTONLY` on macOS; inotify, `eventfd`

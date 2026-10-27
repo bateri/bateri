@@ -139,6 +139,14 @@ pub(crate) trait FontSystem {
         None
     }
 
+    /// Where a caret stands at each of the places `at` (byte offsets of
+    /// `text`, in order) of `text` shaped as one line from `font`, pixels
+    /// from the line's start: what an editor puts its carets and its
+    /// selections by, one line shaped for all of them.
+    fn caret_offsets(_font: &Self::Font, _text: &str, _at: &[usize]) -> Option<Vec<f64>> {
+        None
+    }
+
     /// Draws one glyph's coverage into a tight bitmap, its origin shifted
     /// right by `sub` pixels (`0.0 <= sub < 1.0`): the horizontal sub-pixel
     /// position the text atlas keys on. `None` for a glyph with no ink

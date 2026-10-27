@@ -98,11 +98,11 @@ fmt:
 #   Two commits would put two kablo versions in one build — the parser bateri
 #   decodes the stream with and the format it speaks to the relay would no longer
 #   come from the same source — and nothing but this line would say so.
-# - `pencere-host`, `pencere-view` and `pencere-sandbox` (the protocol a program speaks to
-#   show a view in its pane, and the kit its native views are made with) are crates of
-#   their own repository, not kablo's: Cargo.toml pins each by a full commit hash and they
-#   resolve to github.com/bateri/pencere at that hash. The three share one `rev` (one
-#   pencere, one protocol, one engine), and every crate of that repository in the build
+# - `pencere-host`, `pencere-view`, `pencere-sandbox` and `pencere-editor` (the protocol a
+#   program speaks to show a view in its pane, and the kit its native views are made with)
+#   are crates of their own repository, not kablo's: Cargo.toml pins each by a full commit
+#   hash and they resolve to github.com/bateri/pencere at that hash. The four share one
+#   `rev` (one pencere, one protocol, one engine, one editor), and every crate of that repository in the build
 #   (`pencere-wire` too, which the host and the sandbox bring) comes from it: a path or a
 #   registry copy of the kit would be a second copy that drifts. They stay out of the kablo
 #   rule above, because it is another repository with its own commits — one hash for the
@@ -135,13 +135,13 @@ audit:
 	done; \
 	if [ "$$(echo $$kablo_revs | tr ' ' '\n' | sort -u | wc -l | tr -d ' ')" != "1" ]; then echo "audit: vte, alacritty_terminal and kablo-proto are not pinned by one kablo commit (rev):$$kablo_revs"; fail=1; fi; \
 	pencere_tree=$$($(CARGO) tree --workspace -e normal,dev); pencere_revs=""; \
-	for crate in pencere-host pencere-view pencere-sandbox pencere; do \
+	for crate in pencere-host pencere-view pencere-sandbox pencere-editor pencere; do \
 		pencere_rev=$$(sed -n 's/^'"$$crate"' = { git = "https:\/\/github.com\/bateri\/pencere", rev = "\([0-9a-f]\{40\}\)" }$$/\1/p' Cargo.toml); \
 		pencere_revs="$$pencere_revs $$pencere_rev"; \
 		if [ -z "$$pencere_rev" ]; then echo "audit: Cargo.toml does not pin $$crate with a full commit hash (rev) of github.com/bateri/pencere"; fail=1; \
 		elif ! echo "$$pencere_tree" | grep -qE "(^|[ ─])$$crate v[0-9.]+ \(https://github.com/bateri/pencere\?rev=$$pencere_rev#"; then echo "audit: $$crate does not resolve to github.com/bateri/pencere at rev $$pencere_rev"; fail=1; fi; \
 	done; \
-	if [ "$$(echo $$pencere_revs | tr ' ' '\n' | sort -u | wc -l | tr -d ' ')" != "1" ]; then echo "audit: pencere-host, pencere-view, pencere-sandbox and pencere are not pinned by one pencere commit (rev):$$pencere_revs"; fail=1; fi; \
+	if [ "$$(echo $$pencere_revs | tr ' ' '\n' | sort -u | wc -l | tr -d ' ')" != "1" ]; then echo "audit: pencere-host, pencere-view, pencere-sandbox, pencere-editor and pencere are not pinned by one pencere commit (rev):$$pencere_revs"; fail=1; fi; \
 	if echo "$$pencere_tree" | grep -E "(^|[ ─])pencere(-[a-z]+)? v[0-9.]+" | grep -vE "\(https://github.com/bateri/pencere\?rev=[0-9a-f]{40}#"; then echo "audit: a crate of pencere is in the build from somewhere other than github.com/bateri/pencere at a pinned commit — the kit is taken from pencere alone"; fail=1; fi; \
 	for heavy in wasmtime zune-jpeg resvg png; do \
 		own=$$($(CARGO) tree --workspace -e normal,dev -i $$heavy --depth 1 2>/dev/null | sed -n -E 's/^.*(├──|└──) (bt-[a-z-]+|bateri) v.*$$/\2/p'); \
