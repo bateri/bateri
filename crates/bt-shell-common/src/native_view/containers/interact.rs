@@ -8,8 +8,8 @@
 //! changes the list itself, so a menu does something the person can see.
 
 use super::{
-    CHOSEN, Container, Containers, FIELD, GROUP_BUTTON, GROUP_GAP, HOVERED, LIST, ROW, SEARCH,
-    State, wave,
+    CHOSEN, Container, Containers, FIELD, GROUP_BUTTON, GROUP_GAP, HOVERED, ROW, SEARCH, State,
+    wave,
 };
 use pencere_view::{
     Button, Cursor, Id, Input, Key, Keyboard, Menu, MenuEntry, Mods, Point, Queries, Reply,
@@ -258,36 +258,21 @@ impl Containers {
     }
 
     /// The page was laid out as `laid`: what depends on where things stand is brought up to
-    /// date — the list's window and how far it is scrolled, what the pointer is over now that the
-    /// page moved under it. Returns whether the page has to be built and laid out again (the rows
-    /// in view depend on both).
+    /// date — the list's window, what the pointer is over now that the page moved under it.
+    /// Returns whether the page has to be built and laid out again (the list's window is one its
+    /// rows made do not fill).
     pub fn settle(&mut self, laid: &dyn Queries) -> bool {
-        let mut moved = false;
-        if let Some(extent) = laid.scroll_extent(LIST) {
-            moved = extent.view.h != self.list_view;
-            self.list_view = extent.view.h;
-            // What the page asked and the host has not done yet stands until it is done.
-            if self.asks.is_empty() {
-                moved |= extent.offset.y != self.list_offset;
-                self.list_offset = extent.offset.y;
-            }
-        }
+        let moved = self.list.settle(laid);
         if let Some(at) = self.pointer {
             self.hover_to(laid, Some(at));
         }
         moved
     }
 
-    /// The host scrolled boxes of the page: how far each is now. The rows in view are the ones
-    /// at the list's new place.
+    /// The host scrolled boxes of the page: the list is built again where what is in view comes
+    /// near the end of the rows made.
     pub fn scrolled(&mut self, boxes: &[(Id, pencere_view::Point)]) -> Reply {
-        let mut moved = false;
-        for (id, offset) in boxes {
-            if *id == LIST && offset.y != self.list_offset {
-                self.list_offset = offset.y;
-                moved = true;
-            }
-        }
+        let moved = self.list.scrolled(boxes);
         self.reply(moved)
     }
 
@@ -323,16 +308,8 @@ impl Containers {
         let Some(at) = self.cursor_at(&rows) else {
             return;
         };
-        let places = Self::places(&rows);
-        let to = places.reveal(at, self.list_offset, self.list_view);
-        if to != self.list_offset {
-            self.list_offset = to;
-            self.asks.push(pencere_view::ScrollTo {
-                id: LIST,
-                x: None,
-                y: Some(to),
-                animate: false,
-            });
+        if let Some(ask) = self.list.reveal(&Self::places(&rows), at) {
+            self.asks.push(ask);
         }
     }
 
@@ -489,7 +466,7 @@ impl Containers {
         }
         let rows = self.rows();
         let at = self.cursor_at(&rows);
-        let page = ((self.list_view / ROW) as usize).saturating_sub(1).max(1);
+        let page = ((self.list.view() / ROW) as usize).saturating_sub(1).max(1);
         let last = rows.len().saturating_sub(1);
         let move_to = |to: usize| Some(to.min(last));
         let target = match key {

@@ -669,17 +669,22 @@ fn a_list_that_shrinks_under_a_scrolled_window_comes_back_into_reach() {
     page.set_query("redis");
     let laid = lay(&mut page, 330.0);
     assert_eq!(list_offset(), 0.0);
-    assert_eq!(page.list_offset, 0.0, "and the page was told");
+    assert_eq!(page.list.offset(), 0.0, "and the page was told");
     assert!(laid.bounds(RowKey::Container("cache").id()).is_some());
 }
 
 #[test]
-fn only_the_rows_in_view_are_built_however_long_the_list_is() {
+fn only_the_rows_near_what_is_in_view_are_built_however_long_the_list_is() {
     let mut page = many(10_000);
     let size = Size::new(1000.0, 600.0);
     let built = |page: &Containers| layout(page.view(size), size, 1.0, &mut Mono).len();
     let at_top = built(&page);
-    assert!(at_top < 600, "{at_top} elements for 11 000 rows");
+    // As many elements for eleven thousand rows as for a thousand and one: a window of the list.
+    assert_eq!(
+        at_top,
+        built(&many(1_000)),
+        "the page does not grow with the list"
+    );
     // Far down the list the page is no bigger, and the rows there are the ones built.
     let laid = layout(page.view(size), size, 1.0, &mut Mono);
     let extent = laid.scroll_extent(LIST).unwrap();
@@ -696,8 +701,8 @@ fn only_the_rows_in_view_are_built_however_long_the_list_is() {
         });
     });
     let deep = lay(&mut page, 600.0);
-    assert_eq!(page.list_offset, 150_000.0, "the page was told");
-    assert!(deep.len() < 600);
+    assert_eq!(page.list.offset(), 150_000.0, "the page was told");
+    assert!(deep.len() <= at_top, "far down the page is no bigger");
     let rows = page.rows();
     let places = Containers::places(&rows);
     let first = places.at(150_000.0).unwrap();

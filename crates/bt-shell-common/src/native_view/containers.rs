@@ -9,7 +9,9 @@
 //! drops the columns that matter least, the way the list this was drawn from does, and a
 //! narrow one drops the rail too.
 
-use pencere_view::{Align, Element, Id, Role, Rows, Size, Track, Ui, div, spacer, spark, text};
+use pencere_view::{
+    Align, Element, Id, List, Role, Rows, Size, Track, Ui, div, spacer, spark, text,
+};
 
 mod interact;
 
@@ -173,10 +175,9 @@ pub struct Containers {
     /// Where the pointer last was over the page, points: the hover is asked again where it
     /// stands when the page moves under it.
     pointer: Option<pencere_view::Point>,
-    /// How tall the list's window was when the page was last laid out, points.
-    list_view: f32,
-    /// How far the host has the list scrolled, as it last said (or the page asked since), points.
-    list_offset: f32,
+    /// The list of containers: which of its rows were made, how tall its window is and how far
+    /// the host has it scrolled.
+    list: List,
     /// The scrolls the page asks of the host, not yet taken ([`Containers::take_asks`]).
     asks: Vec<pencere_view::ScrollTo>,
     /// What the entries of the menu that is up do, by entry; and the containers they do it to.
@@ -330,8 +331,7 @@ impl Containers {
             grouped: true,
             ui: Ui::default(),
             pointer: None,
-            list_view: 400.0,
-            list_offset: 0.0,
+            list: List::new(LIST),
             asks: Vec::new(),
             menu: interact::MenuState::default(),
             press_mods: pencere_view::Mods::default(),
@@ -682,26 +682,22 @@ impl Containers {
             .color(Role::Quiet)
             .children(heads);
 
-        // Only the rows in view are made; the rest of the list's length is two spacers.
+        // Only the rows near what is in view are made; the rest of the list's length is two
+        // spacers. Where no container is shown, what the list says stands where its rows would.
         let rows = self.rows();
-        let places = Self::places(&rows);
-        let window = places.window(self.list_offset, view, 2.0 * ROW);
-        let mut body = div()
-            .col()
-            .id(LIST)
-            .focusable()
-            .grow(1.0)
-            .min_h(0.0)
-            .px(8.0)
-            .scroll()
-            .child(div().h(places.top(window.start)).no_shrink());
-        if rows.is_empty() {
-            body = body.child(self.nothing());
-        }
-        for row in &rows[window.clone()] {
-            body = body.child(self.row(row, width));
-        }
-        body = body.child(div().h(places.total() - places.top(window.end)).no_shrink());
+        let body = div().col().focusable().grow(1.0).min_h(0.0).px(8.0);
+        let body = if rows.is_empty() {
+            self.list.forget();
+            body.id(LIST)
+                .scroll()
+                .child(div().h(LIST_LEAD).no_shrink())
+                .child(self.nothing())
+                .child(div().h(LIST_TRAIL).no_shrink())
+        } else {
+            self.list.build(body, Self::places(&rows), view, |index| {
+                rows.get(index).map_or_else(div, |row| self.row(row, width))
+            })
+        };
 
         div()
             .col()
