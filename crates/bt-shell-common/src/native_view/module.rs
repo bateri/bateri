@@ -123,6 +123,18 @@ impl Shared {
     }
 }
 
+impl Shared {
+    /// Tells the module where the boxes went that moved since it was last told: at once, not at
+    /// the next frame, so that the page starts on the rows that come into view while the frame
+    /// that moves the boxes is drawn.
+    fn tell_scrolled(&mut self) {
+        let moved = self.scrolls.scrolls.take_moved();
+        if !moved.is_empty() {
+            self.module.event(Event::Scrolled(moved));
+        }
+    }
+}
+
 /// What a module is held to in what it says to the program of its pane: the program's `flow`
 /// ([`Flow`]) says whether the program has the room, and is told what the module takes of what
 /// the program says. A module whose page no program opened (the engine's own, in this process)
@@ -267,6 +279,7 @@ impl PageDrive for ModuleHandle {
         let (took, redraw) = shared.scrolls.pointer(&into_page(input, place));
         shared.redraw |= redraw;
         if took {
+            shared.tell_scrolled();
             return;
         }
         if let Input::Key { key, mods } = input
@@ -291,6 +304,7 @@ impl PageDrive for ModuleHandle {
             Some(laid) => {
                 let wheel = shared.scrolls.wheel(&laid, page_at, dx, dy, phase);
                 shared.redraw |= wheel.took;
+                shared.tell_scrolled();
                 wheel.left
             }
             None => Point::new(dx, dy),
@@ -504,11 +518,9 @@ impl UiPage for ModulePage {
                 shared.laid = Some(Arc::clone(&laid));
                 shared.laid_for = Some((size, scale));
                 shared.fresh = false;
-                // Where the boxes went: the page builds what came into view.
-                let moved = shared.scrolls.scrolls.take_moved();
-                if !moved.is_empty() {
-                    shared.module.event(Event::Scrolled(moved));
-                }
+                // Where the boxes went (a spring, a glide, an ask, a list that got shorter): the
+                // page builds what came into view.
+                shared.tell_scrolled();
             }
             let outline = Outline::of(&laid, shared.place);
             let told = (outline != shared.outline)
