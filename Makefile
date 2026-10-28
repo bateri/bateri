@@ -3,7 +3,7 @@ CARGO ?= cargo
 # Prerequisite order is only guaranteed under serial make; under -j the promises
 # "cheapest gate first" and "version first" break.
 .NOTPARALLEL:
-.PHONY: check prune fmt audit clippy test guest demopen test-heavy test-view test-all gate gate-push hooks linux-server linux-run shader smoke terminfo test-race scan bundle package install dev release publish ship release-gate sparkle dmgbuild linux
+.PHONY: check prune fmt audit clippy test guest demopen test-heavy test-view test-all gate gate-push hooks linux-server linux-run shader smoke terminfo test-race scan throughput bundle package install dev release publish ship release-gate sparkle dmgbuild linux
 
 # Definition of done. Homebrew rustc is not pinned (there is deliberately no
 # rust-toolchain.toml): the version is printed first so a clippy failure that
@@ -370,6 +370,17 @@ test-race:
 # ten thousand characters are measured.
 scan:
 	$(CARGO) test -p bt-atlas --release -- --ignored census --nocapture
+
+# The reader's processing throughput on kitty's six `kitten __benchmark__`
+# workloads, headless, in MiB/s: bateri's read path with a pipe's 1 MiB reads
+# and a macOS PTY's 1 KiB ones, and a bare alacritty `Term` beside them; then
+# where the time goes, each walker of the read path taken out in turn. The
+# workloads and what a run is checked for are `crates/bt-core/src/reader/throughput.rs`.
+# NOT a gate: its numbers depend on the machine and on what else runs on it —
+# to compare two trees, run them in turns, a few rounds each. Release, because
+# a debug build's numbers say nothing.
+throughput:
+	$(CARGO) test -p bt-core --lib --release -- --ignored --test-threads=1 reader::throughput --nocapture
 
 # Builds release and installs `bateri.app` under target/ (NOT to
 # /Applications). It contains Sparkle (`Contents/Frameworks/`, below) and the
