@@ -73,6 +73,12 @@ fn is_skin_tone(c: char) -> bool {
 /// string (`…‍❤`) is not in the table; had the criterion been the code
 /// point's own width, the ten-code-point kiss would split in two.
 fn emoji_capable(c: char) -> bool {
+    // A code point that is two columns alone is two with VS16 too (asked of
+    // every code point by a test): running CJK text asks this of every
+    // character and skips the pair's measure.
+    if UnicodeWidthChar::width(c) == Some(2) {
+        return true;
+    }
     let mut buf = [0u8; 8];
     let len = c.encode_utf8(&mut buf).len();
     let vs16 = VS16.encode_utf8(&mut buf[len..]).len();
@@ -98,6 +104,20 @@ pub(crate) fn may_extend(c: char) -> bool {
         || is_regional_indicator(c)
         || is_skin_tone(c)
         || emoji_capable(c)
+}
+
+/// Can `c` extend a cluster whose newest code point is `newest` — the
+/// prefilter of [`extends`] that reads that one code point and not the
+/// cluster. Three of the four arms do not look at the cluster at all; the
+/// fourth needs a ZWJ behind `c`. The grid's wrapper asks this before it
+/// builds the head cell's cluster: in running text — CJK, accented letters —
+/// a character that [`may_extend`] lets through never has its cell's text
+/// copied.
+pub(crate) fn may_follow(newest: char, c: char) -> bool {
+    UnicodeWidthChar::width(c) == Some(0)
+        || is_regional_indicator(c)
+        || is_skin_tone(c)
+        || (newest == ZWJ && emoji_capable(c))
 }
 
 /// Does the open cluster `open` (non-empty) extend with `c`. Four arms, no
@@ -472,8 +492,23 @@ mod tests {
             for open in opens {
                 if extends(open, c) {
                     assert!(may_extend(c), "{open:?} + {c:?}");
+                    let newest = open.chars().next_back().unwrap_or_default();
+                    assert!(may_follow(newest, c), "{open:?} + {c:?}");
                 }
             }
+        }
+    }
+
+    /// The shortcut for a two-column code point says what the pair's measure
+    /// says, for every code point there is.
+    #[test]
+    fn a_wide_code_point_is_emoji_capable_as_its_pair_measures() {
+        for c in (0..=0x10_FFFF).filter_map(char::from_u32) {
+            if UnicodeWidthChar::width(c) != Some(2) {
+                continue;
+            }
+            let pair: String = [c, VS16].into_iter().collect();
+            assert_eq!(pair.width(), 2, "{c:?}");
         }
     }
 

@@ -432,12 +432,24 @@ impl<'a, U: EventListener> ClusterHandler<'a, U> {
         1 + cell.zerowidth().map_or(0, <[char]>::len) >= crate::cluster::MAX_CODE_POINTS
     }
 
-    /// The head cell's cluster: base character + `zerowidth`.
+    /// The head cell's cluster's newest code point: the last of `zerowidth`,
+    /// or the base character.
+    fn newest(&self, at: Point) -> char {
+        let cell = &self.term.grid()[at.line][at.column];
+        cell.zerowidth()
+            .and_then(<[char]>::last)
+            .copied()
+            .unwrap_or(cell.c)
+    }
+
+    /// The head cell's cluster: base character + `zerowidth`, with room for
+    /// the code point it is asked about — one allocation, not one per growth.
     fn open(&self, at: Point) -> String {
         let cell = &self.term.grid()[at.line][at.column];
-        let mut open = String::new();
+        let marks = cell.zerowidth().unwrap_or_default();
+        let mut open = String::with_capacity(4 * (marks.len() + 2));
         open.push(cell.c);
-        open.extend(cell.zerowidth().unwrap_or_default());
+        open.extend(marks);
         open
     }
 
@@ -546,6 +558,12 @@ impl<U: EventListener> Handler for ClusterHandler<'_, U> {
             return;
         }
         if !open_cluster {
+            return self.term.input(c);
+        }
+        // Most of what reaches here — a CJK character behind another — is
+        // turned back by the cluster's newest code point, before the cluster
+        // is copied out of the cell to be asked.
+        if !crate::cluster::may_follow(self.newest(at), c) {
             return self.term.input(c);
         }
         let mut open = self.open(at);

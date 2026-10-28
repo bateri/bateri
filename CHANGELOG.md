@@ -112,6 +112,14 @@ of every installed copy. A version without a section is not released.
 
 ### Changed
 
+- **A program's output is taken in faster.** What bateri does with every byte a program writes
+  before the terminal acts on it — following where an escape sequence stands, looking for the
+  shell's marks, putting emoji sequences together — now skims text and the bodies of long
+  sequences rather than going over them a byte at a time, no longer keeps a second copy of an
+  image while it arrives, and lets Chinese, Japanese and Korean text by without building
+  anything for it. Images and CJK text are taken several times faster, long escape sequences
+  and plain text faster too: a program that floods the terminal is done sooner and takes less
+  of your Mac while it does.
 - **A program's web view speaks pencere's one protocol; MCP is gone.** A program that shows a
   web view now opens it from a bundle with the same messages a view bateri draws itself uses
   (calls and answers, subscriptions and pushes), asks for the addresses and browser features
