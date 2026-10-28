@@ -417,7 +417,7 @@ pub(crate) fn draw_text_right(
 
 /// `chars` as an attributed string with the `marks` in `marked`, cut to `keep` characters and
 /// ended with an ellipsis when that is fewer than there are.
-fn styled(
+pub(crate) fn styled(
     chars: &[char],
     marks: &[usize],
     keep: usize,

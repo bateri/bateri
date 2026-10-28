@@ -1640,6 +1640,21 @@ impl TerminalTab {
         Self::place_of(&self.focused_pane())
     }
 
+    /// The folder `pane`'s shell is in, in words and without its host (the home as `~`; a
+    /// remote pane's as the server tells it): what the big view searches a pane by.
+    fn directory_of(pane: &TerminalPane) -> Option<String> {
+        let session = pane.session()?;
+        if session.remote_mark().is_some() {
+            return Some(session.remote_link_directory()).filter(|directory| !directory.is_empty());
+        }
+        let home = crate::child::home();
+        tabs::place(
+            None,
+            session.working_directory().as_deref(),
+            home.as_deref(),
+        )
+    }
+
     /// Where `pane`'s shell is, in words ([`Self::place`]'s rule for any one pane): the big
     /// view names each pane of a tab by it.
     fn place_of(pane: &TerminalPane) -> Option<String> {
@@ -1735,7 +1750,7 @@ impl TerminalTab {
                         .session()
                         .and_then(|session| session.remote_mark())
                         .map(|(host, _)| host),
-                    directory: Self::place_of(pane),
+                    directory: Self::directory_of(pane),
                     account: pane.server_target().and_then(|_| {
                         pane.host()
                             .kept_terminal(pane.uuid())

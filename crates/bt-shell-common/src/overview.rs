@@ -16,6 +16,9 @@
 //! ↵ lands. The model reads nothing from the windows: the shell hands the tabs in
 //! ([`Tab`], their panes the card's own [`CardPane`] list) and gets an [`Act`] out.
 
+use std::collections::HashMap;
+
+use crate::palette::{Kind, Row as PaletteRow, score};
 use crate::remote_stats::Detail;
 use crate::split::Rect;
 use crate::tabs::CardPane;
@@ -167,8 +170,59 @@ fn tabs_text(count: usize) -> String {
     format!("{count} {}", if count == 1 { "tab" } else { "tabs" })
 }
 
-/// The view's state: the tabs, the machine the left column selects, the selected tab and where
-/// the pointer is over it.
+/// What the search found in one tab.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Hit {
+    /// The letters of the tab's name the query matched (positions in the name as written).
+    pub name_marks: Vec<usize>,
+    /// The panes on the machine whose program or folder the query matched: when there are any
+    /// they are the lit ones and the tab's others are dim.
+    pub panes: Vec<u64>,
+    /// The best of them: the program's name as the pane gives it, and the letters matched in it.
+    pub program: Option<(String, Vec<usize>)>,
+}
+
+/// The one the query makes of `tab`: found when the tab's name matches or a pane on `machine`
+/// has a program or a folder that does. The rows are ⌘P's ([`score`]) with no host in them —
+/// "rasp" finds a tab named rasp, never a pane that is on rasp — and of a kind with no cluster
+/// word, or "tabs" would find every tab.
+fn hit_of(tab: &Tab, machine: &Machine, query: &str) -> Option<Hit> {
+    let own = score(
+        &PaletteRow::new(Kind::Pane, &format!("t{}", tab.id), tab.name.clone()),
+        query,
+    );
+    let mut panes = Vec::new();
+    let mut best: Option<(f64, &CardPane, Vec<usize>)> = None;
+    for pane in tab.panes.iter().filter(|pane| machine.holds(pane)) {
+        let row = PaletteRow::new(
+            Kind::Pane,
+            &format!("{}.{}", tab.id, pane.id),
+            pane.name.clone(),
+        )
+        .subtitle(pane.directory.clone().unwrap_or_default());
+        let Some(found) = score(&row, query) else {
+            continue;
+        };
+        panes.push(pane.id);
+        if best.as_ref().is_none_or(|(top, ..)| found.score > *top) {
+            best = Some((found.score, pane, found.marks));
+        }
+    }
+    if own.is_none() && panes.is_empty() {
+        return None;
+    }
+    Some(Hit {
+        name_marks: own.map(|found| found.marks).unwrap_or_default(),
+        panes,
+        program: best.map(|(_, pane, marks)| (pane.name.clone(), marks)),
+    })
+}
+
+/// What the search row says when it is empty.
+pub const FIND: &str = "Find a tab by name, program or folder";
+
+/// The view's state: the tabs, the machine the left column selects, what is searched, the
+/// selected tab and where the pointer is over it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Overview {
     all: Vec<Tab>,
@@ -179,6 +233,9 @@ pub struct Overview {
     /// The machine the pointer is over in the left column: its panes light in the grid, the
     /// selection stays.
     glance: Option<Machine>,
+    /// What the search row holds; the grid keeps the tabs it finds, in the strip's order.
+    query: String,
+    hits: HashMap<u64, Hit>,
     selected: Option<u64>,
     /// The pane the pointer is over in the selected tab (a split tab's), `None` for the keys'
     /// selection.
@@ -197,6 +254,8 @@ impl Overview {
             shown: Vec::new(),
             machine: Machine::All,
             glance: None,
+            query: String::new(),
+            hits: HashMap::new(),
             selected,
             pointed: None,
         };
@@ -208,9 +267,26 @@ impl Overview {
     /// still among them.
     fn reshow(&mut self) {
         let machine = &self.machine;
-        self.shown = (0..self.all.len())
+        let on_machine: Vec<usize> = (0..self.all.len())
             .filter(|&at| self.all[at].panes.iter().any(|pane| machine.holds(pane)))
             .collect();
+        let query = self.query.trim();
+        if query.is_empty() {
+            self.hits.clear();
+            self.shown = on_machine;
+        } else {
+            self.hits = on_machine
+                .iter()
+                .filter_map(|&at| {
+                    let tab = &self.all[at];
+                    hit_of(tab, machine, query).map(|hit| (tab.id, hit))
+                })
+                .collect();
+            self.shown = on_machine
+                .into_iter()
+                .filter(|&at| self.hits.contains_key(&self.all[at].id))
+                .collect();
+        }
         if !self
             .selected
             .is_some_and(|selected| self.is_shown(selected))
@@ -329,8 +405,79 @@ impl Overview {
     pub fn dim(&self, tab: u64, pane: &CardPane) -> bool {
         let lit = self.glance.as_ref().unwrap_or(&self.machine);
         !lit.holds(pane)
+            || self
+                .hits
+                .get(&tab)
+                .is_some_and(|hit| !hit.panes.is_empty() && !hit.panes.contains(&pane.id))
             || (self.selected == Some(tab)
                 && self.pointed.is_some_and(|pointed| pointed != pane.id))
+    }
+
+    // ─── The search ──────────────────────────────────────────────────────
+
+    /// The search row holds `text`: the grid keeps the tabs it finds, the first of them selected.
+    /// The machine is not touched.
+    pub fn set_query(&mut self, text: &str) {
+        if self.query == text {
+            return;
+        }
+        self.query = text.to_owned();
+        self.reshow();
+        if !self.query.trim().is_empty() {
+            self.selected = self.shown.first().map(|&at| self.all[at].id);
+            self.pointed = None;
+        }
+    }
+
+    pub fn query(&self) -> &str {
+        &self.query
+    }
+
+    /// What the query found in tab `tab`, while there is a query.
+    pub fn hit(&self, tab: u64) -> Option<&Hit> {
+        self.hits.get(&tab)
+    }
+
+    /// "3 found", while there is a query.
+    pub fn found(&self) -> Option<String> {
+        (!self.query.trim().is_empty()).then(|| format!("{} found", self.shown.len()))
+    }
+
+    /// What the empty search row says: what it finds, and where (the machine, when one is selected).
+    pub fn placeholder(&self) -> String {
+        match &self.machine {
+            Machine::All => FIND.to_owned(),
+            machine => format!("Find on {}", machine.title()),
+        }
+    }
+
+    /// Esc: the search first (the machine stays), then the view. `true` when the view is to go.
+    pub fn escape(&mut self) -> bool {
+        if self.query.is_empty() {
+            return true;
+        }
+        self.set_query("");
+        false
+    }
+
+    /// The keys that do something now, for the right of the search row: the key and what it does.
+    pub fn hints(&self) -> Vec<(&'static str, &'static str)> {
+        let mut hints = Vec::new();
+        if self.selected.is_some() {
+            hints.push(("↵", GO_TO_TAB));
+        }
+        if self.machines().len() > 1 {
+            hints.push(("⇥", "Next machine"));
+        }
+        hints.push((
+            "esc",
+            if self.query.is_empty() {
+                "Close"
+            } else {
+                "Clear"
+            },
+        ));
+        hints
     }
 
     // ─── The machines ────────────────────────────────────────────────────
@@ -1295,5 +1442,183 @@ mod tests {
         assert_eq!(uptime_text(3 * 3600 + 20 * 60), "3 h 20 min");
         assert_eq!(uptime_text(86_400), "1 day");
         assert_eq!(uptime_text(40 * 86_400), "40 days");
+    }
+
+    // ─── The search ───
+
+    /// A pane running `program` in `directory`, on `host`.
+    fn running(id: u64, program: &str, directory: &str, host: Option<&str>) -> CardPane {
+        CardPane {
+            name: program.to_owned(),
+            directory: Some(directory.to_owned()),
+            host: host.map(str::to_owned),
+            ..pane(id, whole(), false)
+        }
+    }
+
+    fn named(id: u64, name: &str, panes: Vec<CardPane>) -> Tab {
+        Tab {
+            name: name.to_owned(),
+            panes,
+            ..tab(id, None)
+        }
+    }
+
+    /// `api` runs cargo test and a shell, `web` npm test here and vim on rasp, `notes` only a
+    /// shell on rasp.
+    fn searched() -> Overview {
+        Overview::new(
+            vec![
+                named(
+                    1,
+                    "api",
+                    vec![
+                        running(11, "cargo test", "~/api", None),
+                        running(12, "zsh", "~/api", None),
+                    ],
+                ),
+                named(
+                    2,
+                    "web",
+                    vec![
+                        running(21, "npm test", "~/web", None),
+                        running(22, "vim", "~/app", Some("rasp")),
+                    ],
+                ),
+                named(
+                    3,
+                    "notes",
+                    vec![running(31, "zsh", "~/notes", Some("rasp"))],
+                ),
+            ],
+            Some(3),
+        )
+    }
+
+    fn found(overview: &Overview) -> Vec<u64> {
+        overview.tabs().map(|tab| tab.id).collect()
+    }
+
+    #[test]
+    fn a_query_keeps_the_tabs_it_finds_in_the_strips_order_and_selects_the_first() {
+        let mut overview = searched();
+        overview.set_query("test");
+        assert_eq!(found(&overview), vec![1, 2], "api and web, not notes");
+        assert_eq!(overview.selected(), Some(1), "the first found");
+        assert_eq!(overview.found().as_deref(), Some("2 found"));
+        // The pane that matched is lit, the tab's others are dim.
+        let (api, web) = (overview.tab(0).clone(), overview.tab(1).clone());
+        assert!(!overview.dim(1, &api.panes[0]));
+        assert!(overview.dim(1, &api.panes[1]));
+        assert!(!overview.dim(2, &web.panes[0]));
+        assert!(overview.dim(2, &web.panes[1]));
+        assert_eq!(
+            overview
+                .hit(1)
+                .and_then(|hit| hit.program.clone())
+                .map(|p| p.0)
+                .as_deref(),
+            Some("cargo test")
+        );
+        overview.set_query("");
+        assert_eq!(found(&overview), vec![1, 2, 3]);
+        assert_eq!(overview.found(), None);
+    }
+
+    #[test]
+    fn a_host_is_not_searched_but_a_name_is() {
+        let mut overview = searched();
+        overview.set_query("rasp");
+        assert!(
+            found(&overview).is_empty(),
+            "the panes on rasp are not found by rasp"
+        );
+        let mut overview = Overview::new(
+            vec![named(1, "rasp notes", vec![running(1, "zsh", "~", None)])],
+            None,
+        );
+        overview.set_query("rasp");
+        assert_eq!(found(&overview), vec![1], "a tab named rasp is");
+    }
+
+    #[test]
+    fn the_word_tabs_does_not_find_every_tab() {
+        let mut overview = searched();
+        overview.set_query("tabs");
+        assert!(found(&overview).is_empty());
+    }
+
+    #[test]
+    fn a_found_name_says_which_letters() {
+        let mut overview = searched();
+        overview.set_query("ap");
+        let hit = overview.hit(1).expect("api");
+        assert_eq!(hit.name_marks, vec![0, 1]);
+        assert!(hit.panes.is_empty() || hit.panes.contains(&11) || hit.panes.contains(&12));
+        // A name found by itself leaves every pane lit.
+        overview.set_query("not");
+        assert_eq!(found(&overview), vec![3]);
+        let notes = overview.tab(0).clone();
+        assert!(!overview.dim(3, &notes.panes[0]));
+        assert_eq!(
+            overview.hit(3).map(|hit| hit.name_marks.clone()),
+            Some(vec![0, 1, 2])
+        );
+    }
+
+    #[test]
+    fn the_search_stays_inside_the_machine_selected() {
+        let mut overview = searched();
+        overview.set_query("vim");
+        assert_eq!(found(&overview), vec![2], "all tabs: web has a vim");
+        assert!(overview.set_machine(Machine::Local));
+        assert!(
+            found(&overview).is_empty(),
+            "web's vim is on rasp, and rasp is not selected"
+        );
+        assert!(overview.set_machine(Machine::Host("rasp".to_owned())));
+        assert_eq!(found(&overview), vec![2]);
+        assert_eq!(
+            overview.machine(),
+            &Machine::Host("rasp".to_owned()),
+            "the search never selects a machine"
+        );
+        assert_eq!(overview.placeholder(), "Find on ⇄ rasp");
+        overview.set_machine(Machine::All);
+        assert_eq!(overview.placeholder(), FIND);
+    }
+
+    #[test]
+    fn the_folder_is_searched_too() {
+        let mut overview = searched();
+        overview.set_query("notes");
+        assert_eq!(found(&overview), vec![3]);
+        overview.set_query("~/app");
+        assert_eq!(found(&overview), vec![2], "web's vim is in ~/app");
+    }
+
+    #[test]
+    fn escape_clears_the_search_first_and_the_machine_stays() {
+        let mut overview = searched();
+        overview.set_machine(Machine::Local);
+        overview.set_query("test");
+        assert!(!overview.escape(), "the first Esc is the search's");
+        assert_eq!(overview.query(), "");
+        assert_eq!(overview.machine(), &Machine::Local);
+        assert!(overview.escape(), "the second takes the view down");
+    }
+
+    #[test]
+    fn the_hints_follow_the_selection_and_the_query() {
+        let mut overview = searched();
+        let hints = overview.hints();
+        assert_eq!(hints.first(), Some(&("↵", GO_TO_TAB)));
+        assert_eq!(hints.last(), Some(&("esc", "Close")));
+        assert!(hints.contains(&("⇥", "Next machine")));
+        overview.set_query("zzzz");
+        assert_eq!(overview.selected(), None, "nothing found: nothing to go to");
+        let hints = overview.hints();
+        assert!(!hints.iter().any(|(key, _)| *key == "↵"));
+        assert_eq!(hints.last(), Some(&("esc", "Clear")));
     }
 }

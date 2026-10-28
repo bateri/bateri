@@ -32,24 +32,41 @@ use objc2::{
     AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel,
 };
 use objc2_app_kit::{
-    NSAutoresizingMaskOptions, NSBezierPath, NSCompositingOperation, NSControlTextEditingDelegate,
-    NSEvent, NSEventModifierFlags, NSFocusRingType, NSFont, NSFontWeightMedium,
-    NSFontWeightSemibold, NSGraphicsContext, NSImage, NSTextField, NSTextFieldDelegate,
-    NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindowOrderingMode,
+    NSAttributedStringNSStringDrawing, NSAutoresizingMaskOptions, NSBezierPath,
+    NSCompositingOperation, NSControlTextEditingDelegate, NSEvent, NSEventModifierFlags,
+    NSFocusRingType, NSFont, NSFontWeightMedium, NSFontWeightSemibold, NSGraphicsContext, NSImage,
+    NSTextField, NSTextFieldDelegate, NSTrackingArea, NSTrackingAreaOptions, NSView,
+    NSWindowOrderingMode,
 };
-use objc2_foundation::{NSNotification, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
+use objc2_foundation::{
+    NSAttributedString, NSNotification, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
+};
 use objc2_quartz_core::CALayer;
 
 use crate::app;
 use crate::arrange;
-use crate::palette::{Attributes, Look, attributes, draw_text, draw_text_right, text_width};
+use crate::palette::{
+    Attributes, Look, attributes, draw_text, draw_text_right, styled, text_width,
+};
 use crate::server_stats;
 use crate::tab_bar::{Ease, PALETTE_ICON_SIDE, Tint, palette_icon, play, rounded, selected_row};
 use crate::window::{RootView, TerminalWindow};
 
 /// The air above the first row, under the title row, and below the last one.
 const TOP_AIR: f64 = 16.0;
-const BOTTOM_AIR: f64 = 48.0;
+const BOTTOM_AIR: f64 = 8.0;
+/// The search row at the bottom: a plate the dock's way, this tall, this far above the window's
+/// bottom edge and in from the column and the right edge; what the grid leaves for it.
+const PLATE_HEIGHT: f64 = 44.0;
+const PLATE_GAP: f64 = 16.0;
+const PLATE_SIDE: f64 = 24.0;
+const PLATE_RADIUS: f64 = 12.0;
+const PLATE_PAD: f64 = 18.0;
+const PLATE_AREA: f64 = PLATE_HEIGHT + 2.0 * PLATE_GAP;
+const FIELD_SIZE: f64 = 14.0;
+/// The most of the plate's width the keys and the count at its right take.
+const KEYS_SHARE: f64 = 0.45;
+const KEYS_MAX: f64 = 340.0;
 /// The corner of a picture and of the ring round the selected one.
 const RADIUS: f64 = 8.0;
 const RING: f64 = 2.5;
@@ -228,13 +245,10 @@ define_class!(
             self.equivalent(event)
         }
 
-        /// The letters changed: there is nothing to search yet, so none are kept.
+        /// The letters changed: the grid keeps the tabs the search finds.
         #[unsafe(method(controlTextDidChange:))]
         fn control_text_changed(&self, _notification: &NSNotification) {
-            let field = &self.ivars().field;
-            if field.stringValue().length() > 0 {
-                field.setStringValue(&NSString::from_str(""));
-            }
+            self.queried();
         }
 
         /// The keyboard went somewhere else (a window that is not key, another field): the view
@@ -271,11 +285,9 @@ impl OverviewView {
         field.setBezeled(false);
         field.setDrawsBackground(false);
         field.setFocusRingType(NSFocusRingType::None);
-        field.setFont(Some(&NSFont::systemFontOfSize(SMALL_SIZE)));
+        field.setFont(Some(&NSFont::systemFontOfSize(FIELD_SIZE)));
         field.setAutoresizingMask(NSAutoresizingMaskOptions::empty());
-        // Seen by nobody, kept by the window: a hidden view cannot take the keyboard.
-        field.setAlphaValue(0.0);
-        field.setFrame(NSRect::new(NSPoint::ZERO, NSSize::new(1.0, 1.0)));
+        field.setTextColor(Some(&colours(theme).text.color()));
         let this = Self::alloc(mtm).set_ivars(OverviewIvars {
             window,
             state: RefCell::new(state),
@@ -338,7 +350,7 @@ impl OverviewView {
 
     /// The viewport the grid scrolls in: from under the title row to the view's bottom.
     fn viewport(&self) -> f64 {
-        (self.bounds().size.height - self.ivars().top.get() - TOP_AIR).max(1.0)
+        (self.bounds().size.height - self.ivars().top.get() - TOP_AIR - PLATE_AREA).max(1.0)
     }
 
     /// Where the grid's origin is in the view: the grid's y is the view's plus this.
@@ -439,7 +451,7 @@ impl OverviewView {
             self.activate();
             true
         } else if command == sel!(cancelOperation:) {
-            self.dismiss();
+            self.escape();
             true
         } else if command == sel!(insertTab:) {
             self.cycle(true);
@@ -450,6 +462,28 @@ impl OverviewView {
         } else {
             false
         }
+    }
+
+    /// Esc: the search first, then the view.
+    fn escape(&self) {
+        let close = self.ivars().state.borrow_mut().escape();
+        if close {
+            self.dismiss();
+        } else {
+            self.ivars().field.setStringValue(&NSString::from_str(""));
+            self.queried();
+        }
+    }
+
+    /// The search row's text is the model's query now: the grid starts from the top, with the
+    /// pictures of the tabs it keeps.
+    fn queried(&self) {
+        let iv = self.ivars();
+        let text = iv.field.stringValue().to_string();
+        iv.state.borrow_mut().set_query(&text);
+        iv.scroll.set(0.0);
+        self.shoot();
+        self.setNeedsDisplay(true);
     }
 
     /// ⇥ (`forward`) and ⇧⇥: the next machine of the left column.
@@ -472,6 +506,7 @@ impl OverviewView {
         iv.scroll.set(0.0);
         let layout = self.layout();
         self.reveal(&layout);
+        self.place_field();
         self.sync_view();
         self.touch();
         self.shoot();
@@ -801,6 +836,7 @@ impl OverviewView {
         let layout = self.layout();
         iv.scroll
             .set(iv.scroll.get().clamp(0.0, self.max_scroll(&layout)));
+        self.place_field();
         self.shoot();
         self.setNeedsDisplay(true);
     }
@@ -809,6 +845,10 @@ impl OverviewView {
     pub(crate) fn set_theme(&self, theme: &Theme) {
         self.ivars().look.set(colours(theme));
         self.ivars().row_look.set(selected_row(theme));
+        self.ivars()
+            .field
+            .setTextColor(Some(&colours(theme).text.color()));
+        self.place_field();
         self.reload();
     }
 
@@ -829,7 +869,7 @@ impl OverviewView {
             NSPoint::new(0.0, iv.top.get()),
             NSSize::new(
                 bounds.size.width,
-                (bounds.size.height - iv.top.get()).max(0.0),
+                (bounds.size.height - iv.top.get() - PLATE_AREA).max(0.0),
             ),
         ));
         let dim_font = NSFont::systemFontOfSize_weight(SMALL_SIZE, unsafe { NSFontWeightSemibold });
@@ -855,6 +895,77 @@ impl OverviewView {
         NSGraphicsContext::restoreGraphicsState_class();
         // The column is over the grid's left, which has the room for it.
         self.paint_column(&state);
+        self.paint_plate(&state);
+    }
+
+    /// The search row's plate, in the dock's tones, with the count and the keys at its right.
+    fn plate(&self) -> NSRect {
+        let bounds = self.bounds();
+        NSRect::new(
+            NSPoint::new(
+                SIDE + PLATE_SIDE,
+                bounds.size.height - PLATE_GAP - PLATE_HEIGHT,
+            ),
+            NSSize::new(
+                (bounds.size.width - SIDE - 2.0 * PLATE_SIDE).max(1.0),
+                PLATE_HEIGHT,
+            ),
+        )
+    }
+
+    /// How much of the plate's width the count and the keys take.
+    fn keys_room(&self, plate: NSRect) -> f64 {
+        (plate.size.width * KEYS_SHARE).min(KEYS_MAX)
+    }
+
+    /// The field stands in the plate left of the keys, and says what the row finds.
+    fn place_field(&self) {
+        let iv = self.ivars();
+        let plate = self.plate();
+        let height = 22.0;
+        iv.field.setFrame(NSRect::new(
+            NSPoint::new(
+                plate.origin.x + PLATE_PAD,
+                plate.origin.y + (PLATE_HEIGHT - height) / 2.0,
+            ),
+            NSSize::new(
+                (plate.size.width - 2.0 * PLATE_PAD - self.keys_room(plate)).max(40.0),
+                height,
+            ),
+        ));
+        let look = iv.look.get();
+        let text = iv.state.borrow().placeholder();
+        let quiet = attributes(&NSFont::systemFontOfSize(FIELD_SIZE), look.dim);
+        // SAFETY: the attributes are `NSColor`/`NSFont` under AppKit's two keys.
+        let placeholder =
+            unsafe { NSAttributedString::new_with_attributes(&NSString::from_str(&text), &quiet) };
+        iv.field.setPlaceholderAttributedString(Some(&placeholder));
+    }
+
+    fn paint_plate(&self, state: &Overview) {
+        let look = self.ivars().look.get();
+        let plate = self.plate();
+        rounded(plate, PLATE_RADIUS, look.band, Some(look.line));
+        let small = attributes(&NSFont::systemFontOfSize(SMALL_SIZE), look.dim);
+        let key = attributes(
+            &NSFont::systemFontOfSize_weight(SMALL_SIZE, unsafe { NSFontWeightSemibold }),
+            look.text,
+        );
+        let mut right = plate.origin.x + plate.size.width - PLATE_PAD;
+        let least = plate.origin.x + plate.size.width - self.keys_room(plate);
+        for (glyph, verb) in state.hints().into_iter().rev() {
+            let word = format!(" {verb}");
+            let width = text_width(glyph, &key) + text_width(&word, &small);
+            if right - width < least {
+                break;
+            }
+            let left = draw_text_right(&word, right, plate.origin.y, PLATE_HEIGHT, &small);
+            draw_text_right(glyph, left, plate.origin.y, PLATE_HEIGHT, &key);
+            right = left - text_width(glyph, &key) - 14.0;
+        }
+        if let Some(found) = state.found() {
+            draw_text_right(&found, right, plate.origin.y, PLATE_HEIGHT, &small);
+        }
     }
 
     /// The left column: the machines, the selected one wearing the side column's selected row,
@@ -1031,8 +1142,38 @@ impl OverviewView {
             .map(|verb| format!("↵ {verb}"));
         let verb_width = verb.as_ref().map_or(0.0, |verb| text_width(verb, &small));
         let room = (right - left - verb_width - GAP_AFTER_NAME).max(0.0);
-        let name = fit(&tab.name, room, &strong);
-        let end = draw_text(&name, left, row.origin.y, row.size.height, &strong);
+        let marked = attributes(
+            &NSFont::systemFontOfSize_weight(NAME_SIZE, unsafe { NSFontWeightSemibold }),
+            look.accent,
+        );
+        let hit = state.hit(tab.id);
+        let name_marks = hit.map_or(&[][..], |hit| hit.name_marks.as_slice());
+        let mut end = draw_marked(
+            &tab.name,
+            name_marks,
+            left,
+            room,
+            row.origin.y,
+            row.size.height,
+            &strong,
+            &marked,
+        );
+        // The program the search found in a pane, beside the name: `api  cargo test`.
+        if let Some((program, marks)) = hit.and_then(|hit| hit.program.as_ref()) {
+            let spare = room - (end - left) - GAP_AFTER_NAME;
+            if spare > 24.0 {
+                end = draw_marked(
+                    program,
+                    marks,
+                    end + GAP_AFTER_NAME,
+                    spare,
+                    row.origin.y,
+                    row.size.height,
+                    &small,
+                    &marked,
+                );
+            }
+        }
         if let Some(verb) = verb {
             draw_text(
                 &verb,
@@ -1087,6 +1228,38 @@ fn draw_image(image: &NSImage, rect: NSRect) {
             None,
         );
     }
+}
+
+/// `text` with the letters at `marks` in `marked`, cut with an ellipsis to fit `room` points from
+/// `x`, centred in the slot `[top, top + height)`; returns where it ended (`x` if not even a
+/// letter fits).
+#[allow(clippy::too_many_arguments)]
+fn draw_marked(
+    text: &str,
+    marks: &[usize],
+    x: f64,
+    room: f64,
+    top: f64,
+    height: f64,
+    plain: &Attributes,
+    marked: &Attributes,
+) -> f64 {
+    let chars: Vec<char> = text.chars().collect();
+    let mut keep = chars.len();
+    let mut string = styled(&chars, marks, keep, plain, marked);
+    let mut width = string.size().width;
+    while width > room && keep > 1 {
+        // A guess that lands close, then single steps.
+        let guess = ((keep as f64) * room / width) as usize;
+        keep = guess.clamp(1, keep - 1);
+        string = styled(&chars, marks, keep, plain, marked);
+        width = string.size().width;
+    }
+    if width > room {
+        return x;
+    }
+    string.drawAtPoint(NSPoint::new(x, top + (height - string.size().height) / 2.0));
+    x + width
 }
 
 /// `text` cut to fit `width` points, ended with an ellipsis when it was cut.

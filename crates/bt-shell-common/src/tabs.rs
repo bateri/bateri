@@ -1965,8 +1965,8 @@ pub struct CardPane {
     /// The host the pane's shell is on when it is a remote session (as displayed, `user@`
     /// included, [`bt_core::Session::remote_mark`]); `None` for a pane on this computer.
     pub host: Option<String>,
-    /// Where the pane's shell is, in words ([`place`]); `None` while nothing says. The overview
-    /// finds and names a pane by it.
+    /// The folder the pane's shell is in, without its host (the home as `~`); `None` while
+    /// nothing says. The big view finds a pane by it.
     pub directory: Option<String>,
     /// The kablo account of the server the pane is a door to ([`crate::ssh_wrap::host_key`]),
     /// `None` for a pane on this computer and for a plain ssh pane (no load is measured there).
