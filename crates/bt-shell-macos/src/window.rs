@@ -128,6 +128,7 @@ use crate::groups::{
 use crate::jobs::Foreground;
 use crate::launch::Closing;
 use crate::moves::{self, Joins, Move};
+use crate::overview::{self, OverviewView};
 use crate::palette::{self, PaletteScrim};
 use crate::pane::TerminalPane;
 use crate::pointer;
@@ -744,6 +745,10 @@ define_class!(
             // and the clock again, one going away takes the turns off and
             // lets the clock lapse.
             self.refresh_bar();
+            // The big view's wake lapses with a window nobody sees and is set again with it.
+            if visible && let Some(view) = self.ivars().root.overview() {
+                view.resume();
+            }
         }
 
         // **Focus path.** In an unfocused window the caret's inside empties and
@@ -794,6 +799,7 @@ define_class!(
             // The palette is the window's while the window is key: a question opened over it,
             // another application in front, and it goes.
             self.close_palette();
+            self.close_overview();
             // A lifted tab (⌥⌘ held) is set down with them.
             if let Some(app) = app::delegate(self.mtm()) {
                 app.key_window_resigned();
@@ -977,7 +983,6 @@ define_class!(
             } else if [
                 sel!(showNextTab:),
                 sel!(showPreviousTab:),
-                sel!(showTabList:),
                 sel!(detachTab:),
                 sel!(closeOtherTabs:),
             ]
@@ -989,6 +994,10 @@ define_class!(
                 // window's title, and one named before the others closed must
                 // be possible to change.)
                 self.ivars().order.borrow().len() > 1
+            } else if action == Some(sel!(showTabList:)) {
+                // The big view: open, the same item takes it down; otherwise it needs a window
+                // it may open over (no question up), and shows the tabs even of a lone one.
+                self.ivars().root.overview().is_some() || overview::may_open(self)
             } else if action == Some(sel!(splitRight:)) {
                 tab.can_split(Axis::Horizontal)
             } else if action == Some(sel!(splitDown:)) {
@@ -1227,7 +1236,7 @@ define_class!(
         /// list button, or where it would be while the tabs fit.
         #[unsafe(method(showTabList:))]
         fn show_tab_list(&self, _sender: Option<&AnyObject>) {
-            self.bar().show_list();
+            self.toggle_overview();
         }
 
         /// A row of the Show All Tabs list: the item's `tag` names the tab.
@@ -1539,6 +1548,9 @@ pub(crate) struct RootIvars {
     /// The command palette while it is open: over everything the window holds, the side
     /// column's edge included ([`crate::palette`]).
     palette: RefCell<Option<Retained<PaletteScrim>>>,
+    /// The big view (Show All Tabs) while it is open: over everything, the palette's place
+    /// and the palette's way ([`crate::overview`]); never open together with the palette.
+    overview: RefCell<Option<Retained<OverviewView>>>,
 }
 
 /// Whether `[appearance] tab_position` puts the tabs in the side column. One answer for every
@@ -1576,6 +1588,7 @@ define_class!(
             if let Some(palette) = self.palette() {
                 palette.refit(self.content());
             }
+            self.refit_overview();
         }
 
         /// AppKit's layout pass: the window's chrome is settled, so the row
@@ -1611,6 +1624,7 @@ impl RootView {
             side_width: Cell::new(side_width),
             row: Cell::new(0.0),
             palette: RefCell::new(None),
+            overview: RefCell::new(None),
         });
         // SAFETY: `initWithFrame:` is NSView's designated initializer and the
         // ivars are set.
@@ -1695,7 +1709,7 @@ impl RootView {
     /// the compact toolbar leaves above the content. Kept when the window
     /// reports none (full screen with the toolbar hidden). Only outside a
     /// frame change, where the rect is settled ([`RootIvars`]).
-    fn title_row(&self) -> f64 {
+    pub(crate) fn title_row(&self) -> f64 {
         let Some(window) = self.window() else {
             return self.ivars().row.get();
         };
@@ -1825,6 +1839,28 @@ impl RootView {
     /// Seats the palette that was put up, or clears the seat when it is taken down.
     pub(crate) fn seat_palette(&self, palette: Option<Retained<PaletteScrim>>) {
         self.ivars().palette.replace(palette);
+    }
+
+    /// The big view, while it is open.
+    pub(crate) fn overview(&self) -> Option<Retained<OverviewView>> {
+        self.ivars().overview.borrow().clone()
+    }
+
+    /// Seats the big view that was put up, or clears the seat when it is taken down.
+    pub(crate) fn seat_overview(&self, overview: Option<Retained<OverviewView>>) {
+        self.ivars().overview.replace(overview);
+    }
+
+    /// The big view follows the window's size.
+    fn refit_overview(&self) {
+        if let Some(view) = self.overview() {
+            let content = self.content();
+            view.refit(
+                self.bounds(),
+                content.size.height / content.size.width.max(1.0),
+                self.title_row(),
+            );
+        }
     }
 
     /// A tab's container joins under the bar, at the content's frame; under the title row's
@@ -2784,6 +2820,99 @@ impl TerminalWindow {
     /// it down.
     pub(crate) fn toggle_palette(&self) {
         palette::toggle(self);
+    }
+
+    /// Window ▸ Show All Tabs (⇧⌘\\): the big view over the window's content, or takes it down
+    /// ([`overview::toggle`]).
+    pub(crate) fn toggle_overview(&self) {
+        overview::toggle(self);
+    }
+
+    /// Takes the big view down. A no-op while it is not open.
+    pub(crate) fn close_overview(&self) {
+        if self.ivars().root.overview().is_none() {
+            return;
+        }
+        overview::close(&self.ivars().root);
+        self.focus_selected_tab();
+    }
+
+    /// ↵ in the big view: it comes down, the tab is shown with the pane the pointer was over
+    /// focused (a question of the window's own refuses it, with a beep) and the keyboard is the
+    /// tab's.
+    pub(crate) fn overview_go(&self, act: bt_shell_common::overview::Act) {
+        let bt_shell_common::overview::Act::GoToTab { tab, pane } = act;
+        overview::close(&self.ivars().root);
+        match pane {
+            Some(pane) => self.show_pane(tab, pane),
+            None => self.select_tab(tab),
+        };
+        self.focus_selected_tab();
+    }
+
+    /// ⌘`tag` in the big view: the tab the strip's digit reaches, as ↵ on it.
+    pub(crate) fn overview_digit(&self, tag: u8) -> bool {
+        let target = self.ivars().groups.borrow().shortcut(
+            &self.ivars().order.borrow(),
+            self.listing(),
+            tag,
+        );
+        let Some(tab) = target else {
+            return false;
+        };
+        self.overview_go(bt_shell_common::overview::Act::GoToTab { tab, pane: None });
+        true
+    }
+
+    /// The big view's wake ([`OverviewView::tick`]).
+    pub(crate) fn overview_tick(&self, generation: u64) {
+        if let Some(view) = self.ivars().root.overview() {
+            view.tick(generation);
+        }
+    }
+
+    /// The tab on screen.
+    pub(crate) fn selected_tab_id(&self) -> Option<u64> {
+        self.ivars().order.borrow().selected()
+    }
+
+    /// Pixels to the point on this window's screen.
+    pub(crate) fn backing_scale(&self) -> f64 {
+        self.ivars().window.backingScaleFactor()
+    }
+
+    /// What the big view lists ([`bt_shell_common::overview::Tab`]): every tab in the strip's
+    /// order, a closed group's hidden ones too, each with its group, its key and its panes
+    /// ([`TerminalTab::card_panes`], the summary card's own list), and the tabs' labels (the
+    /// icon and what it reports).
+    pub(crate) fn overview_facts(&self) -> (Vec<bt_shell_common::overview::Tab>, Vec<Label>) {
+        let keys = self.tab_keys();
+        let groups = self.ivars().groups.borrow();
+        let labels = self.all_labels();
+        let tabs = labels
+            .iter()
+            .filter_map(|label| {
+                let tab = self.tab(label.tab)?;
+                Some(bt_shell_common::overview::Tab {
+                    id: label.tab,
+                    name: label.title.clone(),
+                    group: groups.group_of(label.tab).and_then(|id| {
+                        groups
+                            .group(id)
+                            .map(|group| bt_shell_common::overview::Group {
+                                id: id.get(),
+                                name: group.name.clone(),
+                            })
+                    }),
+                    key: keys
+                        .iter()
+                        .find(|(listed, _)| *listed == label.tab)
+                        .map(|(_, hint)| hint.clone()),
+                    panes: tab.card_panes(),
+                })
+            })
+            .collect();
+        (tabs, labels)
     }
 
     /// Window ▸ Go to Tab… (⌘P): the palette on the tabs, or its highlight one tab on
@@ -4674,6 +4803,9 @@ impl TerminalWindow {
         // An open palette wears the new theme too (a theme shown while the palette is up).
         if let Some(palette) = self.ivars().root.palette() {
             palette.set_theme(&theme);
+        }
+        if let Some(view) = self.ivars().root.overview() {
+            view.set_theme(&theme);
         }
     }
 

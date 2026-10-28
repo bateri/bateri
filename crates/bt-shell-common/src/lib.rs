@@ -65,6 +65,7 @@ pub mod native_view;
 pub mod notices;
 #[cfg(test)]
 mod outward_contract;
+pub mod overview;
 pub mod palette;
 pub mod port_forward;
 pub mod ports;

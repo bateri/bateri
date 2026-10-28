@@ -59,6 +59,7 @@ mod leaving;
 mod locale;
 mod menu;
 mod native_page;
+mod overview;
 mod pacer;
 mod palette;
 mod pane;

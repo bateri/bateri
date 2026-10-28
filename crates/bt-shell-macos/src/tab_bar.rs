@@ -2627,7 +2627,7 @@ const SIGN_OUT: f64 = 0.12;
 /// The curves of the comings (out: quick, then slow to rest) and goings (in: slow, then quick):
 /// the design's CSS `ease-out` and `ease-in`.
 #[derive(Clone, Copy)]
-enum Ease {
+pub(crate) enum Ease {
     Out,
     In,
 }
@@ -2706,7 +2706,15 @@ fn delayed(animation: &CAAnimation, layer: &CALayer, wait: f64) {
 /// Plays `from` to `to` of `path` on `layer` over `secs`, after `wait`. The layer's model value
 /// is already the end of it, and the animation removes itself on completion: nothing is left to
 /// clean up.
-fn play(layer: &CALayer, path: &str, from: f64, to: f64, secs: f64, ease: Ease, wait: f64) {
+pub(crate) fn play(
+    layer: &CALayer,
+    path: &str,
+    from: f64,
+    to: f64,
+    secs: f64,
+    ease: Ease,
+    wait: f64,
+) {
     let animation = CABasicAnimation::animationWithKeyPath(Some(&NSString::from_str(path)));
     // SAFETY: plain `NSNumber`s, what these key paths take.
     unsafe {
@@ -6990,6 +6998,12 @@ impl TabBar {
             }
             menu.addItem(&item);
         }
+        // Under the tabs, the big view the same command opens (Window ▸ Show All Tabs), its key
+        // the command table's.
+        menu.addItem(&NSMenuItem::separatorItem(mtm));
+        let all = window_item(mtm, &window, "Show All Tabs", sel!(showTabList:), 0);
+        crate::menu::keys::key_item(mtm, &all);
+        menu.addItem(&all);
         let height = iv
             .column
             .borrow()

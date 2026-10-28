@@ -82,6 +82,21 @@ fn set_key(item: &NSMenuItem, chord: Option<&Chord>) {
     }
 }
 
+/// Writes the key the command table gives `item`'s command to an item built outside the main
+/// menu (the list button's menu repeats Show All Tabs): the table's, never a key written here
+/// (`.claude/rules/menu.md`). Without a key, or without an application object, it has none.
+pub(crate) fn key_item(mtm: MainThreadMarker, item: &NSMenuItem) {
+    let chord = crate::app::delegate(mtm)
+        .zip(id_of(item))
+        .and_then(|(app, id)| {
+            app.keys()
+                .item_keys()
+                .get(&id)
+                .and_then(|chords| chords.first().copied())
+        });
+    set_key(item, chord.as_ref());
+}
+
 /// The hidden item that carries `primary`'s second key.
 fn copy_of(mtm: MainThreadMarker, primary: &NSMenuItem, chord: &Chord) -> Retained<NSMenuItem> {
     // SAFETY: the action is the primary's own, an action the responders it reaches define; the

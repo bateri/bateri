@@ -1962,6 +1962,12 @@ pub struct CardPane {
     pub exit: Option<i32>,
     /// The tab's focused pane.
     pub focused: bool,
+    /// The host the pane's shell is on when it is a remote session (as displayed, `user@`
+    /// included, [`bt_core::Session::remote_mark`]); `None` for a pane on this computer.
+    pub host: Option<String>,
+    /// Where the pane's shell is, in words ([`place`]); `None` while nothing says. The overview
+    /// finds and names a pane by it.
+    pub directory: Option<String>,
 }
 
 impl CardPane {
@@ -2045,8 +2051,16 @@ pub fn map_height(aspect: f64) -> f64 {
 /// and `height` tall: its share of the map less half of [`MAP_GAP`] at each inner edge, so two
 /// neighbours are a gap apart and a pane at the map's edge reaches it.
 pub fn map_tile(place: Rect, height: f64) -> Rect {
+    inset_tile(place, MAP_WIDTH, height, MAP_GAP)
+}
+
+/// Where a pane standing at `place` (fractions of the area) is drawn on a picture of its tab
+/// `width` by `height` points: its share of the picture less half of `gap` at each inner edge,
+/// so two neighbours are a gap apart and a pane at the picture's edge reaches it. The card's
+/// map ([`map_tile`]) and the big view's tabs ([`crate::overview`]) both place their panes by it.
+pub fn inset_tile(place: Rect, width: f64, height: f64, gap: f64) -> Rect {
     const EDGE: f64 = 0.001;
-    let half = MAP_GAP / 2.0;
+    let half = gap / 2.0;
     let left = if place.x > EDGE { half } else { 0.0 };
     let top = if place.y > EDGE { half } else { 0.0 };
     let right = if place.x + place.width < 1.0 - EDGE {
@@ -2060,9 +2074,9 @@ pub fn map_tile(place: Rect, height: f64) -> Rect {
         0.0
     };
     Rect::new(
-        place.x * MAP_WIDTH + left,
+        place.x * width + left,
         place.y * height + top,
-        place.width * MAP_WIDTH - left - right,
+        place.width * width - left - right,
         place.height * height - top - bottom,
     )
 }
@@ -4676,6 +4690,8 @@ mod tests {
             indicator,
             exit: None,
             focused: id == 1,
+            host: None,
+            directory: None,
         }
     }
 

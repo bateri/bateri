@@ -328,23 +328,23 @@ fn empty_message(scope: Option<&Scope>, depth: usize, query: &str, looking: bool
 
 /// The palette's colours, all from the theme.
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct Look {
-    ground: Tint,
-    band: Tint,
-    line: Tint,
-    text: Tint,
-    dim: Tint,
-    accent: Tint,
+pub(crate) struct Look {
+    pub(crate) ground: Tint,
+    pub(crate) band: Tint,
+    pub(crate) line: Tint,
+    pub(crate) text: Tint,
+    pub(crate) dim: Tint,
+    pub(crate) accent: Tint,
     /// The theme's status roles, for a row's status text.
-    success: Tint,
-    warning: Tint,
-    error: Tint,
-    lit: Tint,
-    shadow: Tint,
+    pub(crate) success: Tint,
+    pub(crate) warning: Tint,
+    pub(crate) error: Tint,
+    pub(crate) lit: Tint,
+    pub(crate) shadow: Tint,
 }
 
 impl Look {
-    fn of(theme: &Theme) -> Look {
+    pub(crate) fn of(theme: &Theme) -> Look {
         let hex = |[r, g, b]: [u8; 3]| (u32::from(r) << 16) | (u32::from(g) << 8) | u32::from(b);
         let dark = theme.is_dark();
         Look {
@@ -365,10 +365,10 @@ impl Look {
 
 // ─── Text ─────────────────────────────────────────────────────────────────
 
-type Attributes = Retained<NSDictionary<NSAttributedStringKey, AnyObject>>;
+pub(crate) type Attributes = Retained<NSDictionary<NSAttributedStringKey, AnyObject>>;
 
 /// A font and a colour as the attributes AppKit draws a string with.
-fn attributes(font: &NSFont, color: Tint) -> Attributes {
+pub(crate) fn attributes(font: &NSFont, color: Tint) -> Attributes {
     let color = color.color();
     let values: [&AnyObject; 2] = [color.as_ref(), font.as_ref()];
     // SAFETY: AppKit's two attribute keys (extern statics), each with the value type it
@@ -381,14 +381,14 @@ fn attributes(font: &NSFont, color: Tint) -> Attributes {
     }
 }
 
-fn text_width(text: &str, attributes: &Attributes) -> f64 {
+pub(crate) fn text_width(text: &str, attributes: &Attributes) -> f64 {
     // SAFETY: `attributes` is a dictionary of the keys and value types `sizeWithAttributes:` reads.
     unsafe { NSString::from_str(text).sizeWithAttributes(Some(attributes)) }.width
 }
 
 /// Draws `text` with its left edge at `x`, centred in the slot `[top, top + height)`; returns
 /// where it ended.
-fn draw_text(text: &str, x: f64, top: f64, height: f64, attributes: &Attributes) -> f64 {
+pub(crate) fn draw_text(text: &str, x: f64, top: f64, height: f64, attributes: &Attributes) -> f64 {
     let string = NSString::from_str(text);
     // SAFETY: as `text_width`.
     let size = unsafe { string.sizeWithAttributes(Some(attributes)) };
@@ -403,7 +403,13 @@ fn draw_text(text: &str, x: f64, top: f64, height: f64, attributes: &Attributes)
 }
 
 /// Draws `text` ending at `right`; returns where it began.
-fn draw_text_right(text: &str, right: f64, top: f64, height: f64, attributes: &Attributes) -> f64 {
+pub(crate) fn draw_text_right(
+    text: &str,
+    right: f64,
+    top: f64,
+    height: f64,
+    attributes: &Attributes,
+) -> f64 {
     let left = right - text_width(text, attributes);
     draw_text(text, left, top, height, attributes);
     left
@@ -2033,6 +2039,8 @@ fn tab_icons(mtm: MainThreadMarker, places: &Places, theme: &Theme) -> Icons {
 /// Opens the palette over `window`'s content; `start`: on that page, which esc closes from
 /// (⌘P on the tabs, ⌘O on the folders) rather than going back to the root.
 fn open(window: &TerminalWindow, start: Option<Scope>) {
+    // The big view and the palette are not open together.
+    window.close_overview();
     let mtm = window.mtm();
     let Some(app) = app::delegate(mtm) else {
         return;

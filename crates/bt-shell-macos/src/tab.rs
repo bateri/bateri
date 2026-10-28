@@ -1637,7 +1637,12 @@ impl TerminalTab {
     /// `host:directory` in a remote session ([`tabs::place`], the summary card's line); `None`
     /// while no session says. The command palette's tab rows read it.
     pub(crate) fn place(&self) -> Option<String> {
-        let pane = self.focused_pane();
+        Self::place_of(&self.focused_pane())
+    }
+
+    /// Where `pane`'s shell is, in words ([`Self::place`]'s rule for any one pane): the big
+    /// view names each pane of a tab by it.
+    fn place_of(pane: &TerminalPane) -> Option<String> {
         let session = pane.session()?;
         let remote = session
             .remote_mark()
@@ -1689,7 +1694,7 @@ impl TerminalTab {
     /// shows a tick or a dot the program is the one that ended, as the chip's emblem has it
     /// ([`Self::emblem`]). A failed pane's exit code is read from its newest command's row — a
     /// `Term` round, which the card's own read allows.
-    fn card_panes(&self) -> Vec<CardPane> {
+    pub(crate) fn card_panes(&self) -> Vec<CardPane> {
         let panes = self.panes();
         let (hidden, away) = (self.hidden(), self.away());
         let focused = self.focused_pane().id();
@@ -1726,6 +1731,11 @@ impl TerminalTab {
                     indicator,
                     exit,
                     focused: id == focused,
+                    host: pane
+                        .session()
+                        .and_then(|session| session.remote_mark())
+                        .map(|(host, _)| host),
+                    directory: Self::place_of(pane),
                 })
             })
             .collect()

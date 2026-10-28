@@ -159,7 +159,7 @@ audit:
 			|| { echo "audit: unjustified panic path in bt-core ($$f)"; fail=1; }; \
 	done; \
 	if grep -rnE "beginSheet|endSheet|attachedSheet" crates/bt-shell-macos/src --include='*.rs' | grep -v "^crates/bt-shell-macos/src/sheets.rs:" | grep -v "^crates/bt-shell-macos/src/settings_window" | grep -v ":[[:space:]]*//"; then echo "audit: a sheet begun, ended or asked about outside the sheet gate (bt-shell-macos sheets.rs)"; fail=1; fi; \
-	app_mods="agent|app|arrange|hold_service|leaving|menu|palette|pane_drag|settings_window|split_view|tab|tab_bar|tab_drag|tab_group|tab_merge|tab_side|tab_switch|tab_title|updater|window"; \
+	app_mods="agent|app|arrange|hold_service|leaving|menu|overview|palette|pane_drag|settings_window|split_view|tab|tab_bar|tab_drag|tab_group|tab_merge|tab_side|tab_switch|tab_title|updater|window"; \
 	for f in crates/bt-shell-macos/src/*.rs; do \
 		m=$$(basename "$$f" .rs); \
 		if echo "$$m" | grep -qxE "lib|$$app_mods"; then continue; fi; \
@@ -190,10 +190,12 @@ test:
 # The tests `#[ignore]`d for something else than being heavy, by their paths: the race tier
 # (`make test-race`), the font inventories (`make scan`, `raster_digest`), the frame-loop
 # measurement hook, the askpass child the master tests start themselves and the tests that
-# need a local sshd. A new `#[ignore]` of that kind goes here too, or the heavy runs try it.
+# need a local sshd and the reader's throughput benchmarks (`make throughput`, in release). A new
+# `#[ignore]` of that kind goes here too, or the heavy runs try it.
 NOT_HEAVY = --skip ::race_ --skip census::tests::census --skip raster_digest \
 	--skip wgpu_tests::offscreen_frame_loop --skip ssh_route::tests::askpass_child \
-	--skip ssh_route::tests::a_real_master_opens --skip ssh_route::tests::password_sshd_
+	--skip ssh_route::tests::a_real_master_opens --skip ssh_route::tests::password_sshd_ \
+	--skip reader::throughput
 
 # The libraries' heavy tests: those whose path holds one of AREA's words
 # (`AREA="child:: kablo::"`), every one without it. Nothing is built again: the same test
