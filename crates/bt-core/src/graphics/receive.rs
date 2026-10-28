@@ -114,7 +114,9 @@ struct Known {
 
 /// A chunked transmission in progress.
 struct Open {
-    /// The keys of the first chunk; a chunk after it names none of them.
+    /// The keys of the first chunk; a chunk after it names none of them but
+    /// `m`, `q` and the action ([`Command::is_chunk`]), and only `q` is taken
+    /// from it.
     command: Command,
     /// The base64 text of the payload so far, chunks joined as they came.
     text: Vec<u8>,
