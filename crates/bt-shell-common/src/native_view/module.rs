@@ -1053,7 +1053,7 @@ impl UiPage for ModulePage {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crate::native_view::guest_dir;
     use bt_core::{MINIMUM_CONTRAST, Theme};
@@ -2776,5 +2776,254 @@ return {
         assert_eq!(drained.ended, None);
         assert_eq!(pictures(&build(&mut page, &renderer, &theme, 0.4)), 0);
         assert!(handle.drain(&mut |_, _| {}).diagnostics.is_empty());
+    }
+
+    /// The pane in all but AppKit, around this module's drive: for the scenarios of
+    /// `native_view::pane_tests`, which say what the pane does with a page and what it sees of it.
+    pub(in crate::native_view) struct PaneRig {
+        page: ModulePage,
+        handle: ModuleHandle,
+        list: DrawList,
+        log: Rc<RefCell<super::super::pane_tests::Transcript>>,
+    }
+
+    impl PaneRig {
+        /// The page of the script `source` below a strip of 32 points, measured evenly; the
+        /// outline told as the pane is told it.
+        pub(in crate::native_view) fn open(source: &str) -> Self {
+            let (page, handle, _woken) = editor_rig(source);
+            let log = Rc::new(RefCell::new(super::super::pane_tests::Transcript::default()));
+            let told = Rc::clone(&log);
+            handle.watch_outline(Box::new(move |outline| {
+                told.borrow_mut().outline(
+                    &outline.fields,
+                    &outline.accessible,
+                    &outline.tips,
+                    &outline.commands,
+                );
+            }));
+            Self {
+                page,
+                handle,
+                list: DrawList::default(),
+                log,
+            }
+        }
+
+        /// A frame of 800 × 600 pixels at a pixel to a point, at `now`.
+        pub(in crate::native_view) fn frame(&mut self, now: f64) {
+            let (list, told) = self
+                .page
+                .frame(frame_at(now), &mut super::super::editing::Even);
+            if let Some((told, outline)) = told {
+                told(&outline);
+            }
+            self.list = list;
+        }
+
+        /// What the page said, done as the pane does it.
+        fn drain(&mut self) -> bool {
+            let mut said = Vec::new();
+            let drained = self
+                .handle
+                .drain(&mut |reply, pointer| said.push((reply, pointer)));
+            let mut log = self.log.borrow_mut();
+            for message in &drained.sent {
+                log.send(message);
+            }
+            for (reply, pointer) in said {
+                if reply.close {
+                    log.close();
+                }
+                if reply.redraw {
+                    log.redraw();
+                }
+                if pointer {
+                    log.cursor(reply.cursor);
+                }
+                for (field, text) in &reply.fill {
+                    log.fill(*field, text);
+                }
+                if let Some(to) = reply.keyboard {
+                    log.keyboard(to);
+                }
+                if let Some(text) = &reply.copy {
+                    log.copy(text);
+                }
+                if let Some(url) = &reply.link {
+                    log.link(url);
+                }
+                if let Some(menu) = &reply.menu {
+                    log.menu(menu);
+                }
+            }
+            for words in &drained.diagnostics {
+                log.diagnostic(words);
+            }
+            if let Some(why) = &drained.ended {
+                log.ended(why);
+                return false;
+            }
+            if drained.redraw {
+                log.redraw();
+            } else if drained.wake {
+                log.rearm();
+            }
+            drained.redraw
+        }
+
+        /// Waits until the module has done what it was told, does what it said and draws the
+        /// frames it wants at `now`, until it wants none.
+        pub(in crate::native_view) fn settle(&mut self, now: f64) {
+            for _ in 0..100 {
+                assert!(
+                    self.handle
+                        .shared
+                        .borrow()
+                        .module
+                        .flush(Duration::from_secs(10)),
+                    "the module did not come to what it was told"
+                );
+                let redraw = self.drain();
+                if !redraw && !self.page.animating() {
+                    return;
+                }
+                self.frame(now);
+            }
+            panic!("the page never came to rest");
+        }
+
+        /// The same for a pane that is not seen: no frame is drawn.
+        pub(in crate::native_view) fn settle_unseen(&mut self) {
+            assert!(
+                self.handle
+                    .shared
+                    .borrow()
+                    .module
+                    .flush(Duration::from_secs(10))
+            );
+            self.drain();
+        }
+
+        /// The pointer, in the pane's points: a press ends what an input method composes (the
+        /// pane has its system forget it) before the page is told.
+        pub(in crate::native_view) fn input(&mut self, input: Input) {
+            if matches!(input, Input::Press { .. })
+                && let Some(editors) = self.handle.editors()
+                && editors.focused().is_some()
+                && editors.marked().is_some()
+            {
+                editors.unmark();
+                self.log.borrow_mut().say("discard marked text");
+            }
+            self.handle.send_input(input);
+        }
+
+        /// A key: to the editor with the keyboard, where one has it, and to the page where none
+        /// takes it.
+        pub(in crate::native_view) fn key(&mut self, key: Key, mods: Mods) {
+            let route = match self
+                .handle
+                .editors()
+                .filter(|editors| editors.focused().is_some())
+            {
+                Some(editors) => editors.key(key, mods),
+                None => Route::NotEditor,
+            };
+            if route == Route::NotEditor {
+                self.handle.send_input(Input::Key { key, mods });
+            }
+            self.log
+                .borrow_mut()
+                .say(format!("route {key:?} {route:?}"));
+        }
+
+        /// A key went up: nobody's while an editor has the keyboard.
+        pub(in crate::native_view) fn key_up(&mut self, key: Key, mods: Mods) {
+            if self
+                .handle
+                .editors()
+                .is_some_and(|editors| editors.focused().is_some())
+            {
+                return;
+            }
+            self.handle.send_input(Input::KeyUp { key, mods });
+        }
+
+        pub(in crate::native_view) fn wheel(&mut self, at: Point, dx: f32, dy: f32, phase: Phase) {
+            self.handle.send_wheel(at, dx, dy, phase);
+        }
+
+        pub(in crate::native_view) fn text(&mut self, field: Id, text: &str) {
+            self.handle.send_text(field, text);
+        }
+
+        pub(in crate::native_view) fn focus(&mut self, field: Option<Id>) {
+            self.handle.send_focus(field);
+        }
+
+        pub(in crate::native_view) fn pick(&mut self, index: usize) {
+            self.handle.send_pick(index);
+        }
+
+        pub(in crate::native_view) fn command(&mut self, id: Id) {
+            self.handle.send_command(id);
+        }
+
+        pub(in crate::native_view) fn files(&mut self, at: Point, paths: Vec<String>) {
+            self.handle.send_files(at, paths);
+        }
+
+        pub(in crate::native_view) fn set_scrolling(&mut self, scrolling: Scrolling) {
+            self.handle.set_scrolling(scrolling);
+        }
+
+        pub(in crate::native_view) fn set_zoom(&mut self, zoom: f32) {
+            self.handle.set_zoom(zoom);
+        }
+
+        pub(in crate::native_view) fn set_active(&mut self, active: bool) {
+            self.handle.set_active(active);
+        }
+
+        pub(in crate::native_view) fn wake_unseen(&mut self, now: f64) -> Option<f64> {
+            self.handle.wake_unseen(now)
+        }
+
+        /// When the page at rest wants its next frame.
+        pub(in crate::native_view) fn wake_at(&self) -> Option<f64> {
+            self.page.wake_at()
+        }
+
+        pub(in crate::native_view) fn editors(&self) -> Option<PageEditors> {
+            self.handle.editors()
+        }
+
+        /// The line of what the page heard, as the last frame drew it.
+        pub(in crate::native_view) fn said(&self) -> String {
+            drawn(&self.list)
+                .into_iter()
+                .find_map(|words| words.strip_prefix("said: ").map(str::to_owned))
+                .unwrap_or_default()
+        }
+
+        /// How many boxes the last frame drew.
+        pub(in crate::native_view) fn quads(&self) -> usize {
+            self.list
+                .items
+                .iter()
+                .filter(|item| matches!(item, pencere_view::Paint::Quad(_)))
+                .count()
+        }
+
+        /// A line of the test's own.
+        pub(in crate::native_view) fn note(&mut self, line: String) {
+            self.log.borrow_mut().say(line);
+        }
+
+        /// The lines written since they were last taken.
+        pub(in crate::native_view) fn lines(&mut self) -> Vec<String> {
+            self.log.borrow_mut().take()
+        }
     }
 }

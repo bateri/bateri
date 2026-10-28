@@ -47,6 +47,8 @@ use containers::Containers;
 mod containers;
 mod editing;
 mod module;
+#[cfg(test)]
+mod pane_tests;
 mod scrolling;
 mod waking;
 pub use editing::Route;

@@ -1297,7 +1297,7 @@ dependencies = [
 [[package]]
 name = "pencere"
 version = "0.3.1"
-source = "git+https://github.com/bateri/pencere?rev=824f75acea0308a581b2a6c264d58db5ba9bd4c3#824f75acea0308a581b2a6c264d58db5ba9bd4c3"
+source = "git+https://github.com/bateri/pencere?rev=777f921ae6b5f666450fc8023b53ca618ea2748c#777f921ae6b5f666450fc8023b53ca618ea2748c"
 dependencies = [
  "libc",
  "pencere-wire",
@@ -1308,7 +1308,7 @@ dependencies = [
 [[package]]
 name = "pencere-editor"
 version = "0.3.1"
-source = "git+https://github.com/bateri/pencere?rev=824f75acea0308a581b2a6c264d58db5ba9bd4c3#824f75acea0308a581b2a6c264d58db5ba9bd4c3"
+source = "git+https://github.com/bateri/pencere?rev=777f921ae6b5f666450fc8023b53ca618ea2748c#777f921ae6b5f666450fc8023b53ca618ea2748c"
 dependencies = [
  "pencere-view",
  "regex",
@@ -1319,7 +1319,7 @@ dependencies = [
 [[package]]
 name = "pencere-host"
 version = "0.3.1"
-source = "git+https://github.com/bateri/pencere?rev=824f75acea0308a581b2a6c264d58db5ba9bd4c3#824f75acea0308a581b2a6c264d58db5ba9bd4c3"
+source = "git+https://github.com/bateri/pencere?rev=777f921ae6b5f666450fc8023b53ca618ea2748c#777f921ae6b5f666450fc8023b53ca618ea2748c"
 dependencies = [
  "pencere-wire",
  "serde",
@@ -1329,7 +1329,7 @@ dependencies = [
 [[package]]
 name = "pencere-sandbox"
 version = "0.3.1"
-source = "git+https://github.com/bateri/pencere?rev=824f75acea0308a581b2a6c264d58db5ba9bd4c3#824f75acea0308a581b2a6c264d58db5ba9bd4c3"
+source = "git+https://github.com/bateri/pencere?rev=777f921ae6b5f666450fc8023b53ca618ea2748c#777f921ae6b5f666450fc8023b53ca618ea2748c"
 dependencies = [
  "pencere-view",
  "pencere-wire",
@@ -1344,7 +1344,7 @@ dependencies = [
 [[package]]
 name = "pencere-view"
 version = "0.3.1"
-source = "git+https://github.com/bateri/pencere?rev=824f75acea0308a581b2a6c264d58db5ba9bd4c3#824f75acea0308a581b2a6c264d58db5ba9bd4c3"
+source = "git+https://github.com/bateri/pencere?rev=777f921ae6b5f666450fc8023b53ca618ea2748c#777f921ae6b5f666450fc8023b53ca618ea2748c"
 dependencies = [
  "taffy",
 ]
@@ -1352,7 +1352,7 @@ dependencies = [
 [[package]]
 name = "pencere-wire"
 version = "0.3.1"
-source = "git+https://github.com/bateri/pencere?rev=824f75acea0308a581b2a6c264d58db5ba9bd4c3#824f75acea0308a581b2a6c264d58db5ba9bd4c3"
+source = "git+https://github.com/bateri/pencere?rev=777f921ae6b5f666450fc8023b53ca618ea2748c#777f921ae6b5f666450fc8023b53ca618ea2748c"
 dependencies = [
  "serde",
  "serde_json",
