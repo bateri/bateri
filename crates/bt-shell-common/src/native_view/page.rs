@@ -21,6 +21,12 @@
 //!   that borrows the page for each call alone.
 //! - **Its fields and its screen reader** — [`PageHandle::watch_outline`]: the outline a frame says
 //!   changed, told after the page is let go of, since the pane moves its fields in that call.
+//! - **What a reply asked of a field its own frame brings** — [`PageHandle::watch_held`]: a find bar
+//!   opened, filled and given the keyboard in one reply has no field until the frame that lays it out
+//!   has been drawn and the outline told, so the drive holds the texts and the keyboard
+//!   ([`pencere_drive::Painted::held`]) and the pane takes them right after the outline.
+//! - **The time of day, and the keyboard** — [`PaneProgram`]: the person's offset from UTC, which the
+//!   sandbox cannot know, and the system's keyboard convention.
 //!
 //! The pane's pasteboard, pointer, menus, browser and the session it speaks through are
 //! `bt-shell-macos`'s (its `pencere_drive::Host`); the clock that wakes a page whose pane is not seen
@@ -29,12 +35,13 @@
 use std::cell::{RefCell, RefMut};
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use bt_core::Flow;
 use bt_gpu::{Renderer, UiContext, UiList, UiPage};
-use pencere_drive::{FrameAt, Outline, Page, Placement, Route, Setup};
+use pencere_drive::{FrameAt, Outline, Page, Painted, Placement, Route, Setup};
 use pencere_sandbox::{Assets, ModuleLimits, Program, Script};
-use pencere_view::{Font, Id, Key, Measure, Metrics, Mods, Point, Rect};
+use pencere_view::{Font, Id, Key, Measure, Metrics, Mods, Point, Rect, WallTime};
 
 use super::containers::Demo;
 use super::{SHAPED_LIMIT, Shaped, Typeset, to_list};
@@ -189,6 +196,38 @@ impl Program for PaneProgram {
     fn now(&self) -> Option<f64> {
         self.clock.map(|clock| clock())
     }
+
+    /// The time of day with the person's offset from UTC as it is now (daylight saving time
+    /// included): the sandbox knows no time zone, and a page that shows the time of day shows the
+    /// person's.
+    fn wall_clock(&self) -> WallTime {
+        let seconds = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0.0, |since| since.as_secs_f64());
+        WallTime {
+            seconds,
+            utc_offset: local_utc_offset(seconds),
+        }
+    }
+
+    // `keyboard` is the sandbox's own answer: the system this is built for (a Mac's on macOS, which
+    // is the only shell there is; `bt-shell-linux` will be Linux's), `a_pages_keyboard_is_the_systems`.
+}
+
+/// How far the person's local time is ahead of UTC at `unix` seconds, in seconds (the system's
+/// time zone rules, so daylight saving time is in it); 0 where the system cannot say.
+fn local_utc_offset(unix: f64) -> i32 {
+    #[allow(clippy::cast_possible_truncation)]
+    let time = unix.floor() as libc::time_t;
+    // SAFETY: `localtime_r` writes only the `tm` it is given, and reads the time it is given and
+    // the system's zone rules, which it guards itself. A zeroed `tm` is a valid one to fill.
+    let mut broken: libc::tm = unsafe { std::mem::zeroed() };
+    let filled = unsafe { libc::localtime_r(&raw const time, &raw mut broken) };
+    if filled.is_null() {
+        0
+    } else {
+        i32::try_from(broken.tm_gmtoff).unwrap_or(0)
+    }
 }
 
 /// The renderer as a page's measure, in frames and between them: it opens and shapes through the
@@ -239,7 +278,7 @@ impl UiPage for PageDrawing {
                 shaped.lines.clear();
             }
         }
-        let (list, outline) = {
+        let (list, mut painted) = {
             let mut page = self.handle.page();
             let painted = page.frame(FrameAt {
                 size: cx.size_px,
@@ -263,15 +302,14 @@ impl UiPage for PageDrawing {
                 &painted.list,
                 (0.0, inset),
             );
-            (list, painted.outline)
+            (list, painted)
         };
         // After the page is let go of: the pane moves its fields in this call, and that may come
         // back to the page (the keyboard put in a field). The one place a frame's fields are
-        // applied: what the drive holds for fields a reply opens (`Painted::deliver_held`, a later
-        // pencere) is delivered by the pane right after it, here, once its fields exist.
-        if let Some(outline) = outline {
-            self.handle.tell_outline(&outline);
-        }
+        // applied, and right after it what the drive held for the fields a reply opened
+        // (`Painted::deliver_held`) is given to the pane, once its fields exist. Not only when the
+        // outline changed: what is held can wait for a frame whose outline is the one the pane has.
+        self.handle.tell_frame(&mut painted);
         list
     }
 
@@ -287,12 +325,16 @@ impl UiPage for PageDrawing {
 /// What is called when a page's outline changes ([`PageHandle::watch_outline`]).
 type OnOutline = Rc<dyn Fn(&Outline)>;
 
+/// What is called with what a frame brings besides its outline ([`PageHandle::watch_held`]).
+type OnHeld = Rc<dyn Fn(&mut Painted)>;
+
 /// The pane's handle on a page of the kit: the drive's page, which the link's frames of it share.
 /// Cloned freely; all of it on the main thread.
 #[derive(Clone)]
 pub struct PageHandle {
     page: Rc<RefCell<Page>>,
     on_outline: Rc<RefCell<Option<OnOutline>>>,
+    on_held: Rc<RefCell<Option<OnHeld>>>,
 }
 
 impl PageHandle {
@@ -300,6 +342,7 @@ impl PageHandle {
         Self {
             page: Rc::new(RefCell::new(page)),
             on_outline: Rc::new(RefCell::new(None)),
+            on_held: Rc::new(RefCell::new(None)),
         }
     }
 
@@ -327,6 +370,29 @@ impl PageHandle {
         let told = self.on_outline.borrow().clone();
         if let Some(told) = told {
             told(outline);
+        }
+    }
+
+    /// `told` is called, on the thread that builds the frame, with the frame ([`Painted`]) right after
+    /// its outline was told, so that the pane has the fields, when replies asked something of fields
+    /// that frame lays out (their texts and the keyboard): `told` hands it to the pane's host with
+    /// [`Painted::deliver_held`]. The page is not borrowed.
+    pub fn watch_held(&self, told: Box<dyn Fn(&mut Painted)>) {
+        self.on_held.replace(Some(Rc::from(told)));
+    }
+
+    /// A frame's outline if it changed, then what the drive held for its fields: the order a pane
+    /// needs, for a field is the pane's only once the outline was told. The page is not borrowed.
+    fn tell_frame(&self, painted: &mut Painted) {
+        if let Some(outline) = painted.outline.take() {
+            self.tell_outline(&outline);
+        }
+        if painted.held.is_empty() {
+            return;
+        }
+        let told = self.on_held.borrow().clone();
+        if let Some(told) = told {
+            told(painted);
         }
     }
 
@@ -432,7 +498,9 @@ pub(super) mod tests {
     use bt_gpu::UiItem;
     use pencere_drive::Host;
     use pencere_sandbox::Fault;
-    use pencere_view::{Cursor, DrawList, Input, Keyboard, Menu, Paint, Phase};
+    use pencere_view::{
+        Cursor, DrawList, Fill, Input, KeyConvention, Keyboard, Menu, Paint, Phase,
+    };
     use std::sync::mpsc::{Receiver, channel};
     use std::time::Duration;
 
@@ -478,8 +546,8 @@ pub(super) mod tests {
         fn cursor(&mut self, cursor: Cursor) {
             self.0.borrow_mut().cursor(cursor);
         }
-        fn fill(&mut self, field: Id, text: String) {
-            self.0.borrow_mut().fill(field, &text);
+        fn fill(&mut self, field: Id, fill: Fill) {
+            self.0.borrow_mut().fill(field, &fill);
         }
         fn keyboard(&mut self, to: Keyboard) {
             self.0.borrow_mut().keyboard(to);
@@ -538,6 +606,10 @@ pub(super) mod tests {
                     &outline.commands,
                 );
             }));
+            let held = Rc::clone(&log);
+            handle.watch_held(Box::new(move |painted| {
+                painted.deliver_held(&mut Written(Rc::clone(&held)));
+            }));
             Self {
                 handle,
                 list: DrawList::default(),
@@ -554,9 +626,8 @@ pub(super) mod tests {
                 now,
                 reduce_motion: false,
             });
-            if let Some(outline) = painted.outline {
-                self.handle.tell_outline(&outline);
-            }
+            let mut painted = painted;
+            self.handle.tell_frame(&mut painted);
             self.list = painted.list;
         }
 
@@ -736,6 +807,99 @@ pub(super) mod tests {
             clock: None,
         };
         assert!((0..1000).all(|_| demo.may_say(64 << 10)));
+    }
+
+    /// The link's build of a frame hands the pane the frame's outline and then what the drive held
+    /// for the fields that outline brought (`Painted::held`), and does it after the page is let go
+    /// of, not only when the outline changed: what is held can wait for a frame whose outline is the
+    /// one the pane has. A source scan: the order is the pane's and needs the pane.
+    #[test]
+    fn a_frame_tells_the_outline_and_then_what_was_held_for_its_fields_with_the_page_let_go_of() {
+        let source = include_str!("page.rs");
+        let source = &source[..source
+            .find("pub(super) mod tests")
+            .expect("the tests follow")];
+        let build = &source[source
+            .find("    fn build(&mut self, cx: &UiContext<'_>)")
+            .expect("build")..];
+        let build = &build[..build.find("    fn animating(").expect("its end")];
+        let told = build
+            .find("self.handle.tell_frame(&mut painted)")
+            .expect(build);
+        assert!(
+            told > build
+                .find("(list, painted)\n        };")
+                .expect("the page is let go of")
+        );
+        let frame = &source[source.find("    fn tell_frame(").expect("tell_frame")..];
+        let frame = &frame[..frame.find("\n    }\n").expect("its end")];
+        let outline = frame.find("self.tell_outline(&outline)").expect(frame);
+        let held = frame.find("told(painted)").expect(frame);
+        assert!(
+            outline < held,
+            "the outline makes the fields first: {frame}"
+        );
+        assert!(frame.contains("painted.held.is_empty()"), "{frame}");
+    }
+
+    /// The time of day a page reads is the system's with the person's offset from UTC as the system
+    /// has it now, which the sandbox's own answer (UTC) leaves out: what `date` says the offset is,
+    /// and a time of day that is now.
+    #[test]
+    fn a_pages_time_of_day_has_the_persons_offset_from_utc() {
+        let program = PaneProgram {
+            flow: None,
+            clock: None,
+        };
+        let told = program.wall_clock();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("after 1970")
+            .as_secs_f64();
+        assert!(
+            (told.seconds - now).abs() < 5.0,
+            "{} vs {now}",
+            told.seconds
+        );
+        // `date +%z` is the sign, the hours and the minutes of the system's own offset now.
+        let said = std::process::Command::new("date")
+            .arg("+%z")
+            .output()
+            .expect("date runs");
+        let said = String::from_utf8(said.stdout).expect("text");
+        let said = said.trim();
+        let sign = if said.starts_with('-') { -1 } else { 1 };
+        let hours: i32 = said[1..3].parse().expect("hours");
+        let minutes: i32 = said[3..5].parse().expect("minutes");
+        assert_eq!(
+            told.utc_offset,
+            sign * (hours * 3600 + minutes * 60),
+            "{said}"
+        );
+        // Whatever the zone, an offset is within a day of UTC and in whole minutes.
+        for unix in [0.0, 1.7e9, 2.0e9] {
+            let offset = local_utc_offset(unix);
+            assert!(
+                offset.abs() <= 14 * 3600 && offset % 60 == 0,
+                "{offset} at {unix}"
+            );
+        }
+    }
+
+    /// The keyboard a page reads is the system's own convention: a Mac's on the Mac (the sandbox
+    /// says the system this is built for, and the pane has nothing to say against it).
+    #[test]
+    fn a_pages_keyboard_is_the_systems() {
+        let program = PaneProgram {
+            flow: None,
+            clock: None,
+        };
+        let expected = if cfg!(target_os = "macos") {
+            KeyConvention::Mac
+        } else {
+            KeyConvention::Linux
+        };
+        assert_eq!(program.keyboard(), expected);
     }
 
     /// The time a page reads between frames is the pane's clock, the frames' own (the drive's one

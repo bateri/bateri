@@ -365,9 +365,12 @@ fn fill_move_targets(mtm: MainThreadMarker, menu: &NSMenu, targets: &[(u64, Stri
 /// Fills View ▸ Page Commands ▸ with what the page up can be told to do: one item each, by its
 /// title, its `tag` its place in the list (the pane's `pageCommand:` reads it and its
 /// `validateMenuItem:` greys one that cannot be done now). **No item has a key**: a command's keys
-/// are the page's, and a key that reaches the page is the command it does
-/// (`bt_shell_common::native_view`); written here they would take the key from a field of the
-/// page. With no page, or a page with no command, a grey placeholder.
+/// (as many as it has, the first the one a list shows) are the page's, and a key that reaches the
+/// page is the command it does (`bt_shell_common::native_view`); a menu bar item that had them
+/// would take the key from a field of the page, and from every item's key the palette reads off the
+/// menu and Settings ▸ Keyboard lists. The keys of a menu the page pops up are shown
+/// (`BateriView::show_page_menu`: a pop-up menu matches them only while it is open). With no page,
+/// or a page with no command, a grey placeholder.
 fn fill_page_commands(
     mtm: MainThreadMarker,
     menu: &NSMenu,

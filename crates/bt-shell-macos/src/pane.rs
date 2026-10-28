@@ -54,7 +54,7 @@ use bt_gpu::{
     Surface, Waker,
 };
 use dispatch2::{DispatchQueue, DispatchTime};
-use objc2::rc::Retained;
+use objc2::rc::{Retained, Weak as WeakId};
 use objc2::runtime::{AnyObject, ProtocolObject, Sel};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
@@ -87,9 +87,9 @@ use crate::grid::{self, Grid, split_into_grid};
 use bt_shell_common::kablo::roster::Background;
 use bt_shell_common::kablo::service::{PaneLink, Shown};
 use bt_shell_common::native_view::{
-    Bars, Cursor as PageCursor, Fault as PageFault, Host as PageDriveHost, Id as PageId, Input,
-    Key as PageKey, Keyboard, Menu as PageMenu, Mods as PageMods, Opening, PageEditors, PageHandle,
-    Phase, Point as PagePoint, Rect as PageRect, Route, Scrolling,
+    Bars, Cursor as PageCursor, Fault as PageFault, Fill as PageFill, Host as PageDriveHost,
+    Id as PageId, Input, Key as PageKey, Keyboard, Menu as PageMenu, Mods as PageMods, Opening,
+    PageEditors, PageHandle, Phase, Point as PagePoint, Rect as PageRect, Route, Scrolling,
 };
 use bt_shell_common::view_strip;
 use objc2_app_kit::{NSEvent, NSEventType};
@@ -2469,7 +2469,7 @@ define_class!(
             // search bar's.
             let page_field = self
                 .page_field_of(control)
-                .map(|(_, kind)| self.page_field_command(kind, text_view, command));
+                .map(|(id, kind)| self.page_field_command(id, kind, text_view, command));
             // No `return`: `define_class!` converts the `bool` at the end of the body.
             if let Some(handled) = page_field {
                 handled
@@ -4077,6 +4077,15 @@ impl TerminalPane {
         }
     }
 
+    /// What a frame of the page the pane drives brought that replies had asked of its fields (the
+    /// texts and the keyboard, in the order asked), done by the pane's host
+    /// ([`PageHost`], as the rest of what a page said is) now that the frame's fields exist
+    /// (`PageFields::apply`, told before this). A page that went down meanwhile is not the pane's
+    /// to do anything for ([`PageHost`] does each part only while the page is up).
+    fn deliver_held(&self, painted: &mut bt_shell_common::native_view::Painted) {
+        painted.deliver_held(&mut PageHost(self));
+    }
+
     /// How much larger than its own size a page of the kit is drawn: as the terminal's text is
     /// to the kit's ([`bt_shell_common::native_view::Placement::zoom_for`]).
     fn page_zoom(&self) -> f32 {
@@ -4110,6 +4119,17 @@ impl TerminalPane {
             // The page says where its fields are whenever it is laid out another way.
             let fields = Rc::clone(&fields);
             handle.watch_outline(Box::new(move |outline| fields.apply(outline)));
+        }
+        {
+            // What replies asked of the fields a frame brought (a find bar opened, filled and
+            // given the keyboard in one reply), told right after the outline that made them: the
+            // pane is held weakly, the page's handle is held by the pane.
+            let pane = WeakId::new(self);
+            handle.watch_held(Box::new(move |painted| {
+                if let Some(pane) = pane.load() {
+                    pane.deliver_held(painted);
+                }
+            }));
         }
         fields
     }
@@ -6256,52 +6276,62 @@ impl TerminalPane {
             .and_then(|page| page.fields.of(control))
     }
 
-    /// A key of a page's field that is the page's (the kit's specification, §4): in a line, the
-    /// keys that do not edit one line of text ([`crate::native_page::field_key`]); in lines, Esc and
-    /// Tab, and ⏎ breaks the line. The page reads it as a key and says in its reply where the
-    /// keyboard goes; the field keeps it until then. The rest is the field's.
+    /// A key of a page's field that is the page's and not the field's, by the kit's rule of the keys a
+    /// field keeps (`FieldState::takes`, the kit's specification, §2.1 and §4): the field keeps
+    /// what changes its text or its selection where its caret is, and the rest is the page's — Esc,
+    /// Tab and the function keys; in a line ⏎ and the keys that go up and down; a chord that is not
+    /// the field's own (⌘K over a filter); ⌫, ← and Home at the start of the text, → and End at its end
+    /// (⌫ of an empty field). ([`crate::native_page::field_command_key`] says which key a command
+    /// of AppKit's text stands for.) A Mac's own chords of a field (⌃A, ⌃E, ⌃K…) stay the field's, as
+    /// the rule allows. In lines ⏎ breaks the line, unless it is a chord. The page reads the key and
+    /// says in its reply where the keyboard goes; the field keeps it until then.
     fn page_field_command(
         &self,
+        field: bt_shell_common::native_view::Id,
         kind: bt_shell_common::native_view::FieldKind,
         text_view: &AnyObject,
         command: Sel,
     ) -> bool {
-        use bt_shell_common::native_view::FieldKind;
-        let lines = kind == FieldKind::Lines;
-        if lines && command == sel!(insertNewline:) {
-            // SAFETY: the field editor is an `NSTextView`, which answers this with the newline
-            // it would put in a text view that is not a field's.
-            let _: () = unsafe {
-                msg_send![text_view, insertNewlineIgnoringFieldEditor: None::<&AnyObject>]
-            };
-            return true;
-        }
         let event = NSApplication::sharedApplication(self.mtm()).currentEvent();
         // ⌃C in a field ends the program as it does on the page: the field has no use for it, and
         // AppKit names it `noop:` here rather than giving it to the terminal's `keyDown:`.
         if event.as_ref().is_some_and(|event| self.page_signal(event)) {
             return true;
         }
-        let mut mods = event
-            .as_ref()
-            .map(|event| crate::native_page::mods_of(event.modifierFlags()))
-            .unwrap_or_default();
-        // The key itself, for a command that does not say it (`noop:`, which AppKit names for a
-        // key its text has no binding for): without the modifiers, so that ⌃1 is `1`.
+        // The key of the event, when a key made the command (a menu's key equivalent or a click
+        // may have, and is no key of the field).
         let pressed = event
             .as_ref()
-            .and_then(|event| event.charactersIgnoringModifiers())
-            .and_then(|characters| crate::native_page::key_of(&characters.to_string()));
-        let Some(key) = crate::native_page::field_key(
-            command.name().to_str().unwrap_or(""),
-            lines,
-            pressed,
-            mods,
-        ) else {
+            .filter(|event| event.r#type() == NSEventType::KeyDown)
+            .and_then(|event| crate::native_page::event_key_of(event));
+        let Some((key, mods)) =
+            crate::native_page::field_command_key(command.name().to_str().unwrap_or(""), pressed)
+        else {
             return false;
         };
-        if command == sel!(insertBacktab:) {
-            mods.shift = true;
+        // Where the caret is in the field the keyboard is in.
+        let state = self
+            .ivars()
+            .page_up
+            .borrow()
+            .as_ref()
+            .and_then(|page| page.fields.field(field))
+            .and_then(|field| field.state(kind));
+        let Some(state) = state else {
+            return false;
+        };
+        if state.takes(key, mods) {
+            if kind == bt_shell_common::native_view::FieldKind::Lines
+                && command == sel!(insertNewline:)
+            {
+                // SAFETY: the field editor is an `NSTextView`, which answers this with the newline
+                // it would put in a text view that is not a field's.
+                let _: () = unsafe {
+                    msg_send![text_view, insertNewlineIgnoringFieldEditor: None::<&AnyObject>]
+                };
+                return true;
+            }
+            return false;
         }
         if let Some(handle) = self.page_handle() {
             handle.page().input(Input::Key { key, mods });
@@ -7701,10 +7731,12 @@ impl PageDriveHost for PageHost<'_> {
         }
     }
 
-    /// Told before the keyboard, so that a field the keyboard goes to holds what it is to edit.
-    fn fill(&mut self, field: PageId, text: String) {
+    /// Told before the keyboard, so that a field the keyboard goes to holds what it is to edit (and
+    /// has selected in it what the reply selects). A field the reply's own frame brings is told it
+    /// with that frame ([`TerminalPane::deliver_held`]), after its fields exist.
+    fn fill(&mut self, field: PageId, fill: PageFill) {
         if let Some(fields) = self.fields() {
-            fields.fill(field, &text);
+            fields.fill(field, &fill);
         }
     }
 
@@ -8345,6 +8377,47 @@ mod tests {
         assert!(close.contains("!self.0.program_page_up()"), "{close}");
         assert!(close.contains("self.0.take_page_down()"), "{close}");
         assert!(!close.contains("close_view"), "{close}");
+    }
+
+    /// What a reply asks of a field its own frame brings (a find bar opened, filled and given the
+    /// keyboard in one reply) is done by the pane's host after the outline of that frame has made
+    /// the field: the drive holds it for the frame (`Painted::held`), the link's build of the frame
+    /// hands the frame to the pane right after the outline, and the pane does it as the rest of what
+    /// a page said is done (`PageHost`: the field's text and what is selected in it, then the
+    /// keyboard). A source scan: the field is AppKit's and needs a window server.
+    #[test]
+    fn what_a_frame_brings_for_a_field_a_reply_opened_is_done_by_the_host_after_its_outline() {
+        let pane = include_str!("pane.rs");
+        let pane = &pane[..pane.find("#[cfg(test)]").unwrap_or(pane.len())];
+        let body = |signature: &str| {
+            let at = pane.find(signature).expect(signature);
+            &pane[at..at + pane[at..].find("\n    }\n").expect("its end")]
+        };
+        // The handle is told by the page's own frames, and the pane it tells is held weakly: the
+        // closure is the handle's, the handle is the pane's.
+        let fields = body("    fn page_fields(");
+        assert!(fields.contains("handle.watch_held("), "{fields}");
+        assert!(fields.contains("WeakId::new(self)"), "{fields}");
+        assert!(fields.contains("pane.deliver_held(painted)"), "{fields}");
+        // The outline is told first, in the same call, so that the fields are the pane's.
+        let outline = fields.find("handle.watch_outline(").expect("the outline");
+        assert!(outline < fields.find("handle.watch_held(").expect("held"));
+        let held = body("    fn deliver_held(");
+        assert!(
+            held.contains("painted.deliver_held(&mut PageHost(self))"),
+            "{held}"
+        );
+        // The host's `fill` and `keyboard` are the ones the drain does: a text and what is selected
+        // in it ([`PageFill`]) first, the keyboard after.
+        let host = body("    fn fill(&mut self, field: PageId, fill: PageFill) {");
+        assert!(host.contains("fields.fill(field, &fill)"), "{host}");
+        let host = pane
+            .find("impl PageDriveHost for PageHost<'_>")
+            .expect("the host");
+        let host = &pane[host..];
+        assert!(
+            host.find("fn fill(").expect("fill") < host.find("fn keyboard(").expect("keyboard")
+        );
     }
 
     /// A page's wakes come from the frames while its pane is seen and from the pane's own clock

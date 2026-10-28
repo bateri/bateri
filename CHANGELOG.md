@@ -109,6 +109,10 @@ of every installed copy. A version without a section is not released.
   overview, shows a pane whose program has opened a view of its own (a WebAssembly module or
   a Lua script) as that view, images included, not the terminal behind it. The card shows the
   view as it is on screen; a view that has not drawn yet shows the terminal for a moment.
+- **A native view can show the time of day and the keys of its menus.** A view's page
+  reads the time of day with your own offset from UTC (daylight saving time included) and says
+  which keyboard it is on, so a clock or a "⌘" versus "Ctrl" hint reads right; and a menu a page
+  pops up shows the keys that do the same on the page, as the Mac's menus do.
 
 ### Changed
 
@@ -176,6 +180,13 @@ of every installed copy. A version without a section is not released.
 
 ### Fixed
 
+- **A field of a native view opens with its text and the keyboard.** The find bar, the command
+  palette and the dialogs of a program's view (textpen's ⌘F, ⌘E) opened empty and without the
+  keyboard when the page opened and filled the field in one go: the text was put in before the field
+  existed. They now open filled, with what the page selected in them selected, and with the keyboard
+  in them. A field also gives the page the keys it has no use for where its caret is (⌫ in an empty
+  field, ← at the start of the text, → at its end), as the kit's rule says, so a list under a filter
+  moves with the arrows and a dialog's field gives ⌫ back to the page once it is empty.
 - **A large image `kitten icat` sends through ssh is shown.** kitty's own client writes an
   image's action again on every piece it sends it in when the action is not the default one,
   and bateri took the second piece for a command of its own and dropped the image: a picture

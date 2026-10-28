@@ -3201,10 +3201,16 @@ impl BateriView {
                 PageMenuEntry::Separator => shown.addItem(&NSMenuItem::separatorItem(mtm)),
                 PageMenuEntry::Item {
                     title,
-                    key,
+                    keys,
                     enabled,
                 } => {
-                    let key = key.map(String::from).unwrap_or_default();
+                    // The keys that do the same on the page, shown at the end of the line in the
+                    // menu's own glyphs. A pop-up menu matches key equivalents only while it is
+                    // open, so they take no key from the page.
+                    let (key, mask) = keys
+                        .as_ref()
+                        .map(crate::native_page::key_equivalent)
+                        .unwrap_or_else(|| (String::new(), NSEventModifierFlags::empty()));
                     // SAFETY: `initWithTitle:action:keyEquivalent:` takes two `NSString`s and a
                     // selector this view implements; `setTarget:` keeps the target weakly and
                     // the view outlives the menu's modal tracking.
@@ -3218,7 +3224,7 @@ impl BateriView {
                         item.setTarget(Some(self));
                         item
                     };
-                    item.setKeyEquivalentModifierMask(NSEventModifierFlags::empty());
+                    item.setKeyEquivalentModifierMask(mask);
                     item.setTag(index as isize);
                     item.setEnabled(*enabled);
                     shown.addItem(&item);

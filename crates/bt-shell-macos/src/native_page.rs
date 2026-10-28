@@ -27,8 +27,8 @@ use std::rc::{Rc, Weak};
 
 use bt_core::Theme;
 use bt_shell_common::native_view::{
-    Accessible, AccessibleRole, Command, Field, FieldKind, Id, Key, Mods, Outline, PageHandle,
-    Point, Role, Tip, tone_linear,
+    Accessible, AccessibleRole, Command, Field, FieldKind, FieldState, Fill, Id, Key, Mods,
+    Outline, PageHandle, Point, Role, Shortcut, Tip, tone_linear,
 };
 use bt_shell_common::view_strip::Strip;
 use objc2::rc::{Retained, Weak as WeakId};
@@ -593,6 +593,7 @@ impl PageFields {
         match to.and_then(|id| self.field(id)) {
             Some(field) => {
                 window.makeFirstResponder(Some(&field));
+                field.select_waiting();
                 self.focused.set(to);
             }
             None => {
@@ -603,12 +604,70 @@ impl PageFields {
         self.moving.set(false);
     }
 
-    /// The text a reply puts in the field named `id`; a name that is not a field is passed over.
-    /// The page is not told of a text it put in itself (setting the value sends no change).
-    pub(crate) fn fill(&self, id: Id, text: &str) {
-        if let Some(field) = self.field(id) {
-            field.setStringValue(&NSString::from_str(text));
+    /// What a reply puts in the field named `id` (a text in place of what it holds, what is
+    /// selected in it, or both: [`Fill`]); a name that is not a field is passed over. The page is
+    /// not told of a text it put in itself (setting the value sends no change). Where a text is put
+    /// in and none selected, the caret goes to its end, where AppKit's own rule would select it all
+    /// once the keyboard comes. A field that does not have the keyboard has no editor to select in:
+    /// the selection waits for the keyboard the page sends it (`send_keyboard`).
+    pub(crate) fn fill(&self, id: Id, fill: &Fill) {
+        let Some(field) = self.field(id) else {
+            return;
+        };
+        let text = match &fill.text {
+            Some(text) => {
+                field.setStringValue(&NSString::from_str(text));
+                text.clone()
+            }
+            None => field.stringValue().to_string(),
+        };
+        let selected = match fill.selection_in(text.chars().count()) {
+            Some(range) => Some(utf16_range(&text, range)),
+            None if fill.text.is_some() => Some((text.encode_utf16().count(), 0)),
+            None => None,
+        };
+        if let Some(range) = selected {
+            field.select(range);
         }
+    }
+}
+
+/// A range of characters (code points, as the kit counts a selection) of `text` as the range of its
+/// UTF-16 units that AppKit's text counts in: `(location, length)`.
+pub(crate) fn utf16_range(text: &str, chars: std::ops::Range<usize>) -> (usize, usize) {
+    let units = |upto: usize| -> usize { text.chars().take(upto).map(char::len_utf16).sum() };
+    let (from, to) = (units(chars.start), units(chars.end));
+    (from, to.saturating_sub(from))
+}
+
+impl PageTextField {
+    /// Selects `(location, length)` (UTF-16 units) in the field: at once where the keyboard is in
+    /// it, else when the page sends it the keyboard ([`PageTextField::select_waiting`]).
+    fn select(&self, range: (usize, usize)) {
+        match self.currentEditor() {
+            Some(editor) => editor.setSelectedRange(NSRange::new(range.0, range.1)),
+            None => self.ivars().selection.set(Some(range)),
+        }
+    }
+
+    /// The selection a fill left for the keyboard, put where the keyboard now is: after AppKit made
+    /// its own (it selects all of a field it gives the keyboard to).
+    fn select_waiting(&self) {
+        if let (Some(range), Some(editor)) = (self.ivars().selection.take(), self.currentEditor()) {
+            editor.setSelectedRange(NSRange::new(range.0, range.1));
+        }
+    }
+
+    /// Where the keyboard is in the field, as the kit's rule of keys asks it ([`FieldState`]), in
+    /// UTF-16 units; `None` where the keyboard is not in it.
+    pub(crate) fn state(&self, kind: FieldKind) -> Option<FieldState> {
+        let editor = self.currentEditor()?;
+        let range = editor.selectedRange();
+        Some(FieldState {
+            kind,
+            length: editor.string().length(),
+            selection: range.location..range.location + range.length,
+        })
     }
 }
 
@@ -616,6 +675,9 @@ impl PageFields {
 /// clicks into it).
 pub(crate) struct PageTextFieldIvars {
     id: Cell<Option<Id>>,
+    /// What a fill selected while the keyboard was elsewhere, `(location, length)` in UTF-16 units:
+    /// put in the field when the page's reply sends the keyboard to it.
+    selection: Cell<Option<(usize, usize)>>,
     fields: RefCell<Weak<PageFields>>,
 }
 
@@ -639,6 +701,11 @@ define_class!(
             if took
                 && let (Some(id), Some(fields)) = (self.ivars().id.get(), self.ivars().fields.borrow().upgrade())
             {
+                // What a fill selected waits for the page's own move of the keyboard
+                // (`PageFields::send_keyboard`); the person's click or Tab makes its own.
+                if !fields.moving.get() {
+                    self.ivars().selection.set(None);
+                }
                 fields.focused_by_person(id);
             }
             took
@@ -874,6 +941,7 @@ fn text_field(
     let mtm = pane.mtm();
     let this = PageTextField::alloc(mtm).set_ivars(PageTextFieldIvars {
         id: Cell::new(None),
+        selection: Cell::new(None),
         fields: RefCell::new(Rc::downgrade(fields)),
     });
     // SAFETY: `initWithFrame:` is NSTextField's designated initializer and the ivars are set.
@@ -1047,32 +1115,26 @@ pub(crate) fn key_of(characters: &str) -> Option<Key> {
     })
 }
 
-/// The key a command of a page's field is, when it is the page's and not the field's (the kit's
-/// specification, §4), from the selector AppKit's text names for it, `pressed` (the key of the
-/// event, without its modifiers) and the modifiers held.
+/// The key a command of a page's field stands for, to be asked of the kit's rule of the keys a field
+/// keeps ([`FieldState::takes`], the kit's specification, §2.1 and §4): from the selector AppKit's
+/// text names for the command, and the key of the event in hand (`event`, with the modifiers held)
+/// for the commands that name no key by their selector (`moveLeft:` is ← and also ⌃B, `deleteBackward:`
+/// is ⌫ and also ⌃H).
 ///
-/// In both kinds, Esc and Tab (and ⇧Tab). In a line, besides: ⏎; ↑ and ↓ with whatever modifier
-/// (⇧↑ and ⌘↑ would only take the caret to an end of the one line); page up and down; and a key
-/// the line has no use for, which AppKit names `noop:` — a function key, or ⌘ or ⌃ with a key that
-/// is not one of the field's own (⌘A, ⌘C, ⌘V and ⌘X are the Edit menu's, and never come here; ⌘C
-/// with nothing selected does, and is the page's). Characters, ← →, ⌫ and the field's editing
-/// keys stay the field's.
-pub(crate) fn field_key(
-    command: &str,
-    lines: bool,
-    pressed: Option<Key>,
-    mods: Mods,
-) -> Option<Key> {
-    match command {
-        "cancelOperation:" => return Some(Key::Escape),
-        "insertTab:" | "insertBacktab:" => return Some(Key::Tab),
-        _ => {}
-    }
-    if lines {
-        return None;
-    }
-    match command {
-        "insertNewline:" => Some(Key::Enter),
+/// The selector decides for Esc, Tab (and ⇧Tab), ⏎, and for the keys that go up and down, and
+/// page up and down: they are the keys they are however they are written (`moveToBeginningOfDocument:`
+/// is ↑ in a line). The rest are the event's key. `None` where the field keeps the command whatever
+/// the rule says: a chord of ⌃ and a character that AppKit's text binds to an editing command (⌃A,
+/// ⌃E, ⌃K, ⌃D, ⌃F, ⌃B, ⌃H, ⌃T, ⌃Y: a Mac's own, which the rule allows a host to keep as well),
+/// and a command made by no key (`event` is `None`: a dead key's first stroke).
+pub(crate) fn field_command_key(command: &str, event: Option<(Key, Mods)>) -> Option<(Key, Mods)> {
+    let mods = event.map(|(_, mods)| mods).unwrap_or_default();
+    let named = match command {
+        "cancelOperation:" => Some(Key::Escape),
+        "insertTab:" | "insertBacktab:" => Some(Key::Tab),
+        "insertNewline:" | "insertNewlineIgnoringFieldEditor:" | "insertLineBreak:" => {
+            Some(Key::Enter)
+        }
         "moveUp:"
         | "moveUpAndModifySelection:"
         | "moveToBeginningOfDocument:"
@@ -1085,13 +1147,59 @@ pub(crate) fn field_key(
         | "moveParagraphForwardAndModifySelection:" => Some(Key::Down),
         "scrollPageUp:" | "pageUp:" | "pageUpAndModifySelection:" => Some(Key::PageUp),
         "scrollPageDown:" | "pageDown:" | "pageDownAndModifySelection:" => Some(Key::PageDown),
-        "noop:" => match pressed? {
-            key @ (Key::Function(_) | Key::PageUp | Key::PageDown) => Some(key),
-            key if mods.command || mods.control => Some(key),
-            _ => None,
-        },
         _ => None,
+    };
+    if let Some(key) = named {
+        let mods = Mods {
+            shift: mods.shift || command == "insertBacktab:",
+            ..mods
+        };
+        return Some((key, mods));
     }
+    let (key, mods) = event?;
+    if mods.control && !mods.command && matches!(key, Key::Character(_)) && command != "noop:" {
+        return None;
+    }
+    Some((key, mods))
+}
+
+/// The keys of a menu's entry as AppKit's menu items have them: the characters of the key
+/// equivalent (a letter in lower case, with Shift in the mask; the arrows and the keys beside them
+/// are private-use characters, the reverse of [`key_of`]) and the modifier flags, so that the menu
+/// shows them in its own glyphs.
+pub(crate) fn key_equivalent(shortcut: &Shortcut) -> (String, NSEventModifierFlags) {
+    let key = match shortcut.key {
+        Key::Character(c) => c.to_lowercase().collect(),
+        Key::Up => "\u{f700}".to_owned(),
+        Key::Down => "\u{f701}".to_owned(),
+        Key::Left => "\u{f702}".to_owned(),
+        Key::Right => "\u{f703}".to_owned(),
+        Key::Home => "\u{f729}".to_owned(),
+        Key::End => "\u{f72b}".to_owned(),
+        Key::PageUp => "\u{f72c}".to_owned(),
+        Key::PageDown => "\u{f72d}".to_owned(),
+        Key::Enter => "\r".to_owned(),
+        Key::Escape => "\u{1b}".to_owned(),
+        Key::Tab => "\t".to_owned(),
+        Key::Backspace => "\u{8}".to_owned(),
+        Key::Delete => "\u{f728}".to_owned(),
+        // `NSF1FunctionKey` and the rest, one after the other.
+        Key::Function(n) => char::from_u32(0xf704 + u32::from(n.saturating_sub(1)))
+            .map(String::from)
+            .unwrap_or_default(),
+    };
+    let mut mask = NSEventModifierFlags::empty();
+    for (held, flag) in [
+        (shortcut.mods.shift, NSEventModifierFlags::Shift),
+        (shortcut.mods.control, NSEventModifierFlags::Control),
+        (shortcut.mods.alt, NSEventModifierFlags::Option),
+        (shortcut.mods.command, NSEventModifierFlags::Command),
+    ] {
+        if held {
+            mask |= flag;
+        }
+    }
+    (key, mask)
 }
 
 /// The modifiers held, as the page reads them.
@@ -1133,6 +1241,25 @@ fn event_key(characters: Option<&str>, ignoring: Option<&str>, mods: Mods) -> Op
 mod tests {
     use super::*;
 
+    /// What the page is given of a command of a field: the key, or `None` where the field keeps it,
+    /// by the kit's rule with the field's kind, length and selection.
+    fn page_gets(
+        command: &str,
+        event: Option<(Key, Mods)>,
+        state: &FieldState,
+    ) -> Option<(Key, Mods)> {
+        let (key, mods) = field_command_key(command, event)?;
+        (!state.takes(key, mods)).then_some((key, mods))
+    }
+
+    fn state(kind: FieldKind, length: usize, selection: std::ops::Range<usize>) -> FieldState {
+        FieldState {
+            kind,
+            length,
+            selection,
+        }
+    }
+
     #[test]
     fn a_line_gives_the_page_the_keys_that_do_not_edit_it() {
         let none = Mods::default();
@@ -1148,6 +1275,7 @@ mod tests {
             shift: true,
             ..Mods::default()
         };
+        let line = state(FieldKind::Line, 4, 2..2);
         for (selector, key) in [
             ("insertNewline:", Key::Enter),
             ("cancelOperation:", Key::Escape),
@@ -1158,42 +1286,223 @@ mod tests {
             ("scrollPageDown:", Key::PageDown),
             ("pageUp:", Key::PageUp),
         ] {
+            let (given, _) = page_gets(selector, Some((key, shift)), &line)
+                .unwrap_or_else(|| panic!("{selector}"));
+            assert_eq!(given, key, "{selector}");
+        }
+        assert!(page_gets("insertBacktab:", None, &line).is_some_and(|(_, mods)| mods.shift));
+        // Keys the line has no binding for: a function key, ⌘K, ⌃1, ⌘C with nothing selected.
+        for (key, mods) in [
+            (Key::Function(1), none),
+            (Key::Character('k'), command),
+            (Key::Character('1'), control),
+            (Key::Character('c'), command),
+        ] {
             assert_eq!(
-                field_key(selector, false, None, shift),
-                Some(key),
+                page_gets("noop:", Some((key, mods)), &line),
+                Some((key, mods)),
+                "{key:?}"
+            );
+        }
+        // What edits the line stays the line's where the caret is in the middle of it, and a key that
+        // types is never the page's.
+        for (selector, key) in [
+            ("moveLeft:", Key::Left),
+            ("deleteBackward:", Key::Backspace),
+            ("moveToBeginningOfLine:", Key::Left),
+            ("moveRight:", Key::Right),
+            ("deleteForward:", Key::Delete),
+        ] {
+            assert_eq!(
+                page_gets(selector, Some((key, none)), &line),
+                None,
                 "{selector}"
             );
         }
-        // Keys the line has no binding for: a function key, ⌘K, ⌃1, ⌘C with nothing selected.
         assert_eq!(
-            field_key("noop:", false, Some(Key::Function(1)), none),
-            Some(Key::Function(1))
-        );
-        assert_eq!(
-            field_key("noop:", false, Some(Key::Character('k')), command),
-            Some(Key::Character('k'))
-        );
-        assert_eq!(
-            field_key("noop:", false, Some(Key::Character('1')), control),
-            Some(Key::Character('1'))
-        );
-        // What edits the line stays the line's, and a key that types is never the page's.
-        for selector in [
-            "moveLeft:",
-            "deleteBackward:",
-            "moveToBeginningOfLine:",
-            "selectAll:",
-        ] {
-            assert_eq!(field_key(selector, false, None, none), None, "{selector}");
-        }
-        assert_eq!(
-            field_key("noop:", false, Some(Key::Character('é')), none),
+            page_gets("noop:", Some((Key::Character('é'), none)), &line),
             None
         );
-        // Lines keep their arrows and their enter.
-        assert_eq!(field_key("moveUp:", true, None, none), None);
-        assert_eq!(field_key("insertNewline:", true, None, none), None);
-        assert_eq!(field_key("insertTab:", true, None, none), Some(Key::Tab));
+    }
+
+    #[test]
+    fn a_field_gives_the_page_the_keys_it_has_no_use_for_where_its_caret_is() {
+        let none = Mods::default();
+        let event = |key| Some((key, none));
+        // ⌫ in an empty field, ← at the start, → at the end: the page's (a dialog's field gives ⌫
+        // back to the page once it is empty; a list under a filter moves with the arrows).
+        let empty = state(FieldKind::Line, 0, 0..0);
+        assert!(page_gets("deleteBackward:", event(Key::Backspace), &empty).is_some());
+        assert!(page_gets("moveLeft:", event(Key::Left), &empty).is_some());
+        assert!(page_gets("moveRight:", event(Key::Right), &empty).is_some());
+        let start = state(FieldKind::Line, 4, 0..0);
+        assert!(page_gets("moveLeft:", event(Key::Left), &start).is_some());
+        assert!(page_gets("deleteBackward:", event(Key::Backspace), &start).is_some());
+        assert!(page_gets("moveRight:", event(Key::Right), &start).is_none());
+        assert!(page_gets("deleteForward:", event(Key::Delete), &start).is_none());
+        let end = state(FieldKind::Line, 4, 4..4);
+        assert!(page_gets("moveRight:", event(Key::Right), &end).is_some());
+        assert!(page_gets("deleteForward:", event(Key::Delete), &end).is_some());
+        assert!(page_gets("deleteBackward:", event(Key::Backspace), &end).is_none());
+        // What is selected is taken away or let go of: the field's, at either end.
+        let all = state(FieldKind::Line, 4, 0..4);
+        for (selector, key) in [
+            ("deleteBackward:", Key::Backspace),
+            ("moveLeft:", Key::Left),
+            ("moveRight:", Key::Right),
+            ("deleteForward:", Key::Delete),
+        ] {
+            assert!(
+                page_gets(selector, event(key), &all).is_none(),
+                "{selector}"
+            );
+        }
+        // Lines keep their enter and their arrows inside the text, and give the page the ends.
+        let lines = state(FieldKind::Lines, 9, 4..4);
+        assert!(page_gets("insertNewline:", event(Key::Enter), &lines).is_none());
+        assert!(page_gets("moveUp:", event(Key::Up), &lines).is_none());
+        assert!(page_gets("moveUp:", event(Key::Up), &state(FieldKind::Lines, 9, 0..0)).is_some());
+        assert!(
+            page_gets(
+                "moveDown:",
+                event(Key::Down),
+                &state(FieldKind::Lines, 9, 9..9)
+            )
+            .is_some()
+        );
+        assert!(page_gets("insertTab:", event(Key::Tab), &lines).is_some());
+        let command = Mods {
+            command: true,
+            ..none
+        };
+        assert!(page_gets("insertNewline:", Some((Key::Enter, command)), &lines).is_some());
+    }
+
+    #[test]
+    fn a_macs_own_chords_of_a_field_stay_the_fields() {
+        // ⌃A, ⌃E, ⌃K and the rest are what AppKit's text binds to editing commands: the rule leaves
+        // them to a host whose system gives them, and a ⌃ chord AppKit binds to nothing is the page's.
+        let control = Mods {
+            control: true,
+            ..Mods::default()
+        };
+        let line = state(FieldKind::Line, 4, 4..4);
+        for (selector, key) in [
+            ("moveToEndOfLine:", 'e'),
+            ("deleteToEndOfParagraph:", 'k'),
+            ("moveToBeginningOfParagraph:", 'a'),
+            ("moveRight:", 'f'),
+        ] {
+            assert_eq!(
+                page_gets(selector, Some((Key::Character(key), control)), &line),
+                None,
+                "{selector}"
+            );
+        }
+        assert_eq!(
+            page_gets("noop:", Some((Key::Character('w'), control)), &line),
+            Some((Key::Character('w'), control))
+        );
+        // A key with no key behind it (a dead key's first stroke) is the field's.
+        assert_eq!(page_gets("noop:", None, &line), None);
+    }
+
+    #[test]
+    fn the_keys_of_a_menus_entry_are_the_key_equivalent_of_a_menu_item() {
+        let shortcut = |words: &str| Shortcut::parse(words).expect("a key");
+        assert_eq!(
+            key_equivalent(&shortcut("cmd+shift+k")),
+            (
+                "k".to_owned(),
+                NSEventModifierFlags::Command | NSEventModifierFlags::Shift
+            )
+        );
+        assert_eq!(
+            key_equivalent(&shortcut("ctrl+alt+right")),
+            (
+                "\u{f703}".to_owned(),
+                NSEventModifierFlags::Control | NSEventModifierFlags::Option
+            )
+        );
+        // The key `key_of` makes of the character is the key the entry was written with.
+        for words in [
+            "enter",
+            "escape",
+            "tab",
+            "backspace",
+            "delete",
+            "up",
+            "page_down",
+            "home",
+            "f5",
+            "d",
+        ] {
+            let shortcut = shortcut(words);
+            let (characters, mask) = key_equivalent(&shortcut);
+            assert_eq!(key_of(&characters), Some(shortcut.key), "{words}");
+            assert!(mask.is_empty(), "{words}");
+        }
+        assert_eq!(key_equivalent(&shortcut("K")).0, "k");
+    }
+
+    /// A field the page's reply fills and gives the keyboard has its selection after AppKit made its
+    /// own (it selects all of a field it gives the keyboard to), and a selection a fill left for a
+    /// keyboard that never came is not put on the person's later click or Tab; the key rule is the
+    /// kit's (`FieldState::takes`), asked of the pane with the field's own state. A source scan:
+    /// the field is AppKit's and needs a window server.
+    #[test]
+    fn a_selection_a_fill_made_comes_after_the_keyboard_and_a_keys_rule_is_the_kits() {
+        let source = include_str!("native_page.rs");
+        let code = &source[..source.find("#[cfg(test)]").expect("the tests follow")];
+        let body = |signature: &str| {
+            let at = code.find(signature).expect(signature);
+            &code[at..at + code[at..].find("\n    }\n").expect("its end")]
+        };
+        let keyboard = body("    pub(crate) fn send_keyboard(");
+        assert!(
+            keyboard
+                .find("window.makeFirstResponder(Some(&field))")
+                .expect(keyboard)
+                < keyboard.find("field.select_waiting()").expect(keyboard),
+            "{keyboard}"
+        );
+        let fill = body("    pub(crate) fn fill(");
+        assert!(fill.contains("field.select(range)"), "{fill}");
+        assert!(fill.contains("field.setStringValue("), "{fill}");
+        // The text is put in before it is selected in, and a text with none selected has its caret
+        // at its end.
+        assert!(fill.find("setStringValue").unwrap() < fill.find("field.select(range)").unwrap());
+        assert!(fill.contains("text.encode_utf16().count(), 0"), "{fill}");
+        let responder = body("        fn become_first_responder(&self) -> bool {");
+        assert!(responder.contains("if !fields.moving.get()"), "{responder}");
+        assert!(responder.contains("selection.set(None)"), "{responder}");
+        assert!(
+            !code.contains("fn field_key("),
+            "the kit's rule replaced it"
+        );
+        let pane = include_str!("pane.rs");
+        let at = pane
+            .find("    fn page_field_command(")
+            .expect("page_field_command");
+        let command = &pane[at..at + pane[at..].find("\n    }\n").expect("its end")];
+        assert!(command.contains("state.takes(key, mods)"), "{command}");
+        assert!(command.contains("field_command_key("), "{command}");
+        assert!(command.contains("field.state(kind)"), "{command}");
+    }
+
+    #[test]
+    fn a_fills_selection_is_in_the_units_appkit_counts() {
+        // Characters (code points, as the kit counts a selection) to UTF-16 units: 😀 is two.
+        assert_eq!(utf16_range("abc", 0..3), (0, 3));
+        assert_eq!(utf16_range("a😀b", 1..2), (1, 2));
+        assert_eq!(utf16_range("a😀b", 2..3), (3, 1));
+        assert_eq!(utf16_range("a😀b", 3..3), (4, 0));
+        // `Fill::selection_in` holds it to the text first: a selection to the end, `0..usize::MAX`.
+        let fill = Fill::text("a😀b").select_all();
+        assert_eq!(
+            fill.selection_in(3).map(|range| utf16_range("a😀b", range)),
+            Some((0, 4))
+        );
     }
 
     #[test]

@@ -13,6 +13,7 @@ use super::{
 };
 use pencere_view::{
     Button, Cursor, Id, Input, Key, Keyboard, Menu, MenuEntry, Mods, Point, Queries, Reply,
+    Shortcut,
 };
 
 /// Which containers the list shows by their state.
@@ -735,7 +736,7 @@ impl Containers {
         let mut item = |title: &str, key: Option<char>, act: Option<Act>| {
             entries.push(MenuEntry::Item {
                 title: title.to_owned(),
-                key,
+                keys: key.map(plain),
                 enabled: act.is_some(),
             });
             acts.push(act);
@@ -772,7 +773,7 @@ impl Containers {
         for (title, key) in grey {
             entries.push(MenuEntry::Item {
                 title: title.to_owned(),
-                key: Some(key),
+                keys: Some(plain(key)),
                 enabled: false,
             });
             acts.push(None);
@@ -780,7 +781,7 @@ impl Containers {
         for (title, key, act) in tail {
             entries.push(MenuEntry::Item {
                 title: title.to_owned(),
-                key,
+                keys: key.map(plain),
                 enabled: act.is_some(),
             });
             acts.push(act);
@@ -789,14 +790,14 @@ impl Containers {
         if any_up {
             entries.push(MenuEntry::Item {
                 title: "Kill".to_owned(),
-                key: Some('K'),
+                keys: Some(plain('K')),
                 enabled: true,
             });
             acts.push(Some(Act::Kill));
         }
         entries.push(MenuEntry::Item {
             title: "Remove".to_owned(),
-            key: Some('d'),
+            keys: Some(plain('d')),
             enabled: true,
         });
         acts.push(Some(Act::Remove));
@@ -848,4 +849,9 @@ impl Container {
             });
         format!("{:012x}", hash & 0xffff_ffff_ffff)
     }
+}
+
+/// The key of a menu's entry: one character, as the list takes it.
+fn plain(key: char) -> Shortcut {
+    Shortcut::new(Key::Character(key), Mods::default())
 }
