@@ -266,7 +266,9 @@ impl UiPage for PageDrawing {
             (list, painted.outline)
         };
         // After the page is let go of: the pane moves its fields in this call, and that may come
-        // back to the page (the keyboard put in a field).
+        // back to the page (the keyboard put in a field). The one place a frame's fields are
+        // applied: what the drive holds for fields a reply opens (`Painted::deliver_held`, a later
+        // pencere) is delivered by the pane right after it, here, once its fields exist.
         if let Some(outline) = outline {
             self.handle.tell_outline(&outline);
         }
