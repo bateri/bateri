@@ -6283,18 +6283,19 @@ pub(crate) fn decode_base64(input: &[u8], out: &mut Vec<u8>) -> Option<()> {
         [rest @ .., b'='] => rest,
         rest => rest,
     };
+    out.reserve(body.len() / 4 * 3 + 2);
     let mut chunks = body.chunks_exact(4);
     for chunk in chunks.by_ref() {
-        let a = b64_value(chunk[0])?;
-        let b = b64_value(chunk[1])?;
-        let c = b64_value(chunk[2])?;
-        let d = b64_value(chunk[3])?;
-        // The masks are **mandatory**, not decoration: shifting a six-bit value without a
-        // mask overflows a `u8` and panics in debug — there is no unjustified panic in
-        // `bt-core`.
-        out.push((a << 2) | (b >> 4));
-        out.push(((b & 0x0f) << 4) | (c >> 2));
-        out.push(((c & 0x03) << 6) | d);
+        // The four are looked up before any is judged and judged at once: a value of the
+        // alphabet is under 64 and the table's invalid mark is not, so one test of the four
+        // ORed together is the four tests — an image's megabytes of text come through here.
+        let [a, b, c, d] = [chunk[0], chunk[1], chunk[2], chunk[3]]
+            .map(|byte| u32::from(B64_DECODE[usize::from(byte)]));
+        if (a | b | c | d) >= 64 {
+            return None;
+        }
+        let [_, first, second, third] = ((a << 18) | (b << 12) | (c << 6) | d).to_be_bytes();
+        out.extend_from_slice(&[first, second, third]);
     }
     match chunks.remainder() {
         [] => Some(()),
