@@ -114,6 +114,13 @@ of every installed copy. A version without a section is not released.
   which keyboard it is on, so a clock or a "⌘" versus "Ctrl" hint reads right; a picture of a page
   can spin (a loading spinner), and stops while Reduce Motion is on; and a menu a page pops up
   shows the keys that do the same on the page, as the Mac's menus do.
+- **A native view's editor can have a gutter of its own, an overview ruler and gaps for the page.**
+  A program's editor lists the gutter's columns it wants (a column of breakpoints, bars along the lines
+  a file changed in, the numbers, the buttons that fold), puts dots, bars, triangles and tinted
+  pictures in them, marks where things are down the editor's right edge, and opens a gap after a line
+  for its own panel (a peek) that scrolls with the text. The pointer over such an editor is the I-beam
+  over the text, the arrow in the gutter and the hand over what answers a press there; a marker has
+  its tooltip while the pointer rests on it and is lit while it is over it.
 
 ### Changed
 
