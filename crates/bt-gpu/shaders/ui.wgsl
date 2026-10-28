@@ -258,7 +258,9 @@ fn ui_glyph_fragment(in: GlyphOut) -> @location(0) vec4<f32> {
 //   tint@32  linear straight RGBA; used where params.y is 1
 //   radii@48 top-left, top-right, bottom-right, bottom-left
 //   clip@64  x0, y0, x1, y1
-//   params@80 opacity, tinted (0 or 1), unused, unused
+//   params@80 opacity, tinted (0 or 1), turn, unused
+//            the turn: radians clockwise about the middle of the rectangle (0 for an image that
+//            does not spin); the clip stays where it is
 //
 // One draw per run of instances over ONE texture (each has its own bind group;
 // group 0 is the same layout the atlas planes have: texture @0, sampler @1).
@@ -306,10 +308,15 @@ struct ImageOut {
 @vertex
 fn ui_image_vertex(@builtin(vertex_index) vid: u32, it: ImageIn) -> ImageOut {
     let corner = vec2<f32>(f32(vid & 1u), f32(vid >> 1u));
-    // The rectangle grown by a pixel: the rounded edge's antialiasing.
-    let lo = it.rect.xy - 1.0;
-    let hi = it.rect.xy + it.rect.zw + 1.0;
-    let at = mix(lo, hi, corner);
+    // The rectangle grown by a pixel: the rounded edge's antialiasing. A turned one is drawn in
+    // the square its corners can reach, whatever the turn.
+    let half_size = it.rect.zw * 0.5;
+    let center = it.rect.xy + half_size;
+    var reach = half_size + 1.0;
+    if it.params.z != 0.0 {
+        reach = vec2<f32>(length(half_size) + 1.0);
+    }
+    let at = mix(center - reach, center + reach, corner);
     let ndc = at / imm.viewport_px * 2.0 - 1.0;
     var o: ImageOut;
     o.position = vec4<f32>(ndc.x, -ndc.y, 0.0, 1.0);
@@ -340,7 +347,15 @@ fn ui_image_fragment(in: ImageOut) -> @location(0) vec4<f32> {
         discard;
     }
     let half_size = in.rect.zw * 0.5;
-    let rel = p - (in.rect.xy + half_size);
+    let center = in.rect.xy + half_size;
+    // Where this pixel is in the rectangle as the file has it: a turned image is the file turned
+    // clockwise about the rectangle's middle, so the pixel is turned back the same way round.
+    var rel = p - center;
+    if in.params.z != 0.0 {
+        let c = cos(in.params.z);
+        let s = sin(in.params.z);
+        rel = vec2<f32>(c * rel.x + s * rel.y, c * rel.y - s * rel.x);
+    }
     let d = rounded_box_sdf(rel, half_size, corner_radius(rel, in.radii));
     let inside = 1.0 - smoothstep(-0.5, 0.5, d);
 
@@ -360,7 +375,7 @@ fn ui_image_fragment(in: ImageOut) -> @location(0) vec4<f32> {
     // inside the part the rectangle shows (a crop that cuts the file is the part's edge, and a
     // bilinear read there is half the texel on the other side of it). A rectangle that shows
     // the file at its own size reads texel centres and is not moved by this.
-    let share = clamp((p - in.rect.xy) / in.rect.zw, vec2<f32>(0.0), vec2<f32>(1.0));
+    let share = clamp((center + rel - in.rect.xy) / in.rect.zw, vec2<f32>(0.0), vec2<f32>(1.0));
     let near = min(in.uv.xy, in.uv.zw);
     let far = max(in.uv.xy, in.uv.zw);
     let middle = (near + far) * 0.5;

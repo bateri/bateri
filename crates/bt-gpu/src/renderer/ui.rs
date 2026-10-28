@@ -260,7 +260,8 @@ pub struct UiImage {
     tint: [f32; 4],
     radii: [f32; 4],
     clip: [f32; 4],
-    /// Opacity, tinted (`1.0` or `0.0`), then two unused.
+    /// Opacity, tinted (`1.0` or `0.0`), the turn (radians clockwise about the rectangle's middle),
+    /// then one unused.
     params: [f32; 4],
 }
 
@@ -309,6 +310,14 @@ impl UiImage {
     #[must_use]
     pub const fn opacity(mut self, opacity: f32) -> Self {
         self.params[0] = opacity;
+        self
+    }
+
+    /// The image turned `degrees` clockwise about the middle of its rectangle (a spinner's turn): its
+    /// shape, corners and crop turn with it, and the clip stays where it is.
+    #[must_use]
+    pub fn turn(mut self, degrees: f32) -> Self {
+        self.params[2] = degrees.to_radians();
         self
     }
 

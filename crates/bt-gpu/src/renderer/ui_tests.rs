@@ -531,6 +531,55 @@ fn an_image_lands_in_its_rectangle_in_its_own_colours() {
 }
 
 #[test]
+fn a_turned_image_is_the_image_turned_clockwise_about_the_middle_of_its_rectangle() {
+    let r = renderer();
+    // Two texels side by side: red on the left, green on the right, in a rectangle 24 wide and 8
+    // high about (32, 32).
+    let image = bitmap(7, 2, &[opaque(RED), opaque(GREEN)]);
+    let draw = |image_in: UiImage| {
+        let mut list = UiList::new();
+        assert!(put(&r, &mut list, &image, image_in));
+        r.render_ui_offscreen(EDGE as u32, MIDTONE, &list)
+    };
+    let rect = UiRect::new(20.0, 28.0, 24.0, 8.0);
+    let plain = draw(UiImage::new(rect));
+    assert!(near(at(&plain, 24, 32), RED, 1));
+    assert!(near(at(&plain, 40, 32), GREEN, 1));
+    assert!(near(at(&plain, 32, 22), GROUND, 1));
+    // A quarter turn clockwise: what was on the right is below, what was on the left above; the
+    // rectangle stands up, 8 wide and 24 high, about the same middle.
+    let turned = draw(UiImage::new(rect).turn(90.0));
+    assert!(
+        near(at(&turned, 32, 22), RED, 1),
+        "{:?}",
+        at(&turned, 32, 22)
+    );
+    assert!(
+        near(at(&turned, 32, 42), GREEN, 1),
+        "{:?}",
+        at(&turned, 32, 42)
+    );
+    for (x, y) in [(22, 32), (42, 32), (26, 22), (38, 42), (32, 18), (32, 46)] {
+        assert!(
+            near(at(&turned, x, y), GROUND, 1),
+            "({x}, {y}) is outside it"
+        );
+    }
+    // A turn of a half is the image the other way round, in the same place.
+    let half = draw(UiImage::new(rect).turn(180.0));
+    assert!(near(at(&half, 24, 32), GREEN, 1));
+    assert!(near(at(&half, 40, 32), RED, 1));
+    // The clip does not turn: what is outside it is not drawn, turned or not.
+    let cut = draw(
+        UiImage::new(rect)
+            .turn(90.0)
+            .clip(UiRect::new(0.0, 0.0, 64.0, 32.0)),
+    );
+    assert!(near(at(&cut, 32, 22), RED, 1));
+    assert!(near(at(&cut, 32, 42), GROUND, 1));
+}
+
+#[test]
 fn an_image_that_is_half_transparent_blends_in_linear_light_not_darker() {
     // Premultiplied sRGB: the stored colour is `encoded × alpha`. Read as an sRGB texture it
     // would be decoded as if it were an encoded colour and every soft edge would come out

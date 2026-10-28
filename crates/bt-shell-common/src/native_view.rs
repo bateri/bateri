@@ -210,7 +210,9 @@ pub fn quad(theme: &Theme, quad: &Quad, origin: (f32, f32)) -> UiQuad {
 }
 
 /// The engine's image as the renderer's, moved to `origin` pixels: the part of the file the
-/// rectangle shows, its corners and its clip as a box has them, its opacity, and the tint — a
+/// rectangle shows, its corners and its clip as a box has them, its opacity, how far it is turned
+/// (`Picture::turn`: a spinner's, degrees clockwise about the middle of its rectangle, the clip not
+/// turned with it), and the tint — a
 /// colour the page said, resolved in the theme like a fill ([`resolve`]) and not held to the
 /// contrast floor: it paints a shape, not words.
 pub fn image(theme: &Theme, picture: &Picture, origin: (f32, f32)) -> UiImage {
@@ -219,6 +221,7 @@ pub fn image(theme: &Theme, picture: &Picture, origin: (f32, f32)) -> UiImage {
     let mut out = UiImage::new(at(picture.rect))
         .crop(UiRect::new(crop.x, crop.y, crop.w, crop.h))
         .opacity(picture.opacity)
+        .turn(picture.turn)
         .radii(picture.radii)
         .clip(at(picture.clip));
     if let Some(color) = picture.tint {
@@ -916,6 +919,33 @@ mod tests {
         // In another theme, another bitmap.
         let (other, _) = figure(&Theme::BATERI_LIGHT, &drawn, (0.0, 0.0)).expect("drawn");
         assert_ne!(other.id, bitmap.id);
+    }
+
+    #[test]
+    fn a_picture_that_spins_is_drawn_turned_about_its_middle_and_cut_where_it_was() {
+        let picture = |turn: f32| Picture {
+            src: "spinner.png".to_owned(),
+            rect: Rect::new(10.0, 20.0, 24.0, 8.0),
+            crop: Rect::new(0.0, 0.0, 1.0, 1.0),
+            tint: None,
+            opacity: 1.0,
+            radii: [0.0; 4],
+            clip: Rect::new(0.0, 0.0, 100.0, 100.0),
+            turn,
+        };
+        let theme = Theme::BATERI;
+        let at = (3.0, 4.0);
+        // Not turned is the image as it was (a page that does not spin draws as before).
+        let plain = image(&theme, &picture(0.0), at);
+        assert_eq!(
+            plain,
+            UiImage::new(UiRect::new(13.0, 24.0, 24.0, 8.0))
+                .clip(UiRect::new(3.0, 4.0, 100.0, 100.0))
+        );
+        // Turned, the renderer is told how far (clockwise, degrees on the page's side), and the
+        // rectangle and the clip stay where they are: the renderer turns the shape about the middle.
+        assert_eq!(image(&theme, &picture(90.0), at), plain.turn(90.0));
+        assert_ne!(image(&theme, &picture(90.0), at), plain);
     }
 
     #[test]

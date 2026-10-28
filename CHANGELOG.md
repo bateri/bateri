@@ -109,10 +109,11 @@ of every installed copy. A version without a section is not released.
   overview, shows a pane whose program has opened a view of its own (a WebAssembly module or
   a Lua script) as that view, images included, not the terminal behind it. The card shows the
   view as it is on screen; a view that has not drawn yet shows the terminal for a moment.
-- **A native view can show the time of day and the keys of its menus.** A view's page
+- **A native view can show the time of day, spinners and the keys of its menus.** A view's page
   reads the time of day with your own offset from UTC (daylight saving time included) and says
-  which keyboard it is on, so a clock or a "⌘" versus "Ctrl" hint reads right; and a menu a page
-  pops up shows the keys that do the same on the page, as the Mac's menus do.
+  which keyboard it is on, so a clock or a "⌘" versus "Ctrl" hint reads right; a picture of a page
+  can spin (a loading spinner), and stops while Reduce Motion is on; and a menu a page pops up
+  shows the keys that do the same on the page, as the Mac's menus do.
 
 ### Changed
 
