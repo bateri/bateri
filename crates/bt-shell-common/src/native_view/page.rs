@@ -594,17 +594,18 @@ pub(super) mod tests {
             self.drain();
         }
 
-        /// The pointer, in the pane's points: a press ends what an input method composes (the
-        /// drive does it as it is told the press; the pane has its system forget it after).
+        /// The pointer, in the pane's points: a press ends what an input method composes first —
+        /// the editor keeps it as typed, the system forgets it — and then moves the caret
+        /// (`TerminalPane::end_composition`).
         pub(in crate::native_view) fn input(&mut self, input: Input) {
-            let editors = self.handle.editors();
-            let composing = matches!(input, Input::Press { .. })
-                && editors.focused().is_some()
-                && editors.marked().is_some();
-            self.handle.page().input(input);
-            if composing {
-                self.log.borrow_mut().say("discard marked text");
+            if matches!(input, Input::Press { .. }) {
+                let editors = self.handle.editors();
+                if editors.focused().is_some() && editors.marked().is_some() {
+                    editors.unmark();
+                    self.log.borrow_mut().say("discard marked text");
+                }
             }
+            self.handle.page().input(input);
         }
 
         /// A key: to the editor with the keyboard, where one has it, and to the page where none

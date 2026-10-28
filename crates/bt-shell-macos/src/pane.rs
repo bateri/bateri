@@ -4095,11 +4095,16 @@ impl TerminalPane {
     ) -> Rc<crate::native_page::PageFields> {
         let zoom = self.page_zoom();
         let fields = crate::native_page::PageFields::new(self, *theme, family, zoom);
+        // What AppKit says first, then the page borrowed: nothing of the pane runs while it is.
+        let (scrolling, active) = (
+            self.page_scrolling(),
+            self.is_active() && self.keyboard_here(),
+        );
         {
             let mut page = handle.page();
             page.set_zoom(zoom);
-            page.set_scrolling(self.page_scrolling());
-            page.set_active(self.is_active() && self.keyboard_here());
+            page.set_scrolling(scrolling);
+            page.set_active(active);
         }
         {
             // The page says where its fields are whenever it is laid out another way.
@@ -4126,18 +4131,14 @@ impl TerminalPane {
             return;
         };
         let button = bt_shell_common::native_view::Button::Left;
-        // A press ends what an input method composes in an editor (the drive does it): the
-        // system forgets it after.
-        let composing = self.page_composing();
+        // A press ends what an input method composes in an editor, as a click does.
+        self.end_composition();
         handle.page().input(Input::Press {
             at,
             button,
             mods: bt_shell_common::native_view::Mods::default(),
             count: 1,
         });
-        if composing {
-            self.discard_marked_text();
-        }
         handle.page().input(Input::Release { at, button });
         self.drain_page();
     }
@@ -4645,7 +4646,8 @@ impl TerminalPane {
         }
         // A page's bars are drawn as the pane's own is.
         if let Some(handle) = self.page_handle() {
-            handle.page().set_scrolling(self.page_scrolling());
+            let scrolling = self.page_scrolling();
+            handle.page().set_scrolling(scrolling);
             self.drain_page();
         }
         if before.reserves() != mode.reserves() {
@@ -4720,9 +4722,8 @@ impl TerminalPane {
         let Some(handle) = self.page_handle() else {
             return;
         };
-        handle
-            .page()
-            .set_active(self.is_active() && self.keyboard_here());
+        let active = self.is_active() && self.keyboard_here();
+        handle.page().set_active(active);
         if handle.editors().focused().is_some()
             && let Some(link) = self.link()
         {
@@ -6046,9 +6047,11 @@ impl TerminalPane {
             return false;
         }
         // A press ends what an input method composes in an editor, as it does in a text view:
-        // what it composed stays (the drive does it as it is told the press), and the system
-        // forgets it after.
-        let composing = matches!(input, Input::Press { .. }) && self.page_composing();
+        // what it composed stays, and the system forgets it, before the press moves the caret or
+        // the keyboard (what the system says of the composition is the editor's that composed it).
+        if matches!(input, Input::Press { .. }) {
+            self.end_composition();
+        }
         // A click on the page took the keyboard out of a field: the page hears it first.
         let left = matches!(input, Input::Press { .. })
             && self
@@ -6062,25 +6065,22 @@ impl TerminalPane {
         }
         if let Some(handle) = self.page_handle() {
             handle.page().input(input);
-            if composing {
-                self.discard_marked_text();
-            }
             self.drain_page();
         }
         true
     }
 
-    /// Whether an input method composes in the editor with the keyboard: what a press is to end.
-    fn page_composing(&self) -> bool {
-        self.page_editing()
-            .is_some_and(|editors| editors.marked().is_some())
-    }
-
-    /// The system forgets what its input method composed, once the editor has kept it as typed
-    /// (a text view unmarks, then has its input context discard: the same order).
-    fn discard_marked_text(&self) {
-        if let Some(context) = self.view().inputContext() {
-            context.discardMarkedText();
+    /// What an input method composes in the editor with the keyboard ends: the editor keeps it as
+    /// typed, and then the system forgets it (a text view unmarks, then has its input context
+    /// discard: the same order). Nothing composing, nothing done.
+    fn end_composition(&self) {
+        if let Some(editors) = self.page_editing()
+            && editors.marked().is_some()
+        {
+            editors.unmark();
+            if let Some(context) = self.view().inputContext() {
+                context.discardMarkedText();
+            }
         }
     }
 
@@ -6143,8 +6143,8 @@ impl TerminalPane {
         let Some(handle) = self.page_handle() else {
             return;
         };
-        // The frames' clock: the base of the link's tick stamps.
-        let now = CACurrentMediaTime();
+        // The frames' clock: the base of the link's tick stamps, and the page's own.
+        let now = frames_clock();
         let Some(at) = handle.page().wake_unseen(now) else {
             return;
         };
@@ -7634,7 +7634,7 @@ struct PageHost<'a>(&'a TerminalPane);
 impl PageHost<'_> {
     /// The page is still up: nothing before this took it down.
     fn up(&self) -> bool {
-        self.0.page_handle().is_some()
+        self.0.ivars().page_up.borrow().is_some()
     }
 
     /// The fields the page up has.
@@ -7747,9 +7747,7 @@ impl PageDriveHost for PageHost<'_> {
     /// An image the page named that could not be shown: the page goes on without it, and the one
     /// who wrote it reads why where a page's failures are read.
     fn diagnostic(&mut self, words: String) {
-        if self.up() {
-            eprintln!("bateri: the page's {words}");
-        }
+        eprintln!("bateri: the page's {words}");
     }
 
     /// The module is gone: the page goes down with it, and the terminal is the pane's again.
@@ -8381,7 +8379,7 @@ mod tests {
             unseen.contains("handle.page().wake_unseen(now)"),
             "{unseen}"
         );
-        assert!(unseen.contains("CACurrentMediaTime()"), "{unseen}");
+        assert!(unseen.contains("frames_clock()"), "{unseen}");
         assert!(
             unseen.contains(
                 "let Some(at) = handle.page().wake_unseen(now) else {\n            return;"
@@ -8503,12 +8501,12 @@ mod tests {
     }
 
     /// A press on a page ends what an input method composes in the editor with the keyboard: the
-    /// drive keeps what it composed as typed as it is told the press, and the system is told to
-    /// forget it after — the order a text view keeps (it unmarks, then has its input context
-    /// discard), whether the press is the pointer's or a screen reader's. A source scan, because
-    /// what it guards needs a window server and an input method.
+    /// editor keeps it as typed and the system is told to forget it, in the order a text view keeps
+    /// (it unmarks, then has its input context discard), and before the press moves the caret or
+    /// the keyboard — whether the press is the pointer's or a screen reader's. A source scan,
+    /// because what it guards needs a window server and an input method.
     #[test]
-    fn a_press_ends_what_an_input_method_composes_and_the_system_forgets_it_after() {
+    fn a_press_ends_what_an_input_method_composes_before_it_moves_the_caret() {
         let pane = include_str!("pane.rs");
         let pane = &pane[..pane.find("#[cfg(test)]").unwrap_or(pane.len())];
         let body = |signature: &str| {
@@ -8520,11 +8518,20 @@ mod tests {
             "    pub(crate) fn press_page_at(",
         ] {
             let press = body(signature);
-            let asked = press.find("self.page_composing()").expect("asked before");
+            let ended = press.find("self.end_composition()").expect("ended");
             let told = press.find("handle.page().input(").expect("the press");
-            let forgot = press.find("self.discard_marked_text()").expect("forgotten");
-            assert!(asked < told && told < forgot, "{signature}: {press}");
+            assert!(ended < told, "{signature}: {press}");
         }
+        let page_input = body("    pub(crate) fn page_input(");
+        let ended = page_input.find("self.end_composition()").expect("ended");
+        let left = page_input
+            .find("self.page_field_focused(None)")
+            .expect("left");
+        assert!(ended < left, "{page_input}");
+        let end = body("    fn end_composition(");
+        let unmark = end.find("editors.unmark()").expect("unmarked");
+        let discard = end.find("discardMarkedText()").expect("forgotten");
+        assert!(unmark < discard, "{end}");
         assert_eq!(pane.matches("discardMarkedText()").count(), 1);
     }
 

@@ -56,7 +56,8 @@ impl Runner for Demo {
             Event::Text { text, .. } => self.list.set_query(&text),
             Event::MenuPick(index) => self.list.pick(index),
             Event::Scrolled(boxes) => self.list.scrolled(&boxes),
-            // The list has no editor and no command, takes no files and asks no wake.
+            // The list has no editor (no pointer over one, no edit, no selection), no field to
+            // take the keyboard, no command, takes no files and asks no wake.
             _ => Reply::none(),
         })
     }
