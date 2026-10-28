@@ -1,189 +1,61 @@
-//! A page of the UI kit in a pane: `pencere-view`'s draw list on `bt-gpu`'s renderer.
+//! A page of the UI kit in a pane: the host's part of it. The page is driven by pencere's drive
+//! (`pencere_drive::Page`, the kit's specification, §4, written once for every host): what the
+//! person does told to the page, its frames laid out with its editors and its scrolling, its wakes,
+//! and what it said handed back in one order. bateri keeps no copy of it. What is here is what only
+//! the pane can do — the rows of the drive's README marked "the host's":
 //!
-//! The engine (`pencere-view`) writes a page as boxes and lines of text and knows neither the
-//! terminal's fonts, nor its colours, nor its renderer. This is where the three meet:
-//!
-//! - **Text** is shaped and measured by the renderer ([`bt_gpu::Renderer::ui_shape`]) — the
-//!   object that measures is the object that draws, so the width the layout was given is the
-//!   width of the glyphs on screen. The terminal's own face is the pane's font family.
-//! - **Colours** are the theme's: the engine names a [`Role`], the theme says what it is
-//!   ([`tone_linear`]) — the arithmetic of colours stays in `bt_core::Theme`, a page keeps
-//!   none, and a theme change is a new list and nothing else. A colour the page gives as a
-//!   value takes the form that goes with the theme's brightness ([`resolve`]). **The words of
-//!   a page are held to the contrast floor of the program's words in the grid**
-//!   ([`ink`]): the page is the program's, and what it writes is read against the fills under
-//!   it, not against the pane's ground alone.
-//! - **Figures** — the paths of a canvas — are drawn into pixels by `pencere-sandbox`
-//!   ([`draw_figure`], the one rasteriser every host of the kit draws them with) in the theme's
-//!   colours, and drawn as an image is ([`figure`]); a figure that changes is another texture,
-//!   and the one it was goes with the list that last named it.
-//! - **Images** are files of the program's bundle, decoded off the thread that draws by
-//!   `pencere-sandbox` ([`Images`]) and drawn as textured rectangles ([`bt_gpu::UiImage`]):
-//!   the layout asks the decoder for a file's size ([`Measure::image`]) and the list gives the
-//!   renderer its pixels ([`image`]). A file that is not decoded yet is a box with nothing in
-//!   it; the decoder wakes the pane **once** for what it learned, and a page at rest is asked
-//!   for nothing and wakes nothing.
-//! - **The list** is the renderer's ([`bt_gpu::UiList`]), in pixels, drawn in place of the
-//!   terminal's grid while the page is up ([`bt_gpu::DisplayLink::set_page`]).
-//!
-//! A page is a function from the size it has (points) to an [`Element`]; [`EnginePage`] calls
-//! it for every frame the link asks for — the pane resized, the theme or the font changed —
-//! and lays the result out again, so a pane that is split or resized finds the page laid out
-//! for its new size.
+//! - **Measuring and drawing text in its fonts, the draw list in its renderer and theme.** Text is
+//!   shaped and measured by the renderer ([`bt_gpu::Renderer::ui_shape`]) — the object that
+//!   measures is the object that draws, so the width the layout was given is the width of the
+//!   glyphs on screen, and the terminal's own face is the pane's font family. **Colours** are the
+//!   theme's: the engine names a [`Role`], the theme says what it is ([`tone_linear`]) — the
+//!   arithmetic of colours stays in `bt_core::Theme`, a page keeps none, and a theme change is a
+//!   new list and nothing else. A colour the page gives as a value takes the form that goes with
+//!   the theme's brightness ([`resolve`]). **The words of a page are held to the contrast floor of
+//!   the program's words in the grid** ([`ink`]): the page is the program's, and what it writes is
+//!   read against the fills under it, not against the pane's ground alone. **Figures** — the paths
+//!   of a canvas — are drawn into pixels by `pencere-sandbox` ([`draw_figure`], the one rasteriser
+//!   every host of the kit draws them with) in the theme's colours, and drawn as an image is
+//!   ([`figure`]); **images**, decoded by the drive's `Images` off the thread that draws, are
+//!   textured rectangles ([`bt_gpu::UiImage`], [`image`]). The list is the renderer's
+//!   ([`bt_gpu::UiList`]), in pixels, drawn in place of the terminal's grid while the page is up
+//!   ([`bt_gpu::DisplayLink::set_page`]). The page as the link's `UiPage` and the renderer as its
+//!   measure are `page`'s.
+//! - **Its keyboard, its input method, its fields and its screen reader**: the handle the pane
+//!   reaches the page and its editors by ([`PageHandle`], [`PageEditors`]) and the outline it is
+//!   told ([`PageHandle::watch_outline`]). The keys themselves, the pasteboard, the pointer's
+//!   shapes, the menus and the browser are `bt-shell-macos`'s, as its `pencere_drive::Host`.
+//! - **The program and the session it speaks through**: the files of the view's bundle
+//!   ([`BundleAssets`]), and the program's flow and the frames' clock a page is given ([`Opening`]).
+//! - **The demo of a debug build**: the container list ([`containers_demo`]), a page written in
+//!   Rust and run by the drive as a module is.
 
-use std::cell::RefCell;
 use std::collections::HashMap;
-use std::rc::Rc;
-
 use std::sync::{Arc, Weak};
 
 use bt_core::{LinearRgba, Session, Theme};
 use bt_gpu::{
-    Renderer, ShapedText, TextFamily, TextFontId, TextStyle, UiBitmap, UiContext, UiImage, UiList,
-    UiPage, UiQuad, UiRect, tint,
+    Renderer, ShapedText, TextFamily, TextFontId, TextStyle, UiBitmap, UiImage, UiList, UiQuad,
+    UiRect, tint,
 };
-use containers::Containers;
 
 mod containers;
-mod editing;
-mod module;
+mod page;
 #[cfg(test)]
 mod pane_tests;
-mod scrolling;
-mod waking;
-pub use editing::Route;
-pub use module::{ModuleHandle, PageEditors, module_page, script_page};
-pub use pencere_sandbox::{Assets, ImageLimits, ModuleLimits, Script};
+pub use page::{Opening, PageEditors, PageHandle, containers_demo, module_page, script_page};
+pub use pencere_drive::{
+    Drained, Field, Host, Outline, Placement, Route, Scrolling, Tip, ZOOM_TEXT,
+};
+pub use pencere_sandbox::{Assets, Fault, ImageLimits, ModuleLimits, Script};
 use pencere_sandbox::{Images, draw_figure};
 pub use pencere_view::{
     Accessible, AccessibleRole, Bars, Button, Command, Cursor, FieldKind, Id, Input, Key, Keyboard,
-    Menu, MenuEntry, Mods, Phase, Point, Rect, Reply, Role, Shortcut, State,
+    Menu, MenuEntry, Mods, Phase, Point, Rect, Role, Shortcut, State,
 };
 use pencere_view::{
-    Color, DrawList, Element, Family, Figure, Font, Laid, Measure, Metrics, Paint, Picture, Quad,
-    Run, Size, Source,
+    Color, DrawList, Family, Figure, Font, Measure, Metrics, Paint, Picture, Quad, Run, Source,
 };
-use scrolling::HostScrolls;
-pub use scrolling::Scrolling;
-
-/// A text field the host puts over a page: its name (the id of the element that is its room), its
-/// kind, where its room stands in the pane's points, what it says while it is empty — the words
-/// the page put in that room — and what it is to a screen reader.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Field {
-    pub id: Id,
-    pub kind: FieldKind,
-    pub rect: Rect,
-    pub hint: Option<String>,
-    pub label: Option<String>,
-}
-
-/// Where a page stands in its pane: below the strip's `inset` points, and `zoom` of the pane's
-/// points to one of the page's — the page is drawn as large as the terminal's text is to the
-/// kit's own size (`ZOOM_TEXT`), so its words are the size of the terminal's.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Placement {
-    pub inset: f32,
-    pub zoom: f32,
-}
-
-/// The size of the kit's text where a page does not say one (`pencere-view`'s default, 12.5
-/// points): a terminal whose text is this size draws a page at its own size.
-pub const ZOOM_TEXT: f32 = 12.5;
-
-/// The least and the most a page is drawn at, against its own size: a terminal set in a tiny or a
-/// huge face keeps a page that can still be laid out in its pane.
-const ZOOM_RANGE: (f32, f32) = (0.5, 4.0);
-
-impl Placement {
-    /// `zoom` for a terminal whose text is `points` large ([`ZOOM_TEXT`]); 1 for one that is
-    /// not a size.
-    pub fn zoom_for(points: f64) -> f32 {
-        #[allow(clippy::cast_possible_truncation)]
-        let zoom = (points as f32) / ZOOM_TEXT;
-        if zoom.is_finite() && zoom > 0.0 {
-            zoom.clamp(ZOOM_RANGE.0, ZOOM_RANGE.1)
-        } else {
-            1.0
-        }
-    }
-
-    /// A box of the page in the pane's points.
-    pub fn to_pane(self, rect: Rect) -> Rect {
-        let z = self.zoom;
-        Rect::new(rect.x * z, rect.y * z + self.inset, rect.w * z, rect.h * z)
-    }
-
-    /// A point of the pane as the page's.
-    pub fn to_page(self, at: Point) -> Point {
-        Point::new(at.x / self.zoom, (at.y - self.inset) / self.zoom)
-    }
-}
-
-/// What is called when a page's outline changes ([`PageDrive::watch_outline`]).
-pub(crate) type OnOutline = Rc<dyn Fn(&Outline)>;
-
-/// What the host keeps of a page besides its pixels, in the pane's points: the fields it puts
-/// over it and what a screen reader says of it. Told to the host when it changes
-/// ([`PageDrive::watch_outline`]).
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct Outline {
-    pub fields: Vec<Field>,
-    pub accessible: Vec<Accessible>,
-    /// What the page says of a part of it while the pointer rests there, innermost last.
-    pub tips: Vec<Tip>,
-    /// What the page can be told to do now (`Laid::commands`), the nearest the keyboard first:
-    /// what the host lists where a person looks for what can be done, and tells the page of
-    /// ([`PageDrive::send_command`]).
-    pub commands: Vec<Command>,
-}
-
-/// A tooltip of the page: where it is in the pane, and what it says (the keys that do the same in
-/// brackets, as the system's own tooltips write a shortcut).
-#[derive(Clone, Debug, PartialEq)]
-pub struct Tip {
-    pub rect: Rect,
-    pub words: String,
-}
-
-impl Outline {
-    /// The outline of `laid`, placed in the pane as `at` says.
-    pub(crate) fn of(laid: &Laid, at: Placement) -> Self {
-        Self {
-            fields: laid
-                .fields()
-                .into_iter()
-                .map(|field| Field {
-                    id: field.id,
-                    kind: field.kind,
-                    rect: at.to_pane(field.rect),
-                    hint: field.hint,
-                    label: field.label,
-                })
-                .collect(),
-            accessible: laid
-                .accessible()
-                .into_iter()
-                .map(|item| Accessible {
-                    rect: at.to_pane(item.rect),
-                    ..item
-                })
-                .collect(),
-            tips: laid
-                .tips()
-                .into_iter()
-                .map(|(rect, tip)| Tip {
-                    rect: at.to_pane(rect),
-                    words: match tip.keys {
-                        Some(keys) if !keys.is_empty() => format!("{} ({keys})", tip.words),
-                        _ => tip.words,
-                    },
-                })
-                .collect(),
-            commands: laid.commands(),
-        }
-    }
-}
 
 /// The greatest level of `raised` that is drawn (the kit's specification, §3.1): the interface
 /// carries a byte and a page may say 255, and a host treats a level above this as this one — a
@@ -430,100 +302,6 @@ pub fn guest_dir() -> std::path::PathBuf {
     )
 }
 
-/// What a pane drives a page of the kit by, whatever the page is made of: one that lives in this
-/// process ([`ContainersHandle`]) or a module in a sandbox ([`ModuleHandle`]).
-///
-/// The pane **tells** (what the person did) and **asks what has come back** ([`PageDrive::drain`]);
-/// it never waits for a page to answer. A page of this process answers at once, so the pane drains
-/// right after it tells; a module answers when it has, and the pane drains when it is woken.
-pub trait PageDrive {
-    /// The person did something with the pointer, the wheel or a key, in the pane's points (the
-    /// top-left corner of the pane is the origin; the strip's room is included). A pointer input
-    /// over a box's scroll bar is the bar's, not the page's.
-    fn send_input(&self, input: Input);
-    /// The wheel or the trackpad over `at`, in the pane's points, by `dx` and `dy` (positive: the
-    /// content moves left and up), `phase` the part of the gesture the system says it is. The
-    /// pane scrolls the box under the pointer itself, on the page as it was last laid out
-    /// ([`Scrolling`]); a turn no box took is the page's, as [`Input::Scroll`].
-    fn send_wheel(&self, at: Point, dx: f32, dy: f32, _phase: Phase) {
-        self.send_input(Input::Scroll { at, dx, dy });
-    }
-    /// How the page's boxes scroll on this system: their bars as the pane's scroll bar is, whether
-    /// a gesture pulls a box past its end, what a click in a bar's track does.
-    fn set_scrolling(&self, _scrolling: Scrolling) {}
-    /// The text of the field named `field` changed: the person typed, pasted or deleted.
-    fn send_text(&self, field: Id, text: &str);
-    /// The person clicked into the field named `field`, or the keyboard went back to the page of
-    /// itself (`None`); not told when it went where the page's reply sent it.
-    fn send_focus(&self, field: Option<Id>);
-    /// The person picked the `index`th entry of the menu the last reply asked for.
-    fn send_pick(&self, index: usize);
-    /// The program that opened the page said something: one JSON object, as it wrote it. A page
-    /// that no program opened (the engine's own, in this process) hears none.
-    fn send_message(&self, _text: &str) {}
-    /// The program has read enough that the page may say what it was told the program had no
-    /// room for. A page that no program opened is never told.
-    fn send_room(&self) {}
-    /// The person asked for the command named `id`, from the host's list of what the page can be
-    /// told to do ([`Outline::commands`]). The keys of a command are not told here: the drive
-    /// tells the page the command in place of a key it is told that does one.
-    fn send_command(&self, _id: Id) {}
-    /// Files were dropped on the page at `at`, in the pane's points: their paths.
-    fn send_files(&self, _at: Point, _paths: Vec<String>) {}
-    /// `told` is called, on the thread that builds the frame, when the page's outline changes
-    /// (the pane resized, the page laid out another way, a field or a label came or went): the
-    /// host puts its fields where the page leaves room for them and tells the screen reader.
-    /// Called once with the outline the page has now.
-    fn watch_outline(&self, told: Box<dyn Fn(&Outline)>);
-    /// The terminal's text is this much larger than the kit's own (`Placement::zoom_for`): the
-    /// page is drawn that much larger, and laid out again.
-    fn set_zoom(&self, zoom: f32);
-    /// What measures the page's text between frames, where the pane's keys, input method and
-    /// pointer are done to its editors: the renderer its frames are drawn with (the object that
-    /// measures is the object that draws).
-    fn set_renderer(&self, _renderer: Rc<Renderer>) {}
-    /// Whether the pane's keyboard is in the page (not one of its fields, not another pane) of the
-    /// person's window: an editor's caret is drawn, and blinks, only then.
-    fn set_active(&self, _active: bool) {}
-    /// The page's editors, as the pane's keys, input method, pasteboard and screen reader reach
-    /// them; `None` for a page that has none (the engine's own, in this process).
-    fn editors(&self) -> Option<PageEditors> {
-        None
-    }
-    /// The pane is not seen and draws no frames, and it is `now` on the frames' clock: the page is
-    /// woken if the time it asked to be woken at has come and a second has passed since it was
-    /// last woken (the frames wake it while the pane is seen). When to ask again, if the page
-    /// waits for a wake; `None` for a page that asks none (the engine's own, in this process).
-    fn wake_unseen(&self, _now: f64) -> Option<f64> {
-        None
-    }
-    /// Hands over what the page has said since the last call: each reply, in order, with whether
-    /// the event it answers was the pointer's (the pointer's shape after a key is nobody's to
-    /// set). Never waits.
-    fn drain(&self, reply: &mut dyn FnMut(Reply, bool)) -> Drained;
-}
-
-/// What a page had besides replies.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Drained {
-    /// The page has something new to show: a frame of it is worth drawing.
-    pub redraw: bool,
-    /// Images the page named that could not be shown, each once, a sentence for the page's
-    /// author (`image "x" is …`). The page goes on without them.
-    pub diagnostics: Vec<String>,
-    /// Why the page is gone, the first time it is told: the pane takes it down.
-    pub ended: Option<String>,
-    /// What the page said to its program since the last call, in order: JSON objects, as it
-    /// wrote them. The pane carries them to the program, and only while the page's view is
-    /// open (`bt_core::Session::module_message`). Told before `ended`: what a page said before
-    /// it went is said.
-    pub sent: Vec<String>,
-    /// The time the page waits to be woken at changed, and no frame took it: the pane arms its
-    /// clock for the time the page names now (`bt_gpu::DisplayLink::rearm_page`), with no frame
-    /// drawn for it. A page that asks nothing never says so.
-    pub wake: bool,
-}
-
 /// The fonts opened and the lines shaped so far. They outlive a build: a page is laid out
 /// again for every size the pane has, and the same words in the same fonts are shaped once.
 #[derive(Default)]
@@ -537,14 +315,13 @@ struct Shaped {
 const SHAPED_LIMIT: usize = 4096;
 
 /// The renderer as the engine's measure: opens and shapes through it, remembering what it
-/// did, so a line measured to be laid out is not shaped again to be drawn.
+/// did, so a line measured to be laid out is not shaped again to be drawn. The page's pictures
+/// are the drive's to measure (`pencere_sandbox::Images`), not the renderer's.
 struct Typeset<'a> {
     renderer: &'a Renderer,
     /// The terminal's face: what `Family::Terminal` is.
     terminal: &'a Option<String>,
     shaped: &'a mut Shaped,
-    /// The page's images; a page that has no bundle has none and its pictures are boxes.
-    images: Option<&'a Images>,
 }
 
 impl Typeset<'_> {
@@ -584,13 +361,6 @@ impl Measure for Typeset<'_> {
             })
     }
 
-    /// The size of the file in its own pixels, once the decoder knows it. The first time a file
-    /// is asked for it does not: it starts to be decoded, and the page is laid out again when
-    /// it is known.
-    fn image(&mut self, src: &str) -> Option<Size> {
-        self.images.and_then(|images| images.size(src))
-    }
-
     /// Where an editor's carets stand in a line: the renderer's own carets of the line shaped once
     /// ([`Renderer::ui_carets`], inside a ligature too), not each start of it shaped and kept in
     /// the cache of lines — an editor asks this of every line it lays out, with every place in it.
@@ -607,15 +377,16 @@ impl Measure for Typeset<'_> {
 }
 
 /// The draw list on the renderer's, at `origin` pixels of the surface, its words held to
-/// `minimum_contrast` ([`ink`]).
+/// `minimum_contrast` ([`ink`]) and its pictures the decoded files of `images`, the page's.
 fn to_list(
-    renderer: &Renderer,
     theme: &Theme,
     minimum_contrast: f64,
     typeset: &mut Typeset<'_>,
+    images: Option<&Images>,
     draws: &DrawList,
     origin: (f32, f32),
 ) -> UiList {
+    let renderer = typeset.renderer;
     let mut list = UiList::new();
     for item in &draws.items {
         match item {
@@ -642,9 +413,8 @@ fn to_list(
             // None yet — being decoded, or an SVG not yet drawn at its first size — is a box with
             // nothing in it until the decoder wakes the pane; one it refused stays so.
             Paint::Image(picture) => {
-                let Some(bitmap) = typeset
-                    .images
-                    .and_then(|images| images.bitmap(&picture.src, picture.full()))
+                let Some(bitmap) =
+                    images.and_then(|images| images.bitmap(&picture.src, picture.full()))
                 else {
                     continue;
                 };
@@ -674,7 +444,7 @@ fn to_list(
                     image,
                 );
             }
-            // An editor's place that no editor filled (`module`'s editors fill every one they
+            // An editor's place that no editor filled (the drive's editors fill every one they
             // have): its room's fill, under it, is what shows.
             Paint::Editor(_) => {}
         }
@@ -710,525 +480,14 @@ fn decorations(run: &Run, line: &ShapedText) -> Vec<Rect> {
     rules
 }
 
-/// A page written with the engine, shown as a pane's [`UiPage`].
-///
-/// `view` is the page: given the size of the area it has, in points, it returns the elements.
-/// The area is the pane's less `inset` points at the top — what the application keeps for its
-/// own strip over the page (`view_strip`), which the page never draws into.
-pub struct EnginePage<F> {
-    terminal: Option<String>,
-    inset: f32,
-    view: F,
-    shaped: Shaped,
-}
-
-impl<F: FnMut(Size) -> Element> EnginePage<F> {
-    /// `terminal` is the pane's font family (`None`: the default chain), the face the page's
-    /// `Family::Terminal` text is set in.
-    pub fn new(terminal: Option<String>, inset: f32, view: F) -> Self {
-        Self {
-            terminal,
-            inset,
-            view,
-            shaped: Shaped::default(),
-        }
-    }
-}
-
-impl<F: FnMut(Size) -> Element> UiPage for EnginePage<F> {
-    fn build(&mut self, cx: &UiContext<'_>) -> UiList {
-        let scale = cx.scale as f32;
-        let inset = (self.inset * scale).round();
-        let width = cx.size_px.0 as f32;
-        let height = (cx.size_px.1 as f32 - inset).max(0.0);
-        let root = (self.view)(Size::new(width / scale, height / scale));
-        if self.shaped.lines.len() > SHAPED_LIMIT {
-            self.shaped.lines.clear();
-        }
-        let mut typeset = Typeset {
-            renderer: cx.renderer,
-            terminal: &self.terminal,
-            shaped: &mut self.shaped,
-            images: None,
-        };
-        let laid = pencere_view::layout(root, Size::new(width, height), scale, &mut typeset);
-        let draws = laid.paint(&mut typeset);
-        to_list(
-            cx.renderer,
-            cx.theme,
-            cx.minimum_contrast,
-            &mut typeset,
-            &draws,
-            (0.0, inset),
-        )
-    }
-}
-
-/// The container list of the engine's demo as a pane's page, and the handle the pane drives it
-/// by. `terminal` is the pane's font family; `inset` the points at the top the application
-/// keeps for its own strip.
-///
-/// The page is the engine's [`Containers`] with what the person does to it: the handle takes
-/// the pane's input ([`ContainersHandle::input`]) in the pane's points, answers what the page
-/// says back ([`Reply`]) and tells the host where the filter's text field stands
-/// ([`ContainersHandle::on_field`]). **A page at rest costs no frames**: the page draws when the
-/// handle's input changed what it shows, and keeps asking for frames only while a fade of its
-/// is moving ([`UiPage::animating`]).
-pub fn containers_demo(
-    terminal: Option<String>,
-    inset: f32,
-) -> (Box<dyn UiPage>, ContainersHandle) {
-    let shared = Rc::new(RefCell::new(Shared {
-        page: Containers::fixture(),
-        laid: pencere_view::layout(pencere_view::div(), Size::new(1.0, 1.0), 1.0, &mut NoText),
-        place: Placement { inset, zoom: 1.0 },
-        outline: Outline::default(),
-        on_outline: None,
-        replies: Vec::new(),
-        scrolls: HostScrolls::new(),
-        redraw: false,
-    }));
-    let page = ContainersPage {
-        terminal,
-        inset,
-        shaped: Shaped::default(),
-        shared: Rc::clone(&shared),
-    };
-    (Box::new(page), ContainersHandle { shared })
-}
-
-/// A host that has no text to measure: the page laid out before the first frame has no words.
-struct NoText;
-
-impl Measure for NoText {
-    fn measure(&mut self, _font: &Font, _text: &str) -> Metrics {
-        Metrics::default()
-    }
-}
-
-/// What the page and its handle share.
-struct Shared {
-    page: Containers,
-    /// The page as it was last laid out: what the pointer is asked against.
-    laid: Laid,
-    /// Where the page stands in the pane.
-    place: Placement,
-    /// The fields and what a screen reader says, as last told, in the pane's points.
-    outline: Outline,
-    on_outline: Option<OnOutline>,
-    /// What the page said that the pane has not taken ([`PageDrive::drain`]).
-    replies: Vec<(Reply, bool)>,
-    /// How far the pane has the page's boxes scrolled.
-    scrolls: HostScrolls,
-    /// A box was scrolled, or its bars changed: a frame is worth drawing.
-    redraw: bool,
-}
-
-/// The drive of the container-list page: the pane's input in, the page's reply out. Cloned
-/// freely; all of it on the main thread.
-#[derive(Clone)]
-pub struct ContainersHandle {
-    shared: Rc<RefCell<Shared>>,
-}
-
-impl ContainersHandle {
-    /// What the person did, in the pane's points (the top-left corner of the pane is the
-    /// origin; the strip's room is included). The reply's points are the pane's too.
-    pub fn input(&self, input: Input) -> Reply {
-        let mut shared = self.shared.borrow_mut();
-        let place = shared.place;
-        let Shared { page, laid, .. } = &mut *shared;
-        from_pane(page.input(into_page(input, place), laid), place)
-    }
-
-    /// The filter field's text changed (the page has the one field).
-    pub fn set_query(&self, text: &str) -> Reply {
-        let mut shared = self.shared.borrow_mut();
-        let place = shared.place;
-        from_pane(shared.page.set_query(text), place)
-    }
-
-    /// The person picked the `index`th entry of the menu the last reply asked for.
-    pub fn pick(&self, index: usize) -> Reply {
-        let mut shared = self.shared.borrow_mut();
-        let place = shared.place;
-        from_pane(shared.page.pick(index), place)
-    }
-
-    /// The page's fields, in the pane's points, as of the last frame.
-    pub fn fields(&self) -> Vec<Field> {
-        self.shared.borrow().outline.fields.clone()
-    }
-
-    /// `told` is called, on the thread that builds the frame, when the outline changes (the pane
-    /// resized, the page laid out another way): the host moves its fields to it. Called once
-    /// with the outline the page has now.
-    pub fn on_outline(&self, told: impl Fn(&Outline) + 'static) {
-        let (outline, told) = {
-            let mut shared = self.shared.borrow_mut();
-            let told: Rc<dyn Fn(&Outline)> = Rc::new(told);
-            shared.on_outline = Some(Rc::clone(&told));
-            (shared.outline.clone(), told)
-        };
-        told(&outline);
-    }
-}
-
-impl PageDrive for ContainersHandle {
-    fn send_input(&self, input: Input) {
-        {
-            let mut shared = self.shared.borrow_mut();
-            let place = shared.place;
-            let (took, redraw) = shared.scrolls.pointer(&into_page(input, place));
-            shared.redraw |= redraw;
-            if took {
-                return;
-            }
-        }
-        let pointer = !matches!(
-            input,
-            Input::Key { .. } | Input::KeyUp { .. } | Input::Mods(_)
-        );
-        let reply = ContainersHandle::input(self, input);
-        self.shared.borrow_mut().replies.push((reply, pointer));
-    }
-
-    fn send_wheel(&self, at: Point, dx: f32, dy: f32, phase: Phase) {
-        let left = {
-            let mut shared = self.shared.borrow_mut();
-            let place = shared.place;
-            let Shared { scrolls, laid, .. } = &mut *shared;
-            let (page_at, zoom) = (place.to_page(at), place.zoom);
-            let wheel = scrolls.wheel(laid, page_at, dx / zoom, dy / zoom, phase);
-            shared.redraw |= wheel.took;
-            // What no box took is the page's, in the pane's points as every input is told.
-            Point::new(wheel.left.x * zoom, wheel.left.y * zoom)
-        };
-        if left.x != 0.0 || left.y != 0.0 {
-            self.send_input(Input::Scroll {
-                at,
-                dx: left.x,
-                dy: left.y,
-            });
-        }
-    }
-
-    fn set_scrolling(&self, scrolling: Scrolling) {
-        let mut shared = self.shared.borrow_mut();
-        shared.scrolls.set(scrolling);
-        shared.redraw = true;
-    }
-
-    fn send_text(&self, _field: Id, text: &str) {
-        let reply = self.set_query(text);
-        self.shared.borrow_mut().replies.push((reply, false));
-    }
-
-    fn send_focus(&self, _field: Option<Id>) {}
-
-    fn send_pick(&self, index: usize) {
-        let reply = self.pick(index);
-        self.shared.borrow_mut().replies.push((reply, false));
-    }
-
-    fn watch_outline(&self, told: Box<dyn Fn(&Outline)>) {
-        self.on_outline(told);
-    }
-
-    fn set_zoom(&self, zoom: f32) {
-        self.shared.borrow_mut().place.zoom = zoom;
-    }
-
-    fn drain(&self, reply: &mut dyn FnMut(Reply, bool)) -> Drained {
-        // Taken before they are handed over: the pane may take the page down in the middle.
-        let (replies, redraw) = {
-            let mut shared = self.shared.borrow_mut();
-            (
-                std::mem::take(&mut shared.replies),
-                std::mem::take(&mut shared.redraw),
-            )
-        };
-        for (said, pointer) in replies {
-            reply(said, pointer);
-        }
-        Drained {
-            redraw,
-            ..Drained::default()
-        }
-    }
-}
-
-/// An input in the pane's points as the page's: the strip's room is not the page's, and a page
-/// drawn larger has fewer points.
-fn into_page(input: Input, place: Placement) -> Input {
-    let at = |at: Point| place.to_page(at);
-    match input {
-        Input::Move(here) => Input::Move(at(here)),
-        Input::Press {
-            at: here,
-            button,
-            mods,
-            count,
-        } => Input::Press {
-            at: at(here),
-            button,
-            mods,
-            count,
-        },
-        Input::Release { at: here, button } => Input::Release {
-            at: at(here),
-            button,
-        },
-        Input::Scroll { at: here, dx, dy } => Input::Scroll {
-            at: at(here),
-            dx: dx / place.zoom,
-            dy: dy / place.zoom,
-        },
-        other @ (Input::Leave | Input::Key { .. } | Input::KeyUp { .. } | Input::Mods(_)) => other,
-    }
-}
-
-/// A reply of the page with its points in the pane's.
-fn from_pane(mut reply: Reply, place: Placement) -> Reply {
-    if let Some(menu) = &mut reply.menu {
-        let at = place.to_pane(Rect::new(menu.at.x, menu.at.y, 0.0, 0.0));
-        menu.at = Point::new(at.x, at.y);
-    }
-    reply
-}
-
-/// The engine's container list as a [`UiPage`]: built from the shared state for every frame
-/// the link asks for.
-struct ContainersPage {
-    terminal: Option<String>,
-    inset: f32,
-    shaped: Shaped,
-    shared: Rc<RefCell<Shared>>,
-}
-
-/// The most times a page is built for one frame: the rows in view depend on how far the list is
-/// scrolled, and what the scroll comes to depends on the rows — a second build settles it.
-const BUILDS: usize = 3;
-
-/// The page laid out where the pane has its boxes scrolled, what it asked for done first: in
-/// `viewport` pixels at `scale`, for the frame at `now`.
-fn lay_scrolled(
-    shared: &mut Shared,
-    size: Size,
-    viewport: Size,
-    scale: f32,
-    measure: &mut dyn Measure,
-    (now, reduce_motion): (f64, bool),
-) -> Laid {
-    let asks = shared.page.take_asks();
-    shared.scrolls.ask(asks);
-    let mut root = shared.page.view(size);
-    shared.scrolls.scrolls.apply(&mut root);
-    let mut laid = pencere_view::layout(root, viewport, scale, measure);
-    shared.scrolls.scrolls.place(&mut laid, now, reduce_motion);
-    laid
-}
-
-impl UiPage for ContainersPage {
-    fn build(&mut self, cx: &UiContext<'_>) -> UiList {
-        let zoom = self.shared.borrow().place.zoom;
-        let inset = (self.inset * cx.scale as f32).round();
-        let scale = cx.scale as f32 * zoom;
-        let width = cx.size_px.0 as f32;
-        let height = (cx.size_px.1 as f32 - inset).max(0.0);
-        let size = Size::new(width / scale, height / scale);
-        if self.shaped.lines.len() > SHAPED_LIMIT {
-            self.shaped.lines.clear();
-        }
-        let mut typeset = Typeset {
-            renderer: cx.renderer,
-            terminal: &self.terminal,
-            shaped: &mut self.shaped,
-            images: None,
-        };
-        let (list, told) = {
-            let mut shared = self.shared.borrow_mut();
-            shared.scrolls.frame(cx.now);
-            shared.page.advance(cx.now, cx.reduce_motion);
-            let viewport = Size::new(width, height);
-            let frame = (cx.now, cx.reduce_motion);
-            let mut laid = lay_scrolled(&mut shared, size, viewport, scale, &mut typeset, frame);
-            for _ in 1..BUILDS {
-                // Where the boxes went, and what depends on the layout: either may change the
-                // rows in view.
-                let moved = shared.scrolls.scrolls.take_moved();
-                let told = !moved.is_empty() && shared.page.scrolled(&moved).redraw;
-                if !shared.page.settle(&laid) && !told {
-                    break;
-                }
-                laid = lay_scrolled(&mut shared, size, viewport, scale, &mut typeset, frame);
-            }
-            let draws = laid.paint(&mut typeset);
-            let list = to_list(
-                cx.renderer,
-                cx.theme,
-                cx.minimum_contrast,
-                &mut typeset,
-                &draws,
-                (0.0, inset),
-            );
-            // The fields and what a screen reader says, in the pane's points.
-            let outline = Outline::of(&laid, shared.place);
-            let told = (outline != shared.outline)
-                .then(|| {
-                    shared
-                        .on_outline
-                        .clone()
-                        .map(|told| (told, outline.clone()))
-                })
-                .flatten();
-            shared.outline = outline;
-            shared.laid = laid;
-            (list, told)
-        };
-        // After the page is let go of: the host moves its fields in this call.
-        if let Some((told, outline)) = told {
-            told(&outline);
-        }
-        list
-    }
-
-    fn animating(&self) -> bool {
-        let shared = self.shared.borrow();
-        shared.page.animating() || shared.scrolls.moving()
-    }
-
-    fn wake_at(&self) -> Option<f64> {
-        self.shared.borrow().scrolls.wake_at()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use bt_core::MINIMUM_CONTRAST;
-    use pencere_view::{Border, Gradient, Rect, Shadow, path};
+    use containers::Containers;
+    use pencere_view::{Border, Gradient, Rect, Shadow, Size, path};
 
     const THEMES: [Theme; 3] = [Theme::BATERI, Theme::BATERI_LIGHT, Theme::LINEN];
-
-    /// Text measured with no GPU: each character half its font's size wide.
-    struct Half;
-
-    impl Measure for Half {
-        fn measure(&mut self, font: &Font, text: &str) -> Metrics {
-            Metrics {
-                width: text.chars().count() as f32 * font.size * 0.5,
-                height: font.size * 1.25,
-            }
-        }
-    }
-
-    /// The demo's page laid out as a frame lays it out at `now` ([`ContainersPage::build`]):
-    /// where the pane has its boxes scrolled, the page told where they went and settled.
-    fn lay_demo(handle: &ContainersHandle, now: f64) {
-        let size = Size::new(1000.0, 330.0);
-        let mut shared = handle.shared.borrow_mut();
-        shared.scrolls.frame(now);
-        let mut laid = lay_scrolled(&mut shared, size, size, 1.0, &mut Half, (now, false));
-        for _ in 1..BUILDS {
-            let moved = shared.scrolls.scrolls.take_moved();
-            let told = !moved.is_empty() && shared.page.scrolled(&moved).redraw;
-            if !shared.page.settle(&laid) && !told {
-                break;
-            }
-            laid = lay_scrolled(&mut shared, size, size, 1.0, &mut Half, (now, false));
-        }
-        shared.laid = laid;
-    }
-
-    #[test]
-    fn the_pane_scrolls_the_page_s_list_itself_and_the_page_builds_where_it_went() {
-        let (_page, handle) = containers_demo(None, 0.0);
-        lay_demo(&handle, 0.0);
-        let list = handle
-            .shared
-            .borrow()
-            .laid
-            .bounds(containers::LIST)
-            .expect("the list");
-        let over = Point::new(list.x + list.w / 2.0, list.y + list.h / 2.0);
-        handle.send_wheel(over, 0.0, 120.0, Phase::Wheel);
-        let drained = handle.drain(&mut |_, _| panic!("the page is not asked"));
-        assert!(drained.redraw, "a frame is worth drawing");
-        let offset = |handle: &ContainersHandle| {
-            handle
-                .shared
-                .borrow()
-                .laid
-                .scroll_extent(containers::LIST)
-                .map(|extent| extent.offset.y)
-        };
-        lay_demo(&handle, 0.1);
-        assert_eq!(
-            offset(&handle),
-            Some(120.0),
-            "the list is where the wheel took it"
-        );
-        // The keys move the cursor to the end: the page asks for its row to be shown, and the
-        // next frame shows it.
-        handle.send_input(Input::Key {
-            key: Key::End,
-            mods: Mods::default(),
-        });
-        lay_demo(&handle, 0.2);
-        let extent = handle
-            .shared
-            .borrow()
-            .laid
-            .scroll_extent(containers::LIST)
-            .expect("the list");
-        assert_eq!(extent.offset.y, extent.max_offset());
-        // A wheel over what does not scroll is the page's.
-        handle.send_wheel(Point::new(2.0, 2.0), 0.0, 10.0, Phase::Wheel);
-        let mut told = 0;
-        handle.drain(&mut |_, _| told += 1);
-        assert_eq!(told, 2, "the key's reply, and the wheel's");
-    }
-
-    #[test]
-    fn a_press_on_the_bar_is_the_bar_s_and_not_the_page_s() {
-        let (_page, handle) = containers_demo(None, 0.0);
-        handle.set_scrolling(Scrolling {
-            bars: Bars::Always,
-            elastic: true,
-            track_jumps: false,
-        });
-        lay_demo(&handle, 0.0);
-        let list = handle
-            .shared
-            .borrow()
-            .laid
-            .bounds(containers::LIST)
-            .expect("the list");
-        // Low in the track, below the knob at the top: a page down, over a glide.
-        let track = Point::new(list.right() - 4.0, list.bottom() - 6.0);
-        handle.send_input(Input::Press {
-            at: track,
-            button: Button::Left,
-            mods: Mods::default(),
-            count: 1,
-        });
-        handle.send_input(Input::Release {
-            at: track,
-            button: Button::Left,
-        });
-        let drained = handle.drain(&mut |_, _| panic!("the page heard the bar's press"));
-        assert!(drained.redraw);
-        lay_demo(&handle, 1.0);
-        let offset = handle
-            .shared
-            .borrow()
-            .laid
-            .scroll_extent(containers::LIST)
-            .map(|extent| extent.offset.y)
-            .unwrap_or_default();
-        assert!(offset > 0.0, "{offset}");
-    }
 
     #[test]
     fn every_tone_is_the_themes_own_value() {
@@ -1658,121 +917,6 @@ mod tests {
         assert_ne!(other.id, bitmap.id);
     }
 
-    /// The demo through the bridge and the real renderer: boxes and, where the platform has
-    /// proportional text, the glyphs. Skipped where no GPU device can be had.
-    #[test]
-    fn the_container_list_becomes_boxes_and_glyphs_on_the_renderer() {
-        let Ok(renderer) = Renderer::system_default() else {
-            eprintln!("skipped: no GPU device");
-            return;
-        };
-        let theme = Theme::BATERI;
-        let cx = UiContext {
-            renderer: &renderer,
-            size_px: (2000, 1200),
-            scale: 2.0,
-            theme: &theme,
-            now: 0.0,
-            reduce_motion: false,
-            minimum_contrast: MINIMUM_CONTRAST,
-        };
-        let (mut page, _) = containers_demo(None, 32.0);
-        let list = page.build(&cx);
-        let boxes = list
-            .items()
-            .iter()
-            .filter(|item| matches!(item, bt_gpu::UiItem::Quad(_)))
-            .count();
-        let glyphs = list.len() - boxes;
-        assert!(
-            boxes > 100,
-            "the rows, dots, tags and the sparklines: {boxes}"
-        );
-        if Renderer::ui_text_supported() {
-            assert!(glyphs > 300, "the words of the page: {glyphs}");
-        } else {
-            assert_eq!(glyphs, 0);
-        }
-    }
-
-    #[test]
-    fn the_strips_room_is_not_the_pages_and_a_menu_comes_back_in_the_panes_points() {
-        use pencere_view::{Button, Menu, Mods};
-        let place = Placement {
-            inset: 32.0,
-            zoom: 1.0,
-        };
-        let moved = into_page(Input::Move(Point::new(10.0, 50.0)), place);
-        assert_eq!(moved, Input::Move(Point::new(10.0, 18.0)));
-        let pressed = into_page(
-            Input::Press {
-                at: Point::new(1.0, 40.0),
-                button: Button::Right,
-                mods: Mods::default(),
-                count: 2,
-            },
-            place,
-        );
-        assert!(matches!(
-            pressed,
-            Input::Press { at, count: 2, .. } if at == Point::new(1.0, 8.0)
-        ));
-        assert_eq!(into_page(Input::Leave, place), Input::Leave);
-        let reply = Reply {
-            menu: Some(Menu {
-                at: Point::new(4.0, 8.0),
-                entries: Vec::new(),
-            }),
-            ..Reply::default()
-        };
-        assert_eq!(
-            from_pane(reply, place).menu.map(|menu| menu.at),
-            Some(Point::new(4.0, 40.0))
-        );
-    }
-
-    #[test]
-    fn a_page_drawn_as_large_as_the_terminals_text_has_fewer_points_in_the_same_pane() {
-        use pencere_view::Menu;
-        // A terminal at 15 points draws the kit's 12.5 at 1.2.
-        let place = Placement {
-            inset: 32.0,
-            zoom: Placement::zoom_for(15.0),
-        };
-        assert!((place.zoom - 1.2).abs() < 1e-6);
-        assert_eq!(Placement::zoom_for(f64::NAN), 1.0);
-        assert_eq!(Placement::zoom_for(1000.0), 4.0, "within the range");
-        let moved = into_page(Input::Move(Point::new(12.0, 32.0 + 24.0)), place);
-        assert_eq!(moved, Input::Move(Point::new(10.0, 20.0)));
-        let wheel = into_page(
-            Input::Scroll {
-                at: Point::new(0.0, 32.0),
-                dx: 6.0,
-                dy: 12.0,
-            },
-            place,
-        );
-        assert!(matches!(wheel, Input::Scroll { dx, dy, .. } if (dx, dy) == (5.0, 10.0)));
-        let reply = Reply {
-            menu: Some(Menu {
-                at: Point::new(10.0, 20.0),
-                entries: Vec::new(),
-            }),
-            ..Reply::default()
-        };
-        let at = from_pane(reply, place).menu.map(|menu| menu.at).unwrap();
-        assert!(
-            (at.x - 12.0).abs() < 1e-4 && (at.y - 56.0).abs() < 1e-4,
-            "{at:?}"
-        );
-        let room = place.to_pane(Rect::new(10.0, 10.0, 100.0, 20.0));
-        let near = |a: f32, b: f32| (a - b).abs() < 1e-3;
-        assert!(
-            near(room.x, 12.0) && near(room.y, 44.0) && near(room.w, 120.0) && near(room.h, 24.0),
-            "{room:?}"
-        );
-    }
-
     #[test]
     fn a_colour_taken_toward_another_is_mixed_in_srgb_in_the_theme() {
         let theme = Theme::BATERI;
@@ -1825,199 +969,5 @@ mod tests {
             through.y > 6.0 && through.y < 24.0,
             "across the letters: {through:?}"
         );
-    }
-
-    #[test]
-    fn the_field_is_the_room_the_page_leaves_moved_below_the_strip_with_the_words_in_it() {
-        struct Fixed;
-        impl Measure for Fixed {
-            fn measure(&mut self, font: &Font, text: &str) -> Metrics {
-                #[allow(clippy::cast_precision_loss)]
-                let width = text.chars().count() as f32 * font.size * 0.5;
-                Metrics {
-                    width,
-                    height: font.size * 1.25,
-                }
-            }
-        }
-        let page = |hint: Option<&str>| {
-            let room = pencere_view::div()
-                .text_field(Id::named("filter"))
-                .w(120.0)
-                .h(18.0);
-            let room = match hint {
-                Some(hint) => room.child(pencere_view::text(hint)),
-                None => room,
-            };
-            pencere_view::div().p(10.0).child(room)
-        };
-        let laid = pencere_view::layout(
-            page(Some("Filter images")),
-            Size::new(400.0, 100.0),
-            1.0,
-            &mut Fixed,
-        );
-        let at = |inset| Placement { inset, zoom: 1.0 };
-        assert_eq!(
-            Outline::of(&laid, at(32.0)).fields,
-            [Field {
-                id: Id::named("filter"),
-                kind: FieldKind::Line,
-                rect: Rect::new(10.0, 42.0, 120.0, 18.0),
-                hint: Some("Filter images".to_owned()),
-                label: None,
-            }]
-        );
-        let laid = pencere_view::layout(page(None), Size::new(400.0, 100.0), 1.0, &mut Fixed);
-        assert_eq!(
-            Outline::of(&laid, at(0.0)).fields[0].hint,
-            None,
-            "no words, no hint"
-        );
-        let laid = pencere_view::layout(
-            pencere_view::div(),
-            Size::new(400.0, 100.0),
-            1.0,
-            &mut Fixed,
-        );
-        assert!(
-            Outline::of(&laid, at(0.0)).fields.is_empty(),
-            "no room, no field"
-        );
-    }
-
-    #[test]
-    fn the_keyboard_is_answered_before_the_first_frame() {
-        let (_page, handle) = containers_demo(None, 32.0);
-        let escape = Input::Key {
-            key: pencere_view::Key::Escape,
-            mods: pencere_view::Mods::default(),
-        };
-        assert!(handle.input(escape).close);
-        assert!(
-            handle.fields().is_empty(),
-            "no frame, no place for the field"
-        );
-        // A pointer over a page that was never laid out is over nothing.
-        assert!(!handle.input(Input::Move(Point::new(5.0, 50.0))).redraw);
-    }
-
-    #[test]
-    fn a_page_of_this_process_answers_at_once_and_the_pane_takes_the_answers_by_draining() {
-        let (_page, handle) = containers_demo(None, 32.0);
-        let drive: &dyn PageDrive = &handle;
-        drive.send_input(Input::Move(Point::new(5.0, 50.0)));
-        drive.send_input(Input::Key {
-            key: pencere_view::Key::Escape,
-            mods: pencere_view::Mods::default(),
-        });
-        drive.send_text(containers::FIELD, "api");
-        let mut said = Vec::new();
-        let drained = drive.drain(&mut |reply, pointer| said.push((reply, pointer)));
-        assert_eq!(drained, Drained::default());
-        assert_eq!(said.len(), 3, "one reply for each thing told");
-        // Told in order, each with whether it was the pointer's: the move, then the key.
-        assert!(said[0].1);
-        assert!(!said[1].1 && said[1].0.close);
-        assert!(!said[2].1);
-        // Taken once.
-        assert_eq!(
-            drive.drain(&mut |_, _| panic!("nothing is left to take")),
-            Drained::default()
-        );
-    }
-
-    /// The page on the real renderer: it draws on a request and rests, the fades that start
-    /// with the pointer end by themselves, and the host is told where its field goes.
-    /// Skipped where no GPU device can be had.
-    #[test]
-    fn the_page_rests_between_the_inputs_that_change_it_and_tells_the_host_its_field() {
-        let Ok(renderer) = Renderer::system_default() else {
-            eprintln!("skipped: no GPU device");
-            return;
-        };
-        let theme = Theme::BATERI;
-        let build = |page: &mut Box<dyn UiPage>, now: f64, reduce_motion: bool| {
-            page.build(&UiContext {
-                renderer: &renderer,
-                size_px: (2000, 1200),
-                scale: 2.0,
-                theme: &theme,
-                now,
-                reduce_motion,
-                minimum_contrast: MINIMUM_CONTRAST,
-            })
-        };
-        let (mut page, handle) = containers_demo(None, 32.0);
-        let told: Rc<RefCell<Vec<Vec<Field>>>> = Rc::default();
-        {
-            let told = Rc::clone(&told);
-            handle.on_outline(move |outline| told.borrow_mut().push(outline.fields.clone()));
-        }
-        assert_eq!(
-            told.borrow().as_slice(),
-            &[Vec::<Field>::new()],
-            "told at once"
-        );
-        build(&mut page, 1.0, false);
-        let field = handle
-            .fields()
-            .first()
-            .expect("the filter's field has a place")
-            .rect;
-        assert_eq!(
-            told.borrow().last().cloned(),
-            Some(vec![Field {
-                id: containers::FIELD,
-                kind: FieldKind::Line,
-                rect: field,
-                hint: Some(containers::FIELD_HINT.to_owned()),
-                label: None,
-            }]),
-            "its place, and what the page says the field says while it is empty"
-        );
-        assert!(field.y >= 32.0, "below the strip: {field:?}");
-        // Laid out again the same way, the host is not told again.
-        build(&mut page, 1.1, false);
-        assert_eq!(told.borrow().len(), 2);
-        assert!(!page.animating());
-
-        // A press on the field's box asks for the keyboard for the host's field.
-        let middle = Point::new(field.x + field.w / 2.0, field.y + field.h / 2.0);
-        let press = handle.input(Input::Press {
-            at: middle,
-            button: pencere_view::Button::Left,
-            mods: pencere_view::Mods::default(),
-            count: 1,
-        });
-        assert_eq!(
-            press.keyboard,
-            Some(pencere_view::Keyboard::Field(containers::FIELD))
-        );
-
-        // The pointer over a row: one frame's worth of change, then fades until they end.
-        let over_a_row = Point::new(300.0, 32.0 + 150.0);
-        let moved = handle.input(Input::Move(over_a_row));
-        assert!(moved.redraw);
-        let same = handle.input(Input::Move(Point::new(301.0, 32.0 + 151.0)));
-        assert!(!same.redraw, "the same row: no frame");
-        let mut now = 2.0;
-        let mut frames = 0;
-        loop {
-            build(&mut page, now, false);
-            frames += 1;
-            now += 1.0 / 60.0;
-            if !page.animating() {
-                break;
-            }
-            assert!(frames < 40, "the page never came to rest");
-        }
-        assert!(frames > 2, "a fade takes a few frames, not one: {frames}");
-        // Under Reduce Motion the same change is one frame.
-        let (mut page, handle) = containers_demo(None, 32.0);
-        build(&mut page, 1.0, true);
-        assert!(handle.input(Input::Move(over_a_row)).redraw);
-        build(&mut page, 1.1, true);
-        assert!(!page.animating());
     }
 }

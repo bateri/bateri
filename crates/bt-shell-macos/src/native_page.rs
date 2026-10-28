@@ -7,11 +7,11 @@
 //! the strip's place at the top and the room it takes (`view_strip::HEIGHT`), which the page
 //! never draws into.
 //!
-//! What the pane adds to the page for it to be used: the filter's text field over the page's
-//! box for it (AppKit's, in the terminal's face and the theme's ink — the text of the page is
-//! the page's own, a field is not text to draw), the tracking area that tells the page where the
+//! What the pane adds to the page for it to be used: the text fields over the page's boxes for
+//! them (AppKit's, in the terminal's face and the theme's ink — the text of the page is the
+//! page's own, a field is not text to draw), the tracking area that tells the page where the
 //! pointer is whoever has the keyboard, and the handle the pane's input goes to the page by
-//! ([`bt_shell_common::native_view::ContainersHandle`]).
+//! ([`bt_shell_common::native_view::PageHandle`]: pencere's drive of the page).
 //!
 //! A page is up for one of two owners ([`Owner`]): a debug build's demo of the kit (`Debug ▸
 //! Show Container List Demo`), whose button and ⌃C close it, or the view a program opened — a
@@ -27,7 +27,7 @@ use std::rc::{Rc, Weak};
 
 use bt_core::Theme;
 use bt_shell_common::native_view::{
-    Accessible, AccessibleRole, Command, Field, FieldKind, Id, Key, Mods, Outline, PageDrive,
+    Accessible, AccessibleRole, Command, Field, FieldKind, Id, Key, Mods, Outline, PageHandle,
     Point, Role, Tip, tone_linear,
 };
 use bt_shell_common::view_strip::Strip;
@@ -122,7 +122,7 @@ pub(crate) enum Owner {
 /// fields the page has, the tracking area over the pane, whose page it is.
 pub(crate) struct Page {
     pub owner: Owner,
-    pub handle: Rc<dyn PageDrive>,
+    pub handle: PageHandle,
     pub fields: Rc<PageFields>,
     pub area: Retained<NSTrackingArea>,
 }
@@ -603,13 +603,11 @@ impl PageFields {
         self.moving.set(false);
     }
 
-    /// The texts a reply puts in fields, by their names; a name that is not a field is passed
-    /// over. The page is not told of a text it put in itself (setting the value sends no change).
-    pub(crate) fn fill(&self, texts: &[(Id, String)]) {
-        for (id, text) in texts {
-            if let Some(field) = self.field(*id) {
-                field.setStringValue(&NSString::from_str(text));
-            }
+    /// The text a reply puts in the field named `id`; a name that is not a field is passed over.
+    /// The page is not told of a text it put in itself (setting the value sends no change).
+    pub(crate) fn fill(&self, id: Id, text: &str) {
+        if let Some(field) = self.field(id) {
+            field.setStringValue(&NSString::from_str(text));
         }
     }
 }

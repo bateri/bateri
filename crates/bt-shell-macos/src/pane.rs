@@ -49,8 +49,6 @@ use bt_core::{
     SearchStatus, Session, SessionOptions, Settings, Theme, TtyModes, Wake,
 };
 use bt_core::{load_shell, smoke_shell};
-#[cfg(debug_assertions)]
-use bt_gpu::UiPage;
 use bt_gpu::{
     CellMetrics, DisplayLink, GpuError, Layout, Pacer, Renderer, ScrollbarMode, Shot, Stats,
     Surface, Waker,
@@ -89,8 +87,9 @@ use crate::grid::{self, Grid, split_into_grid};
 use bt_shell_common::kablo::roster::Background;
 use bt_shell_common::kablo::service::{PaneLink, Shown};
 use bt_shell_common::native_view::{
-    Bars, Cursor as PageCursor, Input, Key as PageKey, Keyboard, Mods as PageMods, PageDrive,
-    PageEditors, Phase, Point as PagePoint, Rect as PageRect, Reply, Route, Scrolling,
+    Bars, Cursor as PageCursor, Fault as PageFault, Host as PageDriveHost, Id as PageId, Input,
+    Key as PageKey, Keyboard, Menu as PageMenu, Mods as PageMods, Opening, PageEditors, PageHandle,
+    Phase, Point as PagePoint, Rect as PageRect, Route, Scrolling,
 };
 use bt_shell_common::view_strip;
 use objc2_app_kit::{NSEvent, NSEventType};
@@ -4071,7 +4070,7 @@ impl TerminalPane {
         if let Some(page) = self.ivars().page_up.borrow().as_ref() {
             let zoom = self.page_zoom();
             page.fields.set_zoom(zoom);
-            page.handle.set_zoom(zoom);
+            page.handle.page().set_zoom(zoom);
             if let Some(link) = self.link() {
                 link.poke_page();
             }
@@ -4086,20 +4085,22 @@ impl TerminalPane {
     }
 
     /// The fields of the page `handle` drives: made and moved as its outline says, the size of
-    /// the terminal's text, and the page told how large it is drawn.
+    /// the terminal's text, and the page told how large it is drawn, how its boxes scroll here and
+    /// whether the keyboard is in it (its editors' carets blink only there).
     fn page_fields(
         &self,
-        handle: &Rc<dyn PageDrive>,
+        handle: &PageHandle,
         theme: &bt_core::Theme,
         family: Option<String>,
     ) -> Rc<crate::native_page::PageFields> {
         let zoom = self.page_zoom();
         let fields = crate::native_page::PageFields::new(self, *theme, family, zoom);
-        handle.set_zoom(zoom);
-        // Its editors are measured between frames as its frames are, and blink only where the
-        // keyboard is.
-        handle.set_renderer(Rc::clone(&self.ivars().renderer));
-        handle.set_active(self.is_active() && self.keyboard_here());
+        {
+            let mut page = handle.page();
+            page.set_zoom(zoom);
+            page.set_scrolling(self.page_scrolling());
+            page.set_active(self.is_active() && self.keyboard_here());
+        }
         {
             // The page says where its fields are whenever it is laid out another way.
             let fields = Rc::clone(&fields);
@@ -4125,13 +4126,19 @@ impl TerminalPane {
             return;
         };
         let button = bt_shell_common::native_view::Button::Left;
-        handle.send_input(Input::Press {
+        // A press ends what an input method composes in an editor (the drive does it): the
+        // system forgets it after.
+        let composing = self.page_composing();
+        handle.page().input(Input::Press {
             at,
             button,
             mods: bt_shell_common::native_view::Mods::default(),
             count: 1,
         });
-        handle.send_input(Input::Release { at, button });
+        if composing {
+            self.discard_marked_text();
+        }
+        handle.page().input(Input::Release { at, button });
         self.drain_page();
     }
 
@@ -4166,7 +4173,7 @@ impl TerminalPane {
     /// of itself): the page is told.
     pub(crate) fn page_field_focused(&self, field: Option<bt_shell_common::native_view::Id>) {
         if let Some(handle) = self.page_handle() {
-            handle.send_focus(field);
+            handle.page().focus(field);
             self.drain_page();
         }
     }
@@ -4638,7 +4645,7 @@ impl TerminalPane {
         }
         // A page's bars are drawn as the pane's own is.
         if let Some(handle) = self.page_handle() {
-            handle.set_scrolling(self.page_scrolling());
+            handle.page().set_scrolling(self.page_scrolling());
             self.drain_page();
         }
         if before.reserves() != mode.reserves() {
@@ -4708,15 +4715,15 @@ impl TerminalPane {
 
     /// Tells the page up whether the keyboard is in it, in the person's window: an editor's caret
     /// is drawn, and blinks, only then. A frame shows it; the page is not drained here, since the
-    /// keyboard moves while a reply of the page is being done ([`TerminalPane::apply_page_reply`]).
+    /// keyboard moves while a reply of the page is being done ([`PageHost`]).
     fn tell_page_active(&self) {
         let Some(handle) = self.page_handle() else {
             return;
         };
-        handle.set_active(self.is_active() && self.keyboard_here());
-        if handle
-            .editors()
-            .is_some_and(|editors| editors.focused().is_some())
+        handle
+            .page()
+            .set_active(self.is_active() && self.keyboard_here());
+        if handle.editors().focused().is_some()
             && let Some(link) = self.link()
         {
             link.poke_page();
@@ -5751,43 +5758,20 @@ impl TerminalPane {
         );
         ivars.page_strip.replace(Some(strip));
         let family = ivars.font.borrow().family.clone();
-        let inset = view_strip::HEIGHT as f32;
-        let (page, handle): (Box<dyn UiPage>, Rc<dyn PageDrive>) = match bytes {
-            None => {
-                let (page, handle) =
-                    bt_shell_common::native_view::containers_demo(family.clone(), inset);
-                (page, Rc::new(handle))
-            }
-            Some(bytes) => {
-                // The module's thread tells the main queue when it has put something out; the
-                // pane is found there by its id, if it is still open.
-                let id = self.id();
-                let wake = move || {
-                    DispatchQueue::main().exec_async(move || {
-                        // audit: a block running on the main queue is on the main thread by definition.
-                        let mtm =
-                            MainThreadMarker::new().expect("the main queue is the main thread");
-                        if let Some(pane) = crate::embed::pane(mtm, id) {
-                            pane.drain_page();
-                        }
-                    });
-                };
-                // The engine's own page: no program opened it, so none holds it to anything.
-                let (page, handle) = bt_shell_common::native_view::module_page(
-                    bytes,
-                    bt_shell_common::native_view::ModuleLimits::default(),
-                    family.clone(),
-                    inset,
-                    None,
-                    // No bundle: a debug page has no files to draw.
-                    None,
-                    wake,
-                );
-                (page, Rc::new(handle))
-            }
+        // The engine's own page: no program opened it, so none holds it to anything.
+        let opening = self.page_opening(family.clone(), None);
+        let (page, handle) = match bytes {
+            None => bt_shell_common::native_view::containers_demo(opening, self.page_wake()),
+            Some(bytes) => bt_shell_common::native_view::module_page(
+                bytes,
+                bt_shell_common::native_view::ModuleLimits::default(),
+                // No bundle: a debug page has no files to draw.
+                None,
+                opening,
+                self.page_wake(),
+            ),
         };
         let fields = self.page_fields(&handle, &theme, family);
-        handle.set_scrolling(self.page_scrolling());
         let area = crate::native_page::pointer_area(self.view());
         ivars.page_up.replace(Some(crate::native_page::Page {
             owner: crate::native_page::Owner::Demo,
@@ -5819,8 +5803,37 @@ impl TerminalPane {
         }
     }
 
-    /// The handle the demo page's input goes by, if that is the page up.
-    fn page_handle(&self) -> Option<Rc<dyn PageDrive>> {
+    /// What a page of the kit is opened with in this pane: the terminal's face, the strip's room
+    /// over it, the flow of the program that opened it (`None` for a debug build's demo), the
+    /// frames' clock and the renderer the frames are drawn with.
+    fn page_opening(&self, terminal: Option<String>, flow: Option<bt_core::Flow>) -> Opening {
+        Opening {
+            terminal,
+            inset: view_strip::HEIGHT as f32,
+            flow,
+            clock: frames_clock,
+            renderer: Rc::clone(&self.ivars().renderer),
+        }
+    }
+
+    /// What a page's module, and its images, call when they have put something out: it hops to
+    /// the main queue, where the pane is found by its id if it is still open, and drains the page.
+    /// It never lays out or draws itself: the images' decoder may call it from inside a build.
+    fn page_wake(&self) -> impl Fn() + Send + Sync + 'static {
+        let id = self.id();
+        move || {
+            DispatchQueue::main().exec_async(move || {
+                // audit: a block running on the main queue is on the main thread by definition.
+                let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
+                if let Some(pane) = crate::embed::pane(mtm, id) {
+                    pane.drain_page();
+                }
+            });
+        }
+    }
+
+    /// The handle the page up is driven by, if a page is up.
+    fn page_handle(&self) -> Option<PageHandle> {
         self.ivars()
             .page_up
             .borrow()
@@ -5854,7 +5867,7 @@ impl TerminalPane {
             }
             Some(handle) => {
                 if let Some((key, mods)) = crate::native_page::event_key_of(event) {
-                    handle.send_input(Input::Key { key, mods });
+                    handle.page().input(Input::Key { key, mods });
                     self.drain_page();
                 }
             }
@@ -5886,9 +5899,9 @@ impl TerminalPane {
         }
     }
 
-    /// The editors of the page up, if it has any: what a screen reader reads of them.
+    /// The editors of the page up: what a screen reader reads of them.
     pub(crate) fn page_editors(&self) -> Option<PageEditors> {
-        self.page_handle()?.editors()
+        Some(self.page_handle()?.editors())
     }
 
     /// The page's editors while one of them has the keyboard: the terminal's view hands that one
@@ -5982,7 +5995,7 @@ impl TerminalPane {
     /// pasteboard): the input method's window follows its caret, a screen reader is told of its
     /// text and selection, and a frame shows it. The page was told at once; what it answers wakes
     /// the pane as any answer does. Nothing is drained here: the input method also speaks while a
-    /// reply of the page moves the keyboard ([`TerminalPane::apply_page_reply`]).
+    /// reply of the page moves the keyboard ([`PageHost`]).
     pub(crate) fn page_edited(&self) {
         if let Some(focused) = self.page_editing().and_then(|editors| editors.focused()) {
             if let Some(context) = self.view().inputContext() {
@@ -6033,16 +6046,9 @@ impl TerminalPane {
             return false;
         }
         // A press ends what an input method composes in an editor, as it does in a text view:
-        // what it composed stays, and the system forgets it.
-        if matches!(input, Input::Press { .. })
-            && let Some(editors) = self.page_editing()
-            && editors.marked().is_some()
-        {
-            editors.unmark();
-            if let Some(context) = self.view().inputContext() {
-                context.discardMarkedText();
-            }
-        }
+        // what it composed stays (the drive does it as it is told the press), and the system
+        // forgets it after.
+        let composing = matches!(input, Input::Press { .. }) && self.page_composing();
         // A click on the page took the keyboard out of a field: the page hears it first.
         let left = matches!(input, Input::Press { .. })
             && self
@@ -6055,21 +6061,38 @@ impl TerminalPane {
             self.page_field_focused(None);
         }
         if let Some(handle) = self.page_handle() {
-            handle.send_input(input);
+            handle.page().input(input);
+            if composing {
+                self.discard_marked_text();
+            }
             self.drain_page();
         }
         true
     }
 
+    /// Whether an input method composes in the editor with the keyboard: what a press is to end.
+    fn page_composing(&self) -> bool {
+        self.page_editing()
+            .is_some_and(|editors| editors.marked().is_some())
+    }
+
+    /// The system forgets what its input method composed, once the editor has kept it as typed
+    /// (a text view unmarks, then has its input context discard: the same order).
+    fn discard_marked_text(&self) {
+        if let Some(context) = self.view().inputContext() {
+            context.discardMarkedText();
+        }
+    }
+
     /// The wheel or the trackpad over a page of the kit's, in the view's points, with the part of
     /// the gesture AppKit says it is: the pane scrolls the page's box under the pointer
-    /// ([`PageDrive::send_wheel`]). `true` when a page is up.
+    /// (`pencere_drive::Page::wheel`). `true` when a page is up.
     pub(crate) fn page_wheel(&self, at: PagePoint, dx: f32, dy: f32, phase: Phase) -> bool {
         if !self.page_is_up() {
             return false;
         }
         if let Some(handle) = self.page_handle() {
-            handle.send_wheel(at, dx, dy, phase);
+            handle.page().wheel(at, dx, dy, phase);
             self.drain_page();
         }
         true
@@ -6093,65 +6116,18 @@ impl TerminalPane {
         }
     }
 
-    /// Takes what the page has said since the last time and does it ([`TerminalPane::apply_page_reply`]):
-    /// right after the person's input for a page of this process, and when the module's thread
-    /// wakes the main queue for a module in the sandbox. A page that is new to show gets its frame;
-    /// a module that is gone takes the page down with it (the terminal is the pane's again).
+    /// Takes what the page has said since the last time and does it ([`PageHost`], in the order
+    /// the drive hands it over): right after the person's input, and when the module's thread
+    /// wakes the main queue. A page that is new to show gets its frame; a module that is gone takes
+    /// the page down with it (the terminal is the pane's again).
     pub(crate) fn drain_page(&self) {
         let Some(handle) = self.page_handle() else {
             return;
         };
-        let mut said = Vec::new();
-        let drained = handle.drain(&mut |reply, pointer| said.push((reply, pointer)));
-        // What the page said to its program goes to the session's gate, which writes it only
-        // while the program's view is open: a page that was torn down a moment ago writes
-        // nothing.
-        if self.program_page_up()
-            && let Some(session) = self.session()
-        {
-            for message in &drained.sent {
-                session.module_message(message);
-            }
-        }
-        for (reply, pointer) in said {
-            // A reply may have closed the page.
-            if self.page_handle().is_none() {
-                return;
-            }
-            self.apply_page_reply(reply, pointer);
-        }
-        // Images the page named that could not be shown: the page goes on without them, and
-        // the one who wrote it reads why where a page's failures are read.
-        for diagnostic in &drained.diagnostics {
-            eprintln!("bateri: the page's {diagnostic}");
-        }
-        if let Some(why) = drained.ended {
-            eprintln!("bateri: {why}; the terminal is back");
-            if self.program_page_up()
-                && let Some(session) = self.session()
-            {
-                // The program is told the view failed, not that the person closed it, and
-                // why: it is the one that can say so on the screen once the shell has it back.
-                session.view_failed(&why);
-                // And down the way every end of a program's view goes: its questions and
-                // requests with it, the tab's mark and the terminal's record.
-                self.end_view();
-            } else {
-                self.take_page_down();
-            }
-            return;
-        }
-        if drained.redraw
-            && let Some(link) = self.link()
-        {
-            link.poke_page();
-        } else if drained.wake
-            && let Some(link) = self.link()
-        {
-            // A reply asked the page to be woken and nothing is to be drawn now: the link's
-            // clock is armed for the time, and the frame it comes at wakes the page.
-            link.rearm_page();
-        }
+        // Taken first, the page let go of: what is done with it calls back into the pane, which
+        // may tell the page more (a menu picked from, the keyboard put in a field).
+        let drained = handle.page().drain();
+        drained.deliver(&mut PageHost(self));
         self.wake_unseen_page();
     }
 
@@ -6169,7 +6145,7 @@ impl TerminalPane {
         };
         // The frames' clock: the base of the link's tick stamps.
         let now = CACurrentMediaTime();
-        let Some(at) = handle.wake_unseen(now) else {
+        let Some(at) = handle.page().wake_unseen(now) else {
             return;
         };
         let (number, armed) = self.ivars().unseen_wake.get();
@@ -6196,81 +6172,10 @@ impl TerminalPane {
         self.drain_page();
     }
 
-    /// Does what a page said back: a frame of it when it changed, the menu it asked for, the
-    /// keyboard in its field, text on the pasteboard, the pointer's shape, a link to open, its end.
-    fn apply_page_reply(&self, reply: Reply, pointer: bool) {
-        if reply.close {
-            // A debug demo is the person's to close (Esc is its key for it). A program's view
-            // is the program's to end — its `dismiss` or `bye`, or ⌃C, which reaches the
-            // program — so the page's wish to close is not carried: a key the page reads for
-            // itself does not end what the program put there.
-            if !self.program_page_up() {
-                self.take_page_down();
-                return;
-            }
-        }
-        if reply.redraw
-            && let Some(link) = self.link()
-        {
-            link.poke_page();
-        }
-        // Only while the pointer is over the page itself: an answer that comes after it left
-        // would set the shape over the cursor rects of whatever it is over now (the divider's
-        // handle between panes, the tab column).
-        if pointer && self.view().page_pointer_is_over() {
-            match reply.cursor {
-                PageCursor::Pointer => NSCursor::pointingHandCursor().set(),
-                PageCursor::Text => NSCursor::IBeamCursor().set(),
-                PageCursor::Arrow => NSCursor::arrowCursor().set(),
-                // Their replacements are macOS 15's; bateri runs on 14.
-                #[allow(deprecated)]
-                PageCursor::ResizeHorizontal => NSCursor::resizeLeftRightCursor().set(),
-                #[allow(deprecated)]
-                PageCursor::ResizeVertical => NSCursor::resizeUpDownCursor().set(),
-                PageCursor::NotAllowed => NSCursor::operationNotAllowedCursor().set(),
-                PageCursor::Grab => NSCursor::openHandCursor().set(),
-                PageCursor::Grabbing => NSCursor::closedHandCursor().set(),
-                PageCursor::Crosshair => NSCursor::crosshairCursor().set(),
-            }
-        }
-        let fields = self
-            .ivars()
-            .page_up
-            .borrow()
-            .as_ref()
-            .map(|page| Rc::clone(&page.fields));
-        if let Some(fields) = fields {
-            // The texts first, so that a field the keyboard goes to holds what it is to edit.
-            fields.fill(&reply.fill);
-            match reply.keyboard {
-                Some(Keyboard::Field(id)) => fields.send_keyboard(Some(id)),
-                Some(Keyboard::Page) => fields.send_keyboard(None),
-                None => {}
-            }
-        }
-        if let Some(text) = reply.copy {
-            clipboard::copy(&NSPasteboard::generalPasteboard(), Some(text));
-        }
-        // A link the page asks to open goes the way a web view's goes: to the session that holds
-        // the program's view, which holds it to the same rule and asks the person the same
-        // question (`Action::OpenLink`, `drain_views`), and opens it in the same browser. A debug
-        // demo has no program's view to ask for it.
-        if let Some(url) = &reply.link
-            && self.program_page_up()
-            && let Some(session) = self.session()
-        {
-            session.module_link(url);
-        }
-        // Last: the menu holds this call until the person has chosen.
-        if let Some(menu) = reply.menu {
-            self.view().show_page_menu(&menu);
-        }
-    }
-
     /// The person picked entry `index` of the menu the page asked for.
     pub(crate) fn page_menu_pick(&self, index: usize) {
         if let Some(handle) = self.page_handle() {
-            handle.send_pick(index);
+            handle.page().pick(index);
             self.drain_page();
         }
     }
@@ -6296,7 +6201,7 @@ impl TerminalPane {
             return;
         }
         if let Some(handle) = self.page_handle() {
-            handle.send_command(command.id);
+            handle.page().command(command.id);
             self.drain_page();
         }
     }
@@ -6309,14 +6214,11 @@ impl TerminalPane {
             return false;
         }
         // An editor with the keyboard took the keys that went down: the page heard none of
-        // them go down, and hears none go up.
-        if self.page_editing().is_some() {
-            return true;
-        }
+        // them go down, and the drive tells it none going up.
         if let (Some(handle), Some((key, mods))) =
             (self.page_handle(), crate::native_page::event_key_of(event))
         {
-            handle.send_input(Input::KeyUp { key, mods });
+            handle.page().key_up(key, mods);
             self.drain_page();
         }
         true
@@ -6333,7 +6235,7 @@ impl TerminalPane {
             return false;
         }
         if let Some(handle) = self.page_handle() {
-            handle.send_files(at, paths);
+            handle.page().files(at, paths);
             self.drain_page();
         }
         true
@@ -6402,7 +6304,7 @@ impl TerminalPane {
             mods.shift = true;
         }
         if let Some(handle) = self.page_handle() {
-            handle.send_input(Input::Key { key, mods });
+            handle.page().input(Input::Key { key, mods });
             self.drain_page();
         }
         true
@@ -6427,7 +6329,7 @@ impl TerminalPane {
             .and_then(|page| page.fields.field(id))
             .map(|field| field.stringValue().to_string())
             .unwrap_or_default();
-        handle.send_text(id, &text);
+        handle.page().text(id, &text);
         self.drain_page();
     }
 
@@ -6479,7 +6381,7 @@ impl TerminalPane {
             && self.program_page_up()
             && let Some(handle) = self.page_handle()
         {
-            handle.send_room();
+            handle.page().room();
         }
         for action in session.take_view_actions() {
             match action {
@@ -6487,7 +6389,7 @@ impl TerminalPane {
                 Action::ToView(message) => {
                     if self.program_page_up() {
                         if let Some(handle) = self.page_handle() {
-                            handle.send_message(&message);
+                            handle.page().message(&message);
                         }
                     } else {
                         if let Some(host) = self.view_host() {
@@ -6572,23 +6474,10 @@ impl TerminalPane {
         );
         ivars.page_strip.replace(Some(strip));
         let family = ivars.font.borrow().family.clone();
-        let inset = view_strip::HEIGHT as f32;
-        // The module's thread tells the main queue when it has put something out; the pane is
-        // found there by its id, if it is still open.
-        let id = self.id();
-        let wake = move || {
-            DispatchQueue::main().exec_async(move || {
-                // audit: a block running on the main queue is on the main thread by definition.
-                let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
-                if let Some(pane) = crate::embed::pane(mtm, id) {
-                    pane.drain_page();
-                }
-            });
-        };
         // Held to the program that opened it: what it says is what the program has the room
         // for, and what it takes of the program's words lets the program say more.
         let limits = bt_shell_common::native_view::ModuleLimits::default();
-        let flow = self.session().map(|session| session.flow());
+        let opening = self.page_opening(family.clone(), Some(session.flow()));
         // The images of the page are files of the bundle the program sent, read from the session
         // that keeps them. The `wake` is the one the module has: it only hops to the main queue,
         // so the images' decoder may call it from inside a build.
@@ -6602,25 +6491,19 @@ impl TerminalPane {
                     bundle: Some(assets),
                 },
                 limits,
-                family.clone(),
-                inset,
-                flow,
-                wake,
+                opening,
+                self.page_wake(),
             )
         } else {
             bt_shell_common::native_view::module_page(
                 bytes.to_vec(),
                 limits,
-                family.clone(),
-                inset,
-                flow,
                 Some(assets),
-                wake,
+                opening,
+                self.page_wake(),
             )
         };
-        let handle: Rc<dyn PageDrive> = Rc::new(handle);
         let fields = self.page_fields(&handle, &theme, family);
-        handle.set_scrolling(self.page_scrolling());
         let area = crate::native_page::pointer_area(self.view());
         ivars.page_up.replace(Some(crate::native_page::Page {
             owner: crate::native_page::Owner::Program,
@@ -7735,6 +7618,172 @@ fn new_pane_uuid() -> PaneUuid {
         .expect("NSUUID's UUIDString must be a canonical UUID")
 }
 
+/// The frames' clock, the base of the link's tick stamps (`CACurrentMediaTime`, the pacer's): the
+/// clock a page of the kit is given to read between frames (`Opening::clock`), so that what the
+/// person does between frames and the frames themselves are on one clock.
+fn frames_clock() -> f64 {
+    CACurrentMediaTime()
+}
+
+/// The pane as the host of the page up (`pencere_drive::Host`): what the page said, done by AppKit
+/// and the session, in the order the drive hands it over (`Drained::deliver`). Each part is done
+/// only while the page is still up: a reply may have closed it (a demo's wish to close, its end),
+/// and nothing after that is the pane's to do.
+struct PageHost<'a>(&'a TerminalPane);
+
+impl PageHost<'_> {
+    /// The page is still up: nothing before this took it down.
+    fn up(&self) -> bool {
+        self.0.page_handle().is_some()
+    }
+
+    /// The fields the page up has.
+    fn fields(&self) -> Option<Rc<crate::native_page::PageFields>> {
+        self.0
+            .ivars()
+            .page_up
+            .borrow()
+            .as_ref()
+            .map(|page| Rc::clone(&page.fields))
+    }
+}
+
+impl PageDriveHost for PageHost<'_> {
+    /// What the page said to its program goes to the session's gate, which writes it only while
+    /// the program's view is open: a page that was torn down a moment ago writes nothing.
+    fn send(&mut self, message: String) {
+        let pane = self.0;
+        if pane.program_page_up()
+            && let Some(session) = pane.session()
+        {
+            session.module_message(&message);
+        }
+    }
+
+    /// A debug demo is the person's to close (Esc is its key for it). A program's view is the
+    /// program's to end — its `dismiss` or `bye`, or ⌃C, which reaches the program — so the page's
+    /// wish to close is not carried: a key the page reads for itself does not end what the program
+    /// put there.
+    fn close(&mut self) {
+        if self.up() && !self.0.program_page_up() {
+            self.0.take_page_down();
+        }
+    }
+
+    fn redraw(&mut self) {
+        if self.up()
+            && let Some(link) = self.0.link()
+        {
+            link.poke_page();
+        }
+    }
+
+    /// Only while the pointer is over the page itself: an answer that comes after it left would
+    /// set the shape over the cursor rects of whatever it is over now (the divider's handle between
+    /// panes, the tab column).
+    fn cursor(&mut self, cursor: PageCursor) {
+        if !self.up() || !self.0.view().page_pointer_is_over() {
+            return;
+        }
+        match cursor {
+            PageCursor::Pointer => NSCursor::pointingHandCursor().set(),
+            PageCursor::Text => NSCursor::IBeamCursor().set(),
+            PageCursor::Arrow => NSCursor::arrowCursor().set(),
+            // Their replacements are macOS 15's; bateri runs on 14.
+            #[allow(deprecated)]
+            PageCursor::ResizeHorizontal => NSCursor::resizeLeftRightCursor().set(),
+            #[allow(deprecated)]
+            PageCursor::ResizeVertical => NSCursor::resizeUpDownCursor().set(),
+            PageCursor::NotAllowed => NSCursor::operationNotAllowedCursor().set(),
+            PageCursor::Grab => NSCursor::openHandCursor().set(),
+            PageCursor::Grabbing => NSCursor::closedHandCursor().set(),
+            PageCursor::Crosshair => NSCursor::crosshairCursor().set(),
+        }
+    }
+
+    /// Told before the keyboard, so that a field the keyboard goes to holds what it is to edit.
+    fn fill(&mut self, field: PageId, text: String) {
+        if let Some(fields) = self.fields() {
+            fields.fill(field, &text);
+        }
+    }
+
+    fn keyboard(&mut self, to: Keyboard) {
+        if let Some(fields) = self.fields() {
+            match to {
+                Keyboard::Field(id) => fields.send_keyboard(Some(id)),
+                Keyboard::Page => fields.send_keyboard(None),
+            }
+        }
+    }
+
+    fn copy(&mut self, text: String) {
+        if self.up() {
+            clipboard::copy(&NSPasteboard::generalPasteboard(), Some(text));
+        }
+    }
+
+    /// A link the page asks to open goes the way a web view's goes: to the session that holds the
+    /// program's view, which holds it to the same rule and asks the person the same question
+    /// (`Action::OpenLink`, `drain_views`), and opens it in the same browser. A debug demo has no
+    /// program's view to ask for it.
+    fn link(&mut self, url: String) {
+        let pane = self.0;
+        if self.up()
+            && pane.program_page_up()
+            && let Some(session) = pane.session()
+        {
+            session.module_link(&url);
+        }
+    }
+
+    /// Last of a reply: the menu holds this call until the person has chosen.
+    fn menu(&mut self, menu: PageMenu) {
+        if self.up() {
+            self.0.view().show_page_menu(&menu);
+        }
+    }
+
+    /// An image the page named that could not be shown: the page goes on without it, and the one
+    /// who wrote it reads why where a page's failures are read.
+    fn diagnostic(&mut self, words: String) {
+        if self.up() {
+            eprintln!("bateri: the page's {words}");
+        }
+    }
+
+    /// The module is gone: the page goes down with it, and the terminal is the pane's again.
+    fn ended(&mut self, why: PageFault) {
+        let pane = self.0;
+        if !self.up() {
+            return;
+        }
+        eprintln!("bateri: {why}; the terminal is back");
+        if pane.program_page_up()
+            && let Some(session) = pane.session()
+        {
+            // The program is told the view failed, not that the person closed it, and why: it
+            // is the one that can say so on the screen once the shell has it back.
+            session.view_failed(&why.to_string());
+            // And down the way every end of a program's view goes: its questions and requests
+            // with it, the tab's mark and the terminal's record.
+            pane.end_view();
+        } else {
+            pane.take_page_down();
+        }
+    }
+
+    /// A reply asked the page to be woken and nothing is to be drawn now: the link's clock is
+    /// armed for the time, and the frame it comes at wakes the page.
+    fn rearm(&mut self) {
+        if self.up()
+            && let Some(link) = self.0.link()
+        {
+            link.rearm_page();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     /// The command memory is filled on the start of a command, while its rows are on the grid: a
@@ -8257,10 +8306,20 @@ mod tests {
             let at = pane.find(signature).expect(signature);
             &pane[at..at + pane[at..].find("\n    }\n").expect("its end")]
         };
+        // What the page said is done by the pane as the page's host, in the drive's order.
         let drain = body("    pub(crate) fn drain_page(");
-        assert!(drain.contains("self.program_page_up()"), "{drain}");
-        assert!(drain.contains("session.module_message(message)"), "{drain}");
-        assert!(drain.contains("session.view_failed(&why)"), "{drain}");
+        assert!(
+            drain.contains("drained.deliver(&mut PageHost(self))"),
+            "{drain}"
+        );
+        let send = body("    fn send(&mut self, message: String) {");
+        assert!(send.contains("pane.program_page_up()"), "{send}");
+        assert!(send.contains("session.module_message(&message)"), "{send}");
+        let ended = body("    fn ended(&mut self, why: PageFault) {");
+        assert!(
+            ended.contains("session.view_failed(&why.to_string())"),
+            "{ended}"
+        );
         assert!(
             pane.matches("module_message(").count() == 1,
             "nothing else writes a module's words"
@@ -8284,9 +8343,10 @@ mod tests {
         let at = strip.find("fn program_strip(").expect("program_strip");
         assert!(strip[at..at + 600].contains("sel!(quitProgram:)"));
         // A page's wish to close ends a debug demo and nothing a program opened.
-        let reply = body("    fn apply_page_reply(");
-        assert!(reply.contains("if !self.program_page_up() {"), "{reply}");
-        assert!(!reply.contains("close_view"), "{reply}");
+        let close = body("    fn close(&mut self) {");
+        assert!(close.contains("!self.0.program_page_up()"), "{close}");
+        assert!(close.contains("self.0.take_page_down()"), "{close}");
+        assert!(!close.contains("close_view"), "{close}");
     }
 
     /// A page's wakes come from the frames while its pane is seen and from the pane's own clock
@@ -8303,29 +8363,35 @@ mod tests {
             let at = pane.find(signature).expect(signature);
             &pane[at..at + pane[at..].find("\n    }\n").expect("its end")]
         };
-        let drain = body("    pub(crate) fn drain_page(");
-        let redraw = drain
-            .find("if drained.redraw")
-            .expect("a frame for what changed");
-        let wake = drain
-            .find("} else if drained.wake")
-            .expect("a wake that is no frame");
-        assert!(redraw < wake, "{drain}");
-        let (frame, armed) = drain[redraw..].split_at(wake - redraw);
-        assert!(frame.contains("link.poke_page()"), "{drain}");
-        assert!(armed.contains("link.rearm_page()"), "{drain}");
+        // The drive says which of the two a drain wants (`Drained::deliver`: a frame, else the
+        // clock): a frame is the link's, and a wake alone arms the link's clock and draws nothing.
+        let frame = body("    fn redraw(&mut self) {");
+        assert!(frame.contains("link.poke_page()"), "{frame}");
+        let armed = body("    fn rearm(&mut self) {");
+        assert!(armed.contains("link.rearm_page()"), "{armed}");
         assert!(
             !armed.contains("poke_page"),
-            "a wake alone is not a frame: {drain}"
+            "a wake alone is not a frame: {armed}"
         );
+        let drain = body("    pub(crate) fn drain_page(");
         assert!(drain.contains("self.wake_unseen_page();"), "{drain}");
         let unseen = body("    fn wake_unseen_page(");
         assert!(unseen.contains("if self.ivars().seen.get()"), "{unseen}");
-        assert!(unseen.contains("handle.wake_unseen(now)"), "{unseen}");
+        assert!(
+            unseen.contains("handle.page().wake_unseen(now)"),
+            "{unseen}"
+        );
         assert!(unseen.contains("CACurrentMediaTime()"), "{unseen}");
         assert!(
-            unseen.contains("let Some(at) = handle.wake_unseen(now) else {\n            return;"),
+            unseen.contains(
+                "let Some(at) = handle.page().wake_unseen(now) else {\n            return;"
+            ),
             "nothing is armed for a page that waits for no wake: {unseen}"
+        );
+        // And the page's own clock is the frames': the base of the link's tick stamps.
+        assert!(
+            pane.contains("fn frames_clock() -> f64 {\n    CACurrentMediaTime()\n}"),
+            "the page is given the frames' clock"
         );
         assert!(unseen.contains("Self::unseen_wake_due"), "{unseen}");
         let due = body("    fn unseen_wake_due(");
@@ -8354,19 +8420,15 @@ mod tests {
             let at = pane.find(signature).expect(signature);
             &pane[at..at + pane[at..].find("\n    }\n").expect("its end")]
         };
-        let reply = body("    fn apply_page_reply(");
-        let asked = reply
-            .find("session.module_link(url)")
+        // (Before the menu, which holds the call until the person has chosen: the drive's order,
+        // `Drained::deliver`.)
+        let link = body("    fn link(&mut self, url: String) {");
+        let asked = link
+            .find("session.module_link(&url)")
             .expect("the page's link");
-        assert!(reply.contains("if let Some(url) = &reply.link"), "{reply}");
         assert!(
-            reply[..asked].contains("&& self.program_page_up()"),
-            "{reply}"
-        );
-        // Before the menu, which holds the call until the person has chosen.
-        assert!(
-            asked < reply.find("show_page_menu").expect("the menu"),
-            "{reply}"
+            link[..asked].contains("&& pane.program_page_up()"),
+            "{link}"
         );
         assert_eq!(
             pane.matches("module_link(").count(),
@@ -8431,12 +8493,39 @@ mod tests {
         let left = body(view, "    fn page_pointer_left(");
         assert!(left.contains("page_over.replace(false)"), "{left}");
         assert!(left.contains("Input::Leave"), "{left}");
-        // An answer sets the shape only while the pointer is over the page.
-        let reply = body(pane, "    fn apply_page_reply(");
-        let set = reply.find(".set()").expect("a shape is set");
-        let guard = reply.find("page_pointer_is_over()").expect("the guard");
-        assert!(guard < set, "{reply}");
+        // An answer sets the shape only while the pointer is over the page (the drive tells the
+        // shape only for an answer to the pointer).
+        let shape = body(pane, "    fn cursor(&mut self, cursor: PageCursor) {");
+        let set = shape.find(".set()").expect("a shape is set");
+        let guard = shape.find("page_pointer_is_over()").expect("the guard");
+        assert!(guard < set, "{shape}");
         assert!(body(pane, "    fn take_page_down(").contains("forget_page_pointer()"));
+    }
+
+    /// A press on a page ends what an input method composes in the editor with the keyboard: the
+    /// drive keeps what it composed as typed as it is told the press, and the system is told to
+    /// forget it after — the order a text view keeps (it unmarks, then has its input context
+    /// discard), whether the press is the pointer's or a screen reader's. A source scan, because
+    /// what it guards needs a window server and an input method.
+    #[test]
+    fn a_press_ends_what_an_input_method_composes_and_the_system_forgets_it_after() {
+        let pane = include_str!("pane.rs");
+        let pane = &pane[..pane.find("#[cfg(test)]").unwrap_or(pane.len())];
+        let body = |signature: &str| {
+            let at = pane.find(signature).expect(signature);
+            &pane[at..at + pane[at..].find("\n    }\n").expect("its end")]
+        };
+        for signature in [
+            "    pub(crate) fn page_input(",
+            "    pub(crate) fn press_page_at(",
+        ] {
+            let press = body(signature);
+            let asked = press.find("self.page_composing()").expect("asked before");
+            let told = press.find("handle.page().input(").expect("the press");
+            let forgot = press.find("self.discard_marked_text()").expect("forgotten");
+            assert!(asked < told && told < forgot, "{signature}: {press}");
+        }
+        assert_eq!(pane.matches("discardMarkedText()").count(), 1);
     }
 
     /// A pane that shows a program's view has the keyboard in the view, and the window's ways of

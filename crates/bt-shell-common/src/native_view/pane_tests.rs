@@ -19,7 +19,7 @@ use super::{
     Scrolling,
 };
 
-pub(super) use super::module::tests::PaneRig;
+pub(super) use super::page::tests::PaneRig;
 
 /// What the pane did and what the page heard, a line each, in order.
 #[derive(Default)]

@@ -13,7 +13,10 @@ use pencere_view::{
     Align, Element, Id, List, Role, Rows, Size, Track, Ui, div, spacer, spark, text,
 };
 
+mod demo;
 mod interact;
+
+pub(crate) use demo::Demo;
 
 use interact::{Row, RowKey, Status, What};
 

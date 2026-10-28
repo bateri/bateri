@@ -20,11 +20,14 @@ bt-gpu = { workspace = true }
 # The UI kit's page engine (`native_view`): the bridge that puts its draw list on the
 # renderer. No platform library, no other crate of the workspace.
 pencere-view = { workspace = true }
-# The sandbox a page module runs in (`native_view::module`): platformless, like the engine.
+# The sandbox a page module runs in: the files of a view's bundle given to it
+# (`native_view::BundleAssets`), the demo run as a module is (`Runner`), the figures drawn into
+# pixels. Platformless, like the engine.
 pencere-sandbox = { workspace = true }
-# The editor of text a page puts in its room (`native_view::editing`): platformless, like the
-# engine it is written on.
-pencere-editor = { workspace = true }
+# The drive of a page of the kit (`native_view`): the page told what the person does, laid out
+# with its editors and its scrolling, its replies and wakes handed to the pane. Platformless,
+# like the engine, the editor and the sandbox it is written on.
+pencere-drive = { workspace = true }
 # The passwd entry (`child`, `getpwuid_r`), the process table (`jobs`: the
 # `libproc` half and `sysctl(KERN_PROCARGS2)` on macOS), `upload`'s
 # `kill`/`waitid` and `watch` (`O_EVTONLY` on macOS; inotify, `eventfd`
