@@ -146,6 +146,29 @@ pub(crate) fn set_card(account: &str, pane: u64, open: bool) {
     }
 }
 
+/// The big view of window `view` shows the server of `account` or stopped: the card's twin, for a
+/// view that is no pane's ([`Account::set_view`]).
+pub(crate) fn set_view(account: &str, view: u64, open: bool) {
+    let actions = with(|registry| {
+        let slot = registry.slots.get_mut(account)?;
+        Some(slot.account.set_view(Instant::now(), view, open))
+    });
+    if let Some(actions) = actions {
+        run(account, actions);
+    }
+}
+
+/// The last samples' CPU levels (`0..=7`, oldest first) for the big view's line.
+pub(crate) fn history(account: &str) -> Vec<u8> {
+    with(|registry| {
+        registry
+            .slots
+            .get(account)
+            .map(|slot| slot.account.history().to_vec())
+    })
+    .unwrap_or_default()
+}
+
 /// The login changed (Forget Password): a run that ended on a failed open samples again at once.
 pub(crate) fn retry(account: &str) {
     let actions = with(|registry| {

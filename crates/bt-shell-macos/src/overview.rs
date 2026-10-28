@@ -23,7 +23,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 
 use bt_core::Theme;
-use bt_shell_common::overview::{Direction, Layout, Overview, Row};
+use bt_shell_common::overview::{self as rules, Direction, Layout, Machine, Overview, Row};
 use bt_shell_common::split::Rect;
 use bt_shell_common::tabs;
 use objc2::rc::Retained;
@@ -43,7 +43,8 @@ use objc2_quartz_core::CALayer;
 use crate::app;
 use crate::arrange;
 use crate::palette::{Attributes, Look, attributes, draw_text, draw_text_right, text_width};
-use crate::tab_bar::{Ease, PALETTE_ICON_SIDE, Tint, palette_icon, play};
+use crate::server_stats;
+use crate::tab_bar::{Ease, PALETTE_ICON_SIDE, Tint, palette_icon, play, rounded, selected_row};
 use crate::window::{RootView, TerminalWindow};
 
 /// The air above the first row, under the title row, and below the last one.
@@ -69,18 +70,40 @@ const SMALL_SIZE: f64 = 12.0;
 const GAP_AFTER_ICON: f64 = 7.0;
 const GAP_AFTER_NAME: f64 = 10.0;
 
+/// The left column's width, its rows' inset from the window's edge and from each other, and a
+/// machine row's height (two lines: the name, how many tabs).
+const SIDE: f64 = 244.0;
+const SIDE_INSET: f64 = 14.0;
+const MACHINE_ROW: f64 = 46.0;
+const MACHINE_GAP: f64 = 2.0;
+/// Inside a machine row: the text's left, and the load block's lines under a server's row.
+const ROW_TEXT: f64 = 12.0;
+const LOAD_LINE: f64 = 17.0;
+const LOAD_PAD: f64 = 8.0;
+const SPARK_HEIGHT: f64 = 22.0;
+const SPARK_BAR: f64 = 4.0;
+const SPARK_GAP: f64 = 2.0;
+/// The key hint under the column.
+const HINT: &str = "⇥ next machine   ⇧⇥ previous";
+
 pub(crate) struct OverviewIvars {
     /// The window the view is in: where closing, going to a tab and the wake find it again.
     window: u64,
     state: RefCell<Overview>,
     field: Retained<NSTextField>,
     look: Cell<Look>,
+    /// The selected machine row's fill and line (the side column's selected row).
+    row_look: Cell<(Tint, Tint)>,
     /// Each tab's icon, drawn in the theme's colours.
     icons: RefCell<HashMap<u64, Retained<NSImage>>>,
     /// The last still of each pane, `(tab, pane)`.
     shots: RefCell<HashMap<(u64, u64), Retained<NSImage>>>,
     /// The tabs some pane of which holds textures for the view.
     shot_tabs: RefCell<HashSet<u64>>,
+    /// The selected server's last sample as the column says it, and its CPU levels.
+    load: RefCell<Option<(rules::Load, Vec<u8>)>>,
+    /// The account whose load the window's view is asking for ([`server_stats::set_view`]).
+    viewed: RefCell<Option<String>>,
     scroll: Cell<f64>,
     /// The window's content, height over width: the shape of a tab's picture.
     aspect: Cell<f64>,
@@ -166,14 +189,18 @@ define_class!(
             let selected = self.ivars().state.borrow().selected();
             if let Some(selected) = selected {
                 self.ivars().state.borrow_mut().select(selected);
-                self.setNeedsDisplay(true);
             }
+            self.ivars().state.borrow_mut().glance(None);
+            self.setNeedsDisplay(true);
         }
 
         /// A press on a cell is ↵ on it; a press anywhere else is nothing.
         #[unsafe(method(mouseDown:))]
         fn mouse_down(&self, event: &NSEvent) {
-            if self.point_at(event) {
+            let at = self.convertPoint_fromView(event.locationInWindow(), None);
+            if at.x < SIDE {
+                self.press_column(at.y);
+            } else if self.point_at(event) {
                 self.activate();
             }
         }
@@ -254,6 +281,9 @@ impl OverviewView {
             state: RefCell::new(state),
             field: field.clone(),
             look: Cell::new(colours(theme)),
+            row_look: Cell::new(selected_row(theme)),
+            load: RefCell::new(None),
+            viewed: RefCell::new(None),
             icons: RefCell::new(HashMap::new()),
             shots: RefCell::new(HashMap::new()),
             shot_tabs: RefCell::new(HashSet::new()),
@@ -303,7 +333,7 @@ impl OverviewView {
         let iv = self.ivars();
         iv.state
             .borrow()
-            .layout(self.bounds().size.width, iv.aspect.get())
+            .layout((self.bounds().size.width - SIDE).max(1.0), iv.aspect.get())
     }
 
     /// The viewport the grid scrolls in: from under the title row to the view's bottom.
@@ -338,7 +368,7 @@ impl OverviewView {
     /// The event's point in the grid's own coordinates.
     fn grid_point(&self, event: &NSEvent) -> (f64, f64) {
         let at = self.convertPoint_fromView(event.locationInWindow(), None);
-        (at.x, at.y - self.origin_y())
+        (at.x - SIDE, at.y - self.origin_y())
     }
 
     /// Selects the cell under the pointer, and names its pane under it; `true` when the pointer is
@@ -349,12 +379,23 @@ impl OverviewView {
             return false;
         }
         let (x, y) = self.grid_point(event);
+        let at = self.convertPoint_fromView(event.locationInWindow(), None);
+        self.touch();
+        if at.x < SIDE {
+            self.glance_at(at.y);
+            return false;
+        }
         let layout = self.layout();
         let mut state = iv.state.borrow_mut();
+        let glanced = state.glance(None);
         let Some(index) = layout.tab_at(x, y) else {
+            drop(state);
+            if glanced {
+                self.setNeedsDisplay(true);
+            }
             return false;
         };
-        let tab = &state.tabs()[index];
+        let tab = state.tab(index);
         let id = tab.id;
         let pane = layout
             .in_picture(index, x, y)
@@ -362,7 +403,7 @@ impl OverviewView {
             .and_then(|(fx, fy)| tab.pane_at(fx, fy));
         let before = (state.selected(), state.pointed());
         state.point(id, pane);
-        if before != (state.selected(), state.pointed()) {
+        if glanced || before != (state.selected(), state.pointed()) {
             drop(state);
             self.setNeedsDisplay(true);
         }
@@ -400,9 +441,144 @@ impl OverviewView {
         } else if command == sel!(cancelOperation:) {
             self.dismiss();
             true
+        } else if command == sel!(insertTab:) {
+            self.cycle(true);
+            true
+        } else if command == sel!(insertBacktab:) {
+            self.cycle(false);
+            true
         } else {
-            // ⇥ and ⇧⇥ go nowhere: the field is the view's only stop.
-            command == sel!(insertTab:) || command == sel!(insertBacktab:)
+            false
+        }
+    }
+
+    /// ⇥ (`forward`) and ⇧⇥: the next machine of the left column.
+    fn cycle(&self, forward: bool) {
+        self.ivars().state.borrow_mut().cycle(forward);
+        self.machine_changed();
+    }
+
+    /// A click on a machine's row selects it.
+    fn choose_machine(&self, machine: Machine) {
+        if self.ivars().state.borrow_mut().set_machine(machine) {
+            self.machine_changed();
+        }
+    }
+
+    /// The grid is of another machine: it starts from the top, with its own pictures, and the
+    /// server's load is asked for if it is one that has any.
+    fn machine_changed(&self) {
+        let iv = self.ivars();
+        iv.scroll.set(0.0);
+        let layout = self.layout();
+        self.reveal(&layout);
+        self.sync_view();
+        self.touch();
+        self.shoot();
+        self.setNeedsDisplay(true);
+    }
+
+    /// The view is being used: the server it shows is sampled for another stretch.
+    fn touch(&self) {
+        if let Some(account) = self.ivars().viewed.borrow().as_deref() {
+            server_stats::interaction(account);
+        }
+    }
+
+    /// The server's load is asked for while the view shows it — the details, whether or not a
+    /// pane of it is on screen — and only then: the account the view asked for before lets go.
+    fn sync_view(&self) {
+        let iv = self.ivars();
+        let wanted = iv.state.borrow().account();
+        let mut viewed = iv.viewed.borrow_mut();
+        if *viewed == wanted {
+            return;
+        }
+        if let Some(old) = viewed.take() {
+            server_stats::set_view(&old, iv.window, false);
+        }
+        if let Some(account) = &wanted {
+            server_stats::set_view(account, iv.window, true);
+        }
+        *viewed = wanted;
+        drop(viewed);
+        iv.load.replace(None);
+        self.read_load();
+    }
+
+    /// The selected server's last sample, as the column says it.
+    fn read_load(&self) {
+        let iv = self.ivars();
+        let load = iv.viewed.borrow().as_deref().and_then(|account| {
+            let detail = server_stats::detail(account)?;
+            Some((rules::load(&detail), server_stats::history(account)))
+        });
+        iv.load.replace(load);
+    }
+
+    // ─── The left column ─────────────────────────────────────────────────
+
+    /// The block under the selected server's row: its height, 0 without a sample.
+    fn load_height(&self) -> f64 {
+        let load = self.ivars().load.borrow();
+        let Some((load, levels)) = load.as_ref() else {
+            return 0.0;
+        };
+        let lines = load.rows.len() + usize::from(load.os.is_some());
+        2.0 * LOAD_PAD
+            + lines as f64 * LOAD_LINE
+            + if levels.is_empty() {
+                0.0
+            } else {
+                SPARK_HEIGHT + 4.0
+            }
+    }
+
+    /// The rows of the column and where they stand in the view; the selected server's row has
+    /// its load block under it, which moves the rows below.
+    fn column(&self) -> Vec<(rules::MachineRow, NSRect)> {
+        let iv = self.ivars();
+        let state = iv.state.borrow();
+        let mut top = iv.top.get() + TOP_AIR;
+        let block = self.load_height();
+        state
+            .machines()
+            .into_iter()
+            .map(|row| {
+                let rect = NSRect::new(
+                    NSPoint::new(SIDE_INSET, top),
+                    NSSize::new(SIDE - 2.0 * SIDE_INSET, MACHINE_ROW),
+                );
+                top += MACHINE_ROW + MACHINE_GAP;
+                if row.machine == *state.machine() && row.account.is_some() {
+                    top += block;
+                }
+                (row, rect)
+            })
+            .collect()
+    }
+
+    /// The pointer is at `y` in the column: that machine's panes light, without selecting it.
+    fn glance_at(&self, y: f64) {
+        let machine = self
+            .column()
+            .into_iter()
+            .find(|(_, rect)| y >= rect.origin.y && y < rect.origin.y + rect.size.height)
+            .map(|(row, _)| row.machine);
+        if self.ivars().state.borrow_mut().glance(machine) {
+            self.setNeedsDisplay(true);
+        }
+    }
+
+    /// A press in the column at `y`: the machine under it is selected.
+    fn press_column(&self, y: f64) {
+        let machine = self
+            .column()
+            .into_iter()
+            .find(|(_, rect)| y >= rect.origin.y && y < rect.origin.y + rect.size.height)
+            .map(|(row, _)| row.machine);
+        if let Some(machine) = machine {
+            self.choose_machine(machine);
         }
     }
 
@@ -486,6 +662,7 @@ impl OverviewView {
         };
         let theme = window.bar().theme();
         iv.look.set(colours(&theme));
+        iv.row_look.set(selected_row(&theme));
         let (tabs, labels) = window.overview_facts();
         iv.icons.replace(
             labels
@@ -499,6 +676,8 @@ impl OverviewView {
                 .collect(),
         );
         iv.state.borrow_mut().refresh(tabs);
+        self.sync_view();
+        self.read_load();
         let layout = self.layout();
         iv.scroll
             .set(iv.scroll.get().clamp(0.0, self.max_scroll(&layout)));
@@ -522,7 +701,7 @@ impl OverviewView {
         let shown: HashSet<u64> = layout
             .visible(iv.scroll.get(), self.viewport())
             .into_iter()
-            .map(|index| state.tabs()[index].id)
+            .map(|index| state.tab(index).id)
             .collect();
         for gone in iv.shot_tabs.borrow().difference(&shown) {
             window.release_tab_shots(*gone);
@@ -531,7 +710,7 @@ impl OverviewView {
             .borrow_mut()
             .retain(|(tab, _), _| shown.contains(tab));
         for index in layout.visible(iv.scroll.get(), self.viewport()) {
-            let tab = &state.tabs()[index];
+            let tab = state.tab(index);
             let tiles: Vec<(u64, (f64, f64))> = tab
                 .panes
                 .iter()
@@ -629,6 +808,7 @@ impl OverviewView {
     /// The theme changed while the view is up.
     pub(crate) fn set_theme(&self, theme: &Theme) {
         self.ivars().look.set(colours(theme));
+        self.ivars().row_look.set(selected_row(theme));
         self.reload();
     }
 
@@ -660,7 +840,7 @@ impl OverviewView {
             {
                 draw_text(
                     text,
-                    rect.x + 2.0,
+                    rect.x + SIDE + 2.0,
                     rect.y + origin + rect.height * 0.35,
                     rect.height * 0.65,
                     &dim,
@@ -669,10 +849,97 @@ impl OverviewView {
         }
         let selected = state.selected();
         for index in layout.visible(iv.scroll.get(), self.viewport()) {
-            let tab = &state.tabs()[index];
+            let tab = state.tab(index);
             self.paint_cell(&state, &layout, index, origin, selected == Some(tab.id));
         }
         NSGraphicsContext::restoreGraphicsState_class();
+        // The column is over the grid's left, which has the room for it.
+        self.paint_column(&state);
+    }
+
+    /// The left column: the machines, the selected one wearing the side column's selected row,
+    /// a server's load under it, the keys that move along it at the bottom.
+    fn paint_column(&self, state: &Overview) {
+        let iv = self.ivars();
+        let look = iv.look.get();
+        let (fill, line) = iv.row_look.get();
+        let column = self.column();
+        let name = |selected: bool| {
+            attributes(
+                &NSFont::systemFontOfSize_weight(NAME_SIZE, unsafe { NSFontWeightMedium }),
+                if selected { look.text } else { look.dim },
+            )
+        };
+        let small = attributes(&NSFont::systemFontOfSize(SMALL_SIZE), look.dim);
+        for (row, rect) in &column {
+            let selected = row.machine == *state.machine();
+            if selected {
+                rounded(*rect, tabs::TAB_RADIUS, fill, Some(line));
+            }
+            draw_text(
+                &row.title,
+                rect.origin.x + ROW_TEXT,
+                rect.origin.y + 6.0,
+                20.0,
+                &name(selected),
+            );
+            draw_text(
+                &row.count,
+                rect.origin.x + ROW_TEXT,
+                rect.origin.y + 25.0,
+                16.0,
+                &small,
+            );
+            if selected && row.account.is_some() {
+                self.paint_load(rect.origin.y + rect.size.height + LOAD_PAD, &small);
+            }
+        }
+        let bottom = self.bounds().size.height;
+        draw_text(
+            HINT,
+            SIDE_INSET + ROW_TEXT,
+            bottom - 44.0,
+            18.0,
+            &attributes(&NSFont::systemFontOfSize(SMALL_SIZE - 0.5), look.dim),
+        );
+    }
+
+    /// A server's load under its row: the CPU's last levels as bars, then label and value for
+    /// the CPU, memory, disk and uptime, and the operating system last.
+    fn paint_load(&self, top: f64, small: &Attributes) {
+        let iv = self.ivars();
+        let look = iv.look.get();
+        let load = iv.load.borrow();
+        let Some((load, levels)) = load.as_ref() else {
+            return;
+        };
+        let (left, right) = (SIDE_INSET + ROW_TEXT, SIDE - SIDE_INSET - ROW_TEXT);
+        let mut y = top;
+        if !levels.is_empty() {
+            for (at, level) in levels.iter().enumerate() {
+                let height = (f64::from(*level) + 1.0) / 8.0 * SPARK_HEIGHT;
+                let bar = NSRect::new(
+                    NSPoint::new(
+                        left + at as f64 * (SPARK_BAR + SPARK_GAP),
+                        y + SPARK_HEIGHT - height,
+                    ),
+                    NSSize::new(SPARK_BAR, height),
+                );
+                look.accent.color().setFill();
+                NSBezierPath::fillRect(bar);
+            }
+            y += SPARK_HEIGHT + 4.0;
+        }
+        let text = attributes(&NSFont::systemFontOfSize(SMALL_SIZE), look.text);
+        for (label, value) in &load.rows {
+            draw_text(label, left, y, LOAD_LINE, small);
+            draw_text_right(value, right, y, LOAD_LINE, &text);
+            y += LOAD_LINE;
+        }
+        if let Some(os) = &load.os {
+            let os = fit(os, right - left, small);
+            draw_text(&os, left, y, LOAD_LINE, small);
+        }
     }
 
     fn paint_cell(
@@ -685,14 +952,14 @@ impl OverviewView {
     ) {
         let iv = self.ivars();
         let look = iv.look.get();
-        let tab = &state.tabs()[index];
+        let tab = state.tab(index);
         let (Some(picture), Some(name_row)) = (layout.picture(index), layout.name_row(index))
         else {
             return;
         };
         let at = |rect: Rect| {
             NSRect::new(
-                NSPoint::new(rect.x, rect.y + origin),
+                NSPoint::new(rect.x + SIDE, rect.y + origin),
                 NSSize::new(rect.width, rect.height),
             )
         };
@@ -714,7 +981,7 @@ impl OverviewView {
                 look.ground.color().setFill();
                 NSBezierPath::fillRect(rect);
             }
-            if state.dim(tab.id, pane.id) {
+            if state.dim(tab.id, pane) {
                 Tint::of(look.ground.rgb, DIM_COVER).color().setFill();
                 NSBezierPath::fillRect(rect);
             }
@@ -722,7 +989,7 @@ impl OverviewView {
         NSGraphicsContext::restoreGraphicsState_class();
         if selected {
             let ring = NSRect::new(
-                NSPoint::new(picture.x - RING_AIR, picture.y + origin - RING_AIR),
+                NSPoint::new(picture.x + SIDE - RING_AIR, picture.y + origin - RING_AIR),
                 NSSize::new(
                     picture.width + 2.0 * RING_AIR,
                     picture.height + 2.0 * RING_AIR,
@@ -898,6 +1165,9 @@ pub(crate) fn close(root: &RootView) {
     iv.closing.set(true);
     iv.generation.set(iv.generation.get().wrapping_add(1));
     root.seat_overview(None);
+    if let Some(account) = iv.viewed.take() {
+        server_stats::set_view(&account, iv.window, false);
+    }
     view.release();
     view.removeFromSuperview();
 }

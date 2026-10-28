@@ -623,6 +623,10 @@ pub struct Account {
     /// The panes whose card is open: while any is, every request asks for the
     /// details.
     cards: Vec<u64>,
+    /// The windows whose big view shows this server ([`Account::set_view`]): the server is
+    /// sampled for them with its details, as for an open card, whether or not a pane of it
+    /// is on screen — the view is what is looked at.
+    views: Vec<u64>,
     /// Counts the times the account went from no pane to some: the schedule's
     /// generation. A server's counters are the server's, so a pane that
     /// comes while others are there joins the run and restarts nothing.
@@ -646,6 +650,7 @@ impl Account {
             form,
             members: Vec::new(),
             cards: Vec::new(),
+            views: Vec::new(),
             epoch: 0,
             last: None,
             detail: None,
@@ -706,7 +711,7 @@ impl Account {
         let was = self.cards.len();
         self.cards.retain(|card| *card != pane);
         let mut actions = Vec::new();
-        if self.cards.is_empty() && was > 0 {
+        if !self.detail_wanted() && was > 0 {
             actions.extend(self.schedule.set_detail(now, false));
         }
         actions.extend(self.resync(now));
@@ -752,17 +757,50 @@ impl Account {
     /// The card of `pane` opened or closed. While one is open every request
     /// asks for the details, and opening asks at once.
     pub fn set_card(&mut self, now: Instant, pane: u64, open: bool) -> Vec<Action> {
-        let was = !self.cards.is_empty();
+        let was = self.detail_wanted();
         self.cards.retain(|card| *card != pane);
         if open {
             self.cards.push(pane);
         }
-        let is = !self.cards.is_empty();
+        let is = self.detail_wanted();
         if was == is {
             return Vec::new();
         }
         let actions = self.schedule.set_detail(now, is);
         self.settle(actions)
+    }
+
+    /// The big view of window `view` shows this server (`open`) or stopped showing it: the
+    /// card's pane-less twin. While a view does, every request asks for the details and the
+    /// server is sampled though no pane of it is on screen; when the last one lets go, the
+    /// usual rules — a pane on screen, a touch within [`STATS_IDLE`], the settings' interval
+    /// — are all that is left.
+    pub fn set_view(&mut self, now: Instant, view: u64, open: bool) -> Vec<Action> {
+        let (was, was_detail) = (!self.views.is_empty(), self.detail_wanted());
+        self.views.retain(|seen| *seen != view);
+        if open {
+            self.views.push(view);
+        }
+        let (is, is_detail) = (!self.views.is_empty(), self.detail_wanted());
+        let mut actions = Vec::new();
+        if was != is {
+            actions.extend(self.resync(now));
+        }
+        if was_detail != is_detail {
+            actions.extend(self.schedule.set_detail(now, is_detail));
+        }
+        self.settle(actions)
+    }
+
+    /// Whether a card or a view is open on this server: the requests ask for details.
+    fn detail_wanted(&self) -> bool {
+        !self.cards.is_empty() || !self.views.is_empty()
+    }
+
+    /// The last sample's CPU levels (`0..=7`, oldest first), the sparkline's own, whatever
+    /// the drawn form is; empty before a second sample.
+    pub fn history(&self) -> &[u8] {
+        self.last.as_ref().map_or(&[], RemoteStats::history)
     }
 
     /// The login changed: a run that ended on a failed open samples again at
@@ -814,7 +852,7 @@ impl Account {
     /// visibility: a run while any pane shows the server, sampled while any of
     /// them is on screen.
     fn resync(&mut self, now: Instant) -> Vec<Action> {
-        let visible = self.members.iter().any(|member| member.visible);
+        let visible = self.members.iter().any(|member| member.visible) || !self.views.is_empty();
         let mut actions = Vec::new();
         match (!self.members.is_empty(), self.schedule.generation()) {
             (true, None) => {
@@ -1546,6 +1584,63 @@ mod tests {
         again.set_visible(t0, 2, false);
         assert!(!again.sampling(t0));
         assert_eq!(again.set_visible(t0, 1, true), [request(true)]);
+    }
+
+    #[test]
+    fn a_big_view_samples_a_server_no_pane_of_which_is_on_screen_and_lets_go() {
+        let t0 = Instant::now();
+        let mut account = Account::new(Some(StatsForm::Alerts), INTERVAL);
+        // The only pane that shows the server is covered: nothing is asked of the server.
+        assert!(account.join(t0, member(1, false)).is_empty());
+        assert!(!account.sampling(t0));
+        // The view opens: the server is sampled, with its details, at once.
+        let opened = account.set_view(t0, 9, true);
+        assert_eq!(requests(&opened), 1, "{opened:?}");
+        assert!(account.sampling(t0));
+        // A second window's view adds nothing; the first one leaving takes nothing away.
+        assert!(account.set_view(t0, 10, true).is_empty());
+        assert!(account.set_view(t0, 9, false).is_empty());
+        assert!(account.sampling(t0));
+        // The last one leaves: the pane that is covered is all there is, and nothing is sampled.
+        account.set_view(t0, 10, false);
+        assert!(!account.sampling(t0));
+    }
+
+    #[test]
+    fn a_view_and_a_card_each_keep_the_details_on_until_both_are_closed() {
+        let t0 = Instant::now();
+        let mut account = account_started(t0);
+        let epoch = account.generation().expect("a run");
+        account.answered(t0, epoch, Reply::Sample(&sample(1000, 800)));
+        assert_eq!(requests(&account.set_card(t0, 1, true)), 1);
+        assert!(
+            account.set_view(t0, 9, true).is_empty(),
+            "the details are already asked for"
+        );
+        assert!(
+            account.set_card(t0, 1, false).is_empty(),
+            "the view still wants them"
+        );
+        account.set_view(t0, 9, false);
+        let answered = account.answered(t0, epoch, Reply::Sample(&sample(1100, 850)));
+        let (token, after) = armed(&answered.actions);
+        assert_eq!(account.tick(t0 + after, token), [request(false)]);
+    }
+
+    #[test]
+    fn the_cpu_levels_are_kept_for_the_view_whatever_form_is_drawn() {
+        let t0 = Instant::now();
+        let mut account = account_started(t0);
+        let epoch = account.generation().expect("a run");
+        assert!(account.history().is_empty());
+        account.answered(t0, epoch, Reply::Sample(&sample(1000, 800)));
+        let answered = account.answered(t0, epoch, Reply::Sample(&sample(2000, 1500)));
+        assert!(answered.shown.is_some());
+        assert_eq!(
+            account.history().len(),
+            1,
+            "the second sample is the first CPU reading"
+        );
     }
 
     #[test]

@@ -16,6 +16,7 @@
 //! ↵ lands. The model reads nothing from the windows: the shell hands the tabs in
 //! ([`Tab`], their panes the card's own [`CardPane`] list) and gets an [`Act`] out.
 
+use crate::remote_stats::Detail;
 use crate::split::Rect;
 use crate::tabs::CardPane;
 
@@ -112,10 +113,72 @@ pub enum Act {
     GoToTab { tab: u64, pane: Option<u64> },
 }
 
-/// The view's state: the tabs, the selected one and where the pointer is over it.
+/// The name of the row that lists every tab, and of the one that lists this computer's: the
+/// local machine is not named after the hardware it is (the shell on Linux says the same).
+pub const ALL_TABS: &str = "All tabs";
+pub const LOCAL: &str = "This Computer";
+
+/// What the left column selects: a tab shows in the grid when one of its panes is on the machine.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum Machine {
+    /// Every tab.
+    All,
+    /// This computer: the panes with no ssh.
+    Local,
+    /// A server a pane of the window is in, as the pane's session names its host
+    /// ([`CardPane::host`]).
+    Host(String),
+}
+
+impl Machine {
+    /// The row's name.
+    pub fn title(&self) -> String {
+        match self {
+            Machine::All => ALL_TABS.to_owned(),
+            Machine::Local => LOCAL.to_owned(),
+            Machine::Host(host) => format!("⇄ {host}"),
+        }
+    }
+
+    /// Whether `pane` is on the machine.
+    pub fn holds(&self, pane: &CardPane) -> bool {
+        match self {
+            Machine::All => true,
+            Machine::Local => pane.host.is_none(),
+            Machine::Host(host) => pane.host.as_deref() == Some(host),
+        }
+    }
+}
+
+/// A row of the left column.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MachineRow {
+    pub machine: Machine,
+    pub title: String,
+    /// "2 tabs" under the name.
+    pub count: String,
+    /// The kablo account of a server whose panes have one: its load shows under the row when it
+    /// is the selected one. `None` for the rows that are not a server and for a plain ssh.
+    pub account: Option<String>,
+}
+
+/// "2 tabs".
+fn tabs_text(count: usize) -> String {
+    format!("{count} {}", if count == 1 { "tab" } else { "tabs" })
+}
+
+/// The view's state: the tabs, the machine the left column selects, the selected tab and where
+/// the pointer is over it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Overview {
-    tabs: Vec<Tab>,
+    all: Vec<Tab>,
+    /// The places in [`Self::all`] of the tabs the machine leaves in the grid, in the strip's
+    /// order.
+    shown: Vec<usize>,
+    machine: Machine,
+    /// The machine the pointer is over in the left column: its panes light in the grid, the
+    /// selection stays.
+    glance: Option<Machine>,
     selected: Option<u64>,
     /// The pane the pointer is over in the selected tab (a split tab's), `None` for the keys'
     /// selection.
@@ -124,42 +187,35 @@ pub struct Overview {
 
 impl Overview {
     /// The view of `tabs` (the strip's order), with `here`, the tab the window shows, selected;
-    /// the first tab when `here` is not among them.
+    /// the first tab when `here` is not among them. All tabs are shown.
     pub fn new(tabs: Vec<Tab>, here: Option<u64>) -> Self {
         let selected = here
             .filter(|here| tabs.iter().any(|tab| tab.id == *here))
             .or_else(|| tabs.first().map(|tab| tab.id));
-        Self {
-            tabs,
+        let mut overview = Self {
+            all: tabs,
+            shown: Vec::new(),
+            machine: Machine::All,
+            glance: None,
             selected,
             pointed: None,
-        }
+        };
+        overview.reshow();
+        overview
     }
 
-    pub fn tabs(&self) -> &[Tab] {
-        &self.tabs
-    }
-
-    pub fn selected(&self) -> Option<u64> {
-        self.selected
-    }
-
-    /// The selected tab's place in [`Self::tabs`].
-    pub fn selected_index(&self) -> Option<usize> {
-        let selected = self.selected?;
-        self.tabs.iter().position(|tab| tab.id == selected)
-    }
-
-    /// The tabs and what they report, read afresh (the view is open while the programs go on):
-    /// the selection stays on its tab, and on the tab that took its place when it is gone.
-    pub fn refresh(&mut self, tabs: Vec<Tab>) {
-        let at = self.selected_index().unwrap_or(0);
-        self.tabs = tabs;
-        if !self.selected.is_some_and(|selected| self.has(selected)) {
-            self.selected = self
-                .tabs
-                .get(at.min(self.tabs.len().saturating_sub(1)))
-                .map(|tab| tab.id);
+    /// The places of the tabs the machine leaves, and the selection kept on a tab that is
+    /// still among them.
+    fn reshow(&mut self) {
+        let machine = &self.machine;
+        self.shown = (0..self.all.len())
+            .filter(|&at| self.all[at].panes.iter().any(|pane| machine.holds(pane)))
+            .collect();
+        if !self
+            .selected
+            .is_some_and(|selected| self.is_shown(selected))
+        {
+            self.selected = self.shown.first().map(|&at| self.all[at].id);
         }
         if !self
             .pointed
@@ -169,13 +225,71 @@ impl Overview {
         }
     }
 
-    fn has(&self, tab: u64) -> bool {
-        self.tabs.iter().any(|candidate| candidate.id == tab)
+    fn is_shown(&self, tab: u64) -> bool {
+        self.shown.iter().any(|&at| self.all[at].id == tab)
+    }
+
+    /// How many tabs the grid holds.
+    pub fn len(&self) -> usize {
+        self.shown.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.shown.is_empty()
+    }
+
+    /// The `index`th tab of the grid.
+    pub fn tab(&self, index: usize) -> &Tab {
+        &self.all[self.shown[index]]
+    }
+
+    /// The tabs of the grid, in the strip's order.
+    pub fn tabs(&self) -> impl Iterator<Item = &Tab> {
+        self.shown.iter().map(|&at| &self.all[at])
+    }
+
+    pub fn selected(&self) -> Option<u64> {
+        self.selected
+    }
+
+    /// The selected tab's place in the grid.
+    pub fn selected_index(&self) -> Option<usize> {
+        let selected = self.selected?;
+        self.tabs().position(|tab| tab.id == selected)
+    }
+
+    /// The tabs and what they report, read afresh (the view is open while the programs go on):
+    /// the selection stays on its tab, and on the tab that took its place when it is gone; the
+    /// machine stays unless it has no tab left.
+    pub fn refresh(&mut self, tabs: Vec<Tab>) {
+        let at = self.selected_index().unwrap_or(0);
+        self.all = tabs;
+        if !self
+            .machines()
+            .iter()
+            .any(|row| row.machine == self.machine)
+        {
+            self.machine = Machine::All;
+        }
+        if self
+            .glance
+            .as_ref()
+            .is_some_and(|glance| !self.machines().iter().any(|row| row.machine == *glance))
+        {
+            self.glance = None;
+        }
+        let before = self.selected;
+        self.reshow();
+        if before.is_some() && self.selected != before {
+            // The tab that took its place: the one now at its old place, the last if none.
+            let place = at.min(self.shown.len().saturating_sub(1));
+            self.selected = self.shown.get(place).map(|&at| self.all[at].id);
+        }
     }
 
     fn selected_has_pane(&self, pane: u64) -> bool {
         self.selected_index().is_some_and(|at| {
-            self.tabs[at]
+            self.tab(at)
                 .panes
                 .iter()
                 .any(|candidate| candidate.id == pane)
@@ -183,9 +297,9 @@ impl Overview {
     }
 
     /// Selects tab `tab` (a key, never the pointer: no pane is pointed at); `false` if the
-    /// view does not list it.
+    /// grid does not hold it.
     pub fn select(&mut self, tab: u64) -> bool {
-        if !self.has(tab) {
+        if !self.is_shown(tab) {
             return false;
         }
         self.selected = Some(tab);
@@ -194,9 +308,9 @@ impl Overview {
     }
 
     /// The pointer is over tab `tab`, over its pane `pane` when there is one: the tab is
-    /// selected. `false` if the view does not list the tab.
+    /// selected. `false` if the grid does not hold the tab.
     pub fn point(&mut self, tab: u64, pane: Option<u64>) -> bool {
-        if !self.has(tab) {
+        if !self.is_shown(tab) {
             return false;
         }
         self.selected = Some(tab);
@@ -209,11 +323,112 @@ impl Overview {
         self.pointed
     }
 
-    /// Whether pane `pane` of tab `tab` is drawn dim: the pointer is over another pane of that
+    /// Whether `pane` of tab `tab` is drawn dim: it is not on the machine the grid is of (or the
+    /// one the pointer is over in the left column), or the pointer is over another pane of the
     /// tab and a split tab's other panes give way to it.
-    pub fn dim(&self, tab: u64, pane: u64) -> bool {
-        self.selected == Some(tab) && self.pointed.is_some_and(|pointed| pointed != pane)
+    pub fn dim(&self, tab: u64, pane: &CardPane) -> bool {
+        let lit = self.glance.as_ref().unwrap_or(&self.machine);
+        !lit.holds(pane)
+            || (self.selected == Some(tab)
+                && self.pointed.is_some_and(|pointed| pointed != pane.id))
     }
+
+    // ─── The machines ────────────────────────────────────────────────────
+
+    /// The left column: All tabs, This Computer (when a pane of the window is local), then the
+    /// servers a pane of the window is in, by name — an order that does not change as tabs move,
+    /// so ⇥ goes the same way twice. A machine with no tab in the window has no row.
+    pub fn machines(&self) -> Vec<MachineRow> {
+        let count = |machine: &Machine| {
+            self.all
+                .iter()
+                .filter(|tab| tab.panes.iter().any(|pane| machine.holds(pane)))
+                .count()
+        };
+        let row = |machine: Machine, count: usize, account: Option<String>| MachineRow {
+            title: machine.title(),
+            machine,
+            count: tabs_text(count),
+            account,
+        };
+        let mut rows = vec![row(Machine::All, self.all.len(), None)];
+        let local = count(&Machine::Local);
+        if local > 0 {
+            rows.push(row(Machine::Local, local, None));
+        }
+        let mut hosts: Vec<(&str, Option<&String>)> = Vec::new();
+        for pane in self.all.iter().flat_map(|tab| tab.panes.iter()) {
+            let Some(host) = pane.host.as_deref() else {
+                continue;
+            };
+            match hosts.iter_mut().find(|(known, _)| *known == host) {
+                Some((_, account)) => {
+                    if account.is_none() {
+                        *account = pane.account.as_ref();
+                    }
+                }
+                None => hosts.push((host, pane.account.as_ref())),
+            }
+        }
+        hosts.sort_by_key(|(host, _)| host.to_lowercase());
+        for (host, account) in hosts {
+            let machine = Machine::Host(host.to_owned());
+            let tabs = count(&machine);
+            rows.push(row(machine, tabs, account.cloned()));
+        }
+        rows
+    }
+
+    /// The machine the grid is of.
+    pub fn machine(&self) -> &Machine {
+        &self.machine
+    }
+
+    /// The kablo account of the selected machine, when it is a server that has one.
+    pub fn account(&self) -> Option<String> {
+        self.machines()
+            .into_iter()
+            .find(|row| row.machine == self.machine)
+            .and_then(|row| row.account)
+    }
+
+    /// Selects `machine`; `false` if the left column has no such row. The tab selected stays when
+    /// the machine has it, else the first the machine has.
+    pub fn set_machine(&mut self, machine: Machine) -> bool {
+        if !self.machines().iter().any(|row| row.machine == machine) {
+            return false;
+        }
+        self.machine = machine;
+        self.glance = None;
+        self.reshow();
+        true
+    }
+
+    /// ⇥ (`forward`) or ⇧⇥: the next machine of the column, wrapping.
+    pub fn cycle(&mut self, forward: bool) {
+        let rows = self.machines();
+        let at = rows
+            .iter()
+            .position(|row| row.machine == self.machine)
+            .unwrap_or(0);
+        let next = if forward {
+            (at + 1) % rows.len()
+        } else {
+            (at + rows.len() - 1) % rows.len()
+        };
+        self.set_machine(rows[next].machine.clone());
+    }
+
+    /// The pointer is over `machine`'s row (`Some`) or left the column: that machine's panes
+    /// light in the grid without selecting it.
+    pub fn glance(&mut self, machine: Option<Machine>) -> bool {
+        let machine = machine.filter(|machine| *machine != self.machine);
+        let changed = self.glance != machine;
+        self.glance = machine;
+        changed
+    }
+
+    // ─── Moving and acting ───────────────────────────────────────────────
 
     /// The selection one cell along `direction` in `layout`; `false` when there is nowhere to go
     /// (the row's end, the first or last row of tabs).
@@ -248,7 +463,7 @@ impl Overview {
         let Some(&index) = tabs.get(column) else {
             return false;
         };
-        self.selected = Some(self.tabs[index].id);
+        self.selected = Some(self.tab(index).id);
         self.pointed = None;
         true
     }
@@ -270,7 +485,8 @@ impl Overview {
     /// The grid for a view `width` points wide whose tabs have the shape `aspect` (the window's
     /// content, height over width).
     pub fn layout(&self, width: f64, aspect: f64) -> Layout {
-        Layout::new(&self.tabs, width, aspect)
+        let tabs: Vec<&Tab> = self.tabs().collect();
+        Layout::new(&tabs, width, aspect)
     }
 }
 
@@ -322,7 +538,7 @@ pub struct Layout {
 }
 
 impl Layout {
-    fn new(tabs: &[Tab], width: f64, aspect: f64) -> Self {
+    fn new(tabs: &[&Tab], width: f64, aspect: f64) -> Self {
         let columns = columns(width);
         let tile_w = tile_width(width, columns);
         let aspect = if aspect.is_finite() {
@@ -489,6 +705,46 @@ impl Layout {
     }
 }
 
+/// What the left column says of a server under its row.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Load {
+    /// Label and value, top to bottom: CPU, memory, disk and how long it has been up.
+    pub rows: Vec<(String, String)>,
+    /// The operating system, if the server said.
+    pub os: Option<String>,
+}
+
+/// A server's last sample as the left column says it; the numbers are the server card's own
+/// ([`crate::server_card::load`]).
+pub fn load(detail: &Detail) -> Load {
+    let card = crate::server_card::load("", Some(detail));
+    let mut rows = vec![
+        (card.cpu_label, card.cpu.value),
+        ("Memory".to_owned(), card.mem.value),
+    ];
+    if let Some(disk) = detail.disk {
+        rows.push(("Disk".to_owned(), format!("{disk}%")));
+    }
+    if let Some(seconds) = detail.uptime {
+        rows.push(("Up".to_owned(), uptime_text(seconds)));
+    }
+    Load {
+        rows,
+        os: detail.os.clone(),
+    }
+}
+
+/// How long a server has been up: "12 days", "3 h 20 min", "5 min".
+pub fn uptime_text(seconds: u64) -> String {
+    let (days, hours, minutes) = (seconds / 86_400, seconds / 3_600 % 24, seconds / 60 % 60);
+    match (days, hours) {
+        (0, 0) => format!("{minutes} min"),
+        (0, hours) => format!("{hours} h {minutes} min"),
+        (1, _) => "1 day".to_owned(),
+        (days, _) => format!("{days} days"),
+    }
+}
+
 /// A group's heading: "api-work · 2 tabs".
 fn heading_text(name: &str, count: usize) -> String {
     format!(
@@ -514,6 +770,7 @@ mod tests {
             focused,
             host: None,
             directory: None,
+            account: None,
         }
     }
 
@@ -702,11 +959,15 @@ mod tests {
         assert_eq!(overview.selected(), Some(1));
         assert_eq!(overview.pointed(), Some(12));
         assert!(
-            overview.dim(1, 11),
+            overview.dim(1, &split.panes[0]),
             "the pane the pointer is not over gives way"
         );
-        assert!(!overview.dim(1, 12));
-        assert!(!overview.dim(2, 20), "another tab's panes are not touched");
+        assert!(!overview.dim(1, &split.panes[1]));
+        let other = overview.tab(1).panes[0].clone();
+        assert!(
+            !overview.dim(2, &other),
+            "another tab's panes are not touched"
+        );
         assert_eq!(
             overview.act(),
             Some(Act::GoToTab {
@@ -717,7 +978,7 @@ mod tests {
         // A key takes the pointer's pane away: ↵ lands on the focused one again.
         assert!(overview.select(1));
         assert_eq!(overview.pointed(), None);
-        assert!(!overview.dim(1, 11));
+        assert!(!overview.dim(1, &split.panes[0]));
         assert_eq!(overview.act(), Some(Act::GoToTab { tab: 1, pane: None }));
         assert!(!overview.point(9, None), "a tab the view does not list");
     }
@@ -827,5 +1088,212 @@ mod tests {
             0.0,
             "a view that fits"
         );
+    }
+
+    // ─── The machines ───
+
+    /// A pane on `host` (`None`: this computer), with a kablo account when it is a server's door.
+    fn on(id: u64, host: Option<&str>, account: Option<&str>) -> CardPane {
+        CardPane {
+            host: host.map(str::to_owned),
+            account: account.map(str::to_owned),
+            ..pane(id, whole(), false)
+        }
+    }
+
+    fn with_panes(id: u64, panes: Vec<CardPane>) -> Tab {
+        Tab {
+            panes,
+            ..tab(id, None)
+        }
+    }
+
+    /// `web` has two panes on rasp and one here; `api` is here; `db` is on db1.
+    fn mixed() -> Overview {
+        Overview::new(
+            vec![
+                with_panes(
+                    1,
+                    vec![
+                        on(11, Some("rasp"), Some("u@rasp:22")),
+                        on(12, Some("rasp"), Some("u@rasp:22")),
+                        on(13, None, None),
+                    ],
+                ),
+                with_panes(2, vec![on(21, None, None)]),
+                with_panes(3, vec![on(31, Some("db1"), None)]),
+            ],
+            Some(2),
+        )
+    }
+
+    fn names(overview: &Overview) -> Vec<String> {
+        overview
+            .machines()
+            .into_iter()
+            .map(|row| row.title)
+            .collect()
+    }
+
+    #[test]
+    fn the_column_lists_all_this_computer_and_the_servers_by_name() {
+        let overview = mixed();
+        assert_eq!(
+            names(&overview),
+            vec!["All tabs", "This Computer", "⇄ db1", "⇄ rasp"]
+        );
+        let counts: Vec<String> = overview
+            .machines()
+            .into_iter()
+            .map(|row| row.count)
+            .collect();
+        assert_eq!(counts, vec!["3 tabs", "2 tabs", "1 tab", "1 tab"]);
+        let accounts: Vec<Option<String>> = overview
+            .machines()
+            .into_iter()
+            .map(|row| row.account)
+            .collect();
+        assert_eq!(
+            accounts,
+            vec![None, None, None, Some("u@rasp:22".to_owned())],
+            "a plain ssh has no account: no load is measured there"
+        );
+        assert!(
+            !names(&Overview::new(
+                vec![with_panes(1, vec![on(1, Some("x"), None)])],
+                None
+            ))
+            .contains(&"This Computer".to_owned()),
+            "no local pane in the window: no row for this computer"
+        );
+    }
+
+    #[test]
+    fn a_machine_leaves_the_tabs_that_have_a_pane_on_it_and_dims_the_others() {
+        let mut overview = mixed();
+        assert!(overview.set_machine(Machine::Host("rasp".to_owned())));
+        assert_eq!(overview.len(), 1);
+        let web = overview.tab(0).clone();
+        assert_eq!(web.id, 1);
+        assert!(!overview.dim(1, &web.panes[0]), "a pane on rasp is lit");
+        assert!(
+            overview.dim(1, &web.panes[2]),
+            "the local pane of web is dim"
+        );
+        // The same tab is in This Computer's grid, the other way round.
+        assert!(overview.set_machine(Machine::Local));
+        assert_eq!(
+            overview.tabs().map(|tab| tab.id).collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert!(overview.dim(1, &web.panes[0]));
+        assert!(!overview.dim(1, &web.panes[2]));
+        assert!(!overview.set_machine(Machine::Host("nowhere".to_owned())));
+    }
+
+    #[test]
+    fn the_selected_tab_stays_unless_the_machine_has_not_got_it() {
+        let mut overview = mixed();
+        assert_eq!(overview.selected(), Some(2));
+        overview.set_machine(Machine::Local);
+        assert_eq!(overview.selected(), Some(2), "api is here");
+        overview.set_machine(Machine::Host("db1".to_owned()));
+        assert_eq!(
+            overview.selected(),
+            Some(3),
+            "the first tab the machine has"
+        );
+    }
+
+    #[test]
+    fn tab_goes_round_the_column_both_ways() {
+        let mut overview = mixed();
+        let mut seen = vec![overview.machine().title()];
+        for _ in 0..4 {
+            overview.cycle(true);
+            seen.push(overview.machine().title());
+        }
+        assert_eq!(
+            seen,
+            vec!["All tabs", "This Computer", "⇄ db1", "⇄ rasp", "All tabs"],
+            "after the last server, All tabs again"
+        );
+        overview.cycle(false);
+        assert_eq!(overview.machine(), &Machine::Host("rasp".to_owned()));
+    }
+
+    #[test]
+    fn a_server_whose_last_tab_is_closed_goes_and_takes_the_selection_with_it() {
+        let mut overview = mixed();
+        overview.set_machine(Machine::Host("db1".to_owned()));
+        overview.refresh(vec![
+            with_panes(1, vec![on(13, None, None)]),
+            with_panes(2, vec![on(21, None, None)]),
+        ]);
+        assert_eq!(overview.machine(), &Machine::All);
+        assert_eq!(names(&overview), vec!["All tabs", "This Computer"]);
+        assert_eq!(overview.len(), 2);
+    }
+
+    #[test]
+    fn the_pointer_over_a_row_lights_that_machines_panes_and_selects_nothing() {
+        let mut overview = mixed();
+        let web = overview.tab(0).clone();
+        assert!(overview.glance(Some(Machine::Host("rasp".to_owned()))));
+        assert!(!overview.dim(1, &web.panes[0]), "rasp's pane lights");
+        assert!(overview.dim(1, &web.panes[2]), "the local one goes dim");
+        assert_eq!(overview.machine(), &Machine::All);
+        assert!(overview.glance(None));
+        assert!(!overview.dim(1, &web.panes[2]));
+        assert!(
+            !overview.glance(Some(Machine::All)),
+            "the machine the grid is of is nothing new"
+        );
+    }
+
+    #[test]
+    fn the_arrows_walk_the_grid_the_machine_leaves() {
+        let mut overview = mixed();
+        overview.set_machine(Machine::Local);
+        let layout = overview.layout(width_for(3), 0.6);
+        assert_eq!(overview.selected(), Some(2));
+        assert!(
+            !overview.step(&layout, Direction::Right),
+            "api is the last of two"
+        );
+        assert!(overview.step(&layout, Direction::Left));
+        assert_eq!(overview.selected(), Some(1));
+    }
+
+    #[test]
+    fn the_load_is_said_as_the_card_says_it_with_the_disk_and_the_uptime() {
+        let detail = Detail {
+            os: Some("Ubuntu 24.04 LTS".to_owned()),
+            cores: Some(4),
+            cpu: Some(23),
+            mem_used: 3 << 30,
+            mem_total: 8 << 30,
+            disk: Some(54),
+            uptime: Some(12 * 86_400 + 5),
+            ..Detail::default()
+        };
+        let load = load(&detail);
+        assert_eq!(load.rows[0], ("CPU · 4 cores".to_owned(), "23%".to_owned()));
+        assert_eq!(load.rows[1].0, "Memory");
+        assert_eq!(load.rows[2], ("Disk".to_owned(), "54%".to_owned()));
+        assert_eq!(load.rows[3], ("Up".to_owned(), "12 days".to_owned()));
+        assert_eq!(load.os.as_deref(), Some("Ubuntu 24.04 LTS"));
+        let bare = super::load(&Detail::default());
+        assert_eq!(bare.rows.len(), 2, "no disk and no uptime: no such rows");
+        assert_eq!(bare.os, None);
+    }
+
+    #[test]
+    fn an_uptime_is_said_in_its_biggest_unit() {
+        assert_eq!(uptime_text(59), "0 min");
+        assert_eq!(uptime_text(5 * 60), "5 min");
+        assert_eq!(uptime_text(3 * 3600 + 20 * 60), "3 h 20 min");
+        assert_eq!(uptime_text(86_400), "1 day");
+        assert_eq!(uptime_text(40 * 86_400), "40 days");
     }
 }

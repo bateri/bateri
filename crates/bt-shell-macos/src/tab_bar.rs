@@ -1711,6 +1711,13 @@ fn draw_bare_arrow(at: NSPoint, down: bool, color: u32) {
 
 // ─── The icon in a menu row ───────────────────────────────────────────────
 
+/// How the selected row of a list wears `theme`: the fill and the line of the side column's
+/// selected row ([`Palette::selected`]), which the big view's selected machine wears too.
+pub(crate) fn selected_row(theme: &Theme) -> (Tint, Tint) {
+    let palette = Palette::of(theme);
+    (palette.selected, palette.selected_line)
+}
+
 /// The icon of tab `label` for a menu row (Show All Tabs): its mark on its tile, as the chip wears
 /// it, and what the tab reports as a dot on the corner.
 fn list_image(label: &Label, style: IconStyle, palette: Palette) -> Retained<NSImage> {

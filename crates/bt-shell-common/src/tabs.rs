@@ -1968,6 +1968,9 @@ pub struct CardPane {
     /// Where the pane's shell is, in words ([`place`]); `None` while nothing says. The overview
     /// finds and names a pane by it.
     pub directory: Option<String>,
+    /// The kablo account of the server the pane is a door to ([`crate::ssh_wrap::host_key`]),
+    /// `None` for a pane on this computer and for a plain ssh pane (no load is measured there).
+    pub account: Option<String>,
 }
 
 impl CardPane {
@@ -4692,6 +4695,7 @@ mod tests {
             focused: id == 1,
             host: None,
             directory: None,
+            account: None,
         }
     }
 

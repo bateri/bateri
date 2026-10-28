@@ -1736,6 +1736,11 @@ impl TerminalTab {
                         .and_then(|session| session.remote_mark())
                         .map(|(host, _)| host),
                     directory: Self::place_of(pane),
+                    account: pane.server_target().and_then(|_| {
+                        pane.host()
+                            .kept_terminal(pane.uuid())
+                            .map(|shown| shown.account)
+                    }),
                 })
             })
             .collect()
