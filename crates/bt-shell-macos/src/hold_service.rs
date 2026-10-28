@@ -28,7 +28,7 @@ use bt_shell_common::kablo::ledger::Ledger;
 use bt_shell_common::kablo::local;
 use bt_shell_common::kablo::roster::Background;
 use bt_shell_common::kablo::service::{
-    PaneInfo, PaneLink, Peer, QUIT_END_WAIT, Service, Shown, Survey,
+    PaneInfo, PaneLink, Peer, QUIT_END_WAIT, Screen, Service, Shown, Survey,
 };
 use bt_shell_common::kablo::ssh::SshBackend;
 
@@ -269,6 +269,24 @@ pub(crate) fn survey(account: &str, done: impl FnOnce(Survey) + Send + 'static) 
     match SERVICE.get() {
         Some(service) => service.survey(account, done),
         None => done(Survey::default()),
+    }
+}
+
+/// The screen of a terminal of `account` that no pane shows, as the server builds it
+/// ([`Service::picture`]): `done` runs on the service's thread and must only hand the answer on.
+/// No service, no answer: it runs at once with nothing.
+#[expect(
+    dead_code,
+    reason = "the big view's background sections ask for it, a phase later"
+)]
+pub(crate) fn picture(
+    account: &str,
+    terminal: &SessionId,
+    done: impl FnOnce(Option<Screen>) + Send + 'static,
+) {
+    match SERVICE.get() {
+        Some(service) => service.picture(account, terminal, done),
+        None => done(None),
     }
 }
 

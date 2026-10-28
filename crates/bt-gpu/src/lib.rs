@@ -90,7 +90,9 @@ pub use frame::{
     context_col_under, context_row_offset, context_shift_px, dock_px, edge_ceiling_rows,
     edge_drawn_px, edge_fades, edge_reserve_px,
 };
-pub use link::{DisplayLink, Layout, Origin, Pacer, Shot, Snapshot, TickTarget, Ticker, Waker};
+pub use link::{
+    DisplayLink, Layout, Origin, Pacer, Shot, Snapshot, Stage, TickTarget, Ticker, Waker,
+};
 pub use metrics::{CellMetrics, FontNotice, GridInset, family_notice};
 pub use renderer::Renderer;
 pub use renderer::shrink::tile_crop;

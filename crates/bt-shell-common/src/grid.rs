@@ -205,6 +205,18 @@ pub fn fitted_size(
     )
 }
 
+/// The pixel size of a pane that holds exactly `cols` × `rows` cells and no dock, scroll-bar
+/// track or top strip: the surface a still of a screen nobody shows is drawn at
+/// ([`bt_gpu::Stage`]). [`fitted_size`] of it is itself.
+pub fn size_of_grid(cols: u16, rows: u16, cell: CellMetrics) -> (u32, u32) {
+    let (cell_w, cell_h) = cell.cell_px();
+    let inset = cell.grid_inset();
+    (
+        u32::from(inset.left) + u32::from(cols) * u32::from(cell_w) + u32::from(inset.right),
+        u32::from(rows) * u32::from(cell_h) + u32::from(inset.foot),
+    )
+}
+
 /// The context row's strip in `width_px` wide pane: whole small-step columns
 /// between the two side margins, and what is left over.
 ///
@@ -405,6 +417,20 @@ mod tests {
         let g = split_into_grid(1800.0, 1200.0, cell, DOCK_ROWS, NO_RESERVE, NO_TOP);
         assert_eq!(g.cols, 102);
         assert_eq!(1800 - 25 - u32::from(g.cols) * 17, 25 + 16);
+    }
+
+    #[test]
+    fn a_grid_of_cells_alone_is_its_own_fitted_size_and_holds_its_columns_and_rows() {
+        let cell = CellMetrics::new(17, 40, 13, 16, 1, 2.0)
+            .expect("non-zero cell")
+            .with_corners(20.5, 20.5);
+        for (cols, rows) in [(1u16, 1u16), (80, 24), (211, 57)] {
+            let (w, h) = size_of_grid(cols, rows, cell);
+            let (fw, fh) = fitted_size(f64::from(w), f64::from(h), cell, 0, NO_RESERVE, NO_TOP);
+            assert_eq!((f64::from(w), f64::from(h)), (fw, fh));
+            let g = split_into_grid(fw, fh, cell, 0, NO_RESERVE, NO_TOP);
+            assert_eq!((g.cols, g.rows), (cols, rows));
+        }
     }
 
     #[test]

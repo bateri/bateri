@@ -65,6 +65,7 @@ mod input;
 mod link;
 mod notify;
 pub mod pencere;
+mod picture;
 mod pointer;
 mod program_status;
 mod reader;
@@ -93,6 +94,7 @@ pub use history::{CommandRecord, MEMORY_LIMIT as COMMAND_MEMORY_LIMIT, RecordSta
 pub use identity::{LC_TERMINAL, PaneUuid, TERM_PROGRAM, TERM_PROGRAM_VERSION, pane_env};
 pub use input::{Arrow, FunctionKey, MouseButton, MouseModifiers, TextKey};
 pub use notify::Notification;
+pub use picture::pictured;
 pub use pointer::PointerShape;
 pub use program_status::{ProgramActivity, State as ProgramState};
 pub use reset::keeping_history as reset_keeping_history;

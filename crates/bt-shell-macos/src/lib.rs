@@ -72,6 +72,12 @@ mod promise;
 mod remote_ports;
 #[cfg(debug_assertions)]
 mod sample_page;
+// Read by the background sections of the big view (the next phase).
+#[expect(
+    dead_code,
+    reason = "the big view's background sections read it, a phase later"
+)]
+mod screens;
 mod search_bar;
 mod server_card;
 mod server_stats;

@@ -67,7 +67,7 @@ pub use kablo_proto::{Error, SessionId};
 pub use mail::{FailCode, Over, Talk};
 
 use kablo_proto::v1::stream::{Incoming, IncomingDecoder};
-use kablo_proto::v1::{ClientName, MAX_HISTORY, Message, OFFSET_END, Packet, View};
+use kablo_proto::v1::{Capture, ClientName, MAX_HISTORY, Message, OFFSET_END, Packet, View};
 use kablo_proto::{NOISE_LIMIT, WIRE};
 
 #[cfg(any(test, feature = "test-support"))]
@@ -316,6 +316,22 @@ pub enum Event {
         /// The bytes.
         data: Vec<u8>,
     },
+    /// The answer to [`Client::read_picture`]: the screen of a terminal this client does not
+    /// attach, as the bytes that build it when they are written to a freshly reset terminal of
+    /// `cols` × `rows`. `offset` is how much of the program's output it is of — the same offset,
+    /// the same screen.
+    Screen {
+        /// The terminal.
+        terminal: SessionId,
+        /// The offset of the program's output the screen is of.
+        offset: u64,
+        /// The columns of the terminal the picture was made for.
+        cols: u16,
+        /// The rows of the terminal the picture was made for.
+        rows: u16,
+        /// The bytes, the pieces together.
+        data: Vec<u8>,
+    },
     /// Program output, exactly as it was written, in order.
     Output {
         /// The terminal.
@@ -491,6 +507,9 @@ pub struct Client {
     outbox: Vec<u8>,
     events: VecDeque<Event>,
     terminals: BTreeMap<SessionId, Terminal>,
+    /// The pictures asked for with [`Client::read_picture`] and not whole yet: each terminal's
+    /// pieces so far. Terminals this client has no attach for, so nothing of `terminals`.
+    reads: BTreeMap<SessionId, Vec<u8>>,
     /// When anything last came from the far end.
     heard: Instant,
     /// When a `ping` was sent that nothing has come after.
@@ -517,6 +536,7 @@ impl Client {
             outbox: Vec::new(),
             events: VecDeque::new(),
             terminals: BTreeMap::new(),
+            reads: BTreeMap::new(),
             heard: now,
             ping: None,
             mail: mail::Mail::default(),
@@ -605,6 +625,9 @@ impl Client {
                 }
             }
         };
+        // A picture asked for is not coming over a connection that is gone: it is asked again
+        // when the owner wants it.
+        self.reads.clear();
         self.events.push_back(Event::Lost { cause });
     }
 
@@ -868,6 +891,25 @@ impl Client {
             return false;
         }
         self.queue(Packet::about(id.clone(), Message::Status));
+        true
+    }
+
+    /// Asks for the screen of a terminal this client does not attach, as the bytes that build
+    /// it (a `read` with `picture`): the answer is [`Event::Screen`], or [`Event::Failed`] about
+    /// the terminal when the server has none by that name. Nothing is streamed afterwards, and
+    /// nothing of the terminal's other clients is touched: the server counts no attach and
+    /// notes no size for it.
+    ///
+    /// `false` when the connection is not up or the terminal is one this client attaches (its
+    /// own picture comes with the attach).
+    pub fn read_picture(&mut self, id: &SessionId) -> bool {
+        if !self.link.is_live() || self.terminals.contains_key(id) {
+            return false;
+        }
+        self.reads.insert(id.clone(), Vec::new());
+        let mut capture = Capture::default();
+        capture.picture = true;
+        self.queue(Packet::about(id.clone(), Message::Read(capture)));
         true
     }
 
@@ -1147,6 +1189,10 @@ impl Client {
                 data,
             } => {
                 let Some(id) = session else { return };
+                if !self.terminals.contains_key(&id) {
+                    self.read_piece(id, offset, cols, rows, more, data);
+                    return;
+                }
                 let Some(terminal) = self.terminals.get_mut(&id) else {
                     return;
                 };
@@ -1259,6 +1305,35 @@ impl Client {
         }
     }
 
+    /// A piece of the picture a [`Client::read_picture`] asked for. One nobody asked for is
+    /// let go.
+    fn read_piece(
+        &mut self,
+        id: SessionId,
+        offset: u64,
+        cols: u16,
+        rows: u16,
+        more: bool,
+        data: Vec<u8>,
+    ) {
+        let Some(pieces) = self.reads.get_mut(&id) else {
+            return;
+        };
+        pieces.extend_from_slice(&data);
+        if more {
+            return;
+        }
+        let data = std::mem::take(pieces);
+        self.reads.remove(&id);
+        self.events.push_back(Event::Screen {
+            terminal: id,
+            offset,
+            cols,
+            rows,
+            data,
+        });
+    }
+
     fn handle_error(
         &mut self,
         session: Option<SessionId>,
@@ -1276,6 +1351,10 @@ impl Client {
             return;
         };
         let phase = self.terminals.get(&id).map(|t| t.phase);
+        // The answer to a read is an error: the picture will not come.
+        if phase.is_none() {
+            self.reads.remove(&id);
+        }
         match (code, phase) {
             (ErrorCode::TAKEN, Some(Phase::Asked | Phase::Attached | Phase::Wanted)) => {
                 let by = Some(text).filter(|by| !by.is_empty());

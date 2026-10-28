@@ -1089,6 +1089,66 @@ fn the_status_and_the_list_come_back_as_events() {
     ));
 }
 
+#[test]
+fn a_terminal_not_attached_has_its_screen_read_as_a_picture_and_is_left_as_it_was() {
+    let mut rig = Rig::new(Age::Current);
+    let one = rig.bridge.add("one", SIZE);
+    rig.bridge.write(&one, b"hello");
+    assert!(!rig.client.read_picture(&one), "not connected");
+    rig.connect();
+    assert!(rig.client.read_picture(&one));
+    rig.pump();
+    let (offset, cols, rows, data) = rig
+        .events
+        .iter()
+        .find_map(|e| match e {
+            Event::Screen {
+                terminal,
+                offset,
+                cols,
+                rows,
+                data,
+            } if *terminal == one => Some((*offset, *cols, *rows, data.clone())),
+            _ => None,
+        })
+        .expect("the screen");
+    // The two pieces the server sent are one picture, of the size the server says.
+    assert_eq!(data, Bridge::picture_of(5));
+    assert_eq!((offset, cols, rows), (5, SIZE.cols, SIZE.rows));
+    // **Nothing of an attach happened**: the server counted no client and saw no `attach`,
+    // and no piece of it reached a terminal the client does not have.
+    assert_eq!(rig.bridge.pictures_read(&one), 1);
+    assert!(rig.bridge.attaches(&one).is_empty());
+    assert!(!rig.bridge.is_attached(&one));
+    assert!(!rig.events.iter().any(|e| matches!(
+        e,
+        Event::Picture { .. } | Event::Attached { .. } | Event::Output { .. }
+    )));
+}
+
+#[test]
+fn a_picture_read_of_a_terminal_the_server_does_not_have_fails_and_is_not_kept() {
+    let mut rig = Rig::new(Age::Current);
+    rig.connect();
+    let gone = SessionId::new("gone").expect("an id");
+    assert!(rig.client.read_picture(&gone));
+    rig.pump();
+    assert!(rig.events.iter().any(|e| matches!(
+        e,
+        Event::Failed { terminal: Some(t), code, .. }
+            if *t == gone && *code == ErrorCode::UNKNOWN_SESSION
+    )));
+    assert!(!rig.events.iter().any(|e| matches!(e, Event::Screen { .. })));
+}
+
+#[test]
+fn a_terminal_the_client_attaches_is_not_read_beside_its_attach() {
+    let (mut rig, terminal) = Rig::with_terminal(Age::Current, "t1");
+    assert!(!rig.client.read_picture(&terminal));
+    rig.pump();
+    assert_eq!(rig.bridge.pictures_read(&terminal), 0);
+}
+
 // What goes wrong
 
 #[test]

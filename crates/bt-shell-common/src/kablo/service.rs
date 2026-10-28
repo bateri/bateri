@@ -505,6 +505,18 @@ pub struct Survey {
     pub records: Vec<(Terminal, Record)>,
 }
 
+/// The screen of a terminal no pane shows, as the server built it ([`Service::picture`]): the
+/// bytes that make it when they are written to a freshly reset terminal of `cols` × `rows`.
+/// `offset` is how much of the program's output it is of, so that two with the same one are the
+/// same screen.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Screen {
+    pub offset: u64,
+    pub cols: u16,
+    pub rows: u16,
+    pub bytes: Vec<u8>,
+}
+
 /// How many times a terminal is started again under the next number when a person's terminal
 /// has the one the counter gave.
 const RENUMBER_TRIES: u8 = 5;
@@ -512,6 +524,10 @@ const RENUMBER_TRIES: u8 = 5;
 /// How long a [`Service::survey`] waits for the server's list and for the records: a program is
 /// waiting for the answer, and half an answer is better than none.
 const SURVEY_WAIT: Duration = Duration::from_secs(10);
+
+/// How long a [`Service::picture`] waits for the server's screen: the picture is a courtesy, and
+/// the next round asks again.
+const PICTURE_WAIT: Duration = Duration::from_secs(10);
 
 /// The most a program may say to the application in one conversation, in bytes.
 /// What a conversation keeps while the program is still talking is bounded by this
@@ -776,6 +792,12 @@ enum Msg {
         account: String,
         done: Box<dyn FnOnce(Survey) + Send>,
     },
+    /// The application wants the screen of a terminal of an account ([`Service::picture`]).
+    Picture {
+        account: String,
+        terminal: SessionId,
+        done: Box<dyn FnOnce(Option<Screen>) + Send>,
+    },
     /// The records of survey `id` were read ([`Backend::records`]).
     Recorded {
         id: u64,
@@ -983,6 +1005,7 @@ impl Service {
             drafts: BTreeMap::new(),
             collisions: BTreeMap::new(),
             surveys: Vec::new(),
+            pictures: Vec::new(),
             surveyed: 0,
             grace,
             rx,
@@ -1164,6 +1187,25 @@ impl Service {
     pub fn survey(&self, account: &str, done: impl FnOnce(Survey) + Send + 'static) {
         let _ = self.tx.send(Msg::Survey {
             account: account.to_owned(),
+            done: Box::new(done),
+        });
+    }
+
+    /// The screen of a terminal of the server `account` that no pane shows, as the bytes that
+    /// build it, handed to `done` — on the service's thread, which must not wait: the
+    /// application hops to its own. The server is asked with a `read`, not an `attach`: the
+    /// terminal keeps its clients, its size and its journal, and nothing is streamed after the
+    /// answer. `None` when the connection is down, the server has no such terminal or says
+    /// nothing in [`PICTURE_WAIT`]. Many askers of one terminal share one question.
+    pub fn picture(
+        &self,
+        account: &str,
+        terminal: &SessionId,
+        done: impl FnOnce(Option<Screen>) + Send + 'static,
+    ) {
+        let _ = self.tx.send(Msg::Picture {
+            account: account.to_owned(),
+            terminal: terminal.clone(),
             done: Box::new(done),
         });
     }
@@ -1413,6 +1455,8 @@ struct Core {
     collisions: BTreeMap<HoldId, u8>,
     /// The surveys the application is waiting for ([`Service::survey`]).
     surveys: Vec<Surveying>,
+    /// The screens the application is waiting for ([`Service::picture`]).
+    pictures: Vec<Picturing>,
     /// How many surveys were asked for: the next one's identity.
     surveyed: u64,
     grace: Duration,
@@ -1434,6 +1478,14 @@ struct Surveying {
     terminals: Option<Vec<Status>>,
     records: Option<Vec<(Terminal, Record)>>,
     done: Box<dyn FnOnce(Survey) + Send>,
+}
+
+/// A screen the application waits for: asked of the server once however many ask.
+struct Picturing {
+    account: String,
+    terminal: SessionId,
+    due: Instant,
+    done: Box<dyn FnOnce(Option<Screen>) + Send>,
 }
 
 /// A quit that waits for the terminals it asked to end.
@@ -1460,6 +1512,7 @@ impl Core {
                 .filter_map(Client::next_deadline)
                 .chain(self.ending.iter().map(|ending| ending.at))
                 .chain(self.surveys.iter().map(|survey| survey.due))
+                .chain(self.pictures.iter().map(|picture| picture.due))
                 .min()
                 .map_or(Duration::from_secs(3600), |at| {
                     at.saturating_duration_since(now)
@@ -1641,6 +1694,11 @@ impl Core {
             Msg::DropShown(pane) => self.drop_shown(&pane),
             Msg::HereMade { outcome, pending } => self.here_made(outcome, &pending, now),
             Msg::Survey { account, done } => self.survey(account, done, now),
+            Msg::Picture {
+                account,
+                terminal,
+                done,
+            } => self.picture(account, terminal, done, now),
             Msg::Recorded { id, records } => {
                 if let Some(survey) = self.surveys.iter_mut().find(|survey| survey.id == id) {
                     survey.records = Some(records);
@@ -1692,6 +1750,7 @@ impl Core {
     fn settle(&mut self) {
         self.kill_due(Instant::now());
         self.finish_surveys(Instant::now());
+        self.finish_pictures(Instant::now());
         for _ in 0..64 {
             let now = Instant::now();
             for account in std::mem::take(&mut self.relist) {
@@ -1752,7 +1811,32 @@ impl Core {
                                 self.found(&account, list);
                                 self.listed_for_surveys(&account, list);
                             }
-                            Event::Lost { .. } => self.lost_for_surveys(&account),
+                            Event::Lost { .. } => {
+                                self.lost_for_surveys(&account);
+                                self.answer_pictures(&account, None, None);
+                            }
+                            Event::Screen {
+                                terminal,
+                                offset,
+                                cols,
+                                rows,
+                                data,
+                            } => self.answer_pictures(
+                                &account,
+                                Some(terminal),
+                                Some(Screen {
+                                    offset: *offset,
+                                    cols: *cols,
+                                    rows: *rows,
+                                    bytes: data.clone(),
+                                }),
+                            ),
+                            // The server will not give the screen: it has no such terminal, or
+                            // could not ask the program.
+                            Event::Failed {
+                                terminal: Some(terminal),
+                                ..
+                            } => self.answer_pictures(&account, Some(terminal), None),
                             _ => {}
                         }
                         match *event {
@@ -1861,6 +1945,69 @@ impl Core {
             records: None,
             done,
         });
+    }
+
+    /// [`Service::picture`]: the server is asked once for the screen however many ask; a
+    /// connection that is not up answers at once with nothing.
+    fn picture(
+        &mut self,
+        account: String,
+        terminal: SessionId,
+        done: Box<dyn FnOnce(Option<Screen>) + Send>,
+        now: Instant,
+    ) {
+        let asked = self
+            .pictures
+            .iter()
+            .any(|picture| picture.account == account && picture.terminal == terminal);
+        if !asked
+            && !self
+                .hub
+                .client_mut(&account)
+                .is_some_and(|client| client.read_picture(&terminal))
+        {
+            done(None);
+            return;
+        }
+        self.pictures.push(Picturing {
+            account,
+            terminal,
+            due: now + PICTURE_WAIT,
+            done,
+        });
+        self.refresh = true;
+    }
+
+    /// The server answered (`screen`) or refused (`None`) for `terminal` of `account` — or, with
+    /// no terminal, the connection to the account went: those who wait for it are told.
+    fn answer_pictures(
+        &mut self,
+        account: &str,
+        terminal: Option<&SessionId>,
+        screen: Option<Screen>,
+    ) {
+        let mut kept = Vec::new();
+        for picture in std::mem::take(&mut self.pictures) {
+            if picture.account == account && terminal.is_none_or(|t| *t == picture.terminal) {
+                (picture.done)(screen.clone());
+            } else {
+                kept.push(picture);
+            }
+        }
+        self.pictures = kept;
+    }
+
+    /// The screens whose time is out are answered with nothing.
+    fn finish_pictures(&mut self, now: Instant) {
+        let mut kept = Vec::new();
+        for picture in std::mem::take(&mut self.pictures) {
+            if picture.due <= now {
+                (picture.done)(None);
+            } else {
+                kept.push(picture);
+            }
+        }
+        self.pictures = kept;
     }
 
     /// The server's list came: the surveys of the account that wait for it have it.

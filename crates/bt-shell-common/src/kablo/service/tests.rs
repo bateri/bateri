@@ -3009,6 +3009,67 @@ fn an_answer_to_a_letter_of_a_connection_that_went_is_not_said_on_the_next() {
     assert_eq!(rig.world.bridge().said_to_sender(again), b"ok\n");
 }
 
+// Picture: the screen of a terminal no pane shows, read without attaching to it
+
+/// The answer to a picture, once it comes.
+fn pictured(rig: &Rig, account: &str, terminal: &SessionId) -> Option<Screen> {
+    let (tx, rx) = mpsc::channel();
+    rig.service.picture(account, terminal, move |screen| {
+        let _ = tx.send(screen);
+    });
+    rx.recv_timeout(Duration::from_secs(15)).expect("a picture")
+}
+
+#[test]
+fn a_terminal_no_pane_shows_is_read_as_a_picture_and_left_as_it_was() {
+    let rig = Rig::new("picture");
+    let _holder = Holder::new(&rig.socket(), "b-1");
+    rig.terminals(1);
+    let left = rig.world.bridge().add("left", Size::default());
+    rig.world.bridge().write(&left, b"hello");
+    let screen = pictured(&rig, ACCOUNT, &left).expect("the screen");
+    assert_eq!(screen.bytes, Bridge::picture_of(5));
+    assert_eq!(screen.offset, 5);
+    assert_eq!(rig.world.bridge().pictures_read(&left), 1);
+    // **Read, not attached**: the server counted no client and the terminal's size is its own.
+    assert!(!rig.world.bridge().is_attached(&left));
+    assert!(rig.world.bridge().attaches(&left).is_empty());
+    assert_eq!(rig.world.bridge().size_of(&left), Some(Size::default()));
+}
+
+#[test]
+fn a_picture_of_a_terminal_the_server_does_not_have_is_none_and_one_of_no_account_is_at_once() {
+    let rig = Rig::new("picture-none");
+    let _holder = Holder::new(&rig.socket(), "b-1");
+    rig.terminals(1);
+    let gone = SessionId::new("gone").expect("an id");
+    assert_eq!(pictured(&rig, ACCOUNT, &gone), None);
+    assert_eq!(pictured(&rig, "nobody@nowhere:22", &gone), None);
+}
+
+#[test]
+fn many_who_ask_for_one_picture_share_one_question() {
+    let rig = Rig::new("picture-shared");
+    let _holder = Holder::new(&rig.socket(), "b-1");
+    rig.terminals(1);
+    let left = rig.world.bridge().add("left", Size::default());
+    let (tx, rx) = mpsc::channel();
+    for _ in 0..3 {
+        let tx = tx.clone();
+        rig.service.picture(ACCOUNT, &left, move |screen| {
+            let _ = tx.send(screen);
+        });
+    }
+    for _ in 0..3 {
+        let screen = rx
+            .recv_timeout(Duration::from_secs(15))
+            .expect("an answer")
+            .expect("the screen");
+        assert_eq!(screen.bytes, Bridge::picture_of(0));
+    }
+    assert_eq!(rig.world.bridge().pictures_read(&left), 1);
+}
+
 // Survey: every terminal of an account as the server has it now, with who opened each
 
 /// The answer to a survey, once it comes.

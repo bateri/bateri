@@ -101,6 +101,8 @@ pub struct Session {
     /// Every time a client asked the terminal to drop the input its program had not read: how
     /// many bytes the client had typed by then.
     input_dropped: Vec<usize>,
+    /// How many times a connection that was not attached read its screen as a picture.
+    pictures_read: u32,
     /// The command the terminal was made with.
     argv: Vec<Vec<u8>>,
     /// The environment it was made with, over the defaults.
@@ -130,6 +132,7 @@ impl Session {
             terminated: None,
             forgotten: 0,
             input_dropped: Vec::new(),
+            pictures_read: 0,
             argv: Vec::new(),
             env: Vec::new(),
         }
@@ -633,6 +636,11 @@ impl Bridge {
         self.sessions.get(id).map_or(0, |s| s.forgotten)
     }
 
+    /// How many times a connection that is not attached read the terminal's screen as a picture.
+    pub fn pictures_read(&self, id: &SessionId) -> u32 {
+        self.sessions.get(id).map_or(0, |s| s.pictures_read)
+    }
+
     /// Each time the terminal was asked to drop the input its program had not read: the number
     /// of bytes typed to it by then, so that a test can tell what the request came after.
     pub fn input_dropped(&self, id: &SessionId) -> Vec<usize> {
@@ -921,6 +929,30 @@ impl Bridge {
             Message::Status => {
                 if let Some(status) = self.status(&id) {
                     self.send(&Packet::about(id, Message::StatusReply(status)));
+                }
+            }
+            // The screen as a picture, to a connection that does not attach: no `attached`
+            // before it, nothing streamed after, and the terminal's clients are not touched.
+            Message::Read(capture) if capture.picture && self.age == Age::Current => {
+                let Some(session) = self.sessions.get_mut(&id) else {
+                    self.error(Some(&id), ErrorCode::UNKNOWN_SESSION, "no such session");
+                    return;
+                };
+                session.pictures_read += 1;
+                let (end, size) = (session.end(), session.size);
+                let bytes = Bridge::picture_of(end);
+                let (head, tail) = bytes.split_at(bytes.len() / 2);
+                for (piece, more) in [(head, true), (tail, false)] {
+                    self.send(&Packet::about(
+                        id.clone(),
+                        Message::Picture {
+                            offset: end,
+                            cols: size.cols,
+                            rows: size.rows,
+                            more,
+                            data: piece.to_vec(),
+                        },
+                    ));
                 }
             }
             // The past goes: the journal and, with it, the offsets before the present.
