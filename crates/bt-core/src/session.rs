@@ -2654,7 +2654,7 @@ impl io::Read for TappedPty {
         // A read that continues a sequence (the `_` of an `ESC` the last read
         // ended in) may carry the rest of a command as much as one with `ESC _`
         // in it.
-        let mid_sequence = !self.tail.bytes().is_empty();
+        let mid_sequence = self.tail.mid_sequence();
         self.tail.feed(&buf[..read]);
         // Before the scanner: a remote session that ends in this read is
         // still the one a graphics command in it was written in.
@@ -5683,7 +5683,7 @@ impl Session {
             initial_input: at_prompt,
             held_input: Arc::clone(&held_input),
             adapter: adapter.clone(),
-            tail: snapshot::Tail::default(),
+            tail: snapshot::Tail::lean(),
         };
         // Asked when a command names a file: a pane in a remote session is
         // not on the machine the name belongs to.

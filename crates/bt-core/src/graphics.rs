@@ -76,6 +76,7 @@ use crate::handler::KeptModes;
 use crate::pencere::Desk;
 use crate::pointer::PointerShapes;
 use crate::shell::BlockKey;
+use crate::skim;
 
 pub(crate) use apc::Collector;
 pub(crate) use place::Motion;
@@ -542,13 +543,14 @@ pub(crate) struct Hub {
 /// plain shell output's path is the one that answers no.
 pub(crate) fn may_carry_command(bytes: &[u8]) -> bool {
     let mut rest = bytes;
-    while let Some(at) = rest.iter().position(|&byte| byte == 0x1b) {
-        match rest.get(at + 1) {
-            None | Some(b'_') => return true,
-            Some(_) => rest = &rest[at + 1..],
+    loop {
+        let at = skim::until(rest, |byte| byte == 0x1b);
+        match rest.get(at..) {
+            None | Some([]) => return false,
+            Some([_]) | Some([_, b'_', ..]) => return true,
+            Some([_, after @ ..]) => rest = after,
         }
     }
-    false
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {

@@ -45,6 +45,7 @@ use alacritty_terminal::vte::ansi::{Color, NamedColor};
 use std::collections::HashMap;
 
 use crate::shell::{BlockKey, Stripe};
+use crate::skim;
 #[cfg(test)]
 use {
     crate::handler::{KeptModes, RESIZE_REPORT_MODE},
@@ -1266,18 +1267,75 @@ pub(crate) struct Tail {
     /// as vte counts it (`action_paramnext`, a saturating `u16`).
     param: u16,
     bytes: Vec<u8>,
+    /// Keeps no bytes ([`Tail::lean`]).
+    lean: bool,
 }
 
 impl Tail {
+    /// A tail that follows where the parser stands and keeps none of the
+    /// bytes: the read path's, which asks [`Tail::mid_sequence`] alone. The
+    /// bytes are what the tests hold to the replay; kept on the read path they
+    /// copied every image's text a second time and every CSI's parameters.
+    pub(crate) fn lean() -> Self {
+        Self {
+            lean: true,
+            ..Self::default()
+        }
+    }
+
+    /// Whether the stream stands inside a sequence or a character — whether
+    /// what the parser was given last is not all acted on yet.
+    pub(crate) fn mid_sequence(&self) -> bool {
+        self.state != Seq::Ground || self.utf8_need > 0
+    }
+
     /// Follows `bytes`, which the parser gets next and in this order.
-    pub(crate) fn feed(&mut self, bytes: &[u8]) {
-        for &byte in bytes {
-            self.step(byte);
+    ///
+    /// What [`Tail::skim`] can take at once it takes at once, the rest is
+    /// stepped through a byte at a time: every read of every pane comes
+    /// through here, and most of it is text or a sequence's body.
+    pub(crate) fn feed(&mut self, mut bytes: &[u8]) {
+        while !bytes.is_empty() {
+            let taken = self.skim(bytes);
+            bytes = bytes.get(taken..).unwrap_or_default();
+            if let Some((&byte, rest)) = bytes.split_first() {
+                self.step(byte);
+                bytes = rest;
+            }
+        }
+    }
+
+    /// Takes the bytes from the start of `bytes` that leave the state where
+    /// it is, keeping of them what [`Tail::step`] would keep, and says how
+    /// many it took — 0 when the next byte is one to step through. The same
+    /// as stepping through them one by one (the sameness is a test's).
+    fn skim(&mut self, bytes: &[u8]) -> usize {
+        match self.state {
+            Seq::Ground if self.utf8_need == 0 => ground_run(bytes),
+            Seq::Apc => {
+                let run = skim::until(bytes, |byte| matches!(byte, 0x18 | 0x1a | 0x1b));
+                let room = APC_KEEP.saturating_sub(self.bytes.len());
+                self.keep_all(bytes.get(..run.min(room)).unwrap_or_default());
+                run
+            }
+            // Every byte from 0x20 up is the OSC's. Past the room the next
+            // byte is stepped through: it is the one that gives the OSC up.
+            Seq::Osc => {
+                let run = skim::until(bytes, |byte| byte < 0x20);
+                let taken = run.min(OSC_KEEP.saturating_sub(self.bytes.len()));
+                self.keep_all(bytes.get(..taken).unwrap_or_default());
+                taken
+            }
+            Seq::OscDropped => skim::until(bytes, |byte| byte < 0x20),
+            Seq::Ignored => skim::until(bytes, |byte| matches!(byte, 0x18 | 0x1a | 0x1b)),
+            Seq::DcsBody => skim::until(bytes, |byte| matches!(byte, 0x18 | 0x1a | 0x1b | 0x9c)),
+            _ => 0,
         }
     }
 
     /// The bytes of the sequence (or the character) the stream stopped in;
     /// empty in the ground state.
+    #[cfg(test)]
     pub(crate) fn bytes(&self) -> &[u8] {
         &self.bytes
     }
@@ -1295,7 +1353,19 @@ impl Tail {
     fn escape(&mut self) {
         self.ground();
         self.state = Seq::Escape;
-        self.bytes.push(0x1b);
+        self.keep(0x1b);
+    }
+
+    fn keep(&mut self, byte: u8) {
+        if !self.lean {
+            self.bytes.push(byte);
+        }
+    }
+
+    fn keep_all(&mut self, bytes: &[u8]) {
+        if !self.lean {
+            self.bytes.extend_from_slice(bytes);
+        }
     }
 
     /// The bytes vte handles the same in every state (its `anywhere`).
@@ -1308,7 +1378,7 @@ impl Tail {
     }
 
     fn enter(&mut self, byte: u8, state: Seq) {
-        self.bytes.push(byte);
+        self.keep(byte);
         self.state = state;
     }
 
@@ -1319,7 +1389,7 @@ impl Tail {
     /// on with a parameter across what it ignores (`DEL`, an executed C0),
     /// which is not kept either, so a digit behind a kept digit extends it.
     fn keep_param(&mut self, byte: u8) {
-        if self.bytes.len() >= PARAMS_KEEP {
+        if self.lean || self.bytes.len() >= PARAMS_KEEP {
             return;
         }
         if byte.is_ascii_digit() {
@@ -1355,7 +1425,7 @@ impl Tail {
                 }
                 if self.utf8_need > 0 {
                     if byte & 0xc0 == 0x80 {
-                        self.bytes.push(byte);
+                        self.keep(byte);
                         self.utf8_need -= 1;
                         if self.utf8_need == 0 {
                             self.ground();
@@ -1373,7 +1443,7 @@ impl Tail {
                     _ => 0,
                 };
                 if need > 0 {
-                    self.bytes.push(byte);
+                    self.keep(byte);
                     self.utf8_need = need;
                 }
             }
@@ -1434,7 +1504,7 @@ impl Tail {
                 0x18 | 0x1a => self.ground(),
                 // The command stays open until the next byte says how it ends.
                 0x1b => self.enter(byte, Seq::ApcEscape),
-                _ if self.bytes.len() < APC_KEEP => self.bytes.push(byte),
+                _ if self.bytes.len() < APC_KEEP => self.keep(byte),
                 _ => {}
             },
             Seq::ApcEscape => {
@@ -1457,9 +1527,35 @@ impl Tail {
                 // Ignored inside an OSC.
                 _ if executed => {}
                 _ if self.state == Seq::OscDropped => {}
-                _ if self.bytes.len() < OSC_KEEP => self.bytes.push(byte),
+                _ if self.bytes.len() < OSC_KEEP => self.keep(byte),
                 _ => self.drop_osc(),
             },
+        }
+    }
+}
+
+/// How far the ground state goes on unmoved, with no character half read: ASCII
+/// other than `ESC`, the bytes no character starts with, and whole characters
+/// of UTF-8 — each of which [`Tail::step`] takes a byte at a time and comes
+/// back to the ground from, with nothing kept. It stops at an `ESC` and at a
+/// character that is cut or malformed, which the step reads.
+fn ground_run(bytes: &[u8]) -> usize {
+    let mut at = 0;
+    loop {
+        let rest = bytes.get(at..).unwrap_or_default();
+        at += skim::until(rest, |byte| byte == 0x1b || byte >= 0x80);
+        let need = match bytes.get(at) {
+            None | Some(0x1b) => return at,
+            Some(0xc2..=0xdf) => 1,
+            Some(0xe0..=0xef) => 2,
+            Some(0xf0..=0xf4) => 3,
+            Some(_) => 0,
+        };
+        match bytes.get(at + 1..=at + need) {
+            Some(continuation) if continuation.iter().all(|&byte| byte & 0xc0 == 0x80) => {
+                at += 1 + need;
+            }
+            _ => return at,
         }
     }
 }
@@ -2315,6 +2411,82 @@ pub(crate) mod tests {
         assert_eq!(new.grid()[Line(0)][Column(0)].c, 'x');
         tail.feed(b"\x07");
         assert!(tail.bytes().is_empty());
+    }
+
+    /// Skimming is stepping: whatever the stream and however its reads cut
+    /// it, the tail a read leaves is the one a walk of its bytes one by one
+    /// leaves — in every state, kept bytes and half-read characters included.
+    /// And the read path's lean tail, keeping nothing, says the stream stands
+    /// inside a sequence exactly where a keeping one has bytes kept.
+    #[test]
+    fn skimming_a_read_leaves_the_tail_stepping_through_it_leaves() {
+        let mut streams: Vec<Vec<u8>> = [
+            "plain text\r\n\tand more",
+            "çay ğ 旦海司 👍🏽 ❤\u{FE0F}\u{200D}🔥 a\u{301}\u{302}",
+            "\x1b[1;31mred\x1b[0m\x1b[?1049h\x1b[2J\x1b[10A\x1b[38:5:24;48:2:1:2:3m",
+            "\x1b]0;a title\x07\x1b]2;another\x1b\\\x1b]8;;http://x\x1b\\link\x1b]8;;\x1b\\",
+            "\x1b]52;c;aGVsbG8=\x18after a cancel\x1b]6;\x01\x02ignored\x7f\x07",
+            "\x1b_Ga=t,m=1;QUJD\x1b\\\x1b_Gm=0;REVG\x1b\\\x1b_G\x1bcancelled\x1b_Gq;\x1a",
+            "\x1bP1$qm\x1b\\\x1bPq#0;1;2\u{9c}\x1bX sos body\x1b\\\x1b^ pm\x18x",
+            "\x1b(B\x1b)0\x1b#8\x1b \x1b\x1b[\x1b]",
+        ]
+        .iter()
+        .map(|stream| stream.as_bytes().to_vec())
+        .collect();
+        // Byte soup leaning on the bytes that move the state: every
+        // introducer, terminator, UTF-8 lead and continuation, cut and
+        // malformed, in every order.
+        let alphabet: &[u8] = b"\x1b\x07\x18\x1a\x9c\x80\xbf\xc2\xe0\xef\xf0\xf4\xf5\xff\x00\x0a\
+            []_P^X\\;:?019Gm a";
+        let mut seed: u64 = 0x2545_f491_4f6c_dd1d;
+        for _ in 0..64 {
+            let stream = (0..512)
+                .map(|_| {
+                    seed ^= seed << 13;
+                    seed ^= seed >> 7;
+                    seed ^= seed << 17;
+                    let pick = usize::try_from(seed % 48).unwrap_or(0);
+                    alphabet.get(pick).copied().unwrap_or(b'x')
+                })
+                .collect();
+            streams.push(stream);
+        }
+        for stream in &streams {
+            for read in [1, 2, 3, 5, 7, 16, 17, 33, 4096] {
+                let (mut skimmed, mut stepped) = (Tail::default(), Tail::default());
+                let mut lean = Tail::lean();
+                for chunk in stream.chunks(read) {
+                    skimmed.feed(chunk);
+                    lean.feed(chunk);
+                    assert!(lean.bytes().is_empty());
+                    assert_eq!(
+                        lean.mid_sequence(),
+                        !skimmed.bytes().is_empty(),
+                        "{:?} read {read} at a time",
+                        String::from_utf8_lossy(stream)
+                    );
+                    for &byte in chunk {
+                        stepped.step(byte);
+                    }
+                    assert_eq!(
+                        (
+                            skimmed.state,
+                            skimmed.utf8_need,
+                            skimmed.param,
+                            &skimmed.bytes
+                        ),
+                        (
+                            stepped.state,
+                            stepped.utf8_need,
+                            stepped.param,
+                            &stepped.bytes
+                        ),
+                        "{:?} read {read} at a time",
+                        String::from_utf8_lossy(stream)
+                    );
+                }
+            }
+        }
     }
 
     #[test]

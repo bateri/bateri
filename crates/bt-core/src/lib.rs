@@ -73,6 +73,7 @@ mod search;
 mod session;
 mod settings;
 mod shell;
+mod skim;
 mod snapshot;
 mod theme;
 mod wake;

@@ -121,6 +121,7 @@ use crate::program_status::{
 };
 use crate::session::{CellHalf, SelectKind};
 use crate::settings::{HostMark, HostRule, MarkSubject, RemoteStatsMode};
+use crate::skim;
 
 /// A single OSC 133 mark the shell writes into the stream.
 ///
@@ -5156,14 +5157,24 @@ impl Scanner {
             // byte, we jump to the next `ESC`. Almost all of the ordinary stream is this
             // branch.
             if self.state == ScanState::Ground {
-                match rest.iter().position(|&b| b == 0x1b) {
-                    Some(at) => {
+                match rest.get(skim::until(rest, |b| b == 0x1b) + 1..) {
+                    Some(after) => {
                         self.state = ScanState::Escape;
-                        rest = &rest[at + 1..];
+                        rest = after;
                     }
                     None => return,
                 }
                 continue;
+            }
+            // An OSC that is not ours is skipped the same way, to the byte
+            // that ends it: an OSC 52's copy, a long title.
+            if self.state == ScanState::Skip {
+                rest = rest
+                    .get(skim::until(rest, is_terminator)..)
+                    .unwrap_or_default();
+                if rest.is_empty() {
+                    return;
+                }
             }
             let byte = rest[0];
             rest = &rest[1..];
