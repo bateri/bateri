@@ -93,9 +93,11 @@ pub(crate) enum Scope {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Command {
     pub(crate) action: Action,
-    /// Whether `a=` was written. A chunk of a transmission in progress
-    /// carries no action, and that is what makes it a chunk.
+    /// Whether `a=` was written ([`Command::is_chunk`]).
     pub(crate) explicit_action: bool,
+    /// Whether no key was written but `a`, `q` and `m`
+    /// ([`Command::is_chunk`]).
+    pub(crate) chunk_keys_only: bool,
     pub(crate) echo: Echo,
     pub(crate) format: Format,
     pub(crate) medium: Medium,
@@ -133,6 +135,22 @@ pub(crate) struct Command {
 }
 
 impl Command {
+    /// Whether the command goes on with a transmission in progress rather
+    /// than starting one of its own: it names no action, or it names nothing
+    /// but the three keys a chunk carries — `m`, `q`, and a transmission's
+    /// action, which kitty's own client writes on every chunk when it is not
+    /// the default one (`kitten icat` sends `a=T,q=2,m=1` after its first
+    /// chunk). A command with keys of its own (a size, an id, a format) is
+    /// one of its own whatever its action.
+    pub(crate) fn is_chunk(&self) -> bool {
+        !self.explicit_action
+            || (self.chunk_keys_only
+                && matches!(
+                    self.action,
+                    Action::Transmit | Action::TransmitAndPut | Action::Query
+                ))
+    }
+
     /// Parses `control`; on failure the error carries the addressing keys
     /// that could still be read, so the program can be answered.
     pub(crate) fn parse(control: &[u8]) -> Result<Self, (Echo, Error)> {
@@ -145,6 +163,7 @@ fn parse(control: &[u8], echo: Echo) -> Result<Command, Error> {
     let mut command = Command {
         action: Action::Transmit,
         explicit_action: false,
+        chunk_keys_only: true,
         echo,
         format: Format::Rgba,
         medium: Medium::Direct,
@@ -173,6 +192,9 @@ fn parse(control: &[u8], echo: Echo) -> Result<Command, Error> {
         ));
     }
     for (key, value) in pairs(control) {
+        if !matches!(key, b'a' | b'q' | b'm') {
+            command.chunk_keys_only = false;
+        }
         match key {
             b'a' => {
                 command.explicit_action = true;

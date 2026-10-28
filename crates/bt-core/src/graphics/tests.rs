@@ -551,8 +551,40 @@ fn a_transmission_that_keeps_coming_is_not_one_that_waited_too_long() {
     );
 }
 
+/// kitty's own client writes a transmission's action on every chunk when it
+/// is not the default one: a chunk that names nothing but the action, `q` and
+/// `m` goes on with the transmission, the image is the chunks' and it is shown
+/// once, as the first chunk asked.
 #[test]
-fn a_command_that_names_its_action_ends_a_transmission_in_progress() {
+fn a_chunk_that_repeats_its_transmissions_action_goes_on_with_it() {
+    for action in ["T", "t"] {
+        let mut rig = Rig::new();
+        let pixels = rgba(4, 4, 9);
+        let text = base64(&pixels);
+        let pieces: Vec<&[u8]> = text.as_bytes().chunks(24).collect();
+        let mut wire_bytes = Vec::new();
+        for (at, piece) in pieces.iter().enumerate() {
+            let more = u8::from(at + 1 < pieces.len());
+            let control = if at == 0 {
+                format!("a={action},f=32,s=4,v=4,i=11,m={more}")
+            } else {
+                format!("a={action},q=2,m={more}")
+            };
+            wire_bytes.extend([ESC_G, control.as_bytes(), b";", piece, ST].concat());
+        }
+        let (motions, answers) = rig.run(&wire_bytes);
+        assert_eq!(rig.pixels(11), Some(pixels), "a={action}");
+        assert_eq!(
+            motions.len(),
+            1,
+            "a={action}: one record, at the last chunk"
+        );
+        assert!(answers.is_empty(), "a={action}: the last q= keeps it quiet");
+    }
+}
+
+#[test]
+fn a_command_of_its_own_ends_a_transmission_in_progress() {
     let mut rig = Rig::new();
     rig.run(&[ESC_G, b"a=t,f=32,s=1,v=1,i=1,m=1;AAAA", ST].concat());
     assert!(rig.commands.open());

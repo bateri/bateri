@@ -176,6 +176,12 @@ of every installed copy. A version without a section is not released.
 
 ### Fixed
 
+- **A large image `kitten icat` sends through ssh is shown.** kitty's own client writes an
+  image's action again on every piece it sends it in when the action is not the default one,
+  and bateri took the second piece for a command of its own and dropped the image: a picture
+  `kitten icat` showed through ssh, or with `--transfer-mode=stream`, never appeared once it
+  was too large to go in one piece. A piece that names nothing but the action, `q` and `m` now
+  goes on with the image it belongs to, as kitty takes it.
 - **The words of a native view fade with what they are in.** A row that goes out of a list (a
   folded group in dockerpen) or comes into it took its words only part of the way: they faded to
   the lowest contrast `[appearance] minimum_contrast` keeps and stayed there, then went at once,

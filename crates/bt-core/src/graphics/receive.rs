@@ -180,11 +180,11 @@ impl Receiver {
                 return;
             }
         };
-        if self.open.is_some() && !command.explicit_action {
+        if self.open.is_some() && command.is_chunk() {
             self.chunk(command, apc, now, env, remote, &mut out);
             return;
         }
-        // A command that names its action ends a transmission in progress.
+        // Any other command ends a transmission in progress.
         self.open = None;
         match command.action {
             Action::Delete => out(Outcome::Pending(Pending::Delete(command))),
