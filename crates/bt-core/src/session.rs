@@ -2743,7 +2743,11 @@ impl io::Read for TappedPty {
             // A command ended — the local one's `D` (an `ssh` is a local command
             // too) or our remote shell's: a program that had a view has none
             // now. The shell's log is unlocked: the guard above was a temporary.
-            if outcome.ended || outcome.remote_ended {
+            // Not a command of the past: the program in front now is the one the
+            // terminal shown again offers a restart, before its past is read, and a
+            // command that ended before it is no end of it — ending the conversation
+            // there forgot the token the program was handed, and its `open` was refused.
+            if (outcome.ended || outcome.remote_ended) && !past {
                 adapter.view_program_ended();
             }
             // The shell is back: no program's pointer stays over its prompt.
@@ -2924,7 +2928,9 @@ pub struct Stream {
 /// ([`AdapterInner::muted`]): the questions in them are not answered — the program was told
 /// long ago, or has stopped waiting —, a copy to the clipboard or a notification is not repeated, the
 /// view protocol's frames are not answered, and a command that started or ended then raises no
-/// edge for the tab to show. The bytes after are the program's now, in every way.
+/// edge for the tab to show and ends no program's view (the restart a program is offered before
+/// the past is read is for the program in front now). The bytes after are the program's now, in
+/// every way.
 ///
 /// The feeder (the owner of the stream's other end, which knows from the server how far the
 /// questions were answered) writes the position **before** the bytes it covers, and closes the
@@ -14379,6 +14385,53 @@ mod tests {
         wait_until("the live notification", Duration::from_secs(8), || {
             terminal.wake.state.lock().unwrap().notes == 1
         });
+    }
+
+    /// A terminal shown again offers its program a restart before the past is read, and that
+    /// past holds the end of a command run before the program (the one stopped with ⌃C before
+    /// it was started): the offer stands through the past and the program's `open` is taken.
+    #[test]
+    fn a_command_that_ended_in_the_past_does_not_end_the_program_offered_a_restart() {
+        use crate::pencere::State;
+        use crate::pencere::tests::{bundle_open, decoded, token_of};
+        use std::io::Write as _;
+        let past = Silence::new();
+        let mut options = test_options(sh("unused"), 40);
+        options.views = Some(ViewOptions::new("bateri-test", "0.0.0"));
+        let mut terminal = streamed_with(options, Some(Arc::clone(&past)));
+
+        terminal.session.restart_view();
+        assert_eq!(terminal.session.view_state(), Some(State::Offered));
+        let offered = decoded(&typed_into(&mut terminal.terminal, 200));
+        let [welcome] = offered.as_slice() else {
+            panic!("one welcome, got {offered:?}");
+        };
+        assert_eq!(welcome.kind, "welcome");
+
+        let before: &[u8] = b"\x1b]133;A\x07$ \x1b]133;B\x07\x1b]133;C\x07old_run\r\n\
+            \x1b]133;D;130\x07\x1b]133;A\x07$ \x1b]133;B\x07\x1b]133;C\x07";
+        past.extend(before.len() as u64);
+        past.close();
+        terminal.terminal.write_all(before).expect("written");
+        wait_text(&terminal.session, "old_run");
+        wait_until("the past read", Duration::from_secs(8), || {
+            !terminal.session.replaying()
+        });
+        assert_eq!(terminal.session.view_state(), Some(State::Offered));
+
+        terminal
+            .terminal
+            .write_all(&bundle_open(&token_of(welcome)))
+            .expect("written");
+        wait_until("the open taken", Duration::from_secs(8), || {
+            terminal.session.view_state() == Some(State::Opening)
+        });
+        let asked = decoded(&typed_into(&mut terminal.terminal, 20));
+        assert!(
+            asked.iter().any(|message| message.kind == "need"),
+            "{asked:?}"
+        );
+        terminal.session.shutdown();
     }
 
     #[test]
