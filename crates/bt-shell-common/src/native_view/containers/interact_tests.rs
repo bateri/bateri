@@ -435,7 +435,7 @@ fn a_right_click_chooses_the_row_and_opens_its_menu_whose_entries_act_on_the_lis
         .iter()
         .filter_map(|entry| match entry {
             MenuEntry::Item { title, .. } => Some(title.as_str()),
-            MenuEntry::Separator => None,
+            MenuEntry::Separator | MenuEntry::Paste { .. } => None,
         })
         .collect();
     assert_eq!(

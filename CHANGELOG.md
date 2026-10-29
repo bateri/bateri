@@ -27,6 +27,14 @@ of every installed copy. A version without a section is not released.
   what ⌥ types on your keyboard (`@`, `[`, `{`, `|`) is typed. Cut, Copy, Paste, Select All and
   Undo are the editor's while it has the keyboard; the caret blinks, and stops after a while as
   the terminal's does. VoiceOver reads the editor as a text area: its text and what is selected.
+- **An editor in a native view can open a menu on a right click.** The page decides what is in it;
+  the editor puts its caret where a text view does for such a click (a click outside the selection
+  moves the caret there, one inside it leaves the selection alone), and ⌃-click is a right click
+  too. The menu can hold a Paste line that bateri itself performs: picking it pastes what is on
+  your pasteboard into that editor as ⌘V does, and the page is only told that the line was picked,
+  never what was pasted. A page can still never read your pasteboard or have an editor paste:
+  text comes from it only on your key or your pick of that line, from the menu you were shown.
+  What a page has an editor copy or cut goes to your pasteboard.
 - **A native view can ask how your terminal draws its cursor.** A page of a program's view can
   read your cursor's shape, whether it blinks and how often, its rounding, its glow, how thick its bar and line are, what it is
   in a window that is not in front and how it moves, and the rounding of your selection, and

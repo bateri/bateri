@@ -45,7 +45,9 @@ mod page;
 #[cfg(test)]
 mod pane_tests;
 pub use look::{LookSlot, caret_width_pt, terminal_look};
-pub use page::{Opening, PageEditors, PageHandle, containers_demo, module_page, script_page};
+pub use page::{
+    MenuUp, Opening, PageEditors, PageHandle, ShownMenu, containers_demo, module_page, script_page,
+};
 pub use pencere_drive::{
     Drained, Field, Held, Host, Outline, Painted, Placement, Route, Scrolling, Tip, ZOOM_TEXT,
 };

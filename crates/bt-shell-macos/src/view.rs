@@ -58,8 +58,8 @@ use objc2_foundation::{
 };
 
 use bt_shell_common::native_view::{
-    Button as PageButton, Input, Menu as PageMenu, MenuEntry as PageMenuEntry, Phase,
-    Point as PagePoint,
+    Button as PageButton, Input, Menu as PageMenu, MenuEntry as PageMenuEntry, MenuUp, Phase,
+    Point as PagePoint, ShownMenu,
 };
 use objc2_app_kit::NSMenu;
 
@@ -646,6 +646,10 @@ pub(crate) struct ViewIvars {
     /// pointer left it (the kit's specification, Section 4): a drag that leaves the page and comes
     /// back, or ends outside it, is followed to its end.
     page_held: Cell<u8>,
+    /// The menu of the page that is open now ([`BateriView::show_page_menu`]), kept until the pop-up
+    /// returns: what is picked is read against it, and a menu another reply of the page asks for
+    /// while it is open is not shown (the main queue runs while a menu is tracked).
+    page_menu: MenuUp,
     /// The mouse's gesture ledger: the selection drag, the presses reported to
     /// the application and the motion report's notch - the rules and
     /// rationales are in [`Gesture`], a tested struct. `Cell` + `Copy`: every
@@ -2147,6 +2151,7 @@ impl BateriView {
             session: OnceCell::new(),
             page_over: Cell::new(false),
             page_held: Cell::new(0),
+            page_menu: MenuUp::default(),
             gesture: Cell::new(Gesture::default()),
             consumed: Cell::new(false),
             commanded: Cell::new(false),
@@ -3191,18 +3196,32 @@ impl BateriView {
 
     /// Pops up the menu a debug page asked for, where it said (the view's points). Items are
     /// enabled by hand: a targeted item would otherwise always be enabled. The pick comes back
-    /// as [`BateriView::page_menu_picked`] with the entry's index in the tag.
+    /// as [`BateriView::page_menu_picked`] with the entry's index in the tag, to be read against
+    /// the menu shown ([`BateriView::shown_page_menu`]). A menu is shown while none is: tracking
+    /// runs the main queue, so a reply of the page may ask for another while this one is open, and
+    /// the person picks from what they see.
     pub(crate) fn show_page_menu(&self, menu: &PageMenu) {
+        if !self.ivars().page_menu.raise(menu) {
+            return;
+        }
         let mtm = self.mtm();
         let shown = NSMenu::new(mtm);
         shown.setAutoenablesItems(false);
         for (index, entry) in menu.entries.iter().enumerate() {
             match entry {
                 PageMenuEntry::Separator => shown.addItem(&NSMenuItem::separatorItem(mtm)),
+                // A Paste is the host's own line: the kit's words, and the pasteboard is read only
+                // when it is picked ([`TerminalPane::page_menu_pick`]).
                 PageMenuEntry::Item {
                     title,
                     keys,
                     enabled,
+                }
+                | PageMenuEntry::Paste {
+                    title,
+                    keys,
+                    enabled,
+                    ..
                 } => {
                     // The keys that do the same on the page, shown at the end of the line in the
                     // menu's own glyphs. A pop-up menu matches key equivalents only while it is
@@ -3233,6 +3252,12 @@ impl BateriView {
         }
         let at = NSPoint::new(f64::from(menu.at.x), f64::from(menu.at.y));
         shown.popUpMenuPositioningItem_atLocation_inView(None, at, Some(self));
+        self.ivars().page_menu.lower();
+    }
+
+    /// The menu of the page that is open: what a pick is read against.
+    pub(crate) fn shown_page_menu(&self) -> Option<ShownMenu> {
+        self.ivars().page_menu.shown()
     }
 
     fn window_point_pointer(&self, in_window: NSPoint, outside: OutOfGrid) -> Option<Pointer> {

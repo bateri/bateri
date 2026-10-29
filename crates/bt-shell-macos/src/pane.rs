@@ -6273,8 +6273,14 @@ impl TerminalPane {
 
     /// The person picked entry `index` of the menu the page asked for.
     pub(crate) fn page_menu_pick(&self, index: usize) {
-        if let Some(handle) = self.page_handle() {
-            handle.page().pick(index);
+        // Read against the menu that was shown, not the last the page asked for; the pasteboard
+        // is read only for a Paste of that menu, which the person picked.
+        if let Some(handle) = self.page_handle()
+            && let Some(shown) = self.view().shown_page_menu()
+        {
+            handle.pick(&shown, index, &mut || {
+                clipboard::read(&NSPasteboard::generalPasteboard())
+            });
             self.drain_page();
         }
     }
@@ -7910,6 +7916,62 @@ mod tests {
         assert!(body("    fn command_started(&self) {").contains("self.remember_soon()"));
         assert!(body("    fn remote_command_edge(&self) {").contains("self.remember_soon()"));
         assert!(body("    fn remember_soon(&self) {").contains("pane.remember_commands()"));
+    }
+
+    /// The pasteboard reaches an editor of a page only on the person's key or the person's pick of a
+    /// menu line the host performs itself, and a pick is read against the menu that was shown, not
+    /// the last the page asked for: the pane picks through `PageHandle::pick` with the shown menu
+    /// and the general pasteboard, the view keeps the menu from the pop-up to the pick and shows
+    /// no second one while it is up, and nothing else of the pane's reads the pasteboard for an
+    /// editor. A source scan: the menu is AppKit's.
+    #[test]
+    fn a_pick_pastes_only_from_the_menu_that_was_shown_and_nothing_else_reads_the_pasteboard_for_an_editor()
+     {
+        let pane = include_str!("pane.rs");
+        let pane = &pane[..pane.find("#[cfg(test)]").expect("the tests follow")];
+        let pick = pane
+            .find("    pub(crate) fn page_menu_pick(")
+            .expect("the pick");
+        let pick = &pane[pick..];
+        let pick = &pick[..pick.find("\n    }\n").expect("its end")];
+        assert!(pick.contains("self.view().shown_page_menu()"), "{pick}");
+        assert!(pick.contains("handle.pick(&shown, index"), "{pick}");
+        assert!(
+            pick.contains("clipboard::read(&NSPasteboard::generalPasteboard())"),
+            "{pick}"
+        );
+        assert!(
+            !pane.contains(".page().pick("),
+            "a pick not read against the shown menu"
+        );
+        // The reads of the general pasteboard in this file: a key's paste in an editor, the pick
+        // above, and the terminal's own (Edit ▸ Paste); a page's reply is none of them.
+        let host = &pane[pane
+            .find("impl PageDriveHost for PageHost")
+            .expect("the host")..];
+        assert!(
+            !host.contains("clipboard::read"),
+            "the page's host reads no pasteboard"
+        );
+        assert!(
+            !host.contains("fn paste"),
+            "the page's host reads no pasteboard"
+        );
+        let view = include_str!("view.rs");
+        let show = &view[view.find("pub(crate) fn show_page_menu(").expect("show")..];
+        let show = &show[..show.find("\n    }\n").expect("its end")];
+        let raised = show.find("page_menu.raise(menu)").expect(show);
+        let popped = show.find("popUpMenuPositioningItem").expect(show);
+        let lowered = show.find("page_menu.lower()").expect(show);
+        assert!(raised < popped && popped < lowered, "{show}");
+        // What `copy` and a cut put on the pasteboard goes through the host's one `copy`, in a
+        // frame (`Held::Copy`) and between frames (`Drained::copied`) alike.
+        let copy = &host[host.find("fn copy(&mut self").expect("copy")..];
+        let copy = &copy[..copy.find("\n    }\n").expect("its end")];
+        assert!(
+            copy.contains("clipboard::copy(&NSPasteboard::generalPasteboard(), Some(text))"),
+            "{copy}"
+        );
     }
 
     /// The add-ons that work on a server are offered in a pane that shows a terminal a server

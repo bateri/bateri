@@ -42,11 +42,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use bt_core::Flow;
 use bt_gpu::{Renderer, UiContext, UiList, UiPage};
-use pencere_drive::{FrameAt, Outline, Page, Painted, Placement, Route, Setup};
+use pencere_drive::{FrameAt, Host, Outline, Page, Painted, Placement, Route, Setup};
 use pencere_sandbox::{Assets, ModuleLimits, Program, Script};
 use pencere_view::{
-    Drawing as Drawn, Font, Id, Input, Key, Measure, Metrics, Mods, Phase, Point, Rect,
-    TerminalLook, WallTime,
+    Drawing as Drawn, Font, Id, Input, Key, Measure, Menu, MenuEntry, Metrics, Mods, Phase, Point,
+    Rect, TerminalLook, WallTime,
 };
 
 use super::containers::Demo;
@@ -437,6 +437,29 @@ impl PageHandle {
         self.page().set_active(active);
     }
 
+    /// The person picked entry `index` of `shown`, the menu the pane popped up. A line the host
+    /// performs itself (`MenuEntry::Paste`) reads the pasteboard through `pasteboard` only if
+    /// **that menu's** entry at `index` is a Paste that was on, and only into the editor it was
+    /// shown for, which must still have the keyboard: the drive keeps the entries of the last menu
+    /// a reply asked for, which is not the one on the screen when a reply with another menu came
+    /// while this one was up, and a pick of a line that is no Paste would otherwise paste with the
+    /// other menu's. The pasteboard is never read for any other pick.
+    pub fn pick(
+        &self,
+        shown: &ShownMenu,
+        index: usize,
+        pasteboard: &mut dyn FnMut() -> Option<String>,
+    ) {
+        let editor = shown
+            .paste_at(index)
+            .filter(|editor| self.editors().focused() == Some(*editor));
+        let mut host = PasteboardOf {
+            allowed: editor.is_some(),
+            read: pasteboard,
+        };
+        self.page().pick(index, &mut host);
+    }
+
     /// The page is told `held` if that is not what it last heard.
     fn catch_up(&self, held: Mods) {
         if self.told.replace(held) != held {
@@ -491,6 +514,90 @@ impl PageHandle {
         PageEditors {
             page: Rc::clone(&self.page),
         }
+    }
+}
+
+/// A menu as the pane popped it up: which of its lines are a Paste the host performs, and for
+/// which editor. The pane keeps it from the pop-up to the pick, so that a pick is read against the
+/// menu the person saw ([`PageHandle::pick`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ShownMenu {
+    pastes: Vec<Option<Id>>,
+}
+
+impl ShownMenu {
+    /// The menu as it is shown: a Paste that is on is the one kind of line that asks the pasteboard.
+    pub fn of(menu: &Menu) -> Self {
+        let pastes = menu
+            .entries
+            .iter()
+            .map(|entry| match entry {
+                MenuEntry::Paste {
+                    editor,
+                    enabled: true,
+                    ..
+                } => Some(*editor),
+                MenuEntry::Item { .. } | MenuEntry::Separator | MenuEntry::Paste { .. } => None,
+            })
+            .collect();
+        Self { pastes }
+    }
+
+    /// Whether the line at `index` is a Paste that is on.
+    #[cfg(test)]
+    pub(super) fn pastes_at(&self, index: usize) -> bool {
+        self.paste_at(index).is_some()
+    }
+
+    /// The editor the line at `index` pastes into, if it is a Paste that is on.
+    fn paste_at(&self, index: usize) -> Option<Id> {
+        self.pastes.get(index).copied().flatten()
+    }
+}
+
+/// The menu the pane has up, kept from the pop-up to the pick (a pop-up menu holds the pane, but what
+/// the main queue runs while it is tracked, the page's replies among it, goes on). Only one is
+/// tracked at a time: a menu another reply asks for while this one is open is not shown, so that
+/// what the person picks from is what they were shown. The menu stays known after the pop-up
+/// returns until the next is raised, so that a pick is read against it whether the system sends the
+/// line's action before the pop-up returns or after.
+#[derive(Debug, Default)]
+pub struct MenuUp {
+    tracking: Cell<bool>,
+    shown: RefCell<Option<ShownMenu>>,
+}
+
+impl MenuUp {
+    /// `menu` is about to be popped up: `false` where another is open (and `menu` is not to be shown).
+    pub fn raise(&self, menu: &Menu) -> bool {
+        if self.tracking.replace(true) {
+            return false;
+        }
+        *self.shown.borrow_mut() = Some(ShownMenu::of(menu));
+        true
+    }
+
+    /// The menu the person is picking from, or picked from last.
+    pub fn shown(&self) -> Option<ShownMenu> {
+        self.shown.borrow().clone()
+    }
+
+    /// The pop-up returned, picked from or not: the next menu may be shown.
+    pub fn lower(&self) {
+        self.tracking.set(false);
+    }
+}
+
+/// The host of a pick: it has the pasteboard for the one line that is a Paste, and none for any
+/// other (the drive asks the host for nothing else in a pick).
+struct PasteboardOf<'a> {
+    allowed: bool,
+    read: &'a mut dyn FnMut() -> Option<String>,
+}
+
+impl Host for PasteboardOf<'_> {
+    fn paste(&mut self) -> Option<String> {
+        if self.allowed { (self.read)() } else { None }
     }
 }
 
@@ -671,6 +778,8 @@ pub(super) mod tests {
         /// The modifiers the system holds, as the pane reads them from the keyboard when it tells
         /// the page what the person does with the pointer.
         held: Mods,
+        /// What the system's pasteboard holds.
+        board: Rc<RefCell<Option<String>>>,
     }
 
     impl PaneRig {
@@ -714,6 +823,7 @@ pub(super) mod tests {
                 list: DrawList::default(),
                 log,
                 held: Mods::default(),
+                board: Rc::new(RefCell::new(None)),
             }
         }
 
@@ -832,8 +942,33 @@ pub(super) mod tests {
             self.handle.page().focus(field);
         }
 
+        /// The person picks entry `index` of the menu the pane showed (`Written::menu` kept it):
+        /// the pane's pick, with the pasteboard it has.
         pub(in crate::native_view) fn pick(&mut self, index: usize) {
-            self.handle.page().pick(index);
+            let shown = self.log.borrow().up.shown().expect("a menu is up");
+            let board = self.board.clone();
+            let log = Rc::clone(&self.log);
+            self.handle.pick(&shown, index, &mut || {
+                log.borrow_mut().say("pasteboard read");
+                board.borrow().clone()
+            });
+            // The pop-up returns after its action.
+            self.log.borrow().up.lower();
+        }
+
+        /// Whether a menu is up.
+        pub(in crate::native_view) fn log_menu(&self) -> Option<ShownMenu> {
+            self.log.borrow().up.shown()
+        }
+
+        /// The person closes the menu without picking.
+        pub(in crate::native_view) fn dismiss(&mut self) {
+            self.log.borrow().up.lower();
+        }
+
+        /// What the system's pasteboard holds.
+        pub(in crate::native_view) fn set_pasteboard(&mut self, text: &str) {
+            *self.board.borrow_mut() = Some(text.to_owned());
         }
 
         pub(in crate::native_view) fn command(&mut self, id: Id) {

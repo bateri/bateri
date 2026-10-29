@@ -15,24 +15,29 @@
 use std::fmt::Debug;
 
 use super::{
-    Accessible, Bars, Button, Command, Cursor, Fill, Id, Input, Key, Keyboard, Menu, Mods, Phase,
-    Point, Scrolling,
+    Accessible, Bars, Button, Command, Cursor, Fill, Id, Input, Key, Keyboard, Menu, MenuEntry,
+    Mods, Phase, Point, Scrolling,
 };
 
 pub(super) use super::page::tests::PaneRig;
+use super::page::{MenuUp, ShownMenu};
 
 /// What the pane did and what the page heard, a line each, in order.
 #[derive(Default)]
-pub(super) struct Transcript(Vec<String>);
+pub(super) struct Transcript {
+    lines: Vec<String>,
+    /// The menu the pane has up.
+    pub(super) up: MenuUp,
+}
 
 impl Transcript {
     pub(super) fn say(&mut self, line: impl Into<String>) {
-        self.0.push(line.into());
+        self.lines.push(line.into());
     }
 
     /// Takes the lines written so far.
     pub(super) fn take(&mut self) -> Vec<String> {
-        std::mem::take(&mut self.0)
+        std::mem::take(&mut self.lines)
     }
 
     // What the pane does with what a page said, in the pane's order: what the page said to its
@@ -72,7 +77,11 @@ impl Transcript {
         self.say(format!("link {url}"));
     }
     pub(super) fn menu(&mut self, menu: &Menu) {
-        self.say(format!("menu {menu:?}"));
+        if self.up.raise(menu) {
+            self.say(format!("menu {menu:?}"));
+        } else {
+            self.say("menu not shown: one is up");
+        }
     }
     pub(super) fn diagnostic(&mut self, words: &str) {
         self.say(format!("diagnostic {words}"));
@@ -958,4 +967,310 @@ fn the_pointers_rest_on_a_word_is_a_time_the_seen_pane_wakes_the_page_at() {
     rig.input(Input::Leave);
     frame(&mut rig, 1.5);
     assert_eq!(rig.said(), "hover:dwell hover:leave");
+}
+
+/// A page whose editor opens a menu of the page's on a right press (`gestures`): Cut and Copy are its
+/// asks, Paste a line the host performs. Two keys, pressed while no editor has the keyboard, set what
+/// the page does when it is woken half a second after the menu opened, which is another reply while
+/// the menu is up:
+/// `w` asks for another menu whose every line is a Paste, `k` has the keyboard go to the page. What
+/// the page heard is the line of `said: `.
+const MENU: &str = r#"local told = {}
+local mode = ""
+return {
+    render = function()
+        return pencere.div():size_full()
+            :child(pencere.editor("e", { gutter = false, gestures = { ["right+press"] = "context" } }):h(100):w(400))
+            :child(pencere.text("said: " .. table.concat(told, " ")))
+    end,
+    handle = function(event)
+        local t = event.type
+        if t == "editor_ready" then
+            return { editor = { e = { { load = "alpha beta\ngamma delta" } } } }
+        elseif t == "key" then
+            if event.key == "w" then mode = "menu" elseif event.key == "k" then mode = "keyboard" end
+            return true
+        elseif t == "press" and event.place then
+            told[#told + 1] = "press:" .. event.button .. ":ctrl=" .. tostring(event.mods.control)
+                .. ":inside=" .. tostring(event.place.inside) .. ":v" .. tostring(event.place.version)
+            if event.button == "right" then
+                return { redraw = true, wake = mode ~= "" and 0.5 or nil, menu = { at = { x = event.x, y = event.y }, entries = {
+                    { title = "Cut" }, { title = "Copy" }, "-", { title = "Whatever", paste = "e" } } } }
+            end
+        elseif t == "wake" then
+            told[#told + 1] = "wake:" .. mode
+            if mode == "menu" then
+                return { redraw = true, menu = { at = { x = 5, y = 5 }, entries = {
+                    { paste = "e" }, { paste = "e" }, { paste = "e" }, { paste = "e" } } } }
+            elseif mode == "keyboard" then
+                return { redraw = true, keyboard = "page" }
+            end
+        elseif t == "menu" then
+            told[#told + 1] = "pick:" .. event.index
+            if event.index == 2 then
+                return { redraw = true, editor = { e = { { command = "copy" } } } }
+            end
+        elseif t == "text" then
+            told[#told + 1] = "text:" .. event.text
+        elseif t == "edit" then
+            if event.origin ~= "load" then told[#told + 1] = "edit:" .. event.origin end
+        end
+        return true
+    end,
+}"#;
+
+fn menu_page() -> PaneRig {
+    let mut rig = PaneRig::open(MENU);
+    rig.frame(0.0);
+    rig.settle(0.0);
+    rig.lines();
+    rig
+}
+
+/// The text of the editor with the keyboard.
+fn typed(rig: &PaneRig) -> String {
+    let editors = rig.editors().expect("editors");
+    let length = editors.length().expect("an editor has the keyboard");
+    editors.text(0, length).expect("its text")
+}
+
+/// A press of `button` at `at` in the editor of [`MENU`], below the strip.
+fn press_in_editor(rig: &mut PaneRig, button: Button, mods: Mods) {
+    rig.input(Input::Press {
+        at: Point::new(12.0, 32.0 + 12.0),
+        button,
+        mods,
+        count: 1,
+    });
+    rig.input(Input::Release {
+        at: Point::new(12.0, 32.0 + 12.0),
+        button,
+    });
+    rig.settle(0.0);
+}
+
+const WAKE_AT: f64 = 1.0;
+
+/// The pasteboard is read for the pick of a Paste line of the menu that is up, with the keyboard in
+/// the editor the line was shown for, and for no other: the page hears the pick, never the text.
+#[test]
+fn a_paste_line_reads_the_pasteboard_when_it_is_picked_and_the_page_hears_the_pick_not_the_text() {
+    let mut rig = menu_page();
+    rig.set_pasteboard("SECRET");
+    press_in_editor(&mut rig, Button::Right, Mods::default());
+    // The menu is up and nothing has read the pasteboard.
+    let lines = rig.lines();
+    assert!(lines.iter().any(|line| line.starts_with("menu Menu")));
+    assert!(
+        lines.iter().all(|line| line != "pasteboard read"),
+        "{lines:#?}"
+    );
+    rig.pick(3);
+    rig.settle(0.0);
+    let lines = rig.lines();
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|line| *line == "pasteboard read")
+            .count(),
+        1
+    );
+    assert!(typed(&rig).contains("SECRET"), "{}", typed(&rig));
+    // The menu is the kit's words, whatever the page wrote; the page is told the pick and an edit,
+    // and never the text.
+    let said = rig.said();
+    assert!(said.contains("pick:4") && said.contains("edit:"), "{said}");
+    assert!(
+        !said.contains("SECRET") && !said.contains("text:"),
+        "{said}"
+    );
+}
+
+/// The other lines of a menu never read the pasteboard: Copy is the page's ask, which the pane
+/// answers by writing the pasteboard (what the page has an editor copy, `Drained::copied`).
+#[test]
+fn a_line_that_is_not_a_paste_never_reads_the_pasteboard_and_a_copy_is_written_to_it() {
+    let mut rig = menu_page();
+    rig.set_pasteboard("SECRET");
+    press_in_editor(&mut rig, Button::Right, Mods::default());
+    rig.lines();
+    rig.pick(1);
+    rig.settle(0.0);
+    let lines = rig.lines();
+    assert!(
+        lines.iter().all(|line| line != "pasteboard read"),
+        "{lines:#?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.starts_with("copy \"") && line.contains("alpha beta")),
+        "{lines:#?}"
+    );
+    assert!(!typed(&rig).contains("SECRET"));
+}
+
+/// While a menu is up the page may reply with another (the main queue runs while a pop-up menu is
+/// tracked): the drive keeps the entries of the last menu the page asked for, so a pick of a line
+/// of the one on the screen that is no Paste would paste with the new menu's. That menu is not
+/// shown, and the pick is read against the one the person saw.
+#[test]
+fn a_menu_the_page_asks_for_while_another_is_up_is_not_shown_and_a_pick_is_read_against_the_shown()
+{
+    let mut rig = menu_page();
+    rig.set_pasteboard("SECRET");
+    let (key, mods) = plain('w');
+    rig.key(key, mods);
+    press_in_editor(&mut rig, Button::Right, Mods::default());
+    // The first frame after it places the wake the menu's reply asked for, and the next wakes the page.
+    rig.frame(0.1);
+    rig.settle(0.1);
+    rig.lines();
+    // The page is woken while its menu is up and asks for another, whose every line is a Paste.
+    rig.frame(WAKE_AT);
+    rig.settle(WAKE_AT);
+    let lines = rig.lines();
+    assert!(
+        lines.iter().any(|line| line == "menu not shown: one is up"),
+        "{lines:#?}"
+    );
+    assert!(rig.said().contains("wake:menu"), "{}", rig.said());
+    let before = typed(&rig);
+    // The person picks Copy, a line of the menu they were shown: nothing is pasted.
+    rig.pick(1);
+    rig.settle(WAKE_AT);
+    let lines = rig.lines();
+    assert!(
+        lines.iter().all(|line| line != "pasteboard read"),
+        "{lines:#?}"
+    );
+    assert_eq!(typed(&rig), before);
+    assert!(!rig.said().contains("edit:"), "{}", rig.said());
+    // And a Paste of the menu that was shown still pastes (a fresh menu: the last was picked from).
+    press_in_editor(&mut rig, Button::Right, Mods::default());
+    rig.pick(3);
+    rig.settle(WAKE_AT);
+    assert!(typed(&rig).contains("SECRET"));
+}
+
+/// A Paste pastes into the editor it was shown for, and only while it has the keyboard: a reply that
+/// takes the keyboard from it while the menu is up leaves the pick with nothing to paste into.
+#[test]
+fn a_paste_line_does_not_read_the_pasteboard_once_its_editor_has_lost_the_keyboard() {
+    let mut rig = menu_page();
+    rig.set_pasteboard("SECRET");
+    let (key, mods) = plain('k');
+    rig.key(key, mods);
+    press_in_editor(&mut rig, Button::Right, Mods::default());
+    rig.frame(0.1);
+    rig.settle(0.1);
+    rig.frame(WAKE_AT);
+    rig.settle(WAKE_AT);
+    assert!(rig.said().contains("wake:keyboard"), "{}", rig.said());
+    rig.lines();
+    let shown = rig.log_menu();
+    assert!(shown.is_some());
+    rig.pick(3);
+    rig.settle(WAKE_AT);
+    let lines = rig.lines();
+    assert!(
+        lines.iter().all(|line| line != "pasteboard read"),
+        "{lines:#?}"
+    );
+    assert!(rig.said().contains("pick:4"), "{}", rig.said());
+}
+
+/// A menu dismissed lets the next the page asks for be shown (`MenuUp`).
+#[test]
+fn a_menu_that_was_dismissed_lets_the_next_one_be_shown() {
+    let up = MenuUp::default();
+    let menu = Menu {
+        at: Point::new(0.0, 0.0),
+        entries: vec![MenuEntry::Paste {
+            title: "Paste".to_owned(),
+            keys: None,
+            enabled: true,
+            editor: Id::named("e"),
+        }],
+    };
+    assert!(up.shown().is_none());
+    assert!(up.raise(&menu));
+    assert!(!up.raise(&menu), "one at a time");
+    assert!(up.shown().is_some());
+    up.lower();
+    // Known until the next is shown, for an action the system sends after the pop-up returned.
+    assert!(up.shown().is_some());
+    assert!(up.raise(&menu));
+}
+
+/// A line is a Paste for the pick only where the menu shown says so: a Paste that is off, a rule and
+/// an ordinary line are not.
+#[test]
+fn only_a_paste_that_is_on_is_a_paste_in_the_menu_that_was_shown() {
+    let paste = |enabled| MenuEntry::Paste {
+        title: "Paste".to_owned(),
+        keys: None,
+        enabled,
+        editor: Id::named("e"),
+    };
+    let menu = Menu {
+        at: Point::new(0.0, 0.0),
+        entries: vec![
+            MenuEntry::Item {
+                title: "Copy".to_owned(),
+                keys: None,
+                enabled: true,
+            },
+            MenuEntry::Separator,
+            paste(false),
+            paste(true),
+        ],
+    };
+    let shown = ShownMenu::of(&menu);
+    let pastes: Vec<bool> = (0..5).map(|index| shown.pastes_at(index)).collect();
+    assert_eq!(pastes, [false, false, false, true, false]);
+}
+
+/// A Mac's ⌃ with the main button reaches the page as it is sent (the left button and ⌃), and the
+/// drive turns it into the right press of an editor whose `gestures` say a right press opens a menu:
+/// the page is told the right button's press, without the ⌃, and the menu opens.
+#[test]
+fn a_control_click_is_sent_as_the_left_button_and_is_a_right_press_to_the_page() {
+    let control = Mods {
+        control: true,
+        ..Mods::default()
+    };
+    let mut rig = menu_page();
+    press_in_editor(&mut rig, Button::Left, control);
+    assert!(
+        rig.said().contains("press:right:ctrl=false"),
+        "{}",
+        rig.said()
+    );
+    assert!(rig.lines().iter().any(|line| line.starts_with("menu Menu")));
+    // Without the ⌃ it is the editor's own press: the page is told a left press, and no menu.
+    let mut rig = menu_page();
+    press_in_editor(&mut rig, Button::Left, Mods::default());
+    assert!(rig.said().contains("press:left"), "{}", rig.said());
+    assert!(
+        rig.lines()
+            .iter()
+            .all(|line| !line.starts_with("menu Menu"))
+    );
+}
+
+/// The press that opens a menu tells the page where it was (`place`): `inside` says it was in a
+/// selection or at a caret before the press moved the caret, and `version` is the editor's.
+#[test]
+fn the_press_that_opens_a_menu_says_whether_it_was_inside_a_selection_or_at_a_caret() {
+    let mut rig = menu_page();
+    press_in_editor(&mut rig, Button::Right, Mods::default());
+    assert_eq!(rig.said(), "press:right:ctrl=false:inside=false:v1");
+    rig.dismiss();
+    // The caret the first press put is where the second is.
+    press_in_editor(&mut rig, Button::Right, Mods::default());
+    assert_eq!(
+        rig.said(),
+        "press:right:ctrl=false:inside=false:v1 press:right:ctrl=false:inside=true:v1"
+    );
 }
