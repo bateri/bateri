@@ -5070,6 +5070,8 @@ impl AppDelegate {
                 self.new_tab_started(window.id(), Seat::Beside, Some(&start));
             }
             Go::OpenAllBackground(host) => self.open_all_background(&window, &host),
+            // The big view over the window, with the server selected in its list of machines.
+            Go::SeeAll(host) => window.overview_on(&host),
             // A pane of the server's page: its tab comes forward and the pane has the keyboard;
             // nothing moves.
             Go::FocusPane { tab, pane } => {

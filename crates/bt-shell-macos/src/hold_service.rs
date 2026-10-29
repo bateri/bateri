@@ -275,10 +275,6 @@ pub(crate) fn survey(account: &str, done: impl FnOnce(Survey) + Send + 'static) 
 /// The screen of a terminal of `account` that no pane shows, as the server builds it
 /// ([`Service::picture`]): `done` runs on the service's thread and must only hand the answer on.
 /// No service, no answer: it runs at once with nothing.
-#[expect(
-    dead_code,
-    reason = "the big view's background sections ask for it, a phase later"
-)]
 pub(crate) fn picture(
     account: &str,
     terminal: &SessionId,

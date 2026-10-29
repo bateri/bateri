@@ -18,7 +18,6 @@ use std::collections::HashMap;
 use bt_core::{Session, SessionOptions, Settings, Theme};
 use bt_gpu::Stage;
 use bt_shell_common::grid::size_of_grid;
-use bt_shell_common::kablo::SessionId;
 use bt_shell_common::kablo::service::Screen;
 use objc2_core_foundation::CFRetained;
 use objc2_core_graphics::CGImage;
@@ -27,7 +26,7 @@ use crate::snapshot;
 
 /// A terminal on a server: its account ([`bt_shell_common::ssh_wrap::host_key`]) and its name
 /// there.
-pub(crate) type Key = (String, SessionId);
+pub(crate) type Key = bt_shell_common::overview::Key;
 
 /// What is kept of one terminal.
 struct Kept {
@@ -164,10 +163,7 @@ mod tests {
     use super::*;
 
     fn key() -> Key {
-        (
-            "u@rasp:22".to_owned(),
-            SessionId::new("claude").expect("an id"),
-        )
+        ("u@rasp:22".to_owned(), "claude".to_owned())
     }
 
     fn screen(offset: u64, bytes: &[u8]) -> Screen {

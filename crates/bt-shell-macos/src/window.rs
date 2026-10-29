@@ -2840,14 +2840,80 @@ impl TerminalWindow {
     /// ↵ in the big view: it comes down, the tab is shown with the pane the pointer was over
     /// focused (a question of the window's own refuses it, with a beep) and the keyboard is the
     /// tab's.
+    ///
+    /// A terminal a server keeps comes the way ⌘P opens it (`Go::OpenBackground`,
+    /// `Go::SplitBackground`): in a tab of its own, or beside the pane the window shows.
     pub(crate) fn overview_go(&self, act: bt_shell_common::overview::Act) {
-        let bt_shell_common::overview::Act::GoToTab { tab, pane } = act;
-        overview::close(&self.ivars().root);
-        match pane {
-            Some(pane) => self.show_pane(tab, pane),
-            None => self.select_tab(tab),
+        use bt_shell_common::overview::Act;
+        use bt_shell_common::palette::Go;
+        let (account, terminal, beside) = match act {
+            Act::GoToTab { tab, pane } => {
+                overview::close(&self.ivars().root);
+                match pane {
+                    Some(pane) => self.show_pane(tab, pane),
+                    None => self.select_tab(tab),
+                };
+                self.focus_selected_tab();
+                return;
+            }
+            Act::OpenBackground { account, terminal } => (account, terminal, false),
+            Act::OpenBeside { account, terminal } => (account, terminal, true),
         };
+        overview::close(&self.ivars().root);
         self.focus_selected_tab();
+        let go = if beside {
+            Go::SplitBackground { account, terminal }
+        } else {
+            Go::OpenBackground { account, terminal }
+        };
+        if let Some(app) = app::delegate(self.mtm()) {
+            app.palette_go(self.id(), go);
+        }
+    }
+
+    /// *See All on rasp* (the server's card, the last row of its page in ⌘P): the big view over
+    /// the window with the server selected in its list of machines.
+    pub(crate) fn overview_on(&self, host: &str) {
+        overview::show_on(self, host);
+    }
+
+    /// ⌘↵ in the big view: every terminal the server `host` keeps, together in a new tab
+    /// (`Go::OpenAllBackground`, the card's *Open All in New Tab*).
+    pub(crate) fn overview_open_all(&self, host: &str) {
+        overview::close(&self.ivars().root);
+        self.focus_selected_tab();
+        if let Some(app) = app::delegate(self.mtm()) {
+            app.palette_go(
+                self.id(),
+                bt_shell_common::palette::Go::OpenAllBackground(host.to_owned()),
+            );
+        }
+    }
+
+    /// A drag of a terminal a server keeps ended on pane `pane` of tab `tab`: the tab is shown
+    /// with the pane focused and the terminal opens beside it (`Go::SplitBackground`'s way,
+    /// which keeps the rule of room: a pane with none for it gets a tab of its own).
+    pub(crate) fn overview_drop(&self, account: String, terminal: String, tab: u64, pane: u64) {
+        overview::close(&self.ivars().root);
+        self.show_pane(tab, pane);
+        self.focus_selected_tab();
+        if let Some(app) = app::delegate(self.mtm()) {
+            app.palette_go(
+                self.id(),
+                bt_shell_common::palette::Go::SplitBackground { account, terminal },
+            );
+        }
+    }
+
+    /// The server's screen came for the big view's terminal `key` ([`hold_service::picture`]).
+    pub(crate) fn overview_screen(
+        &self,
+        key: crate::screens::Key,
+        screen: Option<bt_shell_common::kablo::service::Screen>,
+    ) {
+        if let Some(view) = self.ivars().root.overview() {
+            view.screen_arrived(&key, screen);
+        }
     }
 
     /// ⌘`tag` in the big view: the tab the strip's digit reaches, as ↵ on it.

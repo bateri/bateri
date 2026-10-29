@@ -22,24 +22,32 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 
+use block2::RcBlock;
 use bt_core::Theme;
-use bt_shell_common::overview::{self as rules, Direction, Layout, Machine, Overview, Row};
+use bt_shell_common::kablo::SessionId;
+use bt_shell_common::overview::{
+    self as rules, Cell as Tile, Direction, Layout, Machine, Overview, Row,
+};
+use bt_shell_common::server_card;
 use bt_shell_common::split::Rect;
 use bt_shell_common::tabs;
+use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject, Sel};
 use objc2::{
     AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel,
 };
 use objc2_app_kit::{
-    NSAttributedStringNSStringDrawing, NSAutoresizingMaskOptions, NSBezierPath,
-    NSCompositingOperation, NSControlTextEditingDelegate, NSEvent, NSEventModifierFlags,
-    NSFocusRingType, NSFont, NSFontWeightMedium, NSFontWeightSemibold, NSGraphicsContext, NSImage,
+    NSAlert, NSAlertFirstButtonReturn, NSApplication, NSAttributedStringNSStringDrawing,
+    NSAutoresizingMaskOptions, NSBezierPath, NSCompositingOperation, NSControlTextEditingDelegate,
+    NSEvent, NSEventModifierFlags, NSFocusRingType, NSFont, NSFontWeightMedium,
+    NSFontWeightSemibold, NSGraphicsContext, NSImage, NSMenu, NSMenuItem, NSModalResponse,
     NSTextField, NSTextFieldDelegate, NSTrackingArea, NSTrackingAreaOptions, NSView,
     NSWindowOrderingMode,
 };
 use objc2_foundation::{
     NSAttributedString, NSNotification, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
+    ns_string,
 };
 use objc2_quartz_core::CALayer;
 
@@ -48,7 +56,9 @@ use crate::arrange;
 use crate::palette::{
     Attributes, Look, attributes, draw_text, draw_text_right, styled, text_width,
 };
+use crate::screens::Screens;
 use crate::server_stats;
+use crate::sheets::{self, Asker};
 use crate::tab_bar::{Ease, PALETTE_ICON_SIDE, Tint, palette_icon, play, rounded, selected_row};
 use crate::window::{RootView, TerminalWindow};
 
@@ -101,6 +111,8 @@ const SPARK_HEIGHT: f64 = 22.0;
 const SPARK_BAR: f64 = 4.0;
 const SPARK_GAP: f64 = 2.0;
 /// The key hint under the column.
+/// The air each side of a section heading's *Open All in New Tab*.
+const BUTTON_PAD: f64 = 8.0;
 const HINT: &str = "⇥ next machine   ⇧⇥ previous";
 
 pub(crate) struct OverviewIvars {
@@ -132,7 +144,30 @@ pub(crate) struct OverviewIvars {
     generation: Cell<u64>,
     /// The wake lapsed because the window was not seen; it is set again when it is.
     parked: Cell<bool>,
+    /// The sessions the servers' screens built and the stage that draws them.
+    screens: RefCell<Screens>,
+    /// The last picture of each terminal in the background, at the tile's size.
+    away_shots: RefCell<HashMap<rules::Key, Retained<NSImage>>>,
+    /// The terminals whose screen was asked for and has not come.
+    asked: RefCell<HashSet<rules::Key>>,
+    /// A press on a terminal's tile, until the button is up.
+    press: RefCell<Option<Press>>,
+    /// Where a drag of a terminal would drop: the tab and its pane under the pointer.
+    drop: Cell<Option<(u64, u64)>>,
+    /// The terminal the context menu is for.
+    menu_for: RefCell<Option<rules::Key>>,
 }
+
+/// A press on a terminal's tile: a release without a drag opens the terminal, a drag carries it
+/// to a pane of a tab.
+struct Press {
+    key: rules::Key,
+    at: NSPoint,
+    dragging: bool,
+}
+
+/// How far a press moves before it is a drag.
+const DRAG_START: f64 = 6.0;
 
 define_class!(
     // SAFETY: NSView is designed for subclassing; the view implements no `Drop` and is born with
@@ -211,19 +246,81 @@ define_class!(
             self.setNeedsDisplay(true);
         }
 
-        /// A press on a cell is ↵ on it; a press anywhere else is nothing.
+        /// A press on a tab is ↵ on it; on a terminal in the background it is ↵ once the button
+        /// is up, unless it was dragged; on a section's *Open All in New Tab*, that.
         #[unsafe(method(mouseDown:))]
         fn mouse_down(&self, event: &NSEvent) {
             let at = self.convertPoint_fromView(event.locationInWindow(), None);
             if at.x < SIDE {
                 self.press_column(at.y);
+            } else if let Some(host) = self.section_button_at(event) {
+                if let Some(window) = self.terminal_window() {
+                    window.overview_open_all(&host);
+                }
             } else if self.point_at(event) {
-                self.activate();
+                let key = self.ivars().state.borrow().selected_away().cloned();
+                match key {
+                    Some(key) => {
+                        self.ivars().press.replace(Some(Press {
+                            key,
+                            at,
+                            dragging: false,
+                        }));
+                    }
+                    None => self.activate(),
+                }
             }
         }
 
+        /// A terminal's tile carried over a tab: the pane it would open beside is ringed.
+        #[unsafe(method(mouseDragged:))]
+        fn mouse_dragged(&self, event: &NSEvent) {
+            self.dragged(event);
+        }
+
+        #[unsafe(method(mouseUp:))]
+        fn mouse_up(&self, event: &NSEvent) {
+            self.released(event);
+        }
+
+        /// A terminal's tile has one item: *End Terminal*.
         #[unsafe(method(rightMouseDown:))]
-        fn right_mouse_down(&self, _event: &NSEvent) {}
+        fn right_mouse_down(&self, event: &NSEvent) {
+            if self.ivars().closing.get() {
+                return;
+            }
+            let at = self.convertPoint_fromView(event.locationInWindow(), None);
+            if at.x < SIDE || !self.point_at(event) {
+                return;
+            }
+            let key = self.ivars().state.borrow().selected_away().cloned();
+            let Some(key) = key else {
+                return;
+            };
+            self.ivars().menu_for.replace(Some(key));
+            let menu = NSMenu::new(self.mtm());
+            menu.setAutoenablesItems(false);
+            // SAFETY: `initWithTitle:action:keyEquivalent:` takes two `NSString`s and a selector
+            // the target implements (`endTerminal:` below); the view is the item's target for as
+            // long as the menu is up.
+            let item = unsafe {
+                let item = NSMenuItem::initWithTitle_action_keyEquivalent(
+                    NSMenuItem::alloc(self.mtm()),
+                    &NSString::from_str(rules::END_TERMINAL),
+                    Some(sel!(endTerminal:)),
+                    ns_string!(""),
+                );
+                item.setTarget(Some(self));
+                item
+            };
+            menu.addItem(&item);
+            menu.popUpMenuPositioningItem_atLocation_inView(None, at, Some(self));
+        }
+
+        #[unsafe(method(endTerminal:))]
+        fn end_terminal(&self, _sender: Option<&AnyObject>) {
+            self.ask_end();
+        }
 
         #[unsafe(method(otherMouseDown:))]
         fn other_mouse_down(&self, _event: &NSEvent) {}
@@ -305,6 +402,12 @@ impl OverviewView {
             closing: Cell::new(false),
             generation: Cell::new(0),
             parked: Cell::new(false),
+            screens: RefCell::new(Screens::default()),
+            away_shots: RefCell::new(HashMap::new()),
+            asked: RefCell::new(HashSet::new()),
+            press: RefCell::new(None),
+            drop: Cell::new(None),
+            menu_for: RefCell::new(None),
         });
         // SAFETY: `initWithFrame:` is NSView's designated initializer and the ivars are set.
         let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] };
@@ -407,6 +510,15 @@ impl OverviewView {
             }
             return false;
         };
+        if index >= state.len() {
+            let before = state.selected_cell();
+            state.point_cell(index);
+            if glanced || before != state.selected_cell() {
+                drop(state);
+                self.setNeedsDisplay(true);
+            }
+            return true;
+        }
         let tab = state.tab(index);
         let id = tab.id;
         let pane = layout
@@ -448,7 +560,15 @@ impl OverviewView {
             || command == sel!(insertNewlineIgnoringFieldEditor:)
             || command == sel!(insertLineBreak:)
         {
-            self.activate();
+            // ⌥↵ opens a terminal in the background beside the pane on screen; on a tab it is ↵.
+            let option = NSApplication::sharedApplication(self.mtm())
+                .currentEvent()
+                .is_some_and(|event| event.modifierFlags().contains(NSEventModifierFlags::Option));
+            if option {
+                self.activate_beside();
+            } else {
+                self.activate();
+            }
             true
         } else if command == sel!(cancelOperation:) {
             self.escape();
@@ -630,7 +750,7 @@ impl OverviewView {
     /// Scrolls the selected cell into view.
     fn reveal(&self, layout: &Layout) {
         let iv = self.ivars();
-        let Some(index) = iv.state.borrow().selected_index() else {
+        let Some(index) = iv.state.borrow().selected_cell() else {
             return;
         };
         let scroll = layout.reveal(index, iv.scroll.get(), self.viewport(), REVEAL_AIR);
@@ -645,6 +765,18 @@ impl OverviewView {
     fn equivalent(&self, event: &NSEvent) -> bool {
         if self.ivars().closing.get() {
             return false;
+        }
+        // ⌘↵ opens every terminal of the server in one tab (nothing when there is no server).
+        const RETURN: u16 = 36;
+        const ENTER: u16 = 76;
+        let held = event.modifierFlags()
+            & (NSEventModifierFlags::Command
+                | NSEventModifierFlags::Option
+                | NSEventModifierFlags::Control
+                | NSEventModifierFlags::Shift);
+        if matches!(event.keyCode(), RETURN | ENTER) && held == NSEventModifierFlags::Command {
+            self.activate_all();
+            return true;
         }
         let Some(mods) = crate::menu::keys::family_mods(self.mtm(), "select_tab") else {
             return false;
@@ -680,6 +812,158 @@ impl OverviewView {
         }
     }
 
+    /// ⌥↵: the selected terminal in the background opens beside the pane on screen; a tab is
+    /// just shown.
+    fn activate_beside(&self) {
+        let act = {
+            let state = self.ivars().state.borrow();
+            state.act_beside().or_else(|| state.act())
+        };
+        if let (Some(act), Some(window)) = (act, self.terminal_window()) {
+            window.overview_go(act);
+        }
+    }
+
+    /// ⌘↵: every terminal the selected terminal's server (or the selected server) keeps, in a
+    /// new tab.
+    fn activate_all(&self) {
+        let host = self.ivars().state.borrow().open_all_host();
+        match (host, self.terminal_window()) {
+            (Some(host), Some(window)) => window.overview_open_all(&host),
+            _ => crate::preview::beep(),
+        }
+    }
+
+    /// The section heading's *Open All in New Tab* under the pointer: the server it is of.
+    fn section_button_at(&self, event: &NSEvent) -> Option<String> {
+        let iv = self.ivars();
+        let (x, y) = self.grid_point(event);
+        let layout = self.layout();
+        let state = iv.state.borrow();
+        let width = text_width(rules::OPEN_ALL, &self.heading_attributes()) + 2.0 * BUTTON_PAD;
+        layout.rows.iter().enumerate().find_map(|(at, row)| {
+            let Row::Section { section, .. } = row else {
+                return None;
+            };
+            let rect = layout.heading(at)?;
+            let inside = x >= rect.x + rect.width - width
+                && x < rect.x + rect.width
+                && y >= rect.y
+                && y < rect.y + rect.height;
+            if inside {
+                Some(state.sections().get(*section)?.host.clone())
+            } else {
+                None
+            }
+        })
+    }
+
+    /// The text of the dim headings.
+    fn heading_attributes(&self) -> Attributes {
+        let dim_font = NSFont::systemFontOfSize_weight(SMALL_SIZE, unsafe { NSFontWeightSemibold });
+        attributes(&dim_font, self.ivars().look.get().dim)
+    }
+
+    /// The tab and the pane of it under `event`, when it is over a tab's picture.
+    fn drop_at(&self, event: &NSEvent) -> Option<(u64, u64)> {
+        let (x, y) = self.grid_point(event);
+        let layout = self.layout();
+        let state = self.ivars().state.borrow();
+        let index = layout.tab_at(x, y).filter(|&index| index < state.len())?;
+        let tab = state.tab(index);
+        let (fx, fy) = layout.in_picture(index, x, y)?;
+        Some((tab.id, tab.pane_at(fx, fy)?))
+    }
+
+    /// The press moved: past the threshold it is a drag, and the pane under the pointer is the
+    /// one the terminal would open beside.
+    fn dragged(&self, event: &NSEvent) {
+        let iv = self.ivars();
+        let at = self.convertPoint_fromView(event.locationInWindow(), None);
+        let dragging = {
+            let mut press = iv.press.borrow_mut();
+            let Some(press) = press.as_mut() else {
+                return;
+            };
+            if !press.dragging && (at.x - press.at.x).hypot(at.y - press.at.y) >= DRAG_START {
+                press.dragging = true;
+            }
+            press.dragging
+        };
+        if !dragging {
+            return;
+        }
+        let target = self.drop_at(event);
+        if iv.drop.replace(target) != target {
+            self.setNeedsDisplay(true);
+        }
+    }
+
+    /// The button is up: a press that was not dragged opens the terminal, a drag ends on the
+    /// pane under the pointer, if there is one.
+    fn released(&self, event: &NSEvent) {
+        let iv = self.ivars();
+        let Some(press) = iv.press.take() else {
+            return;
+        };
+        let target = iv.drop.take();
+        if press.dragging {
+            self.setNeedsDisplay(true);
+            if let (Some((tab, pane)), Some(window)) = (
+                target.or_else(|| self.drop_at(event)),
+                self.terminal_window(),
+            ) {
+                window.overview_drop(press.key.0, press.key.1, tab, pane);
+            }
+        } else if self.point_at(event) {
+            self.activate();
+        }
+    }
+
+    /// *End Terminal*: the question closing a pane asks, as a sheet on the window; only an
+    /// answer of End reaches the server.
+    fn ask_end(&self) {
+        let iv = self.ivars();
+        let Some(key) = iv.menu_for.take() else {
+            return;
+        };
+        let found = {
+            let state = iv.state.borrow();
+            state.sections().iter().find_map(|section| {
+                section
+                    .entries
+                    .iter()
+                    .find(|entry| (&entry.account, &entry.terminal) == (&key.0, &key.1))
+                    .map(|entry| (section.host.clone(), entry.clone()))
+            })
+        };
+        let (Some((host, entry)), Some(window)) = (found, self.window()) else {
+            return;
+        };
+        let Some(seat) = sheets::seat(Asker::Window(&window)).filter(|seat| !seat.is_taken())
+        else {
+            // A question is up already: nothing is ended without one.
+            return;
+        };
+        let (title, message) = server_card::end_text(&host, &entry);
+        let alert = NSAlert::new(self.mtm());
+        alert.setMessageText(&NSString::from_str(&title));
+        alert.setInformativeText(&NSString::from_str(&message));
+        alert.addButtonWithTitle(&NSString::from_str(server_card::END));
+        let cancel = alert.addButtonWithTitle(ns_string!("Cancel"));
+        // Esc by hand (the rationale of `window::alert`).
+        cancel.setKeyEquivalent(ns_string!("\u{1b}"));
+        let answered = RcBlock::new(move |response: NSModalResponse| {
+            if response != NSAlertFirstButtonReturn {
+                return;
+            }
+            if let Ok(terminal) = SessionId::new(&entry.terminal) {
+                crate::hold_service::end_terminal(&entry.account, &terminal);
+            }
+        });
+        seat.begin(&alert, &answered);
+    }
+
     /// The view asks to be taken down (Esc, the keyboard gone elsewhere).
     fn dismiss(&self) {
         if let Some(window) = self.terminal_window() {
@@ -710,13 +994,108 @@ impl OverviewView {
                 })
                 .collect(),
         );
-        iv.state.borrow_mut().refresh(tabs);
+        {
+            let mut state = iv.state.borrow_mut();
+            state.refresh(tabs);
+            state.set_background(background_sections());
+        }
         self.sync_view();
         self.read_load();
         let layout = self.layout();
         iv.scroll
             .set(iv.scroll.get().clamp(0.0, self.max_scroll(&layout)));
         self.shoot();
+        self.fetch(true);
+        self.setNeedsDisplay(true);
+    }
+
+    /// The servers' screens of the terminals in the viewport are asked for: every one when
+    /// `all` (the wake, a new look), else only those with no picture yet (a scroll). The
+    /// pictures of the terminals that left the viewport are let go of.
+    fn fetch(&self, all: bool) {
+        let iv = self.ivars();
+        let layout = self.layout();
+        let wanted: Vec<rules::Key> = {
+            let state = iv.state.borrow();
+            layout
+                .visible(iv.scroll.get(), self.viewport())
+                .into_iter()
+                .filter_map(|index| match state.cell(index)? {
+                    Tile::Away { entry, .. } => {
+                        Some((entry.account.clone(), entry.terminal.clone()))
+                    }
+                    Tile::Tab(_) => None,
+                })
+                .collect()
+        };
+        iv.away_shots
+            .borrow_mut()
+            .retain(|key, _| wanted.contains(key));
+        iv.screens.borrow_mut().retain(|key| wanted.contains(key));
+        let window = iv.window;
+        for key in wanted {
+            if iv.asked.borrow().contains(&key)
+                || (!all && iv.away_shots.borrow().contains_key(&key))
+            {
+                continue;
+            }
+            let Ok(terminal) = SessionId::new(&key.1) else {
+                continue;
+            };
+            iv.asked.borrow_mut().insert(key.clone());
+            let account = key.0.clone();
+            crate::hold_service::picture(&account, &terminal, move |screen| {
+                DispatchQueue::main().exec_async(move || {
+                    let Some(mtm) = objc2::MainThreadMarker::new() else {
+                        return;
+                    };
+                    if let Some(window) = app::delegate(mtm).and_then(|app| app.window(window)) {
+                        window.overview_screen(key, screen);
+                    }
+                });
+            });
+        }
+    }
+
+    /// The server's screen of `key` came (`None`: it would not give it). It is built into a
+    /// session and drawn at the tile's size, unless it is the screen the tile has.
+    pub(crate) fn screen_arrived(
+        &self,
+        key: &rules::Key,
+        screen: Option<bt_shell_common::kablo::service::Screen>,
+    ) {
+        let iv = self.ivars();
+        iv.asked.borrow_mut().remove(key);
+        let (Some(screen), Some(window)) = (screen, self.terminal_window()) else {
+            return;
+        };
+        if iv.closing.get() || !window.window_visible() {
+            return;
+        }
+        let Some(app) = app::delegate(self.mtm()) else {
+            return;
+        };
+        let (scale, theme) = (window.backing_scale(), window.bar().theme());
+        let settings = app.settings();
+        let layout = self.layout();
+        let tile = (
+            (layout.tile.0 * scale).round().max(1.0) as u32,
+            (layout.tile.1 * scale).round().max(1.0) as u32,
+        );
+        let mut screens = iv.screens.borrow_mut();
+        let changed = screens.arrived(key.clone(), &screen, &settings, &theme, scale);
+        if !changed && iv.away_shots.borrow().contains_key(key) {
+            return;
+        }
+        let Some(image) = screens.image(key, &settings, scale, tile) else {
+            return;
+        };
+        let picture = NSImage::initWithCGImage_size(
+            NSImage::alloc(),
+            &image,
+            NSSize::new(layout.tile.0, layout.tile.1),
+        );
+        iv.away_shots.borrow_mut().insert(key.clone(), picture);
         self.setNeedsDisplay(true);
     }
 
@@ -733,18 +1112,19 @@ impl OverviewView {
         let scale = window.backing_scale();
         let layout = self.layout();
         let state = iv.state.borrow();
-        let shown: HashSet<u64> = layout
+        let tabs: Vec<usize> = layout
             .visible(iv.scroll.get(), self.viewport())
             .into_iter()
-            .map(|index| state.tab(index).id)
+            .filter(|&index| index < state.len())
             .collect();
+        let shown: HashSet<u64> = tabs.iter().map(|&index| state.tab(index).id).collect();
         for gone in iv.shot_tabs.borrow().difference(&shown) {
             window.release_tab_shots(*gone);
         }
         iv.shots
             .borrow_mut()
             .retain(|(tab, _), _| shown.contains(tab));
-        for index in layout.visible(iv.scroll.get(), self.viewport()) {
+        for index in tabs {
             let tab = state.tab(index);
             let tiles: Vec<(u64, (f64, f64))> = tab
                 .panes
@@ -770,6 +1150,8 @@ impl OverviewView {
             }
         }
         iv.shot_tabs.replace(shown);
+        drop(state);
+        self.fetch(false);
     }
 
     /// The panes let go of what they kept for the view's pictures.
@@ -782,6 +1164,9 @@ impl OverviewView {
         }
         iv.shot_tabs.borrow_mut().clear();
         iv.shots.borrow_mut().clear();
+        iv.screens.borrow_mut().release();
+        iv.away_shots.borrow_mut().clear();
+        iv.asked.borrow_mut().clear();
     }
 
     // ─── The wake ────────────────────────────────────────────────────────
@@ -874,23 +1259,35 @@ impl OverviewView {
         ));
         let dim_font = NSFont::systemFontOfSize_weight(SMALL_SIZE, unsafe { NSFontWeightSemibold });
         let dim = attributes(&dim_font, look.dim);
+        let button = attributes(&dim_font, look.accent);
         for (at, row) in layout.rows.iter().enumerate() {
-            if let Row::Heading { text, .. } = row
-                && let Some(rect) = layout.heading(at)
-            {
-                draw_text(
-                    text,
-                    rect.x + SIDE + 2.0,
+            let (Row::Heading { text, .. } | Row::Section { text, .. }) = row else {
+                continue;
+            };
+            let Some(rect) = layout.heading(at) else {
+                continue;
+            };
+            draw_text(
+                text,
+                rect.x + SIDE + 2.0,
+                rect.y + origin + rect.height * 0.35,
+                rect.height * 0.65,
+                &dim,
+            );
+            // A section's heading carries the button that opens all of its terminals at once.
+            if matches!(row, Row::Section { .. }) {
+                draw_text_right(
+                    rules::OPEN_ALL,
+                    rect.x + SIDE + rect.width - BUTTON_PAD,
                     rect.y + origin + rect.height * 0.35,
                     rect.height * 0.65,
-                    &dim,
+                    &button,
                 );
             }
         }
-        let selected = state.selected();
+        let selected = state.selected_cell();
         for index in layout.visible(iv.scroll.get(), self.viewport()) {
-            let tab = state.tab(index);
-            self.paint_cell(&state, &layout, index, origin, selected == Some(tab.id));
+            self.paint_cell(&state, &layout, index, origin, selected == Some(index));
         }
         NSGraphicsContext::restoreGraphicsState_class();
         // The column is over the grid's left, which has the room for it.
@@ -1061,9 +1458,138 @@ impl OverviewView {
         origin: f64,
         selected: bool,
     ) {
+        match state.cell(index) {
+            Some(Tile::Tab(tab)) => self.paint_tab(state, layout, index, tab, origin, selected),
+            Some(Tile::Away { entry, .. }) => {
+                self.paint_away(state, layout, index, entry, origin, selected);
+            }
+            None => {}
+        }
+    }
+
+    /// A terminal a server keeps: its screen as the server built it, dim until it is the
+    /// selected one, and under it the name, the folder and what ↵ does.
+    fn paint_away(
+        &self,
+        state: &Overview,
+        layout: &Layout,
+        index: usize,
+        entry: &server_card::Entry,
+        origin: f64,
+        selected: bool,
+    ) {
         let iv = self.ivars();
         let look = iv.look.get();
-        let tab = state.tab(index);
+        let (Some(picture), Some(name_row)) = (layout.picture(index), layout.name_row(index))
+        else {
+            return;
+        };
+        let at = |rect: Rect| {
+            NSRect::new(
+                NSPoint::new(rect.x + SIDE, rect.y + origin),
+                NSSize::new(rect.width, rect.height),
+            )
+        };
+        let key = (entry.account.clone(), entry.terminal.clone());
+        NSGraphicsContext::saveGraphicsState_class();
+        NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(at(picture), RADIUS, RADIUS)
+            .addClip();
+        look.band.color().setFill();
+        NSBezierPath::fillRect(at(picture));
+        if let Some(shot) = iv.away_shots.borrow().get(&key) {
+            draw_image(shot, at(picture));
+        }
+        if !selected {
+            Tint::of(look.ground.rgb, DIM_COVER).color().setFill();
+            NSBezierPath::fillRect(at(picture));
+        }
+        NSGraphicsContext::restoreGraphicsState_class();
+        if selected {
+            let ring = NSRect::new(
+                NSPoint::new(picture.x + SIDE - RING_AIR, picture.y + origin - RING_AIR),
+                NSSize::new(
+                    picture.width + 2.0 * RING_AIR,
+                    picture.height + 2.0 * RING_AIR,
+                ),
+            );
+            let path = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(
+                ring,
+                RADIUS + RING_AIR,
+                RADIUS + RING_AIR,
+            );
+            path.setLineWidth(RING);
+            look.accent.color().setStroke();
+            path.stroke();
+        }
+        let row = at(name_row);
+        let left = row.origin.x + 2.0;
+        let right = row.origin.x + row.size.width - 2.0;
+        let small = attributes(&NSFont::systemFontOfSize(SMALL_SIZE), look.dim);
+        let strong = attributes(
+            &NSFont::systemFontOfSize_weight(NAME_SIZE, unsafe { NSFontWeightMedium }),
+            if selected { look.text } else { look.dim },
+        );
+        let marked = attributes(
+            &NSFont::systemFontOfSize_weight(NAME_SIZE, unsafe { NSFontWeightSemibold }),
+            look.accent,
+        );
+        let verb = state
+            .verb()
+            .filter(|_| selected)
+            .map(|verb| format!("↵ {verb}"));
+        let verb_width = verb.as_ref().map_or(0.0, |verb| text_width(verb, &small));
+        let room = (right - left - verb_width - GAP_AFTER_NAME).max(0.0);
+        let hit = state.away_hit(&key);
+        let name_marks = hit.map_or(&[][..], |hit| hit.name_marks.as_slice());
+        let mut end = draw_marked(
+            &entry.title,
+            name_marks,
+            left,
+            room,
+            row.origin.y,
+            row.size.height,
+            &strong,
+            &marked,
+        );
+        // The folder it is in, dim, beside the name: `claude  ~/api`.
+        if let Some(place) = &entry.place {
+            let spare = room - (end - left) - GAP_AFTER_NAME;
+            if spare > 24.0 {
+                let marks = hit.map_or(&[][..], |hit| hit.place_marks.as_slice());
+                end = draw_marked(
+                    place,
+                    marks,
+                    end + GAP_AFTER_NAME,
+                    spare,
+                    row.origin.y,
+                    row.size.height,
+                    &small,
+                    &marked,
+                );
+            }
+        }
+        if let Some(verb) = verb {
+            draw_text(
+                &verb,
+                end + GAP_AFTER_NAME,
+                row.origin.y,
+                row.size.height,
+                &small,
+            );
+        }
+    }
+
+    fn paint_tab(
+        &self,
+        state: &Overview,
+        layout: &Layout,
+        index: usize,
+        tab: &rules::Tab,
+        origin: f64,
+        selected: bool,
+    ) {
+        let iv = self.ivars();
+        let look = iv.look.get();
         let (Some(picture), Some(name_row)) = (layout.picture(index), layout.name_row(index))
         else {
             return;
@@ -1095,6 +1621,21 @@ impl OverviewView {
             if state.dim(tab.id, pane) {
                 Tint::of(look.ground.rgb, DIM_COVER).color().setFill();
                 NSBezierPath::fillRect(rect);
+            }
+            // A terminal being carried would open beside this pane: it is ringed.
+            if iv.drop.get() == Some((tab.id, pane.id)) {
+                let inset = RING;
+                let ring = NSRect::new(
+                    NSPoint::new(rect.origin.x + inset, rect.origin.y + inset),
+                    NSSize::new(
+                        (rect.size.width - 2.0 * inset).max(1.0),
+                        (rect.size.height - 2.0 * inset).max(1.0),
+                    ),
+                );
+                let path = NSBezierPath::bezierPathWithRect(ring);
+                path.setLineWidth(RING);
+                look.accent.color().setStroke();
+                path.stroke();
             }
         }
         NSGraphicsContext::restoreGraphicsState_class();
@@ -1295,6 +1836,30 @@ pub(crate) fn may_open(window: &TerminalWindow) -> bool {
     window.palette_may_open()
 }
 
+/// The servers' terminals in the background as the big view lists them: the server card's own
+/// rows ([`server_card::entry_of`]), all of them, grouped by server.
+fn background_sections() -> Vec<rules::Section> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs());
+    let mut sections: Vec<rules::Section> = Vec::new();
+    for background in crate::hold_service::background_all() {
+        let entry = server_card::entry_of(&background, now, &crate::server_card::local);
+        match sections
+            .iter_mut()
+            .find(|section| section.account == background.account)
+        {
+            Some(section) => section.entries.push(entry),
+            None => sections.push(rules::Section {
+                account: background.account.clone(),
+                host: background.host.clone(),
+                entries: vec![entry],
+            }),
+        }
+    }
+    sections
+}
+
 /// Puts the view up over the window's content, the selected tab the window shows, and gives
 /// the keyboard to its field.
 pub(crate) fn open(window: &TerminalWindow) {
@@ -1307,7 +1872,11 @@ pub(crate) fn open(window: &TerminalWindow) {
     let theme = window.bar().theme();
     let (tabs, _) = window.overview_facts();
     let here = window.selected_tab_id();
-    let view = OverviewView::new(mtm, window.id(), Overview::new(tabs, here), &theme);
+    let mut state = Overview::new(tabs, here);
+    state.set_background(background_sections());
+    // The servers are asked what they keep now; the view reads what comes on its next wake.
+    crate::hold_service::refresh_background();
+    let view = OverviewView::new(mtm, window.id(), state, &theme);
     let content = root.content();
     view.refit(
         root.bounds(),
@@ -1326,6 +1895,30 @@ pub(crate) fn open(window: &TerminalWindow) {
     }
     view.appear();
     view.schedule();
+}
+
+/// The view over the window with the machine `host` selected in its list (the server's name as
+/// the user typed it): opened if it was not, and the machine changed if it was. A server the
+/// list does not have leaves All tabs.
+pub(crate) fn show_on(window: &TerminalWindow, host: &str) {
+    open(window);
+    let Some(view) = window.root().overview() else {
+        return;
+    };
+    let machine = {
+        let state = view.ivars().state.borrow();
+        state
+            .machines()
+            .into_iter()
+            .map(|row| row.machine)
+            .find(|machine| {
+                matches!(machine, Machine::Host(name)
+                    if bt_core::bare_host(name).eq_ignore_ascii_case(bt_core::bare_host(host)))
+            })
+    };
+    if let Some(machine) = machine {
+        view.choose_machine(machine);
+    }
 }
 
 /// Takes the view down: the window has none from here on, the panes let go of the pictures

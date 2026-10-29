@@ -462,7 +462,8 @@ mod tests {
                 "act.openAll.rasp",
                 "bg.b-2@u@rasp:22",
                 "pane.7.70",
-                "host.rasp"
+                "host.rasp",
+                "act.seeAll.rasp"
             ]
         );
         // The page of a server nobody told the palette of is just the new tab.

@@ -18,6 +18,13 @@
 
 use std::collections::HashMap;
 
+mod away;
+
+pub use away::{
+    AwayHit, Cell, END_TERMINAL, Key, OPEN_ALL, OPEN_BESIDE, OPEN_IN_TAB, Part, Section,
+    section_text,
+};
+
 use crate::palette::{Kind, Row as PaletteRow, score};
 use crate::remote_stats::Detail;
 use crate::split::Rect;
@@ -109,11 +116,15 @@ pub enum Direction {
 }
 
 /// What ↵ (or a click) asks the shell to do.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Act {
     /// Show tab `tab` with `pane` focused: the pane the pointer is over, else `None` (the tab's
     /// own focused pane stays).
     GoToTab { tab: u64, pane: Option<u64> },
+    /// A terminal a server keeps in the background, in a tab of its own.
+    OpenBackground { account: String, terminal: String },
+    /// The same, beside the pane the window shows (the other way ↵ opens it, ⌥↵).
+    OpenBeside { account: String, terminal: String },
 }
 
 /// The name of the row that lists every tab, and of the one that lists this computer's: the
@@ -240,6 +251,14 @@ pub struct Overview {
     /// The pane the pointer is over in the selected tab (a split tab's), `None` for the keys'
     /// selection.
     pointed: Option<u64>,
+    /// The servers' terminals in the background, by the servers' names ([`Section`]).
+    sections: Vec<Section>,
+    /// The places in [`Self::sections`] of the terminals the machine and the search leave, as
+    /// `(section, entry)`, section by section.
+    away: Vec<(usize, usize)>,
+    away_hits: HashMap<Key, AwayHit>,
+    /// The terminal selected instead of a tab: at most one of the two is.
+    selected_away: Option<Key>,
 }
 
 impl Overview {
@@ -258,6 +277,10 @@ impl Overview {
             hits: HashMap::new(),
             selected,
             pointed: None,
+            sections: Vec::new(),
+            away: Vec::new(),
+            away_hits: HashMap::new(),
+            selected_away: None,
         };
         overview.reshow();
         overview
@@ -287,11 +310,25 @@ impl Overview {
                 .filter(|&at| self.hits.contains_key(&self.all[at].id))
                 .collect();
         }
-        if !self
+        self.reaway();
+        let tab_kept = self
             .selected
-            .is_some_and(|selected| self.is_shown(selected))
-        {
+            .is_some_and(|selected| self.is_shown(selected));
+        let away_kept = self.selected_away.as_ref().is_some_and(|key| {
+            self.away
+                .iter()
+                .any(|&(section, entry)| self.key_of(section, entry) == *key)
+        });
+        if tab_kept {
+            self.selected_away = None;
+        } else if away_kept {
+            self.selected = None;
+        } else {
             self.selected = self.shown.first().map(|&at| self.all[at].id);
+            self.selected_away = match self.selected {
+                Some(_) => None,
+                None => self.away.first().map(|&(s, e)| self.key_of(s, e)),
+            };
         }
         if !self
             .pointed
@@ -379,6 +416,7 @@ impl Overview {
             return false;
         }
         self.selected = Some(tab);
+        self.selected_away = None;
         self.pointed = None;
         true
     }
@@ -390,6 +428,7 @@ impl Overview {
             return false;
         }
         self.selected = Some(tab);
+        self.selected_away = None;
         self.pointed = pane.filter(|&pane| self.selected_has_pane(pane));
         true
     }
@@ -425,6 +464,10 @@ impl Overview {
         self.reshow();
         if !self.query.trim().is_empty() {
             self.selected = self.shown.first().map(|&at| self.all[at].id);
+            self.selected_away = match self.selected {
+                Some(_) => None,
+                None => self.away.first().map(|&(s, e)| self.key_of(s, e)),
+            };
             self.pointed = None;
         }
     }
@@ -440,7 +483,7 @@ impl Overview {
 
     /// "3 found", while there is a query.
     pub fn found(&self) -> Option<String> {
-        (!self.query.trim().is_empty()).then(|| format!("{} found", self.shown.len()))
+        (!self.query.trim().is_empty()).then(|| format!("{} found", self.cells()))
     }
 
     /// What the empty search row says: what it finds, and where (the machine, when one is selected).
@@ -465,6 +508,10 @@ impl Overview {
         let mut hints = Vec::new();
         if self.selected.is_some() {
             hints.push(("↵", GO_TO_TAB));
+        } else if self.selected_away.is_some() {
+            hints.push(("↵", OPEN_IN_TAB));
+            hints.push(("⌥↵", OPEN_BESIDE));
+            hints.push(("⌘↵", OPEN_ALL));
         }
         if self.machines().len() > 1 {
             hints.push(("⇥", "Next machine"));
@@ -517,11 +564,43 @@ impl Overview {
                 None => hosts.push((host, pane.account.as_ref())),
             }
         }
+        // A server that keeps terminals for the user is a machine even when no pane of the
+        // window is on it: its row is its section's.
+        for section in &self.sections {
+            let bare = bt_core::bare_host(&section.host);
+            match hosts
+                .iter_mut()
+                .find(|(known, _)| bt_core::bare_host(known).eq_ignore_ascii_case(bare))
+            {
+                Some((_, account)) => {
+                    if account.is_none() {
+                        *account = Some(&section.account);
+                    }
+                }
+                None => hosts.push((&section.host, Some(&section.account))),
+            }
+        }
         hosts.sort_by_key(|(host, _)| host.to_lowercase());
         for (host, account) in hosts {
             let machine = Machine::Host(host.to_owned());
             let tabs = count(&machine);
-            rows.push(row(machine, tabs, account.cloned()));
+            let away: usize = self
+                .sections
+                .iter()
+                .filter(|section| {
+                    bt_core::bare_host(&section.host).eq_ignore_ascii_case(bt_core::bare_host(host))
+                })
+                .map(|section| section.entries.len())
+                .sum();
+            let mut line = row(machine, tabs, account.cloned());
+            if away > 0 {
+                line.count = if tabs == 0 {
+                    format!("{away} in the background")
+                } else {
+                    format!("{} · {away} in the background", line.count)
+                };
+            }
+            rows.push(line);
         }
         rows
     }
@@ -580,7 +659,7 @@ impl Overview {
     /// The selection one cell along `direction` in `layout`; `false` when there is nowhere to go
     /// (the row's end, the first or last row of tabs).
     pub fn step(&mut self, layout: &Layout, direction: Direction) -> bool {
-        let Some(at) = self.selected_index() else {
+        let Some(at) = self.selected_cell() else {
             return false;
         };
         let Some(&(row, column)) = layout.cells.get(at) else {
@@ -588,7 +667,7 @@ impl Overview {
         };
         let length = |row: usize| match &layout.rows[row] {
             Row::Tiles(tabs) => tabs.len(),
-            Row::Heading { .. } => 0,
+            Row::Heading { .. } | Row::Section { .. } => 0,
         };
         let target = match direction {
             Direction::Left => column.checked_sub(1).map(|column| (row, column)),
@@ -610,13 +689,14 @@ impl Overview {
         let Some(&index) = tabs.get(column) else {
             return false;
         };
-        self.selected = Some(self.tab(index).id);
-        self.pointed = None;
-        true
+        self.select_cell(index)
     }
 
     /// What ↵ does now.
     pub fn act(&self) -> Option<Act> {
+        if let Some((account, terminal)) = self.selected_away.clone() {
+            return Some(Act::OpenBackground { account, terminal });
+        }
         let tab = self.selected?;
         Some(Act::GoToTab {
             tab,
@@ -624,8 +704,11 @@ impl Overview {
         })
     }
 
-    /// The word beside the selected tab's name that says what ↵ does.
+    /// The word beside the selected cell's name that says what ↵ does.
     pub fn verb(&self) -> Option<&'static str> {
+        if self.selected_away.is_some() {
+            return Some(OPEN_IN_TAB);
+        }
         self.selected.map(|_| GO_TO_TAB)
     }
 
@@ -633,7 +716,7 @@ impl Overview {
     /// content, height over width).
     pub fn layout(&self, width: f64, aspect: f64) -> Layout {
         let tabs: Vec<&Tab> = self.tabs().collect();
-        Layout::new(&tabs, width, aspect)
+        Layout::new(&tabs, &self.parts(), width, aspect)
     }
 }
 
@@ -662,7 +745,10 @@ pub fn tile_width(width: f64, columns: usize) -> f64 {
 pub enum Row {
     /// A group's dim heading ("api-work · 2 tabs").
     Heading { group: u64, text: String },
-    /// Tabs, by their place in [`Overview::tabs`], left to right.
+    /// A server's section heading ("In the background on ⇄ rasp · 3"); `section` is its place
+    /// among [`Overview::sections`].
+    Section { section: usize, text: String },
+    /// Cells, by their number ([`Overview::cell`]: the tabs, then the terminals), left to right.
     Tiles(Vec<usize>),
 }
 
@@ -685,7 +771,7 @@ pub struct Layout {
 }
 
 impl Layout {
-    fn new(tabs: &[&Tab], width: f64, aspect: f64) -> Self {
+    fn new(tabs: &[&Tab], parts: &[Part], width: f64, aspect: f64) -> Self {
         let columns = columns(width);
         let tile_w = tile_width(width, columns);
         let aspect = if aspect.is_finite() {
@@ -725,6 +811,26 @@ impl Layout {
                 }
             }
         }
+        // The servers' terminals follow the tabs, each section under its heading, the tiles
+        // numbered on from the last tab.
+        let mut index = tabs.len();
+        for part in parts {
+            rows.push(Row::Section {
+                section: part.section,
+                text: part.text.clone(),
+            });
+            let mut left = part.count;
+            while left > 0 {
+                let take = left.min(columns);
+                let row: Vec<usize> = (index..index + take).collect();
+                for column in 0..take {
+                    cells.push((rows.len(), column));
+                }
+                rows.push(Row::Tiles(row));
+                index += take;
+                left -= take;
+            }
+        }
         let mut tops = Vec::with_capacity(rows.len());
         let mut bottom = 0.0;
         for (at, row) in rows.iter().enumerate() {
@@ -732,7 +838,7 @@ impl Layout {
             tops.push(top);
             bottom = top
                 + match row {
-                    Row::Heading { .. } => HEADING_ROW,
+                    Row::Heading { .. } | Row::Section { .. } => HEADING_ROW,
                     Row::Tiles(_) => tile.1 + NAME_ROW,
                 };
         }
@@ -770,7 +876,7 @@ impl Layout {
         ))
     }
 
-    /// Row `row`'s heading line, for a [`Row::Heading`].
+    /// Row `row`'s heading line, for a [`Row::Heading`] or a [`Row::Section`].
     pub fn heading(&self, row: usize) -> Option<Rect> {
         let top = *self.tops.get(row)?;
         Some(Rect::new(
@@ -1620,5 +1726,284 @@ mod tests {
         let hints = overview.hints();
         assert!(!hints.iter().any(|(key, _)| *key == "↵"));
         assert_eq!(hints.last(), Some(&("esc", "Clear")));
+    }
+
+    // ─── The servers' terminals in the background ────────────────────────
+
+    fn away(account: &str, terminal: &str, title: &str, place: &str) -> crate::server_card::Entry {
+        crate::server_card::Entry {
+            account: account.to_owned(),
+            terminal: terminal.to_owned(),
+            title: title.to_owned(),
+            place: Some(place.to_owned()),
+            activity: Some("running 2m 00s".to_owned()),
+            running: true,
+            by: None,
+        }
+    }
+
+    /// `mixed()` with two terminals in the background on rasp and one on db2, a server no pane
+    /// of the window is on.
+    fn kept() -> Overview {
+        let mut overview = mixed();
+        overview.set_background(vec![
+            Section {
+                account: "u@db2:22".to_owned(),
+                host: "db2".to_owned(),
+                entries: vec![away("u@db2:22", "psql", "psql", "~/dumps")],
+            },
+            Section {
+                account: "u@rasp:22".to_owned(),
+                host: "rasp".to_owned(),
+                entries: vec![
+                    away("u@rasp:22", "claude", "claude", "~/api"),
+                    away("u@rasp:22", "build", "cargo watch", "~/api"),
+                ],
+            },
+        ]);
+        overview
+    }
+
+    fn away_names(overview: &Overview) -> Vec<String> {
+        (overview.len()..overview.cells())
+            .filter_map(|index| match overview.cell(index)? {
+                Cell::Away { entry, .. } => Some(entry.title.clone()),
+                Cell::Tab(_) => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn all_tabs_shows_every_servers_section_a_server_only_its_own_and_this_computer_none() {
+        let mut overview = kept();
+        assert_eq!(away_names(&overview), ["psql", "claude", "cargo watch"]);
+        overview.set_machine(Machine::Host("rasp".to_owned()));
+        assert_eq!(away_names(&overview), ["claude", "cargo watch"]);
+        overview.set_machine(Machine::Local);
+        assert!(away_names(&overview).is_empty());
+        assert_eq!(overview.cells(), overview.len());
+    }
+
+    #[test]
+    fn a_server_with_terminals_and_no_tab_has_a_row_and_a_server_with_neither_has_none() {
+        let mut overview = kept();
+        let rows = overview.machines();
+        let db2 = rows
+            .iter()
+            .find(|row| row.title == "⇄ db2")
+            .expect("a row for db2");
+        assert_eq!(db2.count, "1 in the background");
+        assert_eq!(db2.account.as_deref(), Some("u@db2:22"));
+        let rasp = rows
+            .iter()
+            .find(|row| row.title == "⇄ rasp")
+            .expect("a row for rasp");
+        assert_eq!(rasp.count, "1 tab · 2 in the background");
+        // The last terminal of db2 goes: its section and its row go, and the machine falls
+        // back to All tabs when it was the one selected.
+        overview.set_machine(Machine::Host("db2".to_owned()));
+        assert_eq!(away_names(&overview), ["psql"]);
+        overview.set_background(vec![overview.sections()[1].clone()]);
+        assert!(!names(&overview).contains(&"⇄ db2".to_owned()));
+        assert_eq!(overview.machine(), &Machine::All);
+        assert_eq!(away_names(&overview), ["claude", "cargo watch"]);
+    }
+
+    #[test]
+    fn a_servers_name_matches_across_user_and_case() {
+        let mut overview = mixed();
+        overview.set_background(vec![Section {
+            account: "u@rasp:22".to_owned(),
+            host: "RASP".to_owned(),
+            entries: vec![away("u@rasp:22", "claude", "claude", "~")],
+        }]);
+        // One row for the server: the panes' `rasp` and the section's `RASP` are the same.
+        assert_eq!(
+            names(&overview)
+                .iter()
+                .filter(|n| n.contains("asp"))
+                .count(),
+            1
+        );
+        overview.set_machine(Machine::Host("rasp".to_owned()));
+        assert_eq!(away_names(&overview), ["claude"]);
+    }
+
+    #[test]
+    fn the_sections_stand_under_the_tabs_each_under_its_heading_and_the_tiles_go_on_from_the_tabs()
+    {
+        let overview = kept();
+        let layout = overview.layout(width_for(2), 0.6);
+        let headings: Vec<_> = layout
+            .rows
+            .iter()
+            .filter_map(|row| match row {
+                Row::Section { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            headings,
+            [
+                "Running in the background on ⇄ db2 · 1",
+                "Running in the background on ⇄ rasp · 2"
+            ]
+        );
+        // Three tabs, then the terminals numbered on from them, none of them the tabs'.
+        let tiles: Vec<Vec<usize>> = layout
+            .rows
+            .iter()
+            .filter_map(|row| match row {
+                Row::Tiles(cells) => Some(cells.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            tiles,
+            vec![vec![0, 1], vec![2], vec![3], vec![4, 5]],
+            "two columns: the tabs, then each section from a row of its own"
+        );
+        let last_tab = layout.picture(2).expect("a picture");
+        let first_away = layout.picture(3).expect("a picture");
+        assert!(first_away.y > last_tab.y + last_tab.height);
+    }
+
+    #[test]
+    fn the_arrows_go_down_from_the_tabs_into_the_sections_and_back() {
+        let mut overview = kept();
+        let layout = overview.layout(width_for(3), 0.6);
+        overview.select(3);
+        assert!(overview.step(&layout, Direction::Down));
+        assert_eq!(overview.selected(), None);
+        assert_eq!(
+            overview
+                .selected_away()
+                .map(|(_, terminal)| terminal.as_str()),
+            Some("psql")
+        );
+        assert!(overview.step(&layout, Direction::Down));
+        assert_eq!(
+            overview
+                .selected_away()
+                .map(|(_, terminal)| terminal.as_str()),
+            Some("claude")
+        );
+        assert!(overview.step(&layout, Direction::Right));
+        assert_eq!(
+            overview
+                .selected_away()
+                .map(|(_, terminal)| terminal.as_str()),
+            Some("build")
+        );
+        assert!(!overview.step(&layout, Direction::Down), "the last row");
+        assert!(overview.step(&layout, Direction::Up));
+        assert!(overview.step(&layout, Direction::Up));
+        assert!(!overview.step(&layout, Direction::Up), "the first row");
+        assert_eq!(overview.selected(), Some(1), "the first column of the tabs");
+        assert_eq!(overview.selected_away(), None);
+    }
+
+    #[test]
+    fn enter_opens_the_terminal_selected_and_the_keys_say_how() {
+        let mut overview = kept();
+        let layout = overview.layout(width_for(3), 0.6);
+        overview.select(3);
+        overview.step(&layout, Direction::Down);
+        overview.step(&layout, Direction::Down);
+        assert_eq!(
+            overview.act(),
+            Some(Act::OpenBackground {
+                account: "u@rasp:22".to_owned(),
+                terminal: "claude".to_owned()
+            })
+        );
+        assert_eq!(
+            overview.act_beside(),
+            Some(Act::OpenBeside {
+                account: "u@rasp:22".to_owned(),
+                terminal: "claude".to_owned()
+            })
+        );
+        assert_eq!(overview.verb(), Some("Open in New Tab"));
+        let hints = overview.hints();
+        assert_eq!(
+            &hints[..3],
+            [
+                ("↵", "Open in New Tab"),
+                ("⌥↵", "Open Beside"),
+                ("⌘↵", "Open All in New Tab")
+            ]
+        );
+        // ⌘↵ opens every terminal of the server the selected one is on.
+        assert_eq!(overview.open_all_host().as_deref(), Some("rasp"));
+    }
+
+    #[test]
+    fn open_all_names_the_machine_when_a_tab_is_selected_and_nothing_on_all_tabs() {
+        let mut overview = kept();
+        assert_eq!(overview.open_all_host(), None, "a tab, on All tabs");
+        overview.set_machine(Machine::Host("rasp".to_owned()));
+        assert_eq!(overview.open_all_host().as_deref(), Some("rasp"));
+        overview.set_machine(Machine::Host("db1".to_owned()));
+        assert_eq!(overview.open_all_host(), None, "db1 keeps nothing");
+    }
+
+    #[test]
+    fn the_search_finds_the_terminals_by_title_and_folder_and_the_first_tab_found_keeps_the_selection()
+     {
+        let mut overview = kept();
+        overview.set_query("dumps");
+        assert_eq!(away_names(&overview), ["psql"]);
+        assert_eq!(overview.len(), 0);
+        assert_eq!(
+            overview
+                .selected_away()
+                .map(|(_, terminal)| terminal.as_str()),
+            Some("psql"),
+            "nothing else was found: the first terminal"
+        );
+        assert_eq!(overview.found().as_deref(), Some("1 found"));
+        let hit = overview
+            .away_hit(&("u@db2:22".to_owned(), "psql".to_owned()))
+            .expect("a hit");
+        assert!(!hit.place_marks.is_empty());
+        // A word a tab and a terminal both carry: the tab, which comes first, is selected.
+        overview.set_query("");
+        let mut tabs = vec![with_panes(9, vec![running(91, "claude", "~/api", None)])];
+        tabs[0].name = "claude".to_owned();
+        let mut both = Overview::new(tabs, None);
+        both.set_background(vec![Section {
+            account: "u@rasp:22".to_owned(),
+            host: "rasp".to_owned(),
+            entries: vec![away("u@rasp:22", "claude", "claude", "~/api")],
+        }]);
+        both.set_query("claude");
+        assert_eq!(both.selected(), Some(9));
+        assert_eq!(both.selected_away(), None);
+        assert_eq!(both.cells(), 2);
+    }
+
+    #[test]
+    fn a_terminal_that_ends_while_the_view_is_open_gives_its_place_to_the_next() {
+        let mut overview = kept();
+        let layout = overview.layout(width_for(3), 0.6);
+        overview.select(3);
+        overview.step(&layout, Direction::Down);
+        overview.step(&layout, Direction::Down);
+        assert_eq!(
+            overview
+                .selected_away()
+                .map(|(_, terminal)| terminal.as_str()),
+            Some("claude")
+        );
+        let mut sections = overview.sections().to_vec();
+        sections[1].entries.remove(0);
+        overview.set_background(sections);
+        assert_eq!(
+            overview
+                .selected_away()
+                .map(|(_, terminal)| terminal.as_str()),
+            Some("build")
+        );
     }
 }

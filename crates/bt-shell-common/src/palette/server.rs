@@ -44,6 +44,8 @@ pub const PANES_HEADING: &str = "Tabs";
 pub const ELSEWHERE_HEADING: &str = crate::server_card::OTHERS_HEADING;
 /// The identity prefix of Open All: `act.openAll.<server>`.
 const OPEN_ALL: &str = "act.openAll.";
+/// The id of the row that opens the big view on a server, the host following.
+const SEE_ALL: &str = "act.seeAll.";
 
 /// A terminal a server keeps for the user that no pane of this Mac shows.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -213,6 +215,17 @@ pub fn open_all_row(host: &str, count: usize) -> Row {
     .hint("↵", "Open All")
 }
 
+/// The last row of a server's page: the big view, on the server.
+pub fn see_all_row(host: &str) -> Row {
+    Row::new(
+        Kind::Action,
+        &format!("seeAll.{host}"),
+        crate::server_card::see_all_text(host),
+    )
+    .keywords("big view show all tabs terminals overview")
+    .hint("↵", crate::server_card::SEE_ALL)
+}
+
 /// The sections of the page of the server `host`, each with the heading that stands over its rows
 /// (`None`: none). The page of a server kablo keeps nothing on, or that the palette was not told
 /// of, has only the new tab.
@@ -254,6 +267,10 @@ fn sections(host: &str, targets: &Targets) -> Vec<(Option<String>, Vec<Row>)> {
                 .keywords("ssh connect terminal"),
         ],
     ));
+    // The last row: the big view on this server, for a page of a server the palette knows.
+    if server_of(targets, host).is_some() {
+        sections.push((None, vec![see_all_row(host)]));
+    }
     sections
 }
 
@@ -311,6 +328,9 @@ pub(super) fn go(id: &str, modifier: Modifier) -> Option<Go> {
     }
     if let Some(host) = id.strip_prefix(OPEN_ALL) {
         return (modifier == Modifier::None).then(|| Go::OpenAllBackground(host.to_owned()));
+    }
+    if let Some(host) = id.strip_prefix(SEE_ALL) {
+        return (modifier == Modifier::None).then(|| Go::SeeAll(host.to_owned()));
     }
     if let Some(key) = id.strip_prefix(Kind::Pane.prefix()) {
         let (tab, pane) = key.split_once('.')?;

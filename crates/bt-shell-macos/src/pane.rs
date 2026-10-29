@@ -251,6 +251,9 @@ pub trait PaneHost {
     /// The card's *Open All in New Tab*: every terminal the server `host` keeps that no pane
     /// shows, together in a new tab of the pane's window.
     fn open_all_background(&self, _pane: u64, _host: &str) {}
+    /// The card's *See All on rasp*: the big view over the pane's window, with the server
+    /// `host` selected.
+    fn see_all_background(&self, _pane: u64, _host: &str) {}
     /// The card's *End Terminal*: the terminal `terminal` of `account`, which no pane shows,
     /// ends on the server (asked **after** the user said so).
     fn end_background(&self, _account: &str, _terminal: &str) {}

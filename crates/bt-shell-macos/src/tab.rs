@@ -235,6 +235,10 @@ impl PaneHost for TabHost {
         ));
     }
 
+    fn see_all_background(&self, _pane: u64, host: &str) {
+        self.go(bt_shell_common::palette::Go::SeeAll(host.to_owned()));
+    }
+
     fn end_background(&self, account: &str, terminal: &str) {
         if let Ok(terminal) = bt_shell_common::kablo::SessionId::new(terminal) {
             crate::hold_service::end_terminal(account, &terminal);

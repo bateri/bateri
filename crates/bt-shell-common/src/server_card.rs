@@ -38,6 +38,9 @@ pub const OPEN_ALL: &str = "Open All in New Tab";
 pub const OPEN: &str = "Open in New Tab";
 /// The row menu's one item.
 pub const END: &str = "End Terminal";
+/// The button under the list (and the last row of the server's page in ⌘P) that opens the big
+/// view on the server: the host follows it ([`see_all_text`]).
+pub const SEE_ALL: &str = "See All";
 /// The heading over the terminals another Mac has open; the number follows it
 /// ([`others_heading`]).
 pub const OTHERS_HEADING: &str = "On other Macs";
@@ -114,31 +117,40 @@ pub struct Listing {
     pub more: usize,
 }
 
+/// The row of one terminal at `now` (seconds since the Unix epoch); `local` says when a second of
+/// the server's clock is, here. The card's rows and the big view's tiles are the same entry.
+pub fn entry_of(background: &Background, now: u64, local: &dyn Fn(u64) -> Local) -> Entry {
+    let facts = BackgroundFacts::of(background, now);
+    let activity = background.activity(now);
+    Entry {
+        account: facts.account,
+        terminal: facts.terminal,
+        title: facts.title,
+        place: facts.place,
+        activity: activity_text(activity, now, local),
+        running: matches!(activity, Activity::Running(_)),
+        by: Some(background.elsewhere().join(", ")).filter(|by| !by.is_empty()),
+    }
+}
+
 /// The list of `backgrounds` (one account's, the last to write first) at `now` (seconds since the
 /// Unix epoch); `local` says when a second of the server's clock is, here.
 pub fn listing(backgrounds: &[Background], now: u64, local: &dyn Fn(u64) -> Local) -> Listing {
     let entries: Vec<Entry> = backgrounds
         .iter()
         .take(MOST_ROWS)
-        .map(|background| {
-            let facts = BackgroundFacts::of(background, now);
-            let activity = background.activity(now);
-            Entry {
-                account: facts.account,
-                terminal: facts.terminal,
-                title: facts.title,
-                place: facts.place,
-                activity: activity_text(activity, now, local),
-                running: matches!(activity, Activity::Running(_)),
-                by: Some(background.elsewhere().join(", ")).filter(|by| !by.is_empty()),
-            }
-        })
+        .map(|background| entry_of(background, now, local))
         .collect();
     Listing {
         total: backgrounds.len(),
         more: backgrounds.len().saturating_sub(entries.len()),
         entries,
     }
+}
+
+/// `See All on rasp`.
+pub fn see_all_text(host: &str) -> String {
+    format!("{SEE_ALL} on {host}")
 }
 
 /// `Running in the background · 3`.

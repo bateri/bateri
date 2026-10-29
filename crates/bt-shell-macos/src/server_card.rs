@@ -84,6 +84,8 @@ pub(crate) enum Item {
     OpenAll,
     Terminal(usize),
     Move(usize),
+    /// The button under the list that opens the big view on the server.
+    SeeAll,
 }
 
 /// A part of the card as it is named: the terminal's own name (and the list it is on), not its
@@ -93,6 +95,7 @@ enum Picked {
     OpenAll,
     Terminal(String),
     Move(String),
+    SeeAll,
 }
 
 impl Picked {
@@ -107,6 +110,7 @@ impl Picked {
         };
         match item {
             Item::OpenAll => Picked::OpenAll,
+            Item::SeeAll => Picked::SeeAll,
             Item::Terminal(index) => Picked::Terminal(name(&model.listing, index)),
             Item::Move(index) => Picked::Move(name(&model.others, index)),
         }
@@ -122,6 +126,7 @@ impl Picked {
         };
         match self {
             Picked::OpenAll => Some(Item::OpenAll),
+            Picked::SeeAll => Some(Item::SeeAll),
             Picked::Terminal(terminal) => find(&model.listing, terminal).map(Item::Terminal),
             Picked::Move(terminal) => find(&model.others, terminal).map(Item::Move),
         }
@@ -174,6 +179,8 @@ pub(crate) struct ServerCard {
     notes: Vec<String>,
     /// The heading's *Open All in New Tab*.
     open_all: Option<Retained<CardRow>>,
+    /// The button under the list: *See All on rasp*.
+    see_all: Option<Retained<CardRow>>,
     /// The selected part: the pointer's or the keys'.
     selected: Option<usize>,
 }
@@ -426,6 +433,7 @@ impl TerminalPane {
             note: None,
             notes: Vec::new(),
             open_all: None,
+            see_all: None,
             selected: None,
         }));
         // The list is what the servers last said; they are asked again, and the answer comes.
@@ -623,6 +631,7 @@ impl TerminalPane {
         open.note = None;
         open.notes.clear();
         open.open_all = None;
+        open.see_all = None;
         let secondary = NSColor::secondaryLabelColor();
         let inner = WIDTH - 2.0 * PAD;
         let mut top = PAD;
@@ -699,6 +708,19 @@ impl TerminalPane {
             );
             place(canvas, &more, PAD, top + 2.0, inner, LINE);
             top += LINE + 2.0;
+        }
+        // The big view on this server: the list is only its first rows.
+        if model.listing.total > 0 {
+            let text = server_card::see_all_text(&model.host);
+            let frame = rect(PAD - 6.0, top + 2.0, inner, LINE + 6.0);
+            let row = CardRow::new(mtm, self, Item::SeeAll, frame);
+            let label_text = label(mtm, &text, 11.0, &secondary);
+            place(&row, &label_text, 6.0, 3.0, inner - 12.0, LINE);
+            canvas.addSubview(&row);
+            row.setAccessibilityLabel(Some(&NSString::from_str(&text)));
+            open.items.push(Item::SeeAll);
+            open.see_all = Some(row);
+            top += LINE + 8.0;
         }
 
         if model.others.total > 0 {
@@ -790,6 +812,10 @@ impl TerminalPane {
             Item::OpenAll => {
                 self.close_server_card();
                 self.host().open_all_background(self.id(), &model.host);
+            }
+            Item::SeeAll => {
+                self.close_server_card();
+                self.host().see_all_background(self.id(), &model.host);
             }
             Item::Terminal(index) => {
                 let Some(entry) = model.listing.entries.get(index) else {
@@ -942,6 +968,9 @@ impl ServerCard {
         if let Some(row) = &self.open_all {
             row.set_selected(selected == Some(Item::OpenAll));
         }
+        if let Some(row) = &self.see_all {
+            row.set_selected(selected == Some(Item::SeeAll));
+        }
         for (index, row) in self.rows.iter().enumerate() {
             row.draw(selected == Some(Item::Terminal(index)));
         }
@@ -1055,7 +1084,7 @@ fn current_event_time(mtm: MainThreadMarker) -> Option<f64> {
 }
 
 /// A second of the server's clock as this Mac's calendar reads it.
-fn local(seconds: u64) -> Local {
+pub(crate) fn local(seconds: u64) -> Local {
     let Ok(time) = libc::time_t::try_from(seconds) else {
         return Local::civil(1970, 1, 1, 0, 0);
     };

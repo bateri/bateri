@@ -191,6 +191,21 @@ fn a_server_is_found_by_the_name_without_the_user_in_front() {
 }
 
 #[test]
+fn the_last_row_of_a_servers_page_is_the_big_view_on_it_and_only_enter_chooses_it() {
+    let targets = targets(vec![server(two_waiting(), Vec::new())]);
+    let rows = server_rows("rasp", &targets);
+    let last = rows.last().expect("a row");
+    assert_eq!(last.id, "act.seeAll.rasp");
+    assert_eq!(last.title, "See All on rasp");
+    assert_eq!(
+        go(&last.id, Modifier::None),
+        Some(Go::SeeAll("rasp".to_owned()))
+    );
+    assert_eq!(go(&last.id, Modifier::Option), None);
+    assert_eq!(go(&last.id, Modifier::Command), None);
+}
+
+#[test]
 fn the_page_of_a_server_lists_open_all_the_background_the_panes_and_the_new_tab() {
     let panes = vec![
         pane(7, 70, "~/app", "web", Some("⌘2")),
@@ -210,6 +225,7 @@ fn the_page_of_a_server_lists_open_all_the_background_the_panes_and_the_new_tab(
             "pane.7.71",
             "pane.9.90",
             "host.rasp",
+            "act.seeAll.rasp",
         ]
     );
     assert_eq!(
@@ -242,7 +258,7 @@ fn a_server_with_nothing_in_the_background_has_no_open_all_and_no_empty_heading(
     )]);
     let list = server_list("rasp", &targets, "");
     let listed: Vec<&str> = list.hits.iter().map(|hit| hit.row.id.as_str()).collect();
-    assert_eq!(listed, ["pane.7.70", "host.rasp"]);
+    assert_eq!(listed, ["pane.7.70", "host.rasp", "act.seeAll.rasp"]);
     assert_eq!(list.headings[0], (0, PANES_HEADING.to_owned()));
     // A server the palette was not told of still offers the new tab.
     let unknown = server_list("elsewhere", &targets, "");
@@ -355,7 +371,8 @@ fn the_terminals_on_other_macs_are_on_the_servers_page_and_in_no_search_from_the
             "bg.b-1@u@rasp:22",
             "pane.7.70",
             "mv.b-5@u@rasp:22",
-            "host.rasp"
+            "host.rasp",
+            "act.seeAll.rasp"
         ]
     );
     // A query on the page keeps it when it finds it, by the Mac's name too.
