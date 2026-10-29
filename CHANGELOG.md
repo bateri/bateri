@@ -35,6 +35,9 @@ of every installed copy. A version without a section is not released.
 - **The caret of an editor in a native view glows as far as your terminal's cursor does.** The
   glow around the caret of the editor a page puts in its view now reaches as far as the halo of
   your cursor, so the two look alike.
+- **A block caret of an editor in a native view shows the letter under it as it moves.** When the
+  caret is a block that glides from place to place, the letters it goes over and the one it comes
+  to show on it from the first frame, as in your terminal, and not only when it stops.
 - **A native view goes on working when you do nothing.** A page can ask to be woken after a
   while, and set timers on it: a long file is coloured to its end without a key pressed, a save
   waits for the typing to stop, a clock ticks. bateri wakes it when it asks and no more often than
