@@ -19,9 +19,13 @@
 //! textures when the view closes ([`TerminalWindow::release_tab_shots`]). Only the tabs in the
 //! viewport are asked.
 
+mod motion;
+
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::ptr::NonNull;
+use std::rc::Rc;
+use std::time::Duration;
 
 use block2::RcBlock;
 use bt_core::Theme;
@@ -31,7 +35,7 @@ use bt_shell_common::overview::{
 };
 use bt_shell_common::server_card;
 use bt_shell_common::split::Rect;
-use bt_shell_common::tabs;
+use bt_shell_common::tabs::{self, CardPane};
 use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject, Sel};
@@ -39,19 +43,23 @@ use objc2::{
     AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send, sel,
 };
 use objc2_app_kit::{
-    NSAlert, NSAlertFirstButtonReturn, NSAnimatablePropertyContainer, NSAnimationContext,
-    NSApplication, NSAttributedStringNSStringDrawing, NSAutoresizingMaskOptions, NSBezierPath,
+    NSAffineTransformNSAppKitAdditions, NSAlert, NSAlertFirstButtonReturn,
+    NSAnimatablePropertyContainer, NSAnimationContext, NSApplication,
+    NSAttributedStringNSStringDrawing, NSAutoresizingMaskOptions, NSBezierPath, NSColor,
     NSCompositingOperation, NSControlTextEditingDelegate, NSEvent, NSEventModifierFlags,
-    NSFocusRingType, NSFont, NSFontWeightMedium, NSFontWeightSemibold, NSGraphicsContext, NSImage,
-    NSMenu, NSMenuItem, NSModalResponse, NSTextField, NSTextFieldDelegate, NSTrackingArea,
-    NSTrackingAreaOptions, NSView, NSWindowOrderingMode,
+    NSFocusRingType, NSFont, NSFontWeightMedium, NSFontWeightSemibold, NSGradient,
+    NSGraphicsContext, NSImage, NSMenu, NSMenuItem, NSModalResponse, NSTextField,
+    NSTextFieldDelegate, NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindowOrderingMode,
 };
+use objc2_core_graphics::CGContext;
 use objc2_foundation::{
-    NSNotification, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSValue, ns_string,
+    NSAffineTransform, NSArray, NSNotification, NSObjectProtocol, NSPoint, NSRect, NSRunLoop,
+    NSRunLoopCommonModes, NSSize, NSString, NSValue, ns_string,
 };
 use objc2_quartz_core::{
-    CABasicAnimation, CALayer, CAMediaTiming, CAMediaTimingFunction, CATransform3D,
-    NSValueCATransform3DAdditions, kCAFillModeForwards, kCAMediaTimingFunctionEaseIn,
+    CABasicAnimation, CACurrentMediaTime, CADisplayLink, CALayer, CAMediaTiming,
+    CAMediaTimingFunction, CATransform3D, NSValueCATransform3DAdditions, kCAFillModeForwards,
+    kCAMediaTimingFunctionEaseIn,
 };
 
 use crate::app;
@@ -67,6 +75,11 @@ use crate::tab_bar::{
     Ease, PALETTE_ICON_SIDE, Tint, palette_icon, play, play_look, rounded, selected_row,
 };
 use crate::window::{RootView, TerminalWindow};
+
+use self::motion::{
+    ARRIVE_SCALE, FILTER_SECS, Frame, From, Heading, Id, LEAVE_SCALE, Motion, Placed, SELECT_SECS,
+    Was, arriving, ease, leaving, lerp, lerp_rect, scaled,
+};
 
 /// The air above the first row, under the title row, and below the last one.
 const TOP_AIR: f64 = 16.0;
@@ -91,6 +104,8 @@ const KEYS_MAX: f64 = 340.0;
 const RADIUS: f64 = 8.0;
 const RING: f64 = 2.5;
 const RING_AIR: f64 = 4.0;
+/// How long the window's size rests before every picture is taken again at it.
+const SETTLE: Duration = Duration::from_millis(150);
 /// How far a wheel notch scrolls when the device gives lines, not points.
 const LINE_SCROLL: f64 = 12.0;
 /// The air kept round the selected cell when an arrow scrolls it into view.
@@ -127,6 +142,10 @@ const SPARK_GAP: f64 = 2.0;
 /// The air each side of a section heading's *Open All in New Tab*.
 const BUTTON_PAD: f64 = 8.0;
 const HINT: &str = "⇥ next machine   ⇧⇥ previous";
+/// The key that does what a selected cell's verb says, and the least of a name row its name keeps
+/// beside the verb (a row narrower than that shows the name alone).
+const RETURN_KEY: &str = "↵";
+const NAME_LEAST: f64 = 48.0;
 
 pub(crate) struct OverviewIvars {
     /// The window the view is in: where closing, going to a tab and the wake find it again.
@@ -169,6 +188,12 @@ pub(crate) struct OverviewIvars {
     drop: Cell<Option<(u64, u64)>>,
     /// The terminal the context menu is for.
     menu_for: RefCell<Option<rules::Key>>,
+    /// The change on its way while one is, and the display link that draws it frame by frame
+    /// ([`motion`]).
+    motion: RefCell<Option<Motion>>,
+    link: RefCell<Option<Retained<CADisplayLink>>>,
+    /// The pictures' outline ([`edge_of`]).
+    edge: Cell<Tint>,
 }
 
 /// A press on a terminal's tile: a release without a drag opens the terminal, a drag carries it
@@ -232,6 +257,12 @@ define_class!(
             self.paint();
         }
 
+        /// A frame of the display while something moves: the next picture of it, or its end.
+        #[unsafe(method(motionTick:))]
+        fn motion_tick(&self, _link: &CADisplayLink) {
+            self.ticked();
+        }
+
         #[unsafe(method(updateTrackingAreas))]
         fn update_tracking_areas(&self) {
             // SAFETY: `NSView`'s argumentless method returning nothing.
@@ -254,12 +285,13 @@ define_class!(
             if self.ivars().closing.get() {
                 return;
             }
+            let from = self.capture(false);
             let selected = self.ivars().state.borrow().selected();
             if let Some(selected) = selected {
                 self.ivars().state.borrow_mut().select(selected);
             }
             self.ivars().state.borrow_mut().glance(None);
-            self.setNeedsDisplay(true);
+            self.start(from, SELECT_SECS);
         }
 
         /// A press on a tab is ↵ on it; on a terminal in the background it is ↵ once the button
@@ -406,6 +438,20 @@ fn colours(theme: &Theme) -> Look {
     Look::of(theme)
 }
 
+/// The hairline round a picture, so a screen as light or as dark as the ground still has an
+/// edge: white in the dark, black in the light, faint — never a tint of the ground, which would
+/// read as dirt on the edge.
+fn edge_of(theme: &Theme) -> Tint {
+    Tint::of(
+        if theme.is_dark() {
+            0xff_ff_ff
+        } else {
+            0x00_00_00
+        },
+        0.1,
+    )
+}
+
 impl OverviewView {
     fn new(mtm: MainThreadMarker, window: u64, state: Overview, theme: &Theme) -> Retained<Self> {
         let field = NSTextField::new(mtm);
@@ -439,6 +485,9 @@ impl OverviewView {
             press: RefCell::new(None),
             drop: Cell::new(None),
             menu_for: RefCell::new(None),
+            motion: RefCell::new(None),
+            link: RefCell::new(None),
+            edge: Cell::new(edge_of(theme)),
         });
         // SAFETY: `initWithFrame:` is NSView's designated initializer and the ivars are set.
         let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] };
@@ -531,13 +580,15 @@ impl OverviewView {
             self.glance_at(at.y);
             return false;
         }
+        // The ring glides to the cell the pointer came to.
+        let from = self.capture(false);
         let layout = self.layout();
         let mut state = iv.state.borrow_mut();
         let glanced = state.glance(None);
         let Some(index) = layout.tab_at(x, y) else {
             drop(state);
             if glanced {
-                self.setNeedsDisplay(true);
+                self.start(from, SELECT_SECS);
             }
             return false;
         };
@@ -546,7 +597,7 @@ impl OverviewView {
             state.point_cell(index);
             if glanced || before != state.selected_cell() {
                 drop(state);
-                self.setNeedsDisplay(true);
+                self.start(from, SELECT_SECS);
             }
             return true;
         }
@@ -560,7 +611,7 @@ impl OverviewView {
         state.point(id, pane);
         if glanced || before != (state.selected(), state.pointed()) {
             drop(state);
-            self.setNeedsDisplay(true);
+            self.start(from, SELECT_SECS);
         }
         true
     }
@@ -631,28 +682,32 @@ impl OverviewView {
     fn queried(&self) {
         let iv = self.ivars();
         let text = iv.field.stringValue().to_string();
+        let from = self.capture(true);
         iv.state.borrow_mut().set_query(&text);
         iv.scroll.set(0.0);
         self.shoot();
-        self.setNeedsDisplay(true);
+        self.start(from, FILTER_SECS);
     }
 
     /// ⇥ (`forward`) and ⇧⇥: the next machine of the left column.
     fn cycle(&self, forward: bool) {
+        let from = self.capture(true);
         self.ivars().state.borrow_mut().cycle(forward);
-        self.machine_changed();
+        self.machine_changed(from);
     }
 
     /// A click on a machine's row selects it.
     fn choose_machine(&self, machine: Machine) {
+        let from = self.capture(true);
         if self.ivars().state.borrow_mut().set_machine(machine) {
-            self.machine_changed();
+            self.machine_changed(from);
         }
     }
 
     /// The grid is of another machine: it starts from the top, with its own pictures, and the
-    /// server's load is asked for if it is one that has any.
-    fn machine_changed(&self) {
+    /// server's load is asked for if it is one that has any. What was on screen (`from`) moves
+    /// to it: the tiles that stay slide, the others go and come.
+    fn machine_changed(&self, from: Option<From>) {
         let iv = self.ivars();
         iv.scroll.set(0.0);
         let layout = self.layout();
@@ -661,7 +716,7 @@ impl OverviewView {
         self.sync_view();
         self.touch();
         self.shoot();
-        self.setNeedsDisplay(true);
+        self.start(from, FILTER_SECS);
     }
 
     /// The view is being used: the server it shows is sampled for another stretch.
@@ -751,8 +806,9 @@ impl OverviewView {
             .into_iter()
             .find(|(_, rect)| y >= rect.origin.y && y < rect.origin.y + rect.size.height)
             .map(|(row, _)| row.machine);
+        let from = self.capture(false);
         if self.ivars().state.borrow_mut().glance(machine) {
-            self.setNeedsDisplay(true);
+            self.start(from, SELECT_SECS);
         }
     }
 
@@ -768,14 +824,17 @@ impl OverviewView {
         }
     }
 
+    /// An arrow: the ring glides to the next cell, and the grid with it when that one was out
+    /// of sight.
     fn step(&self, direction: Direction) {
         let layout = self.layout();
+        let from = self.capture(false);
         let moved = self.ivars().state.borrow_mut().step(&layout, direction);
         if !moved {
             return;
         }
         self.reveal(&layout);
-        self.setNeedsDisplay(true);
+        self.start(from, SELECT_SECS);
     }
 
     /// Scrolls the selected cell into view.
@@ -1027,6 +1086,7 @@ impl OverviewView {
         let theme = window.bar().theme();
         iv.look.set(colours(&theme));
         iv.row_look.set(selected_row(&theme));
+        iv.edge.set(edge_of(&theme));
         let (tabs, labels) = window.overview_facts();
         iv.icons.replace(
             labels
@@ -1224,11 +1284,16 @@ impl OverviewView {
 
     /// Sets the one delayed wake that takes the pictures afresh ([`tabs::MAP_REFRESH`]).
     fn schedule(&self) {
+        self.schedule_in(tabs::MAP_REFRESH);
+    }
+
+    /// Sets the one delayed wake `delay` from now, in place of the one that was set.
+    fn schedule_in(&self, delay: Duration) {
         let iv = self.ivars();
         let generation = iv.generation.get().wrapping_add(1);
         iv.generation.set(generation);
         let window = iv.window;
-        arrange::after(tabs::MAP_REFRESH, move |app| {
+        arrange::after(delay, move |app| {
             if let Some(window) = app.window(window) {
                 window.overview_tick(generation);
             }
@@ -1263,17 +1328,25 @@ impl OverviewView {
         self.schedule();
     }
 
-    /// The window's size changed: the view takes the root's, and the grid with it.
+    /// The window's size changed: the view takes the root's, and the grid with it; the selected
+    /// cell stays in sight. A motion's places were the old size's: it ends.
+    ///
+    /// The pictures taken now may be of the panes' old size — a pane lays itself out after the
+    /// window, and a program's view hands back the picture it had while it takes the next — so
+    /// once the size has rested for [`SETTLE`] the wake takes them all again.
     pub(crate) fn refit(&self, frame: NSRect, aspect: f64, top: f64) {
         let iv = self.ivars();
+        self.halt();
         self.setFrame(frame);
         iv.aspect.set(aspect);
         iv.top.set(top);
         let layout = self.layout();
         iv.scroll
             .set(iv.scroll.get().clamp(0.0, self.max_scroll(&layout)));
+        self.reveal(&layout);
         self.place_field();
         self.shoot();
+        self.schedule_in(SETTLE);
         self.setNeedsDisplay(true);
     }
 
@@ -1281,6 +1354,7 @@ impl OverviewView {
     pub(crate) fn set_theme(&self, theme: &Theme) {
         self.ivars().look.set(colours(theme));
         self.ivars().row_look.set(selected_row(theme));
+        self.ivars().edge.set(edge_of(theme));
         self.ivars()
             .field
             .setTextColor(Some(&colours(theme).text.color()));
@@ -1296,55 +1370,504 @@ impl OverviewView {
         let bounds = self.bounds();
         look.ground.color().setFill();
         NSBezierPath::fillRect(bounds);
-        let layout = self.layout();
+        let scene = self.scene(CACurrentMediaTime());
         let state = iv.state.borrow();
+        let layout = self.layout();
         let origin = self.origin_y();
         // What scrolls goes under the title row, not over the window's buttons.
-        NSGraphicsContext::saveGraphicsState_class();
-        NSBezierPath::clipRect(NSRect::new(
+        let shown = NSRect::new(
             NSPoint::new(0.0, iv.top.get()),
             NSSize::new(
                 bounds.size.width,
                 (bounds.size.height - iv.top.get() - PLATE_AREA).max(0.0),
             ),
-        ));
-        let dim_font = NSFont::systemFontOfSize_weight(SMALL_SIZE, unsafe { NSFontWeightSemibold });
-        let dim = attributes(&dim_font, look.dim);
-        let button = attributes(&dim_font, look.accent);
-        for (at, row) in layout.rows.iter().enumerate() {
-            let (Row::Heading { text, .. } | Row::Section { text, .. }) = row else {
+        );
+        NSGraphicsContext::saveGraphicsState_class();
+        NSBezierPath::clipRect(shown);
+        for heading in &scene.headings {
+            self.paint_heading(heading);
+        }
+        for cell in &scene.cells {
+            let rect = cell.placed.rect;
+            // The name row and the line under it hang below the picture.
+            let bottom = rect.origin.y + rect.size.height + rules::NAME_ROW + NOTE_HEIGHT;
+            if bottom > shown.origin.y && rect.origin.y < shown.origin.y + shown.size.height {
+                self.paint_shown(&state, &layout, origin, cell, &scene.dims);
+            }
+        }
+        if let Some((rect, seen)) = scene.ring {
+            self.paint_ring(rect, seen);
+        }
+        NSGraphicsContext::restoreGraphicsState_class();
+        // The column is over the grid's left, which has the room for it.
+        self.paint_column(&scene);
+        self.paint_plate(&state);
+    }
+
+    /// What the view shows at `now`: the model's state as it lays it out, and — while a change
+    /// is on its way — everything part way from where it was on screen ([`motion`]).
+    fn scene(&self, now: f64) -> Scene {
+        let iv = self.ivars();
+        let state = iv.state.borrow();
+        let layout = self.layout();
+        let origin = self.origin_y();
+        let motion = iv.motion.borrow();
+        let from = motion.as_ref().map(|motion| &motion.from);
+        let t = motion.as_ref().map_or(1.0, |motion| motion.at(now));
+        let k = ease(t);
+        let selected = state.selected_cell();
+        // The state's cells, each from where it was, or coming.
+        let mut live = Vec::new();
+        let mut target = None;
+        for index in 0..state.cells() {
+            let (Some(id), Some(picture)) = (cell_id(&state, index), layout.picture(index)) else {
                 continue;
+            };
+            let to = Placed {
+                rect: on_view(picture, origin),
+                alpha: 1.0,
+                chosen: if selected == Some(index) { 1.0 } else { 0.0 },
+            };
+            if selected == Some(index) {
+                target = Some(to.rect);
+            }
+            let placed = match from.map(|from| from.cells.get(&id)) {
+                None => to,
+                Some(Some(was)) => Placed {
+                    rect: lerp_rect(was.placed.rect, to.rect, k),
+                    alpha: lerp(was.placed.alpha, 1.0, k),
+                    chosen: lerp(was.placed.chosen, to.chosen, k),
+                },
+                Some(None) => {
+                    let seen = arriving(t);
+                    Placed {
+                        rect: scaled(to.rect, lerp(ARRIVE_SCALE, 1.0, seen)),
+                        alpha: seen,
+                        ..to
+                    }
+                }
+            };
+            live.push(Shown {
+                id,
+                index,
+                frame: None,
+                placed,
+            });
+        }
+        // The ones that went, fading and shrinking a little where they were, under the rest.
+        let mut cells = Vec::new();
+        if let Some(from) = from {
+            let here: HashSet<&Id> = live.iter().map(|shown| &shown.id).collect();
+            for (id, was) in &from.cells {
+                let Some((frame, index)) = was.ghost.as_ref().filter(|_| !here.contains(id)) else {
+                    continue;
+                };
+                let alpha = was.placed.alpha * leaving(t);
+                if alpha > 0.0 {
+                    cells.push(Shown {
+                        id: id.clone(),
+                        index: *index,
+                        frame: Some(Rc::clone(frame)),
+                        placed: Placed {
+                            rect: scaled(was.placed.rect, lerp(1.0, LEAVE_SCALE, k)),
+                            alpha,
+                            chosen: was.placed.chosen,
+                        },
+                    });
+                }
+            }
+        }
+        cells.extend(live);
+        // The ring: gliding from the picture it was round to where the selected one is going —
+        // on the same curve as the picture, so a picture that moves keeps its ring on it.
+        let ring = match (from.map(|from| from.ring), target) {
+            (None, Some(to)) => Some((to, 1.0)),
+            (Some(Some((was, seen))), Some(to)) => {
+                Some((lerp_rect(was, to, k), lerp(seen, 1.0, k)))
+            }
+            (Some(None), Some(to)) => Some((to, k)),
+            (Some(Some((was, seen))), None) => Some((was, seen * (1.0 - k))),
+            (_, None) => None,
+        }
+        .filter(|(_, seen)| *seen > 0.0);
+        // Each pane's dimness, eased from what it was.
+        let mut dims = HashMap::new();
+        for shown in cells.iter().filter(|shown| shown.frame.is_none()) {
+            let Some(Tile::Tab(tab)) = state.cell(shown.index) else {
+                continue;
+            };
+            for pane in &tab.panes {
+                let to = if state.dim(tab.id, pane) { 1.0 } else { 0.0 };
+                let was = from
+                    .and_then(|from| from.dims.get(&(tab.id, pane.id)))
+                    .copied()
+                    .unwrap_or(to);
+                dims.insert((tab.id, pane.id), lerp(was, to, k));
+            }
+        }
+        // The headings: one that stays moves with its tiles, one that goes fades where it was.
+        let mut headings = Vec::new();
+        for (at, row) in layout.rows.iter().enumerate() {
+            let (text, button) = match row {
+                Row::Heading { text, .. } => (text, false),
+                // The group of another computer's terminals is not opened with the rest.
+                Row::Section { text, other, .. } => (text, !*other),
+                Row::Tiles(_) => continue,
             };
             let Some(rect) = layout.heading(at) else {
                 continue;
             };
-            draw_text(
-                text,
-                rect.x + SIDE + 2.0,
-                rect.y + origin + rect.height * 0.35,
-                rect.height * 0.65,
-                &dim,
-            );
-            // A section's heading carries the button that opens all of its terminals at once,
-            // but the group of another computer's terminals is not opened with the rest.
-            if matches!(row, Row::Section { other: false, .. }) {
-                draw_text_right(
-                    rules::OPEN_ALL,
-                    rect.x + SIDE + rect.width - BUTTON_PAD,
-                    rect.y + origin + rect.height * 0.35,
-                    rect.height * 0.65,
-                    &button,
-                );
+            let to = on_view(rect, origin);
+            let was = from.map(|from| from.headings.iter().find(|was| was.text == *text));
+            let (rect, alpha) = match was {
+                None => (to, 1.0),
+                Some(Some(was)) => (lerp_rect(was.rect, to, k), lerp(was.alpha, 1.0, k)),
+                Some(None) => (to, arriving(t)),
+            };
+            headings.push(Heading {
+                text: text.clone(),
+                button,
+                rect,
+                alpha,
+            });
+        }
+        if let Some(from) = from {
+            for was in &from.headings {
+                let alpha = was.alpha * leaving(t);
+                if alpha > 0.0 && !headings.iter().any(|heading| heading.text == was.text) {
+                    headings.push(Heading {
+                        alpha,
+                        ..was.clone()
+                    });
+                }
             }
         }
-        let selected = state.selected_cell();
-        for index in layout.visible(iv.scroll.get(), self.viewport()) {
-            self.paint_cell(&state, &layout, index, origin, selected == Some(index));
+        // The column: the rows slide when a server's load comes or goes under one, the selected
+        // row's fill slides to its machine, the load fades in under a newly selected server.
+        let machine = state.machine().clone();
+        let mut rows = Vec::new();
+        let mut fill_to = None;
+        for (row, rect) in self.column() {
+            let chosen = if row.machine == machine { 1.0 } else { 0.0 };
+            let (rect, chosen) = match from.and_then(|from| from.rows.get(&row.machine)) {
+                Some(&(was, was_chosen)) => (lerp_rect(was, rect, k), lerp(was_chosen, chosen, k)),
+                None => (rect, chosen),
+            };
+            if row.machine == machine {
+                fill_to = Some(rect);
+            }
+            rows.push((row, rect, chosen));
+        }
+        let fill = match (from.and_then(|from| from.fill), fill_to) {
+            (Some(was), Some(to)) => Some(lerp_rect(was, to, k)),
+            (_, to) => to,
+        };
+        let load = match from {
+            Some(from) if from.machine != machine => arriving(t),
+            Some(from) => lerp(from.load, 1.0, k),
+            None => 1.0,
+        };
+        Scene {
+            cells,
+            ring,
+            dims,
+            headings,
+            rows,
+            fill,
+            load,
+        }
+    }
+
+    // ─── Motion ──────────────────────────────────────────────────────────
+
+    /// What is on screen now, for a change about to come to move from; `None` when nothing is to
+    /// move (Reduce Motion, the view on its way out). With `leaving` the change may take cells
+    /// away: they keep the state and the pictures they are drawn from while they go.
+    fn capture(&self, leaving: bool) -> Option<From> {
+        let iv = self.ivars();
+        if iv.closing.get() || reduced(self.mtm()) {
+            return None;
+        }
+        let scene = self.scene(CACurrentMediaTime());
+        let frame = leaving.then(|| {
+            Rc::new(Frame {
+                state: iv.state.borrow().clone(),
+                layout: self.layout(),
+                shots: iv.shots.borrow().clone(),
+                away_shots: iv.away_shots.borrow().clone(),
+            })
+        });
+        let cells = scene
+            .cells
+            .into_iter()
+            .map(|shown| {
+                // One already going keeps the state it goes from.
+                let ghost = shown
+                    .frame
+                    .or_else(|| frame.clone())
+                    .map(|frame| (frame, shown.index));
+                (
+                    shown.id,
+                    Was {
+                        placed: shown.placed,
+                        ghost,
+                    },
+                )
+            })
+            .collect();
+        Some(From {
+            cells,
+            dims: scene.dims,
+            ring: scene.ring,
+            headings: scene.headings,
+            rows: scene
+                .rows
+                .into_iter()
+                .map(|(row, rect, chosen)| (row.machine, (rect, chosen)))
+                .collect(),
+            fill: scene.fill,
+            machine: iv.state.borrow().machine().clone(),
+            load: scene.load,
+        })
+    }
+
+    /// What was on screen (`from`) moves over `secs` to what the state shows now; without it, the
+    /// state is simply drawn.
+    fn start(&self, from: Option<From>, secs: f64) {
+        if let Some(from) = from {
+            let iv = self.ivars();
+            iv.motion
+                .replace(Some(Motion::new(from, CACurrentMediaTime(), secs)));
+            if iv.link.borrow().is_none() {
+                // SAFETY: the view implements `motionTick:` with the `(CADisplayLink)` signature
+                // the link calls.
+                let link = unsafe { self.displayLinkWithTarget_selector(self, sel!(motionTick:)) };
+                // SAFETY: added to the main run loop from the main thread, in the common modes:
+                // the tracking mode of a press or a live resize would silence the default one.
+                unsafe {
+                    link.addToRunLoop_forMode(&NSRunLoop::mainRunLoop(), NSRunLoopCommonModes)
+                };
+                iv.link.replace(Some(link));
+            }
+        }
+        self.setNeedsDisplay(true);
+    }
+
+    /// The display ticked: the motion is drawn on, or — at its end — let go with its link.
+    fn ticked(&self) {
+        let over = self
+            .ivars()
+            .motion
+            .borrow()
+            .as_ref()
+            .is_none_or(|motion| motion.at(CACurrentMediaTime()) >= 1.0);
+        if over {
+            self.halt();
+        }
+        self.setNeedsDisplay(true);
+    }
+
+    /// Nothing moves any more: the motion goes, and the link, which holds the view while it runs.
+    fn halt(&self) {
+        let iv = self.ivars();
+        iv.motion.replace(None);
+        if let Some(link) = iv.link.take() {
+            link.invalidate();
+        }
+    }
+
+    // ─── Drawing the parts ───────────────────────────────────────────────
+
+    /// A group's or a section's heading where the scene has it.
+    fn paint_heading(&self, heading: &Heading) {
+        let look = self.ivars().look.get();
+        let font = NSFont::systemFontOfSize_weight(SMALL_SIZE, unsafe { NSFontWeightSemibold });
+        let rect = heading.rect;
+        let (top, height) = (
+            rect.origin.y + rect.size.height * 0.35,
+            rect.size.height * 0.65,
+        );
+        draw_text(
+            &heading.text,
+            rect.origin.x + 2.0,
+            top,
+            height,
+            &attributes(&font, faded(look.dim, heading.alpha)),
+        );
+        // A section's heading carries the button that opens all of its terminals at once.
+        if heading.button {
+            draw_text_right(
+                rules::OPEN_ALL,
+                rect.origin.x + rect.size.width - BUTTON_PAD,
+                top,
+                height,
+                &attributes(&font, faded(look.accent, heading.alpha)),
+            );
+        }
+    }
+
+    /// One cell where the scene has it: drawn as its state lays it out, then moved and scaled onto
+    /// its place and seen as much as the scene says. A cell that is leaving is drawn from the
+    /// state it left ([`Frame`]).
+    fn paint_shown(
+        &self,
+        state: &Overview,
+        layout: &Layout,
+        origin: f64,
+        shown: &Shown,
+        dims: &HashMap<(u64, u64), f64>,
+    ) {
+        let iv = self.ivars();
+        let live = (iv.shots.borrow(), iv.away_shots.borrow());
+        let (state, layout, origin, shots, away_shots) = match &shown.frame {
+            Some(frame) => (
+                &frame.state,
+                &frame.layout,
+                0.0,
+                &frame.shots,
+                &frame.away_shots,
+            ),
+            None => (state, layout, origin, &*live.0, &*live.1),
+        };
+        let (Some(picture), Some(name_row)) =
+            (layout.picture(shown.index), layout.name_row(shown.index))
+        else {
+            return;
+        };
+        let base = on_view(picture, origin);
+        let placed = shown.placed;
+        NSGraphicsContext::saveGraphicsState_class();
+        if placed.rect != base {
+            let onto = NSAffineTransform::transform();
+            onto.translateXBy_yBy(placed.rect.origin.x, placed.rect.origin.y);
+            onto.scaleXBy_yBy(
+                placed.rect.size.width / base.size.width.max(1.0),
+                placed.rect.size.height / base.size.height.max(1.0),
+            );
+            onto.translateXBy_yBy(-base.origin.x, -base.origin.y);
+            onto.concat();
+        }
+        // A cell part seen is drawn whole into a layer the size of the cell, which is laid on
+        // at its share: the picture and the name do not show through each other.
+        let layer = (placed.alpha < 1.0)
+            .then(NSGraphicsContext::currentContext)
+            .flatten()
+            .map(|context| context.CGContext());
+        if let Some(context) = &layer {
+            NSBezierPath::clipRect(NSRect::new(
+                NSPoint::new(base.origin.x - RING_AIR, base.origin.y - RING_AIR),
+                NSSize::new(
+                    base.size.width + 2.0 * RING_AIR,
+                    base.size.height + name_row.height + NOTE_HEIGHT + 2.0 * RING_AIR,
+                ),
+            ));
+            CGContext::set_alpha(Some(context), placed.alpha);
+            // SAFETY: no auxiliary dictionary; the layer is ended below, inside the same saved
+            // graphics state.
+            unsafe { CGContext::begin_transparency_layer(Some(context), None) };
+        }
+        let dim = |tab: u64, pane: &CardPane| {
+            dims.get(&(tab, pane.id))
+                .copied()
+                .unwrap_or(if state.dim(tab, pane) { 1.0 } else { 0.0 })
+        };
+        match state.cell(shown.index) {
+            Some(Tile::Tab(tab)) => {
+                self.paint_tab(
+                    state,
+                    layout,
+                    shown.index,
+                    tab,
+                    origin,
+                    placed.chosen,
+                    shots,
+                    &dim,
+                );
+            }
+            Some(Tile::Away { entry, other, .. }) => {
+                self.paint_away(
+                    state,
+                    layout,
+                    shown.index,
+                    entry,
+                    other,
+                    origin,
+                    placed.chosen,
+                    away_shots,
+                );
+            }
+            None => {}
+        }
+        if let Some(context) = &layer {
+            CGContext::end_transparency_layer(Some(context));
         }
         NSGraphicsContext::restoreGraphicsState_class();
-        // The column is over the grid's left, which has the room for it.
-        self.paint_column(&state);
-        self.paint_plate(&state);
+    }
+
+    /// The ring round the selected picture at `rect`, seen as much as `seen` — one ring for the
+    /// view, drawn over the cells, so it can glide between them.
+    fn paint_ring(&self, rect: NSRect, seen: f64) {
+        let look = self.ivars().look.get();
+        let ring = NSRect::new(
+            NSPoint::new(rect.origin.x - RING_AIR, rect.origin.y - RING_AIR),
+            NSSize::new(
+                rect.size.width + 2.0 * RING_AIR,
+                rect.size.height + 2.0 * RING_AIR,
+            ),
+        );
+        let path = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(
+            ring,
+            RADIUS + RING_AIR,
+            RADIUS + RING_AIR,
+        );
+        path.setLineWidth(RING);
+        faded(look.accent, seen).color().setStroke();
+        path.stroke();
+    }
+
+    /// The hairline round a picture at `rect` ([`edge_of`]): one pixel of the display, inside the
+    /// picture's rounded edge.
+    fn paint_edge(&self, rect: NSRect) {
+        let line = 1.0
+            / self
+                .window()
+                .map_or(2.0, |window| window.backingScaleFactor());
+        let inset = line / 2.0;
+        let path = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(
+            NSRect::new(
+                NSPoint::new(rect.origin.x + inset, rect.origin.y + inset),
+                NSSize::new(rect.size.width - line, rect.size.height - line),
+            ),
+            RADIUS - inset,
+            RADIUS - inset,
+        );
+        path.setLineWidth(line);
+        self.ivars().edge.get().color().setStroke();
+        path.stroke();
+    }
+
+    /// What ↵ does (`verb`) in a name row, ending at `right` — the same place in every row, beside
+    /// the key, whatever the name's length — seen as much as the cell is selected (`chosen`).
+    /// Returns where the name's room ends: the verb's room is taken by as much, so the name gives
+    /// way softly. A row too short to hold it beside the name from `left` gets none.
+    fn paint_verb(&self, verb: &str, chosen: f64, left: f64, right: f64, slot: (f64, f64)) -> f64 {
+        if chosen <= 0.0 {
+            return right;
+        }
+        let ink = faded(self.ivars().look.get().accent, chosen);
+        let key = attributes(
+            &NSFont::systemFontOfSize_weight(SMALL_SIZE, unsafe { NSFontWeightSemibold }),
+            ink,
+        );
+        let word = attributes(&NSFont::systemFontOfSize(SMALL_SIZE), ink);
+        let verb = format!(" {verb}");
+        let width = text_width(RETURN_KEY, &key) + text_width(&verb, &word);
+        if right - width - GAP_AFTER_NAME < left + NAME_LEAST {
+            return right;
+        }
+        let after = draw_text(RETURN_KEY, right - width, slot.0, slot.1, &key);
+        draw_text(&verb, after, slot.0, slot.1, &word);
+        right - (width + GAP_AFTER_NAME) * chosen
     }
 
     /// The search row's plate, in the dock's tones, with the count and the keys at its right.
@@ -1445,31 +1968,26 @@ impl OverviewView {
         }
     }
 
-    /// The left column: the machines, the selected one wearing the side column's selected row,
-    /// a server's load under it, the keys that move along it at the bottom.
-    fn paint_column(&self, state: &Overview) {
+    /// The left column: the machines, the selected one wearing the side column's selected row
+    /// (its fill glides to it), a server's load under it, the keys that move along it at the
+    /// bottom.
+    fn paint_column(&self, scene: &Scene) {
         let iv = self.ivars();
         let look = iv.look.get();
         let (fill, line) = iv.row_look.get();
-        let column = self.column();
-        let name = |selected: bool| {
-            attributes(
-                &NSFont::systemFontOfSize_weight(NAME_SIZE, unsafe { NSFontWeightMedium }),
-                if selected { look.text } else { look.dim },
-            )
-        };
+        if let Some(rect) = scene.fill {
+            rounded(rect, tabs::TAB_RADIUS, fill, Some(line));
+        }
+        let name = NSFont::systemFontOfSize_weight(NAME_SIZE, unsafe { NSFontWeightMedium });
         let small = attributes(&NSFont::systemFontOfSize(SMALL_SIZE), look.dim);
-        for (row, rect) in &column {
-            let selected = row.machine == *state.machine();
-            if selected {
-                rounded(*rect, tabs::TAB_RADIUS, fill, Some(line));
-            }
+        let machine = iv.state.borrow().machine().clone();
+        for (row, rect, chosen) in &scene.rows {
             draw_text(
                 &row.title,
                 rect.origin.x + ROW_TEXT,
                 rect.origin.y + 6.0,
                 20.0,
-                &name(selected),
+                &attributes(&name, mix(look.dim, look.text, *chosen)),
             );
             draw_text(
                 &row.count,
@@ -1478,8 +1996,8 @@ impl OverviewView {
                 16.0,
                 &small,
             );
-            if selected && row.account.is_some() {
-                self.paint_load(rect.origin.y + rect.size.height + LOAD_PAD, &small);
+            if row.machine == machine && row.account.is_some() {
+                self.paint_load(rect.origin.y + rect.size.height + LOAD_PAD, scene.load);
             }
         }
         // On the search row's line, level with the plate's words.
@@ -1494,17 +2012,19 @@ impl OverviewView {
     }
 
     /// A server's load under its row: the CPU's last levels as bars, then label and value for
-    /// the CPU, memory, disk and uptime, and the operating system last.
-    fn paint_load(&self, top: f64, small: &Attributes) {
+    /// the CPU, memory, disk and uptime, and the operating system last; seen as much as `seen`.
+    fn paint_load(&self, top: f64, seen: f64) {
         let iv = self.ivars();
         let look = iv.look.get();
         let load = iv.load.borrow();
         let Some((load, levels)) = load.as_ref() else {
             return;
         };
+        let small = attributes(&NSFont::systemFontOfSize(SMALL_SIZE), faded(look.dim, seen));
         let (left, right) = (SIDE_INSET + ROW_TEXT, SIDE - SIDE_INSET - ROW_TEXT);
         let mut y = top;
         if !levels.is_empty() {
+            faded(look.accent, seen).color().setFill();
             for (at, level) in levels.iter().enumerate() {
                 let height = (f64::from(*level) + 1.0) / 8.0 * SPARK_HEIGHT;
                 let bar = NSRect::new(
@@ -1514,47 +2034,32 @@ impl OverviewView {
                     ),
                     NSSize::new(SPARK_BAR, height),
                 );
-                look.accent.color().setFill();
                 NSBezierPath::fillRect(bar);
             }
             y += SPARK_HEIGHT + 4.0;
         }
-        let text = attributes(&NSFont::systemFontOfSize(SMALL_SIZE), look.text);
+        let text = attributes(
+            &NSFont::systemFontOfSize(SMALL_SIZE),
+            faded(look.text, seen),
+        );
         for (label, value) in &load.rows {
-            draw_text(label, left, y, LOAD_LINE, small);
+            draw_text(label, left, y, LOAD_LINE, &small);
             draw_text_right(value, right, y, LOAD_LINE, &text);
             y += LOAD_LINE;
         }
         if let Some(os) = &load.os {
-            let os = fit(os, right - left, small);
-            draw_text(&os, left, y, LOAD_LINE, small);
+            let os = fit(os, right - left, &small);
+            draw_text(&os, left, y, LOAD_LINE, &small);
         }
     }
 
-    fn paint_cell(
-        &self,
-        state: &Overview,
-        layout: &Layout,
-        index: usize,
-        origin: f64,
-        selected: bool,
-    ) {
-        match state.cell(index) {
-            Some(Tile::Tab(tab)) => self.paint_tab(state, layout, index, tab, origin, selected),
-            Some(Tile::Away { entry, other, .. }) => {
-                self.paint_away(state, layout, index, entry, other, origin, selected);
-            }
-            None => {}
-        }
-    }
-
-    /// A terminal a server keeps: its screen as the server built it, dim until it is the
-    /// selected one, and under it the name, the folder and what ↵ does. One another computer has
-    /// open (`other`) also names that computer at the right and, once selected, says in a line
-    /// below what moving it here does (the server card's sentence).
+    /// A terminal a server keeps: its screen as the server built it, dim but for the selected one
+    /// (`chosen` is how selected it looks), and under it the name, the folder and what ↵ does.
+    /// One another computer has open (`other`) also names that computer at the right and, once
+    /// selected, says in a line below what moving it here does (the server card's sentence).
     #[expect(
         clippy::too_many_arguments,
-        reason = "the tile's facts and where it is painted: one call from `paint_cell`"
+        reason = "the tile's facts, where it is painted and its pictures: one call from `paint_shown`"
     )]
     fn paint_away(
         &self,
@@ -1564,130 +2069,111 @@ impl OverviewView {
         entry: &server_card::Entry,
         other: bool,
         origin: f64,
-        selected: bool,
+        chosen: f64,
+        shots: &HashMap<rules::Key, Retained<NSImage>>,
     ) {
-        let iv = self.ivars();
-        let look = iv.look.get();
+        let look = self.ivars().look.get();
         let (Some(picture), Some(name_row)) = (layout.picture(index), layout.name_row(index))
         else {
             return;
         };
-        let at = |rect: Rect| {
-            NSRect::new(
-                NSPoint::new(rect.x + SIDE, rect.y + origin),
-                NSSize::new(rect.width, rect.height),
-            )
-        };
+        let at = |rect: Rect| on_view(rect, origin);
         let key = (entry.account.clone(), entry.terminal.clone());
         NSGraphicsContext::saveGraphicsState_class();
         NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(at(picture), RADIUS, RADIUS)
             .addClip();
         look.band.color().setFill();
         NSBezierPath::fillRect(at(picture));
-        if let Some(shot) = iv.away_shots.borrow().get(&key) {
+        if let Some(shot) = shots.get(&key) {
             draw_image(shot, at(picture));
         }
-        if !selected {
-            Tint::of(look.ground.rgb, DIM_COVER).color().setFill();
+        if chosen < 1.0 {
+            Tint::of(look.ground.rgb, DIM_COVER * (1.0 - chosen))
+                .color()
+                .setFill();
             NSBezierPath::fillRect(at(picture));
         }
         NSGraphicsContext::restoreGraphicsState_class();
-        if selected {
-            let ring = NSRect::new(
-                NSPoint::new(picture.x + SIDE - RING_AIR, picture.y + origin - RING_AIR),
-                NSSize::new(
-                    picture.width + 2.0 * RING_AIR,
-                    picture.height + 2.0 * RING_AIR,
-                ),
-            );
-            let path = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(
-                ring,
-                RADIUS + RING_AIR,
-                RADIUS + RING_AIR,
-            );
-            path.setLineWidth(RING);
-            look.accent.color().setStroke();
-            path.stroke();
-        }
+        self.paint_edge(at(picture));
         let row = at(name_row);
+        let slot = (row.origin.y, row.size.height);
         let left = row.origin.x + 2.0;
-        let right = row.origin.x + row.size.width - 2.0;
+        let mut right = row.origin.x + row.size.width - 2.0;
         let small = attributes(&NSFont::systemFontOfSize(SMALL_SIZE), look.dim);
-        let strong = attributes(
-            &NSFont::systemFontOfSize_weight(NAME_SIZE, unsafe { NSFontWeightMedium }),
-            if selected { look.text } else { look.dim },
-        );
-        let marked = attributes(
-            &NSFont::systemFontOfSize_weight(NAME_SIZE, unsafe { NSFontWeightSemibold }),
-            look.accent,
-        );
-        let verb = state
-            .verb()
-            .filter(|_| selected)
-            .map(|verb| format!("↵ {verb}"));
-        let verb_width = verb.as_ref().map_or(0.0, |verb| text_width(verb, &small));
         // The computer that has it open, dim at the right edge (as long as a third of the row).
         let by = entry
             .by
             .as_deref()
             .filter(|_| other)
             .map(|by| fit(by, (right - left) / 3.0, &small));
-        let by_width = by.as_ref().map_or(0.0, |by| text_width(by, &small));
-        let room = (right - left - verb_width - by_width - 2.0 * GAP_AFTER_NAME).max(0.0);
+        if let Some(by) = &by {
+            right = draw_text_right(by, right, slot.0, slot.1, &small) - GAP_AFTER_NAME;
+        }
+        let verb = if other {
+            rules::MOVE_HERE
+        } else {
+            rules::OPEN_IN_TAB
+        };
+        let right = self.paint_verb(verb, chosen, left, right, slot);
+        let strong = attributes(
+            &NSFont::systemFontOfSize_weight(NAME_SIZE, unsafe { NSFontWeightMedium }),
+            mix(look.dim, look.text, chosen),
+        );
+        let marked = attributes(
+            &NSFont::systemFontOfSize_weight(NAME_SIZE, unsafe { NSFontWeightSemibold }),
+            look.accent,
+        );
+        let room = (right - left).max(0.0);
         let hit = state.away_hit(&key);
         let name_marks = hit.map_or(&[][..], |hit| hit.name_marks.as_slice());
-        let mut end = draw_marked(
+        let end = draw_marked(
             &entry.title,
             name_marks,
             left,
             room,
-            row.origin.y,
-            row.size.height,
-            &strong,
-            &marked,
+            slot,
+            (&strong, &marked),
+            look.ground,
         );
         // The folder it is in, dim, beside the name: `claude  ~/api`.
         if let Some(place) = &entry.place {
             let spare = room - (end - left) - GAP_AFTER_NAME;
             if spare > 24.0 {
                 let marks = hit.map_or(&[][..], |hit| hit.place_marks.as_slice());
-                end = draw_marked(
+                draw_marked(
                     place,
                     marks,
                     end + GAP_AFTER_NAME,
                     spare,
-                    row.origin.y,
-                    row.size.height,
-                    &small,
-                    &marked,
+                    slot,
+                    (&small, &marked),
+                    look.ground,
                 );
             }
         }
-        if let Some(verb) = verb {
-            draw_text(
-                &verb,
-                end + GAP_AFTER_NAME,
-                row.origin.y,
-                row.size.height,
-                &small,
+        // What moving it does, in the gap under the row, for the selected tile.
+        if by.is_some() && chosen > 0.0 {
+            let ink = attributes(
+                &NSFont::systemFontOfSize(SMALL_SIZE),
+                faded(look.dim, chosen),
             );
-        }
-        if let Some(by) = by {
-            draw_text_right(&by, right, row.origin.y, row.size.height, &small);
-            // What moving it does, in the gap under the row, for the selected tile only.
-            if selected {
-                let note = server_card::move_note(entry.by.as_deref().unwrap_or_default());
-                draw_text(
-                    &fit(&note, right - left, &small),
-                    left,
-                    row.origin.y + row.size.height - 4.0,
-                    NOTE_HEIGHT,
-                    &small,
-                );
-            }
+            let note = server_card::move_note(entry.by.as_deref().unwrap_or_default());
+            draw_text(
+                &fit(&note, row.size.width - 4.0, &ink),
+                left,
+                slot.0 + slot.1 - 4.0,
+                NOTE_HEIGHT,
+                &ink,
+            );
         }
     }
 
+    /// A tab: each pane's picture where the tab's tree puts it (dim as much as `dim` says), and
+    /// the name row under it.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the tab, where it is painted, its pictures and its panes' dimness: one call from `paint_shown`"
+    )]
     fn paint_tab(
         &self,
         state: &Overview,
@@ -1695,7 +2181,9 @@ impl OverviewView {
         index: usize,
         tab: &rules::Tab,
         origin: f64,
-        selected: bool,
+        chosen: f64,
+        shots: &HashMap<(u64, u64), Retained<NSImage>>,
+        dim: &dyn Fn(u64, &CardPane) -> f64,
     ) {
         let iv = self.ivars();
         let look = iv.look.get();
@@ -1703,19 +2191,13 @@ impl OverviewView {
         else {
             return;
         };
-        let at = |rect: Rect| {
-            NSRect::new(
-                NSPoint::new(rect.x + SIDE, rect.y + origin),
-                NSSize::new(rect.width, rect.height),
-            )
-        };
+        let at = |rect: Rect| on_view(rect, origin);
         // The pictures: each pane where the tab's tree puts it, a thin gap between neighbours.
         NSGraphicsContext::saveGraphicsState_class();
         NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(at(picture), RADIUS, RADIUS)
             .addClip();
         look.band.color().setFill();
         NSBezierPath::fillRect(at(picture));
-        let shots = iv.shots.borrow();
         for pane in &tab.panes {
             let Some(rect) = layout.pane_rect(index, pane) else {
                 continue;
@@ -1727,8 +2209,11 @@ impl OverviewView {
                 look.ground.color().setFill();
                 NSBezierPath::fillRect(rect);
             }
-            if state.dim(tab.id, pane) {
-                Tint::of(look.ground.rgb, DIM_COVER).color().setFill();
+            let dimness = dim(tab.id, pane);
+            if dimness > 0.0 {
+                Tint::of(look.ground.rgb, DIM_COVER * dimness)
+                    .color()
+                    .setFill();
                 NSBezierPath::fillRect(rect);
             }
             // A terminal being carried would open beside this pane: it is ringed.
@@ -1748,25 +2233,13 @@ impl OverviewView {
             }
         }
         NSGraphicsContext::restoreGraphicsState_class();
-        if selected {
-            let ring = NSRect::new(
-                NSPoint::new(picture.x + SIDE - RING_AIR, picture.y + origin - RING_AIR),
-                NSSize::new(
-                    picture.width + 2.0 * RING_AIR,
-                    picture.height + 2.0 * RING_AIR,
-                ),
-            );
-            let path = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(
-                ring,
-                RADIUS + RING_AIR,
-                RADIUS + RING_AIR,
-            );
-            path.setLineWidth(RING);
-            look.accent.color().setStroke();
-            path.stroke();
-        }
-        // The name row: the tab's icon, its name, what ↵ does when it is selected, its key.
+        self.paint_edge(at(picture));
+        // The name row: the tab's icon and name from the left, its key at the right and, while it
+        // is the selected one, what ↵ does just left of the key — a place of its own, not after
+        // the name, so it stands still whatever the name's length. A name longer than its room
+        // fades out at its end, as the strip's titles do.
         let row = at(name_row);
+        let slot = (row.origin.y, row.size.height);
         let side = PALETTE_ICON_SIDE;
         let mut left = row.origin.x + 2.0;
         if let Some(icon) = iv.icons.borrow().get(&tab.id) {
@@ -1779,59 +2252,43 @@ impl OverviewView {
         let mut right = row.origin.x + row.size.width - 2.0;
         let small = attributes(&NSFont::systemFontOfSize(SMALL_SIZE), look.dim);
         if let Some(key) = &tab.key {
-            right =
-                draw_text_right(key, right, row.origin.y, row.size.height, &small) - GAP_AFTER_NAME;
+            right = draw_text_right(key, right, slot.0, slot.1, &small) - GAP_AFTER_NAME;
         }
+        let right = self.paint_verb(rules::GO_TO_TAB, chosen, left, right, slot);
         let strong = attributes(
             &NSFont::systemFontOfSize_weight(NAME_SIZE, unsafe { NSFontWeightMedium }),
-            if selected { look.text } else { look.dim },
+            mix(look.dim, look.text, chosen),
         );
-        let verb = state
-            .verb()
-            .filter(|_| selected)
-            .map(|verb| format!("↵ {verb}"));
-        let verb_width = verb.as_ref().map_or(0.0, |verb| text_width(verb, &small));
-        let room = (right - left - verb_width - GAP_AFTER_NAME).max(0.0);
         let marked = attributes(
             &NSFont::systemFontOfSize_weight(NAME_SIZE, unsafe { NSFontWeightSemibold }),
             look.accent,
         );
+        let room = (right - left).max(0.0);
         let hit = state.hit(tab.id);
         let name_marks = hit.map_or(&[][..], |hit| hit.name_marks.as_slice());
-        let mut end = draw_marked(
+        let end = draw_marked(
             &tab.name,
             name_marks,
             left,
             room,
-            row.origin.y,
-            row.size.height,
-            &strong,
-            &marked,
+            slot,
+            (&strong, &marked),
+            look.ground,
         );
         // The program the search found in a pane, beside the name: `api  cargo test`.
         if let Some((program, marks)) = hit.and_then(|hit| hit.program.as_ref()) {
             let spare = room - (end - left) - GAP_AFTER_NAME;
             if spare > 24.0 {
-                end = draw_marked(
+                draw_marked(
                     program,
                     marks,
                     end + GAP_AFTER_NAME,
                     spare,
-                    row.origin.y,
-                    row.size.height,
-                    &small,
-                    &marked,
+                    slot,
+                    (&small, &marked),
+                    look.ground,
                 );
             }
-        }
-        if let Some(verb) = verb {
-            draw_text(
-                &verb,
-                end + GAP_AFTER_NAME,
-                row.origin.y,
-                row.size.height,
-                &small,
-            );
         }
     }
 
@@ -1857,6 +2314,7 @@ impl OverviewView {
     /// taken off the window at the end (at once with Reduce Motion): the pictures stay until
     /// then.
     fn leave(&self) {
+        self.halt();
         let look = (!reduced(self.mtm()))
             .then(|| self.layer())
             .flatten()
@@ -1940,13 +2398,34 @@ fn hold_at(layer: &CALayer, path: &str, from: &AnyObject, to: &AnyObject) {
     layer.addAnimation_forKey(&animation, Some(&NSString::from_str(path)));
 }
 
-/// `image` in `rect`, the right way up in a flipped drawing too.
+/// `image` in `rect`, the right way up in a flipped drawing too, filling it the way a pane's
+/// picture fills its tile ([`bt_gpu::tile_crop`]: what spills over is cut, the left edge and the
+/// bottom kept). A picture is taken in its tile's shape; one taken before the window changed shape
+/// is cut to the new one rather than squeezed into it until the next comes.
 fn draw_image(image: &NSImage, rect: NSRect) {
+    let size = image.size();
+    // The rule wants pixels; only the shapes count, so points in fine steps do.
+    let steps = |points: f64| (points * 8.0).round().clamp(1.0, f64::from(u32::MAX)) as u32;
+    let [u0, v0, u1, v1] = bt_gpu::tile_crop(
+        (steps(size.width), steps(size.height)),
+        (steps(rect.size.width), steps(rect.size.height)),
+    );
+    // The image's own space is up from its bottom: the crop's top is left out, its bottom kept.
+    let from = NSRect::new(
+        NSPoint::new(
+            f64::from(u0) * size.width,
+            (1.0 - f64::from(v1)) * size.height,
+        ),
+        NSSize::new(
+            f64::from(u1 - u0) * size.width,
+            f64::from(v1 - v0) * size.height,
+        ),
+    );
     // SAFETY: no hints.
     unsafe {
         image.drawInRect_fromRect_operation_fraction_respectFlipped_hints(
             rect,
-            NSRect::ZERO,
+            from,
             NSCompositingOperation::SourceOver,
             1.0,
             true,
@@ -1955,39 +2434,125 @@ fn draw_image(image: &NSImage, rect: NSRect) {
     }
 }
 
-/// `text` with the letters at `marks` in `marked`, cut with an ellipsis to fit `room` points from
-/// `x`, centred in the slot `[top, top + height)`; returns where it ended (`x` if not even a
-/// letter fits).
-#[expect(
-    clippy::too_many_arguments,
-    reason = "text, marks, two fonts and the slot it is drawn in: one call site shape in both rows"
-)]
+/// `text` with the letters at `marks` in the second of `inks` (the rest in the first), from `x`
+/// in a room `room` wide, centred in the slot `(top, height)`; returns where it ended. A text
+/// longer than its room fades out at the room's end the way the strip's titles do
+/// ([`tabs::title_overflows`], [`tabs::title_fade`]) — its end covered with the `ground` it
+/// stands on — and never ends in "…".
 fn draw_marked(
     text: &str,
     marks: &[usize],
     x: f64,
     room: f64,
-    top: f64,
-    height: f64,
-    plain: &Attributes,
-    marked: &Attributes,
+    slot: (f64, f64),
+    inks: (&Attributes, &Attributes),
+    ground: Tint,
 ) -> f64 {
-    let chars: Vec<char> = text.chars().collect();
-    let mut keep = chars.len();
-    let mut string = styled(&chars, marks, keep, plain, marked);
-    let mut width = string.size().width;
-    while width > room && keep > 1 {
-        // A guess that lands close, then single steps.
-        let guess = ((keep as f64) * room / width) as usize;
-        keep = guess.clamp(1, keep - 1);
-        string = styled(&chars, marks, keep, plain, marked);
-        width = string.size().width;
-    }
-    if width > room {
+    if room < 1.0 {
         return x;
     }
-    string.drawAtPoint(NSPoint::new(x, top + (height - string.size().height) / 2.0));
-    x + width
+    let chars: Vec<char> = text.chars().collect();
+    let string = styled(&chars, marks, chars.len(), inks.0, inks.1);
+    let size = string.size();
+    let at = NSPoint::new(x, slot.0 + (slot.1 - size.height) / 2.0);
+    if !tabs::title_overflows(size.width, room) {
+        string.drawAtPoint(at);
+        return x + size.width;
+    }
+    let place = NSRect::new(NSPoint::new(x, slot.0), NSSize::new(room, slot.1));
+    NSGraphicsContext::saveGraphicsState_class();
+    NSBezierPath::clipRect(place);
+    string.drawAtPoint(at);
+    NSGraphicsContext::restoreGraphicsState_class();
+    fade_end(place, ground);
+    x + room
+}
+
+/// Covers the end of `place` with `ground`, from nothing to all of it over the strip's fade
+/// ([`tabs::title_faded`]'s curve, in even steps a gradient joins).
+fn fade_end(place: NSRect, ground: Tint) {
+    const STOPS: usize = 9;
+    let fade = tabs::title_fade(place.size.width);
+    let colours: Vec<Retained<NSColor>> = (0..STOPS)
+        .map(|stop| {
+            let at = fade * stop as f64 / (STOPS - 1) as f64;
+            faded(ground, tabs::title_faded(at, fade)).color()
+        })
+        .collect();
+    let gradient =
+        NSGradient::initWithColors(NSGradient::alloc(), &NSArray::from_retained_slice(&colours));
+    if let Some(gradient) = gradient {
+        gradient.drawInRect_angle(
+            NSRect::new(
+                NSPoint::new(place.origin.x + place.size.width - fade, place.origin.y),
+                NSSize::new(fade, place.size.height),
+            ),
+            0.0,
+        );
+    }
+}
+
+/// `tint` seen as much as `seen`.
+fn faded(tint: Tint, seen: f64) -> Tint {
+    Tint::of(tint.rgb, tint.alpha * seen.clamp(0.0, 1.0))
+}
+
+/// The ink part way from `from` to `to`.
+fn mix(from: Tint, to: Tint, k: f64) -> Tint {
+    let k = k.clamp(0.0, 1.0);
+    let channel = |shift: u32| {
+        let (a, b) = (
+            f64::from((from.rgb >> shift) & 0xff),
+            f64::from((to.rgb >> shift) & 0xff),
+        );
+        (lerp(a, b, k).round() as u32) << shift
+    };
+    Tint::of(
+        channel(16) | channel(8) | channel(0),
+        lerp(from.alpha, to.alpha, k),
+    )
+}
+
+/// A rectangle of the grid (its origin the grid's top left before any scroll) in the view, the
+/// grid's origin `origin` down the view.
+fn on_view(rect: Rect, origin: f64) -> NSRect {
+    NSRect::new(
+        NSPoint::new(rect.x + SIDE, rect.y + origin),
+        NSSize::new(rect.width, rect.height),
+    )
+}
+
+/// Cell `index`'s identity across states: a tab's id, a terminal's key.
+fn cell_id(state: &Overview, index: usize) -> Option<Id> {
+    match state.cell(index)? {
+        Tile::Tab(tab) => Some(Id::Tab(tab.id)),
+        Tile::Away { entry, .. } => Some(Id::Away((entry.account.clone(), entry.terminal.clone()))),
+    }
+}
+
+/// What the view shows at a moment ([`OverviewView::scene`]).
+struct Scene {
+    /// The cells to draw, the ones on their way out first, under the rest.
+    cells: Vec<Shown>,
+    /// The selected picture the ring goes round, and how seen the ring is.
+    ring: Option<(NSRect, f64)>,
+    /// Each pane's dimness, `(tab, pane)`: 0 lit, 1 dim.
+    dims: HashMap<(u64, u64), f64>,
+    headings: Vec<Heading>,
+    /// The column's rows, where they stand and how selected they look; the selected row's fill;
+    /// how seen the selected server's load is.
+    rows: Vec<(rules::MachineRow, NSRect, f64)>,
+    fill: Option<NSRect>,
+    load: f64,
+}
+
+/// A cell in a scene: a cell of the state by its number (`frame` none), or — on its way out — of
+/// the frame it left.
+struct Shown {
+    id: Id,
+    index: usize,
+    frame: Option<Rc<Frame>>,
+    placed: Placed,
 }
 
 /// `text` cut to fit `width` points, ended with an ellipsis when it was cut.
@@ -2123,8 +2688,11 @@ pub(crate) fn show_on(window: &TerminalWindow, host: &str) {
                     if bt_core::bare_host(name).eq_ignore_ascii_case(bt_core::bare_host(host)))
             })
     };
-    if let Some(machine) = machine {
-        view.choose_machine(machine);
+    // The view opens on the machine: nothing to move from.
+    if let Some(machine) = machine
+        && view.ivars().state.borrow_mut().set_machine(machine)
+    {
+        view.machine_changed(None);
     }
 }
 

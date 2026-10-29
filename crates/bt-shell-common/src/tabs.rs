@@ -518,6 +518,17 @@ pub fn title_fade(room: f64) -> f64 {
     TITLE_FADE.min(room.max(0.0))
 }
 
+/// How much of a fading title is gone `at` points into its `fade` (from where the fade starts):
+/// nothing at its start, all of it at the room's end, along a smooth step. The one curve for
+/// the strip's mask and every other title drawn with the strip's fade.
+pub fn title_faded(at: f64, fade: f64) -> f64 {
+    if fade <= 0.0 {
+        return 1.0;
+    }
+    let t = (at / fade).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
 /// Whether a title `text` wide (as the type sets it) overflows a `room` wide place: then its end
 /// fades out over [`title_fade`] and the whole of it is in the tooltip. It never moves to show the
 /// rest — a title that slides leaves the tab showing only its tail. The one rule for the chips,
@@ -2764,6 +2775,22 @@ mod tests {
         assert_eq!(title_fade(140.0), TITLE_FADE);
         assert_eq!(title_fade(10.0), 10.0);
         assert_eq!(title_fade(-4.0), 0.0);
+    }
+
+    #[test]
+    fn a_fading_title_goes_smoothly_from_whole_to_gone() {
+        assert_eq!(title_faded(0.0, TITLE_FADE), 0.0);
+        assert_eq!(title_faded(TITLE_FADE, TITLE_FADE), 1.0);
+        assert_eq!(title_faded(TITLE_FADE / 2.0, TITLE_FADE), 0.5);
+        assert_eq!(title_faded(-3.0, TITLE_FADE), 0.0, "before the fade");
+        assert_eq!(title_faded(40.0, TITLE_FADE), 1.0, "past the room's end");
+        assert_eq!(title_faded(0.0, 0.0), 1.0, "no fade: no room to show it in");
+        let mut last = 0.0;
+        for at in 1..22 {
+            let gone = title_faded(f64::from(at), TITLE_FADE);
+            assert!(gone > last, "it only ever goes");
+            last = gone;
+        }
     }
 
     #[test]

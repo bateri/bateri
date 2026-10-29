@@ -167,18 +167,17 @@ impl Title {
 }
 
 /// The mask's picture in `rect` (top-down): black — its alpha is what shows — from the left edge,
-/// running out to nothing over the last `fade` points along a smooth step.
+/// running out to nothing over the last `fade` points along [`tabs::title_faded`].
 fn fade_picture(rect: NSRect, fade: f64) {
     let (width, height) = (rect.size.width, rect.size.height);
     let black = |alpha: f64| NSColor::colorWithSRGBRed_green_blue_alpha(0.0, 0.0, 0.0, alpha);
-    let step = |t: f64| t * t * (3.0 - 2.0 * t);
     let solid = (width - fade).max(0.0);
     black(1.0).setFill();
     NSBezierPath::bezierPathWithRect(NSRect::new(NSPoint::ZERO, NSSize::new(solid, height))).fill();
     // A column each: the picture is painted when the place's size changes, not per frame.
     for column in 0..fade.ceil() as usize {
         let x = column as f64;
-        black(1.0 - step(((x + 0.5) / fade).min(1.0))).setFill();
+        black(1.0 - tabs::title_faded(x + 0.5, fade)).setFill();
         NSBezierPath::bezierPathWithRect(NSRect::new(
             NSPoint::new(solid + x, 0.0),
             NSSize::new(1.0, height),
