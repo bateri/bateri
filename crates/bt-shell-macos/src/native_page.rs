@@ -1212,6 +1212,13 @@ pub(crate) fn mods_of(flags: NSEventModifierFlags) -> Mods {
     }
 }
 
+/// The modifiers the system holds now, whichever window has the keyboard: what the page is caught
+/// up with before the pointer is told anything ([`PageHandle::input`]), since `flagsChanged` is the
+/// key window's alone and a ⌘ pressed elsewhere is not heard.
+pub(crate) fn held_mods() -> Mods {
+    mods_of(NSEvent::modifierFlags_class())
+}
+
 /// The key `event` is for a page, or for an editor of it, and the modifiers held ([`event_key`]).
 /// `None` for a key that makes none (the first stroke of a dead key has no characters): in an
 /// editor it is the system's handling of text's.

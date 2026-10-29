@@ -121,6 +121,13 @@ of every installed copy. A version without a section is not released.
   for its own panel (a peek) that scrolls with the text. The pointer over such an editor is the I-beam
   over the text, the arrow in the gutter and the hand over what answers a press there; a marker has
   its tooltip while the pointer rests on it and is lit while it is over it.
+- **A native view's editor can answer the pointer and the keys a code editor does.** A program's
+  editor can make a link of the word under the pointer while ⌘ is held (the hand, a line under the
+  word, and a ⌘-click that goes to the program instead of putting a caret there), say what a click, a
+  ⌥-click or a ⌘-click does, show hints inside the lines (a parameter's name, a type, an error at a line's
+  end), show a card by a word or by the caret that stays while the pointer is on it, and take chords of
+  keys (⌘K ⌘U). A ⌘ pressed while another window had the keyboard counts as soon as the pointer comes
+  over the editor, and the hand follows ⌘ going down and up without the pointer moving.
 
 ### Changed
 

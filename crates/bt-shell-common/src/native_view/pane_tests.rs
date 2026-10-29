@@ -788,3 +788,174 @@ fn a_field_opened_by_a_reply_gets_its_text_and_the_keyboard_once_the_frame_that_
         "{later:#?}"
     );
 }
+
+/// A page with an editor that makes a link of the word under the pointer while ⌘ is held (`target`,
+/// a look that is `held` and `over`, the hand then) and hears of the pointer's rest on a word
+/// (`hover`, after half a second). What it heard is the line of `said: `.
+const WORDS: &str = r#"local text = "alpha beta\ngamma delta"
+local told = {}
+local version = 0
+return {
+    render = function()
+        return pencere.div():size_full()
+            :child(pencere.editor("code", {
+                gutter = false,
+                events = { "target", "hover" },
+                hover = { delay = 0.5 },
+                gestures = { ["mod+press"] = "target" },
+            }):h(100):w(400))
+            :child(pencere.text("said: " .. table.concat(told, " ")))
+    end,
+    handle = function(event)
+        if event.type == "editor_ready" then
+            return { editor = { code = { { load = text } } } }
+        elseif event.type == "edit" then
+            version = event.version
+        elseif event.type == "target" then
+            told[#told + 1] = event.kind
+            local marks = {}
+            if event.kind == "enter" then
+                marks[1] = { from = event.from, to = event.to, color = "accent", underline = "accent",
+                    held = "mod", over = true }
+            end
+            return { redraw = true, editor = { code = { { decorate = "links", version = version, from = 0,
+                to = #text, decorations = marks } } } }
+        elseif event.type == "hover" then
+            told[#told + 1] = "hover:" .. event.kind
+            return { redraw = true }
+        end
+        return true
+    end,
+}"#;
+
+fn words() -> PaneRig {
+    let mut rig = PaneRig::open(WORDS);
+    rig.frame(0.0);
+    rig.settle(0.0);
+    rig.frame(0.1);
+    rig.settle(0.1);
+    rig.lines();
+    rig
+}
+
+/// The shapes the pane was told since it last looked, in order.
+fn shapes(rig: &mut PaneRig) -> Vec<String> {
+    rig.lines()
+        .into_iter()
+        .filter(|line| line.starts_with("cursor "))
+        .collect()
+}
+
+/// A frame at `now`, and what the page said to it.
+fn frame(rig: &mut PaneRig, now: f64) {
+    rig.frame(now);
+    rig.settle(now);
+}
+
+const COMMAND: Mods = Mods {
+    shift: false,
+    control: false,
+    alt: false,
+    command: true,
+};
+
+/// The point of the first word of the editor of [`WORDS`], below the strip.
+fn on_a_word() -> Point {
+    Point::new(12.0, 32.0 + 12.0)
+}
+
+/// ⌘ pressed while another window had the keyboard is not heard by the page (`flagsChanged` is the
+/// key window's alone): before the pointer is told anything the pane tells the page the modifiers the
+/// system holds, when they are not what it last heard, so the word under the pointer is a link and
+/// the pointer the hand at once. The pointer's leaving and the keyboard's leaving make the drive
+/// forget the modifiers, and the next thing the pointer does tells them again; a modifier that
+/// changes alone while the pointer stands still is told by the pane's `flagsChanged` and the shape
+/// it makes (`Drained::cursor`) is the pane's to take.
+#[test]
+fn a_modifier_pressed_elsewhere_is_told_before_the_pointer_comes_over_the_editor() {
+    // Without it, the control: the pointer over the word is the I-beam and no link was offered.
+    let mut rig = words();
+    rig.input(Input::Move(on_a_word()));
+    frame(&mut rig, 0.3);
+    assert_eq!(
+        shapes(&mut rig).last().map(String::as_str),
+        Some("cursor Text")
+    );
+    assert_eq!(rig.said(), "");
+
+    let mut rig = words();
+    rig.hold(COMMAND);
+    rig.input(Input::Move(on_a_word()));
+    frame(&mut rig, 0.3);
+    assert_eq!(
+        shapes(&mut rig).last().map(String::as_str),
+        Some("cursor Pointer")
+    );
+    assert_eq!(rig.said(), "enter");
+    // The pointer standing still, ⌘ let go with the keyboard in the page: the page is told, the
+    // link is taken back and the shape comes with no move of the pointer.
+    rig.flags_changed(Mods::default());
+    frame(&mut rig, 0.6);
+    assert_eq!(shapes(&mut rig), ["cursor Text"]);
+    assert_eq!(rig.said(), "enter leave");
+    // The pointer leaves the page and ⌘ is pressed outside it; it comes back: the drive forgot the
+    // modifiers with the pointer's leaving, and is told them again with its first move.
+    rig.input(Input::Leave);
+    rig.hold(COMMAND);
+    rig.input(Input::Move(on_a_word()));
+    frame(&mut rig, 0.9);
+    assert_eq!(
+        shapes(&mut rig).last().map(String::as_str),
+        Some("cursor Pointer")
+    );
+    assert_eq!(rig.said(), "enter leave enter");
+    // The keyboard leaves the page (another window in front) with ⌘ held: the drive forgets them,
+    // the link goes, and the pointer's next move tells them again.
+    rig.set_active(false);
+    frame(&mut rig, 1.2);
+    assert_eq!(rig.said(), "enter leave enter leave");
+    rig.input(Input::Move(Point::new(14.0, 32.0 + 12.0)));
+    frame(&mut rig, 1.5);
+    assert_eq!(rig.said(), "enter leave enter leave enter");
+    // And the wheel: the page that does not know ⌘ is told it before the wheel.
+    rig.set_active(false);
+    frame(&mut rig, 1.8);
+    rig.wheel(on_a_word(), 0.0, 10.0, Phase::Wheel);
+    frame(&mut rig, 2.1);
+    assert_eq!(
+        rig.said(),
+        "enter leave enter leave enter leave enter",
+        "the wheel tells the modifiers too"
+    );
+}
+
+/// The pointer's rest on a word is a time the page wants a frame at (`Page::wake_at` counts it as the
+/// caret's blink), and the pane that is seen takes it as it takes the page's own wakes: the frame at
+/// that time tells the page the pointer rested, once.
+#[test]
+fn the_pointers_rest_on_a_word_is_a_time_the_seen_pane_wakes_the_page_at() {
+    let round = |at: Option<f64>| at.map(|at| (at * 10.0).round() / 10.0);
+    let mut rig = words();
+    assert_eq!(
+        round(rig.wake_at()),
+        None,
+        "a page at rest waits for nothing"
+    );
+    rig.input(Input::Move(on_a_word()));
+    rig.settle(0.2);
+    assert_eq!(
+        round(rig.wake_at()),
+        Some(0.6),
+        "half a second after the move"
+    );
+    frame(&mut rig, 0.3);
+    assert_eq!(rig.said(), "");
+    frame(&mut rig, 0.7);
+    assert_eq!(rig.said(), "hover:dwell");
+    frame(&mut rig, 1.2);
+    assert_eq!(rig.said(), "hover:dwell", "told once");
+    assert_eq!(round(rig.wake_at()), None);
+    rig.input(Input::Leave);
+    frame(&mut rig, 1.5);
+    assert_eq!(rig.said(), "hover:dwell hover:leave");
+}

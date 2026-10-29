@@ -32,7 +32,7 @@
 //! `bt-shell-macos`'s (its `pencere_drive::Host`); the clock that wakes a page whose pane is not seen
 //! is its own too (`Page::wake_unseen`).
 
-use std::cell::{RefCell, RefMut};
+use std::cell::{Cell, RefCell, RefMut};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -41,7 +41,7 @@ use bt_core::Flow;
 use bt_gpu::{Renderer, UiContext, UiList, UiPage};
 use pencere_drive::{FrameAt, Outline, Page, Painted, Placement, Route, Setup};
 use pencere_sandbox::{Assets, ModuleLimits, Program, Script};
-use pencere_view::{Font, Id, Key, Measure, Metrics, Mods, Point, Rect, WallTime};
+use pencere_view::{Font, Id, Input, Key, Measure, Metrics, Mods, Phase, Point, Rect, WallTime};
 
 use super::containers::Demo;
 use super::{SHAPED_LIMIT, Shaped, Typeset, to_list};
@@ -333,6 +333,10 @@ type OnHeld = Rc<dyn Fn(&mut Painted)>;
 #[derive(Clone)]
 pub struct PageHandle {
     page: Rc<RefCell<Page>>,
+    /// The modifiers the page was last told of, by a `Mods` or by what carries them (a key, a
+    /// press): what the drive holds of them, which [`PageHandle::input`] catches up with the
+    /// system's before the pointer is told anything.
+    told: Rc<Cell<Mods>>,
     on_outline: Rc<RefCell<Option<OnOutline>>>,
     on_held: Rc<RefCell<Option<OnHeld>>>,
 }
@@ -341,18 +345,79 @@ impl PageHandle {
     fn new(page: Page) -> Self {
         Self {
             page: Rc::new(RefCell::new(page)),
+            told: Rc::new(Cell::new(Mods::default())),
             on_outline: Rc::new(RefCell::new(None)),
             on_held: Rc::new(RefCell::new(None)),
         }
     }
 
-    /// The drive's page, for one call: what the pane tells it (`input`, `wheel`, `text`, `focus`,
-    /// `pick`, `command`, `files`, `message`, `room`), how it is to be (`set_zoom`,
-    /// `set_scrolling`, `set_active`), its wakes while the pane is not seen (`wake_unseen`) and what
+    /// The drive's page, for one call: what the pane tells it (`text`, `focus`, `pick`, `command`,
+    /// `files`, `message`, `room`; the person's input goes by [`PageHandle::input`],
+    /// [`PageHandle::wheel`], [`PageHandle::key_up`] and the keyboard's coming and going by
+    /// [`PageHandle::set_active`], which keep what the page knows of the modifiers), how it is to be
+    /// (`set_zoom`, `set_scrolling`), its wakes while the pane is not seen (`wake_unseen`) and what
     /// it said (`drain`, done after the page is let go of: `Drained::deliver` calls back into the
     /// pane, which may call the page again).
     pub fn page(&self) -> RefMut<'_, Page> {
         self.page.borrow_mut()
+    }
+
+    /// Tells the page what the person did, with `held` the modifiers the system holds now. The
+    /// drive hears a modifier only from the host (`flagsChanged` is the key window's alone), so a
+    /// ⌘ pressed while another window had the keyboard is unknown to it when the pointer comes
+    /// over an editor: before the pointer is told anything (a move, a press, a release) the page is
+    /// told the modifiers if they are not what it last heard (`Input::Mods`; the pointer's events
+    /// carry none), and the drive then draws what they make and takes the shape they give. What a
+    /// press, a key or `Mods` itself carries is what the page knows from then on, and the
+    /// pointer's leaving makes the drive forget them (so does the keyboard's leaving,
+    /// [`PageHandle::set_active`]).
+    pub fn input(&self, input: Input, held: Mods) {
+        if matches!(
+            input,
+            Input::Move(_) | Input::Press { .. } | Input::Release { .. }
+        ) {
+            self.catch_up(held);
+        }
+        self.page().input(input);
+        match input {
+            Input::Mods(mods)
+            | Input::Key { mods, .. }
+            | Input::KeyUp { mods, .. }
+            | Input::Press { mods, .. } => self.told.set(mods),
+            Input::Leave => self.told.set(Mods::default()),
+            Input::Move(_) | Input::Release { .. } | Input::Scroll { .. } => {}
+        }
+    }
+
+    /// The wheel or the trackpad over the page: the modifiers are caught up first, as for the
+    /// pointer ([`PageHandle::input`]).
+    pub fn wheel(&self, at: Point, dx: f32, dy: f32, phase: Phase, held: Mods) {
+        self.catch_up(held);
+        self.page().wheel(at, dx, dy, phase);
+    }
+
+    /// A key went up while the page has the keyboard: the drive takes its modifiers as it takes a
+    /// key's.
+    pub fn key_up(&self, key: Key, mods: Mods) {
+        self.told.set(mods);
+        self.page().key_up(key, mods);
+    }
+
+    /// Whether the host's keyboard is in the page: an editor's caret is drawn, and blinks, only
+    /// then. The drive forgets the modifiers (and the pointer's rest) of a window that does not
+    /// have the keyboard, and so does the handle's record of them.
+    pub fn set_active(&self, active: bool) {
+        if !active {
+            self.told.set(Mods::default());
+        }
+        self.page().set_active(active);
+    }
+
+    /// The page is told `held` if that is not what it last heard.
+    fn catch_up(&self, held: Mods) {
+        if self.told.replace(held) != held {
+            self.page().input(Input::Mods(held));
+        }
     }
 
     /// `told` is called, on the thread that builds the frame, when the page's outline changes (the
@@ -579,6 +644,9 @@ pub(super) mod tests {
         handle: PageHandle,
         list: DrawList,
         log: Rc<RefCell<Transcript>>,
+        /// The modifiers the system holds, as the pane reads them from the keyboard when it tells
+        /// the page what the person does with the pointer.
+        held: Mods,
     }
 
     impl PaneRig {
@@ -614,6 +682,7 @@ pub(super) mod tests {
                 handle,
                 list: DrawList::default(),
                 log,
+                held: Mods::default(),
             }
         }
 
@@ -678,7 +747,24 @@ pub(super) mod tests {
                     self.log.borrow_mut().say("discard marked text");
                 }
             }
-            self.handle.page().input(input);
+            // A press carries the modifiers it was made with: they are held.
+            if let Input::Press { mods, .. } = input {
+                self.held = mods;
+            }
+            self.handle.input(input, self.held);
+        }
+
+        /// The person holds `mods` while the page is not told: the window in front is another's,
+        /// or no key was pressed. The page hears of it with the next thing the pointer does.
+        pub(in crate::native_view) fn hold(&mut self, mods: Mods) {
+            self.held = mods;
+        }
+
+        /// The modifiers change while the keyboard is in the page (`flagsChanged`): the pane tells
+        /// the page at once.
+        pub(in crate::native_view) fn flags_changed(&mut self, mods: Mods) {
+            self.held = mods;
+            self.handle.input(Input::Mods(mods), mods);
         }
 
         /// A key: to the editor with the keyboard, where one has it, and to the page where none
@@ -691,7 +777,7 @@ pub(super) mod tests {
                 Route::NotEditor
             };
             if route == Route::NotEditor {
-                self.handle.page().input(Input::Key { key, mods });
+                self.handle.input(Input::Key { key, mods }, self.held);
             }
             self.log
                 .borrow_mut()
@@ -700,11 +786,11 @@ pub(super) mod tests {
 
         /// A key went up: nobody's while an editor has the keyboard.
         pub(in crate::native_view) fn key_up(&mut self, key: Key, mods: Mods) {
-            self.handle.page().key_up(key, mods);
+            self.handle.key_up(key, mods);
         }
 
         pub(in crate::native_view) fn wheel(&mut self, at: Point, dx: f32, dy: f32, phase: Phase) {
-            self.handle.page().wheel(at, dx, dy, phase);
+            self.handle.wheel(at, dx, dy, phase, self.held);
         }
 
         pub(in crate::native_view) fn text(&mut self, field: Id, text: &str) {
@@ -739,7 +825,7 @@ pub(super) mod tests {
         }
 
         pub(in crate::native_view) fn set_active(&mut self, active: bool) {
-            self.handle.page().set_active(active);
+            self.handle.set_active(active);
         }
 
         pub(in crate::native_view) fn wake_unseen(&mut self, now: f64) -> Option<f64> {

@@ -4113,8 +4113,8 @@ impl TerminalPane {
             let mut page = handle.page();
             page.set_zoom(zoom);
             page.set_scrolling(scrolling);
-            page.set_active(active);
         }
+        handle.set_active(active);
         {
             // The page says where its fields are whenever it is laid out another way.
             let fields = Rc::clone(&fields);
@@ -4153,13 +4153,19 @@ impl TerminalPane {
         let button = bt_shell_common::native_view::Button::Left;
         // A press ends what an input method composes in an editor, as a click does.
         self.end_composition();
-        handle.page().input(Input::Press {
-            at,
-            button,
-            mods: bt_shell_common::native_view::Mods::default(),
-            count: 1,
-        });
-        handle.page().input(Input::Release { at, button });
+        // The press carries its modifiers (none: a screen reader's press is not held with a key), so
+        // the page is caught up with the same.
+        let held = bt_shell_common::native_view::Mods::default();
+        handle.input(
+            Input::Press {
+                at,
+                button,
+                mods: held,
+                count: 1,
+            },
+            held,
+        );
+        handle.input(Input::Release { at, button }, held);
         self.drain_page();
     }
 
@@ -4743,7 +4749,7 @@ impl TerminalPane {
             return;
         };
         let active = self.is_active() && self.keyboard_here();
-        handle.page().set_active(active);
+        handle.set_active(active);
         if handle.editors().focused().is_some()
             && let Some(link) = self.link()
         {
@@ -5888,7 +5894,7 @@ impl TerminalPane {
             }
             Some(handle) => {
                 if let Some((key, mods)) = crate::native_page::event_key_of(event) {
-                    handle.page().input(Input::Key { key, mods });
+                    handle.input(Input::Key { key, mods }, mods);
                     self.drain_page();
                 }
             }
@@ -6084,7 +6090,9 @@ impl TerminalPane {
             self.page_field_focused(None);
         }
         if let Some(handle) = self.page_handle() {
-            handle.page().input(input);
+            // Told the modifiers the system holds first, if the page does not know them
+            // ([`PageHandle::input`]): a ⌘ pressed while another window had the keyboard.
+            handle.input(input, crate::native_page::held_mods());
             self.drain_page();
         }
         true
@@ -6112,7 +6120,7 @@ impl TerminalPane {
             return false;
         }
         if let Some(handle) = self.page_handle() {
-            handle.page().wheel(at, dx, dy, phase);
+            handle.wheel(at, dx, dy, phase, crate::native_page::held_mods());
             self.drain_page();
         }
         true
@@ -6238,7 +6246,7 @@ impl TerminalPane {
         if let (Some(handle), Some((key, mods))) =
             (self.page_handle(), crate::native_page::event_key_of(event))
         {
-            handle.page().key_up(key, mods);
+            handle.key_up(key, mods);
             self.drain_page();
         }
         true
@@ -6334,7 +6342,7 @@ impl TerminalPane {
             return false;
         }
         if let Some(handle) = self.page_handle() {
-            handle.page().input(Input::Key { key, mods });
+            handle.input(Input::Key { key, mods }, mods);
             self.drain_page();
         }
         true
@@ -8592,7 +8600,7 @@ mod tests {
         ] {
             let press = body(signature);
             let ended = press.find("self.end_composition()").expect("ended");
-            let told = press.find("handle.page().input(").expect("the press");
+            let told = press.find("handle.input(").expect("the press");
             assert!(ended < told, "{signature}: {press}");
         }
         let page_input = body("    pub(crate) fn page_input(");
@@ -8606,6 +8614,97 @@ mod tests {
         let discard = end.find("discardMarkedText()").expect("forgotten");
         assert!(unmark < discard, "{end}");
         assert_eq!(pane.matches("discardMarkedText()").count(), 1);
+    }
+
+    /// The page is told what the person does only through the page's handle, which catches it up
+    /// with the modifiers the system holds before the pointer is told anything (a move, a press, a
+    /// release, the wheel): a ⌘ pressed while another window had the keyboard is not heard
+    /// (`flagsChanged` is the key window's alone), and the editor's links and the hand over them
+    /// wait for it. The pane reads the system's modifiers at that moment (`NSEvent`'s class
+    /// `modifierFlags`, not an event's, which a scroll phase or a drag may not have), and the
+    /// keyboard's leaving goes through the handle too, which makes the drive forget them. A source
+    /// scan: the handle's catch-up is tested in `native_view::pane_tests`, and what this guards is
+    /// that every way into the page is the handle's.
+    #[test]
+    fn the_pointer_is_told_the_modifiers_the_system_holds_before_it_is_told_anything() {
+        let pane = include_str!("pane.rs");
+        let pane = &pane[..pane.find("#[cfg(test)]").unwrap_or(pane.len())];
+        let view = include_str!("view.rs");
+        let view = &view[..view.find("#[cfg(test)]").unwrap_or(view.len())];
+        let body = |source: &'static str, signature: &str| {
+            let at = source.find(signature).expect(signature);
+            let end = if signature.starts_with("        ") {
+                "\n        }\n"
+            } else {
+                "\n    }\n"
+            };
+            &source[at..at + source[at..].find(end).expect("its end")]
+        };
+        // Nothing of the person's goes to the drive's page but through the handle.
+        for call in [
+            ".page().input(",
+            ".page().wheel(",
+            ".page().key_up(",
+            ".page().set_active(",
+            ".page().key(",
+        ] {
+            assert!(
+                !pane.contains(call),
+                "{call} goes round the handle's record of the modifiers"
+            );
+            assert!(!view.contains(call), "{call}");
+        }
+        let held = "crate::native_page::held_mods()";
+        let input = body(pane, "    pub(crate) fn page_input(");
+        assert!(
+            input.contains(&format!("handle.input(input, {held})")),
+            "{input}"
+        );
+        let wheel = body(pane, "    pub(crate) fn page_wheel(");
+        assert!(
+            wheel.contains(&format!("{held})")) && wheel.contains("handle.wheel("),
+            "{wheel}"
+        );
+        let live = body(include_str!("native_page.rs"), "pub(crate) fn held_mods(");
+        assert!(live.contains("NSEvent::modifierFlags_class()"), "{live}");
+        // The modifiers alone, the keyboard's way out and the pointer's go through the same.
+        let active = body(pane, "    fn tell_page_active(");
+        assert!(active.contains("handle.set_active(active)"), "{active}");
+        // The one move, press, release and wheel of the view reach the page by `page_input` and
+        // `page_wheel`, which drain what it said (the pointer's shape, the clock) right after.
+        assert!(body(view, "        fn flags_changed(").contains("pane.page_input(Input::Mods("));
+        assert!(body(view, "    fn page_pointer(").contains("pane.page_input(Input::Move("));
+        assert!(body(view, "    fn page_pointer_left(").contains("pane.page_input(Input::Leave)"));
+        assert!(body(pane, "    pub(crate) fn page_wheel(").contains("self.drain_page()"));
+        assert!(input.contains("self.drain_page()"), "{input}");
+    }
+
+    /// The shape a modifier alone gives the pointer over a link (`Drained::cursor`, ⌘ held over a
+    /// word) is set by the same host method as the shape of a reply to the pointer, and so is held to
+    /// the same rule: only while the pointer is over the page itself. It comes with the drain of the
+    /// `flagsChanged` that told the page the modifier, so the pointer need not move. A source scan,
+    /// because what it guards needs a window server and an editor with links in a pane.
+    #[test]
+    fn the_shape_a_modifier_gives_the_pointer_is_set_where_a_replys_is_and_by_the_same_rule() {
+        let pane = include_str!("pane.rs");
+        let pane = &pane[..pane.find("#[cfg(test)]").unwrap_or(pane.len())];
+        let at = pane
+            .find("    fn cursor(&mut self, cursor: PageCursor) {")
+            .expect("cursor");
+        let shape = &pane[at..at + pane[at..].find("\n    }\n").expect("its end")];
+        assert!(
+            shape.find("page_pointer_is_over()") < shape.find(".set()"),
+            "{shape}"
+        );
+        // The drive hands the shape of a modifier to `Host::cursor` as it does a reply's: the pane
+        // has no second method for it.
+        assert_eq!(pane.matches("fn cursor(&mut self").count(), 1);
+        let drain = pane.find("    pub(crate) fn drain_page(").expect("drain");
+        let drain = &pane[drain..drain + pane[drain..].find("\n    }\n").expect("its end")];
+        assert!(
+            drain.contains("drained.deliver(&mut PageHost(self))"),
+            "{drain}"
+        );
     }
 
     /// A pane that shows a program's view has the keyboard in the view, and the window's ways of
