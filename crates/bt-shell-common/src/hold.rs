@@ -136,7 +136,9 @@ pub type ShellCommand = (String, Vec<String>);
 /// What the process needs from its surroundings, so a test brings its own.
 pub struct Env {
     /// The name of the bateri instance directory this pane was born under
-    /// (`BATERI_SSH_INSTANCE`); it stays the same across an update.
+    /// (`BATERI_SSH_INSTANCE`); the next bateri of the same session listens
+    /// under it too (`ssh_route::instance_for`), after a quit, an update or a
+    /// crash.
     pub instance: Option<String>,
     /// The roots instance directories are looked for under.
     pub roots: Vec<PathBuf>,

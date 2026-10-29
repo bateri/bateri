@@ -2451,7 +2451,9 @@ fn verdict(
 
 /// The application's ssh masters: askpass is this very binary, the
 /// sockets live in this instance's own directory under the user's cache
-/// directory (or `/tmp/bateri-$UID`). What a dead bateri left
+/// directory (or `/tmp/bateri-$UID`), named for the session
+/// ([`ssh_route::instance_for`]) so a pane's `ssh-hold` that outlived the
+/// bateri before finds this one where it found that one. What a dead bateri left
 /// behind is swept once, off the main thread. A master ends with the user's
 /// last session to its host and on quit ([`AppDelegate::shutdown`]).
 /// The saved passwords are the login keychain's ([`crate::keychain`]).
@@ -2460,20 +2462,18 @@ fn verdict(
 /// kablo ([`retired_holders::update_waiting`]), asked here, before the sweep's thread ends the
 /// holder that tells.
 fn masters() -> Option<(Arc<Masters>, bool)> {
+    let session = restore_dir(
+        &Inputs::User { config_root: None },
+        || {
+            NSBundle::mainBundle()
+                .bundleIdentifier()
+                .map(|id| id.to_string())
+        },
+        child::home,
+    );
     // Before anything that could ask it a question (the launch's restore) or start the
     // service: the terminals kept on servers are written down in the session directory.
-    crate::hold_service::open_ledger(
-        restore_dir(
-            &Inputs::User { config_root: None },
-            || {
-                NSBundle::mainBundle()
-                    .bundleIdentifier()
-                    .map(|id| id.to_string())
-            },
-            child::home,
-        )
-        .map(|dir| restore::ledger_path(&dir)),
-    );
+    crate::hold_service::open_ledger(session.as_deref().map(restore::ledger_path));
     let askpass = std::env::current_exe().ok()?;
     // SAFETY: `getuid` has no preconditions and cannot fail.
     let uid = unsafe { libc::getuid() };
@@ -2488,7 +2488,13 @@ fn masters() -> Option<(Arc<Masters>, bool)> {
     let old_update = retiring
         .as_ref()
         .is_some_and(|(roots, exe)| retired_holders::update_waiting(roots, exe));
-    let masters = Arc::new(Masters::new(askpass, bases, store));
+    // Without a session directory (an unbundled process) no pane outlives this one: a fresh name.
+    let instance = session
+        .as_deref()
+        .map_or_else(ssh_route::new_instance, |session| {
+            ssh_route::instance_for(&bases, session)
+        });
+    let masters = Arc::new(Masters::with_instance(askpass, bases, store, instance));
     let sweeper = Arc::clone(&masters);
     crate::hold_service::expect_service();
     let sweeping = std::thread::Builder::new()

@@ -44,6 +44,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 use std::io::{self, BufRead, BufReader, Read, Write};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -56,6 +57,7 @@ use std::time::{Duration, Instant};
 use bt_core::RemoteTarget;
 
 use crate::focus::FOCUS_SOCKET;
+use crate::hold::HOLD_SOCKET;
 use crate::retired_holders::{holder_listening, is_holder_socket_name};
 use crate::upload::connection;
 
@@ -1043,7 +1045,8 @@ pub struct Masters {
     /// The socket roots ([`socket_bases`]); this instance's directory is under
     /// each ([`prepare_instance`]).
     roots: Vec<PathBuf>,
-    /// This instance's directory name: random, chosen at birth.
+    /// This instance's directory name, chosen at birth: the session's, or a
+    /// random one for a second copy of the bundle ([`instance_for`]).
     instance: String,
     /// The socket bases: this instance's directory under each root that could
     /// hold one — prepared once, on the first job's thread.
@@ -1095,8 +1098,8 @@ impl Masters {
         Self::with_instance(askpass, roots, store, new_instance())
     }
 
-    /// [`Self::new`] with the instance directory's name given: an instance
-    /// carried over an update and the tests.
+    /// [`Self::new`] with the instance directory's name given: the session's
+    /// ([`instance_for`]) and the tests.
     pub fn with_instance(
         askpass: PathBuf,
         roots: Vec<PathBuf>,
@@ -1389,9 +1392,10 @@ impl Masters {
     pub fn sweep(&self) {
         // First: the sweep runs ssh per dead socket and the user's first
         // `ssh` must not miss the directory meanwhile (it skips our own).
-        // An instance carried over an update has its masters in
-        // them already: a live one is ours again — [`resolve`]'s `-O check`
-        // finds it, no password asked — and a dead one goes now.
+        // The session's name is the bateri before's too ([`instance_for`]):
+        // its masters may be in the directory already, a live one is ours
+        // again — [`resolve`]'s `-O check` finds it, no password asked — and
+        // a dead one goes now.
         for dir in self.bases() {
             remove_dead_sockets(dir);
         }
@@ -1901,6 +1905,42 @@ pub fn new_instance() -> String {
     )
 }
 
+/// The instance directory name of the bateri whose session directory is
+/// `session` ([`INSTANCE_DIGITS`] hex digits): the same at every launch.
+/// A pane's `ssh-hold` outlives the bateri it was born under — kablo keeps
+/// its terminal on this computer across a quit, an update and a crash — and
+/// it only ever looks for the name it was born with (`BATERI_SSH_INSTANCE`),
+/// so the next bateri must listen under that name. The session directory is
+/// per bundle identifier and per home, so the installed bateri and a
+/// development copy never share it. FNV-1a over the path's bytes: the name
+/// must come out the same in every version of bateri, which no std hasher
+/// promises.
+pub fn session_instance(session: &Path) -> String {
+    let hash = session
+        .as_os_str()
+        .as_bytes()
+        .iter()
+        .fold(0x811c_9dc5_u32, |hash, byte| {
+            (hash ^ u32::from(*byte)).wrapping_mul(0x0100_0193)
+        });
+    format!("{hash:08x}")
+}
+
+/// The instance directory name a bateri with the session directory
+/// `session` takes: the session's ([`session_instance`]), unless a living
+/// process other than this one owns its directory under one of `roots` — a
+/// second copy of the same bundle, whose first copy's panes are the first
+/// copy's — and then a fresh one ([`new_instance`]). A directory the bateri
+/// before left is taken over by [`prepare_instance`].
+pub fn instance_for(roots: &[PathBuf], session: &Path) -> String {
+    let name = session_instance(session);
+    let pid = std::process::id();
+    let held = roots.iter().any(|root| {
+        owner(&root.join(&name)).is_some_and(|current| current != pid && alive(current))
+    });
+    if held { new_instance() } else { name }
+}
+
 fn hex_name(name: &str, digits: usize) -> bool {
     name.len() == digits && name.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
@@ -1944,12 +1984,20 @@ pub(crate) fn alive(pid: u32) -> bool {
 /// root private ([`prepare_dir`]), the directory born **whole** — made under
 /// a hidden name, the owner file written, then renamed into place — so another
 /// instance's sweep never sees it without an owner. An existing one must be
-/// this process's.
+/// this process's, or one no living process owns: the session's name is the
+/// bateri before's too ([`instance_for`]), whose quit leaves the directory
+/// when something stays in it and whose crash leaves all of it — it is taken
+/// over ([`take_over`]), and what is still in it is the start's to clear (the
+/// sweep's dead sockets, the listeners' own binds).
 pub fn prepare_instance(root: &Path, instance: &str) -> io::Result<PathBuf> {
     prepare_dir(root)?;
     let dir = root.join(instance);
     let pid = std::process::id();
     if owner(&dir) == Some(pid) {
+        return Ok(dir);
+    }
+    if private_dir(&dir) {
+        take_over(&dir, pid)?;
         return Ok(dir);
     }
     let temp = root.join(format!(".{instance}-{}", random_hex()?));
@@ -1968,6 +2016,26 @@ pub fn prepare_instance(root: &Path, instance: &str) -> io::Result<PathBuf> {
             }
         }
     }
+}
+
+/// Makes `pid` the owner of the existing instance directory `dir`: refused
+/// while a living process other than `pid` owns it — a running bateri's
+/// directory is never taken. The owner file is written whole (a hidden name,
+/// then renamed), so no reader sees it half written.
+fn take_over(dir: &Path, pid: u32) -> io::Result<()> {
+    if owner(dir).is_some_and(|current| current != pid && alive(current)) {
+        return Err(io::Error::new(
+            io::ErrorKind::AddrInUse,
+            "the instance's owner is alive",
+        ));
+    }
+    let temp = dir.join(format!(".{OWNER_FILE}-{}", random_hex()?));
+    let written = std::fs::write(&temp, pid.to_string())
+        .and_then(|()| std::fs::rename(&temp, dir.join(OWNER_FILE)));
+    if written.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    written
 }
 
 /// `ssh -O exit` on `socket` without a destination of the user's: `-F
@@ -2057,11 +2125,13 @@ fn remove_instance(dir: &Path) {
             continue;
         };
         // The focus listener by name only: on ⌘Q it is this process's
-        // and still listening, and it goes with the directory.
-        // A holder's socket likewise (either kind): a holder that ended by
-        // its limit leaves the directory to the next start's sweep.
+        // and still listening, and it goes with the directory; the panes'
+        // `hold` listener too. A holder's socket likewise (either kind): a
+        // holder that ended by its limit leaves the directory to the next
+        // start's sweep.
         let ours = name == OWNER_FILE
             || name == FOCUS_SOCKET
+            || name == HOLD_SOCKET
             || is_holder_socket_name(name)
             || our_socket_name(name)
             || attempt_error_file(name);
@@ -3833,6 +3903,110 @@ exit $code
         pid
     }
 
+    /// The session's name is a function of its directory alone, the same in
+    /// every version of bateri (a pane born under the previous version looks
+    /// for it): the frozen values below must not change. Two sessions — the
+    /// installed bateri and a development copy — never share one.
+    #[test]
+    fn a_session_names_the_same_instance_in_every_version_and_no_other_session_does() {
+        let installed =
+            Path::new("/Users/me/Library/Application Support/bateri/session/dev.bateri.bateri");
+        let dev = Path::new("/Users/me/Library/Application Support/bateri/session/dev.bateri.dev");
+        assert_eq!(session_instance(installed), "c148d55a");
+        assert_eq!(session_instance(dev), "1d9697d4");
+        assert!(hex_name(&session_instance(dev), INSTANCE_DIGITS));
+    }
+
+    /// A pane's `ssh-hold` keeps the instance name it was born with and the
+    /// bateri it was born under goes (a quit, an update, a crash) while kablo
+    /// keeps the terminal: the next bateri of the same session listens where
+    /// the pane looks — whether the one before removed its directory, left it
+    /// with something in it, or died in it. Only a living other owner (a
+    /// second copy of the bundle) sends a launch to a fresh name.
+    #[test]
+    fn the_next_bateri_of_a_session_listens_where_the_panes_of_the_one_before_look() {
+        let scratch = scratch("session-name");
+        let roots = vec![scratch.join("r")];
+        let session = scratch.join("session/dev.bateri.dev");
+        let name = session_instance(&session);
+        let born = |instance: String| {
+            let masters = Masters::with_instance(
+                PathBuf::from("/nonexistent"),
+                roots.clone(),
+                Arc::new(NoStore),
+                instance,
+            );
+            masters
+                .bases()
+                .first()
+                .cloned()
+                .expect("an instance directory")
+        };
+        let first = instance_for(&roots, &session);
+        assert_eq!(first, name);
+        let dir = born(first.clone());
+        let pane = crate::hold::Env {
+            instance: Some(first),
+            roots: roots.clone(),
+            ssh: "ssh".into(),
+            shell: |_| None,
+        };
+        let looks = pane.sockets();
+        assert_eq!(looks, [dir.join(HOLD_SOCKET)]);
+
+        // Died in it: its owner file, its listener's file.
+        std::fs::write(dir.join(OWNER_FILE), dead_pid().to_string()).unwrap();
+        drop(UnixListener::bind(dir.join(HOLD_SOCKET)).unwrap());
+        assert_eq!(instance_for(&roots, &session), name, "after a crash");
+        assert_eq!(born(name.clone()), dir);
+        assert_eq!(owner(&dir), Some(std::process::id()));
+        assert_eq!(looks, [dir.join(HOLD_SOCKET)]);
+
+        // Quit with something left in it: no owner file.
+        std::fs::remove_file(dir.join(OWNER_FILE)).unwrap();
+        std::fs::write(dir.join("notes"), "").unwrap();
+        assert_eq!(instance_for(&roots, &session), name, "after a quit");
+        assert_eq!(born(name.clone()), dir);
+        assert_eq!(owner(&dir), Some(std::process::id()));
+
+        // A second copy while the first lives: a child of this test stands in.
+        let mut first_copy = Command::new("/bin/sleep").arg("30").spawn().expect("sleep");
+        let living = first_copy.id();
+        std::fs::write(dir.join(OWNER_FILE), living.to_string()).unwrap();
+        let second = instance_for(&roots, &session);
+        let refused = prepare_instance(&roots[0], &name);
+        let left = owner(&dir);
+        let _ = first_copy.kill();
+        let _ = first_copy.wait();
+        assert_ne!(second, name, "a living bateri's name is not taken");
+        assert!(hex_name(&second, INSTANCE_DIGITS));
+        assert!(refused.is_err());
+        assert_eq!(left, Some(living), "nor its directory");
+        std::fs::remove_dir_all(&scratch).unwrap();
+    }
+
+    /// ⌘Q removes the instance directory with the panes' `hold` listener
+    /// still listening in it, as the focus listener: a directory left behind
+    /// has no owner, so no sweep ever removes it.
+    #[test]
+    fn quitting_takes_the_hold_listener_with_the_directory() {
+        let scratch = scratch("hold-close");
+        let root = scratch.join("r");
+        let dir = prepare_instance(&root, "0a1b2c3d").unwrap();
+        let listener = UnixListener::bind(dir.join(HOLD_SOCKET)).unwrap();
+        let masters = Masters::with_instance(
+            PathBuf::from("/nonexistent"),
+            vec![root.clone()],
+            Arc::new(NoStore),
+            "0a1b2c3d".to_owned(),
+        );
+        let _ = masters.bases();
+        masters.close_all(Instant::now() + Duration::from_secs(5));
+        assert!(!dir.exists(), "the directory stayed for its hold listener");
+        drop(listener);
+        std::fs::remove_dir_all(&scratch).unwrap();
+    }
+
     /// An instance directory is born whole with its owner, and the
     /// sweep retires only a dead owner's — never a living instance's, this
     /// one's or one without an owner.
@@ -3859,7 +4033,12 @@ exit $code
         // A dead one, with a dead master, an attempt's files and a stranger's file.
         let dead = prepare_instance(&base, "33333333").unwrap();
         std::fs::write(dead.join(OWNER_FILE), dead_pid().to_string()).unwrap();
-        for name in ["0123456789abcdef", "q-0123456789abcdef", FOCUS_SOCKET] {
+        for name in [
+            "0123456789abcdef",
+            "q-0123456789abcdef",
+            FOCUS_SOCKET,
+            HOLD_SOCKET,
+        ] {
             drop(UnixListener::bind(dead.join(name)).unwrap());
         }
         std::fs::write(dead.join("q-0123456789abcdef.err"), "").unwrap();
