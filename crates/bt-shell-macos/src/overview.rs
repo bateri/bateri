@@ -1367,7 +1367,8 @@ impl OverviewView {
         (plate.size.width * KEYS_SHARE).min(KEYS_MAX)
     }
 
-    /// The field stands in the plate left of the keys.
+    /// The field stands in the plate left of the keys, as low as puts its text on the plate's
+    /// middle line, the keys' line (its text sits `FIELD_TEXT_Y` off its own middle).
     fn place_field(&self) {
         let iv = self.ivars();
         let plate = self.plate();
@@ -1375,7 +1376,7 @@ impl OverviewView {
         iv.field.setFrame(NSRect::new(
             NSPoint::new(
                 plate.origin.x + PLATE_PAD,
-                plate.origin.y + (PLATE_HEIGHT - height) / 2.0,
+                plate.origin.y + (PLATE_HEIGHT - height) / 2.0 - FIELD_TEXT_Y,
             ),
             NSSize::new(
                 (plate.size.width - 2.0 * PLATE_PAD - self.keys_room(plate)).max(40.0),
@@ -1481,12 +1482,13 @@ impl OverviewView {
                 self.paint_load(rect.origin.y + rect.size.height + LOAD_PAD, &small);
             }
         }
-        let bottom = self.bounds().size.height;
+        // On the search row's line, level with the plate's words.
+        let plate = self.plate();
         draw_text(
             HINT,
             SIDE_INSET + ROW_TEXT,
-            bottom - 44.0,
-            18.0,
+            plate.origin.y,
+            PLATE_HEIGHT,
             &attributes(&NSFont::systemFontOfSize(SMALL_SIZE - 0.5), look.dim),
         );
     }
