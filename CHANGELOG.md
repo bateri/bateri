@@ -27,6 +27,11 @@ of every installed copy. A version without a section is not released.
   what ⌥ types on your keyboard (`@`, `[`, `{`, `|`) is typed. Cut, Copy, Paste, Select All and
   Undo are the editor's while it has the keyboard; the caret blinks, and stops after a while as
   the terminal's does. VoiceOver reads the editor as a text area: its text and what is selected.
+- **A native view can ask how your terminal draws its cursor.** A page of a program's view can
+  read your cursor's shape, whether it blinks and how often, its rounding, its glow, how thick its bar and line are, what it is
+  in a window that is not in front and how it moves, and the rounding of your selection, and
+  be told when you change one, so that the editor in it can look like your cursor if the page
+  wants that. bateri only tells it; the page decides.
 - **A native view goes on working when you do nothing.** A page can ask to be woken after a
   while, and set timers on it: a long file is coloured to its end without a key pressed, a save
   waits for the typing to stop, a clock ticks. bateri wakes it when it asks and no more often than

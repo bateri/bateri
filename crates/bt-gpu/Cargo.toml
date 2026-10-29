@@ -13,6 +13,10 @@ bt-atlas = { workspace = true }
 # layer and the vsync rhythm come from `bt-shell` (`Surface::from_layer`,
 # `Pacer`).
 wgpu = { workspace = true }
+# The shape of a selection that runs over several lines (`pencere_view::bands`): written once, in
+# pencere, and drawn by every host and by the kit's editor alike. A crate of the graph already
+# (`bt-shell-common` has it), so nothing new comes in; it is pure geometry and no platform's.
+pencere-view = { workspace = true }
 
 [dev-dependencies]
 # The glyph guards' sample characters come from the atlas backend's fixture:

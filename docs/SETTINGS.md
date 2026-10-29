@@ -886,6 +886,17 @@ wrong value for this key is **not caught** by bateri's own smoke test: the
 timed run never reads the settings file and blinking is off by default, so the
 only protection is the accepted range itself.
 
+**The cursor settings are also told to a program's native view.** The shape (`cursor`,
+`"beam"` as the view's bar), whether it blinks and how often (`cursor_blink`,
+`cursor_blink_interval`), `cursor_radius`, `cursor_glow`, `cursor_unfocused` and
+`[motion] cursor_motion`, together with how thick the cursor's bar and line are drawn and the
+rounding of a selection, are what a page of the view can read of how your terminal draws its
+cursor (`cursor_blink = "auto"` is told as blinking, since a page has no program to ask).
+bateri **only tells** it: a page that wants the editors in it to look like your cursor
+asks for that, and a page that does not keeps its own editors as they are. Change a setting
+and a page that is open is told, and reads it again. Reduce Motion is not a part of this: the
+view's editor follows it by itself.
+
 `confirm_close` says whether to ask before closing. The question is **one**
 sheet for that tab on ⌘W and the tab bar's × button, for all of the window's
 tabs on the red button and ⇧⌘W, for the other tabs on "Close Other Tabs", and

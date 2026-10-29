@@ -1473,6 +1473,17 @@ mod tests {
     /// A 120 Hz frame; the tests' common step.
     const TICK: f32 = 1.0 / 120.0;
 
+    /// The numbers pencere's editor moves its caret by, to be a terminal's (`CaretMotion`'s doc:
+    /// "a terminal's takes 0.18", "a terminal's is 30"), are these: the terminal says its look to a
+    /// page in them (`bt-shell-common`'s `terminal_look`), and a page that takes them must glide as
+    /// the cursor does. If either moves here, the kit's constants are to move with it.
+    #[test]
+    fn the_kits_numbers_for_a_caret_are_the_cursors() {
+        use pencere_view::edit::CaretMotion;
+        assert_eq!(EASE_DURATION, CaretMotion::EASE);
+        assert_eq!(OMEGA, CaretMotion::SPRING);
+    }
+
     /// A cursor in flight from `(0,0)` to `(10,4)`, **with the given style**.
     fn moving_with(style: CursorMotion) -> Motion {
         let mut motion = Motion::default();

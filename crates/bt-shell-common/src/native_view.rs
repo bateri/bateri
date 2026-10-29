@@ -40,9 +40,11 @@ use bt_gpu::{
 };
 
 mod containers;
+mod look;
 mod page;
 #[cfg(test)]
 mod pane_tests;
+pub use look::{LookSlot, caret_width_pt, terminal_look};
 pub use page::{Opening, PageEditors, PageHandle, containers_demo, module_page, script_page};
 pub use pencere_drive::{
     Drained, Field, Held, Host, Outline, Painted, Placement, Route, Scrolling, Tip, ZOOM_TEXT,
@@ -52,7 +54,7 @@ use pencere_sandbox::{Images, draw_figure};
 pub use pencere_view::{
     Accessible, AccessibleRole, Bars, Button, Command, Cursor, FieldKind, FieldState, Fill, Id,
     Input, Key, KeyConvention, Keyboard, Menu, MenuEntry, Mods, Phase, Point, Rect, Role, Shortcut,
-    State, WallTime,
+    State, TerminalLook, WallTime,
 };
 use pencere_view::{
     Color, DrawList, Family, Figure, Font, Measure, Metrics, Paint, Picture, Quad, Run, Source,

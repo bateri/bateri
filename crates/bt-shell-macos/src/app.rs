@@ -6007,6 +6007,15 @@ impl AppDelegate {
                 pane.apply_caret(&new);
             }
         }
+        // And a page's program is told how the terminal draws its cursor and its selection, in the
+        // kit's words, when the keys behind it changed (the cursor's shape and blink are
+        // `terminal`'s, its radius, glow, period and state `caret`'s, its motion `motion`'s). A
+        // record the page reads and decides on: nothing of it reaches a page's editors from here.
+        if changes.terminal || changes.caret || changes.motion {
+            for pane in &panes {
+                pane.set_terminal_look(&new);
+            }
+        }
         // `keep_running` is read when quitting; its live part is the permission
         // ⌘Q's reminder needs.
         let ask = leaving::asks_notification_permission(Some(old.keep_running), new.keep_running);

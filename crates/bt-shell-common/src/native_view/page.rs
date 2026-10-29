@@ -27,6 +27,9 @@
 //!   ([`pencere_drive::Painted::held`]) and the pane takes them right after the outline.
 //! - **The time of day, and the keyboard** — [`PaneProgram`]: the person's offset from UTC, which the
 //!   sandbox cannot know, and the system's keyboard convention.
+//! - **How the terminal draws its cursor and its selection, and what it draws** — [`PaneProgram`]
+//!   again, from [`LookSlot`]: told to the page as a record and nothing more (the page decides what
+//!   its editors take of it). `Setup` has no caret blink of the host's to give any more.
 //!
 //! The pane's pasteboard, pointer, menus, browser and the session it speaks through are
 //! `bt-shell-macos`'s (its `pencere_drive::Host`); the clock that wakes a page whose pane is not seen
@@ -41,9 +44,13 @@ use bt_core::Flow;
 use bt_gpu::{Renderer, UiContext, UiList, UiPage};
 use pencere_drive::{FrameAt, Outline, Page, Painted, Placement, Route, Setup};
 use pencere_sandbox::{Assets, ModuleLimits, Program, Script};
-use pencere_view::{Font, Id, Input, Key, Measure, Metrics, Mods, Phase, Point, Rect, WallTime};
+use pencere_view::{
+    Drawing as Drawn, Font, Id, Input, Key, Measure, Metrics, Mods, Phase, Point, Rect,
+    TerminalLook, WallTime,
+};
 
 use super::containers::Demo;
+use super::look::LookSlot;
 use super::{SHAPED_LIMIT, Shaped, Typeset, to_list};
 
 /// What a pane opens a page of the kit with, whatever the page is.
@@ -62,6 +69,10 @@ pub struct Opening {
     pub clock: fn() -> f64,
     /// What measures and draws the page's text.
     pub renderer: Rc<Renderer>,
+    /// How the terminal draws its cursor and its selection, which the page's program reads from
+    /// the module's thread (`pencere.terminal_look()`) and the pane changes when the person's
+    /// settings or the terminal's font do: the same slot, the pane's own clone of it.
+    pub look: LookSlot,
 }
 
 /// The page of a component (`bytes`, binary or text) held to `limits`, as the link's [`UiPage`], and
@@ -121,6 +132,7 @@ impl Opening {
             PaneProgram {
                 flow: self.flow,
                 clock: Some(self.clock),
+                look: self.look,
             },
             assets,
             Box::new(measure),
@@ -134,7 +146,7 @@ impl Opening {
 }
 
 /// What a page in a pane is given, besides what measures it: what it is held to, its program and
-/// clock, its files, its place below the strip, and the terminal's caret's blink. How its boxes
+/// clock, its files and its place below the strip. How its boxes
 /// scroll is the pane's to say once it is up (`Page::set_scrolling`).
 fn setup(
     limits: ModuleLimits,
@@ -148,7 +160,6 @@ fn setup(
         program: Arc::new(program),
         assets,
         placement: Placement { inset, zoom: 1.0 },
-        blink: bt_core::CURSOR_BLINK_INTERVAL,
         measure,
         ..Setup::default()
     }
@@ -180,6 +191,7 @@ impl Drawing {
 struct PaneProgram {
     flow: Option<Flow>,
     clock: Option<fn() -> f64>,
+    look: LookSlot,
 }
 
 impl Program for PaneProgram {
@@ -208,6 +220,18 @@ impl Program for PaneProgram {
             seconds,
             utc_offset: local_utc_offset(seconds),
         }
+    }
+
+    /// How the terminal draws its cursor and its selection, as the person has set it now (read
+    /// from the module's thread, so from the slot the pane changes on the main one).
+    fn terminal_look(&self) -> TerminalLook {
+        self.look.get()
+    }
+
+    /// What this host draws that not every host does: the soft shadow (`Quad::shadow`), which
+    /// the renderer's boxes have ([`bt_gpu::UiQuad::shadow`]). The same every time.
+    fn draws(&self) -> Vec<Drawn> {
+        vec![Drawn::Shadow]
     }
 
     // `keyboard` is the sandbox's own answer: the system this is built for (a Mac's on macOS, which
@@ -653,6 +677,12 @@ pub(super) mod tests {
         /// The page of the script `source` below a strip of 32 points, measured evenly; the
         /// outline told as the pane is told it.
         pub(in crate::native_view) fn open(source: &str) -> Self {
+            Self::open_with(source, LookSlot::default())
+        }
+
+        /// The same with the look of the terminal the page reads (`pencere.terminal_look()`) in
+        /// `look`, the slot the pane would change.
+        pub(in crate::native_view) fn open_with(source: &str, look: LookSlot) -> Self {
             let script = Script {
                 path: "page.lua".to_owned(),
                 source: source.as_bytes().to_vec(),
@@ -661,6 +691,7 @@ pub(super) mod tests {
             let program = PaneProgram {
                 flow: None,
                 clock: None,
+                look,
             };
             let setup = setup(ModuleLimits::default(), 32.0, program, None, Box::new(Even));
             let handle = PageHandle::new(Page::script(script, setup, || {}));
@@ -878,6 +909,7 @@ pub(super) mod tests {
         let held = PaneProgram {
             flow: Some(flow.clone()),
             clock: None,
+            look: LookSlot::default(),
         };
         let mut said = 0;
         while held.may_say(64 << 10) {
@@ -891,6 +923,7 @@ pub(super) mod tests {
         let demo = PaneProgram {
             flow: None,
             clock: None,
+            look: LookSlot::default(),
         };
         assert!((0..1000).all(|_| demo.may_say(64 << 10)));
     }
@@ -936,6 +969,7 @@ pub(super) mod tests {
         let program = PaneProgram {
             flow: None,
             clock: None,
+            look: LookSlot::default(),
         };
         let told = program.wall_clock();
         let now = SystemTime::now()
@@ -972,6 +1006,61 @@ pub(super) mod tests {
         }
     }
 
+    /// How the terminal draws its cursor is what a page reads of it, as the person has it now, and
+    /// the page is told when it changes and not otherwise: the program reads the slot the pane
+    /// changes, `draws` says the soft shadow (the renderer's boxes have one), and nothing is applied
+    /// to the page's editors — it is a record to be read, and the page decides.
+    #[test]
+    fn a_page_reads_how_the_terminal_draws_its_cursor_and_is_told_when_it_changes() {
+        use super::super::look::terminal_look;
+        use bt_core::{CaretShape, Settings};
+        const SOURCE: &str = r#"local told = 0
+return {
+    render = function()
+        local caret = pencere.terminal_look().caret or {}
+        local draws = pencere.draws()
+        return pencere.div():size_full()
+            :child(pencere.text(string.format("look: %s %s %s %s", tostring(caret.shape), tostring(caret.glow), tostring(draws.shadow), tostring(caret.width))))
+            :child(pencere.text("told: " .. told))
+    end,
+    handle = function(event)
+        if event.type == "terminal_look" then told = told + 1 end
+        return true
+    end,
+}"#;
+        let words = |rig: &PaneRig, prefix: &str| {
+            drawn(&rig.list)
+                .into_iter()
+                .find_map(|words| words.strip_prefix(prefix).map(str::to_owned))
+                .unwrap_or_default()
+        };
+        let look = LookSlot::new(terminal_look(&Settings::default()));
+        let mut rig = PaneRig::open_with(SOURCE, look.clone());
+        rig.frame(0.0);
+        rig.settle(0.0);
+        assert_eq!(words(&rig, "look: "), "block 1 true nil");
+        assert_eq!(words(&rig, "told: "), "0");
+        // The person sets a beam: the pane changes the slot and, since it is a change, tells the page.
+        let beam = Settings {
+            cursor: CaretShape::Beam,
+            ..Settings::default()
+        };
+        assert!(look.set(terminal_look(&beam)));
+        rig.handle.page().terminal_look_changed();
+        rig.settle(0.1);
+        rig.frame(0.1);
+        assert_eq!(words(&rig, "look: "), "bar 1 true nil");
+        assert_eq!(words(&rig, "told: "), "1");
+        // The width the pane adds (it is no setting) reaches the page in its points.
+        let mut wide = terminal_look(&beam);
+        wide.caret.width = Some(1.5);
+        assert!(look.set(wide));
+        rig.handle.page().terminal_look_changed();
+        rig.settle(0.2);
+        rig.frame(0.2);
+        assert_eq!(words(&rig, "look: "), "bar 1 true 1.5");
+    }
+
     /// The keyboard a page reads is the system's own convention: a Mac's on the Mac (the sandbox
     /// says the system this is built for, and the pane has nothing to say against it).
     #[test]
@@ -979,6 +1068,7 @@ pub(super) mod tests {
         let program = PaneProgram {
             flow: None,
             clock: None,
+            look: LookSlot::default(),
         };
         let expected = if cfg!(target_os = "macos") {
             KeyConvention::Mac
@@ -998,11 +1088,13 @@ pub(super) mod tests {
         let program = PaneProgram {
             flow: None,
             clock: Some(frames_clock),
+            look: LookSlot::default(),
         };
         assert_eq!(program.now(), Some(1234.5));
         let none = PaneProgram {
             flow: None,
             clock: None,
+            look: LookSlot::default(),
         };
         assert_eq!(none.now(), None);
     }
@@ -1043,6 +1135,7 @@ pub(super) mod tests {
             flow,
             clock,
             renderer: Rc::clone(renderer),
+            look: LookSlot::default(),
         }
     }
 
@@ -1199,6 +1292,7 @@ pub(super) mod tests {
             let program = PaneProgram {
                 flow: Some(session.flow()),
                 clock: None,
+                look: LookSlot::default(),
             };
             let setup = setup(ModuleLimits::default(), 32.0, program, None, Box::new(Even));
             let mut page = Page::script(script, setup, || {});
@@ -1379,6 +1473,7 @@ pub(super) mod tests {
         let program = PaneProgram {
             flow: None,
             clock: None,
+            look: LookSlot::default(),
         };
         let setup = setup(ModuleLimits::default(), 0.0, program, None, Box::new(Even));
         let mut page = Page::spawn(|| Ok(Demo::new()), setup, || {});

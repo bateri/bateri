@@ -38,6 +38,7 @@ use bt_core::{
     LinearRgba, Picture, Pictures, SearchRun, SelectionRun, TrackBlock, TrackMark, UnderlineStyle,
     UnfocusedCaret,
 };
+use pencere_view::bands;
 
 use crate::arrival::dust::{self, HOT_LENGTH_PT, Zone};
 use crate::arrival::{Scene, WAVE_REACH_PT};
@@ -294,75 +295,7 @@ pub(crate) fn caret_radius_px(cell_px: (f32, f32), ratio: f32) -> f32 {
 /// half the cell's short side, so the shape is not broken even if it becomes
 /// a pill. The user's `cursor_radius` does not touch this (the key
 /// is the caret's).
-pub(crate) const SELECTION_RADIUS: f32 = 0.22;
-
-/// One corner of the selection shape; its order in
-/// [`selection_corners`]'s array is TL, TR, BR, BL — `selection_fragment`'s
-/// mask order.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Corner {
-    /// An exposed corner: the neighbouring row's run on that edge does not
-    /// cover the corner's column (either there is no neighbour, or the column
-    /// is outside it).
-    Convex,
-    /// The neighbouring run covers the corner and the edge is aligned on
-    /// both: the shape continues straight.
-    Square,
-    /// The neighbour covers the corner **and** overshoots this run's edge:
-    /// the corner is square, and a concave fill piece falls outside the step.
-    /// The fill is always produced by the **narrow** run — the wide one's edge
-    /// on that side is not covered by its neighbour, so every step is filled
-    /// exactly once.
-    Concave,
-}
-
-/// The four corners of `runs[index]` (TL, TR, BR, BL).
-///
-/// A neighbour is only the **adjacent** row's run: if a row with no run comes
-/// between (a row with no drawable cell produces no run) the shape
-/// splits there and the two pieces take their own corners. `runs` is in row
-/// order with at most one run per row (`bt_core::SelectionRuns::as_slice`).
-///
-/// The decision is on the column, not the pixel: a corner looks at whether
-/// the neighbour on that edge covers that **column**. Two runs that touch only
-/// diagonally (the upper starts at 5, the lower ends at 4) do not cover each
-/// other and give two convex corners — the usual state of a selection in
-/// line flow.
-pub(crate) fn selection_corners(runs: &[SelectionRun], index: usize) -> [Corner; 4] {
-    let this = runs[index];
-    let adjacent = |other: Option<&SelectionRun>, row: Option<u16>| {
-        other.copied().filter(|o| Some(o.row) == row)
-    };
-    let above = index
-        .checked_sub(1)
-        .and_then(|i| adjacent(runs.get(i), this.row.checked_sub(1)));
-    let below = adjacent(runs.get(index + 1), this.row.checked_add(1));
-    // The left corner looks at the `first` column, the right corner at the
-    // `last` column; if the neighbour covers that column it is square, and if
-    // it also overshoots in that direction, concave.
-    let left = |n: Option<SelectionRun>| corner(n, this.first, |n| n.first < this.first);
-    let right = |n: Option<SelectionRun>| corner(n, this.last, |n| n.last > this.last);
-    [left(above), right(above), right(below), left(below)]
-}
-
-/// One corner of [`selection_corners`]: does the neighbour cover column
-/// `col`, and if it does, does it overshoot this edge.
-fn corner(
-    neighbour: Option<SelectionRun>,
-    col: u16,
-    extends: impl Fn(SelectionRun) -> bool,
-) -> Corner {
-    match neighbour {
-        Some(n) if (n.first..=n.last).contains(&col) => {
-            if extends(n) {
-                Corner::Concave
-            } else {
-                Corner::Square
-            }
-        }
-        _ => Corner::Convex,
-    }
-}
+pub const SELECTION_RADIUS: f32 = 0.22;
 
 /// The caret's **two** rectangles; both are top-left corner + size, window space.
 ///
@@ -378,6 +311,18 @@ struct CaretRects {
     /// The inversion's area ([`CursorBlock`]). An empty rectangle = no
     /// inversion, not a separate flag.
     opaque: ([f32; 2], [f32; 2]),
+}
+
+/// How thick the caret's bar and line are, in pixels: the font's underline metric (`rule`),
+/// one pixel at the least and the cell's short side at the most. Public because the page of a
+/// pane is told it (as points, `bt-shell-common`'s terminal look), so that an editor's caret
+/// is as thick as the terminal's.
+///
+/// **`min`+`max`, not `clamp`**: `f32::clamp` wants `min <= max` and `Frame::default()`'s cell is
+/// `(0.0, 0.0)`: a `push_caret` arriving without `clear` would **panic** inside the display link
+/// callback. At a zero cell the thickness also stays zero, i.e. a caret that is not drawn.
+pub fn caret_thickness_px(cell_px: (f32, f32), rule: f32) -> f32 {
+    rule.max(1.0).min(cell_px.0.min(cell_px.1))
 }
 
 /// The caret's rectangles: top-left corner and size, in pixels **in window
@@ -399,14 +344,7 @@ fn caret_painted_rect(
     shape: CaretShape,
     rule: f32,
 ) -> ([f32; 2], [f32; 2]) {
-    // **`min`+`max`, not `clamp`**: `f32::clamp`
-    // wants `min <= max` and `Frame::default()`'s cell is `(0.0, 0.0)` — a
-    // `push_caret` arriving without `clear` would **panic** inside the
-    // display link callback. Not a panic path as such, but it would kill a
-    // window; at a zero cell the thickness also stays zero, i.e. a caret that
-    // is not drawn.
-    let limit = cell_px.0.min(cell_px.1);
-    let thick = rule.max(1.0).min(limit);
+    let thick = caret_thickness_px(cell_px, rule);
     match shape {
         CaretShape::Block => (at, [cell_px.0, cell_px.1]),
         // At the **bottom** of the cell, not at the font's underline
@@ -1946,7 +1884,7 @@ impl Frame {
     /// quads could leave a translucent line at a fractional cell width.
     ///
     /// **The whole slice at once**, not run by run: a corner's decision
-    /// depends on the neighbouring row's run ([`selection_corners`]). The
+    /// depends on the neighbouring row's run (`pencere_view::bands`). The
     /// instance's `rgba` slot here is not a colour but a **corner mask** —
     /// per corner `1` convex, `0` square; the concave fill is a separate `r×r`
     /// instance and its mask has `-1` at the corner that is the circle's
@@ -1984,58 +1922,63 @@ impl Frame {
     /// The quads and concave fills of the selection runs, in `pos`'s
     /// coordinate space — the **single** shape decision of the two surfaces
     /// (grid, dock); only the cell's position differs.
+    ///
+    /// The shape itself is pencere's (`pencere_view::bands`, the one every
+    /// host and the kit's editor draw a selection by): the runs go in as boxes, the
+    /// pieces come out as boxes, and this turns them into the shader's
+    /// instances — a body's corner mask is `1` where its radius is not
+    /// zero and `0` where it is, and a fillet is an `r×r` quad with `-1` at
+    /// the corner that is the circle's centre. The radius is one uniform per
+    /// frame ([`Frame::selection_radius`]); `bands` holds a corner to what the
+    /// shape can take, which on a cell grid is that radius (a step is at least
+    /// a cell wide, a band at least a cell).
     fn selection_parts(
         &self,
         runs: &[SelectionRun],
         pos: impl Fn(&Self, u16, u16) -> [f32; 2],
         out: &mut Vec<Instance>,
     ) {
-        let r = self.selection_radius();
         let (cw, ch) = self.cell_px;
-        for (index, run) in runs.iter().enumerate() {
-            debug_assert!(run.first <= run.last, "reversed run: {run:?}");
-            let corners = selection_corners(runs, index);
-            let pos = pos(self, run.first, run.row);
-            let width = (f32::from(run.last.saturating_sub(run.first)) + 1.0) * cw;
-            out.push(Instance {
-                pos,
-                size: [width, ch],
-                rgba: corners.map(|c| if c == Corner::Convex { 1.0 } else { 0.0 }),
-            });
-            if r <= 0.0 {
-                continue;
-            }
-            let (x0, x1) = (pos[0], pos[0] + width);
-            let (y0, y1) = (pos[1], pos[1] + ch);
-            // The fill is **outside** the step, in this run's own row band:
-            // the `r×r` square beside the corner, the circle's centre being the
-            // square's end farthest from the corner. The order is [`Corner`]'s
-            // (TL, TR, BR, BL); the second number is the fill quad's corner
-            // that carries the centre.
-            let fills = [
-                ([x0 - r, y0], 3),
-                ([x1, y0], 2),
-                ([x1, y1 - r], 1),
-                ([x0 - r, y1 - r], 0),
-            ];
-            for (corner, (fill_pos, centre)) in corners.into_iter().zip(fills) {
-                if corner != Corner::Concave {
-                    continue;
+        let bands: Vec<bands::Band> = runs
+            .iter()
+            .map(|run| {
+                debug_assert!(run.first <= run.last, "reversed run: {run:?}");
+                let at = pos(self, run.first, run.row);
+                let width = (f32::from(run.last.saturating_sub(run.first)) + 1.0) * cw;
+                bands::Band::new(at[1], at[1] + ch, at[0], at[0] + width)
+            })
+            .collect();
+        for part in bands::rounded(&bands, self.selection_radius()) {
+            out.push(match part {
+                bands::Part::Body { rect, radii, .. } => Instance {
+                    pos: [rect.x, rect.y],
+                    size: [rect.w, rect.h],
+                    rgba: radii.map(|radius| if radius > 0.0 { 1.0 } else { 0.0 }),
+                },
+                bands::Part::Fillet { rect, corner, .. } => {
+                    // The mask's index of the quad's corner that carries the circle's centre
+                    // (TL, TR, BR, BL are 0..4): the one across from the turn's corner.
+                    let centre = match corner {
+                        bands::Corner::TopLeft => 3,
+                        bands::Corner::TopRight => 2,
+                        bands::Corner::BottomRight => 1,
+                        bands::Corner::BottomLeft => 0,
+                    };
+                    let mut mask = [0.0; 4];
+                    mask[centre] = -1.0;
+                    Instance {
+                        pos: [rect.x, rect.y],
+                        size: [rect.w, rect.h],
+                        rgba: mask,
+                    }
                 }
-                let mut mask = [0.0; 4];
-                mask[centre] = -1.0;
-                out.push(Instance {
-                    pos: fill_pos,
-                    size: [r, r],
-                    rgba: mask,
-                });
-            }
+            });
         }
     }
 
     /// The search highlight's runs on the grid: the selection's shape
     /// ([`Frame::selection_parts`], `SELECTION_RADIUS`) but the corners are
-    /// **per match** — [`selection_corners`] assumes one run per row and
+    /// **per match** — [`Frame::selection_parts`] assumes one run per row and
     /// array adjacency, whereas search puts several runs on a row and two
     /// separate matches on consecutive rows must not fuse into a single shape
     /// A single wrapped match does fuse: `SearchRun::continues`
@@ -4465,83 +4408,154 @@ mod tests {
     /// `cursor_alpha_reaches_the_block_and_the_text`.
     const OPAQUE: f32 = 1.0;
 
+    /// The shape the selection's rows come to, as the instance lists the shader draws: a quad
+    /// for each run (the mask is its corners, `1` round and `0` square) and, at a step, a fill
+    /// beside it (`-1` at the corner that is the circle's centre). The lists were taken from the
+    /// shape's own code before it was taken over by pencere's `bands`, so that what is
+    /// drawn at the selection's radius is the same list.
     #[test]
-    fn a_lone_run_rounds_all_four_corners() {
-        let runs = [run(3, 2, 9)];
-        assert_eq!(selection_corners(&runs, 0), [Corner::Convex; 4]);
-    }
-
-    #[test]
-    fn two_equal_runs_square_their_inner_corners() {
-        use Corner::{Convex, Square};
-        let runs = [run(3, 2, 9), run(4, 2, 9)];
-        assert_eq!(
-            selection_corners(&runs, 0),
-            [Convex, Convex, Square, Square]
+    fn the_selection_comes_to_the_same_instances_as_it_always_did() {
+        type Scene = (
+            &'static str,
+            u16,
+            u16,
+            Vec<SelectionRun>,
+            Vec<([f32; 2], [f32; 2], [f32; 4])>,
         );
-        assert_eq!(
-            selection_corners(&runs, 1),
-            [Square, Square, Convex, Convex]
-        );
-    }
-
-    #[test]
-    fn a_step_gets_one_concave_fill_from_the_narrower_run() {
-        use Corner::{Concave, Convex, Square};
-        // The typical state of a flow selection: on top from 4 to the end of
-        // the row, below from the start of the row to the end. On the left edge
-        // the lower row is longer → the upper run's BL is concave; the right
-        // edge is aligned → square.
-        let runs = [run(3, 4, 9), run(4, 0, 9)];
-        assert_eq!(
-            selection_corners(&runs, 0),
-            [Convex, Convex, Square, Concave]
-        );
-        assert_eq!(
-            selection_corners(&runs, 1),
-            [Convex, Square, Convex, Convex]
-        );
-        // The reverse step: the lower run is narrow and stays to the right →
-        // its TR is concave.
-        let runs = [run(3, 0, 9), run(4, 0, 5)];
-        assert_eq!(
-            selection_corners(&runs, 0),
-            [Convex, Convex, Convex, Square]
-        );
-        assert_eq!(
-            selection_corners(&runs, 1),
-            [Square, Concave, Convex, Convex]
-        );
-        // The fill is only in the narrow run: the two rows' concave-corner
-        // total is one.
-        let concave = |runs: &[SelectionRun]| {
-            (0..runs.len())
-                .flat_map(|i| selection_corners(runs, i))
-                .filter(|&c| c == Concave)
-                .count()
-        };
-        assert_eq!(concave(&[run(3, 4, 9), run(4, 0, 9)]), 1);
-        assert_eq!(
-            concave(&[run(3, 3, 6), run(4, 0, 9)]),
-            2,
-            "a step on both sides"
-        );
-    }
-
-    #[test]
-    fn diagonal_runs_touch_only_at_a_point_and_stay_convex() {
-        // The upper starts at 5, the lower ends at 4: they share no column at
-        // all, so two separate rounded pieces.
-        let runs = [run(3, 5, 9), run(4, 0, 4)];
-        assert_eq!(selection_corners(&runs, 0), [Corner::Convex; 4]);
-        assert_eq!(selection_corners(&runs, 1), [Corner::Convex; 4]);
-    }
-
-    #[test]
-    fn a_blank_row_between_runs_splits_the_shape() {
-        let runs = [run(3, 0, 9), run(5, 0, 9)];
-        assert_eq!(selection_corners(&runs, 0), [Corner::Convex; 4]);
-        assert_eq!(selection_corners(&runs, 1), [Corner::Convex; 4]);
+        let scenes: Vec<Scene> = vec![
+            (
+                "a lone run",
+                40,
+                80,
+                vec![run(3, 2, 9)],
+                vec![([80.0, 240.0], [320.0, 80.0], [1.0, 1.0, 1.0, 1.0])],
+            ),
+            (
+                "two equal runs",
+                40,
+                80,
+                vec![run(3, 2, 9), run(4, 2, 9)],
+                vec![
+                    ([80.0, 240.0], [320.0, 80.0], [1.0, 1.0, 0.0, 0.0]),
+                    ([80.0, 320.0], [320.0, 80.0], [0.0, 0.0, 1.0, 1.0]),
+                ],
+            ),
+            (
+                "a step on the left",
+                40,
+                80,
+                vec![run(3, 4, 9), run(4, 0, 9)],
+                vec![
+                    ([160.0, 240.0], [240.0, 80.0], [1.0, 1.0, 0.0, 0.0]),
+                    ([142.4, 302.4], [17.6, 17.6], [-1.0, 0.0, 0.0, 0.0]),
+                    ([0.0, 320.0], [400.0, 80.0], [1.0, 0.0, 1.0, 1.0]),
+                ],
+            ),
+            (
+                "a step on the right",
+                40,
+                80,
+                vec![run(3, 0, 9), run(4, 0, 5)],
+                vec![
+                    ([0.0, 240.0], [400.0, 80.0], [1.0, 1.0, 1.0, 0.0]),
+                    ([0.0, 320.0], [240.0, 80.0], [0.0, 0.0, 1.0, 1.0]),
+                    ([240.0, 320.0], [17.6, 17.6], [0.0, 0.0, -1.0, 0.0]),
+                ],
+            ),
+            (
+                "a step on both sides",
+                40,
+                80,
+                vec![run(3, 3, 6), run(4, 0, 9)],
+                vec![
+                    ([120.0, 240.0], [160.0, 80.0], [1.0, 1.0, 0.0, 0.0]),
+                    ([280.0, 302.4], [17.6, 17.6], [0.0, -1.0, 0.0, 0.0]),
+                    ([102.4, 302.4], [17.6, 17.6], [-1.0, 0.0, 0.0, 0.0]),
+                    ([0.0, 320.0], [400.0, 80.0], [1.0, 1.0, 1.0, 1.0]),
+                ],
+            ),
+            (
+                "runs that touch at a point",
+                40,
+                80,
+                vec![run(3, 5, 9), run(4, 0, 4)],
+                vec![
+                    ([200.0, 240.0], [200.0, 80.0], [1.0, 1.0, 1.0, 1.0]),
+                    ([0.0, 320.0], [200.0, 80.0], [1.0, 1.0, 1.0, 1.0]),
+                ],
+            ),
+            (
+                "a blank row between runs",
+                40,
+                80,
+                vec![run(3, 0, 9), run(5, 0, 9)],
+                vec![
+                    ([0.0, 240.0], [400.0, 80.0], [1.0, 1.0, 1.0, 1.0]),
+                    ([0.0, 400.0], [400.0, 80.0], [1.0, 1.0, 1.0, 1.0]),
+                ],
+            ),
+            (
+                "a flow selection with a narrow last row",
+                40,
+                80,
+                vec![run(2, 4, 9), run(3, 0, 9), run(4, 0, 3), run(5, 2, 2)],
+                vec![
+                    ([160.0, 160.0], [240.0, 80.0], [1.0, 1.0, 0.0, 0.0]),
+                    ([142.4, 222.4], [17.6, 17.6], [-1.0, 0.0, 0.0, 0.0]),
+                    ([0.0, 240.0], [400.0, 80.0], [1.0, 0.0, 1.0, 0.0]),
+                    ([0.0, 320.0], [160.0, 80.0], [0.0, 0.0, 1.0, 1.0]),
+                    ([160.0, 320.0], [17.6, 17.6], [0.0, 0.0, -1.0, 0.0]),
+                    ([80.0, 400.0], [40.0, 80.0], [0.0, 0.0, 1.0, 1.0]),
+                    ([62.4, 400.0], [17.6, 17.6], [0.0, 0.0, 0.0, -1.0]),
+                    ([120.0, 400.0], [17.6, 17.6], [0.0, 0.0, -1.0, 0.0]),
+                ],
+            ),
+            (
+                "a cell narrower than the radius",
+                10,
+                80,
+                vec![run(3, 4, 9), run(4, 0, 9), run(5, 3, 5)],
+                vec![
+                    ([40.0, 240.0], [60.0, 80.0], [1.0, 1.0, 0.0, 0.0]),
+                    ([35.0, 315.0], [5.0, 5.0], [-1.0, 0.0, 0.0, 0.0]),
+                    ([0.0, 320.0], [100.0, 80.0], [1.0, 0.0, 1.0, 1.0]),
+                    ([30.0, 400.0], [30.0, 80.0], [0.0, 0.0, 1.0, 1.0]),
+                    ([25.0, 400.0], [5.0, 5.0], [0.0, 0.0, 0.0, -1.0]),
+                    ([60.0, 400.0], [5.0, 5.0], [0.0, 0.0, -1.0, 0.0]),
+                ],
+            ),
+            (
+                "the narrower run above",
+                9,
+                18,
+                vec![run(0, 1, 1), run(1, 0, 3)],
+                vec![
+                    ([9.0, 0.0], [9.0, 18.0], [1.0, 1.0, 0.0, 0.0]),
+                    ([18.0, 14.04], [3.96, 3.96], [0.0, -1.0, 0.0, 0.0]),
+                    ([5.04, 14.04], [3.96, 3.96], [-1.0, 0.0, 0.0, 0.0]),
+                    ([0.0, 18.0], [36.0, 18.0], [1.0, 1.0, 1.0, 1.0]),
+                ],
+            ),
+        ];
+        for (name, w, h, runs, expected) in scenes {
+            let mut frame = Frame::default();
+            frame.clear(grid(w, h), CaretStyle::default());
+            frame.push_selection(&runs, BG);
+            let seen: Vec<_> = frame
+                .selection_instances()
+                .iter()
+                .map(|i| (i.pos, i.size, i.rgba))
+                .collect();
+            assert_eq!(seen.len(), expected.len(), "{name}: {seen:?}");
+            for (got, want) in seen.iter().zip(&expected) {
+                let close =
+                    |a: &[f32], b: &[f32]| a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-3);
+                assert!(
+                    close(&got.0, &want.0) && close(&got.1, &want.1) && got.2 == want.2,
+                    "{name}: {seen:?} != {expected:?}"
+                );
+            }
+        }
     }
 
     /// A grid measure with a **zero** left margin: most of the tests in this

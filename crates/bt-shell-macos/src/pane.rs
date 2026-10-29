@@ -88,8 +88,9 @@ use bt_shell_common::kablo::roster::Background;
 use bt_shell_common::kablo::service::{PaneLink, Shown};
 use bt_shell_common::native_view::{
     Bars, Cursor as PageCursor, Fault as PageFault, Fill as PageFill, Host as PageDriveHost,
-    Id as PageId, Input, Key as PageKey, Keyboard, Menu as PageMenu, Mods as PageMods, Opening,
-    PageEditors, PageHandle, Phase, Point as PagePoint, Rect as PageRect, Route, Scrolling,
+    Id as PageId, Input, Key as PageKey, Keyboard, LookSlot, Menu as PageMenu, Mods as PageMods,
+    Opening, PageEditors, PageHandle, Phase, Point as PagePoint, Rect as PageRect, Route,
+    Scrolling, TerminalLook, caret_width_pt, terminal_look,
 };
 use bt_shell_common::view_strip;
 use objc2_app_kit::{NSEvent, NSEventType};
@@ -2130,6 +2131,14 @@ pub struct PaneIvars {
     /// program opened: whose it is, the handle its input goes by, the filter's text field, the
     /// pointer's tracking area (`crate::native_page`).
     page_up: RefCell<Option<crate::native_page::Page>>,
+    /// How the terminal draws its cursor and its selection, told to the page that is up
+    /// (`pencere.terminal_look()`): the part that is the person's settings (`look_base`, from
+    /// the birth settings and the save-time path alike, [`TerminalPane::set_terminal_look`]) and
+    /// the slot the page's program reads it from, on the module's thread (`look`, the same slot
+    /// as the one a page is opened with). The pane only **says** it; the page decides what its
+    /// editors take.
+    look_base: Cell<TerminalLook>,
+    look: LookSlot,
     /// The clock that wakes the page up while the pane is not seen and draws no frames
     /// ([`TerminalPane::wake_unseen_page`]): the number of the delayed block that is the one, and
     /// the time it was armed for (`None`: none is armed).
@@ -2798,6 +2807,7 @@ impl TerminalPane {
         let jump = JumpLatest::new(mtm);
         jump.paint(&theme);
         let jump_surface = jump.surface.clone();
+        let look_base = terminal_look(&settings);
         let this = Self::alloc(mtm).set_ivars(PaneIvars {
             id,
             run,
@@ -2870,6 +2880,8 @@ impl TerminalPane {
             pencere: RefCell::new(None),
             page_strip: RefCell::new(None),
             page_up: RefCell::new(None),
+            look_base: Cell::new(look_base),
+            look: LookSlot::new(look_base),
             unseen_wake: Cell::new((0, None)),
             view_waits: RefCell::new(Waits::default()),
             view_owed: RefCell::new(None),
@@ -5528,6 +5540,8 @@ impl TerminalPane {
         self.refresh_jump();
         // So does the veil over a grid that waits for its connection.
         self.place_link_veil();
+        // The cursor's bar is as thick as the font's rule is at this scale: the page is told it.
+        self.refresh_terminal_look();
     }
 
     /// Matches the layer's drawable size to the view's backing geometry **and**
@@ -5834,13 +5848,67 @@ impl TerminalPane {
     /// over it, the flow of the program that opened it (`None` for a debug build's demo), the
     /// frames' clock and the renderer the frames are drawn with.
     fn page_opening(&self, terminal: Option<String>, flow: Option<bt_core::Flow>) -> Opening {
+        // The width of the cursor's bar is no setting: the page is opened with it as it is now.
+        self.refresh_terminal_look();
         Opening {
             terminal,
             inset: view_strip::HEIGHT as f32,
             flow,
             clock: frames_clock,
             renderer: Rc::clone(&self.ivars().renderer),
+            look: self.ivars().look.clone(),
         }
+    }
+
+    /// The settings changed, or the pane was born with them: how the terminal draws its cursor and
+    /// its selection, from the person's settings, is told to the page that is up if it is not
+    /// what it was ([`TerminalPane::refresh_terminal_look`]). Nothing is applied to the page's
+    /// editors here or anywhere else in the pane: the look is a record the page reads.
+    pub(crate) fn set_terminal_look(&self, settings: &Settings) {
+        self.ivars().look_base.set(terminal_look(settings));
+        self.refresh_terminal_look();
+    }
+
+    /// The look to say now: the settings' part and the thickness of the cursor's bar and line,
+    /// which is no setting but the font's underline metric at this display's scale and over how
+    /// much larger than its own size the page is drawn here, so it follows the font, Bigger and
+    /// Smaller, and the display the window is on. The slot changes at once (the module reads it
+    /// from its own thread); the page that is up is told **if the look is not what it was**,
+    /// from the main queue and not from here, since this is called from the geometry's refresh
+    /// and from inside the settings' apply, where the page may be borrowed.
+    pub(crate) fn refresh_terminal_look(&self) {
+        let mut look = self.ivars().look_base.get();
+        if let Some(window) = self.window() {
+            let scale = window.backingScaleFactor();
+            let cell = self.cell_metrics(scale);
+            look.caret.width =
+                caret_width_pt(cell.cell_px(), cell.rule_px(), scale, self.page_zoom());
+        } else {
+            // A pane off a window has no scale to measure by: the width the slot has stays (the
+            // page is not told a look without it, and again when the window is back).
+            look.caret.width = self.ivars().look.get().caret.width;
+        }
+        if self.ivars().look.set(look) && self.page_handle().is_some() {
+            let id = self.id();
+            DispatchQueue::main().exec_async(move || {
+                // audit: a block running on the main queue is on the main thread by definition.
+                let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
+                if let Some(pane) = crate::embed::pane(mtm, id) {
+                    pane.page_look_changed();
+                }
+            });
+        }
+    }
+
+    /// The page is told how the terminal draws its cursor and its selection is not what it was
+    /// (the kit's `terminal-look` event), on the pane's thread, as the kit asks, and what it said
+    /// in answer is drained as after any other event.
+    fn page_look_changed(&self) {
+        let Some(handle) = self.page_handle() else {
+            return;
+        };
+        handle.page().terminal_look_changed();
+        self.drain_page();
     }
 
     /// What a page's module, and its images, call when they have put something out: it hops to
@@ -8523,6 +8591,82 @@ mod tests {
         assert_eq!(pane.matches("ask::link(").count(), 1);
         let web = include_str!("pencere_view.rs");
         assert!(web.contains("self.ivars().session.view_message(&text.to_string())"));
+    }
+
+    /// How the terminal draws its cursor and its selection is **told** to a page and never applied
+    /// to its editors (the user's rule, 2026-10-29: bateri says, the page decides): the settings'
+    /// save-time path, the geometry (the cursor's bar is as thick as the font's rule at the
+    /// display's scale) and the page's opening all go through one place that changes the slot the
+    /// page's program reads, and the page is told from the main queue, never from inside the call
+    /// that changed the slot (the geometry's refresh and the settings' apply may have the page
+    /// borrowed). A source scan: what it guards needs a window server and a program's view.
+    #[test]
+    fn the_terminals_look_is_told_to_a_page_and_never_applied_to_its_editors() {
+        let pane = include_str!("pane.rs");
+        let pane = &pane[..pane.find("#[cfg(test)]").unwrap_or(pane.len())];
+        let app = include_str!("app.rs");
+        let body = |signature: &str| {
+            let at = pane.find(signature).expect(signature);
+            &pane[at..at + pane[at..].find("\n    }\n").expect("its end")]
+        };
+        let geometry = body("    pub(crate) fn refresh_geometry(");
+        assert!(
+            geometry.contains("self.refresh_terminal_look();"),
+            "{geometry}"
+        );
+        let opening = body("    fn page_opening(");
+        assert!(
+            opening.contains("self.refresh_terminal_look();"),
+            "{opening}"
+        );
+        assert!(
+            opening.contains("look: self.ivars().look.clone()"),
+            "{opening}"
+        );
+        let refresh = body("    pub(crate) fn refresh_terminal_look(");
+        assert!(refresh.contains("self.ivars().look.set(look)"), "{refresh}");
+        assert!(
+            refresh.contains("DispatchQueue::main().exec_async"),
+            "{refresh}"
+        );
+        assert!(
+            !refresh.contains("terminal_look_changed"),
+            "told from the main queue, not from here: {refresh}"
+        );
+        let told = body("    fn page_look_changed(&self) {");
+        assert!(
+            told.contains("handle.page().terminal_look_changed();"),
+            "{told}"
+        );
+        assert!(told.contains("self.drain_page();"), "{told}");
+        assert_eq!(
+            pane.matches("terminal_look_changed(").count(),
+            1,
+            "the page is told in one place"
+        );
+        // The save-time path hands the new settings to every pane when a key behind the look moved.
+        let apply = &app[app.find("fn apply_settings(").expect("apply_settings")..];
+        let apply = &apply[..apply.find("\n    }\n").expect("its end")];
+        assert!(
+            apply.contains("if changes.terminal || changes.caret || changes.motion {")
+                && apply.contains("pane.set_terminal_look(&new);"),
+            "{apply}"
+        );
+        // Nothing writes an editor's options from the host's side: the look is read by the page.
+        for source in [
+            pane,
+            include_str!("native_page.rs"),
+            include_str!("view.rs"),
+        ] {
+            assert!(
+                !source.contains("EditorOptions"),
+                "the host sets no editor's options"
+            );
+            assert!(
+                !source.contains("TerminalLook::fill"),
+                "the page's helper is the page's"
+            );
+        }
     }
 
     /// A page sets the pointer's shape only while the pointer is over the page itself. The window
