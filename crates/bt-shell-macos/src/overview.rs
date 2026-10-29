@@ -96,6 +96,9 @@ const NAME_SIZE: f64 = 13.0;
 const SMALL_SIZE: f64 = 12.0;
 const GAP_AFTER_ICON: f64 = 7.0;
 const GAP_AFTER_NAME: f64 = 10.0;
+/// The line under the selected tile of another computer's terminal that says what ↵ does: it
+/// stands in the gap between rows (`rules::ROW_GAP`).
+const NOTE_HEIGHT: f64 = 16.0;
 
 /// The left column's width, its rows' inset from the window's edge and from each other, and a
 /// machine row's height (two lines: the name, how many tabs).
@@ -258,7 +261,15 @@ define_class!(
                     window.overview_open_all(&host);
                 }
             } else if self.point_at(event) {
-                let key = self.ivars().state.borrow().selected_away().cloned();
+                let key = {
+                    let state = self.ivars().state.borrow();
+                    // A click on a terminal another computer has open only selects it: taking
+                    // it from there is ↵ alone (as in the palette's page), never an accident of the pointer.
+                    if state.selected_other() {
+                        return;
+                    }
+                    state.selected_away().cloned()
+                };
                 match key {
                     Some(key) => {
                         self.ivars().press.replace(Some(Press {
@@ -293,7 +304,14 @@ define_class!(
             if at.x < SIDE || !self.point_at(event) {
                 return;
             }
-            let key = self.ivars().state.borrow().selected_away().cloned();
+            let key = {
+                let state = self.ivars().state.borrow();
+                // End Terminal is for the server's own: another computer's terminal is that
+                // computer's to end (the server card offers it for those only).
+                (!state.selected_other())
+                    .then(|| state.selected_away().cloned())
+                    .flatten()
+            };
             let Some(key) = key else {
                 return;
             };
@@ -817,10 +835,17 @@ impl OverviewView {
     fn activate_beside(&self) {
         let act = {
             let state = self.ivars().state.borrow();
-            state.act_beside().or_else(|| state.act())
+            // A terminal another computer has open is moved here by ↵ alone: it has no
+            // "beside" and ⌥↵ must not fall back to the plain ↵.
+            if state.selected_other() {
+                None
+            } else {
+                state.act_beside().or_else(|| state.act())
+            }
         };
-        if let (Some(act), Some(window)) = (act, self.terminal_window()) {
-            window.overview_go(act);
+        match (act, self.terminal_window()) {
+            (Some(act), Some(window)) => window.overview_go(act),
+            _ => crate::preview::beep(),
         }
     }
 
@@ -842,7 +867,12 @@ impl OverviewView {
         let state = iv.state.borrow();
         let width = text_width(rules::OPEN_ALL, &self.heading_attributes()) + 2.0 * BUTTON_PAD;
         layout.rows.iter().enumerate().find_map(|(at, row)| {
-            let Row::Section { section, .. } = row else {
+            let Row::Section {
+                section,
+                other: false,
+                ..
+            } = row
+            else {
                 return None;
             };
             let rect = layout.heading(at)?;
@@ -915,7 +945,9 @@ impl OverviewView {
             ) {
                 window.overview_drop(press.key.0, press.key.1, tab, pane);
             }
-        } else if self.point_at(event) {
+        } else if self.point_at(event) && iv.state.borrow().selected_away() == Some(&press.key) {
+            // The pointer may have left the tile it went down on (within the drag threshold);
+            // the release opens the terminal it went down on, never the one it ended over.
             self.activate();
         }
     }
@@ -1084,7 +1116,13 @@ impl OverviewView {
         );
         let mut screens = iv.screens.borrow_mut();
         let changed = screens.arrived(key.clone(), &screen, &settings, &theme, scale);
-        if !changed && iv.away_shots.borrow().contains_key(key) {
+        // The picture is drawn again when the screen changed or the tile it is of did (the
+        // window was resized); the same screen at the same size is what the tile shows.
+        let sized = iv.away_shots.borrow().get(key).is_some_and(|shot| {
+            let size = shot.size();
+            size.width == layout.tile.0 && size.height == layout.tile.1
+        });
+        if !changed && sized {
             return;
         }
         let Some(image) = screens.image(key, &settings, scale, tile) else {
@@ -1274,8 +1312,9 @@ impl OverviewView {
                 rect.height * 0.65,
                 &dim,
             );
-            // A section's heading carries the button that opens all of its terminals at once.
-            if matches!(row, Row::Section { .. }) {
+            // A section's heading carries the button that opens all of its terminals at once,
+            // but the group of another computer's terminals is not opened with the rest.
+            if matches!(row, Row::Section { other: false, .. }) {
                 draw_text_right(
                     rules::OPEN_ALL,
                     rect.x + SIDE + rect.width - BUTTON_PAD,
@@ -1460,21 +1499,28 @@ impl OverviewView {
     ) {
         match state.cell(index) {
             Some(Tile::Tab(tab)) => self.paint_tab(state, layout, index, tab, origin, selected),
-            Some(Tile::Away { entry, .. }) => {
-                self.paint_away(state, layout, index, entry, origin, selected);
+            Some(Tile::Away { entry, other, .. }) => {
+                self.paint_away(state, layout, index, entry, other, origin, selected);
             }
             None => {}
         }
     }
 
     /// A terminal a server keeps: its screen as the server built it, dim until it is the
-    /// selected one, and under it the name, the folder and what ↵ does.
+    /// selected one, and under it the name, the folder and what ↵ does. One another computer has
+    /// open (`other`) also names that computer at the right and, once selected, says in a line
+    /// below what moving it here does (the server card's sentence).
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the tile's facts and where it is painted: one call from `paint_cell`"
+    )]
     fn paint_away(
         &self,
         state: &Overview,
         layout: &Layout,
         index: usize,
         entry: &server_card::Entry,
+        other: bool,
         origin: f64,
         selected: bool,
     ) {
@@ -1538,7 +1584,14 @@ impl OverviewView {
             .filter(|_| selected)
             .map(|verb| format!("↵ {verb}"));
         let verb_width = verb.as_ref().map_or(0.0, |verb| text_width(verb, &small));
-        let room = (right - left - verb_width - GAP_AFTER_NAME).max(0.0);
+        // The computer that has it open, dim at the right edge (as long as a third of the row).
+        let by = entry
+            .by
+            .as_deref()
+            .filter(|_| other)
+            .map(|by| fit(by, (right - left) / 3.0, &small));
+        let by_width = by.as_ref().map_or(0.0, |by| text_width(by, &small));
+        let room = (right - left - verb_width - by_width - 2.0 * GAP_AFTER_NAME).max(0.0);
         let hit = state.away_hit(&key);
         let name_marks = hit.map_or(&[][..], |hit| hit.name_marks.as_slice());
         let mut end = draw_marked(
@@ -1576,6 +1629,20 @@ impl OverviewView {
                 row.size.height,
                 &small,
             );
+        }
+        if let Some(by) = by {
+            draw_text_right(&by, right, row.origin.y, row.size.height, &small);
+            // What moving it does, in the gap under the row, for the selected tile only.
+            if selected {
+                let note = server_card::move_note(entry.by.as_deref().unwrap_or_default());
+                draw_text(
+                    &fit(&note, right - left, &small),
+                    left,
+                    row.origin.y + row.size.height - 4.0,
+                    NOTE_HEIGHT,
+                    &small,
+                );
+            }
         }
     }
 
@@ -1774,7 +1841,10 @@ fn draw_image(image: &NSImage, rect: NSRect) {
 /// `text` with the letters at `marks` in `marked`, cut with an ellipsis to fit `room` points from
 /// `x`, centred in the slot `[top, top + height)`; returns where it ended (`x` if not even a
 /// letter fits).
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "text, marks, two fonts and the slot it is drawn in: one call site shape in both rows"
+)]
 fn draw_marked(
     text: &str,
     marks: &[usize],
@@ -1854,6 +1924,24 @@ fn background_sections() -> Vec<rules::Section> {
                 account: background.account.clone(),
                 host: background.host.clone(),
                 entries: vec![entry],
+                elsewhere: Vec::new(),
+            }),
+        }
+    }
+    // The terminals other computers have open: the group under the server's own, which a server
+    // with nothing of its own in the background has too.
+    for background in crate::hold_service::elsewhere_all() {
+        let entry = server_card::entry_of(&background, now, &crate::server_card::local);
+        match sections
+            .iter_mut()
+            .find(|section| section.account == background.account)
+        {
+            Some(section) => section.elsewhere.push(entry),
+            None => sections.push(rules::Section {
+                account: background.account.clone(),
+                host: background.host.clone(),
+                entries: Vec::new(),
+                elsewhere: vec![entry],
             }),
         }
     }

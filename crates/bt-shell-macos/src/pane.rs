@@ -234,7 +234,7 @@ pub trait PaneHost {
         Vec::new()
     }
     /// The terminals the server of `account` keeps that another Mac has open and no pane of this
-    /// Mac shows, the last to write first: the card's *On other Macs*. The default is an owner
+    /// Mac shows, the last to write first: the card's *On other computers*. The default is an owner
     /// that has no such terminals.
     fn elsewhere(&self, _account: &str) -> Vec<Background> {
         Vec::new()

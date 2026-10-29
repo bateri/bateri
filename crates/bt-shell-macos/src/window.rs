@@ -2846,7 +2846,7 @@ impl TerminalWindow {
     pub(crate) fn overview_go(&self, act: bt_shell_common::overview::Act) {
         use bt_shell_common::overview::Act;
         use bt_shell_common::palette::Go;
-        let (account, terminal, beside) = match act {
+        let go = match act {
             Act::GoToTab { tab, pane } => {
                 overview::close(&self.ivars().root);
                 match pane {
@@ -2856,16 +2856,14 @@ impl TerminalWindow {
                 self.focus_selected_tab();
                 return;
             }
-            Act::OpenBackground { account, terminal } => (account, terminal, false),
-            Act::OpenBeside { account, terminal } => (account, terminal, true),
+            Act::OpenBackground { account, terminal } => Go::OpenBackground { account, terminal },
+            Act::OpenBeside { account, terminal } => Go::SplitBackground { account, terminal },
+            // A terminal another computer has open: the palette's way, which takes it from that
+            // computer (its pane goes dim) into a tab here.
+            Act::MoveHere { account, terminal } => Go::MoveHere { account, terminal },
         };
         overview::close(&self.ivars().root);
         self.focus_selected_tab();
-        let go = if beside {
-            Go::SplitBackground { account, terminal }
-        } else {
-            Go::OpenBackground { account, terminal }
-        };
         if let Some(app) = app::delegate(self.mtm()) {
             app.palette_go(self.id(), go);
         }

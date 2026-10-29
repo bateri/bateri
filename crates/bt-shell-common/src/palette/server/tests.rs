@@ -337,7 +337,7 @@ fn choosing_a_row_of_the_server_comes_to_what_the_row_says() {
 /// name at the right, and the band says what ⏎ does to the pane there. A search from the root does
 /// not find them — ⏎ on a row found by chance must not take a terminal from the Mac using it.
 #[test]
-fn the_terminals_on_other_macs_are_on_the_servers_page_and_in_no_search_from_the_root() {
+fn the_terminals_on_other_computers_are_on_the_servers_page_and_in_no_search_from_the_root() {
     let row = elsewhere_row(&moved("b-5", "claude", "iMac"));
     assert_eq!(row.id, "mv.b-5@u@rasp:22");
     assert_eq!(row.kind, Kind::Elsewhere);

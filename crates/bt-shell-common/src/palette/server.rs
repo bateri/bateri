@@ -14,7 +14,7 @@
 //! tab's ⌘ digit at the right (⏎ brings the tab and the pane forward, nothing moves); *On other
 //! Macs*, the terminals another Mac has open, each with that Mac's name at the right (⏎ moves it
 //! here: the pane there goes dim); and, last, *New Tab on rasp*, which is what ⏎ on the server's
-//! row does. A heading is a noun, never a verb. The terminals on other Macs are on this page only:
+//! row does. A heading is a noun, never a verb. The terminals on other computers are on this page only:
 //! a search from the root does not find them, so ⏎ on a row found by chance never takes a terminal
 //! from the Mac that is using it.
 //!

@@ -184,7 +184,7 @@ pub(crate) fn exited(account: &str) -> Vec<SessionId> {
 }
 
 /// The terminals another Mac has open, the last to write first: what the server's card and the
-/// palette's page of a server list under *On other Macs* ([`Service::elsewhere_all`]). Read
+/// palette's page of a server list under *On other computers* ([`Service::elsewhere_all`]). Read
 /// without waiting. None in a process without the service.
 pub(crate) fn elsewhere_all() -> Vec<Background> {
     SERVICE

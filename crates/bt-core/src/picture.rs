@@ -98,3 +98,51 @@ pub fn pictured(mut options: SessionOptions, picture: &[u8]) -> io::Result<Sessi
         },
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::time::{Duration, Instant};
+
+    use super::*;
+    use crate::{Settings, Theme};
+
+    fn options() -> SessionOptions {
+        SessionOptions {
+            command: None,
+            working_directory: None,
+            home: None,
+            env: HashMap::new(),
+            cols: 20,
+            rows: 5,
+            cell_px: (8, 16),
+            terminal: Settings::default().terminal(),
+            theme: Theme::BATERI,
+            dock: false,
+            cluster: true,
+            initial_input: None,
+            shell_marks: false,
+            pane_uuid: None,
+            hostname: None,
+            replay: None,
+            views: None,
+        }
+    }
+
+    #[test]
+    fn a_picture_session_lets_go_at_once_not_after_the_shutdown_grace() {
+        // The big view drops one of these for every screen that changes, on the main thread.
+        let started = Instant::now();
+        for _ in 0..10 {
+            let session =
+                pictured(options(), b"\x1b[2J\x1b[H\x1b[41m   \x1b[0m").expect("a session");
+            drop(session);
+        }
+        let took = started.elapsed();
+        eprintln!("ten pictured sessions built and dropped in {took:?}");
+        assert!(
+            took < Duration::from_millis(500),
+            "ten sessions took {took:?}: a drop waits on the reader"
+        );
+    }
+}

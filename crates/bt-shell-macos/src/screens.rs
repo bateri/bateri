@@ -34,8 +34,10 @@ struct Kept {
     offset: u64,
     cols: u16,
     rows: u16,
-    /// The cell the session was made for; another font makes another session.
+    /// The cell and the theme the session was made for; another font or theme makes another
+    /// session (the colours are the theme's, resolved as the bytes are parsed).
     cell: (u16, u16),
+    theme: Theme,
     session: Session,
     /// The last image drawn from the session, and the tile (pixels) it is of.
     image: Option<((u32, u32), CFRetained<CGImage>)>,
@@ -75,8 +77,8 @@ impl Screens {
         };
         let cell = stage.cell_metrics(scale).cell_px();
         if let Some(kept) = self.kept.get(&key)
-            && (kept.offset, kept.cols, kept.rows, kept.cell)
-                == (screen.offset, screen.cols, screen.rows, cell)
+            && (kept.offset, kept.cols, kept.rows, kept.cell, kept.theme)
+                == (screen.offset, screen.cols, screen.rows, cell, *theme)
         {
             return false;
         }
@@ -112,6 +114,7 @@ impl Screens {
                 cols: screen.cols,
                 rows: screen.rows,
                 cell,
+                theme: *theme,
                 session,
                 image: None,
             },
@@ -202,6 +205,9 @@ mod tests {
             .image(&key(), &settings, 2.0, tile)
             .expect("a picture");
         assert!(std::ptr::eq(&*image, &*again), "drawn once");
+        // The same screen under another theme is built again: its colours are the theme's.
+        assert!(screens.arrived(key(), &red, &settings, &Theme::LINEN, 2.0));
+        assert!(!screens.arrived(key(), &red, &settings, &Theme::LINEN, 2.0));
         // Another offset is another screen.
         assert!(screens.arrived(key(), &screen(9, b"\x1b[44m   "), &settings, &theme, 2.0));
         screens.release();

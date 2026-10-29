@@ -5,7 +5,7 @@
 //! The card has two parts, and what is in them is **the server's, not the pane's**: the load (one
 //! measuring for the server however many panes show it, [`super::remote_stats::Account`]) and the
 //! terminals the server keeps that no pane of this Mac shows ([`super::kablo::roster`]) — nobody's,
-//! under *Running in the background*, and the ones another Mac has open under *On other Macs*.
+//! under *Running in the background*, and the ones another Mac has open under *On other computers*.
 //! Terminals a tab of this Mac has open are not listed — they are on screen already.
 //!
 //! - **The load is small**: the CPU and the memory as a bar each and a line naming the busiest
@@ -17,7 +17,7 @@
 //!   carry no verb; the one verb a row has is the one a click does, written at its right while the
 //!   pointer is on it ([`OPEN`]). The row's time is the palette's own text: how long a program has
 //!   been in front is [`bt_core::running_counter`], and a shell waiting says since when.
-//! - **On other Macs** is the same rows with the Mac's name at the right, and the one verb of a
+//! - **On other computers** is the same rows with the Mac's name at the right, and the one verb of a
 //!   click is [`MOVE`]: it opens the terminal here and the pane on that Mac goes dim ([`move_note`]).
 //! - **Ending a terminal** asks in the words closing a pane does ([`end_text`]).
 
@@ -43,7 +43,7 @@ pub const END: &str = "End Terminal";
 pub const SEE_ALL: &str = "See All";
 /// The heading over the terminals another Mac has open; the number follows it
 /// ([`others_heading`]).
-pub const OTHERS_HEADING: &str = "On other Macs";
+pub const OTHERS_HEADING: &str = "On other computers";
 /// What a click on a row of that list does, written at its right while the pointer is on it.
 pub const MOVE: &str = "Move Here";
 /// The list when nothing runs in the background.
@@ -158,7 +158,7 @@ pub fn heading(total: usize) -> String {
     format!("{HEADING} · {total}")
 }
 
-/// `On other Macs · 2`.
+/// `On other computers · 2`.
 pub fn others_heading(total: usize) -> String {
     format!("{OTHERS_HEADING} · {total}")
 }

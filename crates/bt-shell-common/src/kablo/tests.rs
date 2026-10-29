@@ -1142,6 +1142,30 @@ fn a_picture_read_of_a_terminal_the_server_does_not_have_fails_and_is_not_kept()
 }
 
 #[test]
+fn a_terminal_the_client_let_go_of_is_read_like_one_it_never_had() {
+    let (mut rig, terminal) = Rig::with_terminal(Age::Current, "t1");
+    rig.bridge.write(&terminal, b"hello");
+    rig.pump();
+    rig.take();
+    rig.client.detach(&terminal);
+    assert!(rig.client.read_picture(&terminal));
+    rig.pump();
+    let data = rig
+        .events
+        .iter()
+        .find_map(|e| match e {
+            Event::Screen {
+                terminal: t, data, ..
+            } if *t == terminal => Some(data.clone()),
+            _ => None,
+        })
+        .expect("the screen of a terminal this client detached");
+    assert_eq!(data, Bridge::picture_of(5));
+    // Not attached to again by the read.
+    assert!(!rig.bridge.is_attached(&terminal));
+}
+
+#[test]
 fn a_terminal_the_client_attaches_is_not_read_beside_its_attach() {
     let (mut rig, terminal) = Rig::with_terminal(Age::Current, "t1");
     assert!(!rig.client.read_picture(&terminal));

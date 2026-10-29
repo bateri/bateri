@@ -2,7 +2,7 @@
 //! server keeps opens it. Above, the server's load (small: the CPU and the memory as a bar each
 //! and the busiest processes); below, the terminals the server keeps that no pane of this Mac
 //! shows — *Running in the background · N*, with *Open All in New Tab* in the heading — and the
-//! ones another Mac has open, *On other Macs · N*. A second click, a click outside or Esc closes
+//! ones another Mac has open, *On other computers · N*. A second click, a click outside or Esc closes
 //! it.
 //!
 //! - **What it says is in `bt-shell-common::server_card`**: the words, the numbers, the rows
@@ -13,7 +13,7 @@
 //!   Terminal*, which asks in the words closing a pane does, through the sheet gate
 //!   (`sheets`), and only then reaches the server. Nothing that is open in a tab is listed, and
 //!   nothing here moves a pane that is.
-//! - **A row of *On other Macs*** says the Mac's name at its right and, selected, *Move Here*; a
+//! - **A row of *On other computers*** says the Mac's name at its right and, selected, *Move Here*; a
 //!   line under the section says what that does (the pane there goes dim). It has no *End
 //!   Terminal*: a terminal somebody is using is not ended from here.
 //! - **Keys** are the upload list's pattern: `transient`, anchored to the control that was
@@ -78,7 +78,7 @@ const DOWN: u16 = 125;
 const UP: u16 = 126;
 
 /// What a navigable part of the card is: the heading's *Open All in New Tab*, the terminal on
-/// the list's `n`th row, or the terminal on the `n`th row of *On other Macs*.
+/// the list's `n`th row, or the terminal on the `n`th row of *On other computers*.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Item {
     OpenAll,
@@ -170,7 +170,7 @@ pub(crate) struct ServerCard {
     items: Vec<Item>,
     /// The terminals' rows, by the list's index.
     rows: Vec<RowViews>,
-    /// The rows of *On other Macs*, by their list's index.
+    /// The rows of *On other computers*, by their list's index.
     moved: Vec<RowViews>,
     /// The line under that section: what moving a terminal does, written while a row of it is
     /// selected (the space is kept the whole time, so the card does not grow under the pointer).
@@ -529,7 +529,7 @@ impl TerminalPane {
             return;
         }
         // The selection is what it names, not where it stands: a list that dropped or reordered
-        // a row must not leave it on another terminal (⏎ on a row of *On other Macs* takes the
+        // a row must not leave it on another terminal (⏎ on a row of *On other computers* takes the
         // terminal from the Mac that is using it).
         let kept = open
             .drawn
@@ -962,7 +962,7 @@ impl TerminalPane {
 
 impl ServerCard {
     /// Draws the selection: the part's fill, and at the selected row's right what a click does;
-    /// under *On other Macs*, what moving a terminal does to the pane on the other Mac.
+    /// under *On other computers*, what moving a terminal does to the pane on the other Mac.
     fn apply_selection(&mut self) {
         let selected = self.selected.and_then(|at| self.items.get(at)).copied();
         if let Some(row) = &self.open_all {

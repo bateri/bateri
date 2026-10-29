@@ -273,7 +273,7 @@ fn a_day_is_counted_on_the_calendar_so_a_new_year_is_one_day_on() {
 /// A row of the list of terminals another Mac has open names the Macs (each once) where the others
 /// say nothing; the words of the heading and of what moving does are the card's and the palette's.
 #[test]
-fn a_terminal_on_other_macs_names_them_and_one_nobody_has_does_not() {
+fn a_terminal_on_other_computers_names_them_and_one_nobody_has_does_not() {
     let mut open = terminal("b-1", "claude", NOON, true);
     open.clients = 3;
     open.clients_named = vec![Some("iMac".into()), None, Some("Studio".into())];
@@ -281,7 +281,7 @@ fn a_terminal_on_other_macs_names_them_and_one_nobody_has_does_not() {
     assert_eq!(found.entries[0].by.as_deref(), Some("iMac, Studio"));
     assert_eq!(found.entries[1].by, None);
 
-    assert_eq!(others_heading(2), "On other Macs · 2");
+    assert_eq!(others_heading(2), "On other computers · 2");
     assert_eq!(MOVE, "Move Here");
     assert_eq!(
         move_note("iMac"),

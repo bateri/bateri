@@ -15,8 +15,10 @@
 use super::*;
 use crate::server_card::Entry;
 
-/// What ⌘↵ asks of the shell, and the words of the three verbs.
+/// The words of the verbs: ↵, ⌥↵, ⌘↵, the menu's, and the one on a terminal another computer has
+/// open (the server card's own).
 pub const OPEN_IN_TAB: &str = "Open in New Tab";
+pub const MOVE_HERE: &str = crate::server_card::MOVE;
 pub const OPEN_BESIDE: &str = "Open Beside";
 pub const OPEN_ALL: &str = "Open All in New Tab";
 pub const END_TERMINAL: &str = "End Terminal";
@@ -37,7 +39,11 @@ pub struct Section {
     pub account: String,
     /// The server as the user typed it (`rasp`).
     pub host: String,
+    /// The terminals the server keeps that no computer shows.
     pub entries: Vec<Entry>,
+    /// The terminals another computer has open ([`Entry::by`] names it): listed in a group of
+    /// their own, moved here with ↵ and never opened beside, in a tab or with the rest.
+    pub elsewhere: Vec<Entry>,
 }
 
 /// What the search found in one terminal's tile.
@@ -57,6 +63,9 @@ pub enum Cell<'a> {
         /// Where the section stands among [`Overview::sections`].
         section: usize,
         entry: &'a Entry,
+        /// The terminal is another computer's (the group *On other computers*), not the
+        /// server's own in the background.
+        other: bool,
     },
 }
 
@@ -91,7 +100,7 @@ impl Overview {
     /// sections in the order of their servers' names, the selection kept on its terminal and on
     /// the one that took its place when it is gone.
     pub fn set_background(&mut self, mut sections: Vec<Section>) {
-        sections.retain(|section| !section.entries.is_empty());
+        sections.retain(|section| !section.entries.is_empty() || !section.elsewhere.is_empty());
         sections.sort_by_key(|section| section.host.to_lowercase());
         if sections == self.sections {
             return;
@@ -101,9 +110,10 @@ impl Overview {
         let place = self.selected_away.as_ref().and_then(|key| {
             self.away
                 .iter()
-                .position(|&(s, e)| self.key_of(s, e) == *key)
+                .position(|&(s, e, o)| self.key_of(s, e, o) == *key)
         });
         let before = self.selected_away.clone();
+        let was_other = self.selected_other();
         self.sections = sections;
         if !self
             .machines()
@@ -120,10 +130,35 @@ impl Overview {
             self.glance = None;
         }
         self.reshow();
-        if before.is_some() && self.selected_away != before && !self.away.is_empty() {
-            let place = place.unwrap_or(0).min(self.away.len() - 1);
-            self.selected = None;
-            self.selected_away = Some(self.key_of(self.away[place].0, self.away[place].1));
+        // A terminal another computer opened meanwhile is the same terminal under the same
+        // selection, but ↵ on it would now take it from there: the selection leaves it as it
+        // leaves a terminal that is gone.
+        let taken = self.selected_other() && !was_other;
+        if before.is_some() && (self.selected_away != before || taken) {
+            self.reselect_away(place.unwrap_or(0), was_other);
+        }
+    }
+
+    /// The selection of a terminal that is gone (or that another computer opened) goes to the
+    /// terminal that took its `place`, else to the one before it; one another computer has open
+    /// is never chosen for the user unless the selection was in that group already (`other`).
+    /// With none to choose it goes to the first tab.
+    fn reselect_away(&mut self, place: usize, other: bool) {
+        let fits = |at: &usize| other || !self.away[*at].2;
+        let place = place.min(self.away.len());
+        let chosen = (place..self.away.len())
+            .find(fits)
+            .or_else(|| (0..place).rev().find(fits));
+        match chosen {
+            Some(at) => {
+                let (s, e, o) = self.away[at];
+                self.selected = None;
+                self.selected_away = Some(self.key_of(s, e, o));
+            }
+            None => {
+                self.selected_away = None;
+                self.selected = self.shown.first().map(|&at| self.all[at].id);
+            }
         }
     }
 
@@ -132,9 +167,39 @@ impl Overview {
         &self.sections
     }
 
-    pub(super) fn key_of(&self, section: usize, entry: usize) -> Key {
-        let entry = &self.sections[section].entries[entry];
+    pub(super) fn key_of(&self, section: usize, entry: usize, other: bool) -> Key {
+        let entry = self.entry_of(section, entry, other);
         (entry.account.clone(), entry.terminal.clone())
+    }
+
+    fn entry_of(&self, section: usize, entry: usize, other: bool) -> &Entry {
+        let section = &self.sections[section];
+        if other {
+            &section.elsewhere[entry]
+        } else {
+            &section.entries[entry]
+        }
+    }
+
+    /// The first terminal of the server's own that the grid holds: where a search puts the
+    /// selection when it finds no tab. A terminal another computer has open is never chosen for
+    /// the user (↵ on it would take it from the computer that shows it).
+    pub(super) fn first_background(&self) -> Option<Key> {
+        self.away
+            .iter()
+            .find(|&&(_, _, other)| !other)
+            .map(|&(s, e, o)| self.key_of(s, e, o))
+    }
+
+    /// Whether the selected terminal is another computer's.
+    pub fn selected_other(&self) -> bool {
+        let Some(key) = self.selected_away.as_ref() else {
+            return false;
+        };
+        self.away.iter().any(|&(s, e, o)| {
+            let entry = self.entry_of(s, e, o);
+            o && (&entry.account, &entry.terminal) == (&key.0, &key.1)
+        })
     }
 
     /// The places of the terminals the machine and the search leave, section by section.
@@ -151,13 +216,15 @@ impl Overview {
             if !held {
                 continue;
             }
-            for (e, entry) in section.entries.iter().enumerate() {
-                if query.is_empty() {
-                    self.away.push((s, e));
-                } else if let Some(hit) = away_hit(entry, &query) {
-                    self.away_hits
-                        .insert((entry.account.clone(), entry.terminal.clone()), hit);
-                    self.away.push((s, e));
+            for (other, entries) in [(false, &section.entries), (true, &section.elsewhere)] {
+                for (e, entry) in entries.iter().enumerate() {
+                    if query.is_empty() {
+                        self.away.push((s, e, other));
+                    } else if let Some(hit) = away_hit(entry, &query) {
+                        self.away_hits
+                            .insert((entry.account.clone(), entry.terminal.clone()), hit);
+                        self.away.push((s, e, other));
+                    }
                 }
             }
         }
@@ -178,10 +245,11 @@ impl Overview {
         if index < self.shown.len() {
             return Some(Cell::Tab(self.tab(index)));
         }
-        let &(section, entry) = self.away.get(index - self.shown.len())?;
+        let &(section, entry, other) = self.away.get(index - self.shown.len())?;
         Some(Cell::Away {
             section,
-            entry: &self.sections[section].entries[entry],
+            entry: self.entry_of(section, entry, other),
+            other,
         })
     }
 
@@ -204,7 +272,7 @@ impl Overview {
         let at = self
             .away
             .iter()
-            .position(|&(s, e)| self.key_of(s, e) == *key)?;
+            .position(|&(s, e, o)| self.key_of(s, e, o) == *key)?;
         Some(self.shown.len() + at)
     }
 
@@ -234,7 +302,8 @@ impl Overview {
         moved && before != (self.selected, self.selected_away.clone())
     }
 
-    /// The server whose section the selected terminal is in.
+    /// The server whose section the selected terminal is in, when it is one of the server's own
+    /// in the background.
     pub(super) fn away_host(&self) -> Option<&Section> {
         let key = self.selected_away.as_ref()?;
         self.sections.iter().find(|section| {
@@ -262,12 +331,15 @@ impl Overview {
 
     /// The Act of the selected terminal opened the other way (⌥↵): beside the pane on screen.
     pub fn act_beside(&self) -> Option<Act> {
+        if self.selected_other() {
+            return None;
+        }
         let (account, terminal) = self.selected_away.clone()?;
         Some(Act::OpenBeside { account, terminal })
     }
 
     /// The terminals the grid holds, section by section, as `(section, entry)`.
-    pub fn away_cells(&self) -> &[(usize, usize)] {
+    pub fn away_cells(&self) -> &[(usize, usize, bool)] {
         &self.away
     }
 
@@ -275,11 +347,12 @@ impl Overview {
     /// terminal: heading, then how many tiles.
     pub(super) fn parts(&self) -> Vec<Part> {
         let mut parts: Vec<Part> = Vec::new();
-        for &(s, _) in &self.away {
+        for &(s, _, other) in &self.away {
             match parts.last_mut() {
-                Some(part) if part.section == s => part.count += 1,
+                Some(part) if part.section == s && part.other == other => part.count += 1,
                 _ => parts.push(Part {
                     section: s,
+                    other,
                     text: String::new(),
                     count: 1,
                 }),
@@ -287,7 +360,21 @@ impl Overview {
         }
         for part in &mut parts {
             let section = &self.sections[part.section];
-            part.text = section_text(&section.host, part.count);
+            // The second group's heading is the server card's own; a server with nothing of its
+            // own in the grid says whose group it is.
+            let alone = !self.away.iter().any(|&(s, _, o)| s == part.section && !o);
+            part.text = if !part.other {
+                section_text(&section.host, part.count)
+            } else if alone {
+                format!(
+                    "{} on ⇄ {} · {}",
+                    crate::server_card::OTHERS_HEADING,
+                    section.host,
+                    part.count
+                )
+            } else {
+                crate::server_card::others_heading(part.count)
+            };
         }
         parts
     }
@@ -298,6 +385,8 @@ impl Overview {
 pub struct Part {
     /// Where the section stands among [`Overview::sections`].
     pub section: usize,
+    /// The group of terminals other computers have open, not the server's own.
+    pub other: bool,
     pub text: String,
     pub count: usize,
 }

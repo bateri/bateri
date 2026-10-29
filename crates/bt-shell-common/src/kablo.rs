@@ -900,10 +900,17 @@ impl Client {
     /// nothing of the terminal's other clients is touched: the server counts no attach and
     /// notes no size for it.
     ///
-    /// `false` when the connection is not up or the terminal is one this client attaches (its
-    /// own picture comes with the attach).
+    /// `false` when the connection is not up or the terminal is one this client attaches or is
+    /// about to (its own picture comes with the attach). A terminal this client let go of
+    /// (detached, taken, ended) is read like one it never had.
     pub fn read_picture(&mut self, id: &SessionId) -> bool {
-        if !self.link.is_live() || self.terminals.contains_key(id) {
+        let attaching = self.terminals.get(id).is_some_and(|t| {
+            matches!(
+                t.phase,
+                Phase::Creating | Phase::Wanted | Phase::Asked | Phase::Checking | Phase::Attached
+            )
+        });
+        if !self.link.is_live() || attaching {
             return false;
         }
         self.reads.insert(id.clone(), Vec::new());
@@ -1189,14 +1196,15 @@ impl Client {
                 data,
             } => {
                 let Some(id) = session else { return };
-                if !self.terminals.contains_key(&id) {
-                    self.read_piece(id, offset, cols, rows, more, data);
-                    return;
-                }
                 let Some(terminal) = self.terminals.get_mut(&id) else {
+                    self.read_piece(id, offset, cols, rows, more, data);
                     return;
                 };
                 if terminal.phase != Phase::Attached {
+                    // A picture of a terminal that is not attached answers a read: it was asked
+                    // before the terminal was let go of, or before it was attached again (the
+                    // server answers in the order it was asked).
+                    self.read_piece(id, offset, cols, rows, more, data);
                     return;
                 }
                 let first = !terminal.picture_open;
@@ -1352,7 +1360,7 @@ impl Client {
         };
         let phase = self.terminals.get(&id).map(|t| t.phase);
         // The answer to a read is an error: the picture will not come.
-        if phase.is_none() {
+        if phase != Some(Phase::Attached) {
             self.reads.remove(&id);
         }
         match (code, phase) {

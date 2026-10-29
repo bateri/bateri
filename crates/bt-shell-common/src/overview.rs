@@ -21,7 +21,7 @@ use std::collections::HashMap;
 mod away;
 
 pub use away::{
-    AwayHit, Cell, END_TERMINAL, Key, OPEN_ALL, OPEN_BESIDE, OPEN_IN_TAB, Part, Section,
+    AwayHit, Cell, END_TERMINAL, Key, MOVE_HERE, OPEN_ALL, OPEN_BESIDE, OPEN_IN_TAB, Part, Section,
     section_text,
 };
 
@@ -125,6 +125,9 @@ pub enum Act {
     OpenBackground { account: String, terminal: String },
     /// The same, beside the pane the window shows (the other way ↵ opens it, ⌥↵).
     OpenBeside { account: String, terminal: String },
+    /// A terminal another computer has open, taken from it into a tab here (the other
+    /// computer's pane goes dim).
+    MoveHere { account: String, terminal: String },
 }
 
 /// The name of the row that lists every tab, and of the one that lists this computer's: the
@@ -255,7 +258,7 @@ pub struct Overview {
     sections: Vec<Section>,
     /// The places in [`Self::sections`] of the terminals the machine and the search leave, as
     /// `(section, entry)`, section by section.
-    away: Vec<(usize, usize)>,
+    away: Vec<(usize, usize, bool)>,
     away_hits: HashMap<Key, AwayHit>,
     /// The terminal selected instead of a tab: at most one of the two is.
     selected_away: Option<Key>,
@@ -317,7 +320,7 @@ impl Overview {
         let away_kept = self.selected_away.as_ref().is_some_and(|key| {
             self.away
                 .iter()
-                .any(|&(section, entry)| self.key_of(section, entry) == *key)
+                .any(|&(section, entry, other)| self.key_of(section, entry, other) == *key)
         });
         if tab_kept {
             self.selected_away = None;
@@ -327,7 +330,7 @@ impl Overview {
             self.selected = self.shown.first().map(|&at| self.all[at].id);
             self.selected_away = match self.selected {
                 Some(_) => None,
-                None => self.away.first().map(|&(s, e)| self.key_of(s, e)),
+                None => self.first_background(),
             };
         }
         if !self
@@ -464,9 +467,11 @@ impl Overview {
         self.reshow();
         if !self.query.trim().is_empty() {
             self.selected = self.shown.first().map(|&at| self.all[at].id);
+            // A terminal another computer has open is found but never chosen: when only those
+            // are found the selection is empty and ↵ does nothing.
             self.selected_away = match self.selected {
                 Some(_) => None,
-                None => self.away.first().map(|&(s, e)| self.key_of(s, e)),
+                None => self.first_background(),
             };
             self.pointed = None;
         }
@@ -508,6 +513,8 @@ impl Overview {
         let mut hints = Vec::new();
         if self.selected.is_some() {
             hints.push(("↵", GO_TO_TAB));
+        } else if self.selected_other() {
+            hints.push(("↵", MOVE_HERE));
         } else if self.selected_away.is_some() {
             hints.push(("↵", OPEN_IN_TAB));
             hints.push(("⌥↵", OPEN_BESIDE));
@@ -660,7 +667,9 @@ impl Overview {
     /// (the row's end, the first or last row of tabs).
     pub fn step(&mut self, layout: &Layout, direction: Direction) -> bool {
         let Some(at) = self.selected_cell() else {
-            return false;
+            // Nothing is selected (a search found only what other computers have open): a
+            // key takes the first cell.
+            return self.cells() > 0 && self.select_cell(0);
         };
         let Some(&(row, column)) = layout.cells.get(at) else {
             return false;
@@ -695,6 +704,9 @@ impl Overview {
     /// What ↵ does now.
     pub fn act(&self) -> Option<Act> {
         if let Some((account, terminal)) = self.selected_away.clone() {
+            if self.selected_other() {
+                return Some(Act::MoveHere { account, terminal });
+            }
             return Some(Act::OpenBackground { account, terminal });
         }
         let tab = self.selected?;
@@ -706,6 +718,9 @@ impl Overview {
 
     /// The word beside the selected cell's name that says what ↵ does.
     pub fn verb(&self) -> Option<&'static str> {
+        if self.selected_other() {
+            return Some(MOVE_HERE);
+        }
         if self.selected_away.is_some() {
             return Some(OPEN_IN_TAB);
         }
@@ -747,7 +762,12 @@ pub enum Row {
     Heading { group: u64, text: String },
     /// A server's section heading ("In the background on ⇄ rasp · 3"); `section` is its place
     /// among [`Overview::sections`].
-    Section { section: usize, text: String },
+    Section {
+        section: usize,
+        /// The group of terminals other computers have open: no *Open All* on its heading.
+        other: bool,
+        text: String,
+    },
     /// Cells, by their number ([`Overview::cell`]: the tabs, then the terminals), left to right.
     Tiles(Vec<usize>),
 }
@@ -817,6 +837,7 @@ impl Layout {
         for part in parts {
             rows.push(Row::Section {
                 section: part.section,
+                other: part.other,
                 text: part.text.clone(),
             });
             let mut left = part.count;
@@ -1750,11 +1771,13 @@ mod tests {
             Section {
                 account: "u@db2:22".to_owned(),
                 host: "db2".to_owned(),
+                elsewhere: Vec::new(),
                 entries: vec![away("u@db2:22", "psql", "psql", "~/dumps")],
             },
             Section {
                 account: "u@rasp:22".to_owned(),
                 host: "rasp".to_owned(),
+                elsewhere: Vec::new(),
                 entries: vec![
                     away("u@rasp:22", "claude", "claude", "~/api"),
                     away("u@rasp:22", "build", "cargo watch", "~/api"),
@@ -1815,6 +1838,7 @@ mod tests {
         overview.set_background(vec![Section {
             account: "u@rasp:22".to_owned(),
             host: "RASP".to_owned(),
+            elsewhere: Vec::new(),
             entries: vec![away("u@rasp:22", "claude", "claude", "~")],
         }]);
         // One row for the server: the panes' `rasp` and the section's `RASP` are the same.
@@ -1975,6 +1999,7 @@ mod tests {
         both.set_background(vec![Section {
             account: "u@rasp:22".to_owned(),
             host: "rasp".to_owned(),
+            elsewhere: Vec::new(),
             entries: vec![away("u@rasp:22", "claude", "claude", "~/api")],
         }]);
         both.set_query("claude");
@@ -2004,6 +2029,231 @@ mod tests {
                 .selected_away()
                 .map(|(_, terminal)| terminal.as_str()),
             Some("build")
+        );
+    }
+
+    fn elsewhere(
+        account: &str,
+        terminal: &str,
+        title: &str,
+        by: &str,
+    ) -> crate::server_card::Entry {
+        crate::server_card::Entry {
+            by: Some(by.to_owned()),
+            ..away(account, terminal, title, "~/site")
+        }
+    }
+
+    /// `kept()` with two terminals other computers have open on rasp (the studio's and the
+    /// laptop's) and one on nas, a server no tab of the window is on and that keeps nothing of its own.
+    fn shared() -> Overview {
+        let mut overview = kept();
+        let mut sections = overview.sections().to_vec();
+        let rasp = sections
+            .iter_mut()
+            .find(|s| s.host == "rasp")
+            .expect("rasp");
+        rasp.elsewhere = vec![
+            elsewhere("u@rasp:22", "web", "npm run dev", "studio"),
+            elsewhere("u@rasp:22", "logs", "tail -f", "laptop"),
+        ];
+        sections.push(Section {
+            account: "u@nas:22".to_owned(),
+            host: "nas".to_owned(),
+            entries: Vec::new(),
+            elsewhere: vec![elsewhere("u@nas:22", "psql", "psql", "studio")],
+        });
+        overview.set_background(sections);
+        overview
+    }
+
+    fn headings(overview: &Overview) -> Vec<String> {
+        overview.parts().into_iter().map(|part| part.text).collect()
+    }
+
+    #[test]
+    fn the_other_computers_group_is_under_the_servers_own_in_every_section_that_has_one() {
+        let mut overview = shared();
+        assert_eq!(
+            headings(&overview),
+            [
+                "Running in the background on ⇄ db2 · 1",
+                "On other computers on ⇄ nas · 1",
+                "Running in the background on ⇄ rasp · 2",
+                "On other computers · 2",
+            ]
+        );
+        assert_eq!(
+            away_names(&overview),
+            [
+                "psql",
+                "psql",
+                "claude",
+                "cargo watch",
+                "npm run dev",
+                "tail -f"
+            ]
+        );
+        // A server is its own machine: rasp's page holds its two groups, db2's none of them.
+        overview.set_machine(Machine::Host("rasp".to_owned()));
+        assert_eq!(
+            away_names(&overview),
+            ["claude", "cargo watch", "npm run dev", "tail -f"]
+        );
+        // This Computer keeps no terminal of the servers, in the background or elsewhere.
+        overview.set_machine(Machine::Local);
+        assert_eq!(overview.away_len(), 0);
+    }
+
+    #[test]
+    fn a_server_with_only_terminals_other_computers_have_open_keeps_its_machine_row() {
+        let overview = shared();
+        let rows = overview.machines();
+        let nas = rows
+            .iter()
+            .find(|row| row.machine == Machine::Host("nas".to_owned()))
+            .expect("a row for nas");
+        assert_eq!(nas.account.as_deref(), Some("u@nas:22"));
+        // The row's count is of the tabs and the server's own background, not the group.
+        assert!(!nas.count.contains("background"), "{}", nas.count);
+        let rasp = rows
+            .iter()
+            .find(|row| row.machine == Machine::Host("rasp".to_owned()))
+            .expect("a row for rasp");
+        assert!(rasp.count.contains("2 in the background"), "{}", rasp.count);
+    }
+
+    fn select_named(overview: &mut Overview, title: &str) {
+        let at = (0..overview.cells())
+            .find(|&index| match overview.cell(index) {
+                Some(Cell::Away { entry, .. }) => entry.title == title,
+                _ => false,
+            })
+            .expect("the cell");
+        assert!(overview.select_cell(at));
+    }
+
+    #[test]
+    fn enter_on_a_terminal_another_computer_has_open_moves_it_here_and_nothing_else_applies() {
+        let mut overview = shared();
+        select_named(&mut overview, "npm run dev");
+        assert_eq!(
+            overview.act(),
+            Some(Act::MoveHere {
+                account: "u@rasp:22".to_owned(),
+                terminal: "web".to_owned()
+            })
+        );
+        assert_eq!(overview.verb(), Some(MOVE_HERE));
+        assert_eq!(overview.hints().first(), Some(&("↵", MOVE_HERE)));
+        assert!(
+            !overview
+                .hints()
+                .iter()
+                .any(|(key, _)| *key == "⌥↵" || *key == "⌘↵"),
+            "no beside, no open all"
+        );
+        assert_eq!(overview.act_beside(), None);
+        assert_eq!(
+            overview.open_all_host(),
+            None,
+            "the group is not opened with the rest"
+        );
+        // A terminal of the server's own, on the same server, still is.
+        select_named(&mut overview, "claude");
+        assert_eq!(overview.open_all_host().as_deref(), Some("rasp"));
+        assert!(matches!(
+            overview.act_beside(),
+            Some(Act::OpenBeside { .. })
+        ));
+    }
+
+    #[test]
+    fn a_search_that_finds_only_what_other_computers_have_open_selects_nothing_and_enter_does_nothing()
+     {
+        let mut overview = shared();
+        overview.set_query("npm");
+        assert_eq!(overview.cells(), 1, "the terminal is found");
+        assert_eq!(overview.selected(), None);
+        assert_eq!(overview.selected_away(), None);
+        assert_eq!(overview.act(), None);
+        assert!(!overview.hints().iter().any(|(key, _)| *key == "↵"));
+        // An arrow takes the first cell; only then is there something to move here.
+        let layout = overview.layout(width_for(3), 0.6);
+        assert!(overview.step(&layout, Direction::Right));
+        assert!(overview.selected_other());
+        assert!(matches!(overview.act(), Some(Act::MoveHere { .. })));
+        // A word the server's own terminals carry too: those are chosen, the group is not.
+        overview.set_query("c");
+        assert!(overview.cells() > 1);
+        assert!(!overview.selected_other());
+    }
+
+    #[test]
+    fn the_other_computers_group_gives_the_selection_back_when_the_terminal_goes() {
+        let mut overview = shared();
+        select_named(&mut overview, "npm run dev");
+        let mut sections = overview.sections().to_vec();
+        let rasp = sections
+            .iter_mut()
+            .find(|s| s.host == "rasp")
+            .expect("rasp");
+        rasp.elsewhere.remove(0);
+        overview.set_background(sections);
+        assert_eq!(
+            overview
+                .selected_away()
+                .map(|(_, terminal)| terminal.as_str()),
+            Some("logs"),
+            "the next terminal of the group takes its place"
+        );
+        // The last terminal of the server's own gone while the group has some: the selection
+        // is not given to the group, it goes to the first tab.
+        let mut overview = shared();
+        select_named(&mut overview, "cargo watch");
+        let mut sections = overview.sections().to_vec();
+        for section in &mut sections {
+            section.entries.clear();
+        }
+        overview.set_background(sections);
+        assert!(!overview.selected_other());
+        assert_eq!(overview.selected_away(), None);
+        assert!(
+            overview.selected().is_some(),
+            "a tab, not another computer's terminal"
+        );
+        // A terminal another computer opened under the selection is no longer chosen.
+        let mut overview = shared();
+        select_named(&mut overview, "claude");
+        let mut sections = overview.sections().to_vec();
+        let rasp = sections
+            .iter_mut()
+            .find(|s| s.host == "rasp")
+            .expect("rasp");
+        let moved = rasp.entries.remove(0);
+        rasp.elsewhere.push(crate::server_card::Entry {
+            by: Some("studio".to_owned()),
+            ..moved
+        });
+        overview.set_background(sections);
+        assert!(!overview.selected_other(), "↵ must not take it from there");
+        assert_eq!(
+            overview
+                .selected_away()
+                .map(|(_, terminal)| terminal.as_str()),
+            Some("build"),
+            "the next of the server's own"
+        );
+        // The server's last terminal of every kind gone: the section and its row go.
+        let mut overview = shared();
+        let mut sections = overview.sections().to_vec();
+        sections.retain(|section| section.host != "nas");
+        overview.set_background(sections);
+        assert!(
+            !overview
+                .machines()
+                .iter()
+                .any(|row| row.machine == Machine::Host("nas".to_owned()))
         );
     }
 }
