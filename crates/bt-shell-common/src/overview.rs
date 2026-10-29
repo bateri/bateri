@@ -60,6 +60,11 @@ pub const MAX_ASPECT: f64 = 1.2;
 /// What ↵ does with a tab.
 pub const GO_TO_TAB: &str = "Go to Tab";
 
+/// Esc on the search row, and what it says: it closes the view, or clears the search first.
+pub const ESC: &str = "esc";
+pub const CLOSE: &str = "Close";
+pub const CLEAR: &str = "Clear";
+
 /// A group a tab belongs to.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Group {
@@ -523,14 +528,7 @@ impl Overview {
         if self.machines().len() > 1 {
             hints.push(("⇥", "Next machine"));
         }
-        hints.push((
-            "esc",
-            if self.query.is_empty() {
-                "Close"
-            } else {
-                "Clear"
-            },
-        ));
+        hints.push((ESC, if self.query.is_empty() { CLOSE } else { CLEAR }));
         hints
     }
 

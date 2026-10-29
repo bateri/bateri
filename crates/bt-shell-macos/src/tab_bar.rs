@@ -2736,7 +2736,7 @@ pub(crate) fn play(
 
 /// Plays `layer` from the look `from` (a matrix that [`fitted`] checked) to rest over `secs`.
 /// The layer's own transform is already the rest, and the animation removes itself on completion.
-fn play_look(layer: &CALayer, from: CATransform3D, secs: f64, ease: Ease) {
+pub(crate) fn play_look(layer: &CALayer, from: CATransform3D, secs: f64, ease: Ease) {
     let animation = CABasicAnimation::animationWithKeyPath(Some(ns_string!("transform")));
     // SAFETY: plain `NSValue`s around `CATransform3D` values, what this key path takes.
     unsafe {

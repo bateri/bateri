@@ -1795,7 +1795,10 @@ impl RootView {
             NSRect::new(NSPoint::ZERO, NSSize::new(bounds.size.width, row))
         };
         claim.setHidden(!side);
-        self.ivars().edge.setHidden(!side);
+        // Not under the big view ([`Self::seat_overview`]).
+        self.ivars()
+            .edge
+            .setHidden(!side || self.ivars().overview.borrow().is_some());
         bar.set_side(side.then_some(row));
         bar.setFrame(bar_frame);
         if side {
@@ -1847,8 +1850,17 @@ impl RootView {
     }
 
     /// Seats the big view that was put up, or clears the seat when it is taken down.
+    ///
+    /// Under the view the strip and the side column's edge are hidden: a tracking area reports
+    /// to its owner whatever lies over it, so a chip under the view would open its card over
+    /// it, show its tip and set its pointer.
     pub(crate) fn seat_overview(&self, overview: Option<Retained<OverviewView>>) {
+        let covered = overview.is_some();
         self.ivars().overview.replace(overview);
+        self.ivars().bar.setHidden(covered);
+        self.ivars()
+            .edge
+            .setHidden(covered || !tabs_at_side(self.mtm()));
     }
 
     /// The big view follows the window's size.

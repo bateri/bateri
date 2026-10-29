@@ -21,6 +21,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
+use std::ptr::NonNull;
 
 use block2::RcBlock;
 use bt_core::Theme;
@@ -35,31 +36,36 @@ use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject, Sel};
 use objc2::{
-    AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel,
+    AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send, sel,
 };
 use objc2_app_kit::{
-    NSAlert, NSAlertFirstButtonReturn, NSApplication, NSAttributedStringNSStringDrawing,
-    NSAutoresizingMaskOptions, NSBezierPath, NSCompositingOperation, NSControlTextEditingDelegate,
-    NSEvent, NSEventModifierFlags, NSFocusRingType, NSFont, NSFontWeightMedium,
-    NSFontWeightSemibold, NSGraphicsContext, NSImage, NSMenu, NSMenuItem, NSModalResponse,
-    NSTextField, NSTextFieldDelegate, NSTrackingArea, NSTrackingAreaOptions, NSView,
-    NSWindowOrderingMode,
+    NSAlert, NSAlertFirstButtonReturn, NSAnimatablePropertyContainer, NSAnimationContext,
+    NSApplication, NSAttributedStringNSStringDrawing, NSAutoresizingMaskOptions, NSBezierPath,
+    NSCompositingOperation, NSControlTextEditingDelegate, NSEvent, NSEventModifierFlags,
+    NSFocusRingType, NSFont, NSFontWeightMedium, NSFontWeightSemibold, NSGraphicsContext, NSImage,
+    NSMenu, NSMenuItem, NSModalResponse, NSTextField, NSTextFieldDelegate, NSTrackingArea,
+    NSTrackingAreaOptions, NSView, NSWindowOrderingMode,
 };
 use objc2_foundation::{
-    NSAttributedString, NSNotification, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
-    ns_string,
+    NSNotification, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSValue, ns_string,
 };
-use objc2_quartz_core::CALayer;
+use objc2_quartz_core::{
+    CABasicAnimation, CALayer, CAMediaTiming, CAMediaTimingFunction, CATransform3D,
+    NSValueCATransform3DAdditions, kCAFillModeForwards, kCAMediaTimingFunctionEaseIn,
+};
 
 use crate::app;
 use crate::arrange;
+use crate::card::{self, IDENTITY};
 use crate::palette::{
     Attributes, Look, attributes, draw_text, draw_text_right, styled, text_width,
 };
 use crate::screens::Screens;
 use crate::server_stats;
 use crate::sheets::{self, Asker};
-use crate::tab_bar::{Ease, PALETTE_ICON_SIDE, Tint, palette_icon, play, rounded, selected_row};
+use crate::tab_bar::{
+    Ease, PALETTE_ICON_SIDE, Tint, palette_icon, play, play_look, rounded, selected_row,
+};
 use crate::window::{RootView, TerminalWindow};
 
 /// The air above the first row, under the title row, and below the last one.
@@ -74,6 +80,10 @@ const PLATE_RADIUS: f64 = 12.0;
 const PLATE_PAD: f64 = 18.0;
 const PLATE_AREA: f64 = PLATE_HEIGHT + 2.0 * PLATE_GAP;
 const FIELD_SIZE: f64 = 14.0;
+/// Where the field's own text stands in it (measured against AppKit's placeholder on the same
+/// field), which the row's words while nothing is typed share.
+const FIELD_TEXT_X: f64 = 2.0;
+const FIELD_TEXT_Y: f64 = -2.5;
 /// The most of the plate's width the keys and the count at its right take.
 const KEYS_SHARE: f64 = 0.45;
 const KEYS_MAX: f64 = 340.0;
@@ -233,7 +243,10 @@ define_class!(
         /// lit. Only a move does it, never a scroll that slid a cell under a still pointer.
         #[unsafe(method(mouseMoved:))]
         fn mouse_moved(&self, event: &NSEvent) {
-            self.point_at(event);
+            // A view on its way out still hears its area; the pointer is the window's again.
+            if !self.ivars().closing.get() {
+                self.point_at(event);
+            }
         }
 
         #[unsafe(method(mouseExited:))]
@@ -1354,7 +1367,7 @@ impl OverviewView {
         (plate.size.width * KEYS_SHARE).min(KEYS_MAX)
     }
 
-    /// The field stands in the plate left of the keys, and says what the row finds.
+    /// The field stands in the plate left of the keys.
     fn place_field(&self) {
         let iv = self.ivars();
         let plate = self.plate();
@@ -1369,19 +1382,36 @@ impl OverviewView {
                 height,
             ),
         ));
-        let look = iv.look.get();
-        let text = iv.state.borrow().placeholder();
-        let quiet = attributes(&NSFont::systemFontOfSize(FIELD_SIZE), look.dim);
-        // SAFETY: the attributes are `NSColor`/`NSFont` under AppKit's two keys.
-        let placeholder =
-            unsafe { NSAttributedString::new_with_attributes(&NSString::from_str(&text), &quiet) };
-        iv.field.setPlaceholderAttributedString(Some(&placeholder));
     }
 
     fn paint_plate(&self, state: &Overview) {
-        let look = self.ivars().look.get();
+        let iv = self.ivars();
+        let look = iv.look.get();
         let plate = self.plate();
         rounded(plate, PLATE_RADIUS, look.band, Some(look.line));
+        // What the row finds, while nothing is typed: drawn here, under the field where its text
+        // starts, not the field's placeholder — setting that ends the editing under way, and a
+        // field that lets the keyboard go takes the view down (⇥ to another machine closed it).
+        let typed = iv.field.currentEditor().map_or_else(
+            || iv.field.stringValue().length(),
+            |editor| editor.string().length(),
+        );
+        if typed == 0 {
+            let field = iv.field.frame();
+            let quiet = attributes(&NSFont::systemFontOfSize(FIELD_SIZE), look.dim);
+            let text = fit(
+                &state.placeholder(),
+                field.size.width - FIELD_TEXT_X,
+                &quiet,
+            );
+            draw_text(
+                &text,
+                field.origin.x + FIELD_TEXT_X,
+                field.origin.y + FIELD_TEXT_Y,
+                field.size.height,
+                &quiet,
+            );
+        }
         let small = attributes(&NSFont::systemFontOfSize(SMALL_SIZE), look.dim);
         let key = attributes(
             &NSFont::systemFontOfSize_weight(SMALL_SIZE, unsafe { NSFontWeightSemibold }),
@@ -1391,13 +1421,23 @@ impl OverviewView {
         let least = plate.origin.x + plate.size.width - self.keys_room(plate);
         for (glyph, verb) in state.hints().into_iter().rev() {
             let word = format!(" {verb}");
-            let width = text_width(glyph, &key) + text_width(&word, &small);
-            if right - width < least {
+            // Esc says Close or Clear as the search empties and fills: it keeps the wider word's
+            // room, so the keys left of it stay where they are while typing.
+            let room = if glyph == rules::ESC {
+                [rules::CLOSE, rules::CLEAR]
+                    .iter()
+                    .map(|verb| text_width(&format!(" {verb}"), &small))
+                    .fold(0.0, f64::max)
+            } else {
+                text_width(&word, &small)
+            };
+            let left = right - room - text_width(glyph, &key);
+            if left < least {
                 break;
             }
-            let left = draw_text_right(&word, right, plate.origin.y, PLATE_HEIGHT, &small);
-            draw_text_right(glyph, left, plate.origin.y, PLATE_HEIGHT, &key);
-            right = left - text_width(glyph, &key) - 14.0;
+            let after = draw_text(glyph, left, plate.origin.y, PLATE_HEIGHT, &key);
+            draw_text(&word, after, plate.origin.y, PLATE_HEIGHT, &small);
+            right = left - 14.0;
         }
         if let Some(found) = state.found() {
             draw_text_right(&found, right, plate.origin.y, PLATE_HEIGHT, &small);
@@ -1793,34 +1833,109 @@ impl OverviewView {
         }
     }
 
-    // ─── Opening ─────────────────────────────────────────────────────────
+    // ─── Opening and closing ─────────────────────────────────────────────
 
-    /// The view settles from slightly larger and fades in, once (Core Animation; none with
-    /// Reduce Motion).
+    /// The view settles from a little larger about its middle and fades in, once (Core
+    /// Animation; none with Reduce Motion).
     fn appear(&self) {
-        let reduce = app::delegate(self.mtm()).is_none_or(|app| app.reduce_motion());
-        if reduce {
+        if reduced(self.mtm()) {
             return;
         }
         self.setWantsLayer(true);
-        if let Some(layer) = self.layer() {
-            settle(&layer);
+        let Some(layer) = self.layer() else {
+            return;
+        };
+        if let Some(look) = grown(&layer, self.frame()) {
+            play_look(&layer, look, OPEN_SECS, Ease::Out);
         }
+        play(&layer, "opacity", 0.0, 1.0, OPEN_SECS, Ease::Out, 0.0);
+    }
+
+    /// The view leaves the way it came — growing a little about its middle and fading — and is
+    /// taken off the window at the end (at once with Reduce Motion): the pictures stay until
+    /// then.
+    fn leave(&self) {
+        let look = (!reduced(self.mtm()))
+            .then(|| self.layer())
+            .flatten()
+            .and_then(|layer| Some((grown(&layer, self.frame())?, layer)));
+        let Some((look, layer)) = look else {
+            self.release();
+            self.removeFromSuperview();
+            return;
+        };
+        // SAFETY: plain `NSValue`s around `CATransform3D` values.
+        let (rest, look) = unsafe {
+            (
+                NSValue::valueWithCATransform3D(IDENTITY),
+                NSValue::valueWithCATransform3D(look),
+            )
+        };
+        hold_at(&layer, "transform", &rest, &look);
+        // The fade is AppKit's, whose group says when it is over: the view goes then.
+        let fading = self.retain();
+        let changes = RcBlock::new(move |context: NonNull<NSAnimationContext>| {
+            // SAFETY: AppKit gives the block a live context, for the block's duration.
+            let context = unsafe { context.as_ref() };
+            context.setDuration(OPEN_SECS);
+            context.setTimingFunction(Some(&ease_in()));
+            fading.animator().setAlphaValue(0.0);
+        });
+        let leaving = self.retain();
+        let done = RcBlock::new(move || {
+            leaving.release();
+            leaving.removeFromSuperview();
+        });
+        NSAnimationContext::runAnimationGroup_completionHandler(&changes, Some(&done));
     }
 }
 
-/// `layer` plays from a little larger and clear to rest.
-fn settle(layer: &CALayer) {
-    play(
-        layer,
-        "transform.scale",
-        OPEN_SCALE,
-        1.0,
-        OPEN_SECS,
-        Ease::Out,
-        0.0,
+/// Whether the system asks for less motion (no application object: as if it did).
+fn reduced(mtm: MainThreadMarker) -> bool {
+    app::delegate(mtm).is_none_or(|app| app.reduce_motion())
+}
+
+/// How `layer`, standing at `frame`, looks [`OPEN_SCALE`] times larger about its middle — the
+/// matrix [`card::fitted`] checked against the layer. A view's layer scales about its corner:
+/// scaled there, the view slid in from the side.
+fn grown(layer: &CALayer, frame: NSRect) -> Option<CATransform3D> {
+    let at = Rect::new(
+        frame.origin.x,
+        frame.origin.y,
+        frame.size.width,
+        frame.size.height,
     );
-    play(layer, "opacity", 0.0, 1.0, OPEN_SECS, Ease::Out, 0.0);
+    let (width, height) = (at.width * OPEN_SCALE, at.height * OPEN_SCALE);
+    let look = Rect::new(
+        at.x - (width - at.width) / 2.0,
+        at.y - (height - at.height) / 2.0,
+        width,
+        height,
+    );
+    card::fitted(layer, look, at)
+}
+
+/// The closing's curve: slow, then quick.
+fn ease_in() -> Retained<CAMediaTimingFunction> {
+    // SAFETY: a constant name QuartzCore exposes, it lives for the whole process.
+    CAMediaTimingFunction::functionWithName(unsafe { kCAMediaTimingFunctionEaseIn })
+}
+
+/// Plays `path` of `layer` from `from` to `to` over the opening's time, on the closing's curve,
+/// and keeps `to` on screen once it is over: the view is taken away then.
+fn hold_at(layer: &CALayer, path: &str, from: &AnyObject, to: &AnyObject) {
+    let animation = CABasicAnimation::animationWithKeyPath(Some(&NSString::from_str(path)));
+    // SAFETY: the values are the objects the key path takes (an `NSValue` of a
+    // `CATransform3D`, an `NSNumber`).
+    unsafe {
+        animation.setFromValue(Some(from));
+        animation.setToValue(Some(to));
+        animation.setFillMode(kCAFillModeForwards);
+    }
+    animation.setDuration(OPEN_SECS);
+    animation.setTimingFunction(Some(&ease_in()));
+    animation.setRemovedOnCompletion(false);
+    layer.addAnimation_forKey(&animation, Some(&NSString::from_str(path)));
 }
 
 /// `image` in `rect`, the right way up in a flipped drawing too.
@@ -1957,6 +2072,8 @@ pub(crate) fn open(window: &TerminalWindow) {
         return;
     }
     window.close_palette();
+    // The strip goes under the view: its card, its key hints and a group's list go now.
+    window.bar().resigned();
     let theme = window.bar().theme();
     let (tabs, _) = window.overview_facts();
     let here = window.selected_tab_id();
@@ -2009,8 +2126,9 @@ pub(crate) fn show_on(window: &TerminalWindow, host: &str) {
     }
 }
 
-/// Takes the view down: the window has none from here on, the panes let go of the pictures
-/// they kept for it and the wake finds nothing to do.
+/// Takes the view down: the window has none from here on and the wake finds nothing to do; the
+/// view leaves ([`OverviewView::leave`]) and the panes let go of the pictures they kept for it
+/// once it is gone.
 pub(crate) fn close(root: &RootView) {
     let Some(view) = root.overview() else {
         return;
@@ -2022,6 +2140,5 @@ pub(crate) fn close(root: &RootView) {
     if let Some(account) = iv.viewed.take() {
         server_stats::set_view(&account, iv.window, false);
     }
-    view.release();
-    view.removeFromSuperview();
+    view.leave();
 }
