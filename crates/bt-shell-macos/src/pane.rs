@@ -2030,7 +2030,7 @@ pub struct PaneIvars {
     /// The card's frame: the topmost child, above the veil
     /// ([`crate::card`]). Invisible unless the pane is one of several.
     card_frame: Retained<FrameBox>,
-    /// The pane has a header over it (a split tab's, `pane_head`): its top corners and its card's
+    /// The pane has a header over it (`pane_head`): its top corners and its card's
     /// light are the header's ([`TerminalPane::set_headed`]).
     headed: Cell<bool>,
     /// The ⌘-hovered OSC 8 link's target and its text: above the
@@ -4460,7 +4460,7 @@ impl TerminalPane {
         ))
     }
 
-    /// The pane stands under a header (a split tab's) or not: its top corners and its card's
+    /// The pane stands under a header or not: its top corners and its card's
     /// light go to the header. The container says so with every layout, before
     /// [`Self::set_card`].
     pub(crate) fn set_headed(&self, headed: bool) {

@@ -116,8 +116,8 @@ pub(crate) fn corner_pt() -> f64 {
     (windowed_corner_pt() - GAP_PT).max(0.0)
 }
 
-/// The height of a pane's header in a split tab, points: the terminal's gutter above and below a
-/// row's 18 pt line (`pane_head`). A design constant, the design's 34.
+/// The height of a pane's header, points — every pane in view has one: the terminal's gutter
+/// above and below a row's 18 pt line (`pane_head`). A design constant, the design's 34.
 pub(crate) const HEAD_PT: f64 = 34.0;
 
 /// The slide's length, in seconds. A design constant, the canvas's 220 ms.

@@ -1,4 +1,4 @@
-//! Carrying a pane: a split tab's pane is taken by its header (`tab_head`), no key held,
+//! Carrying a pane: a pane is taken by its header (`tab_head`), no key held,
 //! carried by a small card, and let go beside another pane, at the window's edge, in the
 //! middle of another pane (a swap), on a tab's chip, between chips — in its own window or in
 //! another — or over no window at all. The drop is the appliers' ([`TerminalWindow::move_pane`],

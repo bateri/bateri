@@ -201,7 +201,7 @@ mod tab_switch;
 // A title that does not fit: faded at its end, slid under the pointer.
 #[path = "tab_title.rs"]
 mod tab_title;
-// A pane's header in a split tab: the bar's mark and title drawing over each pane.
+// A pane's header: the bar's mark and title drawing over each pane.
 #[path = "tab_head.rs"]
 mod pane_head;
 pub(crate) use pane_head::{HeadLook, PaneHead};
@@ -642,6 +642,27 @@ fn fade(view: &NSView, to: f64, secs: f64) {
     }
     let view = view.retain();
     animate(secs, move || view.animator().setAlphaValue(to));
+}
+
+/// [`track_hover`] with the moves in between: a view whose parts each light under the pointer
+/// (a pane header's tools, Activity's lines).
+fn track_moves(view: &NSView) {
+    let options = NSTrackingAreaOptions::MouseEnteredAndExited
+        | NSTrackingAreaOptions::MouseMoved
+        | NSTrackingAreaOptions::ActiveInActiveApp
+        | NSTrackingAreaOptions::InVisibleRect;
+    // SAFETY: `owner` is the view, which owns the area and outlives it; no user info.
+    // `InVisibleRect` follows the view's bounds, so the rect is ignored.
+    let area = unsafe {
+        NSTrackingArea::initWithRect_options_owner_userInfo(
+            NSTrackingArea::alloc(),
+            NSRect::ZERO,
+            options,
+            Some(view),
+            None,
+        )
+    };
+    view.addTrackingArea(&area);
 }
 
 /// A tracking area over `view`'s visible rect for its enter and exit —

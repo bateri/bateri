@@ -47,7 +47,7 @@ use std::cell::{Cell, RefCell};
 
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
-use objc2::{AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
+use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{
     NSAccessibility, NSAffineTransformNSAppKitAdditions, NSBezierPath, NSBox, NSColor, NSFont,
     NSFontAttributeName, NSFontWeightMedium, NSFontWeightSemibold, NSForegroundColorAttributeName,
@@ -1294,22 +1294,7 @@ impl AgentRows {
         let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] };
         this.setHidden(true);
         // The line under the pointer is its own: entering, moving within and leaving.
-        let options = objc2_app_kit::NSTrackingAreaOptions::MouseEnteredAndExited
-            | objc2_app_kit::NSTrackingAreaOptions::MouseMoved
-            | objc2_app_kit::NSTrackingAreaOptions::ActiveInActiveApp
-            | objc2_app_kit::NSTrackingAreaOptions::InVisibleRect;
-        // SAFETY: `owner` is the view, which owns the area and outlives it; no user info.
-        // `InVisibleRect` follows the view's bounds, so the rect is ignored.
-        let area = unsafe {
-            objc2_app_kit::NSTrackingArea::initWithRect_options_owner_userInfo(
-                objc2_app_kit::NSTrackingArea::alloc(),
-                NSRect::ZERO,
-                options,
-                Some(&this),
-                None,
-            )
-        };
-        this.addTrackingArea(&area);
+        super::track_moves(&this);
         this
     }
 
@@ -1602,11 +1587,6 @@ pub(super) struct AgentLook {
     pub(super) selected: bool,
     pub(super) palette: Palette,
     pub(super) style: IconStyle,
-}
-
-/// [`draw_line`] for the bar's other children: a pane's header writes its title with it.
-pub(super) fn draw_title(text: &str, rect: NSRect, size: f64, strong: bool, color: u32) {
-    draw_line(text, rect, size, strong, color);
 }
 
 /// One line of text in `rect` (top-down), cut with an ellipsis where it does not fit: `size`

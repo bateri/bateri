@@ -1,10 +1,15 @@
-//! A pane's header in a split tab: the band [`crate::card::HEAD_PT`] tall over every pane, part
-//! of its card. The program's mark with no tile — a dot on its corner says the pane's own
-//! signals —, the pane's title (the focused pane's in full ink), and under the pointer the
-//! pane's tools at its right: Split Right, Split Down, Open in New Tab, Close Split. A press on
-//! the band gives the pane the keyboard and is the start of carrying it: past the slop the pane
-//! is carried (`pane_drag`, no key held) — to a region of a pane, onto a strip, out of the
-//! window. A press on a tool runs that command on this pane.
+//! A pane's header: the band [`crate::card::HEAD_PT`] tall over every pane in view — a tab's only
+//! one and a zoomed one too, so a pane can always be taken by it, whatever the program in it
+//! covers. The program's mark with no tile — a dot on its corner says the pane's own signals —,
+//! the pane's title (the focused pane's in full ink), and under the pointer the pane's tools at
+//! its right: Split Right, Split Down, Open in New Tab (with other panes beside it) and Close
+//! Split. A press on the band gives the pane the keyboard and is the start of carrying it: past
+//! the slop the pane is carried (`pane_drag`, no key held) — to a region of a pane, onto a strip,
+//! out of the window. A press on a tool runs that command on this pane.
+//!
+//! **The title is a tab's** ([`super::tab_title::Title`]): a title that does not fit fades at its
+//! end instead of ending in "…", and gives the tools its room while they show — the tools come in
+//! the way a chip's `×` does ([`TOOLS_SECS`]), and the one under the pointer stands on a face.
 //!
 //! **One band, the container's.** The header is not the pane's: the split container lays it out
 //! over the pane's place (`split::Spacing::with_head`, so the layout, the split limit, a drag
@@ -21,11 +26,13 @@ use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSAccessibility, NSApplication, NSBezierPath, NSEvent, NSGraphicsContext, NSView,
+    NSAccessibility, NSApplication, NSBezierPath, NSEvent, NSFont, NSFontWeightMedium,
+    NSFontWeightSemibold, NSGraphicsContext, NSTextAlignment, NSView,
 };
 use objc2_foundation::{NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
 
-use super::{Palette, ProgramKind, Tint, draw_mark, track_hover};
+use super::tab_title::Title;
+use super::{Palette, ProgramKind, Tint, draw_mark, fade, track_moves};
 use crate::tabs::{self, Indicator};
 
 /// The mark's side, points: the program's own glyph, no tile.
@@ -42,6 +49,10 @@ const TOOL_GAP: f64 = 2.0;
 const GUTTER: f64 = 8.0;
 /// The title's type, points: a row's.
 const TITLE_TEXT: f64 = 12.5;
+/// How long the tools take to come and go under the pointer: a chip's `×`'s pace.
+const TOOLS_SECS: f64 = 0.12;
+/// A tool's face's corner radius.
+const TOOL_RADIUS: f64 = 5.0;
 
 /// A pane's tools, in the order they stand.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -53,7 +64,15 @@ enum Tool {
 }
 
 impl Tool {
-    const ALL: [Tool; 4] = [Tool::SplitRight, Tool::SplitDown, Tool::NewTab, Tool::Close];
+    /// The tools of a pane: Open in New Tab only beside other panes — a tab's only pane is the
+    /// tab already.
+    fn of(alone: bool) -> &'static [Tool] {
+        if alone {
+            &[Tool::SplitRight, Tool::SplitDown, Tool::Close]
+        } else {
+            &[Tool::SplitRight, Tool::SplitDown, Tool::NewTab, Tool::Close]
+        }
+    }
 
     fn name(self) -> &'static str {
         match self {
@@ -84,6 +103,8 @@ pub(crate) struct HeadLook {
     pub(crate) focused: bool,
     /// The pane is a card: the band takes its top corners and its light.
     pub(crate) carded: bool,
+    /// The tab's only pane: no Open in New Tab among its tools.
+    pub(crate) alone: bool,
 }
 
 pub(crate) struct HeadIvars {
@@ -98,9 +119,11 @@ pub(crate) struct HeadIvars {
     /// The grid's left and right margins under it (`CellMetrics::with_corners`): the mark stands
     /// on the first, the tools end at the second.
     margins: Cell<(f64, f64)>,
+    /// The pointer is on the band: the tools show and the title gives them its room.
     hot: Cell<bool>,
-    hot_tool: Cell<Option<Tool>>,
     pressed: Cell<Option<Tool>>,
+    title: Title,
+    tools: Retained<HeadTools>,
 }
 
 define_class!(
@@ -131,33 +154,27 @@ define_class!(
         }
 
         #[unsafe(method(mouseEntered:))]
-        fn mouse_entered(&self, _event: &NSEvent) {
+        fn mouse_entered(&self, event: &NSEvent) {
             self.ivars().hot.set(true);
-            self.setNeedsDisplay(true);
+            self.lay_out_parts();
+            self.point_at(event);
         }
 
         #[unsafe(method(mouseExited:))]
         fn mouse_exited(&self, _event: &NSEvent) {
             self.ivars().hot.set(false);
-            self.ivars().hot_tool.set(None);
-            self.setNeedsDisplay(true);
+            self.ivars().tools.set_hot(None);
+            self.lay_out_parts();
         }
 
         #[unsafe(method(mouseMoved:))]
         fn mouse_moved(&self, event: &NSEvent) {
-            let at = self.convertPoint_fromView(event.locationInWindow(), None);
-            let tool = self.tool_at(at);
-            if self.ivars().hot_tool.replace(tool) != tool {
-                let tip = tool.map(|tool| NSString::from_str(tool.name()));
-                self.setToolTip(tip.as_deref());
-                self.setNeedsDisplay(true);
-            }
+            self.point_at(event);
         }
 
         #[unsafe(method(mouseDown:))]
         fn mouse_down(&self, event: &NSEvent) {
-            let at = self.convertPoint_fromView(event.locationInWindow(), None);
-            let tool = self.tool_at(at);
+            let tool = self.tool_at(event);
             self.ivars().pressed.set(tool);
             self.focus_pane();
             // Off the tools the press may become a carry: the session watches the pointer from
@@ -171,12 +188,17 @@ define_class!(
 
         #[unsafe(method(mouseUp:))]
         fn mouse_up(&self, event: &NSEvent) {
-            let at = self.convertPoint_fromView(event.locationInWindow(), None);
             if let Some(tool) = self.ivars().pressed.take()
-                && self.tool_at(at) == Some(tool)
+                && self.tool_at(event) == Some(tool)
             {
                 self.run(tool);
             }
+        }
+
+        /// A new width: the title and the tools take their places in it again.
+        #[unsafe(method(resizeSubviewsWithOldSize:))]
+        fn resize_subviews(&self, _old: NSSize) {
+            self.lay_out_parts();
         }
 
         #[unsafe(method(drawRect:))]
@@ -188,6 +210,8 @@ define_class!(
 
 impl PaneHead {
     pub(crate) fn new(mtm: MainThreadMarker, pane: u64) -> Retained<Self> {
+        let title = Title::new(mtm, NSTextAlignment::Left);
+        let tools = HeadTools::new(mtm);
         let this = Self::alloc(mtm).set_ivars(HeadIvars {
             pane: Cell::new(pane),
             look: RefCell::new(None),
@@ -197,12 +221,18 @@ impl PaneHead {
             radius: Cell::new(0.0),
             margins: Cell::new((GUTTER, GUTTER)),
             hot: Cell::new(false),
-            hot_tool: Cell::new(None),
             pressed: Cell::new(None),
+            title,
+            tools: tools.clone(),
         });
         // SAFETY: `initWithFrame:` is NSView's designated initializer and the ivars are set.
         let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] };
-        track_hover(&this);
+        this.addSubview(this.ivars().title.view());
+        this.ivars().title.field().setAccessibilityElement(false);
+        tools.setAlphaValue(0.0);
+        this.addSubview(&tools);
+        // Entering, moving over the tools and leaving.
+        track_moves(&this);
         this
     }
 
@@ -214,6 +244,7 @@ impl PaneHead {
     /// The grid's margins under it, from the pane's corners (the container's layout).
     pub(crate) fn set_margins(&self, margins: (f64, f64)) {
         if self.ivars().margins.replace(margins) != margins {
+            self.lay_out_parts();
             self.setNeedsDisplay(true);
         }
     }
@@ -223,7 +254,7 @@ impl PaneHead {
         let iv = self.ivars();
         let palette = Palette::of(theme);
         // Every field is written whatever came before it: `|`, not `||` — a new theme that also
-        // changed the look (the focus frame's colour) kept the old ground.
+        // changed the look kept the old ground.
         let changed = (iv.look.borrow().as_ref() != Some(&look))
             | (iv.palette.replace(Some(palette)) != Some(palette))
             | (iv.ground.replace(theme.background) != theme.background)
@@ -233,17 +264,21 @@ impl PaneHead {
         self.setAccessibilityLabel(Some(&tip));
         iv.look.replace(Some(look));
         if changed {
+            self.lay_out_parts();
             self.setNeedsDisplay(true);
         }
     }
 
-    /// The tools' boxes, right to left from the grid's right margin.
-    fn tools(&self) -> Vec<(Tool, NSRect)> {
+    /// The tools' boxes, right to left from the grid's right margin, in the band's space.
+    fn tool_boxes(&self) -> Vec<(Tool, NSRect)> {
+        let iv = self.ivars();
+        let alone = iv.look.borrow().as_ref().is_some_and(|look| look.alone);
+        let tools = Tool::of(alone);
         let width = self.bounds().size.width;
-        let count = Tool::ALL.len() as f64;
+        let count = tools.len() as f64;
         let all = count * TOOL_WIDTH + (count - 1.0) * TOOL_GAP;
-        let start = width - self.ivars().margins.get().1 - all;
-        Tool::ALL
+        let start = width - iv.margins.get().1 - all;
+        tools
             .iter()
             .enumerate()
             .map(|(index, &tool)| {
@@ -259,10 +294,115 @@ impl PaneHead {
             .collect()
     }
 
-    /// The tool under `at`, while the tools show (the pointer is on the band).
-    fn tool_at(&self, at: NSPoint) -> Option<Tool> {
-        self.ivars().look.borrow().as_ref()?;
-        self.tools().into_iter().find_map(|(tool, rect)| {
+    /// Where the mark stands: on the grid's left line, centred in the row.
+    fn mark_rect(&self) -> NSRect {
+        NSRect::new(
+            NSPoint::new(
+                self.ivars().margins.get().0,
+                GUTTER + (TOOL_HEIGHT - MARK) / 2.0,
+            ),
+            NSSize::new(MARK, MARK),
+        )
+    }
+
+    /// Places the title and the tools: the title after the mark, to the grid's right margin —
+    /// or, while the tools show, to just before them; the tools come in or go.
+    fn lay_out_parts(&self) {
+        let iv = self.ivars();
+        let look = iv.look.borrow();
+        let (Some(look), Some(palette)) = (look.as_ref(), iv.palette.get()) else {
+            return;
+        };
+        let width = self.bounds().size.width;
+        let hot = iv.hot.get();
+        let boxes = self.tool_boxes();
+        let x = self.mark_rect().origin.x + MARK + tabs::ICON_GAP + 2.0;
+        let end = if hot {
+            boxes
+                .first()
+                .map_or(width, |(_, rect)| rect.origin.x - tabs::ICON_GAP)
+        } else {
+            width - iv.margins.get().1
+        };
+        let text = iv.title.field();
+        let ink = if look.focused {
+            palette.title
+        } else {
+            palette.dim
+        };
+        // SAFETY: AppKit's constant font weights.
+        let weight = unsafe {
+            if look.focused {
+                NSFontWeightSemibold
+            } else {
+                NSFontWeightMedium
+            }
+        };
+        text.setFont(Some(&NSFont::systemFontOfSize_weight(TITLE_TEXT, weight)));
+        text.setTextColor(Some(&Tint::of(ink, 1.0).color()));
+        if text.stringValue().to_string() != look.title {
+            text.setStringValue(&NSString::from_str(&look.title));
+        }
+        let natural = text.fittingSize();
+        iv.title.place(
+            NSRect::new(
+                NSPoint::new(x, GUTTER + ((TOOL_HEIGHT - natural.height) / 2.0).max(0.0)),
+                NSSize::new((end - x).max(0.0), natural.height),
+            ),
+            natural.width,
+        );
+        // The tools stand in their row; their own view draws them and the face under the pointer.
+        let first = boxes.first().map_or(width, |(_, rect)| rect.origin.x);
+        let last = boxes
+            .last()
+            .map_or(width, |(_, rect)| rect.origin.x + rect.size.width);
+        iv.tools.setFrame(NSRect::new(
+            NSPoint::new(first, GUTTER),
+            NSSize::new((last - first).max(0.0), TOOL_HEIGHT),
+        ));
+        iv.tools.set(
+            boxes
+                .iter()
+                .map(|(tool, rect)| {
+                    (
+                        *tool,
+                        NSRect::new(NSPoint::new(rect.origin.x - first, 0.0), rect.size),
+                    )
+                })
+                .collect(),
+            palette,
+        );
+        let still = crate::app::delegate(self.mtm()).is_some_and(|app| app.reduce_motion());
+        fade(
+            &iv.tools,
+            f64::from(u8::from(hot)),
+            if still { 0.0 } else { TOOLS_SECS },
+        );
+    }
+
+    /// The pointer moved on the band: the tool under it is lit and named.
+    fn point_at(&self, event: &NSEvent) {
+        let tool = self.tool_at(event);
+        let iv = self.ivars();
+        if iv.tools.set_hot(tool) {
+            let tip = tool.map(|tool| tool.name().to_owned()).or_else(|| {
+                // A title that fades at its end says the whole of itself here.
+                iv.title
+                    .overflows()
+                    .then(|| iv.look.borrow().as_ref().map(|look| look.title.clone()))
+                    .flatten()
+            });
+            self.setToolTip(tip.as_deref().map(NSString::from_str).as_deref());
+        }
+    }
+
+    /// The tool under the event's point, while the tools show (the pointer is on the band).
+    fn tool_at(&self, event: &NSEvent) -> Option<Tool> {
+        if !self.ivars().hot.get() {
+            return None;
+        }
+        let at = self.convertPoint_fromView(event.locationInWindow(), None);
+        self.tool_boxes().into_iter().find_map(|(tool, rect)| {
             let inside = at.x >= rect.origin.x
                 && at.x <= rect.origin.x + rect.size.width
                 && at.y >= rect.origin.y
@@ -290,10 +430,11 @@ impl PaneHead {
         let sender: &AnyObject = self;
         // SAFETY: every tool's action takes one optional sender argument.
         unsafe { app.sendAction_to_from(tool.action(), None, Some(sender)) };
-        self.ivars().hot_tool.set(None);
-        self.setNeedsDisplay(true);
+        self.ivars().tools.set_hot(None);
     }
 
+    /// The band: its ground, the card's light on its top edge, the mark and its dot. The title
+    /// and the tools are views of their own over it.
     fn draw(&self) {
         let iv = self.ivars();
         let look = iv.look.borrow();
@@ -334,11 +475,7 @@ impl PaneHead {
         } else {
             palette.dim
         };
-        let margins = iv.margins.get();
-        let mark = NSRect::new(
-            NSPoint::new(margins.0, GUTTER + (TOOL_HEIGHT - MARK) / 2.0),
-            NSSize::new(MARK, MARK),
-        );
+        let mark = self.mark_rect();
         draw_mark(look.kind, mark, &Tint::of(ink, 1.0).color());
         if let Some(indicator) = look.indicator {
             let tone = palette.tone(tabs::list_dot(indicator), 0);
@@ -352,38 +489,93 @@ impl PaneHead {
                 .fill();
             }
         }
-        // The title after the mark; while the tools show it keeps clear of them.
-        let x = mark.origin.x + MARK + tabs::ICON_GAP + 2.0;
-        let tools = self.tools();
-        let end = if iv.hot.get() {
-            tools.first().map_or(bounds.size.width, |(_, rect)| {
-                rect.origin.x - tabs::ICON_GAP
-            })
-        } else {
-            bounds.size.width - margins.1
-        };
-        super::tab_side::draw_title(
-            &look.title,
-            NSRect::new(
-                NSPoint::new(x, GUTTER),
-                NSSize::new((end - x).max(0.0), TOOL_HEIGHT),
-            ),
-            TITLE_TEXT,
-            look.focused,
-            ink,
-        );
-        if iv.hot.get() {
-            for (tool, rect) in tools {
-                let hot = iv.hot_tool.get() == Some(tool);
+    }
+}
+
+pub(crate) struct ToolsIvars {
+    /// Each tool and its box, in the view's space.
+    boxes: RefCell<Vec<(Tool, NSRect)>>,
+    palette: Cell<Option<Palette>>,
+    /// The tool under the pointer: on a face, in full ink.
+    hot: Cell<Option<Tool>>,
+}
+
+define_class!(
+    /// A header's tools: drawn in a row, the one under the pointer on a face. Their own view, so
+    /// they come and go with its opacity; the header takes every press.
+    // SAFETY: NSView is designed for subclassing; HeadTools implements no `Drop` and is born with
+    // `initWithFrame:`.
+    #[unsafe(super(NSView))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "BateriPaneHeadTools"]
+    #[ivars = ToolsIvars]
+    pub(crate) struct HeadTools;
+
+    unsafe impl NSObjectProtocol for HeadTools {}
+
+    impl HeadTools {
+        #[unsafe(method(isFlipped))]
+        fn is_flipped(&self) -> bool {
+            true
+        }
+
+        #[unsafe(method_id(hitTest:))]
+        fn hit_test(&self, _point: NSPoint) -> Option<Retained<NSView>> {
+            None
+        }
+
+        #[unsafe(method(drawRect:))]
+        fn draw_rect(&self, _dirty: NSRect) {
+            let iv = self.ivars();
+            let Some(palette) = iv.palette.get() else {
+                return;
+            };
+            for &(tool, rect) in iv.boxes.borrow().iter() {
+                let hot = iv.hot.get() == Some(tool);
                 if hot {
-                    let face =
-                        NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(rect, 5.0, 5.0);
                     palette.close_hover.color().setFill();
-                    face.fill();
+                    NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(
+                        rect,
+                        TOOL_RADIUS,
+                        TOOL_RADIUS,
+                    )
+                    .fill();
                 }
                 draw_tool(tool, rect, if hot { palette.title } else { palette.dim });
             }
         }
+    }
+);
+
+impl HeadTools {
+    fn new(mtm: MainThreadMarker) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(ToolsIvars {
+            boxes: RefCell::new(Vec::new()),
+            palette: Cell::new(None),
+            hot: Cell::new(None),
+        });
+        // SAFETY: `initWithFrame:` is NSView's designated initializer and the ivars are set.
+        unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] }
+    }
+
+    /// The tools' boxes and the palette they are drawn in.
+    fn set(&self, boxes: Vec<(Tool, NSRect)>, palette: Palette) {
+        let iv = self.ivars();
+        let changed =
+            (*iv.boxes.borrow() != boxes) | (iv.palette.replace(Some(palette)) != Some(palette));
+        iv.boxes.replace(boxes);
+        if changed {
+            self.setNeedsDisplay(true);
+        }
+    }
+
+    /// The tool under the pointer; `true` if it changed.
+    fn set_hot(&self, tool: Option<Tool>) -> bool {
+        let changed = self.ivars().hot.replace(tool) != tool;
+        if changed {
+            self.setNeedsDisplay(true);
+        }
+        changed
     }
 }
 

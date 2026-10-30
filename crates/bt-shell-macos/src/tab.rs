@@ -685,19 +685,17 @@ impl TerminalTab {
         self.ivars().container.ground_follows();
     }
 
-    /// Gives the panes' headers of a split tab what they show: each pane's program mark, its
-    /// title, its own signals' dot, whether it holds the focus and the focus frame round it.
-    /// AppKit's work, it asks for no frame.
+    /// Gives the panes' headers what they show — a tab's only pane's too: each pane's program
+    /// mark, its title, its own signals' dot, whether it holds the focus and whether it is the
+    /// tab's only pane. AppKit's work, it asks for no frame.
     pub(crate) fn refresh_heads(&self) {
         let container = &self.ivars().container;
-        if !container.shows_split() {
-            return;
-        }
         let Some(theme) = self.focused_pane().session().map(|session| session.theme()) else {
             return;
         };
         let focused = self.focused_pane().id();
         let carded = container.carded();
+        let alone = self.panes().len() == 1;
         let (hidden, away) = (self.hidden(), self.away());
         let looks = self
             .panes()
@@ -715,6 +713,7 @@ impl TerminalTab {
                         indicator: tabs::indicator(self.signals_of(pane, hidden, away)),
                         focused: own,
                         carded,
+                        alone,
                     },
                 )
             })

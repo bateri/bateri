@@ -1005,7 +1005,7 @@ define_class!(
                 });
                 // With no agent in the window there is nothing to list: the eye is not there either.
                 tabs_at_side(self.mtm()) && !self.column_hidden() && self.has_agents()
-            } else if action == Some(sel!(toggleSidebar:)) {
+            } else if action == Some(sel!(toggleSideColumn:)) {
                 // The title says which way the column goes; a column there is only at the side.
                 item.setTitle(if self.column_hidden() {
                     ns_string!("Show Sidebar")
@@ -1280,7 +1280,9 @@ define_class!(
         }
 
         /// View ▸ Hide Sidebar / Show Sidebar (⌃⌘S): the window's side column goes or comes.
-        #[unsafe(method(toggleSidebar:))]
+        /// Not `toggleSidebar:`: `NSWindow` answers that one itself (macOS 26), so the action
+        /// stopped at the window and never reached its delegate — the menu's key did nothing.
+        #[unsafe(method(toggleSideColumn:))]
         fn toggle_sidebar(&self, _sender: Option<&AnyObject>) {
             if tabs_at_side(self.mtm()) {
                 self.toggle_column();
@@ -5260,6 +5262,47 @@ impl TerminalWindow {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The window's actions reach it as its `NSWindow`'s delegate, after the window itself: an
+    /// action the window answers stops there and never comes here — `toggleSidebar:` did, and
+    /// ⌃⌘S did nothing. Every action of this class is asked of `NSWindow`'s instances.
+    #[test]
+    fn no_action_of_the_window_is_one_nswindow_answers_itself() {
+        use objc2::ClassType;
+        let source = include_str!("window.rs");
+        let start = source
+            .find("#[name = \"BateriTerminalWindow\"]")
+            .expect("the class is defined here");
+        let class = &source[start..];
+        let class = &class[..class.find("\n);\n").expect("the class ends")];
+        let window = objc2_app_kit::NSWindow::class();
+        let mut asked = 0;
+        let lines: Vec<&str> = class.lines().collect();
+        for (index, line) in lines.iter().enumerate() {
+            let Some(at) = line.find("#[unsafe(method(") else {
+                continue;
+            };
+            let name = &line[at + "#[unsafe(method(".len()..];
+            let name = &name[..name.find(')').expect("the selector ends")];
+            // An action takes its sender; the delegate's own methods (a window's notices, a
+            // key-value observation) are not sent down the responder chain.
+            let takes_sender = lines
+                .get(index + 1)
+                .is_some_and(|next| next.contains("_sender: Option<&AnyObject>"));
+            if !takes_sender {
+                continue;
+            }
+            asked += 1;
+            let selector = objc2::runtime::Sel::register(
+                &std::ffi::CString::new(name).expect("a selector has no NUL"),
+            );
+            assert!(
+                window.instance_method(selector).is_none(),
+                "NSWindow answers {name} itself: the action never reaches the window's delegate"
+            );
+        }
+        assert!(asked > 20, "the actions were read ({asked})");
+    }
 
     #[test]
     fn the_content_is_what_the_tabs_leave() {

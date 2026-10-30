@@ -559,7 +559,7 @@ pub(crate) fn install(
             ),
             // The key window's side column: its title says which way it goes and the window's
             // `validateMenuItem:` writes it, grey while the tabs are in the title row.
-            item(mtm, "Hide Sidebar", sel!(toggleSidebar:)),
+            item(mtm, "Hide Sidebar", sel!(toggleSideColumn:)),
             // The key window's column lists only its agents; the window's `validateMenuItem:`
             // checks it.
             item(mtm, "Show Activity", sel!(showActivity:)),
