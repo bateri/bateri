@@ -686,6 +686,8 @@ impl TabBar {
                     look.hovered = false;
                 } else {
                     look.hint = hints.first().cloned().flatten();
+                    // The `×` and the key stand level with the name, as the tile does.
+                    look.band = Some(tabs::TAB_HEIGHT);
                 }
             }
             chip.set(frame, &look, palette, motion, slide);
@@ -1428,13 +1430,14 @@ impl AgentRows {
             } else if bundled && lit {
                 rounded(row, TAB_RADIUS, Tint::of(palette.title, 0.03125), None);
             }
-            // The program's tile, where a row's stands, centred on the line.
+            // The program's tile, where a row's stands, level with the name: in the line's top
+            // band, the height of a plain row, however far the status and the details run below.
             let slot = glyph_slot();
             NSGraphicsContext::saveGraphicsState_class();
             let shift = NSAffineTransform::transform();
             shift.translateXBy_yBy(
                 tabs::ROW_LEAD - slot.origin.x,
-                top + (tabs::AGENT_ROW - tabs::TILE_HEIGHT) / 2.0 - slot.origin.y,
+                top + (tabs::TAB_HEIGHT - tabs::TILE_HEIGHT) / 2.0 - slot.origin.y,
             );
             shift.concat();
             draw_tile(
@@ -1489,7 +1492,10 @@ impl AgentRows {
                 draw_line(
                     &hint,
                     NSRect::new(
-                        NSPoint::new(width - tabs::CLOSE_INSET - tabs::CHIP_PAD, top + 12.0),
+                        NSPoint::new(
+                            width - tabs::CLOSE_INSET - tabs::CHIP_PAD,
+                            top + (tabs::TAB_HEIGHT - 20.0) / 2.0,
+                        ),
                         NSSize::new(tabs::CHIP_PAD, 20.0),
                     ),
                     11.0,
