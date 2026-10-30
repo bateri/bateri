@@ -86,7 +86,8 @@ looks, `[appearance] content_edge` ("Content edge") and
 `[appearance] minimum_contrast` ("Minimum contrast", under the themes) and
 `[appearance] dim_unfocused_splits` ("Dim unfocused splits") and
 `[appearance] focus_frame` ("Focus frame") and
-`[appearance] split_style` ("Split style") and `[appearance]
+`[appearance] split_style` ("Split style") and
+`[appearance] tab_details` ("Tab details") and `[appearance]
 resize_in_steps` ("Resize in steps") and `[appearance] tab_position`
 ("Tabs") and `[appearance] tab_icons`
 ("Tab icons") with `tab_icon_colors` ("Icon colors"); on
@@ -289,6 +290,11 @@ focus_frame = false
 # too; lines lets the panes touch with one thin line between them, for the
 # most room.
 split_style = "cards"
+# "off" | "smart" | "always". What a row of the side column says beyond its
+# name: where its program stands (the folder and the git branch, or the
+# server) and, while it asks for permission, what it asks. "smart" says it in
+# Activity only, "always" in every row with a program to speak of.
+tab_details = "smart"
 # true | false. Resizes a window a whole cell at a time while you drag its
 # edge, so a lone pane's text keeps the same margin on both sides and the
 # strip at its top its least height. Off: the window follows the pointer, and
@@ -1065,6 +1071,7 @@ minimum_contrast = 3.0
 dim_unfocused_splits = false
 focus_frame = false
 split_style = "cards"
+tab_details = "smart"
 resize_in_steps = false
 tab_icons = true
 tab_icon_colors = "theme"
@@ -1081,6 +1088,7 @@ tab_position = "top"
 | `dim_unfocused_splits` | `true` \| `false` | `false` | dim the panes of a split tab that don't have the focus |
 | `focus_frame` | `true` \| `false` | `false` | a 2 pt line in the accent round the focused pane of a split tab |
 | `split_style` | `"cards"` \| `"lines"` | `"cards"` | how a tab sets its panes apart: cards on a ground, one pane's too, or panes divided by a line |
+| `tab_details` | `"off"` \| `"smart"` \| `"always"` | `"smart"` | what a row of the side column says beyond its name: folder and branch (or server) and what a program asks |
 | `resize_in_steps` | `true` \| `false` | `false` | resize a window a whole cell at a time while its edge is dragged |
 | `tab_icons` | `true` \| `false` | `true` | show the program a tab runs as an icon on a tile before its title |
 | `tab_icon_colors` | `"theme"` \| `"brand"` | `"theme"` | whether the icon uses the theme's colors only, or keeps the program's own color where it has one |
@@ -1239,7 +1247,11 @@ tab_position = "top"
   program — its name and, under it, *Running · 4m*, *Asking*, *Finished*,
   *Failed* or *Idle* — and a tab with two programs shows two lines on one
   face. A click on a line goes to that program's pane, and ⌘1–9 count the
-  programs, not the tabs. Each window keeps its own choices, and a restored
+  programs, not the tabs. `tab_details` (View ▸ **Tab Details**, a right
+  click on the column's empty part) adds under a program's line where it
+  stands — the folder and the git branch, or the server — and, while it asks
+  for permission, what it asks, cut at two lines: `"smart"` in Activity only,
+  `"always"` in the plain list too, `"off"` nowhere. Each window keeps its own choices, and a restored
   session brings them back. The window
   moves by the column's empty space and beside the traffic lights, and a press
   on a pane's top line selects text as anywhere else. Rows are dragged as the

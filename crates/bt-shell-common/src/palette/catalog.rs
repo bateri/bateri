@@ -27,7 +27,7 @@ use bt_core::{
     CaretShape, ConfirmClose, ContentEdge, CursorBlink, CursorMotion, DockArrival, Erase,
     IconColors, KeepRunning, Keypress, Osc52, ReduceMotion, RemoteStatsMode, RestoreWindows,
     SYSTEM_THEME, Scrollbar, Settings, SettingsEdit, ShellIntegration, SmoothScroll, SplitStyle,
-    TabPosition,
+    TabDetails, TabPosition,
 };
 
 use super::row::{Kind, Preview, Row, Scope, Slot, Tone};
@@ -438,7 +438,7 @@ macro_rules! number {
 const WHILE_MATCHING_SYSTEM: Option<&str> = Some("while Theme is Match System");
 const NEW_SHELLS: Option<&str> = Some("new shells only");
 
-static CATALOG: [Setting; 35] = [
+static CATALOG: [Setting; 36] = [
     Setting {
         key: "appearance.theme",
         section: Section::Appearance,
@@ -627,6 +627,17 @@ static CATALOG: [Setting; 35] = [
         SplitStyle,
         |s| s.split_style,
         SettingsEdit::SplitStyle
+    ),
+    named!(
+        "appearance.tab_details",
+        Appearance,
+        "Tab Details",
+        "row folder branch question details activity",
+        true,
+        None,
+        TabDetails,
+        |s| s.tab_details,
+        SettingsEdit::TabDetails
     ),
     toggle!(
         "appearance.dim_unfocused_splits",
@@ -867,8 +878,8 @@ mod tests {
     }
 
     #[test]
-    fn the_catalog_lists_the_thirty_five_settings_once_each() {
-        assert_eq!(all().len(), 35);
+    fn the_catalog_lists_the_thirty_six_settings_once_each() {
+        assert_eq!(all().len(), 36);
         for (n, setting) in all().iter().enumerate() {
             assert!(
                 all()[n + 1..]
@@ -999,7 +1010,7 @@ mod tests {
         assert_eq!(dark.opens, Some(Scope::Theme(Slot::Dark)));
         assert_eq!(dark.subtitle, "while Theme is Match System");
         assert_eq!(dark.value.as_deref(), Some("bateri"));
-        assert_eq!(rows(&settings).len(), 35);
+        assert_eq!(rows(&settings).len(), 36);
     }
 
     #[test]
@@ -1046,6 +1057,7 @@ mod tests {
                 "font.line_height",
                 "terminal.cursor",
                 "appearance.split_style",
+                "appearance.tab_details",
                 "appearance.dim_unfocused_splits",
                 "appearance.focus_frame",
                 "appearance.tab_position",

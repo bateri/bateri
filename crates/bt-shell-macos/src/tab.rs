@@ -1727,7 +1727,8 @@ impl TerminalTab {
         let panes = self.panes();
         let (hidden, away) = (self.hidden(), self.away());
         let focused = self.focused_pane().id();
-        self.container()
+        let mut lines: Vec<AgentLine> = self
+            .container()
             .tree()
             .leaves()
             .into_iter()
@@ -1735,6 +1736,20 @@ impl TerminalTab {
                 let pane = panes.iter().find(|pane| pane.id() == id)?;
                 let session = pane.session()?;
                 let report = session.program_report()?;
+                // Where it stands: the server's name remotely, else the folder's with the branch.
+                let place = match session.remote_mark() {
+                    Some((host, _)) => Some(host),
+                    None => {
+                        let folder = session.working_directory().and_then(|path| {
+                            path.file_name()
+                                .map(|name| name.to_string_lossy().into_owned())
+                        });
+                        let parts: Vec<String> =
+                            folder.into_iter().chain(session.branch()).collect();
+                        (!parts.is_empty()).then(|| parts.join(" · "))
+                    }
+                };
+
                 let indicator = tabs::indicator(self.signals_of(pane, hidden, away));
                 let (word, tone) = match report.state {
                     ProgramState::Blocked => ("Asking", AgentTone::Asking),
@@ -1756,9 +1771,17 @@ impl TerminalTab {
                     status: format!("{word} · {held}"),
                     tone,
                     focused: id == focused,
+                    place,
+                    asks: report.message,
                 })
             })
-            .collect()
+            .collect();
+        // The line above saying the same place says it for both.
+        let places = tabs::said_places(lines.iter_mut().map(|line| line.place.take()).collect());
+        for (line, place) in lines.iter_mut().zip(places) {
+            line.place = place;
+        }
+        lines
     }
 
     pub(crate) fn card_panes(&self) -> Vec<CardPane> {

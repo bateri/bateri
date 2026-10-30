@@ -585,6 +585,49 @@ impl SplitStyle {
     }
 }
 
+/// `[appearance] tab_details`: whether a row of the side column says where its
+/// program stands (the folder and the git branch, or the server) and, while it
+/// asks for permission, what it asks — in Activity only, everywhere, or nowhere.
+///
+/// Only the platform shell reads it (the side column's drawing); its own field
+/// in [`Changes`]. An ordinary key: a value that isn't accepted is the default
+/// at launch and leaves the value in effect at save time.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TabDetails {
+    /// No details: a row is its name.
+    Off,
+    /// Details in Activity, where the rows are the programs working for the
+    /// user; the plain list stays one line a tab.
+    #[default]
+    Smart,
+    /// Details in every row that has a program to speak of.
+    Always,
+}
+
+impl TabDetails {
+    /// The single list of spellings in the settings file (the same rationale as
+    /// [`UnfocusedCaret::NAMES`]).
+    pub const NAMES: &'static [(&'static str, Self)] = &[
+        ("off", Self::Off),
+        ("smart", Self::Smart),
+        ("always", Self::Always),
+    ];
+
+    /// The spelling in the settings file.
+    pub fn name(self) -> &'static str {
+        name_in(Self::NAMES, self)
+    }
+
+    /// Whether a row shows details in the column as it lists now (`activity`).
+    pub fn shown(self, activity: bool) -> bool {
+        match self {
+            Self::Off => false,
+            Self::Smart => activity,
+            Self::Always => true,
+        }
+    }
+}
+
 /// `[appearance] tab_icon_colors`: whether a tab's icon takes the theme's
 /// colors or its program's own brand color where it has one.
 ///
@@ -1465,6 +1508,9 @@ pub struct Settings {
     /// `[appearance] split_style`: cards on a ground or panes divided by a
     /// line ([`SplitStyle`]). Doesn't enter `TerminalOptions`.
     pub split_style: SplitStyle,
+    /// `[appearance] tab_details`: what a row of the side column says beyond its
+    /// name ([`TabDetails`]). Doesn't enter `TerminalOptions`.
+    pub tab_details: TabDetails,
     /// `[appearance] resize_in_steps`: whether a window dragged by its edge
     /// grows and shrinks a whole cell at a time, so a lone pane's text keeps
     /// the same margin on both sides and the top edge's strip its least
@@ -1576,6 +1622,7 @@ impl Default for Settings {
             dim_unfocused_splits: false,
             focus_frame: false,
             split_style: SplitStyle::default(),
+            tab_details: TabDetails::default(),
             resize_in_steps: false,
             tab_icons: true,
             tab_icon_colors: IconColors::default(),
@@ -1693,6 +1740,8 @@ pub enum SettingsEdit {
     FocusFrame(bool),
     /// The settings window's "Split style": `[appearance] split_style`.
     SplitStyle(SplitStyle),
+    /// The settings window's "Tab details": `[appearance] tab_details`.
+    TabDetails(TabDetails),
     /// The settings window's "Resize in steps": `[appearance]
     /// resize_in_steps`.
     ResizeInSteps(bool),
@@ -1802,6 +1851,7 @@ impl SettingsEdit {
             ),
             Self::FocusFrame(_) => ("appearance", "focus_frame", "appearance.focus_frame"),
             Self::SplitStyle(_) => ("appearance", "split_style", "appearance.split_style"),
+            Self::TabDetails(_) => ("appearance", "tab_details", "appearance.tab_details"),
             Self::ResizeInSteps(_) => (
                 "appearance",
                 "resize_in_steps",
@@ -1868,6 +1918,7 @@ impl SettingsEdit {
             Self::Scrollbar(scrollbar) => scrollbar.name().into(),
             Self::ContentEdge(edge) => edge.name().into(),
             Self::SplitStyle(style) => style.name().into(),
+            Self::TabDetails(details) => details.name().into(),
             Self::IconColors(colors) => colors.name().into(),
             Self::TabPosition(position) => position.name().into(),
             Self::Osc52(mode) => mode.name().into(),
@@ -2031,6 +2082,11 @@ focus_frame = false
 # too; lines lets the panes touch with one thin line between them, for the
 # most room.
 split_style = "cards"
+# "off" | "smart" | "always". What a row of the side column says beyond its
+# name: where its program stands (the folder and the git branch, or the
+# server) and, while it asks for permission, what it asks. "smart" says it in
+# Activity only, "always" in every row with a program to speak of.
+tab_details = "smart"
 # true | false. Resizes a window a whole cell at a time while you drag its
 # edge, so a lone pane's text keeps the same margin on both sides and the
 # strip at its top its least height. Off: the window follows the pointer, and
@@ -2495,6 +2551,16 @@ stats_interval = 3
                         &mut parsed.diagnostics,
                     );
                 }
+                if let Some(item) = appearance.get("tab_details") {
+                    parsed.settings.tab_details = named_enum(
+                        text,
+                        item,
+                        "appearance.tab_details",
+                        TabDetails::NAMES,
+                        fallback.tab_details,
+                        &mut parsed.diagnostics,
+                    );
+                }
                 if let Some(item) = appearance.get("resize_in_steps") {
                     parsed.settings.resize_in_steps = boolean(
                         text,
@@ -2543,6 +2609,7 @@ stats_interval = 3
                 parsed.settings.dim_unfocused_splits = fallback.dim_unfocused_splits;
                 parsed.settings.focus_frame = fallback.focus_frame;
                 parsed.settings.split_style = fallback.split_style;
+                parsed.settings.tab_details = fallback.tab_details;
                 parsed.settings.resize_in_steps = fallback.resize_in_steps;
                 parsed.settings.tab_icons = fallback.tab_icons;
                 parsed.settings.tab_icon_colors = fallback.tab_icon_colors;
@@ -2864,6 +2931,7 @@ stats_interval = 3
             dim_splits: self.dim_unfocused_splits != new.dim_unfocused_splits,
             focus_frame: self.focus_frame != new.focus_frame,
             split_style: self.split_style != new.split_style,
+            tab_details: self.tab_details != new.tab_details,
             resize_in_steps: self.resize_in_steps != new.resize_in_steps,
             tab_icons: self.tab_icons != new.tab_icons
                 || self.tab_icon_colors != new.tab_icon_colors,
@@ -3588,6 +3656,9 @@ pub struct Changes {
     /// split tab out again, as cards or divided by a line. A field of its
     /// own, for [`Self::caret`]'s reason.
     pub split_style: bool,
+    /// [`Settings::tab_details`] changed: the platform shell lays every side
+    /// column out again. A field of its own, for [`Self::caret`]'s reason.
+    pub tab_details: bool,
     /// [`Settings::tab_position`] changed: the platform shell moves every
     /// window's tabs between the bar and the column in place. A field of its
     /// own, for [`Self::caret`]'s reason.
@@ -4430,6 +4501,7 @@ mod tests {
             ("appearance", "dim_unfocused_splits"),
             ("appearance", "focus_frame"),
             ("appearance", "split_style"),
+            ("appearance", "tab_details"),
             ("appearance", "resize_in_steps"),
             ("appearance", "tab_icons"),
             ("appearance", "tab_icon_colors"),
@@ -4615,6 +4687,7 @@ mod tests {
                 dim_splits: false,
                 focus_frame: false,
                 split_style: false,
+                tab_details: false,
                 resize_in_steps: false,
                 tab_icons: false,
                 tab_position: false,
@@ -4659,6 +4732,7 @@ mod tests {
             dim_unfocused_splits: true,
             focus_frame: true,
             split_style: SplitStyle::Lines,
+            tab_details: TabDetails::Always,
             resize_in_steps: true,
             tab_icons: false,
             tab_icon_colors: IconColors::Brand,
@@ -4859,6 +4933,7 @@ mod tests {
             dim_splits: false,
             focus_frame: false,
             split_style: false,
+            tab_details: false,
             resize_in_steps: false,
             tab_icons: false,
             tab_position: false,
@@ -4926,6 +5001,7 @@ mod tests {
             Changes {
                 dim_splits: true,
                 split_style: false,
+                tab_details: false,
                 tab_icons: false,
                 ..Changes::default()
             }
@@ -5093,6 +5169,7 @@ mod tests {
                 dim_splits: false,
                 focus_frame: false,
                 split_style: false,
+                tab_details: false,
                 resize_in_steps: false,
                 tab_icons: false,
                 tab_position: false,
@@ -5253,6 +5330,7 @@ found {found}; using \"spring\""
                 dim_splits: false,
                 focus_frame: false,
                 split_style: false,
+                tab_details: false,
                 resize_in_steps: false,
                 tab_icons: false,
                 tab_position: false,
@@ -5353,6 +5431,7 @@ found {found}; using \"system\""
                 dim_splits: false,
                 focus_frame: false,
                 split_style: false,
+                tab_details: false,
                 resize_in_steps: false,
                 tab_icons: false,
                 tab_position: false,
@@ -5986,6 +6065,29 @@ found 1.5; using 0.1"
     }
 
     #[test]
+    fn tab_details_is_read_and_defaults_to_smart() {
+        assert_eq!(clean("").tab_details, TabDetails::Smart);
+        for (value, expected) in [
+            ("off", TabDetails::Off),
+            ("smart", TabDetails::Smart),
+            ("always", TabDetails::Always),
+        ] {
+            let text = format!("[appearance]\ntab_details = \"{value}\"\n");
+            assert_eq!(clean(&text).tab_details, expected, "{value}");
+            assert_eq!(expected.name(), value);
+        }
+        // Smart in Activity only, always everywhere, off nowhere.
+        assert!(!TabDetails::Smart.shown(false) && TabDetails::Smart.shown(true));
+        assert!(TabDetails::Always.shown(false) && !TabDetails::Off.shown(true));
+        // A change is its own; the edit writes the one line.
+        let always = clean("[appearance]\ntab_details = \"always\"\n");
+        assert!(clean("").changes(&always).tab_details);
+        let written = Settings::with_edit("", &SettingsEdit::TabDetails(TabDetails::Off))
+            .expect("writable text");
+        assert_eq!(written, "[appearance]\ntab_details = \"off\"\n");
+    }
+
+    #[test]
     fn tab_position_is_read_and_defaults_to_top() {
         assert_eq!(clean("").tab_position, TabPosition::Top);
         for (value, expected) in [("top", TabPosition::Top), ("side", TabPosition::Side)] {
@@ -6545,6 +6647,7 @@ found 1.5; using 0.1"
                     dim_splits: false,
                     focus_frame: false,
                     split_style: false,
+                    tab_details: false,
                     resize_in_steps: false,
                     tab_icons: false,
                     tab_position: false,
@@ -6654,6 +6757,7 @@ found 1.5; using 0.1"
                 dim_splits: false,
                 focus_frame: false,
                 split_style: false,
+                tab_details: false,
                 resize_in_steps: false,
                 tab_icons: false,
                 tab_position: false,
@@ -6767,6 +6871,7 @@ found 1.5; using 0.1"
                 dim_splits: false,
                 focus_frame: false,
                 split_style: false,
+                tab_details: false,
                 resize_in_steps: false,
                 tab_icons: false,
                 tab_position: false,
@@ -7307,6 +7412,7 @@ cursor = \"spring\"
             SettingsEdit::DimUnfocusedSplits(on) => settings.dim_unfocused_splits = on,
             SettingsEdit::FocusFrame(on) => settings.focus_frame = on,
             SettingsEdit::SplitStyle(style) => settings.split_style = style,
+            SettingsEdit::TabDetails(details) => settings.tab_details = details,
             SettingsEdit::ResizeInSteps(on) => settings.resize_in_steps = on,
             SettingsEdit::TabIcons(on) => settings.tab_icons = on,
             SettingsEdit::IconColors(colors) => settings.tab_icon_colors = colors,
@@ -7406,6 +7512,7 @@ cursor = \"spring\"
             SettingsEdit::DimUnfocusedSplits(true),
             SettingsEdit::FocusFrame(true),
             SettingsEdit::SplitStyle(SplitStyle::Lines),
+            SettingsEdit::TabDetails(TabDetails::Always),
             SettingsEdit::ResizeInSteps(true),
             SettingsEdit::TabIcons(false),
             SettingsEdit::IconColors(IconColors::Brand),

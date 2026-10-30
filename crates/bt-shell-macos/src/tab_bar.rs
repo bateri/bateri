@@ -3356,7 +3356,7 @@ define_class!(
         fn mouse_down(&self, event: &NSEvent) {
             // An agent's line in Activity: the press goes to its pane, and nothing moves.
             let agents = &self.ivars().agents;
-            if !agents.isHidden() {
+            if agents.takes_press() {
                 let at = agents.convertPoint_fromView(event.locationInWindow(), None);
                 if let (Some(bar), Some(pane)) = (self.bar(), agents.pane_at(at.y)) {
                     bar.pick_pane(self.ivars().tab.get(), pane);
@@ -3693,6 +3693,7 @@ impl Chip {
             lifted,
             ghost,
             side,
+            band,
         } = look;
         let (style, side) = (*style, *side);
         let (selected, hovered, single) = (*selected, *hovered, *single);
@@ -3758,6 +3759,8 @@ impl Chip {
             None => false,
         };
         let size = frame.size;
+        // The parts are centred in the band; the faces take the whole chip.
+        let band_height = band.unwrap_or(size.height);
         if placed {
             let whole = NSRect::new(NSPoint::ZERO, size);
             for part in self.parts() {
@@ -3850,7 +3853,7 @@ impl Chip {
             NSRect::new(
                 NSPoint::new(
                     pad + text_x,
-                    ((size.height - natural.height) / 2.0).max(0.0),
+                    ((band_height - natural.height) / 2.0).max(0.0),
                 ),
                 NSSize::new(text_width, natural.height),
             ),
@@ -3865,7 +3868,7 @@ impl Chip {
         if let (Some(x), Some(lead)) = (glyph_x, lead) {
             let high = tabs::ICON_SIDE + 2.0 * GLYPH_OVERHANG;
             iv.glyph.setFrame(NSRect::new(
-                NSPoint::new(pad + x - GLYPH_LEFT, ((size.height - high) / 2.0).round()),
+                NSPoint::new(pad + x - GLYPH_LEFT, ((band_height - high) / 2.0).round()),
                 NSSize::new(GLYPH_LEFT + lead + GLYPH_OVERHANG, high),
             ));
         }
@@ -3878,7 +3881,12 @@ impl Chip {
                 down: *down,
             });
         iv.glyph.set(look, *turn, palette, *reduce);
-        self.set_hint(hint, size, palette, row.as_ref().map(|row| row.key));
+        self.set_hint(
+            hint,
+            NSSize::new(size.width, band_height),
+            palette,
+            row.as_ref().map(|row| row.key),
+        );
         // The ×'s place: the chip's left corner, or a row's right end — where the ⌘ key takes
         // its room, so while the key shows the × does not.
         iv.close.setFrame(match &row {
@@ -3978,6 +3986,10 @@ struct Look<'a> {
     /// The chip is a row of the side column: its parts sit where `tabs::Row` puts them, the `×`
     /// and the ⌘ hint at the right end.
     side: bool,
+    /// The height of the band its parts are centred in, from its top: a row of the side column
+    /// with details under it is taller than its band ([`tab_side::AgentRows`] draws the rest).
+    /// `None`: the whole chip.
+    band: Option<f64>,
 }
 
 /// What a layout knows that is the same for every chip: the part of a [`Look`] that comes from
@@ -4068,6 +4080,7 @@ impl Seen {
             lifted,
             ghost,
             side,
+            band: None,
         }
     }
 }
@@ -5495,6 +5508,8 @@ pub(crate) struct Aside {
     pub(crate) unseen: Option<Indicator>,
     /// The column shows Activity.
     pub(crate) activity: bool,
+    /// What a row says beyond its name (`[appearance] tab_details`).
+    pub(crate) details: bool,
 }
 
 /// One agent's line in the side column's Activity: a pane whose program reports itself.
@@ -5510,6 +5525,11 @@ pub(crate) struct AgentLine {
     pub(crate) tone: AgentTone,
     /// It is the tab's focused pane: the tab on screen selects this line.
     pub(crate) focused: bool,
+    /// Where it stands, for the row's details (`[appearance] tab_details`): the folder and the
+    /// git branch, or the server; `None` where the line above says the same.
+    pub(crate) place: Option<String>,
+    /// What it asks while it waits for the user (`OSC 7501`'s `msg`).
+    pub(crate) asks: Option<String>,
 }
 
 /// The colour of an agent's status line: what asks for the user stands out.
@@ -5586,6 +5606,9 @@ struct Shown {
     /// The column shows Activity: the tabs whose panes' programs report themselves, a line per
     /// agent ([`Label::agents`]).
     activity: bool,
+    /// A row says where its program stands and what it asks (`[appearance] tab_details` for the
+    /// list as it is now).
+    details: bool,
     /// The most urgent thing the tabs other than the one on screen ask (`tabs::group_indicator`):
     /// the sidebar button's badge while the column hides.
     unseen: Option<Indicator>,
@@ -5953,10 +5976,19 @@ define_class!(
         #[unsafe(method_id(menuForEvent:))]
         fn menu_for_event(&self, event: &NSEvent) -> Option<Retained<NSMenu>> {
             let point = self.convertPoint_fromView(event.locationInWindow(), None);
-            // No `?`: `define_class!` converts the body's last expression.
-            self.tab_under(point)
-                .filter(|_| self.lone_title(self.ivars().shown.borrow().tabs.len()))
-                .and_then(|tab| self.tab_menu(tab))
+            // The side column's empty part: what its rows say (Tab Details ▸). A left press there
+            // still moves the window. No `?` or `return`: `define_class!` converts the body's last
+            // expression.
+            let under = self.tab_under(point);
+            if self.is_side() && !self.column_hidden() && under.is_none() {
+                let menu = NSMenu::new(self.mtm());
+                menu.addItem(&crate::menu::tab_details_menu(self.mtm()));
+                Some(menu)
+            } else {
+                under
+                    .filter(|_| self.lone_title(self.ivars().shown.borrow().tabs.len()))
+                    .and_then(|tab| self.tab_menu(tab))
+            }
         }
 
         /// A wheel or a trackpad moves the strip once the tabs no longer fit
@@ -6201,7 +6233,11 @@ impl TabBar {
         notice: String,
         aside: Aside,
     ) {
-        let Aside { unseen, activity } = aside;
+        let Aside {
+            unseen,
+            activity,
+            details,
+        } = aside;
         let iv = self.ivars();
         // The tips of the buttons name keys that `[keys]` moves; the bar is given its tabs
         // again whenever it does.
@@ -6240,6 +6276,7 @@ impl TabBar {
             selected,
             notice,
             activity,
+            details,
             unseen,
         });
         self.refresh_group_list(listed);

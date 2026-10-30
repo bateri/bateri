@@ -33,7 +33,7 @@ use bt_core::{
     KeepRunning, Keypress, LETTER_SPACING_RANGE, LINE_HEIGHT_RANGE, Osc52, PreviewKeep,
     ReduceMotion, RemoteStatsMode, RestoreWindows, SCROLLBACK_MAX, STATS_INTERVAL_RANGE,
     SYSTEM_THEME, Scrollbar, Settings, SettingsEdit, ShellIntegration, SmoothScroll, SplitStyle,
-    TabPosition, UnfocusedCaret,
+    TabDetails, TabPosition, UnfocusedCaret,
 };
 use bt_gpu::{FontNotice, ScrollbarMode};
 use objc2::rc::Retained;
@@ -235,6 +235,7 @@ enum Key {
     DimSplits,
     FocusFrame,
     SplitStyle,
+    TabDetails,
     TabIcons,
     TabIconColors,
     ResizeInSteps,
@@ -245,7 +246,7 @@ enum Key {
 
 impl Key {
     /// The order is the `tag` itself: `ALL[tag]`.
-    const ALL: [Key; 49] = [
+    const ALL: [Key; 50] = [
         Key::ConfirmClose,
         Key::Clipboard,
         Key::Scrollback,
@@ -289,6 +290,7 @@ impl Key {
         Key::DimSplits,
         Key::FocusFrame,
         Key::SplitStyle,
+        Key::TabDetails,
         Key::TabIcons,
         Key::TabIconColors,
         Key::ResizeInSteps,
@@ -325,6 +327,7 @@ impl Key {
             Key::DimSplits => "appearance.dim_unfocused_splits",
             Key::FocusFrame => "appearance.focus_frame",
             Key::SplitStyle => "appearance.split_style",
+            Key::TabDetails => "appearance.tab_details",
             Key::ResizeInSteps => "appearance.resize_in_steps",
             Key::TabIcons => "appearance.tab_icons",
             Key::TabIconColors => "appearance.tab_icon_colors",
@@ -511,6 +514,19 @@ impl Choice for SplitStyle {
         match self {
             SplitStyle::Cards => "Cards",
             SplitStyle::Lines => "Lines",
+        }
+    }
+}
+
+impl Choice for TabDetails {
+    fn names() -> &'static [(&'static str, Self)] {
+        Self::NAMES
+    }
+    fn title(self) -> &'static str {
+        match self {
+            TabDetails::Off => "Off",
+            TabDetails::Smart => "Smart",
+            TabDetails::Always => "Always",
         }
     }
 }
@@ -1170,6 +1186,7 @@ struct Controls {
     scrollbar: Retained<NSPopUpButton>,
     content_edge: Retained<NSPopUpButton>,
     split_style: Retained<NSPopUpButton>,
+    tab_details: Retained<NSPopUpButton>,
     tab_icons: Retained<NSSwitch>,
     tab_icon_colors: Retained<NSPopUpButton>,
     tab_position: Retained<NSPopUpButton>,
@@ -1366,6 +1383,7 @@ define_class!(
                 Key::Scrollbar => choice_at(index).map(SettingsEdit::Scrollbar),
                 Key::ContentEdge => choice_at(index).map(SettingsEdit::ContentEdge),
                 Key::SplitStyle => choice_at(index).map(SettingsEdit::SplitStyle),
+                Key::TabDetails => choice_at(index).map(SettingsEdit::TabDetails),
                 Key::TabIconColors => choice_at(index).map(SettingsEdit::IconColors),
                 Key::TabPosition => choice_at(index).map(SettingsEdit::TabPosition),
                 Key::ShellIntegration => choice_at(index).map(SettingsEdit::ShellIntegration),
@@ -1786,6 +1804,7 @@ impl SettingsWindow {
         select_choice(&c.scrollbar, settings.scrollbar);
         select_choice(&c.content_edge, settings.content_edge);
         select_choice(&c.split_style, settings.split_style);
+        select_choice(&c.tab_details, settings.tab_details);
         set_switch(&c.tab_icons, settings.tab_icons);
         select_choice(&c.tab_icon_colors, settings.tab_icon_colors);
         select_choice(&c.tab_position, settings.tab_position);
@@ -2510,6 +2529,7 @@ impl SettingsWindow {
         let dim_splits = self.switch(Key::DimSplits);
         let focus_frame = self.switch(Key::FocusFrame);
         let split_style = self.popup::<SplitStyle>(Key::SplitStyle);
+        let tab_details = self.popup::<TabDetails>(Key::TabDetails);
         let resize_in_steps = self.switch(Key::ResizeInSteps);
         let tab_icons = self.switch(Key::TabIcons);
         let tab_icon_colors = self.popup::<IconColors>(Key::TabIconColors);
@@ -2595,6 +2615,13 @@ impl SettingsWindow {
             &split_style,
             &[&split_style],
             Some("Cards stand on a ground with a gap round them; lines let the panes touch with one line between them."),
+        );
+        appearance.row(
+            Key::TabDetails,
+            "Tab details:",
+            &tab_details,
+            &[&tab_details],
+            Some("Under a program's row in the side column, where it stands and what it asks. Smart: in Activity only."),
         );
         appearance.row(
             Key::ResizeInSteps,
@@ -2892,6 +2919,7 @@ impl SettingsWindow {
             scrollbar,
             content_edge,
             split_style,
+            tab_details,
             tab_icons,
             tab_icon_colors,
             tab_position,
@@ -3386,7 +3414,7 @@ mod tests {
                     restore_windows = []\nkeep_running = []\nscrollbar = []\n\
                     [appearance]\ntheme = []\nlight_theme = []\ndark_theme = []\n\
                     content_edge = []\nminimum_contrast = []\ndim_unfocused_splits = []\n\
-                    focus_frame = []\nsplit_style = []\nresize_in_steps = []\ntab_icons = []\ntab_icon_colors = []\ntab_position = []\n\
+                    focus_frame = []\nsplit_style = []\ntab_details = []\nresize_in_steps = []\ntab_icons = []\ntab_icon_colors = []\ntab_position = []\n\
                     [font]\nfamily = []\nsize = []\nline_height = []\nletter_spacing = []\n\
                     [clipboard]\nosc52 = []\n\
                     [motion]\ncursor_motion = []\nreduce_motion = []\nsmooth_scroll = []\n\
@@ -3452,6 +3480,7 @@ mod tests {
                 Key::FocusFrame => SettingsEdit::FocusFrame(true),
                 Key::ResizeInSteps => SettingsEdit::ResizeInSteps(true),
                 Key::SplitStyle => SettingsEdit::SplitStyle(SplitStyle::Lines),
+                Key::TabDetails => SettingsEdit::TabDetails(TabDetails::Always),
                 Key::TabIcons => SettingsEdit::TabIcons(false),
                 Key::TabIconColors => SettingsEdit::IconColors(IconColors::Brand),
                 Key::TabPosition => SettingsEdit::TabPosition(TabPosition::Side),

@@ -543,12 +543,14 @@ impl TabBar {
         // The list's places, headers among them: a carried tab's room opens before the row it is
         // over, below any header that stands there. In Activity a tab's row holds its agents.
         let entries = side_entries(&shown.headings, count, flight.gap, 0);
-        let entries = if shown.activity {
-            let agents: Vec<usize> = shown.tabs.iter().map(|label| label.agents.len()).collect();
-            agent_entries(entries, &agents)
-        } else {
-            entries
-        };
+        let room =
+            (self.bounds().size.width - 2.0 * tabs::EDGE - DETAIL_X - tabs::ROW_END).max(0.0);
+        let shapes: Vec<RowShape> = shown
+            .tabs
+            .iter()
+            .map(|label| RowShape::of(label, shown.activity, shown.details, room))
+            .collect();
+        let entries = tall_entries(entries, &shapes);
         let mut column = side.layout_with(&entries);
         let selected_tab = shown.tabs.get(shown.selected).map(|label| label.tab);
         let was_overflowing = iv.overflowed.replace(column.overflow);
@@ -594,7 +596,8 @@ impl TabBar {
         for (index, chip) in chips.iter().enumerate() {
             let label = &shown.tabs[index];
             let naming = iv.renaming.get() == Some(label.tab);
-            let agents = shown.activity && !label.agents.is_empty();
+            let shape = &shapes[index];
+            let agents = shape.whole;
             // An agent's lines show their own names; the chip shows none.
             let title = if naming || agents {
                 String::new()
@@ -636,6 +639,10 @@ impl TabBar {
                 },
             );
             let mut look = look;
+            if shape.lead.is_some() {
+                // A plain row with details: its parts in its band, the details under it.
+                look.band = Some(tabs::TAB_HEIGHT);
+            }
             if agents {
                 // The lines draw the face, the selection and the tiles; the chip keeps its place.
                 look.emblem = None;
@@ -659,12 +666,24 @@ impl TabBar {
                     })
                     .collect()
             });
+            let lines = if agents {
+                Some(label.agents.as_slice())
+            } else {
+                shape
+                    .lead
+                    .map(|lead| std::slice::from_ref(&label.agents[lead]))
+            };
             chip.ivars().agents.set(
-                agents.then_some(label.agents.as_slice()),
-                hints,
-                index == shown.selected,
-                palette,
-                seen.style,
+                lines,
+                AgentLook {
+                    hints,
+                    heights: shape.heights.clone(),
+                    whole: agents,
+                    details: shown.details,
+                    selected: index == shown.selected,
+                    palette,
+                    style: seen.style,
+                },
             );
             if naming {
                 self.place_row_field(row, palette);
@@ -812,15 +831,82 @@ impl TabBar {
     }
 }
 
-/// The listed tabs' rows in Activity: each tab's [`Entry::Tab`] in `entries` becomes a row of
-/// its agents' lines (`agents[i]` for the `i`th tab), one [`tabs::AGENT_ROW`] each.
-fn agent_entries(entries: Vec<Entry>, agents: &[usize]) -> Vec<Entry> {
-    let mut lines = agents.iter();
+/// Where a row's text starts, from the row's left edge: after the tile and its gap.
+const DETAIL_X: f64 = tabs::ROW_LEAD + tabs::TILE_WIDTH + tabs::ICON_GAP + 2.0;
+
+/// How a listed tab's row is made: in Activity its agents' lines are the row (`whole`), each of
+/// its `heights`; in the plain list with details its band is a chip's and the details of its
+/// `lead` agent — the one asking, else the focused one — stand under it; otherwise it is a
+/// plain row.
+#[derive(Clone, Debug, PartialEq)]
+struct RowShape {
+    whole: bool,
+    lead: Option<usize>,
+    heights: Vec<f64>,
+    height: f64,
+}
+
+impl RowShape {
+    fn of(label: &super::Label, activity: bool, details: bool, room: f64) -> Self {
+        let height_of = |line: &AgentLine, top: f64| {
+            let asks = line.asks.as_deref().map(AgentRows::ask_width);
+            tabs::detail_height(
+                top,
+                details && line.place.is_some(),
+                if details {
+                    tabs::ask_lines(asks, room)
+                } else {
+                    0
+                },
+            )
+        };
+        if activity && !label.agents.is_empty() {
+            let heights: Vec<f64> = label
+                .agents
+                .iter()
+                .map(|line| height_of(line, tabs::AGENT_ROW))
+                .collect();
+            let height = heights.iter().sum();
+            return Self {
+                whole: true,
+                lead: None,
+                heights,
+                height,
+            };
+        }
+        let lead = label
+            .agents
+            .iter()
+            .position(|line| line.tone == AgentTone::Asking)
+            .or_else(|| label.agents.iter().position(|line| line.focused))
+            .filter(|_| details);
+        let height = lead.map_or(tabs::TAB_HEIGHT, |lead| {
+            height_of(&label.agents[lead], tabs::TAB_HEIGHT)
+        });
+        // A lead with nothing to say is a plain row.
+        let lead = lead.filter(|_| height > tabs::TAB_HEIGHT);
+        Self {
+            whole: false,
+            lead,
+            heights: vec![height],
+            height,
+        }
+    }
+}
+
+/// The listed tabs' rows: each tab's [`Entry::Tab`] in `entries` takes its shape's height
+/// ([`RowShape`]); a plain row stays [`Entry::Tab`].
+fn tall_entries(entries: Vec<Entry>, shapes: &[RowShape]) -> Vec<Entry> {
+    let mut rows = shapes.iter();
     entries
         .into_iter()
         .map(|entry| match entry {
-            Entry::Tab => lines.next().map_or(entry, |&count| {
-                Entry::Tall(count.max(1) as f64 * tabs::AGENT_ROW)
+            Entry::Tab => rows.next().map_or(entry, |shape| {
+                if shape.whole || shape.lead.is_some() {
+                    Entry::Tall(shape.height)
+                } else {
+                    Entry::Tab
+                }
             }),
             entry => entry,
         })
@@ -829,6 +915,13 @@ fn agent_entries(entries: Vec<Entry>, agents: &[usize]) -> Vec<Entry> {
 
 pub(crate) struct AgentIvars {
     lines: RefCell<Vec<AgentLine>>,
+    /// Each line's height ([`tabs::detail_height`]); the lines stand one under the other.
+    heights: RefCell<Vec<f64>>,
+    /// The lines are the row (Activity): the face, the tile, the name and the status are drawn
+    /// here. Otherwise the row is the chip's own and only the details under its band are.
+    whole: Cell<bool>,
+    /// The details under each line: where it stands and what it asks.
+    details: Cell<bool>,
     /// The ⌘ key that reaches each line, while Select Tab's modifiers are held.
     hints: RefCell<Vec<Option<String>>>,
     /// The tab is the one on screen: its focused pane's line is selected.
@@ -875,6 +968,9 @@ impl AgentRows {
     pub(super) fn new(mtm: MainThreadMarker) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(AgentIvars {
             lines: RefCell::new(Vec::new()),
+            heights: RefCell::new(Vec::new()),
+            whole: Cell::new(true),
+            details: Cell::new(false),
             hints: RefCell::new(Vec::new()),
             selected: Cell::new(false),
             palette: Cell::new(None),
@@ -886,39 +982,66 @@ impl AgentRows {
         this
     }
 
-    /// Shows the tab's `lines` (`None` hides them: the chip is a row of its own again).
-    pub(super) fn set(
-        &self,
-        lines: Option<&[AgentLine]>,
-        hints: Vec<Option<String>>,
-        selected: bool,
-        palette: Palette,
-        style: IconStyle,
-    ) {
+    /// Shows the tab's `lines` (`None` hides them: the chip is a row of its own again), each
+    /// of its `heights`; `whole` while they are the row (Activity), else only their details are
+    /// drawn, under the chip's band.
+    pub(super) fn set(&self, lines: Option<&[AgentLine]>, look: AgentLook) {
         let iv = self.ivars();
         let Some(lines) = lines else {
             self.setHidden(true);
             return;
         };
+        let AgentLook {
+            hints,
+            heights,
+            whole,
+            details,
+            selected,
+            palette,
+            style,
+        } = look;
         let changed = *iv.lines.borrow() != lines
             || *iv.hints.borrow() != hints
+            || *iv.heights.borrow() != heights
+            || iv.whole.replace(whole) != whole
+            || iv.details.replace(details) != details
             || iv.selected.replace(selected) != selected
             || iv.palette.replace(Some(palette)) != Some(palette)
             || iv.style.replace(Some(style)) != Some(style);
         iv.lines.replace(lines.to_vec());
         iv.hints.replace(hints);
+        iv.heights.replace(heights);
         self.setHidden(false);
         if changed {
             self.setNeedsDisplay(true);
         }
     }
 
+    /// Whether the lines are the row and take its press ([`Self::pane_at`]).
+    pub(super) fn takes_press(&self) -> bool {
+        !self.isHidden() && self.ivars().whole.get()
+    }
+
     /// The pane whose line is at `y` (the view's own, top-down); the last one below the end.
     pub(super) fn pane_at(&self, y: f64) -> Option<u64> {
-        let lines = self.ivars().lines.borrow();
-        let index =
-            ((y / tabs::AGENT_ROW).floor().max(0.0) as usize).min(lines.len().checked_sub(1)?);
-        lines.get(index).map(|line| line.pane)
+        let iv = self.ivars();
+        let lines = iv.lines.borrow();
+        let heights = iv.heights.borrow();
+        let mut top = 0.0;
+        for (line, height) in lines.iter().zip(heights.iter()) {
+            top += height;
+            if y < top {
+                return Some(line.pane);
+            }
+        }
+        lines.last().map(|line| line.pane)
+    }
+
+    /// How wide `text` is in the type a question is drawn in ([`tabs::ask_lines`] measures by it).
+    pub(super) fn ask_width(text: &str) -> f64 {
+        let (_, attributes) = line_type(DETAIL_TEXT, false, 0, NSLineBreakMode::ByWordWrapping);
+        // SAFETY: the dictionary holds a font, a colour and a paragraph style under their keys.
+        unsafe { NSString::from_str(text).sizeWithAttributes(Some(&attributes)) }.width
     }
 
     fn draw(&self) {
@@ -928,16 +1051,29 @@ impl AgentRows {
         };
         let lines = iv.lines.borrow();
         let hints = iv.hints.borrow();
+        let heights = iv.heights.borrow();
         let bounds = self.bounds();
         let width = bounds.size.width;
+        let x = tabs::ROW_LEAD + tabs::TILE_WIDTH + tabs::ICON_GAP + 2.0;
+        if !iv.whole.get() {
+            // A plain row: its band is the chip's, the details stand under it.
+            if let Some(line) = lines.first() {
+                let room = (width - x - tabs::ROW_END).max(0.0);
+                self.draw_details(line, x, tabs::TAB_HEIGHT - 5.0, room, palette);
+            }
+            return;
+        }
         let bundled = lines.len() > 1;
         // A tab's agents share a face; the picked line and a hovered one lie on it.
         if bundled {
             rounded(bounds, TAB_RADIUS, Tint::of(palette.title, 0.04), None);
         }
+        let mut next = 0.0;
         for (index, line) in lines.iter().enumerate() {
-            let top = index as f64 * tabs::AGENT_ROW;
-            let row = NSRect::new(NSPoint::new(0.0, top), NSSize::new(width, tabs::AGENT_ROW));
+            let height = heights.get(index).copied().unwrap_or(tabs::AGENT_ROW);
+            let top = next;
+            next += height;
+            let row = NSRect::new(NSPoint::new(0.0, top), NSSize::new(width, height));
             let strong = iv.selected.get() && line.focused;
             if strong {
                 let face = if bundled {
@@ -966,7 +1102,6 @@ impl AgentRows {
                 palette,
             );
             NSGraphicsContext::restoreGraphicsState_class();
-            let x = tabs::ROW_LEAD + tabs::TILE_WIDTH + tabs::ICON_GAP + 2.0;
             let hint = hints.get(index).cloned().flatten();
             let end = if hint.is_some() {
                 tabs::ROW_CROWDED
@@ -989,10 +1124,11 @@ impl AgentRows {
             draw_line(
                 &line.status,
                 NSRect::new(NSPoint::new(x, top + 23.0), NSSize::new(room, 16.0)),
-                11.0,
+                DETAIL_TEXT,
                 false,
                 tone,
             );
+            self.draw_details(line, x, top + tabs::AGENT_ROW - 5.0, room, palette);
             if let Some(hint) = hint {
                 draw_line(
                     &hint,
@@ -1009,9 +1145,57 @@ impl AgentRows {
     }
 }
 
-/// One line of text in `rect` (top-down), cut with an ellipsis where it does not fit: `size`
-/// points, semibold when `strong`, else medium.
-fn draw_line(text: &str, rect: NSRect, size: f64, strong: bool, color: u32) {
+impl AgentRows {
+    /// A line's details from `base` down: where it stands, in the dim ink, and what it asks, in
+    /// the title's, cut at [`tabs::ASK_LINES`] lines.
+    fn draw_details(&self, line: &AgentLine, x: f64, base: f64, room: f64, palette: Palette) {
+        if !self.ivars().details.get() {
+            return;
+        }
+        let mut at = base;
+        if let Some(place) = &line.place {
+            draw_line(
+                place,
+                NSRect::new(NSPoint::new(x, at), NSSize::new(room, tabs::PLACE_ROW)),
+                DETAIL_TEXT,
+                false,
+                palette.dim,
+            );
+            at += tabs::PLACE_ROW;
+        }
+        if let Some(asks) = &line.asks {
+            let lines = tabs::ask_lines(Some(Self::ask_width(asks)), room);
+            let (_, attributes) = line_type(
+                DETAIL_TEXT,
+                false,
+                palette.title,
+                NSLineBreakMode::ByWordWrapping,
+            );
+            let rect = NSRect::new(
+                NSPoint::new(x, at),
+                NSSize::new(room, lines as f64 * tabs::ASK_ROW),
+            );
+            // SAFETY: the dictionary holds a font, a colour and a paragraph style under their
+            // keys; the text wraps in the box and what is past its foot is not drawn.
+            unsafe { NSString::from_str(asks).drawInRect_withAttributes(rect, Some(&attributes)) };
+        }
+    }
+}
+
+/// The type of a detail's line and of the status, points.
+const DETAIL_TEXT: f64 = 11.0;
+
+/// The font and the attributes of a line of `size` points, semibold when `strong`, else medium,
+/// in `color`, broken as `breaking` says.
+fn line_type(
+    size: f64,
+    strong: bool,
+    color: u32,
+    breaking: NSLineBreakMode,
+) -> (
+    Retained<NSFont>,
+    Retained<NSDictionary<NSAttributedStringKey, AnyObject>>,
+) {
     // SAFETY: AppKit's constant font weights.
     let weight = unsafe {
         if strong {
@@ -1022,7 +1206,7 @@ fn draw_line(text: &str, rect: NSRect, size: f64, strong: bool, color: u32) {
     };
     let font = NSFont::systemFontOfSize_weight(size, weight);
     let paragraph = NSMutableParagraphStyle::new();
-    paragraph.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
+    paragraph.setLineBreakMode(breaking);
     let ink = Tint::of(color, 1.0).color();
     // SAFETY: AppKit's constant attribute keys, alive for the process.
     let keys: [&NSAttributedStringKey; 3] = unsafe {
@@ -1034,6 +1218,24 @@ fn draw_line(text: &str, rect: NSRect, size: f64, strong: bool, color: u32) {
     };
     let values: [&AnyObject; 3] = [&font, &ink, &paragraph];
     let attributes = NSDictionary::from_slices(&keys, &values);
+    (font, attributes)
+}
+
+/// The look [`AgentRows::set`] is given: what the column decided for the tab's lines.
+pub(super) struct AgentLook {
+    pub(super) hints: Vec<Option<String>>,
+    pub(super) heights: Vec<f64>,
+    pub(super) whole: bool,
+    pub(super) details: bool,
+    pub(super) selected: bool,
+    pub(super) palette: Palette,
+    pub(super) style: IconStyle,
+}
+
+/// One line of text in `rect` (top-down), cut with an ellipsis where it does not fit: `size`
+/// points, semibold when `strong`, else medium.
+fn draw_line(text: &str, rect: NSRect, size: f64, strong: bool, color: u32) {
+    let (font, attributes) = line_type(size, strong, color, NSLineBreakMode::ByTruncatingTail);
     // Centred up and down in its box, as a label's single line is.
     let height = font.ascender() - font.descender();
     let at = NSRect::new(

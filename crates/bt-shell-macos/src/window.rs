@@ -4653,10 +4653,14 @@ impl TerminalWindow {
         let single = self.lone_tab();
         let side = self.bar().is_side();
         let activity = side && self.listing_activity();
-        // In Activity a tab is listed by its agents, and only with some.
+        let details = side
+            && app::delegate(self.mtm())
+                .is_some_and(|app| app.settings().tab_details.shown(activity));
+        // In Activity a tab is listed by its agents, and only with some; the plain list reads
+        // them for a row's details.
         let label = |tab: &TerminalTab| {
             let mut label = Self::label_of(tab, single);
-            if activity {
+            if activity || details {
                 label.agents = tab.agents();
             }
             (!activity || !label.agents.is_empty()).then_some(label)
@@ -4765,7 +4769,11 @@ impl TerminalWindow {
             headings,
             switcher,
             notice,
-            crate::tab_bar::Aside { unseen, activity },
+            crate::tab_bar::Aside {
+                unseen,
+                activity,
+                details,
+            },
         );
     }
 

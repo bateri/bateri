@@ -17,8 +17,8 @@ use std::time::{Duration, Instant};
 use block2::RcBlock;
 use bt_core::{
     HostMark, InitialInput, MarkSubject, PaneUuid, ReduceMotion, RemoteKind, RestoreWindows,
-    SHUTDOWN_GRACE, SYSTEM_THEME, Scrollbar, Settings, SettingsEdit, ShellIntegration, TabPosition,
-    Teardown, Theme,
+    SHUTDOWN_GRACE, SYSTEM_THEME, Scrollbar, Settings, SettingsEdit, ShellIntegration, TabDetails,
+    TabPosition, Teardown, Theme,
 };
 use bt_gpu::{DisplayLink, MIN_SAMPLES, Renderer, ScrollbarMode, Stats};
 use bt_shell_common::kablo::quit;
@@ -1552,6 +1552,27 @@ define_class!(
                     NSControlStateValueOff
                 });
                 model.enabled
+            } else if let Some(details) = [
+                (sel!(tabDetailsOff:), TabDetails::Off),
+                (sel!(tabDetailsSmart:), TabDetails::Smart),
+                (sel!(tabDetailsAlways:), TabDetails::Always),
+            ]
+            .into_iter()
+            .find_map(|(action, details)| (item.action() == Some(action)).then_some(details))
+            {
+                // Tab Details ▸: the checked one is the setting's; grey with no file to write,
+                // as Tabs ▸ is.
+                item.setState(if self.settings().tab_details == details {
+                    NSControlStateValueOn
+                } else {
+                    NSControlStateValueOff
+                });
+                matches!(
+                    self.inputs(),
+                    Inputs::User {
+                        config_root: Some(_)
+                    }
+                )
             } else if let Some(place) = [
                 (sel!(tabsAtTop:), TabPosition::Top),
                 (sel!(tabsAtSide:), TabPosition::Side),
@@ -1825,6 +1846,24 @@ define_class!(
         #[unsafe(method(matchSystemTheme:))]
         fn match_system_theme(&self, _sender: Option<&AnyObject>) {
             self.save_theme(SYSTEM_THEME);
+        }
+
+        /// View ▸ Tab Details ▸ Off: a row of the side column is its name.
+        #[unsafe(method(tabDetailsOff:))]
+        fn tab_details_off(&self, _sender: Option<&AnyObject>) {
+            self.save_edit(&SettingsEdit::TabDetails(TabDetails::Off));
+        }
+
+        /// View ▸ Tab Details ▸ Smart: details in Activity only.
+        #[unsafe(method(tabDetailsSmart:))]
+        fn tab_details_smart(&self, _sender: Option<&AnyObject>) {
+            self.save_edit(&SettingsEdit::TabDetails(TabDetails::Smart));
+        }
+
+        /// View ▸ Tab Details ▸ Always: details in every row with a program to speak of.
+        #[unsafe(method(tabDetailsAlways:))]
+        fn tab_details_always(&self, _sender: Option<&AnyObject>) {
+            self.save_edit(&SettingsEdit::TabDetails(TabDetails::Always));
         }
 
         /// View ▸ Tabs ▸ Top: the tabs in the title row of every window.
@@ -6089,6 +6128,12 @@ impl AppDelegate {
         if changes.split_style {
             for window in &windows {
                 window.apply_split_style();
+            }
+        }
+        // What a row of the side column says: every bar is given its tabs again.
+        if changes.tab_details {
+            for window in &windows {
+                window.refresh_bar();
             }
         }
         // The tabs in the title row or in the side column: every window places them again.

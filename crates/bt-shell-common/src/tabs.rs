@@ -1451,6 +1451,49 @@ pub enum Entry {
 /// is doing and for how long.
 pub const AGENT_ROW: f64 = 44.0;
 
+/// The height of a detail's line under a row (`[appearance] tab_details`): where the program
+/// stands, the folder and the branch or the server.
+pub const PLACE_ROW: f64 = 16.0;
+
+/// The height of a line of what a program asks, under a row; it takes [`ASK_LINES`] at the most.
+pub const ASK_ROW: f64 = 15.0;
+
+/// What a program asks is cut at this many lines.
+pub const ASK_LINES: usize = 2;
+
+/// How tall a row with details is (`[appearance] tab_details`): its own height `top` — a tab's
+/// [`TAB_HEIGHT`], an agent's [`AGENT_ROW`] — and under it the place's line when there is one
+/// and `asks` lines of what the program asks (at most [`ASK_LINES`]).
+pub fn detail_height(top: f64, place: bool, asks: usize) -> f64 {
+    top + if place { PLACE_ROW } else { 0.0 } + asks.min(ASK_LINES) as f64 * ASK_ROW
+}
+
+/// The places a tab's agents' lines say, top to bottom: a line whose place is the one above's
+/// says none — the line above says it for both.
+pub fn said_places<T: PartialEq>(places: Vec<Option<T>>) -> Vec<Option<T>> {
+    let mut said: Vec<Option<T>> = Vec::with_capacity(places.len());
+    let mut before: Option<usize> = None;
+    for (index, place) in places.into_iter().enumerate() {
+        let repeated =
+            place.is_some() && before.is_some_and(|at| said[at].as_ref() == place.as_ref());
+        if place.is_some() && !repeated {
+            before = Some(index);
+        }
+        said.push(if repeated { None } else { place });
+    }
+    said
+}
+
+/// How many lines a question `width` wide takes in a row whose text has `room`: none for none,
+/// one where it fits, else [`ASK_LINES`] — the rest is cut.
+pub fn ask_lines(width: Option<f64>, room: f64) -> usize {
+    match width {
+        None => 0,
+        Some(width) if width <= room => 1,
+        Some(_) => ASK_LINES,
+    }
+}
+
 /// Which agent ⌘`tag` reaches in Activity, where the keys count agents, not tabs: `counts` are
 /// the listed tabs' agents in the order the column lists them. `(tab, agent)` — the listed tab's
 /// index and the agent's among its own — by [`tab_index`]'s rule over all of them.
@@ -5149,6 +5192,40 @@ mod tests {
             "two lines on one face, then the next row a gap down"
         );
         assert_eq!(column.slot_at(150.0), 1);
+    }
+
+    #[test]
+    fn a_place_the_line_above_says_is_not_said_again() {
+        let place = |text: &str| Some(text.to_owned());
+        assert_eq!(
+            said_places(vec![
+                place("bateri · main"),
+                place("bateri · main"),
+                place("kablo")
+            ]),
+            [place("bateri · main"), None, place("kablo")]
+        );
+        // Three in a row say it once; a line without a place does not break the run's memory.
+        assert_eq!(
+            said_places(vec![place("a"), None, place("a"), place("b"), place("b")]),
+            [place("a"), None, None, place("b"), None]
+        );
+    }
+
+    #[test]
+    fn a_row_with_details_grows_by_its_lines() {
+        // An agent's line alone, with its place, with a question of one and of two lines.
+        assert_eq!(detail_height(AGENT_ROW, false, 0), 44.0);
+        assert_eq!(detail_height(AGENT_ROW, true, 0), 60.0);
+        assert_eq!(detail_height(AGENT_ROW, true, 1), 75.0);
+        assert_eq!(detail_height(AGENT_ROW, true, 2), 90.0);
+        assert_eq!(detail_height(AGENT_ROW, false, 5), 74.0, "cut at two lines");
+        // A plain row of the list, the same way.
+        assert_eq!(detail_height(TAB_HEIGHT, true, 1), 59.0);
+        // A question takes one line where it fits, two where it does not, none when absent.
+        assert_eq!(ask_lines(None, 100.0), 0);
+        assert_eq!(ask_lines(Some(80.0), 100.0), 1);
+        assert_eq!(ask_lines(Some(180.0), 100.0), 2);
     }
 
     #[test]

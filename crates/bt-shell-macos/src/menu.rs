@@ -563,6 +563,9 @@ pub(crate) fn install(
             // The key window's column lists only its agents; the window's `validateMenuItem:`
             // checks it.
             item(mtm, "Show Activity", sel!(showActivity:)),
+            // What a row of the side column says beyond its name; the check comes from the app
+            // delegate's `validateMenuItem:`, as Tabs ▸'s does.
+            tab_details_menu(mtm),
             NSMenuItem::separatorItem(mtm),
             // `+` is a Shift character: the menu matches Cmd-Shift-= and shows
             // "⌘+". `-` is an ASCII hyphen, not the minus sign (U+2212) — the keyboard does
@@ -904,6 +907,20 @@ fn item(mtm: MainThreadMarker, title: &str, action: Sel) -> Retained<NSMenuItem>
 fn tagged(item: Retained<NSMenuItem>, tag: u8) -> Retained<NSMenuItem> {
     item.setTag(isize::from(tag));
     item
+}
+
+/// Tab Details ▸ Off / Smart / Always (`[appearance] tab_details`): View's and the side column's
+/// right click's, one build for both.
+pub(crate) fn tab_details_menu(mtm: MainThreadMarker) -> Retained<NSMenuItem> {
+    submenu(
+        mtm,
+        "Tab Details",
+        &[
+            item(mtm, "Off", sel!(tabDetailsOff:)),
+            item(mtm, "Smart", sel!(tabDetailsSmart:)),
+            item(mtm, "Always", sel!(tabDetailsAlways:)),
+        ],
+    )
 }
 
 /// The menu carrying `items` and the item attaching it to the parent menu. The
