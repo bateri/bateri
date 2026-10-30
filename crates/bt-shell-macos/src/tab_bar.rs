@@ -6079,6 +6079,9 @@ impl TabBar {
     pub(crate) fn new(mtm: MainThreadMarker, window: u64) -> Retained<Self> {
         let new_tab = BarButton::new(mtm, Kind::NewTab);
         let sidebar = BarButton::new(mtm, Kind::Sidebar);
+        // Wherever it stands — the column's head, or the title row while the column hides — it is
+        // a bare glyph, with a face only under the pointer.
+        sidebar.set_bare(true);
         let eye = BarButton::new(mtm, Kind::Activity);
         let switch = tab_switch::GroupButton::new(mtm);
         let list = BarButton::new(mtm, Kind::List);

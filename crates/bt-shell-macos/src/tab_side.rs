@@ -500,7 +500,6 @@ impl TabBar {
         }
         iv.sidebar.setFrame(ns_rect(head.sidebar));
         iv.sidebar.set_look(palette, TAB_RADIUS);
-        iv.sidebar.set_bare(true);
         iv.sidebar.set_badge(shown.unseen);
         iv.eye.setHidden(true);
         // The badge says what waits while the column hides; its counts wait with it.
