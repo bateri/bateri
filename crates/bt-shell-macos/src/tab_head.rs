@@ -10,7 +10,7 @@
 //! over the pane's place (`split::Spacing::with_head`, so the layout, the split limit, a drag
 //! and a resize all count it) and the pane starts under it, with its own margin. On a card the
 //! header takes the card's top corners and its light, the pane the bottom ones; the focus frame
-//! runs round both, the header drawing its top half.
+//! runs round both (the container's, `card::FocusRing`).
 //!
 //! A child of `tab_bar` for the bar's mark and indicator drawing, which a sibling could not
 //! reach.
@@ -21,7 +21,7 @@ use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSAccessibility, NSApplication, NSBezierPath, NSColor, NSEvent, NSGraphicsContext, NSView,
+    NSAccessibility, NSApplication, NSBezierPath, NSEvent, NSGraphicsContext, NSView,
 };
 use objc2_foundation::{NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
 
@@ -84,9 +84,6 @@ pub(crate) struct HeadLook {
     pub(crate) focused: bool,
     /// The pane is a card: the band takes its top corners and its light.
     pub(crate) carded: bool,
-    /// The focus frame runs round the pane (`[appearance] focus_frame`): the band draws its top
-    /// half, in this colour.
-    pub(crate) frame: Option<[u8; 3]>,
 }
 
 pub(crate) struct HeadIvars {
@@ -386,38 +383,6 @@ impl PaneHead {
                 }
                 draw_tool(tool, rect, if hot { palette.title } else { palette.dim });
             }
-        }
-        if let Some([r, g, b]) = look.frame {
-            // The focus frame's top half: down both sides and round the top corners.
-            let half = 1.0;
-            let path = NSBezierPath::bezierPath();
-            let (x0, x1) = (
-                bounds.origin.x + half,
-                bounds.origin.x + bounds.size.width - half,
-            );
-            let (y0, y1) = (bounds.origin.y + half, bounds.origin.y + bounds.size.height);
-            let corner = (radius - half).max(0.0);
-            path.moveToPoint(NSPoint::new(x0, y1));
-            path.appendBezierPathWithArcFromPoint_toPoint_radius(
-                NSPoint::new(x0, y0),
-                NSPoint::new(x1, y0),
-                corner,
-            );
-            path.appendBezierPathWithArcFromPoint_toPoint_radius(
-                NSPoint::new(x1, y0),
-                NSPoint::new(x1, y1),
-                corner,
-            );
-            path.lineToPoint(NSPoint::new(x1, y1));
-            path.setLineWidth(2.0);
-            NSColor::colorWithSRGBRed_green_blue_alpha(
-                f64::from(r) / 255.0,
-                f64::from(g) / 255.0,
-                f64::from(b) / 255.0,
-                1.0,
-            )
-            .setStroke();
-            path.stroke();
         }
     }
 }

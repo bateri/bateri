@@ -78,7 +78,7 @@ use objc2_quartz_core::{
     kCAGravityTopLeft,
 };
 
-use crate::card::{self, FocusRing, FrameBox};
+use crate::card::{self, FrameBox};
 use crate::environment::Wants;
 
 use crate::clipboard::{self, PendingCopy};
@@ -2030,10 +2030,6 @@ pub struct PaneIvars {
     /// The card's frame: the topmost child, above the veil
     /// ([`crate::card`]). Invisible unless the pane is one of several.
     card_frame: Retained<FrameBox>,
-    /// The focus frame (`[appearance] focus_frame`): over the card's frame,
-    /// shown on the focused pane of a split tab by the owner
-    /// ([`TerminalPane::set_focus_look`]).
-    focus_ring: Retained<FocusRing>,
     /// The pane has a header over it (a split tab's, `pane_head`): its top corners and its card's
     /// light are the header's ([`TerminalPane::set_headed`]).
     headed: Cell<bool>,
@@ -2801,7 +2797,6 @@ impl TerminalPane {
         let link_veil = DimOverlay::new(mtm);
         link_veil.paint_with(&theme, LINK_VEIL_ALPHA);
         let card_frame = FrameBox::new(mtm, &theme);
-        let focus_ring = FocusRing::new(mtm, &theme);
         let link_label = LinkLabel::new(mtm);
         link_label.0.paint(&theme);
         let block_tip = BlockTipParts::new(mtm);
@@ -2837,7 +2832,6 @@ impl TerminalPane {
             link_veil: link_veil.clone(),
             connection: Cell::new(PaneLink::Live),
             card_frame: card_frame.clone(),
-            focus_ring: focus_ring.clone(),
             headed: Cell::new(false),
             link_label: link_label.clone(),
             link: OnceCell::new(),
@@ -2975,12 +2969,6 @@ impl TerminalPane {
                 | NSAutoresizingMaskOptions::ViewHeightSizable,
         );
         this.addSubview(&card_frame);
-        focus_ring.setFrame(this.bounds());
-        focus_ring.setAutoresizingMask(
-            NSAutoresizingMaskOptions::ViewWidthSizable
-                | NSAutoresizingMaskOptions::ViewHeightSizable,
-        );
-        this.addSubview(&focus_ring);
         let font = this.ivars().font.borrow().clone();
         this.request_font(&font);
         Ok(this)
@@ -4282,7 +4270,6 @@ impl TerminalPane {
         self.ivars().dim.paint(&theme);
         self.ivars().link_veil.paint_with(&theme, LINK_VEIL_ALPHA);
         self.ivars().card_frame.paint(&theme);
-        self.ivars().focus_ring.paint(&theme);
         self.ivars().link_label.0.paint(&theme);
         self.ivars().block_tip.paint(&theme);
         self.ivars().jump.paint(&theme);
@@ -4294,30 +4281,20 @@ impl TerminalPane {
     }
 
     /// What tells this pane's focus: the focused card stands nearer (its
-    /// light and its footing, [`crate::card`]), `veiled` shows the dim veil
-    /// over an unfocused one (`[appearance] dim_unfocused_splits`) and
-    /// `framed` the line round the focused one (`[appearance] focus_frame`).
+    /// light and its footing, [`crate::card`]) and `veiled` shows the dim veil
+    /// over an unfocused one (`[appearance] dim_unfocused_splits`); the line
+    /// round the focused one is the container's (`SplitView::set_focus_frame`).
     /// The decision is the owner's (`TerminalTab::refresh_look`); it asks for
-    /// no frame — all three are AppKit's.
-    pub(crate) fn set_focus_look(&self, focused: bool, veiled: bool, framed: bool) {
+    /// no frame — both are AppKit's.
+    pub(crate) fn set_focus_look(&self, focused: bool, veiled: bool) {
         self.ivars().card_frame.set_focused(focused);
         self.ivars().dim.setHidden(!veiled);
-        self.ivars().focus_ring.setHidden(!framed);
     }
 
-    /// The focus frame follows the pane's corners: a card's all round, or a
-    /// lined pane's square top and the curve it takes where it meets the
-    /// window's bottom ([`TerminalPane::set_corners`]).
-    fn shape_ring(&self) {
-        let (left, right) = self.ivars().corners.get();
-        let headed = self.ivars().headed.get();
-        let corners = if self.is_card() {
-            let card = card::corner_pt();
-            (if headed { 0.0 } else { card }, card, card)
-        } else {
-            (0.0, left, right)
-        };
-        self.ivars().focus_ring.set_corners(corners, headed);
+    /// The radii of the pane's bottom corners, in points: what the window's or the card's
+    /// curve takes there ([`TerminalPane::set_corners`]).
+    pub(crate) fn corners(&self) -> (f64, f64) {
+        self.ivars().corners.get()
     }
 
     // ─── The connection of a terminal the server keeps ───────────────────
@@ -4469,7 +4446,6 @@ impl TerminalPane {
         if let Some(layer) = self.layer() {
             card::round(&layer, carded, headed);
         }
-        self.shape_ring();
     }
 
     /// The grid's left and right margins, in points, as the pane's own metrics carry them
@@ -4484,9 +4460,9 @@ impl TerminalPane {
         ))
     }
 
-    /// The pane stands under a header (a split tab's) or not: its top corners, its card's light
-    /// and the focus frame's top go to the header. The container says so with every layout,
-    /// before [`Self::set_card`].
+    /// The pane stands under a header (a split tab's) or not: its top corners and its card's
+    /// light go to the header. The container says so with every layout, before
+    /// [`Self::set_card`].
     pub(crate) fn set_headed(&self, headed: bool) {
         self.ivars().headed.set(headed);
     }
@@ -4533,11 +4509,7 @@ impl TerminalPane {
             }
         };
         let corners = (radius(left), radius(right));
-        let moved = self.ivars().corners.replace(corners) != corners;
-        if moved {
-            self.shape_ring();
-        }
-        moved
+        self.ivars().corners.replace(corners) != corners
     }
 
     /// The renderer's metrics at `scale` with this pane's corners applied:

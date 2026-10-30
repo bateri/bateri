@@ -672,10 +672,14 @@ impl TerminalTab {
             (settings.dim_unfocused_splits, settings.focus_frame)
         });
         let dim = panes.len() > 1 && veil;
-        let frame = line && self.ivars().container.shows_split();
         for pane in &panes {
             let own = pane.id() == focused;
-            pane.set_focus_look(own, dim && !own, frame && own);
+            pane.set_focus_look(own, dim && !own);
+        }
+        if let Some(theme) = self.focused_pane().session().map(|session| session.theme()) {
+            self.ivars()
+                .container
+                .set_focus_frame(line.then_some(focused), &theme);
         }
         self.refresh_heads();
         self.ivars().container.ground_follows();
@@ -693,7 +697,6 @@ impl TerminalTab {
             return;
         };
         let focused = self.focused_pane().id();
-        let framed = app::delegate(self.mtm()).is_some_and(|app| app.settings().focus_frame);
         let carded = container.carded();
         let (hidden, away) = (self.hidden(), self.away());
         let looks = self
@@ -712,7 +715,6 @@ impl TerminalTab {
                         indicator: tabs::indicator(self.signals_of(pane, hidden, away)),
                         focused: own,
                         carded,
-                        frame: (framed && own).then(|| theme.focus_frame_srgb()),
                     },
                 )
             })

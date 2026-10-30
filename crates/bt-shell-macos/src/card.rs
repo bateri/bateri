@@ -13,7 +13,8 @@
 //! Nothing is veiled: all panes read at once (the veil is
 //! `[appearance] dim_unfocused_splits`, the pane's own `DimOverlay`). With
 //! `[appearance] focus_frame` the focused pane of a split tab also has a line
-//! in the accent round it ([`FocusRing`]), under either style.
+//! in the accent round its card ([`FocusRing`]), under either style, which
+//! slides to the next card when the focus moves.
 //!
 //! **Three views, three jobs.** The corners are the pane's *own* backing
 //! layer (`cornerRadius` + `masksToBounds`: the Metal child and every overlay
@@ -297,20 +298,19 @@ impl FrameBox {
 const FOCUS_PT: f64 = 2.0;
 
 pub(crate) struct RingIvars {
-    /// `Theme::focus_frame_srgb`: the accent, or the accent drawn far enough
-    /// from the background to be seen.
-    tone: Cell<[u8; 3]>,
-    /// The radii of the corners the line follows, in points: top (both),
-    /// bottom left, bottom right — the card's all round, or a lined pane's
-    /// square top and the window's curve where it meets the window's bottom.
-    corners: Cell<(f64, f64, f64)>,
-    /// The pane has a header: the line is open at its top, the header draws that half.
-    open: Cell<bool>,
+    /// The pane whose card the line stands round; `None` while it is hidden.
+    on: Cell<Option<u64>>,
 }
 
 define_class!(
-    // SAFETY: NSView is designed for subclassing; FocusRing implements no
-    // `Drop` and is born with NSView's `init`.
+    /// The focus frame (`[appearance] focus_frame`): one line in the accent round the focused
+    /// card of a split tab, its header and all, under either style. It is the container's and not
+    /// a pane's, so moving the focus **slides** it from one card to the next ([`MOVE_SECS`])
+    /// instead of putting one out and lighting another. It is its layer's border: Core Animation
+    /// draws it at every size on the way, so its corners stay round through a slide and from the
+    /// first frame — a drawn line would be a picture stretched from the size it was drawn at.
+    // SAFETY: NSView is designed for subclassing; FocusRing implements no `Drop` and is born
+    // with NSView's `init`.
     #[unsafe(super(NSView))]
     #[thread_kind = MainThreadOnly]
     #[name = "BateriFocusRing"]
@@ -326,107 +326,78 @@ define_class!(
         fn hit_test(&self, _point: NSPoint) -> Option<Retained<NSView>> {
             None
         }
-
-        /// The line inside the pane's edge, following its corners.
-        #[unsafe(method(drawRect:))]
-        fn draw_rect(&self, _dirty: NSRect) {
-            let iv = self.ivars();
-            let half = FOCUS_PT / 2.0;
-            let (top, left, right) = iv.corners.get();
-            let line = cornered(
-                grown(self.bounds(), -half),
-                (top - half).max(0.0),
-                (left - half).max(0.0),
-                (right - half).max(0.0),
-                iv.open.get(),
-            );
-            line.setLineWidth(FOCUS_PT);
-            srgb(iv.tone.get(), 1.0).setStroke();
-            line.stroke();
-        }
     }
 );
 
 impl FocusRing {
-    /// Born hidden: the owner shows it on the focused pane of a split tab.
-    pub(crate) fn new(mtm: MainThreadMarker, theme: &Theme) -> Retained<Self> {
+    /// Born hidden: the container stands it round the focused card of a split tab.
+    pub(crate) fn new(mtm: MainThreadMarker) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(RingIvars {
-            tone: Cell::new(theme.focus_frame_srgb()),
-            corners: Cell::new((0.0, 0.0, 0.0)),
-            open: Cell::new(false),
+            on: Cell::new(None),
         });
         // SAFETY: `NSView`'s `init`; the ivars are set.
         let this: Retained<Self> = unsafe { msg_send![super(this), init] };
+        this.setWantsLayer(true);
+        if let Some(layer) = this.layer() {
+            layer.setBorderWidth(FOCUS_PT);
+        }
         this.setHidden(true);
         this
     }
 
-    /// The theme's frame colour.
-    pub(crate) fn paint(&self, theme: &Theme) {
-        let tone = theme.focus_frame_srgb();
-        if self.ivars().tone.replace(tone) != tone {
-            self.setNeedsDisplay(true);
+    /// Stands the line round `frame` (the container's space) of pane `pane`'s card, with the
+    /// card's corners `(top, bottom left, bottom right)`, in `theme`'s frame colour; `None` hides
+    /// it. A move to another pane's card slides there unless `still` (Reduce Motion); the same
+    /// card laid out again is followed at once.
+    pub(crate) fn place(
+        &self,
+        at: Option<(u64, NSRect, (f64, f64, f64))>,
+        theme: &Theme,
+        still: bool,
+    ) {
+        let Some(layer) = self.layer() else {
+            return;
+        };
+        let Some((pane, frame, (top, left, right))) = at else {
+            self.ivars().on.set(None);
+            self.setHidden(true);
+            return;
+        };
+        layer.setBorderColor(Some(&srgb(theme.focus_frame_srgb(), 1.0).CGColor()));
+        // One radius for the corners that have one: a card's are all alike, a lined pane's are
+        // the window's curve where it meets the window's bottom and square elsewhere. The layer
+        // is not flipped: its minimum y is the bottom.
+        let radius = top.max(left).max(right);
+        let mut corners = CACornerMask::empty();
+        for (round, corner) in [
+            (
+                top,
+                CACornerMask::LayerMinXMaxYCorner | CACornerMask::LayerMaxXMaxYCorner,
+            ),
+            (left, CACornerMask::LayerMinXMinYCorner),
+            (right, CACornerMask::LayerMaxXMinYCorner),
+        ] {
+            if round > 0.0 {
+                corners |= corner;
+            }
+        }
+        layer.setCornerRadius(radius);
+        layer.setMaskedCorners(corners);
+        let shown = !self.isHidden();
+        let moved = self.ivars().on.replace(Some(pane)) != Some(pane);
+        self.setHidden(false);
+        if self.frame() == frame {
+            return;
+        }
+        if shown && moved && !still {
+            let this = self.retain();
+            animate(MOVE_SECS, move || this.animator().setFrame(frame), || {});
+        } else {
+            // A slide on its way would carry on to its old place.
+            layer.removeAllAnimations();
+            self.setFrame(frame);
         }
     }
-
-    /// The radii the line follows, `(top, bottom left, bottom right)`, and whether its top is
-    /// the header's.
-    pub(crate) fn set_corners(&self, corners: (f64, f64, f64), open: bool) {
-        let moved = self.ivars().corners.replace(corners) != corners;
-        if self.ivars().open.replace(open) != open || moved {
-            self.setNeedsDisplay(true);
-        }
-    }
-}
-
-/// A rectangle with its own radius at each corner, in bottom-up coordinates:
-/// the two top ones `top`, the bottom ones `left` and `right`. Each radius is
-/// held to half the shorter side. `open`: no top edge — up both sides from the bottom.
-fn cornered(rect: NSRect, top: f64, left: f64, right: f64, open: bool) -> Retained<NSBezierPath> {
-    let (x0, y0) = (rect.origin.x, rect.origin.y);
-    let (x1, y1) = (x0 + rect.size.width, y0 + rect.size.height);
-    let most = rect.size.width.min(rect.size.height) / 2.0;
-    let (top, left, right) = (top.min(most), left.min(most), right.min(most));
-    let path = NSBezierPath::bezierPath();
-    if open {
-        // The header's band carries the top: the sides run up to the pane's edge.
-        path.moveToPoint(NSPoint::new(x0, y1 + 1.0));
-        path.appendBezierPathWithArcFromPoint_toPoint_radius(
-            NSPoint::new(x0, y0),
-            NSPoint::new(x1, y0),
-            left,
-        );
-        path.appendBezierPathWithArcFromPoint_toPoint_radius(
-            NSPoint::new(x1, y0),
-            NSPoint::new(x1, y1),
-            right,
-        );
-        path.lineToPoint(NSPoint::new(x1, y1 + 1.0));
-        return path;
-    }
-    path.moveToPoint(NSPoint::new(x0 + left, y0));
-    path.appendBezierPathWithArcFromPoint_toPoint_radius(
-        NSPoint::new(x1, y0),
-        NSPoint::new(x1, y1),
-        right,
-    );
-    path.appendBezierPathWithArcFromPoint_toPoint_radius(
-        NSPoint::new(x1, y1),
-        NSPoint::new(x0, y1),
-        top,
-    );
-    path.appendBezierPathWithArcFromPoint_toPoint_radius(
-        NSPoint::new(x0, y1),
-        NSPoint::new(x0, y0),
-        top,
-    );
-    path.appendBezierPathWithArcFromPoint_toPoint_radius(
-        NSPoint::new(x0, y0),
-        NSPoint::new(x1, y0),
-        left,
-    );
-    path.closePath();
-    path
 }
 
 /// Rounds and clips the pane's own layer, or gives the corners back. Under a header (a split

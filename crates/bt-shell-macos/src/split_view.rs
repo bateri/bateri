@@ -352,6 +352,12 @@ pub(crate) struct SplitIvars {
     /// The dividers' drag handles, in the order of
     /// [`split::Layout::dividers`].
     handles: RefCell<Vec<Retained<DividerHandle>>>,
+    /// The focus frame (`[appearance] focus_frame`): above the panes and their headers, round
+    /// the card of [`Self::framed`] while the tab shows a split ([`Self::set_focus_frame`]).
+    focus_ring: Retained<card::FocusRing>,
+    /// The pane the focus frame stands round, and the theme it is drawn in; `None`: no frame.
+    framed: Cell<Option<u64>>,
+    ring_theme: Cell<Option<Theme>>,
     /// The tab's sheet owner while one of its questions is up
     /// ([`crate::sheets`]): here because the container is the tab's view,
     /// which an asking pane reaches through its superview even while it
@@ -396,6 +402,7 @@ impl SplitView {
         first: &TerminalPane,
     ) -> Retained<Self> {
         let hairline = Hairline::new(mtm);
+        let focus_ring = card::FocusRing::new(mtm);
         let backdrop = NSBox::new(mtm);
         backdrop.setBoxType(NSBoxType::Custom);
         backdrop.setTitlePosition(NSTitlePosition::NoTitle);
@@ -410,6 +417,9 @@ impl SplitView {
             zoomed: Cell::new(None),
             heads: RefCell::new(Vec::new()),
             handles: RefCell::new(Vec::new()),
+            focus_ring: focus_ring.clone(),
+            framed: Cell::new(None),
+            ring_theme: Cell::new(None),
             sheet_owner: OwnerSlot::default(),
         });
         // SAFETY: `initWithFrame:` is NSView's designated initializer and the
@@ -421,6 +431,7 @@ impl SplitView {
         this.addSubview(&backdrop);
         this.addSubview(first);
         this.addSubview(&hairline);
+        this.addSubview(&focus_ring);
         this.layout_panes();
         this
     }
@@ -971,6 +982,44 @@ impl SplitView {
         let color = NSColor::colorWithSRGBRed_green_blue_alpha(r, g, b, 1.0);
         self.ivars().hairline.setFillColor(&color);
         self.ivars().backdrop.setFillColor(&color);
+        self.ivars().ring_theme.set(Some(*theme));
+        self.place_ring();
+    }
+
+    /// The focus frame stands round pane `pane`'s card, in `theme`'s frame colour, or nowhere
+    /// (`None`): the focused pane with `[appearance] focus_frame` on (`TerminalTab::refresh_look`),
+    /// shown only while the tab shows a split. A move to another pane slides it there.
+    pub(crate) fn set_focus_frame(&self, pane: Option<u64>, theme: &Theme) {
+        self.ivars().framed.set(pane);
+        self.ivars().ring_theme.set(Some(*theme));
+        self.place_ring();
+    }
+
+    /// The focus frame where the layout has its card now: header and pane, with the card's
+    /// corners — a card's all round, a lined pane's square on top and the window's curve where
+    /// its bottom meets the window's.
+    fn place_ring(&self) {
+        let iv = self.ivars();
+        let Some(theme) = iv.ring_theme.get() else {
+            return;
+        };
+        let still = crate::app::delegate(self.mtm()).is_some_and(|app| app.reduce_motion());
+        let top = if self.carded() {
+            card::corner_pt()
+        } else {
+            0.0
+        };
+        let at = iv
+            .framed
+            .get()
+            .filter(|_| self.shows_split())
+            .and_then(|id| self.pane(id))
+            .filter(|pane| !pane.isHidden())
+            .map(|pane| {
+                let (left, right) = pane.corners();
+                (pane.id(), self.card_frame(&pane), (top, left, right))
+            });
+        iv.focus_ring.place(at, &theme, still);
     }
 
     /// What the content does at the panes' top edge: the hairline shows only
@@ -1166,6 +1215,7 @@ impl SplitView {
             let (left, right) = self.corners_of(self.bounds_rect(), false);
             only.place(self.bounds(), left, right);
             self.sync_handles(&[]);
+            self.place_ring();
             self.ground_follows();
             return;
         }
@@ -1197,6 +1247,7 @@ impl SplitView {
         }
         self.place_heads(&layout.panes, headed);
         self.sync_handles(&layout.dividers);
+        self.place_ring();
         self.ground_follows();
     }
 

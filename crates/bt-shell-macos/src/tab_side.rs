@@ -47,7 +47,7 @@ use std::cell::{Cell, RefCell};
 
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
-use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
+use objc2::{AnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{
     NSAccessibility, NSAffineTransformNSAppKitAdditions, NSBezierPath, NSBox, NSColor, NSFont,
     NSFontAttributeName, NSFontWeightMedium, NSFontWeightSemibold, NSForegroundColorAttributeName,
@@ -666,16 +666,8 @@ impl TabBar {
                 // A plain row with details: its parts in its band, the details under it.
                 look.band = Some(tabs::TAB_HEIGHT);
             }
-            if agents {
-                // The lines draw the face, the selection and the tiles; the chip keeps its place.
-                look.emblem = None;
-                look.indicator = None;
-                look.hint = None;
-                look.selected = false;
-                look.hovered = false;
-            }
-            chip.set(frame, &look, palette, motion, slide);
-            let hints = seen.hints.map_or_else(Vec::new, |mods| {
+            // In Activity the keys count agents ([`tabs::agent_digit`]).
+            let hints: Vec<Option<String>> = seen.hints.map_or_else(Vec::new, |mods| {
                 (0..label.agents.len())
                     .map(|agent| {
                         tabs::agent_digit(index, agent, &counts)
@@ -683,6 +675,21 @@ impl TabBar {
                     })
                     .collect()
             });
+            if agents {
+                // The lines draw the tiles, the names and what each agent is doing. One agent's
+                // row is the chip's as any row is — its face, its hover, its `×` and its key; a
+                // tab of several agents is one face the lines draw, each line its own hover.
+                look.emblem = None;
+                look.indicator = None;
+                if label.agents.len() > 1 {
+                    look.hint = None;
+                    look.selected = false;
+                    look.hovered = false;
+                } else {
+                    look.hint = hints.first().cloned().flatten();
+                }
+            }
+            chip.set(frame, &look, palette, motion, slide);
             let lines = if agents {
                 Some(label.agents.as_slice())
             } else {
@@ -1215,6 +1222,8 @@ pub(crate) struct AgentIvars {
     selected: Cell<bool>,
     palette: Cell<Option<Palette>>,
     style: Cell<Option<IconStyle>>,
+    /// The line under the pointer: its title in full ink and, among several, its own face.
+    hot: Cell<Option<usize>>,
 }
 
 define_class!(
@@ -1244,6 +1253,23 @@ define_class!(
             None
         }
 
+        #[unsafe(method(mouseEntered:))]
+        fn mouse_entered(&self, event: &objc2_app_kit::NSEvent) {
+            self.hover_at(event);
+        }
+
+        #[unsafe(method(mouseMoved:))]
+        fn mouse_moved(&self, event: &objc2_app_kit::NSEvent) {
+            self.hover_at(event);
+        }
+
+        #[unsafe(method(mouseExited:))]
+        fn mouse_exited(&self, _event: &objc2_app_kit::NSEvent) {
+            if self.ivars().hot.replace(None).is_some() {
+                self.setNeedsDisplay(true);
+            }
+        }
+
         #[unsafe(method(drawRect:))]
         fn draw_rect(&self, _dirty: NSRect) {
             self.draw();
@@ -1262,11 +1288,60 @@ impl AgentRows {
             selected: Cell::new(false),
             palette: Cell::new(None),
             style: Cell::new(None),
+            hot: Cell::new(None),
         });
         // SAFETY: `initWithFrame:` is NSView's designated initializer and the ivars are set.
         let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] };
         this.setHidden(true);
+        // The line under the pointer is its own: entering, moving within and leaving.
+        let options = objc2_app_kit::NSTrackingAreaOptions::MouseEnteredAndExited
+            | objc2_app_kit::NSTrackingAreaOptions::MouseMoved
+            | objc2_app_kit::NSTrackingAreaOptions::ActiveInActiveApp
+            | objc2_app_kit::NSTrackingAreaOptions::InVisibleRect;
+        // SAFETY: `owner` is the view, which owns the area and outlives it; no user info.
+        // `InVisibleRect` follows the view's bounds, so the rect is ignored.
+        let area = unsafe {
+            objc2_app_kit::NSTrackingArea::initWithRect_options_owner_userInfo(
+                objc2_app_kit::NSTrackingArea::alloc(),
+                NSRect::ZERO,
+                options,
+                Some(&this),
+                None,
+            )
+        };
+        this.addTrackingArea(&area);
         this
+    }
+
+    /// Takes the lines away: the chip is no row of the column (the title row's chip, the hidden
+    /// column's title), whatever the last layout of the column gave it.
+    pub(super) fn hide(&self) {
+        self.setHidden(true);
+        self.ivars().hot.set(None);
+    }
+
+    /// The pointer moved over the lines: the one under it is the hot one.
+    fn hover_at(&self, event: &objc2_app_kit::NSEvent) {
+        let at = self.convertPoint_fromView(event.locationInWindow(), None);
+        let hot = self.line_at(at.y);
+        if self.ivars().hot.replace(hot) != hot {
+            self.setNeedsDisplay(true);
+        }
+    }
+
+    /// The index of the line at `y` (the view's own, top-down); the last one below the end.
+    fn line_at(&self, y: f64) -> Option<usize> {
+        let iv = self.ivars();
+        let count = iv.lines.borrow().len();
+        let heights = iv.heights.borrow();
+        let mut top = 0.0;
+        for (index, height) in heights.iter().take(count).enumerate() {
+            top += height;
+            if y < top {
+                return Some(index);
+            }
+        }
+        count.checked_sub(1)
     }
 
     /// Shows the tab's `lines` (`None` hides them: the chip is a row of its own again), each
@@ -1313,17 +1388,8 @@ impl AgentRows {
 
     /// The pane whose line is at `y` (the view's own, top-down); the last one below the end.
     pub(super) fn pane_at(&self, y: f64) -> Option<u64> {
-        let iv = self.ivars();
-        let lines = iv.lines.borrow();
-        let heights = iv.heights.borrow();
-        let mut top = 0.0;
-        for (line, height) in lines.iter().zip(heights.iter()) {
-            top += height;
-            if y < top {
-                return Some(line.pane);
-            }
-        }
-        lines.last().map(|line| line.pane)
+        let index = self.line_at(y)?;
+        self.ivars().lines.borrow().get(index).map(|line| line.pane)
     }
 
     /// How wide `text` is in the type a question is drawn in ([`tabs::ask_lines`] measures by it).
@@ -1353,24 +1419,30 @@ impl AgentRows {
             return;
         }
         let bundled = lines.len() > 1;
-        // A tab's agents share a face; the picked line and a hovered one lie on it.
+        // A tab's agents share a face; the picked line and a hovered one lie on it, together the
+        // selected face (10 %) and a hover of 7 %. One agent's row is the chip's: its face, its
+        // hover, its `×` and its key are the chip's.
         if bundled {
             rounded(bounds, TAB_RADIUS, Tint::of(palette.title, 0.04), None);
         }
+        let hot = iv.hot.get();
         let mut next = 0.0;
         for (index, line) in lines.iter().enumerate() {
             let height = heights.get(index).copied().unwrap_or(tabs::AGENT_ROW);
             let top = next;
             next += height;
             let row = NSRect::new(NSPoint::new(0.0, top), NSSize::new(width, height));
-            let strong = iv.selected.get() && line.focused;
-            if strong {
-                let face = if bundled {
-                    Tint::of(palette.title, 0.0625)
-                } else {
-                    palette.selected
-                };
-                rounded(row, TAB_RADIUS, face, Some(palette.selected_line));
+            let strong = iv.selected.get() && (line.focused || !bundled);
+            let lit = hot == Some(index) && !strong;
+            if bundled && strong {
+                rounded(
+                    row,
+                    TAB_RADIUS,
+                    Tint::of(palette.title, 0.0625),
+                    Some(palette.selected_line),
+                );
+            } else if bundled && lit {
+                rounded(row, TAB_RADIUS, Tint::of(palette.title, 0.03125), None);
             }
             // The program's tile, where a row's stands, centred on the line.
             let slot = glyph_slot();
@@ -1391,8 +1463,15 @@ impl AgentRows {
                 palette,
             );
             NSGraphicsContext::restoreGraphicsState_class();
-            let hint = hints.get(index).cloned().flatten();
-            let end = if hint.is_some() {
+            // A line of several draws its own key; one agent's is the chip's, which also shows
+            // its `×` under the pointer: the title gives way to either.
+            let hint = hints.get(index).cloned().flatten().filter(|_| bundled);
+            let crowded = if bundled {
+                hint.is_some()
+            } else {
+                hot.is_some() || hints.first().is_some_and(Option::is_some)
+            };
+            let end = if crowded {
                 tabs::ROW_CROWDED
             } else {
                 tabs::ROW_END
@@ -1403,7 +1482,11 @@ impl AgentRows {
                 NSRect::new(NSPoint::new(x, top + 4.5), NSSize::new(room, 18.0)),
                 super::CHIP_TEXT,
                 strong,
-                if strong { palette.title } else { palette.dim },
+                if strong || hot == Some(index) {
+                    palette.title
+                } else {
+                    palette.dim
+                },
             );
             let tone = match line.tone {
                 AgentTone::Quiet => palette.dim,

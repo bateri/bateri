@@ -4637,10 +4637,12 @@ impl TerminalWindow {
                 }
             }
         }
+        // A tab on screen the list does not hold (Activity lists the agents' tabs alone) selects no
+        // row: the place past the last.
         let selected = order
             .selected()
             .and_then(|shown| labels.iter().position(|label| label.tab == shown))
-            .unwrap_or(0);
+            .unwrap_or(labels.len());
         // The title row of a window with groups leads with the button that switches between them.
         let switcher = (!side && !groups.is_empty()).then(|| {
             let on_screen = groups.shown(&order);

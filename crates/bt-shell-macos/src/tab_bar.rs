@@ -3523,10 +3523,11 @@ impl Chip {
         self.ivars().tab.get()
     }
 
-    /// The parts that fill the whole chip: the faces, the transfer's fill and the lines. They are
+    /// The parts that fill the whole chip: the faces, the transfer's fill, the lines and an
+    /// agent's lines in the column. They are
     /// given the chip's size wherever it gets a new one ([`Self::set`]): at once with it, or along
     /// its slide.
-    fn parts(&self) -> [Retained<NSView>; 5] {
+    fn parts(&self) -> [Retained<NSView>; 6] {
         let iv = self.ivars();
         [
             Retained::into_super(iv.hover.clone()),
@@ -3534,6 +3535,7 @@ impl Chip {
             Retained::into_super(iv.face.clone()),
             Retained::into_super(iv.fill.clone()),
             Retained::into_super(iv.lines.clone()),
+            Retained::into_super(iv.agents.clone()),
         ]
     }
 
@@ -3667,6 +3669,11 @@ impl Chip {
         } = look;
         let (style, side) = (*style, *side);
         let (selected, hovered, single) = (*selected, *hovered, *single);
+        // An agent's lines are a row of the column's; anywhere else the chip shows none of them,
+        // whatever the column's last layout gave it.
+        if !side {
+            self.ivars().agents.hide();
+        }
         // Picked is a side row's: the one-tab form has no face to tint.
         let picked = *picked && !single;
         let ghost = *ghost && !single;
@@ -5564,6 +5571,7 @@ struct Shown {
     /// The group button and its list, in the title row of a window with groups; none in the
     /// column and none while no group exists.
     switcher: Option<Switcher>,
+    /// The listed tab on screen; past the last when the list does not hold it (Activity).
     selected: usize,
     /// The settings diagnostic; empty without one.
     notice: String,
@@ -9556,7 +9564,7 @@ mod tests {
             let rest = &source[at..];
             &rest[..rest.find("\n    }\n").expect("the method ends")]
         };
-        for part in ["hover", "pick", "face", "fill", "lines"] {
+        for part in ["hover", "pick", "face", "fill", "lines", "agents"] {
             assert!(
                 parts.contains(&format!("iv.{part}.clone()")),
                 "{part} fills the chip and is one of its parts"
