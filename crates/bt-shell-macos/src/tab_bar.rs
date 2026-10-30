@@ -199,6 +199,10 @@ mod tab_switch;
 // A title that does not fit: faded at its end, slid under the pointer.
 #[path = "tab_title.rs"]
 mod tab_title;
+// A pane's header in a split tab: the bar's mark and title drawing over each pane.
+#[path = "tab_head.rs"]
+mod pane_head;
+pub(crate) use pane_head::{HeadLook, PaneHead};
 
 /// Space between the zoom button's right edge and the strip — the design's
 /// strip starts at 84 pt beside lights ending at 72 pt. In full screen the

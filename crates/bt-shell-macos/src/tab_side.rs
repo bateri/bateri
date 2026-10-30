@@ -1509,6 +1509,11 @@ pub(super) struct AgentLook {
     pub(super) style: IconStyle,
 }
 
+/// [`draw_line`] for the bar's other children: a pane's header writes its title with it.
+pub(super) fn draw_title(text: &str, rect: NSRect, size: f64, strong: bool, color: u32) {
+    draw_line(text, rect, size, strong, color);
+}
+
 /// One line of text in `rect` (top-down), cut with an ellipsis where it does not fit: `size`
 /// points, semibold when `strong`, else medium.
 fn draw_line(text: &str, rect: NSRect, size: f64, strong: bool, color: u32) {

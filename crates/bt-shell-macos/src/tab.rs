@@ -67,7 +67,7 @@ use crate::restore::{SavedTab, Shape};
 use crate::sheets;
 use crate::split::{Axis, Direction, Placement, Removal, Tree};
 use crate::split_view::SplitView;
-use crate::tab_bar::{AgentLine, AgentTone, Emblem, Upload};
+use crate::tab_bar::{AgentLine, AgentTone, Emblem, HeadLook, Upload};
 use crate::tabs::{self, Card, CardCommand, CardPane, Finish, Indicator, Signals, Tally, Unseen};
 use crate::upload;
 use crate::uploader;
@@ -694,7 +694,47 @@ impl TerminalTab {
             let own = pane.id() == focused;
             pane.set_focus_look(own, dim && !own, frame && own);
         }
+        self.refresh_heads();
         self.ivars().container.ground_follows();
+    }
+
+    /// Gives the panes' headers of a split tab what they show: each pane's program mark, its
+    /// title, its own signals' dot, whether it holds the focus and the focus frame round it.
+    /// AppKit's work, it asks for no frame.
+    pub(crate) fn refresh_heads(&self) {
+        let container = &self.ivars().container;
+        if !container.shows_split() {
+            return;
+        }
+        let Some(theme) = self.focused_pane().session().map(|session| session.theme()) else {
+            return;
+        };
+        let focused = self.focused_pane().id();
+        let framed = app::delegate(self.mtm()).is_some_and(|app| app.settings().focus_frame);
+        let carded = container.carded();
+        let (hidden, away) = (self.hidden(), self.away());
+        let looks = self
+            .panes()
+            .iter()
+            .map(|pane| {
+                let own = pane.id() == focused;
+                (
+                    pane.id(),
+                    HeadLook {
+                        kind: pane.program_kind(),
+                        title: pane
+                            .session()
+                            .map(|session| session.title())
+                            .unwrap_or_default(),
+                        indicator: tabs::indicator(self.signals_of(pane, hidden, away)),
+                        focused: own,
+                        carded,
+                        frame: (framed && own).then(|| theme.focus_frame_srgb()),
+                    },
+                )
+            })
+            .collect();
+        container.set_head_looks(looks, &theme);
     }
 
     /// The zoomed pane; `None` → the splits are visible.

@@ -1731,7 +1731,8 @@ impl RootView {
                 .iter()
                 .filter(|pane| !pane.isHidden())
                 .map(|pane| {
-                    let at = shade.convertRect_fromView(pane.frame(), Some(container));
+                    let at =
+                        shade.convertRect_fromView(container.card_frame(pane), Some(container));
                     (at, pane.shows_focus())
                 })
                 .collect()
@@ -4660,6 +4661,10 @@ impl TerminalWindow {
     /// from what it is given — and the sheet gate when a tab's question
     /// starts or stops waiting (`sheets`).
     pub(crate) fn refresh_bar(&self) {
+        // What the bar hears — a title, a program's state — the panes' headers say too.
+        for tab in self.tabs() {
+            tab.refresh_heads();
+        }
         let single = self.lone_tab();
         let side = self.bar().is_side();
         let activity = side && self.listing_activity();

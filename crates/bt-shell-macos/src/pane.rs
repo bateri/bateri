@@ -2042,6 +2042,9 @@ pub struct PaneIvars {
     /// shown on the focused pane of a split tab by the owner
     /// ([`TerminalPane::set_focus_look`]).
     focus_ring: Retained<FocusRing>,
+    /// The pane has a header over it (a split tab's, `pane_head`): its top corners and its card's
+    /// light are the header's ([`TerminalPane::set_headed`]).
+    headed: Cell<bool>,
     /// The ⌘-hovered OSC 8 link's target and its text: above the
     /// terminal and the search panel, below the dim veil. AppKit's, outside the
     /// frame path; shown by [`TerminalPane::set_link_target`].
@@ -2843,6 +2846,7 @@ impl TerminalPane {
             connection: Cell::new(PaneLink::Live),
             card_frame: card_frame.clone(),
             focus_ring: focus_ring.clone(),
+            headed: Cell::new(false),
             link_label: link_label.clone(),
             link: OnceCell::new(),
             shot: RefCell::new(None),
@@ -4314,13 +4318,14 @@ impl TerminalPane {
     /// window's bottom ([`TerminalPane::set_corners`]).
     fn shape_ring(&self) {
         let (left, right) = self.ivars().corners.get();
+        let headed = self.ivars().headed.get();
         let corners = if self.is_card() {
             let card = card::corner_pt();
-            (card, card, card)
+            (if headed { 0.0 } else { card }, card, card)
         } else {
             (0.0, left, right)
         };
-        self.ivars().focus_ring.set_corners(corners);
+        self.ivars().focus_ring.set_corners(corners, headed);
     }
 
     // ─── The connection of a terminal the server keeps ───────────────────
@@ -4463,11 +4468,35 @@ impl TerminalPane {
     /// clips its layer and shows or hides the light on it ([`crate::card`]).
     /// The container calls it on every layout.
     pub(crate) fn set_card(&self, carded: bool) {
+        let headed = self.ivars().headed.get();
         self.ivars().card_frame.set_carded(carded);
+        // Under a header the card's light is the header's.
+        if headed {
+            self.ivars().card_frame.setAlphaValue(0.0);
+        }
         if let Some(layer) = self.layer() {
-            card::round(&layer, carded);
+            card::round(&layer, carded, headed);
         }
         self.shape_ring();
+    }
+
+    /// The grid's left and right margins, in points, as the pane's own metrics carry them
+    /// (`CellMetrics::with_corners`): where its text starts and ends across. A header over the
+    /// pane stands its mark on the first. `None` off a window.
+    pub(crate) fn side_margins(&self) -> Option<(f64, f64)> {
+        let scale = self.window()?.backingScaleFactor();
+        let cell = self.cell_metrics(scale);
+        Some((
+            f64::from(cell.side_left_px()) / scale,
+            f64::from(cell.side_right_px()) / scale,
+        ))
+    }
+
+    /// The pane stands under a header (a split tab's) or not: its top corners, its card's light
+    /// and the focus frame's top go to the header. The container says so with every layout,
+    /// before [`Self::set_card`].
+    pub(crate) fn set_headed(&self, headed: bool) {
+        self.ivars().headed.set(headed);
     }
 
     /// Tells the pane the radii, in points, of its bottom left and right

@@ -167,6 +167,9 @@ pub struct Spacing {
     top: f64,
     /// The margin at the area's left edge: `around` unless [`Spacing::with_left`] said otherwise.
     left: f64,
+    /// What each leaf keeps at its top for its header ([`Spacing::with_head`]): the pane starts
+    /// that far down its place, and a leaf's smallest height counts it.
+    head: f64,
 }
 
 impl Spacing {
@@ -176,6 +179,7 @@ impl Spacing {
         around: 0.0,
         top: 0.0,
         left: 0.0,
+        head: 0.0,
     };
 
     /// A gap of `between` points between panes and `around` points between the panes and the
@@ -187,7 +191,23 @@ impl Spacing {
             around: pixels(around),
             top: pixels(around),
             left: pixels(around),
+            head: 0.0,
         }
+    }
+
+    /// The same spacing with a header `head` points tall over every leaf: a split tab's panes
+    /// each have one. Asked from here like every margin, so the layout, the room a split asks
+    /// for, a drag and a resize all count it.
+    pub fn with_head(self, head: f64, scale: f64) -> Self {
+        Self {
+            head: (head * scale).round().max(0.0),
+            ..self
+        }
+    }
+
+    /// The header each leaf keeps at its top, in device pixels.
+    pub fn head_px(self) -> f64 {
+        self.head
     }
 
     /// The same spacing with `top` points at the area's top edge instead of the margin around:
@@ -537,7 +557,7 @@ impl Tree {
     pub fn layout_spaced(&self, bounds: Rect, scale: f64, spacing: Spacing) -> Layout {
         let mut out = Layout::default();
         let root = spacing.inside(snap(bounds, scale));
-        self.place(root, spacing.between, &mut out);
+        self.place(root, spacing, &mut out);
         let points = 1.0 / scale;
         for (_, rect) in &mut out.panes {
             *rect = rect.scaled(points);
@@ -716,7 +736,14 @@ impl Tree {
     /// share of the side with the smaller share.
     fn min_px(&self, axis: Axis, limits: &Limits<'_>) -> f64 {
         match self {
-            Tree::Leaf(id) => ((limits.min)(*id).along(axis) * limits.scale).ceil(),
+            Tree::Leaf(id) => {
+                // A header stands over every leaf's pane: a stack's lengths count it.
+                let head = match axis {
+                    Axis::Vertical => limits.spacing.head,
+                    Axis::Horizontal => 0.0,
+                };
+                ((limits.min)(*id).along(axis) * limits.scale).ceil() + head
+            }
             Tree::Split {
                 axis: own,
                 ratio,
@@ -735,22 +762,31 @@ impl Tree {
         }
     }
 
-    fn place(&self, rect: Rect, between: f64, out: &mut Layout) {
+    fn place(&self, rect: Rect, spacing: Spacing, out: &mut Layout) {
         match self {
-            Tree::Leaf(id) => out.panes.push((*id, rect)),
+            // The pane under its header.
+            Tree::Leaf(id) => out.panes.push((
+                *id,
+                Rect::new(
+                    rect.x,
+                    rect.y + spacing.head,
+                    rect.width,
+                    (rect.height - spacing.head).max(0.0),
+                ),
+            )),
             Tree::Split {
                 axis,
                 ratio,
                 first,
                 second,
             } => {
-                let (a, divider, b) = halves_px(rect, *axis, *ratio, between);
-                first.place(a, between, out);
+                let (a, divider, b) = halves_px(rect, *axis, *ratio, spacing.between);
+                first.place(a, spacing, out);
                 out.dividers.push(Divider {
                     rect: divider,
                     axis: *axis,
                 });
-                second.place(b, between, out);
+                second.place(b, spacing, out);
             }
         }
     }
@@ -2058,6 +2094,46 @@ mod tests {
     }
 
     // ----- spacing -----
+
+    #[test]
+    fn a_header_over_each_leaf_moves_its_pane_down_and_counts_in_a_stack() {
+        let bounds = Rect::new(0.0, 0.0, 800.0, 600.0);
+        let mut tree = Tree::Leaf(1);
+        assert!(tree.split(1, Axis::Vertical, 2));
+        let headed = Spacing::gapped(8.0, 8.0, 1.0).with_head(34.0, 1.0);
+        let layout = tree.layout_spaced(bounds, 1.0, headed);
+        let plain = tree.layout_spaced(bounds, 1.0, Spacing::gapped(8.0, 8.0, 1.0));
+        for ((_, pane), (_, place)) in layout.panes.iter().zip(&plain.panes) {
+            assert_eq!(pane.y, place.y + 34.0, "under its header");
+            assert_eq!(pane.height, place.height - 34.0);
+            assert_eq!((pane.x, pane.width), (place.x, place.width));
+        }
+        assert_eq!(layout.dividers, plain.dividers, "the gaps do not move");
+        // A pane's smallest height counts its header: a stack that fits without headers can
+        // ask too much with them.
+        let min = |_: u64| Size::new(100.0, 270.0);
+        let room = |spacing| Room {
+            bounds,
+            scale: 1.0,
+            spacing,
+            min: &min,
+        };
+        assert!(tree.fits(&room(Spacing::gapped(8.0, 8.0, 1.0))));
+        assert!(
+            !tree.fits(&room(headed)),
+            "270 of pane under 34 of header does not"
+        );
+        // The header changes nothing across: side by side, the widths stay.
+        let mut wide = Tree::Leaf(1);
+        assert!(wide.split(1, Axis::Horizontal, 2));
+        assert_eq!(
+            wide.layout_spaced(bounds, 1.0, headed).panes[0].1.width,
+            wide.layout_spaced(bounds, 1.0, Spacing::gapped(8.0, 8.0, 1.0))
+                .panes[0]
+                .1
+                .width
+        );
+    }
 
     #[test]
     fn the_divided_spacing_is_the_layout_the_ungapped_functions_give() {

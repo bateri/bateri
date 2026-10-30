@@ -56,8 +56,9 @@ use objc2_foundation::{
     NSString, NSValue, ns_string,
 };
 use objc2_quartz_core::{
-    CABasicAnimation, CACurrentMediaTime, CALayer, CAMediaTiming, CAMediaTimingFunction,
-    CATransaction, CATransform3D, NSValueCATransform3DAdditions, kCAFillModeBackwards,
+    CABasicAnimation, CACornerMask, CACurrentMediaTime, CALayer, CAMediaTiming,
+    CAMediaTimingFunction, CATransaction, CATransform3D, NSValueCATransform3DAdditions,
+    kCAFillModeBackwards,
 };
 
 use crate::split::{self, Rect, Slide};
@@ -113,6 +114,10 @@ fn windowed_corner_pt() -> f64 {
 pub(crate) fn corner_pt() -> f64 {
     (windowed_corner_pt() - GAP_PT).max(0.0)
 }
+
+/// The height of a pane's header in a split tab, points: the terminal's gutter above and below a
+/// row's 18 pt line (`pane_head`). A design constant, the design's 34.
+pub(crate) const HEAD_PT: f64 = 34.0;
 
 /// The slide's length, in seconds. A design constant, the canvas's 220 ms.
 pub(crate) const SLIDE_SECS: f64 = 0.22;
@@ -311,6 +316,8 @@ pub(crate) struct RingIvars {
     /// bottom left, bottom right — the card's all round, or a lined pane's
     /// square top and the window's curve where it meets the window's bottom.
     corners: Cell<(f64, f64, f64)>,
+    /// The pane has a header: the line is open at its top, the header draws that half.
+    open: Cell<bool>,
 }
 
 define_class!(
@@ -343,6 +350,7 @@ define_class!(
                 (top - half).max(0.0),
                 (left - half).max(0.0),
                 (right - half).max(0.0),
+                iv.open.get(),
             );
             line.setLineWidth(FOCUS_PT);
             srgb(iv.tone.get(), 1.0).setStroke();
@@ -357,6 +365,7 @@ impl FocusRing {
         let this = Self::alloc(mtm).set_ivars(RingIvars {
             tone: Cell::new(theme.focus_frame_srgb()),
             corners: Cell::new((0.0, 0.0, 0.0)),
+            open: Cell::new(false),
         });
         // SAFETY: `NSView`'s `init`; the ivars are set.
         let this: Retained<Self> = unsafe { msg_send![super(this), init] };
@@ -372,9 +381,11 @@ impl FocusRing {
         }
     }
 
-    /// The radii the line follows: `(top, bottom left, bottom right)`.
-    pub(crate) fn set_corners(&self, corners: (f64, f64, f64)) {
-        if self.ivars().corners.replace(corners) != corners {
+    /// The radii the line follows, `(top, bottom left, bottom right)`, and whether its top is
+    /// the header's.
+    pub(crate) fn set_corners(&self, corners: (f64, f64, f64), open: bool) {
+        let moved = self.ivars().corners.replace(corners) != corners;
+        if self.ivars().open.replace(open) != open || moved {
             self.setNeedsDisplay(true);
         }
     }
@@ -382,13 +393,29 @@ impl FocusRing {
 
 /// A rectangle with its own radius at each corner, in bottom-up coordinates:
 /// the two top ones `top`, the bottom ones `left` and `right`. Each radius is
-/// held to half the shorter side.
-fn cornered(rect: NSRect, top: f64, left: f64, right: f64) -> Retained<NSBezierPath> {
+/// held to half the shorter side. `open`: no top edge — up both sides from the bottom.
+fn cornered(rect: NSRect, top: f64, left: f64, right: f64, open: bool) -> Retained<NSBezierPath> {
     let (x0, y0) = (rect.origin.x, rect.origin.y);
     let (x1, y1) = (x0 + rect.size.width, y0 + rect.size.height);
     let most = rect.size.width.min(rect.size.height) / 2.0;
     let (top, left, right) = (top.min(most), left.min(most), right.min(most));
     let path = NSBezierPath::bezierPath();
+    if open {
+        // The header's band carries the top: the sides run up to the pane's edge.
+        path.moveToPoint(NSPoint::new(x0, y1 + 1.0));
+        path.appendBezierPathWithArcFromPoint_toPoint_radius(
+            NSPoint::new(x0, y0),
+            NSPoint::new(x1, y0),
+            left,
+        );
+        path.appendBezierPathWithArcFromPoint_toPoint_radius(
+            NSPoint::new(x1, y0),
+            NSPoint::new(x1, y1),
+            right,
+        );
+        path.lineToPoint(NSPoint::new(x1, y1 + 1.0));
+        return path;
+    }
     path.moveToPoint(NSPoint::new(x0 + left, y0));
     path.appendBezierPathWithArcFromPoint_toPoint_radius(
         NSPoint::new(x1, y0),
@@ -414,10 +441,15 @@ fn cornered(rect: NSRect, top: f64, left: f64, right: f64) -> Retained<NSBezierP
     path
 }
 
-/// Rounds and clips the pane's own layer, or gives the corners back.
-pub(crate) fn round(layer: &CALayer, carded: bool) {
+/// Rounds and clips the pane's own layer, or gives the corners back. Under a header (a split
+/// tab's pane) only the bottom corners are the pane's: the header takes the top ones.
+pub(crate) fn round(layer: &CALayer, carded: bool, headed: bool) {
     layer.setCornerRadius(if carded { corner_pt() } else { 0.0 });
     layer.setMasksToBounds(carded);
+    // The pane's layer is not flipped: its minimum y is the bottom.
+    let bottom = CACornerMask::LayerMinXMinYCorner | CACornerMask::LayerMaxXMinYCorner;
+    let all = bottom | CACornerMask::LayerMinXMaxYCorner | CACornerMask::LayerMaxXMaxYCorner;
+    layer.setMaskedCorners(if headed { bottom } else { all });
 }
 
 /// The matrix of a [`Slide`], about the layer's anchor: scale, then shift.
