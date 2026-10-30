@@ -49,11 +49,10 @@ impl Theme {
     /// in the `[ansi]` section; a color is `"#rrggbb"` (uppercase is fine too).
     /// `Err` only on invalid TOML, in the same sense as in the settings file.
     ///
-    /// The base is a parameter, not a constant: in production it is always
-    /// `Theme::BATERI` (where a missing key comes from is `bt-shell`'s
-    /// decision), but the test of the theme block in the document reads with a
-    /// base whose **every value is distinct**, so that a missing key is not
-    /// silently filled from the base.
+    /// The base is a parameter, not a constant: in production it is the one
+    /// [`Theme::read`] chooses, but the test of the theme block in the document
+    /// reads with a base whose **every value is distinct**, so that a missing
+    /// key is not silently filled from the base.
     pub fn parse(text: &str, base: &Theme) -> Result<(Theme, Vec<Diagnostic>), Diagnostic> {
         let doc = document(text)?;
         let root = doc.as_table();
@@ -82,6 +81,29 @@ impl Theme {
             }
         }
         Ok((theme, diagnostics))
+    }
+
+    /// The text of `themes/{name}.toml` → the theme, on the base a missing key
+    /// comes from: the embedded theme the name shadows; under another name,
+    /// `bateri Light` when the file's background is light and `bateri` when it
+    /// is dark or not given ([`Theme::is_dark`]). A user who writes a light
+    /// background and a few colours gets a light theme's selection and search
+    /// marks, not the dark theme's, which would not read on it.
+    pub fn read(name: &str, text: &str) -> Result<(Theme, Vec<Diagnostic>), Diagnostic> {
+        let base = match Theme::embedded(name) {
+            Some(theme) => theme,
+            None => {
+                // The background decides; it is read on the dark base, so a
+                // file without one stays dark.
+                let (dark, _) = Theme::parse(text, &Theme::BATERI)?;
+                if dark.is_dark() {
+                    Theme::BATERI
+                } else {
+                    Theme::BATERI_LIGHT
+                }
+            }
+        };
+        Theme::parse(text, &base)
     }
 }
 
@@ -340,6 +362,43 @@ mod tests {
             (inherited.search_match, inherited.search_current),
             (Theme::BATERI.search_match, Theme::BATERI.search_current)
         );
+    }
+
+    #[test]
+    fn an_unnamed_theme_takes_its_missing_colours_from_its_own_kind() {
+        // A light background and nothing else: the marks come from the light
+        // embedded theme, not the dark one they would not read on.
+        let (theme, diagnostics) =
+            Theme::read("my-paper", "background = \"#fafafa\"\n").expect("parses");
+        assert!(diagnostics.is_empty());
+        assert_eq!(theme.background, 0xfafafa);
+        assert_eq!(theme.selection, Theme::BATERI_LIGHT.selection);
+        assert_eq!(theme.search_match, Theme::BATERI_LIGHT.search_match);
+        assert_eq!(theme.search_current, Theme::BATERI_LIGHT.search_current);
+        assert_eq!(theme.foreground, Theme::BATERI_LIGHT.foreground);
+        // A dark background, or none, keeps the dark base.
+        let (dark, _) = Theme::read("my-ink", "background = \"#101010\"\n").expect("parses");
+        assert_eq!(dark.selection, Theme::BATERI.selection);
+        let (plain, _) = Theme::read("my-accent", "accent = \"#ff0000\"\n").expect("parses");
+        assert_eq!(
+            plain,
+            Theme {
+                accent: 0xff0000,
+                ..Theme::BATERI
+            }
+        );
+        // A name that shadows an embedded theme is read on that theme, light
+        // or dark.
+        let (shadow, _) = Theme::read("linen", "accent = \"#ff0000\"\n").expect("parses");
+        assert_eq!(
+            shadow,
+            Theme {
+                accent: 0xff0000,
+                ..Theme::LINEN
+            }
+        );
+        // Unparseable text is still its own result.
+        assert!(Theme::read("my-paper", "background = \n").is_err());
     }
 
     #[test]

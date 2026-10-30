@@ -1,8 +1,9 @@
-//! A pane's look in a split tab: the **card**. With one pane the tab shows it
-//! edge to edge; with two or more every pane is a card — a gap between and
+//! A pane's look under `[appearance] split_style = "cards"`: the **card**.
+//! Every pane of every tab is one, a tab's only pane too — a gap between and
 //! around ([`GAP_PT`], the frame computation's: `split::Spacing`), corners
 //! rounded and clipped ([`corner_pt`], concentric with the window's corner),
-//! standing on the window's **ground** ([`Ground`], `Theme::ground_srgb`).
+//! standing on the window's **ground** ([`Ground`], `Theme::ground_srgb`, one
+//! flat tone).
 //! No line draws a card: it reads as a card by **depth**, light from above.
 //! Its top edge catches the light, a dark theme's card has a faint sheen
 //! under it, and its shadow is tucked under its foot instead of spreading
@@ -10,7 +11,9 @@
 //! black, and a frame line round every card was what read as plain. The
 //! focused card is nearer: a deeper shadow, a warm light on a dark theme.
 //! Nothing is veiled: all panes read at once (the veil is
-//! `[appearance] dim_unfocused_splits`, the pane's own `DimOverlay`).
+//! `[appearance] dim_unfocused_splits`, the pane's own `DimOverlay`). With
+//! `[appearance] focus_frame` the focused pane of a split tab also has a line
+//! in the accent round it ([`FocusRing`]), under either style.
 //!
 //! **Three views, three jobs.** The corners are the pane's *own* backing
 //! layer (`cornerRadius` + `masksToBounds`: the Metal child and every overlay
@@ -295,6 +298,122 @@ impl FrameBox {
     }
 }
 
+// ─── The focus frame ─────────────────────────────────────────────────────
+
+/// The focus frame's width, in points (`[appearance] focus_frame`).
+const FOCUS_PT: f64 = 2.0;
+
+pub(crate) struct RingIvars {
+    /// `Theme::focus_frame_srgb`: the accent, or the accent drawn far enough
+    /// from the background to be seen.
+    tone: Cell<[u8; 3]>,
+    /// The radii of the corners the line follows, in points: top (both),
+    /// bottom left, bottom right — the card's all round, or a lined pane's
+    /// square top and the window's curve where it meets the window's bottom.
+    corners: Cell<(f64, f64, f64)>,
+}
+
+define_class!(
+    // SAFETY: NSView is designed for subclassing; FocusRing implements no
+    // `Drop` and is born with NSView's `init`.
+    #[unsafe(super(NSView))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "BateriFocusRing"]
+    #[ivars = RingIvars]
+    pub(crate) struct FocusRing;
+
+    unsafe impl NSObjectProtocol for FocusRing {}
+
+    impl FocusRing {
+        /// Never takes part in hit testing (the veil's rule): a click on the
+        /// line belongs to the pane under it.
+        #[unsafe(method_id(hitTest:))]
+        fn hit_test(&self, _point: NSPoint) -> Option<Retained<NSView>> {
+            None
+        }
+
+        /// The line inside the pane's edge, following its corners.
+        #[unsafe(method(drawRect:))]
+        fn draw_rect(&self, _dirty: NSRect) {
+            let iv = self.ivars();
+            let half = FOCUS_PT / 2.0;
+            let (top, left, right) = iv.corners.get();
+            let line = cornered(
+                grown(self.bounds(), -half),
+                (top - half).max(0.0),
+                (left - half).max(0.0),
+                (right - half).max(0.0),
+            );
+            line.setLineWidth(FOCUS_PT);
+            srgb(iv.tone.get(), 1.0).setStroke();
+            line.stroke();
+        }
+    }
+);
+
+impl FocusRing {
+    /// Born hidden: the owner shows it on the focused pane of a split tab.
+    pub(crate) fn new(mtm: MainThreadMarker, theme: &Theme) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(RingIvars {
+            tone: Cell::new(theme.focus_frame_srgb()),
+            corners: Cell::new((0.0, 0.0, 0.0)),
+        });
+        // SAFETY: `NSView`'s `init`; the ivars are set.
+        let this: Retained<Self> = unsafe { msg_send![super(this), init] };
+        this.setHidden(true);
+        this
+    }
+
+    /// The theme's frame colour.
+    pub(crate) fn paint(&self, theme: &Theme) {
+        let tone = theme.focus_frame_srgb();
+        if self.ivars().tone.replace(tone) != tone {
+            self.setNeedsDisplay(true);
+        }
+    }
+
+    /// The radii the line follows: `(top, bottom left, bottom right)`.
+    pub(crate) fn set_corners(&self, corners: (f64, f64, f64)) {
+        if self.ivars().corners.replace(corners) != corners {
+            self.setNeedsDisplay(true);
+        }
+    }
+}
+
+/// A rectangle with its own radius at each corner, in bottom-up coordinates:
+/// the two top ones `top`, the bottom ones `left` and `right`. Each radius is
+/// held to half the shorter side.
+fn cornered(rect: NSRect, top: f64, left: f64, right: f64) -> Retained<NSBezierPath> {
+    let (x0, y0) = (rect.origin.x, rect.origin.y);
+    let (x1, y1) = (x0 + rect.size.width, y0 + rect.size.height);
+    let most = rect.size.width.min(rect.size.height) / 2.0;
+    let (top, left, right) = (top.min(most), left.min(most), right.min(most));
+    let path = NSBezierPath::bezierPath();
+    path.moveToPoint(NSPoint::new(x0 + left, y0));
+    path.appendBezierPathWithArcFromPoint_toPoint_radius(
+        NSPoint::new(x1, y0),
+        NSPoint::new(x1, y1),
+        right,
+    );
+    path.appendBezierPathWithArcFromPoint_toPoint_radius(
+        NSPoint::new(x1, y1),
+        NSPoint::new(x0, y1),
+        top,
+    );
+    path.appendBezierPathWithArcFromPoint_toPoint_radius(
+        NSPoint::new(x0, y1),
+        NSPoint::new(x0, y0),
+        top,
+    );
+    path.appendBezierPathWithArcFromPoint_toPoint_radius(
+        NSPoint::new(x0, y0),
+        NSPoint::new(x1, y0),
+        left,
+    );
+    path.closePath();
+    path
+}
+
 /// Rounds and clips the pane's own layer, or gives the corners back.
 pub(crate) fn round(layer: &CALayer, carded: bool) {
     layer.setCornerRadius(if carded { corner_pt() } else { 0.0 });
@@ -535,9 +654,9 @@ pub(crate) fn slide(pane: &NSView, frame: &NSView, change: &Change, secs: f64) {
 // ─── The ground under the cards ──────────────────────────────────────────
 
 pub(crate) struct GroundIvars {
-    /// `Theme::ground_srgb`'s two stops; `None` until painted.
-    stops: Cell<Option<[[u8; 3]; 2]>>,
-    /// Whether it is meant to show: the tab on screen is split into cards.
+    /// `Theme::ground_srgb`; `None` until painted.
+    tone: Cell<Option<[u8; 3]>>,
+    /// Whether it is meant to show: the tab on screen is laid out as cards.
     shown: Cell<bool>,
 }
 
@@ -562,27 +681,11 @@ define_class!(
 
         #[unsafe(method(drawRect:))]
         fn draw_rect(&self, _dirty: NSRect) {
-            let Some([start, end]) = self.ivars().stops.get() else {
+            let Some(tone) = self.ivars().tone.get() else {
                 return;
             };
-            let color = |[r, g, b]: [u8; 3]| {
-                NSColor::colorWithSRGBRed_green_blue_alpha(
-                    f64::from(r) / 255.0,
-                    f64::from(g) / 255.0,
-                    f64::from(b) / 255.0,
-                    1.0,
-                )
-            };
-            let gradient = NSGradient::initWithStartingColor_endingColor(
-                NSGradient::alloc(),
-                &color(start),
-                &color(end),
-            );
-            if let Some(gradient) = gradient {
-                // Bottom-up coordinates: -45° runs from the top left to the
-                // bottom right.
-                gradient.drawInRect_angle(self.bounds(), -45.0);
-            }
+            srgb(tone, 1.0).setFill();
+            NSBezierPath::fillRect(self.bounds());
         }
     }
 );
@@ -592,7 +695,7 @@ impl Ground {
     /// containers; born hidden, a window opens on a tab of one pane.
     pub(crate) fn new(mtm: MainThreadMarker, frame: NSRect) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(GroundIvars {
-            stops: Cell::new(None),
+            tone: Cell::new(None),
             shown: Cell::new(false),
         });
         // SAFETY: `initWithFrame:` is NSView's designated initializer and the
@@ -605,17 +708,17 @@ impl Ground {
 
     /// The theme's ground (`Theme::ground_srgb`); redrawn only when it changed.
     pub(crate) fn paint(&self, theme: &Theme) {
-        let stops = Some(theme.ground_srgb());
-        if self.ivars().stops.replace(stops) != stops {
+        let tone = Some(theme.ground_srgb());
+        if self.ivars().tone.replace(tone) != tone {
             self.setNeedsDisplay(true);
         }
     }
 
-    /// Shows the ground (the tab on screen is split) or gives the title row
-    /// back to the background (one pane, or a zoomed one). A change fades over
-    /// the slide's length, the same 220 ms the panes take to become cards, so
-    /// switching between a split tab and a single one does not flash the
-    /// title row; `at_once` under Reduce Motion or off screen.
+    /// Shows the ground (the tab on screen is laid out as cards) or gives the
+    /// title row back to the background (panes divided by a line). A change
+    /// fades over the slide's length, the same 220 ms the panes take to become
+    /// cards, so the title row does not flash; `at_once` under Reduce Motion
+    /// or off screen.
     pub(crate) fn show(&self, shown: bool, at_once: bool) {
         if self.ivars().shown.replace(shown) == shown {
             return;

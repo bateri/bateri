@@ -736,31 +736,46 @@ impl Theme {
     /// white than with black (WCAG), so light text is what reads on it. The
     /// threshold is not invented, it is where the two ratios are equal. One
     /// answer for everything that differs between a dark and a light theme:
-    /// the window's appearance (`bt-shell`) and the split tab's ground
-    /// ([`Theme::ground_srgb`]).
+    /// the window's appearance (`bt-shell`), the cards' ground
+    /// ([`Theme::ground_srgb`]) and which way a faint focus frame goes
+    /// ([`Theme::focus_frame_srgb`]).
     pub const fn is_dark(&self) -> bool {
         let background = self.background_rgb();
         contrast(background, rgb(0xffffff)) > contrast(background, rgb(0x000000))
     }
 
-    /// The split tab's ground, **sRGB** bytes: a gradient from `[0]` at the
-    /// window's top left to `[1]` at its bottom right, under the title row and
-    /// round the cards (`bt-shell`). A tab with one pane has none, its title
-    /// row is the background.
+    /// The ground the cards stand on, **sRGB** bytes: one flat tone under the
+    /// title row and round every tab's cards, one pane's too (`bt-shell`,
+    /// `[appearance] split_style = "cards"`).
     ///
-    /// **Not a role but a value derived from four** (a role that isn't drawn
-    /// isn't added): the background is lifted a step toward the foreground —
-    /// a dark theme's ground is lighter than its panes, a light theme's
-    /// darker, so the cards read as cards on it — and from there the top left
-    /// leans toward the accent and the bottom right toward the cursor. Every
-    /// theme gets its own ground from its own colours; the steps are larger
-    /// on a dark theme, where a small difference from black does not show.
-    pub const fn ground_srgb(&self) -> [[u8; 3]; 2] {
-        let (start, end) = if self.is_dark() { (38, 28) } else { (28, 22) };
-        let base = self.step(self.background_rgb());
-        let start = toward(base, rgb(self.accent), start);
-        let end = toward(base, rgb(self.cursor), end);
-        [[start.r, start.g, start.b], [end.r, end.g, end.b]]
+    /// **Not a role but a value derived from two**: the background a step
+    /// toward the foreground ([`Theme::step`]) — a dark theme's ground is
+    /// lighter than its panes, a light theme's darker, so the cards read as
+    /// cards on it. Every theme gets its own ground from its own colours.
+    pub const fn ground_srgb(&self) -> [u8; 3] {
+        let Rgb { r, g, b } = self.step(self.background_rgb());
+        [r, g, b]
+    }
+
+    /// The focus frame's colour, **sRGB** bytes: the line round the focused
+    /// pane of a split tab (`[appearance] focus_frame`). The accent, unless it
+    /// is too faint on the panes' background to be seen as a line
+    /// ([`FOCUS_FRAME_CONTRAST`]): then it is drawn mixed toward the end away
+    /// from the background — black on a light theme, white on a dark one — in
+    /// steps of one percent from the accent itself, and the first step that
+    /// reads is the line. The theme's accent is not changed: the running
+    /// block's stripe keeps it.
+    pub const fn focus_frame_srgb(&self) -> [u8; 3] {
+        let accent = rgb(self.accent);
+        let background = self.background_rgb();
+        let away = if self.is_dark() { WHITE } else { BLACK };
+        let mut share = 0;
+        let mut frame = accent;
+        while share < 100 && contrast(frame, background) < FOCUS_FRAME_CONTRAST {
+            share += 1;
+            frame = toward(accent, away, share);
+        }
+        [frame.r, frame.g, frame.b]
     }
 
     /// The dock's ground, the surface its input row stands on, **linear**
@@ -847,8 +862,8 @@ impl Theme {
     /// between them.
     ///
     /// **Not a role but a value derived from the rule for "a surface a step
-    /// above"** ([`Theme::step`]), the same rule the split tab's ground
-    /// starts from ([`Theme::ground_srgb`], a step above the panes), so the
+    /// above"** ([`Theme::step`]), the same rule the cards' ground
+    /// is ([`Theme::ground_srgb`], a step above the panes), so the
     /// two can't drift apart.
     pub const fn band_linear(&self) -> LinearRgba {
         linear_rgba(self.band_rgb())
@@ -882,7 +897,7 @@ impl Theme {
     /// field, a key cap in a UI page). `0` is the background itself.
     ///
     /// **Not a role but a value derived from the rule for "a surface a step
-    /// above"**, the same one the dock's folder row and the split tab's
+    /// above"**, the same one the dock's folder row and the cards'
     /// ground use, so a page's cards, the dock and the ground round the
     /// cards cannot drift apart. A page names the level, never a colour.
     pub const fn raised_linear(&self, steps: u8) -> LinearRgba {
@@ -896,8 +911,8 @@ impl Theme {
     }
 
     /// `base` a step toward the foreground: **the one rule for "a surface a
-    /// step above"** — the folder row above the dock's ground, the split
-    /// tab's ground above the panes. The step is larger on a dark theme,
+    /// step above"** — the folder row above the dock's ground, the
+    /// cards' ground above the panes. The step is larger on a dark theme,
     /// where a small difference from black does not show; another theme gets
     /// its own tone from its own colours.
     const fn step(&self, base: Rgb) -> Rgb {
@@ -1252,6 +1267,11 @@ const fn dim_channel(color: u8, background: u8) -> u8 {
     ((2 * color as u16 + background as u16) / 3) as u8
 }
 
+/// The least contrast ratio the focus frame keeps against the panes'
+/// background ([`Theme::focus_frame_srgb`]): WCAG's ratio for a graphical
+/// object that has to be seen, a line among them.
+pub(crate) const FOCUS_FRAME_CONTRAST: f64 = 3.0;
+
 /// How strongly a search match's mark lays `warning` over the background,
 /// percent ([`Theme::search_mark_linear`]) — a design constant (the approved
 /// design's value): quieter than the current match's full-strength mark, so
@@ -1529,17 +1549,67 @@ mod tests {
     }
 
     #[test]
-    fn the_ground_leans_from_the_accent_to_the_cursor() {
-        // Black lifted 8 % toward the foreground, then 38 % toward the accent
-        // and 28 % toward the cursor; the light theme takes the smaller steps.
+    fn the_ground_is_the_background_one_step_toward_the_foreground() {
+        // A flat tone: 8 % toward the foreground on a dark theme, 4 % on a
+        // light one, the values the design was drawn with.
+        assert_eq!(Theme::BATERI.ground_srgb(), [0x11, 0x11, 0x12]);
+        assert_eq!(Theme::ULTRAVIOLET.ground_srgb(), [0x2c, 0x25, 0x43]);
+        assert_eq!(Theme::BATERI_LIGHT.ground_srgb(), [0xed, 0xee, 0xf0]);
+        assert_eq!(Theme::LINEN.ground_srgb(), [0xeb, 0xe7, 0xdf]);
+        // One rule for "a surface a step above": the first raised level.
+        for (_, _, theme) in EMBEDDED {
+            let [r, g, b] = theme.ground_srgb();
+            assert_eq!(
+                LinearRgba::from_srgb(r, g, b),
+                theme.raised_linear(1),
+                "{theme:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_focus_frame_reads_on_every_embedded_theme() {
+        for (name, _, theme) in EMBEDDED {
+            let [r, g, b] = theme.focus_frame_srgb();
+            let frame = Rgb { r, g, b };
+            assert!(
+                super::contrast(frame, theme.background_rgb()) >= FOCUS_FRAME_CONTRAST,
+                "{name}"
+            );
+            if name == "everforest-light" {
+                // The one accent too faint on its own background: drawn 24 %
+                // of the way toward black, where it first reads.
+                assert_eq!(theme.focus_frame_srgb(), [0x61, 0x8e, 0x88]);
+            } else {
+                assert_eq!(
+                    frame,
+                    rgb(theme.accent),
+                    "{name}: only a faint accent moves"
+                );
+            }
+        }
+        // The theme's own accent is never changed by it.
         assert_eq!(
-            Theme::BATERI.ground_srgb(),
-            [[0x39, 0x46, 0x56], [0x49, 0x3e, 0x29]]
+            Theme::embedded("everforest-light").map(|theme| theme.accent),
+            Some(0x7fbbb3)
         );
-        assert_eq!(
-            Theme::BATERI_LIGHT.ground_srgb(),
-            [[0xbc, 0xc9, 0xdc], [0xd7, 0xd0, 0xbf]]
-        );
+    }
+
+    #[test]
+    fn a_faint_frame_goes_toward_the_end_away_from_the_background() {
+        // A dark theme's faint accent lightens, a light one's darkens.
+        let dark = Theme {
+            accent: 0x101010,
+            ..Theme::BATERI
+        };
+        let [r, g, b] = dark.focus_frame_srgb();
+        assert!(luminance(Rgb { r, g, b }) > luminance(rgb(0x101010)));
+        let light = Theme {
+            accent: 0xf0f0f0,
+            ..Theme::LINEN
+        };
+        let [r, g, b] = light.focus_frame_srgb();
+        assert!(luminance(Rgb { r, g, b }) < luminance(rgb(0xf0f0f0)));
     }
 
     #[test]
@@ -1653,44 +1723,20 @@ mod tests {
     }
 
     #[test]
-    fn the_split_grounds_base_is_one_step_above_the_panes() {
-        // One copy of "a step above": with nothing to lean toward (accent and
-        // cursor are the step itself) the ground is the background a step
-        // toward the foreground.
-        for theme in [Theme::BATERI, Theme::LINEN] {
-            let Rgb { r, g, b } = theme.step(theme.background_rgb());
-            let flat = Theme {
-                accent: u32::from_be_bytes([0, r, g, b]),
-                cursor: u32::from_be_bytes([0, r, g, b]),
-                ..theme
-            };
-            assert_eq!(flat.ground_srgb(), [[r, g, b]; 2]);
-        }
-        assert_eq!(
-            {
-                let Rgb { r, g, b } = Theme::LINEN.step(Theme::LINEN.background_rgb());
-                [r, g, b]
-            },
-            [0xeb, 0xe7, 0xdf]
-        );
-    }
-
-    #[test]
     fn the_ground_follows_the_theme_it_is_drawn_from() {
-        // Derived, not stored: another accent moves the top left and nothing
-        // else, another cursor the bottom right.
+        // Derived, not stored: the background and the foreground move it, the
+        // accent and the cursor no longer lean it.
         let accent = Theme {
             accent: 0xff0000,
-            ..Theme::BATERI
-        };
-        assert_ne!(accent.ground_srgb()[0], Theme::BATERI.ground_srgb()[0]);
-        assert_eq!(accent.ground_srgb()[1], Theme::BATERI.ground_srgb()[1]);
-        let cursor = Theme {
             cursor: 0x00ff00,
             ..Theme::BATERI
         };
-        assert_eq!(cursor.ground_srgb()[0], Theme::BATERI.ground_srgb()[0]);
-        assert_ne!(cursor.ground_srgb()[1], Theme::BATERI.ground_srgb()[1]);
+        assert_eq!(accent.ground_srgb(), Theme::BATERI.ground_srgb());
+        let ink = Theme {
+            foreground: 0xff0000,
+            ..Theme::BATERI
+        };
+        assert_ne!(ink.ground_srgb(), Theme::BATERI.ground_srgb());
     }
 
     #[test]

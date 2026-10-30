@@ -4448,13 +4448,16 @@ impl TerminalWindow {
         if window.styleMask().contains(NSWindowStyleMask::FullScreen) {
             return None;
         }
-        let pane = self.try_selected_tab()?.filling_pane()?;
+        let tab = self.try_selected_tab()?;
+        let pane = tab.filling_pane()?;
         // The tab's area is the content beside the side column or below the title row, and the
-        // filling pane is all of it.
+        // filling pane is all of it less a card's margins.
         let content = window
             .contentRectForFrameRect(NSRect::new(NSPoint::ZERO, size))
             .size;
-        let inset = self.ivars().root.tabs_inset(content.width);
+        let tabs = self.ivars().root.tabs_inset(content.width);
+        let card = tab.container().margins();
+        let inset = NSSize::new(tabs.width + card.width, tabs.height + card.height);
         let fitted = pane.fitted_size(NSSize::new(
             content.width - inset.width,
             content.height - inset.height,
@@ -4962,11 +4965,19 @@ impl TerminalWindow {
                 .styleMask()
                 .contains(NSWindowStyleMask::FullScreen);
         let fitted = stepping
-            .then(|| self.try_selected_tab()?.filling_pane())
-            .flatten()
-            .and_then(|pane| pane.fitted_size(NSSize::new(size.width - column, size.height)));
+            .then(|| {
+                let tab = self.try_selected_tab()?;
+                let card = tab.container().margins();
+                let pane = tab.filling_pane()?;
+                let fitted = pane.fitted_size(NSSize::new(
+                    size.width - column - card.width,
+                    size.height - card.height,
+                ))?;
+                Some(fitted.width + card.width)
+            })
+            .flatten();
         let column = fitted.map_or(column, |fitted| {
-            tabs::side_width(size.width - fitted.width, size.width)
+            tabs::side_width(size.width - fitted, size.width)
         });
         root.set_side_width(column);
     }

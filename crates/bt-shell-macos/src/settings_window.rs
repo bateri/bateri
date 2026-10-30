@@ -233,6 +233,7 @@ enum Key {
     Ports,
     MinimumContrast,
     DimSplits,
+    FocusFrame,
     SplitStyle,
     TabIcons,
     TabIconColors,
@@ -244,7 +245,7 @@ enum Key {
 
 impl Key {
     /// The order is the `tag` itself: `ALL[tag]`.
-    const ALL: [Key; 48] = [
+    const ALL: [Key; 49] = [
         Key::ConfirmClose,
         Key::Clipboard,
         Key::Scrollback,
@@ -286,6 +287,7 @@ impl Key {
         Key::Ports,
         Key::MinimumContrast,
         Key::DimSplits,
+        Key::FocusFrame,
         Key::SplitStyle,
         Key::TabIcons,
         Key::TabIconColors,
@@ -321,6 +323,7 @@ impl Key {
             Key::ContentEdge => "appearance.content_edge",
             Key::MinimumContrast => "appearance.minimum_contrast",
             Key::DimSplits => "appearance.dim_unfocused_splits",
+            Key::FocusFrame => "appearance.focus_frame",
             Key::SplitStyle => "appearance.split_style",
             Key::ResizeInSteps => "appearance.resize_in_steps",
             Key::TabIcons => "appearance.tab_icons",
@@ -1200,6 +1203,7 @@ struct Controls {
     python_env: Retained<NSSwitch>,
     node_version: Retained<NSSwitch>,
     dim_splits: Retained<NSSwitch>,
+    focus_frame: Retained<NSSwitch>,
     resize_in_steps: Retained<NSSwitch>,
     /// The panes' rows: the lock, the dependent row and the row's
     /// diagnostic come from here.
@@ -1419,6 +1423,7 @@ define_class!(
                 Some(Key::PythonEnv) => Some(SettingsEdit::ShellPythonEnv(on)),
                 Some(Key::NodeVersion) => Some(SettingsEdit::ShellNodeVersion(on)),
                 Some(Key::DimSplits) => Some(SettingsEdit::DimUnfocusedSplits(on)),
+                Some(Key::FocusFrame) => Some(SettingsEdit::FocusFrame(on)),
                 Some(Key::ResizeInSteps) => Some(SettingsEdit::ResizeInSteps(on)),
                 Some(Key::TabIcons) => Some(SettingsEdit::TabIcons(on)),
                 _ => None,
@@ -1817,6 +1822,7 @@ impl SettingsWindow {
         set_switch(&c.python_env, settings.shell_python_env);
         set_switch(&c.node_version, settings.shell_node_version);
         set_switch(&c.dim_splits, settings.dim_unfocused_splits);
+        set_switch(&c.focus_frame, settings.focus_frame);
         set_switch(&c.resize_in_steps, settings.resize_in_steps);
         let files = &settings.remote_files;
         let (items, index) = size_items(files.preview_max_size, PREVIEW_SIZE_PRESETS);
@@ -2502,6 +2508,7 @@ impl SettingsWindow {
         let scrollbar = self.popup::<Scrollbar>(Key::Scrollbar);
         let content_edge = self.popup::<ContentEdge>(Key::ContentEdge);
         let dim_splits = self.switch(Key::DimSplits);
+        let focus_frame = self.switch(Key::FocusFrame);
         let split_style = self.popup::<SplitStyle>(Key::SplitStyle);
         let resize_in_steps = self.switch(Key::ResizeInSteps);
         let tab_icons = self.switch(Key::TabIcons);
@@ -2574,6 +2581,13 @@ impl SettingsWindow {
             &dim_splits,
             &[&dim_splits],
             Some("Veil the panes of a split tab that don't have the focus. Off: the focused pane is told by the card standing nearer."),
+        );
+        appearance.row(
+            Key::FocusFrame,
+            "Focus frame:",
+            &focus_frame,
+            &[&focus_frame],
+            Some("Draw a line in the theme's accent round the focused pane of a split tab."),
         );
         appearance.row(
             Key::SplitStyle,
@@ -2910,6 +2924,7 @@ impl SettingsWindow {
             python_env,
             node_version,
             dim_splits,
+            focus_frame,
             resize_in_steps,
             rows,
         };
@@ -3371,7 +3386,7 @@ mod tests {
                     restore_windows = []\nkeep_running = []\nscrollbar = []\n\
                     [appearance]\ntheme = []\nlight_theme = []\ndark_theme = []\n\
                     content_edge = []\nminimum_contrast = []\ndim_unfocused_splits = []\n\
-                    split_style = []\nresize_in_steps = []\ntab_icons = []\ntab_icon_colors = []\ntab_position = []\n\
+                    focus_frame = []\nsplit_style = []\nresize_in_steps = []\ntab_icons = []\ntab_icon_colors = []\ntab_position = []\n\
                     [font]\nfamily = []\nsize = []\nline_height = []\nletter_spacing = []\n\
                     [clipboard]\nosc52 = []\n\
                     [motion]\ncursor_motion = []\nreduce_motion = []\nsmooth_scroll = []\n\
@@ -3434,6 +3449,7 @@ mod tests {
                 Key::PythonEnv => SettingsEdit::ShellPythonEnv(false),
                 Key::NodeVersion => SettingsEdit::ShellNodeVersion(false),
                 Key::DimSplits => SettingsEdit::DimUnfocusedSplits(true),
+                Key::FocusFrame => SettingsEdit::FocusFrame(true),
                 Key::ResizeInSteps => SettingsEdit::ResizeInSteps(true),
                 Key::SplitStyle => SettingsEdit::SplitStyle(SplitStyle::Lines),
                 Key::TabIcons => SettingsEdit::TabIcons(false),

@@ -574,9 +574,10 @@ impl Tree {
         self.layout_zoomed_spaced(bounds, scale, zoomed, Spacing::DIVIDED)
     }
 
-    /// [`Tree::layout_zoomed`] with the space `spacing` leaves when nothing is zoomed. The zoomed
-    /// pane covers the whole area whatever the spacing: a margin around the one pane in view
-    /// would read as a card, and a zoomed pane is meant to look like a tab of one.
+    /// [`Tree::layout_zoomed`] with the space `spacing` leaves. The zoomed pane covers the area
+    /// less the spacing's margins and no gap between: a zoomed pane is meant to look like a tab
+    /// of one, which is a card on the ground when the panes are cards and the whole area when
+    /// they touch.
     pub fn layout_zoomed_spaced(
         &self,
         bounds: Rect,
@@ -586,7 +587,7 @@ impl Tree {
     ) -> Layout {
         match zoomed {
             Some(id) if self.leaves().contains(&id) => Layout {
-                panes: vec![(id, snap(bounds, scale).scaled(1.0 / scale))],
+                panes: vec![(id, spacing.inside(snap(bounds, scale)).scaled(1.0 / scale))],
                 dividers: Vec::new(),
             },
             _ => self.layout_spaced(bounds, scale, spacing),
@@ -2045,6 +2046,14 @@ mod tests {
             tree.layout_zoomed(bounds, 2.0, Some(9)),
             before,
             "leaf not in the tree"
+        );
+        // With a margin the zoomed pane is a tab of one: the area less the margins.
+        let gapped = Spacing::gapped(8.0, 8.0, 2.0).with_top(0.0, 2.0);
+        let alone = Tree::Leaf(3).layout_spaced(bounds, 2.0, gapped);
+        assert_eq!(
+            tree.layout_zoomed_spaced(bounds, 2.0, Some(3), gapped)
+                .panes,
+            alone.panes
         );
     }
 

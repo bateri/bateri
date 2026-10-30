@@ -85,6 +85,7 @@ of `[remote]` and the two keys of the load indicator (`stats`,
 looks, `[appearance] content_edge` ("Content edge") and
 `[appearance] minimum_contrast` ("Minimum contrast", under the themes) and
 `[appearance] dim_unfocused_splits` ("Dim unfocused splits") and
+`[appearance] focus_frame` ("Focus frame") and
 `[appearance] split_style` ("Split style") and `[appearance]
 resize_in_steps` ("Resize in steps") and `[appearance] tab_position`
 ("Tabs") and `[appearance] tab_icons`
@@ -280,10 +281,13 @@ minimum_contrast = 3.0
 # a veil of the theme's background. Off: every pane reads at full strength and
 # the focused one is told by the card standing nearer and by the cursor.
 dim_unfocused_splits = false
-# "cards" | "lines". How a split tab sets its panes apart: cards stand on a
-# ground of their own with a gap round them, rounded and lit from above;
-# lines lets the panes touch with one thin line between them, for the most
-# room.
+# true | false. Draws a 2 pt line in the theme's accent round the focused pane
+# of a split tab. Off: the card standing nearer and the cursor tell it.
+focus_frame = false
+# "cards" | "lines". How a tab sets its panes apart: cards stand on a ground
+# of their own with a gap round them, rounded and lit from above, one pane's
+# too; lines lets the panes touch with one thin line between them, for the
+# most room.
 split_style = "cards"
 # true | false. Resizes a window a whole cell at a time while you drag its
 # edge, so a lone pane's text keeps the same margin on both sides and the
@@ -679,7 +683,7 @@ error (or the ⚠) stays visible there too.
 | two commands with the same `[keys]` shortcut | both keep it, warning with the line; the menu runs the one that comes first in it |
 | the chosen theme cannot be found | the built-in theme matching the appearance (`bateri` in dark, `bateri-light` in light), warning |
 | the theme file cannot be read, is empty or is invalid TOML | the built-in theme matching the appearance, warning (a built-in theme with the same name is **not** used) |
-| a color in the theme file is not accepted | only that color comes from `bateri`, warning |
+| a color in the theme file is not accepted | only that color comes from the file's base (`bateri`, `bateri-light` or the shadowed built-in theme), warning |
 | the font family cannot be found | the default font (SF Mono, otherwise Menlo), warning |
 | the font family is not monospaced | the family is still used, warning |
 
@@ -1059,6 +1063,7 @@ dark_theme = "bateri"
 content_edge = "fade"
 minimum_contrast = 3.0
 dim_unfocused_splits = false
+focus_frame = false
 split_style = "cards"
 resize_in_steps = false
 tab_icons = true
@@ -1074,7 +1079,8 @@ tab_position = "top"
 | `content_edge` | `"fade"` \| `"line"` \| `"cut"` | `"fade"` | what the text does where it meets the tab bar, or the frame of a split pane |
 | `minimum_contrast` | decimal, `1.0`–`21.0` | `3.0` | the least contrast ratio a program's text keeps against its background; `1` turns it off |
 | `dim_unfocused_splits` | `true` \| `false` | `false` | dim the panes of a split tab that don't have the focus |
-| `split_style` | `"cards"` \| `"lines"` | `"cards"` | how a split tab sets its panes apart: cards on a ground, or panes divided by a line |
+| `focus_frame` | `true` \| `false` | `false` | a 2 pt line in the accent round the focused pane of a split tab |
+| `split_style` | `"cards"` \| `"lines"` | `"cards"` | how a tab sets its panes apart: cards on a ground, one pane's too, or panes divided by a line |
 | `resize_in_steps` | `true` \| `false` | `false` | resize a window a whole cell at a time while its edge is dragged |
 | `tab_icons` | `true` \| `false` | `true` | show the program a tab runs as an icon on a tile before its title |
 | `tab_icon_colors` | `"theme"` \| `"brand"` | `"theme"` | whether the icon uses the theme's colors only, or keeps the program's own color where it has one |
@@ -1145,21 +1151,29 @@ tab_position = "top"
 - A program with a light theme of its own still looks best in it; many pick
   it by themselves from the background bateri reports (OSC 11) when their
   theme is set to automatic.
-- A tab with one pane shows it edge to edge. With two or more, under
-  `split_style = "cards"`, the panes are cards on a ground of their own (the
-  theme's gradient, see [Themes](#themes)): an 8 pt gap round and between
-  them, none under the tab bar, corners rounded with the window's. No line
+- Under `split_style = "cards"` every tab's panes are cards on a ground of
+  their own, a tab with one pane too (a flat tone drawn from the theme, see
+  [Themes](#themes)): an 8 pt gap round and between them, none under the tab
+  bar and none beside the side column, corners rounded with the window's. No line
   draws a card: its top edge catches a light, a dark theme's card has a faint
   sheen under its top, and its shadow is tucked under its foot. The focused
   card stands nearer — a deeper shadow, and on a dark theme a warm light.
   Nothing is dimmed, so every pane reads at once. Going from one pane to two
   (and back) slides the panes into place in a fifth of a second — at once
   with Reduce Motion — and the program in each pane is resized once, not on
-  every frame. A zoomed pane (Shift Cmd Return) fills the tab again.
+  every frame. A zoomed pane (Shift Cmd Return) is a card on its own, like a
+  tab's only pane.
 - `split_style = "lines"` lets the panes touch instead, with a one-pixel line
   in the divider's color between them, square corners and the plain
   background — the most room for text. The focused pane is then told by its
-  cursor alone, or also by `dim_unfocused_splits`. It applies at once.
+  cursor alone, or also by `dim_unfocused_splits` or `focus_frame`. It
+  applies at once.
+- `focus_frame = true` draws a 2 pt line in the theme's `accent` round the
+  focused pane of a split tab, under either style (along the window's corner
+  where a lined pane meets it); a tab with one pane has none. Off by default:
+  a card standing nearer and the cursor tell the focused pane. Where the
+  accent is too faint on the background, the line is drawn a little darker or
+  lighter so it reads (see [Themes](#themes)).
 - A tab's chip shows which program runs in it, before its title: Claude Code,
   Codex, OpenCode, Antigravity, Gemini CLI, Pi, Herdr, Cursor CLI, Copilot
   CLI, Qwen Code and Kimi CLI by their own marks, and a shell, a remote
@@ -1219,11 +1233,11 @@ tab_position = "top"
   into a window of its own, onto another window's column or bar to move it
   there. A pane carried with ⌥⌘ and dropped on a row joins that tab; dropped
   between two rows it opens a new tab. One place for every window; it applies
-  at once, and `"top"` brings the bar back as it was. A tab with one pane is
-  set off from the column by a thin line in the divider's color; under
-  `split_style = "cards"` a split tab's cards and the column stand on the
-  ground together, the line fades as the ground comes in, and the first card
-  keeps its 8 pt from the column like its other sides.
+  at once, and `"top"` brings the bar back as it was. Under
+  `split_style = "cards"` every tab's cards and the column stand on the ground
+  together and the first card keeps its 8 pt from the column like its other
+  sides; under `"lines"` the panes are set off from the column by a thin line
+  in the divider's color.
 
 ### `[font]`
 
@@ -2419,8 +2433,8 @@ is text in the form `"#rrggbb"` (uppercase works too; no `#rgb` and no alpha).
 | `background` | default background, the window's backdrop |
 | `foreground` | default foreground; the scroll bar's thumb and its track, translucent |
 | `dim` | default foreground written dim (SGR 2) |
-| `accent` | accent; the mark of a **running** command, beside it and on the wide scroll bar; the top left of a split tab's ground |
-| `cursor` | the color of the cursor block; the bottom right of a split tab's ground |
+| `accent` | accent; the mark of a **running** command, beside it and on the wide scroll bar; the focus frame (`focus_frame`) |
+| `cursor` | the color of the cursor block |
 | `selection` | the highlight of a mouse selection; selected text keeps its own color, and in an unfocused window the highlight fades towards the background |
 | `search_match` | the highlight of all matches of a search through history (⌘F); text keeps its own color, and it fades in an unfocused window |
 | `search_current` | the highlight of the current match — the one ⏎/⌘G shows; more prominent than `search_match`, and the selection is drawn above both |
@@ -2431,17 +2445,20 @@ is text in the form `"#rrggbb"` (uppercase works too; no `#rgb` and no alpha).
 | `[ansi]` `black` `red` `green` `yellow` `blue` `magenta` `cyan` `white` | ANSI 0–7 |
 | `[ansi]` `bright_black` … `bright_white` | ANSI 8–15, in the same order; `bright_yellow` is also the scroll bar's mark of the current match when it stands out from the background more than `warning` does (otherwise `warning` itself is) |
 
-- **Every key is optional.** A missing key comes from the built-in `bateri`
-  theme; a two-line file that only changes the background is a valid theme.
-- In a file that **shadows** a built-in theme (`themes/bateri-light.toml`), a
-  missing key comes from that built-in theme itself; for a name that does not
-  shadow one, the base stays `bateri`.
+- **Every key is optional.** A missing key comes from a built-in theme, the
+  file's **base**; a two-line file that only changes the background is a valid
+  theme.
+- In a file that **shadows** a built-in theme (`themes/bateri-light.toml`), the
+  base is that built-in theme itself. For a name that does not shadow one, the
+  base follows the file's own `background`: `bateri-light` when it is light,
+  `bateri` when it is dark or not written — so a light theme that leaves out
+  `selection` or the search colors gets the light theme's, which read on it.
 - **The rule has no exceptions**, not even `cursor`: in a file that only
   writes `accent`, the cursor stays the built-in theme's cursor. Whoever wants
   a separate cursor writes `cursor` — one key among more than twenty behaving
   differently would surprise more than it would help.
 - A color that is not accepted (`"red"`, `"#12345"`, a number) takes the
-  base's value (`bateri` or the shadowed built-in theme) and gives a warning;
+  base's value and gives a warning;
   the other colors are still read.
 - **An empty file** (or only whitespace) counts as unusable: many editors
   empty the file first while saving, and the window should not flash to the
@@ -2455,24 +2472,24 @@ is text in the form `"#rrggbb"` (uppercase works too; no `#rgb` and no alpha).
   darkens in a dark theme and lightens in a light theme. On a black
   background this is the same as the "two thirds of the color" rule of
   alacritty and vte.
-- **A split tab's ground** — the title row and the gaps round its panes — is
-  not a key either: it is drawn from the theme. The background is lifted a
-  step toward the foreground (lighter in a dark theme, darker in a light one)
-  and runs as a gradient from a touch of `accent` at the top left to a touch
-  of `cursor` at the bottom right. A tab with one pane keeps the plain
-  background, and switching between the two fades the title row over.
-- `dim`, `success`, `error` and `selection`, like every key, come from
-  `bateri` when missing: in a light theme, if `dim` is not written, dim
-  default text is drawn with the dark theme's gray (`#909093`); if
-  `success`/`error` are not written, the command marks are drawn with the dark
-  theme's green and red; if `selection` is not written, the selection is drawn
-  with the dark theme's slate (`#283042`) — hard to read under dark text in a
-  light theme, so a light theme should write its `selection`. The same goes
-  for `search_match` and `search_current`: if they are not written, the search
-  highlight comes in the dark theme's dark warm tones (`#3a3212`, `#503a0c`).
-  If `info` is not written, a remote session's host and top line are drawn
-  with the dark theme's cyan (`#79b3b3`), and if `warning` is not written, a
-  host marked `staging` is drawn with the dark theme's yellow (`#d6b16a`).
+- **The cards' ground** — under `split_style = "cards"`, the title row and
+  the gaps round every tab's panes — is not a key either: it is drawn from
+  the theme, one flat tone: the background a step toward the foreground (8%
+  in a dark theme, so lighter; 4% in a light one, so darker).
+- **The focus frame** (`focus_frame`) is drawn in `accent`. Where `accent` is
+  too faint on the background to be seen as a line (a contrast below 3:1), the
+  frame alone is drawn mixed toward black in a light theme, toward white in a
+  dark one, just far enough to reach 3:1; the theme's `accent` itself does not
+  change. Among the built-in themes only Everforest Light needs it.
+- `dim`, `success`, `error` and `selection`, like every key, come from the
+  base when missing. A file that shadows a built-in theme but changes its
+  `background` from dark to light (or the other way) keeps that theme's
+  other colors: if `dim` is not written, dim default text is drawn with the
+  shadowed theme's gray; if `selection`, `search_match` or `search_current`
+  are not written, they come in its tones, which may not read on the new
+  background — such a file should write them. The same goes for `info` (a
+  remote session's host and top line) and `warning` (a host marked
+  `staging`).
 
 ### Embedded `bateri`
 

@@ -1457,6 +1457,11 @@ pub struct Settings {
     /// Off by default: a split tab tells its focused pane by the pane itself
     /// (a card standing nearer, the cursor). Doesn't enter `TerminalOptions`.
     pub dim_unfocused_splits: bool,
+    /// `[appearance] focus_frame`: whether the focused pane of a split tab is
+    /// drawn with a line in the accent round it (`Theme::focus_frame_srgb`).
+    /// Off by default: a card standing nearer and the cursor tell it. Doesn't
+    /// enter `TerminalOptions`.
+    pub focus_frame: bool,
     /// `[appearance] split_style`: cards on a ground or panes divided by a
     /// line ([`SplitStyle`]). Doesn't enter `TerminalOptions`.
     pub split_style: SplitStyle,
@@ -1569,6 +1574,7 @@ impl Default for Settings {
             content_edge: ContentEdge::default(),
             minimum_contrast: MINIMUM_CONTRAST,
             dim_unfocused_splits: false,
+            focus_frame: false,
             split_style: SplitStyle::default(),
             resize_in_steps: false,
             tab_icons: true,
@@ -1683,6 +1689,8 @@ pub enum SettingsEdit {
     /// The settings window's "Dim unfocused splits": `[appearance]
     /// dim_unfocused_splits`.
     DimUnfocusedSplits(bool),
+    /// The settings window's "Focus frame": `[appearance] focus_frame`.
+    FocusFrame(bool),
     /// The settings window's "Split style": `[appearance] split_style`.
     SplitStyle(SplitStyle),
     /// The settings window's "Resize in steps": `[appearance]
@@ -1792,6 +1800,7 @@ impl SettingsEdit {
                 "dim_unfocused_splits",
                 "appearance.dim_unfocused_splits",
             ),
+            Self::FocusFrame(_) => ("appearance", "focus_frame", "appearance.focus_frame"),
             Self::SplitStyle(_) => ("appearance", "split_style", "appearance.split_style"),
             Self::ResizeInSteps(_) => (
                 "appearance",
@@ -1888,6 +1897,7 @@ impl SettingsEdit {
             | Self::ShellPythonEnv(on)
             | Self::ShellNodeVersion(on)
             | Self::DimUnfocusedSplits(on)
+            | Self::FocusFrame(on)
             | Self::ResizeInSteps(on)
             | Self::TabIcons(on) => (*on).into(),
             Self::CursorRadius(value)
@@ -2013,10 +2023,13 @@ minimum_contrast = 3.0
 # a veil of the theme's background. Off: every pane reads at full strength and
 # the focused one is told by the card standing nearer and by the cursor.
 dim_unfocused_splits = false
-# "cards" | "lines". How a split tab sets its panes apart: cards stand on a
-# ground of their own with a gap round them, rounded and lit from above;
-# lines lets the panes touch with one thin line between them, for the most
-# room.
+# true | false. Draws a 2 pt line in the theme's accent round the focused pane
+# of a split tab. Off: the card standing nearer and the cursor tell it.
+focus_frame = false
+# "cards" | "lines". How a tab sets its panes apart: cards stand on a ground
+# of their own with a gap round them, rounded and lit from above, one pane's
+# too; lines lets the panes touch with one thin line between them, for the
+# most room.
 split_style = "cards"
 # true | false. Resizes a window a whole cell at a time while you drag its
 # edge, so a lone pane's text keeps the same margin on both sides and the
@@ -2463,6 +2476,15 @@ stats_interval = 3
                         &mut parsed.diagnostics,
                     );
                 }
+                if let Some(item) = appearance.get("focus_frame") {
+                    parsed.settings.focus_frame = boolean(
+                        text,
+                        item,
+                        "appearance.focus_frame",
+                        fallback.focus_frame,
+                        &mut parsed.diagnostics,
+                    );
+                }
                 if let Some(item) = appearance.get("split_style") {
                     parsed.settings.split_style = named_enum(
                         text,
@@ -2519,6 +2541,7 @@ stats_interval = 3
                 parsed.settings.content_edge = fallback.content_edge;
                 parsed.settings.minimum_contrast = fallback.minimum_contrast;
                 parsed.settings.dim_unfocused_splits = fallback.dim_unfocused_splits;
+                parsed.settings.focus_frame = fallback.focus_frame;
                 parsed.settings.split_style = fallback.split_style;
                 parsed.settings.resize_in_steps = fallback.resize_in_steps;
                 parsed.settings.tab_icons = fallback.tab_icons;
@@ -2839,6 +2862,7 @@ stats_interval = 3
             content_edge: self.content_edge != new.content_edge,
             contrast: self.minimum_contrast != new.minimum_contrast,
             dim_splits: self.dim_unfocused_splits != new.dim_unfocused_splits,
+            focus_frame: self.focus_frame != new.focus_frame,
             split_style: self.split_style != new.split_style,
             resize_in_steps: self.resize_in_steps != new.resize_in_steps,
             tab_icons: self.tab_icons != new.tab_icons
@@ -3556,6 +3580,10 @@ pub struct Changes {
     /// the choice to every tab, which veils or unveils its unfocused panes.
     /// A field of its own, for [`Self::caret`]'s reason.
     pub dim_splits: bool,
+    /// [`Settings::focus_frame`] changed: the platform shell gives the choice
+    /// to every split tab, which draws or drops the line round its focused
+    /// pane. A field of its own, for [`Self::caret`]'s reason.
+    pub focus_frame: bool,
     /// [`Settings::split_style`] changed: the platform shell lays every
     /// split tab out again, as cards or divided by a line. A field of its
     /// own, for [`Self::caret`]'s reason.
@@ -4400,6 +4428,7 @@ mod tests {
             ("appearance", "content_edge"),
             ("appearance", "minimum_contrast"),
             ("appearance", "dim_unfocused_splits"),
+            ("appearance", "focus_frame"),
             ("appearance", "split_style"),
             ("appearance", "resize_in_steps"),
             ("appearance", "tab_icons"),
@@ -4584,6 +4613,7 @@ mod tests {
                 content_edge: false,
                 contrast: false,
                 dim_splits: false,
+                focus_frame: false,
                 split_style: false,
                 resize_in_steps: false,
                 tab_icons: false,
@@ -4627,6 +4657,7 @@ mod tests {
             content_edge: ContentEdge::Line,
             minimum_contrast: 4.5,
             dim_unfocused_splits: true,
+            focus_frame: true,
             split_style: SplitStyle::Lines,
             resize_in_steps: true,
             tab_icons: false,
@@ -4826,6 +4857,7 @@ mod tests {
             content_edge: false,
             contrast: false,
             dim_splits: false,
+            focus_frame: false,
             split_style: false,
             resize_in_steps: false,
             tab_icons: false,
@@ -4907,6 +4939,38 @@ mod tests {
         assert_eq!(
             written,
             "[appearance]\ntheme = \"system\"\nfuture = 1\ndim_unfocused_splits = true\n"
+        );
+    }
+
+    #[test]
+    fn focus_frame_is_read() {
+        // Off by default: a card standing nearer and the cursor tell the
+        // focused pane.
+        assert!(!Settings::default().focus_frame);
+        assert!(clean("[appearance]\nfocus_frame = true\n").focus_frame);
+        assert!(!clean("[appearance]\nfocus_frame = false\n").focus_frame);
+        // A wrong type is rejected with the default and a diagnostic of its own.
+        let (settings, diagnostic) = rejected("[appearance]\nfocus_frame = 1\n");
+        assert!(!settings.focus_frame);
+        assert_eq!(diagnostic.key, Some("appearance.focus_frame"));
+        // A change is its own news: it goes to the tabs, nothing else.
+        let after = clean("[appearance]\nfocus_frame = true\n");
+        assert_eq!(
+            Settings::default().changes(&after),
+            Changes {
+                focus_frame: true,
+                ..Changes::default()
+            }
+        );
+        // The edit writes the one line and keeps what it doesn't know.
+        let written = Settings::with_edit(
+            "[appearance]\ntheme = \"system\"\nfuture = 1\n",
+            &SettingsEdit::FocusFrame(true),
+        )
+        .expect("writable text");
+        assert_eq!(
+            written,
+            "[appearance]\ntheme = \"system\"\nfuture = 1\nfocus_frame = true\n"
         );
     }
 
@@ -5027,6 +5091,7 @@ mod tests {
                 content_edge: false,
                 contrast: false,
                 dim_splits: false,
+                focus_frame: false,
                 split_style: false,
                 resize_in_steps: false,
                 tab_icons: false,
@@ -5186,6 +5251,7 @@ found {found}; using \"spring\""
                 content_edge: false,
                 contrast: false,
                 dim_splits: false,
+                focus_frame: false,
                 split_style: false,
                 resize_in_steps: false,
                 tab_icons: false,
@@ -5285,6 +5351,7 @@ found {found}; using \"system\""
                 content_edge: false,
                 contrast: false,
                 dim_splits: false,
+                focus_frame: false,
                 split_style: false,
                 resize_in_steps: false,
                 tab_icons: false,
@@ -6476,6 +6543,7 @@ found 1.5; using 0.1"
                     content_edge: false,
                     contrast: false,
                     dim_splits: false,
+                    focus_frame: false,
                     split_style: false,
                     resize_in_steps: false,
                     tab_icons: false,
@@ -6584,6 +6652,7 @@ found 1.5; using 0.1"
                 content_edge: false,
                 contrast: false,
                 dim_splits: false,
+                focus_frame: false,
                 split_style: false,
                 resize_in_steps: false,
                 tab_icons: false,
@@ -6696,6 +6765,7 @@ found 1.5; using 0.1"
                 content_edge: false,
                 contrast: false,
                 dim_splits: false,
+                focus_frame: false,
                 split_style: false,
                 resize_in_steps: false,
                 tab_icons: false,
@@ -7235,6 +7305,7 @@ cursor = \"spring\"
             SettingsEdit::ContentEdge(edge) => settings.content_edge = edge,
             SettingsEdit::MinimumContrast(ratio) => settings.minimum_contrast = two(ratio),
             SettingsEdit::DimUnfocusedSplits(on) => settings.dim_unfocused_splits = on,
+            SettingsEdit::FocusFrame(on) => settings.focus_frame = on,
             SettingsEdit::SplitStyle(style) => settings.split_style = style,
             SettingsEdit::ResizeInSteps(on) => settings.resize_in_steps = on,
             SettingsEdit::TabIcons(on) => settings.tab_icons = on,
@@ -7333,6 +7404,7 @@ cursor = \"spring\"
             SettingsEdit::ContentEdge(ContentEdge::Cut),
             SettingsEdit::MinimumContrast(4.5),
             SettingsEdit::DimUnfocusedSplits(true),
+            SettingsEdit::FocusFrame(true),
             SettingsEdit::SplitStyle(SplitStyle::Lines),
             SettingsEdit::ResizeInSteps(true),
             SettingsEdit::TabIcons(false),

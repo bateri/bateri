@@ -6070,8 +6070,9 @@ impl AppDelegate {
                 window.set_content_edge(edge);
             }
         }
-        // The veil over unfocused splits: each tab reads the choice again.
-        if changes.dim_splits {
+        // The veil over unfocused splits and the focus frame: each tab reads the
+        // choice again.
+        if changes.dim_splits || changes.focus_frame {
             for window in &windows {
                 window.refresh_split_look();
             }

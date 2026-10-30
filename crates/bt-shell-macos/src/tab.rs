@@ -677,16 +677,22 @@ impl TerminalTab {
 
     /// What tells the focused pane from the others: its card's frame is
     /// a step stronger, and — only with `[appearance] dim_unfocused_splits` — the
-    /// others sit under the dim veil. No veil with a single pane. AppKit's
-    /// work, it asks for no frame.
+    /// others sit under the dim veil, and — only with `[appearance] focus_frame`
+    /// — a line in the accent runs round it. No veil with a single pane, no line
+    /// with a single pane in view (a zoomed one too). AppKit's work, it asks for
+    /// no frame.
     pub(crate) fn refresh_look(&self) {
         let panes = self.panes();
         let focused = self.focused_pane().id();
-        let dim = panes.len() > 1
-            && app::delegate(self.mtm()).is_some_and(|app| app.settings().dim_unfocused_splits);
+        let (veil, line) = app::delegate(self.mtm()).map_or((false, false), |app| {
+            let settings = app.settings();
+            (settings.dim_unfocused_splits, settings.focus_frame)
+        });
+        let dim = panes.len() > 1 && veil;
+        let frame = line && self.ivars().container.shows_split();
         for pane in &panes {
             let own = pane.id() == focused;
-            pane.set_focus_look(own, dim && !own);
+            pane.set_focus_look(own, dim && !own, frame && own);
         }
         self.ivars().container.ground_follows();
     }

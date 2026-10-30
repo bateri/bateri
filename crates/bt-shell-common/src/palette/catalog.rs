@@ -438,7 +438,7 @@ macro_rules! number {
 const WHILE_MATCHING_SYSTEM: Option<&str> = Some("while Theme is Match System");
 const NEW_SHELLS: Option<&str> = Some("new shells only");
 
-static CATALOG: [Setting; 34] = [
+static CATALOG: [Setting; 35] = [
     Setting {
         key: "appearance.theme",
         section: Section::Appearance,
@@ -637,6 +637,16 @@ static CATALOG: [Setting; 34] = [
         None,
         |s| s.dim_unfocused_splits,
         SettingsEdit::DimUnfocusedSplits
+    ),
+    toggle!(
+        "appearance.focus_frame",
+        Appearance,
+        "Focus Frame",
+        "pane focus line border accent outline",
+        true,
+        None,
+        |s| s.focus_frame,
+        SettingsEdit::FocusFrame
     ),
     named!(
         "appearance.tab_position",
@@ -857,8 +867,8 @@ mod tests {
     }
 
     #[test]
-    fn the_catalog_lists_the_thirty_four_settings_once_each() {
-        assert_eq!(all().len(), 34);
+    fn the_catalog_lists_the_thirty_five_settings_once_each() {
+        assert_eq!(all().len(), 35);
         for (n, setting) in all().iter().enumerate() {
             assert!(
                 all()[n + 1..]
@@ -989,7 +999,7 @@ mod tests {
         assert_eq!(dark.opens, Some(Scope::Theme(Slot::Dark)));
         assert_eq!(dark.subtitle, "while Theme is Match System");
         assert_eq!(dark.value.as_deref(), Some("bateri"));
-        assert_eq!(rows(&settings).len(), 34);
+        assert_eq!(rows(&settings).len(), 35);
     }
 
     #[test]
@@ -1037,6 +1047,7 @@ mod tests {
                 "terminal.cursor",
                 "appearance.split_style",
                 "appearance.dim_unfocused_splits",
+                "appearance.focus_frame",
                 "appearance.tab_position",
                 "appearance.tab_icons",
                 "appearance.tab_icon_colors",

@@ -356,10 +356,11 @@ pub enum ThemeLoaded {
 /// Resolves a theme name: first `{root}/themes/{name}.toml`, then the embedded themes.
 ///
 /// `root` `None` → the home directory could not be resolved, only the embedded ones. A key
-/// missing from the file comes from the **base**: in a file shadowing an embedded theme, that
-/// theme itself; under another name, `Theme::BATERI` (`docs/SETTINGS.md` → Themes). A user who
-/// writes only `accent` into a shadowing `themes/bateri-light.toml` expects the light theme
-/// with a red cursor; read from the dark base, it would get a dark background in light mode.
+/// missing from the file comes from the **base** ([`Theme::read`]): in a file shadowing an
+/// embedded theme, that theme itself; under another name, `bateri Light` or `bateri` by the
+/// file's own background (`docs/SETTINGS.md` → Themes). A user who writes only `accent` into a
+/// shadowing `themes/bateri-light.toml` expects the light theme with a red cursor; read from
+/// the dark base, it would get a dark background in light mode.
 ///
 /// **If the file exists but is unusable, there is no fallback to the embedded one**: if a
 /// broken `themes/bateri.toml` silently opened the embedded `bateri`, the user could not see
@@ -386,8 +387,7 @@ pub fn load_theme(root: Option<&Path>, name: &str) -> ThemeLoaded {
                 return ThemeLoaded::Failed(format!("{file} is empty"));
             }
             Text::Read(text) => {
-                let base = Theme::embedded(name).unwrap_or(Theme::BATERI);
-                return match Theme::parse(&text, &base) {
+                return match Theme::read(name, &text) {
                     Ok((theme, diagnostics)) => ThemeLoaded::Found(
                         theme,
                         diagnostics.iter().map(|d| format!("{file}: {d}")).collect(),
@@ -1384,14 +1384,15 @@ mod tests {
             )
         );
 
-        // The corrected file is swapped in, the slot empties.
+        // The corrected file is swapped in, the slot empties; a light background
+        // is read on the light base.
         write_theme_file(&root, "paper", "background = \"#ffffff\"\n");
         assert_eq!(
             load_theme(Some(&root.0), "paper").or_current(),
             (
                 Some(Theme {
                     background: 0xffffff,
-                    ..Theme::BATERI
+                    ..Theme::BATERI_LIGHT
                 }),
                 Vec::new()
             )
