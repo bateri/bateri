@@ -99,7 +99,7 @@ objc2-web-kit = { version = "0.3", default-features = false, features = [
     "WKUserContentController", "WKScriptMessage", "WKScriptMessageHandler",
     "WKURLSchemeHandler", "WKURLSchemeTask", "WKNavigationDelegate", "WKNavigationAction",
     "WKNavigation", "WKUIDelegate", "WKWebsiteDataStore", "WKFrameInfo", "WKSecurityOrigin",
-    "WKWindowFeatures",
+    "WKWindowFeatures", "WKOpenPanelParameters",
 # `WKSnapshotConfiguration`: the web view's own picture for the tab card's tile
 # (`pencere_view::still`) — the rectangle and the width of what it gives back;
 # its rectangle is a `CGRect`, behind the `objc2-core-foundation` flag.

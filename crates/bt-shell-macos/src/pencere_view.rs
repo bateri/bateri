@@ -102,14 +102,14 @@ use objc2_app_kit::{
 use objc2_core_foundation::CFRetained;
 use objc2_core_graphics::CGImage;
 use objc2_foundation::{
-    NSBundle, NSData, NSDictionary, NSError, NSHTTPURLResponse, NSLocale, NSObject,
+    NSArray, NSBundle, NSData, NSDictionary, NSError, NSHTTPURLResponse, NSLocale, NSObject,
     NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSTimeZone, NSURL, NSURLRequest,
 };
 use objc2_web_kit::{
     WKFrameInfo, WKNavigation, WKNavigationAction, WKNavigationActionPolicy, WKNavigationDelegate,
-    WKScriptMessage, WKScriptMessageHandler, WKSecurityOrigin, WKUIDelegate, WKURLSchemeHandler,
-    WKURLSchemeTask, WKUserContentController, WKWebView, WKWebViewConfiguration,
-    WKWebsiteDataStore,
+    WKOpenPanelParameters, WKScriptMessage, WKScriptMessageHandler, WKSecurityOrigin, WKUIDelegate,
+    WKURLSchemeHandler, WKURLSchemeTask, WKUserContentController, WKWebView,
+    WKWebViewConfiguration, WKWebsiteDataStore,
 };
 use objc2_web_kit::{WKMediaCaptureType, WKPermissionDecision};
 
@@ -535,6 +535,30 @@ define_class!(
             handler: &DynBlock<dyn Fn(WKPermissionDecision)>,
         ) {
             handler.call((WKPermissionDecision::Deny,));
+        }
+
+        /// A file input of the page: the Open panel, as a sheet of the pane the view covers and
+        /// on the pane's seat like any other, files only, one or more as the input says. The
+        /// handler is called once, later: with the URLs chosen, or with none where the person
+        /// turned it away (WebKit's own answer to a delegate that has no method for it).
+        #[unsafe(method(webView:runOpenPanelWithParameters:initiatedByFrame:completionHandler:))]
+        fn open_panel(
+            &self,
+            web_view: &WKWebView,
+            parameters: &WKOpenPanelParameters,
+            _frame: &WKFrameInfo,
+            handler: &DynBlock<dyn Fn(*mut NSArray<NSURL>)>,
+        ) {
+            // SAFETY: reading the superview on the main thread; the pane is the web view's parent.
+            let pane = unsafe { web_view.superview() }
+                .and_then(|parent| parent.downcast::<TerminalPane>().ok());
+            // SAFETY: a plain property of the parameters.
+            let multiple = unsafe { parameters.allowsMultipleSelection() };
+            let handler = handler.copy();
+            match pane {
+                Some(pane) => pane.web_open_panel(multiple, handler),
+                None => handler.call((std::ptr::null_mut(),)),
+            }
         }
     }
 );

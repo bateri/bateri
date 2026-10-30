@@ -64,6 +64,7 @@ mod pacer;
 mod palette;
 mod pane;
 mod pane_drag;
+mod pane_files;
 mod password_sheet;
 mod pencere_view;
 mod pointer;

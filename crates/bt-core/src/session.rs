@@ -11942,7 +11942,10 @@ impl Session {
     /// an empty one where there is no desk.
     pub fn attached_files(&self) -> pencere::AttachedFiles {
         self.adapter
-            .view(|conversation| conversation.attached_files())
+            .0
+            .desk
+            .as_ref()
+            .map(pencere::Desk::attached_files)
             .unwrap_or_default()
     }
 

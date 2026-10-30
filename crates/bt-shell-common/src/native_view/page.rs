@@ -1437,17 +1437,10 @@ return {
         session.shutdown();
     }
 
-    /// A real pane's files beside a view's bundle, end to end: a program (`demopen --files`) opens
-    /// a view at the interface that has them, and the page (played here, as the pane does it)
-    /// has the program attach a picture and let it go, read a file the person gave and save a copy
-    /// to the place the person chose; and a save the view ends in the middle of leaves no part.
-    #[test]
-    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
-    fn a_views_files_are_attached_read_and_saved_through_a_real_pane() {
-        use crate::child::{SilentWake, wait_until};
-        use crate::native_view::{GivenFile, ViewFiles};
+    /// A session whose pane runs `demopen` with `flag`, in a view of its own.
+    fn demopen_session(flag: &str) -> Arc<bt_core::Session> {
+        use crate::child::SilentWake;
         use bt_core::pencere::ViewOptions;
-        use bt_core::pencere::{Action, FileGrant};
         use bt_core::{CaretShape, CursorBlink, Osc52, Session, SessionOptions, TerminalOptions};
         use std::collections::HashMap;
 
@@ -1464,14 +1457,14 @@ return {
         );
         let mut views = ViewOptions::new("bateri-test", "0.0.0");
         views.native_entry_limit = Some(ModuleLimits::default().component as u64);
-        let session = Arc::new(
+        Arc::new(
             Session::spawn(
                 SessionOptions {
                     command: Some((
                         "/bin/sh".to_owned(),
                         vec![
                             "-c".to_owned(),
-                            "set -m; \"$1\" --files".to_owned(),
+                            format!("set -m; \"$1\" {flag}"),
                             "sh".to_owned(),
                             program.display().to_string(),
                         ],
@@ -1501,7 +1494,22 @@ return {
                 Arc::new(SilentWake),
             )
             .expect("a session"),
-        );
+        )
+    }
+
+    /// A real pane's files beside a view's bundle, end to end: a program (`demopen --files`) opens
+    /// a view at the interface that has them, and the page (played here, as the pane does it)
+    /// has the program attach a picture and let it go, read a file the person gave and save a copy
+    /// to the place the person chose; and a save the view ends in the middle of leaves no part.
+    #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+    fn a_views_files_are_attached_read_and_saved_through_a_real_pane() {
+        use crate::child::wait_until;
+        use crate::native_view::{GivenFile, ViewFiles};
+        use bt_core::Session;
+        use bt_core::pencere::{Action, FileGrant};
+
+        let session = demopen_session("--files");
         // What the pane does with the actions of the view: the files do the file jobs and hear
         // what came of them, the page hears the program's words.
         let dir = std::env::temp_dir().join(format!("bateri-views-files-{}", std::process::id()));
@@ -1517,6 +1525,8 @@ return {
             started: Option<bt_core::pencere::ViewStart>,
             said: Vec<String>,
             forgotten: Vec<String>,
+            picks: Vec<(u32, bool)>,
+            saves: Vec<(u32, String)>,
             calls: u32,
         }
         impl Played {
@@ -1540,6 +1550,8 @@ return {
                             end,
                         } => self.files.write(write, &handle, offset, bytes, end),
                         Action::AbortWrite { handle } => self.files.abort(&handle),
+                        Action::Pick { panel, multiple } => self.picks.push((panel, multiple)),
+                        Action::Save { panel, name, .. } => self.saves.push((panel, name)),
                         _ => {}
                     }
                 }
@@ -1572,6 +1584,8 @@ return {
             started: None,
             said: Vec::new(),
             forgotten: Vec::new(),
+            picks: Vec::new(),
+            saves: Vec::new(),
             calls: 0,
         };
         wait_until("the view to start", || {
@@ -1657,7 +1671,84 @@ return {
         wait_until("the file to have its name", || {
             std::fs::read(&saved).is_ok_and(|bytes| bytes == b"saved text")
         });
-        assert!(!dir.join(".saved.txt.pencere-part").exists());
+        let parts = |dir: &std::path::Path| {
+            std::fs::read_dir(dir)
+                .expect("the directory")
+                .filter_map(Result::ok)
+                .filter(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .ends_with(".pencere-part")
+                })
+                .count()
+        };
+        assert_eq!(parts(&dir), 0);
+
+        // What the pane tells the page of a drop: a handle for each file, with the path where the
+        // program reads what the person does, and a folder with no handle.
+        let dropped = dir.join("dropped.txt");
+        std::fs::write(&dropped, b"dropped").expect("a file");
+        let folder = dir.join("folder");
+        std::fs::create_dir(&folder).expect("a folder");
+        let guess = |_: &std::path::Path| "text/plain".to_owned();
+        let paths = [dropped.clone(), folder.clone(), dir.join("missing")];
+        let entries = crate::native_view::entries_given(&session, &files, &paths, true, &guess);
+        assert_eq!(entries.len(), 2, "{entries:?}");
+        assert_eq!(entries[0].name, "dropped.txt");
+        assert_eq!((entries[0].size, entries[0].folder), (7, false));
+        assert_eq!(entries[0].media_type, "text/plain");
+        assert_eq!(
+            entries[0].path.as_deref(),
+            Some(dropped.to_str().expect("a path"))
+        );
+        assert!(
+            entries[1].folder && entries[1].handle.is_none(),
+            "{entries:?}"
+        );
+        let dropped_handle = entries[0].handle.clone().expect("a handle");
+        let read = played.ask(
+            "read",
+            &format!(r#"{{"handle":"{dropped_handle}","offset":0,"length":100}}"#),
+        );
+        assert!(read.contains(r#""text":"dropped""#), "{read}");
+        // In a remote session the program does not read the person's files: no path is told.
+        let remote = crate::native_view::entries_given(&session, &files, &paths, false, &guess);
+        assert!(
+            remote.iter().all(|entry| entry.path.is_none()),
+            "{remote:?}"
+        );
+        // The place the person chose, as the page is told of it.
+        let copy = dir.join("copy.txt");
+        let saving =
+            crate::native_view::place_saved(&session, &files, copy.clone()).expect("a place");
+        assert_eq!(saving.name, "copy.txt");
+        played.ask(
+            "write",
+            &format!(
+                r#"{{"handle":"{}","offset":0,"text":"a copy","end":true}}"#,
+                saving.handle
+            ),
+        );
+        wait_until("the copy to have its name", || {
+            std::fs::read(&copy).is_ok_and(|bytes| bytes == b"a copy")
+        });
+
+        // The panels the page asks for (what the pane's `Host::panel` calls): the session says
+        // when to show one, holds the page to one at a time, and takes another once it is gone.
+        session.module_pick(true);
+        played.pump();
+        let (panel, multiple) = played.picks[0];
+        assert!(multiple && played.picks.len() == 1, "{:?}", played.picks);
+        session.module_save("a.txt", Some("text/plain"));
+        played.pump();
+        assert!(played.saves.is_empty(), "a second panel while one is up");
+        session.panel_closed(panel);
+        session.module_save("a.txt", Some("text/plain"));
+        played.pump();
+        assert_eq!(played.saves.len(), 1, "{:?}", played.saves);
+        assert_eq!(played.saves[0].1, "a.txt");
+        session.panel_closed(played.saves[0].0);
 
         // A save the view ends in the middle of leaves no part: the session tells the pane to
         // give it up.
@@ -1668,19 +1759,65 @@ return {
             "write",
             &format!(r#"{{"handle":"{place}","offset":0,"text":"half","end":false}}"#),
         );
-        let part = dir.join(".unfinished.txt.pencere-part");
         wait_until("the part to be written", || {
             played.pump();
-            part.exists()
+            parts(&dir) == 1
         });
         session.close_view();
         wait_until("the part to be given up", || {
             played.pump();
-            !part.exists()
+            parts(&dir) == 0
         });
         assert!(!unfinished.exists());
         // And what the view had attached or been given is nothing once it is over.
         assert_eq!(assets.read(&format!("file:{handle}")), None);
+        session.shutdown();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A view at the interface before files has none: the session makes no handle of a file
+    /// the person gives it, and the pane tells the page of none (it takes the drop as it did).
+    #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+    fn a_view_at_an_interface_without_files_is_given_no_handle() {
+        use crate::child::wait_until;
+        use crate::native_view::{GivenFile, ViewFiles};
+        use bt_core::pencere::{Action, FileGrant};
+
+        let session = demopen_session("--lua");
+        let mut started = None;
+        wait_until("the view to start", || {
+            for action in session.take_view_actions() {
+                if let Action::StartView(start) = action {
+                    started = Some(start);
+                }
+            }
+            started.is_some()
+        });
+        let start = started.take().expect("a start");
+        assert_eq!(start.version, "2.0");
+        assert!(!bt_core::pencere::has_files(start.kind, &start.version));
+        let dir = std::env::temp_dir().join(format!("bateri-views-nofiles-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a directory");
+        let file = dir.join("a.txt");
+        std::fs::write(&file, b"a").expect("a file");
+        let size = GivenFile::of(&file).expect("a source").size;
+        assert_eq!(session.grant_file(&FileGrant { size }), None);
+        assert_eq!(session.grant_save(), None);
+        let files = ViewFiles::new(
+            Arc::new(Arc::downgrade(&session)),
+            Arc::new(|_: &std::path::Path| {}),
+        );
+        let entries = crate::native_view::entries_given(
+            &session,
+            &files,
+            &[file],
+            true,
+            &|_: &std::path::Path| String::new(),
+        );
+        assert!(entries.is_empty(), "{entries:?}");
+        assert!(crate::native_view::place_saved(&session, &files, dir.join("b.txt")).is_none());
         session.shutdown();
         let _ = std::fs::remove_dir_all(&dir);
     }

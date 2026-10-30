@@ -69,7 +69,7 @@ pub use ::pencere_host::sandbox::{
 };
 pub use ::pencere_host::session::{
     ATTACHED_SCHEME, Action, AttachedFiles, FileError, FileGrant, MAX_BACKLOG, MAX_FILE_PIECE,
-    MAX_VIEW_MESSAGE, Size, State, ViewKind, ViewStart, WEB_BRIDGE_VERSION,
+    MAX_VIEW_MESSAGE, Size, State, ViewKind, ViewStart, WEB_BRIDGE_VERSION, has_files,
 };
 
 use crate::color::{Theme, srgb_bytes};
@@ -845,6 +845,13 @@ impl Desk {
     /// ([`Conversing::page_context`]).
     pub(crate) fn page_context(&self) -> Option<String> {
         lock(&self.inner).conversation.page_context()
+    }
+
+    /// The table of the files the views of the conversation have attached
+    /// ([`Conversing::attached_files`]): a clone of the shared table, which takes no more than
+    /// the desk's lock and delivers nothing.
+    pub(crate) fn attached_files(&self) -> AttachedFiles {
+        lock(&self.inner).conversation.attached_files()
     }
 
     /// The shell page's frame has loaded: the page is told the `context` it starts with

@@ -46,7 +46,10 @@ mod look;
 mod page;
 #[cfg(test)]
 mod pane_tests;
-pub use files::{FILE_SCHEME, GivenFile, Outcomes, Quarantine, ViewFiles};
+pub use files::{
+    DropWay, FILE_SCHEME, GivenFile, Outcomes, Quarantine, ViewFiles, drop_way, entries_given,
+    place_saved,
+};
 pub use look::{LookSlot, caret_width_pt, terminal_look};
 pub use page::{
     MenuUp, Opening, PageEditors, PageHandle, ShownMenu, containers_demo, module_page, script_page,
@@ -57,9 +60,9 @@ pub use pencere_drive::{
 pub use pencere_sandbox::{Assets, Fault, ImageLimits, ModuleLimits, Script};
 use pencere_sandbox::{Images, draw_figure};
 pub use pencere_view::{
-    Accessible, AccessibleRole, Bars, Button, Command, Cursor, FieldKind, FieldState, Fill, Id,
-    Input, Key, KeyConvention, Keyboard, Menu, MenuEntry, Mods, Phase, Point, Rect, Role, Shortcut,
-    State, TerminalLook, WallTime,
+    Accessible, AccessibleRole, Bars, Button, Command, Cursor, FieldKind, FieldState, FileEntry,
+    FileSource, Fill, Id, Input, Key, KeyConvention, Keyboard, Menu, MenuEntry, Mods, Panel, Phase,
+    Point, Rect, Role, Saving, Shortcut, State, TerminalLook, WallTime,
 };
 use pencere_view::{
     Color, DrawList, Family, Figure, Font, Measure, Metrics, Paint, Picture, Quad, Run, Source,

@@ -22,6 +22,18 @@ of every installed copy. A version without a section is not released.
   slow disk never holds up the window; a file that changed since it was given is reported as gone,
   and a save is written beside its place and takes the place's name only when the program has
   finished it (a save that is given up leaves nothing behind).
+- **Files can be dropped, pasted and chosen in a native view.** In a view whose program speaks
+  the files interface, files dragged from Finder onto the view are given to it (the view is told
+  how many are over it and where), so are files copied in Finder and pasted with ⌘V, and an image
+  on the clipboard with no file of its own (a screenshot) is kept as `image.png` in a temporary
+  folder for the view's own lifetime. A program asks for the Open panel ("Upload Files…") or the
+  Save panel ("Save a Copy…") and bateri shows it on the tab as a sheet, the Save panel in the
+  folder you last used and with the name the program proposed; the files you chose are given
+  to the view, and cancelling gives it none. Where the program runs on this Mac it is also told
+  where each file is; in an `ssh` session it never is, and reads the files through bateri.
+  A view of the older interface and a pane with no view take a drop as before (the path
+  written to the line, an upload in an `ssh` session). A file field in a web view opens the same
+  panel instead of doing nothing.
 - **A native view can have an editor for code.** A program's native view can put an editor of
   text in it, the pencere kit's own, which bateri keeps and draws: as many carets and selections
   as you make (⌘-click, ⌥-drag for a column), undo and redo, the Mac's editing keys (⌥ and ⌘
