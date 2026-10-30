@@ -12,9 +12,16 @@
 //! demopen            a view of the kind `wasm`, readings pushed once a second
 //! demopen --lua      the same, with a script as the view
 //! demopen --lua-files  the same, with a script of two files: the page, and a script it requires
+//! demopen --files   a script view at the interface that has files beside the bundle (`lua` 2.1)
 //! demopen --flood    the readings pushed as fast as the terminal takes them
 //! demopen --stall N  the readings stop after N seconds (a Docker that hangs)
 //! ```
+//!
+//! With `--files` the view's calls `attach` (a text, which the view then draws by its name),
+//! `detach`, `read` (a piece of a file the person gave, by its handle), `receive` (all of one into
+//! the file `to`, with two reads out at a time, as an app that takes a drop does) and `write` (a
+//! piece of the place the person chose to save in) are the program's own, and each says what the
+//! terminal answered it.
 //!
 //! The view's `stop` call is not known (the library answers it with an error) and its `upload`
 //! calls carry a large payload in pieces: the program counts what it gets and says how much
@@ -28,8 +35,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use pencere::{
-    Bundle, Call, EndedBy, File, Kind, NoViewReason, Options, Outcome, Subscription, View,
-    ViewError,
+    Bundle, Call, EndedBy, File, FileError, Kind, NoViewReason, Options, Outcome, Subscription,
+    View, ViewControl, ViewError,
 };
 use serde_json::{Value, json};
 
@@ -44,9 +51,11 @@ const SCRIPT: &[u8] =
 const PAGE: &[u8] = b"-- a page of bateri's tests, of two files\nlocal box = require(\"./parts/box\")\nreturn { render = function()\n\treturn pencere.div():bg(\"raised1\"):p(8):child(pencere.text(\"two files\")):child(box())\nend }\n";
 const BOX: &[u8] = b"return function() return pencere.div():size(20, 20):bg(\"accent\") end\n";
 
-/// The version of the interface of the views the terminal draws itself that this is written
-/// against.
-const VERSION: &str = "2.0";
+/// The versions of the interface of the views the terminal draws itself that this is written
+/// against: the Lua page API's, and the component interface's (`pencere:view@3.0.0`).
+const LUA_VERSION: &str = "2.0";
+const LUA_FILES_VERSION: &str = "2.1";
+const WASM_VERSION: &str = "3.0";
 
 /// How often the made-up host reports.
 const EVERY: Duration = Duration::from_secs(1);
@@ -59,6 +68,7 @@ fn main() -> ExitCode {
     let mut stall = None;
     let mut lua = false;
     let mut files = false;
+    let mut beside = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -67,6 +77,10 @@ fn main() -> ExitCode {
             "--lua-files" => {
                 lua = true;
                 files = true;
+            }
+            "--files" => {
+                lua = true;
+                beside = true;
             }
             "--stall" => match args
                 .next()
@@ -98,11 +112,20 @@ fn main() -> ExitCode {
     let Ok(bundle) = bundle else {
         return ExitCode::from(66);
     };
+    let control = ViewControl::new();
     let upload = Arc::new(Upload::default());
     let counted = Arc::clone(&upload);
     let stalls_at = stall.map(|after| Instant::now() + after);
     let options = Options::new()
-        .view(View::new(kind, &[VERSION], bundle))
+        .view(View::new(
+            kind,
+            &[match (kind, beside) {
+                (Kind::Wasm, _) => WASM_VERSION,
+                (_, true) => LUA_FILES_VERSION,
+                _ => LUA_VERSION,
+            }],
+            bundle,
+        ))
         .program("demopen")
         .title("Containers")
         // The readings: the first is the view's at once, the next ones are a second apart.
@@ -113,6 +136,7 @@ fn main() -> ExitCode {
         })
         // The view sends a large payload in pieces; the last one asks how much there was.
         .call("upload", move |params, call| counted.take(&params, call))
+        .control(control.clone())
         // The terminal shows no view: the list as text. A refusal or a failure has its words.
         .fallback(|why| {
             if let Some(words) = &why.message {
@@ -122,6 +146,11 @@ fn main() -> ExitCode {
             }
             say(&format!("{}\n", CONTAINERS.join("\n")));
         });
+    let options = if beside {
+        beside_calls(options, &control)
+    } else {
+        options
+    };
     let outcome = match pencere::serve(options) {
         Ok(outcome) => outcome,
         Err(why) => {
@@ -143,8 +172,71 @@ fn main() -> ExitCode {
     ExitCode::from(outcome.shell_status())
 }
 
+/// The calls of `--files`: what the view asks of the files beside its bundle, done with the
+/// program's [`ViewControl`] and answered with what the terminal said.
+fn beside_calls(options: Options, control: &ViewControl) -> Options {
+    let attaching = control.clone();
+    let detaching = control.clone();
+    let reading = control.clone();
+    let writing = control.clone();
+    let receiving = control.clone();
+    options
+        .call("receive", move |params, _call| {
+            let handle = params.get("handle").and_then(Value::as_str).unwrap_or("");
+            let to = params.get("to").and_then(Value::as_str).unwrap_or("");
+            let size = receiving
+                .receive(handle, std::path::Path::new(to), |_| true)
+                .map_err(refused)?;
+            Ok(json!({ "size": size }))
+        })
+        .call("attach", move |params, _call| {
+            let text = params.get("text").and_then(Value::as_str).unwrap_or("");
+            let name = attaching
+                .attach(text.as_bytes().to_vec())
+                .map_err(refused)?;
+            Ok(json!({ "name": name }))
+        })
+        .call("detach", move |params, _call| {
+            if let Some(name) = params.get("name").and_then(Value::as_str) {
+                detaching.detach(name);
+            }
+            Ok(json!({}))
+        })
+        .call("read", move |params, _call| {
+            let handle = params.get("handle").and_then(Value::as_str).unwrap_or("");
+            let offset = params.get("offset").and_then(Value::as_u64).unwrap_or(0);
+            let length = params.get("length").and_then(Value::as_u64).unwrap_or(0);
+            let bytes = reading
+                .read(
+                    handle,
+                    offset,
+                    usize::try_from(length).unwrap_or(usize::MAX),
+                )
+                .map_err(refused)?;
+            Ok(json!({ "text": String::from_utf8_lossy(&bytes), "length": bytes.len() }))
+        })
+        .call("write", move |params, _call| {
+            let handle = params.get("handle").and_then(Value::as_str).unwrap_or("");
+            let offset = params.get("offset").and_then(Value::as_u64).unwrap_or(0);
+            let text = params.get("text").and_then(Value::as_str).unwrap_or("");
+            let end = params.get("end").and_then(Value::as_bool) == Some(true);
+            writing
+                .write(handle, offset, text.as_bytes().to_vec(), end)
+                .map_err(refused)?;
+            Ok(json!({}))
+        })
+}
+
+/// What the terminal said no with, as the error of the call.
+fn refused(error: FileError) -> ViewError {
+    match error {
+        FileError::Refused(code) => ViewError::new(code),
+        other => ViewError::with_message("file", other.to_string()),
+    }
+}
+
 fn usage() -> ExitCode {
-    say("usage: demopen [--lua | --lua-files] [--flood] [--stall SECONDS]\n");
+    say("usage: demopen [--lua | --lua-files | --files] [--flood] [--stall SECONDS]\n");
     ExitCode::from(64)
 }
 

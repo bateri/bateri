@@ -58,8 +58,8 @@ use objc2_foundation::{
 };
 
 use bt_shell_common::native_view::{
-    Button as PageButton, Input, Menu as PageMenu, MenuEntry as PageMenuEntry, MenuUp, Phase,
-    Point as PagePoint, ShownMenu,
+    Button as PageButton, DropWay, Input, Menu as PageMenu, MenuEntry as PageMenuEntry, MenuUp,
+    Phase, Point as PagePoint, ShownMenu, drop_way,
 };
 use objc2_app_kit::NSMenu;
 
@@ -640,6 +640,12 @@ pub(crate) struct ViewIvars {
     /// handle of a divider between panes, the tab column) would set the shape over the
     /// cursor rects of the view that is there.
     page_over: Cell<bool>,
+    /// How many files the drag that is over the view carries: read once, where it entered, for
+    /// the page of a view with files to be told at every move.
+    drag_count: Cell<usize>,
+    /// Where the page was last told the drag is, and how many files: AppKit repeats
+    /// `draggingUpdated:` while the pointer is still, and the page hears a change only.
+    drag_told: Cell<Option<(f32, f32, usize)>>,
     /// The buttons pressed on the page of this pane and not yet let go (a bit each: left,
     /// right, middle). While one is held the page is told where the pointer goes and the release,
     /// wherever they are — over the page or not, in the window or out of it — and not that the
@@ -941,8 +947,15 @@ define_class!(
         /// silent. Text wins over an image: what copies both (a cell from a
         /// spreadsheet) pastes as before. An empty string beside an image is
         /// no text - it would paste nothing and hide the image.
+        ///
+        /// **A page whose view has files** is given what is on the pasteboard that is a file
+        /// ([`BateriView::paste_files`]) in place of any of this: the files of a Finder copy, or
+        /// an image with no text, saved as a file of its own.
         #[unsafe(method(paste:))]
         fn paste_clipboard(&self, _sender: Option<&AnyObject>) {
+            if self.paste_files(&NSPasteboard::generalPasteboard()) {
+                return;
+            }
             if self.pane().is_some_and(|pane| pane.page_editor_menu('v')) {
                 return;
             }
@@ -1928,9 +1941,10 @@ define_class!(
         /// it enters the queue.
         ///
         /// **Copy**, not move: the file in Finder must stay in place, we only
-        /// write its path. `draggingUpdated:` is not implemented either -
-        /// on a target that does not implement it AppKit keeps the answer here,
-        /// so the second method would repeat the same constant.
+        /// write its path. A page whose view has files is told what is over it and
+        /// where ([`BateriView::dragged_over`]), at the entering and at every move
+        /// (`draggingUpdated:`), which is why that method is implemented: on a target that
+        /// does not implement it AppKit keeps the answer given here.
         ///
         /// **The session is not asked and the asymmetry stands deliberately:**
         /// `performDragOperation:` below returns `false` while no session is
@@ -1944,18 +1958,19 @@ define_class!(
         /// between), so there is no frame in which the asymmetry could be seen;
         /// let its name stay here anyway.
         #[unsafe(method(draggingEntered:))]
-        fn dragging_entered(
-            &self,
-            _sender: &ProtocolObject<dyn NSDraggingInfo>,
-        ) -> NSDragOperation {
-            // Files over a page of the kit are the page's: it takes them whatever the session.
-            if self.pane().is_some_and(|pane| pane.page_is_up())
-                || self.pane().is_none_or(|pane| pane.accepts_drop())
-            {
-                NSDragOperation::Copy
-            } else {
-                NSDragOperation::None
-            }
+        fn dragging_entered(&self, sender: &ProtocolObject<dyn NSDraggingInfo>) -> NSDragOperation {
+            self.ivars()
+                .drag_count
+                .set(dropped_paths(&sender.draggingPasteboard()).len());
+            self.ivars().drag_told.set(None);
+            self.dragged_over(sender)
+        }
+
+        /// The drag moved over the view: the same answer, and the page of a view with files
+        /// is told where the files are now.
+        #[unsafe(method(draggingUpdated:))]
+        fn dragging_updated(&self, sender: &ProtocolObject<dyn NSDraggingInfo>) -> NSDragOperation {
+            self.dragged_over(sender)
         }
 
         /// The drop was released: in a local session the paths are escaped and
@@ -1987,6 +2002,11 @@ define_class!(
         /// false` would conflict with the outer signature and break the compilation.
         #[unsafe(method(draggingExited:))]
         fn dragging_exited(&self, _sender: Option<&ProtocolObject<dyn NSDraggingInfo>>) {
+            self.ivars().drag_count.set(0);
+            self.ivars().drag_told.set(None);
+            if let Some(pane) = self.pane() {
+                pane.files_drag_left();
+            }
         }
 
         /// The drag ended over the pane, taken or not.
@@ -1996,24 +2016,38 @@ define_class!(
 
         #[unsafe(method(performDragOperation:))]
         fn perform_drag_operation(&self, sender: &ProtocolObject<dyn NSDraggingInfo>) -> bool {
+            let pane = self.pane();
+            self.ivars().drag_count.set(0);
+            self.ivars().drag_told.set(None);
             let paths = dropped_paths(&sender.draggingPasteboard());
-            // Over a page of the kit the paths are the page's, told where they were let go:
-            // nothing is written to the program's line or uploaded.
             let at = self.convertPoint_fromView(sender.draggingLocation(), None);
-            let page_took = !paths.is_empty()
-                && self.pane().is_some_and(|pane| {
-                    pane.page_files(PagePoint::new(at.x as f32, at.y as f32), paths.clone())
-                });
-            page_took
-                || match self.ivars().session.get() {
-                    Some(session) if !paths.is_empty() && session.remote_target().is_some() => self
-                        .pane()
-                        .is_some_and(|pane| pane.upload_drop(paths)),
-                    Some(session) if !paths.is_empty() => {
+            let at = PagePoint::new(at.x as f32, at.y as f32);
+            let session = self.ivars().session.get();
+            let remote = session.is_some_and(|session| session.remote_target().is_some());
+            // What takes the files is what is up in the pane: a page of a view with files is
+            // given them as files (the paths are told where the program reads the person's),
+            // any other page is told their paths, and nothing is written to the program's line
+            // or uploaded; with no page, a remote session uploads them and a local one has
+            // their paths written to the line.
+            !paths.is_empty()
+                && match drop_way(pane.as_ref().and_then(|pane| pane.files_mode()), remote) {
+                    DropWay::Handles => {
+                        let given = pane
+                            .as_ref()
+                            .is_some_and(|pane| pane.give_dropped(at, &paths));
+                        if !given && let Some(pane) = &pane {
+                            // Nothing was given: the page that heard files were over it is
+                            // told they went.
+                            pane.files_drag_left();
+                        }
+                        given
+                    }
+                    DropWay::Paths => pane.is_some_and(|pane| pane.page_files(at, paths)),
+                    DropWay::Upload => pane.is_some_and(|pane| pane.upload_drop(paths)),
+                    DropWay::Paste => session.is_some_and(|session| {
                         session.paste(shell_quote(&paths).into_bytes());
                         true
-                    }
-                    _ => false,
+                    }),
                 }
         }
     }
@@ -2132,10 +2166,52 @@ fn resolve_text(string: &AnyObject) -> Option<String> {
 }
 
 impl BateriView {
+    /// The answer to a drag over the view (`draggingEntered:`, `draggingUpdated:`): copy where
+    /// a page is up or the pane takes a drop, and none where it does not; and the page of a
+    /// view with files is told how many files are over it and where.
+    fn dragged_over(&self, sender: &ProtocolObject<dyn NSDraggingInfo>) -> NSDragOperation {
+        let pane = self.pane();
+        if let Some(pane) = &pane {
+            let at = self.convertPoint_fromView(sender.draggingLocation(), None);
+            let told = (at.x as f32, at.y as f32, self.ivars().drag_count.get());
+            if self.ivars().drag_told.replace(Some(told)) != Some(told) {
+                pane.files_drag_over(PagePoint::new(told.0, told.1), told.2);
+            }
+        }
+        // Files over a page of the kit are the page's: it takes them whatever the session.
+        if pane.as_ref().is_some_and(|pane| pane.page_is_up())
+            || pane.as_ref().is_none_or(|pane| pane.accepts_drop())
+        {
+            NSDragOperation::Copy
+        } else {
+            NSDragOperation::None
+        }
+    }
+
+    /// A paste into a page whose view has files: the files on the pasteboard (what Finder copies,
+    /// whose names are not pasted as text), and an image with no text as a file of its own
+    /// (a screenshot). `true` when it was the page's. Text wins over an image here as it does
+    /// anywhere: what copies both pastes as text.
+    fn paste_files(&self, board: &NSPasteboard) -> bool {
+        let Some(pane) = self.pane().filter(|pane| pane.files_mode() == Some(true)) else {
+            return false;
+        };
+        let paths = dropped_paths(board);
+        if !paths.is_empty() {
+            return pane.give_pasted(&paths);
+        }
+        let has_text = clipboard::read(board).is_some_and(|text| !text.is_empty());
+        !has_text
+            && clipboard::has_image(board)
+            && clipboard::read_image_png(board).is_some_and(|png| pane.give_pasted_image(&png))
+    }
+
     pub(crate) fn new(mtm: MainThreadMarker, frame: NSRect) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(ViewIvars {
             session: OnceCell::new(),
             page_over: Cell::new(false),
+            drag_count: Cell::new(0),
+            drag_told: Cell::new(None),
             page_held: Cell::new(0),
             page_menu: MenuUp::default(),
             gesture: Cell::new(Gesture::default()),

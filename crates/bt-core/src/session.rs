@@ -11945,6 +11945,87 @@ impl Session {
             .view(|conversation| conversation.module_link(url));
     }
 
+    /// The files a program attached to the view that runs (`attach`, specification §8.8), as a
+    /// table another thread reads without the session: what a page draws by a `sha256:` name is
+    /// found there. The same table for the whole life of the session, emptied when the view ends;
+    /// an empty one where there is no desk.
+    pub fn attached_files(&self) -> pencere::AttachedFiles {
+        self.adapter
+            .0
+            .desk
+            .as_ref()
+            .map(pencere::Desk::attached_files)
+            .unwrap_or_default()
+    }
+
+    /// The person gave the view that runs a file (a drop, a paste, a pick in the Open panel): the
+    /// handle the session made of it, or `None` where the view has no files (§8.9). The file's
+    /// path is the terminal's to keep; the handle is all the view and its program know of it.
+    pub fn grant_file(&self, grant: &pencere::FileGrant) -> Option<String> {
+        self.adapter
+            .view(|conversation| conversation.grant_file(grant))
+            .flatten()
+    }
+
+    /// The person chose a place to save in, in the Save panel the view asked for: the handle the
+    /// program writes to, or `None` where the view has no files (§8.10).
+    pub fn grant_save(&self) -> Option<String> {
+        self.adapter
+            .view(|conversation| conversation.grant_save())
+            .flatten()
+    }
+
+    /// What came of the [`pencere::Action::ReadFile`] whose `read` this is: the bytes, or what went
+    /// wrong. The program is answered in the lane the view's words take.
+    pub fn file_read(&self, read: u32, result: Result<Vec<u8>, pencere::FileError>) {
+        self.view_words(|conversation| conversation.file_read(read, result));
+    }
+
+    /// What came of the [`pencere::Action::WriteFile`] whose `write` this is.
+    pub fn file_written(&self, write: u32, result: Result<(), pencere::FileError>) {
+        self.view_words(|conversation| conversation.file_written(write, result));
+    }
+
+    /// A view asks for the Open panel (the drive's `Host::panel`); the pane shows it when the
+    /// session says so ([`pencere::Action::Pick`]) and answers with [`Self::panel_closed`].
+    pub fn module_pick(&self, multiple: bool) {
+        self.adapter
+            .view(|conversation| conversation.module_pick(multiple));
+    }
+
+    /// A view asks for the Save panel, with the name it proposes (and the type of the file, if it
+    /// says): [`pencere::Action::Save`], answered with [`Self::panel_closed`].
+    pub fn module_save(&self, name: &str, media_type: Option<&str>) {
+        self.adapter
+            .view(|conversation| conversation.module_save(name, media_type));
+    }
+
+    /// The panel [`pencere::Action::Pick`] or [`pencere::Action::Save`] showed is gone, with what
+    /// the person chose or without.
+    pub fn panel_closed(&self, panel: u32) {
+        self.adapter
+            .view(|conversation| conversation.panel_closed(panel));
+    }
+
+    /// As `Adapter::view`, for the words of the view's side the program is answered with (the
+    /// `data` of a read, the `wrote` of a write): they take the lane the module's words take, so
+    /// that what the view's side says late is dropped with the view and never typed at the shell
+    /// that has the tty next (see [`Self::module_message`]).
+    fn view_words<R>(&self, act: impl FnOnce(&mut pencere::Conversing) -> R) -> Option<R> {
+        let adapter = &self.adapter;
+        let ticket = adapter.0.flow.module_ticket();
+        let desk = adapter.0.desk.as_ref()?;
+        Some(desk.module_apply(
+            |bytes| adapter.input(bytes),
+            |bytes| {
+                if let Some(epoch) = ticket {
+                    adapter.module_input(epoch, bytes);
+                }
+            },
+            act,
+        ))
+    }
+
     /// The person closes the view; the program is told once it is gone.
     pub fn close_view(&self) {
         self.adapter.view(pencere::Conversing::close_view);
@@ -14440,6 +14521,42 @@ mod tests {
             asked.iter().any(|message| message.kind == "need"),
             "{asked:?}"
         );
+        terminal.session.shutdown();
+    }
+
+    /// A terminal whose server no longer had the bytes before its screen is shown a picture,
+    /// and a kablo that keeps the shell's marks ends the picture with them, in the order they
+    /// came: the blocks on the picture's rows and the prompt come back from them, read as the
+    /// past.
+    #[test]
+    fn a_picture_that_ends_with_the_shells_marks_brings_back_its_blocks_and_its_prompt() {
+        use std::io::Write as _;
+        let past = Silence::new();
+        let mut terminal = streamed_over(Some(Arc::clone(&past)));
+        let picture: &[u8] = b"\x1b]8;;bateri://block/1\x07  btop\x1b]8;;\x07\r\n\
+            \x1b]8;;bateri://block/2\x07  \
+            \x1b]133;A;bt_block=1\x07\x1b]133;B\x07\x1b]8133;e\x07\x1b]133;C\x07\
+            \x1b]133;D;0;bt_block=1\x07\x1b]133;A;bt_block=2\x07\x1b]133;B\x07\x1b]8133;w\x07";
+        past.extend(picture.len() as u64);
+        past.close();
+        terminal.terminal.write_all(picture).expect("written");
+        wait_text(&terminal.session, "btop");
+        wait_until("the past read", Duration::from_secs(8), || {
+            !terminal.session.replaying()
+        });
+        let shell = lock(&terminal.session.shell);
+        assert_eq!(
+            shell.saved_stripes().stripe(BlockKey::Local(1)),
+            Some(Stripe::Success),
+            "the command on the picture's row ended well"
+        );
+        assert_eq!(
+            shell.local.state.map(|state| state.phase),
+            Some(ShellPhase::Input),
+            "the shell is at its prompt"
+        );
+        assert!(shell.dock_editable, "the line is the dock's to edit");
+        drop(shell);
         terminal.session.shutdown();
     }
 

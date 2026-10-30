@@ -24,9 +24,10 @@ use std::ptr;
 use std::sync::atomic::{AtomicPtr, Ordering};
 
 use objc2_app_kit::{
-    NSPasteboard, NSPasteboardTypePNG, NSPasteboardTypeString, NSPasteboardTypeTIFF,
+    NSBitmapImageFileType, NSBitmapImageRep, NSPasteboard, NSPasteboardTypePNG,
+    NSPasteboardTypeString, NSPasteboardTypeTIFF,
 };
-use objc2_foundation::{NSArray, NSString};
+use objc2_foundation::{NSArray, NSData, NSDictionary, NSString};
 
 /// Writes the selected text to the pasteboard. If there is no text to write the
 /// pasteboard is left **untouched** and `false` is returned.
@@ -85,6 +86,29 @@ pub(crate) fn has_image(board: &NSPasteboard) -> bool {
     board
         .availableTypeFromArray(&NSArray::from_slice(&images))
         .is_some()
+}
+
+/// The image on the pasteboard as the bytes of a PNG file: a screenshot copied to the
+/// clipboard has them as they are, an image copied in a browser or in Preview may have only a
+/// TIFF, which is converted. `None` where there is no image or it cannot be read.
+pub(crate) fn read_image_png(board: &NSPasteboard) -> Option<Vec<u8>> {
+    // SAFETY: the same static access as above, for the two image types.
+    if let Some(png) = unsafe { board.dataForType(NSPasteboardTypePNG) } {
+        return Some(png.to_vec());
+    }
+    // SAFETY: as above.
+    let tiff = unsafe { board.dataForType(NSPasteboardTypeTIFF) }?;
+    png_of_tiff(&tiff)
+}
+
+/// The PNG of the TIFF `data`, by the bitmap representation the system reads it with.
+fn png_of_tiff(data: &NSData) -> Option<Vec<u8>> {
+    let rep = NSBitmapImageRep::imageRepWithData(data)?;
+    // SAFETY: the properties are an empty dictionary, which the type takes for no property.
+    let png = unsafe {
+        rep.representationUsingType_properties(NSBitmapImageFileType::PNG, &NSDictionary::new())
+    }?;
+    Some(png.to_vec())
 }
 
 /// The text OSC 52 sends to the pasteboard: the reader thread puts it, the main
@@ -255,6 +279,69 @@ pub(crate) mod tests {
         assert!(board.setData_forType(Some(&png), unsafe { NSPasteboardTypePNG }));
         assert!(has_image(&board));
         assert_eq!(read(&board), None);
+    }
+
+    /// A TIFF of one grey pixel, written by hand: what a browser's copied image may be on the
+    /// pasteboard in place of a PNG.
+    fn tiny_tiff() -> Vec<u8> {
+        let mut tiff = b"II*\0".to_vec();
+        tiff.extend(8u32.to_le_bytes());
+        tiff.extend(9u16.to_le_bytes());
+        // Width, length, bits, no compression, black is zero, the strip's place, samples, rows,
+        // the strip's size: each a SHORT, and the pixel after the table (8 + 2 + 9 * 12 + 4).
+        for (tag, value) in [
+            (256u16, 1u32),
+            (257, 1),
+            (258, 8),
+            (259, 1),
+            (262, 1),
+            (273, 122),
+            (277, 1),
+            (278, 1),
+            (279, 1),
+        ] {
+            tiff.extend(tag.to_le_bytes());
+            tiff.extend(3u16.to_le_bytes());
+            tiff.extend(1u32.to_le_bytes());
+            tiff.extend(value.to_le_bytes());
+        }
+        tiff.extend(0u32.to_le_bytes());
+        tiff.push(0x80);
+        tiff
+    }
+
+    #[test]
+    fn an_image_is_read_as_a_png() {
+        let _pasteboard = pasteboard_lock();
+        let Some(board) = board() else {
+            eprintln!("{HEADLESS}");
+            return;
+        };
+        const SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
+        // No image: nothing.
+        board.clearContents();
+        assert_eq!(read_image_png(&board), None);
+        // A PNG is read as it is.
+        let png = NSData::with_bytes(b"\x89PNG\r\n\x1a\nthe rest");
+        // SAFETY: the static access of `read`.
+        assert!(board.setData_forType(Some(&png), unsafe { NSPasteboardTypePNG }));
+        assert_eq!(
+            read_image_png(&board).as_deref(),
+            Some(&b"\x89PNG\r\n\x1a\nthe rest"[..])
+        );
+        // A TIFF alone is converted.
+        board.clearContents();
+        let tiff = NSData::with_bytes(&tiny_tiff());
+        // SAFETY: as above.
+        assert!(board.setData_forType(Some(&tiff), unsafe { NSPasteboardTypeTIFF }));
+        let converted = read_image_png(&board).expect("a PNG of the TIFF");
+        assert!(converted.starts_with(SIGNATURE), "{converted:?}");
+        // And bytes that are no image give none.
+        board.clearContents();
+        let junk = NSData::with_bytes(b"not an image");
+        // SAFETY: as above.
+        assert!(board.setData_forType(Some(&junk), unsafe { NSPasteboardTypeTIFF }));
+        assert_eq!(read_image_png(&board), None);
     }
 
     #[test]

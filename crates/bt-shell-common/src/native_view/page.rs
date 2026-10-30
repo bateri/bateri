@@ -1437,6 +1437,519 @@ return {
         session.shutdown();
     }
 
+    /// A session whose pane runs `demopen` with `flag`, in a view of its own.
+    fn demopen_session(flag: &str) -> Arc<bt_core::Session> {
+        demopen_session_woken(flag, Arc::new(crate::child::SilentWake))
+    }
+
+    /// [`demopen_session`] with the wake the pane gives the session.
+    fn demopen_session_woken(flag: &str, wake: Arc<dyn bt_core::Wake>) -> Arc<bt_core::Session> {
+        use bt_core::pencere::ViewOptions;
+        use bt_core::{CaretShape, CursorBlink, Osc52, Session, SessionOptions, TerminalOptions};
+        use std::collections::HashMap;
+
+        let program = std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent()?.parent().map(std::path::Path::to_path_buf))
+            .map(|profile| profile.join("examples").join("demopen"))
+            .expect("the path of the test binary");
+        assert!(
+            program.is_file(),
+            "the test program is not built: {} (`cargo build -p bt-core --example demopen`, which \
+             `make test-heavy` does first)",
+            program.display()
+        );
+        let mut views = ViewOptions::new("bateri-test", "0.0.0");
+        views.native_entry_limit = Some(ModuleLimits::default().component as u64);
+        Arc::new(
+            Session::spawn(
+                SessionOptions {
+                    command: Some((
+                        "/bin/sh".to_owned(),
+                        vec![
+                            "-c".to_owned(),
+                            format!("set -m; \"$1\" {flag}"),
+                            "sh".to_owned(),
+                            program.display().to_string(),
+                        ],
+                    )),
+                    working_directory: None,
+                    home: None,
+                    env: HashMap::new(),
+                    cols: 80,
+                    rows: 10,
+                    cell_px: (9, 18),
+                    terminal: TerminalOptions {
+                        scrollback: 100,
+                        osc52: Osc52::Off,
+                        cursor: CaretShape::default(),
+                        blink: CursorBlink::default(),
+                    },
+                    theme: Theme::BATERI,
+                    dock: false,
+                    cluster: false,
+                    initial_input: None,
+                    shell_marks: false,
+                    pane_uuid: None,
+                    hostname: None,
+                    replay: None,
+                    views: Some(views),
+                },
+                wake,
+            )
+            .expect("a session"),
+        )
+    }
+
+    /// A real pane's files beside a view's bundle, end to end: a program (`demopen --files`) opens
+    /// a view at the interface that has them, and the page (played here, as the pane does it)
+    /// has the program attach a picture and let it go, read a file the person gave and save a copy
+    /// to the place the person chose; and a save the view ends in the middle of leaves no part.
+    #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+    fn a_views_files_are_attached_read_and_saved_through_a_real_pane() {
+        use crate::child::wait_until;
+        use crate::native_view::{GivenFile, ViewFiles};
+        use bt_core::Session;
+        use bt_core::pencere::{Action, FileGrant};
+
+        let session = demopen_session("--files");
+        // What the pane does with the actions of the view: the files do the file jobs and hear
+        // what came of them, the page hears the program's words.
+        let dir = std::env::temp_dir().join(format!("bateri-views-files-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a directory");
+        let files = Arc::new(ViewFiles::new(
+            Arc::new(Arc::downgrade(&session)),
+            Arc::new(|_: &std::path::Path| {}),
+        ));
+        struct Played {
+            session: Arc<Session>,
+            files: Arc<ViewFiles>,
+            started: Option<bt_core::pencere::ViewStart>,
+            said: Vec<String>,
+            forgotten: Vec<String>,
+            picks: Vec<(u32, bool)>,
+            saves: Vec<(u32, String)>,
+            calls: u32,
+        }
+        impl Played {
+            fn pump(&mut self) {
+                for action in self.session.take_view_actions() {
+                    match action {
+                        Action::StartView(start) => self.started = Some(*start),
+                        Action::ToView(text) => self.said.push(text),
+                        Action::ForgetFiles(names) => self.forgotten.extend(names),
+                        Action::ReadFile {
+                            read,
+                            handle,
+                            offset,
+                            length,
+                        } => self.files.read(read, &handle, offset, length),
+                        Action::WriteFile {
+                            write,
+                            handle,
+                            offset,
+                            bytes,
+                            end,
+                        } => self.files.write(write, &handle, offset, bytes, end),
+                        Action::AbortWrite { handle } => self.files.abort(&handle),
+                        Action::Pick { panel, multiple } => self.picks.push((panel, multiple)),
+                        Action::Save { panel, name, .. } => self.saves.push((panel, name)),
+                        _ => {}
+                    }
+                }
+            }
+
+            /// The page calls the program and waits for the answer to its call.
+            fn ask(&mut self, method: &str, params: &str) -> String {
+                self.calls += 1;
+                let id = self.calls;
+                let text =
+                    format!(r#"{{"call":{{"id":{id},"method":"{method}","params":{params}}}}}"#);
+                assert!(self.session.module_message(&text), "the view is open");
+                let wanted = format!(r#""response":{{"id":{id},"#);
+                let mut answer = None;
+                wait_until(&format!("the answer to {method}"), || {
+                    self.pump();
+                    answer = self
+                        .said
+                        .iter()
+                        .find(|text| text.contains(&wanted))
+                        .cloned();
+                    answer.is_some()
+                });
+                answer.expect("an answer")
+            }
+        }
+        let mut played = Played {
+            session: Arc::clone(&session),
+            files: Arc::clone(&files),
+            started: None,
+            said: Vec::new(),
+            forgotten: Vec::new(),
+            picks: Vec::new(),
+            saves: Vec::new(),
+            calls: 0,
+        };
+        wait_until("the view to start", || {
+            played.pump();
+            played.started.is_some()
+        });
+        let start = played.started.take().expect("a start");
+        assert_eq!(start.kind, bt_core::pencere::ViewKind::Lua);
+        assert_eq!(start.version, "2.1", "the interface that has files");
+        let entry = session.view_entry().expect("an entry");
+        let (_, entry_bytes) = session.serve_view_file(&entry).expect("the entry is held");
+        let assets = crate::native_view::BundleAssets::new(&session).with_files(Arc::clone(&files));
+
+        // A picture the program attaches is drawn by its name and by no other, and not once the
+        // program lets it go.
+        let attached = played.ask("attach", r#"{"text":"a picture"}"#);
+        let name = attached
+            .split(r#""name":""#)
+            .nth(1)
+            .and_then(|rest| rest.split('"').next())
+            .expect("a name")
+            .to_owned();
+        assert!(name.starts_with("sha256:"), "{attached}");
+        assert_eq!(assets.read(&name).as_deref(), Some(&b"a picture"[..]));
+        // The bundle's own file is a file of the manifest and no `sha256:` name is its path: a
+        // digest nothing attached is no file, though the session's store holds it.
+        let held = format!("sha256:{}", bt_core::pencere::Digest::of(&entry_bytes));
+        assert_eq!(assets.read(&held), None);
+        assert_eq!(assets.read(&entry).as_deref(), Some(&entry_bytes[..]));
+        played.ask("detach", &format!(r#"{{"name":"{name}"}}"#));
+        wait_until("the name to be forgotten", || {
+            played.pump();
+            played.forgotten.contains(&name)
+        });
+        assert_eq!(assets.read(&name), None);
+
+        // A file the person gave: drawn by `file:` and its handle, read by its handle in pieces.
+        let given = dir.join("given.txt");
+        std::fs::write(&given, b"hello, world").expect("a file");
+        let source = GivenFile::of(&given).expect("a source");
+        let handle = session
+            .grant_file(&FileGrant { size: source.size })
+            .expect("a handle");
+        files.keep_given(&handle, source);
+        assert_eq!(
+            assets.read(&format!("file:{handle}")).as_deref(),
+            Some(&b"hello, world"[..])
+        );
+        assert_eq!(assets.read(&format!("file:{}", "0".repeat(32))), None);
+        let first = played.ask(
+            "read",
+            &format!(r#"{{"handle":"{handle}","offset":0,"length":5}}"#),
+        );
+        assert!(first.contains(r#""text":"hello""#), "{first}");
+        let rest = played.ask(
+            "read",
+            &format!(r#"{{"handle":"{handle}","offset":5,"length":100}}"#),
+        );
+        assert!(rest.contains(r#""text":", world""#), "{rest}");
+        // The file changes: the program is told it is gone, and the page draws nothing of it.
+        std::fs::write(&given, b"changed, and longer").expect("a file");
+        let gone = played.ask(
+            "read",
+            &format!(r#"{{"handle":"{handle}","offset":0,"length":5}}"#),
+        );
+        assert!(gone.contains(r#""code":"gone""#), "{gone}");
+        assert_eq!(assets.read(&format!("file:{handle}")), None);
+
+        // A place the person chose: written to a part, and given its name when the last is in.
+        let saved = dir.join("saved.txt");
+        let place = session.grant_save().expect("a handle");
+        files.keep_save(&place, saved.clone());
+        let first = played.ask(
+            "write",
+            &format!(r#"{{"handle":"{place}","offset":0,"text":"saved ","end":false}}"#),
+        );
+        assert!(!first.contains(r#""error""#), "{first}");
+        let last = played.ask(
+            "write",
+            &format!(r#"{{"handle":"{place}","offset":6,"text":"text","end":true}}"#),
+        );
+        assert!(!last.contains(r#""error""#), "{last}");
+        wait_until("the file to have its name", || {
+            std::fs::read(&saved).is_ok_and(|bytes| bytes == b"saved text")
+        });
+        let parts = |dir: &std::path::Path| {
+            std::fs::read_dir(dir)
+                .expect("the directory")
+                .filter_map(Result::ok)
+                .filter(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .ends_with(".pencere-part")
+                })
+                .count()
+        };
+        assert_eq!(parts(&dir), 0);
+
+        // What the pane tells the page of a drop: a handle for each file, with the path where the
+        // program reads what the person does, and a folder with no handle.
+        let dropped = dir.join("dropped.txt");
+        std::fs::write(&dropped, b"dropped").expect("a file");
+        let folder = dir.join("folder");
+        std::fs::create_dir(&folder).expect("a folder");
+        let guess = |_: &std::path::Path| "text/plain".to_owned();
+        let paths = [dropped.clone(), folder.clone(), dir.join("missing")];
+        let entries = crate::native_view::entries_given(&session, &files, &paths, true, &guess);
+        assert_eq!(entries.len(), 2, "{entries:?}");
+        assert_eq!(entries[0].name, "dropped.txt");
+        assert_eq!((entries[0].size, entries[0].folder), (7, false));
+        assert_eq!(entries[0].media_type, "text/plain");
+        assert_eq!(
+            entries[0].path.as_deref(),
+            Some(dropped.to_str().expect("a path"))
+        );
+        assert!(
+            entries[1].folder && entries[1].handle.is_none(),
+            "{entries:?}"
+        );
+        let dropped_handle = entries[0].handle.clone().expect("a handle");
+        let read = played.ask(
+            "read",
+            &format!(r#"{{"handle":"{dropped_handle}","offset":0,"length":100}}"#),
+        );
+        assert!(read.contains(r#""text":"dropped""#), "{read}");
+        // In a remote session the program does not read the person's files: no path is told.
+        let remote = crate::native_view::entries_given(&session, &files, &paths, false, &guess);
+        assert!(
+            remote.iter().all(|entry| entry.path.is_none()),
+            "{remote:?}"
+        );
+        // The place the person chose, as the page is told of it.
+        let copy = dir.join("copy.txt");
+        let saving =
+            crate::native_view::place_saved(&session, &files, copy.clone()).expect("a place");
+        assert_eq!(saving.name, "copy.txt");
+        played.ask(
+            "write",
+            &format!(
+                r#"{{"handle":"{}","offset":0,"text":"a copy","end":true}}"#,
+                saving.handle
+            ),
+        );
+        wait_until("the copy to have its name", || {
+            std::fs::read(&copy).is_ok_and(|bytes| bytes == b"a copy")
+        });
+
+        // The panels the page asks for (what the pane's `Host::panel` calls): the session says
+        // when to show one, holds the page to one at a time, and takes another once it is gone.
+        session.module_pick(true);
+        played.pump();
+        let (panel, multiple) = played.picks[0];
+        assert!(multiple && played.picks.len() == 1, "{:?}", played.picks);
+        session.module_save("a.txt", Some("text/plain"));
+        played.pump();
+        assert!(played.saves.is_empty(), "a second panel while one is up");
+        session.panel_closed(panel);
+        session.module_save("a.txt", Some("text/plain"));
+        played.pump();
+        assert_eq!(played.saves.len(), 1, "{:?}", played.saves);
+        assert_eq!(played.saves[0].1, "a.txt");
+        session.panel_closed(played.saves[0].0);
+
+        // A save the view ends in the middle of leaves no part: the session tells the pane to
+        // give it up.
+        let unfinished = dir.join("unfinished.txt");
+        let place = session.grant_save().expect("a handle");
+        files.keep_save(&place, unfinished.clone());
+        played.ask(
+            "write",
+            &format!(r#"{{"handle":"{place}","offset":0,"text":"half","end":false}}"#),
+        );
+        wait_until("the part to be written", || {
+            played.pump();
+            parts(&dir) == 1
+        });
+        session.close_view();
+        wait_until("the part to be given up", || {
+            played.pump();
+            parts(&dir) == 0
+        });
+        assert!(!unfinished.exists());
+        // And what the view had attached or been given is nothing once it is over.
+        assert_eq!(assets.read(&format!("file:{handle}")), None);
+        session.shutdown();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The files a person gives a view, each received by the program into a place of its own
+    /// (`demopen --files`, `receive`: two reads out at a time, as an app that takes a drop does),
+    /// with the session woken as a pane is: the pane takes what the session has for it when it is
+    /// told so, and not otherwise. A file of more than one piece (1 MiB) was never received: the
+    /// refusal of the read past its end, which the program asks while the second piece is on its
+    /// way, was written between that piece's chunks, and a program drops a message that has a
+    /// frame of the protocol between its chunks.
+    #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+    fn a_file_of_more_than_a_piece_is_received_through_a_real_pane() {
+        use crate::child::{SilentWake, wait_until};
+        use crate::native_view::{GivenFile, ViewFiles};
+        use bt_core::pencere::{Action, FileGrant};
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        /// What a pane does with `view_changed`: a flag, and the take on its own turn.
+        #[derive(Default)]
+        struct PaneWake {
+            pending: Arc<AtomicBool>,
+            quiet: SilentWake,
+        }
+        impl bt_core::Wake for PaneWake {
+            fn wake(&self) {}
+            fn child_exit(&self, code: Option<i32>) {
+                self.quiet.child_exit(code);
+            }
+            fn copy_to_clipboard(&self, text: String) {
+                self.quiet.copy_to_clipboard(text);
+            }
+            fn title_changed(&self) {}
+            fn search_changed(&self) {}
+            fn command_started(&self) {}
+            fn phase_edge(&self) {}
+            fn remote_command_edge(&self) {}
+            fn mirror_changed(&self) {}
+            fn environment_changed(&self) {}
+            fn remote_up(&self) {}
+            fn remote_typed(&self) {}
+            fn link_hover_lost(&self) {}
+            fn pointer_changed(&self) {}
+            fn blocks_changed(&self) {}
+            fn unseen_changed(&self) {}
+            fn program_status_changed(&self) {}
+            fn notification(&self) {}
+            fn view_changed(&self) {
+                self.pending.store(true, Ordering::Release);
+            }
+        }
+
+        let wake = PaneWake::default();
+        let pending = Arc::clone(&wake.pending);
+        let session = demopen_session_woken("--files", Arc::new(wake));
+        let dir = std::env::temp_dir().join(format!("bateri-views-receive-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a directory");
+        let files = Arc::new(ViewFiles::new(
+            Arc::new(Arc::downgrade(&session)),
+            Arc::new(|_: &std::path::Path| {}),
+        ));
+        let mut started = false;
+        let mut said: Vec<String> = Vec::new();
+        // The pane's turn: only when it was told, and the flag goes down before the take.
+        let turn = |said: &mut Vec<String>, started: &mut bool| {
+            if !pending.swap(false, Ordering::AcqRel) {
+                return;
+            }
+            for action in session.take_view_actions() {
+                match action {
+                    Action::StartView(_) => *started = true,
+                    Action::ToView(text) => said.push(text),
+                    Action::ReadFile {
+                        read,
+                        handle,
+                        offset,
+                        length,
+                    } => files.read(read, &handle, offset, length),
+                    _ => {}
+                }
+            }
+        };
+        wait_until("the view to start", || {
+            turn(&mut said, &mut started);
+            started
+        });
+
+        // A small one, then ones that are two pieces and a part, each into a place of its own.
+        let sizes = [5, (1 << 20) + 451_424, 3 << 20, 1 << 20];
+        for (index, size) in sizes.into_iter().enumerate() {
+            let id = index + 1;
+            let source = dir.join(format!("given-{id}"));
+            let content: Vec<u8> = (0..size)
+                .map(|at| u8::try_from(at % 251).unwrap_or(0))
+                .collect();
+            std::fs::write(&source, &content).expect("a file");
+            let given = GivenFile::of(&source).expect("a source");
+            let handle = session
+                .grant_file(&FileGrant { size: given.size })
+                .expect("a handle");
+            files.keep_given(&handle, given);
+            let into = dir.join(format!("received-{id}"));
+            let request = format!(
+                r#"{{"call":{{"id":{id},"method":"receive","params":{{"handle":"{handle}","to":"{}"}}}}}}"#,
+                into.display()
+            );
+            assert!(session.module_message(&request), "the view is open");
+            let wanted = format!(r#""response":{{"id":{id},"#);
+            let since = std::time::Instant::now();
+            while !said.iter().any(|text| text.contains(&wanted)) {
+                turn(&mut said, &mut started);
+                assert!(
+                    since.elapsed() < std::time::Duration::from_secs(20),
+                    "{size} bytes were not received"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            assert!(
+                std::fs::read(&into).is_ok_and(|bytes| bytes == content),
+                "{size} bytes, as they were given"
+            );
+        }
+        session.shutdown();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A view at the interface before files has none: the session makes no handle of a file
+    /// the person gives it, and the pane tells the page of none (it takes the drop as it did).
+    #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+    fn a_view_at_an_interface_without_files_is_given_no_handle() {
+        use crate::child::wait_until;
+        use crate::native_view::{GivenFile, ViewFiles};
+        use bt_core::pencere::{Action, FileGrant};
+
+        let session = demopen_session("--lua");
+        let mut started = None;
+        wait_until("the view to start", || {
+            for action in session.take_view_actions() {
+                if let Action::StartView(start) = action {
+                    started = Some(start);
+                }
+            }
+            started.is_some()
+        });
+        let start = started.take().expect("a start");
+        assert_eq!(start.version, "2.0");
+        assert!(!bt_core::pencere::has_files(start.kind, &start.version));
+        let dir = std::env::temp_dir().join(format!("bateri-views-nofiles-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a directory");
+        let file = dir.join("a.txt");
+        std::fs::write(&file, b"a").expect("a file");
+        let size = GivenFile::of(&file).expect("a source").size;
+        assert_eq!(session.grant_file(&FileGrant { size }), None);
+        assert_eq!(session.grant_save(), None);
+        let files = ViewFiles::new(
+            Arc::new(Arc::downgrade(&session)),
+            Arc::new(|_: &std::path::Path| {}),
+        );
+        let entries = crate::native_view::entries_given(
+            &session,
+            &files,
+            &[file],
+            true,
+            &|_: &std::path::Path| String::new(),
+        );
+        assert!(entries.is_empty(), "{entries:?}");
+        assert!(crate::native_view::place_saved(&session, &files, dir.join("b.txt")).is_none());
+        session.shutdown();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Frames and drains the demo's page until it rests: frames a sixtieth of a second apart from
     /// `now`, as the link draws them while the page moves. How many frames it took.
     fn rest(

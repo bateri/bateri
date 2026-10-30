@@ -89,8 +89,8 @@ use bt_shell_common::kablo::service::{PaneLink, Shown};
 use bt_shell_common::native_view::{
     Bars, Cursor as PageCursor, Fault as PageFault, Fill as PageFill, Host as PageDriveHost,
     Id as PageId, Input, Key as PageKey, Keyboard, LookSlot, Menu as PageMenu, Mods as PageMods,
-    Opening, PageEditors, PageHandle, Phase, Point as PagePoint, Rect as PageRect, Route,
-    Scrolling, TerminalLook, caret_width_pt, terminal_look,
+    Opening, PageEditors, PageHandle, Panel as PagePanel, Phase, Point as PagePoint,
+    Rect as PageRect, Route, Scrolling, TerminalLook, caret_width_pt, terminal_look,
 };
 use bt_shell_common::view_strip;
 use objc2_app_kit::{NSEvent, NSEventType};
@@ -5821,6 +5821,7 @@ impl TerminalPane {
             handle,
             fields,
             area,
+            files: None,
         }));
         link.set_page(Some(page));
         // The header says the demo's words.
@@ -5933,8 +5934,30 @@ impl TerminalPane {
         }
     }
 
+    /// The files of the program's view that is up, if one is.
+    pub(crate) fn view_files(&self) -> Option<Arc<bt_shell_common::native_view::ViewFiles>> {
+        self.ivars()
+            .page_up
+            .borrow()
+            .as_ref()
+            .and_then(|page| page.files.clone())
+    }
+
+    /// The files of a program's view that is about to be shown: what they tell the session, and
+    /// the mark the platform puts on a file the program saved.
+    fn view_files_for(
+        &self,
+        session: &Arc<Session>,
+    ) -> Arc<bt_shell_common::native_view::ViewFiles> {
+        let agent = self.ivars().identity.app_name.clone();
+        Arc::new(bt_shell_common::native_view::ViewFiles::new(
+            Arc::new(Arc::downgrade(session)),
+            Arc::new(move |path: &std::path::Path| crate::uploader::quarantine(path, &agent)),
+        ))
+    }
+
     /// The handle the page up is driven by, if a page is up.
-    fn page_handle(&self) -> Option<PageHandle> {
+    pub(crate) fn page_handle(&self) -> Option<PageHandle> {
         self.ivars()
             .page_up
             .borrow()
@@ -6544,6 +6567,43 @@ impl TerminalPane {
                     let origin = self.view_origin();
                     pencere_view::ask::link(self, &session, link, &url, &origin);
                 }
+                // The files beside the view's bundle: the session asks, the pane's files do it
+                // off the main queue and tell the session what came of it.
+                Action::ReadFile {
+                    read,
+                    handle,
+                    offset,
+                    length,
+                } => match self.view_files() {
+                    Some(files) => files.read(read, &handle, offset, length),
+                    None => session.file_read(read, Err(bt_core::pencere::FileError::Io)),
+                },
+                Action::WriteFile {
+                    write,
+                    handle,
+                    offset,
+                    bytes,
+                    end,
+                } => match self.view_files() {
+                    Some(files) => files.write(write, &handle, offset, bytes, end),
+                    None => session.file_written(write, Err(bt_core::pencere::FileError::Io)),
+                },
+                Action::AbortWrite { handle } => {
+                    if let Some(files) = self.view_files() {
+                        files.abort(&handle);
+                    }
+                }
+                Action::ForgetFiles(names) => {
+                    if let Some(handle) = self.page_handle()
+                        && let Some(images) = handle.page().images()
+                    {
+                        images.forget(&names);
+                    }
+                }
+                // The panels the page asked for, on the pane's seat; the person's choice goes to
+                // the page and then to the session, which may be asked for another.
+                Action::Pick { panel, multiple } => self.show_pick(panel, multiple),
+                Action::Save { panel, name, .. } => self.show_save(panel, &name),
                 _ => {}
             }
         }
@@ -6613,8 +6673,15 @@ impl TerminalPane {
         // The images of the page are files of the bundle the program sent, read from the session
         // that keeps them. The `wake` is the one the module has: it only hops to the main queue,
         // so the images' decoder may call it from inside a build.
-        let assets: Arc<dyn bt_shell_common::native_view::Assets> =
-            Arc::new(bt_shell_common::native_view::BundleAssets::new(session));
+        // A view whose interface has files (a script of 2.1, a component of 3.0) is given the
+        // person's files and the places they save in; any other is what it was.
+        let files = bt_core::pencere::has_files(start.kind, &start.version)
+            .then(|| self.view_files_for(session));
+        let attached = bt_shell_common::native_view::BundleAssets::new(session);
+        let assets: Arc<dyn bt_shell_common::native_view::Assets> = Arc::new(match &files {
+            Some(files) => attached.with_files(Arc::clone(files)),
+            None => attached,
+        });
         let (page, handle) = if start.kind == bt_core::pencere::ViewKind::Lua {
             bt_shell_common::native_view::script_page(
                 bt_shell_common::native_view::Script {
@@ -6642,6 +6709,7 @@ impl TerminalPane {
             handle,
             fields,
             area,
+            files,
         }));
         link.set_page(Some(page));
         // The mark of what runs in the pane (the tab's tile).
@@ -7862,6 +7930,14 @@ impl PageDriveHost for PageHost<'_> {
             && let Some(session) = pane.session()
         {
             session.module_link(&url);
+        }
+    }
+
+    /// A panel the page asks for, in a reply to something the person did: the session holds the
+    /// page to one at a time and says when to show it (`Action::Pick`, `Action::Save`).
+    fn panel(&mut self, panel: PagePanel) {
+        if self.up() {
+            self.0.ask_panel(panel);
         }
     }
 

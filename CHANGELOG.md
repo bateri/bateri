@@ -14,6 +14,27 @@ of every installed copy. A version without a section is not released.
 
 ### Added
 
+- **A native view can show pictures its program sends along.** A program whose view is written
+  for the Lua API `2.1` (`pencere.files`) can attach images to it and let them go, and the view
+  draws them by their name; bateri offers `2.1` next to `2.0`, and a program that speaks only
+  `2.0` is opened as before. The files a person gives the view (dragged, pasted or chosen in a
+  panel) and the places a program saves to are read and written on a thread of their own, so a
+  slow disk never holds up the window; a file that changed since it was given is reported as gone,
+  and a save is written beside its place and takes the place's name only when the program has
+  finished it (a save that is given up leaves nothing behind).
+- **Files can be dropped, pasted and chosen in a native view.** In a view whose program speaks
+  the files interface, files dragged from Finder onto the view are given to it (the view is told
+  how many are over it and where), so are files copied in Finder and pasted with ⌘V, and an image
+  on the clipboard with no file of its own (a screenshot) is kept as `image.png` in a temporary
+  folder for the view's own lifetime; a paste whose files are all gone reaches the view with
+  none, so that it can say so. A program asks for the Open panel ("Upload Files…") or the
+  Save panel ("Save a Copy…") and bateri shows it on the tab as a sheet, the Save panel in the
+  folder you last used and with the name the program proposed; the files you chose are given
+  to the view, and cancelling gives it none. Where the program runs on this Mac it is also told
+  where each file is; in an `ssh` session it never is, and reads the files through bateri.
+  A view of the older interface and a pane with no view take a drop as before (the path
+  written to the line, an upload in an `ssh` session). A file field in a web view opens the same
+  panel instead of doing nothing.
 - **A native view can have an editor for code.** A program's native view can put an editor of
   text in it, the pencere kit's own, which bateri keeps and draws: as many carets and selections
   as you make (⌘-click, ⌥-drag for a column), undo and redo, the Mac's editing keys (⌥ and ⌘
@@ -150,6 +171,11 @@ of every installed copy. A version without a section is not released.
 
 ### Changed
 
+- **A program's native view that is a WebAssembly component is opened at version 3.0.** bateri
+  runs the pencere kit of the version that adds files to a view (a picture a program shows, a
+  file you drop on it, a place you save to), and that kit runs components written for it alone:
+  a program that offers only the older 2.0 component is shown its other view, or none. Views
+  written in Lua are unchanged.
 - **A program's output is taken in faster.** What bateri does with every byte a program writes
   before the terminal acts on it — following where an escape sequence stands, looking for the
   shell's marks, putting emoji sequences together — now skims text and the bodies of long

@@ -68,7 +68,8 @@ pub use ::pencere_host::sandbox::{
     Consent, Declared, Directive, Domain, Grant, Locality, Permission,
 };
 pub use ::pencere_host::session::{
-    Action, MAX_BACKLOG, MAX_VIEW_MESSAGE, Size, State, ViewKind, ViewStart, WEB_BRIDGE_VERSION,
+    ATTACHED_SCHEME, Action, AttachedFiles, FileError, FileGrant, MAX_BACKLOG, MAX_FILE_PIECE,
+    MAX_VIEW_MESSAGE, Size, State, ViewKind, ViewStart, WEB_BRIDGE_VERSION, has_files,
 };
 
 use crate::color::{Theme, srgb_bytes};
@@ -138,12 +139,19 @@ impl fmt::Debug for DropShown {
 pub const DEFAULT_FONT_MONO: &str = "\"SF Mono\", Menlo, monospace";
 
 /// The version of the component interface a `wasm` view is written against: the semver line of
-/// the `pencere:view` package (`2.0` stands for `2.0.x`).
-pub const WASM_VERSION: &str = "2.0";
+/// the `pencere:view` package (`3.0` stands for `3.0.x`). The kit's sandbox opens no other: a
+/// component written against `2.0` is not run.
+pub const WASM_VERSION: &str = "3.0";
 
 /// The version of the Lua API a `lua` view is written against: the prelude's `pencere.version`
 /// (`2` is `2.0`).
 pub const LUA_VERSION: &str = "2.0";
+
+/// The version of the Lua API that has files beside the bundle (`pencere.files`, specification
+/// §8.8 to §8.10): a view opened at it is given the pictures its program attaches and the files
+/// the person gives it. The application offers it beside [`LUA_VERSION`]: a program that speaks
+/// only `2.0` is opened as before.
+pub const LUA_FILES_VERSION: &str = "2.1";
 
 /// The bytes the in-memory shelf keeps before the oldest go. A view's bundle is
 /// at most 64 MiB (the protocol's limit), so one bundle always fits; the number is a
@@ -716,7 +724,7 @@ impl Desk {
         if let Some(limit) = native_entry_limit {
             config.views = vec![
                 Offer::new(ViewKind::Wasm, &[WASM_VERSION]),
-                Offer::new(ViewKind::Lua, &[LUA_VERSION]),
+                Offer::new(ViewKind::Lua, &[LUA_VERSION, LUA_FILES_VERSION]),
                 Offer::new(ViewKind::Web, &[WEB_BRIDGE_VERSION]),
             ];
             config.native_entry_limit = limit;
@@ -839,6 +847,13 @@ impl Desk {
         lock(&self.inner).conversation.page_context()
     }
 
+    /// The table of the files the views of the conversation have attached
+    /// ([`Conversing::attached_files`]): a clone of the shared table, which takes no more than
+    /// the desk's lock and delivers nothing.
+    pub(crate) fn attached_files(&self) -> AttachedFiles {
+        lock(&self.inner).conversation.attached_files()
+    }
+
     /// The shell page's frame has loaded: the page is told the `context` it starts with
     /// (specification §9.5), the current one, **as one more thing for it to take**, behind
     /// what is already waiting and counted as the rest is — not a call that goes round the
@@ -872,7 +887,22 @@ impl Desk {
         keys: impl Fn(Vec<u8>),
         module: impl Fn(Vec<u8>),
     ) -> bool {
-        let wrote = Cell::new(false);
+        self.module_apply(keys, module, |conversation| {
+            conversation.module_message(text)
+        })
+    }
+
+    /// Runs `act` on the conversation as a thing the view's side did, and writes what it says:
+    /// the words of the conversation go to `module`, the lane the words of a module take, while
+    /// the view is open after `act`, and to `keys` when `act` ended it (the protocol's own words
+    /// are not the module's, and the lane the module's words take would drop them with the
+    /// view's).
+    pub(crate) fn module_apply<R>(
+        &self,
+        keys: impl Fn(Vec<u8>),
+        module: impl Fn(Vec<u8>),
+        act: impl FnOnce(&mut Conversing) -> R,
+    ) -> R {
         let said = Cell::new(false);
         self.apply(
             |bytes| {
@@ -883,11 +913,11 @@ impl Desk {
                 }
             },
             |conversation| {
-                wrote.set(conversation.module_message(text));
+                let result = act(conversation);
                 said.set(conversation.state() == State::Open);
+                result
             },
-        );
-        wrote.get()
+        )
     }
 
     /// Whether the program of the pane is the one reading the tty: the rule a `hello` is answered
