@@ -14515,6 +14515,42 @@ mod tests {
         terminal.session.shutdown();
     }
 
+    /// A terminal whose server no longer had the bytes before its screen is shown a picture,
+    /// and a kablo that keeps the shell's marks ends the picture with them, in the order they
+    /// came: the blocks on the picture's rows and the prompt come back from them, read as the
+    /// past.
+    #[test]
+    fn a_picture_that_ends_with_the_shells_marks_brings_back_its_blocks_and_its_prompt() {
+        use std::io::Write as _;
+        let past = Silence::new();
+        let mut terminal = streamed_over(Some(Arc::clone(&past)));
+        let picture: &[u8] = b"\x1b]8;;bateri://block/1\x07  btop\x1b]8;;\x07\r\n\
+            \x1b]8;;bateri://block/2\x07  \
+            \x1b]133;A;bt_block=1\x07\x1b]133;B\x07\x1b]8133;e\x07\x1b]133;C\x07\
+            \x1b]133;D;0;bt_block=1\x07\x1b]133;A;bt_block=2\x07\x1b]133;B\x07\x1b]8133;w\x07";
+        past.extend(picture.len() as u64);
+        past.close();
+        terminal.terminal.write_all(picture).expect("written");
+        wait_text(&terminal.session, "btop");
+        wait_until("the past read", Duration::from_secs(8), || {
+            !terminal.session.replaying()
+        });
+        let shell = lock(&terminal.session.shell);
+        assert_eq!(
+            shell.saved_stripes().stripe(BlockKey::Local(1)),
+            Some(Stripe::Success),
+            "the command on the picture's row ended well"
+        );
+        assert_eq!(
+            shell.local.state.map(|state| state.phase),
+            Some(ShellPhase::Input),
+            "the shell is at its prompt"
+        );
+        assert!(shell.dock_editable, "the line is the dock's to edit");
+        drop(shell);
+        terminal.session.shutdown();
+    }
+
     #[test]
     fn a_past_with_nothing_in_it_is_over_when_it_is_closed() {
         let past = Silence::new();

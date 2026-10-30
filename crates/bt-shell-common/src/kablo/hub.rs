@@ -54,8 +54,11 @@
 //! which were answered ([`bt_core::Silence`]) — the hub says how far that part reaches as the
 //! bytes are written, and when no more of it will come. When the server no longer has the bytes
 //! the pane is given a picture, as every pane is, and is muted for the picture and for the
-//! bytes of the answered part that follow it. A launch after one that did not settle shows it
-//! without its past: from now on, with a picture, and the server forgets the past it had.
+//! bytes of the answered part that follow it. The picture ends with the shell's marks the
+//! stream left, told again in the order they came (a kablo after 0.4.0 keeps them): the blocks
+//! on its rows, the prompt and the dock's line come back from them as from any past. A launch
+//! after one that did not settle shows it without its past: from now on, with a picture, and
+//! the server forgets the past it had.
 
 use std::collections::{BTreeMap, VecDeque};
 
