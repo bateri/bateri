@@ -14,6 +14,14 @@ of every installed copy. A version without a section is not released.
 
 ### Added
 
+- **A native view can show pictures its program sends along.** A program whose view is written
+  for the Lua API `2.1` (`pencere.files`) can attach images to it and let them go, and the view
+  draws them by their name; bateri offers `2.1` next to `2.0`, and a program that speaks only
+  `2.0` is opened as before. The files a person gives the view (dragged, pasted or chosen in a
+  panel) and the places a program saves to are read and written on a thread of their own, so a
+  slow disk never holds up the window; a file that changed since it was given is reported as gone,
+  and a save is written beside its place and takes the place's name only when the program has
+  finished it (a save that is given up leaves nothing behind).
 - **A native view can have an editor for code.** A program's native view can put an editor of
   text in it, the pencere kit's own, which bateri keeps and draws: as many carets and selections
   as you make (⌘-click, ⌥-drag for a column), undo and redo, the Mac's editing keys (⌥ and ⌘

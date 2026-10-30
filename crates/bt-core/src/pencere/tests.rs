@@ -1436,14 +1436,17 @@ fn the_kinds_and_versions_offered_are_what_the_application_can_open_in_the_progr
     let offer = pane.rig.written();
     assert!(
         offer[0].payload.contains(concat!(
-            r#""views":[{"kind":"wasm","versions":["3.0"]},{"kind":"lua","versions":["2.0"]},"#,
+            r#""views":[{"kind":"wasm","versions":["3.0"]},{"kind":"lua","versions":["2.0","2.1"]},"#,
             r#"{"kind":"web","versions":["1.0"]}]"#
         )),
         "{}",
         offer[0].payload
     );
     // The versions are the application's constants, and the Lua API's is the prelude's.
-    assert_eq!((WASM_VERSION, LUA_VERSION), ("3.0", "2.0"));
+    assert_eq!(
+        (WASM_VERSION, LUA_VERSION, LUA_FILES_VERSION),
+        ("3.0", "2.0", "2.1")
+    );
     assert_eq!(WEB_BRIDGE_VERSION, "1.0");
 }
 

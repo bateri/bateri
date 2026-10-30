@@ -1617,7 +1617,7 @@ fn file_url(path: &Path) -> Retained<NSURL> {
 /// marked itself, never its target (the resource value is the link's own), and
 /// the walk never descends through one (`symlink_metadata`): nothing outside the
 /// download is touched.
-fn quarantine(path: &Path, agent: &str) {
+pub(crate) fn quarantine(path: &Path, agent: &str) {
     let properties = NSDictionary::<NSString, NSString>::from_slices(
         &[
             ns_string!("LSQuarantineType"),

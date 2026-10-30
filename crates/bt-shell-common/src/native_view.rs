@@ -33,6 +33,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Weak};
 
+use bt_core::pencere::AttachedFiles;
 use bt_core::{LinearRgba, Session, Theme};
 use bt_gpu::{
     Renderer, ShapedText, TextFamily, TextFontId, TextStyle, UiBitmap, UiImage, UiList, UiQuad,
@@ -40,10 +41,12 @@ use bt_gpu::{
 };
 
 mod containers;
+mod files;
 mod look;
 mod page;
 #[cfg(test)]
 mod pane_tests;
+pub use files::{FILE_SCHEME, GivenFile, Outcomes, Quarantine, ViewFiles};
 pub use look::{LookSlot, caret_width_pt, terminal_look};
 pub use page::{
     MenuUp, Opening, PageEditors, PageHandle, ShownMenu, containers_demo, module_page, script_page,
@@ -262,28 +265,52 @@ pub fn figure(
     Some((bitmap, image))
 }
 
-/// The files of the open view's bundle, as a program sent them and the session keeps them
-/// ([`Session::serve_view_file`]): what a page's images, and the scripts a Lua page requires,
-/// are read from. Holds the session
-/// weakly — the images of a page that outlives its program's view find no file, and are
-/// refused with a word for the page's author, not read from a session that is gone.
+/// The files a page draws and requires: those of the open view's bundle, as a program sent them
+/// and the session keeps them ([`Session::serve_view_file`]) — what a page's images, and the
+/// scripts a Lua page requires, are read from — and, for a view that has files beside its bundle
+/// (`lua` `2.1`, `wasm` `3.0`), the two kinds of name that are not a path of the bundle (the
+/// sandbox's [`Assets::read`]): `sha256:` and a digest, a file the view's program attached
+/// ([`Session::attached_files`], read from the table the session shares and not from the session),
+/// and `file:` and a handle, a file the person gave it ([`ViewFiles::picture`]). A manifest path has
+/// no `:`, so the three never meet. Holds the session weakly — the images of a page that outlives
+/// its program's view find no file, and are refused with a word for the page's author, not read
+/// from a session that is gone.
 ///
 /// Read on the images' worker thread ([`Assets::read`]) and on a script's own, for the scripts it
 /// requires, never the one that draws: the session's lock and the disk are both waited for.
 pub struct BundleAssets {
     session: Weak<Session>,
+    attached: AttachedFiles,
+    files: Option<Arc<ViewFiles>>,
 }
 
 impl BundleAssets {
     pub fn new(session: &Arc<Session>) -> Self {
         Self {
             session: Arc::downgrade(session),
+            attached: session.attached_files(),
+            files: None,
         }
+    }
+
+    /// The handles of the files the person gave the view are those of `files`.
+    #[must_use]
+    pub fn with_files(mut self, files: Arc<ViewFiles>) -> Self {
+        self.files = Some(files);
+        self
     }
 }
 
 impl Assets for BundleAssets {
     fn read(&self, path: &str) -> Option<Arc<[u8]>> {
+        // A name beside the bundle is answered from the view's own tables and from nothing else:
+        // one that is in neither is no file, whatever the session's store holds.
+        if path.starts_with(bt_core::pencere::ATTACHED_SCHEME) {
+            return self.attached.get(path);
+        }
+        if let Some(handle) = path.strip_prefix(FILE_SCHEME) {
+            return self.files.as_ref()?.picture(handle);
+        }
         let (_, bytes) = self.session.upgrade()?.serve_view_file(path)?;
         Some(bytes)
     }

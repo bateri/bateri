@@ -5822,6 +5822,7 @@ impl TerminalPane {
             handle,
             fields,
             area,
+            files: None,
         }));
         link.set_page(Some(page));
     }
@@ -5928,6 +5929,28 @@ impl TerminalPane {
                 }
             });
         }
+    }
+
+    /// The files of the program's view that is up, if one is.
+    fn view_files(&self) -> Option<Arc<bt_shell_common::native_view::ViewFiles>> {
+        self.ivars()
+            .page_up
+            .borrow()
+            .as_ref()
+            .and_then(|page| page.files.clone())
+    }
+
+    /// The files of a program's view that is about to be shown: what they tell the session, and
+    /// the mark the platform puts on a file the program saved.
+    fn view_files_for(
+        &self,
+        session: &Arc<Session>,
+    ) -> Arc<bt_shell_common::native_view::ViewFiles> {
+        let agent = self.ivars().identity.app_name.clone();
+        Arc::new(bt_shell_common::native_view::ViewFiles::new(
+            Arc::new(Arc::downgrade(session)),
+            Arc::new(move |path: &std::path::Path| crate::uploader::quarantine(path, &agent)),
+        ))
     }
 
     /// The handle the page up is driven by, if a page is up.
@@ -6525,6 +6548,43 @@ impl TerminalPane {
                     let origin = self.view_origin();
                     pencere_view::ask::link(self, &session, link, &url, &origin);
                 }
+                // The files beside the view's bundle: the session asks, the pane's files do it
+                // off the main queue and tell the session what came of it.
+                Action::ReadFile {
+                    read,
+                    handle,
+                    offset,
+                    length,
+                } => match self.view_files() {
+                    Some(files) => files.read(read, &handle, offset, length),
+                    None => session.file_read(read, Err(bt_core::pencere::FileError::Io)),
+                },
+                Action::WriteFile {
+                    write,
+                    handle,
+                    offset,
+                    bytes,
+                    end,
+                } => match self.view_files() {
+                    Some(files) => files.write(write, &handle, offset, bytes, end),
+                    None => session.file_written(write, Err(bt_core::pencere::FileError::Io)),
+                },
+                Action::AbortWrite { handle } => {
+                    if let Some(files) = self.view_files() {
+                        files.abort(&handle);
+                    }
+                }
+                Action::ForgetFiles(names) => {
+                    if let Some(handle) = self.page_handle()
+                        && let Some(images) = handle.page().images()
+                    {
+                        images.forget(&names);
+                    }
+                }
+                // No panel is shown yet: the person turned it away.
+                Action::Pick { panel, .. } | Action::Save { panel, .. } => {
+                    session.panel_closed(panel);
+                }
                 _ => {}
             }
         }
@@ -6596,8 +6656,10 @@ impl TerminalPane {
         // The images of the page are files of the bundle the program sent, read from the session
         // that keeps them. The `wake` is the one the module has: it only hops to the main queue,
         // so the images' decoder may call it from inside a build.
-        let assets: Arc<dyn bt_shell_common::native_view::Assets> =
-            Arc::new(bt_shell_common::native_view::BundleAssets::new(session));
+        let files = self.view_files_for(session);
+        let assets: Arc<dyn bt_shell_common::native_view::Assets> = Arc::new(
+            bt_shell_common::native_view::BundleAssets::new(session).with_files(Arc::clone(&files)),
+        );
         let (page, handle) = if start.kind == bt_core::pencere::ViewKind::Lua {
             bt_shell_common::native_view::script_page(
                 bt_shell_common::native_view::Script {
@@ -6625,6 +6687,7 @@ impl TerminalPane {
             handle,
             fields,
             area,
+            files: Some(files),
         }));
         link.set_page(Some(page));
         // The mark of what runs in the pane (the tab's tile).

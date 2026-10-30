@@ -24,11 +24,12 @@
 
 use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
+use std::sync::Arc;
 
 use bt_core::Theme;
 use bt_shell_common::native_view::{
     Accessible, AccessibleRole, Command, Field, FieldKind, FieldState, Fill, Id, Key, Mods,
-    Outline, PageHandle, Point, Role, Shortcut, Tip, tone_linear,
+    Outline, PageHandle, Point, Role, Shortcut, Tip, ViewFiles, tone_linear,
 };
 use bt_shell_common::view_strip::Strip;
 use objc2::rc::{Retained, Weak as WeakId};
@@ -125,6 +126,10 @@ pub(crate) struct Page {
     pub handle: PageHandle,
     pub fields: Rc<PageFields>,
     pub area: Retained<NSTrackingArea>,
+    /// The files beside the bundle of a program's view: the handles of what the person gave it
+    /// and of the places it may save in, and the thread that reads and writes them. They live
+    /// as long as the page: the demo has none.
+    pub files: Option<Arc<ViewFiles>>,
 }
 
 define_class!(
