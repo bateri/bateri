@@ -224,10 +224,9 @@ const CHIP_HEIGHT: f64 = tabs::TAB_HEIGHT;
 /// The single tab's title box inset — it has no `×` to make room for.
 const SINGLE_PAD: f64 = 8.0;
 
-/// The `×` button: its side, its inset from the chip's corner and its
-/// corner radius.
-const CLOSE_SIDE: f64 = 20.0;
-const CLOSE_INSET: f64 = 4.0;
+/// The `×` button: its side and its inset from a row's edge are the pure model's (a chip's and a
+/// row's `×` stand where `tabs::Row` puts them), its corner radius the drawing's.
+use tabs::{CLOSE_INSET, CLOSE_SIDE};
 const CLOSE_RADIUS: f64 = 5.0;
 
 /// Type sizes: a chip's title, the single tab's slightly larger one, a ⌘
@@ -3837,13 +3836,18 @@ impl Chip {
         } else {
             emblem.map(|emblem| tabs::lead_width(tabs::TILE_WIDTH, emblem.edges))
         };
-        // Where the parts stand: a chip's in the strip's arithmetic (`×` at the left, a title
-        // centred in what the padding leaves), a side row's in `tabs::Row`'s (`×` and the ⌘ key at
-        // the right end, the title after the icon).
-        let row = side.then(|| {
+        // Where the parts stand: a side row's and a chip's in `tabs::Row`'s (`×` and the ⌘ key
+        // at the right end, the title after the icon); the one-tab title's in the strip's
+        // arithmetic (a title centred in what the padding leaves).
+        let crowded = hovered || hint.is_some();
+        let row = if side {
             // The title gives way to the `×` while it shows and to the key while that does.
-            tabs::Row::of(size.width, lead, natural.width, hovered || hint.is_some())
-        });
+            Some(tabs::Row::of(size.width, lead, natural.width, crowded))
+        } else if !single {
+            Some(tabs::Row::chip(size.width, lead, natural.width, crowded))
+        } else {
+            None
+        };
         let (glyph_x, text_x, text_width) = match &row {
             Some(row) => (row.lead.map(|lead| lead.x), row.title.x, row.title.width),
             None => tabs::title_row(inner, natural.width, lead),

@@ -377,8 +377,13 @@ pub fn list_dot(indicator: Indicator) -> Tone {
     }
 }
 
-/// Space between two neighbouring tabs. Also where the separator line sits.
+/// Space between two neighbouring rows of the side column, and between a row and what stands
+/// next to it there.
 pub const GAP: f64 = 2.0;
+
+/// Space between two neighbouring chips in the title row's strip; the separator stands in its
+/// middle.
+pub const CHIP_GAP: f64 = 6.0;
 
 /// The widest a tab gets: a few tabs in a wide window do not stretch across it.
 pub const MAX_WIDTH: f64 = 184.0;
@@ -388,10 +393,10 @@ pub const MAX_WIDTH: f64 = 184.0;
 pub const MIN_WIDTH: f64 = 120.0;
 
 /// Empty space always kept between the last tab and the buttons on the right, with [`EDGE`]
-/// beside it: the visible gap from the last tab to the leftmost button is 24 pt = 16 + 8. The
-/// window is moved from there; tabs shrink before giving it up. Enough to grab with the pointer
-/// without pushing `+` away from the tabs it adds to.
-pub const DRAG_MARGIN: f64 = 16.0;
+/// beside it: the visible gap from the last tab to the leftmost button is 40 pt = 32 + 8. The
+/// window is moved from there; tabs shrink before giving it up — a grip the pointer finds
+/// without aiming.
+pub const DRAG_MARGIN: f64 = 32.0;
 
 /// Side of a square button on the right of the bar (`+`, Show All Tabs, the settings warning).
 pub const BUTTON: f64 = 28.0;
@@ -660,7 +665,7 @@ pub struct Strip {
     pub warning: Option<f64>,
     /// How the buttons meet the window's corner: `+`'s inset and every button's radius.
     pub fit: Fit,
-    /// A tab's width plus [`GAP`]: the step from one tab to the next.
+    /// A tab's width plus [`CHIP_GAP`]: the step from one tab to the next.
     slot: f64,
 }
 
@@ -724,7 +729,11 @@ impl Bar {
         }
 
         let count = self.count as f64;
-        let shared = |span: Span| ((span.width + GAP) / count - GAP).floor().min(MAX_WIDTH);
+        let shared = |span: Span| {
+            ((span.width + CHIP_GAP) / count - CHIP_GAP)
+                .floor()
+                .min(MAX_WIDTH)
+        };
         let mut list = None;
         let mut warning = self.warning.then(|| left_of(new_tab));
         let mut span = strip_until(warning.unwrap_or(new_tab));
@@ -742,8 +751,8 @@ impl Bar {
             width = MIN_WIDTH;
         }
 
-        let slot = width + GAP;
-        let total = (count * slot - GAP).max(0.0);
+        let slot = width + CHIP_GAP;
+        let total = (count * slot - CHIP_GAP).max(0.0);
         let max_scroll = if overflow {
             (total - span.width).max(0.0)
         } else {
@@ -761,7 +770,7 @@ impl Bar {
         };
         let separators = (1..self.count)
             .filter(|&right| !lit(right - 1) && !lit(right))
-            .map(|right| chips[right - 1].end() + GAP / 2.0)
+            .map(|right| chips[right - 1].end() + CHIP_GAP / 2.0)
             .collect();
         Strip {
             span,
@@ -821,6 +830,7 @@ impl Laid for Strip {
             max_scroll: self.max_scroll,
             slot: self.slot,
             narrowest: MIN_WIDTH,
+            gap: CHIP_GAP,
         }
     }
 }
@@ -842,7 +852,7 @@ pub struct Run<'a> {
     /// The scroll applied, within `0..=max_scroll`.
     scroll: f64,
     max_scroll: f64,
-    /// A place's extent plus [`GAP`]: what the places keep between them where nothing else
+    /// A place's extent plus [`Run::gap`]: what the places keep between them where nothing else
     /// stands there, and 0 for a run that is not a list of tabs (the lone tab's title). The
     /// places are read where they are, not at multiples of it: a column's headers push the rows
     /// below them down.
@@ -850,6 +860,8 @@ pub struct Run<'a> {
     /// The least a place goes along the axis: what stands in for a held tab that has gone from
     /// the list since the press.
     narrowest: f64,
+    /// What two places keep between them: the strip's [`CHIP_GAP`], the column's [`GAP`].
+    gap: f64,
 }
 
 impl Run<'_> {
@@ -881,7 +893,7 @@ impl Run<'_> {
     /// The place under `at`: the slot of the run that holds that point, among `0..places.len()` —
     /// the first for a point before the run, the last from its visible end on (over the strip's
     /// buttons, in the drag margin, below the column's last row). A place holds its own extent
-    /// and the [`GAP`] after it, and so everything between it and the next place — a column's
+    /// and the [`Run::gap`] after it, and so everything between it and the next place — a column's
     /// header belongs to the row below it, so a point over a header is over that row's place. It
     /// is a function of the layout and `at` alone, so a tab carried over a run can be placed by
     /// it while the run is laid out **with room made** at the answer: the room opens where the
@@ -898,7 +910,7 @@ impl Run<'_> {
         }
         self.places
             .iter()
-            .position(|place| at < place.end() + GAP)
+            .position(|place| at < place.end() + self.gap)
             .unwrap_or(last)
     }
 
@@ -1234,6 +1246,12 @@ pub const ROW_CROWDED: f64 = CHIP_PAD + CLOSE_INSET;
 /// Side of the `×` that closes a row, and its space from the row's right edge.
 pub const CLOSE_SIDE: f64 = 20.0;
 pub const CLOSE_INSET: f64 = 4.0;
+
+/// The `×`'s and the ⌘ key's space from a chip's right edge in the title row's strip.
+pub const CHIP_CLOSE_INSET: f64 = 6.0;
+
+/// What a chip keeps free at its right end while `×` or the ⌘ key shows: the title gives way.
+pub const CHIP_CROWDED: f64 = CHIP_PAD + CHIP_CLOSE_INSET;
 
 /// What the side column is laid out from ([`Side::layout`]).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1709,6 +1727,7 @@ impl Laid for Column {
             max_scroll: self.max_scroll,
             slot: self.slot,
             narrowest: TAB_HEIGHT,
+            gap: GAP,
         }
     }
 }
@@ -1785,7 +1804,18 @@ impl Row {
     /// indicator's room while it shows nothing) and a title `text` wide. `crowded` while `×` or
     /// the ⌘ hint shows: the title gives way to it.
     pub fn of(width: f64, lead: Option<f64>, text: f64, crowded: bool) -> Self {
-        let reserve = if crowded { ROW_CROWDED } else { ROW_END };
+        Self::inset_by(width, lead, text, crowded, CLOSE_INSET)
+    }
+
+    /// A chip of the title row's strip laid out as a row: the icon [`ROW_LEAD`] in, the title
+    /// after it, `×` and the ⌘ key at the right end [`CHIP_CLOSE_INSET`] in; the title keeps
+    /// [`ROW_END`] at rest and gives [`CHIP_CROWDED`] to them while one shows.
+    pub fn chip(width: f64, lead: Option<f64>, text: f64, crowded: bool) -> Self {
+        Self::inset_by(width, lead, text, crowded, CHIP_CLOSE_INSET)
+    }
+
+    fn inset_by(width: f64, lead: Option<f64>, text: f64, crowded: bool, inset: f64) -> Self {
+        let reserve = if crowded { CHIP_PAD + inset } else { ROW_END };
         let inner = (width - ROW_LEAD - reserve).max(0.0);
         let start = lead.map_or(ROW_LEAD, |lead| ROW_LEAD + lead + ICON_GAP);
         let title = text.ceil().min(title_room(inner, lead));
@@ -1793,12 +1823,12 @@ impl Row {
             lead: lead.map(|lead| Span::new(ROW_LEAD, lead)),
             title: Span::new(start, title),
             close: Rect::new(
-                width - CLOSE_INSET - CLOSE_SIDE,
+                width - inset - CLOSE_SIDE,
                 (TAB_HEIGHT - CLOSE_SIDE) / 2.0,
                 CLOSE_SIDE,
                 CLOSE_SIDE,
             ),
-            key: Span::new(width - ROW_CROWDED, CHIP_PAD),
+            key: Span::new(width - inset - CHIP_PAD, CHIP_PAD),
             host_mark: Rect::new(2.0, 7.0, 2.5, TAB_HEIGHT - 14.0),
         }
     }
@@ -3352,7 +3382,7 @@ mod tests {
         }
         .layout();
         assert_eq!((round.new_tab, round.warning), (956.0, Some(924.0)));
-        assert_eq!(round.span, Span::new(84.0, 816.0));
+        assert_eq!(round.span, Span::new(84.0, 800.0));
         let single = Bar {
             corner: 30.0,
             ..bar(1000.0, 1)
@@ -3411,10 +3441,10 @@ mod tests {
         let strip = bar(1000.0, 3).layout();
         assert_eq!(
             strip.span,
-            Span::new(84.0, 856.0),
-            "plus − 8 − 16 is the strip's end: a 24 pt gap"
+            Span::new(84.0, 840.0),
+            "plus − 8 − 32 is the strip's end: a 40 pt gap"
         );
-        assert_eq!(xs(&strip), [(84.0, 184.0), (270.0, 184.0), (456.0, 184.0)]);
+        assert_eq!(xs(&strip), [(84.0, 184.0), (274.0, 184.0), (464.0, 184.0)]);
         assert!(!strip.overflow);
         assert_eq!((strip.max_scroll, strip.scroll), (0.0, 0.0));
         assert!(!strip.fade_leading && !strip.fade_trailing);
@@ -3423,17 +3453,16 @@ mod tests {
     #[test]
     fn more_tabs_shrink_to_share_the_strip() {
         let strip = bar(1000.0, 5).layout();
-        // (856 + 2) / 5 − 2 = 169.6, whole points.
-        assert_eq!(strip.chips[0].width, 169.0);
-        assert_eq!(strip.chips[4].x, 84.0 + 4.0 * 171.0);
+        // (840 + 6) / 5 − 6 = 163.2, whole points.
+        assert_eq!(strip.chips[0].width, 163.0);
+        assert_eq!(strip.chips[4].x, 84.0 + 4.0 * 169.0);
         assert!(!strip.overflow);
-        assert_eq!(bar(1000.0, 6).layout().chips[0].width, 141.0);
+        let six = bar(1000.0, 6).layout();
+        assert!(!six.overflow, "135 still fits");
+        assert_eq!(six.chips[0].width, 135.0);
         let seven = bar(1000.0, 7).layout();
-        assert!(!seven.overflow, "120.57 still fits");
+        assert!(seven.overflow, "114.86 would be below the minimum");
         assert_eq!(seven.chips[0].width, MIN_WIDTH);
-        let eight = bar(1000.0, 8).layout();
-        assert!(eight.overflow, "105 would be below the minimum");
-        assert_eq!(eight.chips[0].width, MIN_WIDTH);
     }
 
     #[test]
@@ -3443,15 +3472,15 @@ mod tests {
         assert!(strip.overflow);
         assert_eq!(strip.new_tab, 684.0);
         assert_eq!(strip.list, Some(652.0), "Show All Tabs, 4 left of +");
-        assert_eq!(strip.span, Span::new(84.0, 544.0));
+        assert_eq!(strip.span, Span::new(84.0, 528.0));
         assert!(strip.chips.iter().all(|chip| chip.width == MIN_WIDTH));
-        assert_eq!(strip.chips[11].x, 84.0 + 11.0 * 122.0);
-        // 12 × 122 − 2 = 1462 of tabs in a 544 strip.
-        assert_eq!(strip.max_scroll, 918.0);
+        assert_eq!(strip.chips[11].x, 84.0 + 11.0 * 126.0);
+        // 12 × 126 − 6 = 1506 of tabs in a 528 strip.
+        assert_eq!(strip.max_scroll, 978.0);
         assert!(!strip.fade_leading && strip.fade_trailing, "at the start");
 
         let end = Bar {
-            scroll: 918.0,
+            scroll: 978.0,
             ..bar(720.0, 12)
         }
         .layout();
@@ -3475,7 +3504,7 @@ mod tests {
             ..bar(720.0, 12)
         }
         .layout();
-        assert_eq!(past.scroll, 918.0, "clamped");
+        assert_eq!(past.scroll, 978.0, "clamped");
         let before = Bar {
             scroll: -3.0,
             ..bar(720.0, 12)
@@ -3483,7 +3512,7 @@ mod tests {
         .layout();
         assert_eq!(before.scroll, 0.0);
         let almost = Bar {
-            scroll: 917.5,
+            scroll: 977.5,
             ..bar(720.0, 12)
         }
         .layout();
@@ -3503,7 +3532,7 @@ mod tests {
         assert_eq!((strip.new_tab, strip.warning), (964.0, Some(932.0)));
         assert_eq!(
             strip.span,
-            Span::new(84.0, 824.0),
+            Span::new(84.0, 808.0),
             "the strip yields its space"
         );
         let overflowing = Bar {
@@ -3517,7 +3546,7 @@ mod tests {
             "Show All Tabs stays next to +"
         );
         assert_eq!(overflowing.warning, Some(620.0));
-        assert_eq!(overflowing.span, Span::new(84.0, 512.0));
+        assert_eq!(overflowing.span, Span::new(84.0, 496.0));
     }
 
     #[test]
@@ -3525,7 +3554,7 @@ mod tests {
         let strip = bar(170.0, 3).layout();
         assert!(strip.overflow);
         assert_eq!(strip.span.width, 0.0, "no room left, not negative");
-        assert_eq!(strip.max_scroll, 3.0 * 122.0 - 2.0);
+        assert_eq!(strip.max_scroll, 3.0 * 126.0 - 6.0);
         assert!(strip.chips.iter().all(|chip| chip.x.is_finite()));
         let none = bar(1000.0, 0).layout();
         assert!(none.chips.is_empty() && none.separators.is_empty() && !none.overflow);
@@ -3539,7 +3568,7 @@ mod tests {
         }
         .layout();
         // Gaps 0–1 and 1–2 touch the selected tab; only 2–3 shows, in the middle of its gap.
-        assert_eq!(strip.separators, [strip.chips[2].end() + GAP / 2.0]);
+        assert_eq!(strip.separators, [strip.chips[2].end() + CHIP_GAP / 2.0]);
         let hovered = Bar {
             selected: 1,
             hovered: Some(3),
@@ -3553,14 +3582,20 @@ mod tests {
             ..bar(1000.0, 5)
         }
         .layout();
-        assert_eq!(dragged.separators, [dragged.chips[3].end() + GAP / 2.0]);
+        assert_eq!(
+            dragged.separators,
+            [dragged.chips[3].end() + CHIP_GAP / 2.0]
+        );
         // A tab whose ground fills with a transfer is lit like a hovered one: its two gaps go.
         let filling = Bar {
             selected: 0,
             ..bar(1000.0, 5)
         }
         .layout_with(|index| index == 3);
-        assert_eq!(filling.separators, [filling.chips[1].end() + GAP / 2.0]);
+        assert_eq!(
+            filling.separators,
+            [filling.chips[1].end() + CHIP_GAP / 2.0]
+        );
         assert_eq!(
             bar(1000.0, 5).layout_with(|_| false),
             bar(1000.0, 5).layout(),
@@ -3571,9 +3606,9 @@ mod tests {
     #[test]
     fn selecting_a_tab_scrolls_it_into_view_with_a_margin() {
         let strip = bar(720.0, 12).layout();
-        assert_eq!(strip.revealing(11), 918.0, "the last one: the strip's end");
-        // Tab 5 spans 610..730; brought to 24 from the trailing edge.
-        assert_eq!(strip.revealing(5), 730.0 - 544.0 + REVEAL_MARGIN);
+        assert_eq!(strip.revealing(11), 978.0, "the last one: the strip's end");
+        // Tab 5 spans 630..750; brought to 24 from the trailing edge.
+        assert_eq!(strip.revealing(5), 750.0 - 528.0 + REVEAL_MARGIN);
         assert_eq!(strip.revealing(0), 0.0);
         let scrolled = Bar {
             scroll: 242.0,
@@ -3581,8 +3616,8 @@ mod tests {
         }
         .layout();
         assert_eq!(scrolled.revealing(3), 242.0, "already in view");
-        // Tab 2 spans 244..364: within 24 of the leading edge.
-        assert_eq!(scrolled.revealing(2), 244.0 - REVEAL_MARGIN);
+        // Tab 2 spans 252..372: within 24 of the leading edge.
+        assert_eq!(scrolled.revealing(2), 252.0 - REVEAL_MARGIN);
         assert_eq!(bar(1000.0, 3).layout().revealing(2), 0.0, "nothing scrolls");
     }
 
@@ -3600,11 +3635,11 @@ mod tests {
             "vertical wheels scroll too"
         );
         assert_eq!(strip.wheeled(-500.0, 0.0), 0.0);
-        assert_eq!(strip.wheeled(0.0, 5000.0), 918.0);
+        assert_eq!(strip.wheeled(0.0, 5000.0), 978.0);
         assert_eq!(bar(1000.0, 3).layout().wheeled(40.0, 0.0), 0.0);
     }
 
-    /// A strip of `count` tabs in a 1000 pt window, chips at 84, 270, 456 …, and a grip on
+    /// A strip of `count` tabs in a 1000 pt window, chips at 84, 274, 464 …, and a grip on
     /// `from` pressed `grab` points into it.
     fn gripped(count: usize, from: usize, grab: f64) -> (Strip, Grip) {
         let strip = bar(1000.0, count).layout();
@@ -3642,7 +3677,7 @@ mod tests {
     #[test]
     fn a_dragged_tab_takes_the_place_its_left_edge_is_nearest() {
         let (strip, mut grip) = gripped(3, 0, 16.0);
-        // The chip's left edge is the pointer less where it was held; slots are 186 apart.
+        // The chip's left edge is the pointer less where it was held; slots are 190 apart.
         assert_eq!(
             grip.track(&strip, level(290.0), ROW),
             Drag::Reorder { left: 274.0, to: 1 }
@@ -3655,12 +3690,12 @@ mod tests {
         assert_eq!(
             grip.track(&strip, level(192.0), ROW),
             Drag::Reorder { left: 176.0, to: 0 },
-            "92 of the 186 points to the next place"
+            "92 of the 190 points to the next place"
         );
         assert_eq!(
-            grip.track(&strip, level(193.0), ROW),
-            Drag::Reorder { left: 177.0, to: 1 },
-            "…and 93, half, is the next one"
+            grip.track(&strip, level(195.0), ROW),
+            Drag::Reorder { left: 179.0, to: 1 },
+            "…and 95, half, is the next one"
         );
         // A tab dragged left from the last place.
         let (strip, mut grip) = gripped(3, 2, 100.0);
@@ -3684,7 +3719,7 @@ mod tests {
         );
         assert_eq!(
             grip.track(&strip, level(990.0), ROW),
-            Drag::Reorder { left: 456.0, to: 2 },
+            Drag::Reorder { left: 464.0, to: 2 },
             "not right of the last place, though the strip goes on"
         );
         // A scrolled strip: the places are the ones in view, and the place is read from the
@@ -3700,7 +3735,7 @@ mod tests {
             grip.track(&scrolled, level(719.0), (720.0, 40.0)),
             Drag::Reorder {
                 left: end,
-                to: ((end - scrolled.span.x + 400.0) / 122.0).round() as usize
+                to: ((end - scrolled.span.x + 400.0) / 126.0).round() as usize
             },
             "no further than the edge it can be seen at"
         );
@@ -3995,13 +4030,30 @@ mod tests {
     }
 
     #[test]
+    fn a_chip_stands_like_a_row_with_its_close_and_key_at_the_right() {
+        // The narrowest chip: 8 in, the tile, 6, and the title to 8 from the end at rest.
+        let rest = Row::chip(MIN_WIDTH, Some(TILE_WIDTH), 1000.0, false);
+        assert_eq!(rest.lead, Some(Span::new(ROW_LEAD, TILE_WIDTH)));
+        assert_eq!(rest.title, Span::new(36.0, 76.0));
+        // Under the pointer or with ⌘ held the title gives 32 to `×` and the key.
+        let crowded = Row::chip(MIN_WIDTH, Some(TILE_WIDTH), 1000.0, true);
+        assert_eq!(crowded.title.end(), MIN_WIDTH - CHIP_CROWDED);
+        assert_eq!(
+            crowded.close.x + crowded.close.width,
+            MIN_WIDTH - 6.0,
+            "6 from the edge"
+        );
+        assert_eq!(crowded.key.end(), MIN_WIDTH - 6.0, "the key where `×` is");
+    }
+
+    #[test]
     fn the_slot_under_a_point_is_the_one_whose_extent_holds_it() {
         let strip = bar(1000.0, 3).layout();
-        // Slots are 186 apart from 84: 84..270, 270..456, 456..642.
+        // Slots are 190 apart from 84: 84..274, 274..464, 464..654.
         assert_eq!(strip.slot_at(100.0), 0);
-        assert_eq!(strip.slot_at(269.9), 0);
+        assert_eq!(strip.slot_at(273.9), 0);
         assert_eq!(
-            strip.slot_at(270.0),
+            strip.slot_at(274.0),
             1,
             "the gap between two tabs is the later one's"
         );
@@ -4013,10 +4065,10 @@ mod tests {
             ..bar(720.0, 12)
         }
         .layout();
-        // Slots of 122 from 84 − 242: tab 2 holds 86..208, so the places follow what is in view.
+        // Slots of 126 from 84 − 242: tab 2 holds 94..220, so the places follow what is in view.
         assert_eq!(scrolled.slot_at(146.0), 2);
-        assert_eq!(scrolled.slot_at(207.9), 2);
-        assert_eq!(scrolled.slot_at(208.0), 3);
+        assert_eq!(scrolled.slot_at(219.9), 2);
+        assert_eq!(scrolled.slot_at(220.0), 3);
         assert_eq!(
             scrolled.slot_at(700.0),
             11,
