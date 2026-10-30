@@ -49,14 +49,13 @@ use bt_core::{ContentEdge, HostMark, MarkSubject, PaneUuid, ProgramState, Settin
 use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
-use objc2_app_kit::{NSEvent, NSResponder, NSView, NSWindow, NSWindowOcclusionState};
+use objc2_app_kit::{NSResponder, NSView, NSWindow, NSWindowOcclusionState};
 use objc2_core_foundation::CFRetained;
 use objc2_core_graphics::CGImage;
 use objc2_foundation::{NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize};
 
 use crate::agent;
 use crate::app;
-use crate::arrange::{self, Entry, Raised, Scene, Status, Wants};
 use crate::embed;
 use crate::launch::Closing;
 use crate::notices::Source;
@@ -293,18 +292,6 @@ impl PaneHost for TabHost {
         self.tab.set(tab);
     }
 
-    fn files_dragged(&self, _pane: u64, over: bool) {
-        if let Some(app) = app::delegate(Self::mtm()) {
-            app.files_dragged(over);
-        }
-    }
-
-    fn carry_press(&self, pane: u64, (x, y): (f64, f64)) {
-        if let Some(app) = app::delegate(Self::mtm()) {
-            app.pane_press(pane, NSPoint::new(x, y));
-        }
-    }
-
     fn program_notification(&self, pane: u64, title: Option<&str>, body: &str) {
         // Told as a server's `bateri notify` is (`agent::notice`). One notification per pane,
         // each replacing the last, so a program that prints them in a loop leaves one, not a
@@ -436,9 +423,6 @@ pub(crate) struct TabIvars {
     /// told apart by pane for the summary card's map. `unseen` is the tab's memory and outlives
     /// a pane that closes with its tick on it; these go with their pane.
     ends: RefCell<Vec<(u64, Unseen)>>,
-    /// What the arrangement moment lifted, while it is up
-    /// ([`TerminalTab::arrange`]).
-    raised: RefCell<Option<Raised>>,
 }
 
 define_class!(
@@ -476,7 +460,6 @@ impl TerminalTab {
             unseen: Cell::new(Unseen::default()),
             tallies: RefCell::new(Vec::new()),
             ends: RefCell::new(Vec::new()),
-            raised: RefCell::new(None),
         });
         // SAFETY: NSObject's init takes no arguments and the ivars are set.
         unsafe { msg_send![super(this), init] }
@@ -781,107 +764,6 @@ impl TerminalTab {
         self.ivars().container.layout_panes();
         for pane in self.panes() {
             pane.refresh_geometry();
-        }
-        // The panes moved under a lift: it is raised again where they stand.
-        if self.ivars().raised.borrow().is_some() {
-            self.arrange(false, false);
-            self.arrange(true, false);
-        }
-    }
-
-    /// Lifts this tab for arranging, or sets it down (`animate`: with the
-    /// fade) — [`crate::arrange`]. A tab that is not on screen is not lifted.
-    pub(crate) fn arrange(&self, on: bool, animate: bool) {
-        let container = &self.ivars().container;
-        if !on {
-            let raised = self.ivars().raised.take();
-            if let Some(raised) = raised {
-                raised.lower(container, &self.panes(), animate);
-                container.lifted(false);
-            }
-            return;
-        }
-        if self.ivars().raised.borrow().is_some()
-            || self.ns_window().is_none()
-            || container.isHiddenOrHasHiddenAncestor()
-        {
-            return;
-        }
-        let Some(app) = app::delegate(self.mtm()) else {
-            return;
-        };
-        let panes = self.panes();
-        let Some(theme) = self.focused_pane().session().map(|session| session.theme()) else {
-            return;
-        };
-        let window = self.ivars().window.get();
-        let windows = app.windows();
-        let tabs = windows
-            .iter()
-            .find(|candidate| candidate.id() == window)
-            .map_or(1, |candidate| candidate.tab_count());
-        let wants = Wants {
-            grip: tabs > 1 || panes.len() > 1 || windows.len() > 1,
-            new_tab: panes.len() > 1,
-        };
-        let home = std::env::var("HOME").ok();
-        let entries = panes
-            .iter()
-            .map(|pane| {
-                let session = pane.session();
-                let dir = session
-                    .and_then(|session| session.working_directory())
-                    .map(|dir| arrange::abbreviate(&dir.to_string_lossy(), home.as_deref()))
-                    .unwrap_or_default();
-                Entry {
-                    pane: pane.id(),
-                    name: session.map_or_else(String::new, |session| session.title()),
-                    dir,
-                    status: pane_status(pane),
-                }
-            })
-            .collect();
-        let pointer = self
-            .ns_window()
-            .map(|window| window.mouseLocationOutsideOfEventStream())
-            .map(|at| container.convertPoint_fromView(at, None))
-            .filter(|at| {
-                let bounds = container.bounds();
-                at.x >= 0.0 && at.y >= 0.0 && at.x < bounds.size.width && at.y < bounds.size.height
-            });
-        let raised = Raised::raise(
-            self.mtm(),
-            Scene {
-                window,
-                tab: self.ivars().id,
-                container,
-                panes: &panes,
-                entries,
-                theme,
-                wants,
-                still: app.reduce_motion(),
-                pointer,
-            },
-        );
-        *self.ivars().raised.borrow_mut() = Some(raised);
-        container.lifted(true);
-    }
-
-    /// The pointer moved while this tab is lifted: the pane under it lifts a
-    /// little less than the others.
-    pub(crate) fn arrange_pointer(&self, event: &NSEvent) {
-        let Some(window) = self.ns_window() else {
-            return;
-        };
-        if !event.window(self.mtm()).is_some_and(|own| own == window) {
-            return;
-        }
-        let at = self
-            .ivars()
-            .container
-            .convertPoint_fromView(event.locationInWindow(), None);
-        if let Some(raised) = self.ivars().raised.borrow().as_ref() {
-            raised.point(&self.panes(), at);
         }
     }
 
@@ -2095,28 +1977,6 @@ impl TerminalTab {
             .collect();
         sheets::dismantle(self.container());
         closing
-    }
-}
-
-/// What one pane is doing, for its capsule: a question waiting, an ssh
-/// session, a running command, or a shell at rest — the chip's indicator for
-/// a single pane ([`TerminalTab::indicator`] looks at the tab as a whole).
-fn pane_status(pane: &TerminalPane) -> Status {
-    if pane.asking() {
-        return Status::Question;
-    }
-    let Some(session) = pane.session() else {
-        return Status::Shell;
-    };
-    // The ssh process runs for the whole session: the remote mark comes
-    // first, or the ring would hide it.
-    if session.remote_target().is_some() {
-        return Status::Remote;
-    }
-    if pane_running(pane).is_some() {
-        Status::Running
-    } else {
-        Status::Shell
     }
 }
 

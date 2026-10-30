@@ -120,7 +120,6 @@ use objc2_quartz_core::{CAMediaTiming, CAMediaTimingFunction, CATransition, kCAT
 
 use crate::Run;
 use crate::app;
-use crate::arrange::Tool;
 use crate::card::{Ground, Shade, fade_to};
 use crate::embed;
 use crate::groups::{
@@ -801,7 +800,7 @@ define_class!(
             // another application in front, and it goes.
             self.close_palette();
             self.close_overview();
-            // A lifted tab (⌥⌘ held) is set down with them.
+            // A press on a pane's header that had not become a carry goes with them.
             if let Some(app) = app::delegate(self.mtm()) {
                 app.key_window_resigned();
             }
@@ -1766,11 +1765,6 @@ impl RootView {
         self.ivars().shade.hold(secs);
     }
 
-    /// The tab on screen is lifted for arranging, or set down.
-    pub(crate) fn shade_lifted(&self, lifted: bool) {
-        self.ivars().shade.set_lifted(lifted);
-    }
-
     /// The title row's height: the content layout rect's top inset — what
     /// the compact toolbar leaves above the content. Kept when the window
     /// reports none (full screen with the toolbar hidden). Only outside a
@@ -2493,61 +2487,6 @@ impl TerminalWindow {
     /// How many tabs the window carries.
     pub(crate) fn tab_count(&self) -> usize {
         self.ivars().order.borrow().len()
-    }
-
-    /// The arrangement moment ([`crate::arrange`]): lifts the selected tab,
-    /// or — setting down — every tab, since the selection may have moved
-    /// while the keys were held.
-    pub(crate) fn arrange(&self, on: bool, animate: bool) {
-        if on {
-            self.selected_tab().arrange(true, animate);
-        } else {
-            for tab in self.tabs() {
-                tab.arrange(false, animate);
-            }
-        }
-    }
-
-    /// A capsule's tool, pressed on `pane`: the pane takes the focus, then
-    /// the work is the menu's — a split from it, the move to a tab of its own
-    /// beside this one, the close that asks if it must. Through the same
-    /// callers as ⌘D, Move Split to New Tab and ⌘W, so nothing here is a
-    /// second way to change the tab list.
-    pub(crate) fn arrange_act(&self, pane: u64, tool: Tool) {
-        let Some(tab) = self.tab_holding(pane) else {
-            return;
-        };
-        let Some(target) = tab
-            .panes()
-            .into_iter()
-            .find(|candidate| candidate.id() == pane)
-        else {
-            return;
-        };
-        tab.focus_pane(&target);
-        match tool {
-            Tool::SplitRight | Tool::SplitDown => {
-                if let Some(axis) = tool.axis() {
-                    tab.split(axis);
-                }
-            }
-            Tool::NewTab => {
-                let gap = self.index_of(tab.id()).map_or(0, |index| index + 1);
-                self.make_move(Move::PaneToNewTab {
-                    pane,
-                    window: self.id(),
-                    gap,
-                    target: self.beside_target(tab.id()),
-                });
-            }
-            Tool::Close => {
-                if tab.panes().len() > 1 {
-                    self.close_pane_asking(&tab);
-                } else {
-                    self.close_tab_asking(tab.id());
-                }
-            }
-        }
     }
 
     /// Tab `id`'s place in the strip; `None` if it is not this window's.
@@ -3400,8 +3339,8 @@ impl TerminalWindow {
 
     /// **A pane or a tab moves** to another tab or becomes one — Move Split to
     /// Tab, to Previous / Next / New Tab, a chip's Merge into Current Tab, a pane
-    /// let go on a chip, between chips or in a tab's panes, a tab let go with ⌥⌘
-    /// on one — in this window or another: what it comes to is
+    /// let go on a chip, between chips or in a tab's panes, a tab let go in a tab's
+    /// panes — in this window or another: what it comes to is
     /// [`moves::plan`]'s, carried out by the application
     /// ([`AppDelegate::make_move`]). `true` if it was made.
     pub(crate) fn make_move(&self, wanted: Move) -> bool {

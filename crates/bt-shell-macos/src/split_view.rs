@@ -337,9 +337,6 @@ pub(crate) struct SplitIvars {
     /// `separator` tone behind the panes, filling the container, which shows
     /// through the one pixel left open between two panes.
     backdrop: Retained<NSBox>,
-    /// The tab is lifted for arranging: the backdrop would show round the
-    /// shrunk panes.
-    lifted: Cell<bool>,
     /// `line`'s hairline: the fill above the panes along the top edge, shown
     /// only while the mode is `line` and the panes touch that edge (the
     /// module header).
@@ -408,7 +405,6 @@ impl SplitView {
             tree: RefCell::new(Tree::Leaf(first.id())),
             panes: RefCell::new(vec![first.retain()]),
             backdrop: backdrop.clone(),
-            lifted: Cell::new(false),
             hairline: hairline.clone(),
             edge: Cell::new(ContentEdge::default()),
             zoomed: Cell::new(None),
@@ -1046,12 +1042,11 @@ impl SplitView {
     }
 
     /// The divider's fill shows under [`SplitStyle::Lines`] while two panes
-    /// or more are in view and the tab is not lifted.
+    /// or more are in view.
     fn sync_backdrop(&self) {
         let backdrop = &self.ivars().backdrop;
         backdrop.setFrame(self.bounds());
-        let shown =
-            self.shows_split() && self.style() == SplitStyle::Lines && !self.ivars().lifted.get();
+        let shown = self.shows_split() && self.style() == SplitStyle::Lines;
         backdrop.setHidden(!shown);
     }
 
@@ -1307,16 +1302,6 @@ impl SplitView {
             && !self.isHidden()
         {
             root.sync_ground();
-        }
-    }
-
-    /// The tab is lifted for arranging, or set down: the lift's own plates
-    /// stand under the shrunk cards, the window's shade steps aside.
-    pub(crate) fn lifted(&self, lifted: bool) {
-        self.ivars().lifted.set(lifted);
-        self.sync_backdrop();
-        if let Some(root) = self.root() {
-            root.shade_lifted(lifted);
         }
     }
 }

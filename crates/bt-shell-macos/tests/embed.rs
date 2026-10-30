@@ -57,12 +57,6 @@ impl Host for Recorder {
     fn post_notices(&self, pane: u64, _source: Source, _messages: Vec<String>) {
         self.heard("notices", pane);
     }
-    fn files_dragged(&self, pane: u64, _over: bool) {
-        self.heard("files", pane);
-    }
-    fn carry_press(&self, pane: u64, _at: (f64, f64)) {
-        self.heard("carry", pane);
-    }
     fn questions_changed(&self, pane: u64) {
         self.heard("questions", pane);
     }

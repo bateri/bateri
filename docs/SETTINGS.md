@@ -183,8 +183,7 @@ reads and writes the [`[keys]`](#keys-1) table.
 - **Restore Defaults…** asks, then removes the shortcuts the file gives; its
   comments and its other settings stay.
 - **A line can show a note under it**: a key two commands share in the file
-  (the menu runs the first), or that ⌥⌘ held arranges the panes, so a family on
-  it shows no numbers on the tabs.
+  (the menu runs the first).
 - Like the other pages it writes only the lines you change, and it follows the
   file when the file changes. When the file cannot be read the page lists the
   shortcuts but cannot change them. In the command palette, → on a command opens
@@ -1268,8 +1267,8 @@ tab_position = "top"
   on a pane's top line selects text as anywhere else. Rows are dragged as the
   tabs of the bar are: drag one to reorder, out of the column to tear it off
   into a window of its own, onto another window's column or bar to move it
-  there. A pane carried with ⌥⌘ and dropped on a row joins that tab; dropped
-  between two rows it opens a new tab. One place for every window; it applies
+  there. A pane carried by its header and dropped on a row joins that tab;
+  dropped between two rows it opens a new tab. One place for every window; it applies
   at once, and `"top"` brings the bar back as it was. Under
   `split_style = "cards"` every tab's cards and the column stand on the ground
   together and the first card keeps its 8 pt from the column like its other
@@ -2419,8 +2418,7 @@ the command's name.
   Select Tab ▸, Select Group ▸ and Select, Resize and Swap Split ▸ are one
   line each, with the digits (tabs 1–9, groups 0–9) or the arrows fixed and the
   modifiers yours. Holding Select Tab's modifiers shows the tabs' numbers, and
-  Select Group's the groups' (⌘ and ⌃⌘ unless you moved them); ⌥⌘ held is always
-  the arrangement of the panes, so a family on ⌥⌘ works but shows no numbers.
+  Select Group's the groups' (⌘ and ⌃⌘ unless you moved them).
   The digits of Select Tab and Select Group take no `shift` (⇧1 types `!`).
 - **One modifier twice** (`shift+shift`, `ctrl+ctrl`, `option+option`,
   `cmd+cmd`) is that key tapped twice. No command has one until you give it, and

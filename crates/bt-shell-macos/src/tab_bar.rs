@@ -5661,7 +5661,7 @@ fn kept_picks(picks: &Picks, tabs: &[Label], selected: usize, side: bool) -> Pic
 }
 
 /// How a press on a row with `flags` held picks, if it does: ⇧ (a range from the tab on screen)
-/// or ⌘ (the row joins or leaves), with nothing else a shortcut uses — ⌥⌘ is the arrangement's,
+/// or ⌘ (the row joins or leaves), with nothing else a shortcut uses — ⌥⌘ is a shortcut's,
 /// ⌃ a context menu's, and Caps Lock and the like do not count. ⇧⌘ is ⇧: a range, as in a list.
 fn pick_click(flags: NSEventModifierFlags) -> Option<Click> {
     let chord = NSEventModifierFlags::Command
@@ -7708,7 +7708,7 @@ impl TabBar {
             image.as_deref(),
             size,
         ));
-        // The block of one tab can be merged into panes with ⌥⌘; several tabs have none.
+        // The block of one tab can be merged into panes; several tabs have none.
         if let Some(tab) = lone {
             app.tab_merge_begin(tab);
         }
@@ -8769,10 +8769,10 @@ impl TabBar {
     }
 }
 
-/// Watches the modifiers for the tabs' key hints, the arrangement moment and the double press: a
+/// Watches the modifiers for the tabs' key hints and the double press: a
 /// local monitor of flag changes, key presses, clicks and scrolls, the application's for its
 /// lifetime (the caller keeps the token). Select Tab's modifiers alone (⌘ until the file says
-/// otherwise) held are a hint's start, Select Group's the groups' hint, ⌥⌘ the arrangement's
+/// otherwise) held are a hint's start, Select Group's the groups' hint
 /// ([`arrange::Hold`]); any other modifier, its release or a key press (a chord: ⌘C, ⌥⌘←) is
 /// the end of either (`AppDelegate::hold_changed`, which tells the key window). Clicks and
 /// scrolls are not a hold's end — ⌘-click is a click — they only spoil the count of a modifier
@@ -9492,7 +9492,7 @@ mod tests {
         assert!((215..=230).contains(&dim), "the dimmed picture is at {dim}");
     }
 
-    /// ⇧ picks a range and ⌘ one row, alone or with Caps Lock; ⌥⌘ is the arrangement's and ⌃ opens
+    /// ⇧ picks a range and ⌘ one row, alone or with Caps Lock; ⌥⌘ is a shortcut's and ⌃ opens
     /// a context menu, so neither picks; no modifier is a plain press.
     #[test]
     fn shift_and_command_pick_and_nothing_else_does() {

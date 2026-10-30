@@ -1,25 +1,21 @@
-//! A tab let go **in** the panes of the tab on screen: with ⌥⌘ held, a tab pulled out of
-//! its strip is a block of panes, and the panes it is over answer for it with their regions —
-//! the same ones a carried pane gets ([`crate::pane_drag`]), drawn for the whole block — and
-//! letting go lands the block there, in its own window or another ([`AppDelegate::make_move`]).
-//! Without the keys the drop is what it always was: a
-//! window where the pointer is ([`crate::tab_drag`]).
+//! A tab let go **in** the panes of the tab on screen: a tab pulled out of its strip is a block
+//! of panes, and the panes it is over answer for it with their regions — the same ones a carried
+//! pane gets ([`crate::pane_drag`]), drawn for the whole block — and letting go lands the block
+//! there, in its own window or another ([`AppDelegate::make_move`]). No key is held: over a bar
+//! the drop is the bar's, over nothing a window where the pointer is ([`crate::tab_drag`]).
 //!
 //! **The session is AppKit's, so this reads it from the outside.** A tab dragged out of the
 //! strip is a dragging session whose destinations are the bars; nothing else of ours is asked
 //! while it runs and no event reaches a monitor. The source reports every move of the image
-//! ([`AppDelegate::tab_merge_read`]) and a short poll covers the keys, which change without a
-//! move ([`POLL`]); the last word is read where the session ends
-//! ([`AppDelegate::tab_merge_end`]), from the keys then.
+//! ([`AppDelegate::tab_merge_read`]); the last word is read where the session ends
+//! ([`AppDelegate::tab_merge_end`]).
 //!
 //! **Which tab is "the tab on screen"?** A press on a chip selects its tab, so by the time a
 //! tab is pulled away it is the one on screen — and a tab cannot land in itself. The tab that
 //! was open before the press is the one the block lands in: it comes back on screen when the
-//! keys go down over the panes ([`TabBar::selected_before`](crate::tab_bar::TabBar)), and a
+//! carry reaches the panes ([`TabBar::selected_before`](crate::tab_bar::TabBar)), and a
 //! tab pulled out of the one that was already open has none to land in (open the other first).
 //! If the carried tab is taken back (Esc) the selection goes back to it.
-
-use std::time::Duration;
 
 use objc2::rc::Retained;
 use objc2::{DefinedClass, MainThreadOnly};
@@ -27,16 +23,11 @@ use objc2_app_kit::NSEvent;
 use objc2_foundation::NSPoint;
 
 use crate::app::AppDelegate;
-use crate::arrange;
 use crate::moves::{Joins, Move};
 use crate::pane_drag::{Zones, preview};
 use crate::split::Verdict;
 use crate::tab::TerminalTab;
 use crate::window::TerminalWindow;
-
-/// How often the keys are read while a tab is carried: the system reports no move when only a
-/// key changes.
-const POLL: Duration = Duration::from_millis(60);
 
 /// A tab carried out of its strip, and what its block shows over the panes.
 pub(crate) struct Merge {
@@ -77,12 +68,6 @@ fn host_of(
     }
 }
 
-/// Whether ⌥⌘ are both down now. Read off the hardware: no flags event is delivered to us
-/// while a session runs.
-fn arranging() -> bool {
-    crate::pointer::swallows(NSEvent::modifierFlags_class())
-}
-
 /// Where a carried tab's block would land.
 struct Aim {
     /// The window the pointer is over, whose tab on screen (or the one the press left, in the
@@ -109,26 +94,13 @@ impl AppDelegate {
             verdict: Verdict::Nothing,
             opened: false,
         }));
-        let generation = iv.tab_poll.get().wrapping_add(1);
-        iv.tab_poll.set(generation);
-        self.tab_merge_poll(generation);
     }
 
-    fn tab_merge_poll(&self, generation: u64) {
-        arrange::after(POLL, move |app| {
-            if app.ivars().tab_poll.get() != generation {
-                return;
-            }
-            app.tab_merge_read(None);
-            app.tab_merge_poll(generation);
-        });
-    }
-
-    /// The image of the carried tab moved to `screen` (the pointer's place now if `None`, for a
-    /// read the poll asks): the block's regions follow. The state is out of its cell while it
-    /// works — landing a tab selects another, and whatever that touches must find none.
-    pub(crate) fn tab_merge_read(&self, screen: Option<NSPoint>) {
-        let screen = screen.unwrap_or_else(NSEvent::mouseLocation);
+    /// The image of the carried tab moved: the block's regions follow the pointer. The state is
+    /// out of its cell while it works — landing a tab selects another, and whatever that touches
+    /// must find none.
+    pub(crate) fn tab_merge_read(&self) {
+        let screen = NSEvent::mouseLocation();
         let Some(mut merge) = self.ivars().tab_merge.take() else {
             return;
         };
@@ -136,14 +108,10 @@ impl AppDelegate {
         self.ivars().tab_merge.replace(Some(merge));
     }
 
-    /// The tab and window a block at `screen` would land in, if the keys are down and the
-    /// pointer is over panes: not over a bar (a drop there is the bar's). In the carried tab's
-    /// own window a tab that is not the carried one is the one to land in; in another window
-    /// the tab it shows is.
+    /// The tab and window a block at `screen` would land in, if the pointer is over panes: not
+    /// over a bar (a drop there is the bar's). In the carried tab's own window a tab that is not
+    /// the carried one is the one to land in; in another window the tab it shows is.
     fn aim(&self, tab: u64, screen: NSPoint) -> Option<Aim> {
-        if !arranging() {
-            return None;
-        }
         let from = self.window_holding(tab)?;
         let carried = self.tab(tab)?;
         let window = self.window_at(screen)?;
@@ -230,9 +198,9 @@ impl AppDelegate {
     }
 
     /// The tab's drag session ended at `screen`. `free` is that nothing took the drop and it
-    /// was not taken back — the case where the keys decide: down over panes, the regions that
-    /// were up are the answer (the block lands where they said, or the tab stays where they
-    /// refused); otherwise the session's own end goes on.
+    /// was not taken back: over panes, the regions that were up are the answer (the block lands
+    /// where they said, or the tab stays where they refused); otherwise the session's own end
+    /// goes on.
     pub(crate) fn tab_merge_end(
         &self,
         merge: Option<Merge>,
@@ -240,8 +208,6 @@ impl AppDelegate {
         screen: NSPoint,
         free: bool,
     ) -> End {
-        let iv = self.ivars();
-        iv.tab_poll.set(iv.tab_poll.get().wrapping_add(1));
         let Some(mut merge) = merge else {
             return End::Free;
         };
@@ -254,7 +220,7 @@ impl AppDelegate {
         };
         if !free {
             // A bar took it, or it was taken back: the carried tab was on screen before
-            // the keys brought another, and it is the one the session goes on with.
+            // the panes brought another, and it is the one the session goes on with.
             if let Some(window) = self.window_holding(tab) {
                 back(&window);
             }
@@ -279,11 +245,6 @@ impl AppDelegate {
         }
     }
 
-    /// Whether a tab is being carried out of a strip now.
-    pub(crate) fn tab_dragging(&self) -> bool {
-        self.ivars().tab_drag.borrow().is_some()
-    }
-
     /// Takes the carried tab's state out of the cell, for the end of its session.
     pub(crate) fn tab_merge_take(&self) -> Option<Merge> {
         self.ivars().tab_merge.take()
@@ -305,7 +266,7 @@ mod tests {
     #[test]
     fn a_block_lands_in_the_tab_on_screen_or_the_one_the_press_left() {
         let here = |tab: u64| tab != 9;
-        // Another tab is on screen (the keys brought it): that one.
+        // Another tab is on screen (the carry over the panes brought it): that one.
         assert_eq!(host_of(Some(2), Some(3), 1, here), Some(2));
         // The carried tab is on screen, as a press leaves it: the tab before the press.
         assert_eq!(host_of(Some(1), Some(3), 1, here), Some(3));

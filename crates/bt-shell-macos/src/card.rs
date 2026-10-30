@@ -169,9 +169,6 @@ pub(crate) struct FrameIvars {
     focused: Cell<bool>,
     /// Whether the pane is a card now.
     carded: Cell<bool>,
-    /// Whether the pane is lifted for arranging ([`crate::arrange`]): every
-    /// card reads as the focused one.
-    raised: Cell<bool>,
 }
 
 define_class!(
@@ -201,7 +198,7 @@ define_class!(
             let iv = self.ivars();
             let bounds = self.bounds();
             let radius = corner_pt();
-            let (dark, lit) = (iv.dark.get(), iv.focused.get() || iv.raised.get());
+            let (dark, lit) = (iv.dark.get(), iv.focused.get());
             NSGraphicsContext::saveGraphicsState_class();
             rounded(bounds, radius).addClip();
             if dark {
@@ -255,7 +252,6 @@ impl FrameBox {
             dark: Cell::new(theme.is_dark()),
             focused: Cell::new(false),
             carded: Cell::new(false),
-            raised: Cell::new(false),
         });
         // SAFETY: `NSView`'s `init`; the ivars are set.
         let this: Retained<Self> = unsafe { msg_send![super(this), init] };
@@ -283,14 +279,6 @@ impl FrameBox {
 
     pub(crate) fn carded(&self) -> bool {
         self.ivars().carded.get()
-    }
-
-    /// The pane is lifted for arranging, or set down: while lifted every
-    /// card's light reads as the focused one's.
-    pub(crate) fn set_raised(&self, raised: bool) {
-        if self.ivars().raised.replace(raised) != raised {
-            self.setNeedsDisplay(true);
-        }
     }
 
     /// Makes the pane a card, or not. `true` if the answer changed.
@@ -557,56 +545,6 @@ fn play_for(
     let curve = CAMediaTimingFunction::functionWithControlPoints(0.2, 0.8, 0.2, 1.0);
     animation.setTimingFunction(Some(&curve));
     layer.addAnimation_forKey(&animation, Some(key));
-}
-
-/// Sets `layer` — a view's backing layer, the view standing at `frame` — to
-/// look shrunk by `scale` about its centre (`1.0` is rest), over `secs` (at
-/// once for zero). The model value is the end at once; a running lift is
-/// continued from where it is on screen. The matrix is [`fitted`]'s, checked
-/// against the layer: no reading of its axes that lands on the shrunk
-/// rectangle, no lift.
-pub(crate) fn lift(layer: &CALayer, frame: Rect, scale: f64, secs: f64) {
-    // SAFETY: reading the presentation copy of a layer we hold, on the main thread.
-    let shown = unsafe { layer.presentationLayer() };
-    let from = shown.map_or_else(|| layer.transform(), |shown| shown.transform());
-    let target = if scale == 1.0 {
-        Some(IDENTITY)
-    } else {
-        let (width, height) = (frame.width * scale, frame.height * scale);
-        let look = Rect::new(
-            frame.x + (frame.width - width) / 2.0,
-            frame.y + (frame.height - height) / 2.0,
-            width,
-            height,
-        );
-        fitted(layer, look, frame)
-    };
-    let Some(target) = target else {
-        return;
-    };
-    CATransaction::begin();
-    CATransaction::setDisableActions(true);
-    layer.setTransform(target);
-    CATransaction::commit();
-    if secs <= 0.0 {
-        layer.removeAnimationForKey(ns_string!("bateri.lift"));
-        return;
-    }
-    // SAFETY: plain `NSValue`s around `CATransform3D` values.
-    let (from, to) = unsafe {
-        (
-            NSValue::valueWithCATransform3D(from),
-            NSValue::valueWithCATransform3D(target),
-        )
-    };
-    play_for(
-        layer,
-        ns_string!("transform"),
-        &from,
-        &to,
-        ns_string!("bateri.lift"),
-        secs,
-    );
 }
 
 /// Settles whatever slide is still running on the pane's layers: the model
@@ -1169,9 +1107,6 @@ pub(crate) struct ShadeIvars {
     /// holds the focus.
     cards: RefCell<Vec<(NSRect, bool)>>,
     dark: Cell<bool>,
-    /// The tab on screen is lifted for arranging: the lift's own plates
-    /// stand under the shrunk panes and this shade would show round them.
-    lifted: Cell<bool>,
     /// One layer per card, in the cards' order ([`Slices`]).
     layers: RefCell<Vec<Retained<CALayer>>>,
 }
@@ -1211,7 +1146,6 @@ impl Shade {
         let this = Self::alloc(mtm).set_ivars(ShadeIvars {
             cards: RefCell::new(Vec::new()),
             dark: Cell::new(true),
-            lifted: Cell::new(false),
             layers: RefCell::new(Vec::new()),
         });
         // SAFETY: `initWithFrame:` is NSView's designated initializer and the
@@ -1279,25 +1213,11 @@ impl Shade {
         CATransaction::commit();
     }
 
-    /// The tab on screen is lifted, or set down.
-    pub(crate) fn set_lifted(&self, lifted: bool) {
-        if self.ivars().lifted.replace(lifted) == lifted {
-            return;
-        }
-        if let Some(layer) = self.layer() {
-            layer.removeAnimationForKey(ns_string!("bateri.hold"));
-        }
-        self.setAlphaValue(if lifted { 0.0 } else { 1.0 });
-    }
-
     /// The cards are sliding for `secs`: the shade already stands at their
     /// final places, so it waits out the slide unseen and then fades in.
     /// Core Animation's own delay — a timer would have to find this view
     /// again.
     pub(crate) fn hold(&self, secs: f64) {
-        if self.ivars().lifted.get() {
-            return;
-        }
         let Some(layer) = self.layer() else {
             return;
         };

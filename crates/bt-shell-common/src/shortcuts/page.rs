@@ -405,9 +405,6 @@ impl Page {
                         others.join(" and ")
                     ));
                 }
-                if let Some(family) = family_note(row) {
-                    said.push(family);
-                }
                 // The menu bar has no way to show a double press: say so, or the row reads as a
                 // command that has no menu key.
                 if !row.chips.is_empty() && !row.in_menu_bar() {
@@ -421,21 +418,6 @@ impl Page {
 
 /// What a row says when a double press is all it has.
 pub const DOUBLE_PRESS_NOTE: &str = "Not shown in the menu bar: a double press has no key to show.";
-
-/// What a family's modifiers do to the tab strip's hints: ⌥⌘ held is the layout mode of the
-/// panes, so the tabs show no number for it.
-fn family_note(row: &PageRow) -> Option<String> {
-    let family = row.command.family?;
-    if !matches!(family, Family::Tabs | Family::Groups) {
-        return None;
-    }
-    let held = row.chips.iter().find_map(|chip| match chip.shortcut {
-        Shortcut::Mods(mods) => Some(mods),
-        _ => None,
-    })?;
-    (held.option && held.cmd && !held.ctrl && !held.shift)
-        .then(|| "⌥⌘ held arranges the panes, so the tabs show no numbers for it.".to_owned())
-}
 
 fn row_of(found: &Found, resolved: &Resolved) -> Option<PageRow> {
     let binding = resolved.binding(found.command.name)?;
@@ -759,13 +741,10 @@ mod tests {
     }
 
     #[test]
-    fn a_family_held_with_option_and_command_says_the_tabs_show_no_numbers() {
+    fn a_family_held_with_option_and_command_needs_no_note() {
+        // ⌥⌘ held lifts nothing any more: a family on it shows its numbers like any other.
         let (page, _) = page("select_tab = \"option+cmd\"\n");
-        let note = page.row("select_tab").and_then(|row| row.note.clone());
-        assert_eq!(
-            note.as_deref(),
-            Some("⌥⌘ held arranges the panes, so the tabs show no numbers for it.")
-        );
+        assert!(page.row("select_tab").expect("a row").note.is_none());
         assert!(page.row("split_right").expect("a row").note.is_none());
     }
 

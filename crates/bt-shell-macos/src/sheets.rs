@@ -504,7 +504,7 @@ pub(crate) fn pane_waiting(pane: &TerminalPane, tab_hidden: bool) -> bool {
 
 /// Where the question up on `container`'s tab ends: the sheet's bottom
 /// edge as a distance from the container's top (the container is flipped),
-/// or `None` with no question up. The arrangement's capsules slide below it.
+/// or `None` with no question up.
 pub(crate) fn question_bottom(container: &dyn Cover) -> Option<f64> {
     let sheet = owner_window(container)?.attachedSheet()?;
     let window = container.view().window()?;

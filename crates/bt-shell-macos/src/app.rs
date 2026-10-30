@@ -46,7 +46,7 @@ use objc2_foundation::{
     NSUserDefaults, ns_string,
 };
 
-use crate::arrange::{self, HOLD_DELAY, Hold, Tool};
+use crate::arrange::Hold;
 use crate::embed;
 use crate::launch::{
     self, Held, Identity, Integration, Launch, Note, ProcessEnv, Resume, fallen_back,
@@ -1063,24 +1063,13 @@ pub(crate) struct Ivars {
     /// ⌥⌘ does a release or a key press walk the windows
     /// ([`AppDelegate::hold_changed`]).
     hold: Cell<Hold>,
-    /// The window whose tab is lifted for arranging, if one is.
-    arranged: Cell<Option<u64>>,
-    /// The lift's wait: a generation, so a release or a key press makes the
-    /// pending lift stale, and whether one is pending.
-    arrange_wait: Cell<u64>,
-    arrange_pending: Cell<bool>,
-    /// A Finder drag of files is over a pane: ⌥⌘ is its copy/link keys then,
-    /// not an arrangement.
-    files_dragged: Cell<bool>,
     /// The source of the tab being carried between windows
     /// ([`tab_drag`](crate::tab_drag)), kept here from the session's start to a
     /// turn after its end: the window the drag began in may close first, and
     /// the session's own hold on its source is not relied on.
     pub(crate) tab_drag: RefCell<Option<Retained<TabDragSource>>>,
-    /// What the carried tab's block shows over the panes with ⌥⌘ down, and the generation of
-    /// the poll that reads the keys while the session runs ([`crate::tab_merge`]).
+    /// What the carried tab's block shows over the panes ([`crate::tab_merge`]).
     pub(crate) tab_merge: RefCell<Option<Merge>>,
-    pub(crate) tab_poll: Cell<u64>,
     /// Where what is carried was let go on a bar — the window and the decision
     /// ([`Landed`]) — until the session ends and [`AppDelegate::tab_drag_ended`] carries it out:
     /// the windows are not touched inside the drop.
@@ -2689,13 +2678,8 @@ impl AppDelegate {
             layout_save_pending: Cell::new(false),
             command_monitor: RefCell::new(None),
             hold: Cell::new(Hold::Nothing),
-            arranged: Cell::new(None),
-            arrange_wait: Cell::new(0),
-            arrange_pending: Cell::new(false),
-            files_dragged: Cell::new(false),
             tab_drag: RefCell::new(None),
             tab_merge: RefCell::new(None),
-            tab_poll: Cell::new(0),
             tab_drop: RefCell::new(None),
             undo: RefCell::new(None),
             pane_drag: RefCell::new(None),
@@ -3914,9 +3898,7 @@ impl AppDelegate {
     ) {
         let dropped = self.ivars().tab_drop.take();
         let detach = dropped.is_none() && operation == NSDragOperation::None && !taken_back;
-        // The keys are read no more; the state is taken a turn later with the rest.
-        let poll = &self.ivars().tab_poll;
-        poll.set(poll.get().wrapping_add(1));
+        // The state is taken a turn later with the rest.
         DispatchQueue::main().exec_async(move || {
             // audit: a block running on the main queue is on the main thread by definition.
             let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
@@ -3925,7 +3907,7 @@ impl AppDelegate {
             };
             // The session is over; its source may go.
             drop(app.ivars().tab_drag.take());
-            // With ⌥⌘ down over panes, a drop on nothing is the block's — of one tab: several
+            // Over panes, a drop on nothing is the block's — of one tab: several
             // tabs and a group have no block to merge. The block lands where the pointer let go,
             // as the regions it showed were read.
             let end = match carried.lone() {
@@ -6677,8 +6659,7 @@ impl AppDelegate {
 
     /// What is held now — the key watch (`tab_bar::watch_command_key`): with
     /// Select Tab's modifiers alone (⌘ unless the file moved them) the key window's bar shows its
-    /// tabs' keys and every other bar hides them, with Select Group's its groups'; with ⌥⌘ alone
-    /// the key window's tab lifts for arranging after the same wait ([`crate::arrange`]).
+    /// tabs' keys and every other bar hides them, with Select Group's its groups'.
     pub(crate) fn hold_changed(&self, hold: Hold) {
         // Every key press says "nothing held": walk the windows only when
         // something was.
@@ -6694,85 +6675,6 @@ impl AppDelegate {
                 .bar()
                 .group_held(hold == Hold::Group && Some(window.id()) == key);
         }
-        self.arrange_hold(hold == Hold::Arrange);
-    }
-
-    /// ⌥⌘ is held alone (`on`) or not. Held: after [`HOLD_DELAY`] the key
-    /// window's selected tab lifts, unless something has made the wait stale
-    /// by then. Not held: a pending lift goes stale and a lifted tab is set
-    /// down.
-    fn arrange_hold(&self, on: bool) {
-        let iv = self.ivars();
-        if !on {
-            iv.arrange_wait.set(iv.arrange_wait.get().wrapping_add(1));
-            iv.arrange_pending.set(false);
-            self.arrange_lower(true);
-            return;
-        }
-        if iv.files_dragged.get()
-            || iv.arranged.get().is_some()
-            || self.pane_dragging()
-            || self.tab_dragging()
-            || iv.arrange_pending.replace(true)
-        {
-            return;
-        }
-        let generation = iv.arrange_wait.get().wrapping_add(1);
-        iv.arrange_wait.set(generation);
-        arrange::after(HOLD_DELAY, move |app| {
-            let iv = app.ivars();
-            if iv.arrange_wait.get() == generation {
-                iv.arrange_pending.set(false);
-                app.arrange_raise();
-            }
-        });
-    }
-
-    /// Lifts the key window's selected tab.
-    fn arrange_raise(&self) {
-        if self.ivars().files_dragged.get()
-            || self.ivars().arranged.get().is_some()
-            || self.pane_dragging()
-            || self.tab_dragging()
-        {
-            return;
-        }
-        if let Some(window) = self.key_window() {
-            window.arrange(true, true);
-            self.ivars().arranged.set(Some(window.id()));
-        }
-    }
-
-    /// Sets the lifted tab down, with the fade when `animate`.
-    pub(crate) fn arrange_lower(&self, animate: bool) {
-        if let Some(id) = self.ivars().arranged.take()
-            && let Some(window) = self.window(id)
-        {
-            window.arrange(false, animate);
-        }
-    }
-
-    /// A capsule's tool was pressed on `pane` of window `window`: the panes
-    /// are set down at once (a split's slide must not meet a lift), the work
-    /// is the window's, and once the slide has played the panes lift again if
-    /// the keys are still down.
-    pub(crate) fn arrange_act(&self, window: u64, pane: u64, tool: Tool) {
-        self.arrange_lower(false);
-        if let Some(window) = self.window(window) {
-            window.arrange_act(pane, tool);
-        }
-        self.arrange_again();
-    }
-
-    /// Once a slide has played — a split, a move — the panes lift again if
-    /// the keys are still down.
-    fn arrange_again(&self) {
-        arrange::after(Duration::from_millis(280), |app| {
-            let iv = app.ivars();
-            if iv.hold.get() == Hold::Arrange && !iv.arrange_pending.get() {
-                app.arrange_raise();
-            }
-        });
     }
 
     // ── Carrying a pane ([`crate::pane_drag`]) ───────────────────────────
@@ -6782,21 +6684,9 @@ impl AppDelegate {
         &self.ivars().pane_drag
     }
 
-    /// Whether a carry (or a press that may become one) is on.
-    pub(crate) fn pane_dragging(&self) -> bool {
-        // A carry that has left its window is a drag session and ends with the button: one
-        // that is still here with the button up never heard its end, and must not keep the
-        // lift dead.
-        self.ivars()
-            .pane_drag
-            .borrow()
-            .as_ref()
-            .is_some_and(|session| !session.flying() || NSEvent::pressedMouseButtons() & 1 != 0)
-    }
-
-    /// A press with ⌥⌘ held on pane `pane`, at `at` (window coordinates): the
-    /// start of a carry if the pane has anywhere to go. A session that was
-    /// left behind (a release the app never saw) is ended first.
+    /// A press on pane `pane`'s header, at `at` (window coordinates): the start of a carry if the
+    /// pane has anywhere to go, once the pointer has moved past the slop. A session that was left
+    /// behind (a release the app never saw) is ended first.
     pub(crate) fn pane_press(&self, pane: u64, at: NSPoint) {
         self.ivars().pane_drag.replace(None);
         if let Some(session) = Session::press(self, pane, at) {
@@ -6804,34 +6694,7 @@ impl AppDelegate {
         }
     }
 
-    /// The pointer went past the slop: the pane is carried, so the lift and
-    /// the capsules go — the keys may be let go from here on.
-    pub(crate) fn pane_drag_started(&self) {
-        let iv = self.ivars();
-        iv.arrange_wait.set(iv.arrange_wait.get().wrapping_add(1));
-        iv.arrange_pending.set(false);
-        self.arrange_lower(true);
-    }
-
-    /// The carry is over: if the keys are still down the panes lift again
-    /// once the slide has played.
-    pub(crate) fn pane_drag_ended(&self) {
-        self.arrange_again();
-    }
-
-    /// A Finder drag of files entered a pane (`entered`) or left or ended:
-    /// while it is over, ⌥⌘ is not an arrangement.
-    pub(crate) fn files_dragged(&self, entered: bool) {
-        self.ivars().files_dragged.set(entered);
-        if entered {
-            let iv = self.ivars();
-            iv.arrange_wait.set(iv.arrange_wait.get().wrapping_add(1));
-            iv.arrange_pending.set(false);
-            self.arrange_lower(false);
-        }
-    }
-
-    /// The key window changed: whatever was lifted is set down.
+    /// The key window changed: a press that had not become a carry is dropped.
     pub(crate) fn key_window_resigned(&self) {
         // A carry that has left its window is a drag session, and the key moving away from the
         // window it is from (the system took it, an app switch) does not end it: it ends
@@ -6845,7 +6708,6 @@ impl AppDelegate {
         if !flying {
             self.ivars().pane_drag.replace(None);
         }
-        self.arrange_hold(false);
     }
 
     /// Starts watching the system's scroll bar preference — **only in a user

@@ -2,7 +2,9 @@
 //! of its card. The program's mark with no tile — a dot on its corner says the pane's own
 //! signals —, the pane's title (the focused pane's in full ink), and under the pointer the
 //! pane's tools at its right: Split Right, Split Down, Open in New Tab, Close Split. A press on
-//! the band gives the pane the keyboard; a press on a tool runs that command on this pane.
+//! the band gives the pane the keyboard and is the start of carrying it: past the slop the pane
+//! is carried (`pane_drag`, no key held) — to a region of a pane, onto a strip, out of the
+//! window. A press on a tool runs that command on this pane.
 //!
 //! **One band, the container's.** The header is not the pane's: the split container lays it out
 //! over the pane's place (`split::Spacing::with_head`, so the layout, the split limit, a drag
@@ -156,8 +158,16 @@ define_class!(
         #[unsafe(method(mouseDown:))]
         fn mouse_down(&self, event: &NSEvent) {
             let at = self.convertPoint_fromView(event.locationInWindow(), None);
-            self.ivars().pressed.set(self.tool_at(at));
+            let tool = self.tool_at(at);
+            self.ivars().pressed.set(tool);
             self.focus_pane();
+            // Off the tools the press may become a carry: the session watches the pointer from
+            // here and takes over once it travels.
+            if tool.is_none()
+                && let Some(app) = crate::app::delegate(self.mtm())
+            {
+                app.pane_press(self.pane(), event.locationInWindow());
+            }
         }
 
         #[unsafe(method(mouseUp:))]

@@ -73,7 +73,7 @@ impl Carried {
         }
     }
 
-    /// The one tab carried, when it is one: the carry the old rules and the ⌥⌘ block know.
+    /// The one tab carried, when it is one: the carry the old rules and the block of panes know.
     pub(crate) fn lone(&self) -> Option<u64> {
         match self {
             Self::Tabs { tabs, .. } if tabs.len() == 1 => Some(tabs[0]),
@@ -137,14 +137,14 @@ define_class!(
             }
         }
 
-        /// The picture moved: the application reads what the tab is over — with ⌥⌘ down,
-        /// panes that would take its block ([`crate::tab_merge`]).
+        /// The picture moved: the application reads what the tab is over — panes that would
+        /// take its block ([`crate::tab_merge`]).
         #[unsafe(method(draggingSession:movedToPoint:))]
         fn session_moved(&self, _session: &NSDraggingSession, _at: NSPoint) {
             // Read at the pointer, not at the picture's reported place: the regions are the
             // pointer's.
             if let Some(app) = app::delegate(self.mtm()) {
-                app.tab_merge_read(None);
+                app.tab_merge_read();
             }
         }
 

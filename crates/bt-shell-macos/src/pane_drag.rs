@@ -1,4 +1,4 @@
-//! Carrying a pane: ⌥⌘ held, a pane is taken by its capsule or by any point of its body,
+//! Carrying a pane: a split tab's pane is taken by its header (`tab_head`), no key held,
 //! carried by a small card, and let go beside another pane, at the window's edge, in the
 //! middle of another pane (a swap), on a tab's chip, between chips — in its own window or in
 //! another — or over no window at all. The drop is the appliers' ([`TerminalWindow::move_pane`],
@@ -9,12 +9,10 @@
 //! **The press only starts a session.** [`AppDelegate::pane_press`] keeps where
 //! the press was and installs a local event monitor for the mouse drag, the
 //! release and Esc; from there the monitor owns the gesture, and swallows
-//! what it takes, so the view that got the press (a capsule that is about to
-//! fade out, a pane that was never told) needs to know nothing. The pointer
-//! must travel [`DRAG_SLOP`] before it is a carry: a click that slides a
-//! point is still a click, and a ⌥⌘-click carries nothing. Once it is, the
-//! keys may be let go — the capsules and the lift go with them, the carry
-//! does not need them.
+//! what it takes, so the view that got the press (the pane's header) needs to know
+//! nothing. The pointer must travel [`DRAG_SLOP`] before it is a carry: a click on
+//! the header that slides a point is still a click, which only gives the pane the
+//! keyboard.
 //!
 //! **Two halves, one reading.** Inside its window the carry is the monitor's: the card hangs
 //! from the pointer. When the pointer is no longer over the window (off it, or under another
@@ -841,6 +839,11 @@ impl Session {
                     return (false, Step::Keep);
                 }
                 let at = event.locationInWindow();
+                // A press that never travelled is the header's click: its release goes on to
+                // the view that took the press.
+                if event.r#type() == NSEventType::LeftMouseUp && self.carry.is_none() {
+                    return (false, Step::End);
+                }
                 if event.r#type() == NSEventType::LeftMouseUp {
                     let screen = window.ns_window().convertPointToScreen(at);
                     self.finish(app, &window, &tab, Some(screen));
@@ -858,8 +861,8 @@ impl Session {
         }
     }
 
-    /// The pointer went past the slop: the arrangement's lift is set down,
-    /// the carried pane's place is veiled and the card hangs from the pointer.
+    /// The pointer went past the slop: the carried pane's place is veiled and the card hangs
+    /// from the pointer.
     fn begin(
         &mut self,
         app: &AppDelegate,
@@ -877,11 +880,12 @@ impl Session {
         let Some(theme) = pane.session().map(|session| session.theme()) else {
             return;
         };
-        app.pane_drag_started();
         let mtm = app.mtm();
-        let home = Zones::new(mtm, container.bounds(), &theme, Some(pane.frame()));
+        // The card is the pane with its header: the veil covers both and the card is their size.
+        let whole = container.card_frame(&pane);
+        let home = Zones::new(mtm, container.bounds(), &theme, Some(whole));
         container.addSubview(&home);
-        let size = card_size(pane.frame().size);
+        let size = card_size(whole.size);
         let card = Card::new(
             mtm,
             card_frame(&content, at, size),
@@ -1348,7 +1352,8 @@ fn fly_back(card: &Retained<Card>, tab: &crate::tab::TerminalTab, pane: u64, sti
     let target = tab.container().pane(pane).and_then(|pane| {
         // SAFETY: reading the superview; we are on the main thread.
         let parent = unsafe { card.superview() }?;
-        Some(parent.convertRect_fromView(pane.frame(), Some(tab.container())))
+        let whole = tab.container().card_frame(&pane);
+        Some(parent.convertRect_fromView(whole, Some(tab.container())))
     });
     let Some(target) = target.filter(|_| !still) else {
         card.removeFromSuperview();
@@ -1438,7 +1443,7 @@ define_class!(
         }
 
         /// ⌘ or ⌥ held at the drop would turn a move into a copy or a link; a pane is only
-        /// moved (and the keys are the carry's own).
+        /// moved.
         #[unsafe(method(ignoreModifierKeysForDraggingSession:))]
         fn ignore_modifier_keys(&self, _session: &NSDraggingSession) -> bool {
             true
@@ -1526,7 +1531,6 @@ impl AppDelegate {
             }
             Step::End => {
                 drop(session);
-                self.pane_drag_ended();
             }
         }
         taken
@@ -1568,7 +1572,6 @@ impl AppDelegate {
             }
             // The session is over; its source may go.
             drop(session);
-            app.pane_drag_ended();
         });
     }
 }

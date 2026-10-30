@@ -1948,11 +1948,6 @@ define_class!(
             &self,
             _sender: &ProtocolObject<dyn NSDraggingInfo>,
         ) -> NSDragOperation {
-            // ⌥⌘ is a drag's own modifier keys while files are over the pane:
-            // no arrangement lifts for the length of it.
-            if let Some(pane) = self.pane() {
-                pane.host().files_dragged(pane.id(), true);
-            }
             // Files over a page of the kit are the page's: it takes them whatever the session.
             if self.pane().is_some_and(|pane| pane.page_is_up())
                 || self.pane().is_none_or(|pane| pane.accepts_drop())
@@ -1992,24 +1987,15 @@ define_class!(
         /// false` would conflict with the outer signature and break the compilation.
         #[unsafe(method(draggingExited:))]
         fn dragging_exited(&self, _sender: Option<&ProtocolObject<dyn NSDraggingInfo>>) {
-            if let Some(pane) = self.pane() {
-                pane.host().files_dragged(pane.id(), false);
-            }
         }
 
         /// The drag ended over the pane, taken or not.
         #[unsafe(method(draggingEnded:))]
         fn dragging_ended(&self, _sender: &ProtocolObject<dyn NSDraggingInfo>) {
-            if let Some(pane) = self.pane() {
-                pane.host().files_dragged(pane.id(), false);
-            }
         }
 
         #[unsafe(method(performDragOperation:))]
         fn perform_drag_operation(&self, sender: &ProtocolObject<dyn NSDraggingInfo>) -> bool {
-            if let Some(pane) = self.pane() {
-                pane.host().files_dragged(pane.id(), false);
-            }
             let paths = dropped_paths(&sender.draggingPasteboard());
             // Over a page of the kit the paths are the page's, told where they were let go:
             // nothing is written to the program's line or uploaded.
@@ -2800,24 +2786,6 @@ impl BateriView {
         // strip's presses; the overlay scroller's bargain.
         if let Some((layout, y)) = self.scrollbar_region(event.locationInWindow()) {
             self.scrollbar_press(session, button, layout, y, event.locationInWindow());
-            return;
-        }
-        // **⌥⌘ held is the arrangement's** ([`crate::arrange`]): the press
-        // reaches neither the program (no report), nor a selection, nor a
-        // ⌘-link, nor the context line and the dock — the bar above has
-        // already been served, so it works with the keys down. Nothing begins
-        // a gesture here; the release finds none and the drag ignores itself
-        // (the carry, once it begins, swallows the drag and the release before
-        // they get here).
-        if pointer::swallows(event.modifierFlags()) {
-            // The press is the pane's carry in the making: it becomes one
-            // once the pointer travels ([`crate::pane_drag`]).
-            if button == MouseButton::Left
-                && let Some(pane) = self.pane()
-            {
-                let at = event.locationInWindow();
-                pane.host().carry_press(pane.id(), (at.x, at.y));
-            }
             return;
         }
         // The upload line's buttons and the load indicator: on the

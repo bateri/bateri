@@ -176,14 +176,6 @@ pub trait PaneHost {
     /// from here on reaches that tab. Without it a moved pane's shell exit
     /// would close nothing and its news would land on the tab it left.
     fn rehomed(&self, _pane: u64, _tab: u64) {}
-    /// Files are being dragged over the pane (`over`) or no longer are: while
-    /// they are, ⌥⌘ are the drag's own keys, so nothing the owner starts with
-    /// ⌥⌘ may start (bateri's arrangement of panes).
-    fn files_dragged(&self, pane: u64, over: bool);
-    /// A press with ⌥⌘ landed on the pane ([`crate::pointer::swallows`]) —
-    /// never the program's: the owner's to carry the pane, if it carries
-    /// panes. `at` is the press in the window's points.
-    fn carry_press(&self, pane: u64, at: (f64, f64));
     /// A question of this pane was put off (its pane is not on screen) or
     /// taken up: a mark the owner shows for a question waiting to be seen
     /// may have changed.
@@ -4507,9 +4499,8 @@ impl TerminalPane {
     /// comes or goes; a value that is not a radius (NaN, negative, infinite)
     /// is a square corner and an absurdly large one is capped
     /// ([`CellMetrics::with_corners`]). The geometry is taken again when the
-    /// value moves — and only then: the temporary look of the arrangement
-    /// ([`crate::arrange`]) does not tell corners, since a column count that
-    /// moved would send the shell a `SIGWINCH` for a look that lasts a moment.
+    /// value moves — and only then: a column count that moved would send the
+    /// shell a `SIGWINCH`.
     pub fn set_corners(&self, left: f64, right: f64) {
         if self.take_corners(left, right) {
             self.refresh_geometry();
@@ -4596,25 +4587,6 @@ impl TerminalPane {
             .map_or(self.ivars().dock_rows.get(), |birth| {
                 birth.integration.dock_rows
             })
-    }
-
-    /// The pane is lifted for arranging ([`crate::arrange`]), or set down:
-    /// its frame reads at the focused strength while lifted.
-    pub(crate) fn set_raised(&self, raised: bool) {
-        self.ivars().card_frame.set_raised(raised);
-    }
-
-    /// The search panel's frame while it is open, in the pane's own
-    /// coordinates (the arrangement's capsule keeps clear of it).
-    pub(crate) fn search_frame(&self) -> Option<NSRect> {
-        let bar = self.ivars().search.get().filter(|bar| bar.is_shown())?;
-        Some(bar.resting_frame())
-    }
-
-    /// Whether the pane holds a question — one up on the tab's owner for
-    /// it, or parked for a place to open.
-    pub(crate) fn asking(&self) -> bool {
-        !self.ivars().opened.borrow().is_empty() || !self.ivars().parked.borrow().is_empty()
     }
 
     /// Whether the pane is a card now.
@@ -9112,12 +9084,6 @@ mod tests {
         }
         fn copy_to_clipboard(&self, pane: u64, text: String) {
             self.0.borrow_mut().push((pane, format!("copy {text}")));
-        }
-        fn files_dragged(&self, pane: u64, over: bool) {
-            self.0.borrow_mut().push((pane, format!("files {over}")));
-        }
-        fn carry_press(&self, pane: u64, _at: (f64, f64)) {
-            self.0.borrow_mut().push((pane, "carry".into()));
         }
         fn questions_changed(&self, pane: u64) {
             self.0.borrow_mut().push((pane, "questions".into()));

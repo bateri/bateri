@@ -82,8 +82,6 @@ impl Host for Quiet {
     fn activity_changed(&self, _: u64) {}
     fn notify(&self, _: u64, _: &str, _: &str) {}
     fn post_notices(&self, _: u64, _: Source, _: Vec<String>) {}
-    fn files_dragged(&self, _: u64, _: bool) {}
-    fn carry_press(&self, _: u64, _: (f64, f64)) {}
     fn questions_changed(&self, _: u64) {}
     fn program_notification(&self, _: u64, _: Option<&str>, _: &str) {}
     fn cover(&self, _: &TerminalPane) -> Option<Rc<dyn Cover>> {
