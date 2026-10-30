@@ -44,9 +44,10 @@ const SCRIPT: &[u8] =
 const PAGE: &[u8] = b"-- a page of bateri's tests, of two files\nlocal box = require(\"./parts/box\")\nreturn { render = function()\n\treturn pencere.div():bg(\"raised1\"):p(8):child(pencere.text(\"two files\")):child(box())\nend }\n";
 const BOX: &[u8] = b"return function() return pencere.div():size(20, 20):bg(\"accent\") end\n";
 
-/// The version of the interface of the views the terminal draws itself that this is written
-/// against.
-const VERSION: &str = "2.0";
+/// The versions of the interface of the views the terminal draws itself that this is written
+/// against: the Lua page API's, and the component interface's (`pencere:view@3.0.0`).
+const LUA_VERSION: &str = "2.0";
+const WASM_VERSION: &str = "3.0";
 
 /// How often the made-up host reports.
 const EVERY: Duration = Duration::from_secs(1);
@@ -102,7 +103,15 @@ fn main() -> ExitCode {
     let counted = Arc::clone(&upload);
     let stalls_at = stall.map(|after| Instant::now() + after);
     let options = Options::new()
-        .view(View::new(kind, &[VERSION], bundle))
+        .view(View::new(
+            kind,
+            &[if kind == Kind::Wasm {
+                WASM_VERSION
+            } else {
+                LUA_VERSION
+            }],
+            bundle,
+        ))
         .program("demopen")
         .title("Containers")
         // The readings: the first is the view's at once, the next ones are a second apart.

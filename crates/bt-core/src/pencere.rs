@@ -138,8 +138,9 @@ impl fmt::Debug for DropShown {
 pub const DEFAULT_FONT_MONO: &str = "\"SF Mono\", Menlo, monospace";
 
 /// The version of the component interface a `wasm` view is written against: the semver line of
-/// the `pencere:view` package (`2.0` stands for `2.0.x`).
-pub const WASM_VERSION: &str = "2.0";
+/// the `pencere:view` package (`3.0` stands for `3.0.x`). The kit's sandbox opens no other: a
+/// component written against `2.0` is not run.
+pub const WASM_VERSION: &str = "3.0";
 
 /// The version of the Lua API a `lua` view is written against: the prelude's `pencere.version`
 /// (`2` is `2.0`).

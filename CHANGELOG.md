@@ -150,6 +150,11 @@ of every installed copy. A version without a section is not released.
 
 ### Changed
 
+- **A program's native view that is a WebAssembly component is opened at version 3.0.** bateri
+  runs the pencere kit of the version that adds files to a view (a picture a program shows, a
+  file you drop on it, a place you save to), and that kit runs components written for it alone:
+  a program that offers only the older 2.0 component is shown its other view, or none. Views
+  written in Lua are unchanged.
 - **A program's output is taken in faster.** What bateri does with every byte a program writes
   before the terminal acts on it — following where an escape sequence stands, looking for the
   shell's marks, putting emoji sequences together — now skims text and the bodies of long
