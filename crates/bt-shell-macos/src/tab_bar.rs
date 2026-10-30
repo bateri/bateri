@@ -161,7 +161,7 @@ use objc2_app_kit::{
     NSWindowButton, NSWindowOrderingMode, NSWindowStyleMask,
 };
 use objc2_core_foundation::CFRetained;
-use objc2_core_graphics::CGImage;
+use objc2_core_graphics::{CGContext, CGImage};
 use objc2_foundation::{
     NSAffineTransform, NSArray, NSData, NSNotification, NSNumber, NSObjectProtocol, NSPoint,
     NSRect, NSSize, NSString, NSUserDefaults, NSValue, ns_string,
@@ -964,27 +964,78 @@ const GLYPH_SIDE: f64 = 14.0;
 /// tile wears for `indicator`, with the ring of the window's ground cut round it, so it reads as
 /// the tabs' own badge carried to a button that stands for tabs out of sight.
 fn draw_corner_badge(indicator: Indicator, centre: NSPoint, palette: Palette) {
-    let side = if indicator == Indicator::Failed {
+    Tint::of(palette.ground, 1.0).color().setFill();
+    circle_at(centre, badge_side(indicator) / 2.0 + BADGE_HALO).fill();
+    draw_badge(indicator, centre, palette);
+}
+
+/// The side of the badge `indicator` wears: the failure's dot is smaller than the rest.
+fn badge_side(indicator: Indicator) -> f64 {
+    if indicator == Indicator::Failed {
         BADGE_DOT
     } else {
         BADGE_SIDE
-    };
-    let circle = |radius: f64, color: u32| {
-        Tint::of(color, 1.0).color().setFill();
-        NSBezierPath::bezierPathWithOvalInRect(NSRect::new(
-            NSPoint::new(centre.x - radius, centre.y - radius),
-            NSSize::new(2.0 * radius, 2.0 * radius),
-        ))
-        .fill();
-    };
-    circle(side / 2.0 + BADGE_HALO, palette.ground);
-    circle(side / 2.0, palette.tone(tabs::list_dot(indicator), 0));
+    }
+}
+
+/// A circle of `radius` about `centre`.
+fn circle_at(centre: NSPoint, radius: f64) -> Retained<NSBezierPath> {
+    NSBezierPath::bezierPathWithOvalInRect(NSRect::new(
+        NSPoint::new(centre.x - radius, centre.y - radius),
+        NSSize::new(2.0 * radius, 2.0 * radius),
+    ))
+}
+
+/// The badge `indicator` wears, its middle at `centre`: its circle in the colour of its meaning
+/// and its sign in the ground's, as a chip's tile wears it.
+fn draw_badge(indicator: Indicator, centre: NSPoint, palette: Palette) {
+    Tint::of(palette.tone(tabs::list_dot(indicator), 0), 1.0)
+        .color()
+        .setFill();
+    circle_at(centre, badge_side(indicator) / 2.0).fill();
     let ink = Tint::of(palette.ground, 1.0);
     match indicator {
         Indicator::Question => draw_query(centre, ink),
         Indicator::Finished => draw_check(centre, ink),
         _ => {}
     }
+}
+
+/// [`draw_tile`] with the badge `indicator` puts on its corner, as a chip's tile wears it: the
+/// ring round the badge cut clear of the tile — whatever the tile stands on shows through it —,
+/// the badge's circle and its sign. Drawn at once, with no coming and going: for tiles a view
+/// draws itself (the side column's Activity lines). A running command is no badge, and with no
+/// icons there is no tile to wear one.
+fn draw_badged_tile(
+    emblem: Emblem,
+    style: IconStyle,
+    palette: Palette,
+    indicator: Option<Indicator>,
+) {
+    let badge = indicator.filter(|&indicator| style.icons && tabs::is_badge(indicator));
+    let Some(indicator) = badge else {
+        draw_tile(emblem, style, palette);
+        return;
+    };
+    let centre = badge_centre(emblem.edges);
+    let context = NSGraphicsContext::currentContext();
+    NSGraphicsContext::saveGraphicsState_class();
+    // The tile in a layer of its own, so the cut takes the tile and not what is under it.
+    if let Some(context) = &context {
+        // SAFETY: no auxiliary dictionary; the layer is ended below, inside the same saved
+        // graphics state.
+        unsafe { CGContext::begin_transparency_layer(Some(&context.CGContext()), None) };
+    }
+    draw_tile(emblem, style, palette);
+    if let Some(context) = &context {
+        context.setCompositingOperation(NSCompositingOperation::Clear);
+    }
+    circle_at(centre, badge_side(indicator) / 2.0 + BADGE_HALO).fill();
+    if let Some(context) = &context {
+        CGContext::end_transparency_layer(Some(&context.CGContext()));
+    }
+    NSGraphicsContext::restoreGraphicsState_class();
+    draw_badge(indicator, centre, palette);
 }
 
 /// The ring cut clear round the biggest badge, as a radius: the picture of the hollow is drawn
@@ -5522,6 +5573,9 @@ pub(crate) struct AgentLine {
     pub(crate) place: Option<String>,
     /// What it asks while it waits for the user (`OSC 7501`'s `msg`).
     pub(crate) asks: Option<String>,
+    /// What its pane reports, as a tab's chip says it of the tab (`tabs::indicator`): the badge on
+    /// its tile's corner.
+    pub(crate) indicator: Option<Indicator>,
 }
 
 /// The colour of an agent's status line: what asks for the user stands out.

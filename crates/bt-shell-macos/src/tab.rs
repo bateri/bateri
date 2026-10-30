@@ -1697,6 +1697,7 @@ impl TerminalTab {
                     focused: id == focused,
                     place,
                     asks: report.message,
+                    indicator,
                 })
             })
             .collect();

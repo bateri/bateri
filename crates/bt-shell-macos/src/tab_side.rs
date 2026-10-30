@@ -63,7 +63,7 @@ use objc2_quartz_core::{CALayer, CATransaction};
 use super::tab_group::{GroupHeader, HeaderLook};
 use super::{
     AgentLine, AgentTone, Chip, Dragging, Emblem, Heading, IconStyle, Motion, Palette, Seen, Shown,
-    Standing, TabBar, Tint, draw_tile, glyph_slot, paint_in, plain_box, rounded,
+    Standing, TabBar, Tint, draw_badged_tile, glyph_slot, paint_in, plain_box, rounded,
 };
 use crate::card;
 use crate::split::Rect;
@@ -1432,6 +1432,7 @@ impl AgentRows {
             }
             // The program's tile, where a row's stands, level with the name: in the line's top
             // band, the height of a plain row, however far the status and the details run below.
+            // What the pane reports is a badge on its corner, as on a chip's tile.
             let slot = glyph_slot();
             NSGraphicsContext::saveGraphicsState_class();
             let shift = NSAffineTransform::transform();
@@ -1440,7 +1441,7 @@ impl AgentRows {
                 top + (tabs::TAB_HEIGHT - tabs::TILE_HEIGHT) / 2.0 - slot.origin.y,
             );
             shift.concat();
-            draw_tile(
+            draw_badged_tile(
                 Emblem {
                     kind: line.kind,
                     edges: 0,
@@ -1448,6 +1449,7 @@ impl AgentRows {
                 },
                 style,
                 palette,
+                line.indicator,
             );
             NSGraphicsContext::restoreGraphicsState_class();
             // A line of several draws its own key; one agent's is the chip's, which also shows
