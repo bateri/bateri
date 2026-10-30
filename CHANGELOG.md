@@ -14,6 +14,42 @@ of every installed copy. A version without a section is not released.
 
 ### Added
 
+- **Activity: what your agents are doing, in the side column.** Show Activity (⇧⌘A, or the eye at
+  the head of the column) lists every program that reports its state, as Claude Code does: a
+  line each with what it calls its work, what it is doing and for how long ("Running · 4m",
+  "Asking · 10s"), where it stands and, while it waits for you, what it asks. One that rests is
+  listed too. Two agents in one tab are two lines on one face, the focused pane's picked. Each
+  agent's icon wears the badge a tab wears for a question, a failure or a finish you have not
+  seen, and ⌘1–9 count agents while Activity is shown. The eye shows only in a window that has
+  an agent.
+- **The side column counts what waits for you.** At the end of the list: how many tabs ask
+  (Asking), failed or finished while you were elsewhere. Click a count to go to the tab that has
+  waited longest, again for the next. A failure or a finish leaves the count once you look at its
+  tab; a question stays until it is answered, on the tab on screen too.
+- **The side column can hide.** Its buttons stand at its head — the column's own, Show Activity
+  and New Tab. View ▸ Hide Sidebar (⌃⌘S), or the column's button, hides it: one row stays over
+  your panes, with the window's buttons, the column's button, the tab's name in the middle and
+  `+`. While it hides, its button wears the badge of a question, a failure or a finish you have
+  not seen in another tab. Each window keeps its choice, across a restart too.
+- **Tab details.** `[appearance] tab_details` (View ▸ Tab Details, the column's right-click menu,
+  Settings): beside a row's name, where its program stands — the folder and the git branch, or
+  the server — and what an agent asks while it waits for you. `"smart"`, the default, says it in
+  Activity only; `"always"` in every row; `"off"` in none.
+- **A focus frame.** `[appearance] focus_frame` (Settings, off by default) draws a 2 pt line in
+  the theme's accent round the focused pane of a split tab, at least 3:1 against the background
+  on every theme. It slides from pane to pane as the focus moves.
+- **Every pane has a header.** A band over each pane — a tab's only pane and a zoomed one too,
+  whatever the program in it covers: the program's mark (a dot on its corner says what the pane
+  reports) and the pane's title, the focused pane's in full ink. Under the pointer Split Right,
+  Split Down, Open in New Tab and Close Split come in at its right, and a title that does not fit
+  fades at its end. Click the header to give the pane the keyboard.
+- **Carry panes and tabs with no key held.** Drag a pane by its header to a region of another
+  pane, onto a tab, between two tabs for a tab of its own, or out of the window for a window of
+  its own. Drag a tab out of the strip or the column into the panes on screen and the regions say
+  where its panes land; drop it on the middle of another tab to join that tab, and wait on a tab
+  to open it. A line marks where a tab goes between two others, and nothing slides aside while
+  you drag. Undo Move (⌘Z) puts it back.
+
 - **A native view can show pictures its program sends along.** A program whose view is written
   for the Lua API `2.1` (`pencere.files`) can attach images to it and let them go, and the view
   draws them by their name; bateri offers `2.1` next to `2.0`, and a program that speaks only
@@ -170,6 +206,25 @@ of every installed copy. A version without a section is not released.
   over the editor, and the hand follows ⌘ going down and up without the pointer moving.
 
 ### Changed
+
+- **bateri's words over a program's view stand in the pane's header.** The strip above a
+  program's view is gone. The pane's header says what the view is instead: the program's icon
+  (the one it made for a dark or a light ground, as your theme is), where it runs, its name and
+  the view's title, with **Quit ⌃C** at its right for as long as the view is up. The view has the
+  whole pane.
+- **Cards for every tab, on one flat ground.** Under `split_style = "cards"` a tab with one pane
+  is a card too, and the ground under the cards is a flat tone drawn from your theme — a step from
+  the background towards the text — instead of the coloured gradient.
+- **The title row is quieter.** Its buttons are bare until the pointer is over them. With the
+  tabs at the top a tab reads like a row of the column — the icon at the left, the title beside
+  it, × at the right — the tabs stand six points apart, and forty points before the buttons are
+  left free to take the window by. The group button's dot is the tabs' badge now.
+- **A theme file takes its missing colours from a theme of its kind.** A file with a light
+  background gets them from `bateri-light`, a dark one from `bateri`, and a file named after a
+  built-in theme from that theme.
+- **Option-Command no longer lifts the panes.** Holding ⌥⌘ lifted them to be carried and let a
+  tab be pulled into the panes; both are done with no key held now, a pane by its header and a
+  tab by its row or its chip.
 
 - **A program's native view that is a WebAssembly component is opened at version 3.0.** bateri
   runs the pencere kit of the version that adds files to a view (a picture a program shows, a

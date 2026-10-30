@@ -1165,12 +1165,15 @@ tab_position = "top"
   draws a card: its top edge catches a light, a dark theme's card has a faint
   sheen under its top, and its shadow is tucked under its foot. The focused
   card stands nearer — a deeper shadow, and on a dark theme a warm light.
-  Nothing is dimmed, so every pane reads at once. In a split tab each pane
-  has a header over it, part of its card: the program's mark (a dot on its
-  corner says what the pane reports), the pane's title — the focused pane's
-  in full ink — and, under the pointer, Split Right, Split Down, Open in New
-  Tab and Close Split; a click on the header gives the pane the keyboard. A
-  tab with one pane, or a zoomed pane, has none. Going from one pane to two
+  Nothing is dimmed, so every pane reads at once. Every pane has a header
+  over it, part of its card — a tab's only pane and a zoomed one too: the
+  program's mark (a dot on its corner says what the pane reports), the
+  pane's title — the focused pane's in full ink — and, under the pointer,
+  Split Right, Split Down, Open in New Tab (beside other panes) and Close
+  Split; a click on the header gives the pane the keyboard, and a drag on it
+  carries the pane. Over a program's view the header says what the view is:
+  the program's icon, where it runs, its name and the view's title, and
+  Quit ⌃C. Going from one pane to two
   (and back) slides the panes into place in a fifth of a second — at once
   with Reduce Motion — and the program in each pane is resized once, not on
   every frame. A zoomed pane (Shift Cmd Return) is a card on its own, like a
