@@ -106,7 +106,16 @@ impl TerminalPane {
     /// when the pasteboard's files were the page's (even if none could be given), so that their
     /// names are not pasted as text.
     pub(crate) fn give_pasted(&self, paths: &[String]) -> bool {
-        self.give_files(PagePoint::new(0.0, 0.0), FileSource::Paste, paths);
+        let corner = PagePoint::new(0.0, 0.0);
+        if !self.give_files(corner, FileSource::Paste, paths)
+            && let Some(handle) = self.page_handle()
+        {
+            // None could be given (files that are gone, no room for another handle): the page
+            // hears a paste with no files, as it hears the Open panel's Cancel, so that it can
+            // say so instead of the person's ⌘V doing nothing at all.
+            handle.page().give(corner, FileSource::Paste, Vec::new());
+            self.drain_page();
+        }
         true
     }
 
@@ -377,6 +386,12 @@ mod tests {
         assert!(ask.contains("session.module_pick(multiple)"), "{ask}");
         assert!(ask.contains("session.module_save("), "{ask}");
         assert!(this.contains("sheets::seat(Asker::Pane(self))"));
+        // Pasted files none of which could be given still reach the page, with no files.
+        let pasted = body(this, "    pub(crate) fn give_pasted(");
+        assert!(
+            pasted.contains("give(corner, FileSource::Paste, Vec::new())"),
+            "{pasted}"
+        );
         // What the person chose goes to the view that asked, and to no other that is up by then.
         for signature in [
             "    fn pick_chosen(",

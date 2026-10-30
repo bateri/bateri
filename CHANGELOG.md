@@ -26,7 +26,8 @@ of every installed copy. A version without a section is not released.
   the files interface, files dragged from Finder onto the view are given to it (the view is told
   how many are over it and where), so are files copied in Finder and pasted with ⌘V, and an image
   on the clipboard with no file of its own (a screenshot) is kept as `image.png` in a temporary
-  folder for the view's own lifetime. A program asks for the Open panel ("Upload Files…") or the
+  folder for the view's own lifetime; a paste whose files are all gone reaches the view with
+  none, so that it can say so. A program asks for the Open panel ("Upload Files…") or the
   Save panel ("Save a Copy…") and bateri shows it on the tab as a sheet, the Save panel in the
   folder you last used and with the name the program proposed; the files you chose are given
   to the view, and cancelling gives it none. Where the program runs on this Mac it is also told
