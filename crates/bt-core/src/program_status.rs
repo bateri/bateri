@@ -124,6 +124,11 @@ pub(crate) enum Report {
         /// The validated `app` name ([`MAX_APP`] bytes of [`name_byte`]s);
         /// `None` when the report gives none or an empty one.
         app: Option<String>,
+        /// The decoded `title`: what the program calls the work, shown as its
+        /// name in the side column's Activity.
+        title: Option<String>,
+        /// The decoded `msg`: what a blocked program asks the user.
+        msg: Option<String>,
     },
 }
 
@@ -183,11 +188,17 @@ pub(crate) fn parse(payload: &[u8], decoded: &mut Vec<u8>) -> Option<Report> {
         Some(value) if !value.is_empty() => String::from_utf8(value.to_vec()).ok(),
         _ => None,
     };
-    for (value, limit) in [(title, MAX_TITLE), (msg, MAX_MSG)] {
-        if let Some(value) = value {
+    // A text that is there must be valid, or the report drops: read both
+    // before `clear`, which takes neither.
+    let mut read_text = |value: Option<&[u8]>, limit| match value {
+        Some(value) => {
             text(value, limit, decoded)?;
+            Some(Some(String::from_utf8_lossy(decoded).into_owned()))
         }
-    }
+        None => Some(None),
+    };
+    let title = read_text(title, MAX_TITLE)?;
+    let msg = read_text(msg, MAX_MSG)?;
     if state == b"clear" {
         return Some(Report::Clear { id });
     }
@@ -195,6 +206,8 @@ pub(crate) fn parse(payload: &[u8], decoded: &mut Vec<u8>) -> Option<Report> {
         id,
         state: State::parse(state)?,
         app,
+        title: title.filter(|title| !title.is_empty()),
+        msg: msg.filter(|msg| !msg.is_empty()),
     })
 }
 
@@ -232,6 +245,8 @@ pub(crate) fn progress(payload: &[u8]) -> Option<Report> {
         id: root(),
         state,
         app: None,
+        title: None,
+        msg: None,
     })
 }
 
@@ -282,6 +297,11 @@ struct Record {
     /// When the record entered its state: a report that repeats the state (a
     /// progress update) keeps it, so a ring's clock and the counter run on.
     since: Instant,
+    /// What the program calls the work; a report that names none keeps the
+    /// last one, as `app` does.
+    title: Option<String>,
+    /// What the program asks while blocked; gone with the blocked state.
+    msg: Option<String>,
     /// The update's number; the smallest is evicted first.
     updated: u64,
 }
@@ -295,6 +315,20 @@ pub struct ProgramActivity {
     pub working: Option<Duration>,
     /// A record waits for the user.
     pub blocked: bool,
+}
+
+/// What a pane's reporting program says of itself ([`ProgramStatus::report`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProgramReport {
+    /// The state the user sees.
+    pub state: State,
+    /// How long it has been in it: a duration, not an instant, so a reader
+    /// with another clock compares nothing.
+    pub held: Duration,
+    /// What the program calls the work.
+    pub title: Option<String>,
+    /// What a blocked program asks.
+    pub message: Option<String>,
 }
 
 /// The terminal's records, by id.
@@ -332,13 +366,21 @@ impl ProgramStatus {
         match report {
             Report::Query => false,
             Report::Clear { id } => self.clear(&id),
-            Report::Set { id, state, app } => {
+            Report::Set {
+                id,
+                state,
+                app,
+                title,
+                msg,
+            } => {
                 self.clock += 1;
                 let (entered, since) = match self.records.get(&id) {
                     Some(record) if record.state == state => (false, record.since),
                     _ => (true, now),
                 };
                 let app = app.or_else(|| self.records.get(&id).and_then(|r| r.app.clone()));
+                let title = title.or_else(|| self.records.get(&id).and_then(|r| r.title.clone()));
+                let msg = msg.filter(|_| state == State::Blocked);
                 if entered {
                     match state {
                         State::Done => self.done = self.done.wrapping_add(1),
@@ -352,6 +394,8 @@ impl ProgramStatus {
                         state,
                         app,
                         since,
+                        title,
+                        msg,
                         updated: self.clock,
                     },
                 );
@@ -418,6 +462,41 @@ impl ProgramStatus {
         })
     }
 
+    /// What the pane's program says of itself, for the side column's Activity
+    /// and the tab's details: the record that decides what the user sees — a
+    /// question first, then work, a failure, a finish, rest — with how long it
+    /// has been so, the work's title (that record's, else the newest one's) and
+    /// what a blocked program asks. `None` while no record is there.
+    pub(crate) fn report(&self, now: Instant) -> Option<ProgramReport> {
+        let rank = |state: State| match state {
+            State::Blocked => 4,
+            State::Working => 3,
+            State::Error => 2,
+            State::Done => 1,
+            State::Idle => 0,
+        };
+        // The highest state; among equals the one that entered it first, so a
+        // long piece of work and a long wait read as long.
+        let decisive = self.records.values().max_by(|a, b| {
+            rank(a.state)
+                .cmp(&rank(b.state))
+                .then(b.since.cmp(&a.since))
+        })?;
+        let title = decisive.title.clone().or_else(|| {
+            self.records
+                .values()
+                .filter(|record| record.title.is_some())
+                .max_by_key(|record| record.updated)
+                .and_then(|record| record.title.clone())
+        });
+        Some(ProgramReport {
+            state: decisive.state,
+            held: now.saturating_duration_since(decisive.since),
+            title,
+            message: decisive.msg.clone(),
+        })
+    }
+
     /// What the tab reads; `None` while no program reports being there (no record,
     /// or only results waiting to be seen) — the shell's own marks are then the
     /// whole story.
@@ -453,6 +532,8 @@ mod tests {
             id: id.to_owned(),
             state,
             app: None,
+            title: None,
+            msg: None,
         }
     }
 
@@ -461,7 +542,48 @@ mod tests {
             id: id.to_owned(),
             state,
             app: Some(app.to_owned()),
+            title: None,
+            msg: None,
         }
+    }
+
+    #[test]
+    fn a_record_keeps_its_title_and_a_blocked_one_its_question() {
+        // "Refactor" / "Allow edit?" / "Next".
+        let now = Instant::now();
+        let later = now + Duration::from_secs(90);
+        let mut status = ProgramStatus::default();
+        let report = |body: &str| read(body).expect("a report");
+        status.apply(report("state=working:title=UmVmYWN0b3I="), now);
+        let working = status.report(later).expect("a record");
+        assert_eq!(working.state, State::Working);
+        assert_eq!(working.title.as_deref(), Some("Refactor"));
+        assert_eq!(working.message, None);
+        assert_eq!(working.held, Duration::from_secs(90));
+        // A question: its text is kept, the title stays from before.
+        status.apply(report("state=blocked:msg=QWxsb3cgZWRpdD8="), later);
+        let asking = status.report(later).expect("a record");
+        assert_eq!(asking.state, State::Blocked);
+        assert_eq!(asking.title.as_deref(), Some("Refactor"));
+        assert_eq!(asking.message.as_deref(), Some("Allow edit?"));
+        assert_eq!(asking.held, Duration::ZERO, "a new state starts its clock");
+        // Out of the question, the question goes; a msg off the blocked state is not kept.
+        status.apply(report("state=working:msg=QWxsb3cgZWRpdD8="), later);
+        assert_eq!(status.report(later).expect("a record").message, None);
+        // A new title replaces the old one.
+        status.apply(report("state=idle:title=TmV4dA=="), later);
+        assert_eq!(
+            status.report(later).expect("a record").title.as_deref(),
+            Some("Next")
+        );
+        // A question in another record outranks this one's rest.
+        status.apply(report("state=blocked:id=sub"), later);
+        assert_eq!(
+            status.report(later).expect("a record").state,
+            State::Blocked
+        );
+        status.apply(report("state=clear"), later);
+        assert_eq!(status.report(later), None);
     }
 
     #[test]
@@ -623,6 +745,8 @@ mod tests {
                 id: String::new(),
                 state,
                 app: None,
+                title: None,
+                msg: None,
             })
         };
         assert_eq!(progress(b"4;1;50"), root(State::Working));

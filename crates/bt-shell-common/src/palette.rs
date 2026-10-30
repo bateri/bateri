@@ -83,8 +83,8 @@ pub use server::{
 pub use state::{Effect, Key, Modifier, Palette, REST};
 pub use switch::{
     Act, EARLIER_HEADING, GROUPS_HEADING, GroupFacts, Places, RECENT_TABS, Report, TabFacts, act,
-    actions as tab_actions, actions_heading, group_id, group_key, group_row, group_rows,
-    listing_order, status as tab_status, tab_id, tab_keys, tab_list, tab_row, tab_rows,
+    actions as tab_actions, actions_heading, agent_tab_keys, group_id, group_key, group_row,
+    group_rows, listing_order, status as tab_status, tab_id, tab_keys, tab_list, tab_row, tab_rows,
 };
 pub use synonyms::for_selector as command_words;
 pub use targets::{

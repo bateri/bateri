@@ -93,7 +93,7 @@ use crate::input::{
 use crate::link;
 use crate::pencere::{self, Desk, ViewOptions};
 use crate::pointer::{PointerShape, PointerShapes};
-use crate::program_status::{self, ProgramActivity};
+use crate::program_status::{self, ProgramActivity, ProgramReport};
 use crate::reader::{
     EventLoop, EventLoopSender, Msg, PTY_CHILD_EVENT_TOKEN, PTY_READ_WRITE_TOKEN, State,
 };
@@ -9688,6 +9688,15 @@ impl Session {
             failed: log.ends.failed.wrapping_add(log.program.failed),
             program: log.program.activity(Instant::now()),
         }
+    }
+
+    /// What the pane's reporting program (`OSC 7501`) says of itself: the
+    /// state the user sees and for how long, the work's title, a blocked
+    /// program's question; `None` while it reports nothing. The side column's
+    /// Activity lists a pane by it. One leaf-lock round, on a look, never on
+    /// the frame path.
+    pub fn program_report(&self) -> Option<ProgramReport> {
+        lock(&self.shell).program.report(Instant::now())
     }
 
     /// The newest block's [`BlockInfo`] — the tab bar's summary card, which

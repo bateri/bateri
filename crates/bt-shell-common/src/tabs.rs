@@ -1312,10 +1312,14 @@ impl Side {
         let mut marks_at = Vec::new();
         for entry in entries {
             match entry {
-                Entry::Tab => {
+                Entry::Tab | Entry::Tall(_) => {
+                    let height = match entry {
+                        Entry::Tall(height) => height,
+                        _ => TAB_HEIGHT,
+                    };
                     marks_at.push(block.take().unwrap_or(cursor) - GAP);
-                    rows_at.push(cursor);
-                    cursor += slot;
+                    rows_at.push((cursor, height));
+                    cursor += height + GAP;
                 }
                 Entry::Header => {
                     if started {
@@ -1341,7 +1345,7 @@ impl Side {
         let overflow = max_scroll > 0.0;
         let along: Vec<Span> = rows_at
             .iter()
-            .map(|&at| Span::new(list.y + at - scroll, TAB_HEIGHT))
+            .map(|&(at, height)| Span::new(list.y + at - scroll, height))
             .collect();
         let rows = along
             .iter()
@@ -1432,12 +1436,44 @@ impl Head {
 }
 
 /// What stands in the side column's list, in one place of it ([`Side::layout_with`]).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Entry {
     /// A tab's row.
     Tab,
+    /// A tab's row of its own height: in Activity, its agents' lines one under the other on one
+    /// face ([`AGENT_ROW`] each). A place like [`Entry::Tab`]'s; only its height differs.
+    Tall(f64),
     /// A group's header.
     Header,
+}
+
+/// The height of an agent's line in the side column's Activity: its name and, under it, what it
+/// is doing and for how long.
+pub const AGENT_ROW: f64 = 44.0;
+
+/// Which agent ⌘`tag` reaches in Activity, where the keys count agents, not tabs: `counts` are
+/// the listed tabs' agents in the order the column lists them. `(tab, agent)` — the listed tab's
+/// index and the agent's among its own — by [`tab_index`]'s rule over all of them.
+pub fn agent_at(tag: u8, counts: &[usize]) -> Option<(usize, usize)> {
+    let total = counts.iter().sum();
+    let mut index = tab_index(tag, total)?;
+    for (tab, &count) in counts.iter().enumerate() {
+        if index < count {
+            return Some((tab, index));
+        }
+        index -= count;
+    }
+    None
+}
+
+/// The digit that reaches the `agent`th agent of the `tab`th listed tab in Activity
+/// ([`agent_at`]'s inverse; [`shortcut_digit`] over all agents).
+pub fn agent_digit(tab: usize, agent: usize, counts: &[usize]) -> Option<u8> {
+    if agent >= *counts.get(tab)? {
+        return None;
+    }
+    let before: usize = counts[..tab].iter().sum();
+    shortcut_digit(before + agent, counts.iter().sum())
 }
 
 /// A group's header in the side column, where it sits ([`Column::headers`]).
@@ -5097,6 +5133,39 @@ mod tests {
         assert_eq!(row.title.x + row.title.width / 2.0, 500.0);
         // A window too narrow for any name gives it none.
         assert_eq!(Head::row(200.0, 40.0, 20.5).title.width, 0.0);
+    }
+
+    #[test]
+    fn a_tall_row_takes_its_own_height_and_pushes_the_rest_down() {
+        // Activity: one tab of two agents, one of one.
+        let column =
+            side(600.0, 0).layout_with(&[Entry::Tall(2.0 * AGENT_ROW), Entry::Tall(AGENT_ROW)]);
+        assert_eq!(
+            column.rows,
+            [
+                Rect::new(8.0, 46.0, 184.0, 88.0),
+                Rect::new(8.0, 136.0, 184.0, 44.0),
+            ],
+            "two lines on one face, then the next row a gap down"
+        );
+        assert_eq!(column.slot_at(150.0), 1);
+    }
+
+    #[test]
+    fn the_keys_count_agents_in_activity() {
+        // Three listed tabs with 2, 1 and 3 agents: six places.
+        let counts = [2, 1, 3];
+        assert_eq!(agent_at(1, &counts), Some((0, 0)));
+        assert_eq!(agent_at(2, &counts), Some((0, 1)), "the tab's second agent");
+        assert_eq!(agent_at(3, &counts), Some((1, 0)));
+        assert_eq!(agent_at(6, &counts), Some((2, 2)));
+        assert_eq!(agent_at(7, &counts), None);
+        assert_eq!(agent_at(9, &counts), Some((2, 2)), "⌘9 is the last");
+        for tag in 1..=6 {
+            let (tab, agent) = agent_at(tag, &counts).expect("a place");
+            assert_eq!(agent_digit(tab, agent, &counts), Some(tag));
+        }
+        assert_eq!(agent_digit(1, 1, &counts), None, "no such agent");
     }
 
     #[test]

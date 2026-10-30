@@ -96,7 +96,7 @@ pub use input::{Arrow, FunctionKey, MouseButton, MouseModifiers, TextKey};
 pub use notify::Notification;
 pub use picture::pictured;
 pub use pointer::PointerShape;
-pub use program_status::{ProgramActivity, State as ProgramState};
+pub use program_status::{ProgramActivity, ProgramReport, State as ProgramState};
 pub use reset::keeping_history as reset_keeping_history;
 pub use search::{
     SearchCover, SearchDirection, SearchQuery, SearchReport, SearchRun, SearchRuns, SearchStatus,

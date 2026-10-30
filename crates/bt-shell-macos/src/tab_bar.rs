@@ -3304,6 +3304,9 @@ pub(crate) struct ChipIvars {
     /// The line that fills under the chip while a carried pane waits on it to
     /// open the tab ([`Chip::dwell`]).
     dwell: RefCell<Option<Retained<NSBox>>>,
+    /// In the side column's Activity, the tab's agents' lines over the chip, which then shows
+    /// none of its own ([`tab_side::AgentRows`]).
+    agents: Retained<tab_side::AgentRows>,
 }
 
 define_class!(
@@ -3351,6 +3354,15 @@ define_class!(
         /// ([`TabBar::hold_picked`]).
         #[unsafe(method(mouseDown:))]
         fn mouse_down(&self, event: &NSEvent) {
+            // An agent's line in Activity: the press goes to its pane, and nothing moves.
+            let agents = &self.ivars().agents;
+            if !agents.isHidden() {
+                let at = agents.convertPoint_fromView(event.locationInWindow(), None);
+                if let (Some(bar), Some(pane)) = (self.bar(), agents.pane_at(at.y)) {
+                    bar.pick_pane(self.ivars().tab.get(), pane);
+                }
+                return;
+            }
             if let Some(bar) = self.bar() {
                 let tab = self.ivars().tab.get();
                 bar.pressed(tab);
@@ -3450,6 +3462,7 @@ impl Chip {
         let title = tab_title::Title::new(mtm, NSTextAlignment::Center);
         let hint = label(mtm);
         let close = CloseButton::new(mtm);
+        let agents = tab_side::AgentRows::new(mtm);
         let this = Self::alloc(mtm).set_ivars(ChipIvars {
             tab: Cell::new(tab),
             selected: Cell::new(false),
@@ -3472,6 +3485,7 @@ impl Chip {
             hint: hint.clone(),
             close: close.clone(),
             dwell: RefCell::new(None),
+            agents: agents.clone(),
         });
         // SAFETY: `initWithFrame:` is NSView's designated initializer and the
         // ivars are set.
@@ -3488,6 +3502,7 @@ impl Chip {
             &**lift,
             &**fill_view,
             &**lines,
+            &**agents,
         ] {
             view.setAutoresizingMask(resizing);
         }
@@ -3501,6 +3516,7 @@ impl Chip {
         this.addSubview(this.ivars().title.view());
         this.addSubview(&hint);
         this.addSubview(&close);
+        this.addSubview(&agents);
         hint.setHidden(true);
         hint.setAccessibilityElement(false);
         this.setAccessibilityElement(true);
@@ -4808,6 +4824,8 @@ enum Kind {
     /// column hides; while it hides its corner carries what the tabs out of sight ask
     /// ([`BarButton::set_badge`]).
     Sidebar,
+    /// Show Activity, in the side column's head: an eye, held in the accent while on.
+    Activity,
 }
 
 pub(crate) struct ButtonIvars {
@@ -4826,6 +4844,8 @@ pub(crate) struct ButtonIvars {
     /// The badge on its top-right corner: the most urgent thing the tabs out of sight ask
     /// (`tabs::group_indicator`).
     badge: Cell<Option<Indicator>>,
+    /// Held on (Show Activity): the accent's quiet face and glyph.
+    on: Cell<bool>,
 }
 
 define_class!(
@@ -4852,10 +4872,13 @@ define_class!(
                 return;
             };
             let hot = iv.hot.get();
+            let on = iv.on.get();
             let fill = if hot { palette.button_hover } else { palette.button };
             match iv.foot.get() {
                 _ if iv.bare.get() => {
-                    if hot {
+                    if on {
+                        rounded(self.bounds(), iv.radius.get(), palette.picked, None);
+                    } else if hot {
                         rounded(self.bounds(), iv.radius.get(), fill, None);
                     }
                 }
@@ -4920,6 +4943,49 @@ define_class!(
                     frame.lineToPoint(point(4.6, 9.6));
                     let color = if hot { palette.title } else { palette.dim };
                     stroke(&frame, 1.25 * unit, Tint::of(color, 1.0));
+                }
+                Kind::Activity => {
+                    // An eye, on the design's 12-unit grid drawn 14 pt.
+                    let unit = GLYPH_SIDE / 12.0;
+                    let point = |x: f64, y: f64| {
+                        NSPoint::new(at.x + (x - 6.0) * unit, at.y + (y - 6.0) * unit)
+                    };
+                    let eye = NSBezierPath::bezierPath();
+                    eye.moveToPoint(point(0.9, 6.0));
+                    eye.curveToPoint_controlPoint1_controlPoint2(
+                        point(6.0, 2.4),
+                        point(2.2, 3.6),
+                        point(4.0, 2.4),
+                    );
+                    eye.curveToPoint_controlPoint1_controlPoint2(
+                        point(11.1, 6.0),
+                        point(8.0, 2.4),
+                        point(9.8, 3.6),
+                    );
+                    eye.curveToPoint_controlPoint1_controlPoint2(
+                        point(6.0, 9.6),
+                        point(9.8, 8.4),
+                        point(8.0, 9.6),
+                    );
+                    eye.curveToPoint_controlPoint1_controlPoint2(
+                        point(0.9, 6.0),
+                        point(4.0, 9.6),
+                        point(2.2, 8.4),
+                    );
+                    eye.closePath();
+                    let pupil = 1.75 * unit;
+                    eye.appendBezierPathWithOvalInRect(NSRect::new(
+                        NSPoint::new(at.x - pupil, at.y - pupil),
+                        NSSize::new(2.0 * pupil, 2.0 * pupil),
+                    ));
+                    let color = if on {
+                        palette.accent
+                    } else if hot {
+                        palette.title
+                    } else {
+                        palette.dim
+                    };
+                    stroke(&eye, 1.25 * unit, Tint::of(color, 1.0));
                 }
             }
             if let Some(indicator) = iv.badge.get() {
@@ -4987,6 +5053,7 @@ impl BarButton {
             foot: Cell::new(None),
             bare: Cell::new(false),
             badge: Cell::new(None),
+            on: Cell::new(false),
         });
         // SAFETY: `initWithFrame:` is NSView's designated initializer and the
         // ivars are set.
@@ -4997,7 +5064,7 @@ impl BarButton {
         match kind {
             Kind::NewTab => this.setAccessibilityLabel(Some(ns_string!("New Tab"))),
             Kind::List => this.setAccessibilityLabel(Some(ns_string!("Show All Tabs"))),
-            Kind::Warning | Kind::Sidebar => {}
+            Kind::Warning | Kind::Sidebar | Kind::Activity => {}
         }
         this.retip(mtm);
         track_hover(&this);
@@ -5019,6 +5086,12 @@ impl BarButton {
                 self.setAccessibilityLabel(Some(&NSString::from_str(name)));
                 (name, "toggle_sidebar")
             }
+            Kind::Activity => {
+                let on = self.ivars().on.get();
+                let name = if on { "Show All Tabs" } else { "Show Activity" };
+                self.setAccessibilityLabel(Some(&NSString::from_str(name)));
+                (name, "show_activity")
+            }
             Kind::Warning => return,
         };
         retip(self, &tip(name, crate::menu::keys::glyphs_of(mtm, command)));
@@ -5035,6 +5108,14 @@ impl BarButton {
     fn set_bare(&self, bare: bool) {
         if self.ivars().bare.replace(bare) != bare {
             self.setNeedsDisplay(true);
+        }
+    }
+
+    /// Held on or not (Show Activity's eye); the tip says what a press does then.
+    fn set_on(&self, on: bool) {
+        if self.ivars().on.replace(on) != on {
+            self.setNeedsDisplay(true);
+            self.retip(self.mtm());
         }
     }
 
@@ -5063,6 +5144,13 @@ impl BarButton {
     fn act(&self) {
         let bar = || self.bar();
         match self.ivars().kind {
+            Kind::Activity => {
+                if let Some(window) = bar().and_then(|bar| bar.terminal_window()) {
+                    window.toggle_activity();
+                }
+                self.ivars().hot.set(false);
+                self.setNeedsDisplay(true);
+            }
             Kind::Sidebar => {
                 if let Some(window) = bar().and_then(|bar| bar.terminal_window()) {
                     window.toggle_column();
@@ -5394,6 +5482,42 @@ pub(crate) struct Label {
     pub(crate) upload: Option<Upload>,
     /// Its focused pane's marked host (`TerminalTab::host_mark`).
     pub(crate) mark: HostMark,
+    /// In the side column's Activity, its panes whose programs report themselves, in tree order
+    /// (`TerminalTab::agents`); empty elsewhere.
+    pub(crate) agents: Vec<AgentLine>,
+}
+
+/// What the side column adds to what the bar shows ([`TabBar::show`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct Aside {
+    /// The most urgent thing the tabs other than the one on screen ask: the sidebar button's
+    /// badge while the column hides.
+    pub(crate) unseen: Option<Indicator>,
+    /// The column shows Activity.
+    pub(crate) activity: bool,
+}
+
+/// One agent's line in the side column's Activity: a pane whose program reports itself.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct AgentLine {
+    pub(crate) pane: u64,
+    /// The program, for its mark on the tile.
+    pub(crate) kind: ProgramKind,
+    /// What the program calls its work, else the pane's title.
+    pub(crate) title: String,
+    /// What it is doing and for how long: "Running · 4m".
+    pub(crate) status: String,
+    pub(crate) tone: AgentTone,
+    /// It is the tab's focused pane: the tab on screen selects this line.
+    pub(crate) focused: bool,
+}
+
+/// The colour of an agent's status line: what asks for the user stands out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AgentTone {
+    Quiet,
+    Asking,
+    Failed,
 }
 
 /// One group's header as the bar shows it ([`TabBar::show`]).
@@ -5459,6 +5583,9 @@ struct Shown {
     selected: usize,
     /// The settings diagnostic; empty without one.
     notice: String,
+    /// The column shows Activity: the tabs whose panes' programs report themselves, a line per
+    /// agent ([`Label::agents`]).
+    activity: bool,
     /// The most urgent thing the tabs other than the one on screen ask (`tabs::group_indicator`):
     /// the sidebar button's badge while the column hides.
     unseen: Option<Indicator>,
@@ -5652,6 +5779,8 @@ pub(crate) struct BarIvars {
     hidden: Cell<bool>,
     /// The column's head button that hides and shows it, and the title row's while it hides.
     sidebar: Retained<BarButton>,
+    /// The column's head button that shows Activity.
+    eye: Retained<BarButton>,
     /// The column as last laid out, in the side mode: the wheel, the list and the name field work
     /// from it.
     column: RefCell<Option<Column>>,
@@ -5921,6 +6050,7 @@ impl TabBar {
     pub(crate) fn new(mtm: MainThreadMarker, window: u64) -> Retained<Self> {
         let new_tab = BarButton::new(mtm, Kind::NewTab);
         let sidebar = BarButton::new(mtm, Kind::Sidebar);
+        let eye = BarButton::new(mtm, Kind::Activity);
         let switch = tab_switch::GroupButton::new(mtm);
         let list = BarButton::new(mtm, Kind::List);
         let warning = BarButton::new(mtm, Kind::Warning);
@@ -5998,6 +6128,7 @@ impl TabBar {
             side: Cell::new(None),
             hidden: Cell::new(false),
             sidebar: sidebar.clone(),
+            eye: eye.clone(),
             column: RefCell::new(None),
             mask: tab_side::Mask::default(),
             before: Cell::new(None),
@@ -6009,6 +6140,7 @@ impl TabBar {
         this.addSubview(&RowClaim::new(mtm));
         this.addSubview(&new_tab);
         this.addSubview(&sidebar);
+        this.addSubview(&eye);
         this.addSubview(&switch);
         this.addSubview(&list);
         this.addSubview(&warning);
@@ -6020,6 +6152,7 @@ impl TabBar {
         warning.setHidden(true);
         switch.setHidden(true);
         sidebar.setHidden(true);
+        eye.setHidden(true);
         // SAFETY: `TabBar` implements the field's delegate protocols (the
         // two optional methods it uses are defined above); the field holds
         // its delegate weakly and the bar owns the field.
@@ -6066,8 +6199,9 @@ impl TabBar {
         headings: Vec<Heading>,
         switcher: Option<Switcher>,
         notice: String,
-        unseen: Option<Indicator>,
+        aside: Aside,
     ) {
+        let Aside { unseen, activity } = aside;
         let iv = self.ivars();
         // The tips of the buttons name keys that `[keys]` moves; the bar is given its tabs
         // again whenever it does.
@@ -6075,6 +6209,7 @@ impl TabBar {
         iv.new_tab.retip(mtm);
         iv.list.retip(mtm);
         iv.sidebar.retip(mtm);
+        iv.eye.retip(mtm);
         for chip in iv.chips.borrow().iter() {
             chip.ivars().close.retip(mtm);
         }
@@ -6104,6 +6239,7 @@ impl TabBar {
             switcher,
             selected,
             notice,
+            activity,
             unseen,
         });
         self.refresh_group_list(listed);
@@ -8482,7 +8618,7 @@ impl TabBar {
     /// `tab` and gives the keyboard to the pane (its chip's tile turns to the pane's program
     /// with it). Done now, not a turn later: the card is only put away, kept by the bar, and the
     /// chips are not rebuilt by a selection.
-    fn pick_pane(&self, tab: u64, pane: u64) {
+    pub(super) fn pick_pane(&self, tab: u64, pane: u64) {
         let iv = self.ivars();
         iv.card_wait.set(iv.card_wait.get().wrapping_add(1));
         self.close_card();
@@ -9333,6 +9469,7 @@ mod tests {
             running: None,
             upload: None,
             mark: bt_core::HostMark::None,
+            agents: Vec::new(),
         }
     }
 

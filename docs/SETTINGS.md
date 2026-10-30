@@ -1233,8 +1233,14 @@ tab_position = "top"
   Sidebar** or ⌃⌘S hides it, and the window's title row then holds the
   sidebar button, the tab's name in the middle and `+` on the right. While it
   hides, a question, a failure or an unseen finish in another tab shows as
-  the tab's badge on the sidebar button's corner. Each window keeps its own
-  choice, and a restored session brings it back. The window
+  the tab's badge on the sidebar button's corner. The eye beside New Tab, View
+  ▸ **Show Activity** or ⇧⌘A narrows the column to the tabs whose programs
+  report what they do (Claude Code and the like), resting ones too: a line per
+  program — its name and, under it, *Running · 4m*, *Asking*, *Finished*,
+  *Failed* or *Idle* — and a tab with two programs shows two lines on one
+  face. A click on a line goes to that program's pane, and ⌘1–9 count the
+  programs, not the tabs. Each window keeps its own choices, and a restored
+  session brings them back. The window
   moves by the column's empty space and beside the traffic lights, and a press
   on a pane's top line selects text as anywhere else. Rows are dragged as the
   tabs of the bar are: drag one to reorder, out of the column to tear it off

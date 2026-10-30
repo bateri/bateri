@@ -995,6 +995,13 @@ define_class!(
                 // window's title, and one named before the others closed must
                 // be possible to change.)
                 self.ivars().order.borrow().len() > 1
+            } else if action == Some(sel!(showActivity:)) {
+                item.setState(if self.activity() {
+                    NSControlStateValueOn
+                } else {
+                    NSControlStateValueOff
+                });
+                tabs_at_side(self.mtm()) && !self.column_hidden()
             } else if action == Some(sel!(toggleSidebar:)) {
                 // The title says which way the column goes; a column there is only at the side.
                 item.setTitle(if self.column_hidden() {
@@ -1229,6 +1236,19 @@ define_class!(
             let Ok(tag) = u8::try_from(item.tag()) else {
                 return;
             };
+            // In Activity ⌘ counts agents: the key goes to that agent's pane.
+            if self.listing_activity() {
+                let listed = self.activity_counts();
+                let counts: Vec<usize> = listed.iter().map(|&(_, count)| count).collect();
+                if let Some((tab, agent)) = tabs::agent_at(tag, &counts)
+                    && let Some(pane) = self
+                        .tab(listed[tab].0)
+                        .and_then(|tab| tab.agents().get(agent).map(|line| line.pane))
+                {
+                    self.show_pane(listed[tab].0, pane);
+                }
+                return;
+            }
             // ⌘ counts the tabs as listed: down the column, a closed group's hidden ones not at
             // all; along the title row, the group on screen.
             let target = self
@@ -1238,6 +1258,14 @@ define_class!(
                 .shortcut(&self.ivars().order.borrow(), self.listing(), tag);
             if let Some(tab) = target {
                 self.select_tab(tab);
+            }
+        }
+
+        /// View ▸ Show Activity (⇧⌘A): the side column lists only the agents, or every tab again.
+        #[unsafe(method(showActivity:))]
+        fn show_activity(&self, _sender: Option<&AnyObject>) {
+            if tabs_at_side(self.mtm()) {
+                self.toggle_activity();
             }
         }
 
@@ -1564,6 +1592,10 @@ pub(crate) struct RootIvars {
     /// bar is the title row and the content takes the window's width. The window's own, like the
     /// width, and back with the session.
     column_hidden: Cell<bool>,
+    /// The side column shows Activity (the eye, ⇧⌘A): only the tabs whose panes' programs report
+    /// themselves, a line per agent. The window's own and back with the session, as the column's
+    /// hiding is.
+    activity: Cell<bool>,
     /// The title row's last measured height; `0` until the window reports one.
     row: Cell<f64>,
     /// The command palette while it is open: over everything the window holds, the side
@@ -1644,6 +1676,7 @@ impl RootView {
             edge: edge.clone(),
             side_width: Cell::new(side_width),
             column_hidden: Cell::new(false),
+            activity: Cell::new(false),
             row: Cell::new(0.0),
             palette: RefCell::new(None),
             overview: RefCell::new(None),
@@ -1774,6 +1807,11 @@ impl RootView {
     /// are in the title row, for when they come back to the side.
     pub(crate) fn column_hidden(&self) -> bool {
         self.ivars().column_hidden.get()
+    }
+
+    /// Whether the side column shows Activity ([`RootIvars::activity`]).
+    pub(crate) fn activity(&self) -> bool {
+        self.ivars().activity.get()
     }
 
     /// Whether the side column stands at the window's left now: the tabs are at the side and the
@@ -2405,6 +2443,12 @@ impl TerminalWindow {
     /// The ⌘ hint of each tab a key reaches in this window, as the palette and the bar say them
     /// (they reach the key window's tabs alone — the caller asks only for that one).
     pub(crate) fn tab_keys(&self) -> Vec<(u64, String)> {
+        if self.listing_activity() {
+            return bt_shell_common::palette::agent_tab_keys(
+                &self.activity_counts(),
+                crate::menu::keys::family_mods(self.mtm(), "select_tab"),
+            );
+        }
         bt_shell_common::palette::tab_keys(
             &self.ivars().groups.borrow(),
             &self.ivars().order.borrow(),
@@ -4608,7 +4652,15 @@ impl TerminalWindow {
     pub(crate) fn refresh_bar(&self) {
         let single = self.lone_tab();
         let side = self.bar().is_side();
-        let label = |tab: &TerminalTab| Self::label_of(tab, single);
+        let activity = side && self.listing_activity();
+        // In Activity a tab is listed by its agents, and only with some.
+        let label = |tab: &TerminalTab| {
+            let mut label = Self::label_of(tab, single);
+            if activity {
+                label.agents = tab.agents();
+            }
+            (!activity || !label.agents.is_empty()).then_some(label)
+        };
         let order = self.ivars().order.borrow();
         let groups = self.ivars().groups.borrow();
         // The column lists headers and hides a closed group's other tabs; the title row shows the
@@ -4628,12 +4680,21 @@ impl TerminalWindow {
         let group_mods = crate::menu::keys::family_mods(self.mtm(), "select_group");
         for item in items {
             match item {
-                Item::Tab(id) => labels.extend(self.tab(id).map(|tab| label(&tab))),
+                Item::Tab(id) => labels.extend(self.tab(id).and_then(|tab| label(&tab))),
                 Item::Header(id) => {
                     let Some(group) = groups.group(id) else {
                         continue;
                     };
                     let members = groups.cluster(&order, Some(id));
+                    // A group with no agent in it has no place in Activity.
+                    if activity
+                        && !members
+                            .iter()
+                            .filter_map(|&member| self.tab(member))
+                            .any(|tab| !tab.agents().is_empty())
+                    {
+                        continue;
+                    }
                     headings.push(Heading {
                         group: id,
                         name: group.name.clone(),
@@ -4698,8 +4759,14 @@ impl TerminalWindow {
         drop((order, groups));
         let unseen = self.cluster_indicator(&others);
         let notice = self.ivars().notice.borrow().clone();
-        self.bar()
-            .show(labels, selected, headings, switcher, notice, unseen);
+        self.bar().show(
+            labels,
+            selected,
+            headings,
+            switcher,
+            notice,
+            crate::tab_bar::Aside { unseen, activity },
+        );
     }
 
     /// What a cluster of tabs — a group's, the ungrouped ones, everything outside the group on
@@ -4739,6 +4806,7 @@ impl TerminalWindow {
             running: tab.running_for(),
             upload: tab.upload(),
             mark: tab.host_mark(),
+            agents: Vec::new(),
         }
     }
 
@@ -5022,6 +5090,45 @@ impl TerminalWindow {
     /// Whether the user hid this window's side column ([`RootView::column_hidden`]).
     pub(crate) fn column_hidden(&self) -> bool {
         self.ivars().root.column_hidden()
+    }
+
+    /// Whether this window's side column shows Activity ([`RootView::activity`]).
+    pub(crate) fn activity(&self) -> bool {
+        self.ivars().root.activity()
+    }
+
+    /// Shows Activity in the side column or every tab again (the eye, View ▸ Show Activity,
+    /// ⇧⌘A), and saves the choice with the layout.
+    pub(crate) fn toggle_activity(&self) {
+        self.set_activity(!self.activity());
+        self.layout_changed();
+    }
+
+    /// Shows Activity or every tab (a restored window, the toggle).
+    pub(crate) fn set_activity(&self, on: bool) {
+        self.ivars().root.ivars().activity.set(on);
+        self.refresh_bar();
+    }
+
+    /// The side column lists Activity now: at the side, on, and not hidden — a hidden column
+    /// lists nothing and the title row's bar is every tab's.
+    fn listing_activity(&self) -> bool {
+        self.activity() && self.ivars().root.column_shown()
+    }
+
+    /// The listed tabs of Activity with how many agents each holds, in the column's order: what
+    /// ⌘1–9 count there ([`tabs::agent_at`]).
+    pub(crate) fn activity_counts(&self) -> Vec<(u64, usize)> {
+        let order = self.ivars().order.borrow();
+        let groups = self.ivars().groups.borrow();
+        groups
+            .numbered(&order, View::Side)
+            .into_iter()
+            .filter_map(|id| {
+                let count = self.tab(id)?.agents().len();
+                (count > 0).then_some((id, count))
+            })
+            .collect()
     }
 
     /// Hides the side column or shows it (the sidebar button, View ▸ Hide Sidebar, ⌃⌘S): the

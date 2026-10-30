@@ -11379,7 +11379,7 @@ mod tests {
         assert_eq!(
             seen,
             [
-                "Set { id: \"build\", state: Working, app: None }",
+                "Set { id: \"build\", state: Working, app: None, title: None, msg: None }",
                 "query",
                 "PromptEnd"
             ]

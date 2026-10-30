@@ -55,18 +55,24 @@
 use std::cell::{Cell, RefCell};
 
 use objc2::rc::Retained;
-use objc2::{DefinedClass, MainThreadOnly};
+use objc2::runtime::AnyObject;
+use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{
-    NSAccessibility, NSBezierPath, NSBox, NSColor, NSFont, NSFontWeightSemibold, NSTextAlignment,
-    NSView,
+    NSAccessibility, NSAffineTransformNSAppKitAdditions, NSBezierPath, NSBox, NSColor, NSFont,
+    NSFontAttributeName, NSFontWeightMedium, NSFontWeightSemibold, NSForegroundColorAttributeName,
+    NSGraphicsContext, NSLineBreakMode, NSMutableParagraphStyle, NSParagraphStyleAttributeName,
+    NSStringDrawing, NSTextAlignment, NSView,
 };
-use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
+use objc2_foundation::{
+    NSAffineTransform, NSAttributedStringKey, NSDictionary, NSObjectProtocol, NSPoint, NSRect,
+    NSSize, NSString,
+};
 use objc2_quartz_core::{CALayer, CATransaction};
 
 use super::tab_group::{GroupHeader, HeaderLook};
 use super::{
-    Chip, Dragging, Heading, IconStyle, Motion, Palette, Seen, Shown, Standing, TabBar, Tint,
-    paint_in, plain_box,
+    AgentLine, AgentTone, Chip, Dragging, Emblem, Heading, IconStyle, Motion, Palette, Seen, Shown,
+    Standing, TabBar, Tint, draw_tile, glyph_slot, paint_in, plain_box, rounded,
 };
 use crate::card;
 use crate::split::Rect;
@@ -346,6 +352,7 @@ impl TabBar {
             self.close_group_list(false);
             // The column's head: bare glyphs, a face only under the pointer.
             iv.sidebar.setHidden(false);
+            iv.eye.set_bare(true);
             iv.new_tab.set_bare(true);
         } else {
             // The bar's own: the list had no mask and no headers, the warning a square foot, `+`
@@ -353,6 +360,7 @@ impl TabBar {
             iv.mask.clear(&iv.strip);
             iv.warning.set_foot(None);
             iv.sidebar.setHidden(true);
+            iv.eye.setHidden(true);
             iv.new_tab.set_bare(false);
             for chip in iv.chips.borrow().iter() {
                 chip.setHidden(false);
@@ -464,6 +472,7 @@ impl TabBar {
         iv.sidebar.set_look(palette, TAB_RADIUS);
         iv.sidebar.set_bare(true);
         iv.sidebar.set_badge(shown.unseen);
+        iv.eye.setHidden(true);
         if let Some(new_tab) = head.new_tab {
             iv.new_tab.setFrame(ns_rect(new_tab));
             iv.new_tab.set_look(palette, TAB_RADIUS);
@@ -532,8 +541,14 @@ impl TabBar {
         let seat = |index: usize| tabs::seat(index, flight.gap);
         let side = self.side_for(top, count + usize::from(flight.gap.is_some()));
         // The list's places, headers among them: a carried tab's room opens before the row it is
-        // over, below any header that stands there.
+        // over, below any header that stands there. In Activity a tab's row holds its agents.
         let entries = side_entries(&shown.headings, count, flight.gap, 0);
+        let entries = if shown.activity {
+            let agents: Vec<usize> = shown.tabs.iter().map(|label| label.agents.len()).collect();
+            agent_entries(entries, &agents)
+        } else {
+            entries
+        };
         let mut column = side.layout_with(&entries);
         let selected_tab = shown.tabs.get(shown.selected).map(|label| label.tab);
         let was_overflowing = iv.overflowed.replace(column.overflow);
@@ -574,10 +589,14 @@ impl TabBar {
         // The rows live in the list's space: its top-left corner is theirs.
         iv.strip.setFrame(ns_rect(column.list));
         let picks = iv.picks.borrow().tabs.clone();
+        // In Activity the keys count agents ([`tabs::agent_digit`]).
+        let counts: Vec<usize> = shown.tabs.iter().map(|label| label.agents.len()).collect();
         for (index, chip) in chips.iter().enumerate() {
             let label = &shown.tabs[index];
             let naming = iv.renaming.get() == Some(label.tab);
-            let title = if naming {
+            let agents = shown.activity && !label.agents.is_empty();
+            // An agent's lines show their own names; the chip shows none.
+            let title = if naming || agents {
                 String::new()
             } else {
                 label.title.clone()
@@ -616,12 +635,36 @@ impl TabBar {
                     side: true,
                 },
             );
+            let mut look = look;
+            if agents {
+                // The lines draw the face, the selection and the tiles; the chip keeps its place.
+                look.emblem = None;
+                look.indicator = None;
+                look.hint = None;
+                look.selected = false;
+                look.hovered = false;
+            }
             chip.set(
                 frame,
                 &look,
                 palette,
                 motion,
                 slide.filter(|_| carried.is_none()),
+            );
+            let hints = seen.hints.map_or_else(Vec::new, |mods| {
+                (0..label.agents.len())
+                    .map(|agent| {
+                        tabs::agent_digit(index, agent, &counts)
+                            .map(|digit| bt_shell_common::shortcuts::digit_glyphs(mods, digit))
+                    })
+                    .collect()
+            });
+            chip.ivars().agents.set(
+                agents.then_some(label.agents.as_slice()),
+                hints,
+                index == shown.selected,
+                palette,
+                seen.style,
             );
             if naming {
                 self.place_row_field(row, palette);
@@ -659,6 +702,10 @@ impl TabBar {
         iv.sidebar.setFrame(ns_rect(column.sidebar));
         iv.sidebar.set_look(palette, TAB_RADIUS);
         iv.sidebar.set_badge(None);
+        iv.eye.setFrame(ns_rect(column.activity));
+        iv.eye.set_look(palette, TAB_RADIUS);
+        iv.eye.set_on(shown.activity);
+        iv.eye.setHidden(false);
         iv.new_tab.setFrame(ns_rect(column.new_tab));
         iv.new_tab.set_look(palette, TAB_RADIUS);
         iv.list.setHidden(true);
@@ -763,6 +810,241 @@ impl TabBar {
             ),
         ));
     }
+}
+
+/// The listed tabs' rows in Activity: each tab's [`Entry::Tab`] in `entries` becomes a row of
+/// its agents' lines (`agents[i]` for the `i`th tab), one [`tabs::AGENT_ROW`] each.
+fn agent_entries(entries: Vec<Entry>, agents: &[usize]) -> Vec<Entry> {
+    let mut lines = agents.iter();
+    entries
+        .into_iter()
+        .map(|entry| match entry {
+            Entry::Tab => lines.next().map_or(entry, |&count| {
+                Entry::Tall(count.max(1) as f64 * tabs::AGENT_ROW)
+            }),
+            entry => entry,
+        })
+        .collect()
+}
+
+pub(crate) struct AgentIvars {
+    lines: RefCell<Vec<AgentLine>>,
+    /// The ⌘ key that reaches each line, while Select Tab's modifiers are held.
+    hints: RefCell<Vec<Option<String>>>,
+    /// The tab is the one on screen: its focused pane's line is selected.
+    selected: Cell<bool>,
+    palette: Cell<Option<Palette>>,
+    style: Cell<Option<IconStyle>>,
+}
+
+define_class!(
+    /// A tab's agents in the side column's Activity, over its chip: a line each, [`tabs::AGENT_ROW`]
+    /// high — the program's tile, what it calls its work and, under it, what it is doing and for
+    /// how long — on one face when there are two or more, the focused pane's line selected while
+    /// the tab is on screen. It draws, the chip takes the press ([`AgentRows::pane_at`]).
+    // SAFETY: NSView is designed for subclassing; AgentRows implements no `Drop` and is born with
+    // `initWithFrame:`.
+    #[unsafe(super(NSView))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "BateriAgentRows"]
+    #[ivars = AgentIvars]
+    pub(crate) struct AgentRows;
+
+    unsafe impl NSObjectProtocol for AgentRows {}
+
+    impl AgentRows {
+        #[unsafe(method(isFlipped))]
+        fn is_flipped(&self) -> bool {
+            true
+        }
+
+        /// The chip under it takes every press.
+        #[unsafe(method_id(hitTest:))]
+        fn hit_test(&self, _point: NSPoint) -> Option<Retained<NSView>> {
+            None
+        }
+
+        #[unsafe(method(drawRect:))]
+        fn draw_rect(&self, _dirty: NSRect) {
+            self.draw();
+        }
+    }
+);
+
+impl AgentRows {
+    pub(super) fn new(mtm: MainThreadMarker) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(AgentIvars {
+            lines: RefCell::new(Vec::new()),
+            hints: RefCell::new(Vec::new()),
+            selected: Cell::new(false),
+            palette: Cell::new(None),
+            style: Cell::new(None),
+        });
+        // SAFETY: `initWithFrame:` is NSView's designated initializer and the ivars are set.
+        let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] };
+        this.setHidden(true);
+        this
+    }
+
+    /// Shows the tab's `lines` (`None` hides them: the chip is a row of its own again).
+    pub(super) fn set(
+        &self,
+        lines: Option<&[AgentLine]>,
+        hints: Vec<Option<String>>,
+        selected: bool,
+        palette: Palette,
+        style: IconStyle,
+    ) {
+        let iv = self.ivars();
+        let Some(lines) = lines else {
+            self.setHidden(true);
+            return;
+        };
+        let changed = *iv.lines.borrow() != lines
+            || *iv.hints.borrow() != hints
+            || iv.selected.replace(selected) != selected
+            || iv.palette.replace(Some(palette)) != Some(palette)
+            || iv.style.replace(Some(style)) != Some(style);
+        iv.lines.replace(lines.to_vec());
+        iv.hints.replace(hints);
+        self.setHidden(false);
+        if changed {
+            self.setNeedsDisplay(true);
+        }
+    }
+
+    /// The pane whose line is at `y` (the view's own, top-down); the last one below the end.
+    pub(super) fn pane_at(&self, y: f64) -> Option<u64> {
+        let lines = self.ivars().lines.borrow();
+        let index =
+            ((y / tabs::AGENT_ROW).floor().max(0.0) as usize).min(lines.len().checked_sub(1)?);
+        lines.get(index).map(|line| line.pane)
+    }
+
+    fn draw(&self) {
+        let iv = self.ivars();
+        let (Some(palette), Some(style)) = (iv.palette.get(), iv.style.get()) else {
+            return;
+        };
+        let lines = iv.lines.borrow();
+        let hints = iv.hints.borrow();
+        let bounds = self.bounds();
+        let width = bounds.size.width;
+        let bundled = lines.len() > 1;
+        // A tab's agents share a face; the picked line and a hovered one lie on it.
+        if bundled {
+            rounded(bounds, TAB_RADIUS, Tint::of(palette.title, 0.04), None);
+        }
+        for (index, line) in lines.iter().enumerate() {
+            let top = index as f64 * tabs::AGENT_ROW;
+            let row = NSRect::new(NSPoint::new(0.0, top), NSSize::new(width, tabs::AGENT_ROW));
+            let strong = iv.selected.get() && line.focused;
+            if strong {
+                let face = if bundled {
+                    Tint::of(palette.title, 0.0625)
+                } else {
+                    palette.selected
+                };
+                rounded(row, TAB_RADIUS, face, Some(palette.selected_line));
+            }
+            // The program's tile, where a row's stands, centred on the line.
+            let slot = glyph_slot();
+            NSGraphicsContext::saveGraphicsState_class();
+            let shift = NSAffineTransform::transform();
+            shift.translateXBy_yBy(
+                tabs::ROW_LEAD - slot.origin.x,
+                top + (tabs::AGENT_ROW - tabs::TILE_HEIGHT) / 2.0 - slot.origin.y,
+            );
+            shift.concat();
+            draw_tile(
+                Emblem {
+                    kind: line.kind,
+                    edges: 0,
+                    face: None,
+                },
+                style,
+                palette,
+            );
+            NSGraphicsContext::restoreGraphicsState_class();
+            let x = tabs::ROW_LEAD + tabs::TILE_WIDTH + tabs::ICON_GAP + 2.0;
+            let hint = hints.get(index).cloned().flatten();
+            let end = if hint.is_some() {
+                tabs::ROW_CROWDED
+            } else {
+                tabs::ROW_END
+            };
+            let room = (width - x - end).max(0.0);
+            draw_line(
+                &line.title,
+                NSRect::new(NSPoint::new(x, top + 4.5), NSSize::new(room, 18.0)),
+                super::CHIP_TEXT,
+                strong,
+                if strong { palette.title } else { palette.dim },
+            );
+            let tone = match line.tone {
+                AgentTone::Quiet => palette.dim,
+                AgentTone::Asking => palette.warning,
+                AgentTone::Failed => palette.error,
+            };
+            draw_line(
+                &line.status,
+                NSRect::new(NSPoint::new(x, top + 23.0), NSSize::new(room, 16.0)),
+                11.0,
+                false,
+                tone,
+            );
+            if let Some(hint) = hint {
+                draw_line(
+                    &hint,
+                    NSRect::new(
+                        NSPoint::new(width - tabs::CLOSE_INSET - tabs::CHIP_PAD, top + 12.0),
+                        NSSize::new(tabs::CHIP_PAD, 20.0),
+                    ),
+                    11.0,
+                    false,
+                    palette.dim,
+                );
+            }
+        }
+    }
+}
+
+/// One line of text in `rect` (top-down), cut with an ellipsis where it does not fit: `size`
+/// points, semibold when `strong`, else medium.
+fn draw_line(text: &str, rect: NSRect, size: f64, strong: bool, color: u32) {
+    // SAFETY: AppKit's constant font weights.
+    let weight = unsafe {
+        if strong {
+            NSFontWeightSemibold
+        } else {
+            NSFontWeightMedium
+        }
+    };
+    let font = NSFont::systemFontOfSize_weight(size, weight);
+    let paragraph = NSMutableParagraphStyle::new();
+    paragraph.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
+    let ink = Tint::of(color, 1.0).color();
+    // SAFETY: AppKit's constant attribute keys, alive for the process.
+    let keys: [&NSAttributedStringKey; 3] = unsafe {
+        [
+            NSFontAttributeName,
+            NSForegroundColorAttributeName,
+            NSParagraphStyleAttributeName,
+        ]
+    };
+    let values: [&AnyObject; 3] = [&font, &ink, &paragraph];
+    let attributes = NSDictionary::from_slices(&keys, &values);
+    // Centred up and down in its box, as a label's single line is.
+    let height = font.ascender() - font.descender();
+    let at = NSRect::new(
+        NSPoint::new(
+            rect.origin.x,
+            rect.origin.y + (rect.size.height - height) / 2.0,
+        ),
+        NSSize::new(rect.size.width, height),
+    );
+    // SAFETY: the dictionary holds a font, a colour and a paragraph style under their keys.
+    unsafe { NSString::from_str(text).drawInRect_withAttributes(at, Some(&attributes)) };
 }
 
 /// What stands in the column's list, top to bottom, for `count` tabs listed under `headings`:

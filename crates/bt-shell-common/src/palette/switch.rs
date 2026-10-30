@@ -135,6 +135,25 @@ pub fn tab_keys<K: Copy + Eq>(
         .collect()
 }
 
+/// [`tab_keys`] while the side column shows Activity, where the keys count agents: `listed` are
+/// the listed tabs with how many agents each holds, in the column's order, and a tab's hint is its
+/// first agent's key ([`tabs::agent_digit`]) — the palette lists tabs, the column agents, and the
+/// two give a tab the same number.
+pub fn agent_tab_keys<K: Copy>(listed: &[(K, usize)], mods: Option<Mods>) -> Vec<(K, String)> {
+    let Some(mods) = mods else {
+        return Vec::new();
+    };
+    let counts: Vec<usize> = listed.iter().map(|&(_, count)| count).collect();
+    listed
+        .iter()
+        .enumerate()
+        .filter_map(|(at, &(tab, _))| {
+            tabs::agent_digit(at, 0, &counts)
+                .map(|digit| (tab, crate::shortcuts::digit_glyphs(mods, digit)))
+        })
+        .collect()
+}
+
 /// The hint of the group at `position` among `count` groups (`None`: the ungrouped tabs, key 0):
 /// the digits the Select Group items carry, with Select Group's modifiers (`mods`; `None` when the
 /// file took them away and then no group has a hint).
@@ -743,6 +762,12 @@ mod tests {
         let closed = groups.groups()[1].id;
         groups.set_collapsed(closed, true);
         // The column: 6, then a's 1, b is closed and 6 is not its tab, then c's 4 and 5.
+        // In Activity a tab's key is its first agent's: two agents before take two keys.
+        assert_eq!(
+            agent_tab_keys(&[(7_u64, 2), (8, 1)], Some(Mods::CMD)),
+            [(7, "⌘1".to_owned()), (8, "⌘3".to_owned())]
+        );
+        assert!(agent_tab_keys(&[(7_u64, 2)], None).is_empty());
         let column = tab_keys(&groups, &order, View::Side, Some(Mods::CMD));
         assert_eq!(
             column,

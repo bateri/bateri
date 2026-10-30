@@ -45,7 +45,7 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::time::Duration;
 
-use bt_core::{ContentEdge, HostMark, MarkSubject, PaneUuid, Settings, Theme};
+use bt_core::{ContentEdge, HostMark, MarkSubject, PaneUuid, ProgramState, Settings, Theme};
 use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send};
@@ -67,7 +67,7 @@ use crate::restore::{SavedTab, Shape};
 use crate::sheets;
 use crate::split::{Axis, Direction, Placement, Removal, Tree};
 use crate::split_view::SplitView;
-use crate::tab_bar::{Emblem, Upload};
+use crate::tab_bar::{AgentLine, AgentTone, Emblem, Upload};
 use crate::tabs::{self, Card, CardCommand, CardPane, Finish, Indicator, Signals, Tally, Unseen};
 use crate::upload;
 use crate::uploader;
@@ -1719,6 +1719,48 @@ impl TerminalTab {
     /// shows a tick or a dot the program is the one that ended, as the chip's emblem has it
     /// ([`Self::emblem`]). A failed pane's exit code is read from its newest command's row — a
     /// `Term` round, which the card's own read allows.
+    /// The tab's agents for the side column's Activity: its panes whose programs report
+    /// themselves (`Session::program_report`), resting ones too, in tree order. What a line says
+    /// is the pane's own signals' word where they speak for the user — a finish or a failure not
+    /// yet seen — and the program's state otherwise: a result already seen reads as rest.
+    pub(crate) fn agents(&self) -> Vec<AgentLine> {
+        let panes = self.panes();
+        let (hidden, away) = (self.hidden(), self.away());
+        let focused = self.focused_pane().id();
+        self.container()
+            .tree()
+            .leaves()
+            .into_iter()
+            .filter_map(|id| {
+                let pane = panes.iter().find(|pane| pane.id() == id)?;
+                let session = pane.session()?;
+                let report = session.program_report()?;
+                let indicator = tabs::indicator(self.signals_of(pane, hidden, away));
+                let (word, tone) = match report.state {
+                    ProgramState::Blocked => ("Asking", AgentTone::Asking),
+                    ProgramState::Working => ("Running", AgentTone::Quiet),
+                    ProgramState::Done | ProgramState::Error | ProgramState::Idle => {
+                        match indicator {
+                            Some(Indicator::Finished) => ("Finished", AgentTone::Quiet),
+                            Some(Indicator::Failed) => ("Failed", AgentTone::Failed),
+                            _ => ("Idle", AgentTone::Quiet),
+                        }
+                    }
+                };
+                let held =
+                    bt_core::running_counter(report.held).unwrap_or_else(|| "now".to_owned());
+                Some(AgentLine {
+                    pane: id,
+                    kind: pane.program_kind(),
+                    title: report.title.unwrap_or_else(|| session.title()),
+                    status: format!("{word} · {held}"),
+                    tone,
+                    focused: id == focused,
+                })
+            })
+            .collect()
+    }
+
     pub(crate) fn card_panes(&self) -> Vec<CardPane> {
         let panes = self.panes();
         let (hidden, away) = (self.hidden(), self.away());

@@ -4429,6 +4429,9 @@ impl AppDelegate {
                         if window.column_hidden {
                             this.set_column_hidden(true);
                         }
+                        if window.activity {
+                            this.set_activity(true);
+                        }
                         this.show_at(frame);
                     })
                     .map(|this| built = Some(this))
@@ -4581,9 +4584,7 @@ impl AppDelegate {
                 // version before widths.
                 side_width: Some(window.side_width()).filter(|&side| side != tabs::SIDE_WIDTH),
                 column_hidden: window.column_hidden(),
-                // Activity is not a choice a window can make yet: written off, so the version
-                // moves once, for both flags.
-                activity: false,
+                activity: window.activity(),
                 groups,
             });
         }
