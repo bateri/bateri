@@ -190,12 +190,13 @@ test:
 # The tests `#[ignore]`d for something else than being heavy, by their paths: the race tier
 # (`make test-race`), the font inventories (`make scan`, `raster_digest`), the frame-loop
 # measurement hook, the askpass child the master tests start themselves and the tests that
-# need a local sshd and the reader's throughput benchmarks (`make throughput`, in release). A new
+# need a local sshd, the reader's throughput benchmarks (`make throughput`, in release) and the
+# file-receive measurement over a real kablo (`measure_file_receive`, release, by hand). A new
 # `#[ignore]` of that kind goes here too, or the heavy runs try it.
 NOT_HEAVY = --skip ::race_ --skip census::tests::census --skip raster_digest \
 	--skip wgpu_tests::offscreen_frame_loop --skip ssh_route::tests::askpass_child \
 	--skip ssh_route::tests::a_real_master_opens --skip ssh_route::tests::password_sshd_ \
-	--skip reader::throughput
+	--skip reader::throughput --skip kablo::local::tests::measure_file_receive
 
 # The libraries' heavy tests: those whose path holds one of AREA's words
 # (`AREA="child:: kablo::"`), every one without it. Nothing is built again: the same test

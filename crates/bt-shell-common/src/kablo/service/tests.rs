@@ -4059,3 +4059,34 @@ fn a_quit_that_ends_the_terminals_ends_both_of_a_panes() {
     assert_eq!(rig.world.mac().terminated(&carrier), Some(false));
     assert_eq!(rig.world.bridge().terminated(&server), Some(false));
 }
+
+#[test]
+fn a_reader_waits_at_a_shut_gate_until_it_is_opened_or_its_throttle_is_dropped() {
+    let gate = Arc::new(Gate::default());
+    let throttle = Throttle(Arc::clone(&gate));
+    let passed = |gate: &Arc<Gate>| {
+        let (tx, rx) = mpsc::channel();
+        let gate = Arc::clone(gate);
+        let _ = thread::spawn(move || {
+            gate.pass();
+            let _ = tx.send(());
+        });
+        rx
+    };
+
+    // Open: it goes through.
+    assert!(passed(&gate).recv_timeout(Duration::from_secs(5)).is_ok());
+    // Shut: it waits, and goes when the loop opens the gate.
+    gate.shut();
+    let waiting = passed(&gate);
+    assert!(waiting.recv_timeout(Duration::from_millis(150)).is_err());
+    gate.open();
+    assert!(waiting.recv_timeout(Duration::from_secs(5)).is_ok());
+    // Shut, and the connection let go of: the reader is not left waiting for a loop that no
+    // longer looks at it.
+    gate.shut();
+    let waiting = passed(&gate);
+    assert!(waiting.recv_timeout(Duration::from_millis(150)).is_err());
+    drop(throttle);
+    assert!(waiting.recv_timeout(Duration::from_secs(5)).is_ok());
+}

@@ -967,6 +967,17 @@ where
                                 && let Err(err) = self.pty_write(&mut state)
                             {
                                 eprintln!("bateri: PTY write failed: {err}");
+                                // A stream its owner has ended (it writes how the program
+                                // ended before it closes the connection) fails to be written
+                                // because the program is gone: that is the program's end, and
+                                // the pane is told it, not left with a reader that stopped.
+                                if let Some(tty::ChildEvent::Exited(Some(status))) =
+                                    self.pty.next_child_event()
+                                {
+                                    self.event_proxy.send_event(Event::ChildExit(status));
+                                    self.terminal.lock().exit();
+                                    self.event_proxy.send_event(Event::Wakeup);
+                                }
                                 break 'event_loop;
                             }
                         }

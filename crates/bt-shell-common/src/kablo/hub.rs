@@ -814,6 +814,20 @@ impl Hub {
         }
     }
 
+    /// How many of the bytes a holder typed wait for the server to take the ones before them
+    /// ([`Client::input_waiting`]); none for a holder that is bound to no terminal.
+    pub fn input_waiting(&self, hold: HoldId) -> usize {
+        self.holds
+            .get(&hold)
+            .and_then(|entry| entry.bound.as_ref())
+            .and_then(|binding| {
+                self.clients
+                    .get(&binding.account)
+                    .map(|client| client.input_waiting(&binding.terminal))
+            })
+            .unwrap_or(0)
+    }
+
     /// The holder's pane changed size: its terminal's is the same from now on (a request that
     /// is still waiting has it for when it is started).
     pub fn resize(&mut self, hold: HoldId, size: Size) {

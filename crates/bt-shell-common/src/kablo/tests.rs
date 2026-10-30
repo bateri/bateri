@@ -1025,19 +1025,173 @@ fn typing_goes_to_the_program_in_order_and_is_refused_where_it_cannot_arrive() {
     let mut typed = b"ls\r".to_vec();
     typed.extend_from_slice(&paste);
     assert_eq!(rig.bridge.typed(&terminal), typed);
-    let chunks = rig
-        .bridge
-        .received
-        .iter()
-        .filter(|p| matches!(&p.message, Message::Input(data) if data.len() <= INPUT_CHUNK))
-        .count();
-    assert_eq!(chunks, 1 + 3);
+    // No message is larger than the protocol is asked to carry, and a server that answers at
+    // once is never made to wait.
+    assert!(
+        rig.bridge
+            .received
+            .iter()
+            .filter_map(|p| match &p.message {
+                Message::Input(data) => Some(data.len()),
+                _ => None,
+            })
+            .all(|len| len <= INPUT_CHUNK)
+    );
+    assert_eq!(rig.client.input_waiting(&terminal), 0);
 
     rig.drop_connection();
     assert!(
         !rig.client.input(&terminal, b"x"),
         "the line would run unseen later"
     );
+}
+
+/// The most bytes of a terminal's input that may be on the way (the contract, spelled out).
+const WINDOW: usize = 256 * 1024;
+
+/// The bytes of the `input` messages the bridge was sent for a terminal.
+fn typed_so_far(rig: &Rig, terminal: &SessionId) -> usize {
+    rig.bridge.typed(terminal).len()
+}
+
+#[test]
+fn typing_beyond_the_window_waits_here_and_goes_as_the_terminal_takes_it() {
+    let (mut rig, terminal) = Rig::with_terminal(Age::Current, "t1");
+    rig.bridge.stall();
+    let paste: Vec<u8> = (0..3 * WINDOW + 1000).map(|n| (n % 251) as u8).collect();
+    assert!(rig.client.input(&terminal, &paste));
+    rig.pump();
+    // One window is on the way, with one question after it; the rest waits here.
+    assert_eq!(typed_so_far(&rig, &terminal), WINDOW);
+    assert_eq!(rig.bridge.held(), 1);
+    assert_eq!(rig.client.input_waiting(&terminal), paste.len() - WINDOW);
+
+    // The terminal takes it: the next window goes, and not before.
+    rig.bridge.take(1);
+    rig.pump();
+    assert_eq!(typed_so_far(&rig, &terminal), 2 * WINDOW);
+    assert_eq!(rig.bridge.held(), 1);
+    rig.bridge.take(1);
+    rig.pump();
+    rig.bridge.take(1);
+    rig.pump();
+    assert_eq!(rig.client.input_waiting(&terminal), 0);
+    assert_eq!(rig.bridge.typed(&terminal), paste, "all of it, in order");
+    // Never more than a window was on the way: each question covers at most one.
+    let mut asked = 0;
+    let mut covered = 0;
+    for packet in &rig.bridge.received {
+        match &packet.message {
+            Message::Input(data) => covered += data.len(),
+            Message::Ping(_) if packet.session.is_some() => {
+                asked += 1;
+                assert!(covered <= WINDOW, "{covered} bytes in one batch");
+                covered = 0;
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(asked, 4);
+}
+
+#[test]
+fn a_key_typed_while_the_window_has_room_is_not_made_to_wait() {
+    let (mut rig, terminal) = Rig::with_terminal(Age::Current, "t1");
+    rig.bridge.stall();
+    assert!(rig.client.input(&terminal, b"l"));
+    rig.pump();
+    assert_eq!(rig.bridge.typed(&terminal), b"l");
+    // The terminal has not taken the first key; the second goes all the same.
+    assert!(rig.client.input(&terminal, b"s"));
+    rig.pump();
+    assert_eq!(rig.bridge.typed(&terminal), b"ls");
+    assert_eq!(rig.client.input_waiting(&terminal), 0);
+}
+
+#[test]
+fn a_lost_connection_forgets_what_was_on_the_way_and_what_waited() {
+    let (mut rig, terminal) = Rig::with_terminal(Age::Current, "t1");
+    rig.bridge.stall();
+    let paste = vec![b'x'; 2 * WINDOW];
+    assert!(rig.client.input(&terminal, &paste));
+    rig.pump();
+    assert!(rig.client.input_waiting(&terminal) > 0);
+
+    rig.drop_connection();
+    assert_eq!(rig.client.input_waiting(&terminal), 0, "not typed late");
+    rig.redial();
+    rig.pump();
+    assert!(rig.client.is_attached(&terminal), "{:?}", rig.events);
+    // The window is empty on the new connection: a key goes at once.
+    let before = typed_so_far(&rig, &terminal);
+    assert!(rig.client.input(&terminal, b"k"));
+    rig.pump();
+    assert_eq!(typed_so_far(&rig, &terminal), before + 1);
+}
+
+#[test]
+fn an_answer_that_is_not_one_of_ours_gives_the_window_nothing() {
+    let (mut rig, terminal) = Rig::with_terminal(Age::Current, "t1");
+    rig.bridge.stall();
+    let paste = vec![b'x'; 2 * WINDOW];
+    assert!(rig.client.input(&terminal, &paste));
+    rig.pump();
+    let waiting = rig.client.input_waiting(&terminal);
+    for token in [vec![], vec![1, 2, 3], 99_999u64.to_le_bytes().to_vec()] {
+        rig.bridge
+            .inject(&Packet::about(terminal.clone(), Message::Pong(token)));
+        rig.bridge
+            .inject(&Packet::connection(Message::Pong(Vec::new())));
+    }
+    rig.pump();
+    assert_eq!(rig.client.input_waiting(&terminal), waiting);
+    assert_eq!(typed_so_far(&rig, &terminal), WINDOW);
+}
+
+#[test]
+fn input_the_server_could_not_hold_stops_what_waits_and_is_told() {
+    let (mut rig, terminal) = Rig::with_terminal(Age::Current, "t1");
+    rig.bridge.stall();
+    let paste = vec![b'x'; 2 * WINDOW];
+    assert!(rig.client.input(&terminal, &paste));
+    rig.pump();
+    // The bridge's backlog was full: something was dropped and the error does not say what.
+    rig.bridge.inject(&Packet::about(
+        terminal.clone(),
+        Message::Error {
+            code: ErrorCode::UNAVAILABLE,
+            text: "too many requests are waiting".to_owned(),
+        },
+    ));
+    rig.pump();
+    assert!(rig.events.iter().any(|e| matches!(
+        e,
+        Event::Failed { terminal: Some(t), code, .. }
+            if *t == terminal && *code == ErrorCode::UNAVAILABLE
+    )));
+    assert_eq!(
+        rig.client.input_waiting(&terminal),
+        0,
+        "nothing goes after the hole"
+    );
+    // The question the error may have been about is not waited for.
+    let before = typed_so_far(&rig, &terminal);
+    assert!(rig.client.input(&terminal, b"k"));
+    rig.pump();
+    assert_eq!(typed_so_far(&rig, &terminal), before + 1);
+}
+
+#[test]
+fn the_input_the_program_has_not_read_is_dropped_here_as_well() {
+    let (mut rig, terminal) = Rig::with_terminal(Age::Current, "t1");
+    rig.bridge.stall();
+    let paste = vec![b'x'; 2 * WINDOW];
+    assert!(rig.client.input(&terminal, &paste));
+    rig.pump();
+    assert!(rig.client.drop_input(&terminal));
+    assert_eq!(rig.client.input_waiting(&terminal), 0);
+    rig.pump();
+    assert_eq!(typed_so_far(&rig, &terminal), WINDOW);
 }
 
 #[test]

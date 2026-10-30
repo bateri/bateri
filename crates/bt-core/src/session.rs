@@ -14333,6 +14333,39 @@ mod tests {
         wait_text(&terminal.session, "bye");
     }
 
+    /// The owner ends a stream the pane is writing into: it writes how the program ended and
+    /// closes the connection, and the pane's next write fails before the signal is read. That
+    /// is the program's end, and the pane is told it; a reader that stopped on the failed write
+    /// alone would leave the pane with a program that never ends.
+    #[test]
+    fn a_streamed_session_whose_stream_is_closed_under_a_write_is_told_the_program_ended() {
+        use std::io::Write as _;
+        let mut terminal = streamed();
+        terminal.terminal.write_all(b"up\r\n").expect("written");
+        wait_text(&terminal.session, "up");
+        // More typed than the stream holds, and nobody reads it.
+        terminal.session.write(&vec![b'x'; 4 << 20]);
+        terminal.status.code(1);
+        terminal
+            .terminal
+            .shutdown(std::net::Shutdown::Both)
+            .expect("shutdown");
+        drop(std::mem::replace(
+            &mut terminal.terminal,
+            std::os::unix::net::UnixStream::pair()
+                .expect("socketpair")
+                .0,
+        ));
+        // The exit signal is not given: only the failed write says the stream is over.
+        assert_eq!(
+            terminal.wake.wait_exit(Duration::from_secs(8)),
+            Some(Some(1))
+        );
+        wait_until("the reader to end", Duration::from_secs(8), || {
+            !terminal.session.reader_alive()
+        });
+    }
+
     /// The program of a streamed pane ends having been sent a view's words (the pane has no
     /// master to flush): the owner of the terminal is asked to drop what the program did not
     /// read. A pane whose program was sent none asks nothing.

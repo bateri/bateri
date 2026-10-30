@@ -295,6 +295,8 @@ of every installed copy. A version without a section is not released.
 
 ### Fixed
 
+- **A long paste, or a file a program receives, in a terminal that runs on a server no longer loses what it typed.** Input that came faster than the program on the other end read it used to be dropped on the way without a word, so a transfer never finished. bateri now sends a terminal's input a window at a time, waits for the server to say the program's terminal took it, and holds the rest back (the pane waits instead of bateri keeping it in memory). Needs the next kablo release on the server; with an older kablo a flood the server cannot hold ends the terminal with the server's words in it instead of stalling it.
+
 - **A terminal shown again after a lot of output keeps its commands and its prompt.** When
   bateri came back to a terminal that had printed more than kablo keeps of it (a long build,
   a program like `btop` left running for an hour), the terminal came back as plain text: no

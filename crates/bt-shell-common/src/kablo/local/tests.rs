@@ -1004,3 +1004,271 @@ fn a_pane_over_a_real_kablo_comes_back_to_its_terminal_with_its_screen_and_the_p
     drop(session);
     service.stop();
 }
+
+// ─── a measurement ───────────────────────────────────────────────────────
+
+/// What a pane does with `view_changed`: a flag, taken on the pane's own turn.
+#[derive(Default)]
+struct PaneFlag {
+    pending: Arc<std::sync::atomic::AtomicBool>,
+    /// The program's end was told to the pane ([`bt_core::Wake::child_exit`]).
+    exited: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl bt_core::Wake for PaneFlag {
+    fn wake(&self) {}
+    fn child_exit(&self, _: Option<i32>) {
+        self.exited
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+    fn copy_to_clipboard(&self, _: String) {}
+    fn title_changed(&self) {}
+    fn search_changed(&self) {}
+    fn command_started(&self) {}
+    fn phase_edge(&self) {}
+    fn remote_command_edge(&self) {}
+    fn mirror_changed(&self) {}
+    fn environment_changed(&self) {}
+    fn remote_up(&self) {}
+    fn remote_typed(&self) {}
+    fn link_hover_lost(&self) {}
+    fn pointer_changed(&self) {}
+    fn blocks_changed(&self) {}
+    fn unseen_changed(&self) {}
+    fn program_status_changed(&self) {}
+    fn notification(&self) {}
+    fn view_changed(&self) {
+        self.pending
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+}
+
+/// The options of a pane whose program is `demopen --files` (the example, built next to the test
+/// binary), run by `/bin/sh` with job control as the view tests do.
+fn demopen_options(home: &Path) -> bt_core::SessionOptions {
+    let program = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent()?.parent().map(Path::to_path_buf))
+        .map(|profile| profile.join("examples").join("demopen"))
+        .expect("the path of the test binary");
+    assert!(program.is_file(), "build it: {}", program.display());
+    let mut views = bt_core::pencere::ViewOptions::new("bateri-test", "0.0.0");
+    views.native_entry_limit = Some(pencere_sandbox::ModuleLimits::default().component as u64);
+    let mut options = plain_options("", home);
+    options.command = Some((
+        "/bin/sh".to_owned(),
+        vec![
+            "-c".to_owned(),
+            "set -m; \"$1\" --files".to_owned(),
+            "sh".to_owned(),
+            program.display().to_string(),
+        ],
+    ));
+    options.rows = 10;
+    options.views = Some(views);
+    options
+}
+
+/// Has the program receive `size` bytes of a file the pane gives it, and says how long it took
+/// (from the call to its answer), the way the pane's turn drives the session.
+fn receive_time(
+    label: &str,
+    session: &Arc<bt_core::Session>,
+    pending: &std::sync::atomic::AtomicBool,
+    exited: &std::sync::atomic::AtomicBool,
+    dir: &Path,
+    source: &Path,
+    content: &[u8],
+) -> Duration {
+    use bt_core::pencere::{Action, FileGrant};
+    use std::sync::atomic::Ordering;
+
+    let files = crate::native_view::ViewFiles::new(
+        Arc::new(Arc::downgrade(session)),
+        Arc::new(|_: &Path| {}),
+    );
+    let mut started = false;
+    let mut said: Vec<String> = Vec::new();
+    let turn = |said: &mut Vec<String>, started: &mut bool| {
+        if !pending.swap(false, Ordering::AcqRel) {
+            return;
+        }
+        for action in session.take_view_actions() {
+            match action {
+                Action::StartView(_) => *started = true,
+                Action::ToView(text) => said.push(text),
+                Action::ReadFile {
+                    read,
+                    handle,
+                    offset,
+                    length,
+                } => files.read(read, &handle, offset, length),
+                _ => {}
+            }
+        }
+    };
+    let begun = Instant::now();
+    while !started {
+        turn(&mut said, &mut started);
+        assert!(begun.elapsed() < Duration::from_secs(30), "no view started");
+        thread::sleep(Duration::from_millis(1));
+    }
+    eprintln!("[{label}] view started after {:?}", begun.elapsed());
+    let given = crate::native_view::GivenFile::of(source).expect("a source");
+    let handle = session
+        .grant_file(&FileGrant { size: given.size })
+        .expect("a handle");
+    files.keep_given(&handle, given);
+    let into = dir.join(format!("received-{label}"));
+    let request = format!(
+        r#"{{"call":{{"id":1,"method":"receive","params":{{"handle":"{handle}","to":"{}"}}}}}}"#,
+        into.display()
+    );
+    let deadline: u64 = std::env::var("BT_MEASURE_TIMEOUT_S")
+        .ok()
+        .and_then(|text| text.parse().ok())
+        .unwrap_or(600);
+    let since = Instant::now();
+    assert!(session.module_message(&request), "the view is open");
+    while !said
+        .iter()
+        .any(|text| text.contains(r#""response":{"id":1,"#))
+    {
+        turn(&mut said, &mut started);
+        // A terminal that ends under the transfer (the server refused its input) is a visible
+        // end, not a wait.
+        if !session.reader_alive() {
+            // What the view is told of the end comes a moment after the reader stopped.
+            for _ in 0..200 {
+                turn(&mut said, &mut started);
+                thread::sleep(Duration::from_millis(5));
+            }
+            panic!(
+                "[{label}] the terminal ended before the file was received, after {:?}; the \
+                 pane was told the program ended: {}; the view saw: {said:?}",
+                since.elapsed(),
+                exited.load(Ordering::Acquire)
+            );
+        }
+        assert!(
+            since.elapsed() < Duration::from_secs(deadline),
+            "[{label}] not received in time"
+        );
+        thread::sleep(Duration::from_millis(1));
+    }
+    let took = since.elapsed();
+    assert!(
+        std::fs::read(&into).is_ok_and(|bytes| bytes == content),
+        "[{label}] not as given"
+    );
+    took
+}
+
+/// Writes the figures of one run.
+fn report(label: &str, took: Duration, bytes: usize) {
+    eprintln!(
+        "MEASURE {label}: {} MiB in {:.2} s = {:.2} MiB/s",
+        bytes >> 20,
+        took.as_secs_f64(),
+        (bytes as f64 / 1_048_576.0) / took.as_secs_f64()
+    );
+}
+
+/// The same file, received by the same program, through a PTY of the pane's own and through a
+/// terminal of a real kablo. Run in release, with the example built first
+/// (`cargo build --release -p bt-core --example demopen`):
+/// `cargo test --release -p bt-shell-common --lib measure_file_receive -- --ignored --nocapture`.
+/// `BT_MEASURE_MIB` (50), `BT_MEASURE_MODES` (`direct,kablo`) and `BT_MEASURE_TIMEOUT_S` (600) set
+/// the size, the runs and the wait. The kablo run does not finish while the input path has no
+/// back-pressure: the bytes the pane writes faster than the terminal reads are dropped on the way
+/// (`BUSY` from the bridge, `INPUT_FULL` from the relay), and the program waits for them.
+#[test]
+#[ignore = "measurement: starts real processes and moves tens of megabytes"]
+fn measure_file_receive_direct_pty_and_kablo() {
+    let Some(bundle) = release() else {
+        eprintln!("SKIPPED: there is no kablo release to run (../kablo/dist or KABLO_DIST)");
+        return;
+    };
+    let mib: usize = std::env::var("BT_MEASURE_MIB")
+        .ok()
+        .and_then(|text| text.parse().ok())
+        .unwrap_or(50);
+    let size = mib << 20;
+    let mut ground = Ground::new("measure");
+    let source = ground.root.join("given");
+    let content: Vec<u8> = (0..size)
+        .map(|at| u8::try_from(at % 251).unwrap_or(0))
+        .collect();
+    std::fs::write(&source, &content).expect("a file");
+    let modes = std::env::var("BT_MEASURE_MODES").unwrap_or_else(|_| "direct,kablo".to_owned());
+
+    if modes.contains("direct") {
+        let wake = PaneFlag::default();
+        let pending = Arc::clone(&wake.pending);
+        let exited = Arc::clone(&wake.exited);
+        let session = Arc::new(
+            bt_core::Session::spawn(demopen_options(&ground.home), Arc::new(wake))
+                .expect("a session"),
+        );
+        let took = receive_time(
+            "direct",
+            &session,
+            &pending,
+            &exited,
+            &ground.root,
+            &source,
+            &content,
+        );
+        report("direct PTY (Session::spawn)", took, size);
+        session.shutdown();
+        let _ = std::fs::remove_file(ground.root.join("received-direct"));
+    }
+
+    if modes.contains("kablo") {
+        let service_dir = ground.root.join("svc");
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&service_dir)
+            .expect("the service's directory");
+        let kablo =
+            kablo_proto::install::install_path_in(&ground.home.to_string_lossy(), bundle.version())
+                .expect("a path");
+        let backend = RealMac {
+            bundle,
+            home: ground.home.clone(),
+            sockets: ground.sockets.clone(),
+        };
+        let ledger = Arc::new(Ledger::memory());
+        let service = Service::start(&service_dir, Arc::new(backend), Arc::clone(&ledger))
+            .expect("a service");
+        let options = demopen_options(&ground.home);
+        let (spec, term_size) = new_session(&options.child_launch(), 1000);
+        let pane = options.pane_uuid.clone().expect("a pane");
+        let stream = service
+            .open_local(&pane, spec, term_size, Duration::from_secs(30))
+            .expect("a terminal of this Mac");
+        let id = ledger.terminals_of(ACCOUNT).remove(0);
+        ground.kept = Some(PathBuf::from(kablo));
+        ground.made.push(id);
+        let wake = PaneFlag::default();
+        let pending = Arc::clone(&wake.pending);
+        let exited = Arc::clone(&wake.exited);
+        let session = Arc::new(
+            bt_core::Session::streamed(options, Arc::new(wake), stream)
+                .expect("a session over the stream"),
+        );
+        let took = receive_time(
+            "kablo",
+            &session,
+            &pending,
+            &exited,
+            &ground.root,
+            &source,
+            &content,
+        );
+        report("kablo terminal (Session::streamed)", took, size);
+        service.end_all(std::slice::from_ref(&pane), Duration::from_secs(10));
+        drop(session);
+        service.stop();
+    }
+}

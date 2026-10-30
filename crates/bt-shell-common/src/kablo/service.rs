@@ -116,7 +116,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -835,10 +835,66 @@ enum Out {
     Close,
 }
 
+/// More typed into a pane than the client has put on the wire ([`Client::input_waiting`]) and
+/// the pane's connection is not read: the pane's writer waits for the socket, and the pane's
+/// own flow control reaches whatever it is writing. About four windows
+/// ([`crate::kablo::INPUT_WINDOW`]), so that a burst the window cannot take at once is held here and
+/// not spread over the memory of the process.
+const INPUT_HOLD: usize = 4 * crate::kablo::INPUT_WINDOW;
+
+/// Where a pane's connection that is not being read is read again: one window waits.
+const INPUT_RESUME: usize = crate::kablo::INPUT_WINDOW;
+
+/// Whether a holder's reader thread may read: the loop shuts it when too much of what the
+/// holder typed waits for the server, and opens it when the server has taken enough.
+#[derive(Default)]
+struct Gate {
+    shut: Mutex<bool>,
+    opened: Condvar,
+}
+
+impl Gate {
+    fn shut(&self) {
+        *self.shut.lock().unwrap_or_else(PoisonError::into_inner) = true;
+    }
+
+    fn open(&self) {
+        *self.shut.lock().unwrap_or_else(PoisonError::into_inner) = false;
+        self.opened.notify_all();
+    }
+
+    fn is_shut(&self) -> bool {
+        *self.shut.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Returns when the gate is open.
+    fn pass(&self) {
+        let mut shut = self.shut.lock().unwrap_or_else(PoisonError::into_inner);
+        while *shut {
+            shut = self
+                .opened
+                .wait(shut)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+}
+
+/// A holder's gate, opened when the holder's connection is let go of, so that a reader that
+/// waits at it goes on to find the end.
+struct Throttle(Arc<Gate>);
+
+impl Drop for Throttle {
+    fn drop(&mut self) {
+        self.0.open();
+    }
+}
+
 /// One holder's connection as the loop keeps it.
 struct Conn {
     peer: Peer,
     out: Sender<Out>,
+    /// Whether the holder's reader may read ([`INPUT_HOLD`]).
+    throttle: Throttle,
     /// The holder is a pane of this Mac: how its terminal's program ended is written here when
     /// the hub has said its last word, before the connection closes.
     status: Option<Arc<StreamExit>>,
@@ -1539,11 +1595,28 @@ impl Core {
         }
     }
 
+    /// Shuts a holder's connection to reading while too much of what it typed waits for the
+    /// server, and opens it again when little does.
+    fn meter(&self, hold: HoldId) {
+        let Some(conn) = self.conns.get(&hold) else {
+            return;
+        };
+        let waiting = self.hub.input_waiting(hold);
+        if waiting >= INPUT_HOLD {
+            conn.throttle.0.shut();
+        } else if waiting <= INPUT_RESUME {
+            conn.throttle.0.open();
+        }
+    }
+
     fn handle(&mut self, message: Msg) {
         let now = Instant::now();
         match message {
             Msg::Accepted(stream, peer) => self.accepted(stream, peer),
-            Msg::Hold(hold, bytes) => self.hub.push(hold, &bytes),
+            Msg::Hold(hold, bytes) => {
+                self.hub.push(hold, &bytes);
+                self.meter(hold);
+            }
             Msg::HoldEof(hold) => {
                 self.hub.closed(hold);
             }
@@ -1734,11 +1807,21 @@ impl Core {
             Some((status, after)) => (Some(status), Some(after)),
             None => (None, None),
         };
-        self.conns.insert(hold, Conn { peer, out, status });
+        let gate = Arc::new(Gate::default());
+        let throttle = Throttle(Arc::clone(&gate));
+        self.conns.insert(
+            hold,
+            Conn {
+                peer,
+                out,
+                throttle,
+                status,
+            },
+        );
         let tx = self.shared.tx.clone();
         let _ = thread::Builder::new()
             .name("ssh-hold reads".into())
-            .spawn(move || hold_reader(hold, reader, &tx));
+            .spawn(move || hold_reader(hold, reader, &tx, &gate));
         let _ = thread::Builder::new()
             .name("ssh-hold writes".into())
             .spawn(move || hold_writer(stream, &written, after));
@@ -1748,6 +1831,16 @@ impl Core {
     /// the hub's events are answered, bytes go out, bridges are started or
     /// let go of — until nothing changes.
     fn settle(&mut self) {
+        // The server may have taken what held a pane's connection shut.
+        let shut: Vec<HoldId> = self
+            .conns
+            .iter()
+            .filter(|(_, conn)| conn.throttle.0.is_shut())
+            .map(|(hold, _)| *hold)
+            .collect();
+        for hold in shut {
+            self.meter(hold);
+        }
         self.kill_due(Instant::now());
         self.finish_surveys(Instant::now());
         self.finish_pictures(Instant::now());
@@ -3451,9 +3544,12 @@ fn prepare(
 
 // ─── the threads that carry bytes ────────────────────────────────────────
 
-fn hold_reader(hold: HoldId, mut stream: UnixStream, tx: &Sender<Msg>) {
+fn hold_reader(hold: HoldId, mut stream: UnixStream, tx: &Sender<Msg>, gate: &Gate) {
     let mut buffer = vec![0u8; CHUNK];
     loop {
+        // A pane that types faster than the server takes is not read: its socket fills and
+        // its writer waits, instead of the process keeping what it said.
+        gate.pass();
         match stream.read(&mut buffer) {
             Ok(0) | Err(_) => break,
             Ok(n) => {

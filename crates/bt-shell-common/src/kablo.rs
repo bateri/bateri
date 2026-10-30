@@ -117,6 +117,20 @@ pub const OPEN_WAIT: Duration = Duration::from_secs(20);
 /// order (the protocol's own limit is a megabyte).
 const INPUT_CHUNK: usize = 256 * 1024;
 
+/// The most bytes of one terminal's input that are on the way to its program without the
+/// server having said the terminal took them. Past it the rest waits in the client, in order,
+/// and goes as the server answers (see [`Client::input`]).
+///
+/// Neither the bridge (which keeps a megabyte of what it has not passed on) nor the session
+/// (a megabyte of what its program has not read) may be asked to hold more than they can: they
+/// drop what does not fit, and say so without saying what, so a sender that does not hold back
+/// loses input without knowing which. A quarter of a megabyte leaves each of them room for the
+/// window and for what other clients of the session type meanwhile, and is large enough that a
+/// round trip of the slowest link (a second, at a few megabytes a second) does not stop a
+/// paste: the window is also what a transfer moves per round trip, so the figure is a cost to
+/// throughput on a slow link, and `INPUT_CHUNK` is its upper bound.
+pub const INPUT_WINDOW: usize = 256 * 1024;
+
 /// How long to wait for the signature of the server's hello before giving up
 /// on what has piled up: the noise the protocol skips, and the hello itself.
 const HANDSHAKE_LIMIT: usize = NOISE_LIMIT + 16;
@@ -467,6 +481,21 @@ struct Terminal {
     /// The first attach holds the answers back itself ([`Attach::replaying`]) and has not been
     /// served yet.
     replay_wanted: bool,
+    /// What is typed into it and has not got to the program yet.
+    input: Input,
+}
+
+/// The input of one terminal in the client's care: how much is on the way, and what waits for
+/// the server to say the terminal took what went before ([`INPUT_WINDOW`]).
+#[derive(Default)]
+struct Input {
+    /// Bytes sent that no answer has covered yet.
+    in_flight: usize,
+    /// The questions asked of the server, oldest first: the token each carried (the `pong`
+    /// brings it back) and the bytes it covers.
+    asked: VecDeque<(u64, usize)>,
+    /// Bytes that wait for the window, in the order they were typed.
+    waiting: VecDeque<u8>,
 }
 
 impl Terminal {
@@ -488,6 +517,7 @@ impl Terminal {
             retry: None,
             unavailable: 0,
             replay_wanted: attach.replaying,
+            input: Input::default(),
         }
     }
 }
@@ -516,6 +546,9 @@ pub struct Client {
     ping: Option<Instant>,
     /// What the app takes from programs on the server ([`mail`]).
     mail: mail::Mail,
+    /// The number the next question about input carries. Never reused, so that an answer to a
+    /// question of a connection that is gone cannot be taken for one of this one.
+    token: u64,
 }
 
 impl Client {
@@ -540,6 +573,7 @@ impl Client {
             heard: now,
             ping: None,
             mail: mail::Mail::default(),
+            token: 0,
         }
     }
 
@@ -834,6 +868,7 @@ impl Client {
                 terminal.phase = Phase::Detached;
             }
             terminal.retry = None;
+            terminal.input = Input::default();
         }
         if attached && self.link.is_live() {
             self.queue(Packet::about(id.clone(), Message::Detach));
@@ -841,10 +876,16 @@ impl Client {
     }
 
     /// Types `bytes` into the program, exactly as they are. `false` when they
-    /// were not sent — the connection is not live or the terminal is not
+    /// were not accepted — the connection is not live or the terminal is not
     /// attached — and the owner should say so (a bell), not keep them: a line
     /// typed minutes ago and sent when the connection comes back runs in a
     /// place the user no longer looks at.
+    ///
+    /// What the server has not been asked to hold is bounded ([`INPUT_WINDOW`]): the bytes
+    /// that fit go at once, each batch followed by a `ping` of the terminal's, which the
+    /// server answers once the program's terminal has taken the batch; the rest waits here,
+    /// in order, and goes as the answers come ([`Client::input_waiting`] says how much). A
+    /// key typed while nothing is in flight goes without waiting for anything.
     pub fn input(&mut self, id: &SessionId, bytes: &[u8]) -> bool {
         let streaming = self
             .terminals
@@ -853,10 +894,85 @@ impl Client {
         if !streaming || !self.link.is_live() {
             return false;
         }
-        for chunk in bytes.chunks(INPUT_CHUNK) {
-            self.queue(Packet::about(id.clone(), Message::Input(chunk.to_vec())));
+        if let Some(terminal) = self.terminals.get_mut(id) {
+            terminal.input.waiting.extend(bytes);
         }
+        self.send_input(id);
         true
+    }
+
+    /// How many bytes typed into a terminal wait here for the server to take the ones before
+    /// them. The owner that feeds [`Client::input`] from a stream it can stop reading stops at
+    /// a bound of its own on this, and reads again when it is lower.
+    pub fn input_waiting(&self, id: &SessionId) -> usize {
+        self.terminals.get(id).map_or(0, |t| t.input.waiting.len())
+    }
+
+    /// Sends what waits for a terminal, as far as the window lets it.
+    fn send_input(&mut self, id: &SessionId) {
+        if !self.link.is_live() {
+            return;
+        }
+        let Some(terminal) = self.terminals.get_mut(id) else {
+            return;
+        };
+        if !matches!(terminal.phase, Phase::Asked | Phase::Attached) {
+            terminal.input = Input::default();
+            return;
+        }
+        let input = &mut terminal.input;
+        let mut packets = Vec::new();
+        let mut batch = 0;
+        while !input.waiting.is_empty() && input.in_flight < INPUT_WINDOW {
+            let n = input
+                .waiting
+                .len()
+                .min(INPUT_CHUNK)
+                .min(INPUT_WINDOW - input.in_flight);
+            let chunk: Vec<u8> = input.waiting.drain(..n).collect();
+            input.in_flight += n;
+            batch += n;
+            packets.push(Packet::about(id.clone(), Message::Input(chunk)));
+        }
+        if batch == 0 {
+            return;
+        }
+        let token = self.token;
+        self.token = self.token.wrapping_add(1);
+        input.asked.push_back((token, batch));
+        packets.push(Packet::about(
+            id.clone(),
+            Message::Ping(token.to_le_bytes().to_vec()),
+        ));
+        for packet in packets {
+            self.queue(packet);
+        }
+    }
+
+    /// The server answered a question about input ([`Client::input`]): everything it covers,
+    /// and what was asked before it, has been taken by the terminal. An answer that is not one
+    /// of ours (the pulse's, or one from before a connection was lost) is let go.
+    fn input_taken(&mut self, session: Option<SessionId>, token: &[u8]) {
+        let Ok(bytes) = <[u8; 8]>::try_from(token) else {
+            return;
+        };
+        let token = u64::from_le_bytes(bytes);
+        let found = self.terminals.iter_mut().find(|(id, terminal)| {
+            session.as_ref().is_none_or(|session| session == *id)
+                && terminal.input.asked.iter().any(|(t, _)| *t == token)
+        });
+        let Some((id, terminal)) = found else {
+            return;
+        };
+        let id = id.clone();
+        let input = &mut terminal.input;
+        while let Some((asked, covered)) = input.asked.pop_front() {
+            input.in_flight = input.in_flight.saturating_sub(covered);
+            if asked == token {
+                break;
+            }
+        }
+        self.send_input(&id);
     }
 
     /// The owner's terminal changed size. Remembered, so that an attach after a
@@ -967,6 +1083,10 @@ impl Client {
         if !streaming || !self.link.is_live() {
             return false;
         }
+        // What waits here is what the program has not read as well: it goes the same way.
+        if let Some(terminal) = self.terminals.get_mut(id) {
+            terminal.input.waiting.clear();
+        }
         self.queue(Packet::about(id.clone(), Message::DropInput));
         true
     }
@@ -1010,6 +1130,9 @@ impl Client {
         self.ping = None;
         for terminal in self.terminals.values_mut() {
             terminal.picture_open = false;
+            // Nothing that was sent is going to be answered on the next connection, and what
+            // waited is not sent late (see [`Client::input`]).
+            terminal.input = Input::default();
         }
     }
 
@@ -1258,6 +1381,7 @@ impl Client {
                 }
                 terminal.phase = Phase::Ended(exit);
                 terminal.picture_open = false;
+                terminal.input = Input::default();
                 self.events.push_back(Event::Ended { terminal: id, exit });
             }
             Message::TerminalState(state) => {
@@ -1309,6 +1433,7 @@ impl Client {
             Message::FeaturesReply(features) => self.mail.said_mailbox(features.mailbox),
             Message::Ticket(ticket) => self.ticketed(session, ticket),
             Message::Error { code, text } => self.handle_error(session, code, &text, now),
+            Message::Pong(token) => self.input_taken(session, &token),
             _ => {}
         }
     }
@@ -1359,6 +1484,22 @@ impl Client {
             return;
         };
         let phase = self.terminals.get(&id).map(|t| t.phase);
+        // Input was lost on the way, and the error does not say which (see [`Client::input`]):
+        // what comes after it would be typed after a hole, so it is not sent. A server that
+        // could not take the input still answers the question after it, and the answer
+        // returns the window; one that could not take the question does not (`unavailable`:
+        // the bridge's backlog was full, or the session's connection was lost), and nothing
+        // is waited for.
+        if matches!(code, ErrorCode::INPUT_FULL | ErrorCode::UNAVAILABLE)
+            && let Some(terminal) = self.terminals.get_mut(&id)
+            && terminal.input.in_flight > 0
+        {
+            terminal.input.waiting.clear();
+            if code == ErrorCode::UNAVAILABLE {
+                terminal.input.in_flight = 0;
+                terminal.input.asked.clear();
+            }
+        }
         // The answer to a read is an error: the picture will not come.
         if phase != Some(Phase::Attached) {
             self.reads.remove(&id);
@@ -1370,6 +1511,7 @@ impl Client {
                     terminal.phase = Phase::Taken;
                     terminal.taken_by = by.clone();
                     terminal.picture_open = false;
+                    terminal.input = Input::default();
                 }
                 self.events.push_back(Event::Taken { terminal: id, by });
             }
@@ -1430,6 +1572,7 @@ impl Client {
             Some(by) => {
                 terminal.phase = Phase::Taken;
                 terminal.taken_by = by.clone();
+                terminal.input = Input::default();
                 self.events.push_back(Event::Taken { terminal: id, by });
             }
             None => {
@@ -1471,6 +1614,7 @@ impl Client {
             terminal.phase = Phase::Gone;
             terminal.spec = None;
             terminal.picture_open = false;
+            terminal.input = Input::default();
         }
         self.events.push_back(Event::Failed {
             terminal: Some(id),

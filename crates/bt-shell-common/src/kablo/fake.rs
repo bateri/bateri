@@ -20,7 +20,7 @@
 //! client.push(..)        ◄── Bridge::take_output (the bridge's bytes)
 //! ```
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 
 use kablo_proto::hello::{Protocol, negotiate};
 use kablo_proto::v1::stream::{self, FailCode, Incoming, IncomingDecoder, MAX_DATA, Side};
@@ -204,6 +204,11 @@ pub struct Bridge {
     /// A terminal's program takes a hang-up for no reason to end (only the
     /// kill does).
     stubborn: bool,
+    /// The programs take what is typed to them only when told to ([`Bridge::stall`]): the
+    /// `pong` of a session's `ping` waits, as a server's does for a program that is not reading.
+    stalled: bool,
+    /// The `pong`s that wait.
+    held: VecDeque<Packet>,
     /// How many connections have been greeted.
     pub connections: u32,
     /// Every packet the client sent, in order, over every connection.
@@ -235,10 +240,33 @@ impl Bridge {
             declined: Vec::new(),
             breaches: 0,
             stubborn: false,
+            stalled: false,
+            held: VecDeque::new(),
             connections: 0,
             received: Vec::new(),
             received_streams: Vec::new(),
         }
+    }
+
+    /// The programs stop taking input: the `pong` of a `ping` that names a session is held
+    /// until [`Bridge::take`] says how much the programs take. A server of today answers a
+    /// `ping` after typed input once the program's terminal has taken it.
+    pub fn stall(&mut self) {
+        self.stalled = true;
+    }
+
+    /// The programs take what the oldest `pings` pings were after: their `pong`s are sent.
+    pub fn take(&mut self, pings: usize) {
+        for _ in 0..pings {
+            if let Some(pong) = self.held.pop_front() {
+                self.send(&pong);
+            }
+        }
+    }
+
+    /// How many `pong`s wait for the programs to take input.
+    pub fn held(&self) -> usize {
+        self.held.len()
     }
 
     /// A relay that answers `features` and keeps no mailbox: no ticket is ever given.
@@ -756,7 +784,17 @@ impl Bridge {
                     .collect();
                 self.send(&Packet::connection(Message::ListReply(all)));
             }
-            Message::Ping(bytes) => self.send(&Packet::connection(Message::Pong(bytes))),
+            Message::Ping(bytes) => {
+                let pong = Packet {
+                    session,
+                    message: Message::Pong(bytes),
+                };
+                if self.stalled && pong.session.is_some() {
+                    self.held.push_back(pong);
+                } else {
+                    self.send(&pong);
+                }
+            }
             Message::Features | Message::FeaturesWith(_) if self.age == Age::Old => {}
             Message::Features => self.features(false),
             Message::FeaturesWith(offers) => self.features(offers.tickets),
