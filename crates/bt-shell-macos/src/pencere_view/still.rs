@@ -27,8 +27,8 @@
 //! ([`bt_gpu::tile_crop`] — the one rule, so the card does not crop some panes at the
 //! bottom and others in the middle). The web view makes the crop and the size itself
 //! (`rect` and `snapshotWidth` of its configuration), so what crosses is the tile's pixels.
-//! The view's area is the pane's less the strip, a little shorter than the tile's shape;
-//! the strip is not in the picture.
+//! The view's area is the whole pane; the header over it is the owner's and not in the
+//! picture.
 
 use std::cell::RefCell;
 use std::ptr::NonNull;

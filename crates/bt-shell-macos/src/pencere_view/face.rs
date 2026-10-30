@@ -1,6 +1,6 @@
-//! A program's own icon on the application's chrome: the strip over its view ([`super::strip`]),
-//! its tab's tile, the tabs menu's row and the tab's card (`tab_bar`, which reaches here; this
-//! module, the pane's, names none of the application's).
+//! A program's own icon on the application's chrome: the header over its view
+//! ([`super::ViewHead`]), its tab's tile, the tabs menu's row and the tab's card (`tab_head` and
+//! `tab_bar`, which reach here; this module, the pane's, names none of the application's).
 //!
 //! What the program gave (`ViewStart`'s icons, which the protocol's host library checked and
 //! bounded) is decoded once, when its view starts, for a light ground and for a dark one
@@ -24,7 +24,7 @@ use objc2_app_kit::{NSBitmapImageRep, NSImage};
 use objc2_foundation::NSData;
 
 /// The pixels a side of the picture asked for: a tab's tile is 22 points wide, on a Retina
-/// screen. The strip's icon, smaller, takes the same picture scaled down.
+/// screen. The header's icon, smaller, takes the same picture scaled down.
 const PIXELS: u32 = 44;
 
 /// A program's icon, decoded, and how it stands.
