@@ -582,7 +582,7 @@ shows one group at a time instead (see **In the title row** below).
   header's menu also has **New Tab in Group**, **Ungroup** (the tabs stay,
   among the ungrouped) and **Close Group**, which asks the way Close Other
   Tabs does.
-- **Keys.** ⌘T and New Tab at the foot of the column open beside the tab on
+- **Keys.** ⌘T and New Tab at the head of the column open beside the tab on
   screen, in its group (a closed group opens); Shell ▸ **New Ungrouped Tab**
   opens among the ungrouped tabs. ⌘1–9 count the tabs as the column lists
   them — a closed group's hidden tabs take no number. ⌃⌘1–8 go to the nth
@@ -592,8 +592,8 @@ shows one group at a time instead (see **In the title row** below).
   the headers.
 - **In the title row.** The bar lists the tabs of the group on screen, or of
   the ungrouped tabs, and a button leads it: a stack and the group's name (the
-  ungrouped tabs have the stack alone), and a dot on its corner while some
-  other group has a question, a failure or a finish you have not seen. Click it
+  ungrouped tabs have the stack alone), and the tab's badge on its corner while
+  some other group has a question, a failure or a finish you have not seen. Click it
   to list the window's groups — the ungrouped tabs first, the group on screen
   ticked, each with what it asks of you and its ⌃⌘ key, and **New Group** last;
   choose one to go to it (on the tab you were last on in it), Esc or a click
@@ -659,8 +659,8 @@ bateri – settings.toml: line 2: `terminal.scrollback` must be an integer, foun
 ```
 
 With several tabs the title bar holds the tabs, so the error becomes a ⚠
-button left of `+` (with the tabs at the side, right of New Tab at the foot of
-the column): hover over it to read the text, click it to open the settings
+button left of `+` (with the tabs at the side, in the column's bottom-left
+corner): hover over it to read the text, click it to open the settings
 window, which shows the file's state.
 
 If there are several errors, the first one and the number of the rest are
@@ -1223,10 +1223,18 @@ tab_position = "top"
   upright — its icon, its title, an × on the right when the pointer is over it
   (⌘1–9 takes the place while ⌘ is held), a marked remote host's mark as a
   stripe at the left edge — and the same tick, dot, transfer fill and summary
-  card, the card opening to the right of the row. New Tab stays at the foot of
-  the column, with the ⚠ of a settings problem beside it; a list longer than
-  the window scrolls and fades at its ends, and Show All Tabs (⇧⌘\) opens its
-  menu at the head of the list (the column has no button for it). The window
+  card, the card opening to the right of the row. The column's head holds,
+  beside the traffic lights, the sidebar button and, at its right end, New
+  Tab — plain glyphs that take a face only under the pointer — and the ⚠ of a
+  settings problem stands in the column's bottom-left corner; a list longer
+  than the window scrolls and fades at its ends, and Show All Tabs (⇧⌘\)
+  opens its menu at the head of the list (the column has no button for it).
+  The column is 184 pt wide at the least; the sidebar button, View ▸ **Hide
+  Sidebar** or ⌃⌘S hides it, and the window's title row then holds the
+  sidebar button, the tab's name in the middle and `+` on the right. While it
+  hides, a question, a failure or an unseen finish in another tab shows as
+  the tab's badge on the sidebar button's corner. Each window keeps its own
+  choice, and a restored session brings it back. The window
   moves by the column's empty space and beside the traffic lights, and a press
   on a pane's top line selects text as anywhere else. Rows are dragged as the
   tabs of the bar are: drag one to reorder, out of the column to tear it off

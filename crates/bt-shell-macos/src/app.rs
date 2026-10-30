@@ -4426,6 +4426,9 @@ impl AppDelegate {
                         if let Some(side) = window.side_width {
                             this.set_side_width(side);
                         }
+                        if window.column_hidden {
+                            this.set_column_hidden(true);
+                        }
                         this.show_at(frame);
                     })
                     .map(|this| built = Some(this))
@@ -4577,6 +4580,10 @@ impl AppDelegate {
                 // A column at the default is written as none: the layout then stays in the
                 // version before widths.
                 side_width: Some(window.side_width()).filter(|&side| side != tabs::SIDE_WIDTH),
+                column_hidden: window.column_hidden(),
+                // Activity is not a choice a window can make yet: written off, so the version
+                // moves once, for both flags.
+                activity: false,
                 groups,
             });
         }

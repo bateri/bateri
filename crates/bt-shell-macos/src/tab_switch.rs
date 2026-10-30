@@ -3,9 +3,10 @@
 //! **The button** leads the bar of a window that has groups: a stack and, for a group, its name;
 //! on the ungrouped tabs the stack alone. It is a button, not a tab — filled, a few points from the
 //! first chip — and the tabs after it are the ones of the group it names (`TerminalWindow::refresh_bar`
-//! lists no other). A dot on its corner says that some other group (or the ungrouped tabs) has
-//! something that asks for the user: a question, a failure, an unseen finish
-//! (`tabs::group_indicator`), whichever group it is — the list says which. A press opens the list
+//! lists no other). A badge on its corner — the tile's own, as the hidden side column's sidebar
+//! button wears it — says that some other group (or the ungrouped tabs) has something that asks
+//! for the user: a question, a failure, an unseen finish (`tabs::group_indicator`), whichever
+//! group it is — the list says which. A press opens the list
 //! ([`TabBar::toggle_group_list`]); a double click names the group (the bar's name field over the
 //! name, [`TabBar::begin_group_rename`]); a right click is the group's menu; pulled out of the bar
 //! it carries the group away in a drag session ([`TabBar::carry_group`]) — to a window of its
@@ -62,9 +63,6 @@ const STACK: f64 = 14.0;
 /// Where the name starts in the button, and what it keeps from the right end.
 pub(super) const NAME_X: f64 = 30.0;
 pub(super) const NAME_END: f64 = 14.0;
-/// The dot on the button's corner: its radius and the halo round it.
-const DOT_RADIUS: f64 = 4.0;
-const DOT_HALO: f64 = 1.5;
 /// A row of the list: the left of its name (the check stands before it), what the right end
 /// holds (the indicator's square, the key's width, the space between and the margin).
 const ROW_NAME_X: f64 = 28.0;
@@ -370,24 +368,14 @@ impl GroupButton {
             Tint::of(if named { palette.dim } else { palette.title }, 1.0),
         );
         if let Some(indicator) = look.elsewhere {
-            let centre = NSPoint::new(
-                bounds.size.width - DOT_RADIUS - DOT_HALO - 0.5,
-                DOT_RADIUS + DOT_HALO + 0.5,
-            );
-            for (radius, color) in [
-                (DOT_RADIUS + DOT_HALO, Tint::of(palette.ground, 1.0)),
-                (
-                    DOT_RADIUS,
-                    Tint::of(palette.tone(tabs::list_dot(indicator), 0), 1.0),
+            super::draw_corner_badge(
+                indicator,
+                NSPoint::new(
+                    bounds.size.width - super::CORNER_BADGE_IN,
+                    super::CORNER_BADGE_IN,
                 ),
-            ] {
-                let path = NSBezierPath::bezierPathWithOvalInRect(NSRect::new(
-                    NSPoint::new(centre.x - radius, centre.y - radius),
-                    NSSize::new(2.0 * radius, 2.0 * radius),
-                ));
-                color.color().setFill();
-                path.fill();
-            }
+                palette,
+            );
         }
     }
 }

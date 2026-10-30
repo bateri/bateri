@@ -557,6 +557,9 @@ pub(crate) fn install(
                     item(mtm, "Side", sel!(tabsAtSide:)),
                 ],
             ),
+            // The key window's side column: its title says which way it goes and the window's
+            // `validateMenuItem:` writes it, grey while the tabs are in the title row.
+            item(mtm, "Hide Sidebar", sel!(toggleSidebar:)),
             NSMenuItem::separatorItem(mtm),
             // `+` is a Shift character: the menu matches Cmd-Shift-= and shows
             // "⌘+". `-` is an ASCII hyphen, not the minus sign (U+2212) — the keyboard does

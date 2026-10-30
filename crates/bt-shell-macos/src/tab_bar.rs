@@ -938,6 +938,40 @@ const BADGE_SIDE: f64 = 10.0;
 const BADGE_DOT: f64 = 7.0;
 const BADGE_HALO: f64 = 1.5;
 
+/// How far in from a button's top-right corner the badge's middle stands, across and down: the
+/// sidebar button's and the group button's ([`draw_corner_badge`]).
+const CORNER_BADGE_IN: f64 = 6.0;
+
+/// The side of a bare glyph in the side column's head, on the design's 12-unit grid.
+const GLYPH_SIDE: f64 = 14.0;
+
+/// The tile's badge on a button's corner, its middle at `centre`: the same circle and sign a
+/// tile wears for `indicator`, with the ring of the window's ground cut round it, so it reads as
+/// the tabs' own badge carried to a button that stands for tabs out of sight.
+fn draw_corner_badge(indicator: Indicator, centre: NSPoint, palette: Palette) {
+    let side = if indicator == Indicator::Failed {
+        BADGE_DOT
+    } else {
+        BADGE_SIDE
+    };
+    let circle = |radius: f64, color: u32| {
+        Tint::of(color, 1.0).color().setFill();
+        NSBezierPath::bezierPathWithOvalInRect(NSRect::new(
+            NSPoint::new(centre.x - radius, centre.y - radius),
+            NSSize::new(2.0 * radius, 2.0 * radius),
+        ))
+        .fill();
+    };
+    circle(side / 2.0 + BADGE_HALO, palette.ground);
+    circle(side / 2.0, palette.tone(tabs::list_dot(indicator), 0));
+    let ink = Tint::of(palette.ground, 1.0);
+    match indicator {
+        Indicator::Question => draw_query(centre, ink),
+        Indicator::Finished => draw_check(centre, ink),
+        _ => {}
+    }
+}
+
 /// The ring cut clear round the biggest badge, as a radius: the picture of the hollow is drawn
 /// for it, and scaled for the smaller dot ([`Badge::hollow_share`]).
 const HOLLOW_RADIUS: f64 = BADGE_SIDE / 2.0 + BADGE_HALO;
@@ -4770,6 +4804,10 @@ enum Kind {
     /// lists every tab itself and scrolls, and ⇧⌘\ opens the same menu at the list's head.
     List,
     Warning,
+    /// Hide Sidebar / Show Sidebar, in the side column's head and in the title row while the
+    /// column hides; while it hides its corner carries what the tabs out of sight ask
+    /// ([`BarButton::set_badge`]).
+    Sidebar,
 }
 
 pub(crate) struct ButtonIvars {
@@ -4780,8 +4818,14 @@ pub(crate) struct ButtonIvars {
     /// The corner radius, from how the bar meets the window's corner.
     radius: Cell<f64>,
     /// The bottom-left corner's own radius where it differs from the others: the side column's
-    /// New Tab sits in the window's bottom-left corner and keeps its centre.
+    /// warning sits in the window's bottom-left corner and keeps its centre.
     foot: Cell<Option<f64>>,
+    /// A bare glyph at rest — the side column's head: a face only under the pointer, never a
+    /// line ([`BarButton::set_bare`]).
+    bare: Cell<bool>,
+    /// The badge on its top-right corner: the most urgent thing the tabs out of sight ask
+    /// (`tabs::group_indicator`).
+    badge: Cell<Option<Indicator>>,
 }
 
 define_class!(
@@ -4810,6 +4854,11 @@ define_class!(
             let hot = iv.hot.get();
             let fill = if hot { palette.button_hover } else { palette.button };
             match iv.foot.get() {
+                _ if iv.bare.get() => {
+                    if hot {
+                        rounded(self.bounds(), iv.radius.get(), fill, None);
+                    }
+                }
                 Some(foot) => {
                     let radius = iv.radius.get();
                     tab_side::rounded_corners(
@@ -4856,6 +4905,30 @@ define_class!(
                     Tint::of(palette.warning, 1.0).color().setFill();
                     dot.fill();
                 }
+                Kind::Sidebar => {
+                    // A window with its column, on the design's 12-unit grid drawn 14 pt.
+                    let unit = GLYPH_SIDE / 12.0;
+                    let point = |x: f64, y: f64| {
+                        NSPoint::new(at.x + (x - 6.0) * unit, at.y + (y - 6.0) * unit)
+                    };
+                    let frame = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(
+                        NSRect::new(point(1.0, 2.25), NSSize::new(10.0 * unit, 7.5 * unit)),
+                        1.6 * unit,
+                        1.6 * unit,
+                    );
+                    frame.moveToPoint(point(4.6, 2.4));
+                    frame.lineToPoint(point(4.6, 9.6));
+                    let color = if hot { palette.title } else { palette.dim };
+                    stroke(&frame, 1.25 * unit, Tint::of(color, 1.0));
+                }
+            }
+            if let Some(indicator) = iv.badge.get() {
+                let bounds = self.bounds();
+                draw_corner_badge(
+                    indicator,
+                    NSPoint::new(bounds.size.width - CORNER_BADGE_IN, CORNER_BADGE_IN),
+                    palette,
+                );
             }
         }
 
@@ -4912,6 +4985,8 @@ impl BarButton {
             palette: Cell::new(None),
             radius: Cell::new(TAB_RADIUS),
             foot: Cell::new(None),
+            bare: Cell::new(false),
+            badge: Cell::new(None),
         });
         // SAFETY: `initWithFrame:` is NSView's designated initializer and the
         // ivars are set.
@@ -4922,7 +4997,7 @@ impl BarButton {
         match kind {
             Kind::NewTab => this.setAccessibilityLabel(Some(ns_string!("New Tab"))),
             Kind::List => this.setAccessibilityLabel(Some(ns_string!("Show All Tabs"))),
-            Kind::Warning => {}
+            Kind::Warning | Kind::Sidebar => {}
         }
         this.retip(mtm);
         track_hover(&this);
@@ -4934,9 +5009,40 @@ impl BarButton {
         let (name, command) = match self.ivars().kind {
             Kind::NewTab => ("New Tab", "new_tab"),
             Kind::List => ("Show All Tabs", "show_all_tabs"),
+            Kind::Sidebar => {
+                let shown = self.bar().is_none_or(|bar| !bar.column_hidden());
+                let name = if shown {
+                    "Hide Sidebar"
+                } else {
+                    "Show Sidebar"
+                };
+                self.setAccessibilityLabel(Some(&NSString::from_str(name)));
+                (name, "toggle_sidebar")
+            }
             Kind::Warning => return,
         };
         retip(self, &tip(name, crate::menu::keys::glyphs_of(mtm, command)));
+    }
+
+    /// The bar the button stands in.
+    fn bar(&self) -> Option<Retained<TabBar>> {
+        // SAFETY: reading the superview; we are on the main thread.
+        unsafe { self.superview() }.and_then(|view| view.downcast::<TabBar>().ok())
+    }
+
+    /// A bare glyph at rest, a face only under the pointer (the side column's head), or the
+    /// framed button the title row's bar has.
+    fn set_bare(&self, bare: bool) {
+        if self.ivars().bare.replace(bare) != bare {
+            self.setNeedsDisplay(true);
+        }
+    }
+
+    /// The badge on the button's corner; `None` takes it off.
+    fn set_badge(&self, badge: Option<Indicator>) {
+        if self.ivars().badge.replace(badge) != badge {
+            self.setNeedsDisplay(true);
+        }
     }
 
     fn set_look(&self, palette: Palette, radius: f64) {
@@ -4955,9 +5061,16 @@ impl BarButton {
     }
 
     fn act(&self) {
-        // SAFETY: reading the superview; we are on the main thread.
-        let bar = || unsafe { self.superview() }.and_then(|view| view.downcast::<TabBar>().ok());
+        let bar = || self.bar();
         match self.ivars().kind {
+            Kind::Sidebar => {
+                if let Some(window) = bar().and_then(|bar| bar.terminal_window()) {
+                    window.toggle_column();
+                }
+                // The column's change moves the button out from under the pointer.
+                self.ivars().hot.set(false);
+                self.setNeedsDisplay(true);
+            }
             Kind::NewTab => {
                 if let Some(bar) = bar() {
                     bar.new_tab();
@@ -5346,6 +5459,9 @@ struct Shown {
     selected: usize,
     /// The settings diagnostic; empty without one.
     notice: String,
+    /// The most urgent thing the tabs other than the one on screen ask (`tabs::group_indicator`):
+    /// the sidebar button's badge while the column hides.
+    unseen: Option<Indicator>,
 }
 
 /// The tabs picked together in the side column, and the tab on screen when they were picked: the
@@ -5530,6 +5646,12 @@ pub(crate) struct BarIvars {
     /// puts the tabs in a column the window's height at its left edge, `None` in the bar in
     /// the title row ([`TabBar::set_side`]; `tab_side.rs`).
     side: Cell<Option<f64>>,
+    /// In the side mode, the column hides: the bar is the title row — the sidebar button, the tab
+    /// on screen's name, New Tab — and the content takes the window's width
+    /// ([`TabBar::set_column_hidden`]; the window's choice, `RootView::column_hidden`).
+    hidden: Cell<bool>,
+    /// The column's head button that hides and shows it, and the title row's while it hides.
+    sidebar: Retained<BarButton>,
     /// The column as last laid out, in the side mode: the wheel, the list and the name field work
     /// from it.
     column: RefCell<Option<Column>>,
@@ -5798,6 +5920,7 @@ define_class!(
 impl TabBar {
     pub(crate) fn new(mtm: MainThreadMarker, window: u64) -> Retained<Self> {
         let new_tab = BarButton::new(mtm, Kind::NewTab);
+        let sidebar = BarButton::new(mtm, Kind::Sidebar);
         let switch = tab_switch::GroupButton::new(mtm);
         let list = BarButton::new(mtm, Kind::List);
         let warning = BarButton::new(mtm, Kind::Warning);
@@ -5873,6 +5996,8 @@ impl TabBar {
             cast: Cell::new(None),
             group_torn: Cell::new(None),
             side: Cell::new(None),
+            hidden: Cell::new(false),
+            sidebar: sidebar.clone(),
             column: RefCell::new(None),
             mask: tab_side::Mask::default(),
             before: Cell::new(None),
@@ -5883,6 +6008,7 @@ impl TabBar {
         // Under everything: the title row is the bar's, not the window server's.
         this.addSubview(&RowClaim::new(mtm));
         this.addSubview(&new_tab);
+        this.addSubview(&sidebar);
         this.addSubview(&switch);
         this.addSubview(&list);
         this.addSubview(&warning);
@@ -5893,6 +6019,7 @@ impl TabBar {
         list.setHidden(true);
         warning.setHidden(true);
         switch.setHidden(true);
+        sidebar.setHidden(true);
         // SAFETY: `TabBar` implements the field's delegate protocols (the
         // two optional methods it uses are defined above); the field holds
         // its delegate weakly and the bar owns the field.
@@ -5939,6 +6066,7 @@ impl TabBar {
         headings: Vec<Heading>,
         switcher: Option<Switcher>,
         notice: String,
+        unseen: Option<Indicator>,
     ) {
         let iv = self.ivars();
         // The tips of the buttons name keys that `[keys]` moves; the bar is given its tabs
@@ -5946,6 +6074,7 @@ impl TabBar {
         let mtm = self.mtm();
         iv.new_tab.retip(mtm);
         iv.list.retip(mtm);
+        iv.sidebar.retip(mtm);
         for chip in iv.chips.borrow().iter() {
             chip.ivars().close.retip(mtm);
         }
@@ -5975,6 +6104,7 @@ impl TabBar {
             switcher,
             selected,
             notice,
+            unseen,
         });
         self.refresh_group_list(listed);
         let mapped = iv.card.borrow().as_ref().is_some_and(OpenCard::pictured);
@@ -6355,6 +6485,10 @@ impl TabBar {
         };
         if let Some(top) = side {
             iv.switch.setHidden(true);
+            if iv.hidden.get() {
+                self.lay_out_head(top, &shown, &chips);
+                return;
+            }
             let flight = tab_side::Flight { drag, gap };
             self.lay_out_column(top, &shown, &chips, &glowing, reflow, flight);
             return;

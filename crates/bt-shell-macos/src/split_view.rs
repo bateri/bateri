@@ -1009,11 +1009,15 @@ impl SplitView {
             .map_or(SplitStyle::default(), |app| app.settings().split_style)
     }
 
-    /// Whether `[appearance] tab_position` puts the tabs in the side column, which then
-    /// stands along the container's left edge ([`spacing`], [`bottom_corners`]). Read at every
-    /// layout, like [`Self::style`]; a change lays every container out again.
+    /// Whether the side column stands along the container's left edge ([`spacing`],
+    /// [`bottom_corners`]): the tabs are at the side and the window has not hidden the column
+    /// ([`RootView::column_shown`]). Read at every layout, like [`Self::style`]; a change lays
+    /// every container out again.
     fn beside_tabs(&self) -> bool {
-        crate::window::tabs_at_side(self.mtm())
+        self.root().map_or_else(
+            || crate::window::tabs_at_side(self.mtm()),
+            |root| root.column_shown(),
+        )
     }
 
     /// The divider's fill shows under [`SplitStyle::Lines`] while two panes

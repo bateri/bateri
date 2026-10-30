@@ -1163,13 +1163,24 @@ pub fn landing(over: Option<Over>) -> Landing {
 
 /// The side column's width as a window first has it: a row at its widest ([`MAX_WIDTH`]) and
 /// [`EDGE`] on both sides. The user drags the column's right edge to make it wider or narrower,
-/// within [`side_width`]'s bounds; a double click there brings it back to this. It does not hide.
+/// within [`side_width`]'s bounds; a double click there brings it back to this. Narrower than
+/// [`SIDE_MIN`] it does not go: whoever wants less hides it (the sidebar button, ⌃⌘S).
 pub const SIDE_WIDTH: f64 = MAX_WIDTH + 2.0 * EDGE;
 
-/// The narrowest column: the bar's narrowest tab ([`MIN_WIDTH`]) and its edges. The tile, the
-/// deck, the ⌘ hint and `×` keep their places there and the title gives way to them, as on a
-/// narrow chip.
-pub const SIDE_MIN: f64 = MIN_WIDTH + 2.0 * EDGE;
+/// Where the window's traffic lights end, from the window's left edge: the zoom button's right
+/// edge, measured on macOS 26 (centres at 19, 42 and 65, 14 pt across). The sidebar button stands
+/// [`LIGHTS_GAP`] right of it, in the column's head and in the title row while the column hides.
+pub const LIGHTS_END: f64 = 72.0;
+
+/// Space between the traffic lights and the sidebar button: wider than [`BUTTON_GAP`], so the
+/// button does not read as a fourth light.
+pub const LIGHTS_GAP: f64 = 12.0;
+
+/// The narrowest column: what its head needs — the traffic lights, the sidebar button, and Show
+/// Activity and New Tab at its right end, [`BUTTON_GAP`] apart, [`EDGE`] from the column's edge.
+/// The tile, the deck, the ⌘ hint and `×` of a row keep their places there and the title gives
+/// way to them, as on a narrow chip.
+pub const SIDE_MIN: f64 = LIGHTS_END + LIGHTS_GAP + 3.0 * BUTTON + 2.0 * BUTTON_GAP + EDGE;
 
 /// The widest column: twice the default. A design number — room for a long program title without
 /// the column becoming most of the window.
@@ -1208,9 +1219,6 @@ pub const HEADER_HEIGHT: f64 = 24.0;
 /// above it: the groups read as separate blocks. A header that opens the list has none.
 pub const GROUP_GAP: f64 = 10.0;
 
-/// Space between New Tab and the settings warning beside it on the column's foot.
-pub const FOOT_GAP: f64 = 6.0;
-
 /// Where a row's leading element (its icon with the deck, or the indicator) starts, from the row's
 /// left edge.
 pub const ROW_LEAD: f64 = 8.0;
@@ -1244,24 +1252,26 @@ pub struct Side {
     pub count: usize,
     /// The list's scroll, as last stored; clamped here.
     pub scroll: f64,
-    /// A settings diagnostic is showing: its warning button joins New Tab on the foot.
+    /// A settings diagnostic is showing: its warning button stands on the column's foot.
     pub warning: bool,
-    /// The radius of the window's bottom-left corner, the one New Tab sits in; 0 where the corner
-    /// is square (full screen). The caller gives what it measured for its window
+    /// The radius of the window's bottom-left corner, the one the warning sits in; 0 where the
+    /// corner is square (full screen). The caller gives what it measured for its window
     /// ([`Fit::of`]).
     pub corner: f64,
 }
 
 impl Side {
-    /// Lays the column out: the list from `top` down to [`EDGE`] above New Tab, New Tab in the
-    /// window's bottom-left corner with the warning right of it. Rows are [`TAB_HEIGHT`] high with
+    /// Lays the column out: its head in the title row — the sidebar button right of the traffic
+    /// lights, Show Activity and New Tab at the column's right end — and the list from `top`
+    /// down to [`EDGE`] above the column's foot, or above the settings warning, which stands in
+    /// the window's bottom-left corner while a diagnostic shows. Rows are [`TAB_HEIGHT`] high with
     /// [`GAP`] between them and [`EDGE`] in from the column's sides, and the list scrolls when
     /// they do not fit.
     ///
-    /// New Tab's corner towards the window's shares the window corner's centre ([`Fit::of`]: the
-    /// inset and the radius add up to the corner, so the space round the corner does not pinch at
-    /// the diagonal) and its other three are [`TAB_RADIUS`], the rows'. Its [`Fit::inset`] is its
-    /// space from the column's left edge and from the window's foot alike.
+    /// The warning's corner towards the window's shares the window corner's centre ([`Fit::of`]:
+    /// the inset and the radius add up to the corner, so the space round the corner does not pinch
+    /// at the diagonal) and its other three are [`TAB_RADIUS`], the rows'. Its [`Fit::inset`] is
+    /// its space from the column's left edge and from the window's foot alike.
     pub fn layout(&self) -> Column {
         self.lay(std::iter::repeat_n(Entry::Tab, self.count))
     }
@@ -1282,12 +1292,14 @@ impl Side {
         let fit = Fit::of(self.corner);
         let foot = self.height - fit.inset - BUTTON;
         let width = self.width;
-        let list = Rect::new(0.0, self.top, width, (foot - EDGE - self.top).max(0.0));
         let warning = self
             .warning
-            .then(|| Rect::new(width - EDGE - BUTTON, foot, BUTTON, BUTTON));
-        let new_tab_end = warning.map_or(width - EDGE, |button| button.x - FOOT_GAP);
-        let new_tab = Rect::new(fit.inset, foot, (new_tab_end - fit.inset).max(0.0), BUTTON);
+            .then(|| Rect::new(fit.inset, foot, BUTTON, BUTTON));
+        let list_end = warning.map_or(self.height, |button| button.y) - EDGE;
+        let list = Rect::new(0.0, self.top, width, (list_end - self.top).max(0.0));
+        let head = Head::of(self.top);
+        let new_tab = Rect::new(width - EDGE - BUTTON, head.y, BUTTON, BUTTON);
+        let activity = Rect::new(new_tab.x - BUTTON_GAP - BUTTON, head.y, BUTTON, BUTTON);
 
         let slot = TAB_HEIGHT + GAP;
         // The list from the top of its content, unscrolled: the rows' tops, the headers' tops with
@@ -1358,12 +1370,63 @@ impl Side {
             max_scroll,
             fade_top: overflow && scroll > SCROLL_SLACK,
             fade_bottom: overflow && scroll < max_scroll - SCROLL_SLACK,
+            sidebar: head.sidebar,
+            activity,
             new_tab,
             warning,
             fit,
             along,
             marks,
             slot,
+        }
+    }
+}
+
+/// The title row's parts while the side column hides: the sidebar button where the column's head
+/// has it, the tab's name in the middle of the window and New Tab in the window's top-right
+/// corner ([`Head::row`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Head {
+    /// The buttons' top: centred in the title row.
+    pub y: f64,
+    /// The sidebar button, [`LIGHTS_GAP`] right of the traffic lights.
+    pub sidebar: Rect,
+    /// New Tab, in the window's top-right corner ([`Fit::of`]); `None` in the column's head,
+    /// where New Tab stands at the column's end ([`Column::new_tab`]).
+    pub new_tab: Option<Rect>,
+    /// The name's room, centred on the window and clear of both buttons by [`EDGE`]; the name is
+    /// centred in it.
+    pub title: Span,
+}
+
+impl Head {
+    /// The head's buttons in a title row `top` high: the column's head ([`Side::layout`]).
+    pub fn of(top: f64) -> Self {
+        let y = ((top - BUTTON) / 2.0).max(0.0);
+        let sidebar = Rect::new(LIGHTS_END + LIGHTS_GAP, y, BUTTON, BUTTON);
+        Self {
+            y,
+            sidebar,
+            new_tab: None,
+            title: Span::new(sidebar.x + BUTTON, 0.0),
+        }
+    }
+
+    /// The title row of a window `width` wide while its column hides: the sidebar button, New
+    /// Tab meeting the window's top-right corner of radius `corner` as the bar's `+` does
+    /// ([`Fit::of`]), and the name between them, centred on the window.
+    pub fn row(width: f64, top: f64, corner: f64) -> Self {
+        let head = Self::of(top);
+        let fit = Fit::of(corner);
+        let new_tab = Rect::new(width - fit.inset - BUTTON, head.y, BUTTON, BUTTON);
+        let middle = width / 2.0;
+        let start = head.sidebar.x + BUTTON + EDGE;
+        let end = new_tab.x - EDGE;
+        let half = (middle - start).min(end - middle).max(0.0);
+        Self {
+            new_tab: Some(new_tab),
+            title: Span::new(middle - half, 2.0 * half),
+            ..head
         }
     }
 }
@@ -1409,12 +1472,16 @@ pub struct Column {
     /// edge. They are a mask on the rows, not a colour painted over them.
     pub fade_top: bool,
     pub fade_bottom: bool,
-    /// New Tab, in the window's bottom-left corner. Its bottom-left radius is
-    /// [`Fit::radius`] of [`Column::fit`], the other three [`TAB_RADIUS`].
+    /// The sidebar button in the column's head, right of the traffic lights ([`Head::of`]).
+    pub sidebar: Rect,
+    /// Show Activity, left of New Tab.
+    pub activity: Rect,
+    /// New Tab, at the head's right end, [`EDGE`] from the column's edge.
     pub new_tab: Rect,
-    /// The settings warning, right of New Tab.
+    /// The settings warning, in the window's bottom-left corner. Its bottom-left radius is
+    /// [`Fit::radius`] of [`Column::fit`], the other three [`TAB_RADIUS`].
     pub warning: Option<Rect>,
-    /// How New Tab meets the window's corner.
+    /// How the warning meets the window's corner.
     pub fit: Fit,
     /// The rows' extents along y, which [`Run`] reads.
     along: Vec<Span>,
@@ -4947,16 +5014,15 @@ mod tests {
     }
 
     #[test]
-    fn the_columns_rows_stand_in_a_list_between_the_title_row_and_new_tab() {
+    fn the_columns_rows_stand_in_a_list_between_the_title_row_and_its_foot() {
         let column = side(600.0, 3).layout();
         assert_eq!(column.width, 200.0);
         assert_eq!(
             (SIDE_WIDTH, column.row_width()),
             (MAX_WIDTH + 16.0, MAX_WIDTH)
         );
-        // New Tab is 8 from the window's foot and left edge; the list ends 8 above it.
-        assert_eq!(column.new_tab, Rect::new(8.0, 564.0, 184.0, 28.0));
-        assert_eq!(column.list, Rect::new(0.0, 40.0, 200.0, 516.0));
+        // No foot without a warning: the list runs to 8 above the window's foot.
+        assert_eq!(column.list, Rect::new(0.0, 40.0, 200.0, 552.0));
         assert_eq!(
             column.rows,
             [
@@ -4976,20 +5042,61 @@ mod tests {
         .layout();
         assert_eq!(
             warned.warning,
-            Some(Rect::new(164.0, 564.0, 28.0, 28.0)),
-            "8 from the right edge, level with New Tab"
+            Some(Rect::new(8.0, 564.0, 28.0, 28.0)),
+            "in the window's bottom-left corner"
         );
         assert_eq!(
-            warned.new_tab,
-            Rect::new(8.0, 564.0, 150.0, 28.0),
-            "New Tab gives it its width and a gap"
+            warned.list,
+            Rect::new(0.0, 40.0, 200.0, 516.0),
+            "the list ends 8 above it"
         );
-        assert_eq!(warned.list, column.list, "the list does not move for it");
         assert_eq!(warned.rows, column.rows);
 
         let none = side(600.0, 0).layout();
         assert!(none.rows.is_empty() && !none.overflow);
         assert_eq!((none.scroll, none.max_scroll), (0.0, 0.0));
+    }
+
+    #[test]
+    fn the_columns_head_holds_its_three_buttons_in_the_title_row() {
+        let column = side(600.0, 3).layout();
+        // Centred in the 40 pt title row; the sidebar button 12 right of the lights' 72.
+        assert_eq!(column.sidebar, Rect::new(84.0, 6.0, 28.0, 28.0));
+        assert_eq!(
+            column.new_tab,
+            Rect::new(164.0, 6.0, 28.0, 28.0),
+            "8 from the edge"
+        );
+        assert_eq!(
+            column.activity,
+            Rect::new(132.0, 6.0, 28.0, 28.0),
+            "4 left of New Tab"
+        );
+        // At the narrowest the three stand 4 apart, as the head's sum says.
+        let narrow = Side {
+            width: SIDE_MIN,
+            ..side(600.0, 3)
+        }
+        .layout();
+        assert_eq!(narrow.sidebar.x + BUTTON + BUTTON_GAP, narrow.activity.x);
+        assert_eq!(narrow.new_tab.x + BUTTON + EDGE, SIDE_MIN);
+    }
+
+    #[test]
+    fn a_hidden_columns_title_row_centres_the_name_between_its_buttons() {
+        let row = Head::row(1000.0, 40.0, 20.5);
+        assert_eq!(
+            row.sidebar,
+            Rect::new(84.0, 6.0, 28.0, 28.0),
+            "where the column had it"
+        );
+        // `+` in the window's top-right corner, as the bar's: 8 in, 12.5 round.
+        assert_eq!(row.new_tab, Some(Rect::new(964.0, 6.0, 28.0, 28.0)));
+        // The name's room is centred on the window, as wide as the nearer button allows.
+        assert_eq!(row.title, Span::new(120.0, 760.0));
+        assert_eq!(row.title.x + row.title.width / 2.0, 500.0);
+        // A window too narrow for any name gives it none.
+        assert_eq!(Head::row(200.0, 40.0, 20.5).title.width, 0.0);
     }
 
     #[test]
@@ -5148,8 +5255,8 @@ mod tests {
     #[test]
     fn a_headed_list_scrolls_by_what_it_holds() {
         let tall = Side {
-            height: 200.0,
-            ..side(600.0, 0)
+            height: 164.0,
+            ..side(564.0, 0)
         };
         let entries = [
             Entry::Tab,
@@ -5257,9 +5364,14 @@ mod tests {
     }
 
     #[test]
-    fn new_tab_keeps_the_window_corners_centre() {
+    fn the_warning_keeps_the_window_corners_centre() {
         // macOS 26's 20.5 pt corner: 12.5 + 8.
-        let tall = side(600.0, 3).layout();
+        let tall = Side {
+            warning: true,
+            ..side(600.0, 3)
+        }
+        .layout();
+        let warning = tall.warning.expect("a warning shows");
         assert_eq!(
             tall.fit,
             Fit {
@@ -5268,9 +5380,9 @@ mod tests {
             }
         );
         assert_eq!(tall.fit.inset + tall.fit.radius, 20.5, "concentric");
-        assert_eq!(tall.new_tab.x, 8.0, "from the column's left edge");
+        assert_eq!(warning.x, 8.0, "from the column's left edge");
         assert_eq!(
-            600.0 - (tall.new_tab.y + tall.new_tab.height),
+            600.0 - (warning.y + warning.height),
             8.0,
             "and from the window's foot"
         );
@@ -5278,6 +5390,7 @@ mod tests {
         for corner in [10.0, 0.0] {
             let column = Side {
                 corner,
+                warning: true,
                 ..side(600.0, 3)
             }
             .layout();
@@ -5289,7 +5402,7 @@ mod tests {
                 },
                 "corner {corner}"
             );
-            assert_eq!(column.new_tab.x, 8.0);
+            assert_eq!(column.warning.map(|button| button.x), Some(8.0));
         }
     }
 
@@ -5299,7 +5412,7 @@ mod tests {
         let at = |scroll: f64| {
             Side {
                 scroll,
-                ..side(400.0, 30)
+                ..side(364.0, 30)
             }
             .layout()
         };
@@ -5327,7 +5440,7 @@ mod tests {
 
     #[test]
     fn a_short_window_still_lays_out() {
-        let column = side(50.0, 3).layout();
+        let column = side(14.0, 3).layout();
         assert_eq!(column.list.height, 0.0);
         assert!(column.overflow, "nothing fits, so everything scrolls");
         assert_eq!(column.slot_at(10.0), 0);
@@ -5337,7 +5450,7 @@ mod tests {
 
     #[test]
     fn selecting_a_row_scrolls_it_into_view_with_a_margin() {
-        let column = side(400.0, 30).layout();
+        let column = side(364.0, 30).layout();
         assert_eq!(column.revealing(29), 594.0, "the last one: the list's end");
         // Row 10 spans 306..334 of the content; brought to 24 from the foot of 316.
         assert_eq!(column.revealing(10), 334.0 - 316.0 + REVEAL_MARGIN);
@@ -5345,26 +5458,26 @@ mod tests {
         assert_eq!(column.revealing(0), 0.0);
         let scrolled = Side {
             scroll: 300.0,
-            ..side(400.0, 30)
+            ..side(364.0, 30)
         }
         .layout();
         assert_eq!(scrolled.revealing(15), 300.0, "in view");
         assert_eq!(scrolled.revealing(10), 306.0 - REVEAL_MARGIN);
         assert_eq!(scrolled.revealing(20), 634.0 - 316.0 + REVEAL_MARGIN);
-        assert_eq!(side(600.0, 3).layout().revealing(2), 0.0, "nothing scrolls");
+        assert_eq!(side(564.0, 3).layout().revealing(2), 0.0, "nothing scrolls");
     }
 
     #[test]
     fn the_wheel_scrolls_the_column_within_its_ends() {
         let column = Side {
             scroll: 100.0,
-            ..side(400.0, 30)
+            ..side(364.0, 30)
         }
         .layout();
         assert_eq!(column.wheeled(30.0), 130.0);
         assert_eq!(column.wheeled(-500.0), 0.0);
         assert_eq!(column.wheeled(5000.0), 594.0);
-        assert_eq!(side(600.0, 3).layout().wheeled(40.0), 0.0);
+        assert_eq!(side(564.0, 3).layout().wheeled(40.0), 0.0);
     }
 
     /// The reading rules every list gives, by its own places: what is under a point, what a
@@ -5497,7 +5610,7 @@ mod tests {
 
     #[test]
     fn a_held_row_follows_the_pointer_down_the_list() {
-        let column = side(600.0, 4).layout();
+        let column = side(564.0, 4).layout();
         let extent = (600.0, SIDE_WIDTH);
         // Row 1 is at 76; held 10 into it.
         let mut grip = Grip::new(&column, 1, 86.0).unwrap();
@@ -5526,7 +5639,7 @@ mod tests {
         // A scrolled list is read where it is now: row 12 is at 106 with 300 scrolled.
         let scrolled = Side {
             scroll: 300.0,
-            ..side(400.0, 30)
+            ..side(364.0, 30)
         }
         .layout();
         let mut grip = Grip::new(&scrolled, 12, 116.0).unwrap();
@@ -5690,10 +5803,14 @@ mod tests {
     /// narrows it past the bar's narrowest tab.
     #[test]
     fn the_columns_width_keeps_its_bounds_and_gives_way_to_the_content() {
-        assert_eq!((SIDE_MIN, SIDE_MAX), (136.0, 400.0));
+        assert_eq!((SIDE_MIN, SIDE_MAX), (184.0, 400.0));
         assert_eq!(side_width(SIDE_WIDTH, 900.0), SIDE_WIDTH, "as asked");
         assert_eq!(side_width(260.0, 900.0), 260.0);
-        assert_eq!(side_width(50.0, 900.0), SIDE_MIN, "no narrower than a tab");
+        assert_eq!(
+            side_width(50.0, 900.0),
+            SIDE_MIN,
+            "no narrower than its head"
+        );
         assert_eq!(
             side_width(900.0, 1600.0),
             SIDE_MAX,
@@ -5701,7 +5818,8 @@ mod tests {
         );
         // The content keeps 300 pt while the column can give it.
         assert_eq!(side_width(400.0, 600.0), 300.0);
-        assert_eq!(side_width(SIDE_WIDTH, 450.0), 150.0);
+        assert_eq!(side_width(SIDE_WIDTH, 490.0), 190.0);
+        assert_eq!(side_width(SIDE_WIDTH, 450.0), SIDE_MIN);
         assert_eq!(
             side_width(SIDE_WIDTH, 300.0),
             SIDE_MIN,
@@ -5740,10 +5858,12 @@ mod tests {
                     .all(|row| row.x == EDGE && row.width == column.row_width())
             );
             let warning = column.warning.expect("a warning shows");
-            assert_eq!(warning.x + warning.width, width - EDGE, "{width}");
-            assert_eq!(
-                column.new_tab.x + column.new_tab.width,
-                warning.x - FOOT_GAP
+            assert_eq!(warning.x, EDGE, "{width}: the warning stays in the corner");
+            assert_eq!(column.new_tab.x + column.new_tab.width, width - EDGE);
+            assert_eq!(column.activity.x + BUTTON + BUTTON_GAP, column.new_tab.x);
+            assert!(
+                column.sidebar.x + BUTTON + BUTTON_GAP <= column.activity.x,
+                "{width}: the head's buttons never meet"
             );
 
             let row = Row::of(column.row_width(), Some(TILE_WIDTH), 1000.0, true);

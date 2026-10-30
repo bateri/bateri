@@ -12,7 +12,9 @@
 //! **The format** follows `remote-hosts` (`ssh_wrap`): line based, the first line names the
 //! version ([`HEADER`] + [`VERSION`]), then one `W` line per window, one `T` line per tab under it
 //! and one `P` line per pane under that; the tree is a pre-order token run (`S h|v {ratio} … L
-//! {index}`). **Every version the writer still writes is read**: version 6 gave a kept terminal
+//! {index}`). **Every version the writer still writes is read**: version 7 gave a window whether
+//! its side column hides and whether it shows Activity (a `W` line's eighth and ninth fields,
+//! `0`/`1` each, after the width), version 6 gave a kept terminal
 //! whether its pane closes when the terminal ends and who asked for the pane (two fields after
 //! the terminal's name: `0`/`1`, and `-` or `+{words}`), version 5 gave a pane the
 //! terminal a server keeps for it (a `P` line's last fields: `-`, or `+{account} {terminal}`
@@ -24,7 +26,8 @@
 //! The writer says the oldest version that holds what there is — 1 while no tab is named, no
 //! column was resized and no group exists, 2 while only names are, 3 once a width is, 4 once a
 //! window has a group, 5 once a pane shows a terminal a server keeps, 6 once such a pane was
-//! asked for by a program on the server (it closes with its terminal, or says who asked) — so a
+//! asked for by a program on the server (it closes with its terminal, or says who asked), 7 once
+//! a window hides its side column or shows Activity — so a
 //! session that uses
 //! nothing new stays readable by the bateri before
 //! it, whose reader drops any other number and, with it, the saved layout. A version's frozen
@@ -83,11 +86,16 @@ use crate::tabs::Tabs;
 /// The first line's word; the version follows it after one space.
 pub const HEADER: &str = "bateri-session";
 
-/// The format's current version: a kept terminal may say that its pane closes when it ends and
-/// who asked for the pane. The ones before it ([`KEPT`], [`GROUPED`], [`SIDED`], [`NAMED`],
+/// The format's current version: a window may say that its side column hides and that it shows
+/// Activity. The ones before it ([`ASKED`], [`KEPT`], [`GROUPED`], [`SIDED`], [`NAMED`],
 /// [`UNNAMED`]) are read too; any other number is not read (a newer bateri's file after a
 /// downgrade is dropped, not misread).
-pub const VERSION: u32 = 6;
+pub const VERSION: u32 = 7;
+
+/// The version before a window's column and Activity flags, which a session whose windows all
+/// show their column and their tabs is still written in: a kept terminal may say that its pane
+/// closes when it ends and who asked for the pane.
+const ASKED: u32 = 6;
 
 /// The version before a program's panes, which a session whose kept terminals were all opened by
 /// the user is still written in.
@@ -160,6 +168,11 @@ pub struct SavedWindow {
     /// `None` keeps the default. Kept while the tabs are in the title row as well, so the column
     /// comes back as it was.
     pub side_width: Option<f64>,
+    /// Whether the user hid the side column (the sidebar button, ⌃⌘S); kept while the tabs are in
+    /// the title row as well, as the width is.
+    pub column_hidden: bool,
+    /// Whether the side column showed Activity instead of every tab.
+    pub activity: bool,
     /// The window's tab groups in the order they are listed; none for a plain list of tabs. The
     /// tabs name theirs by index ([`SavedTab::group`]).
     pub groups: Vec<SavedGroup>,
@@ -626,8 +639,14 @@ impl Saved {
         };
         let asked_for = kept_terminals().any(|kept| kept.close_at_end || kept.opener.is_some());
         let kept = kept_terminals().next().is_some();
-        let version = if asked_for {
+        let flagged = self
+            .windows
+            .iter()
+            .any(|window| window.column_hidden || window.activity);
+        let version = if flagged {
             VERSION
+        } else if asked_for {
+            ASKED
         } else if kept {
             KEPT
         } else if grouped {
@@ -657,6 +676,13 @@ impl Saved {
                     Some(side) => out.push_str(&format!(" {side}")),
                     None => out.push_str(" -"),
                 }
+            }
+            if version >= VERSION {
+                out.push_str(&format!(
+                    " {} {}",
+                    u8::from(window.column_hidden),
+                    u8::from(window.activity)
+                ));
             }
             out.push('\n');
             if version >= GROUPED {
@@ -707,7 +733,7 @@ impl Saved {
                                     kept.terminal.as_str()
                                 ));
                                 // Fields of fixed place, before the arguments' run.
-                                if version >= VERSION {
+                                if version >= ASKED {
                                     out.push_str(&format!(
                                         " {} {}",
                                         u8::from(kept.close_at_end),
@@ -736,7 +762,7 @@ impl Saved {
             return None;
         }
         let version = header.next()?.parse::<u32>().ok()?;
-        if ![UNNAMED, NAMED, SIDED, GROUPED, KEPT, VERSION].contains(&version)
+        if ![UNNAMED, NAMED, SIDED, GROUPED, KEPT, ASKED, VERSION].contains(&version)
             || header.next().is_some()
         {
             return None;
@@ -840,12 +866,20 @@ fn parse_window<'a>(
     } else {
         None
     };
+    // Versions before 7 have neither flag: the column shows, and every tab in it.
+    let (column_hidden, activity) = if version >= VERSION {
+        (parse_bit(tokens.next()?)?, parse_bit(tokens.next()?)?)
+    } else {
+        (false, false)
+    };
     Some(SavedWindow {
         frame,
         tabs: Vec::new(),
         selected,
         key,
         side_width,
+        column_hidden,
+        activity,
         groups: Vec::new(),
     })
 }
@@ -934,7 +968,7 @@ fn parse_kept<'a>(
     }
     let account = unescape(first.strip_prefix('+')?)?;
     let terminal = SessionId::new(tokens.next()?).ok()?;
-    let (close_at_end, opener) = if version >= VERSION {
+    let (close_at_end, opener) = if version >= ASKED {
         let close_at_end = parse_bit(tokens.next()?)?;
         // An empty name says nobody: the card would say "Opened by" and nothing.
         let opener = parse_optional(tokens.next()?)?.filter(|opener| !opener.is_empty());
@@ -1293,6 +1327,8 @@ mod tests {
             selected: 0,
             key: false,
             side_width: None,
+            column_hidden: false,
+            activity: false,
             groups: Vec::new(),
         }
     }
@@ -1564,6 +1600,40 @@ mod tests {
         "\n",
     );
 
+    /// Version 7 for [`rich_flagged`], frozen the same way: a `W` line ends with whether the
+    /// window's column hides and whether it shows Activity.
+    const V7_FIXTURE: &str = concat!(
+        "bateri-session 7\n",
+        "W 120.5 -30 800 600.25 1 1 260.5 1 0\n",
+        "G api\\sserver 0 2\n",
+        "G ünï 1 -\n",
+        "T 0 - - - L 0\n",
+        "P 11111111-2222-3333-4444-555555555555 0 0 - - -\n",
+        "T 1 2 - 0 S h 0.3333333333333333 L 2 S v 0.71 L 0 L 1\n",
+        r"P 0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0 3 1 +/Users/ömer/My\sDrive/çalışma\\dosya - -",
+        "\n",
+        r"P 11111111-2222-3333-4444-555555555555 -2 0 +/tmp/tab\there\nnew\sline\rcr\s- +ssh\s-p\s2222\sprod +ada@prod:2222 b-0123456789abcdef0123456789abcdef 1 +Claude\s(t4) -p 2222 ada@prod",
+        "\n",
+        "P AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE 0 1 + + -\n",
+        "T 0 - - 0 L 0\n",
+        "P AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE 0 0 - - -\n",
+        "T 0 - - 1 L 0\n",
+        "P 0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0 0 0 - - -\n",
+        "W 120.5 -30 800 600.25 0 0 - 0 1\n",
+        "T 0 - - - L 0\n",
+        r"P AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE 0 0 - - +root@rasp:22\svia\sjump:22 b-fedcba9876543210fedcba9876543210 0 +t12 -J my\sjump root@rasp",
+        "\n",
+    );
+
+    /// [`rich_asked`] with the first window's column hidden and the second showing Activity: the
+    /// model of [`V7_FIXTURE`].
+    fn rich_flagged() -> Saved {
+        let mut saved = rich_asked();
+        saved.windows[0].column_hidden = true;
+        saved.windows[1].activity = true;
+        saved
+    }
+
     #[test]
     fn the_previous_version_is_read_byte_for_byte() {
         assert_eq!(Saved::parse(V1_FIXTURE), Some(rich()));
@@ -1571,11 +1641,23 @@ mod tests {
         assert_eq!(Saved::parse(V3_FIXTURE), Some(rich_sided()));
         assert_eq!(Saved::parse(V4_FIXTURE), Some(rich_grouped()));
         assert_eq!(Saved::parse(V5_FIXTURE), Some(rich_kept()));
+        assert_eq!(Saved::parse(V6_FIXTURE), Some(rich_asked()));
     }
 
     #[test]
     fn the_current_version_is_read_byte_for_byte() {
-        assert_eq!(Saved::parse(V6_FIXTURE), Some(rich_asked()));
+        assert_eq!(Saved::parse(V7_FIXTURE), Some(rich_flagged()));
+        // Either flag alone makes the file version 7; neither leaves it at 6.
+        for (hidden, activity) in [(true, false), (false, true)] {
+            let mut one = rich_asked();
+            one.windows[1].column_hidden = hidden;
+            one.windows[1].activity = activity;
+            assert!(one.render().starts_with("bateri-session 7\n"));
+            assert_eq!(Saved::parse(&one.render()), Some(one));
+        }
+        // A flag that is not a bit is not read.
+        let bad = V7_FIXTURE.replacen("260.5 1 0", "260.5 2 0", 1);
+        assert_eq!(Saved::parse(&bad), None);
     }
 
     /// The writer says the oldest version that holds the session — the one before names while no
@@ -1590,6 +1672,7 @@ mod tests {
         assert_eq!(rich_grouped().render(), V4_FIXTURE);
         assert_eq!(rich_kept().render(), V5_FIXTURE);
         assert_eq!(rich_asked().render(), V6_FIXTURE);
+        assert_eq!(rich_flagged().render(), V7_FIXTURE);
     }
 
     /// A pane a program asked for is what makes the file version 6, either half of it alone: a

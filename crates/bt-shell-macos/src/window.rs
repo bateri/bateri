@@ -116,6 +116,7 @@ use objc2_foundation::{
     NSObjectNSKeyValueObserverRegistration, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
     ns_string,
 };
+use objc2_quartz_core::{CAMediaTiming, CAMediaTimingFunction, CATransition, kCATransitionFade};
 
 use crate::Run;
 use crate::app;
@@ -994,6 +995,14 @@ define_class!(
                 // window's title, and one named before the others closed must
                 // be possible to change.)
                 self.ivars().order.borrow().len() > 1
+            } else if action == Some(sel!(toggleSidebar:)) {
+                // The title says which way the column goes; a column there is only at the side.
+                item.setTitle(if self.column_hidden() {
+                    ns_string!("Show Sidebar")
+                } else {
+                    ns_string!("Hide Sidebar")
+                });
+                tabs_at_side(self.mtm())
             } else if action == Some(sel!(showTabList:)) {
                 // The big view: open, the same item takes it down; otherwise it needs a window
                 // it may open over (no question up), and shows the tabs even of a lone one.
@@ -1229,6 +1238,14 @@ define_class!(
                 .shortcut(&self.ivars().order.borrow(), self.listing(), tag);
             if let Some(tab) = target {
                 self.select_tab(tab);
+            }
+        }
+
+        /// View ▸ Hide Sidebar / Show Sidebar (⌃⌘S): the window's side column goes or comes.
+        #[unsafe(method(toggleSidebar:))]
+        fn toggle_sidebar(&self, _sender: Option<&AnyObject>) {
+            if tabs_at_side(self.mtm()) {
+                self.toggle_column();
             }
         }
 
@@ -1543,6 +1560,10 @@ pub(crate) struct RootIvars {
     /// fitted to the window ([`tabs::side_width`]), so one the window narrowed comes back as it
     /// widens. The default until dragged, and kept while the tabs are in the title row.
     side_width: Cell<f64>,
+    /// With the tabs in the side column, the user hid the column (the sidebar button, ⌃⌘S): the
+    /// bar is the title row and the content takes the window's width. The window's own, like the
+    /// width, and back with the session.
+    column_hidden: Cell<bool>,
     /// The title row's last measured height; `0` until the window reports one.
     row: Cell<f64>,
     /// The command palette while it is open: over everything the window holds, the side
@@ -1622,6 +1643,7 @@ impl RootView {
             claim: claim.clone(),
             edge: edge.clone(),
             side_width: Cell::new(side_width),
+            column_hidden: Cell::new(false),
             row: Cell::new(0.0),
             palette: RefCell::new(None),
             overview: RefCell::new(None),
@@ -1680,7 +1702,7 @@ impl RootView {
         // The side column's line is the ground's counterpart: it stands while the content is
         // not cards on the ground (one pane, a zoomed pane, a lined split) and fades out as the
         // ground comes in, so the column is never both ruled off and on the ground.
-        let ruled = shown.is_none() && tabs_at_side(self.mtm());
+        let ruled = shown.is_none() && self.column_shown();
         if self.ivars().ruled.replace(ruled) != ruled {
             fade_to(&self.ivars().rule, ruled, still || !on_screen);
             // A line the window first showed transparent — a window restored on a split tab —
@@ -1722,9 +1744,10 @@ impl RootView {
     }
 
     /// What the tabs keep of a content `width` wide: the width of the side column, or the
-    /// height of the title row the bar stands in. The content is the rest.
+    /// height of the title row the bar stands in — the hidden column's too. The content is the
+    /// rest.
     pub(crate) fn tabs_inset(&self, width: f64) -> NSSize {
-        if tabs_at_side(self.mtm()) {
+        if self.column_shown() {
             NSSize::new(self.column_for(width), 0.0)
         } else {
             NSSize::new(0.0, self.title_row())
@@ -1745,6 +1768,46 @@ impl RootView {
     /// The width the user left the side column at ([`RootIvars::side_width`]).
     pub(crate) fn side_width(&self) -> f64 {
         self.ivars().side_width.get()
+    }
+
+    /// Whether the user hid the side column ([`RootIvars::column_hidden`]); kept while the tabs
+    /// are in the title row, for when they come back to the side.
+    pub(crate) fn column_hidden(&self) -> bool {
+        self.ivars().column_hidden.get()
+    }
+
+    /// Whether the side column stands at the window's left now: the tabs are at the side and the
+    /// user has not hidden it. The containers stand beside it ([`SplitView`]'s cards keep no left
+    /// margin there, and the bottom-left corner is the column's).
+    pub(crate) fn column_shown(&self) -> bool {
+        tabs_at_side(self.mtm()) && !self.column_hidden()
+    }
+
+    /// Hides the side column or shows it again, and lays everything out at once: the containers
+    /// take their new frames once, so a program is resized once. The change crossfades over
+    /// [`COLUMN_SECS`] — unless Reduce Motion is on or the window is not on screen — so it reads
+    /// as one move and not a jump: the column's place and the content's width change together.
+    pub(crate) fn set_column_hidden(&self, hidden: bool) {
+        if self.ivars().column_hidden.replace(hidden) == hidden {
+            return;
+        }
+        let still = crate::app::delegate(self.mtm()).is_some_and(|app| app.reduce_motion());
+        let on_screen = self.window().is_some_and(|window| window.isVisible());
+        if !still
+            && on_screen
+            && tabs_at_side(self.mtm())
+            && let Some(layer) = self.layer()
+        {
+            let fade = CATransition::animation();
+            // SAFETY: Core Animation's constant transition type, alive for the process.
+            fade.setType(unsafe { kCATransitionFade });
+            fade.setDuration(COLUMN_SECS);
+            fade.setTimingFunction(Some(&CAMediaTimingFunction::functionWithControlPoints(
+                0.2, 0.8, 0.2, 1.0,
+            )));
+            layer.addAnimation_forKey(&fade, Some(ns_string!("bateri.column")));
+        }
+        self.lay_out();
     }
 
     /// The side column is to be `width` wide: kept, and everything placed again when it changed.
@@ -1779,7 +1842,8 @@ impl RootView {
         let bar = &self.ivars().bar;
         let claim = &self.ivars().claim;
         let side = tabs_at_side(self.mtm());
-        let column = side.then(|| self.column_for(bounds.size.width));
+        let shown = side && !self.column_hidden();
+        let column = shown.then(|| self.column_for(bounds.size.width));
         let below = content_frame(bounds.size, row, column);
         let bar_frame = if let Some(column) = column {
             self.ivars().edge.setFrame(NSRect::new(
@@ -1794,14 +1858,15 @@ impl RootView {
         } else {
             NSRect::new(NSPoint::ZERO, NSSize::new(bounds.size.width, row))
         };
-        claim.setHidden(!side);
+        claim.setHidden(!shown);
         // Not under the big view ([`Self::seat_overview`]).
         self.ivars()
             .edge
-            .setHidden(!side || self.ivars().overview.borrow().is_some());
+            .setHidden(!shown || self.ivars().overview.borrow().is_some());
+        bar.set_column_hidden(self.column_hidden());
         bar.set_side(side.then_some(row));
         bar.setFrame(bar_frame);
-        if side {
+        if shown {
             // One device pixel, along the column's last: the content starts right after it.
             let scale = self
                 .window()
@@ -1830,7 +1895,7 @@ impl RootView {
     pub(crate) fn content(&self) -> NSRect {
         let size = self.bounds().size;
         let row = self.ivars().row.get().min(size.height);
-        let column = tabs_at_side(self.mtm()).then(|| self.column_for(size.width));
+        let column = self.column_shown().then(|| self.column_for(size.width));
         content_frame(size, row, column)
     }
 
@@ -1858,9 +1923,7 @@ impl RootView {
         let covered = overview.is_some();
         self.ivars().overview.replace(overview);
         self.ivars().bar.setHidden(covered);
-        self.ivars()
-            .edge
-            .setHidden(covered || !tabs_at_side(self.mtm()));
+        self.ivars().edge.setHidden(covered || !self.column_shown());
     }
 
     /// The big view follows the window's size.
@@ -1899,6 +1962,10 @@ pub(crate) fn content_frame(size: NSSize, row: f64, column: Option<f64>) -> NSRe
         ),
     }
 }
+
+/// How long hiding or showing the side column takes, in seconds: a design constant, the
+/// design's 240 ms.
+const COLUMN_SECS: f64 = 0.24;
 
 /// How far the side column's resizing edge reaches in from the column's right side: the column's
 /// own empty padding right of the rows ([`tabs::EDGE`]), so the edge takes no press from a row,
@@ -4620,10 +4687,19 @@ impl TerminalWindow {
                 rows,
             }
         });
+        // What the tabs out of sight ask, for the sidebar button while the column hides: the tab
+        // on screen says its own.
+        let others: Vec<u64> = order
+            .ids()
+            .iter()
+            .copied()
+            .filter(|&tab| Some(tab) != order.selected())
+            .collect();
         drop((order, groups));
+        let unseen = self.cluster_indicator(&others);
         let notice = self.ivars().notice.borrow().clone();
         self.bar()
-            .show(labels, selected, headings, switcher, notice);
+            .show(labels, selected, headings, switcher, notice, unseen);
     }
 
     /// What a cluster of tabs — a group's, the ungrouped ones, everything outside the group on
@@ -4941,6 +5017,27 @@ impl TerminalWindow {
     /// The side column's width as it stands in this window ([`tabs::side_width`]).
     pub(crate) fn column_width(&self) -> f64 {
         self.ivars().root.column_width()
+    }
+
+    /// Whether the user hid this window's side column ([`RootView::column_hidden`]).
+    pub(crate) fn column_hidden(&self) -> bool {
+        self.ivars().root.column_hidden()
+    }
+
+    /// Hides the side column or shows it (the sidebar button, View ▸ Hide Sidebar, ⌃⌘S): the
+    /// content takes the window's width or gives the column back, under `resize_in_steps` the
+    /// window takes the new area's step, and the layout is saved with the choice.
+    pub(crate) fn toggle_column(&self) {
+        self.set_column_hidden(!self.column_hidden());
+        self.layout_changed();
+    }
+
+    /// Hides or shows the side column (a restored window, the toggle), before the window is shown
+    /// or with it on screen.
+    pub(crate) fn set_column_hidden(&self, hidden: bool) {
+        self.ivars().root.set_column_hidden(hidden);
+        self.refresh_bar();
+        self.fit_to_cells();
     }
 
     /// Gives the side column `width` (a window opened from another, a restored one), before the

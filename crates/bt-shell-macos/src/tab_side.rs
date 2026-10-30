@@ -13,9 +13,13 @@
 //! **Where it sits.** The column is as wide as the window makes the bar (`tabs::side_width` of the
 //! width the user dragged its edge to, `side_edge`) and the window's height tall, the traffic
 //! lights at its head: the list starts a title row down (`top`, read from the window, the
-//! same in full screen so the rows do not move as it comes and goes) and ends above New Tab,
-//! which sits in the window's bottom-left corner and keeps that corner's centre
-//! ([`tabs::Fit`]). The rows scroll by the wheel when they do not fit, run under the list's ends
+//! same in full screen so the rows do not move as it comes and goes) and ends at the column's
+//! foot, or above the settings warning, which sits in the window's bottom-left corner and keeps
+//! that corner's centre ([`tabs::Fit`]). The head holds the sidebar button right of the traffic
+//! lights and New Tab at the column's end, bare glyphs (`tabs::Head`). The user may hide the
+//! column ([`TabBar::set_column_hidden`]): the bar is then the title row — the sidebar button,
+//! the tab on screen's name in the middle, New Tab in the window's corner — and the button's
+//! corner carries what the tabs out of sight ask. The rows scroll by the wheel when they do not fit, run under the list's ends
 //! and dissolve there by a mask on the list ([`Mask`]) — not a band of the ground's colour
 //! painted over them, which would lighten a card's shadow falling under the column.
 //!
@@ -78,8 +82,8 @@ pub(super) fn ns_rect(rect: Rect) -> NSRect {
 
 /// A rectangle with its own radius at each corner — top-left, top-right, bottom-right,
 /// bottom-left, as a top-down view draws them — filled, and its inside edge stroked with `line` if
-/// any. [`super::rounded`] for a shape whose corners differ: New Tab in the column keeps the
-/// window's corner at its foot.
+/// any. [`super::rounded`] for a shape whose corners differ: the settings warning in the column
+/// keeps the window's corner at its foot.
 pub(super) fn rounded_corners(rect: NSRect, radii: [f64; 4], fill: Tint, line: Option<Tint>) {
     let path = corners_path(rect, radii);
     fill.color().setFill();
@@ -340,15 +344,134 @@ impl TabBar {
             iv.list.setHidden(true);
             iv.switch.setHidden(true);
             self.close_group_list(false);
+            // The column's head: bare glyphs, a face only under the pointer.
+            iv.sidebar.setHidden(false);
+            iv.new_tab.set_bare(true);
         } else {
-            // The bar's own: the list had no mask and New Tab a square foot, and no headers.
+            // The bar's own: the list had no mask and no headers, the warning a square foot, `+`
+            // its frame, and the chips a hidden column had put away come back.
             iv.mask.clear(&iv.strip);
-            iv.new_tab.set_foot(None);
+            iv.warning.set_foot(None);
+            iv.sidebar.setHidden(true);
+            iv.new_tab.set_bare(false);
+            for chip in iv.chips.borrow().iter() {
+                chip.setHidden(false);
+            }
             for header in iv.headers.take() {
                 header.removeFromSuperview();
             }
             iv.strip.setNeedsDisplay(true);
         }
+    }
+
+    /// Hides the column (the bar becomes the title row: the sidebar button, the name of the tab
+    /// on screen, New Tab) or shows it again; the window lays out after. Only the side mode reads
+    /// it; the window keeps the choice ([`crate::window::RootView::column_hidden`]).
+    pub(crate) fn set_column_hidden(&self, hidden: bool) {
+        let iv = self.ivars();
+        if iv.hidden.replace(hidden) == hidden {
+            return;
+        }
+        self.close_card();
+        iv.drag.set(None);
+        iv.gap.set(None);
+        iv.target.set(None);
+        iv.mark.set(None);
+        iv.insertion.clear();
+        iv.revealed.set(None);
+        iv.sidebar.retip(self.mtm());
+        if !hidden {
+            for chip in iv.chips.borrow().iter() {
+                chip.setHidden(false);
+            }
+        }
+    }
+
+    /// Whether the column hides ([`Self::set_column_hidden`]).
+    pub(crate) fn column_hidden(&self) -> bool {
+        self.ivars().hidden.get()
+    }
+
+    /// The title row while the column hides: the sidebar button where the column's head has it
+    /// with the badge of what the tabs out of sight ask, the tab on screen's name centred on the
+    /// window as a lone tab's is in the title row, and New Tab in the window's top-right corner
+    /// (`tabs::Head::row`). Nothing else of the column shows: the other rows, the headers and the
+    /// settings warning wait for the column to come back.
+    pub(super) fn lay_out_head(&self, top: f64, shown: &Shown, chips: &[Retained<Chip>]) {
+        let iv = self.ivars();
+        let (Some(palette), Some(theme)) = (iv.palette.get(), iv.theme.get()) else {
+            return;
+        };
+        let bounds = self.bounds();
+        let corner = card::window_corner_pt(self.window().as_deref());
+        let head = tabs::Head::row(bounds.size.width, top, corner);
+        iv.strip.setFrame(NSRect::new(NSPoint::ZERO, bounds.size));
+        iv.mask.clear(&iv.strip);
+        for header in iv.headers.take() {
+            header.removeFromSuperview();
+        }
+        iv.strip.set_separators(Vec::new(), palette);
+        let reduce = self.reduce_motion();
+        let motion = Motion::of(reduce);
+        let visible = self
+            .terminal_window()
+            .is_some_and(|window| window.window_visible());
+        let seen = Seen {
+            theme,
+            count: shown.tabs.len(),
+            visible,
+            reduce,
+            style: IconStyle::current(self.mtm()),
+            hints: self.hint_mods(),
+        };
+        let chip_top = ((top - super::CHIP_HEIGHT) / 2.0).max(0.0);
+        for (index, chip) in chips.iter().enumerate() {
+            let on_screen = index == shown.selected;
+            chip.setHidden(!on_screen);
+            if !on_screen {
+                continue;
+            }
+            let label = &shown.tabs[index];
+            let title = super::single_label(&label.title, &shown.notice);
+            let look = seen.look(
+                label,
+                &title,
+                Standing {
+                    index,
+                    naming: false,
+                    selected: true,
+                    hovered: false,
+                    picked: false,
+                    glowing: false,
+                    single: true,
+                    lifted: false,
+                    ghost: false,
+                    side: false,
+                },
+            );
+            chip.set(
+                NSRect::new(
+                    NSPoint::new(head.title.x, chip_top),
+                    NSSize::new(head.title.width, super::CHIP_HEIGHT),
+                ),
+                &look,
+                palette,
+                motion,
+                None,
+            );
+        }
+        iv.sidebar.setFrame(ns_rect(head.sidebar));
+        iv.sidebar.set_look(palette, TAB_RADIUS);
+        iv.sidebar.set_bare(true);
+        iv.sidebar.set_badge(shown.unseen);
+        if let Some(new_tab) = head.new_tab {
+            iv.new_tab.setFrame(ns_rect(new_tab));
+            iv.new_tab.set_look(palette, TAB_RADIUS);
+        }
+        iv.warning.setHidden(true);
+        iv.list.setHidden(true);
+        iv.column.replace(None);
+        self.arm_clock();
     }
 
     /// Whether the bar is the side column.
@@ -533,14 +656,17 @@ impl TabBar {
             .map_or(2.0, |window| window.backingScaleFactor());
         iv.mask.set(&iv.strip, &column, scale);
 
+        iv.sidebar.setFrame(ns_rect(column.sidebar));
+        iv.sidebar.set_look(palette, TAB_RADIUS);
+        iv.sidebar.set_badge(None);
         iv.new_tab.setFrame(ns_rect(column.new_tab));
         iv.new_tab.set_look(palette, TAB_RADIUS);
-        iv.new_tab.set_foot(Some(column.fit.radius));
         iv.list.setHidden(true);
         match column.warning {
             Some(button) => {
                 iv.warning.setFrame(ns_rect(button));
                 iv.warning.set_look(palette, TAB_RADIUS);
+                iv.warning.set_foot(Some(column.fit.radius));
                 let text = NSString::from_str(&shown.notice);
                 iv.warning.setToolTip(Some(&text));
                 iv.warning.setAccessibilityLabel(Some(&text));
