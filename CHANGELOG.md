@@ -240,6 +240,13 @@ of every installed copy. A version without a section is not released.
 
 ### Fixed
 
+- **A terminal shown again after a lot of output keeps its commands and its prompt.** When
+  bateri came back to a terminal that had printed more than kablo keeps of it (a long build,
+  a program like `btop` left running for an hour), the terminal came back as plain text: no
+  marks beside the commands, the caret on the grid and an empty dock until the next command.
+  It now comes back with the commands still marked as they ended, the dock and its line, as
+  any other terminal does. bateri carries kablo 0.5.0, whose picture of a screen tells the
+  shell's marks again.
 - **A field of a native view opens with its text and the keyboard.** The find bar, the command
   palette and the dialogs of a program's view (textpen's ⌘F, ⌘E) opened empty and without the
   keyboard when the page opened and filled the field in one go: the text was put in before the field
