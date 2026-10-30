@@ -17,8 +17,9 @@
 //! page then subscribes, hears a push, and calls the program once more with what it heard.
 //!
 //! Then ⌃C typed in the view arrives at the program as the byte 0x03, a key that is the
-//! application's shortcut (⌘T) goes to the main menu and not to the view, the application's
-//! strip stands over the view's area, and the program's `bye` takes the view down. A page can
+//! application's shortcut (⌘T) goes to the main menu and not to the view, the view covers the
+//! whole pane and gives its owner the words for the header over it, and the program's `bye`
+//! takes the view down. A page can
 //! ask to close itself (`close`, and the program is told `closed` with reason `view`).
 //!
 //! A bundle that asks for an address makes the pane ask the person, with a sheet on the
@@ -48,15 +49,14 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use bt_core::{Chord, Key, Mods, Settings, Theme};
-use bt_shell_common::view_strip;
 use bt_shell_macos::embed::{self, Cover, Host, Identity, Source, TerminalPane};
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, Message, define_class, msg_send, sel};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSButton, NSEvent,
-    NSEventModifierFlags, NSEventType, NSImageView, NSMenu, NSMenuItem, NSTextField, NSView,
-    NSWindow, NSWindowStyleMask,
+    NSEventModifierFlags, NSEventType, NSMenu, NSMenuItem, NSTextField, NSView, NSWindow,
+    NSWindowStyleMask,
 };
 use objc2_core_graphics::CGImage;
 use objc2_foundation::{
@@ -482,16 +482,6 @@ fn holds_keyboard(window: &NSWindow, pane: &TerminalPane) -> bool {
         .is_some_and(|view| view.isDescendantOf(&web))
 }
 
-/// The strip the application keeps over a view: a subview of the pane of its own class.
-fn strip_view(pane: &TerminalPane) -> Option<Retained<NSView>> {
-    pane.subviews().iter().find(|view| {
-        view.class()
-            .name()
-            .to_string_lossy()
-            .contains("BateriPencereStrip")
-    })
-}
-
 /// The test program's icon (the `icons` of its `open`): a 64-pixel PNG of three stacked boxes, as a
 /// `data:` URI, the only kind a terminal takes.
 const ICON: &str = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAAy0lEQVR42u3YsQ3CMBBG4QzowhJTsIMrClgD0dEyAYUHSEXrUYwcKR1VSOP4e9JJVqr4j+zcvWkCAAD4QUg5hpRLSLl2Wu3d4z+brwepuCWAcqAAypYA6pFqtwBOt3c9P19LtfVQAbQNX+ZHvX7uS7V1LyHsEkD76uvm12rPBOAIuATHCWCk3+DwjdDYrfDwwxDAB/ABfAAfoBU2DBmHBeAIuAT5AD6AD+ADwAfwAXwAH8AH8AF8AB/AB/ABfAAfwAfwAXwAAAAAOucLnVucWIVm/igAAAAASUVORK5CYII=";
@@ -706,12 +696,12 @@ fn run(dir: &Path) {
         );
     }
     let hello = watch_it_start(&pane, &mut program);
-    // The context the page was told: the theme's own roles, the pane's area less the strip, and
-    // nothing allowed (no `access`).
+    // The context the page was told: the theme's own roles, the whole pane (the header over it
+    // is the owner's), and nothing allowed (no `access`).
     for needle in [
         "\"mode\":\"dark\"",
         "\"background\":\"#",
-        "\"width\":640,\"height\":368",
+        "\"width\":640,\"height\":400",
         "\"access\":null",
     ] {
         assert!(hello.contains(needle), "{needle:?} is not in: {hello}");
@@ -780,65 +770,25 @@ fn run(dir: &Path) {
         });
     }
 
-    // The strip is the application's own and stands over the view's area: the view is the
-    // pane less the strip's height, below it.
-    let strip = strip_view(&pane).expect("the strip is a subview of the pane");
+    // The view covers the whole pane; what it is, the header over the pane says — the owner's,
+    // outside the view, where the view cannot draw.
     let (area, bounds) = (web.frame(), pane.bounds());
-    assert_eq!(strip.frame().size.height, view_strip::HEIGHT);
-    // It says what the program calls the view and itself, in the words the program gave (the
-    // `title` and `program` of its `open`), and not the process's; on this Mac it names no
-    // place. (The strip's own fields: the button's label is AppKit's.)
-    let words: Vec<String> = strip
-        .subviews()
-        .iter()
-        .filter_map(|view| {
-            view.downcast_ref::<NSTextField>()
-                .filter(|field| !field.isHidden())
-                .map(|field| field.stringValue().to_string())
-        })
-        .collect();
-    assert_eq!(words, ["Pencere Test", "Show things"], "{words:?}");
-    // Left of the program's name, the picture it gave for itself, at the strip's icon size.
-    let pictures: Vec<NSRect> = strip
-        .subviews()
-        .iter()
-        .filter_map(|view| {
-            view.downcast_ref::<NSImageView>()
-                .filter(|picture| !picture.isHidden() && picture.image().is_some())
-                .map(|picture| picture.frame())
-        })
-        .collect();
-    let [picture] = pictures.as_slice() else {
-        panic!("one icon in the strip: {pictures:?}")
-    };
-    assert_eq!(
-        picture.size,
-        NSSize::new(view_strip::ICON, view_strip::ICON)
-    );
-    let name = strip
-        .subviews()
-        .iter()
-        .find_map(|view| {
-            view.downcast_ref::<NSTextField>()
-                .filter(|field| field.stringValue().to_string() == "Pencere Test")
-                .map(|field| field.frame())
-        })
-        .expect("the program's name");
-    assert_eq!(
-        name.origin.x,
-        picture.origin.x + view_strip::ICON + view_strip::ICON_GAP
-    );
-    assert_eq!(
-        strip.frame().origin.y + strip.frame().size.height,
-        bounds.size.height
-    );
-    assert_eq!(area.origin.y, 0.0);
-    assert_eq!(area.size.height, bounds.size.height - view_strip::HEIGHT);
-    assert_eq!(area.size.width, bounds.size.width);
+    assert_eq!(area, bounds);
+    // The words the program gave for the view and itself (the `title` and `program` of its
+    // `open`), not the process's; on this Mac no place. Its icon is drawn by its name, and the
+    // way out is ⌃C to the program.
+    let head = pane
+        .view_head()
+        .expect("the header's words while the view is up");
+    assert_eq!(head.words.place, None);
+    assert_eq!(head.words.program.as_deref(), Some("Pencere Test"));
+    assert_eq!(head.words.title.as_deref(), Some("Show things"));
+    assert!(head.has_icon(), "the program's icon is the header's");
+    assert_eq!(head.exit, embed::ViewExit::Quit);
 
     // The picture a tab's card shows of this pane is the view's own (not the terminal's under
     // it). A card that opens on a view has one at once: the view took its first when it
-    // loaded, the page's own shape (the pane less the strip) and no wider than a tile needs
+    // loaded, the page's own shape (the whole pane) and no wider than a tile needs
     // — not the tile's, and not the terminal's (whose shape is the tile's), which is what a
     // card would get if the view had none. The call asked for the tile's own, which a turn of
     // the run loop later is what the card is given: the page fills the tile and what spills
@@ -854,7 +804,7 @@ fn run(dir: &Path) {
         .expect("a card that opens on a view has a picture to show");
     let page = pane.bounds().size;
     assert!(
-        (shape_of(&first) - page.width / (page.height - view_strip::HEIGHT)).abs() < 0.02,
+        (shape_of(&first) - page.width / page.height).abs() < 0.02,
         "the view's first picture is the page's shape, not the tile's"
     );
     let wanted = tile.0 / tile.1;
@@ -922,6 +872,10 @@ fn run(dir: &Path) {
     // The program ends its view: `bye` with the token. The pane is the terminal's again.
     program.bye(&token);
     until("the view to go", || !covered(&pane));
+    assert!(
+        pane.view_head().is_none(),
+        "the header says the terminal's words again"
+    );
 
     // A view whose page asks for an address: the person is asked before the view starts, and
     // the page is told what was allowed.

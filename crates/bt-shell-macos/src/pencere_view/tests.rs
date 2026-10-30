@@ -16,7 +16,9 @@ use super::serve::{
 };
 use super::still::{self, Capture, PATIENCE, Shared, Still};
 use super::wait::{OFFERED, OPENING, Waits};
-use super::{INTERRUPT, QUIT, SUSPEND, modifiers_of, signal_of, strip_area, view_area};
+use super::{
+    Exit, INTERRUPT, QUIT, SUSPEND, ViewSize, Words, content_size, modifiers_of, signal_of,
+};
 
 const INSTANCE: &str = "v-0123456789abcdef0123456789abcdef";
 const POLICY: &str = "default-src 'none'; script-src 'self' 'unsafe-inline'; connect-src 'self' https://api.example;";
@@ -856,41 +858,47 @@ fn an_offer_made_again_while_the_first_is_waited_for_has_a_time_of_its_own() {
     assert!(waits.expired(second));
 }
 
-// ---- the strip and the view's area ------------------------------------------
+// ---- the view's area and the header's words -------------------------------------
 
 fn pane(x: f64, y: f64, width: f64, height: f64) -> NSRect {
     NSRect::new(NSPoint::new(x, y), NSSize::new(width, height))
 }
 
 #[test]
-fn the_strip_and_the_views_area_are_the_pane_exactly() {
-    // The strip is the pane's top (the pane is unflipped: the top is the larger y) and the
-    // view's area is what is under it, whatever the pane's origin.
+fn the_view_is_told_the_whole_pane_and_nothing_negative() {
+    // The header over a view is the owner's, outside the pane: the view has all of it.
     for bounds in [pane(0.0, 0.0, 800.0, 600.0), pane(10.0, 20.0, 333.5, 250.0)] {
-        let (strip, area) = (strip_area(bounds), view_area(bounds));
-        assert_eq!(strip.size.height, view_strip::HEIGHT);
-        assert_eq!(strip.size.width, bounds.size.width);
-        assert_eq!(area.size.width, bounds.size.width);
-        assert_eq!(area.origin, bounds.origin);
-        assert_eq!(area.origin.y + area.size.height, strip.origin.y);
         assert_eq!(
-            strip.origin.y + strip.size.height,
-            bounds.origin.y + bounds.size.height
+            content_size(bounds),
+            ViewSize {
+                width: bounds.size.width.floor() as u32,
+                height: bounds.size.height.floor() as u32,
+            }
         );
-        assert_eq!(area.size.height + strip.size.height, bounds.size.height);
     }
+    assert_eq!(
+        content_size(pane(0.0, 0.0, -4.0, 0.0)),
+        ViewSize {
+            width: 0,
+            height: 0
+        }
+    );
 }
 
 #[test]
-fn a_pane_shorter_than_the_strip_is_all_strip_and_no_view() {
-    let bounds = pane(0.0, 0.0, 300.0, view_strip::HEIGHT - 10.0);
-    assert_eq!(view_area(bounds).size.height, 0.0);
-    assert_eq!(strip_area(bounds).size.height, bounds.size.height);
-    assert_eq!(strip_area(bounds).origin.y, 0.0);
-    // And nothing is negative for a pane with no size.
-    let none = pane(0.0, 0.0, 0.0, 0.0);
-    assert_eq!(view_area(none).size.height, 0.0);
-    assert_eq!(strip_area(none).size.height, 0.0);
+fn the_header_over_a_view_says_its_words_and_its_way_out_whatever_the_ground() {
+    let words = view_strip::strip(Some("Containers"), Some("prod"), Some("Docker UI"));
+    let kept = Words::new(words.clone(), &[], Exit::Quit);
+    for dark in [false, true] {
+        let head = kept.head(dark);
+        assert_eq!(head.words, words);
+        assert_eq!(head.exit, Exit::Quit);
+        // No icon given: the header draws the mark of what runs the program.
+        assert!(!head.has_icon());
+    }
+    // Quit is ⌃C to the program; a demo's button takes its page down.
+    assert_eq!(Exit::Quit.action(), objc2::sel!(quitProgram:));
+    assert_eq!(Exit::Close.action(), objc2::sel!(closeUiPage:));
 }
 
 #[test]

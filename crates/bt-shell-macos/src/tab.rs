@@ -686,8 +686,8 @@ impl TerminalTab {
     }
 
     /// Gives the panes' headers what they show — a tab's only pane's too: each pane's program
-    /// mark, its title, its own signals' dot, whether it holds the focus and whether it is the
-    /// tab's only pane. AppKit's work, it asks for no frame.
+    /// mark, its title, its own signals' dot, whether it holds the focus, whether it is the
+    /// tab's only pane, and what a program's view over it says of itself (`view_head`). AppKit's work, it asks for no frame.
     pub(crate) fn refresh_heads(&self) {
         let container = &self.ivars().container;
         let Some(theme) = self.focused_pane().session().map(|session| session.theme()) else {
@@ -714,6 +714,7 @@ impl TerminalTab {
                         focused: own,
                         carded,
                         alone,
+                        view: pane.view_head(),
                     },
                 )
             })

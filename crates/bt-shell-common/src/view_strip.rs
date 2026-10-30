@@ -1,23 +1,22 @@
-//! The strip over a program's view: what it says and where its parts stand.
+//! What the application says over a program's view.
 //!
 //! A program's view covers the whole pane, and a view that covers the pane could imitate the
-//! terminal under it. So the application keeps a strip of its own at the top of the pane,
-//! outside the view's area, that says what the view cannot say for itself, each thing once:
-//! where the program runs (`⇄ prod`, the dock's mark for a server; nothing on this Mac), which
-//! program it is (its icon, when it gave one, and its name), what the view is (its title, when it says more than the program's name), and
-//! the way out — one button, **Quit ⌃C**, the verb and the key it is.
+//! terminal under it. So the header over the pane — the application's own, outside the view's
+//! area — says what the view cannot say for itself, each thing once, and for as long as the
+//! view is up: where the program runs (`⇄ prod`, the dock's mark for a server; nothing on this
+//! Mac), which program it is (its icon, when it gave one, and its name), what the view is (its
+//! title, when it says more than the program's name), and the way out — one button,
+//! **Quit ⌃C**, the verb and the key it is.
 //!
 //! Every name in it comes from the program or from the machine it runs on, so it is **cleaned
 //! and bounded** here ([`strip`]) before a toolkit draws it: a name with a line break, a
 //! direction override or a thousand characters must not look like the application's own words.
-//! The title is the least trusted part (the program wrote it) and gives way first when the strip
-//! is narrow; where the program runs stays last ([`arrange`]).
+//! The title is the least trusted part (the program wrote it): the header says the place, the
+//! program and the title in that order, so a header too narrow for them all loses the title
+//! first and where the program runs last.
 //!
-//! Platform-free: the AppKit shell measures the text and draws the parts where [`arrange`] puts
-//! them (`bt-shell-macos::pencere_view`), and another shell would do the same.
-
-/// The strip's height, points: the height of the view's area is the pane's less this.
-pub const HEIGHT: f64 = 32.0;
+//! Platform-free: the AppKit shell draws the words (`bt-shell-macos::tab_head`), and another
+//! shell would do the same.
 
 /// The mark before the server a program runs on: the dock's mark for a remote session
 /// (`bt_core::dock::REMOTE_MARK`), so the strip names a server the way the dock does.
@@ -148,155 +147,6 @@ fn hides_or_reverses(c: char) -> bool {
     )
 }
 
-/// The side of the program's icon, points: a little over the height of the name's capitals, as
-/// an application's icon stands by its name in a menu.
-pub const ICON: f64 = 16.0;
-/// The gap between the program's icon and its name, points: closer than [`GAP`], since the two
-/// are one part and give way together.
-pub const ICON_GAP: f64 = 6.0;
-
-/// The gap left of the first part, points.
-pub const LEFT: f64 = 14.0;
-/// The gap between the parts, points: the parts are told apart by their colours and this, with
-/// no separator between them.
-pub const GAP: f64 = 8.0;
-/// The gap right of the button, points.
-pub const RIGHT: f64 = 8.0;
-/// The narrowest a name is cut to before the next part gives way, points: a few characters and
-/// the ellipsis. A design constant.
-pub const MIN_PART: f64 = 40.0;
-
-/// A part's place along the strip: where it starts and how wide it is, points.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Span {
-    pub x: f64,
-    pub width: f64,
-}
-
-/// Where the parts stand, left to right; a part that is `None` is not drawn (it has no text, or
-/// the strip is too narrow for it).
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Layout {
-    pub place: Option<Span>,
-    /// The program's icon, just left of its name: it stays when the name is cut to nothing and
-    /// goes when the program does.
-    pub icon: Option<Span>,
-    pub program: Option<Span>,
-    pub title: Option<Span>,
-    /// The button, at the right edge; it never gives way.
-    pub button: Span,
-}
-
-/// The natural widths of the parts, as the toolkit measured them; a part with no text is 0.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Widths {
-    pub place: f64,
-    /// [`ICON`] when there is an icon to draw, else 0.
-    pub icon: f64,
-    pub program: f64,
-    pub title: f64,
-    pub button: f64,
-}
-
-/// Where the parts of a strip `width` points wide stand. The button is at the right edge; the
-/// place, the program and the title stand in that order from the left, in what is left. When
-/// they do not fit, the title is cut (to no less than [`MIN_PART`]) and then goes, then the
-/// program is cut, and the place last — where the program runs is what a view must not lose to
-/// a long title or a long name. The program's icon and its name are one part: the name is cut
-/// before the icon, and the two go together.
-pub fn arrange(width: f64, natural: Widths) -> Layout {
-    let button_width = natural.button.max(0.0).min((width - LEFT - RIGHT).max(0.0));
-    let button = Span {
-        x: width - RIGHT - button_width,
-        width: button_width,
-    };
-    // Up to the button, less the gap before it.
-    let room = (button.x - GAP - LEFT).max(0.0);
-    let (icon, name) = (natural.icon.max(0.0), natural.program.max(0.0));
-    let joined = if icon > 0.0 && name > 0.0 {
-        ICON_GAP
-    } else {
-        0.0
-    };
-    let [place, program, title] = fit(
-        room,
-        [
-            natural.place.max(0.0),
-            icon + joined + name,
-            natural.title.max(0.0),
-        ],
-    );
-    let mut x = LEFT;
-    let mut put = |width: f64| {
-        (width > 0.0).then(|| {
-            let span = Span { x, width };
-            x += width + GAP;
-            span
-        })
-    };
-    let place = put(place);
-    let (icon, program) = match put(program) {
-        Some(span) if icon > 0.0 => {
-            let icon = icon.min(span.width);
-            let rest = span.width - icon - ICON_GAP;
-            let program = (name > 0.0 && rest > 0.0).then_some(Span {
-                x: span.x + icon + ICON_GAP,
-                width: rest,
-            });
-            (
-                Some(Span {
-                    x: span.x,
-                    width: icon,
-                }),
-                program,
-            )
-        }
-        program => (None, program),
-    };
-    Layout {
-        place,
-        icon,
-        program,
-        title: put(title),
-        button,
-    }
-}
-
-/// The widths of the place, the program and the title in `room` ([`arrange`]'s order of giving
-/// way). A part of width 0 is not there and takes no gap.
-fn fit(room: f64, [place, program, title]: [f64; 3]) -> [f64; 3] {
-    let row = |parts: [f64; 3]| {
-        let shown = parts.iter().filter(|width| **width > 0.0);
-        shown.clone().sum::<f64>() + GAP * (shown.count().saturating_sub(1) as f64)
-    };
-    // What the parts before one leave for it, less the gap before it.
-    let after = |before: [f64; 3]| {
-        let used = row(before);
-        room - used - if used > 0.0 { GAP } else { 0.0 }
-    };
-    if row([place, program, title]) <= room {
-        return [place, program, title];
-    }
-    if title > 0.0 {
-        let free = after([place, program, 0.0]);
-        if free >= MIN_PART.min(title) || (place == 0.0 && program == 0.0) {
-            return [place, program, free.clamp(0.0, title)];
-        }
-    }
-    if program > 0.0 {
-        let least = MIN_PART.min(program);
-        let free = after([place, 0.0, 0.0]);
-        if free >= least || place == 0.0 {
-            return [place, free.clamp(0.0, program), 0.0];
-        }
-        let free = room - least - GAP;
-        if free >= MIN_PART.min(place) {
-            return [free, least, 0.0];
-        }
-    }
-    [place.min(room), 0.0, 0.0]
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -416,162 +266,5 @@ mod tests {
         );
         // Inside the limit a sequence is whole.
         assert_eq!(clean("👨\u{200d}👩", TITLE_LIMIT), "👨\u{200d}👩");
-    }
-
-    fn widths() -> Widths {
-        Widths {
-            place: 60.0,
-            icon: 0.0,
-            program: 100.0,
-            title: 120.0,
-            button: 70.0,
-        }
-    }
-
-    fn span(x: f64, width: f64) -> Option<Span> {
-        Some(Span { x, width })
-    }
-
-    #[test]
-    fn a_wide_strip_holds_every_part_at_its_natural_width_in_order() {
-        let layout = arrange(900.0, widths());
-        assert_eq!(
-            layout.button,
-            Span {
-                x: 822.0,
-                width: 70.0
-            }
-        );
-        assert_eq!(layout.place, span(14.0, 60.0));
-        assert_eq!(layout.program, span(82.0, 100.0));
-        assert_eq!(layout.title, span(190.0, 120.0));
-    }
-
-    #[test]
-    fn a_part_with_no_text_takes_no_room() {
-        let layout = arrange(
-            900.0,
-            Widths {
-                place: 0.0,
-                ..widths()
-            },
-        );
-        assert_eq!(layout.place, None);
-        assert_eq!(layout.program, span(14.0, 100.0));
-        assert_eq!(layout.title, span(122.0, 120.0));
-    }
-
-    #[test]
-    fn the_title_is_cut_first_and_then_goes() {
-        // Room is 390 − 8 − 70 − 8 − 14 = 290: place and program take 168, and a gap 8.
-        let layout = arrange(390.0, widths());
-        assert_eq!(layout.place, span(14.0, 60.0));
-        assert_eq!(layout.program, span(82.0, 100.0));
-        assert_eq!(layout.title, span(190.0, 114.0));
-        // Room 200: 24 would be left for the title, less than the least it is cut to.
-        let layout = arrange(300.0, widths());
-        assert_eq!(layout.title, None);
-        assert_eq!(layout.program, span(82.0, 100.0));
-    }
-
-    #[test]
-    fn the_program_is_cut_before_the_place_and_the_place_goes_last() {
-        // Room 150: the place keeps 60, the program has 82.
-        let layout = arrange(250.0, widths());
-        assert_eq!(layout.title, None);
-        assert_eq!(layout.place, span(14.0, 60.0));
-        assert_eq!(layout.program, span(82.0, 82.0));
-        // Room 90: the program keeps the least, the place what is left of it.
-        let layout = arrange(190.0, widths());
-        assert_eq!(
-            layout.program,
-            Some(Span {
-                x: 64.0,
-                width: MIN_PART
-            })
-        );
-        assert_eq!(layout.place, span(14.0, 42.0));
-        // Room 80: not both — the place stays, the program goes.
-        let layout = arrange(180.0, widths());
-        assert_eq!(layout.program, None);
-        assert_eq!(layout.place, span(14.0, 60.0));
-    }
-
-    #[test]
-    fn a_lone_part_is_cut_rather_than_dropped_and_nothing_goes_negative() {
-        let lone = Widths {
-            place: 0.0,
-            icon: 0.0,
-            program: 0.0,
-            title: 300.0,
-            button: 70.0,
-        };
-        assert_eq!(arrange(200.0, lone).title, span(14.0, 100.0));
-        let pictured = Widths {
-            icon: ICON,
-            ..widths()
-        };
-        for width in [0.0, 10.0, 50.0, 100.0, 130.0, 160.0, 190.0, 250.0] {
-            for natural in [widths(), lone, pictured] {
-                let layout = arrange(width, natural);
-                for part in [layout.place, layout.icon, layout.program, layout.title]
-                    .into_iter()
-                    .flatten()
-                    .chain([layout.button])
-                {
-                    assert!(part.width >= 0.0, "{width}: {part:?}");
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn the_icon_stands_left_of_the_program_and_the_rest_moves_over() {
-        let layout = arrange(
-            900.0,
-            Widths {
-                icon: ICON,
-                ..widths()
-            },
-        );
-        assert_eq!(layout.place, span(14.0, 60.0));
-        assert_eq!(layout.icon, span(82.0, ICON));
-        assert_eq!(layout.program, span(82.0 + ICON + ICON_GAP, 100.0));
-        assert_eq!(
-            layout.title,
-            span(82.0 + ICON + ICON_GAP + 100.0 + GAP, 120.0)
-        );
-        // No icon, no room taken for one.
-        assert_eq!(arrange(900.0, widths()).icon, None);
-    }
-
-    #[test]
-    fn the_icon_gives_way_with_the_program_and_after_its_name() {
-        let pictured = Widths {
-            icon: ICON,
-            ..widths()
-        };
-        // Room 150: the place keeps 60, the icon and the name share 82, the name is cut.
-        let layout = arrange(250.0, pictured);
-        assert_eq!(layout.icon, span(82.0, ICON));
-        assert_eq!(
-            layout.program,
-            span(82.0 + ICON + ICON_GAP, 82.0 - ICON - ICON_GAP)
-        );
-        // Room 80: the program goes, and its icon with it.
-        let layout = arrange(180.0, pictured);
-        assert_eq!((layout.icon, layout.program), (None, None));
-        assert_eq!(layout.place, span(14.0, 60.0));
-        // An icon with no name stands alone where the program would.
-        let layout = arrange(
-            900.0,
-            Widths {
-                program: 0.0,
-                ..pictured
-            },
-        );
-        assert_eq!(layout.icon, span(82.0, ICON));
-        assert_eq!(layout.program, None);
-        assert_eq!(layout.title, span(82.0 + ICON + GAP, 120.0));
     }
 }

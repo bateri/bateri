@@ -48,9 +48,10 @@
 //! the view's while it is shown: their keys go to it and their menu items are grey
 //! for the pane ([`is_content_item`]).
 //!
-//! **A strip of the application's own** stands at the top of the pane, outside the
-//! view's area ([`strip`]): that a view is shown, where its program runs and how to
-//! leave. The view's area is the pane's less the strip ([`view_area`]).
+//! **The application's own words over it are the pane's header's**, not the view's: the band
+//! over every pane (`tab_head`, the owner's) says that a view is shown, where its program runs,
+//! which program it is and how to leave ([`ViewHead`], [`TerminalPane::view_head`]). The view
+//! covers the whole pane, and the header stands outside it, where the view cannot draw.
 //!
 //! **What the view asks of the person** is asked in the pane's own sheet ([`ask`]): the
 //! addresses and browser features it declared are allowed or refused before it starts, and
@@ -68,7 +69,6 @@ pub(crate) mod face;
 mod files;
 mod serve;
 mod still;
-pub(crate) mod strip;
 mod wait;
 
 #[cfg(test)]
@@ -87,7 +87,7 @@ use bt_core::{Session, Theme};
 use bt_shell_common::palette::{Modifiers, menu_item_id};
 use bt_shell_common::shortcuts::{by_id, chord_of};
 use bt_shell_common::view_store::DiskStore;
-use bt_shell_common::view_strip::{self, Strip};
+use bt_shell_common::view_strip::Strip;
 use dispatch2::{DispatchQueue, DispatchRetained};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
@@ -103,7 +103,7 @@ use objc2_core_foundation::CFRetained;
 use objc2_core_graphics::CGImage;
 use objc2_foundation::{
     NSBundle, NSData, NSDictionary, NSError, NSHTTPURLResponse, NSLocale, NSObject,
-    NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSTimeZone, NSURL, NSURLRequest,
+    NSObjectProtocol, NSRect, NSString, NSTimeZone, NSURL, NSURLRequest,
 };
 use objc2_web_kit::{
     WKFrameInfo, WKNavigation, WKNavigationAction, WKNavigationActionPolicy, WKNavigationDelegate,
@@ -207,7 +207,7 @@ pub(crate) fn is_content_item(item: &NSMenuItem) -> bool {
 
 /// What the program calls itself, as its view's start says (`program` of its `open`);
 /// `None` when it gave none, or nothing is left of it. These are the words for the program in
-/// the strip and in the questions, before what the pane read (`TerminalPane::view_strip`).
+/// the header and in the questions, before what the pane read (`TerminalPane::view_strip`).
 pub(crate) fn said_program(start: &ViewStart) -> Option<&str> {
     start
         .program
@@ -215,27 +215,89 @@ pub(crate) fn said_program(start: &ViewStart) -> Option<&str> {
         .filter(|name| !name.trim().is_empty())
 }
 
-/// The icons the application draws for the program — by its name on the strip, on its tab's
+/// The icons the application draws for the program — by its name in the header, on its tab's
 /// tile: the ones the program gave in its `open`.
-fn strip_icons(start: &ViewStart) -> &[Icon] {
+pub(crate) fn view_icons(start: &ViewStart) -> &[Icon] {
     &start.icons
-}
-
-/// The view's area in a pane of `bounds` (the pane's unflipped points): all of it under the
-/// strip. A pane shorter than the strip has none.
-pub(crate) fn view_area(bounds: NSRect) -> NSRect {
-    let height = (bounds.size.height - view_strip::HEIGHT).max(0.0);
-    NSRect::new(bounds.origin, NSSize::new(bounds.size.width, height))
 }
 
 /// The size of the view's area in a pane of `bounds`, in CSS pixels — which are points — as the
 /// conversation is told its container ([`bt_core::Session::set_view_size`]): the one place it
-/// is worked out, for the size a session is opened with and for the one told afterwards.
+/// is worked out, for the size a session is opened with and for the one told afterwards. The
+/// view covers the whole pane: the header over it is the owner's, outside the pane.
 pub(crate) fn content_size(bounds: NSRect) -> ViewSize {
-    let area = view_area(bounds);
     ViewSize {
-        width: area.size.width.max(0.0).floor() as u32,
-        height: area.size.height.max(0.0).floor() as u32,
+        width: bounds.size.width.max(0.0).floor() as u32,
+        height: bounds.size.height.max(0.0).floor() as u32,
+    }
+}
+
+/// How the header's button lets the person out of what covers the pane ([`ViewHead`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Exit {
+    /// ⌃C to the program, as the key (`quitProgram:`): a program's view.
+    Quit,
+    /// The page comes down (`closeUiPage:`): a debug build's demo page, which no program holds.
+    #[cfg_attr(not(debug_assertions), allow(dead_code))]
+    Close,
+}
+
+impl Exit {
+    /// The pane's action the button sends.
+    pub(crate) fn action(self) -> objc2::runtime::Sel {
+        match self {
+            Exit::Quit => objc2::sel!(quitProgram:),
+            Exit::Close => objc2::sel!(closeUiPage:),
+        }
+    }
+}
+
+/// What the header over a pane says of the view that covers it ([`TerminalPane::view_head`]):
+/// where the program runs, which program it is and what the view is, cleaned and bounded
+/// ([`bt_shell_common::view_strip::strip`]); the program's icon for the theme's ground; and the
+/// way out. A view covers the whole pane and could imitate the terminal, so these words are the
+/// owner's to show **at all times** while the view is up, outside the pane — never under a
+/// pointer only.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ViewHead {
+    pub words: Strip,
+    pub(crate) face: Option<face::FaceId>,
+    pub exit: Exit,
+}
+
+impl ViewHead {
+    /// Whether the program gave an icon the header draws (else the mark of what runs it).
+    pub fn has_icon(&self) -> bool {
+        self.face.is_some()
+    }
+}
+
+/// What the header says of a view while it is up ([`ViewHead`]): the words, the program's
+/// icons, decoded once, and the way out. A copy is another hold on the same icons.
+#[derive(Clone)]
+pub(crate) struct Words {
+    words: Strip,
+    faces: Rc<face::Faces>,
+    exit: Exit,
+}
+
+impl Words {
+    /// `words` and the program's `icons`, with `exit` for the button.
+    pub(crate) fn new(words: Strip, icons: &[Icon], exit: Exit) -> Self {
+        Self {
+            words,
+            faces: Rc::new(face::Faces::new(icons)),
+            exit,
+        }
+    }
+
+    /// What the header shows, for a ground that is dark or not.
+    pub(crate) fn head(&self, dark: bool) -> ViewHead {
+        ViewHead {
+            words: self.words.clone(),
+            face: self.faces.on(dark),
+            exit: self.exit,
+        }
     }
 }
 
@@ -255,19 +317,6 @@ pub(crate) fn keyboard_in_view(window: &NSWindow) -> bool {
         at = unsafe { view.superview() };
     }
     false
-}
-
-/// The strip's place in a pane of `bounds`: the top [`view_strip::HEIGHT`] points, or all of a
-/// pane that is shorter. With [`view_area`] it is the pane exactly.
-pub(crate) fn strip_area(bounds: NSRect) -> NSRect {
-    let height = bounds.size.height.clamp(0.0, view_strip::HEIGHT);
-    NSRect::new(
-        NSPoint::new(
-            bounds.origin.x,
-            bounds.origin.y + bounds.size.height - height,
-        ),
-        NSSize::new(bounds.size.width, height),
-    )
 }
 
 define_class!(
@@ -723,8 +772,6 @@ fn read_file_reply(page: &serve::Page, session: &Session, url: &str) -> serve::R
 #[derive(Clone)]
 pub(crate) struct ViewHost {
     web: Retained<PencereView>,
-    /// The application's strip over the view's area ([`strip`]).
-    strip: Retained<strip::StripView>,
     /// The delegate and the handlers (the web view holds its delegates weakly).
     bridge: Retained<Bridge>,
     /// The picture the tab's card has of the view ([`still`]).
@@ -732,14 +779,14 @@ pub(crate) struct ViewHost {
     /// What the program calls itself ([`said_program`]), for the questions the view asks
     /// after it started.
     program: Option<String>,
-    /// The program's icon as the application's chrome draws it ([`face`]): in the strip, and
-    /// on the tab's tile while the view is up.
-    faces: Rc<face::Faces>,
+    /// What the header over the pane says of the view, the program's icon with it ([`face`]),
+    /// which the tab's tile wears too while the view is up.
+    words: Words,
 }
 
 impl ViewHost {
-    /// Starts the web view of `start` in the pane's area `frame` below a strip that says
-    /// `text`, and has it load the shell. The pane's background (`theme`) shows before the
+    /// Starts the web view of `start` over the whole of the pane's area `frame`, its header
+    /// saying `text`, and has it load the shell. The pane's background (`theme`) shows before the
     /// view paints. `None` if the view cannot be started: a bundle with no entry, or no
     /// unpredictable bytes for the view's origin — the caller then closes the view.
     pub(crate) fn start(
@@ -791,9 +838,8 @@ impl ViewHost {
 
         let this = PencereView::alloc(mtm).set_ivars(());
         // SAFETY: `WKWebView`'s designated initializer.
-        let web: Retained<PencereView> = unsafe {
-            msg_send![super(this), initWithFrame: view_area(frame), configuration: &*configuration]
-        };
+        let web: Retained<PencereView> =
+            unsafe { msg_send![super(this), initWithFrame: frame, configuration: &*configuration] };
         web.setAutoresizingMask(
             NSAutoresizingMaskOptions::ViewWidthSizable
                 | NSAutoresizingMaskOptions::ViewHeightSizable,
@@ -809,15 +855,12 @@ impl ViewHost {
             web.setAllowsMagnification(false);
             web.setInspectable(false);
         }
-        let faces = Rc::new(face::Faces::new(strip_icons(start)));
-        let strip = strip::StripView::new(mtm, strip_area(frame), text, Rc::clone(&faces), theme);
         let host = Self {
             web,
-            strip,
             bridge,
             shot,
             program: said_program(start).map(str::to_owned),
-            faces,
+            words: Words::new(text.clone(), view_icons(start), Exit::Quit),
         };
         host.paint(theme);
         // SAFETY: a request for the shell's own URL.
@@ -833,25 +876,15 @@ impl ViewHost {
         self.program.as_deref()
     }
 
-    /// The program's icon for a ground that is dark or not, when it gave one the application
-    /// can draw: what its tab's tile wears while the view is up.
-    pub(crate) fn face(&self, dark: bool) -> Option<face::FaceId> {
-        self.faces.on(dark)
+    /// What the header over the pane says of the view, for a ground that is dark or not: the
+    /// program's icon in it is what its tab's tile wears while the view is up.
+    pub(crate) fn head(&self, dark: bool) -> ViewHead {
+        self.words.head(dark)
     }
 
     /// The web view, to put in the pane.
     pub(crate) fn web(&self) -> &NSView {
         &self.web
-    }
-
-    /// The strip over it, to put in the pane beside it.
-    pub(crate) fn strip(&self) -> &NSView {
-        &self.strip
-    }
-
-    /// Points the strip's button at the pane (`quitProgram:`).
-    pub(crate) fn aim(&self, pane: &TerminalPane) {
-        self.strip.aim(pane, objc2::sel!(quitProgram:));
     }
 
     /// Runs a call of the shell page's script.
@@ -876,9 +909,8 @@ impl ViewHost {
     }
 
     /// The ground behind the view is the pane's background (`theme`): the web view's own
-    /// under-page colour and the shell page's. The strip is painted with the theme too.
+    /// under-page colour and the shell page's.
     pub(crate) fn paint(&self, theme: &Theme) {
-        self.strip.paint(theme);
         let ground = theme.background_srgb();
         let [r, g, b] = ground.map(|byte| f64::from(byte) / 255.0);
         // SAFETY: setting a colour on a web view this thread owns.
@@ -940,7 +972,6 @@ impl ViewHost {
                 .removeScriptMessageHandlerForName(&NSString::from_str(serve::LOADED_HANDLER));
         }
         self.web.removeFromSuperview();
-        self.strip.removeFromSuperview();
         // The files that were being read for it are for nobody now.
         self.bridge.forget_tasks();
         // The bridge is held until here on purpose: the web view held its

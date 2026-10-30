@@ -1,11 +1,10 @@
-//! The application's strip over a page of the UI kit: the strip a program's view has
-//! (`pencere_view::strip`), saying whose page it is and giving the one way out — its button
-//! closes the page here, where over a program's view it writes ⌃C to the program.
+//! A page of the UI kit over a pane. The header over the pane says whose page it is and gives
+//! the one way out, as over a program's web view (`pencere_view::ViewHead`): its button closes a
+//! demo page here, where over a program's page it writes ⌃C to the program.
 //!
 //! The page itself is `bt-shell-common`'s (`native_view`): the engine's draw list on the
-//! renderer, painted in place of the grid by the pane's link. What the pane keeps for it is
-//! the strip's place at the top and the room it takes (`view_strip::HEIGHT`), which the page
-//! never draws into.
+//! renderer, painted in place of the grid by the pane's link, over the whole pane — the header
+//! is the owner's, outside it.
 //!
 //! What the pane adds to the page for it to be used: the text fields over the page's boxes for
 //! them (AppKit's, in the terminal's face and the theme's ink — the text of the page is the
@@ -30,10 +29,9 @@ use bt_shell_common::native_view::{
     Accessible, AccessibleRole, Command, Field, FieldKind, FieldState, Fill, Id, Key, Mods,
     Outline, PageHandle, Point, Role, Shortcut, Tip, tone_linear,
 };
-use bt_shell_common::view_strip::Strip;
 use objc2::rc::{Retained, Weak as WeakId};
 use objc2::runtime::{AnyObject, ProtocolObject};
-use objc2::{AllocAnyThread, DefinedClass, MainThreadOnly, define_class, msg_send, sel};
+use objc2::{AllocAnyThread, DefinedClass, MainThreadOnly, define_class, msg_send};
 use objc2_app_kit::{
     NSAccessibility, NSAccessibilityButtonRole, NSAccessibilityCheckBoxRole,
     NSAccessibilityElement, NSAccessibilityImageRole, NSAccessibilityLayoutChangedNotification,
@@ -51,52 +49,20 @@ use objc2_foundation::{
 };
 
 use crate::pane::TerminalPane;
-use crate::pencere_view::face::Faces;
-use crate::pencere_view::strip::StripView;
-use crate::pencere_view::strip_area;
-
-/// The strip over the view a program opened: the words of `text` (`view_strip::strip`, the
-/// same as over a web view) and the one button, which sends ⌃C to the program.
-pub(crate) fn program_strip(
-    pane: &TerminalPane,
-    theme: &Theme,
-    text: &Strip,
-) -> Retained<StripView> {
-    let strip = StripView::new(
-        pane.mtm(),
-        strip_area(pane.bounds()),
-        text,
-        Rc::new(Faces::new(&[])),
-        theme,
-    );
-    strip.aim(pane, sel!(quitProgram:));
-    strip
-}
-
-/// The demo's strip over `pane`: the made-up program's name and the title of its page, a button
-/// that closes the page, painted with `theme`.
 #[cfg(debug_assertions)]
-pub(crate) fn strip(
-    pane: &TerminalPane,
-    theme: &Theme,
-    program: &str,
-    title: &str,
-) -> Retained<StripView> {
-    let text = Strip {
+use crate::pencere_view::{Exit, Words};
+
+/// What the header says over the demo page: the made-up program's name and the title of its
+/// page, and a button that closes the page.
+#[cfg(debug_assertions)]
+pub(crate) fn demo_words(program: &str, title: &str) -> Words {
+    let words = bt_shell_common::view_strip::Strip {
         place: None,
         program: Some(program.to_owned()),
         title: Some(title.to_owned()),
         quit_tip: "Closes the demo page. The terminal comes back.".to_owned(),
     };
-    let strip = StripView::new(
-        pane.mtm(),
-        strip_area(pane.bounds()),
-        &text,
-        Rc::new(Faces::new(&[])),
-        theme,
-    );
-    strip.aim(pane, sel!(closeUiPage:));
-    strip
+    Words::new(words, &[], Exit::Close)
 }
 
 /// Where the page modules are: `BT_VIEW_GUEST_DIR`, else `target/guest/dist`, where `make guest`

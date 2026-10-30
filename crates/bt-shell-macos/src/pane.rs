@@ -2122,9 +2122,9 @@ pub struct PaneIvars {
     /// ([`TerminalPane::drain_views`]); the terminal's frames stop for as long as
     /// it is there.
     pencere: RefCell<Option<ViewHost>>,
-    /// The strip over a page of the kit, while one is up (`crate::native_page` is the page's
-    /// side; the strip is the application's own, the same one a program's web view has).
-    page_strip: RefCell<Option<Retained<pencere_view::strip::StripView>>>,
+    /// What the header over the pane says of a page of the kit, while one is up
+    /// ([`TerminalPane::view_head`]: the same words a program's web view has).
+    page_words: RefCell<Option<pencere_view::Words>>,
     /// What a page of the kit needs to be used while it is up — a debug demo, or the view a
     /// program opened: whose it is, the handle its input goes by, the filter's text field, the
     /// pointer's tracking area (`crate::native_page`).
@@ -2662,7 +2662,7 @@ define_class!(
             self.toggle_module_demo("broken");
         }
 
-        /// The strip's button over a page of the kit's own: the page comes down and the
+        /// The header's button over a page of the kit's own: the page comes down and the
         /// terminal is the pane's again.
         #[cfg(debug_assertions)]
         #[unsafe(method(closeUiPage:))]
@@ -2711,7 +2711,7 @@ define_class!(
             self.jump_to_latest();
         }
 
-        /// The strip's "Quit ⌃C" over a program's view: ⌃C, as the key.
+        /// The header's "Quit ⌃C" over a program's view: ⌃C, as the key.
         #[unsafe(method(quitProgram:))]
         fn quit_program_sent(&self, _sender: Option<&AnyObject>) {
             self.interrupt_program();
@@ -2877,7 +2877,7 @@ impl TerminalPane {
             bar_pointer: Cell::new((false, false)),
             seen: Cell::new(true),
             pencere: RefCell::new(None),
-            page_strip: RefCell::new(None),
+            page_words: RefCell::new(None),
             page_up: RefCell::new(None),
             look_base: Cell::new(look_base),
             look: LookSlot::new(look_base),
@@ -4181,8 +4181,7 @@ impl TerminalPane {
     }
 
     /// What the screen reader is given of the pane while a page of the kit is up: the page's own
-    /// elements and fields in the order it reads them, after the pane's other views (the strip)
-    /// but in place of the terminal's view, which the page covers. `None` while no page is up.
+    /// elements and fields in the order it reads them, after the pane's other views but in place of the terminal's view, which the page covers. `None` while no page is up.
     pub(crate) fn page_accessibility(
         &self,
         below: Option<Retained<NSArray>>,
@@ -4256,9 +4255,6 @@ impl TerminalPane {
         }
         if let Some(host) = self.view_host() {
             host.paint(&theme);
-        }
-        if let Some(strip) = self.ivars().page_strip.borrow().as_ref() {
-            strip.paint(&theme);
         }
         if let Some(page) = self.ivars().page_up.borrow().as_ref() {
             page.fields.paint(&theme);
@@ -5731,8 +5727,8 @@ impl TerminalPane {
     }
 
     /// Debug ▸ Show Container List Demo: the engine's container-list page over the
-    /// terminal, under the application's own strip (the one a program's view has, its button
-    /// closing the page), or off again. The page is used: the pointer, the wheel and the
+    /// terminal, the header's words over it as a program's view has them (its button closing
+    /// the page), or off again. The page is used: the pointer, the wheel and the
     /// keys go to it ([`TerminalPane::page_input`], [`TerminalPane::page_key`]), its filter is
     /// a text field of AppKit's and its row menu an `NSMenu`.
     #[cfg(debug_assertions)]
@@ -5801,13 +5797,9 @@ impl TerminalPane {
             Some("broken") => ("broken", "A page that goes wrong"),
             Some(_) => ("dockerpen (wasm)", "Docker"),
         };
-        let strip = crate::native_page::strip(self, &theme, program, title);
-        self.addSubview_positioned_relativeTo(
-            &strip,
-            NSWindowOrderingMode::Below,
-            Some(&ivars.link_veil),
-        );
-        ivars.page_strip.replace(Some(strip));
+        ivars
+            .page_words
+            .replace(Some(crate::native_page::demo_words(program, title)));
         let family = ivars.font.borrow().family.clone();
         // The engine's own page: no program opened it, so none holds it to anything.
         let opening = self.page_opening(family.clone(), None);
@@ -5831,16 +5823,19 @@ impl TerminalPane {
             area,
         }));
         link.set_page(Some(page));
+        // The header says the demo's words.
+        self.host().program_changed(ivars.id);
     }
 
-    /// Takes the page down, whichever it is: its strip and field with it, and the terminal's
-    /// frames come back.
+    /// Takes the page down, whichever it is: its header's words and field with it, and the
+    /// terminal's frames come back.
     fn take_page_down(&self) {
         if let Some(link) = self.link() {
             link.set_page(None);
         }
-        if let Some(strip) = self.ivars().page_strip.take() {
-            strip.removeFromSuperview();
+        if self.ivars().page_words.take().is_some() {
+            // The header says the terminal's words again.
+            self.host().program_changed(self.ivars().id);
         }
         if let Some(page) = self.ivars().page_up.take() {
             // The keyboard was in a field: it goes back to the terminal.
@@ -5854,15 +5849,16 @@ impl TerminalPane {
         }
     }
 
-    /// What a page of the kit is opened with in this pane: the terminal's face, the strip's room
-    /// over it, the flow of the program that opened it (`None` for a debug build's demo), the
+    /// What a page of the kit is opened with in this pane: the terminal's face, no room kept over
+    /// it (the header is the owner's, outside the pane), the flow of the program that opened it (`None` for a debug build's demo), the
     /// frames' clock and the renderer the frames are drawn with.
     fn page_opening(&self, terminal: Option<String>, flow: Option<bt_core::Flow>) -> Opening {
         // The width of the cursor's bar is no setting: the page is opened with it as it is now.
         self.refresh_terminal_look();
         Opening {
             terminal,
-            inset: view_strip::HEIGHT as f32,
+            // The header over the page is the owner's, outside the pane: the page has all of it.
+            inset: 0.0,
             flow,
             clock: frames_clock,
             renderer: Rc::clone(&self.ivars().renderer),
@@ -5948,7 +5944,7 @@ impl TerminalPane {
 
     /// A key while a page of the kit's is up: ⌃C closes a demo and goes to the program of a
     /// program's view (which ends, and the view with it — the same rule as a web view's, the
-    /// strip's Quit ⌃C), as do ⌃\ and ⌃Z (the tty's other signal characters, the program's
+    /// header's Quit ⌃C), as do ⌃\ and ⌃Z (the tty's other signal characters, the program's
     /// whatever its view shows), Esc closes the gauge page, and the page reads the rest (⌘ keys are
     /// the menu's: its content items are grey, so a key that reaches here is nobody's and is
     /// swallowed). Nothing reaches the hidden terminal. `true` when a page is up and took the
@@ -5983,7 +5979,7 @@ impl TerminalPane {
     /// ⌃C, ⌃\ and ⌃Z while a page of the kit's is up, wherever the keyboard is on it (the page, or
     /// one of its fields): the tty's signal characters, the program's whatever its view shows. ⌃C
     /// goes to the program of a program's view (which ends, and the view with it: the same rule as
-    /// a web view's, the strip's Quit ⌃C) and closes a demo, which has no program; the other two go
+    /// a web view's, the header's Quit ⌃C) and closes a demo, which has no program; the other two go
     /// to the program, and are nobody's under a demo. `true` when the key was one of them.
     fn page_signal(&self, event: &NSEvent) -> bool {
         let characters = event.characters().map(|text| text.to_string());
@@ -6471,8 +6467,24 @@ impl TerminalPane {
     /// when it gave one the application can draw: what the tab's tile wears instead of the mark
     /// of the process that runs the program (`node` under a program that calls itself Docker).
     pub(crate) fn view_face(&self) -> Option<crate::pencere_view::face::FaceId> {
+        self.view_head()?.face
+    }
+
+    /// What the header over the pane says of the view that covers it, while one does — a
+    /// program's web view, the page a program's module draws, a debug build's demo page —, for
+    /// the pane's theme's ground: the owner shows it over the pane for as long as the view is up
+    /// ([`pencere_view::ViewHead`]), and is told when it comes and goes
+    /// ([`PaneHost::program_changed`]). `None` over the terminal.
+    pub fn view_head(&self) -> Option<pencere_view::ViewHead> {
         let dark = self.session()?.theme().is_dark();
-        self.view_host()?.face(dark)
+        if let Some(host) = self.view_host() {
+            return Some(host.head(dark));
+        }
+        self.ivars()
+            .page_words
+            .borrow()
+            .as_ref()
+            .map(|words| words.head(dark))
     }
 
     /// Whether the keyboard is in the pane: in the terminal, or in the view that
@@ -6562,8 +6574,8 @@ impl TerminalPane {
     /// Puts a view that is a WebAssembly component or a Lua script over the terminal: the module
     /// or the script the program sent (its entry, held in the session's store), run in the
     /// sandbox (a script by the interpreter that is a module of the sandbox's) and drawn by the link
-    /// as a page of the kit in place of the grid, under the application's strip — the one a
-    /// web view has, whose button sends ⌃C to the program. The page is used like a web view
+    /// as a page of the kit in place of the grid, the header's words over it — the ones a web
+    /// view has, whose button sends ⌃C to the program. The page is used like a web view
     /// is: the pointer, the wheel and the keys go to it, its filter is a text field of AppKit's
     /// and its row menu an `NSMenu`; ⌃C goes to the program, which ends and takes the view
     /// with it. What the module says goes to the program through the session, and only while
@@ -6588,13 +6600,11 @@ impl TerminalPane {
         };
         let ivars = self.ivars();
         let theme = session.theme();
-        let strip = crate::native_page::program_strip(self, &theme, &self.view_strip(start));
-        self.addSubview_positioned_relativeTo(
-            &strip,
-            NSWindowOrderingMode::Below,
-            Some(&ivars.link_veil),
-        );
-        ivars.page_strip.replace(Some(strip));
+        ivars.page_words.replace(Some(pencere_view::Words::new(
+            self.view_strip(start),
+            pencere_view::view_icons(start),
+            pencere_view::Exit::Quit,
+        )));
         let family = ivars.font.borrow().family.clone();
         // Held to the program that opened it: what it says is what the program has the room
         // for, and what it takes of the program's words lets the program say more.
@@ -6641,10 +6651,10 @@ impl TerminalPane {
         self.host().view_changed(self.uuid(), true);
     }
 
-    /// Puts the view over the terminal, with the application's strip above it: over the
-    /// terminal's small surfaces (the link label, the block tip, the jump button) and under
-    /// the veils, so a pane that is not the keyboard's dims over its view and its strip as it
-    /// does over its terminal.
+    /// Puts the view over the whole terminal — the header over the pane says what it is
+    /// ([`TerminalPane::view_head`]): over the terminal's small surfaces (the link label, the
+    /// block tip, the jump button) and under the veils, so a pane that is not the keyboard's
+    /// dims over its view as it does over its terminal.
     fn start_view(&self, session: &Arc<Session>, start: &bt_core::pencere::ViewStart) {
         if start.kind.is_native() {
             self.start_native_view(session, start);
@@ -6661,14 +6671,8 @@ impl TerminalPane {
             session.close_view();
             return;
         };
-        host.aim(self);
         self.addSubview_positioned_relativeTo(
             host.web(),
-            NSWindowOrderingMode::Below,
-            Some(&ivars.link_veil),
-        );
-        self.addSubview_positioned_relativeTo(
-            host.strip(),
             NSWindowOrderingMode::Below,
             Some(&ivars.link_veil),
         );
@@ -6696,11 +6700,11 @@ impl TerminalPane {
     /// the screen the program left.
     fn end_view(&self) {
         if self.program_page_up() {
-            // A module's page: down with its strip and field, and the terminal's frames come
-            // back. What the view had out goes with it, as a web view's does.
+            // A module's page: down with its header's words and field (the tab hears it), and
+            // the terminal's frames come back. What the view had out goes with it, as a web
+            // view's does.
             self.view_gone();
             self.take_page_down();
-            self.host().program_changed(self.ivars().id);
             self.host().view_changed(self.uuid(), false);
             return;
         }
@@ -6827,8 +6831,8 @@ impl TerminalPane {
         }
     }
 
-    /// Tells the conversation how big the view's container is: the pane's area below
-    /// the strip, in CSS pixels, which are points. The same size is not told twice.
+    /// Tells the conversation how big the view's container is: the whole pane, in CSS pixels,
+    /// which are points. The same size is not told twice.
     fn sync_view_size(&self) {
         let Some(session) = self.session() else {
             return;
@@ -6836,7 +6840,7 @@ impl TerminalPane {
         if !session.hosts_views() {
             return;
         }
-        // The view's area is the pane's less the application's strip.
+        // The view's area is the whole pane.
         let size = pencere_view::content_size(self.bounds());
         let size_pair = (size.width, size.height);
         if size.width == 0 || size.height == 0 || size_pair == self.ivars().view_size.get() {
@@ -6846,7 +6850,7 @@ impl TerminalPane {
         session.set_view_size(size);
     }
 
-    /// What the strip over the view of `start` says: where the program runs
+    /// What the header over the view of `start` says: where the program runs
     /// ([`TerminalPane::view_whereabouts`]) and what it is called — what the program calls
     /// itself, else what the pane read —, with the view's title: what the program calls the
     /// view (`view_strip::strip`). Both words are the crate's, cleaned.
@@ -6916,7 +6920,7 @@ impl TerminalPane {
         }
     }
 
-    /// ⌃C in the view: the interrupt reaches the program (the strip's "Quit ⌃C" is this).
+    /// ⌃C in the view: the interrupt reaches the program (the header's "Quit ⌃C" is this).
     pub(crate) fn interrupt_program(&self) {
         self.signal_program(pencere_view::INTERRUPT);
     }
@@ -8475,7 +8479,7 @@ mod tests {
 
     /// What reaches the program from a module's page goes by the session's one gate
     /// (`Session::module_message`, which writes only while the view is open), only for the
-    /// program's page, and ⌃C and the strip's button are the program's, as a web view's are.
+    /// program's page, and ⌃C and the header's button are the program's, as a web view's are.
     #[test]
     fn a_modules_words_go_to_the_program_by_the_one_gate_and_its_interrupt_is_the_programs() {
         let pane = include_str!("pane.rs");
@@ -8517,9 +8521,13 @@ mod tests {
             signal.contains("self.signal_program(character)"),
             "{signal}"
         );
-        let strip = include_str!("native_page.rs");
-        let at = strip.find("fn program_strip(").expect("program_strip");
-        assert!(strip[at..at + 600].contains("sel!(quitProgram:)"));
+        // The header's button over a program's page is ⌃C to the program.
+        let native = body("    fn start_native_view(");
+        assert!(native.contains("pencere_view::Exit::Quit"), "{native}");
+        assert_eq!(
+            crate::pencere_view::Exit::Quit.action(),
+            objc2::sel!(quitProgram:)
+        );
         // A page's wish to close ends a debug demo and nothing a program opened.
         let close = body("    fn close(&mut self) {");
         assert!(close.contains("!self.0.program_page_up()"), "{close}");
