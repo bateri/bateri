@@ -3723,6 +3723,7 @@ impl AppDelegate {
                         count: 1,
                         scroll: 0.0,
                         warning: false,
+                        tally: false,
                         corner: 0.0,
                     }
                     .layout();

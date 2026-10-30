@@ -713,6 +713,9 @@ pub(crate) fn install(
             // `|` is the Shift character of `\`: the menu matches ⇧⌘\. Grey with a single
             // tab (`TerminalWindow`'s `validateMenuItem:`).
             item(mtm, "Show All Tabs", sel!(showTabList:)),
+            // The longest waiting tab, then the next: the counts at the side column's list end
+            // go the same way; no key of its own (`[keys]` gives one).
+            item(mtm, "Go to Waiting Tab", sel!(goToWaiting:)),
             item(mtm, "Rename Tab\u{2026}", sel!(renameTab:)),
             NSMenuItem::separatorItem(mtm),
             // Splits (Ghostty/iTerm2 precedent): the handler is

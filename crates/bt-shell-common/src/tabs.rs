@@ -1254,6 +1254,8 @@ pub struct Side {
     pub scroll: f64,
     /// A settings diagnostic is showing: its warning button stands on the column's foot.
     pub warning: bool,
+    /// Something waits for the user ([`tally`]): its counts stand at the list's end.
+    pub tally: bool,
     /// The radius of the window's bottom-left corner, the one the warning sits in; 0 where the
     /// corner is square (full screen). The caller gives what it measured for its window
     /// ([`Fit::of`]).
@@ -1296,7 +1298,7 @@ impl Side {
             .warning
             .then(|| Rect::new(fit.inset, foot, BUTTON, BUTTON));
         let list_end = warning.map_or(self.height, |button| button.y) - EDGE;
-        let list = Rect::new(0.0, self.top, width, (list_end - self.top).max(0.0));
+        let mut list = Rect::new(0.0, self.top, width, (list_end - self.top).max(0.0));
         let head = Head::of(self.top);
         let new_tab = Rect::new(width - EDGE - BUTTON, head.y, BUTTON, BUTTON);
         let activity = Rect::new(new_tab.x - BUTTON_GAP - BUTTON, head.y, BUTTON, BUTTON);
@@ -1340,6 +1342,20 @@ impl Side {
         } else {
             0.0
         };
+        // The counts follow the last row, two gaps under it; where they would not fit they stand
+        // at the column's foot and the list scrolls above them, its fade ending on them.
+        let counts = self.tally.then(|| {
+            let room = TAB_HEIGHT + 2.0 * GAP;
+            let pinned = content + room > list.height;
+            if pinned {
+                list.height = (list.height - room).max(0.0);
+            }
+            let y = list.y + content.min(list.height) + 2.0 * GAP;
+            Counts {
+                rect: Rect::new(EDGE, y, (width - 2.0 * EDGE).max(0.0), TAB_HEIGHT),
+                corner: (pinned && warning.is_none()).then_some(fit.radius),
+            }
+        });
         let max_scroll = (content - list.height).max(0.0);
         let scroll = self.scroll.clamp(0.0, max_scroll);
         let overflow = max_scroll > 0.0;
@@ -1378,12 +1394,23 @@ impl Side {
             activity,
             new_tab,
             warning,
+            counts,
             fit,
             along,
             marks,
             slot,
         }
     }
+}
+
+/// Where the counts at the list's end stand ([`Column::counts`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Counts {
+    /// Their row: a row's width and height, [`EDGE`] in from the column's sides.
+    pub rect: Rect,
+    /// At the window's foot with nothing under them, the first count's bottom-left corner
+    /// shares the window corner's centre ([`Fit::of`]): its radius.
+    pub corner: Option<f64>,
 }
 
 /// The title row's parts while the side column hides: the sidebar button where the column's head
@@ -1450,6 +1477,103 @@ pub enum Entry {
 /// The height of an agent's line in the side column's Activity: its name and, under it, what it
 /// is doing and for how long.
 pub const AGENT_ROW: f64 = 44.0;
+
+/// What waits for the user at the side column's list end: a question, a failure, a finish
+/// ([`tally`]). Running and resting programs ask nothing and are not counted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Wait {
+    Asking,
+    Failed,
+    Finished,
+}
+
+impl Wait {
+    /// In the order of urgency, [`group_indicator`]'s.
+    pub const ALL: [Wait; 3] = [Wait::Asking, Wait::Failed, Wait::Finished];
+
+    /// The word beside the count.
+    pub fn word(self) -> &'static str {
+        match self {
+            Wait::Asking => "Asking",
+            Wait::Failed => "Failed",
+            Wait::Finished => "Finished",
+        }
+    }
+
+    /// The indicator a row wears for it, drawn small beside the count.
+    pub fn indicator(self) -> Indicator {
+        match self {
+            Wait::Asking => Indicator::Question,
+            Wait::Failed => Indicator::Failed,
+            Wait::Finished => Indicator::Finished,
+        }
+    }
+}
+
+/// What one tab has waiting for the user ([`tally`]'s input), in the column's order.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Waiting<K> {
+    pub tab: K,
+    /// How many of its panes ask — on the tab on screen too: a question waits until it is
+    /// answered.
+    pub asking: usize,
+    /// A failure, a finish not yet looked at: the tab's own marks, which looking at it clears and
+    /// the tab on screen never takes.
+    pub failed: bool,
+    pub finished: bool,
+    /// How long its oldest question has waited; the longest waiting comes first.
+    pub waited: Duration,
+}
+
+/// One count at the list's end: what waits, how much, and the tabs it waits in, the longest
+/// waiting first ([`next_waiting`] goes through them in that order).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Count<K> {
+    pub wait: Wait,
+    pub n: usize,
+    pub tabs: Vec<K>,
+}
+
+/// The counts at the side column's list end: Asking counts the panes that ask, Failed and
+/// Finished the tabs marked so — none where nothing waits, so no count at all when nothing does.
+pub fn tally<K: Copy>(tabs: &[Waiting<K>]) -> Vec<Count<K>> {
+    Wait::ALL
+        .into_iter()
+        .filter_map(|wait| {
+            let mut those: Vec<&Waiting<K>> = tabs
+                .iter()
+                .filter(|tab| match wait {
+                    Wait::Asking => tab.asking > 0,
+                    Wait::Failed => tab.failed,
+                    Wait::Finished => tab.finished,
+                })
+                .collect();
+            // Longest waiting first; equals keep the column's order (a stable sort).
+            those.sort_by(|a, b| b.waited.cmp(&a.waited));
+            let n = match wait {
+                Wait::Asking => those.iter().map(|tab| tab.asking).sum(),
+                Wait::Failed | Wait::Finished => those.len(),
+            };
+            (n > 0).then(|| Count {
+                wait,
+                n,
+                tabs: those.iter().map(|tab| tab.tab).collect(),
+            })
+        })
+        .collect()
+}
+
+/// The tab a press on a count — or Go to Waiting Tab, over `order` — goes to from `current`: the
+/// one after it in `order`, round again; the first when `current` is not in it; none when the
+/// only one waiting is the tab on screen.
+pub fn next_waiting<K: Copy + Eq>(order: &[K], current: Option<K>) -> Option<K> {
+    let at = current.and_then(|current| order.iter().position(|&tab| tab == current));
+    match at {
+        None => order.first().copied(),
+        Some(_) if order.len() < 2 => None,
+        Some(at) => Some(order[(at + 1) % order.len()]),
+    }
+}
 
 /// The height of a detail's line under a row (`[appearance] tab_details`): where the program
 /// stands, the folder and the branch or the server.
@@ -1560,6 +1684,8 @@ pub struct Column {
     /// The settings warning, in the window's bottom-left corner. Its bottom-left radius is
     /// [`Fit::radius`] of [`Column::fit`], the other three [`TAB_RADIUS`].
     pub warning: Option<Rect>,
+    /// Where the counts of what waits stand ([`Side::tally`]); `None` without any.
+    pub counts: Option<Counts>,
     /// How the warning meets the window's corner.
     pub fit: Fit,
     /// The rows' extents along y, which [`Run`] reads.
@@ -5088,6 +5214,7 @@ mod tests {
             count,
             scroll: 0.0,
             warning: false,
+            tally: false,
             corner: 20.5,
         }
     }
@@ -5192,6 +5319,105 @@ mod tests {
             "two lines on one face, then the next row a gap down"
         );
         assert_eq!(column.slot_at(150.0), 1);
+    }
+
+    #[test]
+    fn the_counts_say_what_waits_the_longest_first() {
+        let tab = |tab: u64, asking: usize, failed: bool, finished: bool, waited: u64| Waiting {
+            tab,
+            asking,
+            failed,
+            finished,
+            waited: Duration::from_secs(waited),
+        };
+        // Two questions in one tab, one in another that waited longer; a failure; nothing in 4.
+        let tabs = [
+            tab(1, 2, false, false, 30),
+            tab(2, 0, true, false, 0),
+            tab(3, 1, false, true, 90),
+            tab(4, 0, false, false, 0),
+        ];
+        assert_eq!(
+            tally(&tabs),
+            [
+                Count {
+                    wait: Wait::Asking,
+                    n: 3,
+                    tabs: vec![3, 1]
+                },
+                Count {
+                    wait: Wait::Failed,
+                    n: 1,
+                    tabs: vec![2]
+                },
+                Count {
+                    wait: Wait::Finished,
+                    n: 1,
+                    tabs: vec![3]
+                },
+            ],
+            "panes for questions, tabs for the rest"
+        );
+        assert!(
+            tally(&[tab(1, 0, false, false, 0)]).is_empty(),
+            "nothing waits"
+        );
+        // Pressed again and again: round the order, from the tab on screen.
+        let order = [3_u64, 1];
+        assert_eq!(next_waiting(&order, None), Some(3));
+        assert_eq!(next_waiting(&order, Some(3)), Some(1));
+        assert_eq!(next_waiting(&order, Some(1)), Some(3));
+        assert_eq!(
+            next_waiting(&order, Some(7)),
+            Some(3),
+            "from elsewhere, the first"
+        );
+        assert_eq!(
+            next_waiting(&[3_u64], Some(3)),
+            None,
+            "only the tab on screen"
+        );
+    }
+
+    #[test]
+    fn the_counts_follow_the_last_row_or_stand_at_the_foot() {
+        // Three rows in a tall window: two gaps under the last row's end (6 + 88 + 6 = 100).
+        let short = Side {
+            tally: true,
+            ..side(600.0, 3)
+        }
+        .layout();
+        let tally = short.counts.expect("counts");
+        assert_eq!(tally.rect, Rect::new(8.0, 40.0 + 100.0 + 4.0, 184.0, 28.0));
+        assert_eq!(tally.corner, None);
+        assert_eq!(
+            short.list,
+            side(600.0, 3).layout().list,
+            "the list keeps its room"
+        );
+        // Thirty rows: at the foot, the list ends a row and two gaps above it.
+        let long = Side {
+            tally: true,
+            ..side(600.0, 30)
+        }
+        .layout();
+        let tally = long.counts.expect("counts");
+        assert_eq!(
+            tally.rect.y + tally.rect.height,
+            600.0 - 8.0,
+            "8 from the foot"
+        );
+        assert_eq!(long.list.y + long.list.height + 2.0 * GAP, tally.rect.y);
+        assert_eq!(tally.corner, Some(12.5), "the window corner's centre");
+        // With the warning in the corner the counts keep the rows' radius.
+        let warned = Side {
+            tally: true,
+            warning: true,
+            ..side(600.0, 30)
+        }
+        .layout();
+        assert_eq!(warned.counts.map(|tally| tally.corner), Some(None));
+        assert_eq!(side(600.0, 3).layout().counts, None);
     }
 
     #[test]

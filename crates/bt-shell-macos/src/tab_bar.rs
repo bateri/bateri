@@ -5501,7 +5501,7 @@ pub(crate) struct Label {
 }
 
 /// What the side column adds to what the bar shows ([`TabBar::show`]).
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Aside {
     /// The most urgent thing the tabs other than the one on screen ask: the sidebar button's
     /// badge while the column hides.
@@ -5510,6 +5510,8 @@ pub(crate) struct Aside {
     pub(crate) activity: bool,
     /// What a row says beyond its name (`[appearance] tab_details`).
     pub(crate) details: bool,
+    /// What waits for the user, counted at the list's end (`tabs::tally`).
+    pub(crate) counts: Vec<tabs::Count<u64>>,
 }
 
 /// One agent's line in the side column's Activity: a pane whose program reports itself.
@@ -5609,6 +5611,8 @@ struct Shown {
     /// A row says where its program stands and what it asks (`[appearance] tab_details` for the
     /// list as it is now).
     details: bool,
+    /// What waits for the user, counted at the list's end (`tabs::tally`).
+    counts: Vec<tabs::Count<u64>>,
     /// The most urgent thing the tabs other than the one on screen ask (`tabs::group_indicator`):
     /// the sidebar button's badge while the column hides.
     unseen: Option<Indicator>,
@@ -5804,6 +5808,8 @@ pub(crate) struct BarIvars {
     sidebar: Retained<BarButton>,
     /// The column's head button that shows Activity.
     eye: Retained<BarButton>,
+    /// The counts of what waits at the list's end, one button each ([`tab_side::TallyButton`]).
+    counts: RefCell<Vec<Retained<tab_side::TallyButton>>>,
     /// The column as last laid out, in the side mode: the wheel, the list and the name field work
     /// from it.
     column: RefCell<Option<Column>>,
@@ -6161,6 +6167,7 @@ impl TabBar {
             hidden: Cell::new(false),
             sidebar: sidebar.clone(),
             eye: eye.clone(),
+            counts: RefCell::new(Vec::new()),
             column: RefCell::new(None),
             mask: tab_side::Mask::default(),
             before: Cell::new(None),
@@ -6237,6 +6244,7 @@ impl TabBar {
             unseen,
             activity,
             details,
+            counts,
         } = aside;
         let iv = self.ivars();
         // The tips of the buttons name keys that `[keys]` moves; the bar is given its tabs
@@ -6278,6 +6286,7 @@ impl TabBar {
             activity,
             details,
             unseen,
+            counts,
         });
         self.refresh_group_list(listed);
         let mapped = iv.card.borrow().as_ref().is_some_and(OpenCard::pictured);
@@ -9569,6 +9578,7 @@ mod tests {
                 count: 12,
                 scroll,
                 warning: false,
+                tally: false,
                 corner: 20.5,
             }
             .layout()

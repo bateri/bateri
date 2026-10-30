@@ -2670,6 +2670,7 @@ mod tests {
                 count: 0,
                 scroll: 0.0,
                 warning: false,
+                tally: false,
                 corner: 20.5,
             }
             .layout_with(&items.iter().map(Item::entry).collect::<Vec<_>>());
@@ -2692,6 +2693,7 @@ mod tests {
             count: 0,
             scroll: 0.0,
             warning: false,
+            tally: false,
             corner: 20.5,
         }
         .layout_with(&items.iter().map(Item::entry).collect::<Vec<_>>())

@@ -1784,6 +1784,27 @@ impl TerminalTab {
         lines
     }
 
+    /// What this tab has waiting for the user, for the counts at the side column's list end
+    /// (`tabs::tally`): its panes that ask — on screen too, a question waits until it is
+    /// answered — with how long the oldest has, and its failure and finish not yet looked at.
+    pub(crate) fn waiting(&self) -> tabs::Waiting<u64> {
+        let asking: Vec<std::time::Duration> = self
+            .panes()
+            .iter()
+            .filter_map(|pane| pane.session()?.program_report())
+            .filter(|report| report.state == ProgramState::Blocked)
+            .map(|report| report.held)
+            .collect();
+        let signals = self.signals();
+        tabs::Waiting {
+            tab: self.id(),
+            asking: asking.len(),
+            failed: signals.failed,
+            finished: signals.finished,
+            waited: asking.into_iter().max().unwrap_or_default(),
+        }
+    }
+
     pub(crate) fn card_panes(&self) -> Vec<CardPane> {
         let panes = self.panes();
         let (hidden, away) = (self.hidden(), self.away());

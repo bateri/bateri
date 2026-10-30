@@ -1247,7 +1247,13 @@ tab_position = "top"
   program — its name and, under it, *Running · 4m*, *Asking*, *Finished*,
   *Failed* or *Idle* — and a tab with two programs shows two lines on one
   face. A click on a line goes to that program's pane, and ⌘1–9 count the
-  programs, not the tabs. `tab_details` (View ▸ **Tab Details**, a right
+  programs, not the tabs. While a program asks, a command fails or one
+  finishes unseen, counts stand at the end of the list — *2 Asking*, *1
+  Failed*, *3 Finished*, at the column's foot when the list is long: a click
+  goes to the tab that has waited longest, and the next at the next click;
+  Window ▸ **Go to Waiting Tab** does the same (no key of its own; `[keys]`
+  can give it one). A question counts until it is answered, a failure or a
+  finish until you look at its tab. `tab_details` (View ▸ **Tab Details**, a right
   click on the column's empty part) adds under a program's line where it
   stands — the folder and the git branch, or the server — and, while it asks
   for permission, what it asks, cut at two lines: `"smart"` in Activity only,

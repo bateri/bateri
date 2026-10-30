@@ -298,6 +298,7 @@ pub const COMMANDS: &[Command] = &[
     command("rename_group", "renameGroup", &[]),
     command("move_group_to_new_window", "moveGroupToNewWindow", &[]),
     command("show_all_tabs", "showTabList", &["shift+cmd+\\"]),
+    command("go_to_waiting", "goToWaiting", &[]),
     command("rename_tab", "renameTab", &[]),
     command("select_previous_split", "selectPreviousSplit", &["cmd+["]),
     command("select_next_split", "selectNextSplit", &["cmd+]"]),
@@ -583,21 +584,22 @@ mod tests {
     }
 
     #[test]
-    fn the_commands_with_no_shortcut_are_the_menus_twenty_eight_and_four_new() {
+    fn the_commands_with_no_shortcut_are_the_menus_twenty_eight_and_five_new() {
         let none: Vec<&str> = COMMANDS
             .iter()
             .filter(|command| command.defaults.is_empty())
             .map(|command| command.name)
             .collect();
-        // The twenty-eight items of the menu that have no key today, and the four that
+        // The twenty-eight items of the menu that have no key today, and the five that
         // join the menu: Command History…, Themes… and Open Themes Folder (which the theme
-        // list builds every time it opens), and Open All in New Tab.
-        assert_eq!(none.len(), 28 + 4, "{none:?}");
+        // list builds every time it opens), Open All in New Tab and Go to Waiting Tab.
+        assert_eq!(none.len(), 28 + 5, "{none:?}");
         for new in [
             "command_history",
             "themes",
             "open_themes_folder",
             "open_all_background",
+            "go_to_waiting",
         ] {
             assert!(none.contains(&new), "{new}");
         }

@@ -362,6 +362,9 @@ impl TabBar {
             iv.sidebar.setHidden(true);
             iv.eye.setHidden(true);
             iv.new_tab.set_bare(false);
+            for button in iv.counts.take() {
+                button.removeFromSuperview();
+            }
             for chip in iv.chips.borrow().iter() {
                 chip.setHidden(false);
             }
@@ -473,6 +476,10 @@ impl TabBar {
         iv.sidebar.set_bare(true);
         iv.sidebar.set_badge(shown.unseen);
         iv.eye.setHidden(true);
+        // The badge says what waits while the column hides; its counts wait with it.
+        for button in iv.counts.borrow().iter() {
+            button.setHidden(true);
+        }
         if let Some(new_tab) = head.new_tab {
             iv.new_tab.setFrame(ns_rect(new_tab));
             iv.new_tab.set_look(palette, TAB_RADIUS);
@@ -740,6 +747,7 @@ impl TabBar {
             }
             None => iv.warning.setHidden(true),
         }
+        self.place_counts(&column, &shown.counts, &shown.tabs, palette);
         iv.insertion.set(
             &iv.strip,
             // `between` is the gap's top; the line's middle is half a gap down. A line a carry
@@ -757,6 +765,72 @@ impl TabBar {
         self.arm_clock();
     }
 
+    /// The counts of what waits, in their row at the list's end ([`tabs::Column::counts`]): a
+    /// button each, the words dropped when the three do not fit with them; none without any.
+    fn place_counts(
+        &self,
+        column: &Column,
+        counts: &[tabs::Count<u64>],
+        labels: &[super::Label],
+        palette: Palette,
+    ) {
+        let iv = self.ivars();
+        let mut buttons = iv.counts.borrow_mut();
+        while buttons.len() > counts.len() {
+            if let Some(gone) = buttons.pop() {
+                gone.removeFromSuperview();
+            }
+        }
+        while buttons.len() < counts.len() {
+            let button = TallyButton::new(self.mtm());
+            self.addSubview(&button);
+            buttons.push(button);
+        }
+        let Some(place) = column.counts else {
+            return;
+        };
+        for button in buttons.iter() {
+            button.setHidden(false);
+        }
+        let words = {
+            let wide: f64 = counts
+                .iter()
+                .map(|count| TallyButton::width(count, true))
+                .sum();
+            wide + tabs::GAP * counts.len().saturating_sub(1) as f64 <= place.rect.width
+        };
+        let mut x = place.rect.x;
+        for (index, (button, count)) in buttons.iter().zip(counts).enumerate() {
+            let width = TallyButton::width(count, words);
+            button.setFrame(NSRect::new(
+                NSPoint::new(x, place.rect.y),
+                NSSize::new(width, place.rect.height),
+            ));
+            x += width + tabs::GAP;
+            // The tip names whom it waits for, the longest waiting first.
+            let names: Vec<&str> = count
+                .tabs
+                .iter()
+                .filter_map(|tab| labels.iter().find(|label| label.tab == *tab))
+                .map(|label| label.title.as_str())
+                .collect();
+            let more = if names.len() > 3 { " …" } else { "" };
+            let tip = format!(
+                "{} {}: {}{more}",
+                count.n,
+                count.wait.word(),
+                names[..names.len().min(3)].join(", ")
+            );
+            button.set(
+                count,
+                words,
+                tip,
+                (index == 0).then_some(place.corner).flatten(),
+                palette,
+            );
+        }
+    }
+
     /// The pure column's input for `count` places: the bar's width (the window gives the bar the
     /// column's), the window's height, where the list starts, the settings diagnostic and the
     /// corner, and the scroll as it stands ([`TabBar::bar_for`]'s upright half).
@@ -770,6 +844,7 @@ impl TabBar {
             count,
             scroll: iv.scroll.get(),
             warning: !iv.shown.borrow().notice.is_empty(),
+            tally: !iv.shown.borrow().counts.is_empty(),
             corner: card::window_corner_pt(self.window().as_deref()),
         }
     }
@@ -828,6 +903,208 @@ impl TabBar {
                 height,
             ),
         ));
+    }
+}
+
+pub(crate) struct TallyIvars {
+    wait: Cell<Option<tabs::Wait>>,
+    n: Cell<usize>,
+    words: Cell<bool>,
+    hot: Cell<bool>,
+    pressed: Cell<bool>,
+    /// The bottom-left corner's radius at the window's foot ([`tabs::Counts::corner`]).
+    foot: Cell<Option<f64>>,
+    palette: Cell<Option<Palette>>,
+}
+
+define_class!(
+    /// One count at the side column's list end: the small indicator of what waits, how many and
+    /// the word (dropped where the counts do not fit with it). A press goes to the tab that has
+    /// waited longest, and round again from there (`TerminalWindow::go_to_waiting`).
+    // SAFETY: NSView is designed for subclassing; TallyButton implements no `Drop` and is born
+    // with `initWithFrame:`.
+    #[unsafe(super(NSView))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "BateriTallyButton"]
+    #[ivars = TallyIvars]
+    pub(crate) struct TallyButton;
+
+    unsafe impl NSObjectProtocol for TallyButton {}
+
+    impl TallyButton {
+        #[unsafe(method(isFlipped))]
+        fn is_flipped(&self) -> bool {
+            true
+        }
+
+        #[unsafe(method(acceptsFirstMouse:))]
+        fn accepts_first_mouse(&self, _event: Option<&objc2_app_kit::NSEvent>) -> bool {
+            true
+        }
+
+        #[unsafe(method(mouseDownCanMoveWindow))]
+        fn can_move_window(&self) -> bool {
+            false
+        }
+
+        #[unsafe(method(mouseDown:))]
+        fn mouse_down(&self, _event: &objc2_app_kit::NSEvent) {
+            self.ivars().pressed.set(true);
+        }
+
+        #[unsafe(method(mouseUp:))]
+        fn mouse_up(&self, event: &objc2_app_kit::NSEvent) {
+            let pressed = self.ivars().pressed.replace(false);
+            let at = self.convertPoint_fromView(event.locationInWindow(), None);
+            let bounds = self.bounds();
+            let inside = at.x >= 0.0
+                && at.y >= 0.0
+                && at.x <= bounds.size.width
+                && at.y <= bounds.size.height;
+            if pressed && inside {
+                self.act();
+            }
+        }
+
+        #[unsafe(method(mouseEntered:))]
+        fn mouse_entered(&self, _event: &objc2_app_kit::NSEvent) {
+            self.ivars().hot.set(true);
+            self.setNeedsDisplay(true);
+        }
+
+        #[unsafe(method(mouseExited:))]
+        fn mouse_exited(&self, _event: &objc2_app_kit::NSEvent) {
+            self.ivars().hot.set(false);
+            self.setNeedsDisplay(true);
+        }
+
+        #[unsafe(method(drawRect:))]
+        fn draw_rect(&self, _dirty: NSRect) {
+            self.draw();
+        }
+    }
+);
+
+/// A count's inner spaces: its sides, after the indicator, after the number.
+const TALLY_PAD: f64 = 8.0;
+const TALLY_IN: f64 = 4.0;
+const TALLY_WORD_GAP: f64 = 3.0;
+/// The count's type, points.
+const TALLY_TEXT: f64 = 12.0;
+
+impl TallyButton {
+    pub(super) fn new(mtm: MainThreadMarker) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(TallyIvars {
+            wait: Cell::new(None),
+            n: Cell::new(0),
+            words: Cell::new(true),
+            hot: Cell::new(false),
+            pressed: Cell::new(false),
+            foot: Cell::new(None),
+            palette: Cell::new(None),
+        });
+        // SAFETY: `initWithFrame:` is NSView's designated initializer and the ivars are set.
+        let this: Retained<Self> = unsafe { msg_send![super(this), initWithFrame: NSRect::ZERO] };
+        super::track_hover(&this);
+        this
+    }
+
+    /// How wide `count`'s button is, with its word or without it.
+    pub(super) fn width(count: &tabs::Count<u64>, words: bool) -> f64 {
+        let text = |text: &str, strong: bool| {
+            let (_, attributes) = line_type(TALLY_TEXT, strong, 0, NSLineBreakMode::ByClipping);
+            // SAFETY: the dictionary holds a font, a colour and a paragraph style under their
+            // keys.
+            unsafe { NSString::from_str(text).sizeWithAttributes(Some(&attributes)) }
+                .width
+                .ceil()
+        };
+        let word = if words {
+            TALLY_WORD_GAP + text(count.wait.word(), false)
+        } else {
+            0.0
+        };
+        2.0 * TALLY_PAD + tabs::INDICATOR_SIDE + TALLY_IN + text(&count.n.to_string(), true) + word
+    }
+
+    fn set(
+        &self,
+        count: &tabs::Count<u64>,
+        words: bool,
+        tip: String,
+        foot: Option<f64>,
+        palette: Palette,
+    ) {
+        let iv = self.ivars();
+        let changed = [
+            iv.wait.replace(Some(count.wait)) != Some(count.wait),
+            iv.n.replace(count.n) != count.n,
+            iv.words.replace(words) != words,
+            iv.foot.replace(foot) != foot,
+            iv.palette.replace(Some(palette)) != Some(palette),
+        ]
+        .contains(&true);
+        self.setToolTip(Some(&NSString::from_str(&tip)));
+        self.setAccessibilityLabel(Some(&NSString::from_str(&tip)));
+        if changed {
+            self.setNeedsDisplay(true);
+        }
+    }
+
+    fn draw(&self) {
+        let iv = self.ivars();
+        let (Some(palette), Some(wait)) = (iv.palette.get(), iv.wait.get()) else {
+            return;
+        };
+        let bounds = self.bounds();
+        if iv.hot.get() {
+            let radius = TAB_RADIUS;
+            rounded_corners(
+                bounds,
+                [radius, radius, radius, iv.foot.get().unwrap_or(radius)],
+                palette.hover,
+                None,
+            );
+        }
+        let middle = bounds.size.height / 2.0;
+        super::draw_bare(
+            wait.indicator(),
+            false,
+            NSPoint::new(TALLY_PAD, middle - tabs::INDICATOR_SIDE / 2.0),
+            palette,
+        );
+        let x = TALLY_PAD + tabs::INDICATOR_SIDE + TALLY_IN;
+        let number = iv.n.get().to_string();
+        let room = (bounds.size.width - x).max(0.0);
+        let row = |at: f64, text: &str, strong: bool, color: u32| {
+            draw_line(
+                text,
+                NSRect::new(NSPoint::new(at, 0.0), NSSize::new(room, bounds.size.height)),
+                TALLY_TEXT,
+                strong,
+                color,
+            );
+        };
+        row(x, &number, true, palette.title);
+        if iv.words.get() {
+            let (_, attributes) = line_type(TALLY_TEXT, true, 0, NSLineBreakMode::ByClipping);
+            // SAFETY: as in `width`.
+            let wide = unsafe { NSString::from_str(&number).sizeWithAttributes(Some(&attributes)) }
+                .width
+                .ceil();
+            row(x + wide + TALLY_WORD_GAP, wait.word(), false, palette.dim);
+        }
+    }
+
+    fn act(&self) {
+        let wait = self.ivars().wait.get();
+        // SAFETY: reading the superview; we are on the main thread.
+        let bar = unsafe { self.superview() }.and_then(|view| view.downcast::<TabBar>().ok());
+        if let (Some(window), Some(wait)) = (bar.and_then(|bar| bar.terminal_window()), wait) {
+            window.go_to_waiting(Some(wait));
+        }
+        self.ivars().hot.set(false);
+        self.setNeedsDisplay(true);
     }
 }
 

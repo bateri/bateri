@@ -995,6 +995,9 @@ define_class!(
                 // window's title, and one named before the others closed must
                 // be possible to change.)
                 self.ivars().order.borrow().len() > 1
+            } else if action == Some(sel!(goToWaiting:)) {
+                // Something to go to: a waiting tab other than the one on screen, or round to it.
+                !self.counts().is_empty()
             } else if action == Some(sel!(showActivity:)) {
                 item.setState(if self.activity() {
                     NSControlStateValueOn
@@ -1259,6 +1262,13 @@ define_class!(
             if let Some(tab) = target {
                 self.select_tab(tab);
             }
+        }
+
+        /// Window ▸ Go to Waiting Tab: the tab that has waited longest for the user, and the next
+        /// one at the next press — the order the counts at the side column's list end go in.
+        #[unsafe(method(goToWaiting:))]
+        fn go_to_waiting_action(&self, _sender: Option<&AnyObject>) {
+            self.go_to_waiting(None);
         }
 
         /// View ▸ Show Activity (⇧⌘A): the side column lists only the agents, or every tab again.
@@ -4762,6 +4772,8 @@ impl TerminalWindow {
             .collect();
         drop((order, groups));
         let unseen = self.cluster_indicator(&others);
+        // The counts of what waits stand at the end of the side column's list.
+        let counts = if side { self.counts() } else { Vec::new() };
         let notice = self.ivars().notice.borrow().clone();
         self.bar().show(
             labels,
@@ -4773,6 +4785,7 @@ impl TerminalWindow {
                 unseen,
                 activity,
                 details,
+                counts,
             },
         );
     }
@@ -5122,6 +5135,40 @@ impl TerminalWindow {
     /// lists nothing and the title row's bar is every tab's.
     fn listing_activity(&self) -> bool {
         self.activity() && self.ivars().root.column_shown()
+    }
+
+    /// What waits for the user in this window's tabs, counted ([`tabs::tally`]), in the column's
+    /// order — closed groups' hidden tabs too: a question in one waits like any other.
+    pub(crate) fn counts(&self) -> Vec<tabs::Count<u64>> {
+        let order = self.ivars().order.borrow();
+        let waiting: Vec<tabs::Waiting<u64>> = order
+            .ids()
+            .iter()
+            .filter_map(|&id| self.tab(id))
+            .map(|tab| tab.waiting())
+            .collect();
+        tabs::tally(&waiting)
+    }
+
+    /// A count pressed (`Some(wait)`) or Window ▸ Go to Waiting Tab (`None`, every count's tabs
+    /// in the counts' order): the tab that has waited longest, and from the tab on screen the
+    /// next, round again ([`tabs::next_waiting`]). The tab comes on screen and its row into
+    /// sight; a closed group shows the tab on screen under its header.
+    pub(crate) fn go_to_waiting(&self, wait: Option<tabs::Wait>) {
+        let mut order: Vec<u64> = Vec::new();
+        for count in self.counts() {
+            if wait.is_none_or(|wait| wait == count.wait) {
+                for tab in count.tabs {
+                    if !order.contains(&tab) {
+                        order.push(tab);
+                    }
+                }
+            }
+        }
+        let current = self.ivars().order.borrow().selected();
+        if let Some(next) = tabs::next_waiting(&order, current) {
+            self.select_tab(next);
+        }
     }
 
     /// The listed tabs of Activity with how many agents each holds, in the column's order: what
