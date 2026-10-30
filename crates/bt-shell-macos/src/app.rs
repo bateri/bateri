@@ -53,7 +53,7 @@ use crate::launch::{
 };
 use crate::leaving::{self, QuitKind};
 use crate::menu::ShellMenuDelegate;
-use crate::moves::{self, Move, Plan, Refusal, Slot, Step};
+use crate::moves::{self, Joins, Move, Plan, Refusal, Slot, Step};
 use crate::notices::{Notices, Source};
 use crate::pane::TerminalPane;
 use crate::pane_drag::Session;
@@ -3910,15 +3910,23 @@ impl AppDelegate {
             // Over panes, a drop on nothing is the block's — of one tab: several
             // tabs and a group have no block to merge. The block lands where the pointer let go,
             // as the regions it showed were read.
+            let merge = app.tab_merge_take();
+            let sprung = merge.as_ref().map(Merge::elsewhere).unwrap_or_default();
             let end = match carried.lone() {
-                Some(tab) => {
-                    app.tab_merge_end(app.tab_merge_take(), tab, NSEvent::mouseLocation(), detach)
-                }
-                None => {
-                    drop(app.tab_merge_take());
-                    End::Free
-                }
+                Some(tab) => app.tab_merge_end(merge, tab, NSEvent::mouseLocation(), detach),
+                None => End::Free,
             };
+            // A carry that came to nothing puts back what a wait on a chip opened in another
+            // window (its own window's is the carried tab again, `tab_merge_end`'s).
+            if dropped.is_none() && end != End::Merged && !(detach && end == End::Free) {
+                for (window, before) in sprung {
+                    if let Some(window) = app.window(window)
+                        && window.index_of(before).is_some()
+                    {
+                        window.select_tab(before);
+                    }
+                }
+            }
             if let Some(from) = app.window(carried.window()) {
                 from.bar().drag_ended();
             }
@@ -3941,10 +3949,20 @@ impl AppDelegate {
     }
 
     /// What was carried lands on window `onto` as `landed` says
-    /// ([`Landed`]): the planner's moves ([`Move::TabsToWindow`], [`Move::RegroupTabs`],
-    /// [`Move::GroupToWindow`], [`Move::MoveGroup`]), each undone with Undo Move.
+    /// ([`Landed`]): the planner's moves ([`Move::TabToTab`], [`Move::TabsToWindow`],
+    /// [`Move::RegroupTabs`], [`Move::GroupToWindow`], [`Move::MoveGroup`]), each undone with
+    /// Undo Move.
     fn land(&self, carried: &Carried, onto: &TerminalWindow, landed: Landed) {
         match (carried, landed) {
+            (Carried::Tabs { tabs, .. }, Landed::Merge(into)) => {
+                if let [tab] = tabs.as_slice() {
+                    self.make_move(Move::TabToTab {
+                        tab: *tab,
+                        into,
+                        place: Joins::Beside(Direction::Right),
+                    });
+                }
+            }
             (Carried::Tabs { tabs, .. }, Landed::Strip(landing)) => {
                 if let [tab] = tabs.as_slice() {
                     self.land_tab(*tab, onto, landing);
@@ -4017,7 +4035,7 @@ impl AppDelegate {
             Landing::Reorder(index) => (from.id(), index),
             Landing::Join(index) if from.id() != onto.id() => (onto.id(), index),
             // A join on its own window is a reorder; the bar says so, not this.
-            Landing::Join(_) | Landing::Detach => return,
+            Landing::Join(_) => return,
         };
         self.make_move(Move::TabToStrip { tab, window, index });
     }

@@ -20,7 +20,9 @@ use std::cell::{Cell, RefCell};
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
-use objc2_app_kit::{NSAccessibility, NSApplication, NSBezierPath, NSColor, NSEvent, NSView};
+use objc2_app_kit::{
+    NSAccessibility, NSApplication, NSBezierPath, NSColor, NSEvent, NSGraphicsContext, NSView,
+};
 use objc2_foundation::{NSObjectProtocol, NSPoint, NSRect, NSSize, NSString};
 
 use super::{Palette, ProgramKind, Tint, draw_mark, track_hover};
@@ -223,11 +225,13 @@ impl PaneHead {
     pub(crate) fn set(&self, look: HeadLook, theme: &bt_core::Theme, radius: f64) {
         let iv = self.ivars();
         let palette = Palette::of(theme);
-        let changed = iv.look.borrow().as_ref() != Some(&look)
-            || iv.palette.replace(Some(palette)) != Some(palette)
-            || iv.ground.replace(theme.background) != theme.background
-            || iv.dark.replace(theme.is_dark()) != theme.is_dark()
-            || iv.radius.replace(radius) != radius;
+        // Every field is written whatever came before it: `|`, not `||` — a new theme that also
+        // changed the look (the focus frame's colour) kept the old ground.
+        let changed = (iv.look.borrow().as_ref() != Some(&look))
+            | (iv.palette.replace(Some(palette)) != Some(palette))
+            | (iv.ground.replace(theme.background) != theme.background)
+            | (iv.dark.replace(theme.is_dark()) != theme.is_dark())
+            | (iv.radius.replace(radius) != radius);
         let tip = NSString::from_str(&look.title);
         self.setAccessibilityLabel(Some(&tip));
         iv.look.replace(Some(look));
@@ -306,12 +310,16 @@ impl PaneHead {
         Tint::of(iv.ground.get(), 1.0).color().setFill();
         band.fill();
         if look.carded {
-            // The card's light on its top edge, as the pane's frame had it without a header.
+            // The card's light on its top edge, as the pane's frame had it without a header: the
+            // band less itself moved one line down, clipped to the band — unclipped, the moved
+            // band's foot drew a line under the header, over the pane.
             let (tone, alpha) = match (iv.dark.get(), look.focused) {
                 (true, true) => (0xfff6e8, 0.32),
                 (true, false) => (0xffffff, 0.13),
                 (false, _) => (0xffffff, 1.0),
             };
+            NSGraphicsContext::saveGraphicsState_class();
+            band.addClip();
             let edge = top_rounded(bounds, radius);
             let below = NSRect::new(
                 NSPoint::new(bounds.origin.x, bounds.origin.y + 1.0),
@@ -321,6 +329,7 @@ impl PaneHead {
             edge.setWindingRule(objc2_app_kit::NSWindingRule::EvenOdd);
             Tint::of(tone, alpha).color().setFill();
             edge.fill();
+            NSGraphicsContext::restoreGraphicsState_class();
         }
         // The mark on the grid's left line, the dot on its corner.
         let ink = if look.focused {

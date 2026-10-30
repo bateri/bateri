@@ -1003,7 +1003,8 @@ define_class!(
                 } else {
                     NSControlStateValueOff
                 });
-                tabs_at_side(self.mtm()) && !self.column_hidden()
+                // With no agent in the window there is nothing to list: the eye is not there either.
+                tabs_at_side(self.mtm()) && !self.column_hidden() && self.has_agents()
             } else if action == Some(sel!(toggleSidebar:)) {
                 // The title says which way the column goes; a column there is only at the side.
                 item.setTitle(if self.column_hidden() {
@@ -1273,7 +1274,7 @@ define_class!(
         /// View ▸ Show Activity (⇧⌘A): the side column lists only the agents, or every tab again.
         #[unsafe(method(showActivity:))]
         fn show_activity(&self, _sender: Option<&AnyObject>) {
-            if tabs_at_side(self.mtm()) {
+            if tabs_at_side(self.mtm()) && self.has_agents() {
                 self.toggle_activity();
             }
         }
@@ -3668,8 +3669,8 @@ impl TerminalWindow {
             .gap_target(&self.ivars().order.borrow(), self.listing(), gap)
     }
 
-    /// The window has groups: its side column lists headers, and a row dragged there is carried
-    /// to a place of the column ([`Groups::side_spots`]), not slid along a list.
+    /// The window has groups: its side column lists headers, and a row carried there goes to a
+    /// place of the column ([`Groups::side_spots`]).
     pub(crate) fn has_groups(&self) -> bool {
         !self.ivars().groups.borrow().is_empty()
     }
@@ -3691,18 +3692,6 @@ impl TerminalWindow {
             .groups
             .borrow()
             .side_spots(&self.ivars().order.borrow(), column)
-    }
-
-    /// The column's list with tab `tab` slid to slot `slot` of its spots ([`Groups::side_preview`]).
-    pub(crate) fn side_preview(
-        &self,
-        tab: u64,
-        slot: usize,
-    ) -> Option<crate::groups::SidePreview<u64>> {
-        self.ivars()
-            .groups
-            .borrow()
-            .side_preview(&self.ivars().order.borrow(), tab, slot)
     }
 
     /// The places the side column `column` takes a carried group at ([`Groups::group_spots`]).
@@ -3735,26 +3724,6 @@ impl TerminalWindow {
             .groups
             .borrow()
             .own_target(&self.ivars().order.borrow(), tab, place)
-    }
-
-    /// **The applier: a place in the bar's list.** Tab `id` takes the `to`th place of what the bar
-    /// lists (a tab let go on its own bar). The column's list is the strip's, place by place
-    /// ([`Self::move_tab`]); the title row lists one group and the tab stays in it, which a place
-    /// of the strip cannot say at the group's end ([`Groups::move_within`]).
-    pub(crate) fn move_tab_listed(&self, id: u64, to: usize) {
-        let in_group = !self.bar().is_side() && !self.ivars().groups.borrow().is_empty();
-        if !in_group {
-            self.move_tab(id, self.strip_place(to));
-            return;
-        }
-        if self.tab(id).is_none()
-            || !self.with_strip(|groups, order| groups.move_within(order, id, to))
-        {
-            return;
-        }
-        self.forget_undo();
-        self.refresh_bar();
-        self.layout_changed();
     }
 
     /// The groups the menus list, in order: the group's tag (its identity), its name, and whether
@@ -4606,7 +4575,8 @@ impl TerminalWindow {
         }
         let single = self.lone_tab();
         let side = self.bar().is_side();
-        let activity = side && self.listing_activity();
+        let agents = side && self.has_agents();
+        let activity = agents && self.activity() && self.ivars().root.column_shown();
         let details = side
             && app::delegate(self.mtm())
                 .is_some_and(|app| app.settings().tab_details.shown(activity));
@@ -4728,6 +4698,7 @@ impl TerminalWindow {
             crate::tab_bar::Aside {
                 unseen,
                 activity,
+                agents,
                 details,
                 counts,
             },
@@ -5075,10 +5046,17 @@ impl TerminalWindow {
         self.refresh_bar();
     }
 
-    /// The side column lists Activity now: at the side, on, and not hidden — a hidden column
-    /// lists nothing and the title row's bar is every tab's.
+    /// The side column lists Activity now: at the side, on, not hidden — a hidden column lists
+    /// nothing and the title row's bar is every tab's — and with an agent to list: without one
+    /// the column lists every tab, and the choice waits for the next agent.
     fn listing_activity(&self) -> bool {
-        self.activity() && self.ivars().root.column_shown()
+        self.activity() && self.ivars().root.column_shown() && self.has_agents()
+    }
+
+    /// Some tab of the window runs an agent ([`TerminalTab::agents`]): Activity has something to
+    /// list, and its eye and View ▸ Show Activity are there to press.
+    pub(crate) fn has_agents(&self) -> bool {
+        self.tabs().iter().any(|tab| !tab.agents().is_empty())
     }
 
     /// What waits for the user in this window's tabs, counted ([`tabs::tally`]), in the column's
@@ -5391,7 +5369,6 @@ mod tests {
             ("pub(crate) fn adopt_tab(", "groups.append("),
             ("pub(crate) fn adopt_tab(", "groups.insert_at("),
             ("pub(crate) fn move_tab(", "groups.move_to("),
-            ("pub(crate) fn move_tab_listed(", "groups.move_within("),
             ("pub(crate) fn fold_tab(", "groups.pane_to_tab("),
             ("pub(crate) fn new_tab_of(", "groups.place_new("),
             ("fn leave_order(", "groups.close("),

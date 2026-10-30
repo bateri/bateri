@@ -1,23 +1,20 @@
 //! A tab carried away from its strip: the drag session's source, the type the tab travels under
 //! on the pasteboard and the picture it is drawn as.
 //!
-//! **Only the second half of a drag is a session.** A tab dragged *along* its strip is not one:
-//! the bar tracks the pointer itself and slides the chips (`tab_bar`, with `tabs::Grip` deciding
-//! where the tab would land). The session starts when the pointer leaves the bar — a tab pulled
-//! down or out — because only then can another window's bar, or nothing, receive it, and the
-//! session is what finds the window under the pointer. A bar takes the drop through
-//! `NSDraggingDestination`; a drop on no bar of ours ends at [`TabDragSource`] with no
-//! operation, and the tab becomes a window where the pointer let go
-//! (`AppDelegate::tab_drag_ended`).
+//! **A carried tab is a session from the slop on**, along its strip as much as out of it: nothing
+//! slides while it is carried, and its own bar, another window's and nothing at all are read the
+//! same way — the session is what finds the window under the pointer. A bar takes the drop through
+//! `NSDraggingDestination` (`TabBar::aim`: the middle of another tab's chip joins that tab, a
+//! chip's ends are the place beside it); a drop on no bar of ours ends at [`TabDragSource`] with
+//! no operation, and the tab becomes a window where the pointer let go — or, over panes, joins
+//! them as their regions said (`tab_merge`, `AppDelegate::tab_drag_ended`).
 //!
 //! **What is carried is tabs or a group** ([`Carried`]): a tab, several picked together in the side
 //! column, or a group by its header (or, in the title row, its button). Several tabs and a group
-//! are never slid along a list as one chip is: they start a session as soon as they are pulled,
-//! and the bar the pointer is over answers `draggingUpdated:` with a line at the place
-//! ([`crate::groups::Groups::side_spots`]) and takes the drop ([`Landed`]); the application
-//! carries it out as a move ([`crate::moves`]), so every one of them is undone with Undo Move.
-//! One tab pulled out of a column that has groups slides in it as it always did, and becomes a
-//! session when it leaves it.
+//! have no block of panes to join another tab with: the bar the pointer is over answers
+//! `draggingUpdated:` with a line at the place ([`crate::groups::Groups::side_spots`]) and takes
+//! the drop ([`Landed`]); the application carries it out as a move ([`crate::moves`]), so every
+//! one of them is undone with Undo Move.
 //!
 //! **What is on the pasteboard means something in this process only**: ids count from zero in
 //! every process (a tab's, a group's and a window's alike), and a bateri beside a `bateri-dev`
@@ -98,7 +95,10 @@ impl Carried {
 /// ([`crate::app::AppDelegate::tab_drag_ended`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Landed {
-    /// One tab, let go on a window that has no group: the strip's place ([`crate::tabs::landing`]).
+    /// One tab, let go on the middle of tab `0`'s chip: it joins that tab beside its focused
+    /// pane, a block of panes, in its own window or another.
+    Merge(u64),
+    /// One tab, let go between chips on a window that has no group: the strip's place.
     Strip(Landing),
     /// Tabs, let go where this target says ([`crate::groups::Groups::side_spots`]).
     Tabs(Target<u64>),

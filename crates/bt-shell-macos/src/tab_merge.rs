@@ -36,9 +36,12 @@ pub(crate) struct Merge {
     /// The regions, drawn in the tab they belong to.
     zones: Option<(u64, Retained<Zones>)>,
     verdict: Verdict,
-    /// The tab on screen was changed to the one the block lands in: taken back, the carried
-    /// tab is put on screen again.
+    /// The tab on screen was changed to the one the block lands in, or to one a wait on a chip
+    /// opened: taken back, the carried tab is put on screen again.
     opened: bool,
+    /// Other windows a wait on a chip opened a tab in, each with the tab that was on screen
+    /// there before: a carry that comes to nothing puts it back.
+    sprung: Vec<(u64, u64)>,
 }
 
 /// What the end of a tab's drag session came to.
@@ -93,7 +96,40 @@ impl AppDelegate {
             zones: None,
             verdict: Verdict::Nothing,
             opened: false,
+            sprung: Vec::new(),
         }));
+    }
+
+    /// A carried tab waited on tab `chip`'s chip in window `window` ([`TabBar::wait_on`]): that
+    /// tab opens — and its window comes up if it is not the one in front — so the block's regions
+    /// answer in its panes. What was on screen comes back if the carry comes to nothing.
+    ///
+    /// [`TabBar::wait_on`]: crate::tab_bar::TabBar
+    pub(crate) fn tab_spring(&self, window: u64, chip: u64) {
+        let Some(window) = self.window(window) else {
+            return;
+        };
+        let before = window.try_selected_tab().map(|tab| tab.id());
+        if !window.select_tab(chip) {
+            return;
+        }
+        if !window.ns_window().isKeyWindow() {
+            window.select();
+        }
+        let Some(mut merge) = self.ivars().tab_merge.take() else {
+            return;
+        };
+        if self
+            .window_holding(merge.tab)
+            .is_some_and(|own| own.id() == window.id())
+        {
+            merge.opened = true;
+        } else if let Some(before) = before
+            && !merge.sprung.iter().any(|(held, _)| *held == window.id())
+        {
+            merge.sprung.push((window.id(), before));
+        }
+        self.ivars().tab_merge.replace(Some(merge));
     }
 
     /// The image of the carried tab moved: the block's regions follow the pointer. The state is
@@ -248,6 +284,13 @@ impl AppDelegate {
     /// Takes the carried tab's state out of the cell, for the end of its session.
     pub(crate) fn tab_merge_take(&self) -> Option<Merge> {
         self.ivars().tab_merge.take()
+    }
+}
+
+impl Merge {
+    /// The other windows a wait opened a tab in, with the tab each had on screen before.
+    pub(crate) fn elsewhere(&self) -> Vec<(u64, u64)> {
+        self.sprung.clone()
     }
 }
 

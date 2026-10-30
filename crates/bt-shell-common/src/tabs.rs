@@ -829,7 +829,6 @@ impl Laid for Strip {
             scroll: self.scroll,
             max_scroll: self.max_scroll,
             slot: self.slot,
-            narrowest: MIN_WIDTH,
             gap: CHIP_GAP,
         }
     }
@@ -839,8 +838,7 @@ impl Laid for Strip {
 /// a point, what a carried pane is over, the scroll that brings a tab into view, how far a held
 /// tab may go. **One copy for both lists** — the strip lays its tabs along x ([`Strip`]) and the
 /// side column along y ([`Column`]) — so a rule changed here changes both. A run knows positions
-/// along its axis only; what lies across it (the strip's row, the column's width) is the layout's,
-/// and a pointer is read across it only for how far a held tab is pulled away ([`Grip::track`]).
+/// along its axis only; what lies across it (the strip's row, the column's width) is the layout's.
 #[derive(Clone, Copy, Debug)]
 pub struct Run<'a> {
     /// The visible extent along the axis; places outside it are clipped.
@@ -857,9 +855,6 @@ pub struct Run<'a> {
     /// places are read where they are, not at multiples of it: a column's headers push the rows
     /// below them down.
     slot: f64,
-    /// The least a place goes along the axis: what stands in for a held tab that has gone from
-    /// the list since the press.
-    narrowest: f64,
     /// What two places keep between them: the strip's [`CHIP_GAP`], the column's [`GAP`].
     gap: f64,
 }
@@ -953,8 +948,8 @@ impl Run<'_> {
     }
 }
 
-/// How far along the list the pointer travels from a press before the press is a drag: a click
-/// that slides a pixel or two is still a click, and its tab stays where it is.
+/// How far the pointer travels from a press before the press is a drag: a click that slides a
+/// pixel or two is still a click, and its tab stays where it is.
 pub const DRAG_SLOP: f64 = 4.0;
 
 /// How far outside the bar the pointer may wander with a tab held before the tab comes away from
@@ -977,90 +972,41 @@ pub fn distance_outside(x: f64, y: f64, width: f64, height: f64) -> f64 {
 pub enum Drag {
     /// Not far enough yet: still a click.
     Press,
-    /// The tab follows the pointer along the list. `left` is where its leading edge is drawn
-    /// along the axis (the left edge in the strip, the top in the side column), `to` the place it
-    /// would take if let go now.
-    Reorder { left: f64, to: usize },
-    /// The pointer left the bar (or the column): the tab comes away from the list.
-    TearOff,
+    /// Past the slop, along the list or out of it: the tab is carried. Nothing in the list moves
+    /// while it is — where it would land is read under the pointer ([`Run::pane_over`]): a list
+    /// that slid round a held tab ran from the pointer, the tab under it moving away before it
+    /// could be let go there.
+    Carry,
 }
 
-/// A press on a tab, until the pointer is let go or the tab comes away: where in the tab it was
-/// held and whether it has become a drag. Once a drag, a press is one for good — moving back to
-/// where it began does not take the tab out of the pointer's hand.
+/// A press on a tab, until the pointer is let go or the tab is carried: where the press was.
 ///
-/// It reads a [`Laid`] layout along its axis — x for a [`Strip`], y for a [`Column`]: a pointer is
+/// It reads a [`Laid`] layout along its axis — x for a [`Strip`], y for a [`Column`]: a point is
 /// given as `(along, across)`, so the column is read with `(y, x)`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Grip {
-    from: usize,
-    /// Where along the list the pointer went down.
-    press: f64,
-    /// How far into the tab it was held: the tab's leading edge is the pointer less this.
-    grab: f64,
-    moving: bool,
+    /// Where the pointer went down, `(along, across)` the list.
+    press: (f64, f64),
 }
 
 impl Grip {
-    /// The grip of a press at `at` (along the list's axis) on tab `from` of `laid`; `None` for a
-    /// tab that is not there and for the strip's lone tab, whose title is not a tab to carry. A
-    /// column's lone row is a row like the rest: it is held, and carried to another window.
-    pub fn new(laid: &impl Laid, from: usize, at: f64) -> Option<Self> {
+    /// The grip of a press at `at` on tab `from` of `laid`; `None` for a tab that is not there
+    /// and for the strip's lone tab, whose title is not a tab to carry. A column's lone row is a
+    /// row like the rest: it is held, and carried to another window.
+    pub fn new(laid: &impl Laid, from: usize, at: (f64, f64)) -> Option<Self> {
         let run = laid.run();
-        let place = run.places.get(from).filter(|_| run.slot > 0.0)?;
-        Some(Self {
-            from,
-            press: at,
-            grab: at - place.x,
-            moving: false,
-        })
+        run.places.get(from).filter(|_| run.slot > 0.0)?;
+        Some(Self { press: at })
     }
 
-    /// The tab pressed: its place in the list when the press began.
-    pub fn from(&self) -> usize {
-        self.from
-    }
-
-    /// Reads the pointer at `(at, across)` — along the list's axis and across it — in a bar (or
-    /// column) of `extent` `(along, across)`. The tab is held where it was grabbed, kept within
-    /// what the list shows (a scrolled-away place cannot be dropped on) and among the places that
-    /// exist; `laid` is the layout now, so a list the wheel has moved since the press is read
-    /// where it is.
-    pub fn track(
-        &mut self,
-        laid: &impl Laid,
-        (at, across): (f64, f64),
-        extent: (f64, f64),
-    ) -> Drag {
-        let run = laid.run();
-        if distance_outside(at, across, extent.0, extent.1) > TEAR_DISTANCE {
-            return Drag::TearOff;
+    /// Reads the pointer at `at`: a carry once it has travelled [`DRAG_SLOP`] from the press,
+    /// whichever way — a click that slides a point is still a click.
+    pub fn track(&self, at: (f64, f64)) -> Drag {
+        if (at.0 - self.press.0).hypot(at.1 - self.press.1) < DRAG_SLOP {
+            Drag::Press
+        } else {
+            Drag::Carry
         }
-        if !self.moving && (at - self.press).abs() < DRAG_SLOP {
-            return Drag::Press;
-        }
-        self.moving = true;
-        let width = run
-            .places
-            .get(self.from)
-            .map_or(run.narrowest, |place| place.width);
-        let least = run.span.x;
-        let most = (run.span.end() - width)
-            .min(run.places.last().map_or(least, |place| place.x))
-            .max(least);
-        let left = (at - self.grab).clamp(least, most);
-        // The place that starts nearest to where the tab's edge is drawn; halfway between two,
-        // the later one.
-        let to = run
-            .places
-            .iter()
-            .enumerate()
-            .fold((0, f64::INFINITY), |best, (index, place)| {
-                let away = (place.x - left).abs();
-                if away <= best.1 { (index, away) } else { best }
-            })
-            .0;
-        Drag::Reorder { left, to }
     }
 }
 
@@ -1114,15 +1060,6 @@ pub fn seat(index: usize, gap: Option<usize>) -> usize {
     index + usize::from(gap.is_some_and(|gap| index >= gap))
 }
 
-/// `items` with the one at `from` taken out and put back so that it stands at `to` (past the end
-/// is the end) — the order a dragged tab's neighbours lay out in while it is held.
-pub fn reordered<T>(items: &mut Vec<T>, from: usize, to: usize) {
-    if from < items.len() {
-        let item = items.remove(from);
-        items.insert(to.min(items.len()), item);
-    }
-}
-
 /// What letting a pane go between tabs did to the list ([`Tabs::pane_to_new_tab`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NewTab {
@@ -1142,35 +1079,13 @@ pub fn gap_to_index(from: usize, gap: usize) -> usize {
     if gap > from { gap - 1 } else { gap }
 }
 
-/// What a carried tab is let go over.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Over {
-    /// Its own window's strip, over the slot `place` ([`Strip::slot_at`] of the strip as it is).
-    Own { place: usize },
-    /// Another bateri window's strip, over the slot `gap` of that strip **with the room made**
-    /// for it ([`Strip::slot_at`]): where the tab is inserted.
-    Other { gap: usize },
-}
-
-/// What letting a carried tab go does ([`landing`]).
+/// Where a carried tab let go between two tabs of a window with no group goes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Landing {
     /// It stays in its window, at this place in the order.
     Reorder(usize),
     /// It joins another window, at this place.
     Join(usize),
-    /// It was let go over no strip: a window of its own, where the pointer was.
-    Detach,
-}
-
-/// The decision of a release: over a strip (`Some`) the tab lands there, over nothing — the
-/// desktop, a pane, another application — it becomes a window.
-pub fn landing(over: Option<Over>) -> Landing {
-    match over {
-        Some(Over::Own { place }) => Landing::Reorder(place),
-        Some(Over::Other { gap }) => Landing::Join(gap),
-        None => Landing::Detach,
-    }
 }
 
 /// The side column's width as a window first has it: a row at its widest ([`MAX_WIDTH`]) and
@@ -1726,7 +1641,6 @@ impl Laid for Column {
             scroll: self.scroll,
             max_scroll: self.max_scroll,
             slot: self.slot,
-            narrowest: TAB_HEIGHT,
             gap: GAP,
         }
     }
@@ -3639,148 +3553,21 @@ mod tests {
         assert_eq!(bar(1000.0, 3).layout().wheeled(40.0, 0.0), 0.0);
     }
 
-    /// A strip of `count` tabs in a 1000 pt window, chips at 84, 274, 464 …, and a grip on
-    /// `from` pressed `grab` points into it.
-    fn gripped(count: usize, from: usize, grab: f64) -> (Strip, Grip) {
-        let strip = bar(1000.0, count).layout();
-        let grip = Grip::new(&strip, from, strip.chips[from].x + grab).unwrap();
-        (strip, grip)
-    }
-
-    /// The pointer inside the bar, level with the chips: a 40 pt row.
-    fn level(x: f64) -> (f64, f64) {
-        (x, 20.0)
-    }
-
-    const ROW: (f64, f64) = (1000.0, 40.0);
-
     #[test]
-    fn a_press_becomes_a_drag_past_the_slop_and_stays_one() {
-        let (strip, mut grip) = gripped(3, 0, 16.0);
-        assert_eq!(grip.track(&strip, level(102.0), ROW), Drag::Press);
+    fn a_press_becomes_a_carry_past_the_slop_whichever_way() {
+        let strip = bar(1000.0, 3).layout();
+        let press = (strip.chips[0].x + 16.0, 20.0);
+        let grip = Grip::new(&strip, 0, press).unwrap();
+        let moved = |along: f64, across: f64| grip.track((press.0 + along, press.1 + across));
+        assert_eq!(moved(0.0, 0.0), Drag::Press);
+        assert_eq!(moved(3.0, 0.0), Drag::Press);
+        assert_eq!(moved(-3.0, 2.0), Drag::Press, "either way, under the slop");
+        assert_eq!(moved(DRAG_SLOP, 0.0), Drag::Carry, "along the strip");
+        assert_eq!(moved(0.0, -DRAG_SLOP), Drag::Carry, "out of it");
         assert_eq!(
-            grip.track(&strip, level(97.0), ROW),
-            Drag::Press,
-            "either way"
-        );
-        assert_eq!(
-            grip.track(&strip, level(105.0), ROW),
-            Drag::Reorder { left: 89.0, to: 0 }
-        );
-        assert_eq!(
-            grip.track(&strip, level(101.0), ROW),
-            Drag::Reorder { left: 85.0, to: 0 },
-            "back near the press it is still the drag it became"
-        );
-    }
-
-    #[test]
-    fn a_dragged_tab_takes_the_place_its_left_edge_is_nearest() {
-        let (strip, mut grip) = gripped(3, 0, 16.0);
-        // The chip's left edge is the pointer less where it was held; slots are 190 apart.
-        assert_eq!(
-            grip.track(&strip, level(290.0), ROW),
-            Drag::Reorder { left: 274.0, to: 1 }
-        );
-        assert_eq!(
-            grip.track(&strip, level(190.0), ROW),
-            Drag::Reorder { left: 174.0, to: 0 },
-            "less than half a slot is still the first place"
-        );
-        assert_eq!(
-            grip.track(&strip, level(192.0), ROW),
-            Drag::Reorder { left: 176.0, to: 0 },
-            "92 of the 190 points to the next place"
-        );
-        assert_eq!(
-            grip.track(&strip, level(195.0), ROW),
-            Drag::Reorder { left: 179.0, to: 1 },
-            "…and 95, half, is the next one"
-        );
-        // A tab dragged left from the last place.
-        let (strip, mut grip) = gripped(3, 2, 100.0);
-        assert_eq!(
-            grip.track(&strip, level(500.0), ROW),
-            Drag::Reorder { left: 400.0, to: 2 }
-        );
-        assert_eq!(
-            grip.track(&strip, level(300.0), ROW),
-            Drag::Reorder { left: 200.0, to: 1 }
-        );
-    }
-
-    #[test]
-    fn a_dragged_tab_stays_inside_the_strip_and_its_places() {
-        let (strip, mut grip) = gripped(3, 1, 50.0);
-        assert_eq!(
-            grip.track(&strip, level(5.0), ROW),
-            Drag::Reorder { left: 84.0, to: 0 },
-            "not left of the strip"
-        );
-        assert_eq!(
-            grip.track(&strip, level(990.0), ROW),
-            Drag::Reorder { left: 464.0, to: 2 },
-            "not right of the last place, though the strip goes on"
-        );
-        // A scrolled strip: the places are the ones in view, and the place is read from the
-        // scroll now, not the one at the press.
-        let scrolled = Bar {
-            scroll: 400.0,
-            ..bar(720.0, 12)
-        }
-        .layout();
-        let mut grip = Grip::new(&scrolled, 5, scrolled.chips[5].x + 10.0).unwrap();
-        let end = scrolled.span.end() - MIN_WIDTH;
-        assert_eq!(
-            grip.track(&scrolled, level(719.0), (720.0, 40.0)),
-            Drag::Reorder {
-                left: end,
-                to: ((end - scrolled.span.x + 400.0) / 126.0).round() as usize
-            },
-            "no further than the edge it can be seen at"
-        );
-        assert_eq!(
-            grip.track(&scrolled, level(0.0), (720.0, 40.0)),
-            Drag::Reorder {
-                left: scrolled.span.x,
-                to: 3
-            },
-            "the first place in view: 400 / 122 rounds to 3"
-        );
-    }
-
-    #[test]
-    fn a_tab_pulled_away_from_the_bar_leaves_it() {
-        let (strip, mut grip) = gripped(3, 1, 20.0);
-        // Within TEAR_DISTANCE of the row, below or above: still reordering.
-        assert!(matches!(
-            grip.track(&strip, (300.0, 40.0 + TEAR_DISTANCE), ROW),
-            Drag::Reorder { .. }
-        ));
-        assert!(matches!(
-            grip.track(&strip, (300.0, -TEAR_DISTANCE), ROW),
-            Drag::Reorder { .. }
-        ));
-        // Past it: the tab comes away, with no slop to cross first.
-        let (strip, mut fresh) = gripped(3, 1, 20.0);
-        let press = strip.chips[1].x + 20.0;
-        assert_eq!(
-            fresh.track(&strip, (press, 41.0 + TEAR_DISTANCE), ROW),
-            Drag::TearOff
-        );
-        assert_eq!(
-            grip.track(&strip, (300.0, -TEAR_DISTANCE - 1.0), ROW),
-            Drag::TearOff,
-            "up and out of the window too"
-        );
-        assert_eq!(
-            grip.track(&strip, (-TEAR_DISTANCE - 1.0, 20.0), ROW),
-            Drag::TearOff,
-            "and sideways"
-        );
-        assert_eq!(
-            grip.track(&strip, (1000.0 + TEAR_DISTANCE + 1.0, 20.0), ROW),
-            Drag::TearOff
+            moved(3.0, 3.0),
+            Drag::Carry,
+            "the travel, not one axis of it"
         );
     }
 
@@ -3788,12 +3575,17 @@ mod tests {
     fn a_lone_tab_or_an_absent_one_cannot_be_gripped() {
         let single = bar(1000.0, 1).layout();
         assert_eq!(
-            Grip::new(&single, 0, 500.0),
+            Grip::new(&single, 0, (500.0, 20.0)),
             None,
             "its title moves the window"
         );
         let three = bar(1000.0, 3).layout();
-        assert_eq!(Grip::new(&three, 3, 500.0), None);
+        assert_eq!(Grip::new(&three, 3, (500.0, 20.0)), None);
+        let column = side(564.0, 4).layout();
+        assert!(
+            Grip::new(&column, 4, (100.0, 100.0)).is_none(),
+            "no such row"
+        );
     }
 
     #[test]
@@ -4105,31 +3897,6 @@ mod tests {
         assert_eq!(seat(2, Some(2)), 3, "the tab at the gap moves on");
         assert_eq!(seat(4, Some(2)), 5);
         assert_eq!(seat(0, Some(0)), 1);
-    }
-
-    #[test]
-    fn a_held_tab_stands_at_its_place_among_the_others() {
-        let order = |from, to| {
-            let mut items = vec!['a', 'b', 'c', 'd'];
-            reordered(&mut items, from, to);
-            items.into_iter().collect::<String>()
-        };
-        assert_eq!(order(0, 2), "bcad");
-        assert_eq!(order(3, 0), "dabc");
-        assert_eq!(order(1, 1), "abcd");
-        assert_eq!(order(0, 99), "bcda", "past the end is the end");
-        assert_eq!(order(9, 0), "abcd", "an absent tab is no move");
-    }
-
-    #[test]
-    fn a_tab_let_go_lands_where_the_pointer_was() {
-        assert_eq!(landing(Some(Over::Own { place: 2 })), Landing::Reorder(2));
-        assert_eq!(landing(Some(Over::Other { gap: 1 })), Landing::Join(1));
-        assert_eq!(
-            landing(None),
-            Landing::Detach,
-            "over no strip: a window of its own"
-        );
     }
 
     /// Every combination of the five signals: the indicator is the first one that is on, in
@@ -5714,29 +5481,6 @@ mod tests {
     }
 
     #[test]
-    fn a_held_row_goes_to_the_nearest_place_among_the_headed_rows() {
-        let column = headed();
-        let mut grip = Grip::new(&column, 0, 50.0).unwrap();
-        assert_eq!(
-            grip.track(&column, (51.0, 100.0), (600.0, 200.0)),
-            Drag::Press
-        );
-        // Held 4 in: the edge is at 146, nearest the row that starts at 142.
-        assert_eq!(
-            grip.track(&column, (150.0, 100.0), (600.0, 200.0)),
-            Drag::Reorder { left: 146.0, to: 2 }
-        );
-        // Halfway between two places, the later one: 76 and 142 are 66 apart.
-        let halfway = grip.track(&column, (109.0 + 4.0, 100.0), (600.0, 200.0));
-        assert_eq!(halfway, Drag::Reorder { left: 109.0, to: 2 });
-        // Past the last place it stops at the last.
-        assert_eq!(
-            grip.track(&column, (400.0, 100.0), (600.0, 200.0)),
-            Drag::Reorder { left: 238.0, to: 4 }
-        );
-    }
-
-    #[test]
     fn a_group_shows_only_what_asks_for_the_user() {
         let on = |signals: Signals| group_indicator(signals);
         assert_eq!(on(Signals::default()), None);
@@ -5904,10 +5648,10 @@ mod tests {
         assert_eq!(side(564.0, 3).layout().wheeled(40.0), 0.0);
     }
 
-    /// The reading rules every list gives, by its own places: what is under a point, what a
-    /// carried pane is over, where a held tab lands. Run on the strip (along x) and the column
-    /// (along y) alike — they are one function.
-    fn reads_its_places(laid: &impl Laid, across: f64, extent: (f64, f64)) {
+    /// The reading rules every list gives, by its own places: what is under a point and what a
+    /// carried pane or tab is over. Run on the strip (along x) and the column (along y) alike —
+    /// they are one function.
+    fn reads_its_places(laid: &impl Laid) {
         let run = laid.run();
         let whole: Vec<usize> = (0..run.places.len())
             .filter(|&i| {
@@ -5924,19 +5668,6 @@ mod tests {
             assert_eq!(run.pane_over(at(0.5)), PaneOver::OnTab { index: i });
             assert_eq!(run.pane_over(at(0.1)), PaneOver::Between { gap: i });
             assert_eq!(run.pane_over(at(0.9)), PaneOver::Between { gap: i + 1 });
-            // Held 3 in, carried to the next place: it takes it.
-            if whole.contains(&(i + 1)) {
-                let next = i + 1;
-                let mut grip = Grip::new(laid, i, place.x + 3.0).unwrap();
-                let there = run.places[next].x + 3.0;
-                assert_eq!(
-                    grip.track(laid, (there, across), extent),
-                    Drag::Reorder {
-                        left: run.places[next].x,
-                        to: next
-                    }
-                );
-            }
         }
         // The first before the list, the end past it.
         assert_eq!(run.slot_at(run.span.x - 50.0), 0);
@@ -5951,40 +5682,24 @@ mod tests {
                 gap: run.places.len()
             }
         );
-        // Pulled off the side by more than the tear distance, it comes away.
-        let first = whole[0];
-        let mut grip = Grip::new(laid, first, run.places[first].x + 3.0).unwrap();
-        let there = run.places[first].x + 3.0;
-        assert!(matches!(
-            grip.track(laid, (there, across), extent),
-            Drag::Press
-        ));
-        assert_eq!(
-            grip.track(laid, (there, extent.1 + TEAR_DISTANCE + 1.0), extent),
-            Drag::TearOff
-        );
-        assert!(matches!(
-            grip.track(laid, (there + 40.0, extent.1 + TEAR_DISTANCE), extent),
-            Drag::Reorder { .. }
-        ));
     }
 
     #[test]
     fn the_column_reads_its_places_by_the_strips_rules_along_y() {
-        reads_its_places(&bar(1000.0, 5).layout(), 20.0, ROW);
+        reads_its_places(&bar(1000.0, 5).layout());
         let scrolled_strip = Bar {
             scroll: 300.0,
             ..bar(720.0, 12)
         }
         .layout();
-        reads_its_places(&scrolled_strip, 20.0, (720.0, 40.0));
-        reads_its_places(&side(600.0, 5).layout(), 100.0, (600.0, SIDE_WIDTH));
+        reads_its_places(&scrolled_strip);
+        reads_its_places(&side(600.0, 5).layout());
         let scrolled_column = Side {
             scroll: 300.0,
             ..side(400.0, 30)
         }
         .layout();
-        reads_its_places(&scrolled_column, 100.0, (400.0, SIDE_WIDTH));
+        reads_its_places(&scrolled_column);
     }
 
     #[test]
@@ -6033,94 +5748,13 @@ mod tests {
     }
 
     #[test]
-    fn a_held_row_follows_the_pointer_down_the_list() {
-        let column = side(564.0, 4).layout();
-        let extent = (600.0, SIDE_WIDTH);
-        // Row 1 is at 76; held 10 into it.
-        let mut grip = Grip::new(&column, 1, 86.0).unwrap();
-        assert_eq!(grip.track(&column, (88.0, 100.0), extent), Drag::Press);
-        assert_eq!(
-            grip.track(&column, (96.0, 100.0), extent),
-            Drag::Reorder { left: 86.0, to: 1 }
-        );
-        assert_eq!(
-            grip.track(&column, (120.0, 100.0), extent),
-            Drag::Reorder { left: 110.0, to: 2 },
-            "30 per place: 64 / 30 rounds to 2"
-        );
-        assert_eq!(
-            grip.track(&column, (500.0, 100.0), extent),
-            Drag::Reorder { left: 136.0, to: 3 },
-            "no further than the last place"
-        );
-        assert_eq!(
-            grip.track(&column, (0.0, 100.0), extent),
-            Drag::Reorder { left: 40.0, to: 0 },
-            "no higher than the list"
-        );
-        assert!(Grip::new(&column, 4, 100.0).is_none(), "no such row");
-
-        // A scrolled list is read where it is now: row 12 is at 106 with 300 scrolled.
-        let scrolled = Side {
-            scroll: 300.0,
-            ..side(364.0, 30)
-        }
-        .layout();
-        let mut grip = Grip::new(&scrolled, 12, 116.0).unwrap();
-        assert_eq!(
-            grip.track(&scrolled, (40.0, 100.0), (400.0, SIDE_WIDTH)),
-            Drag::Reorder { left: 40.0, to: 10 },
-            "(300 − 6) / 30 rounds to 10"
-        );
-        assert_eq!(
-            grip.track(&scrolled, (355.0, 100.0), (400.0, SIDE_WIDTH)),
-            Drag::Reorder {
-                left: 328.0,
-                to: 19
-            },
-            "no lower than a row can be seen"
-        );
-    }
-
-    #[test]
-    fn a_row_pulled_out_of_the_column_comes_away() {
-        let column = side(600.0, 4).layout();
-        let extent = (600.0, SIDE_WIDTH);
-        let mut grip = Grip::new(&column, 1, 90.0).unwrap();
-        assert!(matches!(
-            grip.track(&column, (95.0, SIDE_WIDTH + TEAR_DISTANCE), extent),
-            Drag::Reorder { .. }
-        ));
-        assert_eq!(
-            grip.track(&column, (95.0, SIDE_WIDTH + TEAR_DISTANCE + 1.0), extent),
-            Drag::TearOff,
-            "out of the column's side"
-        );
-        assert_eq!(
-            grip.track(&column, (600.0 + TEAR_DISTANCE + 1.0, 100.0), extent),
-            Drag::TearOff,
-            "out of its foot"
-        );
-    }
-
-    #[test]
     fn a_lone_row_is_held_and_carried_like_the_rest() {
         // The strip's lone title is the window's and cannot be held; a column's lone row is a row,
         // and the way to another window's list.
         let column = side(600.0, 1).layout();
-        let extent = (600.0, SIDE_WIDTH);
-        let mut grip = Grip::new(&column, 0, 60.0).expect("a lone row can be held");
-        assert_eq!(grip.track(&column, (62.0, 100.0), extent), Drag::Press);
-        assert_eq!(
-            grip.track(&column, (300.0, 100.0), extent),
-            Drag::Reorder { left: 46.0, to: 0 },
-            "the one place there is, as high as the list lets it"
-        );
-        assert_eq!(
-            grip.track(&column, (60.0, SIDE_WIDTH + TEAR_DISTANCE + 1.0), extent),
-            Drag::TearOff,
-            "and pulled out of the column it comes away"
-        );
+        let grip = Grip::new(&column, 0, (60.0, 100.0)).expect("a lone row can be held");
+        assert_eq!(grip.track((62.0, 100.0)), Drag::Press);
+        assert_eq!(grip.track((300.0, 100.0)), Drag::Carry);
     }
 
     #[test]

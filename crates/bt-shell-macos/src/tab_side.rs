@@ -33,24 +33,15 @@
 //! ([`ROW_LEFT`](super::ROW_LEFT)).
 //!
 //! **Dragging** is the strip's, turned upright: a press on a row is a [`Grip`](crate::tabs::Grip)
-//! read along y, the row follows the pointer and the others slide to make room, and the list
-//! changes once, when the row is let go. Pulled out of the column it comes away in a drag session
-//! (`tab_drag`), as from the bar, and the column takes a row from another window the way the bar
-//! takes a chip: rows part under the pointer and the landing is `tabs::landing`'s. A pane carried
-//! over the column (⌥⌘) lights the row it is over the middle of and, between two rows, draws a
-//! line ([`Insertion`]) instead of opening room: a pane's drop is a mark, a tab's is a seat.
-//!
-//! **In a window that has groups a row still slides, to a place of the column.** Where it is let
-//! go is a slot of [`crate::groups::Groups::side_spots`], not a place of the list: a group's
-//! border has two — the end of the group above, the head of the group below — and the pointer
-//! tells them apart by the middle of the header (over its upper half the gap opens above the
-//! header, over its lower half under it); the others make room there, each header over the row it
-//! would stand over ([`crate::groups::Groups::side_preview`]), and the drop is one move that puts
-//! the row in the group that was shown ([`crate::groups::Groups::side_spots`]'s target). Rows
-//! picked together and a group's header are carried, not slid: they start a drag session at once,
-//! and the column answers the pointer with a line at the place (`TabBar::aim`) — over its own
-//! column as over another window's, where a row dragged out of its own window is answered the
-//! same way.
+//! read along y, and past the slop the row is carried in a drag session (`tab_drag`) — nothing
+//! in the column moves while it is; the row waits, faint, in its place. The column answers what is
+//! carried over it, its own row or another window's, with what the pointer is over: the middle of
+//! a row lights it (a tab joins that tab, a pane joins it too), the place between two rows is
+//! marked by a line ([`Insertion`]) — in a window that has groups a place of
+//! [`crate::groups::Groups::side_spots`]: a group's border has two, the end of the group above
+//! and the head of the group below, told apart by the middle of the header. Rows picked together
+//! and a group's header are carried the same way and answered with the line alone
+//! (`TabBar::aim`).
 
 use std::cell::{Cell, RefCell};
 
@@ -455,7 +446,6 @@ impl TabBar {
                     picked: false,
                     glowing: false,
                     single: true,
-                    lifted: false,
                     ghost: false,
                     side: false,
                 },
@@ -542,7 +532,7 @@ impl TabBar {
         let bounds = self.bounds();
         let position = |tab: u64| shown.tabs.iter().position(|label| label.tab == tab);
         let hovered = iv.hovered.get().and_then(position);
-        // The held row, at the place it would take (`shown` is in that order already).
+        // The carried row: it waits, faint, in its place.
         let dragged = flight.drag.and_then(|drag| position(drag.tab));
         // The row's place in the layout: past the gap a carried tab opens, one on.
         let seat = |index: usize| tabs::seat(index, flight.gap);
@@ -612,16 +602,8 @@ impl TabBar {
                 label.title.clone()
             };
             let row = column.rows[seat(index)];
-            // A row held and moving is at the pointer, at once; the rest slide.
-            let carried = flight
-                .drag
-                .filter(|drag| !drag.torn && dragged == Some(index))
-                .and_then(|drag| drag.at);
             let frame = NSRect::new(
-                NSPoint::new(
-                    row.x - column.list.x,
-                    carried.map_or(row.y, |(top, _)| top) - column.list.y,
-                ),
+                NSPoint::new(row.x - column.list.x, row.y - column.list.y),
                 NSSize::new(row.width, row.height),
             );
             let look = seen.look(
@@ -631,14 +613,11 @@ impl TabBar {
                     index,
                     naming,
                     selected: index == shown.selected,
-                    hovered: (hovered == Some(index)
-                        || carried.is_some()
-                        || iv.target.get() == Some(label.tab))
+                    hovered: (hovered == Some(index) || iv.target.get() == Some(label.tab))
                         && !naming,
                     picked: picks.contains(&label.tab) && !naming,
                     glowing: glowing[index],
                     single: false,
-                    lifted: carried.is_some(),
                     ghost: flight
                         .drag
                         .is_some_and(|drag| drag.torn && dragged == Some(index)),
@@ -658,13 +637,7 @@ impl TabBar {
                 look.selected = false;
                 look.hovered = false;
             }
-            chip.set(
-                frame,
-                &look,
-                palette,
-                motion,
-                slide.filter(|_| carried.is_none()),
-            );
+            chip.set(frame, &look, palette, motion, slide);
             let hints = seen.hints.map_or_else(Vec::new, |mods| {
                 (0..label.agents.len())
                     .map(|agent| {
@@ -731,7 +704,7 @@ impl TabBar {
         iv.eye.setFrame(ns_rect(column.activity));
         iv.eye.set_look(palette, TAB_RADIUS);
         iv.eye.set_on(shown.activity);
-        iv.eye.setHidden(false);
+        iv.eye.setHidden(!shown.agents);
         iv.new_tab.setFrame(ns_rect(column.new_tab));
         iv.new_tab.set_look(palette, TAB_RADIUS);
         iv.list.setHidden(true);
@@ -1277,14 +1250,16 @@ impl AgentRows {
             palette,
             style,
         } = look;
-        let changed = *iv.lines.borrow() != lines
-            || *iv.hints.borrow() != hints
-            || *iv.heights.borrow() != heights
-            || iv.whole.replace(whole) != whole
-            || iv.details.replace(details) != details
-            || iv.selected.replace(selected) != selected
-            || iv.palette.replace(Some(palette)) != Some(palette)
-            || iv.style.replace(Some(style)) != Some(style);
+        // Every field is written whatever came before it: `|`, not `||` — a first set with new
+        // lines left the palette unset and drew nothing until the next layout.
+        let changed = (*iv.lines.borrow() != lines)
+            | (*iv.hints.borrow() != hints)
+            | (*iv.heights.borrow() != heights)
+            | (iv.whole.replace(whole) != whole)
+            | (iv.details.replace(details) != details)
+            | (iv.selected.replace(selected) != selected)
+            | (iv.palette.replace(Some(palette)) != Some(palette))
+            | (iv.style.replace(Some(style)) != Some(style));
         iv.lines.replace(lines.to_vec());
         iv.hints.replace(hints);
         iv.heights.replace(heights);

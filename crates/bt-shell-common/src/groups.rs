@@ -139,7 +139,7 @@ pub fn spot_at<K>(spots: &[Spot<K>], y: f64) -> Option<&Spot<K>> {
     spot_slot(spots, y).map(|slot| &spots[slot])
 }
 
-/// The index of [`spot_at`]'s spot — the slot [`Groups::side_preview`] takes.
+/// The index of [`spot_at`]'s spot.
 pub fn spot_slot<K>(spots: &[Spot<K>], y: f64) -> Option<usize> {
     spots
         .iter()
@@ -167,16 +167,6 @@ pub fn group_spot_at(spots: &[GroupSpot], y: f64) -> Option<&GroupSpot> {
         .rev()
         .find(|spot| spot.from <= y)
         .or(spots.first())
-}
-
-/// The side column's list with one row put at a place of it ([`Groups::side_preview`]).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SidePreview<K> {
-    /// The listed tabs in order, the one that is put among them.
-    pub rows: Vec<K>,
-    /// For each group's header in order, the index in [`Self::rows`] of the row under it — the
-    /// number of rows when there is none (a closed group that lists nothing).
-    pub firsts: Vec<(GroupId, usize)>,
 }
 
 /// The place a group at `from` among the groups takes when it is let go at slot `slot` (before the
@@ -482,37 +472,6 @@ impl<K: Copy + Eq> Groups<K> {
             .collect()
     }
 
-    /// The side column's list as it would stand if `tab` were let go at slot `slot` of
-    /// [`Self::side_spots`] (the same numbering: a place between two things of the list as it is,
-    /// above the first or below the last) — the rows in order and, for each group, the index of
-    /// the row under its header — which a row slid along the column is laid out as while it is
-    /// held, so the others make room where it would stand: over a header, at the end of the group
-    /// above, or under it, at the head of the group. `None` for a tab that is not listed or a slot
-    /// that is not there.
-    ///
-    /// What the drop does is [`Self::place`] of [`Self::slot_target`]; the two agree on where
-    /// the row stands (the tests make each slot say so), so what is shown is what is done.
-    pub fn side_preview(&self, tabs: &Tabs<K>, tab: K, slot: usize) -> Option<SidePreview<K>> {
-        let mut items = self.side_items(tabs);
-        let from = items.iter().position(|item| *item == Item::Tab(tab))?;
-        if slot > items.len() {
-            return None;
-        }
-        items.remove(from);
-        items.insert(if from < slot { slot - 1 } else { slot }, Item::Tab(tab));
-        let mut preview = SidePreview {
-            rows: Vec::new(),
-            firsts: Vec::new(),
-        };
-        for item in items {
-            match item {
-                Item::Tab(tab) => preview.rows.push(tab),
-                Item::Header(group) => preview.firsts.push((group, preview.rows.len())),
-            }
-        }
-        Some(preview)
-    }
-
     /// Where a tab (or a pane that becomes one) let go at gap `gap` of what a view lists — before
     /// the `gap`th listed tab, `len` for the end — is put, **for a window that has groups**: in the
     /// column the gap is the line above the headers that stand over that tab (the gap between two
@@ -551,8 +510,8 @@ impl<K: Copy + Eq> Groups<K> {
     }
 
     /// Where `tab`, let go on its own title row at `place` of what the bar lists, goes: the place
-    /// it ends at, as a chip dragged along the bar takes ([`Self::move_within`]) — the `place`th
-    /// of its cluster's tabs once it has gone, its end past the last. The bar lists the tab
+    /// it ends at — the `place`th of its cluster's tabs once it has gone, its end past the last —
+    /// and in its own cluster, whose end the strip's place would give to the next cluster. The bar lists the tab
     /// with the tab in it, which [`Self::gap_target`] counts for a tab coming from elsewhere;
     /// for a tab that is already there a place to the right is one more of the list than the
     /// gap before the tab it names.
@@ -813,34 +772,6 @@ impl<K: Copy + Eq> Groups<K> {
         let target = self.landing(&rest, index.min(rest.len()));
         self.place(tabs, &[tab], target);
         tabs.ids() != before || self.group_of(tab) != group
-    }
-
-    /// A tab takes place `to` among the tabs of **its own cluster** (past the end is the end) and
-    /// stays in it: a tab dragged along the bar, which lists one cluster and so cannot name the
-    /// place at the cluster's end in the strip — [`Self::move_to`] would put it before the next
-    /// cluster's first tab, which is that cluster's. `to` is the place the tab takes among the
-    /// cluster's tabs once it has moved. `true` if the order changed. In a window without groups
-    /// it is [`Tabs::move_to`].
-    pub fn move_within(&mut self, tabs: &mut Tabs<K>, tab: K, to: usize) -> bool {
-        if tabs.index_of(tab).is_none() {
-            return false;
-        }
-        let of = self.group_of(tab);
-        let before = tabs.ids().to_vec();
-        let before_tab = self
-            .cluster(tabs, of)
-            .into_iter()
-            .filter(|&other| other != tab)
-            .nth(to);
-        let target = match of {
-            Some(group) => Target::Group {
-                group,
-                before: before_tab,
-            },
-            None => Target::Loose { before: before_tab },
-        };
-        self.place(tabs, &[tab], target);
-        tabs.ids() != before
     }
 
     /// The tab `source`, whose last pane went into tab `target`, is gone and the screen follows
@@ -2232,73 +2163,6 @@ mod tests {
     }
 
     #[test]
-    fn a_tab_moved_along_its_own_cluster_stays_in_it() {
-        let (mut tabs, mut groups, api, web) = scene();
-        // 6 7 8 | 1 2 3 | 4 5: api's first tab to its end — `move_to` would give it to web.
-        assert!(groups.move_within(&mut tabs, 1, 2));
-        assert_eq!(tabs.ids(), [6, 7, 8, 2, 3, 1, 4, 5]);
-        assert_eq!(groups.group_of(1), Some(api));
-        assert_eq!(tabs.selected(), Some(1), "the selection stays on its tab");
-        ok(&groups, &tabs);
-
-        let mut flat = tabs.clone();
-        let mut other = groups.clone();
-        other.move_to(&mut flat, 3, 5);
-        assert_eq!(
-            flat.ids(),
-            [6, 7, 8, 2, 1, 3, 4, 5].as_slice(),
-            "the same strip as moving within api to its end, ..."
-        );
-        assert_eq!(
-            other.group_of(3),
-            Some(web),
-            "... but the strip's place at a cluster's end is the next cluster's"
-        );
-
-        // Back to the front, past the end, and to where it is.
-        assert!(groups.move_within(&mut tabs, 1, 0));
-        assert_eq!(tabs.ids(), [6, 7, 8, 1, 2, 3, 4, 5]);
-        assert!(groups.move_within(&mut tabs, 1, 99));
-        assert_eq!(
-            tabs.ids(),
-            [6, 7, 8, 2, 3, 1, 4, 5],
-            "past the end is the end"
-        );
-        assert!(!groups.move_within(&mut tabs, 1, 2), "already there");
-        // The ungrouped tabs have a cluster too.
-        assert!(groups.move_within(&mut tabs, 6, 2));
-        assert_eq!(tabs.ids(), [7, 8, 6, 2, 3, 1, 4, 5]);
-        assert_eq!(groups.group_of(6), None);
-        assert!(
-            !groups.move_within(&mut tabs, 42, 0),
-            "a tab that is not here"
-        );
-        ok(&groups, &tabs);
-    }
-
-    #[test]
-    fn without_groups_moving_within_is_moving() {
-        for tab in 1..=5 {
-            for to in 0..6 {
-                let mut flat = Tabs::new(1);
-                for id in 2..=5 {
-                    flat.append(id);
-                }
-                let mut grouped = flat.clone();
-                let mut groups = Groups::new();
-                let moved = groups.move_within(&mut grouped, tab, to);
-                let there = flat.ids().iter().position(|&id| id == tab).unwrap();
-                flat.move_to(tab, to);
-                assert_eq!(grouped.ids(), flat.ids(), "tab {tab} to {to}");
-                assert_eq!(
-                    moved,
-                    there != flat.ids().iter().position(|&id| id == tab).unwrap()
-                );
-            }
-        }
-    }
-
-    #[test]
     fn command_digits_count_the_tabs_as_they_are_shown() {
         let (mut tabs, mut groups, _, web) = scene();
         groups.set_collapsed(web, true);
@@ -2632,7 +2496,8 @@ mod tests {
                     19 => {
                         let tab = some(&mut rng);
                         let cluster = groups.group_of(tab);
-                        groups.move_within(&mut tabs, tab, rng.below(ids.len() + 1));
+                        let target = groups.own_target(&tabs, tab, rng.below(ids.len() + 1));
+                        groups.place(&mut tabs, &[tab], target);
                         assert_eq!(groups.group_of(tab), cluster, "it stays in its cluster");
                     }
                     _ => {
@@ -3035,89 +2900,42 @@ mod tests {
         assert_eq!(groups.cluster(&tabs, None), [7, 8, 6]);
         ok(&groups, &tabs);
     }
-    /// The rows and the row under each header of the list as it stands.
-    fn standing(groups: &Groups<u32>, tabs: &Tabs<u32>) -> SidePreview<u32> {
-        let mut now = SidePreview {
-            rows: Vec::new(),
-            firsts: Vec::new(),
-        };
+    /// The rows of the list as it stands, and the row under each header.
+    fn standing(groups: &Groups<u32>, tabs: &Tabs<u32>) -> (Vec<u32>, Vec<(GroupId, usize)>) {
+        let (mut rows, mut firsts) = (Vec::new(), Vec::new());
         for item in groups.side_items(tabs) {
             match item {
-                Item::Tab(tab) => now.rows.push(tab),
-                Item::Header(group) => now.firsts.push((group, now.rows.len())),
+                Item::Tab(tab) => rows.push(tab),
+                Item::Header(group) => firsts.push((group, rows.len())),
             }
         }
-        now
+        (rows, firsts)
     }
 
     #[test]
-    fn a_row_slid_to_a_groups_border_stands_in_the_group_the_pointer_says() {
+    fn a_row_let_go_at_a_groups_border_stands_in_the_group_the_pointer_says() {
         let (tabs, groups, api, web) = scene();
         // Listed: `6 7 8 | api 1 2 3 | web 4 5`: slots 0…10, 7 above web's header, 8 under it.
-        // 3 is api's last tab: slid down past its row it is api's end above the header, web's
-        // head under it.
-        let above = groups.side_preview(&tabs, 3, 7).unwrap();
-        assert_eq!(above.rows, [6, 7, 8, 1, 2, 3, 4, 5]);
-        assert_eq!(above.firsts, [(api, 3), (web, 6)]);
-        let under = groups.side_preview(&tabs, 3, 8).unwrap();
-        assert_eq!(under.rows, [6, 7, 8, 1, 2, 3, 4, 5]);
-        assert_eq!(
-            under.firsts,
-            [(api, 3), (web, 5)],
-            "3 is the first row of web"
-        );
-        // An ungrouped tab slid to the same border: the end of api, or the head of web.
-        let end = groups.side_preview(&tabs, 6, 7).unwrap();
-        assert_eq!(end.rows, [7, 8, 1, 2, 3, 6, 4, 5]);
-        assert_eq!(end.firsts, [(api, 2), (web, 6)]);
-        let head = groups.side_preview(&tabs, 6, 8).unwrap();
-        assert_eq!(head.rows, [7, 8, 1, 2, 3, 6, 4, 5]);
-        assert_eq!(head.firsts, [(api, 2), (web, 5)]);
-        // A tab that is not listed and a slot that is not there have no list.
-        assert_eq!(groups.side_preview(&tabs, 99, 3), None);
-        assert_eq!(groups.side_preview(&tabs, 3, 11), None);
-    }
-
-    /// Whatever slot a row is slid to, the list that is shown is the list the drop makes: for each
-    /// tab on screen (the one a press selects, which a closed group lists), each slot of the
-    /// column, with every group open or closed.
-    #[test]
-    fn the_preview_of_a_slot_is_the_list_its_drop_makes() {
-        for closed in [(false, false), (true, false), (false, true), (true, true)] {
-            for tab in 1..=8u32 {
-                let (mut tabs, mut groups, api, web) = scene();
-                groups.set_collapsed(api, closed.0);
-                groups.set_collapsed(web, closed.1);
-                groups.select(&mut tabs, tab);
-                let column = column(&groups, &tabs);
-                let spots = groups.side_spots(&tabs, &column);
-                assert_eq!(spots.len(), groups.side_items(&tabs).len() + 1);
-                for (slot, spot) in spots.iter().enumerate() {
-                    let shown = groups.side_preview(&tabs, tab, slot).unwrap();
-                    let (mut after, mut moved) = (tabs.clone(), groups.clone());
-                    moved.place(&mut after, &[tab], spot.target.clone());
-                    // Where it ends the selection is on it, so a closed group lists it.
-                    let done = standing(&moved, &after);
-                    assert_eq!(
-                        shown.rows, done.rows,
-                        "tab {tab}, slot {slot}, closed {closed:?}: {:?}",
-                        spot.target
-                    );
-                    // A group the tab leaves empty goes with its header: the shown list keeps
-                    // it, empty, for the moment the drop takes.
-                    let kept: Vec<_> = shown
-                        .firsts
-                        .iter()
-                        .copied()
-                        .filter(|(group, _)| moved.group(*group).is_some())
-                        .collect();
-                    assert_eq!(
-                        kept, done.firsts,
-                        "tab {tab}, slot {slot}, closed {closed:?}: {:?}",
-                        spot.target
-                    );
-                }
-            }
-        }
+        let spots = groups.side_spots(&tabs, &column(&groups, &tabs));
+        let drop = |tab: u32, slot: usize| {
+            let (mut after, mut moved) = (tabs.clone(), groups.clone());
+            moved.place(&mut after, &[tab], spots[slot].target.clone());
+            standing(&moved, &after)
+        };
+        // 3 is api's last tab: let go above web's header it stays api's end, under it it is
+        // web's head.
+        let (rows, firsts) = drop(3, 7);
+        assert_eq!(rows, [6, 7, 8, 1, 2, 3, 4, 5]);
+        assert_eq!(firsts, [(api, 3), (web, 6)]);
+        let (rows, firsts) = drop(3, 8);
+        assert_eq!(rows, [6, 7, 8, 1, 2, 3, 4, 5]);
+        assert_eq!(firsts, [(api, 3), (web, 5)], "3 is the first row of web");
+        // An ungrouped tab let go at the same border: the end of api, or the head of web.
+        let (rows, firsts) = drop(6, 7);
+        assert_eq!(rows, [7, 8, 1, 2, 3, 6, 4, 5]);
+        assert_eq!(firsts, [(api, 2), (web, 6)]);
+        let (rows, firsts) = drop(6, 8);
+        assert_eq!(rows, [7, 8, 1, 2, 3, 6, 4, 5]);
+        assert_eq!(firsts, [(api, 2), (web, 5)]);
     }
 }
