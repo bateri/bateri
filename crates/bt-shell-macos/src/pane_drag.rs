@@ -41,7 +41,7 @@
 //! middle of a chip lights it and, waited on ([`SPRING_DELAY`]), opens its tab — in another
 //! window it brings that window up — the regions
 //! then answer in that tab, and a carry that ends without landing there puts the selection
-//! back — while between chips room opens. Letting go on a chip joins its tab beside the focused
+//! back — while between chips a line marks the place. Letting go on a chip joins its tab beside the focused
 //! pane (the selection stays), in the panes of a tab opened that way with the landing the
 //! regions showed, and between chips it becomes a tab there — in any window, one move each
 //! ([`AppDelegate::make_move`]). Let go over no window of ours, a pane becomes a
@@ -971,7 +971,7 @@ impl Session {
     ///
     /// **In a strip** the pane is not over any pane: the chip it is over the middle of is
     /// lit and, waited on, opens its tab (the line under it fills; [`SPRING_DELAY`]) and — in
-    /// another window — brings the window up; between chips room opens, where it would
+    /// another window — brings the window up; between chips a line marks where it would
     /// become a tab. **Elsewhere** the tab on screen of the window under the pointer
     /// answers with its regions: the carried pane's own tab on its veil, any other (a chip
     /// waited on opened it, or it is another window's) with regions drawn in that tab. Over no
@@ -1278,8 +1278,8 @@ impl Session {
         }
         carry.put_back(app, self.window, stays, crossed);
         if !done {
-            // Room a strip held open for a tab that did not come (the window the pane is
-            // from, and the one it was let go in).
+            // A line or a lit chip a strip showed for a tab that did not come (the window the
+            // pane is from, and the one it was let go in).
             window.bar().lay_out();
             if let Some((target, ..)) = &here {
                 target.bar().lay_out();

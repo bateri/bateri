@@ -4576,7 +4576,7 @@ impl TerminalWindow {
         let single = self.lone_tab();
         let side = self.bar().is_side();
         let agents = side && self.has_agents();
-        let activity = agents && self.activity() && self.ivars().root.column_shown();
+        let activity = self.lists_activity(agents);
         let details = side
             && app::delegate(self.mtm())
                 .is_some_and(|app| app.settings().tab_details.shown(activity));
@@ -5050,7 +5050,12 @@ impl TerminalWindow {
     /// nothing and the title row's bar is every tab's — and with an agent to list: without one
     /// the column lists every tab, and the choice waits for the next agent.
     fn listing_activity(&self) -> bool {
-        self.activity() && self.ivars().root.column_shown() && self.has_agents()
+        self.lists_activity(self.has_agents())
+    }
+
+    /// [`Self::listing_activity`] with whether a tab runs an agent already read.
+    fn lists_activity(&self, agents: bool) -> bool {
+        agents && self.activity() && self.ivars().root.column_shown()
     }
 
     /// Some tab of the window runs an agent ([`TerminalTab::agents`]): Activity has something to

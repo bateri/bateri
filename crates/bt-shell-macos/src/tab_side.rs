@@ -260,10 +260,11 @@ pub(super) struct Flight {
 const RING: f64 = 8.0;
 const RING_LINE: f64 = 2.0;
 
-/// The line that marks "a new tab here" between two rows while a pane is carried over them: a ring
+/// The line that marks "here" between two rows while a pane or a tab is carried over them: a ring
 /// at the left and a line along the row's width, in the accent, standing in the gap
-/// ([`Column::between`]). It lives in the list's view, so the list's edges cut it as they cut the
-/// rows.
+/// ([`Column::between`]) — or, between two chips of the strip, a line up the chip's height
+/// ([`tabs::Strip::between`]). It lives in the list's view, so the list's edges cut it as they cut
+/// the rows.
 #[derive(Default)]
 pub(super) struct Insertion {
     parts: RefCell<Option<(Retained<NSBox>, Retained<NSBox>)>>,
@@ -305,12 +306,48 @@ impl Insertion {
             NSPoint::new(ring_x, y - RING / 2.0),
             NSSize::new(RING, RING),
         ));
+        ring.setHidden(false);
         line.setFrame(NSRect::new(
             NSPoint::new(line_x, y - tabs::GAP / 2.0),
             NSSize::new((tabs::EDGE + row_width - line_x).max(0.0), tabs::GAP),
         ));
     }
+
+    /// Stands the line upright with its middle at `x` (the strip's space), from `top` down
+    /// `height`, with no ring; or takes it away (`None`).
+    pub(super) fn set_upright(
+        &self,
+        list: &NSView,
+        at: Option<f64>,
+        top: f64,
+        height: f64,
+        palette: Palette,
+    ) {
+        let Some(x) = at else {
+            self.clear();
+            return;
+        };
+        let mut parts = self.parts.borrow_mut();
+        let (line, ring) = parts.get_or_insert_with(|| {
+            let mtm = list.mtm();
+            let line = plain_box(mtm, Tint::of(palette.accent, 1.0), UPRIGHT / 2.0);
+            let ring = plain_box(mtm, Tint::of(palette.accent, 0.0), RING / 2.0);
+            list.addSubview(&line);
+            list.addSubview(&ring);
+            (line, ring)
+        });
+        line.setFillColor(&Tint::of(palette.accent, 1.0).color());
+        line.setCornerRadius(UPRIGHT / 2.0);
+        ring.setHidden(true);
+        line.setFrame(NSRect::new(
+            NSPoint::new(x - UPRIGHT / 2.0, top),
+            NSSize::new(UPRIGHT, height),
+        ));
+    }
 }
+
+/// The upright line's width between two chips.
+const UPRIGHT: f64 = 2.0;
 
 impl TabBar {
     /// Puts the bar in the side column (`Some(top)`: the title row's height, where the list

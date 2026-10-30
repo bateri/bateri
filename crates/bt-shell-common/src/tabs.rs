@@ -1052,6 +1052,22 @@ impl Strip {
     pub fn pane_over(&self, x: f64) -> PaneOver {
         self.run().pane_over(x)
     }
+
+    /// Where the line that marks the place between tabs stands, along x: in the middle of the gap
+    /// before tab `gap`, past the last tab for the end — kept inside the strip. It marks where a
+    /// carried pane or tab would go ([`PaneOver::Between`]) without moving a chip, as
+    /// [`Column::between`] does down the column.
+    pub fn between(&self, gap: usize) -> f64 {
+        let x = match (self.chips.get(gap), self.chips.last()) {
+            (Some(chip), _) => chip.x - CHIP_GAP / 2.0,
+            (None, Some(last)) => last.end() + CHIP_GAP / 2.0,
+            (None, None) => self.span.x,
+        };
+        x.clamp(
+            self.span.x + 1.0,
+            (self.span.end() - 1.0).max(self.span.x + 1.0),
+        )
+    }
 }
 
 /// The layout's place for the tab at `index` when room is made at `gap` (a tab on its way in):
@@ -3656,6 +3672,26 @@ mod tests {
         );
         assert_eq!(strip.pane_over(9999.0), PaneOver::Between { gap: 3 });
         assert_eq!(strip.pane_over(10.0), PaneOver::Between { gap: 0 });
+    }
+
+    #[test]
+    fn the_line_between_tabs_stands_in_the_gap_it_names() {
+        let strip = bar(1000.0, 3).layout();
+        for gap in 1..3 {
+            let line = strip.between(gap);
+            assert!(
+                strip.chips[gap - 1].end() <= line && line <= strip.chips[gap].x,
+                "gap {gap}: {line}"
+            );
+            assert_eq!(
+                strip.pane_over(line),
+                PaneOver::Between { gap },
+                "the line is where letting go puts the tab"
+            );
+        }
+        assert!(strip.between(3) >= strip.chips[2].end(), "past the last");
+        assert!(strip.between(0) > strip.span.x, "inside the strip");
+        assert!(strip.between(3) < strip.span.end());
     }
 
     #[test]

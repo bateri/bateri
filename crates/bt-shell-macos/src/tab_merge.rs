@@ -100,11 +100,9 @@ impl AppDelegate {
         }));
     }
 
-    /// A carried tab waited on tab `chip`'s chip in window `window` ([`TabBar::wait_on`]): that
-    /// tab opens — and its window comes up if it is not the one in front — so the block's regions
+    /// A carried tab waited on tab `chip`'s chip in window `window` (the bar's wait): that tab
+    /// opens — and its window comes up if it is not the one in front — so the block's regions
     /// answer in its panes. What was on screen comes back if the carry comes to nothing.
-    ///
-    /// [`TabBar::wait_on`]: crate::tab_bar::TabBar
     pub(crate) fn tab_spring(&self, window: u64, chip: u64) {
         let Some(window) = self.window(window) else {
             return;

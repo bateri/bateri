@@ -5698,7 +5698,10 @@ pub(crate) enum PaneTarget {
 struct Aim {
     /// This tab's chip is lit: the one carried tab joins it, beside its focused pane.
     lit: Option<u64>,
-    /// Room opens at this slot of the list (a tab's place on a strip).
+    /// A line marks the place before this tab of the list (its length for the end): the one
+    /// carried tab goes there, and no chip moves ([`tab_side::Insertion`]).
+    mark: Option<usize>,
+    /// Room opens at this slot of the list (several tabs on a title row).
     room: Option<usize>,
     /// A line marks the place at this height of the column's content ([`content_line`]).
     line: Option<f64>,
@@ -6701,6 +6704,14 @@ impl TabBar {
             }
         }
         let inside = |x: f64| x - strip.span.x;
+        // The place a carried pane or tab would go, marked between the chips.
+        iv.insertion.set_upright(
+            &iv.strip,
+            iv.mark.get().map(|gap| inside(strip.between(gap))),
+            top + 4.0,
+            CHIP_HEIGHT - 8.0,
+            palette,
+        );
         iv.strip.set_separators(
             strip.separators.iter().map(|&x| inside(x)).collect(),
             palette,
@@ -7642,7 +7653,7 @@ impl TabBar {
         self.wait_on(None);
         let room = iv.gap.replace(None).is_some();
         let line = iv.cast.replace(None).is_some();
-        let lit = iv.target.replace(None).is_some();
+        let lit = iv.target.replace(None).is_some() | iv.mark.replace(None).is_some();
         if room {
             iv.glide.set(true);
         }
@@ -7651,9 +7662,13 @@ impl TabBar {
         }
     }
 
-    /// The chip of tab `tab` is lit (`None`: none is): a carried tab let go now joins it.
-    fn show_lit(&self, tab: Option<u64>) {
-        if self.ivars().target.replace(tab) != tab {
+    /// The chip of tab `tab` is lit (`None`: none is): a carried tab let go now joins it; or the
+    /// line stands at gap `mark`: it goes there.
+    fn show_lit(&self, tab: Option<u64>, mark: Option<usize>) {
+        let iv = self.ivars();
+        let lit = iv.target.replace(tab) != tab;
+        let marked = iv.mark.replace(mark) != mark;
+        if lit || marked {
             self.lay_out();
         }
     }
@@ -7736,10 +7751,9 @@ impl TabBar {
         contains(self.bounds(), self.convertPoint_fromView(at, None))
     }
 
-    /// The strip's answer to a carried pane: the chip it is over the middle of is lit,
-    /// or room opens between the chips where it would become a tab; `None` when it
-    /// is over neither (or has left). The column marks the place with a line and moves no row
-    /// ([`tab_side::Insertion`]).
+    /// The bar's answer to a carried pane: the chip it is over the middle of is lit, or a line
+    /// marks the place between chips where it would become a tab ([`tab_side::Insertion`]);
+    /// `None` when it is over neither (or has left). No chip moves while it is carried.
     pub(crate) fn show_pane_target(&self, target: Option<PaneTarget>) {
         let iv = self.ivars();
         let tab = match target {
@@ -7750,19 +7764,14 @@ impl TabBar {
             Some(PaneTarget::Between(gap)) => Some(gap),
             _ => None,
         };
-        let mut changed = iv.target.replace(tab) != tab;
-        if iv.side.get().is_some() {
-            changed |= iv.mark.replace(between) != between;
-        }
-        if changed {
+        let lit = iv.target.replace(tab) != tab;
+        let marked = iv.mark.replace(between) != between;
+        if lit || marked {
             self.lay_out();
-        }
-        if iv.side.get().is_none() {
-            self.open_gap(between);
         }
     }
 
-    /// The pane is about to become a tab here: the lit chip and the room between chips are
+    /// The pane is about to become a tab here: the lit chip and the line between chips are
     /// forgotten **without** a layout of their own — the window's list is about to take the
     /// tab in, and that layout is the one that matters ([`Self::close_gap_quietly`]). If the
     /// pane does not become a tab after all, [`Self::lay_out`] puts the chips right.
@@ -7815,13 +7824,13 @@ impl TabBar {
     /// halves of a drop read — the pointer over the bar ([`Self::carried_over`]) and the drop
     /// ([`Self::accept_drop`]) — so what is shown is what is done.
     ///
-    /// **One tab on a window with no group** is the strip's own: room opens at the slot under the
-    /// pointer of the strip it would make (a tab from another window), the window's own tab shows
-    /// no gap (its faint chip is its place), and the place is the strip's ([`tabs::landing`]).
-    /// Everything else — several tabs, a group, any tab on a window that has groups — is a place
-    /// the column names ([`crate::groups::Groups::side_spots`], marked by a line, or among the
-    /// groups, [`crate::groups::Groups::group_spots`]) or, in the title row, a place of the
-    /// cluster on screen.
+    /// **One tab** is read as a carried pane is ([`Self::target_at`]): the middle of another tab's
+    /// chip lights it and the tab joins it, a chip's ends mark the gap beside it with a line
+    /// ([`Self::lone_between`]) — but in the column of a window with groups the gap is a place the
+    /// column names. Everything else — several tabs, a group — is a place the column names
+    /// ([`crate::groups::Groups::side_spots`], marked by a line, or among the groups,
+    /// [`crate::groups::Groups::group_spots`]) or, in the title row, a place of the cluster on
+    /// screen.
     fn aim(&self, carried: &Carried, window: &TerminalWindow, point: NSPoint) -> Aim {
         let own = carried.window() == window.id();
         // One tab is a block of panes, read as a carried pane is: the middle of another tab's
@@ -7915,10 +7924,10 @@ impl TabBar {
     }
 
     /// One tab carried over the ends of a chip or a row ([`PaneTarget::Between`]), where no group
-    /// border needs telling apart (the column of a window with groups reads its spots): room
-    /// opens at that gap in the strip, a line marks it in the column, and letting go puts the tab
-    /// there — in its own list the place it ends at, the gap less its own place before it. The
-    /// two gaps beside its own chip leave it where it is.
+    /// border needs telling apart (the column of a window with groups reads its spots): a line
+    /// marks that gap, as for a carried pane, and letting go puts the tab there — in its own list
+    /// the place it ends at, the gap less its own place before it. The two gaps beside its own
+    /// chip leave it where it is.
     fn lone_between(&self, tab: u64, window: &TerminalWindow, over: Option<PaneTarget>) -> Aim {
         let Some(PaneTarget::Between(gap)) = over else {
             return Aim::default();
@@ -7933,14 +7942,6 @@ impl TabBar {
         if from.is_some_and(|from| gap == from || gap == from + 1) {
             return Aim::default();
         }
-        let (room, line) = if self.is_side() {
-            let line = self
-                .column_with_room(0)
-                .map(|column| content_line(column.between(gap) + tabs::GAP / 2.0, &column));
-            (None, line)
-        } else {
-            (Some(gap), None)
-        };
         let landed = match from {
             Some(from) => {
                 let place = gap - usize::from(gap > from);
@@ -7954,18 +7955,17 @@ impl TabBar {
             None => Landed::Strip(tabs::Landing::Join(window.strip_place(gap))),
         };
         Aim {
-            room,
-            line,
+            mark: Some(gap),
             landed: Some(landed),
             ..Aim::default()
         }
     }
 
     /// `draggingEntered:` and `draggingUpdated:`: what is carried over this bar ([`Self::aim`]):
-    /// a tab from another window opens room at the slot under the pointer **of the strip it
-    /// would make**, so the room is under the pointer and the answer does not depend on the room;
-    /// a window's own tab shows no gap (its faint chip is its place); in the column of a window
-    /// with groups, and for several tabs or a group, a line marks the place. Anything that is not
+    /// a lit chip, a line at a place, or — several tabs on a title row — room at the slot under
+    /// the pointer **of the strip they would make**, so the room is under the pointer and the
+    /// answer does not depend on it; a lit chip whose tab is not on screen is waited on. Anything
+    /// that is not
     /// tabs or a group of this process, or that this window cannot take now (it holds a question
     /// of its own), is not taken: the drop is then on nothing, and what is carried becomes a
     /// window.
@@ -7984,7 +7984,7 @@ impl TabBar {
         let aim = self.aim(&carried, &window, point);
         self.show_cast(aim.line);
         self.open_gap(aim.room);
-        self.show_lit(aim.lit);
+        self.show_lit(aim.lit, aim.mark);
         // A lit chip whose tab is not on screen is waited on: it opens, for the panes.
         self.wait_on(aim.lit.filter(|chip| !window.is_selected(*chip)));
         NSDragOperation::Move
