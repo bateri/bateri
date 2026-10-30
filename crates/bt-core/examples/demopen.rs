@@ -18,9 +18,10 @@
 //! ```
 //!
 //! With `--files` the view's calls `attach` (a text, which the view then draws by its name),
-//! `detach`, `read` (a piece of a file the person gave, by its handle) and `write` (a piece of the
-//! place the person chose to save in) are the program's own, and each says what the terminal
-//! answered it.
+//! `detach`, `read` (a piece of a file the person gave, by its handle), `receive` (all of one into
+//! the file `to`, with two reads out at a time, as an app that takes a drop does) and `write` (a
+//! piece of the place the person chose to save in) are the program's own, and each says what the
+//! terminal answered it.
 //!
 //! The view's `stop` call is not known (the library answers it with an error) and its `upload`
 //! calls carry a large payload in pieces: the program counts what it gets and says how much
@@ -178,7 +179,16 @@ fn beside_calls(options: Options, control: &ViewControl) -> Options {
     let detaching = control.clone();
     let reading = control.clone();
     let writing = control.clone();
+    let receiving = control.clone();
     options
+        .call("receive", move |params, _call| {
+            let handle = params.get("handle").and_then(Value::as_str).unwrap_or("");
+            let to = params.get("to").and_then(Value::as_str).unwrap_or("");
+            let size = receiving
+                .receive(handle, std::path::Path::new(to), |_| true)
+                .map_err(refused)?;
+            Ok(json!({ "size": size }))
+        })
         .call("attach", move |params, _call| {
             let text = params.get("text").and_then(Value::as_str).unwrap_or("");
             let name = attaching

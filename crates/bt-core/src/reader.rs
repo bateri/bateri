@@ -153,6 +153,25 @@ impl EventLoopSender {
     }
 }
 
+/// What a frame of the protocol begins with.
+const FRAME_START: &[u8] = b"\x1b_pencere;";
+
+/// Whether `frame` is a chunk of a message that has more chunks to follow (`more=1` in its
+/// control, specification §4.4).
+fn continues(frame: &[u8]) -> bool {
+    let Some(rest) = frame.strip_prefix(FRAME_START) else {
+        return false;
+    };
+    // `kind;control;payload`: the payload is not looked into.
+    let mut parts = rest.splitn(3, |byte| *byte == b';');
+    let Some(control) = parts.nth(1) else {
+        return false;
+    };
+    control
+        .split(|byte| *byte == b',')
+        .any(|field| field == b"more=1")
+}
+
 /// The characters that make the tty signal the program's group and flush its input (`ISIG`):
 /// ⌃C (interrupt), ⌃\ (quit) and ⌃Z (suspend). The terminal's own settings could name others;
 /// these are the ones the pane writes and the ones a person types.
@@ -222,6 +241,10 @@ pub(crate) struct State {
     module_bytes: usize,
     /// Bytes of the module's the writer gave up since the flow was last told.
     dropped: usize,
+    /// The frame written last was a chunk of a message of the module's with more to follow
+    /// ([`continues`]): the next buffer is its next chunk, ahead of any frame of the protocol that
+    /// waits in `write_list`. Set when a chunk is finished, taken by the next [`Self::goto_next`].
+    mid_message: bool,
     writing: Option<Writing>,
     parser: ansi::Processor,
     /// Whether the last `Handler` call was `input` — [`ClusterHandler`]'s
@@ -247,9 +270,22 @@ impl State {
     /// first and the last byte of a buffer — the one being written is finished (or given up)
     /// before this is asked.
     fn goto_next(&mut self, flow: Option<&Flow>) {
-        self.writing = self.write_list.pop_front().map(Writing::new);
-        if self.writing.is_some() {
-            return;
+        // The chunks of a message go out contiguously, with no other frame of the protocol
+        // between them (specification §4.4): a frame the host wrote on its own account — the
+        // refusal of a read, say — that waits as the chunks of a `data` are written is written
+        // after the last of them, or the program drops the message. A key is not a frame and goes
+        // in between, as it always did.
+        let mid_message = std::mem::take(&mut self.mid_message);
+        let keys_first = !mid_message
+            || !self
+                .write_list
+                .front()
+                .is_some_and(|keys| keys.starts_with(FRAME_START));
+        if keys_first {
+            self.writing = self.write_list.pop_front().map(Writing::new);
+            if self.writing.is_some() {
+                return;
+            }
         }
         while let Some((epoch, frame)) = self.module_list.pop_front() {
             self.module_bytes -= frame.len();
@@ -259,6 +295,17 @@ impl State {
             }
             self.dropped += frame.len();
         }
+        if !keys_first {
+            // The chunks that were to follow are given up: the frames that wait go now.
+            self.writing = self.write_list.pop_front().map(Writing::new);
+        }
+    }
+
+    /// The buffer being written is finished: the next is chosen, with a message of the module's
+    /// that it left unfinished in mind.
+    fn finish(&mut self, done: &Writing, flow: Option<&Flow>) {
+        self.mid_message = matches!(done.lane, Lane::Module(_)) && continues(&done.source);
+        self.goto_next(flow);
     }
 
     /// Queues the module's words as frames, whole: each ends with the `ESC \` that closes it,
@@ -772,7 +819,7 @@ where
                             }
                         }
                         if current.finished() {
-                            state.goto_next(self.flow.as_ref());
+                            state.finish(&current, self.flow.as_ref());
                             break 'write_one;
                         }
                     }
@@ -1509,6 +1556,50 @@ mod tests {
             taken, expected,
             "the key between the second frame and the third"
         );
+        assert_eq!(flow.pending(), 0);
+    }
+
+    /// The chunks of a message of the module's go out with no other frame of the protocol between
+    /// them (specification §4.4): a frame the host wrote on its own account that comes while they
+    /// are written waits for the last of them, and the program does not drop the message. A key
+    /// is no frame and still goes between two chunks.
+    #[test]
+    fn a_frame_of_the_protocol_waits_for_the_last_chunk_of_a_message_of_the_modules() {
+        let (mut event_loop, sender, flow, room, epoch) = laned_loop();
+        let mut state = State::default();
+        let chunk = |control: &str| {
+            let mut frame = format!("\x1b_pencere;data;{control};").into_bytes();
+            frame.resize(100 - 2, b'A');
+            frame.extend_from_slice(b"\x1b\\");
+            frame
+        };
+        let (first, second, last) = (
+            chunk("id=1,re=1,more=1"),
+            chunk("id=1,seq=1,more=1"),
+            chunk("id=1,seq=2"),
+        );
+        let message: Vec<u8> = [first.clone(), second.clone(), last.clone()].concat();
+        sender
+            .send(Msg::Module {
+                epoch,
+                bytes: message,
+            })
+            .unwrap();
+        room.give(150);
+        round(&mut event_loop, &mut state);
+        assert_eq!(room.taken().len(), 150);
+        // The refusal of another read comes with the second chunk half written.
+        let refusal = b"\x1b_pencere;data;id=2,re=3,e=range;\x1b\\".to_vec();
+        sender
+            .send(Msg::Input(Cow::Owned(refusal.clone())))
+            .unwrap();
+        room.give(usize::MAX);
+        round(&mut event_loop, &mut state);
+        let mut expected = first.clone();
+        expected.extend_from_slice(&second);
+        expected.extend_from_slice(&last);
+        expected.extend_from_slice(&refusal);
+        assert_eq!(room.taken(), expected, "the refusal behind the last chunk");
         assert_eq!(flow.pending(), 0);
     }
 

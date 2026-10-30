@@ -1439,7 +1439,11 @@ return {
 
     /// A session whose pane runs `demopen` with `flag`, in a view of its own.
     fn demopen_session(flag: &str) -> Arc<bt_core::Session> {
-        use crate::child::SilentWake;
+        demopen_session_woken(flag, Arc::new(crate::child::SilentWake))
+    }
+
+    /// [`demopen_session`] with the wake the pane gives the session.
+    fn demopen_session_woken(flag: &str, wake: Arc<dyn bt_core::Wake>) -> Arc<bt_core::Session> {
         use bt_core::pencere::ViewOptions;
         use bt_core::{CaretShape, CursorBlink, Osc52, Session, SessionOptions, TerminalOptions};
         use std::collections::HashMap;
@@ -1491,7 +1495,7 @@ return {
                     replay: None,
                     views: Some(views),
                 },
-                Arc::new(SilentWake),
+                wake,
             )
             .expect("a session"),
         )
@@ -1771,6 +1775,130 @@ return {
         assert!(!unfinished.exists());
         // And what the view had attached or been given is nothing once it is over.
         assert_eq!(assets.read(&format!("file:{handle}")), None);
+        session.shutdown();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The files a person gives a view, each received by the program into a place of its own
+    /// (`demopen --files`, `receive`: two reads out at a time, as an app that takes a drop does),
+    /// with the session woken as a pane is: the pane takes what the session has for it when it is
+    /// told so, and not otherwise. A file of more than one piece (1 MiB) was never received: the
+    /// refusal of the read past its end, which the program asks while the second piece is on its
+    /// way, was written between that piece's chunks, and a program drops a message that has a
+    /// frame of the protocol between its chunks.
+    #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+    fn a_file_of_more_than_a_piece_is_received_through_a_real_pane() {
+        use crate::child::{SilentWake, wait_until};
+        use crate::native_view::{GivenFile, ViewFiles};
+        use bt_core::pencere::{Action, FileGrant};
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        /// What a pane does with `view_changed`: a flag, and the take on its own turn.
+        #[derive(Default)]
+        struct PaneWake {
+            pending: Arc<AtomicBool>,
+            quiet: SilentWake,
+        }
+        impl bt_core::Wake for PaneWake {
+            fn wake(&self) {}
+            fn child_exit(&self, code: Option<i32>) {
+                self.quiet.child_exit(code);
+            }
+            fn copy_to_clipboard(&self, text: String) {
+                self.quiet.copy_to_clipboard(text);
+            }
+            fn title_changed(&self) {}
+            fn search_changed(&self) {}
+            fn command_started(&self) {}
+            fn phase_edge(&self) {}
+            fn remote_command_edge(&self) {}
+            fn mirror_changed(&self) {}
+            fn environment_changed(&self) {}
+            fn remote_up(&self) {}
+            fn remote_typed(&self) {}
+            fn link_hover_lost(&self) {}
+            fn pointer_changed(&self) {}
+            fn blocks_changed(&self) {}
+            fn unseen_changed(&self) {}
+            fn program_status_changed(&self) {}
+            fn notification(&self) {}
+            fn view_changed(&self) {
+                self.pending.store(true, Ordering::Release);
+            }
+        }
+
+        let wake = PaneWake::default();
+        let pending = Arc::clone(&wake.pending);
+        let session = demopen_session_woken("--files", Arc::new(wake));
+        let dir = std::env::temp_dir().join(format!("bateri-views-receive-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a directory");
+        let files = Arc::new(ViewFiles::new(
+            Arc::new(Arc::downgrade(&session)),
+            Arc::new(|_: &std::path::Path| {}),
+        ));
+        let mut started = false;
+        let mut said: Vec<String> = Vec::new();
+        // The pane's turn: only when it was told, and the flag goes down before the take.
+        let turn = |said: &mut Vec<String>, started: &mut bool| {
+            if !pending.swap(false, Ordering::AcqRel) {
+                return;
+            }
+            for action in session.take_view_actions() {
+                match action {
+                    Action::StartView(_) => *started = true,
+                    Action::ToView(text) => said.push(text),
+                    Action::ReadFile {
+                        read,
+                        handle,
+                        offset,
+                        length,
+                    } => files.read(read, &handle, offset, length),
+                    _ => {}
+                }
+            }
+        };
+        wait_until("the view to start", || {
+            turn(&mut said, &mut started);
+            started
+        });
+
+        // A small one, then ones that are two pieces and a part, each into a place of its own.
+        let sizes = [5, (1 << 20) + 451_424, 3 << 20, 1 << 20];
+        for (index, size) in sizes.into_iter().enumerate() {
+            let id = index + 1;
+            let source = dir.join(format!("given-{id}"));
+            let content: Vec<u8> = (0..size)
+                .map(|at| u8::try_from(at % 251).unwrap_or(0))
+                .collect();
+            std::fs::write(&source, &content).expect("a file");
+            let given = GivenFile::of(&source).expect("a source");
+            let handle = session
+                .grant_file(&FileGrant { size: given.size })
+                .expect("a handle");
+            files.keep_given(&handle, given);
+            let into = dir.join(format!("received-{id}"));
+            let request = format!(
+                r#"{{"call":{{"id":{id},"method":"receive","params":{{"handle":"{handle}","to":"{}"}}}}}}"#,
+                into.display()
+            );
+            assert!(session.module_message(&request), "the view is open");
+            let wanted = format!(r#""response":{{"id":{id},"#);
+            let since = std::time::Instant::now();
+            while !said.iter().any(|text| text.contains(&wanted)) {
+                turn(&mut said, &mut started);
+                assert!(
+                    since.elapsed() < std::time::Duration::from_secs(20),
+                    "{size} bytes were not received"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            assert!(
+                std::fs::read(&into).is_ok_and(|bytes| bytes == content),
+                "{size} bytes, as they were given"
+            );
+        }
         session.shutdown();
         let _ = std::fs::remove_dir_all(&dir);
     }
