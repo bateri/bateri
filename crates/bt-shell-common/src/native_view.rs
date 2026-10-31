@@ -46,6 +46,7 @@ mod look;
 mod page;
 #[cfg(test)]
 mod pane_tests;
+mod transfers;
 pub use files::{
     DropWay, FILE_SCHEME, GivenFile, Outcomes, Quarantine, ViewFiles, drop_way, entries_given,
     place_saved,
@@ -67,6 +68,7 @@ pub use pencere_view::{
 use pencere_view::{
     Color, DrawList, Family, Figure, Font, Measure, Metrics, Paint, Picture, Quad, Run, Source,
 };
+pub use transfers::Waits;
 
 /// The greatest level of `raised` that is drawn (the kit's specification, §3.1): the interface
 /// carries a byte and a page may say 255, and a host treats a level above this as this one — a

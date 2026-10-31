@@ -983,6 +983,11 @@ pub(crate) struct Ivars {
     /// (no askpass, no master — the remote jobs take today's argv) and when the
     /// running binary's path is unknown (it is the askpass program).
     masters: Option<Arc<Masters>>,
+    /// The folder bateri keeps on this Mac for the files of the views of the programs that run
+    /// here to cross through ([`bt_shell_common::stage`]), made as the application opens.
+    /// `None` in a timed run, without a home directory, and where the folder could not be made:
+    /// the programs get their files in the terminal's stream then.
+    stage: Option<bt_shell_common::stage::Folder>,
     /// Who bateri is to its panes ([`launch::Identity`]): its name, its own
     /// executable as the integration's helper, its bundled zsh scripts.
     identity: Rc<Identity>,
@@ -2558,6 +2563,33 @@ fn masters() -> Option<(Arc<Masters>, bool)> {
     Some((masters, old_update))
 }
 
+/// This Mac's folder for the files of a view to cross through, for the instance `instance`
+/// ([`bt_shell_common::stage::prepare_here`]), made now; the folders of the instances that were
+/// never closed are swept once, off the main thread.
+fn stage_here(instance: &str) -> Option<bt_shell_common::stage::Folder> {
+    use bt_shell_common::stage;
+    let home = child::home()?;
+    let folder = match stage::prepare_here(&home, instance) {
+        Ok(folder) => folder,
+        Err(error) => {
+            eprintln!("bateri: no folder for the files of a program's view: {error}");
+            return None;
+        }
+    };
+    let keep = instance.to_owned();
+    let _ = std::thread::Builder::new()
+        .name("stage sweep".into())
+        .spawn(move || {
+            stage::sweep(
+                &home,
+                &keep,
+                std::time::SystemTime::now(),
+                stage::STALE_AFTER,
+            );
+        });
+    Some(folder)
+}
+
 /// The focus query's answerer: from the listener's thread, one hop to
 /// the main queue — the answer is computed from the live state there, at the
 /// moment of the question, with no shared copy — waited for at most
@@ -2625,6 +2657,9 @@ impl AppDelegate {
             Some((masters, old_update)) => (Some(masters), old_update),
             None => (None, false),
         };
+        let stage = masters
+            .as_deref()
+            .and_then(|masters| stage_here(masters.instance()));
         let this = Self::alloc(mtm).set_ivars(Ivars {
             run: opts.run,
             measured: Cell::new(None),
@@ -2646,6 +2681,7 @@ impl AppDelegate {
             shell_menu: OnceCell::new(),
             updater: OnceCell::new(),
             masters,
+            stage,
             identity: Rc::new(Identity {
                 app_name: "bateri".to_owned(),
                 helper: std::env::current_exe().ok(),
@@ -5272,6 +5308,12 @@ impl AppDelegate {
         for pane in self.all_panes() {
             pane.refresh_server_card();
         }
+    }
+
+    /// The folder this Mac offers the programs that run on it, for the files of their views to
+    /// cross through, and the way to it; `None` where there is none ([`Ivars::stage`]).
+    pub(crate) fn stage_here(&self) -> Option<bt_shell_common::stage::Offered> {
+        bt_shell_common::stage::Offered::here(self.ivars().stage.as_ref()?)
     }
 
     /// The palette is about to show the list: every server is asked for its terminals again, and

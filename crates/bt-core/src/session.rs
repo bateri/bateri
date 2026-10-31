@@ -11986,6 +11986,34 @@ impl Session {
         self.view_words(|conversation| conversation.file_written(write, result));
     }
 
+    /// Sets where the folder the pane's host keeps on the program's machine is (specification
+    /// §8.11), or takes the offer back with `None`: the `welcome`s that follow list `stage` and
+    /// say where. A `welcome` already written is not changed; the offer is in the program's next
+    /// `hello`. A session with no desk has nothing to offer it to.
+    pub fn offer_stage(&self, stage: Option<pencere::StageDir>) {
+        self.adapter
+            .view(|conversation| conversation.offer_stage(stage));
+    }
+
+    /// The pipe of the transfer whose [`pencere::Action::StageFile`] or
+    /// [`pencere::Action::FetchFile`] had this id exists: the program is told its name and opens
+    /// it. Answered in the lane the view's words take, like [`Self::file_read`].
+    pub fn pipe_ready(&self, transfer: u32) {
+        self.view_words(|conversation| conversation.pipe_ready(transfer));
+    }
+
+    /// What came of the [`pencere::Action::StageFile`] whose `stage` this is: where in the file
+    /// the end was, or why the file did not get there.
+    pub fn staged(&self, transfer: u32, result: Result<u64, pencere::StageError>) {
+        self.view_words(|conversation| conversation.staged(transfer, result));
+    }
+
+    /// What came of the [`pencere::Action::FetchFile`] whose `fetch` this is: how long the saved
+    /// file is, or why it did not come.
+    pub fn fetched(&self, transfer: u32, result: Result<u64, pencere::FetchError>) {
+        self.view_words(|conversation| conversation.fetched(transfer, result));
+    }
+
     /// A view asks for the Open panel (the drive's `Host::panel`); the pane shows it when the
     /// session says so ([`pencere::Action::Pick`]) and answers with [`Self::panel_closed`].
     pub fn module_pick(&self, multiple: bool) {

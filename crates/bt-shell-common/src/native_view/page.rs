@@ -1444,6 +1444,15 @@ return {
 
     /// [`demopen_session`] with the wake the pane gives the session.
     fn demopen_session_woken(flag: &str, wake: Arc<dyn bt_core::Wake>) -> Arc<bt_core::Session> {
+        demopen_session_offering(flag, wake, None)
+    }
+
+    /// [`demopen_session_woken`] for a pane that offers its program the folder `stage` names.
+    fn demopen_session_offering(
+        flag: &str,
+        wake: Arc<dyn bt_core::Wake>,
+        stage: Option<bt_core::pencere::StageDir>,
+    ) -> Arc<bt_core::Session> {
         use bt_core::pencere::ViewOptions;
         use bt_core::{CaretShape, CursorBlink, Osc52, Session, SessionOptions, TerminalOptions};
         use std::collections::HashMap;
@@ -1461,6 +1470,7 @@ return {
         );
         let mut views = ViewOptions::new("bateri-test", "0.0.0");
         views.native_entry_limit = Some(ModuleLimits::default().component as u64);
+        views.stage = stage;
         Arc::new(
             Session::spawn(
                 SessionOptions {
@@ -1899,6 +1909,270 @@ return {
                 "{size} bytes, as they were given"
             );
         }
+        session.shutdown();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The bytes of a file through the folder the pane offers its program, both ways, with a real
+    /// program (`demopen --files`, built on pencere's program library): the file a person gave is
+    /// received and a file of the program's is saved to the place the person chose, **and not a
+    /// byte of either goes through the stream** (the session asks the pane for no `read` and no
+    /// `write`), the folder is empty after each, and a transfer the view's end cuts short leaves
+    /// no pipe and no part.
+    #[test]
+    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+    fn a_file_crosses_through_the_folder_both_ways_through_a_real_pane_and_no_byte_is_in_the_stream()
+     {
+        use crate::child::{SilentWake, wait_until};
+        use crate::native_view::{GivenFile, ViewFiles};
+        use crate::stage::{MARKER, Offered, prepare_here};
+        use bt_core::Session;
+        use bt_core::pencere::{Action, FileGrant};
+
+        let dir = std::env::temp_dir().join(format!("bateri-views-stage-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a directory");
+        let folder = prepare_here(&dir.join("home"), "c148d55a")
+            .or_else(|_| {
+                std::fs::create_dir_all(dir.join("home"))?;
+                prepare_here(&dir.join("home"), "c148d55a")
+            })
+            .expect("a folder");
+        let offered = Offered::here(&folder).expect("an offer");
+        let session =
+            demopen_session_offering("--files", Arc::new(SilentWake), Some(offered.dir.clone()));
+        let files = Arc::new(
+            ViewFiles::new(
+                Arc::new(Arc::downgrade(&session)),
+                Arc::new(|_: &std::path::Path| {}),
+            )
+            .with_way(offered.way.clone()),
+        );
+
+        /// The pane's side: what the session asks of it, done as the pane does it, with a count
+        /// of what asked for bytes in the stream.
+        struct Played {
+            session: Arc<Session>,
+            files: Arc<ViewFiles>,
+            started: bool,
+            said: Vec<String>,
+            in_the_stream: u32,
+            staged: u32,
+            fetched: u32,
+            unstaged: u32,
+        }
+        impl Played {
+            fn pump(&mut self) {
+                for action in self.session.take_view_actions() {
+                    match action {
+                        Action::StartView(_) => self.started = true,
+                        Action::ToView(text) => self.said.push(text),
+                        Action::ReadFile {
+                            read,
+                            handle,
+                            offset,
+                            length,
+                        } => {
+                            self.in_the_stream += 1;
+                            self.files.read(read, &handle, offset, length);
+                        }
+                        Action::WriteFile {
+                            write,
+                            handle,
+                            offset,
+                            bytes,
+                            end,
+                        } => {
+                            self.in_the_stream += 1;
+                            self.files.write(write, &handle, offset, bytes, end);
+                        }
+                        Action::AbortWrite { handle } => self.files.abort(&handle),
+                        Action::StageFile {
+                            stage,
+                            handle,
+                            offset,
+                            pipe,
+                        } => {
+                            self.staged += 1;
+                            self.files.stage(stage, &handle, offset, &pipe);
+                        }
+                        Action::FetchFile {
+                            fetch,
+                            handle,
+                            offset,
+                            size,
+                            pipe,
+                        } => {
+                            self.fetched += 1;
+                            self.files.fetch(fetch, &handle, offset, size, &pipe);
+                        }
+                        Action::Unstage { transfer } => {
+                            self.unstaged += 1;
+                            self.files.unstage(transfer);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            /// The page calls the program; the answer to the call, once it is said.
+            fn call(&mut self, id: u32, method: &str, params: &str) {
+                let text =
+                    format!(r#"{{"call":{{"id":{id},"method":"{method}","params":{params}}}}}"#);
+                assert!(self.session.module_message(&text), "the view is open");
+            }
+
+            fn answer(&mut self, id: u32) -> String {
+                let wanted = format!(r#""response":{{"id":{id},"#);
+                let since = std::time::Instant::now();
+                loop {
+                    self.pump();
+                    if let Some(text) = self.said.iter().find(|text| text.contains(&wanted)) {
+                        return text.clone();
+                    }
+                    assert!(
+                        since.elapsed() < std::time::Duration::from_secs(60),
+                        "no answer to call {id}"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+            }
+        }
+        let mut played = Played {
+            session: Arc::clone(&session),
+            files: Arc::clone(&files),
+            started: false,
+            said: Vec::new(),
+            in_the_stream: 0,
+            staged: 0,
+            fetched: 0,
+            unstaged: 0,
+        };
+        wait_until("the view to start", || {
+            played.pump();
+            played.started
+        });
+        let content = |len: usize| -> Vec<u8> {
+            (0..len)
+                .map(|at| u8::try_from((at * 7 + at / 251) % 256).unwrap_or(0))
+                .collect()
+        };
+        let in_folder = || -> Vec<String> {
+            std::fs::read_dir(folder.dir())
+                .expect("the folder")
+                .filter_map(Result::ok)
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .filter(|name| name != MARKER)
+                .collect()
+        };
+        let parts = || -> usize {
+            std::fs::read_dir(&dir)
+                .expect("the directory")
+                .filter_map(Result::ok)
+                .filter(|entry| {
+                    entry
+                        .file_name()
+                        .to_string_lossy()
+                        .ends_with(".pencere-part")
+                })
+                .count()
+        };
+
+        // A file the person gave comes through a pipe, in a few pieces' worth of bytes.
+        let source = dir.join("given.bin");
+        let body = content((3 << 20) + 4321);
+        std::fs::write(&source, &body).expect("a file");
+        let given = GivenFile::of(&source).expect("a source");
+        let handle = session
+            .grant_file(&FileGrant { size: given.size })
+            .expect("a handle");
+        files.keep_given(&handle, given);
+        let into = dir.join("received.bin");
+        played.call(
+            1,
+            "receive",
+            &format!(r#"{{"handle":"{handle}","to":"{}"}}"#, into.display()),
+        );
+        let answer = played.answer(1);
+        assert!(
+            answer.contains(&format!(r#""size":{}"#, body.len())),
+            "{answer}"
+        );
+        assert!(
+            std::fs::read(&into).is_ok_and(|bytes| bytes == body),
+            "as it was given"
+        );
+        assert_eq!(
+            (played.staged, played.in_the_stream),
+            (1, 0),
+            "through the pipe"
+        );
+        wait_until("the pipe to be gone", || in_folder().is_empty());
+        assert_eq!(parts(), 0);
+
+        // A file of the program's goes to the place the person chose, through a pipe.
+        let outgoing = dir.join("outgoing.bin");
+        let sent = content((2 << 20) + 13);
+        std::fs::write(&outgoing, &sent).expect("a file");
+        let saved = dir.join("saved.bin");
+        let place = session.grant_save().expect("a handle");
+        files.keep_save(&place, saved.clone());
+        played.call(
+            2,
+            "send",
+            &format!(r#"{{"handle":"{place}","from":"{}"}}"#, outgoing.display()),
+        );
+        let answer = played.answer(2);
+        assert!(
+            answer.contains(&format!(r#""size":{}"#, sent.len())),
+            "{answer}"
+        );
+        assert!(
+            std::fs::read(&saved).is_ok_and(|bytes| bytes == sent),
+            "as it was sent"
+        );
+        assert_eq!(
+            (played.fetched, played.in_the_stream),
+            (1, 0),
+            "through the pipe"
+        );
+        wait_until("the pipe to be gone", || in_folder().is_empty());
+        assert_eq!(parts(), 0);
+
+        // The view ends in the middle of a large file: no pipe, no part, and no transfer is left.
+        let large = dir.join("large.bin");
+        {
+            let file = std::fs::File::create(&large).expect("a file");
+            file.set_len(512 << 20).expect("a large file");
+        }
+        let given = GivenFile::of(&large).expect("a source");
+        let handle = session
+            .grant_file(&FileGrant { size: given.size })
+            .expect("a handle");
+        files.keep_given(&handle, given);
+        let cut = dir.join("cut.bin");
+        played.call(
+            3,
+            "receive",
+            &format!(r#"{{"handle":"{handle}","to":"{}"}}"#, cut.display()),
+        );
+        wait_until("the transfer to begin", || {
+            played.pump();
+            parts() == 1
+                || played
+                    .said
+                    .iter()
+                    .any(|text| text.contains(r#""response":{"id":3,"#))
+        });
+        session.close_view();
+        wait_until("nothing to be left", || {
+            played.pump();
+            parts() == 0 && in_folder().is_empty() && files.open_transfers() == 0
+        });
+        // The session asked the pane to take the transfer back, and the file was never whole.
+        assert_eq!(played.unstaged, 1);
+        assert!(!cut.exists());
+        assert_eq!(played.in_the_stream, 0);
         session.shutdown();
         let _ = std::fs::remove_dir_all(&dir);
     }

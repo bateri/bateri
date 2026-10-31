@@ -204,6 +204,15 @@ of every installed copy. A version without a section is not released.
   end), show a card by a word or by the caret that stays while the pointer is on it, and take chords of
   keys (⌘K ⌘U). A ⌘ pressed while another window had the keyboard counts as soon as the pointer comes
   over the editor, and the hand follows ⌘ going down and up without the pointer moving.
+- **A file a program asks for or hands back crosses through a private folder on this Mac, not through the
+  terminal's stream.** A program that shows a native view can ask for a file you dropped on it, or hand
+  one back to be saved, and the bytes go through a named pipe in a folder only you can open
+  (`~/.cache/pencere-stage/<instance>/`) instead of being cut into frames on the terminal. A big file
+  no longer holds the terminal's output while it moves, closing the view or pressing ⌃C stops the
+  transfer at once, and nothing is left behind: the pipe goes with the transfer and a half-saved file is
+  deleted. The folder is made when bateri starts; folders of other bateri instances that nobody has
+  touched for thirty days are cleared then. A program that does not know the folder gets the frames it
+  always got.
 
 ### Changed
 

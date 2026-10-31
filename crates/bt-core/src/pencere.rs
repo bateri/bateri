@@ -68,8 +68,9 @@ pub use ::pencere_host::sandbox::{
     Consent, Declared, Directive, Domain, Grant, Locality, Permission,
 };
 pub use ::pencere_host::session::{
-    ATTACHED_SCHEME, Action, AttachedFiles, FileError, FileGrant, MAX_BACKLOG, MAX_FILE_PIECE,
-    MAX_VIEW_MESSAGE, Size, State, ViewKind, ViewStart, WEB_BRIDGE_VERSION, has_files,
+    ATTACHED_SCHEME, Action, AttachedFiles, FetchError, FileError, FileGrant, MAX_BACKLOG,
+    MAX_FILE_PIECE, MAX_OPEN_TRANSFERS, MAX_VIEW_MESSAGE, Size, StageDir, StageError, State,
+    ViewKind, ViewStart, WEB_BRIDGE_VERSION, has_files,
 };
 
 use crate::color::{Theme, srgb_bytes};
@@ -216,6 +217,11 @@ pub struct ViewOptions {
     /// the terminal). A pane that has no terminal of its own asks its owner through the stream
     /// ([`crate::PtyOps::drop_input`]); `None` for an application with no keeper.
     pub drop_shown: Option<DropShown>,
+    /// The folder the pane's host keeps on the machine the program runs on, for the bytes of a
+    /// file to cross through, when it is born (specification §8.11): the `welcome`s list `stage`
+    /// and say where. A pane's program may move to another machine, and then the folder with it
+    /// ([`crate::Session::offer_stage`]).
+    pub stage: Option<StageDir>,
 }
 
 impl ViewOptions {
@@ -239,6 +245,7 @@ impl ViewOptions {
             shell_group: None,
             native_entry_limit: None,
             drop_shown: None,
+            stage: None,
         }
     }
 }
@@ -715,6 +722,7 @@ impl Desk {
             native_entry_limit,
             // The pane's discard: the session gives it to [`pane_discard`].
             drop_shown: _,
+            stage,
         } = options;
         let mut config = Config::new(host, view_theme(&theme, &font_mono), size);
         // The kinds of view this pane opens, each with the versions of its interface the
@@ -735,9 +743,11 @@ impl Desk {
         let entropy = SystemEntropy {
             failed: Arc::clone(&failed),
         };
+        let mut conversation = Conversation::new(config, store, entropy);
+        conversation.offer_stage(stage);
         Self {
             inner: Mutex::new(Inner {
-                conversation: Conversation::new(config, store, entropy),
+                conversation,
                 font_mono,
                 theme,
             }),

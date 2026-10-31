@@ -442,6 +442,56 @@ fn a_hello_is_answered_with_a_welcome_and_a_token() {
 }
 
 #[test]
+fn a_welcome_lists_stage_and_says_where_the_folder_is_once_the_pane_offers_one() {
+    let (rig, _, _) = Rig::new(true);
+    let mut pane = Pane::new(rig);
+    let folder = StageDir::new(
+        "/home/alice/.cache/pencere-stage/6d0f9f1c",
+        "3f9c2a7be1d84056a9c4e7b1d2f80a65",
+    )
+    .expect("an absolute folder and a token of 32 hex digits");
+    let desk = pane.rig.desk.as_ref().expect("a desk");
+    desk.apply(pane.rig.write(), |conversation| {
+        conversation.offer_stage(Some(folder));
+    });
+    pane.feed(&hello());
+    let written = pane.rig.written();
+    assert_eq!(written.len(), 1);
+    assert!(
+        written[0]
+            .payload
+            .contains(r#""features":["dismiss","stage"],"stage":{"dir":"/home/alice/.cache/pencere-stage/6d0f9f1c","token":"3f9c2a7be1d84056a9c4e7b1d2f80a65"}"#),
+        "{}",
+        written[0].payload
+    );
+}
+
+#[test]
+fn a_welcome_of_a_pane_that_offers_no_folder_is_the_one_there_always_was() {
+    let (rig, _, _) = Rig::new(true);
+    let mut pane = Pane::new(rig);
+    let folder = StageDir::new(
+        "/home/alice/.cache/pencere-stage/6d0f9f1c",
+        "3f9c2a7be1d84056a9c4e7b1d2f80a65",
+    )
+    .expect("a folder");
+    let desk = pane.rig.desk.as_ref().expect("a desk");
+    // The offer taken back is no offer: the folder of a pane that moved to a plain `ssh`.
+    desk.apply(pane.rig.write(), |conversation| {
+        conversation.offer_stage(Some(folder));
+        conversation.offer_stage(None);
+    });
+    pane.feed(&hello());
+    let written = pane.rig.written();
+    assert!(
+        written[0].payload.contains(r#""features":["dismiss"]"#)
+            && !written[0].payload.contains("stage"),
+        "{}",
+        written[0].payload
+    );
+}
+
+#[test]
 fn a_pane_without_views_hears_nothing_and_answers_nothing() {
     let (rig, _, wake) = Rig::new(false);
     let mut pane = Pane::new(rig);

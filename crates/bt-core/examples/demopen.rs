@@ -19,9 +19,11 @@
 //!
 //! With `--files` the view's calls `attach` (a text, which the view then draws by its name),
 //! `detach`, `read` (a piece of a file the person gave, by its handle), `receive` (all of one into
-//! the file `to`, with two reads out at a time, as an app that takes a drop does) and `write` (a
-//! piece of the place the person chose to save in) are the program's own, and each says what the
-//! terminal answered it.
+//! the file `to`, with two reads out at a time, as an app that takes a drop does), `send` (all of
+//! the file `from` to the place the person chose to save in, as an app that saves does) and `write`
+//! (a piece of the place the person chose to save in) are the program's own, and each says what
+//! the terminal answered it. `receive` and `send` go through the folder the terminal offers
+//! beside the program when it proves to be the terminal's, and in messages when it does not.
 //!
 //! The view's `stop` call is not known (the library answers it with an error) and its `upload`
 //! calls carry a large payload in pieces: the program counts what it gets and says how much
@@ -180,7 +182,16 @@ fn beside_calls(options: Options, control: &ViewControl) -> Options {
     let reading = control.clone();
     let writing = control.clone();
     let receiving = control.clone();
+    let sending = control.clone();
     options
+        .call("send", move |params, _call| {
+            let handle = params.get("handle").and_then(Value::as_str).unwrap_or("");
+            let from = params.get("from").and_then(Value::as_str).unwrap_or("");
+            let size = sending
+                .send(handle, std::path::Path::new(from), |_| ())
+                .map_err(refused)?;
+            Ok(json!({ "size": size }))
+        })
         .call("receive", move |params, _call| {
             let handle = params.get("handle").and_then(Value::as_str).unwrap_or("");
             let to = params.get("to").and_then(Value::as_str).unwrap_or("");

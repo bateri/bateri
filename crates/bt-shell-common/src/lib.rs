@@ -16,7 +16,8 @@
 //! (`preview_cache`), the remote host's load sampling (`remote_stats`), which
 //! ssh connection a remote job rides on and the askpass wire (`ssh_route`), the host names of
 //! `~/.ssh/config` (`ssh_hosts`), whether
-//! the user's `ssh` gets the remote shell integration (`ssh_wrap`), what an
+//! the user's `ssh` gets the remote shell integration (`ssh_wrap`), the folder bateri keeps on
+//! the machine a program runs on for the bytes of a file to cross through (`stage`), what an
 //! outside process may ask about one pane's focus (`focus`), the saved
 //! session layout and its file (`restore`), the holders of the
 //! bateri before kablo, ended once (`retired_holders`), the
@@ -84,6 +85,7 @@ pub mod split;
 pub mod ssh_hosts;
 pub mod ssh_route;
 pub mod ssh_wrap;
+pub mod stage;
 pub mod tabs;
 pub mod undo;
 pub mod upload;

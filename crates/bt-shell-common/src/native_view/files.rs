@@ -34,9 +34,12 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::SystemTime;
 
 use bt_core::Session;
-use bt_core::pencere::{FileError, FileGrant};
+use bt_core::pencere::{FetchError, FileError, FileGrant, StageError};
 use pencere_sandbox::ImageLimits;
 use pencere_view::{FileEntry, Saving};
+
+use super::transfers::{Ground, Transfers, Waits};
+use crate::stage::Way;
 
 /// The name a file the person gave has for the view that draws it: `file:` and its handle.
 pub const FILE_SCHEME: &str = "file:";
@@ -56,6 +59,12 @@ pub trait Outcomes: Send + Sync + 'static {
     fn file_read(&self, read: u32, result: Result<Vec<u8>, FileError>);
     /// What came of the write whose id this is.
     fn file_written(&self, write: u32, result: Result<(), FileError>);
+    /// The pipe of the transfer whose id this is exists: the program may open it.
+    fn pipe_ready(&self, transfer: u32);
+    /// How the `stage` whose id this is ended: where in the file the end was, or why not.
+    fn staged(&self, transfer: u32, result: Result<u64, StageError>);
+    /// How the `fetch` whose id this is ended: how long the saved file is, or why not.
+    fn fetched(&self, transfer: u32, result: Result<u64, FetchError>);
 }
 
 /// A session that is gone is told nothing: the view its files were for is gone with it.
@@ -69,6 +78,24 @@ impl Outcomes for Weak<Session> {
     fn file_written(&self, write: u32, result: Result<(), FileError>) {
         if let Some(session) = self.upgrade() {
             session.file_written(write, result);
+        }
+    }
+
+    fn pipe_ready(&self, transfer: u32) {
+        if let Some(session) = self.upgrade() {
+            session.pipe_ready(transfer);
+        }
+    }
+
+    fn staged(&self, transfer: u32, result: Result<u64, StageError>) {
+        if let Some(session) = self.upgrade() {
+            session.staged(transfer, result);
+        }
+    }
+
+    fn fetched(&self, transfer: u32, result: Result<u64, FetchError>) {
+        if let Some(session) = self.upgrade() {
+            session.fetched(transfer, result);
         }
     }
 }
@@ -108,7 +135,7 @@ impl GivenFile {
 
 /// What a handle names.
 #[derive(Clone)]
-enum Row {
+pub(super) enum Row {
     /// A file the person gave.
     Given(GivenFile),
     /// A place the person chose to save in.
@@ -145,6 +172,15 @@ pub struct ViewFiles {
     scratch: Mutex<Option<PathBuf>>,
     /// How many files were made there, to give each a folder of its own.
     made: AtomicU64,
+    /// The saves under way, by handle: the worker's writes and a transfer's are one table.
+    parts: Arc<Mutex<HashMap<String, Part>>>,
+    /// The way to the folder the program was offered, if it was offered one (see
+    /// [`Self::with_way`]).
+    way: Option<Way>,
+    /// How long the transfers wait on a pipe.
+    waits: Waits,
+    /// The transfers under way: each is a thread of its own, out of the worker's queue.
+    transfers: Transfers,
 }
 
 impl ViewFiles {
@@ -159,7 +195,27 @@ impl ViewFiles {
             quarantine,
             scratch: Mutex::new(None),
             made: AtomicU64::new(0),
+            parts: Arc::default(),
+            way: None,
+            waits: Waits::default(),
+            transfers: Transfers::default(),
         }
+    }
+
+    /// These files' program was offered the folder that `way` leads to (see [`crate::stage`]):
+    /// its `stage` and `fetch` are carried out there. Without it they are answered `io`, the
+    /// session having offered nothing to be asked for.
+    #[must_use]
+    pub fn with_way(mut self, way: Way) -> Self {
+        self.way = Some(way);
+        self
+    }
+
+    /// How long the transfers wait on a pipe (a test's, shorter than the product's).
+    #[must_use]
+    pub fn with_waits(mut self, waits: Waits) -> Self {
+        self.waits = waits;
+        self
     }
 
     /// A file of `name` made of `bytes` in a folder of the pane's own, for something the person
@@ -261,6 +317,62 @@ impl ViewFiles {
         });
     }
 
+    /// Pours the file `handle` names, from `offset`, into the pipe `pipe` of the folder, on a
+    /// thread of its own. The session is told that the pipe is there
+    /// ([`Outcomes::pipe_ready`]) and then how the transfer ended ([`Outcomes::staged`]).
+    pub fn stage(&self, transfer: u32, handle: &str, offset: u64, pipe: &str) {
+        match self.ground() {
+            Some(ground) => {
+                self.transfers
+                    .stage(ground, transfer, handle.to_owned(), offset, pipe);
+            }
+            None => self.outcomes.staged(transfer, Err(StageError::Io)),
+        }
+    }
+
+    /// Fills the part of the save `handle` names from the pipe `pipe` of the folder, from `offset`
+    /// until the file is `size` long, on a thread of its own, and gives the part the place's name
+    /// ([`Outcomes::pipe_ready`], then [`Outcomes::fetched`]).
+    pub fn fetch(&self, transfer: u32, handle: &str, offset: u64, size: u64, pipe: &str) {
+        match self.ground() {
+            Some(ground) => {
+                self.transfers
+                    .fetch(ground, transfer, handle.to_owned(), offset, size, pipe);
+            }
+            None => self.outcomes.fetched(transfer, Err(FetchError::Io)),
+        }
+    }
+
+    /// The transfer whose id this is is taken back: it stops, its pipe goes and so does what it had
+    /// written of a part. The session is told nothing: it asked for this.
+    pub fn unstage(&self, transfer: u32) {
+        self.transfers.unstage(transfer);
+    }
+
+    /// Every transfer is taken back (the view ended, or the pane is closing). Does not wait for
+    /// the threads: each notices at its next look at its pipe and goes.
+    pub fn end_transfers(&self) {
+        self.transfers.end_all();
+    }
+
+    /// How many transfers are under way.
+    #[cfg(test)]
+    pub(super) fn open_transfers(&self) -> usize {
+        self.transfers.open()
+    }
+
+    /// What a transfer needs, when the program was offered a folder.
+    fn ground(&self) -> Option<Ground> {
+        Some(Ground {
+            table: Arc::clone(&self.table),
+            parts: Arc::clone(&self.parts),
+            outcomes: Arc::clone(&self.outcomes),
+            quarantine: Arc::clone(&self.quarantine),
+            way: self.way.clone()?,
+            waits: self.waits,
+        })
+    }
+
     fn send(&self, job: Job) {
         let mut jobs = lock(&self.jobs);
         if jobs.is_none() {
@@ -269,7 +381,7 @@ impl ViewFiles {
                 table: Arc::clone(&self.table),
                 outcomes: Arc::clone(&self.outcomes),
                 quarantine: Arc::clone(&self.quarantine),
-                parts: HashMap::new(),
+                parts: Arc::clone(&self.parts),
             };
             if std::thread::Builder::new()
                 .name("view-files".into())
@@ -300,6 +412,7 @@ impl ViewFiles {
 
 impl Drop for ViewFiles {
     fn drop(&mut self) {
+        self.transfers.end_all();
         if let Some(folder) = lock(&self.scratch).take() {
             let _ = fs::remove_dir_all(folder);
         }
@@ -410,7 +523,7 @@ struct Worker {
     outcomes: Arc<dyn Outcomes>,
     quarantine: Quarantine,
     /// The saves under way, by handle.
-    parts: HashMap<String, Part>,
+    parts: Arc<Mutex<HashMap<String, Part>>>,
 }
 
 impl Worker {
@@ -441,12 +554,12 @@ impl Worker {
                 } => {
                     let result = self.write(&handle, offset, &bytes, end);
                     if result.is_err() {
-                        self.parts.remove(&handle);
+                        lock(&self.parts).remove(&handle);
                     }
                     self.outcomes.file_written(write, result);
                 }
                 Job::Abort { handle } => {
-                    self.parts.remove(&handle);
+                    lock(&self.parts).remove(&handle);
                 }
             }
         }
@@ -463,13 +576,14 @@ impl Worker {
             Some(Row::Save(target)) => target.clone(),
             _ => return Err(FileError::Io),
         };
-        if offset == 0 && !self.parts.contains_key(handle) {
-            self.parts.insert(
+        let mut parts = lock(&self.parts);
+        if offset == 0 && !parts.contains_key(handle) {
+            parts.insert(
                 handle.to_owned(),
                 Part::create(&target, handle).map_err(write_error)?,
             );
         }
-        let part = self.parts.get_mut(handle).ok_or(FileError::Io)?;
+        let part = parts.get_mut(handle).ok_or(FileError::Io)?;
         // The session writes in order and with no gap; a part that is not where the write is
         // would be a file the program did not write.
         if part.length != offset {
@@ -477,7 +591,7 @@ impl Worker {
         }
         part.file.write_all_at(bytes, offset).map_err(write_error)?;
         part.length = part.length.saturating_add(bytes.len() as u64);
-        if end && let Some(part) = self.parts.remove(handle) {
+        if end && let Some(part) = parts.remove(handle) {
             part.keep(&target).map_err(write_error)?;
             (self.quarantine)(&target);
         }
@@ -509,16 +623,16 @@ fn part_path(target: &Path, handle: &str) -> io::Result<PathBuf> {
 }
 
 /// A save under way: the part, beside the place, which is deleted if it is dropped unkept.
-struct Part {
+pub(super) struct Part {
     path: PathBuf,
-    file: fs::File,
-    length: u64,
+    pub(super) file: fs::File,
+    pub(super) length: u64,
     /// The part has been given its place's name: there is nothing to delete.
     kept: bool,
 }
 
 impl Part {
-    fn create(target: &Path, handle: &str) -> io::Result<Self> {
+    pub(super) fn create(target: &Path, handle: &str) -> io::Result<Self> {
         let path = part_path(target, handle)?;
         // A part a process that was killed left is ours to replace. What is there now is not
         // followed if it is a link, and one put there meanwhile fails the save rather than be
@@ -538,7 +652,7 @@ impl Part {
     }
 
     /// Gives the part the name of its place.
-    fn keep(mut self, target: &Path) -> io::Result<()> {
+    pub(super) fn keep(mut self, target: &Path) -> io::Result<()> {
         self.file.sync_all()?;
         fs::rename(&self.path, target)?;
         // The name is the place's now: the file closes with the part and nothing is deleted.
@@ -556,7 +670,7 @@ impl Drop for Part {
 }
 
 /// What a failure of writing is told to the program as: a disk with no room, or any other.
-fn write_error(error: io::Error) -> FileError {
+pub(super) fn write_error(error: io::Error) -> FileError {
     match error.raw_os_error() {
         Some(libc::ENOSPC | libc::EDQUOT) => FileError::Space,
         _ => FileError::Io,
@@ -594,7 +708,7 @@ fn read_range(source: &GivenFile, offset: u64, length: u64) -> Result<Vec<u8>, F
 }
 
 /// A file that is not there or may not be read is gone from the program's point of view.
-fn read_error(error: io::Error) -> FileError {
+pub(super) fn read_error(error: io::Error) -> FileError {
     match error.kind() {
         io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied => FileError::Gone,
         _ => FileError::Io,
@@ -603,7 +717,7 @@ fn read_error(error: io::Error) -> FileError {
 
 /// The lock, whether or not a thread that held it panicked: the tables are changed a row at a
 /// time and never found half-changed.
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+pub(super) fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
@@ -629,6 +743,9 @@ mod tests {
         fn file_written(&self, write: u32, result: Result<(), FileError>) {
             let _ = lock(&self.0).send(Told::Written(write, result));
         }
+        fn pipe_ready(&self, _: u32) {}
+        fn staged(&self, _: u32, _: Result<u64, StageError>) {}
+        fn fetched(&self, _: u32, _: Result<u64, FetchError>) {}
     }
 
     /// Files whose outcomes come back on the receiver, and whose quarantine counts the paths it

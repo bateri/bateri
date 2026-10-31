@@ -268,6 +268,13 @@ pub trait PaneHost {
     fn shown_dropper(&self, _pane: &PaneUuid) -> Option<bt_core::pencere::DropShown> {
         None
     }
+    /// The folder this pane's host keeps on the machine its program runs on, for the bytes of a
+    /// file to cross through (`bt_shell_common::stage`), and the way to it: this Mac's, for a
+    /// pane whose program runs here. The default is an owner that keeps no folder, whose
+    /// programs get their files in the terminal's stream.
+    fn stage_folder(&self, _pane: &PaneUuid) -> Option<bt_shell_common::stage::Offered> {
+        None
+    }
     /// A program's view opened or closed in the pane: written beside the terminal of this
     /// Mac that carries the pane's bytes, so that a bateri that finds the terminal again
     /// offers the program a restart of it. The default is an owner that keeps no terminals.
@@ -2122,6 +2129,10 @@ pub struct PaneIvars {
     /// ([`TerminalPane::drain_views`]); the terminal's frames stop for as long as
     /// it is there.
     pencere: RefCell<Option<ViewHost>>,
+    /// The folder the pane's host keeps on the machine the program runs on, as the program's
+    /// `welcome` offers it, and the way to it ([`TerminalPane::offer_stage`]): the files of a
+    /// view that starts carry out its transfers there.
+    stage: RefCell<Option<bt_shell_common::stage::Offered>>,
     /// What the header over the pane says of a page of the kit, while one is up
     /// ([`TerminalPane::view_head`]: the same words a program's web view has).
     page_words: RefCell<Option<pencere_view::Words>>,
@@ -2877,6 +2888,7 @@ impl TerminalPane {
             bar_pointer: Cell::new((false, false)),
             seen: Cell::new(true),
             pencere: RefCell::new(None),
+            stage: RefCell::new(None),
             page_words: RefCell::new(None),
             page_up: RefCell::new(None),
             look_base: Cell::new(look_base),
@@ -5650,6 +5662,10 @@ impl TerminalPane {
         options.time_zone = pencere_view::time_zone_name();
         options.reduce_motion = ivars.reduce_motion.get();
         options.drop_shown = self.host().shown_dropper(self.uuid());
+        // The program's first `hello` is answered with the folder of the machine it runs on.
+        let stage = self.host().stage_folder(self.uuid());
+        options.stage = stage.as_ref().map(|offered| offered.dir.clone());
+        self.ivars().stage.replace(stage);
         options.size = pencere_view::content_size(self.bounds());
         // A program may open a view that is a module or a script: it is run in the sandbox and
         // drawn as a page of the kit, up to the size the sandbox compiles.
@@ -5950,10 +5966,15 @@ impl TerminalPane {
         session: &Arc<Session>,
     ) -> Arc<bt_shell_common::native_view::ViewFiles> {
         let agent = self.ivars().identity.app_name.clone();
-        Arc::new(bt_shell_common::native_view::ViewFiles::new(
+        let files = bt_shell_common::native_view::ViewFiles::new(
             Arc::new(Arc::downgrade(session)),
             Arc::new(move |path: &std::path::Path| crate::uploader::quarantine(path, &agent)),
-        ))
+        );
+        // The folder the program was offered is the one its transfers are carried out in.
+        Arc::new(match self.ivars().stage.borrow().as_ref() {
+            Some(offered) => files.with_way(offered.way.clone()),
+            None => files,
+        })
     }
 
     /// The handle the page up is driven by, if a page is up.
@@ -6593,6 +6614,33 @@ impl TerminalPane {
                         files.abort(&handle);
                     }
                 }
+                // The bytes of a file through the folder the pane's host keeps beside the
+                // program, each transfer on a thread of its own that tells the session what
+                // came of it.
+                Action::StageFile {
+                    stage,
+                    handle,
+                    offset,
+                    pipe,
+                } => match self.view_files() {
+                    Some(files) => files.stage(stage, &handle, offset, &pipe),
+                    None => session.staged(stage, Err(bt_core::pencere::StageError::Io)),
+                },
+                Action::FetchFile {
+                    fetch,
+                    handle,
+                    offset,
+                    size,
+                    pipe,
+                } => match self.view_files() {
+                    Some(files) => files.fetch(fetch, &handle, offset, size, &pipe),
+                    None => session.fetched(fetch, Err(bt_core::pencere::FetchError::Io)),
+                },
+                Action::Unstage { transfer } => {
+                    if let Some(files) = self.view_files() {
+                        files.unstage(transfer);
+                    }
+                }
                 Action::ForgetFiles(names) => {
                     if let Some(handle) = self.page_handle()
                         && let Some(images) = handle.page().images()
@@ -6813,6 +6861,10 @@ impl TerminalPane {
     /// answer would open a link for a view that is not there and shut the next view's out.
     fn view_gone(&self) {
         pencere_view::ask::view_ended(self);
+        // And the bytes it had in a pipe: the transfers stop and take their pipes and parts.
+        if let Some(files) = self.view_files() {
+            files.end_transfers();
+        }
     }
 
     /// Sets the deadline the conversation's state calls for: one delayed block on
@@ -8367,6 +8419,43 @@ mod tests {
             !pane.contains("hold_service::"),
             "the pane's modules do not bind to the application's"
         );
+    }
+
+    /// The bytes of a view's files cross through the folder the pane's owner keeps beside the
+    /// program, and every way a view ends takes its transfers with it: the pane offers the folder
+    /// when its session is made (the program's first `hello` is answered with it), the files of
+    /// a view are told the way to it, the three actions of the session reach them, and the view's
+    /// end — all of its ends go through `view_gone` — cuts what is under way. A source scan,
+    /// because the panes need a window server.
+    #[test]
+    fn the_folder_is_offered_when_the_session_is_made_and_the_views_end_cuts_its_transfers() {
+        let pane = include_str!("pane.rs");
+        let pane = &pane[..pane.find("#[cfg(test)]").unwrap_or(pane.len())];
+        let body_of = |name: &str| {
+            let at = pane.find(name).unwrap_or_else(|| panic!("{name}"));
+            &pane[at..at + pane[at..].find("\n    }\n").expect("its end")]
+        };
+        let options = body_of("fn view_options(");
+        assert!(options.contains("self.host().stage_folder(self.uuid())"));
+        assert!(options.contains("options.stage ="));
+        assert!(options.contains("self.ivars().stage.replace("));
+        assert!(body_of("fn view_files_for(").contains("files.with_way("));
+        let gone = body_of("fn view_gone(");
+        assert!(gone.contains("end_transfers()"));
+        for ending in ["fn end_view(", "fn drop_view("] {
+            assert!(body_of(ending).contains("self.view_gone()"), "{ending}");
+        }
+        let drain = body_of("pub(crate) fn drain_views(");
+        for arm in [
+            "Action::StageFile {",
+            "files.stage(stage, &handle, offset, &pipe)",
+            "Action::FetchFile {",
+            "files.fetch(fetch, &handle, offset, size, &pipe)",
+            "Action::Unstage { transfer }",
+            "files.unstage(transfer)",
+        ] {
+            assert!(drain.contains(arm), "{arm}");
+        }
     }
 
     /// The connection-lost veil stops at the dock's context row — the line typed into the
