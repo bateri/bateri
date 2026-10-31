@@ -522,6 +522,12 @@ fn the_scripts_are_one_line_of_plain_sh_a_login_shell_hands_on_as_it_is() {
         upgrade_script("0.2.0", &ids(&["t1", "b-1"])).expect("a script"),
         census_script("0.2.0"),
         prune_script(&["0.1.0".to_owned(), "0.2.0-dev+0123456789ab".to_owned()]).expect("a script"),
+        pipe_script(
+            "/home/me/.cache/pencere-stage/c148d55a",
+            "0b5d7c1e9a3f4682d0e1c7a95b3f8d24",
+            Cross::ToProgram,
+        )
+        .expect("a script"),
     ] {
         // `is_inline`'s alphabet: what fish and csh read inside single quotes
         // as the characters they are.
@@ -899,5 +905,294 @@ fn this_mac_gets_kablo_by_the_same_steps_without_the_shells_files() {
     assert_eq!(
         std::fs::read(&file).expect("the file"),
         b"#!/bin/sh\necho version=9.9.9\n"
+    );
+}
+
+// ─── the folder for a program's files ────────────────────────────────────
+
+/// A home of its own for the scripts that make a program's folder, and the channel that runs them
+/// there for real.
+fn staging_home(name: &str) -> (TempRoot, Home) {
+    let root = TempRoot::new(name);
+    let home = Home::new(&root.0.join("home"));
+    std::fs::create_dir_all(&home.dir).expect("home");
+    (root, home)
+}
+
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn the_folder_of_a_server_is_the_users_own_with_a_marker_and_is_said_where_it_really_is() {
+    let (_root, home) = staging_home("kablo-stage");
+    let folder = prepare_stage(&home, "c148d55a").expect("a folder");
+    let real = std::fs::canonicalize(home.dir.join(".cache/pencere-stage/c148d55a")).expect("dir");
+    assert_eq!(folder.dir(), real);
+    let meta = std::fs::metadata(folder.dir()).expect("the folder");
+    assert_eq!(meta.permissions().mode() & 0o777, 0o700);
+    let root_meta = std::fs::metadata(real.parent().expect("root")).expect("the root");
+    assert_eq!(root_meta.permissions().mode() & 0o777, 0o700);
+    let marker = std::fs::read_to_string(folder.dir().join("marker")).expect("a marker");
+    assert_eq!(marker, folder.token());
+    assert_eq!(marker.len(), 32);
+    assert!(
+        std::fs::read_dir(folder.dir())
+            .expect("a listing")
+            .flatten()
+            .all(|entry| entry.file_name() == "marker"),
+        "nothing but the marker"
+    );
+    // The program offers what the script said, and it is a folder a welcome can name.
+    assert!(folder.offer().is_some());
+}
+
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn the_folder_is_made_anew_each_run_and_its_old_pipes_go() {
+    let (_root, home) = staging_home("kablo-stage-anew");
+    let first = prepare_stage(&home, "c148d55a").expect("a folder");
+    std::fs::write(
+        first.dir().join("0b5d7c1e9a3f4682d0e1c7a95b3f8d24"),
+        b"left",
+    )
+    .expect("left");
+    std::fs::create_dir(first.dir().join("deep")).expect("a directory");
+    let second = prepare_stage(&home, "c148d55a").expect("a folder");
+    assert_eq!(first.dir(), second.dir());
+    assert_ne!(first.token(), second.token(), "a token of each run");
+    let names: Vec<_> = std::fs::read_dir(second.dir())
+        .expect("a listing")
+        .flatten()
+        .map(|entry| entry.file_name())
+        .collect();
+    assert_eq!(names, ["marker"]);
+    let marker = std::fs::read_to_string(second.dir().join("marker")).expect("a marker");
+    assert_eq!(marker, second.token());
+}
+
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn the_folders_of_instances_nobody_has_touched_for_a_month_go_and_the_others_stay() {
+    let (_root, home) = staging_home("kablo-stage-stale");
+    let root = home.dir.join(".cache/pencere-stage");
+    for name in ["aaaaaaaa", "bbbbbbbb"] {
+        std::fs::create_dir_all(root.join(name).join("inside")).expect("an instance");
+    }
+    let stamp = |name: &str, when: &str| {
+        let status = Command::new("touch")
+            .args(["-t", when])
+            .arg(root.join(name))
+            .status()
+            .expect("touch");
+        assert!(status.success());
+    };
+    stamp("aaaaaaaa", "202001010000");
+    let folder = prepare_stage(&home, "c148d55a").expect("a folder");
+    assert!(!root.join("aaaaaaaa").exists(), "a month gone: removed");
+    assert!(root.join("bbbbbbbb").exists(), "touched today: left");
+    assert!(folder.dir().exists());
+}
+
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn a_folder_above_that_is_a_link_or_a_home_that_is_not_plain_gets_no_folder() {
+    // The folder of all the instances is a link: nothing is made in what it points to.
+    let (_root, home) = staging_home("kablo-stage-link");
+    let elsewhere = home.dir.join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).expect("a directory");
+    std::fs::create_dir_all(home.dir.join(".cache")).expect("a cache");
+    std::os::unix::fs::symlink(&elsewhere, home.dir.join(".cache/pencere-stage")).expect("link");
+    assert!(prepare_stage(&home, "c148d55a").is_none());
+    assert_eq!(std::fs::read_dir(&elsewhere).expect("a listing").count(), 0);
+
+    // A home whose path has a space in it cannot be offered: the path is part of a command.
+    let root = TempRoot::new("kablo-stage-space");
+    let home = Home::new(&root.0.join("a home"));
+    std::fs::create_dir_all(&home.dir).expect("home");
+    assert!(prepare_stage(&home, "c148d55a").is_none());
+}
+
+#[test]
+fn the_scripts_of_the_folder_take_nothing_a_shell_could_read_differently() {
+    assert!(stage_folder_script("c148d55a", &"0".repeat(32)).is_some());
+    for bad in ["", "C148D55A", "c148d55a; id", "../x", "c148d55a\n"] {
+        assert!(
+            stage_folder_script(bad, &"0".repeat(32)).is_none(),
+            "{bad:?}"
+        );
+        assert!(stage_folder_script("c148d55a", bad).is_none(), "{bad:?}");
+    }
+    let name = "0b5d7c1e9a3f4682d0e1c7a95b3f8d24";
+    let dir = "/home/me/.cache/pencere-stage/c148d55a";
+    for cross in [Cross::ToProgram, Cross::FromProgram] {
+        assert!(pipe_script(dir, name, cross).is_some());
+        for bad in [
+            "relative/path",
+            "/a b",
+            "/a;id",
+            "/a'b",
+            "/a\"b",
+            "/a$b",
+            "/a`b",
+            "/a\\b",
+            "/a!b",
+            "/a\nb",
+            "//a",
+        ] {
+            assert!(pipe_script(bad, name, cross).is_none(), "{bad:?}");
+        }
+        for bad in [
+            "",
+            "short",
+            "../../etc/passwd",
+            &name.to_uppercase(),
+            "0b5d7c1e9a3f4682d0e1c7a95b3f8d2/",
+        ] {
+            assert!(pipe_script(dir, bad, cross).is_none(), "{bad:?}");
+        }
+        // A login shell reads it inside single quotes, the way it reads the other scripts.
+        let script = pipe_script(dir, name, cross).expect("a script");
+        assert!(
+            script
+                .bytes()
+                .all(|b| (b' '..=b'~').contains(&b) && !matches!(b, b'\'' | b'\\' | b'!')),
+            "{script}"
+        );
+    }
+}
+
+/// Runs a pipe's script the way the server does (`sh -c`), with `input` piped to it.
+fn run_pipe(script: &str) -> std::process::Child {
+    Command::new("sh")
+        .arg("-c")
+        .arg(script)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("sh")
+}
+
+/// A line of what the script says.
+fn said(out: &mut std::io::BufReader<std::process::ChildStdout>) -> String {
+    use std::io::BufRead as _;
+    let mut line = String::new();
+    out.read_line(&mut line).expect("a line");
+    line.trim().to_owned()
+}
+
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn a_pipe_to_the_program_says_ready_then_open_and_carries_what_it_is_given_and_is_gone() {
+    let (_root, home) = staging_home("kablo-pipe-in");
+    let folder = prepare_stage(&home, "c148d55a").expect("a folder");
+    let name = "0b5d7c1e9a3f4682d0e1c7a95b3f8d24";
+    let dir = folder.dir().to_str().expect("a path");
+    let script = pipe_script(dir, name, Cross::ToProgram).expect("a script");
+    let mut child = run_pipe(&script);
+    let mut out = std::io::BufReader::new(child.stdout.take().expect("stdout"));
+    assert_eq!(said(&mut out), PIPE_READY);
+    let path = folder.dir().join(name);
+    assert!(path.exists(), "the pipe is there when it is said");
+    // The program opens its end to read, and only then is the second word said.
+    let reader = std::thread::spawn({
+        let path = path.clone();
+        move || {
+            let mut got = Vec::new();
+            std::fs::File::open(path)
+                .expect("open")
+                .read_to_end(&mut got)
+                .expect("read");
+            got
+        }
+    });
+    assert_eq!(said(&mut out), PIPE_OPEN);
+    let mut input = child.stdin.take().expect("stdin");
+    let data: Vec<u8> = (0..200_000u32).map(|n| (n % 251) as u8).collect();
+    input.write_all(&data).expect("written");
+    drop(input);
+    assert_eq!(reader.join().expect("the reader"), data);
+    assert_eq!(child.wait().expect("ended").code(), Some(0));
+    assert!(!path.exists(), "the pipe goes with the script");
+    assert!(!folder.dir().join(format!("{name}.a")).exists());
+}
+
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn a_pipe_from_the_program_says_ready_then_open_and_then_only_the_bytes() {
+    let (_root, home) = staging_home("kablo-pipe-out");
+    let folder = prepare_stage(&home, "c148d55a").expect("a folder");
+    let name = "0b5d7c1e9a3f4682d0e1c7a95b3f8d24";
+    let dir = folder.dir().to_str().expect("a path");
+    let script = pipe_script(dir, name, Cross::FromProgram).expect("a script");
+    let mut child = run_pipe(&script);
+    let mut out = std::io::BufReader::new(child.stdout.take().expect("stdout"));
+    assert_eq!(said(&mut out), PIPE_READY);
+    let path = folder.dir().join(name);
+    let data: Vec<u8> = (0..200_000u32).map(|n| (n % 241) as u8).collect();
+    let writer = std::thread::spawn({
+        let (path, data) = (path.clone(), data.clone());
+        move || {
+            let mut pipe = std::fs::OpenOptions::new()
+                .write(true)
+                .open(path)
+                .expect("open");
+            pipe.write_all(&data).expect("write");
+        }
+    });
+    assert_eq!(said(&mut out), PIPE_OPEN);
+    let mut got = Vec::new();
+    out.read_to_end(&mut got).expect("the bytes");
+    writer.join().expect("the writer");
+    assert_eq!(got, data);
+    assert_eq!(child.wait().expect("ended").code(), Some(0));
+    assert!(!path.exists());
+}
+
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn a_pipe_whose_program_never_comes_ends_itself_and_takes_the_pipe_with_it() {
+    let (_root, home) = staging_home("kablo-pipe-late");
+    let folder = prepare_stage(&home, "c148d55a").expect("a folder");
+    let name = "0b5d7c1e9a3f4682d0e1c7a95b3f8d24";
+    let dir = folder.dir().to_str().expect("a path");
+    for cross in [Cross::ToProgram, Cross::FromProgram] {
+        let script = pipe_script_waiting(dir, name, cross, 1).expect("a script");
+        let mut child = run_pipe(&script);
+        let mut out = std::io::BufReader::new(child.stdout.take().expect("stdout"));
+        assert_eq!(said(&mut out), PIPE_READY);
+        // Nobody opens it. The script is gone within the wait, and nothing of it is left.
+        let status = child.wait().expect("ended");
+        assert_ne!(status.code(), Some(0), "{cross:?}");
+        let left: Vec<_> = std::fs::read_dir(folder.dir())
+            .expect("a listing")
+            .flatten()
+            .map(|entry| entry.file_name())
+            .collect();
+        assert_eq!(left, ["marker"], "{cross:?}");
+    }
+}
+
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn a_pipe_that_cannot_be_made_says_nothing_and_ends_with_its_own_status() {
+    let (_root, home) = staging_home("kablo-pipe-not");
+    let folder = prepare_stage(&home, "c148d55a").expect("a folder");
+    let name = "0b5d7c1e9a3f4682d0e1c7a95b3f8d24";
+    let dir = folder.dir().to_str().expect("a path");
+    // A pipe of that name is there already: nothing is taken over.
+    std::fs::write(folder.dir().join(name), b"not yours").expect("a file");
+    let script = pipe_script(dir, name, Cross::ToProgram).expect("a script");
+    let mut child = run_pipe(&script);
+    let mut out = String::new();
+    child
+        .stdout
+        .take()
+        .expect("stdout")
+        .read_to_string(&mut out)
+        .expect("out");
+    assert_eq!(out, "");
+    assert_eq!(child.wait().expect("ended").code(), Some(PIPE_NOT_MADE));
+    assert_eq!(
+        std::fs::read(folder.dir().join(name)).expect("still there"),
+        b"not yours"
     );
 }

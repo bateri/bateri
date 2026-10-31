@@ -116,6 +116,12 @@ struct Fake {
     records: Mutex<Vec<(crate::agent::Terminal, crate::agent::notes::Record)>>,
     /// How long reading the records takes.
     records_take: Mutex<Duration>,
+    /// The server makes the folder for a program's files ([`Backend::stage_folder`]).
+    stages: AtomicBool,
+    /// What was asked of the folder, in order: `stage:N` for a step that began when the look for
+    /// kablo had been made N times, `ready` for the application told it is made. Apart from
+    /// [`Fake::log`], which says what a terminal's start waits for: the folder is not it.
+    staged: Mutex<Vec<String>>,
 }
 
 impl Fake {
@@ -148,6 +154,8 @@ impl Fake {
             past: AtomicBool::new(true),
             records: Mutex::new(Vec::new()),
             records_take: Mutex::new(Duration::ZERO),
+            stages: AtomicBool::new(true),
+            staged: Mutex::new(Vec::new()),
         })
     }
 
@@ -202,6 +210,11 @@ impl Fake {
 
     fn log(&self) -> Vec<String> {
         self.log.lock().expect("lock").clone()
+    }
+
+    /// What was asked of the folder for a program's files, in order.
+    fn staged(&self) -> Vec<String> {
+        self.staged.lock().expect("lock").clone()
     }
 
     fn count(&self, what: &str) -> usize {
@@ -424,6 +437,25 @@ impl Backend for Fake {
 
     fn files(&self, _: &KabloHost, _: &Installed) {
         self.note("files");
+    }
+
+    fn stage_folder(&self, _: &KabloHost) -> Option<crate::stage::Folder> {
+        let installs = self.count("install");
+        self.staged
+            .lock()
+            .expect("lock")
+            .push(format!("stage:{installs}"));
+        self.stages.load(Ordering::SeqCst).then(|| {
+            crate::stage::Folder::new(
+                PathBuf::from("/home/u/.cache/pencere-stage/c148d55a"),
+                "0b5d7c1e9a3f4682d0e1c7a95b3f8d24".into(),
+            )
+            .expect("a folder")
+        })
+    }
+
+    fn stage_ready(&self, _: &str) {
+        self.staged.lock().expect("lock").push("ready".into());
     }
 
     fn number(&self, _: &KabloHost) -> Option<u64> {
@@ -799,6 +831,123 @@ fn the_files_of_a_restarted_account_are_written_for_its_first_new_terminal_only(
         world.count("number") == numbered + 2
     });
     assert_eq!(world.count("files"), 1, "once");
+}
+
+/// The folder a server's programs are offered is made once per account, after the step that
+/// brought the account up has answered, and the application is told when it is there: the pane
+/// that showed a terminal of the account before that has nothing else to learn it from.
+#[test]
+fn the_folder_for_a_servers_programs_is_made_once_for_the_account_and_told_when_it_is_there() {
+    let ledger = Arc::new(Ledger::memory());
+    let world = Fake::new(Bridge::new(Age::Current));
+    pane_named(&world);
+    let rig = Rig::kept("stage-once", world.clone(), ledger, END_GRACE);
+    let _first = Holder::new(&rig.socket(), "b-1");
+    until("the folder was told", || world.staged().len() == 2);
+    assert_eq!(
+        world.staged(),
+        ["stage:1", "ready"],
+        "after the look for kablo"
+    );
+    let folder = rig.service.stage_of("u@rasp:22").expect("the folder");
+    assert!(folder.dir().ends_with("pencere-stage/c148d55a"));
+    assert_eq!(rig.service.stage_of("u@elsewhere:22"), None);
+
+    let _second = Holder::new(&rig.socket(), "b-2");
+    let numbered = world.count("number");
+    until("the second terminal was numbered", || {
+        world.count("number") > numbered
+    });
+    assert_eq!(world.staged(), ["stage:1", "ready"], "once for the account");
+}
+
+/// A server that would not make the folder now is asked again at the next step that has the
+/// connection (the bridge's dial, the next terminal), and one that did is never asked again.
+#[test]
+fn a_folder_the_server_would_not_make_is_tried_again_with_the_next_terminal() {
+    let ledger = Arc::new(Ledger::memory());
+    let world = Fake::new(Bridge::new(Age::Current));
+    pane_named(&world);
+    world.stages.store(false, Ordering::SeqCst);
+    let rig = Rig::kept("stage-again", world.clone(), ledger, END_GRACE);
+    let _first = Holder::new(&rig.socket(), "b-1");
+    until("tried", || !world.staged().is_empty());
+    assert_eq!(rig.service.stage_of("u@rasp:22"), None);
+    assert!(!world.staged().contains(&"ready".to_owned()));
+
+    // A server that could not count is not asked for a folder: it may not be there at all.
+    let tried = world.staged().len();
+    let _uncounted = Holder::new(&rig.socket(), "b-uncounted");
+    let asked = world.count("number");
+    until("the uncounted terminal was numbered", || {
+        world.count("number") > asked
+    });
+    assert_eq!(
+        world.staged().len(),
+        tried,
+        "no step for a server that did not count"
+    );
+
+    // A server that counts is a server that answers: the next terminal's step finds it so.
+    world.stages.store(true, Ordering::SeqCst);
+    world.counts_from(5);
+    let _second = Holder::new(&rig.socket(), "b-2");
+    until("the folder was told", || {
+        world.staged().contains(&"ready".to_owned())
+    });
+    assert!(rig.service.stage_of("u@rasp:22").is_some());
+    let steps = world.staged().len();
+    let _third = Holder::new(&rig.socket(), "b-3");
+    let numbered = world.count("number");
+    until("the third terminal was numbered", || {
+        world.count("number") > numbered
+    });
+    assert_eq!(
+        world.staged().len(),
+        steps,
+        "a folder that is made is not made again"
+    );
+}
+
+/// An account the ledger brought back is not looked at, and its folder is made when its terminal
+/// is shown again, with the bridge, and not for the terminals' sake: a pane that comes back after
+/// an update has its programs offered the folder too.
+#[test]
+fn the_folder_of_a_restarted_account_is_made_when_its_terminal_is_shown_again() {
+    let ledger = Arc::new(Ledger::memory());
+    let world = Fake::new(Bridge::new(Age::Current));
+    pane_named(&world);
+    let first = Rig::kept("stage-restart-1", world.clone(), ledger.clone(), END_GRACE);
+    let holder = Holder::new(&first.socket(), "b-1");
+    let terminal = first.terminals(1).remove(0);
+    world.bridge().write(&terminal, b"abc");
+    until("shown", || holder.shown.bytes() == b"abc");
+    until("the folder of the first run", || world.staged().len() == 2);
+    first.service.stop();
+    drop(first);
+
+    let again = Rig::kept("stage-restart-2", world.clone(), ledger, END_GRACE);
+    assert_eq!(
+        again.service.stage_of("u@rasp:22"),
+        None,
+        "a folder of a run is of that run"
+    );
+    let _resumed = Holder::start(
+        &again.socket(),
+        "b-1",
+        Target::Resume {
+            account: "u@rasp:22".into(),
+            offset: Some(3),
+        },
+    );
+    until("the folder of the second run", || world.staged().len() == 4);
+    assert_eq!(world.staged(), ["stage:1", "ready", "stage:1", "ready"]);
+    assert_eq!(
+        world.count("install"),
+        1,
+        "a recalled account is not looked at"
+    );
+    assert!(again.service.stage_of("u@rasp:22").is_some());
 }
 
 /// A number a person took by hand (`kablo new --id t7`) is skipped: the counter is asked again,

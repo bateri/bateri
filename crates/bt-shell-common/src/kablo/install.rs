@@ -400,6 +400,154 @@ pub fn put_files(channel: &dyn Channel, installed: &Installed) {
     let _ = channel.run("sh -s >/dev/null 2>&1; :", files.as_bytes());
 }
 
+// ─── the folder for a program's files ────────────────────────────────────
+
+/// What the folder script prints before the folder's path (the login shell may say things of
+/// its own before it, and nothing else begins with this).
+const STAGE_MARK: &str = "pencere-stage";
+
+/// What a pipe's script prints when the pipe is there, and when the program has opened its end.
+pub const PIPE_READY: &str = "pencere-ready";
+pub const PIPE_OPEN: &str = "pencere-open";
+
+/// The exit status of a pipe's script that could not make the pipe.
+pub const PIPE_NOT_MADE: i32 = 20;
+
+/// How long a pipe's script waits for the program to open its end on its own, whatever the Mac
+/// does: the Mac that asked for the pipe has gone when its connection has, and the script is not
+/// to wait for it for ever. Longer than the Mac's own wait.
+const PIPE_WAIT_SECS: u32 = 12;
+
+/// The script that makes the folder a program on the server may be offered for the bytes of a
+/// file ([`crate::stage`]): `~/.cache/pencere-stage/<instance>`, closed to everyone but the user,
+/// with a marker holding `token`. It checks that the folder above is the user's own and not a link,
+/// removes what an earlier run of the same instance left, removes the folders of instances that
+/// nobody has touched for a month, and says where the folder really is (`pwd -P`: the program
+/// opens the folder without following a link, and a home is often reached through one).
+///
+/// `None` unless `instance` and `token` are lowercase hexadecimal: they are part of the script.
+/// The script is read by `sh` from standard input.
+#[must_use]
+pub fn stage_folder_script(instance: &str, token: &str) -> Option<String> {
+    let hex = |text: &str| {
+        !text.is_empty()
+            && text.len() <= 64
+            && text
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    };
+    if !hex(instance) || !hex(token) {
+        return None;
+    }
+    Some(format!(
+        r#"umask 077
+case $HOME in /*) ;; *) exit 2 ;; esac
+mkdir -p "$HOME/.cache" || exit 3
+r=$HOME/{root}
+if [ -L "$r" ]; then exit 4; fi
+mkdir -p "$r" || exit 5
+chmod 700 "$r" || exit 5
+set -- $(ls -dn "$r")
+[ "$3" = "$(id -u)" ] || exit 6
+d=$r/{instance}
+rm -rf "$d"
+mkdir "$d" || exit 7
+chmod 700 "$d" || exit 7
+printf %s {token} > "$d/.marker-new" || exit 8
+mv -f "$d/.marker-new" "$d/{marker}" || exit 8
+for e in "$r"/*; do
+  [ -d "$e" ] && [ ! -L "$e" ] || continue
+  [ "$e" = "$d" ] && continue
+  [ -n "$(find "$e" -prune -mtime +{stale} 2>/dev/null)" ] && rm -rf "$e"
+done
+cd "$d" || exit 9
+printf '{mark} %s\n' "$(pwd -P)"
+"#,
+        root = crate::stage::ROOT,
+        marker = crate::stage::MARKER,
+        stale = crate::stage::STALE_AFTER.as_secs() / 86_400,
+        mark = STAGE_MARK,
+    ))
+}
+
+/// The folder's path in what [`stage_folder_script`] said, if it said one a script may be trusted
+/// with ([`crate::stage::is_plain_path`]).
+fn stage_folder_path(reply: &Reply) -> Option<String> {
+    if reply.status != Some(0) {
+        return None;
+    }
+    let path = reply
+        .out
+        .lines()
+        .rev()
+        .find_map(|line| line.strip_prefix(STAGE_MARK)?.strip_prefix(' '))?
+        .trim();
+    crate::stage::is_plain_path(path).then(|| path.to_owned())
+}
+
+/// Makes the folder `name` ([`crate::stage::folder_name`]) on the server `channel` runs on, with a
+/// token of its own, and returns it. `None` when the server would not (no `$HOME`, a
+/// folder that is not the user's own) or said a path that cannot be offered.
+#[must_use]
+pub fn prepare_stage(channel: &dyn Channel, name: &str) -> Option<crate::stage::Folder> {
+    let token = crate::stage::hex(&bt_core::pencere::system_random()?);
+    let script = stage_folder_script(name, &token)?;
+    let reply = channel.run("sh -s", script.as_bytes()).ok()?;
+    let path = stage_folder_path(&reply)?;
+    crate::stage::Folder::new(std::path::PathBuf::from(path), token)
+}
+
+/// Which way a file crosses a pipe.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Cross {
+    /// The Mac's file goes in, and the program reads it out (`stage`).
+    ToProgram,
+    /// The program writes it in, and the Mac reads it out (`fetch`).
+    FromProgram,
+}
+
+/// The script that makes the pipe `name` in the folder `dir`, says [`PIPE_READY`], waits for the
+/// program to open its end, says [`PIPE_OPEN`], and carries the bytes: from its standard input to
+/// the pipe ([`Cross::ToProgram`]) or from the pipe to its standard output
+/// ([`Cross::FromProgram`]; the two words come first, and the file's bytes follow the second).
+/// The pipe goes when the script does, and a script whose program never comes ends itself
+/// ([`PIPE_WAIT_SECS`]) and takes the pipe with it. Its exit status is `cat`'s, or
+/// [`PIPE_NOT_MADE`].
+///
+/// One line of `sh` in the alphabet of [`crate::ssh_wrap::is_inline`] (no single quote, backslash
+/// or `!`, and double quotes are fine): it is a command that the user's login shell reads, inside
+/// the single quotes of the remote command, whichever shell that is. `None` unless `dir` is a plain
+/// path and `name` is the name of a pipe.
+#[must_use]
+pub fn pipe_script(dir: &str, name: &str, cross: Cross) -> Option<String> {
+    pipe_script_waiting(dir, name, cross, PIPE_WAIT_SECS)
+}
+
+/// [`pipe_script`] that waits `wait` seconds for the program.
+pub(crate) fn pipe_script_waiting(
+    dir: &str,
+    name: &str,
+    cross: Cross,
+    wait: u32,
+) -> Option<String> {
+    if !crate::stage::is_plain_path(dir) || !crate::stage::is_pipe_name(name) {
+        return None;
+    }
+    let (open, carry) = match cross {
+        Cross::ToProgram => ("exec 3>$f", "cat >&3"),
+        Cross::FromProgram => ("exec 3<$f", "cat <&3"),
+    };
+    // `$f.a` is there until the program has opened its end: what tells the timer that nobody
+    // came. The timer is a subshell of its own, with no output of its own, so that the
+    // connection is not held open by it after the script has ended.
+    Some(format!(
+        "f={dir}/{name}; mkfifo -m 600 $f || exit {PIPE_NOT_MADE}; : > $f.a; \
+         trap \"rm -f $f $f.a\" EXIT; trap \"exit 1\" HUP INT TERM; \
+         (sleep {wait}; [ -e $f.a ] && {{ rm -f $f $f.a; kill -9 $$; }}) >/dev/null 2>&1 & \
+         echo {PIPE_READY}; {open}; rm -f $f.a; echo {PIPE_OPEN}; {carry}"
+    ))
+}
+
 /// What [`probe_script`] found.
 #[derive(Debug, PartialEq, Eq)]
 enum Look {

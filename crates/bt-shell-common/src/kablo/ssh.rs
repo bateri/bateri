@@ -113,6 +113,8 @@ pub struct SshBackend {
     /// The terminals an account keeps in the background are not what they were
     /// ([`Backend::background_changed`]).
     pub listed: BackgroundNews,
+    /// The folder a server's account offers its programs is made ([`Backend::stage_ready`]).
+    pub staged: BackgroundNews,
     /// The application takes what the programs on a server say to it: `Some` makes the
     /// accounts' clients ask for tickets ([`Backend::takes_mail`]). `None`: it takes none.
     pub mail: Option<MailNews>,
@@ -286,6 +288,26 @@ impl Backend for SshBackend {
             limit: install::STEP_LIMIT,
         };
         install::put_files(&channel, installed);
+    }
+
+    fn stage_folder(&self, server: &KabloHost) -> Option<crate::stage::Folder> {
+        // This Mac's programs have the folder the application made; a run that keeps no
+        // masters (the timed one) names no instance to keep a folder for.
+        if local::is_account(&server.key) {
+            return None;
+        }
+        let instance = self.masters.as_ref()?.instance();
+        let target = self.target(server);
+        let channel = SshChannel {
+            argv: ssh_argv_for(&target, &self.route_of(&target)),
+            limit: install::STEP_LIMIT,
+        };
+        let name = crate::stage::folder_name(instance, &server.key, &crate::stage::this_machine());
+        install::prepare_stage(&channel, &name)
+    }
+
+    fn stage_ready(&self, account: &str) {
+        (self.staged)(account);
     }
 
     fn number(&self, server: &KabloHost) -> Option<u64> {

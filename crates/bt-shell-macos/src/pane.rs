@@ -275,6 +275,13 @@ pub trait PaneHost {
     fn stage_folder(&self, _pane: &PaneUuid) -> Option<bt_shell_common::stage::Offered> {
         None
     }
+
+    /// The folder the server of `account` keeps for its programs, once it is made
+    /// (`bt_shell_common::kablo::service::Service::stage_of`); `None` before, for a host that
+    /// keeps no servers' folders, and for an account of this Mac.
+    fn stage_account(&self, _account: &str) -> Option<bt_shell_common::stage::Folder> {
+        None
+    }
     /// A program's view opened or closed in the pane: written beside the terminal of this
     /// Mac that carries the pane's bytes, so that a bateri that finds the terminal again
     /// offers the program a restart of it. The default is an owner that keeps no terminals.
@@ -5663,7 +5670,7 @@ impl TerminalPane {
         options.reduce_motion = ivars.reduce_motion.get();
         options.drop_shown = self.host().shown_dropper(self.uuid());
         // The program's first `hello` is answered with the folder of the machine it runs on.
-        let stage = self.host().stage_folder(self.uuid());
+        let stage = self.stage_offer();
         options.stage = stage.as_ref().map(|offered| offered.dir.clone());
         self.ivars().stage.replace(stage);
         options.size = pencere_view::content_size(self.bounds());
@@ -7089,7 +7096,51 @@ impl TerminalPane {
         if self.server_target().is_none() {
             self.remote_helper().borrow_mut().close();
         }
+        self.refresh_stage();
         self.offer_owed_view();
+    }
+
+    /// The folder the pane's programs are offered, for the bytes of a file to cross through: the
+    /// account's, when the pane shows a terminal a server keeps (and its folder is made); none
+    /// when an `ssh` of the user's own is in front, whose machine bateri keeps no folder on and
+    /// runs nothing on; this Mac's otherwise. **The one place that decides it**, and it asks
+    /// [`TerminalPane::server_target`] before it asks what the host has: a folder offered for a
+    /// machine that is not the program's is a pipe made where the program is not.
+    fn stage_offer(&self) -> Option<bt_shell_common::stage::Offered> {
+        if let Some((_, target, _)) = self.server_target() {
+            let shown = self.host().kept_terminal(self.uuid())?;
+            let folder = self.host().stage_account(&shown.account)?;
+            let reach = Arc::new(bt_shell_common::stage::Through::new(self.masters(), target));
+            return bt_shell_common::stage::Offered::server(&folder, reach);
+        }
+        // A terminal a server keeps whose connection the pane has not found yet (a restarted
+        // bateri's first `hello` comes before the probe has): not this Mac's folder, and not yet
+        // the server's. The edge offers it when the probe has found it.
+        if self.host().kept_terminal(self.uuid()).is_some() {
+            return None;
+        }
+        // Only a plain `ssh` is a machine other than this Mac's with no folder of bateri's.
+        if self
+            .session()
+            .is_some_and(|session| session.remote_target().is_some())
+        {
+            return None;
+        }
+        self.host().stage_folder(self.uuid())
+    }
+
+    /// Offers the programs the folder they are due now ([`TerminalPane::stage_offer`]) if it is
+    /// not the one they were offered: a program that starts after this finds it in its
+    /// `welcome`, and a view that is open keeps the way it began with.
+    pub(crate) fn refresh_stage(&self) {
+        let offered = self.stage_offer();
+        if *self.ivars().stage.borrow() == offered {
+            return;
+        }
+        self.ivars().stage.replace(offered.clone());
+        if let Some(session) = self.session() {
+            session.offer_stage(offered.map(|offered| offered.dir));
+        }
     }
 
     /// The remote edge's half for the dock: `⇄ rasp` is the door to the server's card exactly
@@ -8436,7 +8487,7 @@ mod tests {
             &pane[at..at + pane[at..].find("\n    }\n").expect("its end")]
         };
         let options = body_of("fn view_options(");
-        assert!(options.contains("self.host().stage_folder(self.uuid())"));
+        assert!(options.contains("self.stage_offer()"));
         assert!(options.contains("options.stage ="));
         assert!(options.contains("self.ivars().stage.replace("));
         assert!(body_of("fn view_files_for(").contains("files.with_way("));
@@ -8456,6 +8507,47 @@ mod tests {
         ] {
             assert!(drain.contains(arm), "{arm}");
         }
+    }
+
+    /// The folder a pane's programs are offered is the machine's they run on: the server account's
+    /// when the pane shows a terminal a server keeps (asked of the one gate, before anything else),
+    /// none when an `ssh` of the user's own is in front, this Mac's otherwise — and it is offered
+    /// again whenever that changes: at the pane's remote edge, and when the account's folder is
+    /// made after the edge ran. A source scan, because the panes need a window server.
+    #[test]
+    fn the_folder_offered_is_the_machines_the_program_runs_on_and_is_offered_again_when_it_changes()
+    {
+        let pane = include_str!("pane.rs");
+        let pane = &pane[..pane.find("#[cfg(test)]").unwrap_or(pane.len())];
+        let body_of = |source: &str, name: &str| {
+            let at = source.find(name).unwrap_or_else(|| panic!("{name}"));
+            source[at..at + source[at..].find("\n    }\n").expect("its end")].to_owned()
+        };
+        let offer = body_of(pane, "fn stage_offer(");
+        let gate = offer.find("self.server_target()").expect("asks the gate");
+        let unprobed = offer
+            .rfind("self.host().kept_terminal(")
+            .expect("tells a server's terminal the probe has not found");
+        let plain = offer.find("remote_target()").expect("tells a plain ssh");
+        let here = offer.find("self.host().stage_folder(").expect("this Mac's");
+        assert!(
+            gate < unprobed && unprobed < plain && plain < here,
+            "the gate first, a terminal not yet probed next, a plain ssh after it, this Mac last"
+        );
+        assert!(offer.contains("Offered::server("));
+        assert!(offer.contains("stage_account(&shown.account)"));
+        assert!(body_of(pane, "pub(crate) fn remote_edge(").contains("self.refresh_stage()"));
+        assert!(body_of(pane, "pub(crate) fn refresh_stage(").contains("session.offer_stage("));
+
+        // The account's folder is made on a thread of the service: the notice reaches every pane
+        // that shows a terminal of the account.
+        let service = include_str!("hold_service.rs");
+        assert!(service.contains("staged: Box::new(stage_ready)"));
+        assert!(body_of(service, "fn stage_ready(").contains("app.stage_ready(&account)"));
+        let app = include_str!("app.rs");
+        let notice = body_of(app, "pub(crate) fn stage_ready(");
+        assert!(notice.contains("shown.account == account"));
+        assert!(notice.contains("pane.refresh_stage()"));
     }
 
     /// The connection-lost veil stops at the dock's context row — the line typed into the

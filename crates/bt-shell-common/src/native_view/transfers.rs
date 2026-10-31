@@ -10,6 +10,10 @@
 //! never opens its end, and a transfer taken back (`unstage`, the view's end, the pane's) ends
 //! at once and takes its pipe and its part with it.
 //!
+//! A program on a server has its pipe there: a script run through the account's main connection
+//! makes it and carries the bytes to or from it ([`server`]); the thread that runs it is the same
+//! kind of thread, and it is taken back the same way.
+//!
 //! The session names the pipe (32 hex digits of its own randomness) and rules on who may ask
 //! for what; this is only the moving. What came of it is told to the session
 //! ([`Outcomes`]): first that the pipe is there, then how it ended.
@@ -29,6 +33,8 @@ use bt_core::pencere::{FetchError, FileError, StageError};
 use super::files::{GivenFile, Outcomes, Part, Quarantine, Row, lock, read_error, write_error};
 use crate::stage::{self, Way};
 
+mod server;
+
 /// How a transfer waits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Waits {
@@ -41,6 +47,9 @@ pub struct Waits {
     /// What a transfer looks at between two tries of a pipe, and so the longest that a
     /// transfer taken back takes to notice.
     pub look_again: Duration,
+    /// How long the end of a transfer on a server waits for the script there to have ended: the
+    /// pipe is gone when it has, and the program is not told the transfer is over before.
+    pub tidy_within: Duration,
 }
 
 impl Default for Waits {
@@ -49,6 +58,7 @@ impl Default for Waits {
             opened_within: Duration::from_secs(10),
             silent_for: Duration::from_secs(30),
             look_again: Duration::from_millis(5),
+            tidy_within: Duration::from_secs(2),
         }
     }
 }
@@ -71,7 +81,9 @@ pub(super) struct Ground {
 
 struct Running {
     cancel: Arc<AtomicBool>,
-    pipe: PathBuf,
+    /// The pipe, when it is a file of this Mac's: the one of a server is taken with the script
+    /// that made it.
+    pipe: Option<PathBuf>,
 }
 
 /// The transfers of a view that are under way, by the id of the `stage` or `fetch` they answer.
@@ -90,13 +102,27 @@ impl Transfers {
         offset: u64,
         pipe: &str,
     ) {
-        let Some(path) = pipe_path(&ground.way, pipe) else {
-            ground.outcomes.staged(transfer, Err(StageError::Io));
-            return;
+        let started = if stage::is_pipe_name(pipe) {
+            match ground.way.clone() {
+                Way::Here(dir) => {
+                    let path = dir.join(pipe);
+                    let own = path.clone();
+                    self.start(transfer, Some(path), &ground, move |ground, cancel| {
+                        run_stage(ground, transfer, &handle, offset, &own, cancel)
+                            .map(Finished::Staged)
+                    })
+                }
+                Way::Server(server) => {
+                    let name = pipe.to_owned();
+                    self.start(transfer, None, &ground, move |ground, cancel| {
+                        server::run_stage(ground, &server, transfer, &handle, offset, &name, cancel)
+                            .map(Finished::Staged)
+                    })
+                }
+            }
+        } else {
+            None
         };
-        let started = self.start(transfer, path, &ground, move |ground, path, cancel| {
-            run_stage(ground, transfer, &handle, offset, path, cancel).map(Finished::Staged)
-        });
         if started.is_none() {
             ground.outcomes.staged(transfer, Err(StageError::Io));
         }
@@ -113,13 +139,29 @@ impl Transfers {
         size: u64,
         pipe: &str,
     ) {
-        let Some(path) = pipe_path(&ground.way, pipe) else {
-            ground.outcomes.fetched(transfer, Err(FetchError::Io));
-            return;
+        let started = if stage::is_pipe_name(pipe) {
+            match ground.way.clone() {
+                Way::Here(dir) => {
+                    let path = dir.join(pipe);
+                    let own = path.clone();
+                    self.start(transfer, Some(path), &ground, move |ground, cancel| {
+                        run_fetch(ground, transfer, &handle, offset, size, &own, cancel)
+                            .map(Finished::Fetched)
+                    })
+                }
+                Way::Server(server) => {
+                    let name = pipe.to_owned();
+                    self.start(transfer, None, &ground, move |ground, cancel| {
+                        server::run_fetch(
+                            ground, &server, transfer, &handle, offset, size, &name, cancel,
+                        )
+                        .map(Finished::Fetched)
+                    })
+                }
+            }
+        } else {
+            None
         };
-        let started = self.start(transfer, path, &ground, move |ground, path, cancel| {
-            run_fetch(ground, transfer, &handle, offset, size, path, cancel).map(Finished::Fetched)
-        });
         if started.is_none() {
             ground.outcomes.fetched(transfer, Err(FetchError::Io));
         }
@@ -130,7 +172,9 @@ impl Transfers {
     pub(super) fn unstage(&self, transfer: u32) {
         if let Some(running) = lock(&self.running).get(&transfer) {
             running.cancel.store(true, Ordering::Release);
-            let _ = fs::remove_file(&running.pipe);
+            if let Some(pipe) = &running.pipe {
+                let _ = fs::remove_file(pipe);
+            }
         }
     }
 
@@ -138,7 +182,9 @@ impl Transfers {
     pub(super) fn end_all(&self) {
         for running in lock(&self.running).values() {
             running.cancel.store(true, Ordering::Release);
-            let _ = fs::remove_file(&running.pipe);
+            if let Some(pipe) = &running.pipe {
+                let _ = fs::remove_file(pipe);
+            }
         }
     }
 
@@ -149,13 +195,14 @@ impl Transfers {
     }
 
     /// Starts `work` on a thread of its own; `None` when there is no thread to start. `work`
-    /// returns how the transfer ended, or nothing when it was taken back.
+    /// returns how the transfer ended, or nothing when it was taken back. `pipe` is the file the
+    /// transfer makes on this Mac, if it makes one.
     fn start(
         &self,
         transfer: u32,
-        pipe: PathBuf,
+        pipe: Option<PathBuf>,
         ground: &Ground,
-        work: impl FnOnce(&Ground, &Path, &AtomicBool) -> Option<Finished> + Send + 'static,
+        work: impl FnOnce(&Ground, &AtomicBool) -> Option<Finished> + Send + 'static,
     ) -> Option<()> {
         let cancel = Arc::new(AtomicBool::new(false));
         lock(&self.running).insert(
@@ -170,11 +217,13 @@ impl Transfers {
         let spawned = thread::Builder::new()
             .name("view-transfer".into())
             .spawn(move || {
-                let finished = work(&ground, &pipe, &cancel);
+                let finished = work(&ground, &cancel);
                 // The pipe goes before the session hears how it ended: "closes the pipe and
                 // deletes it, whatever the answer" is the protocol's, and a program that is told
                 // `sent` and looks at the folder finds it empty.
-                let _ = fs::remove_file(&pipe);
+                if let Some(pipe) = &pipe {
+                    let _ = fs::remove_file(pipe);
+                }
                 lock(&running).remove(&transfer);
                 if cancel.load(Ordering::Acquire) {
                     return;
@@ -198,16 +247,6 @@ enum Finished {
     Fetched(Result<u64, FetchError>),
 }
 
-/// Where the pipe named `name` is, if `name` is one the session gives.
-fn pipe_path(way: &Way, name: &str) -> Option<PathBuf> {
-    if !stage::is_pipe_name(name) {
-        return None;
-    }
-    match way {
-        Way::Here(dir) => Some(dir.join(name)),
-    }
-}
-
 /// A file given to the view as it is now, if it is as it was given.
 fn same(file: &File, source: &GivenFile) -> Result<(), StageError> {
     let meta = file.metadata().map_err(|_| StageError::Gone)?;
@@ -215,6 +254,29 @@ fn same(file: &File, source: &GivenFile) -> Result<(), StageError> {
         return Err(StageError::Gone);
     }
     Ok(())
+}
+
+/// The file `handle` names, open, as it was given and with `offset` inside it: what a stage
+/// pours from.
+fn open_source(
+    ground: &Ground,
+    handle: &str,
+    offset: u64,
+) -> Result<(File, GivenFile), StageError> {
+    let source = match lock(&ground.table).get(handle) {
+        Some(Row::Given(source)) => source.clone(),
+        _ => return Err(StageError::Gone),
+    };
+    let file = File::open(&source.path).map_err(|error| match read_error(error) {
+        FileError::Gone => StageError::Gone,
+        _ => StageError::Io,
+    })?;
+    // The file that is open is the one looked at: what is checked is what is poured.
+    same(&file, &source)?;
+    if offset > source.size {
+        return Err(StageError::Size);
+    }
+    Ok((file, source))
 }
 
 /// Pours the file `handle` names, from `offset` to its end, into the pipe at `pipe`, once the
@@ -227,26 +289,10 @@ fn run_stage(
     pipe: &Path,
     cancel: &AtomicBool,
 ) -> Option<Result<u64, StageError>> {
-    let source = match lock(&ground.table).get(handle) {
-        Some(Row::Given(source)) => source.clone(),
-        _ => return Some(Err(StageError::Gone)),
+    let (file, source) = match open_source(ground, handle, offset) {
+        Ok(opened) => opened,
+        Err(error) => return Some(Err(error)),
     };
-    let file = match File::open(&source.path) {
-        Ok(file) => file,
-        Err(error) => {
-            return Some(Err(match read_error(error) {
-                FileError::Gone => StageError::Gone,
-                _ => StageError::Io,
-            }));
-        }
-    };
-    // The file that is open is the one looked at: what is checked is what is poured.
-    if let Err(error) = same(&file, &source) {
-        return Some(Err(error));
-    }
-    if offset > source.size {
-        return Some(Err(StageError::Size));
-    }
     if stage::make_fifo(pipe).is_err() {
         return Some(Err(StageError::Io));
     }
@@ -338,6 +384,34 @@ fn fetch_error(error: io::Error) -> FetchError {
     }
 }
 
+/// The place of the save `handle` names and the part its bytes go to: made anew for the first
+/// bytes, and the one that holds `offset` bytes after.
+fn take_part(
+    ground: &Ground,
+    handle: &str,
+    offset: u64,
+    size: u64,
+) -> Result<(PathBuf, Part), FetchError> {
+    let target = match lock(&ground.table).get(handle) {
+        Some(Row::Save(target)) => target.clone(),
+        _ => return Err(FetchError::Io),
+    };
+    if offset > size {
+        return Err(FetchError::Size);
+    }
+    let earlier = lock(&ground.parts).remove(handle);
+    let part = if offset == 0 {
+        drop(earlier);
+        Part::create(&target, handle).map_err(fetch_error)?
+    } else {
+        match earlier {
+            Some(part) if part.length == offset => part,
+            _ => return Err(FetchError::Size),
+        }
+    };
+    Ok((target, part))
+}
+
 /// Reads the pipe at `pipe` into the part of the save `handle` names until the file is `size` long,
 /// then gives the part the place's name. `None` when the transfer was taken back.
 fn run_fetch(
@@ -349,26 +423,9 @@ fn run_fetch(
     pipe: &Path,
     cancel: &AtomicBool,
 ) -> Option<Result<u64, FetchError>> {
-    let target = match lock(&ground.table).get(handle) {
-        Some(Row::Save(target)) => target.clone(),
-        _ => return Some(Err(FetchError::Io)),
-    };
-    if offset > size {
-        return Some(Err(FetchError::Size));
-    }
-    // A part is made anew for the first bytes, and is the one that holds `offset` bytes after.
-    let earlier = lock(&ground.parts).remove(handle);
-    let mut part = if offset == 0 {
-        drop(earlier);
-        match Part::create(&target, handle) {
-            Ok(part) => part,
-            Err(error) => return Some(Err(fetch_error(error))),
-        }
-    } else {
-        match earlier {
-            Some(part) if part.length == offset => part,
-            _ => return Some(Err(FetchError::Size)),
-        }
+    let (target, mut part) = match take_part(ground, handle, offset, size) {
+        Ok(taken) => taken,
+        Err(error) => return Some(Err(error)),
     };
     if stage::make_fifo(pipe).is_err() {
         return Some(Err(FetchError::Io));
@@ -446,17 +503,17 @@ mod tests {
     use std::sync::mpsc::{self, Receiver, Sender};
     use std::time::SystemTime;
 
-    const PIPE: &str = "0b5d7c1e9a3f4682d0e1c7a95b3f8d24";
+    pub(super) const PIPE: &str = "0b5d7c1e9a3f4682d0e1c7a95b3f8d24";
 
     /// What the session was told, in order.
     #[derive(Debug, PartialEq)]
-    enum Told {
+    pub(super) enum Told {
         PipeReady(u32),
         Staged(u32, Result<u64, StageError>),
         Fetched(u32, Result<u64, FetchError>),
     }
 
-    struct Tell(Mutex<Sender<Told>>);
+    pub(super) struct Tell(Mutex<Sender<Told>>);
 
     impl Outcomes for Tell {
         fn file_read(&self, _: u32, _: Result<Vec<u8>, FileError>) {}
@@ -473,12 +530,12 @@ mod tests {
     }
 
     /// A home, the folder bateri keeps there, and the files of a view that was offered it.
-    struct Rig {
-        home: PathBuf,
-        folder: Folder,
-        files: ViewFiles,
-        told: Receiver<Told>,
-        marked: Arc<Mutex<Vec<PathBuf>>>,
+    pub(super) struct Rig {
+        pub(super) home: PathBuf,
+        pub(super) folder: Folder,
+        pub(super) files: ViewFiles,
+        pub(super) told: Receiver<Told>,
+        pub(super) marked: Arc<Mutex<Vec<PathBuf>>>,
         _clean: Clean,
     }
 
@@ -492,16 +549,59 @@ mod tests {
     }
 
     impl Rig {
-        fn new(name: &str) -> Self {
+        pub(super) fn new(name: &str) -> Self {
             Self::with_waits(name, Waits::default())
         }
 
-        fn with_waits(name: &str, waits: Waits) -> Self {
+        pub(super) fn with_waits(name: &str, waits: Waits) -> Self {
+            Self::build(name, waits, |home| {
+                let folder = prepare_here(home, "c148d55a").expect("a folder");
+                let way = Way::Here(folder.dir().to_owned());
+                (folder, way)
+            })
+        }
+
+        /// A rig whose folder is the one of a server, made by the script that makes it, and whose
+        /// way is an ssh that runs the commands here.
+        pub(super) fn server(name: &str, waits: Waits) -> Self {
+            Self::build(name, waits, |home| {
+                let folder = crate::kablo::install::prepare_stage(&Sh(home.to_owned()), "c148d55a")
+                    .expect("a folder");
+                let ssh = home.join("ssh");
+                crate::child::tests::write_program(&ssh, &fake_ssh(home));
+                let argv = vec![
+                    ssh.to_string_lossy().into_owned(),
+                    "-T".into(),
+                    "host".into(),
+                ];
+                let dir = folder.dir().to_string_lossy().into_owned();
+                let way = Way::Server(crate::stage::Server::new(dir, Arc::new(Fixed(Some(argv)))));
+                (folder, way)
+            })
+        }
+
+        /// A rig whose way is a server that cannot be reached with no one asked.
+        pub(super) fn unreachable(name: &str, waits: Waits) -> Self {
+            Self::build(name, waits, |home| {
+                let folder = crate::kablo::install::prepare_stage(&Sh(home.to_owned()), "c148d55a")
+                    .expect("a folder");
+                let dir = folder.dir().to_string_lossy().into_owned();
+                let way = Way::Server(crate::stage::Server::new(dir, Arc::new(Fixed(None))));
+                (folder, way)
+            })
+        }
+
+        fn build(
+            name: &str,
+            waits: Waits,
+            folder_and_way: impl FnOnce(&Path) -> (Folder, Way),
+        ) -> Self {
             let home = std::env::temp_dir()
                 .join(format!("bateri-transfers-{name}-{}", std::process::id()));
             let _ = fs::remove_dir_all(&home);
             fs::create_dir_all(&home).expect("a home");
-            let folder = prepare_here(&home, "c148d55a").expect("a folder");
+            let clean = Clean(home.clone());
+            let (folder, way) = folder_and_way(&home);
             let (sender, told) = mpsc::channel();
             let marked = Arc::new(Mutex::new(Vec::new()));
             let mark = Arc::clone(&marked);
@@ -509,10 +609,10 @@ mod tests {
                 Arc::new(Tell(Mutex::new(sender))),
                 Arc::new(move |path: &Path| lock(&mark).push(path.to_owned())),
             )
-            .with_way(Way::Here(folder.dir().to_owned()))
+            .with_way(way)
             .with_waits(waits);
             Self {
-                _clean: Clean(home.clone()),
+                _clean: clean,
                 home,
                 folder,
                 files,
@@ -521,12 +621,17 @@ mod tests {
             }
         }
 
-        fn pipe(&self) -> PathBuf {
+        /// What the fake ssh does from now on (see [`fake_ssh`]).
+        pub(super) fn mode(&self, mode: &str) {
+            fs::write(self.home.join("fake-mode"), mode).expect("a mode");
+        }
+
+        pub(super) fn pipe(&self) -> PathBuf {
             self.folder.dir().join(PIPE)
         }
 
         /// A file the person gave, of `bytes`.
-        fn give(&self, bytes: &[u8]) -> String {
+        pub(super) fn give(&self, bytes: &[u8]) -> String {
             let path = self.home.join("given.bin");
             fs::write(&path, bytes).expect("a file");
             let handle = "1".repeat(32);
@@ -536,27 +641,27 @@ mod tests {
         }
 
         /// A place the person chose to save in.
-        fn place(&self, name: &str) -> (String, PathBuf) {
+        pub(super) fn place(&self, name: &str) -> (String, PathBuf) {
             let target = self.home.join(name);
             let handle = "2".repeat(32);
             self.files.keep_save(&handle, target.clone());
             (handle, target)
         }
 
-        fn next(&self) -> Told {
+        pub(super) fn next(&self) -> Told {
             self.told
                 .recv_timeout(Duration::from_secs(10))
                 .expect("the session was told")
         }
 
         /// Nothing more was told, though the transfer had time to say it.
-        fn nothing_more(&self) {
+        pub(super) fn nothing_more(&self) {
             thread::sleep(Duration::from_millis(150));
             assert_eq!(self.told.try_recv().ok(), None);
         }
 
         /// What is in the folder besides its marker.
-        fn left_in_folder(&self) -> Vec<String> {
+        pub(super) fn left_in_folder(&self) -> Vec<String> {
             let mut names: Vec<String> = fs::read_dir(self.folder.dir())
                 .expect("a listing")
                 .flatten()
@@ -568,7 +673,7 @@ mod tests {
         }
 
         /// Every file in the home's top level that is a part.
-        fn parts(&self) -> Vec<String> {
+        pub(super) fn parts(&self) -> Vec<String> {
             fs::read_dir(&self.home)
                 .expect("a listing")
                 .flatten()
@@ -578,15 +683,72 @@ mod tests {
         }
     }
 
+    /// A channel that runs a script for real with `sh`, in a home of its own.
+    struct Sh(PathBuf);
+
+    impl crate::kablo::install::Channel for Sh {
+        fn run(&self, script: &str, input: &[u8]) -> io::Result<crate::kablo::install::Reply> {
+            let home = crate::upload::sq(&self.0.to_string_lossy());
+            crate::kablo::install::run_command(
+                &[
+                    "sh".into(),
+                    "-c".into(),
+                    format!("cd {home} && HOME={home} {script}"),
+                ],
+                input,
+                Duration::from_secs(20),
+            )
+        }
+    }
+
+    /// The connection a way reaches the server by: this argv, or none.
+    struct Fixed(Option<Vec<String>>);
+
+    impl stage::Reach for Fixed {
+        fn argv(&self) -> Option<Vec<String>> {
+            self.0.clone()
+        }
+
+        fn key(&self) -> String {
+            format!("{:?}", self.0)
+        }
+    }
+
+    /// An ssh that runs its last word (the command) here, in `home`, and does what the file
+    /// `fake-mode` there says besides: `refuse` is a connection that cannot be made, `tee` keeps
+    /// what it is sent, `die-after:N` ends the connection after N bytes of the script's output (`dd` of a byte
+    /// at a time writes what it has read at once, which `head` does not),
+    /// `leave-after:N` after N bytes of what it is sent.
+    fn fake_ssh(home: &Path) -> String {
+        format!(
+            r#"#!/bin/sh
+for last; do :; done
+HOME={home}
+export HOME
+cd "$HOME" || exit 1
+mode=$(cat "$HOME/fake-mode" 2>/dev/null)
+case $mode in
+  refuse) exit 255;;
+  tee) tee "$HOME/stdin-log" | sh -c "$last"; exit $?;;
+  die-after:*) sh -c "$last" | dd bs=1 count="${{mode#die-after:}}" 2>/dev/null; exit 255;;
+  leave-after:*) head -c "${{mode#leave-after:}}" | sh -c "$last"; exit 255;;
+  stall-after:*) sh -c "$last" | dd bs=1 count="${{mode#stall-after:}}" 2>/dev/null; sleep 60; exit 0;;
+esac
+exec sh -c "$last"
+"#,
+            home = crate::upload::sq(&home.to_string_lossy())
+        )
+    }
+
     /// Bytes that are not the same from one piece to the next.
-    fn bytes(len: usize) -> Vec<u8> {
+    pub(super) fn bytes(len: usize) -> Vec<u8> {
         (0..len)
             .map(|at| u8::try_from((at * 31 + at / 251) % 256).unwrap_or(0))
             .collect()
     }
 
     /// What a program does with a pipe it was told of: opens it to read and reads to the end.
-    fn read_pipe(path: PathBuf) -> thread::JoinHandle<Vec<u8>> {
+    pub(super) fn read_pipe(path: PathBuf) -> thread::JoinHandle<Vec<u8>> {
         thread::spawn(move || {
             let mut pipe = File::open(path).expect("the pipe opens");
             let mut got = Vec::new();
@@ -800,7 +962,7 @@ mod tests {
     }
 
     /// Fills the pipe of a fetch with `bytes` and closes it.
-    fn fill(rig: &Rig, bytes: Vec<u8>) -> thread::JoinHandle<()> {
+    pub(super) fn fill(rig: &Rig, bytes: Vec<u8>) -> thread::JoinHandle<()> {
         let path = rig.pipe();
         thread::spawn(move || {
             let mut pipe = fs::OpenOptions::new()

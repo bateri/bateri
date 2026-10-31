@@ -2780,6 +2780,18 @@ impl AppDelegate {
         find_open(self.all_panes(), |pane| (pane.id() == id, pane.is_closed()))
     }
 
+    /// The folder of a server's account is made: every pane that shows a terminal of the
+    /// account offers it ([`TerminalPane::refresh_stage`]).
+    pub(crate) fn stage_ready(&self, account: &str) {
+        for pane in self.all_panes() {
+            let shows = crate::hold_service::shown(pane.uuid())
+                .is_some_and(|shown| shown.account == account);
+            if shows {
+                pane.refresh_stage();
+            }
+        }
+    }
+
     /// All panes of all tabs — the list for the walking paths (settings
     /// distribution, Dock icon, lookup by identity); a copy, like the window list.
     fn all_panes(&self) -> Vec<Retained<TerminalPane>> {

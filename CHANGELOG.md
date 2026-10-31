@@ -213,6 +213,16 @@ of every installed copy. A version without a section is not released.
   deleted. The folder is made when bateri starts; folders of other bateri instances that nobody has
   touched for thirty days are cleared then. A program that does not know the folder gets the frames it
   always got.
+- **A program on a server gets and hands back files the same way, through the connection bateri
+  already keeps to the server.** When a terminal a server keeps shows a program's view, bateri makes
+  a folder only you can open under the server's home (`~/.cache/pencere-stage/`, one for each
+  bateri and server, made once for as long as bateri runs) and the program and the Mac move the file
+  through a named pipe in it, carried by the server's main connection: no file bytes go through the
+  terminal's stream, a big file does not hold the terminal while it moves, and a connection that
+  drops in the middle leaves the program able to ask again from where the file stopped instead of
+  from the start. Closing the view or pressing ⌃C ends the transfer on both machines. A plain `ssh`
+  you started yourself is left as it was: bateri puts nothing on that machine, and the program gets
+  its files in the terminal's stream.
 
 ### Changed
 

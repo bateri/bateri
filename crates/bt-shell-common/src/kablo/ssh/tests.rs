@@ -105,6 +105,7 @@ impl World {
             changed: Box::new(|_| ()),
             program: Box::new(|_| ()),
             listed: Box::new(|_| ()),
+            staged: Box::new(|_| ()),
             mail: None,
             notes: None,
         }

@@ -188,6 +188,10 @@ impl PaneHost for TabHost {
         app::delegate(Self::mtm()).and_then(|app| app.stage_here())
     }
 
+    fn stage_account(&self, account: &str) -> Option<bt_shell_common::stage::Folder> {
+        crate::hold_service::stage_of(account)
+    }
+
     fn view_changed(&self, pane: &bt_core::PaneUuid, open: bool) {
         crate::hold_service::view_changed(pane, open);
     }

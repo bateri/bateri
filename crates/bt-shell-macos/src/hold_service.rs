@@ -154,6 +154,12 @@ pub(crate) fn shown(pane: &PaneUuid) -> Option<Shown> {
     SERVICE.get()?.shown(pane)
 }
 
+/// The folder the server of `account` offers its programs for the bytes of a file, once it is
+/// made ([`Service::stage_of`]); `None` before, and in a process without the service.
+pub(crate) fn stage_of(account: &str) -> Option<bt_shell_common::stage::Folder> {
+    SERVICE.get()?.stage_of(account)
+}
+
 /// The terminals the servers keep for the user that no pane of this Mac shows and no other Mac has
 /// open ([`elsewhere_all`]), the last to write first: what the service last heard, read without waiting for a server
 /// ([`Service::background_all`]). None in a process without the service.
@@ -388,6 +394,21 @@ fn background_changed(_account: &str) {
     });
 }
 
+/// The folder of a server's account is made ([`Backend::stage_ready`]): on the main queue, the
+/// panes that show a terminal of the account offer it to their programs. The step that makes it
+/// ends after the pane's remote edge has run, as often as not — the pane asked for the folder
+/// when the terminal appeared, and it was not there — and nothing else would ask again.
+fn stage_ready(account: &str) {
+    let account = account.to_owned();
+    DispatchQueue::main().exec_async(move || {
+        // audit: a block running on the main queue is on the main thread by definition.
+        let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
+        if let Some(app) = delegate(mtm) {
+            app.stage_ready(&account);
+        }
+    });
+}
+
 /// The pane shows a terminal a server keeps from now on, or no longer: the
 /// pane on the main queue asks its remote edge again ([`TerminalPane::remote_edge`]).
 /// The probe that finds the pane's `ssh-hold` in the process table and the holder
@@ -606,6 +627,7 @@ pub(crate) fn serve(
         changed: Box::new(terminal_changed),
         program: Box::new(program_changed),
         listed: Box::new(background_changed),
+        staged: Box::new(stage_ready),
         mail: Some(Box::new(crate::agent::letter)),
         notes: Some(Box::new(crate::agent::notes)),
     };

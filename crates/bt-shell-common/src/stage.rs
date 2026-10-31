@@ -21,6 +21,7 @@ use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use bt_core::pencere::{StageDir, system_random};
@@ -76,6 +77,102 @@ impl Folder {
 pub enum Way {
     /// The program runs on this Mac: the pipe is a file of the folder here.
     Here(PathBuf),
+    /// The program runs on a server: the pipe is made there by a script that runs through the
+    /// account's main connection, and the bytes ride that connection.
+    Server(Server),
+}
+
+/// The account's main connection, as a transfer asks for it: the ssh argv that uses the
+/// connection the account has, without the command to run. It is asked when a transfer begins and
+/// not when the folder is offered, because the connection that was there when the program started
+/// may have been made again since (and asking may open one, which is why the answer is not
+/// kept).
+pub trait Reach: Send + Sync {
+    /// The argv of the ssh to run, the program first and the destination last; `None` when the
+    /// connection cannot be had without asking the person for a login.
+    fn argv(&self) -> Option<Vec<String>>;
+
+    /// What tells this connection from another one: two offers with the same folder and the same
+    /// key are the same offer.
+    fn key(&self) -> String;
+}
+
+/// The folder of an account's server and the connection its transfers ride.
+#[derive(Clone)]
+pub struct Server {
+    dir: String,
+    reach: Arc<dyn Reach>,
+}
+
+impl Server {
+    /// The folder at `dir` on the server, reached through `reach`.
+    #[must_use]
+    pub fn new(dir: String, reach: Arc<dyn Reach>) -> Self {
+        Self { dir, reach }
+    }
+
+    /// The folder's path on the server.
+    #[must_use]
+    pub fn dir(&self) -> &str {
+        &self.dir
+    }
+
+    /// The argv of the ssh a transfer runs (see [`Reach::argv`]).
+    #[must_use]
+    pub fn argv(&self) -> Option<Vec<String>> {
+        self.reach.argv()
+    }
+}
+
+impl std::fmt::Debug for Server {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Server")
+            .field("dir", &self.dir)
+            .field("reach", &self.reach.key())
+            .finish()
+    }
+}
+
+impl PartialEq for Server {
+    fn eq(&self, other: &Self) -> bool {
+        self.dir == other.dir && self.reach.key() == other.reach.key()
+    }
+}
+
+impl Eq for Server {}
+
+/// The connection of a pane that shows a terminal a server keeps: the account's main connection
+/// by the gate every job of bateri's on a server goes through ([`crate::ssh_route::dial`]), and
+/// never with a question to the person.
+pub struct Through {
+    masters: Option<Arc<crate::ssh_route::Masters>>,
+    target: bt_core::RemoteTarget,
+}
+
+impl Through {
+    /// The connection to `target`; `masters` is `None` in a run that keeps none.
+    #[must_use]
+    pub fn new(
+        masters: Option<Arc<crate::ssh_route::Masters>>,
+        target: bt_core::RemoteTarget,
+    ) -> Self {
+        Self { masters, target }
+    }
+}
+
+impl Reach for Through {
+    fn argv(&self) -> Option<Vec<String>> {
+        crate::ssh_route::dial(
+            self.masters.as_deref(),
+            &self.target,
+            crate::ssh_route::Ask::Never,
+        )
+        .ok()
+    }
+
+    fn key(&self) -> String {
+        format!("{}\0{}", self.target.host, self.target.argv.join("\0"))
+    }
 }
 
 /// What a pane offers its programs: the folder as the `welcome` names it, and the way of getting
@@ -97,6 +194,35 @@ impl Offered {
             way: Way::Here(folder.dir().to_owned()),
         })
     }
+
+    /// The folder of a server, as it is offered to a program that runs there; `None` for a path
+    /// that a script cannot be trusted with (see [`is_plain_path`]).
+    #[must_use]
+    pub fn server(folder: &Folder, reach: Arc<dyn Reach>) -> Option<Self> {
+        let dir = folder.dir().to_str().filter(|dir| is_plain_path(dir))?;
+        Some(Self {
+            dir: folder.offer()?,
+            way: Way::Server(Server::new(dir.to_owned(), reach)),
+        })
+    }
+}
+
+/// Whether `path` can enter the scripts bateri runs on a server as it is, with no quoting at all:
+/// absolute, and made of the characters of a path that nobody has to quote for any shell. The
+/// folder comes from the server (the script says where it is) and is part of a command: the
+/// path of a home that has anything else in it is not offered a folder.
+#[must_use]
+pub fn is_plain_path(path: &str) -> bool {
+    path.starts_with('/')
+        && path.len() <= 1024
+        && !path.contains("//")
+        && path.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(
+                    byte,
+                    b'/' | b'.' | b'_' | b'-' | b'+' | b'@' | b',' | b':' | b'='
+                )
+        })
 }
 
 /// The folder of the instance `instance` of bateri under `home`, made anew: whatever an earlier
@@ -179,6 +305,42 @@ pub fn is_instance(name: &str) -> bool {
         && name
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+/// The name of the folder the instance `instance` of bateri keeps on the server of `account`, from
+/// the computer `machine`: the instance's and a hash of the account's key and the computer's name.
+/// Two accounts of one user on one machine (a server reached by two names) have one home between
+/// them, and so have two computers of one user (the instance is a hash of a path, the same on both
+/// when the user's name is): each would otherwise remove the other's folder, and the pipes in it,
+/// when it made its own. FNV-1a, like the instance's own name: it must come out the same in every
+/// run.
+#[must_use]
+pub fn folder_name(instance: &str, account: &str, machine: &str) -> String {
+    let hash = account
+        .bytes()
+        .chain(std::iter::once(0))
+        .chain(machine.bytes())
+        .fold(0x811c_9dc5_u32, |hash, byte| {
+            (hash ^ u32::from(byte)).wrapping_mul(0x0100_0193)
+        });
+    format!("{instance}{hash:08x}")
+}
+
+/// The name this computer gives itself (empty if it gives none): what tells it from another
+/// computer of the same user, for [`folder_name`].
+#[must_use]
+pub fn this_machine() -> String {
+    let mut name = [0_u8; 256];
+    // SAFETY: the buffer lives for the call, and its length is the one passed.
+    let status = unsafe { libc::gethostname(name.as_mut_ptr().cast(), name.len()) };
+    if status != 0 {
+        return String::new();
+    }
+    let end = name
+        .iter()
+        .position(|&byte| byte == 0)
+        .unwrap_or(name.len());
+    String::from_utf8_lossy(&name[..end]).into_owned()
 }
 
 /// Whether `name` is a name the session gives a pipe: 32 lowercase hex digits. A pipe's path is
@@ -269,6 +431,26 @@ pub fn open_pipe(path: &Path, reading: bool) -> io::Result<File> {
         .write(!reading)
         .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW)
         .open(path)
+}
+
+/// `file` made one whose reads and writes do not wait: a read with nothing to read, and a write
+/// to a pipe that is full, fail with `WouldBlock` instead.
+///
+/// # Errors
+///
+/// The system's.
+pub fn nonblocking(file: &File) -> io::Result<()> {
+    let fd: RawFd = file.as_raw_fd();
+    // SAFETY: `fcntl` with `F_GETFL` takes only a descriptor, which `file` keeps open.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `F_SETFL` takes the flags just read, with one more; the descriptor is `file`'s.
+    if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 /// Waits up to `millis` for `file` to be ready to read (`reading`) or to write.
@@ -376,6 +558,31 @@ mod tests {
             "nothing was written where the link went"
         );
         assert!(folder.dir().join(MARKER).is_file());
+    }
+
+    #[test]
+    fn two_accounts_of_one_machine_have_folders_of_their_own_and_each_keeps_its_name() {
+        let first = folder_name("c148d55a", "u@rasp:22", "laptop");
+        let second = folder_name("c148d55a", "u@rasp.local:22", "laptop");
+        assert_ne!(first, second);
+        assert_eq!(first, folder_name("c148d55a", "u@rasp:22", "laptop"));
+        assert_eq!(first.len(), 16);
+        assert!(is_instance(&first), "{first}");
+        assert!(first.starts_with("c148d55a"));
+    }
+
+    #[test]
+    fn two_computers_of_one_user_have_folders_of_their_own_on_the_one_server() {
+        let laptop = folder_name("c148d55a", "u@rasp:22", "laptop");
+        let desktop = folder_name("c148d55a", "u@rasp:22", "desktop");
+        assert_ne!(laptop, desktop);
+        assert!(is_instance(&desktop), "{desktop}");
+        // "ab"+"c" and "a"+"bc" are not one name.
+        assert_ne!(
+            folder_name("c148d55a", "ab", "c"),
+            folder_name("c148d55a", "a", "bc")
+        );
+        assert!(!this_machine().contains('\0'));
     }
 
     #[test]

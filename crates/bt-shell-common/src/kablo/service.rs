@@ -379,6 +379,19 @@ pub trait Backend: Send + Sync + 'static {
     /// per account per run.
     fn files(&self, _server: &KabloHost, _installed: &Installed) {}
 
+    /// Makes the folder a program on the server may be offered for the bytes of a file
+    /// ([`crate::stage`]) and returns it: through the account's main connection, once per account
+    /// per run, on a thread of its own and after the step it follows has answered, so that no one
+    /// waits for it. `None`: the server would not, or there is no folder to offer (the timed run);
+    /// the next terminal of the account tries again.
+    fn stage_folder(&self, _server: &KabloHost) -> Option<crate::stage::Folder> {
+        None
+    }
+
+    /// The folder of `account` ([`Backend::stage_folder`]) is made: the panes that show its
+    /// terminals offer it to their programs from now on. Told from the thread that made it.
+    fn stage_ready(&self, _account: &str) {}
+
     /// Starts the bridge to the server.
     fn carry(&self, server: &KabloHost, installed: &Installed) -> io::Result<Carried>;
 
@@ -962,6 +975,8 @@ pub struct Service {
     exited: Arc<Mutex<BTreeMap<String, Vec<SessionId>>>>,
     /// When a pane last gave up waiting for a terminal of this Mac ([`Service::open_local`]).
     local_gave_up: Mutex<Option<Instant>>,
+    /// What [`Service::stage_of`] reads.
+    stages: Arc<Mutex<HashMap<String, Staged>>>,
 }
 
 /// How long a terminal that was asked to hang up has before it is killed.
@@ -1033,11 +1048,13 @@ impl Service {
         let shown = Arc::new(Mutex::new(HashMap::new()));
         let background = Arc::new(Mutex::new(BTreeMap::new()));
         let exited = Arc::new(Mutex::new(BTreeMap::new()));
+        let stages = Arc::new(Mutex::new(HashMap::new()));
         let core = Core {
             shared: Arc::new(Shared {
                 backend,
                 tx: tx.clone(),
                 ledger,
+                stages: Arc::clone(&stages),
             }),
             hub: Hub::new(),
             conns: BTreeMap::new(),
@@ -1080,6 +1097,7 @@ impl Service {
             background,
             exited,
             local_gave_up: Mutex::new(None),
+            stages,
         })
     }
 
@@ -1094,6 +1112,20 @@ impl Service {
             .unwrap_or_else(|e| e.into_inner())
             .get(pane)
             .cloned()
+    }
+
+    /// The folder for a program's files on the server of `account`, once it is made
+    /// ([`Backend::stage_folder`]); `None` before, and for an account of this Mac.
+    pub fn stage_of(&self, account: &str) -> Option<crate::stage::Folder> {
+        match self
+            .stages
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(account)?
+        {
+            Staged::Ready(folder) => Some(folder.clone()),
+            Staged::Making => None,
+        }
     }
 
     /// The terminals the server of `account` keeps for the user that no pane of this Mac shows and
@@ -1457,6 +1489,49 @@ struct Shared {
     backend: Arc<dyn Backend>,
     tx: Sender<Msg>,
     ledger: Arc<Ledger>,
+    /// The folder of each server account for a program's files, as it is made
+    /// ([`Service::stage_of`]).
+    stages: Arc<Mutex<HashMap<String, Staged>>>,
+}
+
+/// An account's folder for a program's files.
+enum Staged {
+    /// A thread is making it.
+    Making,
+    /// It is made, for as long as the service lives.
+    Ready(crate::stage::Folder),
+}
+
+impl Shared {
+    /// Makes the folder of `server`'s account if it is not made and no one is making it
+    /// ([`Backend::stage_folder`]), and tells the backend when it is. **After** the answer of
+    /// whatever step it follows: the folder is for the next view a program opens, not for the
+    /// terminal that is being started. A server's only: the Mac's programs have the folder the
+    /// application made for them.
+    fn stage_account(&self, server: &KabloHost) {
+        if local::is_account(&server.key) {
+            return;
+        }
+        {
+            let mut stages = self.stages.lock().unwrap_or_else(PoisonError::into_inner);
+            if stages.contains_key(&server.key) {
+                return;
+            }
+            stages.insert(server.key.clone(), Staged::Making);
+        }
+        let folder = self.backend.stage_folder(server);
+        let mut stages = self.stages.lock().unwrap_or_else(PoisonError::into_inner);
+        match folder {
+            Some(folder) => {
+                stages.insert(server.key.clone(), Staged::Ready(folder));
+                drop(stages);
+                self.backend.stage_ready(&server.key);
+            }
+            None => {
+                stages.remove(&server.key);
+            }
+        }
+    }
 }
 
 /// Everything the loop owns.
@@ -2746,11 +2821,18 @@ impl Core {
                         let outcome = shared
                             .backend
                             .carry(&server, refreshed.as_ref().unwrap_or(&installed));
+                        let reached = outcome.is_ok();
                         let _ = shared.tx.send(Msg::Dialed {
                             account,
                             outcome,
                             refreshed,
                         });
+                        // The terminals this account keeps are shown again: their programs'
+                        // folder is made once the bridge is on its way. Not for a server that
+                        // could not be reached, whose every redial would run it again.
+                        if reached {
+                            shared.stage_account(&server);
+                        }
                     }
                 })
                 .is_ok();
@@ -3351,8 +3433,14 @@ impl Core {
             .spawn({
                 let shared = Arc::clone(&shared);
                 move || {
-                    let outcome = prepare(&shared, hold, server, &pane, numbered);
+                    let outcome = prepare(&shared, hold, server.clone(), &pane, numbered);
+                    let made = outcome.is_ok();
                     let _ = shared.tx.send(Msg::Prepared { hold, outcome });
+                    // After the answer: the account is there and a program's folder is made
+                    // while the terminal starts.
+                    if made {
+                        shared.stage_account(&server);
+                    }
                 }
             });
         if spawned.is_err() {
@@ -3381,6 +3469,7 @@ impl Core {
                     true
                 });
                 let number = shared.backend.number(&server);
+                let counted = number.is_some();
                 let _ = shared.tx.send(Msg::Numbered {
                     hold,
                     account,
@@ -3388,6 +3477,10 @@ impl Core {
                     number,
                     filed,
                 });
+                // A server that counted is a server that answers.
+                if counted {
+                    shared.stage_account(&server);
+                }
             })
             .is_ok()
     }
