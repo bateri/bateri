@@ -1047,7 +1047,7 @@ fn typing_goes_to_the_program_in_order_and_is_refused_where_it_cannot_arrive() {
 }
 
 /// The most bytes of a terminal's input that may be on the way (the contract, spelled out).
-const WINDOW: usize = 256 * 1024;
+const WINDOW: usize = 512 * 1024;
 
 /// The bytes of the `input` messages the bridge was sent for a terminal.
 fn typed_so_far(rig: &Rig, terminal: &SessionId) -> usize {
@@ -1094,6 +1094,94 @@ fn typing_beyond_the_window_waits_here_and_goes_as_the_terminal_takes_it() {
     assert_eq!(asked, 4);
 }
 
+/// How many questions about input the client has asked of the server for a terminal.
+fn questions(rig: &Rig, terminal: &SessionId) -> usize {
+    rig.bridge
+        .received
+        .iter()
+        .filter(|p| matches!(p.message, Message::Ping(_)) && p.session.as_ref() == Some(terminal))
+        .count()
+}
+
+#[test]
+fn keys_typed_at_a_program_that_does_not_read_do_not_fill_the_servers_questions() {
+    // The server keeps a thousand questions of a client and ends the terminal past them.
+    let (mut rig, terminal) = Rig::with_terminal(Age::Current, "t1");
+    rig.bridge.stall();
+    for _ in 0..5000 {
+        assert!(rig.client.input(&terminal, b"k"));
+    }
+    rig.pump();
+    assert_eq!(typed_so_far(&rig, &terminal), 5000, "every key went");
+    assert!(
+        questions(&rig, &terminal) <= 9,
+        "{}",
+        questions(&rig, &terminal)
+    );
+    // Nor do pieces of a few kilobytes, up to the whole window.
+    let before = questions(&rig, &terminal);
+    for _ in 0..100 {
+        assert!(rig.client.input(&terminal, &[b'x'; 5000]));
+    }
+    rig.pump();
+    assert_eq!(typed_so_far(&rig, &terminal), 505_000);
+    assert!(questions(&rig, &terminal) - before <= 9);
+}
+
+#[test]
+fn a_lone_key_goes_at_once_with_one_question() {
+    let (mut rig, terminal) = Rig::with_terminal(Age::Current, "t1");
+    rig.bridge.stall();
+    assert!(rig.client.input(&terminal, b"k"));
+    rig.pump();
+    assert_eq!(rig.bridge.typed(&terminal), b"k");
+    assert_eq!(questions(&rig, &terminal), 1);
+}
+
+#[test]
+fn what_no_question_covers_is_asked_about_when_the_answer_before_it_comes() {
+    // Two pieces, the second sent while the first is not answered: it has no question of its
+    // own, and without one asked once the first is answered the window would never return it.
+    let (mut rig, terminal) = Rig::with_terminal(Age::Current, "t1");
+    rig.bridge.stall();
+    assert!(rig.client.input(&terminal, &[b'a'; 100]));
+    assert!(rig.client.input(&terminal, &[b'b'; 100]));
+    rig.pump();
+    assert_eq!(questions(&rig, &terminal), 1);
+    rig.bridge.take(1);
+    rig.pump();
+    assert_eq!(questions(&rig, &terminal), 2, "the rest is asked about");
+    assert_eq!(rig.bridge.held(), 1);
+    rig.bridge.take(1);
+    rig.pump();
+    assert_eq!(rig.bridge.held(), 0);
+}
+
+#[test]
+fn a_full_window_is_not_stuck_by_a_piece_no_question_covers() {
+    let (mut rig, terminal) = Rig::with_terminal(Age::Current, "t1");
+    rig.bridge.stall();
+    // One key, then a paste that fills the window with one byte to spare.
+    assert!(rig.client.input(&terminal, b"k"));
+    let paste = vec![b'x'; WINDOW];
+    assert!(rig.client.input(&terminal, &paste));
+    rig.pump();
+    assert_eq!(typed_so_far(&rig, &terminal), WINDOW);
+    assert_eq!(rig.client.input_waiting(&terminal), 1);
+    // The answers come one at a time, and each one lets the next piece go and be asked about.
+    for _ in 0..4 {
+        if rig.bridge.held() == 0 {
+            break;
+        }
+        rig.bridge.take(1);
+        rig.pump();
+    }
+    assert_eq!(rig.client.input_waiting(&terminal), 0);
+    assert_eq!(typed_so_far(&rig, &terminal), WINDOW + 1);
+    assert_eq!(rig.bridge.held(), 0, "all asked about were answered");
+    assert_eq!(questions(&rig, &terminal), 3);
+}
+
 #[test]
 fn a_key_typed_while_the_window_has_room_is_not_made_to_wait() {
     let (mut rig, terminal) = Rig::with_terminal(Age::Current, "t1");
@@ -1124,9 +1212,11 @@ fn a_lost_connection_forgets_what_was_on_the_way_and_what_waited() {
     assert!(rig.client.is_attached(&terminal), "{:?}", rig.events);
     // The window is empty on the new connection: a key goes at once.
     let before = typed_so_far(&rig, &terminal);
+    let asked = questions(&rig, &terminal);
     assert!(rig.client.input(&terminal, b"k"));
     rig.pump();
     assert_eq!(typed_so_far(&rig, &terminal), before + 1);
+    assert_eq!(questions(&rig, &terminal), asked + 1, "asked on its own");
 }
 
 #[test]

@@ -1071,6 +1071,7 @@ fn demopen_options(home: &Path) -> bt_core::SessionOptions {
 
 /// Has the program receive `size` bytes of a file the pane gives it, and says how long it took
 /// (from the call to its answer), the way the pane's turn drives the session.
+#[allow(clippy::too_many_arguments)]
 fn receive_time(
     label: &str,
     session: &Arc<bt_core::Session>,
@@ -1079,6 +1080,8 @@ fn receive_time(
     dir: &Path,
     source: &Path,
     content: &[u8],
+    remote_to: Option<&str>,
+    before: &dyn Fn(),
 ) -> Duration {
     use bt_core::pencere::{Action, FileGrant};
     use std::sync::atomic::Ordering;
@@ -1119,7 +1122,7 @@ fn receive_time(
         .grant_file(&FileGrant { size: given.size })
         .expect("a handle");
     files.keep_given(&handle, given);
-    let into = dir.join(format!("received-{label}"));
+    let into = remote_to.map_or_else(|| dir.join(format!("received-{label}")), PathBuf::from);
     let request = format!(
         r#"{{"call":{{"id":1,"method":"receive","params":{{"handle":"{handle}","to":"{}"}}}}}}"#,
         into.display()
@@ -1128,6 +1131,7 @@ fn receive_time(
         .ok()
         .and_then(|text| text.parse().ok())
         .unwrap_or(600);
+    before();
     let since = Instant::now();
     assert!(session.module_message(&request), "the view is open");
     while !said
@@ -1158,7 +1162,7 @@ fn receive_time(
     }
     let took = since.elapsed();
     assert!(
-        std::fs::read(&into).is_ok_and(|bytes| bytes == content),
+        remote_to.is_some() || std::fs::read(&into).is_ok_and(|bytes| bytes == content),
         "[{label}] not as given"
     );
     took
@@ -1218,6 +1222,8 @@ fn measure_file_receive_direct_pty_and_kablo() {
             &ground.root,
             &source,
             &content,
+            None,
+            &|| {},
         );
         report("direct PTY (Session::spawn)", took, size);
         session.shutdown();
@@ -1265,10 +1271,358 @@ fn measure_file_receive_direct_pty_and_kablo() {
             &ground.root,
             &source,
             &content,
+            None,
+            &|| {},
         );
         report("kablo terminal (Session::streamed)", took, size);
         service.end_all(std::slice::from_ref(&pane), Duration::from_secs(10));
         drop(session);
         service.stop();
     }
+}
+
+/// What the ssh measurement keeps on the server: one directory below `/tmp`, named, made by the
+/// measurement and removed with it. kablo's sockets (`KABLO_DIR`), its home and its binary are
+/// all below it; the user's own kablo and its terminals are not looked at.
+struct RaspDir {
+    host: String,
+    dir: String,
+    made: Vec<SessionId>,
+    /// A file of this measurement outside the directory, removed with it.
+    extra: Option<String>,
+}
+
+impl RaspDir {
+    fn ssh(&self) -> Command {
+        let mut command = Command::new("ssh");
+        command.args([
+            "-T",
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ControlMaster=no",
+            &self.host,
+        ]);
+        command
+    }
+
+    /// Runs a script on the server, with its standard input from `input`.
+    fn run(&self, script: &str, input: Stdio) -> (Option<i32>, String) {
+        let output = self.ssh().arg(script).stdin(input).output().expect("ssh");
+        (
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout).into_owned(),
+        )
+    }
+
+    fn put(&self, local: &Path, name: &str) {
+        let file = std::fs::File::open(local).expect("a file to put");
+        let script = format!(
+            "cat > {dir}/{name} && chmod 755 {dir}/{name}",
+            dir = self.dir
+        );
+        let (status, _) = self.run(&script, Stdio::from(file));
+        assert_eq!(status, Some(0), "put {name}");
+    }
+
+    /// The environment kablo has on the server, as words of a script.
+    fn env(&self) -> String {
+        format!(
+            "env HOME={dir}/h KABLO_DIR={dir}/s KABLO_TEST_END_KEEP_MS={keep}",
+            dir = self.dir,
+            keep = if std::env::var_os("BT_SSH_KEEP").is_some() {
+                600_000
+            } else {
+                200
+            }
+        )
+    }
+}
+
+impl Drop for RaspDir {
+    fn drop(&mut self) {
+        if std::env::var_os("BT_SSH_KEEP").is_some() {
+            eprintln!("MEASURE kept: {}", self.dir);
+            return;
+        }
+        let (_, err) = self.run(
+            &format!("cat {}/attach.err 2>/dev/null | tail -5", self.dir),
+            Stdio::null(),
+        );
+        if !err.trim().is_empty() {
+            eprintln!("MEASURE attach.err: {}", err.trim());
+        }
+        // The terminals this measurement made, by name; then its own directory, and nothing else.
+        let kablo = format!("{}/h/.local/share/kablo", self.dir);
+        for id in &self.made {
+            let script = format!(
+                "{} {kablo}/*/kablo end --force {} >/dev/null 2>&1",
+                self.env(),
+                id.as_str()
+            );
+            let _ = self.run(&script, Stdio::null());
+        }
+        // What `end` did not reach, by process id and only if its command line names this directory.
+        let leftover = format!(
+            "for p in $(pgrep -f '[b]t-ssh-meas-{}/'); do kill $p; done",
+            std::process::id()
+        );
+        let _ = self.run(&leftover, Stdio::null());
+        if let Some(file) = &self.extra
+            && file.contains("/bt-ssh-meas-")
+            && file.ends_with(".recv")
+        {
+            let _ = self.run(&format!("rm -f {file}"), Stdio::null());
+        }
+        if self.dir.starts_with("/tmp/bt-ssh-meas") && self.dir.len() > "/tmp/bt-ssh-meas".len() {
+            let _ = self.run(&format!("rm -rf {}", self.dir), Stdio::null());
+        }
+    }
+}
+
+/// This Mac's service, with a server for the one account it keeps: the bridge is `ssh`, the
+/// kablo is the one put below the measurement's directory, its sockets are that directory's.
+struct RaspBackend {
+    rasp: Arc<Mutex<RaspDir>>,
+    version: String,
+}
+
+impl Backend for RaspBackend {
+    fn pane(&self, _: &Peer) -> Option<PaneInfo> {
+        None
+    }
+    fn route(&self, _: &[String]) -> Option<KabloHost> {
+        None
+    }
+    fn master(&self, _: &KabloHost) -> Result<Option<Vec<Vec<u8>>>, Refusal> {
+        Ok(None)
+    }
+    fn master_made(&self, _: &KabloHost, _: u8) -> Result<(), Refusal> {
+        Ok(())
+    }
+    fn install(&self, _: &KabloHost, _: &[SessionId]) -> Result<Installed, Refusal> {
+        Ok(Installed {
+            target: kablo_proto::install::Target::LinuxAarch64,
+            version: self.version.clone(),
+            path: kablo_proto::install::install_path(&self.version)
+                .map_err(|_| Refusal::plain())?,
+            fresh: false,
+        })
+    }
+    fn version(&self) -> Option<String> {
+        Some(self.version.clone())
+    }
+    fn carry(&self, _: &KabloHost, installed: &Installed) -> io::Result<Carried> {
+        let rasp = self.rasp.lock().unwrap_or_else(|e| e.into_inner());
+        let mut command = rasp.ssh();
+        command.arg(format!(
+            "{} {}/h/{} attach 2>>{}/attach.err",
+            rasp.env(),
+            rasp.dir,
+            installed.path,
+            rasp.dir
+        ));
+        start(command)
+    }
+}
+
+/// The same file, received by the same program on a server over ssh: `ssh <host>` carries
+/// `kablo attach`, the terminal is `demopen --files` on the server, the file is on this Mac and
+/// is read by handle. Needs `BT_SSH_DEMOPEN` (demopen built for the server, aarch64 musl) and the
+/// server's kablo from the release (`KABLO_DIST`); `BT_SSH_HOST` (`rasp`), `BT_MEASURE_MIB` (50),
+/// `BT_MEASURE_TIMEOUT_S` (600). Everything it makes on the server is below `/tmp/bt-ssh-meas-<pid>`.
+#[test]
+#[ignore = "measurement: starts real processes on a server and moves tens of megabytes over ssh"]
+fn measure_file_receive_over_ssh() {
+    let Some(bundle) = release() else {
+        eprintln!("SKIPPED: there is no kablo release to run");
+        return;
+    };
+    let Some(demopen) = std::env::var_os("BT_SSH_DEMOPEN").map(PathBuf::from) else {
+        eprintln!("SKIPPED: BT_SSH_DEMOPEN is not set");
+        return;
+    };
+    let host = std::env::var("BT_SSH_HOST").unwrap_or_else(|_| "rasp".to_owned());
+    let mib: usize = std::env::var("BT_MEASURE_MIB")
+        .ok()
+        .and_then(|text| text.parse().ok())
+        .unwrap_or(50);
+    let size = mib << 20;
+    let mut ground = Ground::new("measure-ssh");
+    let source = ground.root.join("given");
+    let content: Vec<u8> = (0..size)
+        .map(|at| u8::try_from(at % 251).unwrap_or(0))
+        .collect();
+    std::fs::write(&source, &content).expect("a file");
+
+    let dir = format!("/tmp/bt-ssh-meas-{}", std::process::id());
+    let rasp = Arc::new(Mutex::new(RaspDir {
+        host,
+        dir: dir.clone(),
+        made: Vec::new(),
+        extra: None,
+    }));
+    let version = bundle.version().to_owned();
+    {
+        let rasp = rasp.lock().expect("lock");
+        let (status, said) = rasp.run(
+            &format!(
+                "mkdir -m 700 {dir} && mkdir -m 700 {dir}/s && mkdir -p {dir}/h/.local/share/kablo/{version} && uname -m"
+            ),
+            Stdio::null(),
+        );
+        assert_eq!(status, Some(0), "the directory on the server");
+        assert_eq!(said.trim(), "aarch64");
+        let artifact = bundle
+            .artifact(kablo_proto::install::Target::LinuxAarch64)
+            .expect("a kablo for the server");
+        rasp.put(
+            &artifact.path,
+            &format!("h/.local/share/kablo/{version}/kablo"),
+        );
+        rasp.put(&demopen, "demopen");
+    }
+
+    if std::env::var_os("BT_SSH_RAW").is_some() {
+        // The same bytes through a bare `ssh host cat`, with the handshake taken off.
+        let (host, _) = {
+            let rasp = rasp.lock().expect("lock");
+            (rasp.host.clone(), ())
+        };
+        let hello = Instant::now();
+        let _ = Command::new("ssh")
+            .args(["-T", "-o", "BatchMode=yes", &host, "true"])
+            .status();
+        let hello = hello.elapsed();
+        let file = std::fs::File::open(&source).expect("the file");
+        let begun = Instant::now();
+        let _ = Command::new("ssh")
+            .args(["-T", "-o", "BatchMode=yes", &host, "cat >/dev/null"])
+            .stdin(Stdio::from(file))
+            .status();
+        let all = begun.elapsed();
+        let net = all.saturating_sub(hello);
+        eprintln!(
+            "MEASURE raw ssh cat: {mib} MiB in {:.2} s (handshake {:.2} s) = {:.2} MiB/s net, {:.2} MiB/s with the handshake",
+            all.as_secs_f64(),
+            hello.as_secs_f64(),
+            mib as f64 / net.as_secs_f64(),
+            mib as f64 / all.as_secs_f64()
+        );
+    }
+    let service_dir = ground.root.join("svc");
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&service_dir)
+        .expect("the service's directory");
+    let backend = RaspBackend {
+        rasp: Arc::clone(&rasp),
+        version,
+    };
+    let ledger = Arc::new(Ledger::memory());
+    let service =
+        Service::start(&service_dir, Arc::new(backend), Arc::clone(&ledger)).expect("a service");
+    let options = demopen_options(&ground.home);
+    let (mut spec, term_size) = new_session(&options.child_launch(), 1000);
+    spec.argv = [
+        "/bin/sh",
+        "-c",
+        "sleep 5; set -m; \"$1\" --files",
+        "sh",
+        &format!("{dir}/demopen"),
+    ]
+    .iter()
+    .map(|arg| arg.as_bytes().to_vec())
+    .collect();
+    spec.env.retain(|(name, _)| name != b"PWD");
+    spec.env.push((b"PATH".to_vec(), b"/usr/bin:/bin".to_vec()));
+    spec.cwd = Some(dir.clone().into_bytes());
+    let pane = options.pane_uuid.clone().expect("a pane");
+    let stream = service
+        .open_local(&pane, spec, term_size, Duration::from_secs(60))
+        .expect("a terminal on the server");
+    let id = ledger.terminals_of(ACCOUNT).remove(0);
+    rasp.lock().expect("lock").made.push(id);
+    let wake = PaneFlag::default();
+    let pending = Arc::clone(&wake.pending);
+    let exited = Arc::clone(&wake.exited);
+    let session = Arc::new(
+        bt_core::Session::streamed(options, Arc::new(wake), stream)
+            .expect("a session over the stream"),
+    );
+    // `BT_SSH_RECV=/dev/shm`: the file lands in memory on the server (the disk there is slow).
+    let remote_file = match std::env::var("BT_SSH_RECV") {
+        Ok(place) => format!("{place}/bt-ssh-meas-{}.recv", std::process::id()),
+        Err(_) => format!("{dir}/received"),
+    };
+    rasp.lock().expect("lock").extra = Some(remote_file.clone());
+    let top: Mutex<Option<thread::JoinHandle<io::Result<String>>>> = Mutex::new(None);
+    let mac_top: Mutex<Option<thread::JoinHandle<io::Result<String>>>> = Mutex::new(None);
+    let begin_top = || {
+        if std::env::var_os("BT_MAC_TOP").is_some() {
+            *mac_top.lock().expect("lock") = Some(thread::spawn(|| {
+                Command::new("sh")
+                    .args(["-c", "top -l 6 -s 2 -o cpu -n 7 -stats pid,command,cpu | grep -E 'CPU usage|ssh|cloudflared|bt_shell|PID' | tail -n +4"])
+                    .output()
+                    .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            }));
+        }
+        if std::env::var_os("BT_SSH_TOP").is_none() {
+            return;
+        }
+        let mut command = rasp.lock().expect("lock").ssh();
+        command.arg("top -b -n 9 -d 2 -w 200 -o %CPU | awk '/%Cpu/{print} /^ *[0-9]+ /{ if ($9+0>=1.0) print }'");
+        *top.lock().expect("lock") = Some(thread::spawn(move || {
+            command
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        }));
+    };
+    let took = receive_time(
+        "ssh",
+        &session,
+        &pending,
+        &exited,
+        &ground.root,
+        &source,
+        &content,
+        Some(&remote_file),
+        &begin_top,
+    );
+    report("kablo terminal over ssh (Session::streamed)", took, size);
+    if let Some(top) = mac_top.lock().expect("lock").take() {
+        eprintln!(
+            "MEASURE mac top:\n{}",
+            top.join().ok().and_then(Result::ok).unwrap_or_default()
+        );
+    }
+    if let Some(top) = top.lock().expect("lock").take() {
+        eprintln!(
+            "MEASURE top (2 s samples, the first is since boot):\n{}",
+            top.join().ok().and_then(Result::ok).unwrap_or_default()
+        );
+    }
+    // What arrived is what was given: the size and the sum, on the server and here.
+    let (_, there) = rasp
+        .lock()
+        .expect("lock")
+        .run(&format!("md5sum < {remote_file}"), Stdio::null());
+    let here = Command::new("md5")
+        .arg("-q")
+        .arg(&source)
+        .output()
+        .expect("md5");
+    eprintln!(
+        "MEASURE sums: server {} / here {}",
+        there.trim(),
+        String::from_utf8_lossy(&here.stdout).trim()
+    );
+    assert!(
+        there.starts_with(String::from_utf8_lossy(&here.stdout).trim()),
+        "not as given"
+    );
+    ground.kept = None;
+    service.end_all(std::slice::from_ref(&pane), Duration::from_secs(10));
+    drop(session);
+    service.stop();
 }

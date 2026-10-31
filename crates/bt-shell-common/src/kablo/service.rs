@@ -839,7 +839,8 @@ enum Out {
 /// the pane's connection is not read: the pane's writer waits for the socket, and the pane's
 /// own flow control reaches whatever it is writing. About four windows
 /// ([`crate::kablo::INPUT_WINDOW`]), so that a burst the window cannot take at once is held here and
-/// not spread over the memory of the process.
+/// not spread over the memory of the process (2 MiB for a window of 512 KiB, a pane's reader
+/// shut at 2 MiB and open again at 512 KiB).
 const INPUT_HOLD: usize = 4 * crate::kablo::INPUT_WINDOW;
 
 /// Where a pane's connection that is not being read is read again: one window waits.

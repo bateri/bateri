@@ -124,12 +124,18 @@ const INPUT_CHUNK: usize = 256 * 1024;
 /// Neither the bridge (which keeps a megabyte of what it has not passed on) nor the session
 /// (a megabyte of what its program has not read) may be asked to hold more than they can: they
 /// drop what does not fit, and say so without saying what, so a sender that does not hold back
-/// loses input without knowing which. A quarter of a megabyte leaves each of them room for the
-/// window and for what other clients of the session type meanwhile, and is large enough that a
-/// round trip of the slowest link (a second, at a few megabytes a second) does not stop a
-/// paste: the window is also what a transfer moves per round trip, so the figure is a cost to
-/// throughput on a slow link, and `INPUT_CHUNK` is its upper bound.
-pub const INPUT_WINDOW: usize = 256 * 1024;
+/// loses input without knowing which. Half a megabyte leaves each of them room for the window
+/// and for what other clients of the session type meanwhile. The window is also what a transfer
+/// moves per round trip, so the figure is the speed of a link with a long round trip: measured
+/// over ssh to a Raspberry Pi, a window of 256 KiB moved 3.2-3.8 MiB/s, one of 512 KiB 5.1, one
+/// of a megabyte 5.2-5.8 (and left no room under the limit), and one of 4 MiB killed the terminal.
+pub const INPUT_WINDOW: usize = 512 * 1024;
+
+/// How many bytes of input may go before the next question about them is asked while an earlier
+/// one is still waiting: the server keeps only so many questions of a client (a thousand), and a
+/// question per key typed into a program that does not read would fill them. With this, at
+/// most nine wait (eight of this size and the first, which is asked whatever its size).
+const INPUT_PING_EVERY: usize = INPUT_WINDOW / 8;
 
 /// How long to wait for the signature of the server's hello before giving up
 /// on what has piled up: the noise the protocol skips, and the hello itself.
@@ -491,8 +497,10 @@ struct Terminal {
 struct Input {
     /// Bytes sent that no answer has covered yet.
     in_flight: usize,
+    /// Bytes sent after the last question, which no question covers yet.
+    unasked: usize,
     /// The questions asked of the server, oldest first: the token each carried (the `pong`
-    /// brings it back) and the bytes it covers.
+    /// brings it back) and the bytes it covers: all that went since the question before it.
     asked: VecDeque<(u64, usize)>,
     /// Bytes that wait for the window, in the order they were typed.
     waiting: VecDeque<u8>,
@@ -882,8 +890,9 @@ impl Client {
     /// place the user no longer looks at.
     ///
     /// What the server has not been asked to hold is bounded ([`INPUT_WINDOW`]): the bytes
-    /// that fit go at once, each batch followed by a `ping` of the terminal's, which the
-    /// server answers once the program's terminal has taken the batch; the rest waits here,
+    /// that fit go at once, and a `ping` of the terminal's follows when none waits for an
+    /// answer or when [`INPUT_PING_EVERY`] bytes went since the last one; the server answers
+    /// once the program's terminal has taken all that went before it. The rest waits here,
     /// in order, and goes as the answers come ([`Client::input_waiting`] says how much). A
     /// key typed while nothing is in flight goes without waiting for anything.
     pub fn input(&mut self, id: &SessionId, bytes: &[u8]) -> bool {
@@ -922,7 +931,6 @@ impl Client {
         }
         let input = &mut terminal.input;
         let mut packets = Vec::new();
-        let mut batch = 0;
         while !input.waiting.is_empty() && input.in_flight < INPUT_WINDOW {
             let n = input
                 .waiting
@@ -931,19 +939,21 @@ impl Client {
                 .min(INPUT_WINDOW - input.in_flight);
             let chunk: Vec<u8> = input.waiting.drain(..n).collect();
             input.in_flight += n;
-            batch += n;
+            input.unasked += n;
             packets.push(Packet::about(id.clone(), Message::Input(chunk)));
         }
-        if batch == 0 {
-            return;
+        // Without a question waiting there is nothing to bring the window back, so one is
+        // asked at once; with one waiting, only when enough went for it to be worth another.
+        if input.unasked > 0 && (input.asked.is_empty() || input.unasked >= INPUT_PING_EVERY) {
+            let token = self.token;
+            self.token = self.token.wrapping_add(1);
+            input.asked.push_back((token, input.unasked));
+            input.unasked = 0;
+            packets.push(Packet::about(
+                id.clone(),
+                Message::Ping(token.to_le_bytes().to_vec()),
+            ));
         }
-        let token = self.token;
-        self.token = self.token.wrapping_add(1);
-        input.asked.push_back((token, batch));
-        packets.push(Packet::about(
-            id.clone(),
-            Message::Ping(token.to_le_bytes().to_vec()),
-        ));
         for packet in packets {
             self.queue(packet);
         }
@@ -1497,6 +1507,7 @@ impl Client {
             terminal.input.waiting.clear();
             if code == ErrorCode::UNAVAILABLE {
                 terminal.input.in_flight = 0;
+                terminal.input.unasked = 0;
                 terminal.input.asked.clear();
             }
         }
