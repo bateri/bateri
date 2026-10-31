@@ -4,15 +4,14 @@
 //!
 //! It is written with pencere's own program library (`pencere`, the crate of the program's side
 //! of the protocol) and carries no page of its own: the bundle it opens is a stand-in the tests
-//! can recognise — the header of a component, or a few lines of Lua that name bateri — because
+//! can recognise — a few lines of Lua that name bateri — because
 //! what the tests look at is the conversation, the flow, the signals and the way out, not what a
 //! page draws.
 //!
 //! ```text
-//! demopen            a view of the kind `wasm`, readings pushed once a second
-//! demopen --lua      the same, with a script as the view
+//! demopen            a view of the kind `lua`, a script, readings pushed once a second
 //! demopen --lua-files  the same, with a script of two files: the page, and a script it requires
-//! demopen --files   a script view at the interface that has files beside the bundle (`lua` 2.1)
+//! demopen --files   the same, with the calls on the files beside the bundle (`lua` 2.1)
 //! demopen --flood    the readings pushed as fast as the terminal takes them
 //! demopen --stall N  the readings stop after N seconds (a Docker that hangs)
 //! ```
@@ -42,9 +41,6 @@ use pencere::{
 };
 use serde_json::{Value, json};
 
-/// The first bytes of a WebAssembly component: what a pane holds and serves as the module.
-const COMPONENT: &[u8] = b"\0asm\x0d\0\x01\0";
-
 /// A script that says whose it is.
 const SCRIPT: &[u8] =
     b"-- a page of bateri's tests\nreturn { render = function() return pencere.div() end }\n";
@@ -53,11 +49,9 @@ const SCRIPT: &[u8] =
 const PAGE: &[u8] = b"-- a page of bateri's tests, of two files\nlocal box = require(\"./parts/box\")\nreturn { render = function()\n\treturn pencere.div():bg(\"raised1\"):p(8):child(pencere.text(\"two files\")):child(box())\nend }\n";
 const BOX: &[u8] = b"return function() return pencere.div():size(20, 20):bg(\"accent\") end\n";
 
-/// The versions of the interface of the views the terminal draws itself that this is written
-/// against: the Lua page API's, and the component interface's (`pencere:view@3.0.0`).
-const LUA_VERSION: &str = "2.0";
-const LUA_FILES_VERSION: &str = "2.1";
-const WASM_VERSION: &str = "3.0";
+/// The version of the interface of the views the terminal draws itself that this is written
+/// against: the Lua page API's, the one that has files beside the bundle.
+const LUA_VERSION: &str = "2.1";
 
 /// How often the made-up host reports.
 const EVERY: Duration = Duration::from_secs(1);
@@ -68,22 +62,14 @@ const CONTAINERS: [&str; 4] = ["api", "db", "cache", "toolbox"];
 fn main() -> ExitCode {
     let mut flood = false;
     let mut stall = None;
-    let mut lua = false;
     let mut files = false;
     let mut beside = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--flood" => flood = true,
-            "--lua" => lua = true,
-            "--lua-files" => {
-                lua = true;
-                files = true;
-            }
-            "--files" => {
-                lua = true;
-                beside = true;
-            }
+            "--lua-files" => files = true,
+            "--files" => beside = true,
             "--stall" => match args
                 .next()
                 .and_then(|seconds| seconds.parse::<f64>().ok())
@@ -95,11 +81,6 @@ fn main() -> ExitCode {
             _ => return usage(),
         }
     }
-    let (kind, name, file) = if lua {
-        (Kind::Lua, "containers.lua", SCRIPT)
-    } else {
-        (Kind::Wasm, "containers.wasm", COMPONENT)
-    };
     let bundle = if files {
         Bundle::new(
             "page.lua",
@@ -109,7 +90,7 @@ fn main() -> ExitCode {
             ],
         )
     } else {
-        Bundle::single(name, file)
+        Bundle::single("containers.lua", SCRIPT)
     };
     let Ok(bundle) = bundle else {
         return ExitCode::from(66);
@@ -119,15 +100,7 @@ fn main() -> ExitCode {
     let counted = Arc::clone(&upload);
     let stalls_at = stall.map(|after| Instant::now() + after);
     let options = Options::new()
-        .view(View::new(
-            kind,
-            &[match (kind, beside) {
-                (Kind::Wasm, _) => WASM_VERSION,
-                (_, true) => LUA_FILES_VERSION,
-                _ => LUA_VERSION,
-            }],
-            bundle,
-        ))
+        .view(View::new(Kind::Lua, &[LUA_VERSION], bundle))
         .program("demopen")
         .title("Containers")
         // The readings: the first is the view's at once, the next ones are a second apart.
@@ -247,7 +220,7 @@ fn refused(error: FileError) -> ViewError {
 }
 
 fn usage() -> ExitCode {
-    say("usage: demopen [--lua | --lua-files | --files] [--flood] [--stall SECONDS]\n");
+    say("usage: demopen [--lua-files | --files] [--flood] [--stall SECONDS]\n");
     ExitCode::from(64)
 }
 

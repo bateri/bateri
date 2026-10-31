@@ -1,8 +1,8 @@
 //! The container list run as a page module is ([`pencere_sandbox::Runner`]), in this process: the
 //! drive tells it what the person does and asks it for its page on a thread of its own
-//! (`pencere_drive::Page::spawn`), as it does the list of pencere's sandboxed module
-//! (`kit/guest/containers`), so that a debug build's demo is driven by the drive every page is, and
-//! not by a drive of its own. No program is behind it: the list stays as it opens.
+//! (`pencere_drive::Page::spawn`), as it does a script's page, so that a debug build's demo is
+//! driven by the drive every page is, and not by a drive of its own. No program is behind it: the
+//! list stays as it opens.
 
 use std::sync::Arc;
 

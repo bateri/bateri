@@ -136,8 +136,8 @@ impl Rig {
         Self::build(Some(observer), None, Discard::nothing())
     }
 
-    /// A rig whose desk shows WebAssembly views of up to `limit` bytes.
-    pub(crate) fn with_modules(limit: u64) -> (Arc<Self>, Arc<CountingWake>) {
+    /// A rig whose desk shows the views the application draws (scripts) of up to `limit` bytes.
+    pub(crate) fn with_scripts(limit: u64) -> (Arc<Self>, Arc<CountingWake>) {
         Self::build(
             Some(Box::new(Observed::default)),
             Some(limit),
@@ -147,14 +147,14 @@ impl Rig {
 
     fn build(
         observer: Option<Observer>,
-        wasm_entry_limit: Option<u64>,
+        native_entry_limit: Option<u64>,
         discard: Discard,
     ) -> (Arc<Self>, Arc<CountingWake>) {
         let wake = Arc::new(CountingWake::default());
         let flow = crate::flow::Flow::new();
         let desk = observer.map(|observer| {
             let mut options = ViewOptions::new("bateri-test", "0.0.0");
-            options.native_entry_limit = wasm_entry_limit;
+            options.native_entry_limit = native_entry_limit;
             options.size = Size {
                 width: 800,
                 height: 600,
@@ -238,7 +238,7 @@ pub(crate) fn hello() -> Vec<u8> {
         1,
         None,
         None,
-        r#"{"versions":[1],"views":[{"kind":"wasm","versions":["3.0"]},{"kind":"web","versions":["1.0"]}]}"#,
+        r#"{"versions":[1],"views":[{"kind":"lua","versions":["2.1"]},{"kind":"web","versions":["1.0"]}]}"#,
     )
 }
 
@@ -1363,7 +1363,7 @@ fn a_link_the_page_asks_for_is_put_to_the_person_and_the_page_is_never_answered(
 /// (`Session::module_link`) is this, on the pane's desk.
 #[test]
 fn a_link_a_native_view_asks_for_is_put_to_the_person_as_a_web_pages_is() {
-    let (pane, _, wake) = open_a_module_view();
+    let (pane, _, wake) = open_a_script_view();
     let desk = pane.rig.desk.as_ref().expect("a desk");
     desk.take_views();
     let write = pane.rig.write();
@@ -1445,7 +1445,7 @@ fn a_page_that_asks_for_an_address_waits_for_the_person_and_is_told_what_was_all
 
 #[test]
 fn the_kinds_and_versions_offered_are_what_the_application_can_open_in_the_programs_order() {
-    // A pane that shows no components offers the web view alone, at the bridge's version.
+    // A pane that shows no scripts offers the web view alone, at the bridge's version.
     let (rig, _, _) = Rig::new(true);
     let mut pane = Pane::new(rig);
     pane.feed(&hello());
@@ -1458,9 +1458,10 @@ fn the_kinds_and_versions_offered_are_what_the_application_can_open_in_the_progr
         welcome[0].payload
     );
 
-    // One that does offers the three, at the versions of the interfaces it speaks, and the
-    // `welcome` follows the program's order and leaves out a kind with no version in common.
-    let (rig, _) = Rig::with_modules(1 << 20);
+    // One that does offers the two, at the versions of the interfaces it speaks, and the
+    // `welcome` follows the program's order and leaves out a kind with no version in common, and
+    // one the application does not open (`wasm`, which a program of an older kit still offers).
+    let (rig, _) = Rig::with_scripts(1 << 20);
     let mut pane = Pane::new(rig);
     pane.feed(&wire(
         "hello",
@@ -1469,34 +1470,52 @@ fn the_kinds_and_versions_offered_are_what_the_application_can_open_in_the_progr
         None,
         concat!(
             r#"{"versions":[1],"views":[{"kind":"web","versions":["2.0","1.0"]},"#,
-            r#"{"kind":"lua","versions":["9.9"]},{"kind":"wasm","versions":["0.4","3.0"]}]}"#
+            r#"{"kind":"lua","versions":["2.0"]},{"kind":"wasm","versions":["0.4","3.0"]}]}"#
+        ),
+    ));
+    let welcome = pane.rig.written();
+    assert!(
+        welcome[0]
+            .payload
+            .contains(r#""views":[{"kind":"web","versions":["1.0"]}]"#),
+        "{}",
+        welcome[0].payload
+    );
+    let (rig, _) = Rig::with_scripts(1 << 20);
+    let mut pane = Pane::new(rig);
+    pane.feed(&wire(
+        "hello",
+        1,
+        None,
+        None,
+        concat!(
+            r#"{"versions":[1],"views":[{"kind":"web","versions":["1.0"]},"#,
+            r#"{"kind":"lua","versions":["2.0","2.1"]}]}"#
         ),
     ));
     let welcome = pane.rig.written();
     assert!(
         welcome[0].payload.contains(
-            r#""views":[{"kind":"web","versions":["1.0"]},{"kind":"wasm","versions":["3.0"]}]"#
+            r#""views":[{"kind":"web","versions":["1.0"]},{"kind":"lua","versions":["2.1"]}]"#
         ),
         "{}",
         welcome[0].payload
     );
-    // A restart offers everything the application opens, with the versions, in its own order.
+    // A restart offers everything the application opens, with the versions, in its own order
+    // (which is not the program's here).
     let desk = pane.rig.desk.as_ref().expect("a desk");
     desk.restart(pane.rig.write());
     let offer = pane.rig.written();
     assert!(
         offer[0].payload.contains(concat!(
-            r#""views":[{"kind":"wasm","versions":["3.0"]},{"kind":"lua","versions":["2.0","2.1"]},"#,
+            r#""views":[{"kind":"lua","versions":["2.1"]},"#,
             r#"{"kind":"web","versions":["1.0"]}]"#
         )),
         "{}",
         offer[0].payload
     );
     // The versions are the application's constants, and the Lua API's is the prelude's.
-    assert_eq!(
-        (WASM_VERSION, LUA_VERSION, LUA_FILES_VERSION),
-        ("3.0", "2.0", "2.1")
-    );
+    assert_eq!(LUA_VERSION, "2.1");
     assert_eq!(WEB_BRIDGE_VERSION, "1.0");
 }
 
@@ -1565,39 +1584,39 @@ fn a_file_being_stored_does_not_make_a_pane_wait_for_another_file() {
     reading.join().expect("the reader ends");
 }
 
-// ---- a view that is a WebAssembly component --------------------------------------------
+// ---- a view that is a script -----------------------------------------------------------
 
-/// What the component is, for the tests: the header of an empty one.
-const COMPONENT: &[u8] = b"\0asm\x01\0\0\0";
+/// What a script is, for the tests.
+const SCRIPT: &[u8] = b"return { render = function() end }";
 
-/// The program's `open` of a view that is a component, on the alternate screen.
-fn module_open(token: &str) -> Vec<u8> {
+/// The program's `open` of a view that is a script, on the alternate screen.
+fn script_open(token: &str) -> Vec<u8> {
     let open = format!(
         concat!(
-            r#"{{"token":"{token}","view":"wasm","version":"3.0","program":"demopen","title":"Containers","#,
-            r#""bundle":{{"entry":"view.wasm","files":[{{"path":"view.wasm","sha256":"{digest}","#,
-            r#""size":{size},"type":"application/wasm"}}]}}}}"#
+            r#"{{"token":"{token}","view":"lua","version":"2.1","program":"demopen","title":"Containers","#,
+            r#""bundle":{{"entry":"view.lua","files":[{{"path":"view.lua","sha256":"{digest}","#,
+            r#""size":{size},"type":"text/x-lua"}}]}}}}"#
         ),
         token = token,
-        digest = Digest::of(COMPONENT).to_string(),
-        size = COMPONENT.len(),
+        digest = Digest::of(SCRIPT).to_string(),
+        size = SCRIPT.len(),
     );
     [ALTERNATE_SCREEN, &wire("open", 2, None, None, &open)].concat()
 }
 
-fn module_file() -> Vec<u8> {
+fn script_file() -> Vec<u8> {
     wire(
         "file",
         3,
         None,
-        Some(&Digest::of(COMPONENT).to_string()),
-        &::pencere_host::base64::encode(COMPONENT),
+        Some(&Digest::of(SCRIPT).to_string()),
+        &::pencere_host::base64::encode(SCRIPT),
     )
 }
 
-/// A pane whose program has opened a view that is a component. Returns the pane and the token.
-fn open_a_module_view() -> (Pane, String, Arc<CountingWake>) {
-    let (rig, wake) = Rig::with_modules(1 << 20);
+/// A pane whose program has opened a view that is a script. Returns the pane and the token.
+fn open_a_script_view() -> (Pane, String, Arc<CountingWake>) {
+    let (rig, wake) = Rig::with_scripts(1 << 20);
     let mut pane = Pane::new(rig);
     pane.feed(&hello());
     let welcome = pane.rig.written();
@@ -1605,31 +1624,31 @@ fn open_a_module_view() -> (Pane, String, Arc<CountingWake>) {
     assert!(
         welcome[0]
             .payload
-            .contains(r#""features":["dismiss"],"views":[{"kind":"wasm","versions":["3.0"]},{"kind":"web","versions":["1.0"]}]"#),
+            .contains(r#""features":["dismiss"],"views":[{"kind":"lua","versions":["2.1"]},{"kind":"web","versions":["1.0"]}]"#),
         "{}",
         welcome[0].payload
     );
     let token = token_of(&welcome[0]);
-    pane.feed(&module_open(&token));
+    pane.feed(&script_open(&token));
     let need = pane.rig.written();
     assert_eq!(need.len(), 1, "{need:?}");
     assert_eq!(need[0].kind, "need");
-    pane.feed(&module_file());
+    pane.feed(&script_file());
     // No MCP session: the pane is written nothing, and the view is there to start.
     assert!(pane.rig.written().is_empty());
     (pane, token, wake)
 }
 
 #[test]
-fn a_component_opens_a_view_of_its_kind_and_messages_go_between_it_and_the_program() {
-    let (mut pane, _, _) = open_a_module_view();
+fn a_script_opens_a_view_of_its_kind_and_messages_go_between_it_and_the_program() {
+    let (mut pane, _, _) = open_a_script_view();
     let rig = Arc::clone(&pane.rig);
     let desk = rig.desk.as_ref().expect("a desk");
     let views = desk.take_views();
     let [Action::StartView(start)] = views.as_slice() else {
         panic!("one view to start, got {views:?}");
     };
-    assert_eq!(start.kind, ViewKind::Wasm);
+    assert_eq!(start.kind, ViewKind::Lua);
     assert_eq!(start.program.as_deref(), Some("demopen"));
     assert_eq!(start.title.as_deref(), Some("Containers"));
 
@@ -1649,31 +1668,28 @@ fn a_component_opens_a_view_of_its_kind_and_messages_go_between_it_and_the_progr
     );
 }
 
-/// What a script is, for the tests.
-const SCRIPT: &[u8] = b"return { render = function() end }";
-
 #[test]
 fn a_script_opens_a_view_of_its_kind_and_its_failure_reaches_the_program_with_its_words() {
-    let (rig, _wake) = Rig::with_modules(1 << 20);
+    let (rig, _wake) = Rig::with_scripts(1 << 20);
     let mut pane = Pane::new(rig);
     pane.feed(&wire(
         "hello",
         1,
         None,
         None,
-        r#"{"versions":[1],"views":[{"kind":"lua","versions":["2.0"]},{"kind":"web","versions":["1.0"]}]}"#,
+        r#"{"versions":[1],"views":[{"kind":"lua","versions":["2.1"]},{"kind":"web","versions":["1.0"]}]}"#,
     ));
     let welcome = pane.rig.written();
     assert!(
         welcome[0].payload.contains(
-            r#""views":[{"kind":"lua","versions":["2.0"]},{"kind":"web","versions":["1.0"]}]"#
+            r#""views":[{"kind":"lua","versions":["2.1"]},{"kind":"web","versions":["1.0"]}]"#
         ),
         "{}",
         welcome[0].payload
     );
     let open = format!(
         concat!(
-            r#"{{"token":"{token}","view":"lua","version":"2.0","program":"demopen","#,
+            r#"{{"token":"{token}","view":"lua","version":"2.1","program":"demopen","#,
             r#""bundle":{{"entry":"view.lua","files":[{{"path":"view.lua","sha256":"{digest}","#,
             r#""size":{size},"type":"text/x-lua"}}]}}}}"#
         ),
@@ -1714,7 +1730,7 @@ fn a_script_opens_a_view_of_its_kind_and_its_failure_reaches_the_program_with_it
 
 #[test]
 fn what_the_program_says_for_the_module_is_counted_until_the_module_takes_it() {
-    let (mut pane, _, _) = open_a_module_view();
+    let (mut pane, _, _) = open_a_script_view();
     let rig = Arc::clone(&pane.rig);
     let desk = rig.desk.as_ref().expect("a desk");
     desk.take_views();
@@ -1736,7 +1752,7 @@ fn what_the_program_says_for_the_module_is_counted_until_the_module_takes_it() {
 /// the inbox of a program that writes text with accents never drains and the reader stays shut.
 #[test]
 fn what_the_program_says_with_escapes_is_taken_by_the_count_the_sandbox_gives() {
-    let (mut pane, _, _) = open_a_module_view();
+    let (mut pane, _, _) = open_a_script_view();
     let rig = Arc::clone(&pane.rig);
     let desk = rig.desk.as_ref().expect("a desk");
     desk.take_views();
@@ -1759,7 +1775,7 @@ fn what_the_program_says_with_escapes_is_taken_by_the_count_the_sandbox_gives() 
 
 #[test]
 fn the_end_of_the_view_forgets_what_the_module_never_took() {
-    let (mut pane, token, _) = open_a_module_view();
+    let (mut pane, token, _) = open_a_script_view();
     let rig = Arc::clone(&pane.rig);
     let desk = rig.desk.as_ref().expect("a desk");
     desk.take_views();
@@ -1778,7 +1794,7 @@ fn the_end_of_the_view_forgets_what_the_module_never_took() {
 
 #[test]
 fn a_module_told_full_is_news_for_the_shell_once_like_any_other() {
-    let (pane, _, wake) = open_a_module_view();
+    let (pane, _, wake) = open_a_script_view();
     let rig = Arc::clone(&pane.rig);
     let desk = rig.desk.as_ref().expect("a desk");
     desk.take_views();
@@ -1838,7 +1854,7 @@ fn a_message_the_module_sends_after_its_view_ended_writes_nothing_to_the_pane() 
         }),
     ];
     for (name, end) in endings {
-        let (pane, token, _) = open_a_module_view();
+        let (pane, token, _) = open_a_script_view();
         let rig = Arc::clone(&pane.rig);
         let desk = rig.desk.as_ref().expect("a desk");
         desk.take_views();
@@ -1910,8 +1926,8 @@ fn a_message_over_the_limit_ends_the_view_and_the_program_is_told_on_the_keys_la
     assert!(desk.take_views().contains(&Action::DestroyView));
     told(&lock(&keys), &lock(&lane));
 
-    // A component.
-    let (pane, _, _) = open_a_module_view();
+    // A script.
+    let (pane, _, _) = open_a_script_view();
     let rig = Arc::clone(&pane.rig);
     let desk = rig.desk.as_ref().expect("a desk");
     desk.take_views();
@@ -1953,7 +1969,7 @@ fn a_view_with_more_waiting_for_the_tty_than_the_bound_is_closed_as_a_failure() 
             open_a_view(&mut pane);
             pane
         } else {
-            open_a_module_view().0
+            open_a_script_view().0
         };
         let rig = Arc::clone(&pane.rig);
         let desk = rig.desk.as_ref().expect("a desk");
@@ -2006,38 +2022,18 @@ fn a_view_with_more_waiting_for_the_tty_than_the_bound_is_closed_as_a_failure() 
     }
 }
 
-/// Specification §5.4: the words a view fails with reach the program in `closed`'s `message`
-/// as they were said, a component of another interface's two versions included.
 #[test]
-fn the_words_of_a_component_of_another_interface_name_both_versions_to_the_program() {
-    let (pane, _, _) = open_a_module_view();
-    let rig = Arc::clone(&pane.rig);
-    let desk = rig.desk.as_ref().expect("a desk");
-    let why = "the page could not be loaded: this view is written against `pencere:view@0.5.0`; \
-               this terminal opens `pencere:view@3.0.0`";
-    desk.apply(pane.rig.write(), |conversation| {
-        conversation.view_failed(why)
-    });
-    let wrote = pane.rig.written();
-    assert_eq!(wrote.len(), 1, "{wrote:?}");
-    assert_eq!(wrote[0].kind, "closed");
-    for version in ["`pencere:view@0.5.0`", "`pencere:view@3.0.0`"] {
-        assert!(wrote[0].payload.contains(version), "{}", wrote[0].payload);
-    }
-}
-
-#[test]
-fn a_pane_that_shows_no_components_refuses_one_and_runs_no_view() {
+fn a_pane_that_shows_no_scripts_refuses_one_and_runs_no_view() {
     let (rig, _, _) = Rig::new(true);
     let mut pane = Pane::new(rig);
     pane.feed(&hello());
     let welcome = pane.rig.written();
     assert!(
-        !welcome[0].payload.contains("wasm"),
+        !welcome[0].payload.contains(r#""kind":"lua""#),
         "it does not say it shows them: {}",
         welcome[0].payload
     );
-    pane.feed(&module_open(&token_of(&welcome[0])));
+    pane.feed(&script_open(&token_of(&welcome[0])));
     let closed = pane.rig.written();
     assert_eq!(closed.len(), 1, "{closed:?}");
     assert_eq!(closed[0].kind, "closed");
@@ -2051,12 +2047,12 @@ fn a_pane_that_shows_no_components_refuses_one_and_runs_no_view() {
 }
 
 #[test]
-fn a_component_over_the_limit_is_refused_before_a_byte_of_it_is_asked_for() {
-    let (rig, _) = Rig::with_modules(4);
+fn a_script_over_the_limit_is_refused_before_a_byte_of_it_is_asked_for() {
+    let (rig, _) = Rig::with_scripts(4);
     let mut pane = Pane::new(rig);
     pane.feed(&hello());
     let token = token_of(&pane.rig.written()[0]);
-    pane.feed(&module_open(&token));
+    pane.feed(&script_open(&token));
     let closed = pane.rig.written();
     assert_eq!(closed.len(), 1, "{closed:?}");
     assert!(

@@ -56,22 +56,14 @@ use crate::pencere_view::{Exit, Words};
 /// What the header says over the demo page: the made-up program's name and the title of its
 /// page, and a button that closes the page.
 #[cfg(debug_assertions)]
-pub(crate) fn demo_words(program: &str, title: &str) -> Words {
+pub(crate) fn demo_words() -> Words {
     let words = bt_shell_common::view_strip::Strip {
         place: None,
-        program: Some(program.to_owned()),
-        title: Some(title.to_owned()),
+        program: Some("dockerpen".to_owned()),
+        title: Some("Docker".to_owned()),
         quit_tip: "Closes the demo page. The terminal comes back.".to_owned(),
     };
     Words::new(words, &[], Exit::Close)
-}
-
-/// Where the page modules are: `BT_VIEW_GUEST_DIR`, else `target/guest/dist`, where `make guest`
-/// builds them from the pencere checkout the build is pinned to (bateri carries none of its
-/// own). A development convenience of the debug menu's demos.
-#[cfg(debug_assertions)]
-pub(crate) fn component_path(name: &str) -> std::path::PathBuf {
-    bt_shell_common::native_view::guest_dir().join(format!("{name}.wasm"))
 }
 
 /// Whose a page is.

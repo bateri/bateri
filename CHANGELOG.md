@@ -52,10 +52,10 @@ of every installed copy. A version without a section is not released.
 
 - **A native view can show pictures its program sends along.** A program whose view is written
   for the Lua API `2.1` (`pencere.files`) can attach images to it and let them go, and the view
-  draws them by their name; bateri offers `2.1` next to `2.0`, and a program that speaks only
-  `2.0` is opened as before. The files a person gives the view (dragged, pasted or chosen in a
-  panel) and the places a program saves to are read and written on a thread of their own, so a
-  slow disk never holds up the window; a file that changed since it was given is reported as gone,
+  draws them by their name; bateri offers `2.1`, the one version of the Lua API there is. The
+  files a person gives the view (dragged, pasted or chosen in a panel) and the places a program
+  saves to are read and written on a thread of their own, so a slow disk never holds up the
+  window; a file that changed since it was given is reported as gone,
   and a save is written beside its place and takes the place's name only when the program has
   finished it (a save that is given up leaves nothing behind).
 - **Files can be dropped, pasted and chosen in a native view.** In a view whose program speaks
@@ -68,8 +68,8 @@ of every installed copy. A version without a section is not released.
   folder you last used and with the name the program proposed; the files you chose are given
   to the view, and cancelling gives it none. Where the program runs on this Mac it is also told
   where each file is; in an `ssh` session it never is, and reads the files through bateri.
-  A view of the older interface and a pane with no view take a drop as before (the path
-  written to the line, an upload in an `ssh` session). A file field in a web view opens the same
+  A pane with no view takes a drop as before (the path written to the line, an upload in an
+  `ssh` session). A file field in a web view opens the same
   panel instead of doing nothing.
 - **A native view can have an editor for code.** A program's native view can put an editor of
   text in it, the pencere kit's own, which bateri keeps and draws: as many carets and selections
@@ -127,8 +127,7 @@ of every installed copy. A version without a section is not released.
   palette, and its keys do it. You can drag things on the page and drop files from Finder on
   it, the middle button, a key let go and a modifier held alone reach it, and VoiceOver reads
   its checkboxes, switches, tabs, links, headings and progress as what they are, with their
-  state. A view written for the kit's 1.0 is no longer opened: the program is told so in
-  words that name both versions.
+  state.
 - **A native view moves as its page says, and shows its tooltips.** A page can say how a change
   of a part of it moves (a colour that comes in, a field that widens, a row that slides to its
   new place, comes in or goes out), and bateri moves it at the display's rate without asking the
@@ -150,15 +149,14 @@ of every installed copy. A version without a section is not released.
   leaves one notification per pane, the latest.
 - **A program can show a view that bateri draws itself.** Beside the web view, a program
   that speaks [pencere](https://github.com/bateri/pencere) can now open a view that is a
-  small WebAssembly module or a Lua script. bateri runs it in a sandbox with no files,
+  Lua script. bateri runs it in a sandbox with no files,
   network or clock of its own, draws it in the terminal's own font and theme, and carries
   the messages between it and its program. A view that hangs, asks for too much memory or
   has an error closes, and its program is told why — a script's error with its line.
   Control-C reaches the program at once even while the view is busy talking to it, and
   nothing the view said is typed into the shell afterwards. The kit these views are made
   with is [pencere](https://github.com/bateri/pencere)'s (Apache-2.0, so other terminals
-  can show the same views), and bateri offers the two kinds it draws as version 1.0:
-  `wasm` is `pencere:view@1.0.0` and a script's global is `pencere`.
+  can show the same views), and a script's global is `pencere`.
 - **A Lua view can be several files.** The script of a view that bateri draws may load the
   other Lua files of its bundle with `require("./screens/logs")` (Luau's own rules, so
   editors that know Luau understand the paths), and nothing else: a path that leaves the
@@ -182,9 +180,9 @@ of every installed copy. A version without a section is not released.
   edge. Faint text (a colour at a low opacity) is held to `minimum_contrast` as it shows on
   its background, not as the colour alone would.
 - **A tab's card shows a view that bateri draws.** Hovering over a tab, or opening the
-  overview, shows a pane whose program has opened a view of its own (a WebAssembly module or
-  a Lua script) as that view, images included, not the terminal behind it. The card shows the
-  view as it is on screen; a view that has not drawn yet shows the terminal for a moment.
+  overview, shows a pane whose program has opened a view of its own (a Lua script) as that
+  view, images included, not the terminal behind it. The card shows the view as it is on
+  screen; a view that has not drawn yet shows the terminal for a moment.
 - **A native view can show the time of day, spinners and the keys of its menus.** A view's page
   reads the time of day with your own offset from UTC (daylight saving time included) and says
   which keyboard it is on, so a clock or a "⌘" versus "Ctrl" hint reads right; a picture of a page
@@ -245,11 +243,6 @@ of every installed copy. A version without a section is not released.
   tab be pulled into the panes; both are done with no key held now, a pane by its header and a
   tab by its row or its chip.
 
-- **A program's native view that is a WebAssembly component is opened at version 3.0.** bateri
-  runs the pencere kit of the version that adds files to a view (a picture a program shows, a
-  file you drop on it, a place you save to), and that kit runs components written for it alone:
-  a program that offers only the older 2.0 component is shown its other view, or none. Views
-  written in Lua are unchanged.
 - **A program's output is taken in faster.** What bateri does with every byte a program writes
   before the terminal acts on it — following where an escape sequence stands, looking for the
   shell's marks, putting emoji sequences together — now skims text and the bodies of long

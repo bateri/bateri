@@ -3,7 +3,7 @@ CARGO ?= cargo
 # Prerequisite order is only guaranteed under serial make; under -j the promises
 # "cheapest gate first" and "version first" break.
 .NOTPARALLEL:
-.PHONY: check prune fmt audit clippy test guest demopen test-heavy test-view test-all gate gate-push hooks linux-server linux-run shader smoke terminfo test-race scan throughput bundle package install dev release publish ship release-gate sparkle dmgbuild linux
+.PHONY: check prune fmt audit clippy test demopen test-heavy test-view test-all gate gate-push hooks linux-server linux-run shader smoke terminfo test-race scan throughput bundle package install dev release publish ship release-gate sparkle dmgbuild linux
 
 # Definition of done. Homebrew rustc is not pinned (there is deliberately no
 # rust-toolchain.toml): the version is printed first so a clippy failure that
@@ -201,7 +201,7 @@ NOT_HEAVY = --skip ::race_ --skip census::tests::census --skip raster_digest \
 # The libraries' heavy tests: those whose path holds one of AREA's words
 # (`AREA="child:: kablo::"`), every one without it. Nothing is built again: the same test
 # binaries as `test`, the ignored tests taken.
-test-heavy: guest demopen
+test-heavy: demopen
 	$(CARGO) test --workspace --lib -- --ignored $(NOT_HEAVY) $(AREA)
 
 # The program the end-to-end tests of a pane run in it (`crates/bt-core/examples/demopen.rs`,
@@ -212,41 +212,13 @@ test-heavy: guest demopen
 demopen:
 	$(CARGO) build -p bt-core --example demopen
 
-# The page modules the tests that run a real one try the sandbox with, and the debug menu's
-# demos: bateri carries none, they are pencere's (`kit/guest`), built from the checkout this
-# build is pinned to (`tools/pencere_checkout.py` asks cargo for it; no folder beside this
-# repository is read) into target/guest/dist, with the container list's script beside them.
-# Needs rustup with the `stable` toolchain and its wasm32-unknown-unknown target, as Homebrew's
-# rustc has no WebAssembly standard library; the first build fetches the modules' crates. A
-# stamp for each pencere `rev`: it runs again when the `rev` moves, and not otherwise.
-GUEST_MODULES = containers broken chatty
-GUEST_OUT = target/guest
-PENCERE_REV = $(shell sed -n 's/^pencere-sandbox = .*rev = "\([0-9a-f]\{40\}\)".*/\1/p' Cargo.toml)
-GUEST_BIN = $(shell dirname "$$(rustup which --toolchain stable cargo 2>/dev/null)" 2>/dev/null)
-GUEST_CARGO = PATH="$(GUEST_BIN):$$PATH" DYLD_FALLBACK_LIBRARY_PATH="$(dir $(GUEST_BIN))lib" $(GUEST_BIN)/cargo
-
-guest: $(GUEST_OUT)/built-$(PENCERE_REV)
-
-$(GUEST_OUT)/built-$(PENCERE_REV):
-	@command -v rustup >/dev/null 2>&1 || { echo "guest: rustup is missing (the modules are built with its stable toolchain)"; exit 1; }
-	@rustup target list --installed --toolchain stable 2>/dev/null | grep -qx wasm32-unknown-unknown || { echo "guest: rustup's stable toolchain has no wasm32-unknown-unknown target — rustup target add wasm32-unknown-unknown --toolchain stable"; exit 1; }
-	@kit=$$(python3 tools/pencere_checkout.py) || exit 1; \
-	echo "guest: building the page modules of $$kit"; \
-	$(GUEST_CARGO) build --locked --manifest-path "$$kit/kit/guest/Cargo.toml" --target-dir $(GUEST_OUT)/build --release --target wasm32-unknown-unknown $(addprefix -p ,$(GUEST_MODULES)) || exit 1; \
-	mkdir -p $(GUEST_OUT)/dist; \
-	for m in $(GUEST_MODULES); do \
-		$(GUEST_CARGO) run -q --locked --manifest-path "$$kit/kit/guest/Cargo.toml" --target-dir $(GUEST_OUT)/build -p componentize -- $(GUEST_OUT)/build/wasm32-unknown-unknown/release/$$m.wasm $(GUEST_OUT)/dist/$$m.wasm || exit 1; \
-	done; \
-	cp "$$kit/kit/luau/examples/containers.lua" $(GUEST_OUT)/dist/containers.lua || exit 1; \
-	touch $@
-
 # The program view's test, end to end in a real web view (tens of seconds, one at a time).
 test-view:
 	BT_HEAVY=1 $(CARGO) test --workspace --test pencere
 
 # Every test but those `NOT_HEAVY` names: the fast tier and the heavy one together, the push
 # tier's run.
-test-all: guest demopen
+test-all: demopen
 	BT_HEAVY=1 $(CARGO) test --workspace --all-targets -- --include-ignored $(NOT_HEAVY)
 
 # What a change needs, picked by the files it touched (`tools/gate.sh` says how): `gate` for
@@ -920,12 +892,10 @@ LINUX_GIT_MOUNT = $(if $(filter-out $(CURDIR)/.git,$(LINUX_GIT_COMMON)),-v "$(LI
 
 # The full gate: every Linux crate's clippy and every test but those `NOT_HEAVY` names. The
 # release runs it, once a version: bateri ships for macOS today, and the gate keeps the crates
-# that are to run on Linux one day from drifting until then. The page modules the tests that run
-# one read (`target/guest/dist`, in the repository the container mounts) are built first, on
-# the host: they are WebAssembly, the same for either system.
+# that are to run on Linux one day from drifting until then.
 linux: LINUX_CMD = cargo clippy $(LINUX_CRATES) --all-targets --locked -- -D warnings && \
 	cargo test $(LINUX_CRATES) --all-targets --locked -- --include-ignored $(NOT_HEAVY)
-linux: guest linux-run
+linux: linux-run
 
 # What bateri runs on a server, which is Linux far more often than not: the agent's `bateri`
 # script, the remote shells' integration and kablo's install steps, in a Linux shell with

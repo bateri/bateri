@@ -75,26 +75,13 @@ pub struct Opening {
     pub look: LookSlot,
 }
 
-/// The page of a component (`bytes`, binary or text) held to `limits`, as the link's [`UiPage`], and
-/// the handle the pane drives it by. `assets` is where the files of its bundle are read from, if it
-/// has one: a page without them draws no image. `wake` is called from the module's thread — and
-/// from the images' — when something is put out; it hops to the main thread and has the pane drain
-/// the page, **and never lays out or draws itself**: the images' decoder may call it from inside a
-/// build. Returns at once: the module is compiled and started on its thread.
-pub fn module_page(
-    bytes: Vec<u8>,
-    limits: ModuleLimits,
-    assets: Option<Arc<dyn Assets>>,
-    opening: Opening,
-    wake: impl Fn() + Send + Sync + 'static,
-) -> (Box<dyn UiPage>, PageHandle) {
-    let (setup, drawing) = opening.setup(limits, assets);
-    drawing.with(Page::component(bytes, setup, wake))
-}
-
-/// The page of a script, as [`module_page`]: the interpreter of the script's language as the module
-/// and `script` as what it runs (its text, its path in its bundle, and the bundle, which is where its
-/// images come from too).
+/// The page of a script, held to `limits`, as the link's [`UiPage`], and the handle the pane drives
+/// it by: the interpreter of the script's language as the module and `script` as what it runs (its
+/// text, its path in its bundle, and the bundle, which is where its images come from too). `wake`
+/// is called from the module's thread — and from the images' — when something is put out; it hops
+/// to the main thread and has the pane drain the page, **and never lays out or draws itself**: the
+/// images' decoder may call it from inside a build. Returns at once: the script is started on its
+/// thread.
 pub fn script_page(
     script: Script,
     limits: ModuleLimits,
@@ -107,7 +94,7 @@ pub fn script_page(
 
 /// The container list of a debug build's demo ([`Demo`]), a page written in Rust run as a module is
 /// ([`Page::spawn`]): the same drive, the same answers on the module's thread, as the page a program
-/// sends. Otherwise as [`module_page`].
+/// sends. Otherwise as [`script_page`].
 pub fn containers_demo(
     opening: Opening,
     wake: impl Fn() + Send + Sync + 'static,
@@ -1453,6 +1440,22 @@ return {
         wake: Arc<dyn bt_core::Wake>,
         stage: Option<bt_core::pencere::StageDir>,
     ) -> Arc<bt_core::Session> {
+        demopen_session_with(
+            flag,
+            wake,
+            stage,
+            Some(ModuleLimits::default().component as u64),
+        )
+    }
+
+    /// A session whose pane runs `demopen` with `flag`, its desk opening the views of a script up
+    /// to `native_limit` bytes, or none but the web view's when that is `None`.
+    fn demopen_session_with(
+        flag: &str,
+        wake: Arc<dyn bt_core::Wake>,
+        stage: Option<bt_core::pencere::StageDir>,
+        native_limit: Option<u64>,
+    ) -> Arc<bt_core::Session> {
         use bt_core::pencere::ViewOptions;
         use bt_core::{CaretShape, CursorBlink, Osc52, Session, SessionOptions, TerminalOptions};
         use std::collections::HashMap;
@@ -1469,7 +1472,7 @@ return {
             program.display()
         );
         let mut views = ViewOptions::new("bateri-test", "0.0.0");
-        views.native_entry_limit = Some(ModuleLimits::default().component as u64);
+        views.native_entry_limit = native_limit;
         views.stage = stage;
         Arc::new(
             Session::spawn(
@@ -2177,28 +2180,16 @@ return {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A view at the interface before files has none: the session makes no handle of a file
-    /// the person gives it, and the pane tells the page of none (it takes the drop as it did).
+    /// A session with no view of the kind that has files gives no handle for a file the person
+    /// gives or a place they save in, and the pane tells the page of none (it takes the drop as
+    /// it did): the program here shows a script, and this pane's desk opens none.
     #[test]
     #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
-    fn a_view_at_an_interface_without_files_is_given_no_handle() {
-        use crate::child::wait_until;
+    fn a_session_with_no_view_that_has_files_is_given_no_handle() {
         use crate::native_view::{GivenFile, ViewFiles};
-        use bt_core::pencere::{Action, FileGrant};
+        use bt_core::pencere::FileGrant;
 
-        let session = demopen_session("--lua");
-        let mut started = None;
-        wait_until("the view to start", || {
-            for action in session.take_view_actions() {
-                if let Action::StartView(start) = action {
-                    started = Some(start);
-                }
-            }
-            started.is_some()
-        });
-        let start = started.take().expect("a start");
-        assert_eq!(start.version, "2.0");
-        assert!(!bt_core::pencere::has_files(start.kind, &start.version));
+        let session = demopen_session_with("", Arc::new(crate::child::SilentWake), None, None);
         let dir = std::env::temp_dir().join(format!("bateri-views-nofiles-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("a directory");

@@ -2564,18 +2564,6 @@ define_class!(
                 // The gauge page is the terminal's cover, like a program's view:
                 // not while one of those is up.
                 !self.shows_view()
-            } else if cfg!(debug_assertions)
-                && (action == Some(sel!(showContainerModuleDemo:))
-                    || action == Some(sel!(showBrokenModuleDemo:)))
-            {
-                // A page made by a module: as the others, and the module has to be built
-                // (`make guest`).
-                let module = if action == Some(sel!(showContainerModuleDemo:)) {
-                    "containers"
-                } else {
-                    "broken"
-                };
-                !self.shows_view() && self.module_demo_built(module)
             } else {
                 true
             }
@@ -2663,21 +2651,6 @@ define_class!(
         #[unsafe(method(showContainerDemo:))]
         fn show_container_demo_sent(&self, _sender: Option<&AnyObject>) {
             self.toggle_container_demo();
-        }
-
-        /// Debug ▸ Show Container List Demo (WASM): the same page, made by a module in the
-        /// sandbox (debug builds, `crate::native_page`).
-        #[cfg(debug_assertions)]
-        #[unsafe(method(showContainerModuleDemo:))]
-        fn show_container_module_demo_sent(&self, _sender: Option<&AnyObject>) {
-            self.toggle_module_demo("containers");
-        }
-
-        /// Debug ▸ Show Broken Page Demo (WASM): a module that goes wrong on purpose.
-        #[cfg(debug_assertions)]
-        #[unsafe(method(showBrokenModuleDemo:))]
-        fn show_broken_module_demo_sent(&self, _sender: Option<&AnyObject>) {
-            self.toggle_module_demo("broken");
         }
 
         /// The header's button over a page of the kit's own: the page comes down and the
@@ -5674,8 +5647,8 @@ impl TerminalPane {
         options.stage = stage.as_ref().map(|offered| offered.dir.clone());
         self.ivars().stage.replace(stage);
         options.size = pencere_view::content_size(self.bounds());
-        // A program may open a view that is a module or a script: it is run in the sandbox and
-        // drawn as a page of the kit, up to the size the sandbox compiles.
+        // A program may open a view that is a script: it is run in the sandbox and drawn as a
+        // page of the kit, up to the size the sandbox takes.
         options.native_entry_limit =
             Some(bt_shell_common::native_view::ModuleLimits::default().component as u64);
         options.shell_group = Some(ShellGroup::new(move |child| {
@@ -5756,34 +5729,6 @@ impl TerminalPane {
     /// a text field of AppKit's and its row menu an `NSMenu`.
     #[cfg(debug_assertions)]
     pub(crate) fn toggle_container_demo(&self) {
-        self.toggle_demo(None);
-    }
-
-    /// Debug ▸ Show Container List Demo (WASM) and Show Broken Page Demo (WASM): the same page
-    /// ([`TerminalPane::toggle_container_demo`]) made by a module in the sandbox (built by
-    /// `make guest`, [`bt_shell_common::native_view::guest_dir`]), or the
-    /// module that goes wrong on purpose. Whatever ends the module — a
-    /// loop that never returns, memory without end, a trap — the pane is the terminal's again.
-    #[cfg(debug_assertions)]
-    pub(crate) fn toggle_module_demo(&self, module: &'static str) {
-        self.toggle_demo(Some(module));
-    }
-
-    /// Whether the page module `module` is built and can be opened (only debug builds open one).
-    pub(crate) fn module_demo_built(&self, module: &str) -> bool {
-        #[cfg(debug_assertions)]
-        {
-            crate::native_page::component_path(module).is_file()
-        }
-        #[cfg(not(debug_assertions))]
-        {
-            let _ = module;
-            false
-        }
-    }
-
-    #[cfg(debug_assertions)]
-    fn toggle_demo(&self, module: Option<&'static str>) {
         let Some(link) = self.link() else {
             return;
         };
@@ -5797,46 +5742,16 @@ impl TerminalPane {
         let Some(session) = self.session() else {
             return;
         };
-        let bytes = match module {
-            None => None,
-            Some(name) => {
-                let path = crate::native_page::component_path(name);
-                match std::fs::read(&path) {
-                    Ok(bytes) => Some(bytes),
-                    Err(why) => {
-                        eprintln!(
-                            "bateri: the page module {} could not be read ({why}); `make guest` builds it",
-                            path.display()
-                        );
-                        return;
-                    }
-                }
-            }
-        };
         let theme = session.theme();
         let ivars = self.ivars();
-        let (program, title) = match module {
-            None => ("dockerpen", "Docker"),
-            Some("broken") => ("broken", "A page that goes wrong"),
-            Some(_) => ("dockerpen (wasm)", "Docker"),
-        };
         ivars
             .page_words
-            .replace(Some(crate::native_page::demo_words(program, title)));
+            .replace(Some(crate::native_page::demo_words()));
         let family = ivars.font.borrow().family.clone();
         // The engine's own page: no program opened it, so none holds it to anything.
         let opening = self.page_opening(family.clone(), None);
-        let (page, handle) = match bytes {
-            None => bt_shell_common::native_view::containers_demo(opening, self.page_wake()),
-            Some(bytes) => bt_shell_common::native_view::module_page(
-                bytes,
-                bt_shell_common::native_view::ModuleLimits::default(),
-                // No bundle: a debug page has no files to draw.
-                None,
-                opening,
-                self.page_wake(),
-            ),
-        };
+        let (page, handle) =
+            bt_shell_common::native_view::containers_demo(opening, self.page_wake());
         let fields = self.page_fields(&handle, &theme, family);
         let area = crate::native_page::pointer_area(self.view());
         ivars.page_up.replace(Some(crate::native_page::Page {
@@ -6686,18 +6601,18 @@ impl TerminalPane {
         }
     }
 
-    /// Puts a view that is a WebAssembly component or a Lua script over the terminal: the module
-    /// or the script the program sent (its entry, held in the session's store), run in the
-    /// sandbox (a script by the interpreter that is a module of the sandbox's) and drawn by the link
-    /// as a page of the kit in place of the grid, the header's words over it — the ones a web
-    /// view has, whose button sends ⌃C to the program. The page is used like a web view
-    /// is: the pointer, the wheel and the keys go to it, its filter is a text field of AppKit's
-    /// and its row menu an `NSMenu`; ⌃C goes to the program, which ends and takes the view
-    /// with it. What the module says goes to the program through the session, and only while
-    /// the view is open; what the program says reaches the module as `Action::ToView`.
+    /// Puts a view that is a Lua script over the terminal: the script the program sent (its
+    /// entry, held in the session's store), run in the sandbox by the interpreter that is a
+    /// module of the sandbox's and drawn by the link as a page of the kit in place of the grid,
+    /// the header's words over it — the ones a web view has, whose button sends ⌃C to the
+    /// program. The page is used like a web view is: the pointer, the wheel and the keys go to
+    /// it, its filter is a text field of AppKit's and its row menu an `NSMenu`; ⌃C goes to the
+    /// program, which ends and takes the view with it. What the script says goes to the program
+    /// through the session, and only while the view is open; what the program says reaches the
+    /// script as `Action::ToView`.
     ///
-    /// A module that cannot be started (its entry is not there, or is not a component the
-    /// sandbox takes) fails the view: the program is told, and the terminal stays.
+    /// A script that cannot be started (its entry is not there) fails the view: the program is
+    /// told, and the terminal stays.
     fn start_native_view(&self, session: &Arc<Session>, start: &bt_core::pencere::ViewStart) {
         // The crate has one view at a time; a stale one goes first.
         self.end_view();
@@ -6728,8 +6643,9 @@ impl TerminalPane {
         // The images of the page are files of the bundle the program sent, read from the session
         // that keeps them. The `wake` is the one the module has: it only hops to the main queue,
         // so the images' decoder may call it from inside a build.
-        // A view whose interface has files (a script of 2.1, a component of 3.0) is given the
-        // person's files and the places they save in; any other is what it was.
+        // A view whose interface has files (every script bateri opens, at 2.1) is given the
+        // person's files and the places they save in; the rule is the host's, so a version
+        // without files, if one is ever offered, is what it was.
         let files = bt_core::pencere::has_files(start.kind, &start.version)
             .then(|| self.view_files_for(session));
         let attached = bt_shell_common::native_view::BundleAssets::new(session);
@@ -6737,26 +6653,16 @@ impl TerminalPane {
             Some(files) => attached.with_files(Arc::clone(files)),
             None => attached,
         });
-        let (page, handle) = if start.kind == bt_core::pencere::ViewKind::Lua {
-            bt_shell_common::native_view::script_page(
-                bt_shell_common::native_view::Script {
-                    path: entry,
-                    source: bytes.to_vec(),
-                    bundle: Some(assets),
-                },
-                limits,
-                opening,
-                self.page_wake(),
-            )
-        } else {
-            bt_shell_common::native_view::module_page(
-                bytes.to_vec(),
-                limits,
-                Some(assets),
-                opening,
-                self.page_wake(),
-            )
-        };
+        let (page, handle) = bt_shell_common::native_view::script_page(
+            bt_shell_common::native_view::Script {
+                path: entry,
+                source: bytes.to_vec(),
+                bundle: Some(assets),
+            },
+            limits,
+            opening,
+            self.page_wake(),
+        );
         let fields = self.page_fields(&handle, &theme, family);
         let area = crate::native_page::pointer_area(self.view());
         ivars.page_up.replace(Some(crate::native_page::Page {

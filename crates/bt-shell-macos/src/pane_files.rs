@@ -1,13 +1,13 @@
 //! The files a program's view is given by the person, and the panels it asks for: what the
-//! pane does for a view with files (pencere interface 2.1 for a script, 3.0 for a component).
+//! pane does for a view with files (pencere interface 2.1 for a script).
 //!
 //! **Only such a view takes them.** Files let go over its page, pasted into it or chosen in the
 //! Open panel it asked for become handles the session made ([`entries_given`]) and are told to
 //! the page with [`Page::give`]; the program reads a file by its handle, in pieces, on the
-//! thread of the view's files ([`ViewFiles`]). A view without files (a script of 2.0) and a pane
-//! with no view are what they were: the paths are told, or written to the line, or uploaded
-//! ([`native_view::drop_way`]). The path of a file is told to the page only where the program
-//! reads the same files as the person: a local session.
+//! thread of the view's files ([`ViewFiles`]). A pane with no view is what it was: the paths
+//! are told, or written to the line, or uploaded ([`native_view::drop_way`]). The path of a file
+//! is told to the page only where the program reads the same files as the person: a local
+//! session.
 //!
 //! **A panel is a sheet of the pane's**, on its seat ([`sheets::seat`]): one at a time, the
 //! session holds the page to that ([`Session::module_pick`]), and a pane with no window to

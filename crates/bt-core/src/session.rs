@@ -11865,12 +11865,12 @@ impl Session {
             .view(|conversation| conversation.set_locale(locale, time_zone));
     }
 
-    /// A message of the component of a WebAssembly view (a JSON object, as the component
-    /// wrote it), for the program: written to the program's input through the same gate as
-    /// everything else the view's side says (`Adapter::input`), and **only while that view is
-    /// open**. After the view has closed — the program's `bye` or `dismiss`, the person, the
-    /// view's own failure, the program's end — nothing is written, so a message that arrives
-    /// late can never land in the shell's input as keystrokes. Whether it was written.
+    /// A message of the script of a Lua view (a JSON object, as the sandbox wrote it), for the
+    /// program: written to the program's input through the same gate as everything else the
+    /// view's side says (`Adapter::input`), and **only while that view is open**. After the view
+    /// has closed — the program's `bye` or `dismiss`, the person, the view's own failure, the
+    /// program's end — nothing is written, so a message that arrives late can never land in the
+    /// shell's input as keystrokes. Whether it was written.
     pub fn module_message(&self, text: &str) -> bool {
         let flow = &self.adapter.0.flow;
         // The gate on the module's words: shut by a signal character on its way to the program
@@ -31048,13 +31048,13 @@ e\\314\\201.'; sleep 5";
     }
 
     /// The demo program (`examples/demopen.rs`) against a real pane: it asks
-    /// the terminal, sends its module, hears the page's subscription and pushes readings once a
+    /// the terminal, sends its script, hears the page's subscription and pushes readings once a
     /// second, and when the view is closed it leaves and the pane's child ends. The session is
     /// the one the application uses, the PTY is real, the program is the one a person runs; only
     /// the sandbox (the page's side) is played by the test.
     #[test]
     #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
-    fn the_demo_program_shows_its_module_pushes_what_the_page_asks_for_and_leaves_when_the_view_closes()
+    fn the_demo_program_shows_its_script_pushes_what_the_page_asks_for_and_leaves_when_the_view_closes()
      {
         use crate::pencere::Action;
         let program = demopen();
@@ -31078,7 +31078,7 @@ e\\314\\201.'; sleep 5";
         let wake = Arc::new(TestWake::default());
         let session = Session::spawn(options, Arc::clone(&wake) as Arc<dyn Wake>).unwrap();
 
-        // The program asks, sends its module, and the view starts: of the kind that is drawn
+        // The program asks, sends its script, and the view starts: of the kind that is drawn
         // by the terminal.
         let mut started = None;
         wait_until("the view to start", Duration::from_secs(20), || {
@@ -31090,13 +31090,16 @@ e\\314\\201.'; sleep 5";
             started.is_some()
         });
         let start = started.unwrap();
-        assert_eq!(start.kind, crate::pencere::ViewKind::Wasm);
+        assert_eq!(start.kind, crate::pencere::ViewKind::Lua);
         assert_eq!(start.program.as_deref(), Some("demopen"));
         assert_eq!(start.title.as_deref(), Some("Containers"));
         let entry = session.view_entry().expect("an entry");
-        let (media, module) = session.serve_view_file(&entry).expect("the module is held");
-        assert_eq!(media, "application/wasm");
-        assert!(module.starts_with(b"\0asm"), "a component");
+        let (media, script) = session.serve_view_file(&entry).expect("the script is held");
+        assert_eq!(media, "text/x-lua");
+        assert!(
+            std::str::from_utf8(&script).is_ok_and(|text| text.contains("bateri")),
+            "a script of the page"
+        );
 
         // The page (played) subscribes; the program pushes at once, and again a second later.
         let subscribe = r#"{"subscribe":{"id":1,"topic":"stats"}}"#;
@@ -31147,13 +31150,13 @@ e\\314\\201.'; sleep 5";
         session.shutdown();
     }
 
-    /// The demo program with `--lua` shows the same page as a script: the pane learns the kind
-    /// is `lua`, holds the script as the view's entry, and when the view fails the program is
-    /// told why and says so on the screen once the terminal is the shell's again. The sandbox
-    /// (the script's side) is played by the test.
+    /// The demo program's view is a script: the pane learns the kind is `lua`, holds the script
+    /// as the view's entry, and when the view fails the program is told why and says so on the
+    /// screen once the terminal is the shell's again. The sandbox (the script's side) is played
+    /// by the test.
     #[test]
     #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
-    fn the_demo_program_shows_a_script_when_asked_to_and_says_why_when_its_view_fails() {
+    fn the_demo_program_shows_a_script_and_says_why_when_its_view_fails() {
         use crate::pencere::Action;
         let program = demopen();
         let mut options = test_options(
@@ -31161,7 +31164,7 @@ e\\314\\201.'; sleep 5";
                 "/bin/sh".into(),
                 vec![
                     "-c".into(),
-                    "set -m; \"$1\" --lua".into(),
+                    "set -m; \"$1\"".into(),
                     "sh".into(),
                     program.display().to_string(),
                 ],
@@ -31342,7 +31345,7 @@ e\\314\\201.'; sleep 5";
     /// write garbage, and the program that handles it gets its view back.
     #[test]
     #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
-    fn a_restart_closes_the_modules_view_and_the_demo_program_opens_it_again() {
+    fn a_restart_closes_the_scripts_view_and_the_demo_program_opens_it_again() {
         use crate::pencere::Action;
         let program = demopen();
         let mut options = test_options(
@@ -31395,8 +31398,9 @@ e\\314\\201.'; sleep 5";
         session.shutdown();
     }
 
-    /// A pane running the demo program with `args`, whose desk opens WebAssembly views when `modules` and web views alone when not.
-    fn demo_pane(args: &[&str], modules: bool) -> (Arc<TestWake>, Session) {
+    /// A pane running the demo program with `args`, whose desk opens the views the application
+    /// draws (scripts) when `scripts` and web views alone when not.
+    fn demo_pane(args: &[&str], scripts: bool) -> (Arc<TestWake>, Session) {
         let program = demopen();
         // `set -m` makes the program a job of its own: the tty's foreground group is not the
         // shell's, as for a command a shell started.
@@ -31409,7 +31413,7 @@ e\\314\\201.'; sleep 5";
         command.extend(args.iter().map(|arg| (*arg).to_owned()));
         let mut options = test_options(("/bin/sh".into(), command), 80);
         let mut views = ViewOptions::new("bateri-test", "0.0.0");
-        views.native_entry_limit = modules.then_some(4 << 20);
+        views.native_entry_limit = scripts.then_some(4 << 20);
         options.views = Some(views);
         let wake = Arc::new(TestWake::default());
         let session = Session::spawn(options, Arc::clone(&wake) as Arc<dyn Wake>).unwrap();

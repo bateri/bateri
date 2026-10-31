@@ -422,7 +422,7 @@ impl Drop for ViewFiles {
 /// How the files a person lets go over a pane are taken, by what is up in it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DropWay {
-    /// A page whose view has files (`lua` 2.1, `wasm` 3.0) is up: it is given them by handle,
+    /// A page whose view has files (`lua` 2.1) is up: it is given them by handle,
     /// with the path of each where the program reads what the person does (a local pane).
     Handles,
     /// A page whose view has none is up: it is told the paths, as it was before files.

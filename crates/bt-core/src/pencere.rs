@@ -139,20 +139,11 @@ impl fmt::Debug for DropShown {
 /// (`[font] family`): the system's, as a CSS `font-family`.
 pub const DEFAULT_FONT_MONO: &str = "\"SF Mono\", Menlo, monospace";
 
-/// The version of the component interface a `wasm` view is written against: the semver line of
-/// the `pencere:view` package (`3.0` stands for `3.0.x`). The kit's sandbox opens no other: a
-/// component written against `2.0` is not run.
-pub const WASM_VERSION: &str = "3.0";
-
-/// The version of the Lua API a `lua` view is written against: the prelude's `pencere.version`
-/// (`2` is `2.0`).
-pub const LUA_VERSION: &str = "2.0";
-
-/// The version of the Lua API that has files beside the bundle (`pencere.files`, specification
-/// §8.8 to §8.10): a view opened at it is given the pictures its program attaches and the files
-/// the person gives it. The application offers it beside [`LUA_VERSION`]: a program that speaks
-/// only `2.0` is opened as before.
-pub const LUA_FILES_VERSION: &str = "2.1";
+/// The version of the Lua API a `lua` view is written against, the only one the application
+/// offers: the prelude's `pencere.version`. It has files beside the bundle (`pencere.files`,
+/// specification §8.8 to §8.10): a view opened at it is given the pictures its program attaches
+/// and the files the person gives it.
+pub const LUA_VERSION: &str = "2.1";
 
 /// The bytes the in-memory shelf keeps before the oldest go. A view's bundle is
 /// at most 64 MiB (the protocol's limit), so one bundle always fits; the number is a
@@ -206,10 +197,10 @@ pub struct ViewOptions {
     /// How to find the group the pane's shell leads ([`ShellGroup`]); `None` for a pane
     /// whose child is the shell itself.
     pub shell_group: Option<ShellGroup>,
-    /// The most bytes a view that is a WebAssembly component or a Lua script may be, when the
-    /// application shows such views (it runs them in a sandbox of its own and draws them): the
-    /// pane then offers the kinds `wasm` and `lua` as well as `web` in its `welcome`. `None` for
-    /// one that does not, whose panes leave them out of it and refuse such an `open`.
+    /// The most bytes a view that is a Lua script may be, when the application shows such views
+    /// (it runs them in a sandbox of its own and draws them): the pane then offers the kind `lua`
+    /// as well as `web` in its `welcome`. `None` for one that does not, whose panes leave it out
+    /// of it and refuse such an `open`.
     pub native_entry_limit: Option<u64>,
     /// How the pane asks the keeper of the server terminal it shows to drop what that
     /// terminal's program has not read, when the program of a view ended on that server and the
@@ -726,13 +717,12 @@ impl Desk {
         } = options;
         let mut config = Config::new(host, view_theme(&theme, &font_mono), size);
         // The kinds of view this pane opens, each with the versions of its interface the
-        // application speaks: the page of a WebAssembly module or of a script, when the
-        // application can run one, and the web view. The program's `hello` lists what it can
+        // application speaks: the page of a script, when the application can run one, and the
+        // web view. The program's `hello` lists what it can
         // show and the `welcome` keeps what both sides have, in the program's order.
         if let Some(limit) = native_entry_limit {
             config.views = vec![
-                Offer::new(ViewKind::Wasm, &[WASM_VERSION]),
-                Offer::new(ViewKind::Lua, &[LUA_VERSION, LUA_FILES_VERSION]),
+                Offer::new(ViewKind::Lua, &[LUA_VERSION]),
                 Offer::new(ViewKind::Web, &[WEB_BRIDGE_VERSION]),
             ];
             config.native_entry_limit = limit;
@@ -884,7 +874,7 @@ impl Desk {
         }
     }
 
-    /// A message of the component of a WebAssembly view, for the program: written only while
+    /// A message of the script of a Lua view, for the program: written only while
     /// that view is open ([`Conversing::module_message`]), to `module`, the lane the words of a
     /// module take and the same gate as every other word to the program. What the conversation
     /// says of its own goes to `keys`: a message over the size one may have ends the view as a

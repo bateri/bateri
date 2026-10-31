@@ -4,9 +4,9 @@
 #   gate.sh commit      the fast tier (`make check`) every time, and the heavy tests of the
 #                       areas the change touched: a module of bt-shell-common names its own
 #                       tests (`kablo/…` → `kablo::`), the shell scripts name the shells', the
-#                       agent's and the remote scripts' tests, the page engine, the sandbox
-#                       and the page modules name the sandbox's (the script against the
-#                       engine's page among them), the program view's files its test; a
+#                       agent's and the remote scripts' tests, the page engine and the
+#                       sandbox name the sandbox's (the script against the engine's page
+#                       among them), the program view's files its test; a
 #                       manifest, the Makefile or this script names every heavy test.
 #   gate.sh push        everything once, on a clean tree: the fast tier, every heavy test and
 #                       the program view (`make test-all`), `make linux-server` when what
@@ -101,7 +101,9 @@ while IFS= read -r f; do
         ;;
     # The pane's session against a real program (the end-to-end tests that run `demopen`).
     crates/bt-core/src/session* | crates/bt-core/src/flow* | crates/bt-core/src/reader* | \
-        crates/bt-core/src/pencere* | crates/bt-core/examples/*) areas="$areas session::tests::" ;;
+        crates/bt-core/src/pencere*) areas="$areas session::tests::" ;;
+    # The same program runs in the page's tests of bt-shell-common (`--files`, `--lua-files`).
+    crates/bt-core/examples/*) areas="$areas session::tests:: native_view::" ;;
     assets/shell/*) areas="$areas child:: ssh_wrap:: agent::" ;;
     esac
     case $f in

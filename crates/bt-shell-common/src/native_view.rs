@@ -52,9 +52,7 @@ pub use files::{
     place_saved,
 };
 pub use look::{LookSlot, caret_width_pt, terminal_look};
-pub use page::{
-    MenuUp, Opening, PageEditors, PageHandle, ShownMenu, containers_demo, module_page, script_page,
-};
+pub use page::{MenuUp, Opening, PageEditors, PageHandle, ShownMenu, containers_demo, script_page};
 pub use pencere_drive::{
     Drained, Field, Held, Host, Outline, Painted, Placement, Route, Scrolling, Tip, ZOOM_TEXT,
 };
@@ -273,7 +271,7 @@ pub fn figure(
 /// The files a page draws and requires: those of the open view's bundle, as a program sent them
 /// and the session keeps them ([`Session::serve_view_file`]) — what a page's images, and the
 /// scripts a Lua page requires, are read from — and, for a view that has files beside its bundle
-/// (`lua` `2.1`, `wasm` `3.0`), the two kinds of name that are not a path of the bundle (the
+/// (`lua` `2.1`), the two kinds of name that are not a path of the bundle (the
 /// sandbox's [`Assets::read`]): `sha256:` and a digest, a file the view's program attached
 /// ([`Session::attached_files`], read from the table the session shares and not from the session),
 /// and `file:` and a handle, a file the person gave it ([`ViewFiles::picture`]). A manifest path has
@@ -326,20 +324,6 @@ impl Assets for BundleAssets {
         // so it is not read from the store (`serve_view_file` reads the file).
         self.session.upgrade()?.view_file_type(path)
     }
-}
-
-/// Where the page modules the sandbox is tried with are, in a development tree: the
-/// `BT_VIEW_GUEST_DIR` folder, else `target/guest/dist`, where `make guest` builds them from the
-/// pencere checkout the build is pinned to (bateri carries no module of its own, and no
-/// checkout of pencere is expected to sit beside this one). `containers.lua`, the container
-/// list as a script, is copied there with them. The debug menu's demos and the tests that need
-/// a real module read it; the tests that do fail where it is not there, they do not skip.
-#[cfg(any(test, debug_assertions))]
-pub fn guest_dir() -> std::path::PathBuf {
-    std::env::var_os("BT_VIEW_GUEST_DIR").map_or_else(
-        || std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/guest/dist"),
-        std::path::PathBuf::from,
-    )
 }
 
 /// The fonts opened and the lines shaped so far. They outlive a build: a page is laid out
