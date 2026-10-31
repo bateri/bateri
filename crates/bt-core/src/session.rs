@@ -31193,8 +31193,19 @@ e\\314\\201.'; sleep 5";
             "a script of the page"
         );
 
-        // The script made an error: the pane closes the view, the program is told, and it leaves
-        // having said why.
+        // The script made an error: the pane closes the view and the program is told. A view that
+        // falls once is opened again (the program lives; a page may fall once a minute), and one
+        // that falls again within the minute is the end: the program leaves having said why.
+        session.view_failed("script:12: attempt to index nil with 'x'");
+        let mut reopened = false;
+        wait_until("the view to open again", Duration::from_secs(20), || {
+            for action in session.take_view_actions() {
+                if let Action::StartView(_) = action {
+                    reopened = true;
+                }
+            }
+            reopened
+        });
         session.view_failed("script:12: attempt to index nil with 'x'");
         assert_eq!(wake.wait_exit(Duration::from_secs(20)), Some(Some(0)));
         wait_until("the program's words", Duration::from_secs(10), || {
