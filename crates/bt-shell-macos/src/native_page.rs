@@ -1004,7 +1004,9 @@ fn place_field(field: &PageTextField, place: &Field, zoom: f32, family: Option<&
     if field.frame() != frame {
         field.setFrame(frame);
     }
-    field.setHidden(false);
+    // AppKit draws the field above the page: one the page's popover or dialog lies over is not
+    // shown, or its text would stand over what covers it.
+    field.setHidden(place.covered);
 }
 
 /// The height of one line of `field`, as its cell draws it: its font's line and the cell's

@@ -2332,6 +2332,7 @@ return {
                 rect: field,
                 hint: Some(super::super::containers::FIELD_HINT.to_owned()),
                 label: None,
+                covered: false,
             }]),
             "its place, and what the page says the field says while it is empty"
         );
