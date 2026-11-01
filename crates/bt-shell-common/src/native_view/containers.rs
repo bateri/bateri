@@ -183,8 +183,13 @@ pub struct Containers {
     list: List,
     /// The scrolls the page asks of the host, not yet taken ([`Containers::take_asks`]).
     asks: Vec<pencere_view::ScrollTo>,
-    /// What the entries of the menu that is up do, by entry; and the containers they do it to.
-    menu: interact::MenuState,
+    /// What the entries of the menus asked for do, by entry, and the containers they do it to, by the
+    /// menu's number: the last sixteen, so that a pick is of the menu the host showed, which is
+    /// not always the last asked for.
+    menu: Vec<(u64, interact::MenuState)>,
+    /// How many menus the page has asked for: the number of the last, as the script's page counts
+    /// its own.
+    menus: u64,
     /// The modifiers held when the last button went down: a click on a project's row folds it
     /// unless it was a click that marks.
     press_mods: pencere_view::Mods,
@@ -336,7 +341,8 @@ impl Containers {
             pointer: None,
             list: List::new(LIST),
             asks: Vec::new(),
-            menu: interact::MenuState::default(),
+            menu: Vec::new(),
+            menus: 0,
             press_mods: pencere_view::Mods::default(),
             reduce_motion: false,
         };

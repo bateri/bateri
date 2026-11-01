@@ -109,6 +109,9 @@ impl Row {
     }
 }
 
+/// How many of the menus asked for a page keeps what their entries do.
+pub(super) const MENUS_KEPT: usize = 16;
+
 /// What a menu's entries do and to whom, as of the moment the menu was opened.
 #[derive(Clone, Debug, Default)]
 pub(super) struct MenuState {
@@ -801,13 +804,24 @@ impl Containers {
             enabled: true,
         });
         acts.push(Some(Act::Remove));
-        self.menu = MenuState { acts, targets };
-        Some(Menu { at, entries })
+        self.menus += 1;
+        self.menu.push((self.menus, MenuState { acts, targets }));
+        if self.menu.len() > MENUS_KEPT {
+            self.menu.remove(0);
+        }
+        Some(Menu {
+            at,
+            entries,
+            serial: self.menus,
+        })
     }
 
-    /// The person picked entry `index` of the menu that was opened.
-    pub fn pick(&mut self, index: usize) -> Reply {
-        let MenuState { acts, targets } = std::mem::take(&mut self.menu);
+    /// The person picked entry `index` of the menu with this `serial`, the one the host showed.
+    pub fn pick(&mut self, serial: u64, index: usize) -> Reply {
+        let Some(at) = self.menu.iter().position(|(held, _)| *held == serial) else {
+            return self.reply(false);
+        };
+        let MenuState { acts, targets } = self.menu.remove(at).1;
         let Some(Some(act)) = acts.get(index).copied() else {
             return self.reply(false);
         };

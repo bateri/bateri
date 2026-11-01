@@ -444,7 +444,7 @@ impl PageHandle {
             allowed: editor.is_some(),
             read: pasteboard,
         };
-        self.page().pick(index, &mut host);
+        self.page().pick(shown.serial, index, &mut host);
     }
 
     /// The page is told `held` if that is not what it last heard.
@@ -509,6 +509,9 @@ impl PageHandle {
 /// menu the person saw ([`PageHandle::pick`]).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ShownMenu {
+    /// The menu's number as the page gave it: the pick is told with it, so that the page reads the
+    /// entry against this menu and not the last it asked for.
+    serial: u64,
     pastes: Vec<Option<Id>>,
 }
 
@@ -527,7 +530,10 @@ impl ShownMenu {
                 MenuEntry::Item { .. } | MenuEntry::Separator | MenuEntry::Paste { .. } => None,
             })
             .collect();
-        Self { pastes }
+        Self {
+            serial: menu.serial,
+            pastes,
+        }
     }
 
     /// Whether the line at `index` is a Paste that is on.

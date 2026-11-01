@@ -54,7 +54,7 @@ impl Runner for Demo {
         Ok(match event {
             Event::Input(input) => self.list.input(input, &*self.laid),
             Event::Text { text, .. } => self.list.set_query(&text),
-            Event::MenuPick(index) => self.list.pick(index),
+            Event::MenuPick { serial, index } => self.list.pick(serial, index),
             Event::Scrolled(boxes) => self.list.scrolled(&boxes),
             // The list has no editor (no pointer over one, no edit, no selection), no field to
             // take the keyboard, no command, takes no files and asks no wake.

@@ -464,12 +464,12 @@ fn a_right_click_chooses_the_row_and_opens_its_menu_whose_entries_act_on_the_lis
         .iter()
         .position(|entry| matches!(entry, MenuEntry::Item { title, .. } if title == "Stop"))
         .unwrap();
-    let done = page.pick(stop);
+    let done = page.pick(menu.serial, stop);
     assert!(done.redraw);
     let db = page.containers.iter().find(|c| c.name == "db").unwrap();
     assert_eq!(db.state, State::Exited(0));
     // The menu is spent: the same pick does nothing.
-    assert!(!page.pick(stop).redraw);
+    assert!(!page.pick(menu.serial, stop).redraw);
 }
 
 #[test]
