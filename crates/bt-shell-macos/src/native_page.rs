@@ -994,7 +994,7 @@ fn place_field(field: &PageTextField, place: &Field, zoom: f32, family: Option<&
     } else {
         let height = line_height(field).min(f64::from(room.h));
         let middle = f64::from(room.y + room.h / 2.0);
-        ((middle - height / 2.0).round(), height)
+        (text_top(field, middle, height), height)
     };
     // The host's y is the page's, from the top.
     let frame = NSRect::new(
@@ -1007,6 +1007,26 @@ fn place_field(field: &PageTextField, place: &Field, zoom: f32, family: Option<&
     // AppKit draws the field above the page: one the page's popover or dialog lies over is not
     // shown, or its text would stand over what covers it.
     field.setHidden(place.covered);
+}
+
+/// Where the frame of a one-line `field` stands so that its capitals are centred on the room's
+/// middle, as the page's own words are on theirs: AppKit's baseline is asked of the field
+/// (`firstBaselineOffsetFromTop`, not the font's ascent, which AppKit rounds up), and the frame goes
+/// where that baseline is half a capital below the middle. Centring the frame instead put the text a
+/// point and a half below the words beside the field in a face whose line AppKit draws lower.
+/// Rounded to the screen's pixels.
+fn text_top(field: &PageTextField, middle: f64, height: f64) -> f64 {
+    let Some(font) = field.font() else {
+        return (middle - height / 2.0).round();
+    };
+    let baseline = middle + font.capHeight() / 2.0;
+    // SAFETY: `firstBaselineOffsetFromTop` is NSView's, takes nothing and returns a CGFloat; on the
+    // main thread, as every call here.
+    let offset: f64 = unsafe { msg_send![field, firstBaselineOffsetFromTop] };
+    let scale = field
+        .window()
+        .map_or(2.0, |window| window.backingScaleFactor());
+    ((baseline - offset) * scale).round() / scale
 }
 
 /// The height of one line of `field`, as its cell draws it: its font's line and the cell's
