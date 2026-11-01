@@ -185,7 +185,7 @@ return {
         elseif t == "wake" then
             note("wake")
         elseif t == "edit" then
-            note("edit " .. event.origin .. " " .. pencere.layout.editor_text("e", 0, pencere.layout.editor_length("e")))
+            note("edit " .. event.origin .. " " .. pencere.layout.editor_text("e", 1, pencere.layout.editor_length("e") + 1))
         end
         return true
     end,
@@ -405,7 +405,7 @@ fn an_input_method_composes_in_the_editor_and_a_press_ends_it() {
             "redraw",
             "outline fields [Field { id: Id(12638204792741693372), kind: Line, rect: Rect { x: 0.0, y: 32.0, w: 200.0, h: 20.0 }, hint: Some(\"Filter\"), label: None, covered: false }] accessible [Accessible { role: Field(Line), id: Some(Id(12638204792741693372)), rect: Rect { x: 0.0, y: 32.0, w: 200.0, h: 20.0 }, words: \"Filter\", state: State { checked: None, selected: false, expanded: None, disabled: false, value: None } }, Accessible { role: Button, id: Some(Id(763668877872884410)), rect: Rect { x: 200.0, y: 32.0, w: 40.0, h: 20.0 }, words: \"Help\", state: State { checked: None, selected: false, expanded: None, disabled: false, value: None } }, Accessible { role: Editor, id: Some(Id(12638182802509129152)), rect: Rect { x: 0.0, y: 72.0, w: 400.0, h: 100.0 }, words: \"\", state: State { checked: None, selected: false, expanded: None, disabled: false, value: None } }, Accessible { role: Text, id: None, rect: Rect { x: 0.0, y: 172.0, w: 200.0, h: 16.0 }, words: \"row 1\", state: State { checked: None, selected: false, expanded: None, disabled: false, value: None } }, Accessible { role: Text, id: None, rect: Rect { x: 0.0, y: 188.0, w: 200.0, h: 15.0 }, words: \"row 2\", state: State { checked: None, selected: false, expanded: None, disabled: false, value: None } }, Accessible { role: Text, id: None, rect: Rect { x: 0.0, y: 203.0, w: 200.0, h: 16.0 }, words: \"row 3\", state: State { checked: None, selected: false, expanded: None, disabled: false, value: None } }, Accessible { role: Text, id: None, rect: Rect { x: 0.0, y: 219.0, w: 200.0, h: 16.0 }, words: \"row 4\", state: State { checked: None, selected: false, expanded: None, disabled: false, value: None } }, Accessible { role: Text, id: None, rect: Rect { x: 0.0, y: 235.0, w: 200.0, h: 15.0 }, words: \"row 5\", state: State { checked: None, selected: false, expanded: None, disabled: false, value: None } }, Accessible { role: Text, id: None, rect: Rect { x: 0.0, y: 250.0, w: 200.0, h: 16.0 }, words: \"row 6\", state: State { checked: None, selected: false, expanded: None, disabled: false, value: None } }, Accessible { role: Text, id: None, rect: Rect { x: 0.0, y: 266.0, w: 200.0, h: 15.0 }, words: \"row 7\", state: State { checked: None, selected: false, expanded: None, disabled: false, value: None } }] tips [Tip { rect: Rect { x: 200.0, y: 32.0, w: 40.0, h: 20.0 }, words: \"Help (?)\" }] commands [Command { id: Id(9922177756001819210), title: \"Run\", keys: [Shortcut { key: Enter, mods: Mods { shift: false, control: false, alt: false, command: true } }], enabled: true }]",
             "marked None selected Some((3, 0)) length Some(14) text Some(\"HE!hell\") rect Some(Rect { x: 4.0, y: 76.0, w: 2.0, h: 20.0 }) contents Some((\"HE!hello\\nworld\", (3, 0)))",
-            "said key l|edit load hello\nworld|edit compose か\u{3099}hello\nworld|press e@7|release 300,45|edit compose HEhello\nworld|edit person HE!hello\nworld",
+            "said key l|edit load hello\nworld|edit compose か\u{3099}hello\nworld|press e@12|release 300,45|edit compose HEhello\nworld|edit person HE!hello\nworld",
         ],
     );
 }
@@ -744,7 +744,7 @@ return {
             return {
                 redraw = true,
                 keyboard = { field = "find" },
-                fill = { find = { text = "needle", select = { from = 1, to = 4 } } },
+                fill = { find = { text = "needle", select = { from = 2, to = 5 } } },
             }
         end
         return true
@@ -828,8 +828,8 @@ return {
                 marks[1] = { from = event.from, to = event.to, color = "accent", underline = "accent",
                     held = "mod", over = true }
             end
-            return { redraw = true, editor = { code = { { decorate = "links", version = version, from = 0,
-                to = #text, decorations = marks } } } }
+            return { redraw = true, editor = { code = { { decorate = "links", version = version, from = 1,
+                to = #text + 1, decorations = marks } } } }
         elseif event.type == "hover" then
             told[#told + 1] = "hover:" .. event.kind
             return { redraw = true }
