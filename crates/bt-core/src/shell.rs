@@ -187,46 +187,6 @@ pub(crate) struct RemoteMark {
     pub(crate) id: u32,
     /// The letter and, on `D`, the code; its own identities are `None`.
     pub(crate) mark: Mark,
-    /// `bt_rkey=`: the value the host gave the shell when it started it and the shell keeps from
-    /// the commands it runs ([`RemoteKey`]); `None` on a mark of a shell that never says it.
-    pub(crate) key: Option<u64>,
-}
-
-/// What the host knows of the value a remote shell keeps to itself (`bt_rkey=`), for one remote
-/// session (one local command: `generation`).
-///
-/// The shell's identity, `<P>.<S>.<n>`, is no secret: `S` is the shell's pid, which any process
-/// it runs reads as `$PPID`, `P` the block of the local `ssh` and `n` a counter. So the mark that a
-/// command finished (`D`) is as writable as a `bye` without its token, by a `cat` of a file or by a
-/// program of the server, and it closes no view by itself (specification §10.3 and §14). The
-/// bootstrap gives the shell the attempt's nonce, which is unpredictable (`ssh_wrap::new_nonce`),
-/// and the shell keeps it in a variable it does not export and puts it on its own `A` and `D`.
-///
-/// - `trusted` is that nonce as the **pane** checked it against the one in the `ssh` it wrapped
-///   ([`ShellLog::trust_remote_key`]): the stream can print any `up`, and only the wrapped argv
-///   says which nonce is ours.
-/// - `announced` is that some mark of the session carried a key. From then on a `D` closes a view
-///   only with the trusted one: a stream cannot take the requirement back, and a shell of an
-///   older integration, which never says a key, is taken as it was (a mark in the session that
-///   says nothing is no announcement).
-///
-/// A session whose shell says no key leaves the check at the shell and the running block, which the
-/// specification allows a host that has no value to give.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct RemoteKey {
-    /// The local command the remote session is: a key of an older one is none.
-    generation: u64,
-    trusted: Option<u64>,
-    announced: bool,
-}
-
-/// The key in `bt_rkey=` or in a nonce: sixteen lowercase hexadecimal digits that are not all
-/// zeros (the all-zero nonce is what a failed source of randomness makes, and no secret).
-pub(crate) fn remote_key_of(text: &str) -> Option<u64> {
-    if text.len() != 16 || !text.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
-        return None;
-    }
-    u64::from_str_radix(text, 16).ok().filter(|key| *key != 0)
 }
 
 /// Which ledger a block anchor points to: `bateri://block/<n>` (the local
@@ -2585,8 +2545,6 @@ pub(crate) struct ShellLog {
     /// first byte and routinely beats the probe, and the pane's main-queue
     /// check may run after `D`. Written only while a command runs.
     pub(crate) remote_up: Option<(u64, String)>,
-    /// What the remote session's shell keeps to itself ([`RemoteKey`]).
-    pub(crate) remote_key: RemoteKey,
     /// The command generation whose remote session the user typed into after
     /// its login was seen ([`Self::login`];
     /// [`crate::Session::remote_typed`]): the session was the user's, so a
@@ -2949,7 +2907,6 @@ impl ShellLog {
             login: None,
             raw: None,
             remote_up: None,
-            remote_key: RemoteKey::default(),
             typed: None,
             ours: false,
             command_open: false,
@@ -3151,59 +3108,23 @@ impl ShellLog {
     ///
     /// A new remote shell starts a new trail: the old session's ledger cannot
     /// be read under the new one's numbers (two sessions' `rblock/1`s).
-    /// Whether the end of a remote command, which `remote` says, closes the view of the program
-    /// that ran in it (specification §10.3 and §14: a mark in the stream is no observation by
-    /// itself). It does when
+    /// Whether the end of a remote command, which `remote` says, is one the trail can tie to a
+    /// command that was running (specification §10.3 and §14: a mark in the stream is no observation
+    /// by itself, and a remote shell has none to check it against). It is when the pane has a remote
+    /// session, and the mark is of the shell the trail has seen and of the block that shell is
+    /// running: a stream that is not the remote shell's, and a shell with no command running, say
+    /// nothing of an end.
     ///
-    /// - the pane has a remote session, and the mark is of the shell the trail has seen and of the
-    ///   block that shell is running: a stream that is not the remote shell's, and a shell with no
-    ///   command running, end nothing;
-    /// - and, where the shell has said a key ([`RemoteKey`]), the mark carries the one the host gave
-    ///   it.
-    ///
-    /// The blocks, the dock and the remote session's record take the mark as they did: only the
-    /// view's end is held to this.
-    fn remote_end_closes_views(&mut self, remote: &RemoteMark) -> bool {
-        if self.context.remote.is_none() {
-            return false;
-        }
-        let keys = &mut self.remote_key;
-        if keys.generation != self.command {
-            *keys = RemoteKey {
-                generation: self.command,
-                ..RemoteKey::default()
-            };
-        }
-        keys.announced |= remote.key.is_some();
-        let trusted = keys.trusted;
-        let keyed = !keys.announced || (trusted.is_some() && trusted == remote.key);
-        keyed && self.remote_shell == Some(remote.shell) && self.remote.running() == Some(remote.id)
-    }
-
-    /// Whether the remote shell has said a key on a mark that ended one of its commands
-    /// ([`RemoteKey`]).
-    pub(crate) fn remote_key_said(&self) -> bool {
-        self.remote_key.announced
-    }
-
-    /// The pane checked the nonce `nonce` of the remote bootstrap's `up` against the `ssh` it
-    /// wrapped, in the command of `generation`: it is the value the host gave the shell
-    /// ([`RemoteKey`]). Ignored for a command that is not the running one, for a nonce that is no
-    /// key, and while there is no remote session.
-    pub(crate) fn trust_remote_key(&mut self, generation: u64, nonce: &str) {
-        let Some(key) = remote_key_of(nonce) else {
-            return;
-        };
-        if self.running_command() != Some(generation) {
-            return;
-        }
-        if self.remote_key.generation != generation {
-            self.remote_key = RemoteKey {
-                generation,
-                ..RemoteKey::default()
-            };
-        }
-        self.remote_key.trusted = Some(key);
+    /// Even then it closes no view: it is only said ([`ScanOutcome::remote_ended`]), and the view
+    /// ends when the person has asked the program to quit as well. The blocks, the dock and the
+    /// remote session's record take every mark as they did. The shell's identity is no secret
+    /// (`S` is its pid, which any process it runs reads as `$PPID`), and neither would a value the
+    /// shell kept from the commands it runs be: a program of the same user reads the environment
+    /// of the shell that started it.
+    fn remote_end_seen(&self, remote: &RemoteMark) -> bool {
+        self.context.remote.is_some()
+            && self.remote_shell == Some(remote.shell)
+            && self.remote.running() == Some(remote.id)
     }
 
     fn apply_remote(&mut self, remote: RemoteMark) -> bool {
@@ -3314,8 +3235,8 @@ impl ShellLog {
                 outcome.status =
                     matches!(remote.mark, Mark::PromptStart { .. }) && self.program.prompt();
                 // Asked before the mark is applied: the check is against what the trail knew.
-                outcome.remote_ended = matches!(remote.mark, Mark::CommandEnd { .. })
-                    && self.remote_end_closes_views(&remote);
+                outcome.remote_ended =
+                    matches!(remote.mark, Mark::CommandEnd { .. }) && self.remote_end_seen(&remote);
                 outcome.remote_edge = self.apply_remote(remote);
             }
             // The question was answered by the reader before this lock; the
@@ -5614,7 +5535,6 @@ fn parse_mark(payload: &[u8]) -> Option<ScanEvent<'static>> {
     let mut exit = None;
     let mut id = None;
     let mut remote = None;
-    let mut key = None;
     let mut click_events = false;
     // The code depends on **position** (the first field), the identities on **name** —
     // `BLOCK_ID_FIELD` (`bt_block=`) and `REMOTE_ID_FIELD` (`bt_remote=`); **not** `aid=`
@@ -5627,8 +5547,6 @@ fn parse_mark(payload: &[u8]) -> Option<ScanEvent<'static>> {
             id = Some(value);
         } else if let Some(value) = remote_id(field) {
             remote = Some(value);
-        } else if let Some(value) = field.strip_prefix(REMOTE_KEY_FIELD) {
-            key = std::str::from_utf8(value).ok().and_then(remote_key_of);
         } else if letter == b"A" && field == CLICK_EVENTS_FIELD {
             click_events = true;
         } else if index == 0 && letter == b"D" {
@@ -5648,12 +5566,7 @@ fn parse_mark(payload: &[u8]) -> Option<ScanEvent<'static>> {
         _ => Mark::CommandEnd { exit, id },
     };
     Some(match remote {
-        Some((shell, id)) => ScanEvent::RemoteMark(RemoteMark {
-            shell,
-            id,
-            mark,
-            key,
-        }),
+        Some((shell, id)) => ScanEvent::RemoteMark(RemoteMark { shell, id, mark }),
         None => ScanEvent::Mark(mark),
     })
 }
@@ -5845,10 +5758,6 @@ const CLICK_EVENTS_FIELD: &[u8] = b"click_events=1";
 /// ([`RemoteShell`] and the remote counter). A separate name, not `bt_block=`:
 /// the local gates read that one as the local shell's.
 const REMOTE_ID_FIELD: &[u8] = b"bt_remote=";
-
-/// The field of the marks of our remote shell that holds [`RemoteKey`]'s value: `bt_rkey=<hex>`, on
-/// its `A` and `D`, beside `bt_remote=`.
-const REMOTE_KEY_FIELD: &[u8] = b"bt_rkey=";
 
 /// The shell and block of a `bt_remote=<P>.<S>.<n>` field; any other field is
 /// `None`. The same three numbers as the anchor's path ([`remote_key`]).
@@ -11213,7 +11122,6 @@ mod tests {
             shell: shell(parent),
             id,
             mark,
-            key: None,
         }
     }
 
@@ -12186,12 +12094,13 @@ mod tests {
     }
 
     /// What the stream writes is no observation (specification §10.3, §14): the end of a remote
-    /// command closes a view only as the shell and the block the trail has seen, in a pane that has
-    /// a remote session — a `cat` of a file that holds a `D`, or a program that guesses the
-    /// identity (`S` is its parent's pid, `P` and `n` are small numbers), ends nothing. The mark
-    /// still reaches the blocks and the record as it did.
+    /// command is one for the view's conversation (`remote_ended`) only as the shell and the block
+    /// the trail has seen, in a pane that has a remote session — a `cat` of a file that holds a
+    /// `D`, or a program that guesses the identity (`S` is its parent's pid, `P` and `n` are small
+    /// numbers), is none. Even the right one closes nothing alone: the conversation hears it as
+    /// half of an end. The mark still reaches the blocks and the record as it did.
     #[test]
-    fn a_remote_end_closes_a_view_only_as_the_shell_and_the_block_the_trail_has_seen() {
+    fn a_remote_end_is_heard_only_as_the_shell_and_the_block_the_trail_has_seen() {
         let closes = |log: &mut ShellLog, bytes: &[u8]| {
             let mut scanner = Scanner::new();
             let mut closed = false;
@@ -12238,80 +12147,6 @@ mod tests {
         );
         // The shell is the one the guesses just named: it has to be won back by its own mark.
         assert!(!closes(&mut log, b"\x1b]133;D;0;bt_remote=1.9.1\x07"));
-    }
-
-    /// The identity is no secret, so the shell keeps a value the host gave it to itself: where it says
-    /// one, the end of a command carries it, and a mark without it — or with a guess — closes no view,
-    /// whatever the identity. A shell that says none (an older integration) is taken as it was, and
-    /// nothing the stream writes takes the requirement back.
-    #[test]
-    fn a_shell_that_says_a_key_has_its_end_closed_only_with_that_key() {
-        let key = "0123456789abcdef";
-        let guess = "fedcba9876543210";
-        let mut scanner = Scanner::new();
-        let mut closes = |log: &mut ShellLog, bytes: &[u8]| {
-            let mut closed = false;
-            scanner.feed(bytes, |event| {
-                closed |= log.apply_scan_answering(event, 0).remote_ended;
-            });
-            closed
-        };
-        let run = |tag: &str, end: &str| {
-            format!(
-                "\x1b]133;A;bt_remote=1.9.1{tag}\x07\x1b]133;C;bt_remote=1.9.1\x07\
-                 \x1b]133;D;0;bt_remote=1.9.1{end}\x07"
-            )
-        };
-
-        // The older integration: no key said, the end counts as it did.
-        let mut older = ssh_log();
-        older.trust_remote_key(older.command, key);
-        assert!(closes(&mut older, run("", "").as_bytes()));
-
-        // The shell says its key on its prompt, before any command: the host has it from the pane.
-        let mut log = ssh_log();
-        let generation = log.command;
-        log.trust_remote_key(generation, key);
-        let said = format!(";bt_rkey={key}");
-        assert!(
-            closes(&mut log, run(&said, &said).as_bytes()),
-            "the key it said"
-        );
-        // The guesses: none, another, and one that is no key.
-        for end in [
-            "",
-            &format!(";bt_rkey={guess}"),
-            ";bt_rkey=short",
-            ";bt_rkey=0000000000000000",
-        ] {
-            assert!(
-                !closes(&mut log, run(&said, end).as_bytes()),
-                "an end that says {end:?} closes no view"
-            );
-        }
-        // And a stream that says it has no key does not make the shell keyless.
-        assert!(!closes(&mut log, run("", "").as_bytes()));
-        assert!(
-            closes(&mut log, run(&said, &said).as_bytes()),
-            "the key still closes"
-        );
-
-        // A key said while the host has not been told the one it gave: nothing closes (the stream
-        // may have said it), and the key it gave closes once it is told. A nonce that is not the
-        // running command's, and one that is no key, are not taken.
-        let mut late = ssh_log();
-        assert!(
-            !closes(&mut late, run(&said, &said).as_bytes()),
-            "not told yet"
-        );
-        late.trust_remote_key(late.command + 1, key);
-        late.trust_remote_key(late.command, "not a key");
-        assert!(
-            !closes(&mut late, run(&said, &said).as_bytes()),
-            "told nothing usable"
-        );
-        late.trust_remote_key(late.command, key);
-        assert!(closes(&mut late, run(&said, &said).as_bytes()), "told");
     }
 
     /// A prompt is being edited between its end (`B`) and the command's start

@@ -318,15 +318,25 @@ of every installed copy. A version without a section is not released.
   look-ups; if the engine cannot switch one off, the view does not open and says so.
 - **A line a program prints can no longer close its own view.** The shell's "command ended" mark
   closed a program's view whenever it showed up in the terminal's output, so another program (or a
-  file shown with `cat`) could print one and close the view of a program that was still running. On
-  this Mac the mark now closes a view only when the shell has the terminal back. Over ssh the end
-  of a command closes a view only if the server's shell says it with the key bateri gave it for
-  that connection (a shell script that bateri set up on the server before this version, which has
-  no key, closes the view as before).
+  file shown with `cat`) could print one and close the view of a program that was still running.
+  On your own computer the mark now closes a view only when the shell has the terminal back (or
+  shows its next prompt with it). When the terminal is still the program's, or cannot be told, the mark is
+  only remembered, and your ⌃C (or ⌃\, ⌃Z, or the Quit in the header) then ends the view of a
+  program that is gone. Over ssh the mark never closes a view by itself, since the server's side
+  can print anything: a program that ends in the normal way still closes its view, so does the end
+  of the `ssh`, and a view whose program crashed stays until you press ⌃C, which takes you back to
+  the terminal.
+- **A program cannot put a menu in front of you that pastes your clipboard.** A view's menu opens
+  only for something you did (a click, a key, a pick); a program that opened one by itself, with a
+  Paste line under your pointer, got the clipboard into its view with your next click. The Paste line
+  of a view's menu no longer takes a key of the view's choosing, either.
+- **`bateri split --focus` takes the keyboard only from the pane you are typing in.** A program
+  on a server that asked for the new pane to be focused, from a pane you were not in, took the
+  keyboard from where you were.
 - **`osc52 = "off"` holds for a native view's page too.** With the clipboard setting off, a page's
   Copy button, which waits for its program's answer, still replaced the clipboard. Now only your
-  own copy (your key, your press, your pick of a menu line) reaches it; `"copy"` lets all of it
-  through as before.
+  own copy (⌘C or ⌘X, your press, your pick of a menu line) reaches it; a key the page chose for a
+  copy does not. `"copy"` lets all of it through as before.
 
 - **A long paste, or a file a program receives, in a terminal that runs on a server no longer loses what it typed.** Input that came faster than the program on the other end read it used to be dropped on the way without a word, so a transfer never finished. bateri now sends a terminal's input a window at a time (half a megabyte, asking the server about it at most a few times per window, so typing at a program that does not read never fills the server's questions), waits for the server to say the program's terminal took it, and holds the rest back (the pane waits instead of bateri keeping it in memory). Needs the next kablo release on the server; with an older kablo a flood the server cannot hold ends the terminal with the server's words in it instead of stalling it.
 

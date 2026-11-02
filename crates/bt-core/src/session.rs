@@ -2384,10 +2384,33 @@ impl Adapter {
     }
 
     /// The shell's own mark says the command finished (`D`, local). It ends the program only when
-    /// the tty's foreground group is the shell's, or cannot be told ([`Desk::command_ended`]).
+    /// the tty's foreground group is the shell's; otherwise it is only said ([`Desk::command_ended`]).
     fn view_command_ended(&self) {
         if let Some(desk) = &self.0.desk {
             desk.command_ended(|bytes| self.input(bytes));
+        }
+    }
+
+    /// Our remote shell's mark says the command finished (`D`). The host has no observation of
+    /// its own to believe it by: it is only said ([`Desk::note_end_said`]).
+    fn view_end_said(&self) {
+        if let Some(desk) = &self.0.desk {
+            desk.note_end_said(|bytes| self.input(bytes));
+        }
+    }
+
+    /// The shell showed its prompt (`A`, local, of our shell): with the end of the command said
+    /// and the tty the shell's, the program is over ([`Desk::prompt_shown`]).
+    fn view_prompt_shown(&self) {
+        if let Some(desk) = &self.0.desk {
+            desk.prompt_shown(|bytes| self.input(bytes));
+        }
+    }
+
+    /// The person asked the program to quit ([`Desk::note_quit_asked`]).
+    fn view_quit_asked(&self) {
+        if let Some(desk) = &self.0.desk {
+            desk.note_quit_asked(|bytes| self.input(bytes));
         }
     }
 
@@ -2778,14 +2801,17 @@ impl io::Read for TappedPty {
             // there forgot the token the program was handed, and its `open` was refused.
             // Neither is the end of a program by itself: a mark in the stream is as writable as
             // a `bye` without its token (specification §10.3, §14). The local one counts when the
-            // tty's foreground group is the shell's again; the remote one when it is of the shell
-            // and block the trail has seen, with the key the host gave the shell where it says
-            // one (`ShellLog::remote_end_closes_views`).
+            // tty's foreground group is the shell's again, or at the shell's next prompt with the
+            // tty; the remote one, which has no tty to look at, is only said, and the view ends
+            // when the person has asked the program to quit as well (`Desk::note_end_said`).
             if outcome.remote_ended && !past {
-                adapter.view_program_ended();
+                adapter.view_end_said();
             }
             if outcome.ended && !past {
                 adapter.view_command_ended();
+            }
+            if outcome.prompt && !past {
+                adapter.view_prompt_shown();
             }
             // The shell is back: no program's pointer stays over its prompt.
             if outcome.prompt && adapter.0.pointer.clear() {
@@ -10481,19 +10507,14 @@ impl Session {
         Some((log.running_command()?, pid))
     }
 
-    /// The pane has checked the nonce of the remote bootstrap's `up` against the `ssh` it wrapped,
-    /// in the command of `generation` ([`Session::remote_up`]'s): it is the value the host gave the
-    /// remote shell, which the shell puts on its marks, and the end of a remote command that does not
-    /// carry it closes no view from then on (`ShellLog::trust_remote_key`).
-    pub fn trust_remote_key(&self, generation: u64, nonce: &str) {
-        lock(&self.shell).trust_remote_key(generation, nonce);
-    }
-
-    /// Whether the remote shell has said a key on the mark that ended one of its commands in this
-    /// remote session (`bt_rkey=`, see [`Session::trust_remote_key`]): a server whose scripts are
-    /// from before the key says none, and its marks are taken as they were. One leaf-lock round.
-    pub fn remote_key_said(&self) -> bool {
-        lock(&self.shell).remote_key_said()
+    /// The person asked the program of the view to quit: ⌃C, ⌃\ or ⌃Z in the view, or the header's
+    /// Quit (the pane's `signal_program`, the one way those reach the tty). If the stream has
+    /// said that the command finished, and the host has no observation of its own to tell it by
+    /// (a remote shell, a tty it cannot read, a program that still holds the tty), the program is
+    /// gone now and the view ends without a byte written for it; a stream alone cannot end the view
+    /// (specification §10.3, §14), and nor can this alone.
+    pub fn ask_program_to_quit(&self) {
+        self.adapter.view_quit_asked();
     }
 
     /// Why the remote bootstrap fell back to a plain login shell, from
@@ -32251,7 +32272,7 @@ e\\314\\201.'; sleep 5";
     /// stream, where whoever writes the stream can write it (§14): so it counts when the tty's
     /// foreground group is the shell's again. While the program holds the tty, a `D` it writes
     /// (a local one with the identity of our shell's blocks, or without; one that names a remote
-    /// shell) ends nothing, however well it is made.
+    /// shell) ends nothing, however well it is made, and nor does a prompt it prints.
     #[test]
     fn the_end_of_a_command_ends_the_program_only_when_the_shell_holds_the_tty_again() {
         use crate::pencere::State;
@@ -32268,6 +32289,10 @@ e\\314\\201.'; sleep 5";
         );
         wait_text(&program.session, "fakes");
         assert_eq!(program.state(), Some(State::Offered));
+        // And the shell's prompt, which it can print as well as the `D`.
+        program.write(b"\x1b]133;A;bt_block=1\x07\x1b]133;A;bt_block=2\x07prompts");
+        wait_text(&program.session, "prompts");
+        assert_eq!(program.state(), Some(State::Offered), "prompts it printed");
 
         // The program is over, and the shell is in front again: the mark is true.
         program.end();
@@ -32280,18 +32305,66 @@ e\\314\\201.'; sleep 5";
         program.session.shutdown();
     }
 
-    /// Our remote shell's `D` ends the program that said hello in a remote session: the shell and
-    /// the block the trail has seen, and the key the shell was given where it says one (§10.3). A
-    /// `D` that guesses the identity, one in a pane with no remote session, and one without the
-    /// key close nothing.
+    /// The `D` that the shell's `precmd` hook writes can be read before the tty is the shell's
+    /// again: the program is in front when it is checked, and the mark is only said. The prompt
+    /// that follows it is the shell's, and with the tty in front it ends the program; one the
+    /// program prints while it holds the tty does not.
     #[test]
-    fn the_end_of_a_remote_command_ends_the_program_only_as_the_remote_shell_makes_it() {
+    fn a_late_end_is_closed_by_the_prompt_the_shell_shows_with_the_tty() {
+        use crate::pencere::State;
+        use crate::pencere::tests::hello;
+        let mut program = Playing::then("view-late-end", "; read _");
+        program.write(&hello());
+        program.wait_written(1);
+        program.wait_state(State::Offered);
+        let before = program.written().len();
+
+        // The end, read while the program holds the tty; its prompt, too.
+        program.write(b"\x1b]133;D;0;bt_block=1\x07\x1b]133;A;bt_block=2\x07said");
+        wait_text(&program.session, "said");
+        assert_eq!(program.state(), Some(State::Offered));
+
+        // The tty is the shell's: the next prompt is the shell's.
+        program.end();
+        program.write(b"\x1b]133;A;bt_block=3\x07");
+        wait_until("the prompt", Duration::from_secs(10), || {
+            program.state() == Some(State::Ended)
+        });
+        assert_eq!(program.written().len(), before, "nothing after the end");
+        program.session.shutdown();
+    }
+
+    /// A prompt alone ends nothing, though the shell holds the tty: no end was said before it.
+    #[test]
+    fn a_prompt_with_no_end_said_before_it_ends_no_program() {
+        use crate::pencere::State;
+        use crate::pencere::tests::hello;
+        let mut program = Playing::then("view-prompt-only", "; read _");
+        program.write(&hello());
+        program.wait_written(1);
+        program.wait_state(State::Offered);
+        program.end();
+        program.write(b"\x1b]133;A;bt_block=3\x07prompt");
+        wait_text(&program.session, "prompt");
+        assert_eq!(program.state(), Some(State::Offered));
+        program.session.shutdown();
+    }
+
+    /// What the pane does for a ⌃C in a program's view (`signal_program`, the one way ⌃C, ⌃\, ⌃Z and
+    /// the header's Quit reach the tty): the character, and the ask.
+    fn person_interrupts(program: &Playing) {
+        program.session.write(&[0x03]);
+        program.session.ask_program_to_quit();
+    }
+
+    /// A pane whose `ssh` runs a program that said hello, in a remote session, and the marks of
+    /// the remote shell's `A` and `C` that the stream carries (the shell is at block 1.2.2, running
+    /// a command). `D` is the stream's to write: whoever can write it can write it.
+    fn remote_view(name: &str) -> Playing {
         use crate::RemoteTarget;
         use crate::pencere::State;
         use crate::pencere::tests::hello;
-        let key = "0123456789abcdef";
-        let mut program = Playing::new("view-remote-end");
-        // A local command, an `ssh`, whose remote shell has said its prompt and its command.
+        let mut program = Playing::new(name);
         program.write(b"\x1b]133;A;bt_block=1\x07\x1b]133;C\x07");
         let command = {
             let mut found = None;
@@ -32301,47 +32374,122 @@ e\\314\\201.'; sleep 5";
             });
             found.expect("a running command")
         };
-
-        // No remote session yet: the identity of a shell nobody started ends nothing.
         program.write(hello().as_slice());
         program.wait_written(1);
         program.wait_state(State::Offered);
-        program.write(
-            b"\x1b]133;A;bt_remote=1.2.1;bt_rkey=0123456789abcdef\x07\x1b]133;C;bt_remote=1.2.1\x07\
-              \x1b]133;D;0;bt_remote=1.2.1;bt_rkey=0123456789abcdef\x07nosession",
-        );
-        wait_text(&program.session, "nosession");
-        assert_eq!(program.state(), Some(State::Offered), "no remote session");
-
         assert!(
             program
                 .session
                 .set_remote(command, Some(&RemoteTarget::ssh("prod")))
         );
-        program.session.trust_remote_key(command, key);
-        // The shell started a new command (its `A` said the key before it).
-        program.write(
-            b"\x1b]133;A;bt_remote=1.2.2;bt_rkey=0123456789abcdef\x07\x1b]133;C;bt_remote=1.2.2\x07",
-        );
-        // A guess of the identity, and of the key, and none: nothing.
-        program.write(
-            b"\x1b]133;D;0;bt_remote=1.2.9;bt_rkey=0123456789abcdef\x07\
-              \x1b]133;D;0;bt_remote=1.2.2\x07\
-              \x1b]133;D;0;bt_remote=1.2.2;bt_rkey=fedcba9876543210\x07guesses",
-        );
-        wait_text(&program.session, "guesses");
-        assert_eq!(program.state(), Some(State::Offered), "the guesses");
+        program.write(b"\x1b]133;A;bt_remote=1.2.2\x07\x1b]133;C;bt_remote=1.2.2\x07running");
+        wait_text(&program.session, "running");
+        program
+    }
 
-        // The shell's own end of the command it ran. (The blocks took the guesses as they take any
-        // mark, so the trail is at a finished command: the shell's next command is the one it ends.)
+    /// The end of a command that the stream of a remote session writes ends no view by itself
+    /// (§10.3, §14): the remote shell has no process group to look at, its identity is no secret
+    /// (`S` is its pid, which every program it runs reads as `$PPID`) and neither is any value it
+    /// would keep from them (a program of the same user reads the environment of the shell that
+    /// started it). So the program on the server — or a file it shows — writes the shell's own
+    /// marks, and the view stays; guessed or right, with a key or without.
+    #[test]
+    fn a_remote_end_the_stream_writes_closes_no_view_by_itself() {
+        use crate::pencere::State;
+        let mut program = remote_view("view-remote-forged-end");
+        // The shell's own end of its command, as a program would print it; and the guesses.
         program.write(
-            b"\x1b]133;A;bt_remote=1.2.3;bt_rkey=0123456789abcdef\x07\x1b]133;C;bt_remote=1.2.3\x07\
-              \x1b]133;D;0;bt_remote=1.2.3;bt_rkey=0123456789abcdef\x07",
+            b"\x1b]133;D;0;bt_remote=1.2.9\x07\x1b]133;D;0;bt_remote=1.8.2\x07\
+              \x1b]133;D;0;bt_remote=1.2.2;bt_rkey=0123456789abcdef\x07forged",
         );
-        wait_until("a remote D", Duration::from_secs(10), || {
+        wait_text(&program.session, "forged");
+        assert_eq!(
+            program.state(),
+            Some(State::Offered),
+            "the program's A, C and D with the identity of the remote shell ended its view"
+        );
+        program.session.shutdown();
+    }
+
+    /// The program that ends by itself says `bye` with its token (§10.3): in a remote session too,
+    /// that closes its view and answers it. Nothing the stream can forge stands in the way of this
+    /// end (the token is the program's own, given to it on its input), and a `bye` that is not the
+    /// view's changes nothing, whatever end the stream says around it.
+    #[test]
+    fn the_program_that_says_bye_with_its_token_closes_its_view_in_a_remote_session_too() {
+        use crate::pencere::State;
+        use crate::pencere::tests::{bundle_open, page_file, token_of, wire};
+        let mut program = remote_view("view-remote-bye");
+        let token = token_of(&program.written()[0]);
+        program.write(&bundle_open(&token));
+        assert_eq!(program.wait_written(2)[1].kind, "need");
+        program.write(&page_file());
+        program.wait_state(State::Open);
+
+        // A `bye` that is not the view's: another token, none. The view stays.
+        program.write(&wire(
+            "bye",
+            6,
+            None,
+            None,
+            r#"{"token":"AAAAAAAAAAAAAAAAAAAAAA","reason":"signal"}"#,
+        ));
+        program.write(&wire("bye", 7, None, None, r#"{"reason":"signal"}"#));
+        program.write(b"\x1b]133;D;0;bt_remote=1.2.2\x07said");
+        wait_text(&program.session, "said");
+        assert_eq!(program.state(), Some(State::Open), "a bye that is not its");
+
+        let bye = format!(r#"{{"token":"{token}","reason":"signal"}}"#);
+        program.write(&wire("bye", 8, None, None, &bye));
+        program.wait_state(State::Ended);
+        let answers = program.wait_written(3);
+        assert_eq!(
+            (answers[2].kind.as_str(), answers[2].re()),
+            ("closed", Some(8)),
+            "{answers:?}"
+        );
+        program.session.shutdown();
+    }
+
+    /// The end the stream says and the person's ⌃C together are the end of the view, in either
+    /// order, and the closing writes nothing to the program (§10.3).
+    #[test]
+    fn the_end_the_stream_says_and_the_persons_interrupt_end_the_view_in_either_order() {
+        use crate::pencere::State;
+        // The end first, the ⌃C after it.
+        let mut program = remote_view("view-remote-end-then-quit");
+        let before = program.written().len();
+        program.write(b"\x1b]133;D;0;bt_remote=1.2.2\x07said");
+        wait_text(&program.session, "said");
+        assert_eq!(program.state(), Some(State::Offered), "the end alone");
+        person_interrupts(&program);
+        assert_eq!(program.state(), Some(State::Ended), "the end, then ⌃C");
+        assert_eq!(program.written().len(), before, "nothing after the end");
+        program.session.shutdown();
+
+        // The ⌃C first, the end after it; and a ⌃C alone ends nothing.
+        let mut program = remote_view("view-remote-quit-then-end");
+        let before = program.written().len();
+        person_interrupts(&program);
+        person_interrupts(&program);
+        assert_eq!(program.state(), Some(State::Offered), "⌃C alone");
+        program.write(b"\x1b]133;D;0;bt_remote=1.2.9\x07guess");
+        wait_text(&program.session, "guess");
+        assert_eq!(
+            program.state(),
+            Some(State::Offered),
+            "a guess of the shell"
+        );
+        // (The guess moved the trail to the shell it named: the shell wins it back with its own
+        // marks, and then its end is the one that was said.)
+        program.write(
+            b"\x1b]133;A;bt_remote=1.2.2\x07\x1b]133;C;bt_remote=1.2.2\x07\
+              \x1b]133;D;0;bt_remote=1.2.2\x07said",
+        );
+        wait_until("the end after ⌃C", Duration::from_secs(10), || {
             program.state() == Some(State::Ended)
         });
-        assert_eq!(program.written().len(), 1, "nothing after the end");
+        assert_eq!(program.written().len(), before, "nothing after the end");
         program.session.shutdown();
     }
 

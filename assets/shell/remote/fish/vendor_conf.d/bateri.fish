@@ -33,18 +33,6 @@ if set -q BATERI_RBLOCK
     set -g __bateri_rblock $BATERI_RBLOCK
     set -e BATERI_RBLOCK
 end
-# The shell's key (`boot.sh`): the nonce the host gave it, kept in a variable that is NOT exported
-# and out of the environment, so that no command this shell runs has it. It goes on this shell's own
-# `A` and `D` as `bt_remote`'s companion, `;bt_rkey=`, and nowhere else; the end of a command closes
-# no view of the host without it. A value that is not sixteen lowercase hex digits (or none: an
-# integration started without a nonce) is no key, and the marks go without.
-set -g __bateri_rtag ''
-if set -q BATERI_RKEY
-    if string match -qr '^[0-9a-f]{16}$' -- "$BATERI_RKEY"
-        set -g __bateri_rtag ";bt_rkey=$BATERI_RKEY"
-    end
-    set -e BATERI_RKEY
-end
 # The dock's tier is the Mac's `[shell] integration`: `off` there is `"blocks"` (no dock), anything
 # else is the dock. It is READ, not taken out: it stays in the environment so that `bateri`, the
 # agent's command, hands it to the terminals it opens (`bin/bateri`).
@@ -110,7 +98,7 @@ if string match -qr '^[0-9]+$' -- "$__bateri_rblock"; and set -q fish_pid
             if not jobs 2>/dev/null | string match -qr '\tstopped\t'
                 printf '\e[<4096u\e[?1049l'
             end
-            printf '\e]133;D;%s;bt_remote=%s.%s%s\a' $code $__bateri_rshell $__bateri_block $__bateri_rtag
+            printf '\e]133;D;%s;bt_remote=%s.%s\a' $code $__bateri_rshell $__bateri_block
             # The input modes the command left on go with it, and the title it set (the
             # local wrapper's reasons).
             printf '\e[?1000;1002;1003;1004;1005;1006;1016;2048l\e[<4096u\e[23t'
@@ -119,7 +107,7 @@ if string match -qr '^[0-9]+$' -- "$__bateri_rblock"; and set -q fish_pid
 
     function __bateri_prompt --on-event fish_prompt
         set -g __bateri_block (math $__bateri_block + 1)
-        printf '\e]133;A;bt_remote=%s.%s%s\a' $__bateri_rshell $__bateri_block $__bateri_rtag
+        printf '\e]133;A;bt_remote=%s.%s\a' $__bateri_rshell $__bateri_block
         if test $__bateri_dock = 1
             # The anchor is in the prompt itself (`__bateri_take`), so that a prompt fish draws again
             # from its cache keeps it; the identity of this prompt is set before it is made.

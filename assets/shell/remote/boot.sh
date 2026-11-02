@@ -190,22 +190,6 @@ case ${1-} in
     ;;
 esac
 
-# The shell's key: this attempt's nonce (`$2`, unpredictable: `ssh_wrap::new_nonce`), which the
-# host gave and checks, handed to the login shell's script the way the blocks' parent is, and
-# taken out of the environment again by it: a command the shell runs does not inherit it, so a
-# `cat` of a file, a log line or a program of the server cannot print it in a mark. The shell puts
-# it on its own `A` and `D` (`bt_rkey=`), and the end of a remote command closes no view of the host
-# without it (specification §10.3 and §14; `bt-core`'s `RemoteKey`). Lowercase hex only; without
-# one (`bin/bateri` starts the shell with no nonce) the shell says no key and its marks are taken
-# as they were.
-case ${2-} in
-  '' | *[!0-9a-f]*) unset BATERI_RKEY ;;
-  *)
-    BATERI_RKEY=$2
-    export BATERI_RKEY
-    ;;
-esac
-
 # 4. The login shell with the integration.
 case $bt_shell in
   zsh)

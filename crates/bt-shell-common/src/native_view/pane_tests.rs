@@ -522,7 +522,8 @@ fn a_reply_is_done_in_the_panes_order_and_what_the_person_does_back_is_told() {
             "redraw",
             "route Character('c') NotEditor",
             "redraw",
-            "copy \"copied words\"",
+            // A plain key is the page's word for a copy, not the person's: only ⌘C and ⌘X are.
+            "copy \"copied words\" (not the person's act)",
             "redraw",
             "outline fields [Field { id: Id(12638204792741693372), kind: Line, rect: Rect { x: 0.0, y: 32.0, w: 200.0, h: 20.0 }, hint: Some(\"Filter\"), label: None, covered: false }] accessible [Accessible { role: Field(Line), id: Some(Id(12638204792741693372)), rect: Rect { x: 0.0, y: 32.0, w: 200.0, h: 20.0 }, words: \"Filter\", state: State { checked: None, selected: false, expanded: None, disabled: false, value: None } }, Accessible { role: Button, id: Some(Id(763668877872884410)), rect: Rect { x: 200.0, y: 32.0, w: 40.0, h: 20.0 }, words: \"Help\", state: State { checked: None, selected: false, expanded: None, disabled: false, value: None } }, Accessible { role: Editor, id: Some(Id(12638182802509129152)), rect: Rect { x: 0.0, y: 72.0, w: 400.0, h: 100.0 }, words: \"\", state: State { checked: None, selected: false, expanded: None, disabled: false, value: None } }, Accessible { role: Text, id: None, rect: Rect { x: 0.0, y: 172.0, w: 200.0, h: 16.0 }, words: \"row 1\", state: State { checked: None, selected: false, expanded: None, disabled: false, value: None } }, Accessible { role: Text, id: None, rect: Rect { x: 0.0, y: 188.0, w: 200.0, h: 15.0 }, words: \"row 2\", state: State { checked: None, selected: false, expanded: None, disabled: false, value: None } }, Accessible { role: Text, id: None, rect: Rect { x: 0.0, y: 203.0, w: 200.0, h: 16.0 }, words: \"row 3\", state: State { checked: None, selected: false, expanded: None, disabled: false, value: None } }, Accessible { role: Text, id: None, rect: Rect { x: 0.0, y: 219.0, w: 200.0, h: 16.0 }, words: \"row 4\", state: State { checked: None, selected: false, expanded: None, disabled: false, value: None } }, Accessible { role: Text, id: None, rect: Rect { x: 0.0, y: 235.0, w: 200.0, h: 15.0 }, words: \"row 5\", state: State { checked: None, selected: false, expanded: None, disabled: false, value: None } }, Accessible { role: Text, id: None, rect: Rect { x: 0.0, y: 250.0, w: 200.0, h: 16.0 }, words: \"row 6\", state: State { checked: None, selected: false, expanded: None, disabled: false, value: None } }, Accessible { role: Text, id: None, rect: Rect { x: 0.0, y: 266.0, w: 200.0, h: 15.0 }, words: \"row 7\", state: State { checked: None, selected: false, expanded: None, disabled: false, value: None } }] tips [Tip { rect: Rect { x: 200.0, y: 32.0, w: 40.0, h: 20.0 }, words: \"Help (?)\" }] commands [Command { id: Id(9922177756001819210), title: \"Run\", keys: [Shortcut { key: Enter, mods: Mods { shift: false, control: false, alt: false, command: true } }], enabled: true }]",
             "route Character('o') NotEditor",
@@ -976,12 +977,13 @@ fn the_pointers_rest_on_a_word_is_a_time_the_seen_pane_wakes_the_page_at() {
 
 /// A page whose editor opens a menu of the page's on a right press (`gestures`): Cut and Copy are its
 /// asks, Paste a line the host performs. Two keys, pressed while no editor has the keyboard, set what
-/// the page does when it is woken half a second after the menu opened, which is another reply while
-/// the menu is up:
-/// `w` asks for another menu whose every line is a Paste, `k` has the keyboard go to the page. What
-/// the page heard is the line of `said: `.
+/// the page does while the menu is up: `w` has it ask for a menu in its wake half a second after the
+/// press (which the kit does not let open) and answer the person's next right press with a menu whose
+/// every line is a Paste, `k` has the keyboard go to the page when it is woken. What the page heard
+/// is the line of `said: `.
 const MENU: &str = r#"local told = {}
 local mode = ""
+local asked = 0
 return {
     render = function()
         return pencere.div():size_full()
@@ -999,8 +1001,12 @@ return {
             told[#told + 1] = "press:" .. event.button .. ":ctrl=" .. tostring(event.mods.control)
                 .. ":inside=" .. tostring(event.place.inside) .. ":v" .. tostring(event.place.version)
             if event.button == "right" then
-                return { redraw = true, wake = mode ~= "" and 0.5 or nil, menu = { at = { x = event.x, y = event.y }, entries = {
-                    { title = "Cut" }, { title = "Copy" }, "-", { title = "Whatever", paste = "e" } } } }
+                asked = asked + 1
+                local entries = { { title = "Cut" }, { title = "Copy" }, "-", { title = "Whatever", paste = "e" } }
+                if mode == "menu" and asked == 2 then
+                    entries = { { paste = "e" }, { paste = "e" }, { paste = "e" }, { paste = "e" } }
+                end
+                return { redraw = true, wake = mode ~= "" and 0.5 or nil, menu = { at = { x = event.x, y = event.y }, entries = entries } }
             end
         elseif t == "wake" then
             told[#told + 1] = "wake:" .. mode
@@ -1115,10 +1121,11 @@ fn a_line_that_is_not_a_paste_never_reads_the_pasteboard_and_a_copy_is_written_t
     assert!(!typed(&rig).contains("SECRET"));
 }
 
-/// While a menu is up the page may reply with another (the main queue runs while a pop-up menu is
-/// tracked): the drive keeps the entries of the last menu the page asked for, so a pick of a line
-/// of the one on the screen that is no Paste would paste with the new menu's. That menu is not
-/// shown, and the pick is read against the one the person saw.
+/// While a menu is up another reply of the page may ask for a menu (the main queue runs while a
+/// pop-up menu is tracked, and a press of the person's that was queued is answered): the drive keeps
+/// the entries of the last menu the page asked for, so a pick of a line of the one on the screen that
+/// is no Paste would paste with the new menu's. That menu is not shown, and the pick is read against
+/// the one the person saw. A menu the page asks for in a wake is never one of them: it does not open.
 #[test]
 fn a_menu_the_page_asks_for_while_another_is_up_is_not_shown_and_a_pick_is_read_against_the_shown()
 {
@@ -1131,15 +1138,23 @@ fn a_menu_the_page_asks_for_while_another_is_up_is_not_shown_and_a_pick_is_read_
     rig.frame(0.1);
     rig.settle(0.1);
     rig.lines();
-    // The page is woken while its menu is up and asks for another, whose every line is a Paste.
+    // The page is woken while its menu is up and asks for a menu, whose every line is a Paste: the
+    // wake is no act of the person's, so no menu comes of it, shown or not.
     rig.frame(WAKE_AT);
     rig.settle(WAKE_AT);
+    let lines = rig.lines();
+    assert!(rig.said().contains("wake:menu"), "{}", rig.said());
+    assert!(
+        lines.iter().all(|line| !line.starts_with("menu")),
+        "{lines:#?}"
+    );
+    // The person's next press is answered with that menu while the first is still up.
+    press_in_editor(&mut rig, Button::Right, Mods::default());
     let lines = rig.lines();
     assert!(
         lines.iter().any(|line| line == "menu not shown: one is up"),
         "{lines:#?}"
     );
-    assert!(rig.said().contains("wake:menu"), "{}", rig.said());
     let before = typed(&rig);
     // The person picks Copy, a line of the menu they were shown: nothing is pasted.
     rig.pick(1);
@@ -1193,7 +1208,6 @@ fn a_menu_that_was_dismissed_lets_the_next_one_be_shown() {
         at: Point::new(0.0, 0.0),
         entries: vec![MenuEntry::Paste {
             title: "Paste".to_owned(),
-            keys: None,
             enabled: true,
             editor: Id::named("e"),
         }],
@@ -1215,7 +1229,6 @@ fn a_menu_that_was_dismissed_lets_the_next_one_be_shown() {
 fn only_a_paste_that_is_on_is_a_paste_in_the_menu_that_was_shown() {
     let paste = |enabled| MenuEntry::Paste {
         title: "Paste".to_owned(),
-        keys: None,
         enabled,
         editor: Id::named("e"),
     };

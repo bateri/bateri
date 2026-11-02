@@ -2536,18 +2536,6 @@ mod remote_shells {
         extra: &[(&str, String)],
         dock: bool,
     ) -> Session {
-        sshd_with_nonce(shell, home, extra, dock, NONCE)
-    }
-
-    /// [`sshd_with_seeded`] with the attempt's nonce as the call carries it (`-` is none: the
-    /// call of a terminal `bin/bateri` starts, whose shell has no key).
-    fn sshd_with_nonce(
-        shell: &Path,
-        home: &Path,
-        extra: &[(&str, String)],
-        dock: bool,
-        nonce: &str,
-    ) -> Session {
         let mut env = HashMap::from([
             ("HOME".to_owned(), home.display().to_string()),
             ("SHELL".to_owned(), shell.display().to_string()),
@@ -2572,7 +2560,7 @@ mod remote_shells {
                         ssh,
                         shell.display().to_string(),
                         "-c".to_owned(),
-                        remote_command(boot(), Some(PARENT), nonce, None),
+                        remote_command(boot(), Some(PARENT), NONCE, None),
                     ],
                 )),
                 working_directory: Some(home.to_path_buf()),
@@ -3634,63 +3622,5 @@ mod remote_shells {
             "{:?}",
             String::from_utf8_lossy(&out.stdout)
         );
-    }
-
-    /// The key (`boot.sh`): the nonce the call carries is on the marks of every server shell the
-    /// bootstrap serves (`bt_rkey=`, which the session reads: [`Session::remote_key_said`]) and in
-    /// no command's environment — neither as `BATERI_RKEY` nor by its value, so a program of the
-    /// server cannot print a mark that carries it. A call with no nonce (`-`, what a terminal
-    /// `bin/bateri` starts has) gives the shell no key, and its marks go without one.
-    #[test]
-    #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
-    fn the_server_shells_say_the_key_on_their_marks_and_no_command_has_it() {
-        for name in ["zsh", "bash", "fish"] {
-            let Some(shell) = which(name) else {
-                println!("SKIPPED: {name} is not installed");
-                continue;
-            };
-            if name == "bash"
-                && !crate::child::bash_version(&shell)
-                    .is_some_and(crate::child::BashVersion::integrates)
-            {
-                println!("SKIPPED: this bash is older than the integration's 4.4");
-                continue;
-            }
-            for (nonce, keyed) in [(NONCE, true), ("-", false)] {
-                let what = format!("{name} ({})", if keyed { "keyed" } else { "no nonce" });
-                let root = TempRoot::new(&format!("remote-key-{name}-{keyed}"));
-                let home = root.0.join("home");
-                std::fs::create_dir_all(&home).expect("home");
-                let home = std::fs::canonicalize(&home).expect("home");
-                super::seed_files(&shell, &home, &[], None);
-                let session = sshd_with_nonce(&shell, &home, &[], false, nonce);
-                let probe = if name == "fish" {
-                    "echo \"[env=\"(env | grep -c 'BATERI_RKEY\\|00c0ffee')\"]\"\n"
-                } else {
-                    "echo \"[env=$(env | grep -c 'BATERI_RKEY\\|00c0ffee')]\"\n"
-                };
-                session.write(probe.as_bytes());
-                wait_until(&format!("{what}: a command sees the key"), || {
-                    screen_has(&session, "[env=0]")
-                });
-                // The probe's end mark is the next prompt's news; one more command makes sure it
-                // was printed and read.
-                session.write(b"echo \"[mark-\"done\"]\"\n");
-                wait_until(&format!("{what}: no second command"), || {
-                    screen_has(&session, "[mark-done]")
-                });
-                if keyed {
-                    wait_until(&format!("{what}: the marks say no key"), || {
-                        session.remote_key_said()
-                    });
-                } else {
-                    assert!(
-                        !session.remote_key_said(),
-                        "{what}: a key out of a call with no nonce"
-                    );
-                }
-                close(&session);
-            }
-        }
     }
 }

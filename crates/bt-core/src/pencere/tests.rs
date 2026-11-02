@@ -746,8 +746,8 @@ fn the_end_of_the_command_closes_the_view_and_writes_nothing() {
 /// Specification §10.3 and §14: the shell's mark that a command finished is written in the stream,
 /// and whoever writes the stream can write it. It ends the program only when the tty's foreground
 /// group is the shell's again; while a program holds the tty (the file it shows, a line of its
-/// log, the program itself) it ends nothing, and the program's view stays. A group that cannot be
-/// told leaves the mark what it was.
+/// log, the program itself) it is only said, and the program's view stays — as it does at the
+/// shell's prompt the program prints, until the shell is in front.
 #[test]
 fn the_end_of_a_command_the_stream_says_ends_no_program_while_a_program_holds_the_tty() {
     let (rig, seen, wake) = Rig::new(true);
@@ -757,9 +757,10 @@ fn the_end_of_a_command_the_stream_says_ends_no_program_while_a_program_holds_th
     desk.take_views();
     let changes = wake_count(&wake);
 
-    // The program is in front: the mark ends nothing, and writes nothing.
+    // The program is in front: the mark ends nothing, and writes nothing; nor does its prompt.
     lock(&seen).shell_in_foreground = Some(false);
     desk.command_ended(pane.rig.write());
+    desk.prompt_shown(pane.rig.write());
     assert_eq!(desk.take_views(), []);
     assert_eq!(wake_count(&wake), changes);
     assert!(lock(&pane.rig.input).is_empty(), "{:?}", pane.rig.written());
@@ -768,9 +769,9 @@ fn the_end_of_a_command_the_stream_says_ends_no_program_while_a_program_holds_th
         State::Open
     );
 
-    // The shell is back in front: the mark is the program's end.
+    // The shell is back in front, and shows its prompt: the mark said before it is the program's end.
     lock(&seen).shell_in_foreground = Some(true);
-    desk.command_ended(pane.rig.write());
+    desk.prompt_shown(pane.rig.write());
     assert_eq!(desk.take_views(), [Action::DestroyView]);
     assert_eq!(
         desk.apply(|_| {}, |conversation| conversation.state()),
@@ -780,7 +781,40 @@ fn the_end_of_a_command_the_stream_says_ends_no_program_while_a_program_holds_th
 }
 
 #[test]
-fn the_end_of_a_command_ends_the_program_of_a_tty_that_cannot_be_read() {
+fn the_end_of_a_command_with_the_shell_in_front_ends_the_program_at_once() {
+    let (rig, seen, _) = Rig::new(true);
+    let mut pane = Pane::new(rig);
+    open_a_view(&mut pane);
+    let desk = pane.rig.desk.as_ref().expect("a desk");
+    desk.take_views();
+
+    lock(&seen).shell_in_foreground = Some(true);
+    desk.command_ended(pane.rig.write());
+
+    assert_eq!(desk.take_views(), [Action::DestroyView]);
+    assert!(lock(&pane.rig.input).is_empty(), "{:?}", pane.rig.written());
+}
+
+/// A prompt is not an end: the shell shows it with the tty in front after every command, and no end
+/// was said for the program.
+#[test]
+fn a_prompt_ends_no_program_whose_end_was_not_said() {
+    let (rig, seen, _) = Rig::new(true);
+    let mut pane = Pane::new(rig);
+    open_a_view(&mut pane);
+    let desk = pane.rig.desk.as_ref().expect("a desk");
+    desk.take_views();
+
+    lock(&seen).shell_in_foreground = Some(true);
+    desk.prompt_shown(pane.rig.write());
+
+    assert_eq!(desk.take_views(), []);
+}
+
+/// A tty that cannot be read gives no observation either: the mark is only said, and neither it
+/// nor a prompt ends the program. The person's ⌃C does, once the end was said.
+#[test]
+fn the_end_of_a_command_of_a_tty_that_cannot_be_read_waits_for_the_persons_interrupt() {
     let (rig, seen, _) = Rig::new(true);
     let mut pane = Pane::new(rig);
     open_a_view(&mut pane);
@@ -789,8 +823,89 @@ fn the_end_of_a_command_ends_the_program_of_a_tty_that_cannot_be_read() {
 
     assert_eq!(lock(&seen).shell_in_foreground, None);
     desk.command_ended(pane.rig.write());
+    desk.prompt_shown(pane.rig.write());
+    assert_eq!(desk.take_views(), []);
 
+    desk.note_quit_asked(pane.rig.write());
     assert_eq!(desk.take_views(), [Action::DestroyView]);
+    assert!(lock(&pane.rig.input).is_empty(), "{:?}", pane.rig.written());
+}
+
+/// The end the stream says and the person's ⌃C are the end of the view together, whichever comes
+/// first, and neither is alone; the closing writes nothing to the program.
+#[test]
+fn the_end_said_and_the_quit_asked_end_the_view_in_either_order_and_neither_alone() {
+    for end_first in [true, false] {
+        let (rig, _, _) = Rig::new(true);
+        let mut pane = Pane::new(rig);
+        open_a_view(&mut pane);
+        let desk = pane.rig.desk.as_ref().expect("a desk");
+        desk.take_views();
+
+        if end_first {
+            desk.note_end_said(pane.rig.write());
+        } else {
+            desk.note_quit_asked(pane.rig.write());
+        }
+        assert_eq!(
+            desk.take_views(),
+            [],
+            "one of the two, end first: {end_first}"
+        );
+        assert_eq!(
+            desk.apply(|_| {}, |conversation| conversation.state()),
+            State::Open
+        );
+        if end_first {
+            desk.note_quit_asked(pane.rig.write());
+        } else {
+            desk.note_end_said(pane.rig.write());
+        }
+        assert_eq!(
+            desk.take_views(),
+            [Action::DestroyView],
+            "end first: {end_first}"
+        );
+        assert_eq!(
+            desk.apply(|_| {}, |conversation| conversation.state()),
+            State::Ended
+        );
+        assert!(lock(&pane.rig.input).is_empty(), "{:?}", pane.rig.written());
+    }
+}
+
+/// What was said of the program before its view started is not of the view.
+#[test]
+fn a_new_view_forgets_the_end_that_was_said_before_it() {
+    let (rig, _, _) = Rig::new(true);
+    let mut pane = Pane::new(rig);
+    pane.feed(&hello());
+    let token = token_of(&pane.rig.written()[0]);
+    pane.feed(&bundle_open(&token));
+    let _ = pane.rig.written();
+
+    // The view has not started (its page is not here): an end is said.
+    pane.rig
+        .desk
+        .as_ref()
+        .expect("a desk")
+        .note_end_said(pane.rig.write());
+    pane.feed(&page_file());
+    let desk = pane.rig.desk.as_ref().expect("a desk");
+    assert!(
+        desk.take_views()
+            .iter()
+            .any(|action| matches!(action, Action::StartView(_))),
+        "the view starts"
+    );
+
+    // The view is up: the person's ⌃C alone is not its end.
+    desk.note_quit_asked(pane.rig.write());
+    assert_eq!(desk.take_views(), []);
+    assert_eq!(
+        desk.apply(|_| {}, |conversation| conversation.state()),
+        State::Open
+    );
 }
 
 #[test]

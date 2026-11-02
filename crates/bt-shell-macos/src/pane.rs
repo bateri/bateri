@@ -90,7 +90,7 @@ use bt_shell_common::native_view::{
     Bars, Cursor as PageCursor, Fault as PageFault, Fill as PageFill, Host as PageDriveHost,
     Id as PageId, Input, Key as PageKey, Keyboard, LookSlot, Menu as PageMenu, Mods as PageMods,
     Opening, PageEditors, PageHandle, Panel as PagePanel, Phase, Point as PagePoint,
-    Rect as PageRect, Route, Scrolling, TerminalLook, caret_width_pt, terminal_look,
+    Rect as PageRect, Route, Scrolling, TerminalLook, caret_width_pt, copy_key, terminal_look,
 };
 use bt_shell_common::view_strip;
 use objc2_app_kit::{NSEvent, NSEventType};
@@ -1017,6 +1017,15 @@ fn announce_copy(pending: &PendingCopy, host: &dyn PaneHost, pane: u64) {
     if let Some(text) = pending.take() {
         host.copy_to_clipboard(pane, text);
     }
+}
+
+/// Whether the copy or the cut an editor of a page made on `key` is written to the pasteboard
+/// under `[clipboard] osc52` (`mode`): `"copy"` lets every one through, `"off"` the ones of the
+/// system's own copy and cut keys only ([`copy_key`]) — a key the page chose for a copy
+/// (`keymap = { a = "copy" }`) is a program's word, not the person's. No key (the system's
+/// text commands) is the person's own.
+fn editor_key_may_copy(mode: Osc52, key: Option<(PageKey, PageMods)>) -> bool {
+    mode.lets_a_page_copy(key.is_none_or(|(key, mods)| copy_key(key, mods)))
 }
 
 /// Text on the system's find pasteboard (⌘E's cross-application
@@ -5228,12 +5237,6 @@ impl TerminalPane {
             if *command != generation || *nonce != seen {
                 return;
             }
-            // The `up` is the one of the `ssh` we wrapped: its nonce is the value the shell
-            // behind it was given, which no one but the shell and we know. The remote shell's
-            // `D` closes a view only with it from now on (`Session::trust_remote_key`).
-            if let Some(session) = self.session() {
-                session.trust_remote_key(generation, &seen);
-            }
             if proof.recorded == Some(generation) {
                 return;
             }
@@ -5998,24 +6001,36 @@ impl TerminalPane {
         let Some(editors) = self.page_editing() else {
             return false;
         };
-        let route = match crate::native_page::event_key_of(event) {
+        let key = crate::native_page::event_key_of(event);
+        let route = match key {
             Some((key, mods)) => editors.key(key, mods),
             None => Route::Type,
         };
         match route {
             Route::NotEditor => return false,
             Route::Type => self.view().type_into_editor(event),
-            route => self.page_editor_route(&editors, route),
+            route => self.page_editor_route(&editors, route, key),
         }
         self.page_edited();
         true
     }
 
-    /// The pane's part of where a key went in an editor: the pasteboard's.
-    fn page_editor_route(&self, editors: &PageEditors, route: Route) {
+    /// The pane's part of where a key went in an editor: the pasteboard's. `key` is the key that
+    /// went there. A copy or a cut writes the pasteboard under `[clipboard] osc52` as a page's
+    /// copy does ([`editor_key_may_copy`]): a key the page chose for one (`keymap = { a = "copy" }`)
+    /// is the page's word and not the person's, and `"off"` keeps it from the pasteboard.
+    fn page_editor_route(
+        &self,
+        editors: &PageEditors,
+        route: Route,
+        key: Option<(PageKey, PageMods)>,
+    ) {
         match route {
             Route::Copy(text) | Route::Cut(text) => {
-                clipboard::copy(&NSPasteboard::generalPasteboard(), Some(text));
+                let mode = self.session().map_or(Osc52::Off, |session| session.osc52());
+                if editor_key_may_copy(mode, key) {
+                    clipboard::copy(&NSPasteboard::generalPasteboard(), Some(text));
+                }
             }
             Route::Paste => {
                 if let Some(text) = clipboard::read(&NSPasteboard::generalPasteboard()) {
@@ -6047,7 +6062,7 @@ impl TerminalPane {
             return;
         };
         let route = editors.key(key, mods);
-        self.page_editor_route(&editors, route);
+        self.page_editor_route(&editors, route, Some((key, mods)));
         self.page_edited();
     }
 
@@ -6062,7 +6077,7 @@ impl TerminalPane {
             ..PageMods::default()
         };
         let route = editors.key(PageKey::Character(key), command);
-        self.page_editor_route(&editors, route);
+        self.page_editor_route(&editors, route, Some((PageKey::Character(key), command)));
         self.page_edited();
         true
     }
@@ -6975,7 +6990,25 @@ impl TerminalPane {
         }
         if let Some(session) = self.session() {
             session.write(&[character]);
+            // The person asked the program to quit, whichever way: ⌃C, ⌃\, ⌃Z, the header's Quit
+            // (`interrupt_program`). With the end of its command said in the stream, the program
+            // is gone and the view ends; a stream cannot end it alone (§10.3, §14).
+            session.ask_program_to_quit();
         }
+    }
+
+    /// Whether the keyboard is in this pane: in its terminal, or in one of the fields of its page.
+    /// What a program asks of the keyboard (a page's `keyboard`, `bateri split --focus`) is let
+    /// through only where the person already is: a program that asks from a pane they are not in
+    /// would otherwise take the keyboard, and what they type, from the pane they are in.
+    pub(crate) fn holds_keyboard(&self) -> bool {
+        self.view().is_first_responder()
+            || self
+                .ivars()
+                .page_up
+                .borrow()
+                .as_ref()
+                .is_some_and(|page| page.fields.typing())
     }
 }
 
@@ -7929,7 +7962,7 @@ impl PageDriveHost for PageHost<'_> {
     /// for the click.
     fn keyboard(&mut self, to: Keyboard) {
         if let Some(fields) = self.fields() {
-            if !(self.0.view().is_first_responder() || fields.typing()) {
+            if !self.0.holds_keyboard() {
                 return;
             }
             match to {
@@ -8772,6 +8805,119 @@ mod tests {
         assert!(close.contains("!self.0.program_page_up()"), "{close}");
         assert!(close.contains("self.0.take_page_down()"), "{close}");
         assert!(!close.contains("close_view"), "{close}");
+    }
+
+    /// The person's ask to quit has one way into the tty, `signal_program`: ⌃C of a native page or
+    /// of a web view, ⌃\ and ⌃Z of both, and the header's Quit (`quitProgram:` →
+    /// `interrupt_program`). It writes the character and tells the session, which ends the view
+    /// of a program whose end the stream said (§10.3, §14). A second way would be a ⌃C that
+    /// leaves that out. A source scan: the pane needs a window server.
+    #[test]
+    fn every_signal_the_person_sends_a_program_asks_it_to_quit_in_the_one_place() {
+        let pane = include_str!("pane.rs");
+        let pane = &pane[..pane.find("#[cfg(test)]").unwrap_or(pane.len())];
+        let body = |signature: &str| {
+            let at = pane.find(signature).expect(signature);
+            &pane[at..at + pane[at..].find("\n    }\n").expect("its end")]
+        };
+        let signal = body("    pub(crate) fn signal_program(");
+        let wrote = signal.find("session.write(&[character])").expect(signal);
+        let asked = signal.find("session.ask_program_to_quit()").expect(signal);
+        assert!(wrote < asked, "{signal}");
+        assert!(
+            body("    pub(crate) fn interrupt_program(").contains("self.signal_program("),
+            "the header's Quit and ⌃C are a signal"
+        );
+        assert_eq!(
+            pane.matches("ask_program_to_quit(").count(),
+            1,
+            "the ask is made in one place"
+        );
+        let web = include_str!("pencere_view.rs");
+        assert!(
+            web.contains("pane.signal_program(character)"),
+            "a web view's ⌃C, ⌃\\ and ⌃Z are signals of the same way"
+        );
+        assert!(
+            !web.contains("session.write(&[INTERRUPT"),
+            "a web view writes no ⌃C of its own"
+        );
+    }
+
+    /// A key the page chose for a copy is a program's word and `osc52 = "off"` keeps it from the
+    /// pasteboard; the system's own copy and cut keys, and the Edit menu's, are the person's.
+    #[test]
+    fn under_off_an_editors_copy_reaches_the_pasteboard_only_on_the_system_copy_keys() {
+        use bt_shell_common::native_view::{Key, Mods};
+        let command = Mods {
+            command: true,
+            ..Mods::default()
+        };
+        let keys = [
+            (Some((Key::Character('c'), command)), true),
+            (Some((Key::Character('x'), command)), true),
+            // A keymap line, a letter the page bound to `copy`, with or without a modifier.
+            (Some((Key::Character('a'), Mods::default())), false),
+            (Some((Key::Function(6), Mods::default())), false),
+            (Some((Key::Character('a'), command)), false),
+            (
+                Some((
+                    Key::Character('c'),
+                    Mods {
+                        shift: true,
+                        ..command
+                    },
+                )),
+                false,
+            ),
+        ];
+        for (key, person) in keys {
+            assert_eq!(
+                super::editor_key_may_copy(super::Osc52::Off, key),
+                person,
+                "{key:?}"
+            );
+            assert!(
+                super::editor_key_may_copy(super::Osc52::Copy, key),
+                "{key:?}"
+            );
+        }
+        // The route is where it is asked, and a route's copy is written nowhere else.
+        let pane = include_str!("pane.rs");
+        let pane = &pane[..pane.find("#[cfg(test)]").unwrap_or(pane.len())];
+        let route = &pane[pane.find("fn page_editor_route").expect("the route")..];
+        let route = &route[..route.find("\n    }\n").expect("its end")];
+        let copy = route
+            .find("Route::Copy(text) | Route::Cut(text)")
+            .expect(route);
+        let gate = route.find("editor_key_may_copy(mode, key)").expect(route);
+        let write = route.find("clipboard::copy(").expect(route);
+        assert!(copy < gate && gate < write, "{route}");
+    }
+
+    /// The keyboard goes where a program asks only when the person is there: a page's `keyboard`
+    /// (`PageHost::keyboard`) and `bateri split --focus` (`agent::put`) ask the same pane.
+    #[test]
+    fn what_a_program_asks_of_the_keyboard_is_let_through_where_the_person_has_it() {
+        let pane = include_str!("pane.rs");
+        let pane = &pane[..pane.find("#[cfg(test)]").unwrap_or(pane.len())];
+        let at = pane
+            .find("    fn keyboard(&mut self, to: Keyboard) {")
+            .expect("keyboard");
+        let keyboard = &pane[at..at + pane[at..].find("\n    }\n").expect("its end")];
+        assert!(keyboard.contains("self.0.holds_keyboard()"), "{keyboard}");
+        let agent = include_str!("agent.rs");
+        let put = &agent[agent.find("    fn put(").expect("put")..];
+        let put = &put[..put.find("\n    }\n").expect("its end")];
+        let gate = put
+            .find("place.focus && anchor.holds_keyboard()")
+            .expect(put);
+        assert!(
+            put.matches("show_pane(").count() == 2
+                && put.matches("if focus {").count() == 2
+                && put.find("show_pane(").unwrap() > gate,
+            "{put}"
+        );
     }
 
     /// What a reply asks of a field its own frame brings (a find bar opened, filled and given the

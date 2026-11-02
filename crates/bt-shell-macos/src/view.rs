@@ -3252,47 +3252,44 @@ impl BateriView {
         let shown = NSMenu::new(mtm);
         shown.setAutoenablesItems(false);
         for (index, entry) in menu.entries.iter().enumerate() {
-            match entry {
-                PageMenuEntry::Separator => shown.addItem(&NSMenuItem::separatorItem(mtm)),
-                // A Paste is the host's own line: the kit's words, and the pasteboard is read only
-                // when it is picked ([`TerminalPane::page_menu_pick`]).
+            // A Paste is the host's own line: the kit's words, and the pasteboard is read only
+            // when it is picked ([`TerminalPane::page_menu_pick`]). It shows no keys: the page
+            // chooses none for it.
+            let (title, keys, enabled) = match entry {
+                PageMenuEntry::Separator => {
+                    shown.addItem(&NSMenuItem::separatorItem(mtm));
+                    continue;
+                }
                 PageMenuEntry::Item {
                     title,
                     keys,
                     enabled,
-                }
-                | PageMenuEntry::Paste {
-                    title,
-                    keys,
-                    enabled,
-                    ..
-                } => {
-                    // The keys that do the same on the page, shown at the end of the line in the
-                    // menu's own glyphs. A pop-up menu matches key equivalents only while it is
-                    // open, so they take no key from the page.
-                    let (key, mask) = keys
-                        .as_ref()
-                        .map(crate::native_page::key_equivalent)
-                        .unwrap_or_else(|| (String::new(), NSEventModifierFlags::empty()));
-                    // SAFETY: `initWithTitle:action:keyEquivalent:` takes two `NSString`s and a
-                    // selector this view implements; `setTarget:` keeps the target weakly and
-                    // the view outlives the menu's modal tracking.
-                    let item = unsafe {
-                        let item = NSMenuItem::initWithTitle_action_keyEquivalent(
-                            NSMenuItem::alloc(mtm),
-                            &NSString::from_str(title),
-                            Some(sel!(pageMenuPicked:)),
-                            &NSString::from_str(&key),
-                        );
-                        item.setTarget(Some(self));
-                        item
-                    };
-                    item.setKeyEquivalentModifierMask(mask);
-                    item.setTag(index as isize);
-                    item.setEnabled(*enabled);
-                    shown.addItem(&item);
-                }
-            }
+                } => (title, keys.as_ref(), enabled),
+                PageMenuEntry::Paste { title, enabled, .. } => (title, None, enabled),
+            };
+            // The keys that do the same on the page, shown at the end of the line in the menu's
+            // own glyphs. A pop-up menu matches key equivalents only while it is open, so they
+            // take no key from the page.
+            let (key, mask) = keys
+                .map(crate::native_page::key_equivalent)
+                .unwrap_or_else(|| (String::new(), NSEventModifierFlags::empty()));
+            // SAFETY: `initWithTitle:action:keyEquivalent:` takes two `NSString`s and a selector
+            // this view implements; `setTarget:` keeps the target weakly and the view outlives
+            // the menu's modal tracking.
+            let item = unsafe {
+                let item = NSMenuItem::initWithTitle_action_keyEquivalent(
+                    NSMenuItem::alloc(mtm),
+                    &NSString::from_str(title),
+                    Some(sel!(pageMenuPicked:)),
+                    &NSString::from_str(&key),
+                );
+                item.setTarget(Some(self));
+                item
+            };
+            item.setKeyEquivalentModifierMask(mask);
+            item.setTag(index as isize);
+            item.setEnabled(*enabled);
+            shown.addItem(&item);
         }
         let at = NSPoint::new(f64::from(menu.at.x), f64::from(menu.at.y));
         shown.popUpMenuPositioningItem_atLocation_inView(None, at, Some(self));

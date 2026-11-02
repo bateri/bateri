@@ -701,6 +701,15 @@ pub(crate) struct Desk {
     /// The program of the view runs on another machine: read when the view opened
     /// ([`Discard`]).
     elsewhere: AtomicBool,
+    /// The stream of the view said that the command finished (OSC 133 `D`), and the tty did not
+    /// say otherwise: a local `D` while a program held the tty, or one that could not be checked,
+    /// and a remote `D` of the remote shell ([`Desk::note_end_said`]). A mark in the stream is as
+    /// writable as a `bye` without its token (§10.3, §14), so this is only half of an end.
+    end_said: AtomicBool,
+    /// The person asked the program to quit: ⌃C, ⌃\ or ⌃Z in the view, or the header's Quit
+    /// ([`Desk::note_quit_asked`]). The other half of an end: the person's own act, which no
+    /// stream can make.
+    asked_to_quit: AtomicBool,
 }
 
 struct Inner {
@@ -794,6 +803,8 @@ impl Desk {
             flow,
             discard,
             elsewhere: AtomicBool::new(false),
+            end_said: AtomicBool::new(false),
+            asked_to_quit: AtomicBool::new(false),
         }
     }
 
@@ -992,17 +1003,51 @@ impl Desk {
         (self.discard.throw)(self.elsewhere.load(Ordering::Acquire));
     }
 
-    /// The shell's own mark says the command finished (§10.3: OSC 133 `D`). The mark is as writable
-    /// as a `bye` without its token — a file shown with `cat`, a line of a log, the program itself —
-    /// so it ends the program only when the tty's foreground group is the shell's again. While a
-    /// program holds the tty the mark is ignored, and so is it for no end of any other kind: the
-    /// blocks, the dock and the record of the session took the mark as they did. A group that cannot
-    /// be told leaves the mark what it was.
+    /// The shell's own mark says the command finished (§10.3: OSC 133 `D`, local). The mark is as
+    /// writable as a `bye` without its token — a file shown with `cat`, a line of a log, the program
+    /// itself — so it ends the program only against the host's own observation: when the tty's
+    /// foreground group is the shell's again. While a program holds the tty, or when that cannot be
+    /// told, the mark is only said ([`Self::note_end_said`]): the view ends when the person asks the
+    /// program to quit, or when the shell shows its prompt with the tty ([`Self::prompt_shown`]).
+    /// The blocks, the dock and the record of the session took the mark as they did.
     pub(crate) fn command_ended(&self, write: impl Fn(Vec<u8>)) {
-        if (self.foreground)() == Some(false) {
-            return;
+        match (self.foreground)() {
+            Some(true) => self.program_ended(write),
+            Some(false) | None => self.note_end_said(write),
         }
-        self.program_ended(write);
+    }
+
+    /// The stream said that the command finished, and the host has no observation of its own to
+    /// believe it by (a remote shell has no process group to look at). The view does not end for
+    /// it, whatever the mark is like: it ends when the person has asked the program to quit as well,
+    /// in either order ([`Self::note_quit_asked`]), or by the program's `bye`, its transport ending
+    /// or the person closing it. The person's ⌃C is theirs to give; a program that writes marks
+    /// can make no more of it than that.
+    pub(crate) fn note_end_said(&self, write: impl Fn(Vec<u8>)) {
+        self.end_said.store(true, Ordering::SeqCst);
+        if self.asked_to_quit.load(Ordering::SeqCst) {
+            self.program_ended(write);
+        }
+    }
+
+    /// The person asked the program to quit: ⌃C, ⌃\ or ⌃Z in the view, or the header's Quit.
+    /// With the end of the command said ([`Self::note_end_said`]) the program is gone, and the
+    /// view ends without a byte more for it; without, the signal is only the program's to take.
+    pub(crate) fn note_quit_asked(&self, write: impl Fn(Vec<u8>)) {
+        self.asked_to_quit.store(true, Ordering::SeqCst);
+        if self.end_said.load(Ordering::SeqCst) {
+            self.program_ended(write);
+        }
+    }
+
+    /// The shell showed its prompt (the local `A` of our shell). With the end of the command said
+    /// before it, and the tty the shell's again, the program is over: a `precmd` hook that wrote
+    /// its `D` before the shell had the tty back is not an observation, and this is. A group that
+    /// cannot be told, or a program that still holds the tty, ends nothing.
+    pub(crate) fn prompt_shown(&self, write: impl Fn(Vec<u8>)) {
+        if self.end_said.load(Ordering::SeqCst) && (self.foreground)() == Some(true) {
+            self.program_ended(write);
+        }
     }
 
     /// The program ended (§10.3): the command's `D`, or the child's exit.
@@ -1142,6 +1187,9 @@ impl Desk {
                 // owed. A view ends, whatever ended it: nothing counted is waiting for anyone, and
                 // the module's frames that wait are dropped (the one under way is finished).
                 Action::StartView(_) => {
+                    // What was said of the program before is not of this view.
+                    self.end_said.store(false, Ordering::SeqCst);
+                    self.asked_to_quit.store(false, Ordering::SeqCst);
                     self.flow.begin();
                     // Where the program is **now**: the discard that follows its end is told
                     // this, whatever the shell has forgotten of the session by then. The shell's

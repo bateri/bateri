@@ -9,9 +9,11 @@
 //! request is a *place*, and an app that is asked cannot be made to run anything by it.
 //!
 //! - **The user's screen does not change.** The pane is born without the keyboard (`--focus`
-//!   gives it), in a zoomed tab it is born behind the zoom, and a tab is added beside the
-//!   anchor's tab without being selected ([`TerminalWindow::add_tab_behind`]): nothing the
-//!   user was looking at moves, and the tab strip shows the new one running.
+//!   gives it, and only when the keyboard is in the anchor's pane: a program asks from where
+//!   the person is not as well, and cannot take the keyboard from them,
+//!   [`TerminalPane::holds_keyboard`]), in a zoomed tab it is born behind the zoom, and a tab is
+//!   added beside the anchor's tab without being selected ([`TerminalWindow::add_tab_behind`]):
+//!   nothing the user was looking at moves, and the tab strip shows the new one running.
 //! - **The program is the point of the pane.** Its pipe closes with its terminal
 //!   (`ssh-hold --close-at-end`, [`Held::close_at_end`]) so the pane goes when the program does —
 //!   unless `--keep-open` was asked, when the shell follows as it does for any pane. The pane
@@ -366,6 +368,9 @@ impl<'a> World<'a> {
             .ok_or("the anchor is not a pane of its tab")?;
         // A terminal a pane is about to show is no longer one that was asked to end.
         hold_service::claim(&server.account, &terminal);
+        // `--focus` is the person's word when they say it in the pane they are in; a program that
+        // asks it from a pane they are not in would take the keyboard from where they are.
+        let focus = place.focus && anchor.holds_keyboard();
         match landing.spot {
             Spot::Beside { tree, landing: at } => {
                 let (config, _) = app.pane_launch_as(
@@ -376,7 +381,7 @@ impl<'a> World<'a> {
                     incoming,
                 );
                 let pane = tab.add_planned_pane(mtm, config, tree, at, false)?;
-                if place.focus {
+                if focus {
                     window.show_pane(tab.id(), pane.id());
                 }
             }
@@ -393,7 +398,7 @@ impl<'a> World<'a> {
                     return Err(format!("could not start the shell: {e}"));
                 }
                 window.refresh_title();
-                if place.focus {
+                if focus {
                     window.show_pane(tab_id, pane.id());
                 }
             }

@@ -1423,10 +1423,14 @@ osc52 = "copy"
 - **The page of a program's view** (a `.pen`'s native page) is held to the
   same setting. With `"copy"` everything it copies reaches the clipboard,
   including a Copy button that waits for the program's answer. With `"off"`
-  only a copy that is **your own act** gets through: your key (Cmd-C in a text
-  field of the page), your press, or your pick of a line in the page's own
-  context menu. A copy the program sends, or a page's reply to a message of its
-  program, is ignored.
+  only a copy that is **your own act** gets through: Cmd-C or Cmd-X (in a text
+  field of the page, or the Edit menu), your press, or your pick of a line in
+  the page's own context menu. A copy the program sends, a page's reply to a
+  message of its program, and a key the page chose for a copy (a pen's own
+  shortcut) are ignored.
+- **A web view** (a program's view that is a web page) is not covered: the
+  engine lets a page write the clipboard only in answer to your own click or
+  key, and `osc52` does not reach it.
 - The clipboard written is the **general clipboard**, the one Cmd-C writes. If
   a program sends many copies in a row, only the last one stays in the
   clipboard.

@@ -61,7 +61,7 @@ use pencere_sandbox::{Images, draw_figure};
 pub use pencere_view::{
     Accessible, AccessibleRole, Bars, Button, Command, Cursor, FieldKind, FieldState, FileEntry,
     FileSource, Fill, Id, Input, Key, KeyConvention, Keyboard, Menu, MenuEntry, Mods, Panel, Phase,
-    Point, Rect, Role, Saving, Shortcut, State, TerminalLook, WallTime,
+    Point, Rect, Role, Saving, Shortcut, State, TerminalLook, WallTime, copy_key,
 };
 use pencere_view::{
     Color, DrawList, Family, Figure, Font, Measure, Metrics, Paint, Picture, Quad, Run, Source,
