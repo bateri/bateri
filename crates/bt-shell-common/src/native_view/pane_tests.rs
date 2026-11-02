@@ -143,7 +143,7 @@ return {
                 return { redraw = true, link = "https://example.com/a?b=c" }
             elseif k == "m" then
                 return { redraw = true, menu = { at = { x = 10, y = 20 }, entries = {
-                    { title = "One", key = "1", enabled = true }, "-", { title = "Two", enabled = false } } } }
+                    { title = "One", keys = "1", enabled = true }, "-", { title = "Two", enabled = false } } } }
             elseif k == "f" then
                 return { redraw = true, keyboard = { field = "q" }, fill = { q = "filled" } }
             elseif k == "p" then
@@ -168,8 +168,8 @@ return {
             return { redraw = true, cursor = "text" }
         elseif t == "release" then
             note("release " .. at(event))
-        elseif t == "scroll" then
-            note("scroll " .. event.dy)
+        elseif t == "wheel" then
+            note("wheel " .. event.dy)
         elseif t == "scrolled" then
             note("scrolled " .. event.boxes[1].id .. " " .. event.boxes[1].y)
         elseif t == "text" then
@@ -468,7 +468,7 @@ fn the_bars_answer_the_pointer_before_the_page_and_the_wheel_scrolls_the_box_und
             "cursor Text",
             "redraw",
             "outline fields [Field { id: Id(12638204792741693372), kind: Line, rect: Rect { x: 0.0, y: 32.0, w: 200.0, h: 20.0 }, hint: Some(\"Filter\"), label: None, covered: false }] accessible [Accessible { role: Field(Line), id: Some(Id(12638204792741693372)), rect: Rect { x: 0.0, y: 32.0, w: 200.0, h: 20.0 }, words: \"Filter\", state: State { checked: None, selected: false, expanded: None, disabled: false, value: None } }, Accessible { role: Button, id: Some(Id(763668877872884410)), rect: Rect { x: 200.0, y: 32.0, w: 40.0, h: 20.0 }, words: \"Help\", state: State { checked: None, selected: false, expanded: None, disabled: false, value: None } }, Accessible { role: Editor, id: Some(Id(12638182802509129152)), rect: Rect { x: 0.0, y: 72.0, w: 400.0, h: 100.0 }, words: \"\", state: State { checked: None, selected: false, expanded: None, disabled: false, value: None } }, Accessible { role: Text, id: None, rect: Rect { x: 0.0, y: 162.0, w: 200.0, h: 16.0 }, words: \"row 24\", state: State { checked: None, selected: false, expanded: None, disabled: false, value: None } }, Accessible { role: Text, id: None, rect: Rect { x: 0.0, y: 178.0, w: 200.0, h: 16.0 }, words: \"row 25\", state: State { checked: None, selected: false, expanded: None, disabled: false, value: None } }, Accessible { role: Text, id: None, rect: Rect { x: 0.0, y: 194.0, w: 200.0, h: 15.0 }, words: \"row 26\", state: State { checked: None, selected: false, expanded: None, disabled: false, value: None } }, Accessible { role: Text, id: None, rect: Rect { x: 0.0, y: 209.0, w: 200.0, h: 16.0 }, words: \"row 27\", state: State { checked: None, selected: false, expanded: None, disabled: false, value: None } }, Accessible { role: Text, id: None, rect: Rect { x: 0.0, y: 225.0, w: 200.0, h: 16.0 }, words: \"row 28\", state: State { checked: None, selected: false, expanded: None, disabled: false, value: None } }, Accessible { role: Text, id: None, rect: Rect { x: 0.0, y: 241.0, w: 200.0, h: 15.0 }, words: \"row 29\", state: State { checked: None, selected: false, expanded: None, disabled: false, value: None } }, Accessible { role: Text, id: None, rect: Rect { x: 0.0, y: 256.0, w: 200.0, h: 16.0 }, words: \"row 30\", state: State { checked: None, selected: false, expanded: None, disabled: false, value: None } }] tips [Tip { rect: Rect { x: 200.0, y: 32.0, w: 40.0, h: 20.0 }, words: \"Help (?)\" }] commands [Command { id: Id(9922177756001819210), title: \"Run\", keys: [Shortcut { key: Enter, mods: Mods { shift: false, control: false, alt: false, command: true } }], enabled: true }]",
-            "said scrolled list 60|scroll 30|scrolled list 369|press 100,190",
+            "said scrolled list 60|wheel 30|scrolled list 369|press 100,190",
         ],
     );
 }
@@ -722,7 +722,7 @@ fn the_outline_is_told_in_the_panes_points_as_the_page_is_drawn_larger() {
             "cursor Arrow",
             "redraw",
             "outline fields [Field { id: Id(12638204792741693372), kind: Line, rect: Rect { x: 0.0, y: 32.0, w: 400.0, h: 40.0 }, hint: Some(\"Filter\"), label: None, covered: false }] accessible [Accessible { role: Field(Line), id: Some(Id(12638204792741693372)), rect: Rect { x: 0.0, y: 32.0, w: 400.0, h: 40.0 }, words: \"Filter\", state: State { checked: None, selected: false, expanded: None, disabled: false, value: None } }, Accessible { role: Button, id: Some(Id(763668877872884410)), rect: Rect { x: 400.0, y: 32.0, w: 80.0, h: 40.0 }, words: \"Help\", state: State { checked: None, selected: false, expanded: None, disabled: false, value: None } }, Accessible { role: Editor, id: Some(Id(12638182802509129152)), rect: Rect { x: 0.0, y: 112.0, w: 800.0, h: 200.0 }, words: \"\", state: State { checked: None, selected: false, expanded: None, disabled: false, value: None } }, Accessible { role: Text, id: None, rect: Rect { x: 0.0, y: 283.0, w: 400.0, h: 32.0 }, words: \"row 2\", state: State { checked: None, selected: false, expanded: None, disabled: false, value: None } }, Accessible { role: Text, id: None, rect: Rect { x: 0.0, y: 315.0, w: 400.0, h: 31.0 }, words: \"row 3\", state: State { checked: None, selected: false, expanded: None, disabled: false, value: None } }, Accessible { role: Text, id: None, rect: Rect { x: 0.0, y: 346.0, w: 400.0, h: 31.0 }, words: \"row 4\", state: State { checked: None, selected: false, expanded: None, disabled: false, value: None } }, Accessible { role: Text, id: None, rect: Rect { x: 0.0, y: 377.0, w: 400.0, h: 31.0 }, words: \"row 5\", state: State { checked: None, selected: false, expanded: None, disabled: false, value: None } }, Accessible { role: Text, id: None, rect: Rect { x: 0.0, y: 408.0, w: 400.0, h: 32.0 }, words: \"row 6\", state: State { checked: None, selected: false, expanded: None, disabled: false, value: None } }, Accessible { role: Text, id: None, rect: Rect { x: 0.0, y: 440.0, w: 400.0, h: 31.0 }, words: \"row 7\", state: State { checked: None, selected: false, expanded: None, disabled: false, value: None } }, Accessible { role: Text, id: None, rect: Rect { x: 0.0, y: 471.0, w: 400.0, h: 31.0 }, words: \"row 8\", state: State { checked: None, selected: false, expanded: None, disabled: false, value: None } }, Accessible { role: Text, id: None, rect: Rect { x: 0.0, y: 502.0, w: 400.0, h: 31.0 }, words: \"row 9\", state: State { checked: None, selected: false, expanded: None, disabled: false, value: None } }] tips [Tip { rect: Rect { x: 400.0, y: 32.0, w: 80.0, h: 40.0 }, words: \"Help (?)\" }] commands [Command { id: Id(9922177756001819210), title: \"Run\", keys: [Shortcut { key: Enter, mods: Mods { shift: false, control: false, alt: false, command: true } }], enabled: true }]",
-            "said key l|edit load hello\nworld|focus nil|press 250,259|key m|scrolled list 30|scroll 10",
+            "said key l|edit load hello\nworld|focus nil|press 250,259|key m|scrolled list 30|wheel 10",
         ],
     );
 }
