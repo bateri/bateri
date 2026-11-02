@@ -140,10 +140,10 @@ impl fmt::Debug for DropShown {
 pub const DEFAULT_FONT_MONO: &str = "\"SF Mono\", Menlo, monospace";
 
 /// The version of the Lua API a `lua` view is written against, the only one the application
-/// offers: the prelude's `pencere.version`. It has files beside the bundle (`pencere.files`,
-/// specification §8.8 to §8.10): a view opened at it is given the pictures its program attaches
+/// opens: the prelude's `pencere.version`. A `lua` view has files beside the bundle
+/// (`pencere.files`, specification §8.8 to §8.10): it is given the pictures its program attaches
 /// and the files the person gives it.
-pub const LUA_VERSION: &str = "2.1";
+pub const LUA_VERSION: &str = "0.1";
 
 /// The bytes the in-memory shelf keeps before the oldest go. A view's bundle is
 /// at most 64 MiB (the protocol's limit), so one bundle always fits; the number is a

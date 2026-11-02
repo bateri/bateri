@@ -271,7 +271,7 @@ pub fn figure(
 /// The files a page draws and requires: those of the open view's bundle, as a program sent them
 /// and the session keeps them ([`Session::serve_view_file`]) — what a page's images, and the
 /// scripts a Lua page requires, are read from — and, for a view that has files beside its bundle
-/// (`lua` `2.1`), the two kinds of name that are not a path of the bundle (the
+/// (a `lua` view), the two kinds of name that are not a path of the bundle (the
 /// sandbox's [`Assets::read`]): `sha256:` and a digest, a file the view's program attached
 /// ([`Session::attached_files`], read from the table the session shares and not from the session),
 /// and `file:` and a handle, a file the person gave it ([`ViewFiles::picture`]). A manifest path has

@@ -1,5 +1,5 @@
 //! The files a program's view is given by the person, and the panels it asks for: what the
-//! pane does for a view with files (pencere interface 2.1 for a script).
+//! pane does for a view with files (a `lua` view, a script).
 //!
 //! **Only such a view takes them.** Files let go over its page, pasted into it or chosen in the
 //! Open panel it asked for become handles the session made ([`entries_given`]) and are told to
@@ -355,10 +355,7 @@ mod tests {
         };
         // Only a view whose interface has files is given the person's files.
         let start = body(pane, "    fn start_native_view(");
-        assert!(
-            start.contains("has_files(start.kind, &start.version)"),
-            "{start}"
-        );
+        assert!(start.contains("has_files(start.kind)"), "{start}");
         assert!(
             start.contains("files,\n"),
             "the page's files are the optional ones"

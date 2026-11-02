@@ -11,7 +11,7 @@
 //! ```text
 //! demopen            a view of the kind `lua`, a script, readings pushed once a second
 //! demopen --lua-files  the same, with a script of two files: the page, and a script it requires
-//! demopen --files   the same, with the calls on the files beside the bundle (`lua` 2.1)
+//! demopen --files   the same, with the calls on the files beside the bundle (`lua` 0.1)
 //! demopen --flood    the readings pushed as fast as the terminal takes them
 //! demopen --stall N  the readings stop after N seconds (a Docker that hangs)
 //! ```
@@ -51,7 +51,7 @@ const BOX: &[u8] = b"return function() return pencere.div():size(20, 20):bg(\"ac
 
 /// The version of the interface of the views the terminal draws itself that this is written
 /// against: the Lua page API's, the one that has files beside the bundle.
-const LUA_VERSION: &str = "2.1";
+const LUA_VERSION: &str = "0.1";
 
 /// How often the made-up host reports.
 const EVERY: Duration = Duration::from_secs(1);

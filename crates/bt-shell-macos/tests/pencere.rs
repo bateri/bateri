@@ -177,7 +177,7 @@ impl Program {
     fn hello(&mut self) -> String {
         let id = self.take_id();
         self.say(&format!(
-            "{ESC}_pencere;hello;id={id};{{\"versions\":[1],\"views\":[{{\"kind\":\"web\",\"versions\":[\"1.0\"]}}]}}{ESC}\\{ESC}[c"
+            "{ESC}_pencere;hello;id={id};{{\"versions\":[1],\"views\":[{{\"kind\":\"web\",\"versions\":[\"0.1\"]}}]}}{ESC}\\{ESC}[c"
         ));
         let welcome = self.wait_for("pencere;welcome");
         assert!(
@@ -189,7 +189,7 @@ impl Program {
             "the host closes a view the program dismisses, and says so: {welcome}"
         );
         assert!(
-            welcome.contains("\"views\":[{\"kind\":\"web\",\"versions\":[\"1.0\"]}]"),
+            welcome.contains("\"views\":[{\"kind\":\"web\",\"versions\":[\"0.1\"]}]"),
             "the host opens the page at the version of its bridge: {welcome}"
         );
         welcome
@@ -232,7 +232,7 @@ impl Program {
         self.send(
             "open",
             &format!(
-                "{{\"token\":\"{token}\",\"view\":\"web\",\"version\":\"1.0\",\"program\":\"Pencere Test\",\
+                "{{\"token\":\"{token}\",\"view\":\"web\",\"version\":\"0.1\",\"program\":\"Pencere Test\",\
 \"title\":\"Show things\",\"icons\":[{{\"src\":\"{ICON}\"}}]{access},\
 \"bundle\":{{\"entry\":\"index.html\",\"files\":[{}]}}}}",
                 list.join(",")

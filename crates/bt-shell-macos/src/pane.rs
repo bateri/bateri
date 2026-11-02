@@ -6643,11 +6643,9 @@ impl TerminalPane {
         // The images of the page are files of the bundle the program sent, read from the session
         // that keeps them. The `wake` is the one the module has: it only hops to the main queue,
         // so the images' decoder may call it from inside a build.
-        // A view whose interface has files (every script bateri opens, at 2.1) is given the
-        // person's files and the places they save in; the rule is the host's, so a version
-        // without files, if one is ever offered, is what it was.
-        let files = bt_core::pencere::has_files(start.kind, &start.version)
-            .then(|| self.view_files_for(session));
+        // A view whose kind has files (every script bateri opens) is given the person's files
+        // and the places they save in; the rule is the host's, and a page has none.
+        let files = bt_core::pencere::has_files(start.kind).then(|| self.view_files_for(session));
         let attached = bt_shell_common::native_view::BundleAssets::new(session);
         let assets: Arc<dyn bt_shell_common::native_view::Assets> = Arc::new(match &files {
             Some(files) => attached.with_files(Arc::clone(files)),

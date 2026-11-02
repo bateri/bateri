@@ -51,8 +51,8 @@ of every installed copy. A version without a section is not released.
   you drag. Undo Move (⌘Z) puts it back.
 
 - **A native view can show pictures its program sends along.** A program whose view is written
-  for the Lua API `2.1` (`pencere.files`) can attach images to it and let them go, and the view
-  draws them by their name; bateri offers `2.1`, the one version of the Lua API there is. The
+  for the Lua API `0.1` (`pencere.files`) can attach images to it and let them go, and the view
+  draws them by their name; bateri opens `0.1`, the one version of the Lua API there is. The
   files a person gives the view (dragged, pasted or chosen in a panel) and the places a program
   saves to are read and written on a thread of their own, so a slow disk never holds up the
   window; a file that changed since it was given is reported as gone,

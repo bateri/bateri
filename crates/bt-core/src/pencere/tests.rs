@@ -238,7 +238,7 @@ pub(crate) fn hello() -> Vec<u8> {
         1,
         None,
         None,
-        r#"{"versions":[1],"views":[{"kind":"lua","versions":["2.1"]},{"kind":"web","versions":["1.0"]}]}"#,
+        r#"{"versions":[1],"views":[{"kind":"lua","versions":["0.1"]},{"kind":"web","versions":["0.1"]}]}"#,
     )
 }
 
@@ -354,7 +354,7 @@ fn open_of_bundle(token: &str, extra: &str) -> Vec<u8> {
     let digest = Digest::of(PAGE).to_string();
     let open = format!(
         concat!(
-            r#"{{"token":"{token}","view":"web","version":"1.0","program":"containers","#,
+            r#"{{"token":"{token}","view":"web","version":"0.1","program":"containers","#,
             r#""title":"Containers"{extra},"bundle":{{"entry":"index.html","files":"#,
             r#"[{{"path":"index.html","sha256":"{digest}","size":{size},"type":"text/html"}}]}}}}"#
         ),
@@ -1453,7 +1453,7 @@ fn the_kinds_and_versions_offered_are_what_the_application_can_open_in_the_progr
     assert!(
         welcome[0]
             .payload
-            .contains(r#""views":[{"kind":"web","versions":["1.0"]}]"#),
+            .contains(r#""views":[{"kind":"web","versions":["0.1"]}]"#),
         "{}",
         welcome[0].payload
     );
@@ -1469,15 +1469,15 @@ fn the_kinds_and_versions_offered_are_what_the_application_can_open_in_the_progr
         None,
         None,
         concat!(
-            r#"{"versions":[1],"views":[{"kind":"web","versions":["2.0","1.0"]},"#,
-            r#"{"kind":"lua","versions":["2.0"]},{"kind":"wasm","versions":["0.4","3.0"]}]}"#
+            r#"{"versions":[1],"views":[{"kind":"web","versions":["0.2","0.1"]},"#,
+            r#"{"kind":"lua","versions":["0.2"]},{"kind":"wasm","versions":["0.4","3.0"]}]}"#
         ),
     ));
     let welcome = pane.rig.written();
     assert!(
         welcome[0]
             .payload
-            .contains(r#""views":[{"kind":"web","versions":["1.0"]}]"#),
+            .contains(r#""views":[{"kind":"web","versions":["0.1"]}]"#),
         "{}",
         welcome[0].payload
     );
@@ -1489,14 +1489,14 @@ fn the_kinds_and_versions_offered_are_what_the_application_can_open_in_the_progr
         None,
         None,
         concat!(
-            r#"{"versions":[1],"views":[{"kind":"web","versions":["1.0"]},"#,
-            r#"{"kind":"lua","versions":["2.0","2.1"]}]}"#
+            r#"{"versions":[1],"views":[{"kind":"web","versions":["0.1"]},"#,
+            r#"{"kind":"lua","versions":["0.0","0.1"]}]}"#
         ),
     ));
     let welcome = pane.rig.written();
     assert!(
         welcome[0].payload.contains(
-            r#""views":[{"kind":"web","versions":["1.0"]},{"kind":"lua","versions":["2.1"]}]"#
+            r#""views":[{"kind":"web","versions":["0.1"]},{"kind":"lua","versions":["0.1"]}]"#
         ),
         "{}",
         welcome[0].payload
@@ -1508,15 +1508,15 @@ fn the_kinds_and_versions_offered_are_what_the_application_can_open_in_the_progr
     let offer = pane.rig.written();
     assert!(
         offer[0].payload.contains(concat!(
-            r#""views":[{"kind":"lua","versions":["2.1"]},"#,
-            r#"{"kind":"web","versions":["1.0"]}]"#
+            r#""views":[{"kind":"lua","versions":["0.1"]},"#,
+            r#"{"kind":"web","versions":["0.1"]}]"#
         )),
         "{}",
         offer[0].payload
     );
     // The versions are the application's constants, and the Lua API's is the prelude's.
-    assert_eq!(LUA_VERSION, "2.1");
-    assert_eq!(WEB_BRIDGE_VERSION, "1.0");
+    assert_eq!(LUA_VERSION, "0.1");
+    assert_eq!(WEB_BRIDGE_VERSION, "0.1");
 }
 
 // ---- the shelf ------------------------------------------------------------
@@ -1593,7 +1593,7 @@ const SCRIPT: &[u8] = b"return { render = function() end }";
 fn script_open(token: &str) -> Vec<u8> {
     let open = format!(
         concat!(
-            r#"{{"token":"{token}","view":"lua","version":"2.1","program":"demopen","title":"Containers","#,
+            r#"{{"token":"{token}","view":"lua","version":"0.1","program":"demopen","title":"Containers","#,
             r#""bundle":{{"entry":"view.lua","files":[{{"path":"view.lua","sha256":"{digest}","#,
             r#""size":{size},"type":"text/x-lua"}}]}}}}"#
         ),
@@ -1624,7 +1624,7 @@ fn open_a_script_view() -> (Pane, String, Arc<CountingWake>) {
     assert!(
         welcome[0]
             .payload
-            .contains(r#""features":["dismiss"],"views":[{"kind":"lua","versions":["2.1"]},{"kind":"web","versions":["1.0"]}]"#),
+            .contains(r#""features":["dismiss"],"views":[{"kind":"lua","versions":["0.1"]},{"kind":"web","versions":["0.1"]}]"#),
         "{}",
         welcome[0].payload
     );
@@ -1677,19 +1677,19 @@ fn a_script_opens_a_view_of_its_kind_and_its_failure_reaches_the_program_with_it
         1,
         None,
         None,
-        r#"{"versions":[1],"views":[{"kind":"lua","versions":["2.1"]},{"kind":"web","versions":["1.0"]}]}"#,
+        r#"{"versions":[1],"views":[{"kind":"lua","versions":["0.1"]},{"kind":"web","versions":["0.1"]}]}"#,
     ));
     let welcome = pane.rig.written();
     assert!(
         welcome[0].payload.contains(
-            r#""views":[{"kind":"lua","versions":["2.1"]},{"kind":"web","versions":["1.0"]}]"#
+            r#""views":[{"kind":"lua","versions":["0.1"]},{"kind":"web","versions":["0.1"]}]"#
         ),
         "{}",
         welcome[0].payload
     );
     let open = format!(
         concat!(
-            r#"{{"token":"{token}","view":"lua","version":"2.1","program":"demopen","#,
+            r#"{{"token":"{token}","view":"lua","version":"0.1","program":"demopen","#,
             r#""bundle":{{"entry":"view.lua","files":[{{"path":"view.lua","sha256":"{digest}","#,
             r#""size":{size},"type":"text/x-lua"}}]}}}}"#
         ),

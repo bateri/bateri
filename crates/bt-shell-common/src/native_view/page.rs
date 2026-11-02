@@ -1617,7 +1617,7 @@ return {
         });
         let start = played.started.take().expect("a start");
         assert_eq!(start.kind, bt_core::pencere::ViewKind::Lua);
-        assert_eq!(start.version, "2.1", "the interface that has files");
+        assert_eq!(start.version, "0.1", "the interface that has files");
         let entry = session.view_entry().expect("an entry");
         let (_, entry_bytes) = session.serve_view_file(&entry).expect("the entry is held");
         let assets = crate::native_view::BundleAssets::new(&session).with_files(Arc::clone(&files));
