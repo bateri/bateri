@@ -121,19 +121,21 @@ impl Rig {
             views.then(|| -> Observer { Box::new(move || *lock(&observed)) }),
             None,
             Discard::nothing(),
+            // The shell holds the tty as the test's observation says it does.
+            Some(Arc::clone(&seen)),
         );
         (rig, seen, wake)
     }
 
     /// A rig whose desk throws the program's leftovers away with `discard`.
     pub(crate) fn with_discard(discard: Discard) -> (Arc<Self>, Arc<CountingWake>) {
-        Self::build(Some(Box::new(Observed::default)), None, discard)
+        Self::build(Some(Box::new(Observed::default)), None, discard, None)
     }
 
     /// A rig with a desk whose observer is `observer`: for a test that looks at
     /// what is held when the desk reads the pane.
     pub(crate) fn with_observer(observer: Observer) -> (Arc<Self>, Arc<CountingWake>) {
-        Self::build(Some(observer), None, Discard::nothing())
+        Self::build(Some(observer), None, Discard::nothing(), None)
     }
 
     /// A rig whose desk shows the views the application draws (scripts) of up to `limit` bytes.
@@ -142,6 +144,7 @@ impl Rig {
             Some(Box::new(Observed::default)),
             Some(limit),
             Discard::nothing(),
+            None,
         )
     }
 
@@ -149,6 +152,7 @@ impl Rig {
         observer: Option<Observer>,
         native_entry_limit: Option<u64>,
         discard: Discard,
+        holds: Option<Seen>,
     ) -> (Arc<Self>, Arc<CountingWake>) {
         let wake = Arc::new(CountingWake::default());
         let flow = crate::flow::Flow::new();
@@ -164,6 +168,10 @@ impl Rig {
                 Theme::BATERI,
                 wake.clone(),
                 observer,
+                match holds {
+                    Some(seen) => Box::new(move || lock(&seen).shell_in_foreground),
+                    None => Box::new(|| None),
+                },
                 flow.clone(),
                 discard,
             )
@@ -733,6 +741,56 @@ fn the_end_of_the_command_closes_the_view_and_writes_nothing() {
     assert_eq!(desk.take_views(), [Action::DestroyView]);
     assert_eq!(wake_count(&wake), 3);
     assert!(lock(&pane.rig.input).is_empty(), "{:?}", pane.rig.written());
+}
+
+/// Specification §10.3 and §14: the shell's mark that a command finished is written in the stream,
+/// and whoever writes the stream can write it. It ends the program only when the tty's foreground
+/// group is the shell's again; while a program holds the tty (the file it shows, a line of its
+/// log, the program itself) it ends nothing, and the program's view stays. A group that cannot be
+/// told leaves the mark what it was.
+#[test]
+fn the_end_of_a_command_the_stream_says_ends_no_program_while_a_program_holds_the_tty() {
+    let (rig, seen, wake) = Rig::new(true);
+    let mut pane = Pane::new(rig);
+    open_a_view(&mut pane);
+    let desk = pane.rig.desk.as_ref().expect("a desk");
+    desk.take_views();
+    let changes = wake_count(&wake);
+
+    // The program is in front: the mark ends nothing, and writes nothing.
+    lock(&seen).shell_in_foreground = Some(false);
+    desk.command_ended(pane.rig.write());
+    assert_eq!(desk.take_views(), []);
+    assert_eq!(wake_count(&wake), changes);
+    assert!(lock(&pane.rig.input).is_empty(), "{:?}", pane.rig.written());
+    assert_eq!(
+        desk.apply(|_| {}, |conversation| conversation.state()),
+        State::Open
+    );
+
+    // The shell is back in front: the mark is the program's end.
+    lock(&seen).shell_in_foreground = Some(true);
+    desk.command_ended(pane.rig.write());
+    assert_eq!(desk.take_views(), [Action::DestroyView]);
+    assert_eq!(
+        desk.apply(|_| {}, |conversation| conversation.state()),
+        State::Ended
+    );
+    assert!(lock(&pane.rig.input).is_empty(), "{:?}", pane.rig.written());
+}
+
+#[test]
+fn the_end_of_a_command_ends_the_program_of_a_tty_that_cannot_be_read() {
+    let (rig, seen, _) = Rig::new(true);
+    let mut pane = Pane::new(rig);
+    open_a_view(&mut pane);
+    let desk = pane.rig.desk.as_ref().expect("a desk");
+    desk.take_views();
+
+    assert_eq!(lock(&seen).shell_in_foreground, None);
+    desk.command_ended(pane.rig.write());
+
+    assert_eq!(desk.take_views(), [Action::DestroyView]);
 }
 
 #[test]

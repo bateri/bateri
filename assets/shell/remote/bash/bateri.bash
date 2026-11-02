@@ -30,6 +30,16 @@ fi
 # exported; ours, so out of the environment (the zsh wrapper's reason).
 __bateri_rblock=${BATERI_RBLOCK-}
 unset BATERI_RBLOCK
+# The shell's key (`boot.sh`): the nonce the host gave it, kept in a variable that is NOT exported
+# and out of the environment, so that no command this shell runs has it. It goes on this shell's own
+# `A` and `D` as `bt_remote`'s companion, `;bt_rkey=`, and nowhere else; the end of a command closes
+# no view of the host without it. A value that is not sixteen lowercase hex digits (or none: an
+# integration started without a nonce) is no key, and the marks go without.
+__bateri_rtag=
+if [[ ${BATERI_RKEY-} =~ ^[0-9a-f]{16}$ ]]; then
+  __bateri_rtag=";bt_rkey=$BATERI_RKEY"
+fi
+unset BATERI_RKEY
 # The dock's tier is the Mac's `[shell] integration`: `off` there is `"blocks"` (no dock), anything
 # else is the dock. It is READ, not taken out: it stays in the environment so that `bateri`, the
 # agent's command, hands it to the terminals it opens (`bin/bateri`).
@@ -162,13 +172,13 @@ __bateri_precmd() {
       __bateri_ran=0
       # The screen a program that is over left on, before `D` (the local wrapper's reasons).
       [[ " $__bateri_stopped " == *" $status "* ]] || printf '\033[<4096u\033[?1049l'
-      printf '\033]133;D;%s;bt_remote=%s.%s\007' "$status" "$__bateri_rshell" "$__bateri_block"
+      printf '\033]133;D;%s;bt_remote=%s.%s%s\007' "$status" "$__bateri_rshell" "$__bateri_block" "$__bateri_rtag"
       # The input modes the command left on go with it, and the title it set (the local
       # wrapper's reasons).
       printf '\033[?1000;1002;1003;1004;1005;1006;1016;2048l\033[<4096u\033[23t'
     fi
     __bateri_block=$(( __bateri_block + 1 ))
-    printf '\033]133;A;bt_remote=%s.%s\007' "$__bateri_rshell" "$__bateri_block"
+    printf '\033]133;A;bt_remote=%s.%s%s\007' "$__bateri_rshell" "$__bateri_block" "$__bateri_rtag"
     # With a dock the anchor is in the prompt itself (`__bateri_prompt`), so that a prompt readline
     # draws again keeps it.
     (( __bateri_dock )) ||

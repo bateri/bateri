@@ -65,6 +65,7 @@
 //! deadlines) is `pane`'s.
 
 pub(crate) mod ask;
+mod engine;
 pub(crate) mod face;
 mod files;
 mod serve;
@@ -841,6 +842,19 @@ impl ViewHost {
             let configuration = WKWebViewConfiguration::new(mtm);
             // Nothing outlives the web view: no cookie, no storage, no cache.
             configuration.setWebsiteDataStore(&WKWebsiteDataStore::nonPersistentDataStore(mtm));
+            // And none of the engine's own channels beside the policy (specification §12.2),
+            // whatever the person allowed: a channel WebKit cannot close here is no web view.
+            let preferences: Option<Retained<objc2::runtime::AnyObject>> =
+                msg_send![&*configuration, preferences];
+            let closed = preferences
+                .ok_or("the preferences")
+                .and_then(|preferences| engine::close(&preferences));
+            if let Err(channel) = closed {
+                eprintln!(
+                    "bateri: the web engine cannot close its own network channel ({channel}); the program's view is not opened"
+                );
+                return None;
+            }
             configuration.setURLSchemeHandler_forURLScheme(
                 Some(ProtocolObject::from_ref(&*bridge)),
                 &NSString::from_str(serve::SCHEME),

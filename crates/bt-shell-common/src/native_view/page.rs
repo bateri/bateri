@@ -741,8 +741,8 @@ pub(super) mod tests {
         fn keyboard(&mut self, to: Keyboard) {
             self.0.borrow_mut().keyboard(to);
         }
-        fn copy(&mut self, text: String) {
-            self.0.borrow_mut().copy(&text);
+        fn copy(&mut self, text: String, by_person: bool) {
+            self.0.borrow_mut().copy(&text, by_person);
         }
         fn link(&mut self, url: String) {
             self.0.borrow_mut().link(&url);

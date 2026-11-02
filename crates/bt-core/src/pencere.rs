@@ -467,6 +467,10 @@ pub(crate) type Conversing = Conversation<Shelf, SystemEntropy>;
 /// ([`pane_observer`]).
 pub(crate) type Observer = Box<dyn Fn() -> Observed + Send + Sync>;
 
+/// Whether the pane's shell holds the tty, asked when a shell integration mark says the command
+/// finished ([`pane_foreground`]): `Some(false)` is a program in front.
+pub(crate) type Foreground = Box<dyn Fn() -> Option<bool> + Send + Sync>;
+
 /// The tty's two readings the hardening checks of the protocol use.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Tty {
@@ -510,12 +514,45 @@ fn observed(editing: bool, remote: bool, tty: Option<Tty>, shell: Option<u32>) -
         prompt_editing: editing,
         // The moment of the frame, which the parser alone knows ([`Desk::park`]).
         alternate_screen: None,
-        shell_in_foreground: local
-            .and_then(|tty| tty.foreground)
-            .zip(shell)
-            .map(|(group, shell)| group == shell),
+        shell_in_foreground: shell_holds(local, shell),
         tty_canonical_or_echo: local.map(|tty| tty.canonical_or_echo),
     }
+}
+
+/// Whether the shell's group is the tty's foreground group; `None` when either cannot be told.
+fn shell_holds(tty: Option<Tty>, shell: Option<u32>) -> Option<bool> {
+    tty.and_then(|tty| tty.foreground)
+        .zip(shell)
+        .map(|(group, shell)| group == shell)
+}
+
+/// How a pane tells whether its shell holds the tty, for the end of a command the shell says in
+/// the stream (specification §10.3: the mark counts when the foreground group is the shell's
+/// again, and not while a command still holds the tty). Read as the observer reads the tty — the
+/// master's copy, or a stream's owner by the program's pid — but **also in a remote session**:
+/// there the group in front is `ssh`'s, and a mark of the local shell that arrives while `ssh` runs
+/// is not the shell's. `None` when the group cannot be told, and the mark is then taken as it
+/// was.
+pub(crate) fn pane_foreground(
+    master: Arc<Mutex<Option<File>>>,
+    stream: Option<Arc<dyn PtyOps>>,
+    child_pid: u32,
+    group: Option<ShellGroup>,
+) -> Foreground {
+    let leads = Shell::new(group, child_pid);
+    Box::new(move || {
+        let tty = if let Some(ops) = &stream {
+            ops.tty(child_pid).map(|reading| Tty {
+                foreground: reading.foreground,
+                canonical_or_echo: reading.modes.canonical || reading.modes.echo,
+            })
+        } else {
+            lock(&master)
+                .as_ref()
+                .and_then(|file| read_tty(file.as_fd()))
+        };
+        shell_holds(tty, leads.group())
+    })
 }
 
 /// The observer of a pane: the shell's log for the prompt and the remote
@@ -653,6 +690,8 @@ pub(crate) struct Desk {
     /// Told when the shell has something to take ([`Wake::view_changed`]).
     wake: Arc<dyn Wake>,
     observer: Observer,
+    /// Whether the shell holds the tty ([`pane_foreground`]).
+    foreground: Foreground,
     /// The token's source failed ([`SystemEntropy`]): no view opens.
     entropy_failed: Arc<AtomicBool>,
     /// What passes between the program and the module of its view, and how fast.
@@ -696,6 +735,7 @@ impl Desk {
         theme: Theme,
         wake: Arc<dyn Wake>,
         observer: Observer,
+        foreground: Foreground,
         flow: Flow,
         discard: Discard,
     ) -> Self {
@@ -749,6 +789,7 @@ impl Desk {
             }),
             wake,
             observer,
+            foreground,
             entropy_failed: failed,
             flow,
             discard,
@@ -949,6 +990,19 @@ impl Desk {
     /// Throws away what the program left unread, where it ran.
     fn throw_away(&self) {
         (self.discard.throw)(self.elsewhere.load(Ordering::Acquire));
+    }
+
+    /// The shell's own mark says the command finished (§10.3: OSC 133 `D`). The mark is as writable
+    /// as a `bye` without its token — a file shown with `cat`, a line of a log, the program itself —
+    /// so it ends the program only when the tty's foreground group is the shell's again. While a
+    /// program holds the tty the mark is ignored, and so is it for no end of any other kind: the
+    /// blocks, the dock and the record of the session took the mark as they did. A group that cannot
+    /// be told leaves the mark what it was.
+    pub(crate) fn command_ended(&self, write: impl Fn(Vec<u8>)) {
+        if (self.foreground)() == Some(false) {
+            return;
+        }
+        self.program_ended(write);
     }
 
     /// The program ended (§10.3): the command's `D`, or the child's exit.

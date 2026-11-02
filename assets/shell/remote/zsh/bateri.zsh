@@ -24,6 +24,16 @@ source ${ZDOTDIR:-${0:A:h}}/zdotdir.zsh || return 1
 if (( ! ${+__bateri_rblock} )); then
   typeset -g __bateri_rblock=${BATERI_RBLOCK-}
   unset BATERI_RBLOCK
+  # THE SHELL'S KEY (`boot.sh`): the nonce the host gave it, kept in a variable that is NOT
+  # exported and out of the environment, so that no command this shell runs has it. It goes on this
+  # shell's own `A` and `D` as `bt_remote`'s companion, `;bt_rkey=`, and nowhere else; the end of a
+  # command closes no view of the host without it. A value that is not sixteen lowercase hex digits
+  # (or none: an integration started without a nonce) is no key, and the marks go without.
+  typeset -g __bateri_rtag=
+  if [[ ${#BATERI_RKEY} == 16 && ${BATERI_RKEY-} != *[^0-9a-f]* ]]; then
+    __bateri_rtag=';bt_rkey='$BATERI_RKEY
+  fi
+  unset BATERI_RKEY
 fi
 
 # WHETHER THERE IS A DOCK IN THIS SESSION: the tier the Mac sends (`BATERI_DOCK=off` is its
@@ -98,12 +108,12 @@ __bateri_precmd() {
   emulate -L zsh
   if (( __bateri_ran )); then
     __bateri_ran=0
-    print -nr -- $'\e]133;D;'$code';bt_remote='$__bateri_rshell.$__bateri_block$'\a'
+    print -nr -- $'\e]133;D;'$code';bt_remote='$__bateri_rshell.$__bateri_block$__bateri_rtag$'\a'
     # The input modes the command left on go with it (the local wrapper's reason).
     print -nr -- $'\e[?1000;1002;1003;1004;1005;1006;1016;2048l\e[<4096u'
   fi
   (( __bateri_block++ ))
-  print -nr -- $'\e]133;A;bt_remote='$__bateri_rshell.$__bateri_block$'\a'
+  print -nr -- $'\e]133;A;bt_remote='$__bateri_rshell.$__bateri_block$__bateri_rtag$'\a'
   if (( __bateri_dock )); then
     # The slot that carries the counter to the prompt (the local wrapper's reason for the
     # index: a high one, behind the user's own `psvar`).

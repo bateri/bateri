@@ -30,6 +30,12 @@
 //! asked for again by the same program and set, and another set asks. A link the page asks to
 //! open is asked about and, refused, nothing is said to the page.
 //!
+//! The engine's own channels are closed under a page whatever the person allowed: a page that
+//! opens a peer connection (STUN over UDP and TURN over TCP to loopback) and links a preconnect and
+//! a prefetch reaches no listener of this Mac, while the one origin it was allowed answers a fetch
+//! (the listeners are known to be reachable). A pane whose page asks for the keyboard does not take
+//! it from a pane that has it, and takes it from the pane that is the person's.
+//!
 //! Its own `main` (`harness = false`): AppKit, the main queue and `WKWebView` want the main
 //! thread. Without a window server session (an ssh login) it says so and passes, as the embed
 //! test does. It is a heavy test — a real shell, a real web view, tens of seconds — and runs
@@ -39,7 +45,7 @@
 use std::cell::{Cell, RefCell};
 use std::fs;
 use std::io::{Read as _, Write as _};
-use std::net::TcpListener;
+use std::net::{TcpListener, UdpSocket};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::rc::Rc;
@@ -198,6 +204,35 @@ impl Program {
             .and_then(|rest| rest.split('"').next())
             .expect("a token in the welcome")
             .to_owned()
+    }
+
+    /// The query of a program that offers a view of `kind` (`lua`), and the token of the answer.
+    fn hello_kind(&mut self, kind: &str) -> String {
+        let id = self.take_id();
+        self.say(&format!(
+            "{ESC}_pencere;hello;id={id};{{\"versions\":[1],\"views\":[{{\"kind\":\"{kind}\",\"versions\":[\"0.1\"]}}]}}{ESC}\\{ESC}[c"
+        ));
+        let welcome = self.wait_for("pencere;welcome");
+        welcome
+            .split("\"token\":\"")
+            .nth(1)
+            .and_then(|rest| rest.split('"').next())
+            .expect("a token in the welcome")
+            .to_owned()
+    }
+
+    /// The open of a view of the kind `lua` whose bundle is the one script `source`.
+    fn open_script(&mut self, token: &str, source: &str) {
+        let bytes = source.as_bytes();
+        self.send(
+            "open",
+            &format!(
+                "{{\"token\":\"{token}\",\"view\":\"lua\",\"version\":\"0.1\",\"program\":\"Pencere Test\",\
+\"title\":\"Keys\",\"bundle\":{{\"entry\":\"page.lua\",\"files\":[{{\"path\":\"page.lua\",\"sha256\":\"{}\",\"size\":{},\"type\":\"text/x-lua\"}}]}}}}",
+                bt_core::pencere::Digest::of(bytes),
+                bytes.len()
+            ),
+        );
     }
 
     /// The open of a view of `files` (path, type, bytes), asking for the address `domain` if it
@@ -1208,8 +1243,333 @@ fn run(dir: &Path) {
     }
     twin.close();
 
+    // What the engine does beside the policy, and what a page does with the keyboard: sections of
+    // their own, so that a run says what failed of each when more than one does.
+    let mut failures = Vec::new();
+    section("the engine's own channels", &mut failures, || {
+        engine_channels(mtm, &window, frame_rect, dir);
+    });
+    section("a page's keyboard", &mut failures, || {
+        page_keyboard(mtm, &window, frame_rect, dir);
+    });
+
     pane.close();
+    assert!(failures.is_empty(), "failed: {failures:?}");
     println!("pencere: ok");
+}
+
+/// Runs `body`; a panic is recorded under `name` (its message was printed as it happened) and the
+/// run goes on to the next section.
+fn section(name: &str, failures: &mut Vec<String>, body: impl FnOnce()) {
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)).is_err() {
+        failures.push(name.to_owned());
+    }
+}
+
+/// A UDP socket on this Mac that counts the datagrams it gets: where a peer connection's STUN
+/// request would arrive. It tries itself once (a datagram from the test) and counts only what comes
+/// after.
+struct Datagrams {
+    port: u16,
+    seen: Arc<AtomicUsize>,
+    stop: Arc<AtomicBool>,
+    thread: Option<thread::JoinHandle<()>>,
+}
+
+impl Datagrams {
+    fn start() -> Self {
+        let socket = UdpSocket::bind("127.0.0.1:0").expect("a UDP port on this Mac");
+        socket
+            .set_read_timeout(Some(Duration::from_millis(20)))
+            .expect("a socket that does not wait for ever");
+        let port = socket.local_addr().expect("an address").port();
+        let seen = Arc::new(AtomicUsize::new(0));
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread = thread::spawn({
+            let (seen, stop) = (Arc::clone(&seen), Arc::clone(&stop));
+            move || {
+                let mut buffer = [0u8; 2048];
+                while !stop.load(Ordering::Acquire) {
+                    if socket.recv_from(&mut buffer).is_ok() {
+                        seen.fetch_add(1, Ordering::AcqRel);
+                    }
+                }
+            }
+        });
+        let this = Self {
+            port,
+            seen,
+            stop,
+            thread: Some(thread),
+        };
+        // The listener hears: a datagram from here is counted, and then forgotten.
+        UdpSocket::bind("127.0.0.1:0")
+            .and_then(|sender| sender.send_to(b"self-test", ("127.0.0.1", port)))
+            .expect("a datagram to the listener");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while this.seen.load(Ordering::Acquire) == 0 {
+            assert!(Instant::now() < deadline, "the UDP listener hears nothing");
+            thread::sleep(Duration::from_millis(10));
+        }
+        this.seen.store(0, Ordering::Release);
+        this
+    }
+
+    fn count(&self) -> usize {
+        self.seen.load(Ordering::Acquire)
+    }
+}
+
+impl Drop for Datagrams {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// A page that tries what the engine opens beside a policy once it is told its `context`: a peer
+/// connection with a STUN server (UDP) and a TURN server (TCP) on this Mac, a preconnect and a
+/// prefetch of two origins on this Mac, and a fetch of a third, the only one a person may allow.
+/// It tells the program what it could make and what the engine said.
+const CHANNELS_SCRIPT: &str = "var send=function(m){window.parent.postMessage(m,'*')};\
+var started=false;\
+window.addEventListener('message',function(e){\
+if(e.source!==window.parent)return;var m=e.data;\
+if(!m.context||started)return;started=true;\
+var report={rtc:typeof RTCPeerConnection,prefixed:typeof webkitRTCPeerConnection};\
+try{var pc=new RTCPeerConnection({iceServers:[{urls:'stun:127.0.0.1:__STUN__'},\
+{urls:'turn:127.0.0.1:__TURN__?transport=tcp',username:'u',credential:'c'}]});\
+pc.createDataChannel('x');\
+pc.createOffer().then(function(o){return pc.setLocalDescription(o)}).catch(function(x){report.offer=String(x)});\
+report.made=true}catch(x){report.threw=String(x)}\
+var link=function(rel,href){var l=document.createElement('link');l.rel=rel;l.href=href;document.head.appendChild(l)};\
+link('preconnect','http://127.0.0.1:__PRECONNECT__/');\
+link('prefetch','http://127.0.0.1:__PREFETCH__/x');\
+fetch('http://127.0.0.1:__CONTROL__/control').catch(function(){});\
+send({call:{id:1,method:'hello',params:report}})});";
+
+/// The engine's channels under a page: it reaches no listener of this Mac by a peer connection, a
+/// preconnect or a prefetch, whether the person allowed it nothing or one origin, and the origin it
+/// was allowed (the control) does answer its fetch, so that the listeners are known to be reachable.
+fn engine_channels(mtm: MainThreadMarker, window: &NSWindow, frame_rect: NSRect, dir: &Path) {
+    let (pane, mut program) = open_pane(mtm, window, frame_rect, &dir.join("channels"), PANE + 2);
+    program.say(&format!("{ESC}[?1049h"));
+    let stun = Datagrams::start();
+    let turn = Local::start();
+    let preconnect = Local::start();
+    let prefetch = Local::start();
+    let control = Local::start();
+    let port = |local: &Local| {
+        local
+            .origin
+            .rsplit(':')
+            .next()
+            .unwrap_or_default()
+            .to_owned()
+    };
+    let script = CHANNELS_SCRIPT
+        .replace("__STUN__", &stun.port.to_string())
+        .replace("__TURN__", &port(&turn))
+        .replace("__PRECONNECT__", &port(&preconnect))
+        .replace("__PREFETCH__", &port(&prefetch))
+        .replace("__CONTROL__", &port(&control));
+    let files = [
+        ("index.html", "text/html", PAGE.as_bytes()),
+        ("app.js", "text/javascript", script.as_bytes()),
+    ];
+    let reached = || {
+        format!(
+            "stun udp {}, turn tcp {}, preconnect {}, prefetch {}, control {}",
+            stun.count(),
+            turn.hits(),
+            preconnect.hits(),
+            prefetch.hits(),
+            control.hits()
+        )
+    };
+
+    for allowed in [None, Some(control.origin.clone())] {
+        let token = program.hello();
+        program.open(&token, &files, allowed.as_deref());
+        program.supply(&files);
+        if allowed.is_some() {
+            // The question of the address: the person says yes.
+            let sheet = sheet_of(window);
+            press(window, &sheet, "Allow");
+        }
+        let said = watch_it_start(&pane, &mut program);
+        // ICE gathering and the engine's speculation take a few seconds; the allowed fetch is
+        // the sign that the page's script ran to its end and that the listeners are reachable.
+        if allowed.is_some() {
+            until("the allowed origin to be asked", || control.hits() > 0);
+        }
+        let deadline = Instant::now() + Duration::from_secs(8);
+        while Instant::now() < deadline {
+            spin(0.1);
+        }
+        eprintln!(
+            "pencere: channels, {} allowed: the page said {said}; reached: {}",
+            if allowed.is_some() {
+                "one origin"
+            } else {
+                "nothing"
+            },
+            reached()
+        );
+        program.bye(&token);
+        until("the view to go", || !covered(&pane));
+    }
+    assert!(control.hits() > 0, "the control origin was never asked");
+    assert_eq!(
+        (
+            stun.count(),
+            turn.hits(),
+            preconnect.hits(),
+            prefetch.hits()
+        ),
+        (0, 0, 0, 0),
+        "the engine opened a channel beside the policy: {}",
+        reached()
+    );
+    pane.close();
+}
+
+/// The page of a pane that is not the person's, which asks for the keyboard when its program says
+/// something (a message that no call of its waits for): into its field or into the page, and says
+/// it asked.
+const KEYS_PAGE: &str = r#"return {
+    render = function()
+        return pencere.div():w(300):h(200)
+            :child(pencere.div():text_field("q"):w(200):h(20):child(pencere.text("Filter")))
+    end,
+    message = function(m)
+        pencere.call("asked", { to = m.to })
+        if m.to == "field" then
+            return { redraw = true, keyboard = { field = "q" } }
+        end
+        return { redraw = true, keyboard = "page" }
+    end,
+}"#;
+
+/// Whether the window's keyboard is in `pane`: its terminal, or a field of its page.
+fn keyboard_in(window: &NSWindow, pane: &TerminalPane) -> bool {
+    let me: &NSView = pane;
+    window
+        .firstResponder()
+        .and_then(|responder| responder.downcast::<NSView>().ok())
+        .is_some_and(|view| view.isDescendantOf(me))
+}
+
+/// Whether the window's keyboard is in a field of the page of `pane` (the field's editor), and not
+/// in its terminal.
+fn typing_in(window: &NSWindow, pane: &TerminalPane) -> bool {
+    let terminal = terminal_view(pane);
+    let in_pane = keyboard_in(window, pane);
+    let in_terminal = window
+        .firstResponder()
+        .and_then(|responder| responder.downcast::<NSView>().ok())
+        .zip(terminal)
+        .is_some_and(|(view, terminal)| std::ptr::eq(&*view, &*terminal));
+    in_pane && !in_terminal
+}
+
+/// A page asks for the keyboard (a reply's `keyboard`) in two panes of one window. In the pane that
+/// does not have it, nothing is moved; once the person has clicked into that pane (`focus`) it is
+/// theirs and the page takes it into its field and gives it back to the page as it asks. The page
+/// goes first for the pane that has it, and the other pane keeps its own while this one asks.
+fn page_keyboard(mtm: MainThreadMarker, window: &NSWindow, frame_rect: NSRect, dir: &Path) {
+    let (holder, _holder_program) =
+        open_pane(mtm, window, frame_rect, &dir.join("holder"), PANE + 3);
+    let (asker, mut program) = open_pane(mtm, window, frame_rect, &dir.join("asker"), PANE + 4);
+    // A page is drawn, and its fields made, only while its pane is seen: the window is on screen
+    // for this section (it takes no key and no focus from the person's applications) and the host
+    // says the panes are seen.
+    window.setLevel(objc2_app_kit::NSFloatingWindowLevel);
+    window.setCollectionBehavior(
+        objc2_app_kit::NSWindowCollectionBehavior::CanJoinAllSpaces
+            | objc2_app_kit::NSWindowCollectionBehavior::FullScreenAuxiliary
+            | objc2_app_kit::NSWindowCollectionBehavior::Stationary,
+    );
+    window.setFrameOrigin(NSPoint::new(40.0, 120.0));
+    window.orderFrontRegardless();
+    holder.set_visibility(true);
+    asker.set_visibility(true);
+    program.say(&format!("{ESC}[?1049h"));
+    let token = program.hello_kind("lua");
+    program.open_script(&token, KEYS_PAGE);
+    program.supply(&[("page.lua", "text/x-lua", KEYS_PAGE.as_bytes())]);
+    // The page is up when its field is a view of the pane.
+    let has_field = || {
+        asker.subviews().iter().any(|sub| {
+            descendants(sub).iter().any(|view| {
+                view.downcast_ref::<NSTextField>()
+                    .is_some_and(|f| f.isEditable())
+            })
+        })
+    };
+    // The page's field is made by the first frame the page is drawn in, and a window that is
+    // covered, or on a display that is asleep, draws none: then the keyboard is asked for the page
+    // alone, which needs no field, and the field's half says so and is left.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !has_field() && Instant::now() < deadline {
+        spin(0.05);
+    }
+    let fields = has_field();
+    if !fields {
+        eprintln!(
+            "pencere: the page was not drawn (window occlusion {:?}): its field is not tried",
+            window.occlusionState()
+        );
+    }
+
+    // The person is in the other pane; the page asks in every way it can: nothing moves.
+    assert!(holder.focus(), "the keyboard is in the first pane");
+    assert!(keyboard_in(window, &holder));
+    let asks: &[&str] = if fields {
+        &["field", "page"]
+    } else {
+        &["page"]
+    };
+    for to in asks {
+        program.send("msg", &format!("{{\"to\":\"{to}\"}}"));
+        program.wait_for("\"method\":\"asked\"");
+        spin(0.7);
+        assert!(
+            keyboard_in(window, &holder) && !keyboard_in(window, &asker),
+            "the page took the keyboard from the pane that has it (asking for {to})"
+        );
+    }
+
+    // The person clicks into the page's pane: the keyboard is there and stays; and the page sends
+    // it into its field, and back to the page.
+    assert!(asker.focus(), "the keyboard is in the second pane");
+    assert!(keyboard_in(window, &asker) && !keyboard_in(window, &holder));
+    program.send("msg", "{\"to\":\"page\"}");
+    program.wait_for("\"method\":\"asked\"");
+    spin(0.7);
+    assert!(
+        keyboard_in(window, &asker),
+        "the pane that has the keyboard keeps it"
+    );
+    if fields {
+        program.send("msg", "{\"to\":\"field\"}");
+        program.wait_for("\"method\":\"asked\"");
+        until("the page's field to have the keyboard", || {
+            typing_in(window, &asker)
+        });
+        program.send("msg", "{\"to\":\"page\"}");
+        program.wait_for("\"method\":\"asked\"");
+        until("the keyboard to be back in the page", || {
+            keyboard_in(window, &asker) && !typing_in(window, &asker)
+        });
+    }
+
+    program.bye(&token);
+    holder.close();
+    asker.close();
+    window.orderOut(None);
 }
 
 /// The view covers the pane, and everything that took was the chain: the shell page and the

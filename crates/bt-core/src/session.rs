@@ -1745,6 +1745,20 @@ impl Osc52 {
     pub fn name(self) -> &'static str {
         crate::settings::name_in(Self::NAMES, self)
     }
+
+    /// Whether the host writes the clipboard for a copy a *page* asks for, which is the same
+    /// permission as the sequence's for what a program says: `Copy` lets everything through (a page's
+    /// Copy button that waits for its program's answer included), `Off` only what the person's own act
+    /// copied — their key, their press, their pick of a menu line — and nothing a program or a clock
+    /// made the page say. `by_person` is the kit's word for whose act it was
+    /// (`pencere_drive::Host::copy`).
+    #[must_use]
+    pub fn lets_a_page_copy(self, by_person: bool) -> bool {
+        match self {
+            Self::Copy => true,
+            Self::Off => by_person,
+        }
+    }
 }
 
 /// Builds alacritty's `Config` from **all** of the options — the single path
@@ -2093,6 +2107,11 @@ struct AdapterInner {
     /// The copy is taken **before** the `Term` lock, in the same round as the
     /// theme's and for the same reason: a leaf lock does not go under `Term`.
     blink: Mutex<CursorBlink>,
+    /// The `[clipboard] osc52` setting, read by the host for the copies a *page* asks for
+    /// ([`Session::osc52`]): `Term`'s `Config` carries it for the escape sequence only, and the host
+    /// cannot read it from there. A **leaf lock**, `blink`'s neighbour, written before the `Term`
+    /// lock for the same reason.
+    osc52: Mutex<Osc52>,
     /// The application's OSC 0/2 title; `None` → never came or `ResetTitle`.
     /// Its reader is [`Session::title`].
     ///
@@ -2199,6 +2218,7 @@ impl Adapter {
         size: WindowSize,
         theme: Theme,
         blink: CursorBlink,
+        osc52: Osc52,
         desk: Option<Desk>,
         flow: Flow,
     ) -> Self {
@@ -2210,6 +2230,7 @@ impl Adapter {
             size: Mutex::new(size),
             theme: Mutex::new(theme),
             blink: Mutex::new(blink),
+            osc52: Mutex::new(osc52),
             title: Mutex::new(None),
             title_epoch: AtomicU64::new(0),
             title_at_command: AtomicU64::new(0),
@@ -2359,6 +2380,14 @@ impl Adapter {
     fn view_program_ended(&self) {
         if let Some(desk) = &self.0.desk {
             desk.program_ended(|bytes| self.input(bytes));
+        }
+    }
+
+    /// The shell's own mark says the command finished (`D`, local). It ends the program only when
+    /// the tty's foreground group is the shell's, or cannot be told ([`Desk::command_ended`]).
+    fn view_command_ended(&self) {
+        if let Some(desk) = &self.0.desk {
+            desk.command_ended(|bytes| self.input(bytes));
         }
     }
 
@@ -2747,8 +2776,16 @@ impl io::Read for TappedPty {
             // terminal shown again offers a restart, before its past is read, and a
             // command that ended before it is no end of it — ending the conversation
             // there forgot the token the program was handed, and its `open` was refused.
-            if (outcome.ended || outcome.remote_ended) && !past {
+            // Neither is the end of a program by itself: a mark in the stream is as writable as
+            // a `bye` without its token (specification §10.3, §14). The local one counts when the
+            // tty's foreground group is the shell's again; the remote one when it is of the shell
+            // and block the trail has seen, with the key the host gave the shell where it says
+            // one (`ShellLog::remote_end_closes_views`).
+            if outcome.remote_ended && !past {
                 adapter.view_program_ended();
+            }
+            if outcome.ended && !past {
+                adapter.view_command_ended();
             }
             // The shell is back: no program's pointer stays over its prompt.
             if outcome.prompt && adapter.0.pointer.clear() {
@@ -5642,6 +5679,12 @@ impl Session {
                     // A stream has no master: its tty is read by its program's pid.
                     ops.clone().filter(|_| streamed),
                     child_pid,
+                    group.clone(),
+                ),
+                pencere::pane_foreground(
+                    Arc::clone(&master),
+                    ops.clone().filter(|_| streamed),
+                    child_pid,
                     group,
                 ),
                 flow.clone(),
@@ -5660,6 +5703,7 @@ impl Session {
             size,
             options.theme,
             options.terminal.blink,
+            options.terminal.osc52,
             desk,
             flow.clone(),
         );
@@ -10437,6 +10481,21 @@ impl Session {
         Some((log.running_command()?, pid))
     }
 
+    /// The pane has checked the nonce of the remote bootstrap's `up` against the `ssh` it wrapped,
+    /// in the command of `generation` ([`Session::remote_up`]'s): it is the value the host gave the
+    /// remote shell, which the shell puts on its marks, and the end of a remote command that does not
+    /// carry it closes no view from then on (`ShellLog::trust_remote_key`).
+    pub fn trust_remote_key(&self, generation: u64, nonce: &str) {
+        lock(&self.shell).trust_remote_key(generation, nonce);
+    }
+
+    /// Whether the remote shell has said a key on the mark that ended one of its commands in this
+    /// remote session (`bt_rkey=`, see [`Session::trust_remote_key`]): a server whose scripts are
+    /// from before the key says none, and its marks are taken as they were. One leaf-lock round.
+    pub fn remote_key_said(&self) -> bool {
+        lock(&self.shell).remote_key_said()
+    }
+
     /// Why the remote bootstrap fell back to a plain login shell, from
     /// the stream ([`crate::DockContext::remote_setup`]); `None` if it did not
     /// say so. The pane's label reads it next to "Remote folder unknown". One
@@ -12119,6 +12178,14 @@ impl Session {
             .flatten()
     }
 
+    /// The `[clipboard] osc52` mode the session runs with, which follows the setting live
+    /// ([`Session::set_terminal_options`]). The host reads it for the copies a page's program asks
+    /// for (`pencere_drive::Host::copy`): `Off` lets through only what the person's own act copied.
+    #[must_use]
+    pub fn osc52(&self) -> Osc52 {
+        *lock(&self.adapter.0.osc52)
+    }
+
     /// The entry document of the bundle of the view that is opening or open.
     pub fn view_entry(&self) -> Option<String> {
         self.adapter
@@ -12192,6 +12259,7 @@ impl Session {
         // so it is written to the leaf lock. **Before the `Term` lock**: the
         // reverse order would close a cycle with the reader thread's order.
         *lock(&self.adapter.0.blink) = options.blink;
+        *lock(&self.adapter.0.osc52) = options.osc52;
         {
             let mut term = self.term.lock();
             term.set_options(term_config(options));
@@ -18916,6 +18984,33 @@ mod tests {
         session.write(b"\n");
         wait_ink(&session, &wake, "two");
         assert_eq!(wake.copies(), ["on"]);
+    }
+
+    #[test]
+    fn the_osc52_mode_is_read_back_and_follows_the_setting_live() {
+        let wake = Arc::new(TestWake::default());
+        let session = spawn_with_osc52("sleep 5", Osc52::Off, Arc::clone(&wake));
+        assert_eq!(session.osc52(), Osc52::Off);
+        session.set_terminal_options(TerminalOptions {
+            scrollback: 100,
+            osc52: Osc52::Copy,
+            cursor: CaretShape::default(),
+            blink: CursorBlink::default(),
+        });
+        assert_eq!(session.osc52(), Osc52::Copy);
+    }
+
+    /// A page's copy reaches the clipboard under `"copy"` always and under `"off"` only as the
+    /// person's own act: the one rule `PageHost::copy` asks.
+    #[test]
+    fn a_page_copy_under_off_gets_through_only_as_the_persons_own_act() {
+        assert!(Osc52::Copy.lets_a_page_copy(true));
+        assert!(Osc52::Copy.lets_a_page_copy(false));
+        assert!(Osc52::Off.lets_a_page_copy(true));
+        assert!(
+            !Osc52::Off.lets_a_page_copy(false),
+            "a program's copy under `osc52 = \"off\"`"
+        );
     }
 
     /// Waits for frames until `needle` is visible in the ink; the `od` row can
@@ -30873,6 +30968,13 @@ e\\314\\201.'; sleep 5";
 
     impl Playing {
         fn new(name: &str) -> Self {
+            Self::then(name, "")
+        }
+
+        /// [`Playing::new`] whose shell goes on with `after` when the program is over, in the
+        /// foreground (`read _` is the shell itself waiting on the tty): the program's end is
+        /// then the tty coming back to the shell, as at a prompt.
+        fn then(name: &str, after: &str) -> Self {
             let dir = TempDir::new(name);
             let fifo_path = dir.0.join("out");
             let captured = dir.0.join("in");
@@ -30890,9 +30992,10 @@ e\\314\\201.'; sleep 5";
                         "-c".into(),
                         // `-isig`: a ⌃C written to the pane is a byte for the reader, not
                         // the signal that would end it.
-                        "set -m; stty -opost -icanon -echo -isig; cat \"$1\" & \
-                         sh -c 'echo $$ > \"$3\"; exec cat > \"$2\"' sh \"$1\" \"$2\" \"$3\""
-                            .into(),
+                        format!(
+                            "set -m; stty -opost -icanon -echo -isig; cat \"$1\" & \
+                             sh -c 'echo $$ > \"$3\"; exec cat > \"$2\"' sh \"$1\" \"$2\" \"$3\"{after}"
+                        ),
                         "sh".into(),
                         fifo_path.display().to_string(),
                         captured.display().to_string(),
@@ -30932,6 +31035,21 @@ e\\314\\201.'; sleep 5";
                 pid.is_some()
             });
             pid.expect("a pid")
+        }
+
+        /// The program ends: the process that reads the pane's input is killed, and the tty is
+        /// the shell's again (its group in front), which is waited for.
+        fn end(&self) {
+            // SAFETY: a signal to a process this test started.
+            assert_eq!(unsafe { libc::kill(self.reader_pid(), libc::SIGKILL) }, 0);
+            let shell = i32::try_from(self.session.child_pid()).expect("a pid");
+            wait_until("the shell to hold the tty", Duration::from_secs(10), || {
+                self.session.with_pty_fd(|master| {
+                    use std::os::fd::AsRawFd as _;
+                    // SAFETY: the master is open for the call.
+                    (unsafe { libc::tcgetpgrp(master.as_raw_fd()) } == shell).then_some(())
+                }) == Some(())
+            });
         }
 
         /// The program writes.
@@ -31719,8 +31837,12 @@ e\\314\\201.'; sleep 5";
         } else {
             ":"
         };
+        // The shell's own commands after the program (the lag, the reader) are not jobs of their own
+        // (`set +m`): a shell prints `D` and its prompt, it does not put a command of its own in
+        // front of the tty between them, and the pane reads the mark when the shell holds the tty
+        // (§10.3) — a `D` read after the next job took the tty is the next job's.
         let end = if marks {
-            "printf '\\033]133;D;%s;bt_block=1\\007' \"$code\""
+            "set +m; printf '\\033]133;D;%s;bt_block=1\\007' \"$code\""
         } else {
             ":"
         };
@@ -32125,28 +32247,101 @@ e\\314\\201.'; sleep 5";
         program.session.shutdown();
     }
 
-    /// The command's `D` ends the program: a local one, an `ssh` being the local
-    /// command of a remote session, and our remote shell's own.
+    /// The command's `D` ends the program (§10.3) — the shell's own mark, which is written in the
+    /// stream, where whoever writes the stream can write it (§14): so it counts when the tty's
+    /// foreground group is the shell's again. While the program holds the tty, a `D` it writes
+    /// (a local one with the identity of our shell's blocks, or without; one that names a remote
+    /// shell) ends nothing, however well it is made.
     #[test]
-    fn the_end_of_a_command_ends_the_program_that_said_hello() {
+    fn the_end_of_a_command_ends_the_program_only_when_the_shell_holds_the_tty_again() {
         use crate::pencere::State;
         use crate::pencere::tests::hello;
-        let mut program = Playing::new("view-end");
-        for (end, what) in [
-            (&b"\x1b]133;D;0\x07"[..], "a local D"),
-            (&b"\x1b]133;D;0;bt_remote=1.2.3\x07"[..], "a remote D"),
-        ] {
-            let before = program.written().len();
-            program.write(&hello());
-            program.wait_written(before + 1);
-            program.wait_state(State::Offered);
-            program.write(end);
-            wait_until(what, Duration::from_secs(10), || {
-                program.state() == Some(State::Ended)
+        let mut program = Playing::then("view-end", "; read _");
+        program.write(&hello());
+        program.wait_written(1);
+        program.wait_state(State::Offered);
+        let before = program.written().len();
+
+        // The program in front says that its command is over, every way it can.
+        program.write(
+            b"\x1b]133;D;0\x07\x1b]133;D;0;bt_block=1\x07\x1b]133;D;0;bt_remote=1.2.3\x07fakes",
+        );
+        wait_text(&program.session, "fakes");
+        assert_eq!(program.state(), Some(State::Offered));
+
+        // The program is over, and the shell is in front again: the mark is true.
+        program.end();
+        program.write(b"\x1b]133;D;0;bt_block=1\x07");
+        wait_until("a local D", Duration::from_secs(10), || {
+            program.state() == Some(State::Ended)
+        });
+        // Nothing is written to a program that has ended.
+        assert_eq!(program.written().len(), before);
+        program.session.shutdown();
+    }
+
+    /// Our remote shell's `D` ends the program that said hello in a remote session: the shell and
+    /// the block the trail has seen, and the key the shell was given where it says one (§10.3). A
+    /// `D` that guesses the identity, one in a pane with no remote session, and one without the
+    /// key close nothing.
+    #[test]
+    fn the_end_of_a_remote_command_ends_the_program_only_as_the_remote_shell_makes_it() {
+        use crate::RemoteTarget;
+        use crate::pencere::State;
+        use crate::pencere::tests::hello;
+        let key = "0123456789abcdef";
+        let mut program = Playing::new("view-remote-end");
+        // A local command, an `ssh`, whose remote shell has said its prompt and its command.
+        program.write(b"\x1b]133;A;bt_block=1\x07\x1b]133;C\x07");
+        let command = {
+            let mut found = None;
+            wait_until("the ssh command", Duration::from_secs(10), || {
+                found = program.session.running_command();
+                found.is_some()
             });
-            // Nothing is written to a program that has ended.
-            assert_eq!(program.written().len(), before + 1, "{what}");
-        }
+            found.expect("a running command")
+        };
+
+        // No remote session yet: the identity of a shell nobody started ends nothing.
+        program.write(hello().as_slice());
+        program.wait_written(1);
+        program.wait_state(State::Offered);
+        program.write(
+            b"\x1b]133;A;bt_remote=1.2.1;bt_rkey=0123456789abcdef\x07\x1b]133;C;bt_remote=1.2.1\x07\
+              \x1b]133;D;0;bt_remote=1.2.1;bt_rkey=0123456789abcdef\x07nosession",
+        );
+        wait_text(&program.session, "nosession");
+        assert_eq!(program.state(), Some(State::Offered), "no remote session");
+
+        assert!(
+            program
+                .session
+                .set_remote(command, Some(&RemoteTarget::ssh("prod")))
+        );
+        program.session.trust_remote_key(command, key);
+        // The shell started a new command (its `A` said the key before it).
+        program.write(
+            b"\x1b]133;A;bt_remote=1.2.2;bt_rkey=0123456789abcdef\x07\x1b]133;C;bt_remote=1.2.2\x07",
+        );
+        // A guess of the identity, and of the key, and none: nothing.
+        program.write(
+            b"\x1b]133;D;0;bt_remote=1.2.9;bt_rkey=0123456789abcdef\x07\
+              \x1b]133;D;0;bt_remote=1.2.2\x07\
+              \x1b]133;D;0;bt_remote=1.2.2;bt_rkey=fedcba9876543210\x07guesses",
+        );
+        wait_text(&program.session, "guesses");
+        assert_eq!(program.state(), Some(State::Offered), "the guesses");
+
+        // The shell's own end of the command it ran. (The blocks took the guesses as they take any
+        // mark, so the trail is at a finished command: the shell's next command is the one it ends.)
+        program.write(
+            b"\x1b]133;A;bt_remote=1.2.3;bt_rkey=0123456789abcdef\x07\x1b]133;C;bt_remote=1.2.3\x07\
+              \x1b]133;D;0;bt_remote=1.2.3;bt_rkey=0123456789abcdef\x07",
+        );
+        wait_until("a remote D", Duration::from_secs(10), || {
+            program.state() == Some(State::Ended)
+        });
+        assert_eq!(program.written().len(), 1, "nothing after the end");
         program.session.shutdown();
     }
 

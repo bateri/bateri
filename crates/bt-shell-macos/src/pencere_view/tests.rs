@@ -177,6 +177,31 @@ fn the_policy_is_a_header_of_every_answer_and_never_an_element_of_a_page() {
     );
 }
 
+/// Specification §12.2: with every file the host serves comes the header that says the names are not
+/// to be looked up ahead (`X-DNS-Prefetch-Control: off`), the shell page and a refusal included:
+/// the engine's own switch for it is the other half, and a page the engine reads this of is held
+/// to it where the switch is not looked at.
+#[test]
+fn every_answer_says_that_the_names_in_it_are_not_to_be_looked_up_ahead() {
+    let page = bundle_page();
+    let shell = page.reply(&Page::shell_url(), &files);
+    let missing = page.reply(&url("secret.txt"), &files);
+    assert_eq!(missing.status, 404);
+    for reply in [
+        page.reply(&url("index.html"), &files),
+        page.reply(&url("app.js"), &files),
+        shell,
+        missing,
+    ] {
+        assert_eq!(
+            reply.header("X-DNS-Prefetch-Control"),
+            Some("off"),
+            "{:?}",
+            reply.headers
+        );
+    }
+}
+
 #[test]
 fn what_the_manifest_does_not_name_is_a_404_and_so_is_every_other_origin() {
     let page = bundle_page();

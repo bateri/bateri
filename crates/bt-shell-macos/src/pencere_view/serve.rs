@@ -315,7 +315,9 @@ impl Reply {
 }
 
 /// The headers every answer carries, then its own: the type, the policy, the
-/// length, and a refusal to be cached, sniffed or to name where it was linked from.
+/// length, and a refusal to be cached, sniffed or to name where it was linked from, and to look
+/// up ahead the names in what it holds (specification §12.2: the engine's switch for it is
+/// closed too, `engine::close`).
 fn headers(media: &str, policy: &str, length: usize) -> Vec<(&'static str, String)> {
     vec![
         ("Content-Type", media.to_owned()),
@@ -324,6 +326,7 @@ fn headers(media: &str, policy: &str, length: usize) -> Vec<(&'static str, Strin
         ("Cache-Control", "no-store".to_owned()),
         ("X-Content-Type-Options", "nosniff".to_owned()),
         ("Referrer-Policy", "no-referrer".to_owned()),
+        ("X-DNS-Prefetch-Control", "off".to_owned()),
     ]
 }
 

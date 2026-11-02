@@ -1413,13 +1413,20 @@ osc52 = "copy"
 
 | key | type | default | meaning |
 |---|---|---|---|
-| `osc52` | `"copy"` or `"off"` | `"copy"` | whether a program in the terminal can write to the clipboard |
+| `osc52` | `"copy"` or `"off"` | `"copy"` | whether a program in the terminal, or the page of a program's view, can write to the clipboard |
 
 - **OSC 52** is the sequence a program uses to write text to the clipboard
   through the terminal. Its best-known use is vim or tmux on a machine you
   reach over ssh: text copied there arrives in this Mac's clipboard, even
   though the remote machine has no access to the clipboard. `"copy"` allows
   this, `"off"` ignores the sequence.
+- **The page of a program's view** (a `.pen`'s native page) is held to the
+  same setting. With `"copy"` everything it copies reaches the clipboard,
+  including a Copy button that waits for the program's answer. With `"off"`
+  only a copy that is **your own act** gets through: your key (Cmd-C in a text
+  field of the page), your press, or your pick of a line in the page's own
+  context menu. A copy the program sends, or a page's reply to a message of its
+  program, is ignored.
 - The clipboard written is the **general clipboard**, the one Cmd-C writes. If
   a program sends many copies in a row, only the last one stays in the
   clipboard.
@@ -1427,8 +1434,9 @@ osc52 = "copy"
   terminal cannot read the text in your clipboard. That is why there is no
   value such as `"paste"`.
 - **The cost:** while it is `"copy"`, a program running in the background
-  (remote ones included) can also write to the clipboard and replace what you
-  copied. If you do not want that, use `"off"`.
+  (remote ones included) or the page of a program's view can also write to the
+  clipboard and replace what you copied. If you do not want that, use `"off"`:
+  your own copies keep working, a program's do not.
 - The sequence's target does not matter: a sequence that writes to the
   primary selection (`p`, `s`) also writes to the general clipboard. macOS has
   a single clipboard; in vim `*` and `+` are the same clipboard here, and

@@ -44,8 +44,8 @@ use std::time::{Duration, Instant};
 
 use bt_core::pencere::{Action, ShellGroup, State, ViewOptions, font_stack};
 use bt_core::{
-    BlockHandle, BlockInfo, Chord, CommandId, CommandPhase, ContentEdge, FontOptions, PaneUuid,
-    ProgramBar, RemoteFiles, RemoteTarget, SearchCover, SearchDirection, SearchReport,
+    BlockHandle, BlockInfo, Chord, CommandId, CommandPhase, ContentEdge, FontOptions, Osc52,
+    PaneUuid, ProgramBar, RemoteFiles, RemoteTarget, SearchCover, SearchDirection, SearchReport,
     SearchStatus, Session, SessionOptions, Settings, Theme, TtyModes, Wake,
 };
 use bt_core::{load_shell, smoke_shell};
@@ -5225,7 +5225,16 @@ impl TerminalPane {
             let Some((command, nonce, argv)) = proof.wrapped.as_ref() else {
                 return;
             };
-            if *command != generation || *nonce != seen || proof.recorded == Some(generation) {
+            if *command != generation || *nonce != seen {
+                return;
+            }
+            // The `up` is the one of the `ssh` we wrapped: its nonce is the value the shell
+            // behind it was given, which no one but the shell and we know. The remote shell's
+            // `D` closes a view only with it from now on (`Session::trust_remote_key`).
+            if let Some(session) = self.session() {
+                session.trust_remote_key(generation, &seen);
+            }
+            if proof.recorded == Some(generation) {
                 return;
             }
             let argv = argv.clone();
@@ -7911,8 +7920,18 @@ impl PageDriveHost for PageHost<'_> {
         }
     }
 
+    /// Only a pane that has the keyboard hands it on: the terminal of this pane, or one of its
+    /// page's fields. A page asks for it in a reply to what its program said as well as to what the
+    /// person did, and in a window of several panes a program that says something to a pane that is
+    /// not the person's would otherwise take the keyboard (and what the person types) from the pane
+    /// they are in. A pane the person clicks into has it from then on, and a page that opens
+    /// where the keyboard already is can send it where it likes: the request is let go, not kept
+    /// for the click.
     fn keyboard(&mut self, to: Keyboard) {
         if let Some(fields) = self.fields() {
+            if !(self.0.view().is_first_responder() || fields.typing()) {
+                return;
+            }
             match to {
                 Keyboard::Field(id) => fields.send_keyboard(Some(id)),
                 Keyboard::Page => fields.send_keyboard(None),
@@ -7920,8 +7939,17 @@ impl PageDriveHost for PageHost<'_> {
         }
     }
 
-    fn copy(&mut self, text: String) {
-        if self.up() {
+    /// What a page copies goes to the general pasteboard under `[clipboard] osc52`, the one setting
+    /// that says whether a program may write it: `"copy"` lets every copy through (a page's Copy
+    /// button, which waits for its program's answer, is one), `"off"` only the person's own act
+    /// (`by_person`: their key, their press, their pick of a menu line). A pane with no session has
+    /// no setting to read, and no program that could ask: it is held to the stricter.
+    fn copy(&mut self, text: String, by_person: bool) {
+        let mode = self
+            .0
+            .session()
+            .map_or(Osc52::Off, |session| session.osc52());
+        if self.up() && mode.lets_a_page_copy(by_person) {
             clipboard::copy(&NSPasteboard::generalPasteboard(), Some(text));
         }
     }
@@ -8059,13 +8087,63 @@ mod tests {
         let lowered = show.find("page_menu.lower()").expect(show);
         assert!(raised < popped && popped < lowered, "{show}");
         // What `copy` and a cut put on the pasteboard goes through the host's one `copy`, in a
-        // frame (`Held::Copy`) and between frames (`Drained::copied`) alike.
+        // frame (`Held::Copy`) and between frames (`Drained::copied`) alike, and that one asks
+        // `[clipboard] osc52` first: the write is the setting's and the person's act, not the
+        // page's own say.
         let copy = &host[host.find("fn copy(&mut self").expect("copy")..];
         let copy = &copy[..copy.find("\n    }\n").expect("its end")];
         assert!(
-            copy.contains("clipboard::copy(&NSPasteboard::generalPasteboard(), Some(text))"),
+            copy.contains("fn copy(&mut self, text: String, by_person: bool)"),
             "{copy}"
         );
+        assert!(
+            copy.contains("lets_a_page_copy(by_person)"),
+            "a page's copy that does not ask the setting: {copy}"
+        );
+        let asks = copy.find("lets_a_page_copy").expect(copy);
+        let writes = copy
+            .find("clipboard::copy(&NSPasteboard::generalPasteboard(), Some(text))")
+            .expect(copy);
+        assert!(asks < writes, "the write comes before the setting: {copy}");
+    }
+
+    /// The general pasteboard is read in a pane's code in three places and a page reaches one of
+    /// them only by the person's act: an editor's paste (`page_editor_route`, whose
+    /// `Route::Paste` comes from ⌘V — a keymap line cannot bind `paste`), the pick of a menu line
+    /// the host shows (`page_menu_pick`, above), and the find pasteboard's own name
+    /// (`find_pasteboard_text`, not the general). A new reader in this file fails here until it
+    /// is looked at. A source scan: the pasteboard is AppKit's.
+    #[test]
+    fn the_pane_reads_the_general_pasteboard_only_for_the_paste_key_and_the_menu_row() {
+        let pane = include_str!("pane.rs");
+        let pane = &pane[..pane.find("#[cfg(test)]").expect("the tests follow")];
+        let mut readers = Vec::new();
+        for (at, _) in pane.match_indices("clipboard::read(") {
+            let before = &pane[..at];
+            let function = before.rfind("fn ").expect("a function holds the read");
+            let name = before[function + 3..]
+                .split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .next()
+                .expect("its name");
+            readers.push(name.to_owned());
+        }
+        readers.sort();
+        assert_eq!(
+            readers,
+            [
+                "find_pasteboard_text",
+                "page_editor_route",
+                "page_menu_pick"
+            ],
+            "a new reader of the pasteboard in the pane: who may make it read?"
+        );
+        // The editor's read is the `Route::Paste` arm and no other arm.
+        let route = &pane[pane.find("fn page_editor_route").expect("the route")..];
+        let route = &route[..route.find("\n    }\n").expect("its end")];
+        let paste = route.find("Route::Paste =>").expect(route);
+        let read = route.find("clipboard::read(").expect(route);
+        let next = route[paste..].find("Route::NotEditor").expect(route) + paste;
+        assert!(paste < read && read < next, "{route}");
     }
 
     /// The add-ons that work on a server are offered in a pane that shows a terminal a server

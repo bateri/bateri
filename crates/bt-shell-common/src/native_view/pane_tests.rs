@@ -70,8 +70,12 @@ impl Transcript {
     pub(super) fn keyboard(&mut self, to: Keyboard) {
         self.say(format!("keyboard {to:?}"));
     }
-    pub(super) fn copy(&mut self, text: &str) {
-        self.say(format!("copy {text:?}"));
+    pub(super) fn copy(&mut self, text: &str, by_person: bool) {
+        if by_person {
+            self.say(format!("copy {text:?}"));
+        } else {
+            self.say(format!("copy {text:?} (not the person's act)"));
+        }
     }
     pub(super) fn link(&mut self, url: &str) {
         self.say(format!("link {url}"));
