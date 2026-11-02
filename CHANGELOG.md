@@ -320,23 +320,28 @@ of every installed copy. A version without a section is not released.
   closed a program's view whenever it showed up in the terminal's output, so another program (or a
   file shown with `cat`) could print one and close the view of a program that was still running.
   On your own computer the mark now closes a view only when the shell has the terminal back (or
-  shows its next prompt with it). When the terminal is still the program's, or cannot be told, the mark is
-  only remembered, and your ⌃C (or ⌃\, ⌃Z, or the Quit in the header) then ends the view of a
-  program that is gone. Over ssh the mark never closes a view by itself, since the server's side
-  can print anything: a program that ends in the normal way still closes its view, so does the end
-  of the `ssh`, and a view whose program crashed stays until you press ⌃C, which takes you back to
-  the terminal.
+  shows its next prompt with it). When the terminal is still the program's, the mark ends
+  nothing, not even with your ⌃C; when it cannot be told, the mark is only remembered, and your
+  ⌃C (or ⌃\, ⌃Z, or the Quit in the header) then ends the view of a program that is gone. The two
+  can come in either order, but a ⌃C counts for a mark only for five seconds, and what was said
+  while no view was open is forgotten. Over ssh the mark never closes a view by itself, since the
+  server's side can print anything: a program that ends in the normal way still closes its view,
+  so does the end of the `ssh`, and a view whose program crashed stays until you press ⌃C, which
+  takes you back to the terminal. A view closed this way sends nothing to the program's input.
 - **A program cannot put a menu in front of you that pastes your clipboard.** A view's menu opens
   only for something you did (a click, a key, a pick); a program that opened one by itself, with a
   Paste line under your pointer, got the clipboard into its view with your next click. The Paste line
-  of a view's menu no longer takes a key of the view's choosing, either.
+  of a view's menu no longer takes a key of the view's choosing, either: it shows ⌘V, and it is on
+  only in the menu a right-click opens (greyed out in one a key opened, such as Shift-F10).
 - **`bateri split --focus` takes the keyboard only from the pane you are typing in.** A program
-  on a server that asked for the new pane to be focused, from a pane you were not in, took the
-  keyboard from where you were.
+  on a server that asked for the new pane to be focused, from a pane you were not in, or from a
+  window behind another, took the keyboard from where you were. The pane that asks has to be the
+  one the new pane goes beside, in the window you are typing in, with the keyboard in it (its
+  view's too).
 - **`osc52 = "off"` holds for a native view's page too.** With the clipboard setting off, a page's
   Copy button, which waits for its program's answer, still replaced the clipboard. Now only your
-  own copy (⌘C or ⌘X, your press, your pick of a menu line) reaches it; a key the page chose for a
-  copy does not. `"copy"` lets all of it through as before.
+  own copy (⌘C or ⌘X, your press, your pick of a menu line) reaches it; a plain key, or a command
+  the page bound to a key of its own, does not. `"copy"` lets all of it through as before.
 
 - **A long paste, or a file a program receives, in a terminal that runs on a server no longer loses what it typed.** Input that came faster than the program on the other end read it used to be dropped on the way without a word, so a transfer never finished. bateri now sends a terminal's input a window at a time (half a megabyte, asking the server about it at most a few times per window, so typing at a program that does not read never fills the server's questions), waits for the server to say the program's terminal took it, and holds the rest back (the pane waits instead of bateri keeping it in memory). Needs the next kablo release on the server; with an older kablo a flood the server cannot hold ends the terminal with the server's words in it instead of stalling it.
 

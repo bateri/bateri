@@ -9,8 +9,9 @@
 //! request is a *place*, and an app that is asked cannot be made to run anything by it.
 //!
 //! - **The user's screen does not change.** The pane is born without the keyboard (`--focus`
-//!   gives it, and only when the keyboard is in the anchor's pane: a program asks from where
-//!   the person is not as well, and cannot take the keyboard from them,
+//!   gives it, and only when the terminal that asked is the anchor, this window is the key one
+//!   and the keyboard is in the anchor's pane: a program asks from where the person is not, or
+//!   names the person's terminal as the anchor, and cannot take the keyboard from them,
 //!   [`TerminalPane::holds_keyboard`]), in a zoomed tab it is born behind the zoom, and a tab is
 //!   added beside the anchor's tab without being selected ([`TerminalWindow::add_tab_behind`]):
 //!   nothing the user was looking at moves, and the tab strip shows the new one running.
@@ -368,9 +369,9 @@ impl<'a> World<'a> {
             .ok_or("the anchor is not a pane of its tab")?;
         // A terminal a pane is about to show is no longer one that was asked to end.
         hold_service::claim(&server.account, &terminal);
-        // `--focus` is the person's word when they say it in the pane they are in; a program that
-        // asks it from a pane they are not in would take the keyboard from where they are.
-        let focus = place.focus && anchor.holds_keyboard();
+        // `--focus` was decided by [`World::place`]: the keyboard goes to the new pane only if the
+        // person is where the pane goes.
+        let focus = place.focus;
         match landing.spot {
             Spot::Beside { tree, landing: at } => {
                 let (config, _) = app.pane_launch_as(
@@ -461,6 +462,20 @@ impl Shell for World<'_> {
             .and_then(|(_, _, found)| found.program)
             .or_else(|| shown.program.clone());
         let who = summary::opener(program.as_deref(), asker);
+        // `--focus` is the person's word when they say it in the pane they are in. The request says
+        // it only where the terminal that asked is the anchor (`bt_shell_common::agent::serve`); here
+        // the person is also where the pane goes: this window is the key one, and the keyboard is in
+        // the anchor's pane (a web view's included). A program that asks it from where the person is
+        // not, a window they have behind another, would take the keyboard from where they are.
+        let focus = place.focus
+            && tab
+                .window()
+                .is_some_and(|window| window.ns_window().isKeyWindow())
+            && pane.holds_keyboard();
+        let place = &Place {
+            focus,
+            ..place.clone()
+        };
         match self.put(server, &tab, &pane, anchor, place, who) {
             Ok(placed) => {
                 state(|state| {

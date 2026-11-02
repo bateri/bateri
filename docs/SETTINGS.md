@@ -1426,8 +1426,12 @@ osc52 = "copy"
   only a copy that is **your own act** gets through: Cmd-C or Cmd-X (in a text
   field of the page, or the Edit menu), your press, or your pick of a line in
   the page's own context menu. A copy the program sends, a page's reply to a
-  message of its program, and a key the page chose for a copy (a pen's own
-  shortcut) are ignored.
+  message of its program, a plain key (a letter, an F-key), and a command the
+  page bound to a key of its own (a pen's own shortcut) are ignored: of the
+  keys, only Cmd-C and Cmd-X are your word for the clipboard. That holds for the
+  Paste line of a menu too: it is on only in the menu a right-click opens, and
+  greyed out in a menu a key opened (Shift-F10), because a key the page chose
+  is not your word to read the clipboard.
 - **A web view** (a program's view that is a web page) is not covered: the
   engine lets a page write the clipboard only in answer to your own click or
   key, and `osc52` does not reach it.

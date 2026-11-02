@@ -3253,8 +3253,9 @@ impl BateriView {
         shown.setAutoenablesItems(false);
         for (index, entry) in menu.entries.iter().enumerate() {
             // A Paste is the host's own line: the kit's words, and the pasteboard is read only
-            // when it is picked ([`TerminalPane::page_menu_pick`]). It shows no keys: the page
-            // chooses none for it.
+            // when it is picked ([`TerminalPane::page_menu_pick`]). Its keys are the host's too,
+            // ⌘V, not what the page says: the page does not choose them, and a line the person
+            // sees must show what the key they press does.
             let (title, keys, enabled) = match entry {
                 PageMenuEntry::Separator => {
                     shown.addItem(&NSMenuItem::separatorItem(mtm));
@@ -3270,9 +3271,12 @@ impl BateriView {
             // The keys that do the same on the page, shown at the end of the line in the menu's
             // own glyphs. A pop-up menu matches key equivalents only while it is open, so they
             // take no key from the page.
-            let (key, mask) = keys
-                .map(crate::native_page::key_equivalent)
-                .unwrap_or_else(|| (String::new(), NSEventModifierFlags::empty()));
+            let (key, mask) = match entry {
+                PageMenuEntry::Paste { .. } => ("v".to_owned(), NSEventModifierFlags::Command),
+                _ => keys
+                    .map(crate::native_page::key_equivalent)
+                    .unwrap_or_else(|| (String::new(), NSEventModifierFlags::empty())),
+            };
             // SAFETY: `initWithTitle:action:keyEquivalent:` takes two `NSString`s and a selector
             // this view implements; `setTarget:` keeps the target weakly and the view outlives
             // the menu's modal tracking.

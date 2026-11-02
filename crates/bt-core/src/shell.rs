@@ -3098,6 +3098,19 @@ impl ShellLog {
         outcome
     }
 
+    /// Whether the end of a remote command is one for the view's conversation to hear: when the pane
+    /// has a remote session. A mark in the stream is no observation by itself (specification §10.3
+    /// and §14), and a remote shell has none to check it against, so it closes no view: it is only
+    /// said ([`ScanOutcome::remote_ended`]), and the view ends when the person's ⌃C is its other
+    /// half, within a moment of it ([`crate::pencere::QUIT_WINDOW`]). The mark is not tied to the
+    /// shell the trail has seen or to the block it runs: such a tie buys nothing when the mark ends
+    /// nothing alone, and a program that writes a mark of another shell first (an `A` with a number
+    /// it guessed) moves the trail and would hide the shell's real end from it. The blocks, the
+    /// dock and the remote session's record take every mark as they did.
+    fn remote_end_heard(&self) -> bool {
+        self.context.remote.is_some()
+    }
+
     /// Applies our remote shell's mark to the remote trail — and
     /// **only** there: no local field and none of the local notifications
     /// ([`RemoteMark`]'s doc). Its one notification is its own: `true` at a
@@ -3108,25 +3121,6 @@ impl ShellLog {
     ///
     /// A new remote shell starts a new trail: the old session's ledger cannot
     /// be read under the new one's numbers (two sessions' `rblock/1`s).
-    /// Whether the end of a remote command, which `remote` says, is one the trail can tie to a
-    /// command that was running (specification §10.3 and §14: a mark in the stream is no observation
-    /// by itself, and a remote shell has none to check it against). It is when the pane has a remote
-    /// session, and the mark is of the shell the trail has seen and of the block that shell is
-    /// running: a stream that is not the remote shell's, and a shell with no command running, say
-    /// nothing of an end.
-    ///
-    /// Even then it closes no view: it is only said ([`ScanOutcome::remote_ended`]), and the view
-    /// ends when the person has asked the program to quit as well. The blocks, the dock and the
-    /// remote session's record take every mark as they did. The shell's identity is no secret
-    /// (`S` is its pid, which any process it runs reads as `$PPID`), and neither would a value the
-    /// shell kept from the commands it runs be: a program of the same user reads the environment
-    /// of the shell that started it.
-    fn remote_end_seen(&self, remote: &RemoteMark) -> bool {
-        self.context.remote.is_some()
-            && self.remote_shell == Some(remote.shell)
-            && self.remote.running() == Some(remote.id)
-    }
-
     fn apply_remote(&mut self, remote: RemoteMark) -> bool {
         // **A held `line-finish` ends on every remote mark**, as on every local
         // one ([`Self::apply`]) — the remote dock's, not a local one: a remote mark
@@ -3236,7 +3230,7 @@ impl ShellLog {
                     matches!(remote.mark, Mark::PromptStart { .. }) && self.program.prompt();
                 // Asked before the mark is applied: the check is against what the trail knew.
                 outcome.remote_ended =
-                    matches!(remote.mark, Mark::CommandEnd { .. }) && self.remote_end_seen(&remote);
+                    matches!(remote.mark, Mark::CommandEnd { .. }) && self.remote_end_heard();
                 outcome.remote_edge = self.apply_remote(remote);
             }
             // The question was answered by the reader before this lock; the
@@ -4880,9 +4874,10 @@ pub(crate) struct ScanOutcome {
     /// the local command's, and every remote command would add its traffic for a
     /// trail the next local edge carries anyway.
     pub(crate) remote_edge: bool,
-    /// Our remote shell's command **ended**: a `D` with `bt_remote=`. The part
-    /// of [`Self::remote_edge`] that says a program on the server is over, which
-    /// the view protocol needs apart from the starts.
+    /// Our remote shell's command **ended**: a `D` with `bt_remote=`, in a pane that has a remote
+    /// session. The part of [`Self::remote_edge`] that says a program on the server is over, which
+    /// the view protocol needs apart from the starts; it is only said, and ends no view without
+    /// the person's ⌃C (the stream cannot be believed, §10.3).
     pub(crate) remote_ended: bool,
     /// A program status record changed or went (`OSC 7501`, or the prompt that
     /// ended what it reported) → [`crate::Wake::program_status_changed`].
@@ -12094,59 +12089,55 @@ mod tests {
     }
 
     /// What the stream writes is no observation (specification §10.3, §14): the end of a remote
-    /// command is one for the view's conversation (`remote_ended`) only as the shell and the block
-    /// the trail has seen, in a pane that has a remote session — a `cat` of a file that holds a
-    /// `D`, or a program that guesses the identity (`S` is its parent's pid, `P` and `n` are small
-    /// numbers), is none. Even the right one closes nothing alone: the conversation hears it as
-    /// half of an end. The mark still reaches the blocks and the record as it did.
+    /// command is said to the view's conversation (`remote_ended`) in a pane that has a remote
+    /// session, whatever shell and block the mark names, and ends nothing alone — the conversation
+    /// hears it as half of an end. A guessed mark of another shell moves the trail; it must not hide
+    /// the real shell's end behind it. The mark still reaches the blocks and the record as it did.
     #[test]
-    fn a_remote_end_is_heard_only_as_the_shell_and_the_block_the_trail_has_seen() {
-        let closes = |log: &mut ShellLog, bytes: &[u8]| {
+    fn a_remote_end_is_said_in_a_pane_with_a_remote_session_whatever_shell_and_block_it_names() {
+        let heard = |log: &mut ShellLog, bytes: &[u8]| {
             let mut scanner = Scanner::new();
-            let mut closed = false;
+            let mut heard = false;
             scanner.feed(bytes, |event| {
-                closed |= log.apply_scan_answering(event, 0).remote_ended;
+                heard |= log.apply_scan_answering(event, 0).remote_ended;
             });
-            closed
+            heard
         };
         // A pane with no remote session has no program on another machine to end.
         let mut local = running_log();
-        assert!(!closes(
+        assert!(!heard(
             &mut local,
             b"\x1b]133;A;bt_remote=1.9.1\x07\x1b]133;C;bt_remote=1.9.1\x07"
         ));
         assert!(
-            !closes(&mut local, b"\x1b]133;D;0;bt_remote=1.9.1\x07"),
+            !heard(&mut local, b"\x1b]133;D;0;bt_remote=1.9.1\x07"),
             "a local session has no remote shell"
         );
 
-        // A session in which the shell has not started a command: its `D` is nobody's.
+        // A session with a remote shell: its `A`, `B` and `C` say nothing of an end, every `D` does.
         let mut log = ssh_log();
+        for mark in [
+            &b"\x1b]133;A;bt_remote=1.9.1\x07"[..],
+            b"\x1b]133;B;bt_remote=1.9.1\x07",
+            b"\x1b]133;C;bt_remote=1.9.1\x07",
+        ] {
+            assert!(!heard(&mut log, mark), "{mark:?}");
+        }
+        for (mark, why) in [
+            (&b"\x1b]133;D;0;bt_remote=1.9.1\x07"[..], "the shell's own"),
+            (b"\x1b]133;D;0;bt_remote=1.9.2\x07", "another block"),
+            (b"\x1b]133;D;0;bt_remote=1.8.1\x07", "another shell"),
+            (b"\x1b]133;D;0;bt_remote=2.9.1\x07", "another parent"),
+        ] {
+            assert!(heard(&mut log, mark), "{why}");
+        }
+        // A mark of another shell moved the trail to it: the real shell's end is heard all the same.
+        let mut log = ssh_log();
+        assert!(!heard(&mut log, b"\x1b]133;A;bt_remote=1.9.9\x07"));
         assert!(
-            !closes(&mut log, b"\x1b]133;D;0;bt_remote=1.9.1\x07"),
-            "no shell yet"
+            heard(&mut log, b"\x1b]133;D;139;bt_remote=1.9.1\x07"),
+            "the shell that was moved away from"
         );
-        assert!(!closes(&mut log, b"\x1b]133;A;bt_remote=1.9.1\x07"));
-        assert!(
-            !closes(&mut log, b"\x1b]133;D;0;bt_remote=1.9.1\x07"),
-            "a prompt, and no command running"
-        );
-        assert!(!closes(&mut log, b"\x1b]133;C;bt_remote=1.9.1\x07"));
-        // The identity of another shell, or of another block, is a guess.
-        assert!(
-            !closes(&mut log, b"\x1b]133;D;0;bt_remote=1.9.2\x07"),
-            "another block"
-        );
-        assert!(
-            !closes(&mut log, b"\x1b]133;D;0;bt_remote=1.8.1\x07"),
-            "another shell"
-        );
-        assert!(
-            !closes(&mut log, b"\x1b]133;D;0;bt_remote=2.9.1\x07"),
-            "another parent"
-        );
-        // The shell is the one the guesses just named: it has to be won back by its own mark.
-        assert!(!closes(&mut log, b"\x1b]133;D;0;bt_remote=1.9.1\x07"));
     }
 
     /// A prompt is being edited between its end (`B`) and the command's start

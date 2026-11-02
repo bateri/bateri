@@ -55,6 +55,7 @@ use std::mem;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant};
 
 use ::pencere_host::frame::Message;
 use ::pencere_host::session::{Config, Observed, Offer, Session as Conversation};
@@ -171,6 +172,33 @@ pub fn font_stack(family: Option<&str>) -> String {
     }
 }
 
+/// The time as the desk of a pane reads it: only for the moment the person asked the program to
+/// quit ([`QUIT_WINDOW`]). The system's, unless a test lends its own.
+#[derive(Clone)]
+pub struct Clock(Arc<dyn Fn() -> Instant + Send + Sync>);
+
+impl Clock {
+    /// The system's clock.
+    pub fn system() -> Self {
+        Self(Arc::new(Instant::now))
+    }
+
+    /// A clock that tells the time `now` does.
+    pub fn new(now: impl Fn() -> Instant + Send + Sync + 'static) -> Self {
+        Self(Arc::new(now))
+    }
+
+    fn now(&self) -> Instant {
+        (self.0)()
+    }
+}
+
+impl fmt::Debug for Clock {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("Clock")
+    }
+}
+
 /// What a pane is opened with to host views ([`crate::SessionOptions::views`]).
 /// A pane opened without it hears no frame and answers none: its program falls
 /// back to what it does when nothing answers.
@@ -213,6 +241,8 @@ pub struct ViewOptions {
     /// and say where. A pane's program may move to another machine, and then the folder with it
     /// ([`crate::Session::offer_stage`]).
     pub stage: Option<StageDir>,
+    /// The time the desk reads when the person asks the program to quit ([`Clock`]).
+    pub clock: Clock,
 }
 
 impl ViewOptions {
@@ -237,6 +267,7 @@ impl ViewOptions {
             native_entry_limit: None,
             drop_shown: None,
             stage: None,
+            clock: Clock::system(),
         }
     }
 }
@@ -675,6 +706,12 @@ fn waits(state: State) -> bool {
     matches!(state, State::Opening)
 }
 
+/// Whether a view is opening or open: the only states a mark of the stream or the person's ⌃C can
+/// end it in (an offer has no view to end, and a program that ended has none).
+fn lives(state: State) -> bool {
+    matches!(state, State::Opening | State::Open)
+}
+
 /// The slot a pane's conversation is kept in. See the module's documentation.
 ///
 /// Two leaf locks, so that the heavy work is never in the way of the cheap:
@@ -701,15 +738,33 @@ pub(crate) struct Desk {
     /// The program of the view runs on another machine: read when the view opened
     /// ([`Discard`]).
     elsewhere: AtomicBool,
-    /// The stream of the view said that the command finished (OSC 133 `D`), and the tty did not
-    /// say otherwise: a local `D` while a program held the tty, or one that could not be checked,
-    /// and a remote `D` of the remote shell ([`Desk::note_end_said`]). A mark in the stream is as
-    /// writable as a `bye` without its token (§10.3, §14), so this is only half of an end.
-    end_said: AtomicBool,
-    /// The person asked the program to quit: ⌃C, ⌃\ or ⌃Z in the view, or the header's Quit
-    /// ([`Desk::note_quit_asked`]). The other half of an end: the person's own act, which no
-    /// stream can make.
-    asked_to_quit: AtomicBool,
+    /// The time ([`QUIT_WINDOW`]).
+    clock: Clock,
+}
+
+/// How long after the person asked the program to quit an end mark that the host cannot check
+/// counts as the program's answer to it. The person's ⌃C is the one thing a stream cannot make, and
+/// a program that survived it (ignored it, or took it for a key) is alive: what it prints after the
+/// moment has passed is its own words, and ends nothing.
+pub(crate) const QUIT_WINDOW: Duration = Duration::from_secs(5);
+
+/// What has been said of the end of the program of the view, and what the person asked of it. A mark
+/// in the stream is as writable as a `bye` without its token (§10.3, §14), so a mark ends no view
+/// that the host has no observation of its own to believe it by; it is half of an end, and the
+/// person's ⌃C the other half. Kept with the conversation, and forgotten when no view is opening or
+/// open (a program that says hello again, a view that ended): what was said of one program is
+/// nothing to the next.
+#[derive(Default)]
+struct Ends {
+    /// A local `D` came while a program held the tty (the shell's group was not in front): the
+    /// shell's next prompt with the tty back is the program's end. It is no half of an end of the
+    /// person's: a program in front, alive, can write it.
+    pending: bool,
+    /// An end the host could not check: a remote shell's `D`, or a local one of a tty that could
+    /// not be read. With the person's ⌃C after it, or within [`QUIT_WINDOW`] before it, the view ends.
+    said: bool,
+    /// When the person last asked the program to quit and no end had been said.
+    quit_asked_at: Option<Instant>,
 }
 
 struct Inner {
@@ -718,6 +773,8 @@ struct Inner {
     font_mono: String,
     /// The theme the view was last given.
     theme: Theme,
+    /// What was said of the end of the program, and what the person asked ([`Ends`]).
+    ends: Ends,
 }
 
 struct Slots {
@@ -763,6 +820,7 @@ impl Desk {
             // The pane's discard: the session gives it to [`pane_discard`].
             drop_shown: _,
             stage,
+            clock,
         } = options;
         let mut config = Config::new(host, view_theme(&theme, &font_mono), size);
         // The kinds of view this pane opens, each with the versions of its interface the
@@ -789,6 +847,7 @@ impl Desk {
                 conversation,
                 font_mono,
                 theme,
+                ends: Ends::default(),
             }),
             slots: Mutex::new(Slots {
                 parked: VecDeque::new(),
@@ -803,8 +862,7 @@ impl Desk {
             flow,
             discard,
             elsewhere: AtomicBool::new(false),
-            end_said: AtomicBool::new(false),
-            asked_to_quit: AtomicBool::new(false),
+            clock,
         }
     }
 
@@ -860,6 +918,48 @@ impl Desk {
         result
     }
 
+    /// As [`Self::apply`], for what the view's side can end the view by: the person closing it, the
+    /// page's own `close` or its failure, a program that does not read. If the view was open when
+    /// the stream said the program's command ended (a mark the host could not check, [`Ends`]), the
+    /// program is taken to be gone and the view ends as its end does: the `closed` the conversation
+    /// would write is not written (it would be typed at the shell's prompt, or the server's), the
+    /// conversation is the program's ended, and what the program left unread is thrown away. The
+    /// words of the page before that are not held back for it: the mark may be a lie, and a page
+    /// whose program is alive must not freeze on it.
+    pub(crate) fn apply_closing<R>(
+        &self,
+        write: impl Fn(Vec<u8>),
+        act: impl FnOnce(&mut Conversing) -> R,
+    ) -> R {
+        let (result, writes, notify, gone) = {
+            let mut inner = lock(&self.inner);
+            let said = lives(inner.conversation.state()) && inner.ends.said;
+            let result = act(&mut inner.conversation);
+            let gone = said && !lives(inner.conversation.state());
+            if gone {
+                inner.conversation.program_ended();
+            }
+            let (mut writes, notify) = self.drain(&mut inner);
+            if gone {
+                writes.clear();
+            }
+            (result, writes, notify, gone)
+        };
+        self.deliver(writes, notify, write);
+        if gone {
+            self.flow.interrupt();
+            if self.flow.module_was_written() {
+                self.throw_away();
+            }
+        }
+        result
+    }
+
+    /// The person closes the view ([`Self::apply_closing`]).
+    pub(crate) fn close_view(&self, write: impl Fn(Vec<u8>)) {
+        self.apply_closing(write, Conversing::close_view);
+    }
+
     /// Hands the message of a web page to the conversation (the page's bridge, specification
     /// §9.4): one of the six view messages is written to the program as a `msg`, unread, and
     /// one of the host's own — `context`, `close`, `link` — is answered here. Nothing is
@@ -878,7 +978,7 @@ impl Desk {
         module: impl Fn(Vec<u8>),
     ) {
         let said = Cell::new(false);
-        self.apply(
+        self.apply_closing(
             |bytes| {
                 if said.get() {
                     module(bytes);
@@ -956,7 +1056,7 @@ impl Desk {
         act: impl FnOnce(&mut Conversing) -> R,
     ) -> R {
         let said = Cell::new(false);
-        self.apply(
+        self.apply_closing(
             |bytes| {
                 if said.get() {
                     module(bytes);
@@ -1006,48 +1106,86 @@ impl Desk {
     /// The shell's own mark says the command finished (§10.3: OSC 133 `D`, local). The mark is as
     /// writable as a `bye` without its token — a file shown with `cat`, a line of a log, the program
     /// itself — so it ends the program only against the host's own observation: when the tty's
-    /// foreground group is the shell's again. While a program holds the tty, or when that cannot be
-    /// told, the mark is only said ([`Self::note_end_said`]): the view ends when the person asks the
-    /// program to quit, or when the shell shows its prompt with the tty ([`Self::prompt_shown`]).
+    /// foreground group is the shell's again. While a program holds the tty it is not the shell's
+    /// end and nothing of the person's can make it one: it is kept only for the shell's next prompt
+    /// with the tty ([`Self::prompt_shown`]); program in front or not, ⌃C is the program's. When the
+    /// tty cannot be read the mark is only said ([`Self::note_end_said`]).
     /// The blocks, the dock and the record of the session took the mark as they did.
     pub(crate) fn command_ended(&self, write: impl Fn(Vec<u8>)) {
         match (self.foreground)() {
             Some(true) => self.program_ended(write),
-            Some(false) | None => self.note_end_said(write),
+            Some(false) => {
+                self.judge(|ends, _| {
+                    ends.pending = true;
+                    false
+                });
+            }
+            None => self.note_end_said(write),
         }
     }
 
     /// The stream said that the command finished, and the host has no observation of its own to
-    /// believe it by (a remote shell has no process group to look at). The view does not end for
-    /// it, whatever the mark is like: it ends when the person has asked the program to quit as well,
-    /// in either order ([`Self::note_quit_asked`]), or by the program's `bye`, its transport ending
-    /// or the person closing it. The person's ⌃C is theirs to give; a program that writes marks
-    /// can make no more of it than that.
+    /// believe it by (a remote shell has no process group to look at; a tty that cannot be read).
+    /// The view does not end for it alone, whatever the mark is like. It ends when the person's ⌃C
+    /// came a moment before it ([`QUIT_WINDOW`]: the person asked the program to quit, and the shell
+    /// says it did), or after it ([`Self::note_quit_asked`]); otherwise the mark is kept, and the
+    /// person's next ⌃C ends it. Or by the program's `bye`, its transport ending or the person
+    /// closing it. A program that survived the person's ⌃C and prints a mark later ends nothing.
     pub(crate) fn note_end_said(&self, write: impl Fn(Vec<u8>)) {
-        self.end_said.store(true, Ordering::SeqCst);
-        if self.asked_to_quit.load(Ordering::SeqCst) {
+        let ended = self.judge(|ends, now| {
+            if ends
+                .quit_asked_at
+                .is_some_and(|at| now.saturating_duration_since(at) <= QUIT_WINDOW)
+            {
+                return true;
+            }
+            ends.said = true;
+            false
+        });
+        if ended {
             self.program_ended(write);
         }
     }
 
     /// The person asked the program to quit: ⌃C, ⌃\ or ⌃Z in the view, or the header's Quit.
     /// With the end of the command said ([`Self::note_end_said`]) the program is gone, and the
-    /// view ends without a byte more for it; without, the signal is only the program's to take.
+    /// view ends without a byte more for it; without, the signal is only the program's to take,
+    /// and the moment is kept for the mark the shell says next ([`QUIT_WINDOW`]).
     pub(crate) fn note_quit_asked(&self, write: impl Fn(Vec<u8>)) {
-        self.asked_to_quit.store(true, Ordering::SeqCst);
-        if self.end_said.load(Ordering::SeqCst) {
+        let ended = self.judge(|ends, now| {
+            if ends.said {
+                return true;
+            }
+            ends.quit_asked_at = Some(now);
+            false
+        });
+        if ended {
             self.program_ended(write);
         }
     }
 
     /// The shell showed its prompt (the local `A` of our shell). With the end of the command said
-    /// before it, and the tty the shell's again, the program is over: a `precmd` hook that wrote
-    /// its `D` before the shell had the tty back is not an observation, and this is. A group that
-    /// cannot be told, or a program that still holds the tty, ends nothing.
+    /// before it while a program held the tty, and the tty the shell's again, the program is over:
+    /// a `precmd` hook that wrote its `D` before the shell had the tty back is not an observation,
+    /// and this is. A group that cannot be told, or a program that still holds the tty, ends
+    /// nothing.
     pub(crate) fn prompt_shown(&self, write: impl Fn(Vec<u8>)) {
-        if self.end_said.load(Ordering::SeqCst) && (self.foreground)() == Some(true) {
+        if !self.judge(|ends, _| ends.pending) {
+            return;
+        }
+        if (self.foreground)() == Some(true) {
             self.program_ended(write);
         }
+    }
+
+    /// Runs `decide` on what was said of the end of the program, if a view is opening or open (an
+    /// offer has no view to end, and what is said then is nobody's); whether it says the view ends.
+    fn judge(&self, decide: impl FnOnce(&mut Ends, Instant) -> bool) -> bool {
+        let mut inner = lock(&self.inner);
+        if !lives(inner.conversation.state()) {
+            return false;
+        }
+        decide(&mut inner.ends, self.clock.now())
     }
 
     /// The program ended (§10.3): the command's `D`, or the child's exit.
@@ -1055,8 +1193,11 @@ impl Desk {
     /// The program can no longer be the reader of what the module said: not a byte more of it is
     /// written, the frame under way is given up, and what the module said that the program had
     /// not read — in the tty's queue, where the next reader of the tty would find it — is thrown
-    /// away. The caller is the loop that writes, so nothing is written between the gate and the
-    /// discard.
+    /// away. The caller is the loop that writes, or the main thread (the person's ⌃C that
+    /// completes an end, a view that is closed after the end was said): either way the gate a word
+    /// of the module passes is shut first ([`Flow::interrupt`]), so nothing of it is written
+    /// between the gate and the discard. A frame under way may be half written, and only in the
+    /// view that closes: what the program had not read of it is thrown away.
     pub(crate) fn program_ended(&self, write: impl Fn(Vec<u8>)) {
         self.flow.interrupt();
         self.apply(write, Conversing::program_ended);
@@ -1137,7 +1278,7 @@ impl Desk {
         if waiting <= MAX_BACKLOG {
             return true;
         }
-        self.apply(write, |conversation| conversation.backlog(waiting))
+        self.apply_closing(write, |conversation| conversation.backlog(waiting))
     }
 
     /// The program has read enough for a module that was told *full* to say more
@@ -1187,9 +1328,6 @@ impl Desk {
                 // owed. A view ends, whatever ended it: nothing counted is waiting for anyone, and
                 // the module's frames that wait are dropped (the one under way is finished).
                 Action::StartView(_) => {
-                    // What was said of the program before is not of this view.
-                    self.end_said.store(false, Ordering::SeqCst);
-                    self.asked_to_quit.store(false, Ordering::SeqCst);
                     self.flow.begin();
                     // Where the program is **now**: the discard that follows its end is told
                     // this, whatever the shell has forgotten of the session by then. The shell's
@@ -1205,7 +1343,14 @@ impl Desk {
                 other => kept.push(other),
             }
         }
-        let waiting = waits(inner.conversation.state());
+        let state = inner.conversation.state();
+        // A program that says hello again, a view that ended: what was said of the program before
+        // is nothing to the next one. (Not when a view starts: the program that died while its
+        // view opened has the person's ⌃C to end the view that does.)
+        if !lives(state) {
+            inner.ends = Ends::default();
+        }
+        let waiting = waits(state);
         let mut slots = lock(&self.slots);
         let moved = waiting != slots.waiting;
         slots.waiting = waiting;

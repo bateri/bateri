@@ -71,6 +71,33 @@ impl Wake for CountingWake {
 /// What the pane is seen as, for the test to change.
 pub(crate) type Seen = Arc<Mutex<Observed>>;
 
+/// A clock the test moves: it tells the time it began at and the seconds it was told to go on.
+#[derive(Clone)]
+pub(crate) struct TestClock {
+    began: std::time::Instant,
+    ahead: Arc<Mutex<std::time::Duration>>,
+}
+
+impl TestClock {
+    pub(crate) fn new() -> Self {
+        Self {
+            began: std::time::Instant::now(),
+            ahead: Arc::default(),
+        }
+    }
+
+    /// The clock a desk is given.
+    pub(crate) fn clock(&self) -> Clock {
+        let this = self.clone();
+        Clock::new(move || this.began + *lock(&this.ahead))
+    }
+
+    /// Time goes on by `by`.
+    pub(crate) fn advance(&self, by: std::time::Duration) {
+        *lock(&self.ahead) += by;
+    }
+}
+
 /// The graphics side of a pane, with or without a desk, and where its answers
 /// go.
 pub(crate) struct Rig {
@@ -81,6 +108,8 @@ pub(crate) struct Rig {
     pub(crate) input: Input,
     /// What the desk counts of what passes between the program and the module.
     pub(crate) flow: crate::flow::Flow,
+    /// The time the desk reads.
+    pub(crate) clock: TestClock,
 }
 
 impl Sink for Rig {
@@ -156,8 +185,10 @@ impl Rig {
     ) -> (Arc<Self>, Arc<CountingWake>) {
         let wake = Arc::new(CountingWake::default());
         let flow = crate::flow::Flow::new();
+        let clock = TestClock::new();
         let desk = observer.map(|observer| {
             let mut options = ViewOptions::new("bateri-test", "0.0.0");
+            options.clock = clock.clock();
             options.native_entry_limit = native_entry_limit;
             options.size = Size {
                 width: 800,
@@ -183,6 +214,7 @@ impl Rig {
             desk,
             input: Arc::default(),
             flow,
+            clock,
         });
         (rig, wake)
     }
@@ -832,7 +864,8 @@ fn the_end_of_a_command_of_a_tty_that_cannot_be_read_waits_for_the_persons_inter
 }
 
 /// The end the stream says and the person's ⌃C are the end of the view together, whichever comes
-/// first, and neither is alone; the closing writes nothing to the program.
+/// first (a ⌃C first only for the moment it takes the shell to say it, [`QUIT_WINDOW`]), and neither
+/// is alone; the closing writes nothing to the program.
 #[test]
 fn the_end_said_and_the_quit_asked_end_the_view_in_either_order_and_neither_alone() {
     for end_first in [true, false] {
@@ -846,6 +879,7 @@ fn the_end_said_and_the_quit_asked_end_the_view_in_either_order_and_neither_alon
             desk.note_end_said(pane.rig.write());
         } else {
             desk.note_quit_asked(pane.rig.write());
+            pane.rig.clock.advance(QUIT_WINDOW);
         }
         assert_eq!(
             desk.take_views(),
@@ -874,22 +908,82 @@ fn the_end_said_and_the_quit_asked_end_the_view_in_either_order_and_neither_alon
     }
 }
 
-/// What was said of the program before its view started is not of the view.
+/// A program that a ⌃C did not end is alive, and what it prints is its own: the end mark that
+/// comes after the moment of the ⌃C ([`QUIT_WINDOW`]) is only said, and the person's next ⌃C is
+/// the one that ends the view of a program that is gone. Time is the one thing the test lends.
 #[test]
-fn a_new_view_forgets_the_end_that_was_said_before_it() {
+fn an_end_mark_after_the_moment_of_the_persons_interrupt_is_only_said() {
+    let (rig, _, _) = Rig::new(true);
+    let mut pane = Pane::new(rig);
+    open_a_view(&mut pane);
+    let desk = pane.rig.desk.as_ref().expect("a desk");
+    desk.take_views();
+
+    desk.note_quit_asked(pane.rig.write());
+    pane.rig
+        .clock
+        .advance(QUIT_WINDOW + std::time::Duration::from_millis(1));
+    desk.note_end_said(pane.rig.write());
+    assert_eq!(desk.take_views(), [], "a mark after the moment");
+    assert_eq!(
+        desk.apply(|_| {}, |conversation| conversation.state()),
+        State::Open
+    );
+    desk.note_quit_asked(pane.rig.write());
+    assert_eq!(desk.take_views(), [Action::DestroyView], "the second ⌃C");
+    assert!(lock(&pane.rig.input).is_empty(), "{:?}", pane.rig.written());
+}
+
+/// A local end mark while a program holds the tty is kept for the shell's prompt with the tty back
+/// and is no half of an end for the person's ⌃C, before it or after it: a program in front, alive,
+/// can write it.
+#[test]
+fn a_local_end_of_a_program_in_front_is_no_half_of_an_end_for_the_persons_interrupt() {
+    let (rig, seen, _) = Rig::new(true);
+    let mut pane = Pane::new(rig);
+    open_a_view(&mut pane);
+    let desk = pane.rig.desk.as_ref().expect("a desk");
+    desk.take_views();
+    lock(&seen).shell_in_foreground = Some(false);
+
+    // The mark, then the ⌃C; the ⌃C, then the mark.
+    desk.command_ended(pane.rig.write());
+    desk.note_quit_asked(pane.rig.write());
+    desk.note_quit_asked(pane.rig.write());
+    desk.command_ended(pane.rig.write());
+    assert_eq!(desk.take_views(), []);
+    assert_eq!(
+        desk.apply(|_| {}, |conversation| conversation.state()),
+        State::Open
+    );
+    // The program prints a prompt too: it holds the tty.
+    desk.prompt_shown(pane.rig.write());
+    assert_eq!(desk.take_views(), []);
+    // The shell's: the tty is back.
+    lock(&seen).shell_in_foreground = Some(true);
+    desk.prompt_shown(pane.rig.write());
+    assert_eq!(desk.take_views(), [Action::DestroyView]);
+    assert!(lock(&pane.rig.input).is_empty(), "{:?}", pane.rig.written());
+}
+
+/// The program died while its view opened (the end is said before the page is here, or the
+/// person's ⌃C came): the view starts, and the other half ends it.
+#[test]
+fn an_end_said_while_a_view_opens_is_ended_by_the_persons_interrupt_after_the_view_starts() {
     let (rig, _, _) = Rig::new(true);
     let mut pane = Pane::new(rig);
     pane.feed(&hello());
     let token = token_of(&pane.rig.written()[0]);
     pane.feed(&bundle_open(&token));
     let _ = pane.rig.written();
+    let desk = pane.rig.desk.as_ref().expect("a desk");
+    assert_eq!(
+        desk.apply(|_| {}, |conversation| conversation.state()),
+        State::Opening
+    );
 
     // The view has not started (its page is not here): an end is said.
-    pane.rig
-        .desk
-        .as_ref()
-        .expect("a desk")
-        .note_end_said(pane.rig.write());
+    desk.note_end_said(pane.rig.write());
     pane.feed(&page_file());
     let desk = pane.rig.desk.as_ref().expect("a desk");
     assert!(
@@ -898,14 +992,114 @@ fn a_new_view_forgets_the_end_that_was_said_before_it() {
             .any(|action| matches!(action, Action::StartView(_))),
         "the view starts"
     );
-
-    // The view is up: the person's ⌃C alone is not its end.
-    desk.note_quit_asked(pane.rig.write());
-    assert_eq!(desk.take_views(), []);
     assert_eq!(
         desk.apply(|_| {}, |conversation| conversation.state()),
         State::Open
     );
+
+    // The view is up: the person's ⌃C is the other half.
+    desk.note_quit_asked(pane.rig.write());
+    assert_eq!(desk.take_views(), [Action::DestroyView]);
+    assert!(lock(&pane.rig.input).is_empty(), "{:?}", pane.rig.written());
+}
+
+/// An offer has no view to end: what is said before a view opens is nobody's, and what was said
+/// of a view that ended is nothing to the next one — a program that says hello again, a view that
+/// began after a mark.
+#[test]
+fn what_is_said_of_the_end_with_no_view_opening_or_open_is_forgotten() {
+    // An offer: the mark and the ⌃C are none of its business.
+    let (rig, _, _) = Rig::new(true);
+    let mut pane = Pane::new(rig);
+    pane.feed(&hello());
+    let token = token_of(&pane.rig.written()[0]);
+    let desk = pane.rig.desk.as_ref().expect("a desk");
+    desk.note_end_said(pane.rig.write());
+    desk.note_quit_asked(pane.rig.write());
+    assert_eq!(
+        desk.apply(|_| {}, |conversation| conversation.state()),
+        State::Offered
+    );
+    pane.feed(&bundle_open(&token));
+    let _ = pane.rig.written();
+    pane.feed(&page_file());
+    let desk = pane.rig.desk.as_ref().expect("a desk");
+    desk.take_views();
+    assert_eq!(
+        desk.apply(|_| {}, |conversation| conversation.state()),
+        State::Open
+    );
+    desk.note_quit_asked(pane.rig.write());
+    assert_eq!(
+        desk.take_views(),
+        [],
+        "a ⌃C alone, after marks nobody heard"
+    );
+
+    // A view that ended: the program that says hello next has none of it.
+    desk.note_end_said(pane.rig.write());
+    assert_eq!(desk.take_views(), [Action::DestroyView], "the first view");
+    pane.feed(&hello());
+    let _ = pane.rig.written();
+    let desk = pane.rig.desk.as_ref().expect("a desk");
+    assert_eq!(
+        desk.apply(|_| {}, |conversation| conversation.state()),
+        State::Offered
+    );
+    desk.note_end_said(pane.rig.write());
+    desk.note_quit_asked(pane.rig.write());
+    assert_eq!(
+        desk.apply(|_| {}, |conversation| conversation.state()),
+        State::Offered,
+        "marks and ⌃C alone do not end an offer"
+    );
+}
+
+/// A view whose end the stream said is closed as the program's end is: not a word for the program
+/// (it would be typed at the shell's prompt, or the server's), the conversation ended, whoever
+/// closes it. Without it the view is closed as always, with the `closed` the program reads.
+#[test]
+fn a_view_whose_end_was_said_is_closed_with_no_word_for_the_program() {
+    // Said, and the person closes the view.
+    let (rig, _, _) = Rig::new(true);
+    let mut pane = Pane::new(rig);
+    open_a_view(&mut pane);
+    let desk = pane.rig.desk.as_ref().expect("a desk");
+    desk.take_views();
+    desk.note_end_said(pane.rig.write());
+    desk.close_view(pane.rig.write());
+    assert_eq!(desk.take_views(), [Action::DestroyView]);
+    assert_eq!(
+        desk.apply(|_| {}, |conversation| conversation.state()),
+        State::Ended
+    );
+    assert!(lock(&pane.rig.input).is_empty(), "{:?}", pane.rig.written());
+
+    // Said, and the page closes itself.
+    let (rig, _, _) = Rig::new(true);
+    let mut pane = Pane::new(rig);
+    open_a_view(&mut pane);
+    let desk = pane.rig.desk.as_ref().expect("a desk");
+    desk.take_views();
+    desk.note_end_said(pane.rig.write());
+    desk.view_message(r#"{"close":{}}"#, pane.rig.write(), pane.rig.write());
+    assert_eq!(desk.take_views(), [Action::DestroyView]);
+    assert_eq!(
+        desk.apply(|_| {}, |conversation| conversation.state()),
+        State::Ended
+    );
+    assert!(lock(&pane.rig.input).is_empty(), "{:?}", pane.rig.written());
+
+    // Not said: the program is told.
+    let (rig, _, _) = Rig::new(true);
+    let mut pane = Pane::new(rig);
+    open_a_view(&mut pane);
+    let desk = pane.rig.desk.as_ref().expect("a desk");
+    desk.take_views();
+    desk.close_view(pane.rig.write());
+    let told = pane.rig.written();
+    assert_eq!(told.len(), 1, "{told:?}");
+    assert_eq!(told[0].kind, "closed");
 }
 
 #[test]

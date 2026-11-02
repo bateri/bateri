@@ -6997,10 +6997,11 @@ impl TerminalPane {
         }
     }
 
-    /// Whether the keyboard is in this pane: in its terminal, or in one of the fields of its page.
-    /// What a program asks of the keyboard (a page's `keyboard`, `bateri split --focus`) is let
-    /// through only where the person already is: a program that asks from a pane they are not in
-    /// would otherwise take the keyboard, and what they type, from the pane they are in.
+    /// Whether the keyboard is in this pane: in its terminal, in one of the fields of its page, or
+    /// in the web view of its program. What a program asks of the keyboard (a page's `keyboard`,
+    /// `bateri split --focus`) is let through only where the person already is: a program that
+    /// asks from a pane they are not in would otherwise take the keyboard, and what they type,
+    /// from the pane they are in.
     pub(crate) fn holds_keyboard(&self) -> bool {
         self.view().is_first_responder()
             || self
@@ -7009,6 +7010,12 @@ impl TerminalPane {
                 .borrow()
                 .as_ref()
                 .is_some_and(|page| page.fields.typing())
+            || self
+                .ivars()
+                .pencere
+                .borrow()
+                .as_ref()
+                .is_some_and(|host| host.holds_keyboard())
     }
 }
 
@@ -8119,6 +8126,13 @@ mod tests {
         let popped = show.find("popUpMenuPositioningItem").expect(show);
         let lowered = show.find("page_menu.lower()").expect(show);
         assert!(raised < popped && popped < lowered, "{show}");
+        // The Paste line shows the host's ⌘V, whatever the page says of keys.
+        assert!(
+            show.contains(
+                r#"PageMenuEntry::Paste { .. } => ("v".to_owned(), NSEventModifierFlags::Command)"#
+            ),
+            "{show}"
+        );
         // What `copy` and a cut put on the pasteboard goes through the host's one `copy`, in a
         // frame (`Held::Copy`) and between frames (`Drained::copied`) alike, and that one asks
         // `[clipboard] osc52` first: the write is the setting's and the person's act, not the
@@ -8906,16 +8920,23 @@ mod tests {
             .expect("keyboard");
         let keyboard = &pane[at..at + pane[at..].find("\n    }\n").expect("its end")];
         assert!(keyboard.contains("self.0.holds_keyboard()"), "{keyboard}");
+        // The gate stands in `place`, before `put` makes the pane: the person is in the key window,
+        // and the keyboard is in the pane the new one goes beside (its web view's included). `put`
+        // gives the keyboard to the new pane only as that gate said.
         let agent = include_str!("agent.rs");
+        let place = &agent[agent.find("    fn place(").expect("place")..];
+        let place = &place[..place.find("\n    }\n").expect("its end")];
+        let window = place.find("isKeyWindow()").expect(place);
+        let held = place.find("pane.holds_keyboard()").expect(place);
+        let made = place.find("self.put(").expect(place);
+        assert!(window < made && held < made, "{place}");
         let put = &agent[agent.find("    fn put(").expect("put")..];
         let put = &put[..put.find("\n    }\n").expect("its end")];
-        let gate = put
-            .find("place.focus && anchor.holds_keyboard()")
-            .expect(put);
         assert!(
-            put.matches("show_pane(").count() == 2
-                && put.matches("if focus {").count() == 2
-                && put.find("show_pane(").unwrap() > gate,
+            put.contains("let focus = place.focus;")
+                && !put.contains("holds_keyboard")
+                && put.matches("show_pane(").count() == 2
+                && put.matches("if focus {").count() == 2,
             "{put}"
         );
     }

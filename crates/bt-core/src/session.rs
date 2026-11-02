@@ -12136,7 +12136,9 @@ impl Session {
 
     /// The person closes the view; the program is told once it is gone.
     pub fn close_view(&self) {
-        self.adapter.view(pencere::Conversing::close_view);
+        if let Some(desk) = &self.adapter.0.desk {
+            desk.close_view(|bytes| self.adapter.input(bytes));
+        }
     }
 
     /// A wait the shell chose has run out: the files of an open or the person's
@@ -30984,6 +30986,9 @@ e\\314\\201.'; sleep 5";
         captured: PathBuf,
         /// The process that copies the pane's input to `captured`: the reader of the tty.
         reader: PathBuf,
+        /// The time the pane's desk reads: the window after the person's ⌃C is passed by
+        /// advancing it.
+        clock: crate::pencere::tests::TestClock,
         _dir: TempDir,
     }
 
@@ -31025,7 +31030,10 @@ e\\314\\201.'; sleep 5";
                 ),
                 40,
             );
-            options.views = Some(ViewOptions::new("bateri-test", "0.0.0"));
+            let clock = crate::pencere::tests::TestClock::new();
+            let mut views = ViewOptions::new("bateri-test", "0.0.0");
+            views.clock = clock.clock();
+            options.views = Some(views);
             let wake = Arc::new(TestWake::default());
             let session = Session::spawn(options, Arc::clone(&wake) as Arc<dyn Wake>).unwrap();
             let (opened, open) = mpsc::channel();
@@ -31042,6 +31050,7 @@ e\\314\\201.'; sleep 5";
                 fifo,
                 captured,
                 reader,
+                clock,
                 _dir: dir,
             }
         }
@@ -32307,22 +32316,18 @@ e\\314\\201.'; sleep 5";
 
     /// The `D` that the shell's `precmd` hook writes can be read before the tty is the shell's
     /// again: the program is in front when it is checked, and the mark is only said. The prompt
-    /// that follows it is the shell's, and with the tty in front it ends the program; one the
-    /// program prints while it holds the tty does not.
+    /// that follows it is the shell's, and with the tty in front it ends the view of the program;
+    /// one the program prints while it holds the tty does not.
     #[test]
     fn a_late_end_is_closed_by_the_prompt_the_shell_shows_with_the_tty() {
         use crate::pencere::State;
-        use crate::pencere::tests::hello;
-        let mut program = Playing::then("view-late-end", "; read _");
-        program.write(&hello());
-        program.wait_written(1);
-        program.wait_state(State::Offered);
+        let mut program = local_view("view-late-end");
         let before = program.written().len();
 
         // The end, read while the program holds the tty; its prompt, too.
         program.write(b"\x1b]133;D;0;bt_block=1\x07\x1b]133;A;bt_block=2\x07said");
         wait_text(&program.session, "said");
-        assert_eq!(program.state(), Some(State::Offered));
+        assert_eq!(program.state(), Some(State::Open));
 
         // The tty is the shell's: the next prompt is the shell's.
         program.end();
@@ -32348,13 +32353,6 @@ e\\314\\201.'; sleep 5";
         wait_text(&program.session, "prompt");
         assert_eq!(program.state(), Some(State::Offered));
         program.session.shutdown();
-    }
-
-    /// What the pane does for a ⌃C in a program's view (`signal_program`, the one way ⌃C, ⌃\, ⌃Z and
-    /// the header's Quit reach the tty): the character, and the ask.
-    fn person_interrupts(program: &Playing) {
-        program.session.write(&[0x03]);
-        program.session.ask_program_to_quit();
     }
 
     /// A pane whose `ssh` runs a program that said hello, in a remote session, and the marks of
@@ -32451,45 +32449,377 @@ e\\314\\201.'; sleep 5";
         program.session.shutdown();
     }
 
-    /// The end the stream says and the person's ⌃C together are the end of the view, in either
-    /// order, and the closing writes nothing to the program (§10.3).
+    /// A view that is open in a pane of a remote session: the program said hello and opened it.
+    fn open_view(program: &mut Playing) {
+        use crate::pencere::State;
+        use crate::pencere::tests::{bundle_open, page_file, token_of};
+        let token = token_of(&program.written()[0]);
+        program.write(&bundle_open(&token));
+        assert_eq!(program.wait_written(2)[1].kind, "need");
+        program.write(&page_file());
+        program.wait_state(State::Open);
+    }
+
+    /// An open view of a program in a local pane: the program holds the tty (it is the reader), and
+    /// the shell waits behind it, to take the tty back when the program is over.
+    fn local_view(name: &str) -> Playing {
+        use crate::pencere::State;
+        use crate::pencere::tests::hello;
+        let mut program = Playing::then(name, "; read _");
+        program.write(&hello());
+        program.wait_written(1);
+        program.wait_state(State::Offered);
+        open_view(&mut program);
+        program
+    }
+
+    /// Whether the program that reads the pane's input is still there.
+    fn reads_still(program: &Playing) -> bool {
+        // SAFETY: the null signal to a process this test started.
+        unsafe { libc::kill(program.reader_pid(), 0) == 0 }
+    }
+
+    /// The end the stream says and the person's ⌃C together are the end of the view of a remote
+    /// session, in either order, and the closing writes nothing to the program (§10.3).
     #[test]
     fn the_end_the_stream_says_and_the_persons_interrupt_end_the_view_in_either_order() {
         use crate::pencere::State;
         // The end first, the ⌃C after it.
         let mut program = remote_view("view-remote-end-then-quit");
+        open_view(&mut program);
         let before = program.written().len();
         program.write(b"\x1b]133;D;0;bt_remote=1.2.2\x07said");
         wait_text(&program.session, "said");
-        assert_eq!(program.state(), Some(State::Offered), "the end alone");
-        person_interrupts(&program);
+        assert_eq!(program.state(), Some(State::Open), "the end alone");
+        program.session.ask_program_to_quit();
         assert_eq!(program.state(), Some(State::Ended), "the end, then ⌃C");
         assert_eq!(program.written().len(), before, "nothing after the end");
         program.session.shutdown();
 
-        // The ⌃C first, the end after it; and a ⌃C alone ends nothing.
+        // The ⌃C first, the end after it (the window of a moment); a ⌃C alone ends nothing.
         let mut program = remote_view("view-remote-quit-then-end");
+        open_view(&mut program);
         let before = program.written().len();
-        person_interrupts(&program);
-        person_interrupts(&program);
-        assert_eq!(program.state(), Some(State::Offered), "⌃C alone");
-        program.write(b"\x1b]133;D;0;bt_remote=1.2.9\x07guess");
-        wait_text(&program.session, "guess");
-        assert_eq!(
-            program.state(),
-            Some(State::Offered),
-            "a guess of the shell"
-        );
-        // (The guess moved the trail to the shell it named: the shell wins it back with its own
-        // marks, and then its end is the one that was said.)
-        program.write(
-            b"\x1b]133;A;bt_remote=1.2.2\x07\x1b]133;C;bt_remote=1.2.2\x07\
-              \x1b]133;D;0;bt_remote=1.2.2\x07said",
-        );
+        program.session.ask_program_to_quit();
+        program.session.ask_program_to_quit();
+        assert_eq!(program.state(), Some(State::Open), "⌃C alone");
+        program.clock.advance(Duration::from_secs(4));
+        program.write(b"\x1b]133;D;130;bt_remote=1.2.9\x07\x1b]133;A;bt_remote=1.2.3\x07said");
         wait_until("the end after ⌃C", Duration::from_secs(10), || {
             program.state() == Some(State::Ended)
         });
         assert_eq!(program.written().len(), before, "nothing after the end");
+        program.session.shutdown();
+    }
+
+    /// A program that a ⌃C did not end is alive, and what it prints is its own: an end mark that
+    /// comes after the moment of the person's ⌃C has passed (`QUIT_WINDOW`) ends no view, in a
+    /// remote session or a local one. The view of a program that is gone is ended by a ⌃C of the
+    /// person's, the second.
+    #[test]
+    fn a_printed_end_ends_no_view_when_the_moment_of_the_persons_interrupt_has_passed() {
+        use crate::pencere::State;
+        // Remote: the shell's own mark, and a mark that looks local.
+        for (i, forged) in [
+            &b"\x1b]133;D;0;bt_remote=1.2.2\x07printed"[..],
+            &b"\x1b]133;D;0;bt_block=7\x07printed"[..],
+        ]
+        .iter()
+        .enumerate()
+        {
+            let mut program = remote_view(&format!("view-remote-late-end-{i}"));
+            open_view(&mut program);
+            program.session.ask_program_to_quit();
+            assert_eq!(program.state(), Some(State::Open));
+            program.clock.advance(Duration::from_secs(6));
+            program.write(forged);
+            wait_text(&program.session, "printed");
+            assert_eq!(program.state(), Some(State::Open), "forged[{i}]");
+            program.session.shutdown();
+        }
+        // The mark said, the window gone: the ⌃C of the person, the second, ends the view.
+        let mut program = remote_view("view-remote-late-end-second");
+        open_view(&mut program);
+        program.session.ask_program_to_quit();
+        program.clock.advance(Duration::from_secs(6));
+        program.write(b"\x1b]133;D;0;bt_remote=1.2.2\x07printed");
+        wait_text(&program.session, "printed");
+        assert_eq!(program.state(), Some(State::Open));
+        program.session.ask_program_to_quit();
+        assert_eq!(program.state(), Some(State::Ended), "the second ⌃C");
+        program.session.shutdown();
+
+        // Local: the program holds the tty, so the mark is not the shell's.
+        let mut program = local_view("view-local-late-end");
+        program.session.ask_program_to_quit();
+        program.clock.advance(Duration::from_secs(6));
+        program.write(b"\x1b]133;D;0;bt_block=1\x07printed");
+        wait_text(&program.session, "printed");
+        assert_eq!(program.state(), Some(State::Open));
+        assert!(reads_still(&program), "the program is alive");
+        program.session.shutdown();
+    }
+
+    /// A local end mark while a program holds the tty (the observation says it is not the shell's)
+    /// ends no view whatever the person did before or after: the ⌃C before it, the ⌃C after it, the
+    /// prompt the program prints.
+    #[test]
+    fn a_local_end_mark_while_a_program_holds_the_tty_ends_nothing_in_any_order() {
+        use crate::pencere::State;
+        // The mark, then the ⌃C.
+        let mut program = local_view("view-local-end-then-quit");
+        program.write(b"\x1b]133;D;0;bt_block=1\x07printed");
+        wait_text(&program.session, "printed");
+        assert_eq!(program.state(), Some(State::Open), "the mark alone");
+        program.session.ask_program_to_quit();
+        assert_eq!(program.state(), Some(State::Open), "the mark, then ⌃C");
+        assert!(reads_still(&program), "the program is alive");
+        // The prompt it prints after the mark: the tty is still the program's.
+        program.write(b"\x1b]133;A;bt_block=2\x07prompt");
+        wait_text(&program.session, "prompt");
+        assert_eq!(program.state(), Some(State::Open), "a prompt printed");
+        program.session.shutdown();
+
+        // The ⌃C, then the mark.
+        let mut program = local_view("view-local-quit-then-end");
+        program.session.ask_program_to_quit();
+        program.write(b"\x1b]133;D;0;bt_block=1\x07printed");
+        wait_text(&program.session, "printed");
+        assert_eq!(program.state(), Some(State::Open), "⌃C, then the mark");
+        assert!(reads_still(&program), "the program is alive");
+        program.session.shutdown();
+    }
+
+    /// What was said of a program before its view ended is nothing to the next view's program:
+    /// the next offer is not ended by a mark in the stream, whatever was said and asked before.
+    #[test]
+    fn what_was_said_before_a_view_ended_reaches_not_the_offer_of_the_next_program() {
+        use crate::pencere::State;
+        use crate::pencere::tests::{bundle_open, hello, token_of};
+        let mut program = remote_view("view-remote-stale");
+        open_view(&mut program);
+        program.write(b"\x1b]133;D;0;bt_remote=1.2.2\x07said");
+        wait_text(&program.session, "said");
+        program.session.ask_program_to_quit();
+        assert_eq!(program.state(), Some(State::Ended), "the first view");
+        // The next program of the pane.
+        let written = program.written().len();
+        program.write(&hello());
+        let frames = program.wait_written(written + 1);
+        let token = token_of(frames.last().unwrap());
+        program.wait_state(State::Offered);
+        // A printed mark, and nobody touches a key.
+        program.write(b"\x1b]133;D;0;bt_remote=1.2.2\x07\x1b]133;D;0;bt_block=9\x07forged");
+        wait_text(&program.session, "forged");
+        assert_eq!(
+            program.state(),
+            Some(State::Offered),
+            "a mark ended the offer"
+        );
+        let written = program.written().len();
+        program.write(&bundle_open(&token));
+        let frames = program.wait_written(written + 1);
+        assert_eq!(frames.last().map(|frame| frame.kind.as_str()), Some("need"));
+        // (The page is in the store already: the view may be open when the answer is.)
+        assert!(
+            matches!(program.state(), Some(State::Opening | State::Open)),
+            "{:?}",
+            program.state()
+        );
+        program.session.shutdown();
+    }
+
+    /// A guessed mark that moved the trail to another shell does not hide the real end of the
+    /// remote shell: the program that crashed is gone, the shell's own marks say so, and the
+    /// person's ⌃C ends its view.
+    #[test]
+    fn a_guessed_mark_does_not_hide_the_real_end_of_a_remote_command() {
+        use crate::pencere::State;
+        let mut program = remote_view("view-remote-moved-trail");
+        open_view(&mut program);
+        program.write(b"\x1b]133;A;bt_remote=1.2.9\x07moved");
+        wait_text(&program.session, "moved");
+        program.write(b"\x1b]133;D;139;bt_remote=1.2.2\x07\x1b]133;A;bt_remote=1.2.3\x07prompt");
+        wait_text(&program.session, "prompt");
+        assert_eq!(program.state(), Some(State::Open), "the end alone");
+        program.session.ask_program_to_quit();
+        assert_eq!(program.state(), Some(State::Ended), "the real end, then ⌃C");
+        program.session.shutdown();
+    }
+
+    /// The program died while its view opened (the end is said before the page is here): the
+    /// view starts, and the person's ⌃C ends it. A mark in the stream alone does not.
+    #[test]
+    fn an_end_said_while_the_view_opens_is_ended_by_the_persons_interrupt() {
+        use crate::pencere::State;
+        use crate::pencere::tests::{bundle_open, page_file, token_of};
+        let mut program = remote_view("view-remote-opening");
+        let token = token_of(&program.written()[0]);
+        program.write(&bundle_open(&token));
+        assert_eq!(program.wait_written(2)[1].kind, "need");
+        assert_eq!(program.state(), Some(State::Opening));
+        program.write(b"\x1b]133;D;139;bt_remote=1.2.2\x07\x1b]133;A;bt_remote=1.2.3\x07prompt");
+        wait_text(&program.session, "prompt");
+        assert_eq!(program.state(), Some(State::Opening), "the end alone");
+        program.write(&page_file());
+        program.wait_state(State::Open);
+        program.session.ask_program_to_quit();
+        assert_eq!(program.state(), Some(State::Ended), "the end, then ⌃C");
+        program.session.shutdown();
+    }
+
+    /// A view whose end the stream said closes without a word for the shell: the program is
+    /// taken to be gone, and what is typed at its prompt is the person's shell's. The page's own
+    /// words are not held back for it (a mark may be a lie: the program may be alive).
+    #[test]
+    fn a_view_whose_end_was_said_closes_without_a_word_for_the_shell() {
+        use crate::pencere::State;
+        let mut program = remote_view("view-remote-closed-frame");
+        open_view(&mut program);
+        let before = program.input().len();
+        program.write(b"\x1b]133;D;139;bt_remote=1.2.2\x07\x1b]133;A;bt_remote=1.2.3\x07prompt");
+        wait_text(&program.session, "prompt");
+        program.session.close_view();
+        assert_eq!(program.state(), Some(State::Ended));
+        std::thread::sleep(Duration::from_millis(300));
+        let input = program.input();
+        assert_eq!(
+            String::from_utf8_lossy(&input[before..]),
+            "",
+            "bytes typed at the shell"
+        );
+        program.session.shutdown();
+
+        // The same for the page that closes itself.
+        let mut program = remote_view("view-remote-closed-by-page");
+        open_view(&mut program);
+        let before = program.input().len();
+        program.write(b"\x1b]133;D;139;bt_remote=1.2.2\x07\x1b]133;A;bt_remote=1.2.3\x07prompt");
+        wait_text(&program.session, "prompt");
+        program.session.view_message(r#"{"close":{}}"#);
+        assert_eq!(program.state(), Some(State::Ended));
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(
+            String::from_utf8_lossy(&program.input()[before..]),
+            "",
+            "bytes typed at the shell"
+        );
+        program.session.shutdown();
+
+        // A view whose end was not said is closed with the word for the program, as always.
+        let mut program = remote_view("view-remote-closed-as-always");
+        open_view(&mut program);
+        let frames = program.written().len();
+        program.session.close_view();
+        let frames = program.wait_written(frames + 1);
+        assert_eq!(
+            frames.last().map(|frame| frame.kind.as_str()),
+            Some("closed")
+        );
+        program.session.shutdown();
+    }
+
+    /// Nothing in the stream closes an open view of a program that nobody touched a key for: not the
+    /// marks of the shell, nor of another, nor a hello, a `bye` without its token, the screen's
+    /// reset. The person is the only one who can end a view whose program is alive.
+    #[test]
+    fn nothing_in_the_stream_closes_the_view_of_a_program_nobody_touched_a_key_for() {
+        use crate::pencere::State;
+        use crate::pencere::tests::{hello, wire};
+        let forged: Vec<(&str, Vec<u8>)> = vec![
+            ("D local", b"\x1b]133;D;0;bt_block=1\x07".to_vec()),
+            ("D none", b"\x1b]133;D\x07".to_vec()),
+            ("D aid", b"\x1b]133;D;0;aid=1\x07".to_vec()),
+            ("A local", b"\x1b]133;A;bt_block=2\x07".to_vec()),
+            ("B C", b"\x1b]133;B\x07\x1b]133;C\x07".to_vec()),
+            (
+                "remote ABCD",
+                b"\x1b]133;A;bt_remote=1.2.3\x07\x1b]133;B;bt_remote=1.2.3\x07\
+                  \x1b]133;C;bt_remote=1.2.3\x07\x1b]133;D;0;bt_remote=1.2.3\x07"
+                    .to_vec(),
+            ),
+            (
+                "rkey",
+                b"\x1b]133;D;0;bt_remote=1.2.3;bt_rkey=0123456789abcdef\x07".to_vec(),
+            ),
+            ("no bt", b"\x1b]133;A\x07\x1b]133;D;0\x07".to_vec()),
+            ("up", b"\x1b]8133;i;up;0123456789abcdef\x07".to_vec()),
+            ("hello", hello()),
+            (
+                "bye none",
+                wire("bye", 7, None, None, r#"{"reason":"signal"}"#),
+            ),
+            (
+                "bye other",
+                wire(
+                    "bye",
+                    8,
+                    None,
+                    None,
+                    r#"{"token":"AAAAAAAAAAAAAAAAAAAAAA","reason":"signal"}"#,
+                ),
+            ),
+            ("dismiss none", wire("dismiss", 9, None, None, r#"{}"#)),
+            ("RIS", b"\x1bc".to_vec()),
+            ("altscreen", b"\x1b[?1049h\x1b[?1049l".to_vec()),
+            ("kitty pop", b"\x1b[<4096u".to_vec()),
+        ];
+        for local in [true, false] {
+            let mut program = if local {
+                local_view("view-battery-local")
+            } else {
+                let mut program = remote_view("view-battery-remote");
+                open_view(&mut program);
+                program
+            };
+            for (name, bytes) in &forged {
+                program.write(bytes);
+                let mark = format!("after-{}", name.replace(' ', ""));
+                program.write(b"\x1b[2J\x1b[H");
+                program.write(mark.as_bytes());
+                wait_text(&program.session, &mark);
+                std::thread::sleep(Duration::from_millis(50));
+                assert_eq!(program.state(), Some(State::Open), "local={local} {name}");
+            }
+            program.session.shutdown();
+        }
+    }
+
+    /// The ways a view ends that are the person's and the program's: the end said, then the ⌃C;
+    /// the `ssh` that ends in the local shell, with the tty back in front.
+    #[test]
+    fn the_end_of_the_ssh_that_carried_the_program_ends_its_view() {
+        use crate::RemoteTarget;
+        use crate::pencere::State;
+        use crate::pencere::tests::hello;
+        let mut program = Playing::then("view-ssh-end", "; read _");
+        program.write(b"\x1b]133;A;bt_block=1\x07\x1b]133;C\x07");
+        let command = {
+            let mut found = None;
+            wait_until("the command", Duration::from_secs(10), || {
+                found = program.session.running_command();
+                found.is_some()
+            });
+            found.expect("a running command")
+        };
+        program.write(hello().as_slice());
+        program.wait_written(1);
+        program.wait_state(State::Offered);
+        assert!(
+            program
+                .session
+                .set_remote(command, Some(&RemoteTarget::ssh("prod")))
+        );
+        open_view(&mut program);
+        program.write(b"\x1b]133;A;bt_remote=1.2.2\x07\x1b]133;C;bt_remote=1.2.2\x07running");
+        wait_text(&program.session, "running");
+        let frames = program.written().len();
+        program.end();
+        program.write(b"\x1b]133;D;255;bt_block=1\x07");
+        wait_until("the view to end", Duration::from_secs(10), || {
+            program.state() == Some(State::Ended)
+        });
+        assert_eq!(program.written().len(), frames, "nothing after the end");
         program.session.shutdown();
     }
 
