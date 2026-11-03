@@ -58,6 +58,60 @@ straight to this repository's releases
 own, and nothing but the version check is sent. Every update is signed with
 bateri's EdDSA key and verified before it is installed.
 
+## Pens
+
+A pen is a program that shows a real interface in the pane it runs in, on your machine or on a server over plain `ssh`, in your font and your theme. Each is one file, made with [pencere](https://github.com/bateri/pencere).
+
+### [dockerpen](https://github.com/bateri/dockerpen)
+
+Docker in the pane: containers, their logs and resource use, images, volumes, networks and disk.
+
+![dockerpen](https://raw.githubusercontent.com/bateri/dockerpen/main/docs/containers.png)
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/bateri/dockerpen/main/install.sh | sh
+```
+
+### [pickpen](https://github.com/bateri/pickpen)
+
+Choose rows in the middle of a pipeline: filter, sort and mark them, and the rows you chose go out on stdout.
+
+![pickpen](https://raw.githubusercontent.com/bateri/pickpen/main/docs/confirm.png)
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/bateri/pickpen/main/install.sh | sh
+```
+
+### [toppen](https://github.com/bateri/toppen)
+
+A system monitor in the way of `top` and `btop`: CPU, memory, network, disks, GPU and a process table you can sort and act on.
+
+![toppen](https://raw.githubusercontent.com/bateri/toppen/main/docs/overview.png)
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/bateri/toppen/main/install.sh | sh
+```
+
+### [sqlpen](https://github.com/bateri/sqlpen)
+
+A SQL client for PostgreSQL and SQLite: the tables of the database, an editor that knows SQL, and the rows in a grid.
+
+![sqlpen](https://raw.githubusercontent.com/bateri/sqlpen/main/docs/grid.png)
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/bateri/sqlpen/main/install.sh | sh
+```
+
+### [textpen](https://github.com/bateri/textpen)
+
+A code editor: the project's files as a tree, tabs, search across them, and what git says of them.
+
+![textpen](https://raw.githubusercontent.com/bateri/textpen/main/docs/editor.png)
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/bateri/textpen/main/install.sh | sh
+```
+
 ## Shell integration
 
 bateri sets up **zsh**, **fish** and **bash** (4.4 or newer) automatically when
