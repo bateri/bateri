@@ -670,6 +670,33 @@ fn the_screen_of_the_moment_is_the_frames_and_not_a_later_one() {
     assert!(written.iter().any(|m| m.kind == "need"), "{written:?}");
 }
 
+/// The shell's marks come back through a picture of the screen as the terminal does, and a prompt
+/// that was over long ago may look edited for a moment: an offer that the server's word is behind
+/// goes out whatever they say, and the view it took down has its way back.
+#[test]
+fn a_restart_on_the_servers_word_is_not_stopped_by_a_prompt_in_the_marks() {
+    let (rig, seen, _) = Rig::new(true);
+    let mut pane = Pane::new(rig);
+    open_a_view(&mut pane);
+    let desk = pane.rig.desk.as_ref().expect("a desk");
+    lock(&seen).prompt_editing = true;
+    desk.restart(false, pane.rig.write());
+    assert!(pane.rig.written().is_empty(), "the marks are all it has");
+    assert_eq!(
+        desk.apply(|_| {}, |conversation| conversation.state()),
+        State::Idle
+    );
+
+    desk.restart(true, pane.rig.write());
+    let offer = pane.rig.written();
+    assert_eq!(offer.len(), 1, "{offer:?}");
+    assert_eq!(offer[0].kind, "welcome");
+    assert_eq!(
+        desk.apply(|_| {}, |conversation| conversation.state()),
+        State::Offered
+    );
+}
+
 #[test]
 fn a_frame_while_a_prompt_is_edited_is_ignored() {
     let (rig, seen, _) = Rig::new(true);
@@ -758,6 +785,48 @@ fn the_right_token_in_a_bye_ends_the_view_and_the_pane_is_written_nothing_after(
     desk.apply(pane.rig.write(), |conversation| conversation.close_view());
     desk.program_ended(pane.rig.write());
     assert!(lock(&pane.rig.input).is_empty(), "{:?}", pane.rig.written());
+}
+
+/// A connection that comes back brings what the program wrote while it was gone, and the program
+/// may be gone by now: its `bye` ends the view and the answer is not written, or the shell that
+/// has the terminal now would take it for typing. Once the terminal is back the pane is written
+/// to again.
+#[test]
+fn a_terminal_that_is_not_there_is_written_nothing_and_the_view_ends_all_the_same() {
+    let (rig, _, _) = Rig::new(true);
+    let mut pane = Pane::new(rig);
+    let token = open_a_view(&mut pane);
+    let written = pane.rig.written().len();
+    let desk = pane.rig.desk.as_ref().expect("a desk");
+    desk.take_views();
+
+    desk.flow.hold_words(true);
+    let bye = format!(r#"{{"token":"{token}","reason":"signal"}}"#);
+    pane.feed(&wire("bye", 7, None, None, &bye));
+    let desk = pane.rig.desk.as_ref().expect("a desk");
+    assert_eq!(desk.take_views(), [Action::DestroyView]);
+    assert_eq!(
+        desk.apply(|_| {}, |conversation| conversation.state()),
+        State::Ended
+    );
+    assert_eq!(
+        pane.rig.written().len(),
+        written,
+        "{:?}",
+        pane.rig.written()
+    );
+
+    desk.flow.hold_words(false);
+    let hello = format!(
+        r#"{{"versions":[1],"program":{{"name":"p","version":"1"}},"views":{VIEWS}}}"#,
+        VIEWS = r#"[{"kind":"web","versions":["0.1"]}]"#
+    );
+    pane.feed(&wire("hello", 8, None, None, &hello));
+    assert_eq!(
+        pane.rig.written().len(),
+        written + 1,
+        "the next program is answered"
+    );
 }
 
 #[test]
@@ -1158,7 +1227,7 @@ fn a_restart_offers_a_new_token_to_the_program_that_had_a_view() {
     // As after a restart: the pane is a program's again, no shell around it.
     *lock(&seen) = Observed::default();
 
-    desk.restart(pane.rig.write());
+    desk.restart(false, pane.rig.write());
     // The view is torn down first (at once, whatever its kind); the program is offered the
     // restart after it.
     let written = pane.rig.written();
@@ -1871,7 +1940,7 @@ fn the_kinds_and_versions_offered_are_what_the_application_can_open_in_the_progr
     // A restart offers everything the application opens, with the versions, in its own order
     // (which is not the program's here).
     let desk = pane.rig.desk.as_ref().expect("a desk");
-    desk.restart(pane.rig.write());
+    desk.restart(false, pane.rig.write());
     let offer = pane.rig.written();
     assert!(
         offer[0].payload.contains(concat!(

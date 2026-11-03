@@ -472,6 +472,10 @@ struct Terminal {
     /// A picture has begun and its last piece has not come.
     picture_open: bool,
     state: Option<TerminalState>,
+    /// [`Terminal::state`] was said since the terminal was last attached. It is kept when it is
+    /// not, for what shows it (a tab's icon, what a question about closing calls the program) is
+    /// better a moment old than blank; what writes on the strength of it asks this first.
+    state_fresh: bool,
     /// The request that makes the terminal, while it is `Creating`.
     spec: Option<NewSession>,
     /// `new` has been put on a connection.
@@ -518,6 +522,7 @@ impl Terminal {
             taken_by: None,
             picture_open: false,
             state: None,
+            state_fresh: false,
             spec: None,
             sent: false,
             resent: false,
@@ -654,6 +659,7 @@ impl Client {
                 Phase::Checking => terminal.phase = Phase::Wanted,
                 _ => {}
             }
+            terminal.state_fresh = false;
         }
         self.link = match cause {
             Cause::LoginNeeded => Link::NeedsLogin,
@@ -843,6 +849,7 @@ impl Client {
         terminal.phase = Phase::Wanted;
         terminal.take_wanted = true;
         terminal.taken_by = None;
+        terminal.state_fresh = false;
         if self.link.is_live() {
             self.send_attach(id);
         }
@@ -1129,6 +1136,23 @@ impl Client {
             .is_some_and(|t| t.phase == Phase::Attached)
     }
 
+    /// Whether what the terminal was last said to be doing ([`Client::state_of`]) was said since
+    /// it was last attached, and is not from before a connection that was lost.
+    pub fn state_is_fresh(&self, id: &SessionId) -> bool {
+        self.terminals.get(id).is_some_and(|t| t.state_fresh)
+    }
+
+    /// Whether the terminal is on its way back onto a connection that is up: the server is being
+    /// asked who has it, or to serve it, and has not answered. What is typed now does not reach it:
+    /// [`Client::input`] refuses until the attach is sent, and a refused attach lets go of what was
+    /// sent behind it. A terminal being taken back has no question to wait for and stays out of
+    /// this: it goes from another computer's straight to this one's.
+    pub fn is_coming_back(&self, id: &SessionId) -> bool {
+        self.terminals.get(id).is_some_and(|t| {
+            matches!(t.phase, Phase::Wanted | Phase::Checking | Phase::Asked) && !t.take_wanted
+        })
+    }
+
     // The connection
 
     fn reset_connection(&mut self) {
@@ -1400,6 +1424,7 @@ impl Client {
                     return;
                 };
                 terminal.state = Some(state.clone());
+                terminal.state_fresh = true;
                 self.events.push_back(Event::State {
                     terminal: id,
                     state,
@@ -1597,25 +1622,19 @@ impl Client {
     /// (`Some(None)`: a name that is nothing once the controls are taken out; a client that gave
     /// none is not a computer and is never this). `None` when nobody does — or when the server cannot say (a relay that does not name its clients
     /// lists fewer than it counts): then nothing is known and the client attaches as before.
-    /// This client's own name is left out once, because the server may not have noticed that
-    /// the connection it had is gone.
+    /// This client's own name is never the other computer's, however many times it is listed: the
+    /// server may not have noticed that a connection is gone, and a computer that sleeps and wakes
+    /// leaves one behind each time, for as long as the server takes to notice.
     fn held_by(&self, status: &Status) -> Option<Option<String>> {
         let counted = usize::try_from(status.clients).unwrap_or(usize::MAX);
         if status.clients_named.len() < counted {
             return None;
         }
-        let mut own = self.name;
         status
             .clients_named
             .iter()
             .filter_map(|name| name.as_ref())
-            .find(|name| {
-                if own.as_ref() == Some(*name) {
-                    own = None;
-                    return false;
-                }
-                true
-            })
+            .find(|name| self.name.as_ref() != Some(*name))
             .map(|name| Some(clean(name.as_str())).filter(|name| !name.is_empty()))
     }
 

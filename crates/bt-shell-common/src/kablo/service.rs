@@ -175,6 +175,10 @@ pub struct Shown {
     /// The program in front of the terminal as the server last said, controls
     /// removed; `None` while it has not said.
     pub program: Option<String>,
+    /// [`Shown::program`] was said since the terminal was last attached. A word from before a
+    /// connection that was lost is good enough to show and not to write on: the program may have
+    /// ended while the connection was gone.
+    pub program_fresh: bool,
     /// How the connection to the server stands for this terminal.
     pub link: PaneLink,
     /// While the link is [`PaneLink::Taken`], the name the computer that took the terminal gave
@@ -190,10 +194,11 @@ pub enum PaneLink {
     /// the pane shows is the user's own `ssh` still making the connection.
     /// **Not passive** — the first connection is not one that was lost.
     Connecting,
-    /// The connection is there.
+    /// The connection is there and the terminal is on it: what is written to it arrives.
     Live,
-    /// The terminal was shown and the connection is gone; the bridge is made
-    /// again on its own clock, which the user can skip.
+    /// The terminal was shown and is not on a connection: the connection is gone, and the bridge
+    /// is made again on its own clock, which the user can skip; or it is back and the server has
+    /// not served the terminal yet ([`crate::kablo::Client::is_coming_back`]).
     Reconnecting,
     /// The terminal was shown and the server wants a login nobody has saved
     /// (a password, a second factor). Nothing is tried until the user logs in.
@@ -270,14 +275,16 @@ impl Shown {
     }
 
     /// Whether the server has said that the shell itself is in front of the terminal
-    /// (`-zsh`, `bash`, `fish`). `false` while it has not said, and for a program: a
-    /// byte meant for a shell's line editor is a key to anything else. The pane asks
-    /// before it speaks to the shell on its own (`Session::refresh_dock`), because what
+    /// (`-zsh`, `bash`, `fish`), since it was last attached. `false` while it has not said, and
+    /// for a program: a byte meant for a shell's line editor is a key to anything else. The pane
+    /// asks before it speaks to the shell on its own (`Session::refresh_dock`), because what
     /// the pane remembers of the terminal is a picture from before the connection went.
     pub fn shell_in_front(&self) -> bool {
-        self.program
-            .as_deref()
-            .is_some_and(crate::program::is_shell_name)
+        self.program_fresh
+            && self
+                .program
+                .as_deref()
+                .is_some_and(crate::program::is_shell_name)
     }
 
     /// What a question about closing the pane calls the program that would
@@ -2334,6 +2341,14 @@ impl Core {
                 _ if !self.hub.is_shown(*hold) => PaneLink::Connecting,
                 Some(Link::NeedsLogin) => PaneLink::NeedsLogin,
                 Some(Link::Retrying { .. } | Link::Opening { .. }) => PaneLink::Reconnecting,
+                // A screen is not back until its terminal is: whatever waits for that edge (a
+                // program's view, the shell's mirror of its line) writes to it at once, and what
+                // reaches a terminal that is not served yet is let go of.
+                Some(Link::Live)
+                    if client.is_some_and(|client| client.is_coming_back(terminal)) =>
+                {
+                    PaneLink::Reconnecting
+                }
                 // Live, or over: the holder is about to end and the pane with
                 // the terminal it shows has nothing to wait for.
                 Some(Link::Live | Link::Over(_)) | None => PaneLink::Live,
@@ -2346,6 +2361,7 @@ impl Core {
                     argv,
                     terminal: terminal.clone(),
                     program,
+                    program_fresh: client.is_some_and(|client| client.state_is_fresh(terminal)),
                     link,
                     taken_by: client
                         .and_then(|client| client.taken_by(terminal))
@@ -2380,11 +2396,13 @@ impl Core {
         let kind_of = |shown: &HashMap<PaneUuid, Shown>, pane: &PaneUuid| {
             shown.get(pane).and_then(Shown::kind)
         };
-        // The server's first word on what is in front is news whatever the kind: a pane handed
-        // over with a program's view over its terminal waits for it to know whether the program
-        // is still there.
+        // The server's first word on what is in front since the terminal was attached is news
+        // whatever the kind, the same program's too: a pane that owes a program's view waits for
+        // it to know whether the program is still there.
         let said = |shown: &HashMap<PaneUuid, Shown>, pane: &PaneUuid| {
-            shown.get(pane).is_some_and(|shown| shown.program.is_some())
+            shown
+                .get(pane)
+                .is_some_and(|shown| shown.program_fresh && shown.program.is_some())
         };
         for pane in shown
             .keys()

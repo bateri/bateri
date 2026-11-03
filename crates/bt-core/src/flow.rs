@@ -363,6 +363,11 @@ impl Flow {
         lock(&self.0.state).held = held;
     }
 
+    /// Whether the pane's terminal is not there to be written to ([`Flow::hold_words`]).
+    pub(crate) fn words_held(&self) -> bool {
+        lock(&self.0.state).held
+    }
+
     /// The writer wrote a byte of the module's.
     pub(crate) fn wrote_module(&self) {
         lock(&self.0.state).wrote = true;

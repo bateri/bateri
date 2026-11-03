@@ -12175,8 +12175,23 @@ impl Session {
     /// restart and opens its view again if it had one.
     pub fn restart_view(&self) {
         if let Some(desk) = &self.adapter.0.desk {
-            desk.restart(|bytes| self.adapter.input(bytes));
+            desk.restart(false, |bytes| self.adapter.input(bytes));
         }
+    }
+
+    /// [`Self::restart_view`], for a terminal whose server has just said that a program is in
+    /// front of it: what the shell's marks say of a prompt is older than that.
+    pub fn restart_view_to_program(&self) {
+        if let Some(desk) = &self.adapter.0.desk {
+            desk.restart(true, |bytes| self.adapter.input(bytes));
+        }
+    }
+
+    /// The program that had the view is gone, and the pane knows it from outside the stream (the
+    /// server says a shell is in front of the terminal that came back): the view ends and nothing
+    /// is written, for the shell would take it for typing.
+    pub fn view_program_gone(&self) {
+        self.adapter.view_program_ended();
     }
 
     /// The bytes and media type of the file at `path` of the open view's

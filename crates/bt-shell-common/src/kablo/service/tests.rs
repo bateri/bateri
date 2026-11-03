@@ -1807,6 +1807,56 @@ fn a_pane_is_told_when_its_connection_goes_and_comes_back_and_not_once_per_attem
     assert_eq!(holder.outcome(), Outcome::Exit(0));
 }
 
+/// "Live" is the terminal back on the connection and not the connection alone: while the server
+/// has not served the terminal the pane stays passive, and what is written the moment it is told
+/// otherwise arrives. A program's view is offered to its program at that very moment.
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn a_pane_is_told_its_terminal_is_back_only_when_what_it_writes_arrives() {
+    let rig = Rig::new("back");
+    let pane = pane_named(&rig.world);
+    let mut holder = Holder::new(&rig.socket(), "b-1");
+    let terminal = rig.terminals(1).remove(0);
+    until("the pane found live", || {
+        rig.service
+            .shown(&pane)
+            .is_some_and(|shown| shown.link == PaneLink::Live)
+    });
+
+    rig.world
+        .carry_fails_with(Some(io::ErrorKind::ConnectionRefused));
+    rig.world.break_connection();
+    until("the pane told", || {
+        rig.world.links() == [(pane.clone(), PaneLink::Reconnecting)]
+    });
+
+    // The connection comes back and the server will not serve the terminal yet.
+    rig.world.bridge().refuse_attaches(&terminal, 1);
+    let attaches = rig.world.bridge().attaches(&terminal).len();
+    rig.world.carry_fails_with(None);
+    rig.service.retry(&pane);
+    until("the attach refused", || {
+        rig.world.bridge().attaches(&terminal).len() > attaches
+    });
+    assert_eq!(
+        rig.world.links(),
+        [(pane.clone(), PaneLink::Reconnecting)],
+        "a connection with the terminal not on it is not a terminal that is back"
+    );
+
+    until("the pane told it is back", || {
+        rig.world.links().last() == Some(&(pane.clone(), PaneLink::Live))
+    });
+    assert_eq!(rig.world.links().len(), 2, "one return in all that");
+    holder.typed.write_all(b"welcome").expect("typed");
+    until("what is written at the edge to arrive", || {
+        rig.world.bridge().typed(&terminal) == b"welcome"
+    });
+
+    rig.world.bridge().exit(&terminal, Exit::Code(0));
+    assert_eq!(holder.outcome(), Outcome::Exit(0));
+}
+
 /// A screen that is back is the one edge a program's view is started again at: from
 /// every passive state to live, and from nothing else.
 #[test]
@@ -1837,12 +1887,21 @@ fn the_shell_is_spoken_to_on_its_own_only_when_the_server_says_it_is_in_front() 
         argv: vec!["ssh".into(), "rasp".into()],
         terminal: SessionId::new("t35").expect("an id"),
         program: program.map(str::to_owned),
+        program_fresh: true,
         link: PaneLink::Live,
         taken_by: None,
     };
     for shell in ["zsh", "-zsh", "bash", "fish"] {
         assert!(shown(Some(shell)).shell_in_front(), "{shell}");
     }
+    assert!(
+        !Shown {
+            program_fresh: false,
+            ..shown(Some("bash"))
+        }
+        .shell_in_front(),
+        "said before the connection went: a program may have been started since"
+    );
     for other in ["vim", "npm", "python3", "sudo", ""] {
         assert!(!shown(Some(other)).shell_in_front(), "{other:?}");
     }
@@ -2448,6 +2507,7 @@ fn a_terminal_serves_the_session_to_its_own_server_only() {
         argv: vec!["ssh".into(), "rasp".into()],
         terminal: SessionId::new("b-1").expect("an id"),
         program: None,
+        program_fresh: false,
         link: PaneLink::Live,
         taken_by: None,
     };
@@ -3364,6 +3424,7 @@ fn a_terminal_is_this_macs_by_its_account_alone() {
         argv: Vec::new(),
         terminal: SessionId::new("t1").expect("an id"),
         program: None,
+        program_fresh: false,
         link: PaneLink::Live,
         taken_by: None,
     };

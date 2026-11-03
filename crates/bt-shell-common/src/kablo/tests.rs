@@ -957,6 +957,8 @@ fn a_terminal_nobody_else_has_is_attached_again_after_the_connection_was_down() 
         (Age::Current, vec![]),
         // The server has not noticed this client's old connection is gone.
         (Age::Current, vec![Some("MacBook")]),
+        // Nor the one before it: a computer that sleeps and wakes leaves one each time.
+        (Age::Current, vec![Some("MacBook"), Some("MacBook")]),
         // An agent's `kablo wait` is attached too, and is no computer.
         (Age::Current, vec![None]),
         // A relay from before the names counts its clients and says none of them.
@@ -978,6 +980,27 @@ fn a_terminal_nobody_else_has_is_attached_again_after_the_connection_was_down() 
             "{age:?} {others:?}"
         );
     }
+}
+
+/// What the terminal was said to be doing outlives a lost connection, for what shows it, and is
+/// not taken for what it is doing now until the server says so on the new one.
+#[test]
+fn what_a_terminal_was_said_to_be_doing_is_fresh_only_on_the_connection_that_said_it() {
+    let (mut rig, terminal) = Rig::with_terminal(Age::Current, "t1");
+    assert!(rig.client.state_is_fresh(&terminal), "said at the attach");
+
+    rig.drop_connection();
+    assert!(!rig.client.state_is_fresh(&terminal));
+    assert!(
+        rig.client.state_of(&terminal).is_some(),
+        "kept for what shows it"
+    );
+
+    rig.redial();
+    assert!(
+        rig.client.state_is_fresh(&terminal),
+        "said again at the attach"
+    );
 }
 
 #[test]

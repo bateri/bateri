@@ -898,6 +898,14 @@ impl Desk {
             }
             self.drain(&mut inner)
         };
+        // What is heard while the terminal is not there is answered to nobody, and may be from a
+        // moment that has passed: a connection that comes back brings the `bye` of a program that
+        // is gone by now, whose answer would be typed at the shell in its place.
+        let writes = if self.flow.words_held() {
+            Vec::new()
+        } else {
+            writes
+        };
         self.deliver(writes, notify, write);
     }
 
@@ -1207,9 +1215,13 @@ impl Desk {
     }
 
     /// Starts the view again, with what the pane is seen as now: the crate
-    /// offers the program a restart only if the checks of §6.2 pass.
-    pub(crate) fn restart(&self, write: impl Fn(Vec<u8>)) {
-        let seen = (self.observer)();
+    /// offers the program a restart only if the checks of §6.2 pass. `program_in_front`: the
+    /// server has just said so, which is newer than the shell's marks. Those may be on their way
+    /// through a picture of the screen, whose prompt is over in a moment, and an offer that does
+    /// not go out leaves a view torn down with nothing to bring it back.
+    pub(crate) fn restart(&self, program_in_front: bool, write: impl Fn(Vec<u8>)) {
+        let mut seen = (self.observer)();
+        seen.prompt_editing &= !program_in_front;
         self.apply(write, |conversation| {
             conversation.observe(seen);
             conversation.restart();

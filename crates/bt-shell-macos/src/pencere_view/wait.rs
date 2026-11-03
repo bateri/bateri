@@ -28,14 +28,18 @@
 use std::time::Duration;
 
 use bt_core::pencere::State;
+use bt_shell_common::kablo::{PULSE_IDLE, PULSE_REPLY};
 
 /// How long an `open` may wait for its files or the person's answer.
 pub(super) const OPENING: Duration = Duration::from_secs(30);
 
 /// How long a program that was offered a restart has to open its view again before the
 /// token it was handed is forgotten. A program that can open again does it at once; the
-/// time is for one that is busy, or far away behind an `ssh` link.
-pub(super) const OFFERED: Duration = Duration::from_secs(30);
+/// time is for one that is busy, or far away behind an `ssh` link. **Longer than a dead
+/// connection takes to be noticed**: an offer still waited for when the connection is found gone
+/// is owed again, and one that ran out first would be taken for an answer the program never gave.
+pub(super) const OFFERED: Duration =
+    Duration::from_secs(PULSE_IDLE.as_secs() + PULSE_REPLY.as_secs() + 10);
 
 /// The time a conversation in `state` may wait: `None` for one that waits for
 /// nothing the terminal ends.

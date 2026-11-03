@@ -2171,9 +2171,9 @@ pub struct PaneIvars {
     /// The deadlines set on the conversation with that program's view
     /// ([`TerminalPane::wait_for_view`]).
     view_waits: RefCell<Waits>,
-    /// The terminal a server keeps that this pane showed with a program's view over it when it
-    /// was shown again by this process: the restart offered then did not reach it, and is
-    /// offered again once its server says what is in front of it
+    /// The terminal a server keeps whose program is owed its view: the messages the view lives
+    /// on did not survive the connection going, or a new bateri showing the terminal. Offered to
+    /// the program once its server says what is in front of it
     /// ([`TerminalPane::offer_owed_view`]). `None` when nothing is owed.
     view_owed: RefCell<Option<Resume>>,
     /// The questions the program's view has put to the person and that are up
@@ -3827,14 +3827,14 @@ impl TerminalPane {
             // Offered, not forced: the conversation answers only where a program is in front of
             // the pane (§6.2), and a pane that had no view gets nothing written.
             if self.host().view_was_open(self.uuid()) {
-                self.restart_view_offered(&session);
-                // A pane that shows a terminal a server keeps wrote that offer into a pipe with
-                // no bridge behind it yet, and what reaches the terminal before its bridge is up
-                // is let go of: the offer is owed to that terminal until its server says again
-                // what is in front of it ([`Self::offer_owed_view`]).
-                self.ivars()
-                    .view_owed
-                    .replace(held.as_ref().and_then(|held| held.resume.clone()));
+                match held.as_ref().and_then(|held| held.resume.clone()) {
+                    // A terminal a server keeps has no bridge behind it yet: the offer waits for
+                    // its server to say what is in front of it ([`Self::offer_owed_view`]).
+                    Some(resume) => {
+                        self.ivars().view_owed.replace(Some(resume));
+                    }
+                    None => self.restart_view_offered(&session, Session::restart_view),
+                }
             }
             nudge_program(&session);
         }
@@ -4311,10 +4311,13 @@ impl TerminalPane {
     /// the dock's text: the wait, the clock that tries again and the wake from
     /// sleep ask for no frame (zero frames while idle) — the change itself asks
     /// for one.
-    pub(crate) fn set_connection(&self, link: PaneLink) {
+    pub fn set_connection(&self, link: PaneLink) {
         let before = self.ivars().connection.replace(link);
         if before == link {
             return;
+        }
+        if link.is_passive() && !before.is_passive() {
+            self.owe_view();
         }
         self.ivars().link_veil.setHidden(!link.is_passive());
         self.place_link_veil();
@@ -4339,15 +4342,25 @@ impl TerminalPane {
             {
                 session.refresh_dock();
             }
-            // Nor are the messages a program's view lives on back: a view that is open
-            // is offered to the program again.
-            if self.shows_view()
-                && let Some(session) = self.session().cloned()
-            {
-                self.restart_view_offered(&session);
-            }
         }
         self.offer_owed_view();
+    }
+
+    /// The terminal is gone from under a view that is opening or open, or an offer that may not
+    /// have reached its program: the messages are gone with it, and the program is owed its view
+    /// when the terminal is back. The view stays up meanwhile, under the veil: a picture of a
+    /// moment that has passed, like the grid.
+    fn owe_view(&self) {
+        let going = self
+            .session()
+            .and_then(|session| session.view_state())
+            .is_some_and(|view| matches!(view, State::Opening | State::Open | State::Offered));
+        if going && let Some(shown) = self.host().kept_terminal(self.uuid()) {
+            self.ivars().view_owed.replace(Some(Resume {
+                account: shown.account,
+                terminal: shown.terminal.as_str().to_owned(),
+            }));
+        }
     }
 
     /// How the connection stands for this pane's terminal.
@@ -4981,7 +4994,7 @@ impl TerminalPane {
     /// The program in front of the terminal the pane shows is another one as far as the icon
     /// tells (`Backend::program_changed`): the tab reads the pane's kind again. The server's
     /// word is the news, so there is no probe to run.
-    pub(crate) fn server_program_changed(&self) {
+    pub fn server_program_changed(&self) {
         self.host().program_changed(self.ivars().id);
         self.offer_owed_view();
     }
@@ -6750,6 +6763,11 @@ impl TerminalPane {
     /// keyboard), and the terminal's frames come back — it is drawn again, with
     /// the screen the program left.
     fn end_view(&self) {
+        // A restart waits for the terminal, so a view that ends while it is not there was ended
+        // by the person or by the program's own last word: nothing is owed.
+        if self.connection().is_passive() {
+            self.ivars().view_owed.replace(None);
+        }
         if self.program_page_up() {
             // A module's page: down with its header's words and field (the tab hears it), and
             // the terminal's frames come back. What the view had out goes with it, as a web
@@ -6847,22 +6865,25 @@ impl TerminalPane {
         self.drain_views();
     }
 
-    /// The program is offered a restart (the terminal is shown again by a new bateri; the
-    /// connection to it came back): what the screen restored, the messages a view lives on did not. The offer
-    /// is a token the program was handed unasked, so it has a time to be taken up
+    /// The program is offered a restart by `restart` (the terminal is shown again by a new bateri;
+    /// the connection to it came back): what the screen restored, the messages a view lives on did
+    /// not. The offer is a token the program was handed unasked, so it has a time to be taken up
     /// ([`pencere_view`]'s `wait`), and this is the one way to offer it — a call that does not
     /// set the time leaves the token valid for as long as the pane lives.
-    fn restart_view_offered(&self, session: &Arc<Session>) {
-        session.restart_view();
+    fn restart_view_offered(&self, session: &Arc<Session>, restart: fn(&Session)) {
+        restart(session);
         self.ivars().view_waits.borrow_mut().restart_offered();
         self.wait_for_view(session);
     }
 
-    /// The restart owed to the program of a terminal a server keeps
-    /// (`view_owed`), decided by [`owed_offer`] when the server's word can have come: the
-    /// connection's edge, the terminal's and its program's. The server says what is in front of
-    /// a terminal right after it is attached again and before any of its output, so the word is
-    /// the one thing about the terminal that is not from before the restart.
+    /// The restart owed to the program of a terminal a server keeps (`view_owed`), decided by
+    /// [`owed_offer`] when the server's word can have come: the connection's edge, the terminal's
+    /// and its program's. The server says what is in front of a terminal right after it is
+    /// attached and before any of its output, so the word is the one thing about the terminal
+    /// that is not from before the break. It is paid once: an offer that goes nowhere is owed
+    /// again when the connection is found gone ([`Self::owe_view`]). What cannot be told is a
+    /// program that exits in the moment the offer is on its way: the offer is then typed at the
+    /// shell, unrun, as any word to a program can be (§6.2).
     fn offer_owed_view(&self) {
         let Some(owed) = self.ivars().view_owed.borrow().clone() else {
             return;
@@ -6870,19 +6891,23 @@ impl TerminalPane {
         let Some(shown) = self.host().kept_terminal(self.uuid()) else {
             return;
         };
+        // What is told on the way to the pane is not there for it yet: its edge asks again.
+        if self.connection().is_passive() {
+            return;
+        }
         let session = self.session().cloned();
         let view = session.as_ref().and_then(|session| session.view_state());
-        match owed_offer(&owed, &shown, view) {
-            Owed::Wait => {}
-            Owed::Forget => {
-                self.ivars().view_owed.replace(None);
-            }
-            Owed::Offer => {
-                self.ivars().view_owed.replace(None);
-                if let Some(session) = session {
-                    self.restart_view_offered(&session);
-                }
-            }
+        let decided = owed_offer(&owed, &shown, view);
+        if decided != Owed::Wait {
+            self.ivars().view_owed.replace(None);
+        }
+        let Some(session) = session else {
+            return;
+        };
+        match decided {
+            Owed::Offer => self.restart_view_offered(&session, Session::restart_view_to_program),
+            Owed::ProgramGone => session.view_program_gone(),
+            Owed::Wait | Owed::Forget => {}
         }
     }
 
@@ -7829,15 +7854,15 @@ fn kept_foreground(kept: &Shown) -> Foreground {
 /// ([`TerminalPane::offer_owed_view`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Owed {
-    /// The server has not said what is in front of the terminal since it was attached again, or
-    /// the connection is gone again: an offer now would be let go of on the way.
+    /// The server has not said what is in front of the terminal since it was attached, or the
+    /// connection is gone again: an offer now would be let go of on the way, or typed at a shell.
     Wait,
-    /// A program is in front and nothing of a view is going on: the restart is offered.
+    /// A program is in front: the restart is offered, over whatever of a view is left.
     Offer,
-    /// Nothing is owed any more: a shell is in front (the program ended while no bateri showed
-    /// it, and its line editor would take the offer for typing), the view opened again from the
-    /// first offer (an offer over an open view closes it), the program ended, or the pane shows
-    /// another terminal.
+    /// A shell is in front: the program ended while the connection was gone. Its view ends with
+    /// nothing written, for the shell's line editor would take it for typing.
+    ProgramGone,
+    /// Nothing is owed any more: the program said it ended, or the pane shows another terminal.
     Forget,
 }
 
@@ -7845,18 +7870,16 @@ fn owed_offer(owed: &Resume, shown: &Shown, view: Option<State>) -> Owed {
     if shown.account != owed.account || shown.terminal.as_str() != owed.terminal {
         return Owed::Forget;
     }
-    if shown.link.is_passive() {
-        return Owed::Wait;
-    }
-    let Some(program) = shown.program.as_deref() else {
-        return Owed::Wait;
-    };
-    if program::is_shell_name(program) {
+    if matches!(view, Some(State::Ended) | None) {
         return Owed::Forget;
     }
-    match view {
-        Some(State::Idle | State::Offered) => Owed::Offer,
-        _ => Owed::Forget,
+    if shown.link.is_passive() || !shown.program_fresh {
+        return Owed::Wait;
+    }
+    match shown.program.as_deref() {
+        None => Owed::Wait,
+        Some(program) if program::is_shell_name(program) => Owed::ProgramGone,
+        Some(_) => Owed::Offer,
     }
 }
 
@@ -8379,20 +8402,20 @@ mod tests {
             .expect("the terminal shown again");
         let body = &pane[at..at + pane[at..].find("nudge_program(&session);").expect("nudge")];
         assert!(body.contains("self.host().view_was_open(self.uuid())"));
-        assert!(body.contains("self.restart_view_offered(&session);"));
-        // And owed to the terminal a server keeps that the pane showed, by its name.
+        assert!(body.contains("self.restart_view_offered(&session, Session::restart_view)"));
+        // And owed to the terminal a server keeps that the pane showed, by its name: that one has
+        // no bridge behind it yet to carry an offer.
         assert!(body.contains(".view_owed"));
         assert!(body.contains("held.resume.clone()"));
-        let at = pane
-            .find("pub(crate) fn set_connection(")
-            .expect("set_connection");
+        let at = pane.find("pub fn set_connection(").expect("set_connection");
         let body = &pane[at..at + pane[at..].find("\n    }\n").expect("its end")];
         assert!(body.contains("before.comes_back(link)"));
-        assert!(body.contains("self.shows_view()"));
-        assert!(body.contains("restart_view_offered("));
-        // After the early return, so a retry that changes nothing restarts nothing.
+        // Owed when the terminal goes and paid when it is back, after the early return, so a
+        // retry that changes nothing restarts nothing.
+        assert!(body.find("return;").expect("the return") < body.find("self.owe_view();").unwrap());
+        assert!(body.contains("link.is_passive() && !before.is_passive()"));
         assert!(
-            body.find("return;").expect("the return") < body.find("restart_view_offered(").unwrap()
+            body.find("self.owe_view();").unwrap() < body.find("self.offer_owed_view();").unwrap()
         );
         // The server shell's mirror is asked for at the same edge and under the same
         // rule: a screen that is back is not the stream that drew it.
@@ -8411,9 +8434,9 @@ mod tests {
         );
         // The owed offer is asked wherever the server's word on the terminal can have come.
         for edge in [
-            "pub(crate) fn set_connection(",
+            "pub fn set_connection(",
             "pub(crate) fn remote_edge(",
-            "pub(crate) fn server_program_changed(",
+            "pub fn server_program_changed(",
         ] {
             let at = pane.find(edge).expect(edge);
             let body = &pane[at..at + pane[at..].find("\n    }\n").expect("its end")];
@@ -8440,13 +8463,11 @@ mod tests {
         assert!(body.contains("link.is_passive()"));
         // And it is told before the connection's edge restarts the view: a view offered again
         // must not find its lane held.
-        let at = pane
-            .find("pub(crate) fn set_connection(")
-            .expect("set_connection");
+        let at = pane.find("pub fn set_connection(").expect("set_connection");
         let body = &pane[at..at + pane[at..].find("\n    }\n").expect("its end")];
         assert!(
             body.find("self.apply_connection();").expect("applied")
-                < body.find("restart_view_offered(").expect("restarted")
+                < body.find("self.offer_owed_view();").expect("offered")
         );
     }
 
@@ -8595,10 +8616,10 @@ mod tests {
         assert!(!body.contains("dock_px(\n            ivars.dock_rows.get()"));
     }
 
-    /// A pane handed over with a program's view over a terminal a server keeps owes that program
-    /// the restart until the server says what is in front of the terminal: it waits for the word,
-    /// offers when a program is there and nothing of a view is going on, and forgets it for a
-    /// shell, a view the first offer opened, an ended program and another terminal.
+    /// A pane that owes a program its view (a new bateri showing the terminal, a connection that
+    /// came back) waits for the server's word since the terminal was attached: a program is
+    /// offered the restart over whatever of a view is left, a shell ends the view with nothing
+    /// written, and a program that said it ended, and another terminal, owe nothing.
     #[test]
     fn a_view_owed_to_a_server_terminal_waits_for_the_servers_word() {
         use super::{Owed, owed_offer};
@@ -8616,44 +8637,56 @@ mod tests {
             argv: vec!["ssh".into(), "rasp".into()],
             terminal: SessionId::new("t35").expect("an id"),
             program: program.map(str::to_owned),
+            program_fresh: true,
             link: PaneLink::Live,
             taken_by: None,
         };
-        let idle = Some(State::Idle);
+        let open = Some(State::Open);
         assert_eq!(
-            owed_offer(&owed, &shown(None), idle),
+            owed_offer(&owed, &shown(None), open),
             Owed::Wait,
-            "not said yet"
+            "not said"
         );
+        let stale = Shown {
+            program_fresh: false,
+            ..shown(Some("node"))
+        };
+        assert_eq!(
+            owed_offer(&owed, &stale, open),
+            Owed::Wait,
+            "said before the connection went: the program may have ended since"
+        );
+        let stale_shell = Shown {
+            program_fresh: false,
+            ..shown(Some("bash"))
+        };
+        assert_eq!(owed_offer(&owed, &stale_shell, open), Owed::Wait);
         let gone = Shown {
             link: PaneLink::Reconnecting,
             ..shown(Some("node"))
         };
         assert_eq!(
-            owed_offer(&owed, &gone, idle),
+            owed_offer(&owed, &gone, open),
             Owed::Wait,
             "the bridge went"
         );
-        for view in [Some(State::Idle), Some(State::Offered)] {
+        // Whatever is left of a view: one that is up, one on its way, an offer that may have gone
+        // nowhere and one whose time ran out while the connection was gone.
+        for view in [State::Open, State::Opening, State::Offered, State::Idle] {
             assert_eq!(
-                owed_offer(&owed, &shown(Some("node")), view),
+                owed_offer(&owed, &shown(Some("node")), Some(view)),
                 Owed::Offer,
                 "{view:?}"
             );
+            for program in ["zsh", "-bash", "fish"] {
+                assert_eq!(
+                    owed_offer(&owed, &shown(Some(program)), Some(view)),
+                    Owed::ProgramGone,
+                    "{program} {view:?}"
+                );
+            }
         }
-        for program in ["zsh", "-bash", "fish"] {
-            assert_eq!(
-                owed_offer(&owed, &shown(Some(program)), idle),
-                Owed::Forget,
-                "{program}"
-            );
-        }
-        for view in [
-            Some(State::Opening),
-            Some(State::Open),
-            Some(State::Ended),
-            None,
-        ] {
+        for view in [Some(State::Ended), None] {
             assert_eq!(
                 owed_offer(&owed, &shown(Some("node")), view),
                 Owed::Forget,
@@ -8665,7 +8698,7 @@ mod tests {
             ..shown(Some("node"))
         };
         assert_eq!(
-            owed_offer(&owed, &other, idle),
+            owed_offer(&owed, &other, open),
             Owed::Forget,
             "another terminal"
         );
@@ -8679,14 +8712,26 @@ mod tests {
     fn a_restart_is_offered_only_where_the_offer_has_its_time() {
         let pane = include_str!("pane.rs");
         let pane = &pane[..pane.find("#[cfg(test)]").unwrap_or(pane.len())];
-        let calls = pane
-            .lines()
-            .filter(|line| !line.trim_start().starts_with("//") && line.contains(".restart_view()"))
-            .count();
-        assert_eq!(calls, 1, "one call, in the function that sets the time");
+        let lines = || {
+            pane.lines()
+                .filter(|line| !line.trim_start().starts_with("//"))
+        };
+        assert_eq!(
+            lines()
+                .filter(|line| {
+                    line.contains(".restart_view()") || line.contains(".restart_view_to_program()")
+                })
+                .count(),
+            0,
+            "no call but through the function that sets the time"
+        );
+        let calls = lines().filter(|line| line.contains("Session::restart_view"));
+        for call in calls {
+            assert!(call.contains("restart_view_offered("), "{call}");
+        }
         let at = pane.find("fn restart_view_offered(").expect("the offer");
         let body = &pane[at..at + pane[at..].find("\n    }\n").expect("its end")];
-        assert!(body.contains(".restart_view()"));
+        assert!(body.contains("restart(session)"));
         assert!(body.contains("restart_offered()") && body.contains("wait_for_view("));
     }
 
@@ -9409,6 +9454,7 @@ mod tests {
             argv: vec!["ssh".into(), "rasp".into()],
             terminal: bt_shell_common::kablo::SessionId::new("b-1").expect("an id"),
             program: program.map(str::to_owned),
+            program_fresh: true,
             link: PaneLink::Live,
             taken_by: None,
         };

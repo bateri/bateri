@@ -54,7 +54,9 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use bt_core::{Chord, Key, Mods, Settings, Theme};
+use bt_core::{Chord, Key, Mods, PaneUuid, Settings, Theme};
+use bt_shell_common::kablo::SessionId;
+use bt_shell_common::kablo::service::{PaneLink, Shown};
 use bt_shell_macos::embed::{self, Cover, Host, Identity, Source, TerminalPane};
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
@@ -70,9 +72,10 @@ use objc2_foundation::{
     NSString,
 };
 
-/// What a host heard: nothing this test is about, but the trait wants an answer to each.
+/// What a host heard: nothing this test is about, but the trait wants an answer to each. The
+/// second is the terminal of a server the pane shows, as the section about the connection says it.
 #[derive(Default)]
-struct Quiet(RefCell<Vec<String>>);
+struct Quiet(RefCell<Vec<String>>, RefCell<Option<Shown>>);
 
 impl Host for Quiet {
     /// ⌘T is this host's own shortcut (a new tab, in an application that has tabs).
@@ -92,6 +95,9 @@ impl Host for Quiet {
     fn program_notification(&self, _: u64, _: Option<&str>, _: &str) {}
     fn cover(&self, _: &TerminalPane) -> Option<Rc<dyn Cover>> {
         None
+    }
+    fn kept_terminal(&self, _: &PaneUuid) -> Option<Shown> {
+        self.1.borrow().clone()
     }
 }
 
@@ -634,6 +640,18 @@ fn open_pane(
     dir: &Path,
     id: u64,
 ) -> (Retained<TerminalPane>, Program) {
+    open_hosted_pane(mtm, window, frame_rect, dir, id, Rc::new(Quiet::default()))
+}
+
+/// [`open_pane`], for a host the test keeps.
+fn open_hosted_pane(
+    mtm: MainThreadMarker,
+    window: &NSWindow,
+    frame_rect: NSRect,
+    dir: &Path,
+    id: u64,
+    host: Rc<Quiet>,
+) -> (Retained<TerminalPane>, Program) {
     fs::create_dir_all(dir.join("zdot")).expect("the pane's folder");
     let identity = Rc::new(Identity {
         app_name: "pencere-test".to_owned(),
@@ -642,14 +660,8 @@ fn open_pane(
         fish_wrapper_dir: None,
         bash_wrapper_dir: None,
     });
-    let mut config = embed::Config::new(
-        mtm,
-        id,
-        Rc::new(Quiet::default()),
-        identity,
-        Settings::default(),
-        Theme::BATERI,
-    );
+    let mut config =
+        embed::Config::new(mtm, id, host, identity, Settings::default(), Theme::BATERI);
     // No user dotfiles: the shell reads what it is typed and nothing of the account's.
     config.env = vec![
         ("ZDOTDIR".to_owned(), dir.join("zdot").display().to_string()),
@@ -1252,10 +1264,115 @@ fn run(dir: &Path) {
     section("a page's keyboard", &mut failures, || {
         page_keyboard(mtm, &window, frame_rect, dir);
     });
+    section(
+        "a connection that goes and comes back",
+        &mut failures,
+        || {
+            connection_goes_and_comes_back(mtm, &window, frame_rect, dir);
+        },
+    );
 
     pane.close();
     assert!(failures.is_empty(), "failed: {failures:?}");
     println!("pencere: ok");
+}
+
+/// A pane whose terminal a server keeps, with a program's view over it, as its connection goes and
+/// comes back: the view stays under the veil, the program is offered it again only when the server
+/// has said a program is there, an offer that goes nowhere is made again, and a program that ended
+/// while the connection was gone loses its view with nothing written.
+fn connection_goes_and_comes_back(
+    mtm: MainThreadMarker,
+    window: &NSWindow,
+    frame_rect: NSRect,
+    dir: &Path,
+) {
+    let host = Rc::new(Quiet::default());
+    let (pane, mut program) = open_hosted_pane(
+        mtm,
+        window,
+        frame_rect,
+        &dir.join("connection"),
+        PANE + 40,
+        Rc::clone(&host),
+    );
+    let say = |front: &str, link: PaneLink, program_fresh: bool| {
+        host.1.replace(Some(Shown {
+            account: "u@rasp:22".to_owned(),
+            host: "rasp".to_owned(),
+            argv: vec!["ssh".to_owned(), "rasp".to_owned()],
+            terminal: SessionId::new("t1").expect("an id"),
+            program: Some(front.to_owned()),
+            program_fresh,
+            link,
+            taken_by: None,
+        }));
+    };
+    let goes = |front: &str| {
+        say(front, PaneLink::Reconnecting, false);
+        pane.set_connection(PaneLink::Reconnecting);
+    };
+    let token_of = |offer: &str| {
+        assert!(offer.contains("\"restart\":true"), "{offer}");
+        offer
+            .split("\"token\":\"")
+            .nth(1)
+            .and_then(|rest| rest.split('"').next())
+            .expect("a token in the offer")
+            .to_owned()
+    };
+    say("pen", PaneLink::Live, true);
+    program.say(&format!("{ESC}[?1049h"));
+    let files = [
+        ("index.html", "text/html", PAGE.as_bytes()),
+        ("app.js", "text/javascript", SCRIPT.as_bytes()),
+        ("other.html", "text/html", OTHER.as_bytes()),
+    ];
+    let token = program.hello();
+    program.open(&token, &files, None);
+    program.supply(&files);
+    watch_it_start(&pane, &mut program);
+
+    // The connection goes: nothing is written and the view stays, under the veil.
+    goes("pen");
+    spin(0.3);
+    assert!(covered(&pane), "the view stays while the terminal is away");
+
+    // It is back and the server has not said what is in front: a program may have ended, and an
+    // offer now would be typed at the shell.
+    say("pen", PaneLink::Live, false);
+    pane.set_connection(PaneLink::Live);
+    spin(0.3);
+    assert!(covered(&pane), "the view waits for the server's word");
+    assert!(!program.heard()[program.read..].contains("pencere;welcome"));
+
+    // The server says a program is there: the offer goes, and it is the one way back.
+    say("pen", PaneLink::Live, true);
+    pane.server_program_changed();
+    let first = token_of(&program.wait_for("pencere;welcome"));
+    until("the view to go for the restart", || !covered(&pane));
+
+    // The connection goes before the program answers: the offer may have gone nowhere, and it is
+    // made again when the terminal is back.
+    goes("pen");
+    say("pen", PaneLink::Live, true);
+    pane.set_connection(PaneLink::Live);
+    let second = token_of(&program.wait_for("pencere;welcome"));
+    assert_ne!(first, second, "a new offer has a new token");
+    program.open(&second, &files, None);
+    program.supply(&files);
+    watch_it_start(&pane, &mut program);
+
+    // The program ends while the connection is gone: its view goes and the shell is told nothing.
+    goes("pen");
+    say("bash", PaneLink::Live, true);
+    pane.set_connection(PaneLink::Live);
+    until("the view of the program that went", || !covered(&pane));
+    spin(0.3);
+    let after = &program.heard()[program.read..];
+    assert!(!after.contains("pencere;welcome"), "{after}");
+    assert!(!after.contains("pencere;closed"), "{after}");
+    pane.close();
 }
 
 /// Runs `body`; a panic is recorded under `name` (its message was printed as it happened) and the
