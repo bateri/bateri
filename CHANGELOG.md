@@ -12,6 +12,8 @@ of every installed copy. A version without a section is not released.
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-11-03
+
 ### Before you update
 
 - **This update ends the programs in your local tabs, once.** A tab's shell now runs in a terminal
