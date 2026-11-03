@@ -12,401 +12,114 @@ of every installed copy. A version without a section is not released.
 
 ## [Unreleased]
 
+### Before you update
+
+- **This update ends the programs in your local tabs, once.** A tab's shell now runs in a terminal
+  kablo keeps on this Mac, and the helpers the previous bateri kept programs in cannot hand them
+  over. Windows, tabs and splits come back from the saved session (not under
+  `restore_windows = "off"`) as new shells with their history; tabs on a server come back with
+  their programs. From now on an update, a crash and ⌘Q under `keep_running = "quit"` leave
+  programs running, and the next bateri shows them where they were. What `keep_running` decides has
+  not changed. Where kablo cannot be had, a tab opens as a plain terminal, which does not survive
+  an update or a crash and asks before it closes.
+- **Programs with a web view written for the previous draft have to be updated.** MCP is gone: a web
+  view speaks pencere's one protocol, the same messages as a view bateri draws itself.
+
 ### Added
 
-- **Activity: what your agents are doing, in the side column.** Show Activity (⇧⌘A, or the eye at
-  the head of the column) lists every program that reports its state, as Claude Code does: a
-  line each with what it calls its work, what it is doing and for how long ("Running · 4m",
-  "Asking · 10s"), where it stands and, while it waits for you, what it asks. One that rests is
-  listed too. Two agents in one tab are two lines on one face, the focused pane's picked. Each
-  agent's icon wears the badge a tab wears for a question, a failure or a finish you have not
-  seen, and ⌘1–9 count agents while Activity is shown. The eye shows only in a window that has
-  an agent.
-- **The side column counts what waits for you.** At the end of the list: how many tabs ask
-  (Asking), failed or finished while you were elsewhere. Click a count to go to the tab that has
-  waited longest, again for the next. A failure or a finish leaves the count once you look at its
-  tab; a question stays until it is answered, on the tab on screen too.
-- **The side column can hide.** Its buttons stand at its head — the column's own, Show Activity
-  and New Tab. View ▸ Hide Sidebar (⌃⌘S), or the column's button, hides it: one row stays over
-  your panes, with the window's buttons, the column's button, the tab's name in the middle and
-  `+`. While it hides, its button wears the badge of a question, a failure or a finish you have
-  not seen in another tab. Each window keeps its choice, across a restart too.
-- **Tab details.** `[appearance] tab_details` (View ▸ Tab Details, the column's right-click menu,
-  Settings): beside a row's name, where its program stands — the folder and the git branch, or
-  the server — and what an agent asks while it waits for you. `"smart"`, the default, says it in
-  Activity only; `"always"` in every row; `"off"` in none.
-- **A focus frame.** `[appearance] focus_frame` (Settings, off by default) draws a 2 pt line in
-  the theme's accent round the focused pane of a split tab, at least 3:1 against the background
-  on every theme. It slides from pane to pane as the focus moves.
-- **Every pane has a header.** A band over each pane — a tab's only pane and a zoomed one too,
-  whatever the program in it covers: the program's mark (a dot on its corner says what the pane
-  reports) and the pane's title, the focused pane's in full ink. Under the pointer Split Right,
-  Split Down, Open in New Tab and Close Split come in at its right, and a title that does not fit
-  fades at its end. Click the header to give the pane the keyboard.
-- **Carry panes and tabs with no key held.** Drag a pane by its header to a region of another
-  pane, onto a tab, between two tabs for a tab of its own, or out of the window for a window of
-  its own. Drag a tab out of the strip or the column into the panes on screen and the regions say
-  where its panes land; drop it on the middle of another tab to join that tab, and wait on a tab
-  to open it. A line marks where a tab goes between two others, and nothing slides aside while
-  you drag. Undo Move (⌘Z) puts it back.
-
-- **A native view can show pictures its program sends along.** A program whose view is written
-  for the Lua API `0.1` (`pencere.files`) can attach images to it and let them go, and the view
-  draws them by their name; bateri opens `0.1`, the one version of the Lua API there is. The
-  files a person gives the view (dragged, pasted or chosen in a panel) and the places a program
-  saves to are read and written on a thread of their own, so a slow disk never holds up the
-  window; a file that changed since it was given is reported as gone,
-  and a save is written beside its place and takes the place's name only when the program has
-  finished it (a save that is given up leaves nothing behind).
-- **Files can be dropped, pasted and chosen in a native view.** In a view whose program speaks
-  the files interface, files dragged from Finder onto the view are given to it (the view is told
-  how many are over it and where), so are files copied in Finder and pasted with ⌘V, and an image
-  on the clipboard with no file of its own (a screenshot) is kept as `image.png` in a temporary
-  folder for the view's own lifetime; a paste whose files are all gone reaches the view with
-  none, so that it can say so. A program asks for the Open panel ("Upload Files…") or the
-  Save panel ("Save a Copy…") and bateri shows it on the tab as a sheet, the Save panel in the
-  folder you last used and with the name the program proposed; the files you chose are given
-  to the view, and cancelling gives it none. Where the program runs on this Mac it is also told
-  where each file is; in an `ssh` session it never is, and reads the files through bateri.
-  A pane with no view takes a drop as before (the path written to the line, an upload in an
-  `ssh` session). A file field in a web view opens the same
-  panel instead of doing nothing.
-- **A native view can have an editor for code.** A program's native view can put an editor of
-  text in it, the pencere kit's own, which bateri keeps and draws: as many carets and selections
-  as you make (⌘-click, ⌥-drag for a column), undo and redo, the Mac's editing keys (⌥ and ⌘
-  with the arrows and ⌫, ⌃A, ⌃E, ⌃K) and an editor's (⌘/ comments, ⌥↑ moves lines, ⇥ and ⇧⇥
-  indent), finding, folding and the colours and marks the page gives it. A page can search it
-  as a find bar does (whole words, how many it found and which one you are on, replace and
-  replace all, select every match), tell it how its language comments, indents and folds (a
-  block comment for CSS, the line after `then` indented and `end` brought back, folds by
-  indent), and show its spaces and tabs and the guides of its indent. Your input method
-  composes in it (dead keys, Japanese, Korean, Chinese), its window stands by the caret, and
-  what ⌥ types on your keyboard (`@`, `[`, `{`, `|`) is typed. Cut, Copy, Paste, Select All and
-  Undo are the editor's while it has the keyboard; the caret blinks, and stops after a while as
-  the terminal's does. VoiceOver reads the editor as a text area: its text and what is selected.
-- **An editor in a native view can open a menu on a right click.** The page decides what is in it;
-  the editor puts its caret where a text view does for such a click (a click outside the selection
-  moves the caret there, one inside it leaves the selection alone), and ⌃-click is a right click
-  too. The menu can hold a Paste line that bateri itself performs: picking it pastes what is on
-  your pasteboard into that editor as ⌘V does, and the page is only told that the line was picked,
-  never what was pasted. A page can still never read your pasteboard or have an editor paste:
-  text comes from it only on your key or your pick of that line, from the menu you were shown.
-  What a page has an editor copy or cut goes to your pasteboard.
-- **A native view can ask how your terminal draws its cursor.** A page of a program's view can
-  read your cursor's shape, whether it blinks and how often, its rounding, its glow, how thick its bar and line are, what it is
-  in a window that is not in front and how it moves, and the rounding of your selection, and
-  be told when you change one, so that the editor in it can look like your cursor if the page
-  wants that. bateri only tells it; the page decides.
-- **The caret of an editor in a native view glows as far as your terminal's cursor does.** The
-  glow around the caret of the editor a page puts in its view now reaches as far as the halo of
-  your cursor, so the two look alike.
-- **A block caret of an editor in a native view shows the letter under it as it moves.** When the
-  caret is a block that glides from place to place, the letters it goes over and the one it comes
-  to show on it from the first frame, as in your terminal, and not only when it stops.
-- **A native view goes on working when you do nothing.** A page can ask to be woken after a
-  while, and set timers on it: a long file is coloured to its end without a key pressed, a save
-  waits for the typing to stop, a clock ticks. bateri wakes it when it asks and no more often than
-  it draws a frame; in a tab you are not looking at, or a window that is covered, at most once a
-  second, and no wake is lost. A page that asks for nothing still costs nothing.
-- **A native view can open a link in your browser.** As a web view can: bateri asks you first,
-  with the same question, opens only `http` and `https` addresses, and the page is not told what
-  you answered.
-- **A program's native view is as large as your text, and more of it works.** A view a
-  program draws with the pencere kit (dockerpen's, for one) is drawn as large as the
-  terminal's text and grows and shrinks with ⌘+ and ⌘−. It can have as many text fields as
-  it needs (one line, several lines, or a password), and the keys that are the page's in a
-  field (⏎, Esc, Tab, ↑ ↓) go to it; it hears a double click, the trackpad scrolling sideways,
-  ⌫, ⌦ and the function keys; its words can be italic, underlined or struck through; its
-  colours can blend into each other and its parts fade; and the pointer takes the shape it
-  asks for (resize, not allowed, grab, crosshair). VoiceOver reads the view: its buttons, its
-  fields and its words, and a button can be pressed from it.
-- **Native views of the pencere kit 2.0.** A program's native view can open menus and dialogs
-  over the rest of the page, write paragraphs of more than one look (bold words, a coloured
-  name, a link you click), draw charts and rings, and fill a box from one colour to another.
-  What the page can be told to do is listed under View ▸ Page Commands ▸ and in the command
-  palette, and its keys do it. You can drag things on the page and drop files from Finder on
-  it, the middle button, a key let go and a modifier held alone reach it, and VoiceOver reads
-  its checkboxes, switches, tabs, links, headings and progress as what they are, with their
-  state.
-- **A native view moves as its page says, and shows its tooltips.** A page can say how a change
-  of a part of it moves (a colour that comes in, a field that widens, a row that slides to its
-  new place, comes in or goes out), and bateri moves it at the display's rate without asking the
-  page for each frame; under Reduce Motion nothing moves. A part with a tip shows it as a
-  system tooltip while the pointer rests on it.
-
-- **The line you type on a server is in the dock.** In a terminal the server keeps
-  (the one a plain `ssh` opens when remote shell integration is on), the line at the
-  server's prompt now sits in the dock like it does in a local tab, in zsh, bash and
-  fish: click in it, select, edit it with ← → ⌫, paste into it, and it is no longer
-  shown a second time in the grid above. The dock's bottom line stays the short
-  `⇄ rasp  ~/app`. While the connection is down, the line you had typed dims with the
-  screen and the bottom line keeps saying `Reconnecting…`. `integration = "blocks"` leaves the
-  server's line to its shell, as it does locally.
-- **A program's notification reaches you.** When a program asks the terminal for one
-  (`printf '\e]9;Build finished\a'`, or `OSC 777;notify;title;body`), its tab is marked
-  unless you are looking at it, and while bateri is in the background it comes as a macOS
-  notification with the program's title, or the tab's. A program that sends them in a loop
-  leaves one notification per pane, the latest.
-- **A program can show a view that bateri draws itself.** Beside the web view, a program
-  that speaks [pencere](https://github.com/bateri/pencere) can now open a view that is a
-  Lua script. bateri runs it in a sandbox with no files,
-  network or clock of its own, draws it in the terminal's own font and theme, and carries
-  the messages between it and its program. A view that hangs, asks for too much memory or
-  has an error closes, and its program is told why — a script's error with its line.
-  Control-C reaches the program at once even while the view is busy talking to it, and
-  nothing the view said is typed into the shell afterwards. The kit these views are made
-  with is [pencere](https://github.com/bateri/pencere)'s (Apache-2.0, so other terminals
-  can show the same views), and a script's global is `pencere`.
-- **A Lua view can be several files.** The script of a view that bateri draws may load the
-  other Lua files of its bundle with `require("./screens/logs")` (Luau's own rules, so
-  editors that know Luau understand the paths), and nothing else: a path that leaves the
-  bundle, a file that is not a script and a name the bundle lacks are errors that say the
-  path, and an error in any of the files says that file and line.
-- **A view can use the terminal's whole palette.** Beside its nine roles, a view names the
-  sixteen ANSI colours and the selection by the theme's own values, or gives a colour of
-  its own as `#rrggbb[aa]` with, if it wants one, another for dark themes. Its words keep
-  the **minimum contrast** of Appearance settings against what they stand on, like a
-  program's in the grid: a quiet word on a card is a shade stronger than the theme says
-  where it would be hard to read, and changing the setting redraws the view. A web view is
-  told the palette and the selection in its colours too.
-- **Views that bateri draws show images.** A view can put a PNG, a JPEG or an SVG from its
-  own bundle on the page, fitted to its box (`contain`) or filling it and cropped (`cover`),
-  with rounded corners and opacity, or painted in one of the theme's colours so that an
-  icon follows the theme. SVGs are drawn again, sharp, when the pane is resized. Files are
-  decoded off the screen's thread, so a page never waits for them and a view at rest still
-  costs no frames; a file that cannot be shown leaves its box empty, and why is printed to
-  bateri's stderr for the view's author. A picture drawn far smaller than its file stays
-  still as it moves or the pane is resized, and a cropped one shows nothing from beyond its
-  edge. Faint text (a colour at a low opacity) is held to `minimum_contrast` as it shows on
-  its background, not as the colour alone would.
-- **A tab's card shows a view that bateri draws.** Hovering over a tab, or opening the
-  overview, shows a pane whose program has opened a view of its own (a Lua script) as that
-  view, images included, not the terminal behind it. The card shows the view as it is on
-  screen; a view that has not drawn yet shows the terminal for a moment.
-- **A native view can show the time of day, spinners and the keys of its menus.** A view's page
-  reads the time of day with your own offset from UTC (daylight saving time included) and says
-  which keyboard it is on, so a clock or a "⌘" versus "Ctrl" hint reads right; a picture of a page
-  can spin (a loading spinner), and stops while Reduce Motion is on; and a menu a page pops up
-  shows the keys that do the same on the page, as the Mac's menus do.
-- **A native view's editor can have a gutter of its own, an overview ruler and gaps for the page.**
-  A program's editor lists the gutter's columns it wants (a column of breakpoints, bars along the lines
-  a file changed in, the numbers, the buttons that fold), puts dots, bars, triangles and tinted
-  pictures in them, marks where things are down the editor's right edge, and opens a gap after a line
-  for its own panel (a peek) that scrolls with the text. The pointer over such an editor is the I-beam
-  over the text, the arrow in the gutter and the hand over what answers a press there; a marker has
-  its tooltip while the pointer rests on it and is lit while it is over it.
-- **A native view's editor can answer the pointer and the keys a code editor does.** A program's
-  editor can make a link of the word under the pointer while ⌘ is held (the hand, a line under the
-  word, and a ⌘-click that goes to the program instead of putting a caret there), say what a click, a
-  ⌥-click or a ⌘-click does, show hints inside the lines (a parameter's name, a type, an error at a line's
-  end), show a card by a word or by the caret that stays while the pointer is on it, and take chords of
-  keys (⌘K ⌘U). A ⌘ pressed while another window had the keyboard counts as soon as the pointer comes
-  over the editor, and the hand follows ⌘ going down and up without the pointer moving.
-- **A file a program asks for or hands back crosses through a private folder on this Mac, not through the
-  terminal's stream.** A program that shows a native view can ask for a file you dropped on it, or hand
-  one back to be saved, and the bytes go through a named pipe in a folder only you can open
-  (`~/.cache/pencere-stage/<instance>/`) instead of being cut into frames on the terminal. A big file
-  no longer holds the terminal's output while it moves, closing the view or pressing ⌃C stops the
-  transfer at once, and nothing is left behind: the pipe goes with the transfer and a half-saved file is
-  deleted. The folder is made when bateri starts; folders of other bateri instances that nobody has
-  touched for thirty days are cleared then. A program that does not know the folder gets the frames it
-  always got.
-- **A program on a server gets and hands back files the same way, through the connection bateri
-  already keeps to the server.** When a terminal a server keeps shows a program's view, bateri makes
-  a folder only you can open under the server's home (`~/.cache/pencere-stage/`, one for each
-  bateri and server, made once for as long as bateri runs) and the program and the Mac move the file
-  through a named pipe in it, carried by the server's main connection: no file bytes go through the
-  terminal's stream, a big file does not hold the terminal while it moves, and a connection that
-  drops in the middle leaves the program able to ask again from where the file stopped instead of
-  from the start. Closing the view or pressing ⌃C ends the transfer on both machines. A plain `ssh`
-  you started yourself is left as it was: bateri puts nothing on that machine, and the program gets
-  its files in the terminal's stream.
+- **All your tabs at once.** Show All Tabs (⇧⌘\) covers the window with a picture of every tab's real
+  screens. Search them by name, program and folder, go with the arrows or the pointer and ↵. The
+  window's machines stand beside them with each server's load, its background terminals are listed
+  with their pictures, and a terminal another computer has open moves here with ↵.
+- **Activity: what your agents are doing.** Show Activity (⇧⌘A, or the eye at the head of the side
+  column) lists every program that reports its state, as Claude Code does: its work, what it is
+  doing and for how long, and what it asks while it waits for you. ⌘1–9 count agents while it shows.
+- **The side column counts what waits for you, and can hide.** Its end says how many tabs ask, failed
+  or finished while you were elsewhere; click a count to go to the one that waited longest. View ▸
+  Hide Sidebar (⌃⌘S) leaves one row over your panes, and each window keeps its choice.
+- **Tab details.** `[appearance] tab_details` says beside a row's name where its program stands and
+  what an agent asks: `"smart"` (the default) in Activity only, `"always"`, or `"off"`.
+- **A focus frame.** `[appearance] focus_frame` (off by default) draws a line in the theme's accent
+  round the focused pane of a split tab.
+- **Every pane has a header.** The program's mark and the pane's title, with Split Right, Split Down,
+  Open in New Tab and Close Split under the pointer. Click it to give the pane the keyboard.
+- **Carry panes and tabs with no key held.** Drag a pane by its header to another pane, onto a tab,
+  between two tabs or out of the window. Drag a tab into the panes on screen, or onto another tab to
+  join it. Undo Move (⌘Z) puts it back.
+- **The line you type on a server is in the dock.** In a terminal the server keeps, in zsh, bash and
+  fish, you click, select, edit and paste in it as you do locally.
+- **A program's notification reaches you.** `OSC 9` and `OSC 777;notify` mark the tab unless you are
+  looking at it, and come as a macOS notification while bateri is in the background.
+- **Programs can show a view bateri draws itself.** Beside the web view, a program that speaks
+  [pencere](https://github.com/bateri/pencere) can open a native view: a Lua script in a sandbox with
+  no files, network or clock of its own, drawn in your font and theme and as large as your text
+  (⌘+, ⌘−). It can hold code editors (carets, find, folding, your input method), menus, dialogs,
+  charts and pictures, and take files you drop, paste or choose. VoiceOver reads it, its commands
+  are in View ▸ Page Commands ▸ and the palette, a link it opens asks you first, and a tab's card
+  shows it. A view that hangs, asks for too much memory or has an error closes, and its program is
+  told why.
+- **A view's files move beside the terminal, not through it.** A file you give a program's native
+  view, or one it hands back to be saved, goes through a named pipe in a folder only you can open
+  (`~/.cache/pencere-stage/`), on this Mac and on a server whose terminal kablo keeps. A big file no
+  longer holds the terminal, closing the view or pressing ⌃C stops the transfer, and a half-saved
+  file is deleted. A plain `ssh` you started yourself is left as it was.
 
 ### Changed
 
-- **bateri's words over a program's view stand in the pane's header.** The strip above a
-  program's view is gone. The pane's header says what the view is instead: the program's icon
-  (the one it made for a dark or a light ground, as your theme is), where it runs, its name and
-  the view's title, with **Quit ⌃C** at its right for as long as the view is up. The view has the
-  whole pane.
-- **Cards for every tab, on one flat ground.** Under `split_style = "cards"` a tab with one pane
-  is a card too, and the ground under the cards is a flat tone drawn from your theme — a step from
-  the background towards the text — instead of the coloured gradient.
-- **The title row is quieter.** Its buttons are bare until the pointer is over them. With the
-  tabs at the top a tab reads like a row of the column — the icon at the left, the title beside
-  it, × at the right — the tabs stand six points apart, and forty points before the buttons are
-  left free to take the window by. The group button's dot is the tabs' badge now.
-- **A theme file takes its missing colours from a theme of its kind.** A file with a light
-  background gets them from `bateri-light`, a dark one from `bateri`, and a file named after a
-  built-in theme from that theme.
-- **Option-Command no longer lifts the panes.** Holding ⌥⌘ lifted them to be carried and let a
-  tab be pulled into the panes; both are done with no key held now, a pane by its header and a
-  tab by its row or its chip.
-
-- **A program's output is taken in faster.** What bateri does with every byte a program writes
-  before the terminal acts on it — following where an escape sequence stands, looking for the
-  shell's marks, putting emoji sequences together — now skims text and the bodies of long
-  sequences rather than going over them a byte at a time, no longer keeps a second copy of an
-  image while it arrives, and lets Chinese, Japanese and Korean text by without building
-  anything for it. Images and CJK text are taken several times faster, long escape sequences
-  and plain text faster too: a program that floods the terminal is done sooner and takes less
-  of your Mac while it does.
-- **A program's web view speaks pencere's one protocol; MCP is gone.** A program that shows a
-  web view now opens it from a bundle with the same messages a view bateri draws itself uses
-  (calls and answers, subscriptions and pushes), asks for the addresses and browser features
-  its page needs in the `open` itself, and the page is told the terminal's colours, size,
-  language, time zone and Reduce Motion setting as they change. bateri offers each kind of
-  view with the version of its interface, so a program can say which one it was written
-  against. Closing a view is immediate for every kind. Programs written for the previous
-  draft have to be updated; the strip, the questions to you and the Quit ⌃C button are as
-  they were, except that your answer is now remembered for the program run from that place
-  (the file it started from, or the script an interpreter runs), so a second program with the
-  same name asks again.
-- **⌃\ and ⌃Z reach the program over a view, as ⌃C does.** While a program's view is open, of
-  either kind, the terminal's quit and suspend keys go to the program and not to the view,
-  ahead of anything the view was saying, and nothing the view said follows them into the
-  shell. A program that stops on ⌃Z gives the terminal back and takes it again when it is
-  continued.
-- **A program's web view stays on the page it opened.** Once the view's first page has
-  loaded, nothing takes it to another page: a link, a script changing the address, a form —
-  not even another file of the program's own bundle — and a form cannot send the page to
-  any address. A page that routes by the `#` part of its address (`#section`,
-  `location.hash`) keeps working, and so does a site you allowed the page to embed, in its
-  frame. The page keeps the policy that says what it may reach as a header on every
-  file it is given. The view still opens addresses in your browser, after you say yes.
-- **A view whose program stops reading is closed.** When more than 16 MiB of what a view said
-  is waiting for a program that does not read, the view ends and the program is told. A view
-  that bateri draws is held back long before that, as it was; this is the bound under a
-  web view, which has no way to wait.
-- **A view written against another version of the interface says which.** The program is
-  told both versions (the one the view was written against and the one bateri opens) when it
-  is closed for it. A view bateri draws names the colour of rules and borders `border`, as a
-  web view's page does (it was `line`); a web view's page is told the cursor's colour in
-  its colours; `raised` levels above 8 draw as 8.
-- **Programs in local tabs outlive an update, a kept quit and a crash the way programs on servers do.**
-  Each tab's shell now runs in a terminal kablo keeps on this Mac, and bateri shows it: an
-  update, ⌘Q under `keep_running = "quit"` and a crash leave the programs running, and the
-  next bateri shows them again where they were — with their screens, the blocks of the
-  commands they ran and the dock — without a helper process of bateri's own. A shell that has
-  nothing running in front is simply shown again at its prompt. What `keep_running` decides
-  has not changed. **This update is the one time the programs in local tabs end:** the
-  helper processes the previous bateri kept its programs in cannot hand them to kablo, so the
-  first launch ends them. Windows, tabs and splits come back from the saved session (not under
-  `restore_windows = "off"`), as new shells with their history; tabs that show a terminal on a
-  server come back with their programs.
-  Where kablo cannot be had for a tab it opens as a plain terminal, which does not survive
-  an update or a crash and asks before it closes.
-- **A launch that crashes while it brings your tabs back does not crash the next one too.**
-  The next launch brings the windows and their programs back from a picture of each screen and
-  its scrollback, without reading the terminals' output again, and that scrollback is not kept
-  for the launch after it; if this launch crashes as well, the one after opens a single fresh
-  window and leaves the programs running for a later launch, as holding ⇧ while bateri opens
-  does.
-- **A terminal a tab keeps remembers as many lines as `scrollback` says.** It costs
-  memory in kablo for as long as it lives, as much as its history is long.
+- **bateri's words over a program's view stand in the pane's header.** The strip above a view is gone:
+  the header says where the program runs, its name and the view's title, with **Quit ⌃C** at its right.
+- **Cards for every tab, on one flat ground.** Under `split_style = "cards"` a tab with one pane is a
+  card too, on a flat tone drawn from your theme instead of the coloured gradient.
+- **The title row is quieter.** Its buttons are bare until the pointer is over them, and tabs at the
+  top read like the rows of the column.
+- **A theme file takes its missing colours from a theme of its kind:** `bateri-light` for a light
+  background, `bateri` for a dark one, and a built-in theme for a file named after it.
+- **Option-Command no longer lifts the panes.** Both of its jobs are done with no key held now.
+- **A program's output is taken in faster,** images and Chinese, Japanese and Korean text several times
+  so.
+- **⌃\ and ⌃Z reach the program over a view,** as ⌃C does, of either kind.
+- **A web view stays on the page it opened.** A link, a script or a form cannot take it to another page,
+  and it still opens addresses in your browser after you say yes. Your answer is remembered for the
+  program run from that place, so a second program with the same name asks again.
+- **A view whose program stops reading is closed,** once more than 16 MiB waits for it.
+- **A view written against another version of the interface says which,** to its program.
+- **A launch that crashes while it brings your tabs back does not crash the next one too.** The next
+  launch shows a picture of each screen; if that crashes as well, the one after opens a fresh window
+  and leaves the programs running, as holding ⇧ while bateri opens does.
+- **A terminal a tab keeps remembers as many lines as `scrollback` says,** at a cost in kablo's memory.
 
 ### Fixed
 
-- **A program's native view can no longer take the keyboard from a pane you are typing in.** A view
-  that asked for the keyboard (a text field, or `page`) took it from whichever pane had it, so a
-  program running in a pane behind could pick up what you typed into the next one. A view asks
-  only while its own pane has the keyboard; clicking the view gives it the keyboard as before.
-- **A web view cannot reach the network on its own.** A page that has no `access` could still
-  open a peer connection (WebRTC) to a server of its choosing and ask the engine to connect or
-  look up names ahead of time, which let it talk to hosts the program never named. bateri now
-  switches those channels off in the web engine and tells the page's answers not to start name
-  look-ups; if the engine cannot switch one off, the view does not open and says so.
-- **A line a program prints can no longer close its own view.** The shell's "command ended" mark
-  closed a program's view whenever it showed up in the terminal's output, so another program (or a
-  file shown with `cat`) could print one and close the view of a program that was still running.
-  On your own computer the mark now closes a view only when the shell has the terminal back (or
-  shows its next prompt with it). When the terminal is still the program's, the mark ends
-  nothing, not even with your ⌃C; when it cannot be told, the mark is only remembered, and your
-  ⌃C (or ⌃\, ⌃Z, or the Quit in the header) then ends the view of a program that is gone. The two
-  can come in either order, but a ⌃C counts for a mark only for five seconds, and what was said
-  while no view was open is forgotten. Over ssh the mark never closes a view by itself, since the
-  server's side can print anything: a program that ends in the normal way still closes its view,
-  so does the end of the `ssh`, and a view whose program crashed stays until you press ⌃C, which
-  takes you back to the terminal. A view closed this way sends nothing to the program's input.
-- **A program cannot put a menu in front of you that pastes your clipboard.** A view's menu opens
-  only for something you did (a click, a key, a pick); a program that opened one by itself, with a
-  Paste line under your pointer, got the clipboard into its view with your next click. The Paste line
-  of a view's menu no longer takes a key of the view's choosing, either: it shows ⌘V, and it is on
-  only in the menu a right-click opens (greyed out in one a key opened, such as Shift-F10).
-- **`bateri split --focus` takes the keyboard only from the pane you are typing in.** A program
-  on a server that asked for the new pane to be focused, from a pane you were not in, or from a
-  window behind another, took the keyboard from where you were. The pane that asks has to be the
-  one the new pane goes beside, in the window you are typing in, with the keyboard in it (its
-  view's too).
-- **`osc52 = "off"` holds for a native view's page too.** With the clipboard setting off, a page's
-  Copy button, which waits for its program's answer, still replaced the clipboard. Now only your
-  own copy (⌘C or ⌘X, your press, your pick of a menu line) reaches it; a plain key, or a command
-  the page bound to a key of its own, does not. `"copy"` lets all of it through as before.
-
-- **A long paste, or a file a program receives, in a terminal that runs on a server no longer loses what it typed.** Input that came faster than the program on the other end read it used to be dropped on the way without a word, so a transfer never finished. bateri now sends a terminal's input a window at a time (half a megabyte, asking the server about it at most a few times per window, so typing at a program that does not read never fills the server's questions), waits for the server to say the program's terminal took it, and holds the rest back (the pane waits instead of bateri keeping it in memory). Needs the next kablo release on the server; with an older kablo a flood the server cannot hold ends the terminal with the server's words in it instead of stalling it.
-
-- **A terminal shown again after a lot of output keeps its commands and its prompt.** When
-  bateri came back to a terminal that had printed more than kablo keeps of it (a long build,
-  a program like `btop` left running for an hour), the terminal came back as plain text: no
-  marks beside the commands, the caret on the grid and an empty dock until the next command.
-  It now comes back with the commands still marked as they ended, the dock and its line, as
-  any other terminal does. bateri carries kablo 0.5.0, whose picture of a screen tells the
-  shell's marks again.
-- **A field of a native view opens with its text and the keyboard.** The find bar, the command
-  palette and the dialogs of a program's view (textpen's ⌘F, ⌘E) opened empty and without the
-  keyboard when the page opened and filled the field in one go: the text was put in before the field
-  existed. They now open filled, with what the page selected in them selected, and with the keyboard
-  in them. A field also gives the page the keys it has no use for where its caret is (⌫ in an empty
-  field, ← at the start of the text, → at its end), as the kit's rule says, so a list under a filter
-  moves with the arrows and a dialog's field gives ⌫ back to the page once it is empty.
-- **A large image `kitten icat` sends through ssh is shown.** kitty's own client writes an
-  image's action again on every piece it sends it in when the action is not the default one,
-  and bateri took the second piece for a command of its own and dropped the image: a picture
-  `kitten icat` showed through ssh, or with `--transfer-mode=stream`, never appeared once it
-  was too large to go in one piece. A piece that names nothing but the action, `q` and `m` now
-  goes on with the image it belongs to, as kitty takes it.
-- **The words of a native view fade with what they are in.** A row that goes out of a list (a
-  folded group in dockerpen) or comes into it took its words only part of the way: they faded to
-  the lowest contrast `[appearance] minimum_contrast` keeps and stayed there, then went at once,
-  which looked like the view dropping frames. The opacity a page gives a part, and what a motion
-  fades, is now laid over the colour held to that floor, so words fade all the way with their
-  part, and a page can make words fainter than the floor on purpose.
-
-- **A native view's text field stays in its box when the pane jumps in size.** Opening a pane
-  beside one with a native view (⌘D) or making the window full screen left the view's field off
-  its box, saying its hint above or below it, until the pointer moved over the page.
-
-- **A native view's boxes stand in the middle of their padding at any text size.** At a size
-  of the terminal's text that makes a point of the page a fraction of pixels, a box inside
-  another (the chosen tab of a segmented control) stood a pixel higher than lower; each length is
-  now whole pixels.
-
-- **A native view no longer flickers while its pane or window is resized.** The page of the
-  new size now comes with the resize itself, instead of a frame or more after it — in between,
-  the old page was shown stretched to the new size, or laid out for the size the pane had been —
-  and its filter field stays where the page draws its box instead of sliding with the pane's
-  bottom edge.
-
-- **A view's filter field says what the view says, on one line.** The field bateri puts
-  over a native view (dockerpen's, pickpen's, any kit page's) used to say dockerpen's "Filter by
-  name, image, port…" whatever the view was, and a hint too long for the box wrapped onto a line
-  the box did not show, so the first line sat high. It now says the view's own hint (the words
-  the page puts in the field's room), and a hint that does not fit ends in "…" in the middle of
-  the box. A native view's text can also wrap now (pencere's `wrap()` on a text), where a page
-  asks for it.
-
-- **A server reached through a `ProxyCommand` stays reachable after its
-  connection drops.** With bateri opened from the Dock, the ssh that bateri
-  starts itself — to bring a kept terminal back, to move files, to forward a
-  port — ran without the `PATH` your shell sets, so a `ProxyCommand` naming a
-  tool you installed (`cloudflared`, `tsh`, …) was "command not found": the
-  first `ssh` in a pane connected, but once that connection dropped the pane
-  waited for good, and a new `ssh` to the same server hung too. bateri now asks
-  your shell for its `PATH` once at launch and gives it to every ssh it starts.
-- **Reconnecting to a server no longer leaves its `ProxyCommand` running.**
-  While a kept terminal's server could not be reached, every attempt left one
-  more proxy behind — a `cloudflared` waiting for a login every fifty seconds.
-  An ssh that bateri gives up on now ends with what it started.
+- **A program's view can no longer take the keyboard from a pane you are typing in.** It asks only while
+  its own pane has the keyboard; clicking the view gives it the keyboard as before.
+- **`bateri split --focus` takes the keyboard only from the pane you are typing in.** A program on a
+  server could take it from wherever you were. Otherwise the new pane opens behind.
+- **A web view cannot reach the network on its own.** A page with no `access` could still open a WebRTC
+  connection or have the engine connect or look up names ahead of time. bateri switches those channels
+  off; where the engine has no switch for one, as may be on an older macOS, the view does not open and
+  says so.
+- **A line a program prints can no longer close a view.** On your own computer the shell's "command
+  ended" mark closes a view only once the shell has the terminal back. Over ssh it never does by itself:
+  a program that ends normally closes its view and so does the end of the `ssh`, and the view of a
+  program that crashed stays until you press ⌃C, which takes you back to the terminal.
+- **A program cannot put a menu in front of you that pastes your clipboard.** A view's menu opens only
+  for something you did, and its Paste line is on only in the menu a right-click opens. It shows ⌘V, and
+  no key of the view's choosing picks it.
+- **`osc52 = "off"` holds for a native view too.** Only your own copy reaches the clipboard: ⌘C or ⌘X,
+  your press, your pick of a menu line. A plain key does not, nor does a Copy button that waits for its
+  program's answer, whatever the view then says. `"copy"` lets all of it through as before.
+- **A long paste, or a file a program receives, in a terminal on a server no longer loses what it typed.**
+  Input now goes a window at a time and waits for the server. Until the server's kablo is renewed, a
+  flood it cannot hold ends the terminal with the server's words in it instead of stalling it.
+- **A terminal shown again after a lot of output keeps its commands and its prompt,** marks and dock
+  included.
+- **A large image `kitten icat` sends through ssh is shown.**
+- **A server behind a `ProxyCommand` stays reachable after its connection drops.** The ssh bateri starts
+  itself now has your shell's `PATH`, so `cloudflared` or `tsh` is found, and one it gives up on no longer
+  leaves its proxy running.
+- **Native views look right while they change.** They no longer flicker when resized, words fade all the
+  way with their part, fields open with their text and stay in their box, and a filter field says the
+  view's own hint.
 
 ## [0.22.0] - 2026-10-22
 
