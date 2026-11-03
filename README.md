@@ -10,6 +10,13 @@ glides instead of jumping, and an idle window draws nothing at all.
 · macOS 14 or later · Apple silicon · [bateri.dev](https://bateri.dev) ·
 [Changelog](CHANGELOG.md) · Free software (GPL-3.0)
 
+## Install
+
+Download [`bateri.dmg`](https://github.com/bateri/bateri/releases/latest/download/bateri.dmg)
+from the [latest release](https://github.com/bateri/bateri/releases/latest),
+open it and drag **bateri** into **Applications**. The app is signed with a
+Developer ID and notarized by Apple, so it opens without a warning.
+
 ## Features
 
 - **Command blocks.** Each prompt and its output form a block, marked in the
@@ -42,14 +49,90 @@ glides instead of jumping, and an idle window draws nothing at all.
   window costs no GPU time.
 - **Automatic updates** from GitHub Releases via Sparkle, signed and notarized.
 
-## Install
+## Pens
 
-Download [`bateri.dmg`](https://github.com/bateri/bateri/releases/latest/download/bateri.dmg)
-from the [latest release](https://github.com/bateri/bateri/releases/latest),
-open it and drag **bateri** into **Applications**. The app is signed with a
-Developer ID and notarized by Apple, so it opens without a warning.
+A pen is a program that shows a real interface in the pane it runs in, on your machine or on a server over plain `ssh`, in your font and your theme. Each is one file, made with [pencere](https://github.com/bateri/pencere).
 
-### Updates
+<table>
+  <tr>
+    <td width="50%" valign="top"><a href="https://github.com/bateri/dockerpen"><img src="https://raw.githubusercontent.com/bateri/dockerpen/main/docs/containers.png" width="100%" alt="dockerpen"></a><br><b><a href="https://github.com/bateri/dockerpen">dockerpen</a></b><br>Docker in the pane: containers, their logs and resource use, images, volumes, networks and disk.</td>
+    <td width="50%" valign="top"><a href="https://github.com/bateri/pickpen"><img src="https://raw.githubusercontent.com/bateri/pickpen/main/docs/confirm.png" width="100%" alt="pickpen"></a><br><b><a href="https://github.com/bateri/pickpen">pickpen</a></b><br>Choose rows in the middle of a pipeline: filter, sort and mark them, and the rows you chose go out on stdout.</td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top"><a href="https://github.com/bateri/toppen"><img src="https://raw.githubusercontent.com/bateri/toppen/main/docs/overview.png" width="100%" alt="toppen"></a><br><b><a href="https://github.com/bateri/toppen">toppen</a></b><br>A system monitor in the way of <code>top</code> and <code>btop</code>: CPU, memory, network, disks, GPU and a process table you can sort and act on.</td>
+    <td width="50%" valign="top"><a href="https://github.com/bateri/sqlpen"><img src="https://raw.githubusercontent.com/bateri/sqlpen/main/docs/grid.png" width="100%" alt="sqlpen"></a><br><b><a href="https://github.com/bateri/sqlpen">sqlpen</a></b><br>A SQL client for PostgreSQL and SQLite: the tables of the database, an editor that knows SQL, and the rows in a grid.</td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top"><a href="https://github.com/bateri/textpen"><img src="https://raw.githubusercontent.com/bateri/textpen/main/docs/editor.png" width="100%" alt="textpen"></a><br><b><a href="https://github.com/bateri/textpen">textpen</a></b><br>A code editor: the project's files as a tree, tabs, search across them, and what git says of them.</td>
+    <td width="50%" valign="top"><b>Your own</b><br>A pen is one file, made with <a href="https://github.com/bateri/pencere">pencere</a>, in Lua, TypeScript or Rust: <code>pencere new</code> starts one.</td>
+  </tr>
+</table>
+
+Each installs with its one line:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/bateri/dockerpen/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/bateri/pickpen/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/bateri/toppen/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/bateri/sqlpen/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/bateri/textpen/main/install.sh | sh
+```
+
+## Keyboard shortcuts
+
+| Action | Shortcut |
+|---|---|
+| New tab / new window | ⌘T / ⌘N |
+| New local tab (from an ssh tab) | ⌥⌘T |
+| Split right / split down | ⌘D / ⇧⌘D |
+| Previous / next split | ⌘[ / ⌘] |
+| Select split in a direction | ⌥⌘ + arrow |
+| Resize split | ⌃⌘ + arrow |
+| Equalize splits / zoom split | ⌃⌘= / ⇧⌘↩ |
+| Close pane or tab / close window | ⌘W / ⇧⌘W |
+| Find / next / previous | ⌘F / ⌘G / ⇧⌘G |
+| Clear screen and scrollback / scrollback only | ⌘K / ⌥⌘K |
+| Paste as a single escaped argument | ⌃⌘V |
+| Bigger / smaller / actual size | ⌘+ / ⌘− / ⌘0 |
+| Cancel upload | ⌘. |
+
+Hold **Shift** to select text with the mouse inside programs that capture the
+mouse, such as vim.
+
+## Configuration
+
+Settings live in `~/.config/bateri/settings.toml` and apply as soon as you
+save the file. **bateri ▸ Settings…** (⌘,) opens a settings window that edits
+the same file. Every key is optional; a missing key uses its default.
+
+```toml
+[appearance]
+theme = "system"          # follows light/dark; or a theme name
+
+[font]
+family = "Menlo"
+size = 13
+line_height = 1.0
+
+[terminal]
+cursor = "block"          # "block" | "underline" | "beam"
+confirm_close = "running" # ask before closing while a program is running
+
+[motion]
+cursor_motion = "spring"  # "snap" | "ease" | "spring"
+keypress = "fade"         # how typed letters appear in the dock
+
+[remote]
+hosts = [
+  { host = "prod-*", mark = "production" },
+]
+```
+
+Themes are TOML files in `~/.config/bateri/themes/`, selectable from
+**View ▸ Theme**. The full reference for every key and the theme format is in
+[`docs/SETTINGS.md`](docs/SETTINGS.md).
+
+## Updates
 
 bateri checks for a new version once a day and asks before installing it; you
 can also check any time with **bateri ▸ Check for Updates…**. The check goes
@@ -57,60 +140,6 @@ straight to this repository's releases
 (`releases/latest/download/appcast.xml`) — there is no update server of our
 own, and nothing but the version check is sent. Every update is signed with
 bateri's EdDSA key and verified before it is installed.
-
-## Pens
-
-A pen is a program that shows a real interface in the pane it runs in, on your machine or on a server over plain `ssh`, in your font and your theme. Each is one file, made with [pencere](https://github.com/bateri/pencere).
-
-### [dockerpen](https://github.com/bateri/dockerpen)
-
-Docker in the pane: containers, their logs and resource use, images, volumes, networks and disk.
-
-![dockerpen](https://raw.githubusercontent.com/bateri/dockerpen/main/docs/containers.png)
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/bateri/dockerpen/main/install.sh | sh
-```
-
-### [pickpen](https://github.com/bateri/pickpen)
-
-Choose rows in the middle of a pipeline: filter, sort and mark them, and the rows you chose go out on stdout.
-
-![pickpen](https://raw.githubusercontent.com/bateri/pickpen/main/docs/confirm.png)
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/bateri/pickpen/main/install.sh | sh
-```
-
-### [toppen](https://github.com/bateri/toppen)
-
-A system monitor in the way of `top` and `btop`: CPU, memory, network, disks, GPU and a process table you can sort and act on.
-
-![toppen](https://raw.githubusercontent.com/bateri/toppen/main/docs/overview.png)
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/bateri/toppen/main/install.sh | sh
-```
-
-### [sqlpen](https://github.com/bateri/sqlpen)
-
-A SQL client for PostgreSQL and SQLite: the tables of the database, an editor that knows SQL, and the rows in a grid.
-
-![sqlpen](https://raw.githubusercontent.com/bateri/sqlpen/main/docs/grid.png)
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/bateri/sqlpen/main/install.sh | sh
-```
-
-### [textpen](https://github.com/bateri/textpen)
-
-A code editor: the project's files as a tree, tabs, search across them, and what git says of them.
-
-![textpen](https://raw.githubusercontent.com/bateri/textpen/main/docs/editor.png)
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/bateri/textpen/main/install.sh | sh
-```
 
 ## Shell integration
 
@@ -155,60 +184,6 @@ takes the keyboard; by default the focus stays where it was). Without a program
 the pane runs bateri's shell. Exit codes: 0, 1, 64 (a mistake in the command),
 69 (needs bateri and none is connected), 77 (refused) and, for `wait`, the
 program's own.
-
-## Configuration
-
-Settings live in `~/.config/bateri/settings.toml` and apply as soon as you
-save the file. **bateri ▸ Settings…** (⌘,) opens a settings window that edits
-the same file. Every key is optional; a missing key uses its default.
-
-```toml
-[appearance]
-theme = "system"          # follows light/dark; or a theme name
-
-[font]
-family = "Menlo"
-size = 13
-line_height = 1.0
-
-[terminal]
-cursor = "block"          # "block" | "underline" | "beam"
-confirm_close = "running" # ask before closing while a program is running
-
-[motion]
-cursor_motion = "spring"  # "snap" | "ease" | "spring"
-keypress = "fade"         # how typed letters appear in the dock
-
-[remote]
-hosts = [
-  { host = "prod-*", mark = "production" },
-]
-```
-
-Themes are TOML files in `~/.config/bateri/themes/`, selectable from
-**View ▸ Theme**. The full reference for every key and the theme format is in
-[`docs/SETTINGS.md`](docs/SETTINGS.md).
-
-## Keyboard shortcuts
-
-| Action | Shortcut |
-|---|---|
-| New tab / new window | ⌘T / ⌘N |
-| New local tab (from an ssh tab) | ⌥⌘T |
-| Split right / split down | ⌘D / ⇧⌘D |
-| Previous / next split | ⌘[ / ⌘] |
-| Select split in a direction | ⌥⌘ + arrow |
-| Resize split | ⌃⌘ + arrow |
-| Equalize splits / zoom split | ⌃⌘= / ⇧⌘↩ |
-| Close pane or tab / close window | ⌘W / ⇧⌘W |
-| Find / next / previous | ⌘F / ⌘G / ⇧⌘G |
-| Clear screen and scrollback / scrollback only | ⌘K / ⌥⌘K |
-| Paste as a single escaped argument | ⌃⌘V |
-| Bigger / smaller / actual size | ⌘+ / ⌘− / ⌘0 |
-| Cancel upload | ⌘. |
-
-Hold **Shift** to select text with the mouse inside programs that capture the
-mouse, such as vim.
 
 ## Building from source
 
