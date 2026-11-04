@@ -31,7 +31,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// Zero-width joiner (U+200D). The emoji-presentation code point behind it
 /// joins the cluster — the counterpart of UAX #29 GB11.
-const ZWJ: char = '\u{200D}';
+pub(crate) const ZWJ: char = '\u{200D}';
 
 /// Emoji presentation selector (VS16). [`emoji_capable`]'s question is "does
 /// this code point become a two-column emoji with VS16".
@@ -114,10 +114,14 @@ pub(crate) fn may_extend(c: char) -> bool {
 /// `width` is `c`'s width in the table: the caller asks it once for a code point
 /// however many of these questions it meets.
 pub(crate) fn may_follow(newest: char, c: char, width: Option<usize>) -> bool {
-    width == Some(0)
-        || is_regional_indicator(c)
-        || is_skin_tone(c)
-        || (newest == ZWJ && emoji_capable(c, width))
+    width == Some(0) || joins_alone(c) || (newest == ZWJ && emoji_capable(c, width))
+}
+
+/// Can `c`, a code point with columns, extend a cluster whatever the cluster's
+/// newest code point is: the arms of [`extends`] that look at nothing but `c`
+/// (and, for a flag half and a skin tone, at the head).
+pub(crate) fn joins_alone(c: char) -> bool {
+    is_regional_indicator(c) || is_skin_tone(c)
 }
 
 /// Does a cluster headed by `head` have a cell to land on: a head without

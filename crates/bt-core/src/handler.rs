@@ -180,6 +180,13 @@ pub(crate) struct ClusterHandler<'a, U: EventListener> {
     /// between the calls of one `advance`, so a stream of marks on narrow
     /// letters does not pay an allocation for every mark.
     scratch: String,
+    /// Whether the open cluster's newest code point is known not to be a ZWJ — the one
+    /// thing a code point with columns that is no flag half and no skin tone asks of the
+    /// cluster behind it. Known from what this wrapper itself wrote in its own life, which
+    /// is the only time nothing else touches the grid: it is false when the wrapper is
+    /// born, where the grid may have been changed (a resize) since the last read, and then
+    /// the cell is read. Of use only while `last_input` is set.
+    plain: bool,
 }
 
 impl<'a, U: EventListener> ClusterHandler<'a, U> {
@@ -192,6 +199,7 @@ impl<'a, U: EventListener> ClusterHandler<'a, U> {
             modes: None,
             commands: None,
             scratch: String::new(),
+            plain: false,
         }
     }
 
@@ -522,9 +530,11 @@ impl<'a, U: EventListener> ClusterHandler<'a, U> {
         let mark = width == Some(0);
         // A code point with columns extends a cluster only behind an open one,
         // and most of running text — CJK, accented letters — has none to look
-        // at: it goes in without the head cell being read.
-        if !mark && !open_cluster {
-            return self.term.input(c);
+        // at: it goes in without the head cell being read. So does one behind a
+        // cluster known to end in anything but a ZWJ, unless it is a flag half
+        // or a skin tone, which need no ZWJ.
+        if !mark && (!open_cluster || (self.plain && !crate::cluster::joins_alone(c))) {
+            return self.input_written(c, width);
         }
         let at = self.head();
         if mark {
@@ -537,7 +547,7 @@ impl<'a, U: EventListener> ClusterHandler<'a, U> {
                 return;
             }
             if !open_cluster {
-                return self.term.input(c);
+                return self.input_mark(c);
             }
             // A mark behind a head with columns extends it, whatever the rest of
             // the cluster is ([`crate::cluster::extends`]'s first rule and its
@@ -545,10 +555,11 @@ impl<'a, U: EventListener> ClusterHandler<'a, U> {
             // together to measure.
             let cell = &self.term.grid()[at.line][at.column];
             if !crate::cluster::has_columns(cell.c) {
-                return self.term.input(c);
+                return self.input_mark(c);
             }
             if cell.flags.contains(Flags::WIDE_CHAR) {
                 self.term.grid_mut()[at.line][at.column].push_zerowidth(c);
+                self.plain = c != crate::cluster::ZWJ;
                 return;
             }
         } else {
@@ -556,13 +567,13 @@ impl<'a, U: EventListener> ClusterHandler<'a, U> {
             // turned back by the cluster's newest code point, before the cluster
             // is copied out of the cell to be asked.
             if !crate::cluster::may_follow(self.newest(at), c, width) {
-                return self.term.input(c);
+                return self.input_written(c, width);
             }
         }
         let mut open = self.open(at);
         if !mark && !crate::cluster::extends(&open, c) {
             self.keep(open);
-            return self.term.input(c);
+            return self.input_written(c, width);
         }
         let narrow = !self.term.grid()[at.line][at.column]
             .flags
@@ -578,7 +589,33 @@ impl<'a, U: EventListener> ClusterHandler<'a, U> {
         } else {
             self.term.grid_mut()[at.line][at.column].push_zerowidth(c);
         }
+        // The code point is the cluster's newest, either way it came in.
+        self.plain = c != crate::cluster::ZWJ;
         self.keep(open);
+    }
+
+    /// `Term::input` of a code point that is not a mark, and what that leaves of
+    /// [`ClusterHandler::plain`]: the code point is the newest of the cell it starts
+    /// — if the grid writes it. A code point with no width is not written, and a wide
+    /// one that finds no room for both columns with wrapping off is not either.
+    fn input_written(&mut self, c: char, width: Option<usize>) {
+        let written = match width {
+            Some(1) => true,
+            Some(0) | None => false,
+            Some(_) => {
+                self.term.mode().contains(TermMode::LINE_WRAP)
+                    || self.term.grid().cursor.point.column.0 + 1 < self.term.columns()
+            }
+        };
+        self.term.input(c);
+        self.plain = written;
+    }
+
+    /// `Term::input` of a mark that lands on the cell before the cursor: it is that
+    /// cell's newest code point.
+    fn input_mark(&mut self, c: char) {
+        self.term.input(c);
+        self.plain = c != crate::cluster::ZWJ;
     }
 }
 
@@ -630,6 +667,8 @@ impl<U: EventListener> Handler for ClusterHandler<'_, U> {
         let open_cluster = std::mem::replace(self.last_input, true);
         // In ASCII only digits, `#` and `*` enter an arm.
         if c.is_ascii() && !crate::cluster::may_extend(c) {
+            // Printable, so written, and not a ZWJ.
+            self.plain = matches!(c, ' '..='~');
             return self.term.input(c);
         }
         self.input_extending(c, open_cluster);
@@ -646,9 +685,14 @@ impl<U: EventListener> Handler for ClusterHandler<'_, U> {
         match s.chars().next() {
             Some(first) if open_cluster && crate::cluster::may_extend(first) => {
                 self.input_extending(first, true);
-                self.term.input_ascii(s.get(1..).unwrap_or_default());
+                let rest = s.get(1..).unwrap_or_default();
+                self.plain |= !rest.is_empty();
+                self.term.input_ascii(rest);
             }
-            _ => self.term.input_ascii(s),
+            _ => {
+                self.plain = !s.is_empty();
+                self.term.input_ascii(s);
+            }
         }
     }
 
@@ -1010,6 +1054,7 @@ mod tests {
             "\u{300}",
             "\u{E0067}",
             "\u{0}",
+            "\u{85}",
             "ل",
             "ا",
             "\u{3000}",
@@ -1028,39 +1073,66 @@ mod tests {
             seed ^= seed << 17;
             usize::try_from(seed % bound as u64).unwrap_or(0)
         };
-        for round in 0..400 {
+        for round in 0..1500 {
             let (mut quick, mut slow) = (term(7, 4), term(7, 4));
             let (mut quick_open, mut slow_open) = (false, false);
             // Some rounds with a cluster that runs to the ceiling.
             let run = if round % 8 == 0 { 120 } else { 40 };
-            let mut quick_handler = ClusterHandler::new(&mut quick, true, &mut quick_open);
-            let mut slow_handler = ClusterHandler::new(&mut slow, true, &mut slow_open);
-            for _ in 0..run {
-                match next(24) {
-                    0 => {
-                        quick_handler.carriage_return();
-                        slow_handler.carriage_return();
-                    }
-                    1 => {
-                        quick_handler.linefeed();
-                        slow_handler.linefeed();
-                    }
-                    2 => {
-                        quick_handler.backspace();
-                        slow_handler.backspace();
-                    }
-                    pick => {
-                        // A run of the same mark is how a cluster is filled to its ceiling.
-                        let c = alphabet[next(alphabet.len())];
-                        let times = if pick == 3 { 1 + next(40) } else { 1 };
-                        for _ in 0..times {
-                            quick_handler.input(c);
-                            input_by_asking_everything(&mut slow_handler, c);
+            // The quicker wrapper is reborn between stretches, as the parser's is on every
+            // `advance`, with the cluster left open and what it knew of it gone.
+            for _ in 0..run / 8 {
+                let mut quick_handler = ClusterHandler::new(&mut quick, true, &mut quick_open);
+                let mut slow_handler = ClusterHandler::new(&mut slow, true, &mut slow_open);
+                for _ in 0..8 {
+                    match next(27) {
+                        0 => {
+                            quick_handler.carriage_return();
+                            slow_handler.carriage_return();
+                        }
+                        1 => {
+                            quick_handler.linefeed();
+                            slow_handler.linefeed();
+                        }
+                        2 => {
+                            quick_handler.backspace();
+                            slow_handler.backspace();
+                        }
+                        // Wrapping off, where a wide code point at the last column is not written.
+                        3 => {
+                            let wrap = PrivateMode::Named(NamedPrivateMode::LineWrap);
+                            if next(2) == 0 {
+                                quick_handler.unset_private_mode(wrap);
+                                slow_handler.unset_private_mode(wrap);
+                            } else {
+                                quick_handler.set_private_mode(wrap);
+                                slow_handler.set_private_mode(wrap);
+                            }
+                        }
+                        // A ZWJ on the last column's neighbour with wrapping off, and then a wide
+                        // code point the grid has no room to write.
+                        4 => {
+                            let wrap = PrivateMode::Named(NamedPrivateMode::LineWrap);
+                            quick_handler.unset_private_mode(wrap);
+                            slow_handler.unset_private_mode(wrap);
+                            quick_handler.carriage_return();
+                            slow_handler.carriage_return();
+                            for c in "abcdef\u{200D}旦".chars() {
+                                quick_handler.input(c);
+                                input_by_asking_everything(&mut slow_handler, c);
+                            }
+                        }
+                        pick => {
+                            // A run of the same mark is how a cluster is filled to its ceiling.
+                            let c = alphabet[next(alphabet.len())];
+                            let times = if pick == 5 { 1 + next(40) } else { 1 };
+                            for _ in 0..times {
+                                quick_handler.input(c);
+                                input_by_asking_everything(&mut slow_handler, c);
+                            }
                         }
                     }
                 }
             }
-            drop((quick_handler, slow_handler));
             assert_eq!(
                 dump(&quick, quick_open),
                 dump(&slow, slow_open),
