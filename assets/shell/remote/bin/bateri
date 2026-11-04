@@ -195,6 +195,18 @@ case $bt_bin in
   *) bt_shelldir=$HOME/.local/share/bateri/shell ;;
 esac
 
+# The command for what this starts: a terminal gets the `PATH` of whoever ran this file, and the
+# window's relay runs it by its path from a login shell that never had the command. A program
+# there calls `bateri` all the same.
+case $bt_bin in
+  */shell/bin)
+    case ":${PATH-}:" in
+      *":$bt_bin:"*) ;;
+      *) PATH=$bt_bin${PATH:+:$PATH} ;;
+    esac
+    ;;
+esac
+
 # ─── small pieces ────────────────────────────────────────────────────────
 
 # `bt_split TEXT`: the first line in `bt_l1`, the rest in `bt_rest`.
@@ -768,7 +780,7 @@ bt_open() {
     # none of the caller's own terminal identity (the tab it stands in is not the new pane's).
     if bt_err=$(
       umask "$bt_umask" 2>/dev/null
-      unset LC_BATERI_TAB_URL BATERI_TAB_URL TERM_SESSION_ID
+      unset LC_BATERI_TAB_URL BATERI_TAB_URL TERM_SESSION_ID BATERI_QUIET_ORPHAN
       # The dock's tier (the Mac's `"blocks"`) goes on to the new terminal: its shell reads it.
       if [ "${BATERI_DOCK-}" = off ]; then
         "$bt_kablo" new --id "$bt_id" ${bt_pane_label:+--label "$bt_pane_label"} --cwd "$bt_cwd" --env "PATH=$PATH" --env BATERI_DOCK=off -- "$@" 2>&1 >/dev/null

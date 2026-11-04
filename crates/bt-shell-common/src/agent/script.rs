@@ -51,7 +51,7 @@ case $cmd in
       exit 1
     fi
     umask > "$STUB_DIR/umask.new"
-    env | grep -E '^(LC_BATERI_TAB_URL|BATERI_TAB_URL|TERM_SESSION_ID)=' > "$STUB_DIR/env.new"
+    env | grep -E '^(LC_BATERI_TAB_URL|BATERI_TAB_URL|TERM_SESSION_ID|BATERI_QUIET_ORPHAN)=' > "$STUB_DIR/env.new"
     printf '%s\n' "$id"
     ;;
   app)
@@ -446,7 +446,11 @@ fn new_call(server: &Server, id: &str, program: &[&str]) -> Vec<String> {
         "--cwd",
         &server.home.display().to_string(),
         "--env",
-        &format!("PATH={}", std::env::var("PATH").unwrap_or_default()),
+        &format!(
+            "PATH={}:{}",
+            server.shell_dir().join("bin").display(),
+            std::env::var("PATH").unwrap_or_default()
+        ),
         "--",
     ]
     .iter()
@@ -530,6 +534,24 @@ fn a_split_starts_the_terminal_and_tells_the_mac_where_the_pane_goes() {
         // Nothing waits: the Mac took it.
         assert_eq!(server.note("p1"), None);
     }
+}
+
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn a_caller_with_the_command_on_its_path_hands_that_path_on_as_it_is() {
+    let server = Server::new("split-path-once");
+    server.mac_says(PLACED);
+    let path = format!("/usr/bin:{}:/bin", server.shell_dir().join("bin").display());
+    let said = server.run_file_with(
+        Path::new("/bin/sh"),
+        &server.script(),
+        Some("p4"),
+        &["split", "--", "make"],
+        &[("PATH", &path)],
+    );
+    assert_eq!(said.status, 0, "{}", said.err);
+    let calls = server.calls_of("new");
+    assert!(calls[0].contains(&format!("PATH={path}")), "{:?}", calls[0]);
 }
 
 #[test]
@@ -3189,6 +3211,25 @@ fn the_command_the_window_runs_for_a_relay_reaches_the_script_of_the_other_machi
                 rasp.home.display().to_string(),
                 vec!["make".to_owned(), "it's ok".to_owned()]
             )
+        );
+        // The program finds the command there: this login shell never had it on `PATH`, and a
+        // terminal gets the `PATH` of whoever ran the script. What only this script reads stays
+        // here.
+        let bin = rasp.shell_dir().join("bin").display().to_string();
+        let path = calls[0]
+            .iter()
+            .find_map(|word| word.strip_prefix("PATH="))
+            .expect("the terminal's PATH");
+        assert_eq!(
+            path.split(':').filter(|dir| *dir == bin).count(),
+            1,
+            "{name}: {path}"
+        );
+        assert!(
+            !std::fs::read_to_string(rasp.stub.join("env.new"))
+                .expect("env")
+                .contains("BATERI_QUIET_ORPHAN"),
+            "{name}"
         );
 
         // A machine that was never opened from bateri is told to be.
