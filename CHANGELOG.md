@@ -22,6 +22,7 @@ of every installed copy. A version without a section is not released.
 - A program's view on a server comes back by itself after the connection drops, as when the computer sleeps. It used to leave an empty pane with the program still running behind it, until you quit the program and started it again.
 - If the program ended while the connection was gone, its view closes and nothing is typed at the prompt that took its place.
 - After the computer sleeps and wakes, a server terminal is no longer reported as opened on this same computer, with its keys dead until you brought it back.
+- Ctrl-C pressed while a program on a server prints faster than the connection carries now reaches the program. It could be lost, and the program went on. What was already on its way still shows first, so on a slow connection the prompt can take seconds to come back.
 
 ## [0.23.0] - 2026-11-03
 
