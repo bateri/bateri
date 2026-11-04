@@ -41,6 +41,7 @@ use crate::Run;
 use crate::child;
 use crate::launch::{self, Held, Launch};
 use crate::pane::PaneLaunch;
+use crate::restore::PaneRuns;
 
 pub use crate::footer::ListeningPort;
 pub use crate::launch::{Identity, Integration};
@@ -97,8 +98,8 @@ pub struct Config {
     /// A terminal a server keeps shown as the pane's first program, the shell following it
     /// ([`Held`]); `None` → the shell is the first program.
     pub(crate) held: Option<Held>,
-    /// The shell the pane is for, by its path; `None` → the user's own.
-    pub(crate) shell: Option<PathBuf>,
+    /// What the pane runs; the integration above is for that.
+    pub(crate) runs: PaneRuns,
 }
 
 impl Config {
@@ -136,7 +137,7 @@ impl Config {
             run: None,
             stats: None,
             held: None,
-            shell: None,
+            runs: PaneRuns::UserShell,
         }
     }
 }
@@ -152,7 +153,7 @@ impl Config {
             replay,
             env,
             held,
-            shell,
+            runs,
         } = launch;
         Self {
             working_directory,
@@ -161,7 +162,7 @@ impl Config {
             replay,
             env,
             held,
-            shell,
+            runs,
             ..self
         }
     }
@@ -213,7 +214,7 @@ pub fn open(
         run,
         stats,
         held,
-        shell,
+        runs,
     } = config;
     let pane = TerminalPane::new(
         mtm,
@@ -233,7 +234,7 @@ pub fn open(
                 replay,
                 env,
                 held,
-                shell,
+                runs,
             },
             integration,
             reduce_motion,

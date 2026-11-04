@@ -12,7 +12,8 @@
 //! **The format** follows `remote-hosts` (`ssh_wrap`): line based, the first line names the
 //! version ([`HEADER`] + [`VERSION`]), then one `W` line per window, one `T` line per tab under it
 //! and one `P` line per pane under that; the tree is a pre-order token run (`S h|v {ratio} … L
-//! {index}`). **Every version the writer still writes is read**: version 8 gave a window, a group and a tab the
+//! {index}`). **Every version the writer still writes is read**: version 8 gave a pane what it runs
+//! ([`PaneRuns`], the field after the remote line) and a window, a group and a tab the
 //! number it is known by from outside ([`crate::ids`]: the last field of a `W` and a `G` line, a
 //! `T` line's field after the group, `-` for none), version 7 gave a window whether
 //! its side column hides and whether it shows Activity (a `W` line's eighth and ninth fields,
@@ -239,6 +240,51 @@ pub struct SavedPane {
     pub kept: Option<SavedKept>,
     /// Whether a history file was written for this pane.
     pub history: bool,
+    /// What the pane runs.
+    pub runs: PaneRuns,
+}
+
+/// What a pane runs, when a command asked for it: one answer to what it is born with and what a
+/// restart brings back, because the two must not disagree.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum PaneRuns {
+    /// The user's own shell: every pane the user opens, and `bateri split` with no program.
+    #[default]
+    UserShell,
+    /// A shell a command named alone (`bateri split -- fish`), by its path: that shell's
+    /// integration and dock, and it comes back as that shell.
+    Shell(PathBuf),
+    /// A program a command started in the terminal (`bateri split -- make`). It has no shell to
+    /// fill a dock. With its terminal gone it does not come back, unless it was asked to stay
+    /// open: then it comes back as the user's shell, as a server's does.
+    Program { keep_open: bool },
+}
+
+impl PaneRuns {
+    /// The shell the pane asks to be started with; `None` is the user's own.
+    pub fn shell(&self) -> Option<&Path> {
+        match self {
+            Self::Shell(path) => Some(path),
+            Self::UserShell | Self::Program { .. } => None,
+        }
+    }
+
+    /// What a pane that ran this runs after a restart. `terminal_here`: its terminal is still
+    /// there and the pane shows it again, so it is what it was. Without it a program asked to
+    /// stay open is the user's shell, and so is a shell that is not on the machine any more. A
+    /// program that is not to stay does not get here ([`Self::ends_with_its_terminal`]).
+    pub fn after_restart(&self, terminal_here: bool) -> Self {
+        match self {
+            Self::Shell(path) if !terminal_here && !path.exists() => Self::UserShell,
+            Self::Program { keep_open: true } if !terminal_here => Self::UserShell,
+            other => other.clone(),
+        }
+    }
+
+    /// Whether the pane goes when its terminal does.
+    pub fn ends_with_its_terminal(&self) -> bool {
+        matches!(self, Self::Program { keep_open: false })
+    }
 }
 
 /// A terminal a server keeps (kablo), as far as a restored pane needs to find it again: which
@@ -703,7 +749,13 @@ impl Saved {
         let numbered = self.windows.iter().any(|window| {
             window.id.is_some()
                 || window.groups.iter().any(|group| group.id.is_some())
-                || window.tabs.iter().any(|tab| tab.id.is_some())
+                || window.tabs.iter().any(|tab| {
+                    tab.id.is_some()
+                        || tab
+                            .panes
+                            .iter()
+                            .any(|pane| pane.runs != PaneRuns::UserShell)
+                })
         });
         let version = if numbered {
             VERSION
@@ -799,6 +851,10 @@ impl Saved {
                         render_optional(dir),
                         render_optional(pane.remote_line.as_deref()),
                     ));
+                    if version >= VERSION {
+                        out.push(' ');
+                        out.push_str(&render_runs(&pane.runs));
+                    }
                     // The kept terminal ends the line: its arguments are a run of tokens of
                     // any length.
                     if version >= KEPT {
@@ -1041,6 +1097,11 @@ fn parse_pane<'a>(tokens: &mut impl Iterator<Item = &'a str>, version: u32) -> O
     let history = parse_bit(tokens.next()?)?;
     let dir = parse_optional(tokens.next()?)?.map(PathBuf::from);
     let remote_line = parse_optional(tokens.next()?)?;
+    let runs = if version >= VERSION {
+        parse_runs(tokens.next()?)?
+    } else {
+        PaneRuns::UserShell
+    };
     // Versions before 5 have no kept terminal.
     let kept = if version >= KEPT {
         parse_kept(tokens, version)?
@@ -1054,6 +1115,29 @@ fn parse_pane<'a>(tokens: &mut impl Iterator<Item = &'a str>, version: u32) -> O
         remote_line,
         kept,
         history,
+        runs,
+    })
+}
+
+/// [`PaneRuns`] as a `P` line's field: `-` the user's shell, `+{path}` a shell, `p` a program, `k` a
+/// program asked to stay open. A path that is not UTF-8 is saved as the user's shell.
+fn render_runs(runs: &PaneRuns) -> String {
+    match runs {
+        PaneRuns::UserShell => "-".to_owned(),
+        PaneRuns::Shell(path) => render_optional(path.to_str()),
+        PaneRuns::Program { keep_open: false } => "p".to_owned(),
+        PaneRuns::Program { keep_open: true } => "k".to_owned(),
+    }
+}
+
+/// The field [`render_runs`] writes; the outer `None` is a field not understood.
+fn parse_runs(token: &str) -> Option<PaneRuns> {
+    Some(match token {
+        "p" => PaneRuns::Program { keep_open: false },
+        "k" => PaneRuns::Program { keep_open: true },
+        token => parse_optional(token)?.map_or(PaneRuns::UserShell, |path| {
+            PaneRuns::Shell(PathBuf::from(path))
+        }),
     })
 }
 
@@ -1404,6 +1488,7 @@ mod tests {
             remote_line: None,
             kept: None,
             history: false,
+            runs: PaneRuns::UserShell,
         }
     }
 
@@ -1461,6 +1546,7 @@ mod tests {
                     remote_line: None,
                     kept: None,
                     history: true,
+                    runs: PaneRuns::UserShell,
                 },
                 SavedPane {
                     uuid: id(B),
@@ -1469,6 +1555,7 @@ mod tests {
                     remote_line: Some("ssh -p 2222 prod".to_owned()),
                     kept: None,
                     history: false,
+                    runs: PaneRuns::UserShell,
                 },
                 SavedPane {
                     uuid: id(C),
@@ -1477,6 +1564,7 @@ mod tests {
                     remote_line: Some(String::new()),
                     kept: None,
                     history: true,
+                    runs: PaneRuns::UserShell,
                 },
             ],
             focused: 1,
@@ -1742,27 +1830,74 @@ mod tests {
         saved
     }
 
+    /// What a pane runs is its own field, in the version that says it; what is not one of the
+    /// four is a file not understood.
+    #[test]
+    fn a_pane_keeps_what_it_runs() {
+        let text = |runs: &str| {
+            format!(
+                "bateri-session 8\nW 0 0 800 600 0 0 - 0 0 1\nT 0 - - - 1 L 0\n\
+                 P 11111111-2222-3333-4444-555555555555 0 0 - - {runs} -\n"
+            )
+        };
+        for (token, runs) in [
+            ("-", PaneRuns::UserShell),
+            (
+                r"+/opt/my\sbin/fish",
+                PaneRuns::Shell(PathBuf::from("/opt/my bin/fish")),
+            ),
+            ("p", PaneRuns::Program { keep_open: false }),
+            ("k", PaneRuns::Program { keep_open: true }),
+        ] {
+            let saved = Saved::parse(&text(token)).expect(token);
+            assert_eq!(saved.windows[0].tabs[0].panes[0].runs, runs, "{token}");
+            assert_eq!(saved.render(), text(token), "{token}");
+        }
+        assert_eq!(Saved::parse(&text("x")), None);
+    }
+
+    /// A restart brings back what the pane ran, as far as that is still there.
+    #[test]
+    fn what_a_pane_runs_after_a_restart_follows_its_terminal() {
+        let gone_shell = PaneRuns::Shell(PathBuf::from("/no/such/place/fish"));
+        let shell_here = PaneRuns::Shell(std::env::current_exe().expect("this program"));
+        let program = PaneRuns::Program { keep_open: false };
+        let stays = PaneRuns::Program { keep_open: true };
+        // Its terminal is there: it is what it was, whatever became of the file.
+        for runs in [&gone_shell, &shell_here, &program, &stays] {
+            assert_eq!(&runs.after_restart(true), runs);
+        }
+        // It is not: a shell starts again if it can, and a program asked to stay is the user's.
+        assert_eq!(gone_shell.after_restart(false), PaneRuns::UserShell);
+        assert_eq!(shell_here.after_restart(false), shell_here);
+        assert_eq!(stays.after_restart(false), PaneRuns::UserShell);
+        assert!(program.ends_with_its_terminal());
+        assert!(!stays.ends_with_its_terminal());
+        assert!(!shell_here.ends_with_its_terminal());
+        assert!(!PaneRuns::UserShell.ends_with_its_terminal());
+    }
+
     const V8_FIXTURE: &str = concat!(
         "bateri-session 8\n",
         "W 120.5 -30 800 600.25 1 1 260.5 1 0 1\n",
         "G api\\sserver 0 2 1\n",
         "G ünï 1 - 2\n",
         "T 0 - - - 1 L 0\n",
-        "P 11111111-2222-3333-4444-555555555555 0 0 - - -\n",
+        "P 11111111-2222-3333-4444-555555555555 0 0 - - - -\n",
         "T 1 2 - 0 2 S h 0.3333333333333333 L 2 S v 0.71 L 0 L 1\n",
-        r"P 0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0 3 1 +/Users/ömer/My\sDrive/çalışma\\dosya - -",
+        r"P 0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0 3 1 +/Users/ömer/My\sDrive/çalışma\\dosya - - -",
         "\n",
-        r"P 11111111-2222-3333-4444-555555555555 -2 0 +/tmp/tab\there\nnew\sline\rcr\s- +ssh\s-p\s2222\sprod +ada@prod:2222 b-0123456789abcdef0123456789abcdef 1 +Claude\s(t4) -p 2222 ada@prod",
+        r"P 11111111-2222-3333-4444-555555555555 -2 0 +/tmp/tab\there\nnew\sline\rcr\s- +ssh\s-p\s2222\sprod - +ada@prod:2222 b-0123456789abcdef0123456789abcdef 1 +Claude\s(t4) -p 2222 ada@prod",
         "\n",
-        "P AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE 0 1 + + -\n",
+        "P AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE 0 1 + + - -\n",
         "T 0 - - 0 3 L 0\n",
-        "P AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE 0 0 - - -\n",
+        "P AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE 0 0 - - - -\n",
         // A tab with no number: the field is there and says so.
         "T 0 - - 1 - L 0\n",
-        "P 0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0 0 0 - - -\n",
+        "P 0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0 0 0 - - - -\n",
         "W 120.5 -30 800 600.25 0 0 - 0 1 2\n",
         "T 0 - - - 7 L 0\n",
-        r"P AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE 0 0 - - +root@rasp:22\svia\sjump:22 b-fedcba9876543210fedcba9876543210 0 +t12 -J my\sjump root@rasp",
+        r"P AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE 0 0 - - - +root@rasp:22\svia\sjump:22 b-fedcba9876543210fedcba9876543210 0 +t12 -J my\sjump root@rasp",
         "\n",
     );
 

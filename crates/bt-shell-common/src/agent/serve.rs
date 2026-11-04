@@ -587,6 +587,18 @@ mod tests {
         };
         assert!(failure.text.contains("bootstrap"), "{}", failure.text);
         assert!(mac.placed.is_empty() && mac.openers.is_empty());
+        // A server cannot have this Mac start a shell by naming one either: nothing of it runs.
+        let ask = place_text("anchor p4\nfresh /tmp\nshell /bin/zsh\n");
+        let mut mac = Pretend {
+            anchors: vec!["p4".into()],
+            ..Pretend::default()
+        };
+        let Answer::Reply(Reply::Failed(failure)) = serve(&server(), Some("p4"), &ask, &mut mac)
+        else {
+            panic!("refused");
+        };
+        assert!(failure.text.contains("bootstrap"), "{}", failure.text);
+        assert!(mac.placed.is_empty() && mac.openers.is_empty());
     }
 
     /// Reaching another machine — starting a terminal there, or working with one — is a `full`

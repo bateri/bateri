@@ -18,6 +18,7 @@ use objc2::MainThreadMarker;
 use objc2_app_kit::{NSScroller, NSScrollerStyle, NSWorkspace};
 
 use crate::child;
+use crate::restore::PaneRuns;
 
 /// Who the application that opens a pane is, where bateri would say "bateri" —
 /// given by whoever opens the pane, never guessed from the running program
@@ -116,15 +117,17 @@ pub(crate) fn with_dock(
     }
 }
 
-/// What a pane opened for a program of its own (`bateri split -- sh`) has of the integration: no
-/// dock share. The share is for the shell the integration is read by; a program started by a
-/// command prints no mark, and a share is not given back ([`Integration::dock_rows`]), so it would
-/// stay as an input line nothing writes to. A shell bateri has an integration for, named alone
-/// (`bateri split -- zsh`), is no such program: the script asks for it as a shell (`Start::shell`).
-pub(crate) fn for_program(integration: Integration) -> Integration {
-    Integration {
-        dock_rows: 0,
-        ..integration
+/// What a pane that runs `runs` has of the shell integration. `integration_of` is the decision for
+/// a shell ([`integration_env`]), the user's with `None`. A program a command started (`bateri
+/// split -- sh`) has none: it prints no mark, and a dock share is not given back
+/// ([`Integration::dock_rows`]), so it would stay as an input line nothing writes to.
+pub(crate) fn integration_for(
+    runs: &PaneRuns,
+    integration_of: impl FnOnce(Option<&Path>) -> Integration,
+) -> Integration {
+    match runs {
+        PaneRuns::UserShell | PaneRuns::Shell(_) => integration_of(runs.shell()),
+        PaneRuns::Program { .. } => Integration::default(),
     }
 }
 
@@ -478,8 +481,8 @@ pub(crate) struct Launch {
     /// A terminal a server keeps that the pane's first program shows instead of a shell
     /// starting first ([`Held`]); `None` → the shell is the first program.
     pub(crate) held: Option<Held>,
-    /// The shell asked for by its path (`bateri split -- fish`); `None` → the user's own.
-    pub(crate) shell: Option<PathBuf>,
+    /// What the pane runs ([`PaneRuns`]).
+    pub(crate) runs: PaneRuns,
 }
 
 /// A pane whose **first program** is the pipe to a terminal a server keeps
@@ -602,17 +605,38 @@ pub(crate) fn fallen_back(history: Option<Vec<u8>>, note: Note) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    /// The dock of `-- zsh` and of no `-- sh`: a shell is asked the one decision there is, by its
+    /// path, and a program is not asked at all.
     #[test]
-    fn a_program_a_command_started_gets_no_dock_and_the_rest_as_it_was() {
+    fn what_a_pane_runs_decides_its_integration_and_a_program_has_none() {
         let shell = super::Integration {
             env: vec![("ZDOTDIR".to_owned(), "/w".to_owned())],
             shell_args: vec!["--posix".to_owned()],
             dock_rows: 3,
         };
-        let program = super::for_program(shell.clone());
-        assert_eq!(program.dock_rows, 0);
-        assert_eq!(program.env, shell.env);
-        assert_eq!(program.shell_args, shell.shell_args);
+        let asked = |runs: &super::PaneRuns| {
+            let mut got = None;
+            let integration = super::integration_for(runs, |path| {
+                got = Some(path.map(std::path::Path::to_path_buf));
+                shell.clone()
+            });
+            (integration, got)
+        };
+        assert_eq!(
+            asked(&super::PaneRuns::UserShell),
+            (shell.clone(), Some(None))
+        );
+        let fish = std::path::PathBuf::from("/opt/bin/fish");
+        assert_eq!(
+            asked(&super::PaneRuns::Shell(fish.clone())),
+            (shell.clone(), Some(Some(fish)))
+        );
+        for keep_open in [false, true] {
+            assert_eq!(
+                asked(&super::PaneRuns::Program { keep_open }),
+                (super::Integration::default(), None)
+            );
+        }
     }
 
     #[test]

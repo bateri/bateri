@@ -109,7 +109,7 @@ use crate::promise::FinderDrops;
 use crate::quote;
 use crate::remote_helper::RemoteHelper;
 use crate::remote_ports::RemotePorts;
-use crate::restore::{SavedKept, SavedPane};
+use crate::restore::{PaneRuns, SavedKept, SavedPane};
 use crate::search_bar::{SearchBar, selection_query};
 use crate::server_card::ServerCard;
 use crate::ssh_route::Masters;
@@ -2227,6 +2227,9 @@ pub struct PaneIvars {
     /// its terminal ends, and who asked for it. Session restore saves both, so a pane born again
     /// after a restart is still that program's.
     asked_for: RefCell<AskedFor>,
+    /// What the pane runs, from its start ([`PaneRuns`]): session restore saves it, so a pane born
+    /// again after a restart is what it was.
+    runs: RefCell<PaneRuns>,
     /// The remote generation this pane reported to the masters' registry
     /// ([`Masters::session_started`]); `None` locally.
     ssh_session: Cell<Option<u64>>,
@@ -2902,6 +2905,7 @@ impl TerminalPane {
             masters,
             identity,
             asked_for: RefCell::new(AskedFor::default()),
+            runs: RefCell::new(PaneRuns::default()),
             ssh_session: Cell::new(None),
             wrap_proof: RefCell::new(WrapProof::default()),
             program_memo: Cell::new(ProgramMemo::default()),
@@ -3151,6 +3155,7 @@ impl TerminalPane {
             remote_line: session.remote_line(),
             kept: self.saved_kept(),
             history: history.is_some(),
+            runs: self.ivars().runs.borrow().clone(),
         };
         Some((pane, history))
     }
@@ -3687,7 +3692,7 @@ impl TerminalPane {
             replay,
             env: extra_env,
             held,
-            shell: asked_shell,
+            runs,
         } = launch;
         // Whether the pipe is started or a terminal shown again goes on, the pane is the
         // program's it was asked for by: the pipe has the flag on its own command line, and
@@ -3698,6 +3703,8 @@ impl TerminalPane {
                 opener: held.opener.clone(),
             });
         }
+        let asked_shell = runs.shell().map(std::path::Path::to_path_buf);
+        self.ivars().runs.replace(runs);
         // In smoke and measurement runs the shell is fixed: the result must not
         // depend on the user's `$SHELL` and rc file. The owner of the scripts
         // is `bt-core`; that `smoke_shell` gives eight cells and six glyphs is

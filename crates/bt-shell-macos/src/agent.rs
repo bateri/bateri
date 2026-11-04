@@ -87,6 +87,7 @@ use crate::hold_service;
 use crate::ids::{Id, Kind as IdKind};
 use crate::launch::{Held, Resume};
 use crate::pane::TerminalPane;
+use crate::restore::PaneRuns;
 use crate::tab::TerminalTab;
 use crate::uploader;
 use crate::window::{Lodging, TerminalWindow, initial_rect};
@@ -468,10 +469,7 @@ impl<'a> World<'a> {
                 run: false,
                 held: None,
                 uuid: uuid.clone(),
-                // No `fresh`: the script started a program in the terminal, and no shell of the
-                // user's is there to fill a dock.
-                program: place.fresh.is_none(),
-                shell: place.shell.as_ref().map(PathBuf::from),
+                runs: place.runs(),
             }
         } else {
             if !pipe_installed(&app.shell_integration().env) {
@@ -497,8 +495,7 @@ impl<'a> World<'a> {
                     opener: Some(opener),
                 }),
                 uuid: None,
-                program: false,
-                shell: None,
+                runs: PaneRuns::UserShell,
             }
         };
         let incoming = app.next_id();
@@ -1178,20 +1175,18 @@ mod tests {
     /// place that is not there is a refusal and not a pane in the wrong tab, and a window made for
     /// a pane takes the keyboard only where the rule gives it. A source scan: the windows are
     /// AppKit's and need a window server.
-    /// `bateri split -- sh` on this Mac: the dock is the user's shell's, and `sh` draws none.
+    /// What a request runs reaches the pane by one word (`Place::runs`), and the pane's integration
+    /// and first command follow from it (`launch::integration_for`, `PaneRuns::shell`), each tested
+    /// where it is written: only the joining is left to read here, since it needs a window.
     #[test]
-    fn a_pane_a_program_was_started_for_is_told_so_and_one_with_no_program_is_not() {
+    fn what_a_request_runs_reaches_the_pane_it_opens() {
         let source = include_str!("agent.rs");
         let source = &source[..source.find("#[cfg(test)]").unwrap_or(source.len())];
-        assert!(source.contains("program: place.fresh.is_none(),"));
+        assert!(source.contains("runs: place.runs(),"));
         let app = include_str!("app.rs");
-        assert!(app.contains("start.is_some_and(|start| start.program)"));
-        assert!(app.contains("launch::for_program(self.shell_integration())"));
-        // A shell asked for by its path has that shell's integration, and is the pane's program.
-        assert!(source.contains("shell: place.shell.as_ref().map(PathBuf::from),"));
         assert!(
             app.contains(
-                "self.shell_integration_of(start.and_then(|start| start.shell.as_deref()))"
+                "launch::integration_for(&runs, |shell| self.shell_integration_of(shell))"
             )
         );
         assert!(

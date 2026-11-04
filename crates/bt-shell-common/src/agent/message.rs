@@ -396,6 +396,21 @@ impl Home {
     }
 }
 
+impl Place {
+    /// What the pane this asks for runs: no `fresh` is a program the script started in the
+    /// terminal, `fresh` is a shell for the Mac to start, the one named or the user's.
+    pub fn runs(&self) -> crate::restore::PaneRuns {
+        use crate::restore::PaneRuns;
+        match (&self.fresh, &self.shell) {
+            (None, _) => PaneRuns::Program {
+                keep_open: self.keep_open,
+            },
+            (Some(_), Some(shell)) => PaneRuns::Shell(std::path::PathBuf::from(shell)),
+            (Some(_), None) => PaneRuns::UserShell,
+        }
+    }
+}
+
 /// The path of a shell bateri has an integration for: nothing else is opened this way.
 fn check_shell(path: &str) -> Result<(), Failure> {
     let shell = std::path::Path::new(path);
@@ -1716,11 +1731,30 @@ mod tests {
         ] {
             assert!(Request::parse(bad).is_err(), "{bad}");
         }
+        // What the pane runs follows from the request, with no second word for it.
+        assert_eq!(
+            place.runs(),
+            crate::restore::PaneRuns::Shell("/opt/bin/fish".into())
+        );
+        let own = Place {
+            shell: None,
+            ..place.clone()
+        };
+        assert_eq!(own.runs(), crate::restore::PaneRuns::UserShell);
         let unfresh = Place {
             fresh: None,
             ..place
         };
-        assert!(Request::Place(unfresh).encode().is_err());
+        assert!(Request::Place(unfresh.clone()).encode().is_err());
+        let program = Place {
+            shell: None,
+            keep_open: true,
+            ..unfresh
+        };
+        assert_eq!(
+            program.runs(),
+            crate::restore::PaneRuns::Program { keep_open: true }
+        );
     }
 
     #[test]

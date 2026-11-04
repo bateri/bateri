@@ -179,6 +179,7 @@ bateri split --tab t3 --label server -- make up  # a pane in that tab, with a la
 bateri tab -- make watch                         # in a tab of its own, next to this one
 bateri tab --new-group api --label web           # in a group made for it; also --group g1, --window w1
 bateri window -- make watch                      # in a window of its own; the keyboard stays where it was
+bateri split -- zsh                              # a shell named alone is a shell: its dock, and bateri in it (also fish, bash 4.4+)
 bateri ls [--json]                               # windows, groups, tabs, splits, and the server's panes
 bateri send p9 'q'                               # type into a pane (kablo's send)
 bateri send-key p9 enter

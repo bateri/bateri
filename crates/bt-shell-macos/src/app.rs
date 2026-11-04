@@ -60,7 +60,7 @@ use crate::pane::TerminalPane;
 use crate::pane_drag::Session;
 use crate::preview_cache;
 use crate::remote_files::Sweep;
-use crate::restore::{self, Frame, Saved, SavedKept, SavedPane, SavedWindow};
+use crate::restore::{self, Frame, PaneRuns, Saved, SavedKept, SavedPane, SavedWindow};
 use crate::settings_window::SettingsWindow;
 use crate::split::{Axis, Direction, Tree};
 use crate::ssh_route::{self, Masters};
@@ -425,12 +425,8 @@ pub(crate) struct Start {
     /// program on this Mac asked for, whose terminal the ledger has for it already
     /// ([`crate::hold_service::register_local`]).
     pub(crate) uuid: Option<PaneUuid>,
-    /// The pane shows a program a command started (`bateri split -- sh`), not the user's shell:
-    /// it is born with no dock ([`crate::launch::for_program`]).
-    pub(crate) program: bool,
-    /// The shell the pane is for, asked for by its path (`bateri split -- fish`), with the
-    /// integration and the dock of that shell; `None`: the user's own.
-    pub(crate) shell: Option<PathBuf>,
+    /// What the pane runs, when a command asked ([`PaneRuns`]): its integration and its dock follow.
+    pub(crate) runs: PaneRuns,
 }
 
 /// Where a command the palette lists ran, in the same order as the list the palette was handed
@@ -620,17 +616,21 @@ fn restored_launch(
         replay,
         env: Vec::new(),
         held,
-        shell: None,
+        // What it comes back as is asked with what became of its terminal ([`PaneRuns::after_restart`]).
+        runs: PaneRuns::UserShell,
     }
 }
 
 /// Whether a saved pane does not come back: a pane a program on a server asked for, which closes
 /// when its terminal ends, whose terminal is no longer there to show (`start` has no pipe to it)
-/// — the terminal ended with the quit, or after a crash. Had bateri
+/// — the terminal ended with the quit, or after a crash — and a program a command started on this
+/// Mac whose terminal is not there either (`terminal_here`). Had bateri
 /// been running, the pane would have closed with it; a pane asked to stay open, and every pane the
 /// user opened, comes back as a shell with the note of what became of the terminal.
-fn gone_with_its_terminal(pane: &SavedPane, start: &Launch) -> bool {
-    start.held.is_none() && pane.kept.as_ref().is_some_and(|kept| kept.close_at_end)
+fn gone_with_its_terminal(pane: &SavedPane, start: &Launch, terminal_here: bool) -> bool {
+    let on_a_server =
+        start.held.is_none() && pane.kept.as_ref().is_some_and(|kept| kept.close_at_end);
+    on_a_server || (pane.runs.ends_with_its_terminal() && !terminal_here)
 }
 
 /// How long after the first windows are built a launch counts as settled
@@ -4265,11 +4265,8 @@ impl AppDelegate {
             .and_then(|start| start.directory.clone())
             .or_else(|| session.and_then(|session| session.working_directory()))
             .or_else(child::working_directory);
-        let integration = if start.is_some_and(|start| start.program) {
-            launch::for_program(self.shell_integration())
-        } else {
-            self.shell_integration_of(start.and_then(|start| start.shell.as_deref()))
-        };
+        let runs = start.map_or_else(PaneRuns::default, |start| start.runs.clone());
+        let integration = launch::integration_for(&runs, |shell| self.shell_integration_of(shell));
         // A pane that shows a terminal a server keeps: the new pane's first program is
         // the same `ssh`, and the terminal it asks for starts in the same folder there.
         let served = from.and_then(TerminalPane::server_target);
@@ -4317,7 +4314,7 @@ impl AppDelegate {
             stats: self.stats(),
             held,
             env: Vec::new(),
-            shell: start.and_then(|start| start.shell.clone()),
+            runs,
         };
         (config, theme)
     }
@@ -4646,14 +4643,20 @@ impl AppDelegate {
         } else {
             None
         };
-        let start = restored_launch(pane, replay, |kept| {
+        let mut start = restored_launch(pane, replay, |kept| {
             piped && crate::hold_service::keeps(&kept.account, &kept.terminal)
         });
-        if gone_with_its_terminal(pane, &start) {
+        let terminal_here = crate::hold_service::local_terminal(&pane.uuid).is_some();
+        if gone_with_its_terminal(pane, &start, terminal_here) {
             return None;
         }
+        start.runs = pane.runs.after_restart(terminal_here);
         let (launch, theme) = self.pane_launch(tab, None, Opening::Restore, None);
         let mut launch = launch.with_launch(start);
+        if launch.runs != PaneRuns::UserShell {
+            launch.integration =
+                launch::integration_for(&launch.runs, |shell| self.shell_integration_of(shell));
+        }
         launch.zoom = Zoom::from_steps(pane.zoom_steps, &launch.settings.font);
         Some((launch, theme))
     }
@@ -5183,8 +5186,7 @@ impl AppDelegate {
                     run: false,
                     held: None,
                     uuid: None,
-                    program: false,
-                    shell: None,
+                    runs: PaneRuns::UserShell,
                 };
                 self.new_tab_started(window.id(), Seat::Beside, Some(&start));
             }
@@ -5199,8 +5201,7 @@ impl AppDelegate {
                     run: true,
                     held: None,
                     uuid: None,
-                    program: false,
-                    shell: None,
+                    runs: PaneRuns::UserShell,
                 };
                 let split = beside
                     && window
@@ -5315,8 +5316,7 @@ impl AppDelegate {
                 opener: None,
             }),
             uuid: None,
-            program: false,
-            shell: None,
+            runs: PaneRuns::UserShell,
         })
     }
 
@@ -5711,8 +5711,7 @@ impl AppDelegate {
                 run: false,
                 held: None,
                 uuid: None,
-                program: false,
-                shell: None,
+                runs: PaneRuns::UserShell,
             })
         };
         match how {
@@ -8596,6 +8595,7 @@ mod tests {
             remote_line: Some("ssh prod".into()),
             kept: None,
             history: true,
+            runs: PaneRuns::UserShell,
         };
         let nothing_kept = |_: &SavedKept| -> bool { panic!("no terminal is asked about") };
         let launch = restored_launch(&pane, Some(b"ls\r\n".to_vec()), nothing_kept);
@@ -8632,6 +8632,7 @@ mod tests {
                 opener: None,
             }),
             history: true,
+            runs: PaneRuns::UserShell,
         }
     }
 
@@ -8656,7 +8657,7 @@ mod tests {
         let held = launch.held.as_ref().expect("the pipe again");
         assert!(held.close_at_end);
         assert_eq!(held.opener.as_deref(), Some("Claude (t4)"));
-        assert!(!gone_with_its_terminal(&pane, &launch));
+        assert!(!gone_with_its_terminal(&pane, &launch, false));
         let mut stays = asked_pane();
         if let Some(kept) = &mut stays.kept {
             kept.close_at_end = false;
@@ -8675,10 +8676,30 @@ mod tests {
     fn a_pane_that_closes_with_its_terminal_does_not_come_back_without_it() {
         let pane = asked_pane();
         let launch = restored_launch(&pane, None, |_| false);
-        assert!(gone_with_its_terminal(&pane, &launch));
+        assert!(gone_with_its_terminal(&pane, &launch, false));
         let users = kept_pane();
         let launch = restored_launch(&users, None, |_| false);
-        assert!(!gone_with_its_terminal(&users, &launch));
+        assert!(!gone_with_its_terminal(&users, &launch, false));
+    }
+
+    /// A program a command started on this Mac goes with its terminal, and shows it again while
+    /// it is there; asked to stay open, or a shell, it comes back.
+    #[test]
+    fn a_program_of_this_mac_comes_back_only_with_its_terminal() {
+        let of = |runs: PaneRuns| {
+            let mut pane = kept_pane();
+            pane.kept = None;
+            pane.runs = runs;
+            let launch = restored_launch(&pane, None, |_| false);
+            (
+                gone_with_its_terminal(&pane, &launch, false),
+                gone_with_its_terminal(&pane, &launch, true),
+            )
+        };
+        assert_eq!(of(PaneRuns::Program { keep_open: false }), (true, false));
+        assert_eq!(of(PaneRuns::Program { keep_open: true }), (false, false));
+        assert_eq!(of(PaneRuns::Shell("/bin/zsh".into())), (false, false));
+        assert_eq!(of(PaneRuns::UserShell), (false, false));
     }
 
     /// A pane that showed a terminal a server keeps comes back as the pipe to it, asked for by
@@ -8918,8 +8939,7 @@ mod tests {
             run: false,
             held: None,
             uuid: None,
-            program: false,
-            shell: None,
+            runs: PaneRuns::UserShell,
         };
         assert_eq!(
             first_input(Opening::Tab, remote(), Some(&folder)),
@@ -8931,8 +8951,7 @@ mod tests {
             run: false,
             held: None,
             uuid: None,
-            program: false,
-            shell: None,
+            runs: PaneRuns::UserShell,
         };
         let (input, inherited) = first_input(Opening::Tab, remote(), Some(&history));
         assert_eq!(input, Some(InitialInput::ready("make test")));
@@ -8949,8 +8968,7 @@ mod tests {
             run: true,
             held: None,
             uuid: None,
-            program: false,
-            shell: None,
+            runs: PaneRuns::UserShell,
         };
         assert_eq!(
             first_input(Opening::Tab, remote(), Some(&server)),
@@ -9014,8 +9032,7 @@ mod tests {
             run: false,
             held: None,
             uuid: None,
-            program: false,
-            shell: None,
+            runs: PaneRuns::UserShell,
         };
         assert_eq!(
             held(Opening::Tab, Some(&folder), true, Some(&target), &installed),
