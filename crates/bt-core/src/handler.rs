@@ -510,57 +510,13 @@ impl<'a, U: EventListener> ClusterHandler<'a, U> {
         cell.c = head;
         chars.skip(kept).for_each(|c| cell.push_zerowidth(c));
     }
-}
 
-/// The view goes back inside the history once the parser is done with
-/// `Term`. alacritty 0.26.0's `Grid::scroll_up` moves a scrolled-back view up
-/// by every line a scrolling region scrolls, also when the region does not
-/// start at the top and no line enters the history (a line feed at the
-/// bottom of a region below a fixed row — apt's progress bar —, `CSI M`): the
-/// view ends past the history and the next frame indexes outside the grid.
-/// The clamp moves only the view, which the snapshot does not read; the view
-/// lands on the history's top, where alacritty's arithmetic was heading anyway.
-impl<U: EventListener> Drop for ClusterHandler<'_, U> {
-    fn drop(&mut self) {
-        let grid = self.term.grid();
-        if grid.display_offset() > grid.history_size() {
-            self.term.scroll_display(Scroll::Delta(0));
-        }
-    }
-}
-
-/// The placeholder for widening: `Term::input` needs a two-column code point
-/// and the cell's `c` turns back into the base character right after. Its
-/// value is immaterial; a wide character that alacritty's charset mapping
-/// (DEC special graphics) does not touch.
-const WIDE_PLACEHOLDER: char = '\u{3000}';
-
-/// Forwards all `Handler` methods **other than** `input` to `Term`. `input`
-/// is hand-written because it is the one door clustering enters through.
-macro_rules! forward {
-    ($( fn $name:ident(&mut self $(, $arg:ident: $ty:ty)*); )*) => {
-        $(
-            #[inline]
-            fn $name(&mut self $(, $arg: $ty)*) {
-                // Every intervening call closes the open cluster.
-                *self.last_input = false;
-                self.term.$name($($arg),*)
-            }
-        )*
-    };
-}
-
-#[deny(clippy::missing_trait_methods)]
-impl<U: EventListener> Handler for ClusterHandler<'_, U> {
-    fn input(&mut self, c: char) {
-        if !self.cluster {
-            return self.term.input(c);
-        }
-        let open_cluster = std::mem::replace(self.last_input, true);
-        // In ASCII only digits, `#` and `*` enter an arm.
-        if c.is_ascii() && !crate::cluster::may_extend(c) {
-            return self.term.input(c);
-        }
+    /// [`Handler::input`] past what needs no cluster: the code points that can
+    /// take part in one. Apart from the call because it is large and the
+    /// common code point does not come here: the plain one is inlined into the
+    /// parser's loop.
+    #[inline(never)]
+    fn input_extending(&mut self, c: char, open_cluster: bool) {
         // The one question of the table that every arm below is answered from.
         let width = UnicodeWidthChar::width(c);
         let mark = width == Some(0);
@@ -623,6 +579,60 @@ impl<U: EventListener> Handler for ClusterHandler<'_, U> {
             self.term.grid_mut()[at.line][at.column].push_zerowidth(c);
         }
         self.keep(open);
+    }
+}
+
+/// The view goes back inside the history once the parser is done with
+/// `Term`. alacritty 0.26.0's `Grid::scroll_up` moves a scrolled-back view up
+/// by every line a scrolling region scrolls, also when the region does not
+/// start at the top and no line enters the history (a line feed at the
+/// bottom of a region below a fixed row — apt's progress bar —, `CSI M`): the
+/// view ends past the history and the next frame indexes outside the grid.
+/// The clamp moves only the view, which the snapshot does not read; the view
+/// lands on the history's top, where alacritty's arithmetic was heading anyway.
+impl<U: EventListener> Drop for ClusterHandler<'_, U> {
+    fn drop(&mut self) {
+        let grid = self.term.grid();
+        if grid.display_offset() > grid.history_size() {
+            self.term.scroll_display(Scroll::Delta(0));
+        }
+    }
+}
+
+/// The placeholder for widening: `Term::input` needs a two-column code point
+/// and the cell's `c` turns back into the base character right after. Its
+/// value is immaterial; a wide character that alacritty's charset mapping
+/// (DEC special graphics) does not touch.
+const WIDE_PLACEHOLDER: char = '\u{3000}';
+
+/// Forwards all `Handler` methods **other than** `input` to `Term`. `input`
+/// is hand-written because it is the one door clustering enters through.
+macro_rules! forward {
+    ($( fn $name:ident(&mut self $(, $arg:ident: $ty:ty)*); )*) => {
+        $(
+            #[inline]
+            fn $name(&mut self $(, $arg: $ty)*) {
+                // Every intervening call closes the open cluster.
+                *self.last_input = false;
+                self.term.$name($($arg),*)
+            }
+        )*
+    };
+}
+
+#[deny(clippy::missing_trait_methods)]
+impl<U: EventListener> Handler for ClusterHandler<'_, U> {
+    #[inline]
+    fn input(&mut self, c: char) {
+        if !self.cluster {
+            return self.term.input(c);
+        }
+        let open_cluster = std::mem::replace(self.last_input, true);
+        // In ASCII only digits, `#` and `*` enter an arm.
+        if c.is_ascii() && !crate::cluster::may_extend(c) {
+            return self.term.input(c);
+        }
+        self.input_extending(c, open_cluster);
     }
 
     fn set_private_mode(&mut self, mode: PrivateMode) {
