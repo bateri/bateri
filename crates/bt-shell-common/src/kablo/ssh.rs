@@ -550,11 +550,11 @@ impl Backend for SshBackend {
             None => self.route_of(&target),
         };
         let mut argv = ssh_argv_for(&target, &route);
-        self.refresh_files(&server, &argv);
-        argv.remove(0);
         if argv.iter().any(|word| word.chars().any(char::is_control)) {
             return Err(format!("the connection to {name} cannot be written down"));
         }
+        self.refresh_files(&server, &argv);
+        argv.remove(0);
         Ok(Reached {
             server,
             level,
