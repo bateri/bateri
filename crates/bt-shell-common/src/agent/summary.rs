@@ -30,11 +30,22 @@ pub fn opener(program: Option<&str>, terminal: &str) -> String {
     }
 }
 
+/// The place the words say: the server as the user typed it, without its user and port, or "this
+/// Mac" for the empty name this Mac's account has.
+fn place(host: &str) -> String {
+    if host.is_empty() {
+        return "this Mac".to_owned();
+    }
+    bt_core::bare_host(host)
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect()
+}
+
 /// "Claude opened 3 terminals on rasp": `program` is what ran in the terminal that asked (the
-/// agent), `host` the server as the user typed it.
+/// agent), `host` the server as the user typed it (empty: this Mac).
 pub fn opened(program: Option<&str>, host: &str, count: u32) -> String {
-    let host = bt_core::bare_host(host);
-    let host: String = host.chars().filter(|c| !c.is_control()).collect();
+    let host = place(host);
     let things = if count == 1 {
         "a terminal".to_owned()
     } else {
@@ -46,8 +57,7 @@ pub fn opened(program: Option<&str>, host: &str, count: u32) -> String {
 /// What a notification an agent asked for (`bateri notify`) is titled: who said it and where,
 /// "Claude on rasp". The words themselves are the body.
 pub fn notified(program: Option<&str>, host: &str) -> String {
-    let host = bt_core::bare_host(host);
-    let host: String = host.chars().filter(|c| !c.is_control()).collect();
+    let host = place(host);
     format!("{} on {host}", who(program))
 }
 
@@ -73,6 +83,15 @@ mod tests {
         assert_eq!(opener(Some("2.1.296"), "p4"), "p4");
         assert_eq!(who(Some("claude-code")), "Claude");
         assert_eq!(who(Some("gemini")), "Gemini");
+    }
+
+    #[test]
+    fn this_mac_has_no_host_name_to_say() {
+        assert_eq!(
+            opened(Some("claude"), "", 2),
+            "Claude opened 2 terminals on this Mac"
+        );
+        assert_eq!(notified(None, ""), "A program on this Mac");
     }
 
     #[test]

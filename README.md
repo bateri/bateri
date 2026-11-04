@@ -153,15 +153,18 @@ If you prefer to keep your own prompt and edit on the grid like a classic
 terminal, set `integration = "blocks"` (blocks and marks stay, the dock goes)
 or `"off"` in the `[shell]` section of your settings.
 
-## Agents on a server
+## Agents, here and on a server
 
-In a terminal bateri opened on a server over `ssh`, the `bateri` command is on
-the `PATH` (zsh, bash and fish; cron jobs call
-`~/.local/share/bateri/shell/bin/bateri`). The terminal itself lives on the
-server, under kablo, so these keep working with your Mac asleep; the pane takes
-its place when bateri connects. bateri on the Mac is never asked to run
-anything: what a program sends it only places, lists, labels, moves or closes
-panes, tabs, groups and windows and shows a notification.
+In a terminal bateri opened on this Mac, or on a server over `ssh`, the
+`bateri` command is on the `PATH` (zsh, bash and fish, put there after your own
+files and never written to them; cron jobs call
+`~/.local/share/bateri/shell/bin/bateri`). A pane you open yourself (⌘D, ⌘T) has
+a number too, so `bateri send p3 'q'` reaches it. On a server the terminal
+itself lives there, under kablo, so these keep working with your Mac asleep; the
+pane takes its place when bateri connects. bateri on the Mac is never asked to
+run anything: what a program sends it only places, lists, labels, moves or
+closes panes, tabs, groups and windows and shows a notification. With
+`level = "off"` in `[commands]` the command is not written to this Mac at all.
 
 Everything is named by an id, a letter and a number: `p9` a pane, `t3` a tab,
 `g1` a group, `w1` a window. The opening commands print the pane (`--json` prints
@@ -198,7 +201,8 @@ the command acts on the one it runs in (`close tab`). `split` takes `--left`,
 program and exits with its status) and `--focus` (the pane takes the keyboard;
 by default the focus stays where it was). Fields that contradict each other
 (`split p9 --tab t3`, `tab --group g1 --window w1`) are refused. Without a
-program the pane runs bateri's shell.
+program the pane runs bateri's shell. On this Mac `--keep-open` leaves your login
+shell in the pane when the program ends, and `--wait` needs a program.
 
 **What a machine may do** is a setting per machine, `off`, `own`, `screen` or
 `full`, and nobody is asked ([`[commands]`](docs/SETTINGS.md#commands)). `own`,

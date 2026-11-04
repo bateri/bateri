@@ -52,6 +52,15 @@ pub struct Server {
     pub level: CommandLevel,
 }
 
+impl Server {
+    /// The name the user typed for the server, for a refusal to say; `None` for this Mac, which
+    /// has none (the setting that decides is `[commands] level`, not a host's entry).
+    pub fn host_name(&self) -> Option<&str> {
+        (!crate::kablo::local::is_account(&self.account) && !self.host.is_empty())
+            .then_some(self.host.as_str())
+    }
+}
+
 /// What the Mac's windows are asked.
 pub trait Shell {
     /// Whether a pane of this Mac shows `terminal` of the server already.
@@ -143,7 +152,7 @@ pub fn serve(server: &Server, from: Option<&str>, text: &str, shell: &mut dyn Sh
     if server.level == CommandLevel::Off {
         return Answer::Reply(Reply::Failed(Failure::new(
             Kind::Refused,
-            level::refusal(server.level, Why::Off, Some(&server.host)),
+            level::refusal(server.level, Why::Off, server.host_name()),
         )));
     }
     match Request::parse(text) {
@@ -167,6 +176,15 @@ fn place_for(server: &Server, from: Option<&str>, place: Place, shell: &mut dyn 
             "no terminal for the pane to go beside: it was not asked from a terminal and names none",
         )));
     };
+    // A terminal that is not started is this Mac's to open: a server's pane is the pipe to a
+    // terminal there, which is not here to be shown.
+    if place.fresh.is_some() && !crate::kablo::local::is_account(&server.account) {
+        return Answer::Reply(Reply::Failed(Failure::new(
+            Kind::Failed,
+            "this server has no bootstrap file to start a shell from: open a terminal in bateri \
+             on it again, or name a program after `--`",
+        )));
+    }
     if shell.shows(server, place.terminal) {
         return Answer::Reply(Reply::Placed(Placed {
             landed: Landed::AsAsked,
@@ -182,6 +200,15 @@ fn place_for(server: &Server, from: Option<&str>, place: Place, shell: &mut dyn 
     }
     match shell.place(server, &anchor, &place, from) {
         Placing::Done(placed) => Answer::Reply(Reply::Placed(placed)),
+        // A pane that has no terminal yet is not kept for later: nothing is running to wait
+        // for, and the script has not started anything to leave behind.
+        Placing::NoAnchor | Placing::Unable if place.fresh.is_some() => {
+            Answer::Reply(Reply::Failed(Failure::new(
+                Kind::Failed,
+                "the pane to go beside is not on screen; a pane with no program is opened beside \
+                 one that is",
+            )))
+        }
         Placing::NoAnchor => {
             let reply = waiting_reply(&anchor);
             Answer::Wait(
@@ -371,6 +398,80 @@ mod tests {
         };
         serve(&server(), from, &place_text(text), &mut mac);
         mac.placed.first().map(|placed| placed.3)
+    }
+
+    fn this_mac() -> Server {
+        Server {
+            account: crate::kablo::local::ACCOUNT.into(),
+            host: String::new(),
+            argv: Vec::new(),
+            level: CommandLevel::Own,
+        }
+    }
+
+    /// A pane with no terminal yet is this Mac's to open; a server has no such pane, and one
+    /// that has nothing to stand beside is not kept for later (nothing runs to wait for).
+    #[test]
+    fn a_pane_with_no_terminal_yet_is_this_macs_and_is_not_kept_waiting() {
+        let ask = place_text("anchor p4\nfresh /Users/ada/api\n");
+        let mut mac = Pretend {
+            anchors: vec!["p4".into()],
+            ..Pretend::default()
+        };
+        let Answer::Reply(Reply::Placed(placed)) = serve(&this_mac(), Some("p4"), &ask, &mut mac)
+        else {
+            panic!("placed");
+        };
+        assert_eq!(placed.landed, Landed::AsAsked);
+        assert_eq!(mac.placed.len(), 1);
+
+        // The anchor is on no pane: refused at once, not queued.
+        let mut mac = Pretend::default();
+        let Answer::Reply(Reply::Failed(failure)) = serve(&this_mac(), Some("p4"), &ask, &mut mac)
+        else {
+            panic!("refused");
+        };
+        assert_eq!(failure.kind, Kind::Failed);
+        assert!(failure.text.contains("not on screen"), "{}", failure.text);
+        // And not for a server, whose pane is the pipe to a terminal that is there.
+        let mut mac = Pretend {
+            anchors: vec!["p4".into()],
+            ..Pretend::default()
+        };
+        let Answer::Reply(Reply::Failed(failure)) = serve(&server(), Some("p4"), &ask, &mut mac)
+        else {
+            panic!("refused");
+        };
+        assert!(failure.text.contains("bootstrap"), "{}", failure.text);
+        assert!(mac.placed.is_empty() && mac.openers.is_empty());
+    }
+
+    /// A refusal names the host the user typed for a server, and for this Mac the setting that
+    /// is its own.
+    #[test]
+    fn a_refusal_names_the_setting_of_the_machine_it_is_for() {
+        let off = |mut server: Server| {
+            server.level = CommandLevel::Off;
+            let Answer::Reply(Reply::Failed(failure)) = serve(
+                &server,
+                Some("p4"),
+                &place_text("anchor p4\n"),
+                &mut Pretend::default(),
+            ) else {
+                panic!("refused");
+            };
+            failure.text
+        };
+        let text = off(server());
+        assert!(
+            text.contains("on rasp") && text.contains("[remote] hosts"),
+            "{text}"
+        );
+        let text = off(this_mac());
+        assert!(
+            text.contains("on this Mac") && text.contains("[commands]"),
+            "{text}"
+        );
     }
 
     /// `--focus` reaches the shell as it was asked, with who asked: whether the keyboard moves is
@@ -742,6 +843,7 @@ mod tests {
                 ratio: None,
                 keep_open,
                 focus: false,
+                fresh: None,
                 home: crate::agent::message::Home::default(),
             },
         }

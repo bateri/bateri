@@ -17,7 +17,9 @@
 //! focus yes
 //! ```
 //!
-//! The `terminal` is the one just started, and an agent's number. The `anchor` is a terminal as
+//! The `terminal` is the one just started, and an agent's number (with `fresh DIRECTORY`, one
+//! that is not started yet: the Mac opens an ordinary pane of this Mac under that name, its shell
+//! started in the directory). The `anchor` is a terminal as
 //! kablo names it: `p4` when the agent wrote one, and the caller's own name, whatever it is, when
 //! it did not (a terminal the Mac opened before the numbers existed is `b-` and 32 digits). The
 //! `terminal` of a `close` is named the same way, because a `close` that names none closes the
@@ -153,6 +155,11 @@ pub struct Place {
     pub focus: bool,
     /// Where else than beside the anchor, and the label.
     pub home: Home,
+    /// The terminal is not started: the Mac opens an ordinary pane of this Mac, its shell started
+    /// in this directory, under the name `terminal` gives it (`bateri split` with no program on a
+    /// machine that has no bootstrap — this Mac). A directory and a name are all the message has
+    /// to say of it; no program is carried (073, Karar 1).
+    pub fresh: Option<String>,
 }
 
 impl Place {
@@ -409,6 +416,14 @@ impl Request {
                 }
                 if place.focus {
                     push(&mut out, "focus", "yes")?;
+                }
+                if let Some(directory) = &place.fresh {
+                    if !directory.starts_with('/') {
+                        return Err(Failure::usage(
+                            "`fresh` is the absolute path of a directory",
+                        ));
+                    }
+                    push(&mut out, "fresh", directory)?;
                 }
                 place.home.check(place.side)?;
                 if let Some(tab) = place.home.tab {
@@ -672,6 +687,7 @@ fn read_request<'a>(
                     "ratio",
                     "keep-open",
                     "focus",
+                    "fresh",
                     "tab",
                     "group",
                     "new-group",
@@ -725,6 +741,18 @@ fn read_request<'a>(
                 keep_open: fields.flag("keep-open")?,
                 focus: fields.flag("focus")?,
                 home,
+                fresh: fields
+                    .get("fresh")
+                    .map(|directory| {
+                        if directory.starts_with('/') {
+                            Ok(directory.to_owned())
+                        } else {
+                            Err(Failure::usage(
+                                "`fresh` is the absolute path of a directory",
+                            ))
+                        }
+                    })
+                    .transpose()?,
             }))
         }
         "ls" => {
@@ -1080,7 +1108,41 @@ mod tests {
             ratio: Some(30),
             keep_open: true,
             focus: true,
+            fresh: None,
             home: Home::default(),
+        }
+    }
+
+    #[test]
+    fn a_pane_with_no_terminal_yet_says_the_directory_it_starts_in() {
+        const FRESH: &str = "bateri 2\nplace\nterminal p9\nanchor p4\nfresh /Users/ada/api\n";
+        let wanted = Place {
+            fresh: Some("/Users/ada/api".to_owned()),
+            ..bare_with_anchor()
+        };
+        assert_eq!(Request::parse(FRESH), Ok(Request::Place(wanted.clone())));
+        assert_eq!(Request::Place(wanted).encode().as_deref(), Ok(FRESH));
+        // Only a directory that can be told apart from a word: absolute.
+        let relative = FRESH.replace("/Users/ada/api", "api");
+        let failure = Request::parse(&relative).expect_err("a relative directory");
+        assert_eq!(failure.kind, Kind::Usage);
+        assert!(failure.text.contains("absolute"), "{}", failure.text);
+        let wanted = Place {
+            fresh: Some("api".to_owned()),
+            ..bare_with_anchor()
+        };
+        assert!(Request::Place(wanted).encode().is_err());
+        // A message without the key is the message it was.
+        assert_eq!(
+            Request::parse(&FRESH.replace("fresh /Users/ada/api\n", "")),
+            Ok(Request::Place(bare_with_anchor()))
+        );
+    }
+
+    fn bare_with_anchor() -> Place {
+        Place {
+            anchor: Some(Anchor::of(Terminal(4))),
+            ..bare()
         }
     }
 
@@ -1092,6 +1154,7 @@ mod tests {
             ratio: None,
             keep_open: false,
             focus: false,
+            fresh: None,
             home: Home::default(),
         }
     }
@@ -1199,6 +1262,7 @@ mod tests {
                 ratio: None,
                 keep_open: false,
                 focus: false,
+                fresh: None,
                 home,
             })
         };
@@ -1365,6 +1429,7 @@ mod tests {
             ratio: None,
             keep_open: false,
             focus: false,
+            fresh: None,
             home: Home {
                 new_group: Some("api".to_owned()),
                 ..Home::default()

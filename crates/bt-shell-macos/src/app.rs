@@ -421,6 +421,10 @@ pub(crate) struct Start {
     /// pipe to ([`Held::resume`]): a terminal from the palette's list of those running in the
     /// background. No line is typed and nothing is inherited — the terminal is the pane's.
     pub(crate) held: Option<Held>,
+    /// The identity the pane is born with, when it was decided before it was made: a pane a
+    /// program on this Mac asked for, whose terminal the ledger has for it already
+    /// ([`crate::hold_service::register_local`]).
+    pub(crate) uuid: Option<PaneUuid>,
 }
 
 /// Where a command the palette lists ran, in the same order as the list the palette was handed
@@ -4290,7 +4294,7 @@ impl AppDelegate {
             theme,
             working_directory: dir,
             initial_input: initial,
-            uuid: None,
+            uuid: start.and_then(|start| start.uuid.clone()),
             replay: None,
             zoom: from.map_or_else(Zoom::default, TerminalPane::zoom),
             masters: self.ivars().masters.clone(),
@@ -5166,6 +5170,7 @@ impl AppDelegate {
                     line: None,
                     run: false,
                     held: None,
+                    uuid: None,
                 };
                 self.new_tab_started(window.id(), Seat::Beside, Some(&start));
             }
@@ -5179,6 +5184,7 @@ impl AppDelegate {
                     line: Some(line),
                     run: true,
                     held: None,
+                    uuid: None,
                 };
                 let split = beside
                     && window
@@ -5292,6 +5298,7 @@ impl AppDelegate {
                 }),
                 opener: None,
             }),
+            uuid: None,
         })
     }
 
@@ -5685,6 +5692,7 @@ impl AppDelegate {
                 line: Some(line),
                 run: false,
                 held: None,
+                uuid: None,
             })
         };
         match how {
@@ -6134,6 +6142,11 @@ impl AppDelegate {
         let windows = self.windows();
         let panes = self.all_panes();
         let changes = old.changes(&new);
+        // This Mac's `bateri` command is a file the level decides: written when it is wanted,
+        // taken away when it is not, for the shells that start next.
+        if old.commands_level != new.commands_level {
+            crate::hold_service::rewrite_files(bt_shell_common::kablo::local::ACCOUNT);
+        }
         if changes.terminal {
             for pane in &panes {
                 pane.set_terminal_options(&new);
@@ -8878,6 +8891,7 @@ mod tests {
             line: None,
             run: false,
             held: None,
+            uuid: None,
         };
         assert_eq!(
             first_input(Opening::Tab, remote(), Some(&folder)),
@@ -8888,6 +8902,7 @@ mod tests {
             line: Some("make test".to_owned()),
             run: false,
             held: None,
+            uuid: None,
         };
         let (input, inherited) = first_input(Opening::Tab, remote(), Some(&history));
         assert_eq!(input, Some(InitialInput::ready("make test")));
@@ -8903,6 +8918,7 @@ mod tests {
             line: Some("ssh db-1".to_owned()),
             run: true,
             held: None,
+            uuid: None,
         };
         assert_eq!(
             first_input(Opening::Tab, remote(), Some(&server)),
@@ -8965,6 +8981,7 @@ mod tests {
             line: None,
             run: false,
             held: None,
+            uuid: None,
         };
         assert_eq!(
             held(Opening::Tab, Some(&folder), true, Some(&target), &installed),

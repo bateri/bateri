@@ -110,6 +110,7 @@ mod tests {
                 ratio: None,
                 keep_open: false,
                 focus: false,
+                fresh: None,
                 home: crate::agent::message::Home::default(),
             },
             opener: None,

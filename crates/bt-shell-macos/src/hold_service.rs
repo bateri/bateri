@@ -147,11 +147,66 @@ pub(crate) fn view_was_open(pane: &PaneUuid) -> bool {
         .is_some_and(|terminal| ledger.view_of(local::ACCOUNT, &terminal))
 }
 
+/// The files of the account's machine are written again as its level now says: this Mac's
+/// `bateri` command comes or goes with `[commands] level`, without a restart
+/// ([`Service::rewrite_files`]).
+pub(crate) fn rewrite_files(account: &str) {
+    if let Some(service) = SERVICE.get() {
+        service.rewrite_files(account);
+    }
+}
+
 /// The terminal the pane shows, if it shows one a kablo server keeps (the
 /// program in front of it included, as the server last said). `None` for a pane
 /// that shows its own shell and, in a process without the service, for every pane.
 pub(crate) fn shown(pane: &PaneUuid) -> Option<Shown> {
     SERVICE.get()?.shown(pane)
+}
+
+/// The terminal of this Mac that carries the pane `pane`'s bytes — the pane's own shell, or the
+/// program a `bateri split` started for it — if the ledger says there is one. A pane that shows a
+/// server's terminal has one too (the pipe to the server runs in it), and it is not what that pane
+/// is: [`shown`] answers first.
+pub(crate) fn local_terminal(pane: &PaneUuid) -> Option<SessionId> {
+    if shown(pane).is_some() {
+        return None;
+    }
+    ledger().local_terminal_of(pane)
+}
+
+/// [`shown`] for a pane of this Mac, as far as a program that asks the app something needs it:
+/// the terminal and the program in front of it. `None` for a pane that has no terminal of this
+/// Mac, or that shows a server's.
+pub(crate) fn shown_local(pane: &PaneUuid) -> Option<Shown> {
+    let terminal = local_terminal(pane)?;
+    let program = SERVICE
+        .get()
+        .and_then(|service| service.local_program(&terminal));
+    Some(Shown {
+        account: local::ACCOUNT.to_owned(),
+        host: String::new(),
+        argv: Vec::new(),
+        terminal,
+        program,
+        program_fresh: true,
+        link: PaneLink::Live,
+        taken_by: None,
+    })
+}
+
+/// A program on this Mac started the terminal `terminal` for the pane `pane` is about to be: the
+/// ledger has the pane for it before the pane exists, so that the pane, when it starts, finds
+/// the terminal instead of making one ([`Service::open_local`]).
+pub(crate) fn register_local(pane: &PaneUuid, terminal: &SessionId) {
+    ledger().shown(local::ACCOUNT, terminal, Some(pane));
+}
+
+/// The pane `pane` is about to be is for a terminal that is not started: it is made under `name`
+/// ([`Service::expect_name`]).
+pub(crate) fn expect_name(pane: &PaneUuid, name: SessionId) {
+    if let Some(service) = SERVICE.get() {
+        service.expect_name(pane, name);
+    }
 }
 
 /// The folder the server of `account` offers its programs for the bytes of a file, once it is

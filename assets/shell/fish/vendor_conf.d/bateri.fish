@@ -57,6 +57,20 @@ set -e BATERI_DOCK
 
 status is-interactive; or return
 
+# `bateri`, the agent's command, as the app wrote it to this Mac (`bin/bateri` under
+# `~/.local/share/bateri/shell`, never `XDG_DATA_HOME`: the app's environment and a login shell's
+# are not the same), on `PATH` once. This file is read before the user's `config.fish`, so it is
+# done at the first prompt, after it; and with `set -g`, for this session only (`fish_add_path`
+# would write a universal variable to the user's configuration). Where `[commands] level = "off"`
+# the app does not write the command and there is nothing to add.
+function __bateri_path --on-event fish_prompt
+    functions -e __bateri_path
+    set -l bt_bin $HOME/.local/share/bateri/shell/bin
+    if test -x $bt_bin/bateri; and not contains -- $bt_bin $PATH
+        set -gx PATH $bt_bin $PATH
+    end
+end
+
 # The dock's prompt (`dock.fish`, one level above this directory, shared with the server's wrapper).
 # Without the file the prompt is the user's, with the marks around it, as for `"blocks"`.
 if test $__bateri_dock = 1

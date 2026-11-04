@@ -125,9 +125,14 @@ pub struct SshBackend {
 
 impl SshBackend {
     /// Whether the `bateri` command goes to this server: not when its level is `off`
-    /// ([`Settings::commands_for`]), where nothing of it is to be found.
+    /// ([`Settings::commands_for`]), where nothing of it is to be found. This Mac's level is
+    /// `[commands] level`.
     fn agent_wanted(&self, server: &KabloHost) -> bool {
-        (self.settings)().commands_for(&server.host) != CommandLevel::Off
+        let settings = (self.settings)();
+        if local::is_account(&server.key) {
+            return settings.commands_level != CommandLevel::Off;
+        }
+        settings.commands_for(&server.host) != CommandLevel::Off
     }
 
     /// The server as the file jobs know a target: the user's arguments, with
@@ -187,7 +192,8 @@ impl SshBackend {
     fn install_here(&self, live: &[SessionId]) -> Result<Installed, Refusal> {
         let (bundle, home) = self.here().ok_or_else(Refusal::plain)?;
         let channel = LocalChannel::new(home.to_owned());
-        let installed = install::ensure_here(&channel, bundle).map_err(|_| Refusal::plain())?;
+        let installed = install::ensure_here(&channel, bundle, self.agent_wanted(&local::host()))
+            .map_err(|_| Refusal::plain())?;
         if installed.fresh {
             // The binary was not there: terminals this user has here run an earlier one.
             settle(&here_channel(home), &installed, live);
@@ -284,8 +290,13 @@ impl Backend for SshBackend {
     }
 
     fn files(&self, server: &KabloHost, installed: &Installed) {
-        // The shells of this Mac start from the application's own files.
+        // The shells of this Mac start from the application's own files: what it has of these
+        // is the agent's command and its counter.
         if local::is_account(&server.key) {
+            if let Some((_, home)) = self.here() {
+                let channel = LocalChannel::new(home.to_owned());
+                install::put_files_here(&channel, installed, self.agent_wanted(server));
+            }
             return;
         }
         let target = self.target(server);
@@ -317,10 +328,19 @@ impl Backend for SshBackend {
     }
 
     fn number(&self, server: &KabloHost) -> Option<u64> {
-        // Only a server kablo is kept on has numbers to give: the connection is the one the
-        // install used. This Mac has no counter: its terminals keep the names they are made with.
+        // Only a machine kablo is kept on has numbers to give: the connection is the one the
+        // install used. This Mac's terminals are numbered by the same counter, run here, unless
+        // the command is not wanted (`off`): they then keep the names they are made with.
         if local::is_account(&server.key) {
-            return None;
+            if !self.agent_wanted(server) {
+                return None;
+            }
+            let (_, home) = self.here()?;
+            let channel = LocalChannel {
+                home: home.to_owned(),
+                limit: install::NUMBER_LIMIT,
+            };
+            return install::next_number(&channel);
         }
         self.bundle.as_ref()?;
         let target = self.target(server);
@@ -392,8 +412,12 @@ impl Backend for SshBackend {
     fn refresh(&self, server: &KabloHost, live: &[SessionId]) -> Option<Installed> {
         if local::is_account(&server.key) {
             let (bundle, home) = self.here()?;
-            let installed =
-                install::ensure_here(&LocalChannel::new(home.to_owned()), bundle).ok()?;
+            let installed = install::ensure_here(
+                &LocalChannel::new(home.to_owned()),
+                bundle,
+                self.agent_wanted(server),
+            )
+            .ok()?;
             settle(&here_channel(home), &installed, live);
             return Some(installed);
         }

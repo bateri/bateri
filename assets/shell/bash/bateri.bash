@@ -66,6 +66,21 @@ for __bateri_login in "$HOME/.bash_profile" "$HOME/.bash_login" "$HOME/.profile"
 done
 unset __bateri_login
 
+# `bateri`, the agent's command, as the app wrote it to this Mac (`bin/bateri` under
+# `~/.local/share/bateri/shell`, never `XDG_DATA_HOME`: the app's environment and a login shell's
+# are not the same), on `PATH` once and after the user's login files have set theirs. No file of
+# the user's is written (the `make audit` gate): this is the shell's own `PATH`, for this
+# session. Where `[commands] level = "off"` the app does not write the command and there is
+# nothing to add. (`__bateri_bin` is the `ssh` function's input, above.)
+__bateri_cmd=$HOME/.local/share/bateri/shell/bin
+if [ -x "$__bateri_cmd/bateri" ]; then
+  case ":$PATH:" in
+    *":$__bateri_cmd:"*) ;;
+    *) PATH=$__bateri_cmd:$PATH ;;
+  esac
+fi
+unset __bateri_cmd
+
 # The dock's functions and the hooks' installer (`dock.bash`, beside this file, shared with the
 # server's wrapper). Read at every start, `"blocks"` too: the installer is in it. Without the
 # file the shell is the user's, unmarked.

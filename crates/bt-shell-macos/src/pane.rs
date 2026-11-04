@@ -7884,7 +7884,7 @@ fn owed_offer(owed: &Resume, shown: &Shown, view: Option<State>) -> Owed {
 }
 
 /// A new pane identity, from `NSUUID`.
-fn new_pane_uuid() -> PaneUuid {
+pub(crate) fn new_pane_uuid() -> PaneUuid {
     // `UUIDString` gives the canonical 8-4-4-4-12 form; if `parse` rejects it
     // the defect is in `bt-core`'s contract, not on this line.
     PaneUuid::parse(&NSUUID::new().UUIDString().to_string())

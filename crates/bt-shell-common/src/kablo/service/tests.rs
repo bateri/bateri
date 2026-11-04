@@ -3532,9 +3532,11 @@ fn a_pane_of_this_mac_reads_its_terminals_bytes_as_they_are_and_types_into_it() 
     );
     assert_eq!(world.bridge().size_of(&id), Some(MAC));
     assert_eq!(ledger.pane_of(local::ACCOUNT, &id), Some(pane.clone()));
-    // Kablo was put on this Mac once, and nothing of a server's was asked.
+    // Kablo was put on this Mac once, and nothing of a server's was asked; the counter was, for
+    // a number (there is none to give here: the terminal keeps the name it was made with).
     assert_eq!(world.count("install"), 1);
-    for server_only in ["master", "files", "number", "records"] {
+    assert_eq!(world.count("number"), 1);
+    for server_only in ["master", "files", "records"] {
         assert_eq!(world.count(server_only), 0, "{server_only}");
     }
 
@@ -3684,6 +3686,108 @@ fn where_kablo_cannot_be_put_the_pane_is_an_ordinary_one_and_the_step_is_not_rep
 }
 
 #[test]
+fn a_pane_of_this_mac_that_the_counter_numbers_is_started_under_its_number() {
+    let ledger = Arc::new(Ledger::memory());
+    let world = Fake::new(Bridge::new(Age::Current));
+    world.counts_from(5);
+    let rig = Rig::kept("local-numbered", world.clone(), ledger.clone(), END_GRACE);
+    let (first, second) = (
+        a_pane(),
+        PaneUuid::parse("6B2F3E4D-5C6B-7A89-98A7-B6C5D4E3F2A1").expect("a pane"),
+    );
+
+    let _one = open_local(&rig, &first).expect("a terminal");
+    let _two = open_local(&rig, &second).expect("a terminal");
+    // The number the command and the Mac share (`p5`), and the next, never twice.
+    let mut terminals: Vec<String> = ledger
+        .terminals_of(local::ACCOUNT)
+        .iter()
+        .map(|id| id.as_str().to_owned())
+        .collect();
+    terminals.sort();
+    assert_eq!(terminals, ["p5", "p6"]);
+    let id = SessionId::new("p5").expect("an id");
+    assert_eq!(ledger.pane_of(local::ACCOUNT, &id), Some(first));
+    assert!(world.bridge().has(&id));
+}
+
+#[test]
+fn a_pane_a_program_gave_a_number_to_is_started_under_that_number_and_not_counted_again() {
+    let ledger = Arc::new(Ledger::memory());
+    let world = Fake::new(Bridge::new(Age::Current));
+    world.counts_from(9);
+    let rig = Rig::kept("local-named", world.clone(), ledger.clone(), END_GRACE);
+    let pane = a_pane();
+    let name = SessionId::new("p3").expect("an id");
+
+    rig.service.expect_name(&pane, name.clone());
+    let _stream = open_local(&rig, &pane).expect("a terminal");
+    assert_eq!(ledger.terminals_of(local::ACCOUNT), [name.clone()]);
+    assert_eq!(ledger.pane_of(local::ACCOUNT, &name), Some(pane));
+    assert!(world.bridge().has(&name));
+    assert_eq!(world.count("number"), 0, "the number was given already");
+}
+
+#[test]
+fn a_pane_written_in_the_ledger_before_it_exists_is_shown_the_terminal_a_program_started() {
+    let ledger = Arc::new(Ledger::memory());
+    let world = Fake::new(Bridge::new(Age::Current));
+    world.counts_from(9);
+    let rig = Rig::kept("local-registered", world.clone(), ledger.clone(), END_GRACE);
+    let pane = a_pane();
+    // `bateri split -- htop`: the script started `p3`, and the Mac wrote which pane shows it
+    // before the pane was made.
+    let program = world.bridge().add("p3", MAC);
+    ledger.shown(local::ACCOUNT, &program, Some(&pane));
+    world.bridge().write(&program, b"htop's screen");
+
+    let mut mac = Pane::of(open_local(&rig, &pane).expect("its terminal"));
+    assert_eq!(ledger.terminals_of(local::ACCOUNT), [program.clone()]);
+    mac.reads(b"htop's screen");
+    mac.master.write_all(b"q").expect("typed");
+    until("the key typed", || world.bridge().typed(&program) == b"q");
+    assert_eq!(
+        world.count("number"),
+        0,
+        "no terminal was made, none is numbered"
+    );
+}
+
+#[test]
+fn the_files_of_this_mac_are_written_again_when_its_level_changes() {
+    let world = Fake::new(Bridge::new(Age::Current));
+    let rig = Rig::new("local-files");
+    // Nothing is made yet: nothing to write, and the account will write them as it is made.
+    rig.service.rewrite_files(local::ACCOUNT);
+    let rig = Rig::over("local-files-account", world.clone());
+    let _mac = Pane::of(open_local(&rig, &a_pane()).expect("a terminal"));
+    assert_eq!(world.count("files"), 0);
+    rig.service.rewrite_files(local::ACCOUNT);
+    until("the files written", || world.count("files") == 1);
+}
+
+#[test]
+fn a_program_on_this_mac_that_calls_the_app_is_taken_like_one_on_a_server() {
+    let world = Fake::new(Bridge::new(Age::Current));
+    world.mail.store(true, Ordering::SeqCst);
+    let ledger = Arc::new(Ledger::memory());
+    let rig = Rig::kept("local-mail", world, ledger.clone(), END_GRACE);
+    let pane = a_pane();
+    let _mac = Pane::of(open_local(&rig, &pane).expect("a terminal"));
+    let terminal = ledger.terminals_of(local::ACCOUNT).remove(0);
+
+    let stream = program_opens(&rig, Some(&terminal));
+    rig.world.bridge().sender_data(stream, b"bateri 2\nls\n");
+    rig.world.bridge().sender_eof(stream);
+    let letter = rig.world.letter();
+    // This Mac's account, no host to name, the terminal kablo says it is from.
+    assert_eq!(letter.account, local::ACCOUNT);
+    assert_eq!((letter.host.as_str(), letter.argv.len()), ("", 0));
+    assert_eq!(letter.from, Some(terminal));
+    assert_eq!(letter.bytes, b"bateri 2\nls\n");
+}
+
+#[test]
 fn panes_that_wait_for_the_account_of_this_mac_share_the_making_of_it() {
     let ledger = Arc::new(Ledger::memory());
     let world = Fake::new(Bridge::new(Age::Current));
@@ -3697,6 +3801,7 @@ fn panes_that_wait_for_the_account_of_this_mac_share_the_making_of_it() {
                 spec: a_shell(),
                 size: MAC,
                 reply,
+                name: None,
             };
             rig.service.tx.send(Msg::Local(ask)).expect("sent");
             answer

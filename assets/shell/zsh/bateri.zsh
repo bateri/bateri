@@ -131,6 +131,16 @@ fi
 # so our hook runs behind the user's hooks and sees what they did to PS1.
 __bateri_hooks() {
   autoload -Uz add-zsh-hook
+  # `bateri`, the agent's command, as the app wrote it to this Mac (`bin/bateri` under
+  # `~/.local/share/bateri/shell`, never `XDG_DATA_HOME`: the app's environment and a login
+  # shell's are not the same), on `PATH` once and after the user's files have set theirs. No file
+  # of the user's is written (the `make audit` gate): this is the shell's own `path`, for this
+  # session. Where `[commands] level = "off"` the app does not write the command and there is
+  # nothing to add.
+  local bt_bin=$HOME/.local/share/bateri/shell/bin
+  if [[ -x $bt_bin/bateri ]] && (( ! ${path[(Ie)$bt_bin]} )); then
+    path=($bt_bin $path)
+  fi
   # "Has a command run since the last prompt": `D` is printed only after a command
   # that really ran. An Enter on an empty line spawns a new prompt but there is
   # no command that finished.

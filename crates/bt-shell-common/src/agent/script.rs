@@ -143,6 +143,26 @@ impl Server {
         server
     }
 
+    /// This Mac: a home with the stand-in kablo in it and the two files the application writes
+    /// ([`crate::ssh_wrap::files_script_here`]) — no bootstrap, no shells' files.
+    fn new_here(name: &str) -> Server {
+        let root = TempRoot::new(&format!("agent-script-{name}"));
+        let home = std::fs::canonicalize(&root.0).expect("root").join("home");
+        let stub = home.join("stub");
+        std::fs::create_dir_all(&stub).expect("stub dir");
+        let kablo = home.join(KABLO_PATH);
+        std::fs::create_dir_all(kablo.parent().expect("a directory")).expect("kablo dir");
+        crate::child::tests::write_program(&kablo, KABLO);
+        let server = Server {
+            _root: root,
+            home,
+            stub,
+        };
+        assert!(crate::ssh_wrap::seed_files_here(&server.home, Some(KABLO_PATH), true).success());
+        assert!(server.script().is_file());
+        server
+    }
+
     /// The bootstrap a new terminal runs, as kablo runs it (an argument vector).
     fn bootstrap(&self) {
         // The files are on the server before the terminal starts (`install::ensure` wrote them).
@@ -314,6 +334,7 @@ fn place(terminal: u64, anchor: u64) -> Place {
         ratio: None,
         keep_open: false,
         focus: false,
+        fresh: None,
         home: crate::agent::message::Home::default(),
     }
 }
@@ -415,6 +436,138 @@ fn a_split_starts_the_terminal_and_tells_the_mac_where_the_pane_goes() {
         );
         // Nothing waits: the Mac took it.
         assert_eq!(server.note("p1"), None);
+    }
+}
+
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn this_mac_gets_the_command_and_the_counter_and_nothing_else_and_off_takes_them_away() {
+    let server = Server::new_here("here-files");
+    let shell = server.shell_dir();
+    // Under the home, whatever `XDG_DATA_HOME` the application had; no login shell asked after.
+    assert!(!server.home.join("elsewhere").exists());
+    let command = std::fs::read_to_string(shell.join("bin/bateri")).expect("the command");
+    let asset = include_str!("../../../../assets/shell/remote/bin/bateri");
+    assert_eq!(command, asset.replace("__BATERI_KABLO__", KABLO_PATH));
+    let mode = std::os::unix::fs::PermissionsExt::mode(
+        &std::fs::metadata(shell.join("bin/bateri"))
+            .expect("metadata")
+            .permissions(),
+    );
+    assert_eq!(mode & 0o700, 0o700);
+    assert_eq!(
+        std::fs::read_to_string(shell.join("next.sh")).expect("the counter"),
+        include_str!("../../../../assets/shell/remote/next.sh")
+    );
+    // Nothing of a server's: no bootstrap, no shell directories.
+    let mut found: Vec<String> = Vec::new();
+    for entry in std::fs::read_dir(&shell).expect("the directory") {
+        found.push(
+            entry
+                .expect("an entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned(),
+        );
+    }
+    found.sort();
+    assert_eq!(found, ["bin", "next.sh"]);
+    // Written again it is the same (no rename on every start), and `off` takes both away.
+    assert!(crate::ssh_wrap::seed_files_here(&server.home, Some(KABLO_PATH), true).success());
+    assert!(crate::ssh_wrap::seed_files_here(&server.home, Some(KABLO_PATH), false).success());
+    assert!(!shell.join("bin/bateri").exists() && !shell.join("next.sh").exists());
+}
+
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn a_split_with_no_program_on_this_mac_starts_nothing_and_asks_for_a_pane_of_its_own() {
+    for (name, shell) in shells() {
+        let server = Server::new_here(&format!("here-fresh-{name}"));
+        server.mac_says(PLACED);
+        let said = server.run(&shell, Some("p4"), &["split", "--right", "--cwd", "~"]);
+        assert_eq!(said.status, 0, "{}: {}", shell.display(), said.err);
+        assert_eq!(said.out, "p1\n");
+        // No terminal was started: the Mac opens the pane under the number.
+        assert_eq!(server.calls_of("new"), Vec::<Vec<String>>::new());
+        let wanted = Place {
+            side: Some(Side::Right),
+            fresh: Some(server.home.display().to_string()),
+            ..place(1, 4)
+        };
+        assert_eq!(server.told(), [encoded(wanted)]);
+        // The record of who opened it is written all the same.
+        assert!(server.state().join("terminals/p1").is_file());
+
+        // `--wait` has nothing to wait for; no terminal to go beside is a mistake of its own;
+        // both before anything is numbered.
+        let said = server.run(&shell, Some("p4"), &["split", "--wait"]);
+        assert_eq!(said.status, 64, "{}", said.err);
+        let said = server.run(&shell, None, &["split"]);
+        assert_eq!(said.status, 1, "{}", said.err);
+        assert!(said.err.contains("beside a pane"), "{}", said.err);
+        assert_eq!(server.told().len(), 1);
+
+        // The Mac refuses: the number is spent, and nothing is left behind.
+        server.mac_says("bateri 2\nerror failed no room\n");
+        let said = server.run(&shell, Some("p4"), &["tab"]);
+        assert_eq!(said.status, 1, "{}", said.err);
+        assert!(!server.state().join("terminals/p2").exists());
+    }
+}
+
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn a_program_kept_open_on_this_mac_is_followed_by_the_login_shell_in_its_terminal() {
+    for (name, shell) in shells() {
+        let here = Server::new_here(&format!("here-keep-{name}"));
+        here.mac_says(PLACED);
+        let said = here.run(
+            &shell,
+            Some("p4"),
+            &["split", "--keep-open", "--", "make", "test"],
+        );
+        assert_eq!(said.status, 0, "{}: {}", shell.display(), said.err);
+        let calls = here.calls_of("new");
+        assert_eq!(calls.len(), 1);
+        let call = &calls[0];
+        let at = call
+            .iter()
+            .position(|word| word == "--")
+            .expect("the program");
+        assert_eq!(
+            call[at + 1..],
+            [
+                "sh",
+                "-c",
+                "\"$@\"; exec \"${SHELL:-/bin/sh}\" -l",
+                "sh",
+                "make",
+                "test"
+            ]
+        );
+        let wanted = Place {
+            keep_open: true,
+            ..place(1, 4)
+        };
+        assert_eq!(here.told(), [encoded(wanted)]);
+
+        // Without `--keep-open`, and on a server (its Mac holds the terminal), the program is
+        // started as it was named.
+        here.forget_calls();
+        here.run(&shell, Some("p4"), &["split", "--", "make", "test"]);
+        let plain = &here.calls_of("new")[0];
+        assert_eq!(plain[plain.len() - 3..], ["--", "make", "test"]);
+        let server = Server::new(&format!("server-keep-{name}"));
+        server.mac_says(PLACED);
+        server.run(
+            &shell,
+            Some("p4"),
+            &["split", "--keep-open", "--", "make", "test"],
+        );
+        assert_eq!(
+            server.calls_of("new"),
+            [new_call(&server, "p1", &["make", "test"])]
+        );
     }
 }
 

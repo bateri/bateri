@@ -1,8 +1,8 @@
 #!/bin/sh
-# bateri on a server — what an agent (Claude Code, Codex) asks of the bateri
-# that shows this server's panes. POSIX sh; written by the bootstrap
-# (`boot.sh`) to `~/.local/share/bateri/shell/bin/bateri` and put on `PATH` by
-# the integration of zsh, bash and fish.
+# bateri on a machine — what an agent (Claude Code, Codex) asks of the bateri
+# that shows this machine's panes. POSIX sh; written to
+# `~/.local/share/bateri/shell/bin/bateri` by the bootstrap (`boot.sh`) on a server and by
+# the application on this Mac, and put on `PATH` by the integration of zsh, bash and fish.
 #
 #   bateri split [PANE | --tab TAB] [--left|--right|--above|--below] [--ratio PERCENT]
 #          [--label TEXT] [--cwd DIR] [--keep-open] [--wait] [--focus] [--json] [-- PROGRAM...]
@@ -20,7 +20,7 @@
 #   bateri move tab TAB --group GROUP | --window WINDOW
 #   bateri resize [PANE] --left|--right|--above|--below [--by N]
 #
-# WHO DOES WHAT. The terminal is the server's: `kablo new` starts it here, it
+# WHO DOES WHAT. The terminal is the machine's: `kablo new` starts it here, it
 # gets a number (`p9`, `next.sh`) and `send`, `capture` and `wait` are kablo's
 # own, with no Mac anywhere. The Mac only decides where a pane that shows the
 # terminal goes: `split`, `tab` and `window` tell it so over kablo's app channel
@@ -54,8 +54,8 @@
 # opened pN (`kablo here` — what the system says of the process, never a
 # variable) and whether it stays open; `ls` shows it, and nothing decides by
 # it. WHAT MAY BE DONE is the level the Mac has for this machine (`off`,
-# `own`, `screen`, `full`: the `[remote] hosts` entry of settings.toml, whose
-# `commands` key the Mac reads, not this script), and nobody is asked.
+# `own`, `screen`, `full`: the `[remote] hosts` entry of settings.toml for a server, `[commands]
+# level` for this Mac itself — the Mac reads them, not this script), and nobody is asked.
 # `close pane` goes to the Mac, which closes the pane that shows the terminal as the
 # user closing it would (a pane that stays open for `--keep-open` goes too);
 # named nothing it is the caller's own terminal, under whatever name it has.
@@ -63,6 +63,14 @@
 # it is this machine's own at every level that has the command. The state is
 # under `$HOME`, not `XDG_DATA_HOME`: the Mac and a cron job do not have a
 # login shell's environment (the counter's reason, `next.sh`).
+#
+# THIS MAC. The same file runs on the Mac itself, and nothing in it says which. There is no
+# bootstrap file here (`boot.sh`, a server pane's) — and that one fact is what differs: a
+# `split` with no program has no bootstrap to start, so nothing is started; the number is taken
+# and the Mac is asked for an ordinary pane of this Mac under that name (`fresh`), whose shell is
+# the one the Mac starts for any pane. A `--keep-open` pane is kept open by the terminal itself:
+# the program runs, and the user's login shell follows it in the same terminal (a server's is
+# held by the Mac's pipe to it).
 #
 # The quoted word below is filled in when the bootstrap writes this file
 # (`ssh_wrap`): kablo's place relative to home.
@@ -135,7 +143,7 @@ esac
 if [ -z "$bt_kablo" ]; then
   bt_kablo=$(command -v kablo 2>/dev/null) || bt_kablo=
 fi
-[ -n "$bt_kablo" ] || bt_die 1 'kablo is not installed on this server; open a terminal in bateri again'
+[ -n "$bt_kablo" ] || bt_die 1 'kablo is not installed on this machine; open a terminal in bateri again'
 
 # The directory this file's bootstrap wrote its siblings to (`shell/`): the
 # one `bin/` sits in. `boot.sh` and `next.sh` are beside it.
@@ -475,7 +483,9 @@ bt_open() {
   [ -d "$bt_cwd" ] || bt_die 1 "'$(printf '%s' "$bt_cwd" | bt_clean)' is not a directory"
 
   # The program, or bateri's shell: the bootstrap's file, run from the file
-  # (`boot.sh`), with no parent block, nonce or tab.
+  # (`boot.sh`), with no parent block, nonce or tab. Where there is none (this Mac) nothing is
+  # started: the Mac opens the pane's own shell under the number (`fresh`).
+  bt_fresh=
   if [ $# -eq 0 ]; then
     if [ -r "$bt_shelldir/boot.sh" ]; then
       bt_version=${LC_TERMINAL_VERSION-}
@@ -484,8 +494,15 @@ bt_open() {
       esac
       set -- sh "$bt_shelldir/boot.sh" '' '' "$bt_version" -
     else
-      set -- "${SHELL:-/bin/sh}" -l
+      [ -z "$bt_wait" ] || bt_die 64 '--wait needs a program here: name one after --'
+      [ -z "$bt_orphan" ] || bt_die 1 'a pane with no program goes beside a pane: run this in a bateri terminal, or name one'
+      [ "$(printf '%s' "$bt_cwd" | bt_clean | tr -d '\n')" = "$bt_cwd" ] || bt_die 64 'the directory has a control character in its name'
+      bt_fresh=$bt_cwd
     fi
+  elif [ -n "$bt_keep" ] && [ ! -r "$bt_shelldir/boot.sh" ]; then
+    # No Mac pipe holds this terminal after its program: the terminal itself carries on with
+    # the user's login shell.
+    set -- sh -c '"$@"; exec "${SHELL:-/bin/sh}" -l' sh "$@"
   fi
 
   # The number, and the terminal. A hand-made terminal can hold the number
@@ -497,6 +514,8 @@ bt_open() {
       '' | *[!0-9]* | 0*) bt_die 1 "cannot number a pane: $bt_state is not writable, or bateri's files are not in $bt_shelldir" ;;
     esac
     bt_id=p$bt_n
+    # No terminal to start: the Mac makes it, under this number.
+    [ -z "$bt_fresh" ] || break
     # In a subshell: the new terminal inherits this process, so it gets the caller's umask and
     # none of the caller's own terminal identity (the tab it stands in is not the new pane's).
     if bt_err=$(
@@ -565,6 +584,7 @@ bt_place() {
   [ -z "$bt_ratio" ] || bt_msg="${bt_msg}ratio $bt_ratio${nl}"
   [ -z "$bt_keep" ] || bt_msg="${bt_msg}keep-open yes${nl}"
   [ -z "$bt_focus" ] || bt_msg="${bt_msg}focus yes${nl}"
+  [ -z "$bt_fresh" ] || bt_msg="${bt_msg}fresh $bt_fresh${nl}"
   [ -z "$bt_home_tab" ] || bt_msg="${bt_msg}tab $bt_home_tab${nl}"
   [ -z "$bt_home_group" ] || bt_msg="${bt_msg}group $bt_home_group${nl}"
   [ -z "$bt_home_newgroup" ] || bt_msg="${bt_msg}new-group $bt_home_newgroup${nl}"

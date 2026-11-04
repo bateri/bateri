@@ -5,6 +5,7 @@
 use std::io::{Read, Write};
 use std::os::unix::fs::DirBuilderExt;
 use std::process::Command;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use super::*;
@@ -766,11 +767,29 @@ fn this_macs_account_takes_the_same_steps_with_no_server_and_no_connection() {
         2
     );
 
+    // The `bateri` command and its counter are written to it, and nothing else of a server's
+    // files: its shells start from the application's own.
+    let shell = mac.join(".local/share/bateri/shell");
+    assert!(shell.join("bin/bateri").is_file());
+    assert!(shell.join("next.sh").is_file());
+    assert!(!shell.join("boot.sh").exists() && !shell.join("zsh").exists());
+    // Its terminals are numbered by the counter the command runs, under this Mac's home.
+    assert_eq!(backend.number(&here), Some(1));
+    assert_eq!(backend.number(&here), Some(2));
+    assert_eq!(
+        std::fs::read_to_string(mac.join(".local/share/bateri/next")).expect("a counter"),
+        "3\n"
+    );
     // What only a server has is not taken for it.
-    assert_eq!(backend.number(&here), None);
+    std::fs::remove_file(shell.join("next.sh")).expect("removed");
     backend.files(&here, &installed);
+    assert!(
+        shell.join("next.sh").is_file(),
+        "the files are written again"
+    );
     assert!(backend.records(&here).is_empty());
     assert!(world.calls().is_empty(), "{:?}", world.calls());
+    assert!(!world.home.join(".local/share/bateri").exists());
 
     // The bridge is the file's `attach`, here (the stand-in echoes what it is given).
     let Carried {
@@ -800,6 +819,46 @@ fn this_macs_account_takes_the_same_steps_with_no_server_and_no_connection() {
             .count(),
         3
     );
+}
+
+/// `[commands] level = "off"` on this Mac: the command and the counter are not written, are
+/// taken away when an earlier start wrote them, and no terminal is numbered.
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn this_mac_with_its_commands_off_has_no_command_and_no_numbers() {
+    let world = stand_in("here-off", 0);
+    let mac = world._root.0.join("mac");
+    std::fs::create_dir_all(&mac).expect("this Mac's home");
+    let here = local::host();
+    let level = Arc::new(Mutex::new(CommandLevel::Own));
+    let mut backend = world.backend(Some(world.package()));
+    backend.home = Some(mac.clone());
+    let shared = Arc::clone(&level);
+    backend.settings = Box::new(move || Settings {
+        commands_level: *shared.lock().expect("lock"),
+        ..Settings::default()
+    });
+    let installed = backend.install(&here, &[]).expect("installed");
+    let shell = mac.join(".local/share/bateri/shell");
+    assert!(shell.join("bin/bateri").is_file());
+
+    // The level is turned off and the account comes up again (a start of the application, or a
+    // renewal): the command goes.
+    *level.lock().expect("lock") = CommandLevel::Off;
+    backend.install(&here, &[]).expect("found");
+    assert!(!shell.join("bin/bateri").exists() && !shell.join("next.sh").exists());
+    assert_eq!(backend.number(&here), None);
+    assert!(
+        !mac.join(".local/share/bateri/next").exists(),
+        "no number was given"
+    );
+    backend.files(&here, &installed);
+    assert!(!shell.join("bin/bateri").exists());
+    // And back on, the command is written again.
+    *level.lock().expect("lock") = CommandLevel::Own;
+    backend.files(&here, &installed);
+    assert!(shell.join("bin/bateri").is_file());
+    assert_eq!(backend.number(&here), Some(1));
 }
 
 #[test]

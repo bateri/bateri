@@ -312,7 +312,7 @@ fn a_real_kablo_is_installed_here_keeps_a_terminal_past_its_bridge_and_is_read_b
     };
     let mut ground = Ground::new("real");
     let channel = LocalChannel::new(ground.home.clone());
-    let installed = match ensure_here(&channel, &bundle) {
+    let installed = match ensure_here(&channel, &bundle, true) {
         Ok(installed) => installed,
         Err(Failure::Impossible(why)) => {
             eprintln!("SKIPPED: this machine is not one kablo is built for: {why:?}");
@@ -330,7 +330,7 @@ fn a_real_kablo_is_installed_here_keeps_a_terminal_past_its_bridge_and_is_read_b
         said.contains(&format!("version={}", installed.version)),
         "{said}"
     );
-    assert!(!ensure_here(&channel, &bundle).expect("found").fresh);
+    assert!(!ensure_here(&channel, &bundle, true).expect("found").fresh);
 
     // A terminal through the bridge: made, written to, read from.
     let id = SessionId::new("t1").expect("an id");
@@ -463,7 +463,7 @@ impl Backend for RealMac {
     }
 
     fn install(&self, _: &KabloHost, _: &[SessionId]) -> Result<Installed, Refusal> {
-        ensure_here(&LocalChannel::new(self.home.clone()), &self.bundle)
+        ensure_here(&LocalChannel::new(self.home.clone()), &self.bundle, true)
             .map_err(|_| Refusal::plain())
     }
 

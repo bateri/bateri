@@ -134,7 +134,7 @@ pub(super) fn may_change(server: &Server, panes: Panes, what: &str) -> Done {
         Verdict::Allowed => Ok(()),
         Verdict::Refused(why) => Err(Failure::new(
             Kind::Refused,
-            level::refusal(server.level, why, Some(&server.host)),
+            level::refusal(server.level, why, server.host_name()),
         )),
         Verdict::Unknown => Err(unknown(format!("there is no {what}"))),
     }

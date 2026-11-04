@@ -1,11 +1,11 @@
-# bateri's terminal counter — POSIX sh, run on the SERVER.
+# bateri's terminal counter — POSIX sh, run on the machine kablo is on: a server, or this Mac.
 #
 # Prints the number of the next terminal, digits only, and never prints one
-# twice: the panes an agent opens are `p1`, `p2`, … per server, and a
+# twice: the panes an agent opens are `p1`, `p2`, … per machine, and a
 # number that was given is not given again, whatever became of its terminal.
 # Two callers share it — `bin/bateri` runs this file, and the Mac runs the
-# same bytes over its connection (`sh -c`) for the terminal it opens itself —
-# so the file reads nothing but `HOME` and is the whole of the rule.
+# same bytes over its connection (`sh -c`, or `sh -c` here for this Mac's own panes) for the
+# terminal it opens itself — so the file reads nothing but `HOME` and is the whole of the rule.
 #
 # The state is `~/.local/share/bateri/next` (the number to give next), under a
 # lock that is a directory (`mkdir` is the one atomic step every `sh` has). It

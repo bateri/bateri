@@ -276,23 +276,33 @@ pub fn ensure_for(
     bundle: &Bundle,
     agent: bool,
 ) -> Result<Installed, Failure> {
-    place(channel, bundle, Some(agent))
+    place(channel, bundle, Files::Server { agent })
 }
 
-/// [`ensure`] for this Mac ([`super::local`]): the same look and the same write, without the
-/// shells' files — a terminal here starts from the application's own, and the files of a server
-/// have no reader on the Mac that writes them.
-pub fn ensure_here(channel: &dyn Channel, bundle: &Bundle) -> Result<Installed, Failure> {
-    place(channel, bundle, None)
-}
-
-/// What [`ensure`] and [`ensure_here`] are, with the shells' files (`Some`, and whether the
-/// `bateri` command is among them) or without (`None`).
-fn place(
+/// [`ensure`] for this Mac ([`super::local`]): the same look and the same write, with the two
+/// files of the shells' that this Mac has a reader for — the agent's command and its counter
+/// ([`crate::ssh_wrap::files_script_here`]; with `agent` false, `[commands] level = "off"`, they
+/// are not written and are removed). The rest of a server's files have none: a terminal here
+/// starts from the application's own shells.
+pub fn ensure_here(
     channel: &dyn Channel,
     bundle: &Bundle,
-    files: Option<bool>,
+    agent: bool,
 ) -> Result<Installed, Failure> {
+    place(channel, bundle, Files::Here { agent })
+}
+
+/// Which of the shells' files go with the look at kablo ([`place`]).
+#[derive(Clone, Copy)]
+enum Files {
+    /// A server's whole set, with the `bateri` command or without it.
+    Server { agent: bool },
+    /// This Mac's two ([`crate::ssh_wrap::files_script_here`]).
+    Here { agent: bool },
+}
+
+/// What [`ensure`] and [`ensure_here`] are: the look at kablo, and the files that ride it.
+fn place(channel: &dyn Channel, bundle: &Bundle, files: Files) -> Result<Installed, Failure> {
     let target = server_target(channel)?;
     let artifact = bundle
         .artifact(target)
@@ -305,13 +315,13 @@ fn place(
     };
     // The shells' files ride the call that looks for kablo: no step of their own, on a connection
     // that has no limit on how many bytes one call carries ([`probe_and_files_script`]).
-    let probe = if let Some(agent) = files {
-        let files = crate::ssh_wrap::files_script_for(Some(&installed.path), agent);
-        channel.run(&probe_and_files_script(bundle.version()), files.as_bytes())
-    } else {
-        channel.run(&probe_script(bundle.version()), &[])
-    }
-    .map_err(|error| Failure::transient(format!("looking for kablo: {error}")))?;
+    let script = match files {
+        Files::Server { agent } => crate::ssh_wrap::files_script_for(Some(&installed.path), agent),
+        Files::Here { agent } => crate::ssh_wrap::files_script_here(Some(&installed.path), agent),
+    };
+    let probe = channel
+        .run(&probe_and_files_script(bundle.version()), script.as_bytes())
+        .map_err(|error| Failure::transient(format!("looking for kablo: {error}")))?;
     // A macOS binary is code-signed when the package is made, and a signature
     // is part of the file: two packages of the same kablo have two sums. What
     // such a file says its version is has to do.
@@ -412,6 +422,13 @@ pub fn probe_and_files_script(version: &str) -> String {
 /// which says so.
 pub fn put_files(channel: &dyn Channel, installed: &Installed, agent: bool) {
     let files = crate::ssh_wrap::files_script_for(Some(&installed.path), agent);
+    let _ = channel.run("sh -s >/dev/null 2>&1; :", files.as_bytes());
+}
+
+/// [`put_files`] for this Mac ([`crate::ssh_wrap::files_script_here`]): the agent's command and
+/// its counter, or their removal when the command is not wanted.
+pub fn put_files_here(channel: &dyn Channel, installed: &Installed, agent: bool) {
+    let files = crate::ssh_wrap::files_script_here(Some(&installed.path), agent);
     let _ = channel.run("sh -s >/dev/null 2>&1; :", files.as_bytes());
 }
 
@@ -792,7 +809,8 @@ pub fn run_command(argv: &[String], input: &[u8], limit: Duration) -> io::Result
     run_command_in(argv, input, limit, None)
 }
 
-/// [`run_command`] in the directory `dir` (this process's own when `None`).
+/// [`run_command`] in the directory `dir` (this process's own when `None`), which is also the
+/// `HOME` the step sees.
 pub fn run_command_in(
     argv: &[String],
     input: &[u8],
@@ -805,7 +823,9 @@ pub fn run_command_in(
     let mut command = crate::ssh_route::command(program);
     command.args(args);
     if let Some(dir) = dir {
-        command.current_dir(dir);
+        // The directory is the home of whoever the step is for: what it writes below `$HOME`
+        // (the counter) goes where its relative paths do.
+        command.current_dir(dir).env("HOME", dir);
     }
     let mut child = command
         .stdin(Stdio::piped())

@@ -883,14 +883,14 @@ fn a_name_that_is_not_a_version_is_never_handed_to_rm() {
 
 #[test]
 #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
-fn this_mac_gets_kablo_by_the_same_steps_without_the_shells_files() {
+fn this_mac_gets_kablo_by_the_same_steps_and_of_the_shells_files_only_the_agents_two() {
     let root = TempRoot::new("kablo-here");
     let bundle = package(&root.0, "0.2.0", KABLO);
     let home = root.0.join("mac");
     std::fs::create_dir_all(&home).expect("home");
     let channel = super::super::local::LocalChannel::new(home.clone());
 
-    let first = ensure_here(&channel, &bundle).expect("installed");
+    let first = ensure_here(&channel, &bundle, true).expect("installed");
     assert!(first.fresh, "written now");
     assert_eq!(first.path, ".local/share/kablo/0.2.0/kablo");
     let file = home.join(&first.path);
@@ -904,30 +904,42 @@ fn this_mac_gets_kablo_by_the_same_steps_without_the_shells_files() {
         0o755,
         "runnable"
     );
-    // The Mac's home holds kablo's place and nothing of a server's files (the bootstrap, the
-    // agent's command, the counter).
-    let names: Vec<String> = std::fs::read_dir(&home)
-        .expect("home")
-        .flatten()
-        .map(|entry| entry.file_name().to_string_lossy().into_owned())
-        .collect();
-    assert_eq!(names, [".local"]);
-    let share: Vec<String> = std::fs::read_dir(home.join(".local/share"))
-        .expect("share")
-        .flatten()
-        .map(|entry| entry.file_name().to_string_lossy().into_owned())
-        .collect();
-    assert_eq!(share, ["kablo"]);
+    // The Mac's home holds kablo's place, and of a server's files only the agent's command and
+    // its counter (not the bootstrap and not the shells' own).
+    let names = |dir: &std::path::Path| -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .expect("a directory")
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    };
+    assert_eq!(names(&home), [".local"]);
+    assert_eq!(names(&home.join(".local/share")), ["bateri", "kablo"]);
+    assert_eq!(
+        names(&home.join(".local/share/bateri/shell")),
+        ["bin", "next.sh"]
+    );
+    assert_eq!(
+        names(&home.join(".local/share/bateri/shell/bin")),
+        ["bateri"]
+    );
+    // Its level `off`: they are taken away.
+    ensure_here(&channel, &bundle, false).expect("found");
+    assert!(names(&home.join(".local/share/bateri/shell/bin")).is_empty());
+    assert_eq!(names(&home.join(".local/share/bateri/shell")), ["bin"]);
+    ensure_here(&channel, &bundle, true).expect("found");
 
     // The second time finds it.
-    assert!(!ensure_here(&channel, &bundle).expect("found").fresh);
+    assert!(!ensure_here(&channel, &bundle, true).expect("found").fresh);
 
     // A file at the version's place that is not the package's is left alone: terminals may run
     // from it. (One that does not say the package's version is not "the same kablo, signed by
     // another package" on a Mac either.)
     std::fs::write(&file, "#!/bin/sh\necho version=9.9.9\n").expect("another kablo");
     assert_eq!(
-        ensure_here(&channel, &bundle),
+        ensure_here(&channel, &bundle, true),
         Err(Failure::Transient(
             "the kablo on the server is not the package's".to_owned()
         ))

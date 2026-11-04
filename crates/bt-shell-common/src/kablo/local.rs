@@ -18,9 +18,16 @@
 //! server's is.
 //!
 //! **Whose it is.** The account is the Mac's, and it is *not* a server: none of what bateri does
-//! for a server pane (file drops, the load indicator, the server's ports, a server's files and
-//! counter, the notes a program left there) is done for it. The one place that says which is
-//! which is the account's name ([`is_account`], [`Shown::is_local`](super::service::Shown)).
+//! for a server pane (file drops, the load indicator, the server's ports, a server's shell files,
+//! the notes a program left there) is done for it. The one place that says which is which is the
+//! account's name ([`is_account`], [`Shown::is_local`](super::service::Shown)).
+//!
+//! **What it has of a server's.** The `bateri` command and its counter: the two files are
+//! written below the home directory ([`super::install::ensure_here`]; not at all, and taken
+//! away, when `[commands] level` is `off`), the terminals a pane starts are numbered by the
+//! counter (`p7`) like a server's, and a program that runs `kablo app` in one of them is heard
+//! like one on a server — its level is the setting's, and its pane is an ordinary pane of this
+//! Mac that is born knowing its terminal ([`super::ledger::Ledger::local_terminal_of`]).
 //!
 //! **What a pane gets.** A pane's shell runs in a terminal of this account, and the pane's session
 //! reads its bytes from a stream the service holds as a raw holder

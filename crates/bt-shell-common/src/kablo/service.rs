@@ -75,7 +75,8 @@
 //!
 //! **What the programs on a server say to the app.** A backend that takes mail
 //! ([`Backend::takes_mail`]) has its accounts' clients ask for tickets
-//! ([`crate::kablo::mail`]): a program that runs `kablo app` on the server gets a
+//! ([`crate::kablo::mail`]): a program that runs `kablo app` on the server (or on this Mac, whose
+//! account is asked the same) gets a
 //! conversation with the application, and the service takes it at once (the program
 //! waits ten seconds for that), keeps what the program says until it has said all it
 //! had, and hands the whole of it to [`Backend::mail`] as a [`Letter`] with the way to
@@ -619,6 +620,9 @@ struct Ask {
     spec: NewSession,
     size: Size,
     reply: Sender<Result<Stream, Refusal>>,
+    /// The name its terminal is to have: the number a program that opened the pane was told
+    /// ([`Service::expect_name`]), or the counter's ([`Core::local_numbered`]).
+    name: Option<SessionId>,
 }
 
 /// A terminal of this Mac that has been asked for and has not been made (or found again): the
@@ -724,6 +728,12 @@ enum Msg {
     Here(Pending),
     /// A pane wants a terminal of this Mac ([`Service::open_local`]).
     Local(Ask),
+    /// The counter was asked for the number of the terminal a pane of this Mac wants
+    /// ([`Core::local_numbered`]).
+    LocalNumbered {
+        ask: Ask,
+        number: Option<u64>,
+    },
     /// The account of this Mac that the panes waiting for it are for was made, or could not be.
     LocalAccount(Result<(), Refusal>),
     /// The pane of a raw holder changed size.
@@ -791,6 +801,8 @@ enum Msg {
     /// The user asked to try now (⏎), or logged in: the account dials as soon
     /// as it can.
     Retry(String),
+    /// The files of an account's server are to be written again ([`Service::rewrite_files`]).
+    Rewrite(String),
     /// The computer woke up.
     Wake,
     /// Ask every account for its terminals ([`Service::refresh_background`]).
@@ -975,6 +987,9 @@ pub struct Service {
     threads: Mutex<Vec<thread::JoinHandle<()>>>,
     /// What each pane shows, as the loop last wrote it.
     shown: Arc<Mutex<HashMap<PaneUuid, Shown>>>,
+    /// The program in front of each terminal of this Mac that a pane has, as the loop last wrote
+    /// it ([`Service::local_program`]).
+    local_programs: Arc<Mutex<HashMap<SessionId, String>>>,
     /// The terminals each account keeps in the background, as the loop last wrote them.
     background: Arc<Mutex<BTreeMap<String, Kept>>>,
     /// The terminals each account's server lists that are no longer running and that no pane
@@ -982,6 +997,8 @@ pub struct Service {
     exited: Arc<Mutex<BTreeMap<String, Vec<SessionId>>>>,
     /// When a pane last gave up waiting for a terminal of this Mac ([`Service::open_local`]).
     local_gave_up: Mutex<Option<Instant>>,
+    /// The names panes of this Mac are to have for their terminals ([`Service::expect_name`]).
+    names: Mutex<HashMap<PaneUuid, SessionId>>,
     /// What [`Service::stage_of`] reads.
     stages: Arc<Mutex<HashMap<String, Staged>>>,
 }
@@ -1053,6 +1070,7 @@ impl Service {
                 .spawn(move || accept_loop(&listener, &tx, &stop))?
         };
         let shown = Arc::new(Mutex::new(HashMap::new()));
+        let local_programs = Arc::new(Mutex::new(HashMap::new()));
         let background = Arc::new(Mutex::new(BTreeMap::new()));
         let exited = Arc::new(Mutex::new(BTreeMap::new()));
         let stages = Arc::new(Mutex::new(HashMap::new()));
@@ -1073,6 +1091,7 @@ impl Service {
             local_refused: None,
             awaiting: BTreeMap::new(),
             shown: Arc::clone(&shown),
+            local_programs: Arc::clone(&local_programs),
             roster: BTreeMap::new(),
             relist: BTreeSet::new(),
             fresh: BTreeSet::new(),
@@ -1101,9 +1120,11 @@ impl Service {
             stop,
             threads: Mutex::new(vec![accepting, serving]),
             shown,
+            local_programs,
             background,
             exited,
             local_gave_up: Mutex::new(None),
+            names: Mutex::new(HashMap::new()),
             stages,
         })
     }
@@ -1118,6 +1139,17 @@ impl Service {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .get(pane)
+            .cloned()
+    }
+
+    /// The program in front of `terminal`, a terminal of this Mac that a pane has, as kablo last
+    /// said, controls removed: what names the program that asks for a pane ("Claude opened…").
+    /// Apart from [`Service::shown`], which is a server's alone.
+    pub fn local_program(&self, terminal: &SessionId) -> Option<String> {
+        self.local_programs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(terminal)
             .cloned()
     }
 
@@ -1382,11 +1414,17 @@ impl Service {
             return Err(Refusal::plain());
         }
         let (reply, answer) = mpsc::channel();
+        let name = self
+            .names
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(pane);
         let ask = Ask {
             pane: pane.clone(),
             spec,
             size,
             reply,
+            name,
         };
         self.tx
             .send(Msg::Local(ask))
@@ -1403,6 +1441,18 @@ impl Service {
         }
     }
 
+    /// The next terminal of this Mac `pane` asks for ([`Service::open_local`]) is named `name`,
+    /// started under it as it is not found again: the pane a program asked for without a
+    /// program of its own (`bateri split`), whose number the program was told before there was a
+    /// terminal. Without it the terminal is numbered by the counter, as a pane the user opens
+    /// is.
+    pub fn expect_name(&self, pane: &PaneUuid, name: SessionId) {
+        self.names
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(pane.clone(), name);
+    }
+
     /// Try now: the account of the terminal `pane` shows dials at once instead
     /// of waiting out its pause. What ⏎ does on a pane that waits for the
     /// connection. A pane that shows nothing does nothing.
@@ -1416,6 +1466,13 @@ impl Service {
     /// connection is there now) and every terminal on the server comes back.
     pub fn retry_account(&self, account: &str) {
         let _ = self.tx.send(Msg::Retry(account.to_owned()));
+    }
+
+    /// The files the account's machine has of bateri's are written again, as its level now says
+    /// (`[commands] level` for this Mac: the `bateri` command comes or goes without a restart).
+    /// An account that is not made yet is written when it is.
+    pub fn rewrite_files(&self, account: &str) {
+        let _ = self.tx.send(Msg::Rewrite(account.to_owned()));
     }
 
     /// The computer woke up: a connection that looked open is asked whether it
@@ -1561,6 +1618,8 @@ struct Core {
     awaiting: BTreeMap<HoldId, Awaiting>,
     /// What [`Service::shown`] reads.
     shown: Arc<Mutex<HashMap<PaneUuid, Shown>>>,
+    /// What [`Service::local_program`] reads.
+    local_programs: Arc<Mutex<HashMap<SessionId, String>>>,
     /// What each account's server last said of its terminals.
     roster: BTreeMap<String, Roster>,
     /// The accounts to ask for their terminals again before anything else is done.
@@ -1817,6 +1876,18 @@ impl Core {
                 // A login that was waited for is a connection being made.
                 self.refresh = true;
             }
+            Msg::Rewrite(account) => {
+                if let Some(entry) = self.accounts.get(&account) {
+                    let (shared, server, installed) = (
+                        Arc::clone(&self.shared),
+                        entry.server.clone(),
+                        entry.installed.clone(),
+                    );
+                    let _ = thread::Builder::new()
+                        .name("ssh-hold writes the files".into())
+                        .spawn(move || shared.backend.files(&server, &installed));
+                }
+            }
             Msg::Wake => {
                 let accounts: Vec<String> = self.accounts.keys().cloned().collect();
                 for account in accounts {
@@ -1844,6 +1915,15 @@ impl Core {
             }
             Msg::Here(pending) => self.here(pending),
             Msg::Local(ask) => self.local(ask, now),
+            Msg::LocalNumbered { ask, number } => {
+                self.local_open(
+                    Ask {
+                        name: terminal_named(number),
+                        ..ask
+                    },
+                    None,
+                );
+            }
             Msg::LocalAccount(outcome) => self.local_account(&outcome, now),
             Msg::Resize { hold, size } => self.hub.resize(hold, size),
             Msg::DropInput { hold, remote } => self.drop_input(hold, remote),
@@ -2301,19 +2381,12 @@ impl Core {
             return;
         }
         let mut shown = HashMap::new();
+        let mut local_programs = HashMap::new();
         for (hold, pane) in &self.panes {
             let Some((account, terminal)) = self.hub.terminal_of(*hold) else {
                 continue;
             };
-            // The Mac's own terminals are no server's: what asks for a server's terminal of a
-            // pane does not find one. A pane can have both — its program is the pipe to a
-            // server's terminal and runs in a terminal of this Mac — and what it *shows* is the
-            // server's: the two are two handles, this one carries the bytes, and the writer
-            // leaves it out, so which of the two holds is looked at last decides nothing.
-            if local::is_account(account) {
-                continue;
-            }
-            let program = self
+            let program: Option<String> = self
                 .hub
                 .client(account)
                 .and_then(|client| client.state_of(terminal))
@@ -2324,6 +2397,19 @@ impl Core {
                         .filter(|c| !c.is_control())
                         .collect()
                 });
+            // The Mac's own terminals are no server's: what asks for a server's terminal of a
+            // pane does not find one. A pane can have both — its program is the pipe to a
+            // server's terminal and runs in a terminal of this Mac — and what it *shows* is the
+            // server's: the two are two handles, this one carries the bytes, and the writer
+            // leaves it out, so which of the two holds is looked at last decides nothing. What a
+            // program asks of the app (`bateri`) needs to know the program in front of it, and
+            // that is kept apart.
+            if local::is_account(account) {
+                if let Some(program) = program {
+                    local_programs.insert(terminal.clone(), program);
+                }
+                continue;
+            }
             let (host, argv) = self
                 .accounts
                 .get(account)
@@ -2369,6 +2455,10 @@ impl Core {
                 },
             );
         }
+        *self
+            .local_programs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = local_programs;
         let before = std::mem::replace(
             &mut *self.shown.lock().unwrap_or_else(|e| e.into_inner()),
             shown.clone(),
@@ -3120,13 +3210,46 @@ impl Core {
     /// pane that comes back after an update, a quit that kept the programs, or a crash is shown
     /// its terminal where it was left.
     fn local_start(&mut self, ask: Ask) {
+        // Named by the program that told its number: that terminal is made, not found.
+        if ask.name.is_some() {
+            return self.local_open(ask, None);
+        }
         // Not one a holder shows already: a pane that asks twice is given a second terminal.
         let resume = self
             .shared
             .ledger
             .local_terminal_of(&ask.pane)
             .filter(|terminal| self.hub.hold_of(local::ACCOUNT, terminal).is_none());
-        self.local_open(ask, resume);
+        match resume {
+            Some(_) => self.local_open(ask, resume),
+            None => self.local_numbered(ask),
+        }
+    }
+
+    /// A terminal of this Mac that is to be made is numbered by the counter the `bateri` command
+    /// uses ([`Backend::number`]), on a thread of its own, so that `send`, `capture` and `wait`
+    /// find a pane the user opened by its number as they find one a program opened. No number
+    /// (the command is not wanted, the counter could not count): the terminal keeps the name it
+    /// is made with.
+    fn local_numbered(&mut self, ask: Ask) {
+        let shared = Arc::clone(&self.shared);
+        let tx = shared.tx.clone();
+        let sent = Arc::new(Mutex::new(Some(ask)));
+        let handed = Arc::clone(&sent);
+        let spawned = thread::Builder::new()
+            .name("ssh-hold numbers this Mac".into())
+            .spawn(move || {
+                let number = shared.backend.number(&local::host());
+                let ask = handed.lock().unwrap_or_else(|e| e.into_inner()).take();
+                if let Some(ask) = ask {
+                    let _ = tx.send(Msg::LocalNumbered { ask, number });
+                }
+            });
+        if spawned.is_err()
+            && let Some(ask) = sent.lock().unwrap_or_else(|e| e.into_inner()).take()
+        {
+            self.local_open(ask, None);
+        }
     }
 
     /// [`Core::local_start`] with the terminal chosen: the stream between the pane and the hub is
@@ -3140,6 +3263,7 @@ impl Core {
             spec,
             size,
             reply,
+            name,
         } = ask;
         let refuse = |reply: &Sender<Result<Stream, Refusal>>| {
             let _ = reply.send(Err(Refusal::plain()));
@@ -3177,7 +3301,7 @@ impl Core {
                 }
             }
             None => {
-                let Ok(terminal) = crate::hold::new_terminal_name() else {
+                let Some(terminal) = name.or_else(|| crate::hold::new_terminal_name().ok()) else {
                     self.hub.closed(hold);
                     return refuse(&reply);
                 };
@@ -3315,15 +3439,13 @@ impl Core {
                 ask: (pane, spec, size),
             }) => {
                 self.shared.ledger.end(local::ACCOUNT, &terminal);
-                self.local_open(
-                    Ask {
-                        pane,
-                        spec,
-                        size,
-                        reply,
-                    },
-                    None,
-                );
+                self.local_numbered(Ask {
+                    pane,
+                    spec,
+                    size,
+                    reply,
+                    name: None,
+                });
             }
             None => {
                 let _ = reply.send(Err(Refusal::plain()));
@@ -3351,9 +3473,10 @@ impl Core {
             .version()
             .is_some_and(|version| version != installed.version);
         let mut client = Client::new(name.as_deref(), now);
-        // A program on this Mac that runs `kablo app` finds no application: what programs ask of
-        // the application is a server's.
-        if self.shared.backend.takes_mail() && !local::is_account(&key) {
+        // A program on this Mac that runs `kablo app` finds the application, as a program on a
+        // server does: the `bateri` command is the same one, and what it may do is the Mac's
+        // level ([`Letter`]'s account tells which).
+        if self.shared.backend.takes_mail() {
             client.take_tickets();
         }
         self.hub.add_client(&key, client);

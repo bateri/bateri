@@ -774,6 +774,10 @@ const REMOTE_FILES: [(&str, &str); 14] = [
     ("boot.sh", BOOT_SCRIPT),
 ];
 
+/// The files this Mac gets of [`REMOTE_FILES`]: the agent's command and its counter
+/// ([`files_script_here`]).
+const HERE_FILES: [&str; 2] = [AGENT_COMMAND_PATH, "next.sh"];
+
 /// The script the server's `sh` reads from its standard input to write
 /// [`REMOTE_FILES`] under `${XDG_DATA_HOME:-~/.local/share}/bateri/shell/`:
 /// each file under a temporary name and renamed into place (a shell that starts
@@ -800,11 +804,35 @@ pub fn files_script(kablo: Option<&str>) -> String {
 /// earlier call left it, so a program on the server that runs it stops working. The rest — the
 /// counter, the bootstrap, the shells' files — is what the window's own panes need and stays.
 pub fn files_script_for(kablo: Option<&str>, agent: bool) -> String {
-    /// Where the files go, and the function that puts one there.
-    const PRELUDE: &str = r#"case ${SHELL##*/} in zsh | bash | fish) ;; *) exit 0 ;; esac
-bt_data=${XDG_DATA_HOME:-}
+    files_script_of(kablo, agent, false)
+}
+
+/// [`files_script_for`] for this Mac (`kablo::install::ensure_here`): only the agent's command
+/// and its counter, which are all the Mac needs of a server's files — a terminal here starts from
+/// the application's own shells, and the bootstrap is a server pane's. There is no login shell to
+/// ask after (the script is `sh`'s in the home directory, not an ssh command), so none is
+/// looked at. Without the command (`agent` false: `[commands] level = "off"`) neither file is
+/// written, and both are removed if an earlier call left them: nothing of the command is left to
+/// be found, and nothing numbers a pane for it.
+pub fn files_script_here(kablo: Option<&str>, agent: bool) -> String {
+    files_script_of(kablo, agent, true)
+}
+
+/// [`files_script_for`] and [`files_script_here`]: `here` writes the Mac's two files
+/// ([`HERE_FILES`]) and does not look at `$SHELL`.
+fn files_script_of(kablo: Option<&str>, agent: bool, here: bool) -> String {
+    /// Where a server's files go: `XDG_DATA_HOME` as sshd's command has it, else under the home.
+    const SERVER_DIR: &str = r#"bt_data=${XDG_DATA_HOME:-}
 case $bt_data in /*) ;; *) bt_data=$HOME/.local/share ;; esac
-bt_dir=$bt_data/bateri/shell
+"#;
+    /// Where this Mac's go: under the home, whatever `XDG_DATA_HOME` is. The application's
+    /// environment is not a login shell's, and the wrappers look in one place
+    /// (`~/.local/share/bateri/shell/bin`), as the counter does ([`COUNTER`]).
+    const HERE_DIR: &str = r#"case ${HOME-} in /*) ;; *) exit 0 ;; esac
+bt_data=$HOME/.local/share
+"#;
+    /// The function that puts a file there.
+    const PRELUDE: &str = r#"bt_dir=$bt_data/bateri/shell
 bt_put() {
   bt_tmp=$bt_dir/$1.tmp.$$
   if printf '%s' "$2" > "$bt_tmp"; then
@@ -820,9 +848,21 @@ bt_put() {
   return 1
 }
 "#;
+    /// A server's files are for a login shell the integration serves; the login shell is what
+    /// sshd sets `SHELL` to.
+    const SERVED: &str = "case ${SHELL##*/} in zsh | bash | fish) ;; *) exit 0 ;; esac\n";
     let kablo = kablo.filter(|kablo| is_kablo_path(kablo));
+    let files: Vec<(&str, &str)> = if here {
+        REMOTE_FILES
+            .iter()
+            .copied()
+            .filter(|(path, _)| HERE_FILES.contains(path))
+            .collect()
+    } else {
+        REMOTE_FILES.to_vec()
+    };
     let mut dirs: Vec<&str> = Vec::new();
-    for (path, _) in REMOTE_FILES {
+    for (path, _) in &files {
         if let Some((dir, _)) = path.rsplit_once('/') {
             if !dirs.contains(&dir) {
                 dirs.push(dir);
@@ -834,16 +874,30 @@ bt_put() {
         .map(|dir| format!("\"$bt_dir/{dir}\""))
         .collect::<Vec<_>>()
         .join(" ");
-    let mut text = format!("{PRELUDE}(umask 077 && mkdir -p {made} && \\\n");
-    for (path, content) in REMOTE_FILES {
-        if !agent && path == AGENT_COMMAND_PATH {
+    let served = if here {
+        HERE_DIR.to_owned()
+    } else {
+        format!("{SERVED}{SERVER_DIR}")
+    };
+    if here && !agent {
+        // Nothing to write; what an earlier call wrote goes.
+        let gone = HERE_FILES
+            .iter()
+            .map(|path| format!("\"$bt_dir/{path}\""))
+            .collect::<Vec<_>>()
+            .join(" ");
+        return format!("{served}{PRELUDE}rm -f {gone} 2>/dev/null\nexit 0\n");
+    }
+    let mut text = format!("{served}{PRELUDE}(umask 077 && mkdir -p {made} && \\\n");
+    for (path, content) in &files {
+        if !agent && *path == AGENT_COMMAND_PATH {
             continue;
         }
         let content = match kablo {
             Some(kablo) if content.contains(KABLO_PLACEHOLDER) => {
                 std::borrow::Cow::Owned(content.replace(KABLO_PLACEHOLDER, kablo))
             }
-            _ => std::borrow::Cow::Borrowed(content),
+            _ => std::borrow::Cow::Borrowed(*content),
         };
         text.push_str(&format!(
             "  bt_put {} {} && \\\n",
@@ -917,6 +971,37 @@ pub(crate) fn seed_files_for(
         .take()
         .expect("stdin")
         .write_all(files_script_for(kablo, agent).as_bytes());
+    child.wait().expect("sh ended")
+}
+
+/// What the call that looks for kablo does to this Mac, for a test: `sh -s` reads
+/// [`files_script_here`] in `home`, with the environment an application has — no `SHELL`, and an
+/// `XDG_DATA_HOME` that is not where the files go. The command and the counter are in place when
+/// it returns (`agent`), or gone.
+#[cfg(test)]
+pub(crate) fn seed_files_here(
+    home: &std::path::Path,
+    kablo: Option<&str>,
+    agent: bool,
+) -> std::process::ExitStatus {
+    use std::io::Write as _;
+    let mut child = std::process::Command::new("/bin/sh")
+        .arg("-s")
+        .env_clear()
+        .env("HOME", home)
+        .env("XDG_DATA_HOME", home.join("elsewhere"))
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .current_dir(home)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("sh");
+    let _ = child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(files_script_here(kablo, agent).as_bytes());
     child.wait().expect("sh ended")
 }
 
@@ -3325,24 +3410,122 @@ mod remote_shells {
         }
     }
 
-    /// The local wrappers are the ones that put nothing on `PATH`: the
-    /// agent's command exists on a server only.
+    /// The local wrappers put the agent's command, where the app writes it on this Mac
+    /// (`~/.local/share/bateri/shell/bin`), first on the shell's own `PATH` for the session —
+    /// in all three shells, and by writing nothing of the user's.
     #[test]
-    fn only_the_remote_wrappers_know_the_agents_command() {
-        const WORDS: &str = "agent's command";
-        for local in [
-            include_str!("../../../assets/shell/zsh/bateri.zsh"),
-            include_str!("../../../assets/shell/bash/bateri.bash"),
-            include_str!("../../../assets/shell/fish/vendor_conf.d/bateri.fish"),
+    fn the_local_wrappers_put_the_agents_command_on_path_in_all_three_shells() {
+        let root = TempRoot::new("local-path");
+        let home = root.0.join("home");
+        let bin = home.join(".local/share/bateri/shell/bin");
+        std::fs::create_dir_all(&bin).expect("bin");
+        std::fs::write(bin.join("bateri"), "#!/bin/sh\n").expect("bateri");
+        std::fs::set_permissions(
+            bin.join("bateri"),
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .expect("executable");
+        let assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/shell");
+        let wanted = bin.display().to_string();
+        let mut ran = 0;
+        for (name, program, args, env) in [
+            (
+                "zsh",
+                "zsh",
+                vec![
+                    "-f".to_owned(),
+                    "-c".to_owned(),
+                    "source $ZDOTDIR/bateri.zsh; __bateri_hooks; print -r -- ${path[1]}".to_owned(),
+                ],
+                vec![("ZDOTDIR", assets.join("zsh").display().to_string())],
+            ),
+            (
+                "bash",
+                "bash",
+                vec![
+                    "--noprofile".to_owned(),
+                    "--norc".to_owned(),
+                    "-c".to_owned(),
+                    format!(
+                        "source {}; printf '%s\\n' \"${{PATH%%:*}}\"",
+                        assets.join("bash/bateri.bash").display()
+                    ),
+                ],
+                vec![],
+            ),
+            (
+                "fish",
+                "fish",
+                vec![
+                    "--no-config".to_owned(),
+                    "-i".to_owned(),
+                    "-c".to_owned(),
+                    format!(
+                        "source {}; emit fish_prompt; echo $PATH[1]",
+                        assets.join("fish/vendor_conf.d/bateri.fish").display()
+                    ),
+                ],
+                vec![],
+            ),
         ] {
-            assert!(!local.contains(WORDS) && !local.contains("bin/bateri"));
+            // A shell this machine does not have, or one too old for the wrapper, is not tried.
+            let mut command = std::process::Command::new(program);
+            command
+                .args(&args)
+                .env("HOME", &home)
+                .env("PATH", std::env::var_os("PATH").unwrap_or_default());
+            for (key, value) in &env {
+                command.env(key, value);
+            }
+            let Ok(output) = command.output() else {
+                continue;
+            };
+            let text = String::from_utf8_lossy(&output.stdout);
+            if name == "bash" && !text.trim_end().ends_with(&wanted) {
+                // bash older than 4.4 stops at the wrapper's own version check.
+                let version = std::process::Command::new(program)
+                    .args(["-c", "echo ${BASH_VERSINFO[0]}${BASH_VERSINFO[1]}"])
+                    .output()
+                    .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_owned())
+                    .unwrap_or_default();
+                if version.parse::<u32>().is_ok_and(|version| version < 44) {
+                    continue;
+                }
+            }
+            assert!(
+                text.trim_end().ends_with(&wanted),
+                "{name}: the command is not first on PATH: {text:?}"
+            );
+            ran += 1;
         }
-        for remote in [
-            include_str!("../../../assets/shell/remote/zsh/bateri.zsh"),
-            include_str!("../../../assets/shell/remote/bash/bateri.bash"),
-            include_str!("../../../assets/shell/remote/fish/vendor_conf.d/bateri.fish"),
+        assert!(ran > 0, "no shell to try");
+        // A home with no command in it (`[commands] level = "off"`): nothing is added.
+        std::fs::remove_file(bin.join("bateri")).expect("removed");
+        let output = std::process::Command::new("zsh")
+            .args([
+                "-f",
+                "-c",
+                "source $ZDOTDIR/bateri.zsh; __bateri_hooks; print -r -- ${path[1]}",
+            ])
+            .env("HOME", &home)
+            .env("ZDOTDIR", assets.join("zsh"))
+            .output();
+        if let Ok(output) = output {
+            assert!(
+                !String::from_utf8_lossy(&output.stdout).contains(&wanted),
+                "the command is not there"
+            );
+        }
+        // Nothing of the user's was written (fish makes its own `config.fish` stub, wrapper or not).
+        for file in [
+            ".zshrc",
+            ".zshenv",
+            ".zprofile",
+            ".bashrc",
+            ".bash_profile",
+            ".profile",
         ] {
-            assert!(remote.contains(WORDS));
+            assert!(!home.join(file).exists(), "{file} was written");
         }
     }
 

@@ -57,6 +57,7 @@ mod arrange;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bt_core::CommandLevel;
@@ -72,6 +73,7 @@ use bt_shell_common::agent::summary;
 use bt_shell_common::agent::wait::{Queue, Waiting};
 use bt_shell_common::agent::{Anchor, Terminal};
 use bt_shell_common::kablo::SessionId;
+use bt_shell_common::kablo::local;
 use bt_shell_common::kablo::service::{Letter, Shown, Survey};
 use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
@@ -223,7 +225,11 @@ fn take(app: &AppDelegate, mut letter: Letter) {
         account: letter.account.clone(),
         host: letter.host.clone(),
         argv: letter.argv.clone(),
-        level: app.settings().commands_for(&letter.host),
+        level: if local::is_account(&letter.account) {
+            app.settings().commands_level
+        } else {
+            app.settings().commands_for(&letter.host)
+        },
     };
     let from = letter.from.as_ref().map(|id| id.as_str().to_owned());
     let bytes = std::mem::take(&mut letter.bytes);
@@ -429,30 +435,46 @@ impl<'a> World<'a> {
             _ => (tab.retain(), anchor.retain()),
         };
         let window = into.window().ok_or("the tab has no window")?;
-        if !pipe_installed(&app.shell_integration().env) {
-            return Err("there is no pipe to a server in this process".to_owned());
-        }
-        let args = server
-            .argv
-            .get(1..)
-            .filter(|args| !args.is_empty())
-            .ok_or("the server is not named by arguments")?
-            .to_vec();
         let name = place.terminal.to_string();
         let terminal = SessionId::new(&name).map_err(|e| e.to_string())?;
-        let start = Start {
-            directory: None,
-            line: None,
-            run: false,
-            held: Some(Held {
-                args,
-                resume: Some(Resume {
-                    account: server.account.clone(),
-                    terminal: name,
+        // A pane of this Mac is an ordinary one that is born with the identity its terminal was
+        // written in the ledger for; a server's is the pipe to a terminal there.
+        let uuid = local::is_account(&server.account).then(crate::pane::new_pane_uuid);
+        let start = if uuid.is_some() {
+            Start {
+                // A pane with no program is started where the script was asked to start it; a
+                // program's terminal is where its script put it.
+                directory: place.fresh.as_ref().map(PathBuf::from),
+                line: None,
+                run: false,
+                held: None,
+                uuid: uuid.clone(),
+            }
+        } else {
+            if !pipe_installed(&app.shell_integration().env) {
+                return Err("there is no pipe to a server in this process".to_owned());
+            }
+            let args = server
+                .argv
+                .get(1..)
+                .filter(|args| !args.is_empty())
+                .ok_or("the server is not named by arguments")?
+                .to_vec();
+            Start {
+                directory: None,
+                line: None,
+                run: false,
+                held: Some(Held {
+                    args,
+                    resume: Some(Resume {
+                        account: server.account.clone(),
+                        terminal: name,
+                    }),
+                    close_at_end: !place.keep_open,
+                    opener: Some(opener),
                 }),
-                close_at_end: !place.keep_open,
-                opener: Some(opener),
-            }),
+                uuid: None,
+            }
         };
         let incoming = app.next_id();
         let ask = Ask {
@@ -472,8 +494,18 @@ impl<'a> World<'a> {
                 hidden: false,
             },
         };
-        // A terminal a pane is about to show is no longer one that was asked to end.
-        hold_service::claim(&server.account, &terminal);
+        // A terminal a pane is about to show is no longer one that was asked to end. For this
+        // Mac the ledger is told which pane the terminal is for before the pane exists, so that
+        // the pane finds it when it starts; one that is not started yet is made under its name.
+        if let Some(uuid) = &uuid {
+            if place.fresh.is_some() {
+                hold_service::expect_name(uuid, terminal.clone());
+            } else {
+                hold_service::register_local(uuid, &terminal);
+            }
+        } else {
+            hold_service::claim(&server.account, &terminal);
+        }
         // `--focus` was decided by [`World::place`]: the keyboard goes to the new pane only if the
         // person is where the pane goes.
         let focus = place.focus;
@@ -557,8 +589,19 @@ fn standing(window: &TerminalWindow, tab: &TerminalTab) -> (Option<Id>, Option<I
     )
 }
 
-/// The pane of this Mac that shows `terminal` of the server `account`, with its tab and what the
-/// service says it shows. Any window, any tab, on screen or not.
+/// What `pane` shows of the account `account`: a terminal a server keeps, or — for this Mac's
+/// account — the terminal of this Mac that carries the pane ([`hold_service::shown_local`]). The
+/// service's own [`hold_service::shown`] is a server's alone.
+fn shown_in(pane: &TerminalPane, account: &str) -> Option<Shown> {
+    if local::is_account(account) {
+        return hold_service::shown_local(pane.uuid());
+    }
+    hold_service::shown(pane.uuid()).filter(|shown| shown.account == account)
+}
+
+/// The pane of this Mac that shows `terminal` of the server `account` (for this Mac's account,
+/// the pane the terminal carries), with its tab and what the service says it shows. Any window,
+/// any tab, on screen or not.
 fn find_pane(
     app: &AppDelegate,
     account: &str,
@@ -566,8 +609,7 @@ fn find_pane(
 ) -> Option<(Retained<TerminalTab>, Retained<TerminalPane>, Shown)> {
     for tab in app.tabs() {
         for pane in tab.panes() {
-            if let Some(shown) = hold_service::shown(pane.uuid())
-                && shown.account == account
+            if let Some(shown) = shown_in(&pane, account)
                 && shown.terminal.as_str() == terminal
             {
                 return Some((tab, pane, shown));
@@ -597,6 +639,14 @@ impl Shell for World<'_> {
         opener: Option<&str>,
     ) -> Placing {
         let Some((tab, pane, shown)) = find_pane(self.app, &server.account, anchor.name()) else {
+            // A server's anchor may come later (a pane shows it, any way); this Mac's terminals
+            // are its panes' and nothing else shows one.
+            if local::is_account(&server.account) {
+                return Placing::Refused(Failure::new(
+                    Kind::Unknown,
+                    format!("no pane of this Mac shows {anchor} to go beside"),
+                ));
+            }
             return Placing::NoAnchor;
         };
         // The terminal that asked; a note that was read later does not say, and the pane is said
@@ -757,9 +807,7 @@ fn windows_front_to_back(app: &AppDelegate) -> Vec<Retained<TerminalWindow>> {
 
 /// The terminal of the server `account` that `pane` shows, by its name there.
 fn terminal_of(pane: &TerminalPane, account: &str) -> Option<String> {
-    hold_service::shown(pane.uuid())
-        .filter(|shown| shown.account == account)
-        .map(|shown| shown.terminal.as_str().to_owned())
+    shown_in(pane, account).map(|shown| shown.terminal.as_str().to_owned())
 }
 
 /// How `ls` tells `pane` to the server `account` at `level`: a terminal of that server by its
@@ -999,7 +1047,9 @@ mod tests {
         };
         let place = body("    fn place(");
         let judged = place.find("self.whither(").expect(place);
-        let refused = place.find("Placing::Refused(").expect(place);
+        let refused = place
+            .find("Err(failure) => return Placing::Refused(failure)")
+            .expect(place);
         let made = place.find("self.put(").expect(place);
         assert!(judged < refused && refused < made, "{place}");
         let whither = body("    fn whither(");
@@ -1013,5 +1063,37 @@ mod tests {
         assert!(put.contains("add_tab_lodged("), "{put}");
         assert!(put.contains("open_window_for("), "{put}");
         assert!(put.contains("focus && raise"), "{put}");
+    }
+
+    /// A pane of this Mac is an ordinary pane born with the identity its terminal was written in
+    /// the ledger for (`register_local`), or made under the number it was told (`expect_name`);
+    /// it holds no pipe to a server (no `Held`, no `ssh-hold`), and an anchor that no pane shows
+    /// is refused and not kept waiting. A source scan, like the one above.
+    #[test]
+    fn a_pane_of_this_mac_is_registered_before_it_exists_and_holds_no_pipe() {
+        let source = include_str!("agent.rs");
+        let source = &source[..source.find("#[cfg(test)]").unwrap_or(source.len())];
+        let body = |signature: &str| {
+            let at = source.find(signature).expect(signature);
+            &source[at..at + source[at..].find("\n    }\n").expect("its end")]
+        };
+        let put = body("    fn put(");
+        let local = put.find("local::is_account(&server.account)").expect(put);
+        let pipe = put.find("pipe_installed(").expect(put);
+        assert!(
+            local < pipe,
+            "the server's pipe is not looked at for this Mac: {put}"
+        );
+        assert!(put.contains("hold_service::register_local("), "{put}");
+        assert!(put.contains("hold_service::expect_name("), "{put}");
+        let register = put.find("hold_service::register_local(").expect(put);
+        let launch = put.find("app.pane_launch_as(").expect(put);
+        assert!(register < launch, "the ledger first, the pane after: {put}");
+        let place = body("    fn place(");
+        assert!(
+            place.contains("if local::is_account(&server.account)")
+                && place.contains("Kind::Unknown"),
+            "{place}"
+        );
     }
 }
