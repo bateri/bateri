@@ -97,6 +97,8 @@ pub struct Config {
     /// A terminal a server keeps shown as the pane's first program, the shell following it
     /// ([`Held`]); `None` → the shell is the first program.
     pub(crate) held: Option<Held>,
+    /// The shell the pane is for, by its path; `None` → the user's own.
+    pub(crate) shell: Option<PathBuf>,
 }
 
 impl Config {
@@ -134,6 +136,7 @@ impl Config {
             run: None,
             stats: None,
             held: None,
+            shell: None,
         }
     }
 }
@@ -149,6 +152,7 @@ impl Config {
             replay,
             env,
             held,
+            shell,
         } = launch;
         Self {
             working_directory,
@@ -157,6 +161,7 @@ impl Config {
             replay,
             env,
             held,
+            shell,
             ..self
         }
     }
@@ -208,6 +213,7 @@ pub fn open(
         run,
         stats,
         held,
+        shell,
     } = config;
     let pane = TerminalPane::new(
         mtm,
@@ -227,6 +233,7 @@ pub fn open(
                 replay,
                 env,
                 held,
+                shell,
             },
             integration,
             reduce_motion,

@@ -3687,6 +3687,7 @@ impl TerminalPane {
             replay,
             env: extra_env,
             held,
+            shell: asked_shell,
         } = launch;
         // Whether the pipe is started or a terminal shown again goes on, the pane is the
         // program's it was asked for by: the pipe has the flag on its own command line, and
@@ -3716,7 +3717,7 @@ impl TerminalPane {
         // command is what keeps the two from disagreeing.
         let (command, shell_parent) = match self.ivars().run {
             None => {
-                let shell = child::shell_command(&shell_args);
+                let shell = child::shell_command_for(asked_shell, &shell_args);
                 // A terminal a server keeps shown first: the program in front is the
                 // pipe to it, and `shell_parent` is the shell's, since that is what the
                 // process is once the terminal ends and the pipe has taken its place.

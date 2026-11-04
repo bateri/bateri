@@ -111,6 +111,7 @@ mod tests {
                 keep_open: false,
                 focus: false,
                 fresh: None,
+                shell: None,
                 server: None,
                 home: crate::agent::message::Home::default(),
             },

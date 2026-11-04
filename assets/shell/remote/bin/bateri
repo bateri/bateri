@@ -165,7 +165,8 @@ bt_usage() {
     'A pane is p and its number (p7); with none named it is the one this runs in. One of another' \
     'machine is written with the machine after an @ (p9@prod), as bateri ls writes it; -S starts a' \
     'terminal on a server, or on this Mac from a server (-S @local) (full level only).' \
-    'Without a program, split, tab and window open a shell. bateri ls lists what is open.'
+    'Without a program, split, tab and window open a shell. A shell named alone (-- zsh, -- fish) is' \
+    'the same, with its dock where bateri has an integration for it. bateri ls lists what is open.'
 }
 
 case ${HOME-} in
@@ -303,6 +304,37 @@ bt_check_label() {
 # Whether $1 reads as the id of a pane, a tab, a group or a window.
 bt_reads_as_id() {
   bt_is_kind p "$1" || bt_is_kind t "$1" || bt_is_kind g "$1" || bt_is_kind w "$1"
+}
+
+# `bt_work_shell PROGRAM...`: whether the program is a shell bateri has an integration for with
+# nothing to run but itself (`zsh`, `/opt/homebrew/bin/fish`, `bash -l`); `bt_shell` is its path.
+# Any other (`sh`, `zsh -c make`, one that is not installed) is a program like any.
+bt_work_shell() {
+  case ${1##*/} in
+    zsh | bash | fish) ;;
+    *) return 1 ;;
+  esac
+  case $# in
+    1) ;;
+    2)
+      case $2 in
+        -l | -i | -il | -li | --login) ;;
+        *) return 1 ;;
+      esac
+      ;;
+    *) return 1 ;;
+  esac
+  bt_shell=$(command -v "$1" 2>/dev/null) || return 1
+  case $bt_shell in
+    /*) [ "$(printf '%s' "$bt_shell" | bt_clean | tr -d '\n')" = "$bt_shell" ] || {
+      bt_shell=
+      return 1
+    } ;;
+    *)
+      bt_shell=
+      return 1
+      ;;
+  esac
 }
 
 # `bt_wrong_kind VERB KINDS WORDS WORD`: VERB, which says the kind first, got WORD. An id of one of
@@ -777,6 +809,17 @@ bt_open() {
   # (`boot.sh`), with no parent block, nonce or tab. Where there is none (this Mac) nothing is
   # started: the Mac opens the pane's own shell under the number (`fresh`).
   bt_fresh=
+  # A shell bateri has an integration for, with nothing to run: a shell to work in, the same as no
+  # program, but that one. Where the Mac makes the pane, one that waits or has no pane to go beside
+  # stays a program: only a terminal that is started can do those.
+  bt_shell=
+  if [ -z "$bt_server" ] && [ $# -ge 1 ] && bt_work_shell "$@"; then
+    if [ -r "$bt_shelldir/boot.sh" ] || { [ -z "$bt_wait" ] && [ -z "$bt_orphan" ]; }; then
+      set --
+    else
+      bt_shell=
+    fi
+  fi
   if [ -n "$bt_server" ]; then
     # The server starts it with its own `bateri`: its bootstrap's shell, or the program.
     :
@@ -818,9 +861,9 @@ bt_open() {
       unset LC_BATERI_TAB_URL BATERI_TAB_URL TERM_SESSION_ID BATERI_QUIET_ORPHAN
       # The dock's tier (the Mac's `"blocks"`) goes on to the new terminal: its shell reads it.
       if [ "${BATERI_DOCK-}" = off ]; then
-        "$bt_kablo" new --id "$bt_id" ${bt_pane_label:+--label "$bt_pane_label"} --cwd "$bt_cwd" --env "PATH=$PATH" --env BATERI_DOCK=off -- "$@" 2>&1 >/dev/null
+        "$bt_kablo" new --id "$bt_id" ${bt_pane_label:+--label "$bt_pane_label"} --cwd "$bt_cwd" --env "PATH=$PATH" ${bt_shell:+--env "SHELL=$bt_shell"} --env BATERI_DOCK=off -- "$@" 2>&1 >/dev/null
       else
-        "$bt_kablo" new --id "$bt_id" ${bt_pane_label:+--label "$bt_pane_label"} --cwd "$bt_cwd" --env "PATH=$PATH" -- "$@" 2>&1 >/dev/null
+        "$bt_kablo" new --id "$bt_id" ${bt_pane_label:+--label "$bt_pane_label"} --cwd "$bt_cwd" --env "PATH=$PATH" ${bt_shell:+--env "SHELL=$bt_shell"} -- "$@" 2>&1 >/dev/null
       fi
     ); then
       break
@@ -906,6 +949,7 @@ bt_place() {
   [ -z "$bt_keep" ] || bt_msg="${bt_msg}keep-open yes${nl}"
   [ -z "$bt_focus" ] || bt_msg="${bt_msg}focus yes${nl}"
   [ -z "$bt_fresh" ] || bt_msg="${bt_msg}fresh $bt_fresh${nl}"
+  [ -z "$bt_fresh" ] || [ -z "$bt_shell" ] || bt_msg="${bt_msg}shell $bt_shell${nl}"
   [ -z "$bt_server" ] || bt_msg="${bt_msg}server $bt_server${nl}"
   [ -z "$bt_home_tab" ] || bt_msg="${bt_msg}tab $bt_home_tab${nl}"
   [ -z "$bt_home_group" ] || bt_msg="${bt_msg}group $bt_home_group${nl}"

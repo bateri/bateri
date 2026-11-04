@@ -427,6 +427,7 @@ fn place(terminal: u64, anchor: u64) -> Place {
         keep_open: false,
         focus: false,
         fresh: None,
+        shell: None,
         server: None,
         home: crate::agent::message::Home::default(),
     }
@@ -611,6 +612,7 @@ fn a_split_with_no_program_on_this_mac_starts_nothing_and_asks_for_a_pane_of_its
         let wanted = Place {
             side: Some(Side::Right),
             fresh: Some(server.home.display().to_string()),
+            shell: None,
             server: None,
             ..place(1, 4)
         };
@@ -2491,6 +2493,104 @@ fn move_takes_a_pane_or_a_tab_where_it_says_and_prints_what_it_made() {
         );
         assert_eq!(said.status, 77, "{}", said.err);
         assert_eq!(said.out, "");
+    }
+}
+
+/// `bateri split -- zsh` is a shell to work in, with its dock; `bateri split -- sh` is a program.
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn a_shell_bateri_has_an_integration_for_named_alone_is_a_shell_and_any_other_a_program() {
+    for (name, shell) in shells() {
+        // This Mac: no bootstrap, so the Mac makes the pane, with that shell.
+        let mac = Server::new_here(&format!("shell-here-{name}"));
+        let bin = mac.home.join("shells");
+        std::fs::create_dir_all(&bin).expect("bin");
+        for program in ["zsh", "bash", "fish"] {
+            crate::child::tests::write_program(&bin.join(program), "#!/bin/sh\nexit 0\n");
+        }
+        let path = format!(
+            "{}:{}",
+            bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let env = [("PATH", path.as_str())];
+        let run = |here, args: &[&str]| mac.run_file_with(&shell, &mac.script(), here, args, &env);
+        mac.mac_says(PLACED);
+        for (args, program) in [
+            (&["split", "--", "zsh"][..], "zsh"),
+            (&["tab", "--", "fish"], "fish"),
+            (&["window", "--", "bash", "-l"], "bash"),
+        ] {
+            mac.forget_calls();
+            let said = run(Some("p4"), args);
+            assert_eq!(said.status, 0, "{args:?}: {}", said.err);
+            assert!(mac.calls_of("new").is_empty(), "{args:?}: the Mac makes it");
+            let told = mac.told();
+            let wanted = format!("shell {}\n", bin.join(program).display());
+            assert!(told[0].contains("fresh "), "{args:?}: {}", told[0]);
+            assert!(told[0].contains(&wanted), "{args:?}: {}", told[0]);
+            assert!(Request::parse(&told[0]).is_ok(), "{}", told[0]);
+        }
+        // By its path too; and what is not such a shell, or runs something, is a program.
+        mac.forget_calls();
+        let fish = bin.join("fish").display().to_string();
+        assert_eq!(run(Some("p4"), &["split", "--", &fish]).status, 0);
+        assert!(mac.calls_of("new").is_empty());
+        assert!(mac.told()[0].contains(&format!("shell {fish}\n")));
+        for args in [
+            &["split", "--", "sh"][..],
+            &["split", "--", "zsh", "-c", "make"],
+            &["split", "--", "bash", "build.sh"],
+            &["split", "--wait", "--", "zsh"],
+        ] {
+            mac.forget_calls();
+            let said = run(Some("p4"), args);
+            assert_eq!(said.status, 0, "{args:?}: {}", said.err);
+            assert_eq!(mac.calls_of("new").len(), 1, "{args:?}: a program");
+            assert!(
+                !mac.told()[0].contains("shell "),
+                "{args:?}: {}",
+                mac.told()[0]
+            );
+        }
+        // In no terminal there is no pane for the Mac to make it beside: a program.
+        mac.forget_calls();
+        assert_eq!(run(None, &["split", "--", "zsh"]).status, 0);
+        assert_eq!(mac.calls_of("new").len(), 1);
+
+        // A server: its bootstrap starts it, with that shell's integration, and waits as a
+        // terminal does.
+        let server = Server::new(&format!("shell-server-{name}"));
+        let bin = server.home.join("shells");
+        std::fs::create_dir_all(&bin).expect("bin");
+        crate::child::tests::write_program(&bin.join("fish"), "#!/bin/sh\nexit 0\n");
+        let path = format!(
+            "{}:{}",
+            bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        server.mac_says(PLACED);
+        let said = server.run_file_with(
+            &shell,
+            &server.script(),
+            Some("p4"),
+            &["split", "--", "fish"],
+            &[("PATH", path.as_str())],
+        );
+        assert_eq!(said.status, 0, "{}", said.err);
+        let calls = server.calls_of("new");
+        assert_eq!(calls.len(), 1);
+        assert!(
+            calls[0].contains(&format!("SHELL={}", bin.join("fish").display())),
+            "{:?}",
+            calls[0]
+        );
+        assert!(
+            calls[0].iter().any(|word| word.ends_with("/boot.sh")),
+            "{:?}",
+            calls[0]
+        );
+        assert!(!server.told()[0].contains("shell "), "{}", server.told()[0]);
     }
 }
 

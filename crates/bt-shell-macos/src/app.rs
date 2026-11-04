@@ -428,6 +428,9 @@ pub(crate) struct Start {
     /// The pane shows a program a command started (`bateri split -- sh`), not the user's shell:
     /// it is born with no dock ([`crate::launch::for_program`]).
     pub(crate) program: bool,
+    /// The shell the pane is for, asked for by its path (`bateri split -- fish`), with the
+    /// integration and the dock of that shell; `None`: the user's own.
+    pub(crate) shell: Option<PathBuf>,
 }
 
 /// Where a command the palette lists ran, in the same order as the list the palette was handed
@@ -617,6 +620,7 @@ fn restored_launch(
         replay,
         env: Vec::new(),
         held,
+        shell: None,
     }
 }
 
@@ -4264,7 +4268,7 @@ impl AppDelegate {
         let integration = if start.is_some_and(|start| start.program) {
             launch::for_program(self.shell_integration())
         } else {
-            self.shell_integration()
+            self.shell_integration_of(start.and_then(|start| start.shell.as_deref()))
         };
         // A pane that shows a terminal a server keeps: the new pane's first program is
         // the same `ssh`, and the terminal it asks for starts in the same folder there.
@@ -4313,6 +4317,7 @@ impl AppDelegate {
             stats: self.stats(),
             held,
             env: Vec::new(),
+            shell: start.and_then(|start| start.shell.clone()),
         };
         (config, theme)
     }
@@ -5179,6 +5184,7 @@ impl AppDelegate {
                     held: None,
                     uuid: None,
                     program: false,
+                    shell: None,
                 };
                 self.new_tab_started(window.id(), Seat::Beside, Some(&start));
             }
@@ -5194,6 +5200,7 @@ impl AppDelegate {
                     held: None,
                     uuid: None,
                     program: false,
+                    shell: None,
                 };
                 let split = beside
                     && window
@@ -5309,6 +5316,7 @@ impl AppDelegate {
             }),
             uuid: None,
             program: false,
+            shell: None,
         })
     }
 
@@ -5704,6 +5712,7 @@ impl AppDelegate {
                 held: None,
                 uuid: None,
                 program: false,
+                shell: None,
             })
         };
         match how {
@@ -5860,12 +5869,18 @@ impl AppDelegate {
     /// Both keys from **one borrow**: a reload falling between separate `borrow()`s
     /// could read the two from different files.
     pub(crate) fn shell_integration(&self) -> Integration {
+        self.shell_integration_of(None)
+    }
+
+    /// [`Self::shell_integration`] for the shell at `shell`; `None` is the user's own. The same
+    /// decision whichever it is: a shell with no script, or a bash too old, has none and no dock.
+    fn shell_integration_of(&self, shell: Option<&Path>) -> Integration {
         let setting = self.ivars().settings.borrow().shell_integration;
         let identity = &self.ivars().identity;
         let wrapper = shell_integration_env(
             &self.inputs(),
             setting,
-            child::shell,
+            || shell.map(Path::to_path_buf).or_else(child::shell),
             |kind| identity.script_dir(kind),
             child::bash_version,
             ProcessEnv::current(),
@@ -8904,6 +8919,7 @@ mod tests {
             held: None,
             uuid: None,
             program: false,
+            shell: None,
         };
         assert_eq!(
             first_input(Opening::Tab, remote(), Some(&folder)),
@@ -8916,6 +8932,7 @@ mod tests {
             held: None,
             uuid: None,
             program: false,
+            shell: None,
         };
         let (input, inherited) = first_input(Opening::Tab, remote(), Some(&history));
         assert_eq!(input, Some(InitialInput::ready("make test")));
@@ -8933,6 +8950,7 @@ mod tests {
             held: None,
             uuid: None,
             program: false,
+            shell: None,
         };
         assert_eq!(
             first_input(Opening::Tab, remote(), Some(&server)),
@@ -8997,6 +9015,7 @@ mod tests {
             held: None,
             uuid: None,
             program: false,
+            shell: None,
         };
         assert_eq!(
             held(Opening::Tab, Some(&folder), true, Some(&target), &installed),

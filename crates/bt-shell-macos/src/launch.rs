@@ -119,8 +119,8 @@ pub(crate) fn with_dock(
 /// What a pane opened for a program of its own (`bateri split -- sh`) has of the integration: no
 /// dock share. The share is for the shell the integration is read by; a program started by a
 /// command prints no mark, and a share is not given back ([`Integration::dock_rows`]), so it would
-/// stay as an input line nothing writes to. Whatever the program is called: a `zsh` a command
-/// starts has none of the wrapper's files either.
+/// stay as an input line nothing writes to. A shell bateri has an integration for, named alone
+/// (`bateri split -- zsh`), is no such program: the script asks for it as a shell (`Start::shell`).
 pub(crate) fn for_program(integration: Integration) -> Integration {
     Integration {
         dock_rows: 0,
@@ -478,6 +478,8 @@ pub(crate) struct Launch {
     /// A terminal a server keeps that the pane's first program shows instead of a shell
     /// starting first ([`Held`]); `None` → the shell is the first program.
     pub(crate) held: Option<Held>,
+    /// The shell asked for by its path (`bateri split -- fish`); `None` → the user's own.
+    pub(crate) shell: Option<PathBuf>,
 }
 
 /// A pane whose **first program** is the pipe to a terminal a server keeps

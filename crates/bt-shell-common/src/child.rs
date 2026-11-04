@@ -231,14 +231,23 @@ fn passwd_field(pick: impl Fn(&libc::passwd) -> *mut std::ffi::c_char) -> Option
 /// (bash's `--posix`; empty for every other case): they follow the shell's own name, before the
 /// `-l` on Linux (bash takes its long options first) and inside the `exec` on macOS.
 pub fn shell_command(shell_args: &[String]) -> (Option<(String, Vec<String>)>, ShellParent) {
+    shell_command_for(None, shell_args)
+}
+
+/// [`shell_command`] for `named`, the shell a pane was asked for (`bateri split -- fish`), started
+/// the way the user's own is; `None` is the user's own ([`shell`]).
+pub fn shell_command_for(
+    named: Option<PathBuf>,
+    shell_args: &[String],
+) -> (Option<(String, Vec<String>)>, ShellParent) {
     #[cfg(target_os = "macos")]
     {
-        (login_command(shell_args), ShellParent::Login)
+        (login_command(named, shell_args), ShellParent::Login)
     }
     #[cfg(not(target_os = "macos"))]
     {
         (
-            login_shell_command(shell(), shell_args),
+            login_shell_command(named.or_else(shell), shell_args),
             ShellParent::Direct,
         )
     }
@@ -282,9 +291,9 @@ fn login_shell_command(
 /// building the command halfway and handing it over anyway — meant a terminal that does not
 /// open.
 #[cfg(target_os = "macos")]
-fn login_command(shell_args: &[String]) -> Option<(String, Vec<String>)> {
+fn login_command(named: Option<PathBuf>, shell_args: &[String]) -> Option<(String, Vec<String>)> {
     login_command_from(
-        shell(),
+        named.or_else(shell),
         std::env::var("USER").ok().or_else(passwd_name),
         shell_args,
     )

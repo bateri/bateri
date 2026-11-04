@@ -196,6 +196,10 @@ pub struct Place {
     /// machine that has no bootstrap — this Mac). A directory and a name are all the message has
     /// to say of it; no program is carried.
     pub fresh: Option<String>,
+    /// The shell a `fresh` pane is for, by its absolute path, one bateri has an integration for
+    /// (`bateri split -- fish`). `None`: the user's own. A terminal is never asked to start
+    /// anything else this way: what is not one of those is a program, which the script starts.
+    pub shell: Option<String>,
     /// The terminal runs on this server, not on the machine that asks: the name `ssh` takes for it
     /// (`prod`). The Mac makes the pane that shows it, which connects by its own path (`-S`).
     pub server: Option<String>,
@@ -392,6 +396,18 @@ impl Home {
     }
 }
 
+/// The path of a shell bateri has an integration for: nothing else is opened this way.
+fn check_shell(path: &str) -> Result<(), Failure> {
+    let shell = std::path::Path::new(path);
+    if path.starts_with('/') && crate::child::ShellKind::of(shell).is_some() {
+        Ok(())
+    } else {
+        Err(Failure::usage(
+            "`shell` is the absolute path of a zsh, a bash or a fish",
+        ))
+    }
+}
+
 /// A label a person reads: not empty, one line, short.
 fn check_label(key: &str, label: &str) -> Result<(), Failure> {
     if label.trim().is_empty() || label.len() > LABEL_MAX {
@@ -537,6 +553,13 @@ impl Request {
                         ));
                     }
                     push(&mut out, "fresh", directory)?;
+                }
+                if let Some(shell) = &place.shell {
+                    if place.fresh.is_none() {
+                        return Err(Failure::usage("`shell` goes with `fresh`"));
+                    }
+                    check_shell(shell)?;
+                    push(&mut out, "shell", shell)?;
                 }
                 if let Some(server) = &place.server {
                     if place.fresh.is_some() {
@@ -950,6 +973,7 @@ fn read_request<'a>(
                     "keep-open",
                     "focus",
                     "fresh",
+                    "shell",
                     "server",
                     "tab",
                     "group",
@@ -1019,6 +1043,15 @@ fn read_request<'a>(
                                 "`fresh` is the absolute path of a directory",
                             ))
                         }
+                    })
+                    .transpose()?,
+                shell: fields
+                    .get("shell")
+                    .map(|shell| {
+                        if fields.get("fresh").is_none() {
+                            return Err(Failure::usage("`shell` goes with `fresh`"));
+                        }
+                        check_shell(shell).map(|()| shell.to_owned())
                     })
                     .transpose()?,
                 server: fields
@@ -1506,6 +1539,7 @@ mod tests {
             keep_open: true,
             focus: true,
             fresh: None,
+            shell: None,
             server: None,
             home: Home::default(),
         }
@@ -1516,6 +1550,7 @@ mod tests {
         const FRESH: &str = "bateri 2\nplace\nterminal p9\nanchor p4\nfresh /Users/ada/api\n";
         let wanted = Place {
             fresh: Some("/Users/ada/api".to_owned()),
+            shell: None,
             server: None,
             ..bare_with_anchor()
         };
@@ -1528,6 +1563,7 @@ mod tests {
         assert!(failure.text.contains("absolute"), "{}", failure.text);
         let wanted = Place {
             fresh: Some("api".to_owned()),
+            shell: None,
             server: None,
             ..bare_with_anchor()
         };
@@ -1555,6 +1591,7 @@ mod tests {
             keep_open: false,
             focus: false,
             fresh: None,
+            shell: None,
             server: None,
             home: Home::default(),
         }
@@ -1663,6 +1700,30 @@ mod tests {
         "bateri 2\nplace\nterminal p9\nanchor p4\nside tab\nwindow new\n";
 
     #[test]
+    fn a_shell_goes_with_a_fresh_pane_and_is_one_bateri_has_an_integration_for() {
+        let text =
+            "bateri 2\nplace\nterminal p9\nanchor p4\nfresh /Users/ada\nshell /opt/bin/fish\n";
+        let Ok(Request::Place(place)) = Request::parse(text) else {
+            panic!("{text}");
+        };
+        assert_eq!(place.shell.as_deref(), Some("/opt/bin/fish"));
+        assert_eq!(Request::Place(place.clone()).encode().as_deref(), Ok(text));
+        for bad in [
+            "bateri 2\nplace\nterminal p9\nanchor p4\nshell /bin/zsh\n",
+            "bateri 2\nplace\nterminal p9\nanchor p4\nfresh /tmp\nshell zsh\n",
+            "bateri 2\nplace\nterminal p9\nanchor p4\nfresh /tmp\nshell /bin/sh\n",
+            "bateri 2\nplace\nterminal p9\nanchor p4\nfresh /tmp\nshell /tmp/evil\n",
+        ] {
+            assert!(Request::parse(bad).is_err(), "{bad}");
+        }
+        let unfresh = Place {
+            fresh: None,
+            ..place
+        };
+        assert!(Request::Place(unfresh).encode().is_err());
+    }
+
+    #[test]
     fn a_move_takes_the_lines_of_where_it_goes_and_no_others() {
         for text in [
             // A pane beside another has no place of a tab; a pane that becomes a tab has no other.
@@ -1720,6 +1781,7 @@ mod tests {
                 keep_open: false,
                 focus: false,
                 fresh: None,
+                shell: None,
                 server: None,
                 home,
             })
@@ -1960,6 +2022,7 @@ mod tests {
             keep_open: false,
             focus: false,
             fresh: None,
+            shell: None,
             server: None,
             home: Home {
                 new_group: Some("api".to_owned()),
@@ -2737,6 +2800,7 @@ mod tests {
         );
         let both = Place {
             fresh: Some("/tmp".to_owned()),
+            shell: None,
             server: Some("prod".to_owned()),
             ..place()
         };

@@ -471,6 +471,7 @@ impl<'a> World<'a> {
                 // No `fresh`: the script started a program in the terminal, and no shell of the
                 // user's is there to fill a dock.
                 program: place.fresh.is_none(),
+                shell: place.shell.as_ref().map(PathBuf::from),
             }
         } else {
             if !pipe_installed(&app.shell_integration().env) {
@@ -497,6 +498,7 @@ impl<'a> World<'a> {
                 }),
                 uuid: None,
                 program: false,
+                shell: None,
             }
         };
         let incoming = app.next_id();
@@ -1185,6 +1187,16 @@ mod tests {
         let app = include_str!("app.rs");
         assert!(app.contains("start.is_some_and(|start| start.program)"));
         assert!(app.contains("launch::for_program(self.shell_integration())"));
+        // A shell asked for by its path has that shell's integration, and is the pane's program.
+        assert!(source.contains("shell: place.shell.as_ref().map(PathBuf::from),"));
+        assert!(
+            app.contains(
+                "self.shell_integration_of(start.and_then(|start| start.shell.as_deref()))"
+            )
+        );
+        assert!(
+            include_str!("pane.rs").contains("child::shell_command_for(asked_shell, &shell_args)")
+        );
     }
 
     #[test]
