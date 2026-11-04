@@ -18,8 +18,10 @@
 use bt_shell_common::agent::Anchor;
 use bt_shell_common::agent::arrange::{self as rule, Go, Keyboard};
 use bt_shell_common::agent::level::{self, Act, Panes, Verdict};
-use bt_shell_common::agent::message::{Arrange, Failure, Kind, Reply, Subject, TabHome};
-use bt_shell_common::agent::place::Side;
+use bt_shell_common::agent::message::{
+    Arrange, Failure, Home, Kind, Placed, Reply, Subject, TabHome, WindowHome,
+};
+use bt_shell_common::agent::place::{Landed, Side};
 use bt_shell_common::agent::serve::Server;
 use bt_shell_common::groups::Target as Strip;
 use bt_shell_common::kablo::service::Letter;
@@ -28,7 +30,7 @@ use objc2::MainThreadOnly;
 use objc2::rc::Retained;
 use objc2_app_kit::NSApplication;
 
-use super::{find_address, find_pane, terminal_of};
+use super::{find_address, find_pane, standing, terminal_of};
 use crate::app::AppDelegate;
 use crate::groups::GroupId;
 use crate::ids::{Id, Kind as IdKind};
@@ -46,10 +48,7 @@ pub(super) fn arranged(
     from: Option<&str>,
     request: &Arrange,
 ) {
-    let reply = match carry_out(app, server, from, request) {
-        Ok(()) => Reply::Done,
-        Err(failure) => Reply::Failed(failure),
-    };
+    let reply = carry_out(app, server, from, request).unwrap_or_else(Reply::Failed);
     letter.answer(reply.encode().into_bytes());
 }
 
@@ -179,9 +178,14 @@ fn lays_out(
     }
 }
 
-fn carry_out(app: &AppDelegate, server: &Server, from: Option<&str>, request: &Arrange) -> Done {
+fn carry_out(
+    app: &AppDelegate,
+    server: &Server,
+    from: Option<&str>,
+    request: &Arrange,
+) -> Result<Reply, Failure> {
     let caller = from.and_then(|name| spot(app, server, name));
-    match request {
+    let done: Done = match request {
         Arrange::Focus(subject) => focus(app, server, caller.as_ref(), from, subject),
         Arrange::Zoom(named) => {
             let target = pane_or_own(app, server, from, named.as_ref())?;
@@ -228,11 +232,25 @@ fn carry_out(app: &AppDelegate, server: &Server, from: Option<&str>, request: &A
             }
             move_beside(app, caller.as_ref(), &moving, &target, *side)
         }
+        Arrange::PaneToNewTab { pane, home } => {
+            return pane_to_new_tab(app, server, from, caller.as_ref(), pane, home);
+        }
         Arrange::Close(subject) => close(app, server, caller.as_ref(), subject),
         Arrange::Rename { subject, label } => {
             rename(app, server, caller.as_ref(), subject, label.as_deref())
         }
-        Arrange::MoveTab { tab, to } => move_tab(app, server, caller.as_ref(), *tab, to),
+        Arrange::MoveTab { tab, to } => {
+            move_tab(app, server, caller.as_ref(), *tab, to)?;
+            // A group was made for it, and the caller has no id for that.
+            if matches!(to, TabHome::NewGroup { .. }) {
+                let moved = tab_numbered(app, *tab)?;
+                let window = moved
+                    .window()
+                    .ok_or_else(|| failed("the tab has no window"))?;
+                return Ok(stands(&window, &moved));
+            }
+            Ok(())
+        }
         Arrange::Resize { pane, side, steps } => {
             let target = pane_or_own(app, server, from, pane.as_ref())?;
             lays_out(app, caller.as_ref(), &target.window, &target.tab)?;
@@ -243,7 +261,141 @@ fn carry_out(app: &AppDelegate, server: &Server, from: Option<&str>, request: &A
                 Err(failed("the divider is at its limit"))
             }
         }
+    };
+    done.map(|()| Reply::Done)
+}
+
+/// The answer of a move that made what the caller has no id for: where the tab stands now.
+fn stands(window: &TerminalWindow, tab: &TerminalTab) -> Reply {
+    let (at_tab, at_group, at_window) = standing(window, tab);
+    Reply::Placed(Placed {
+        landed: Landed::AsAsked,
+        next_to: None,
+        squeezed: false,
+        hidden: false,
+        tab: at_tab,
+        group: at_group,
+        window: at_window,
+        keyboard_stayed: false,
+    })
+}
+
+/// The tab is in the place `target` names already: nothing to change, and that is no failure.
+fn stands_in(window: &TerminalWindow, tab: &TerminalTab, target: &Strip<u64>) -> bool {
+    let group = window.groups().group_of(tab.id());
+    match target {
+        Strip::Group { group: wanted, .. } => group == Some(*wanted),
+        Strip::Loose { .. } => group.is_none(),
+        Strip::New(_) | Strip::Numbered(..) => false,
     }
+}
+
+/// The group `id` and its window, where the level lets a tab come to it.
+fn group_judged(
+    app: &AppDelegate,
+    server: &Server,
+    id: Id,
+) -> Result<(Retained<TerminalWindow>, GroupId), Failure> {
+    let (window, group) = group_numbered(app, id)?;
+    let panes = window
+        .tabs_of_group(group)
+        .iter()
+        .fold(Panes::default(), |sum, tab| sum.and(panes_of(tab, server)));
+    may_change(server, panes, &format!("group {id}"))?;
+    Ok((window, group))
+}
+
+/// The window `id`, where the level lets a tab come to it.
+fn window_judged(
+    app: &AppDelegate,
+    server: &Server,
+    id: Id,
+) -> Result<Retained<TerminalWindow>, Failure> {
+    let window = window_numbered(app, id)?;
+    let panes = window
+        .tabs()
+        .iter()
+        .fold(Panes::default(), |sum, tab| sum.and(panes_of(tab, server)));
+    may_change(server, panes, &format!("window {id}"))?;
+    Ok(window)
+}
+
+/// `move pane p9 --new-tab`: the pane becomes a tab of its own where `home` says, judged as a new
+/// tab there is. With no place it goes right of the tab it leaves and in its group, as Move Split
+/// to New Tab does. A tab's only pane is the tab: the tab itself goes, or stays if it is there.
+fn pane_to_new_tab(
+    app: &AppDelegate,
+    server: &Server,
+    from: Option<&str>,
+    caller: Option<&Spot>,
+    named: &Anchor,
+    home: &Home,
+) -> Result<Reply, Failure> {
+    let moving = pane_or_own(app, server, from, Some(named))?;
+    let (into, place) = if let Some(id) = home.group {
+        let (window, group) = group_judged(app, server, id)?;
+        (
+            window,
+            Some(Strip::Group {
+                group,
+                before: None,
+            }),
+        )
+    } else {
+        let window = match &home.window {
+            Some(WindowHome::Existing(id)) => window_judged(app, server, *id)?,
+            Some(WindowHome::New) => {
+                return Err(Failure::new(
+                    Kind::Usage,
+                    "a pane becomes a tab in a window that is there",
+                ));
+            }
+            None => moving.window.clone(),
+        };
+        let place = match &home.new_group {
+            Some(name) => Some(Strip::New(name.clone())),
+            None => home.window.as_ref().map(|_| Strip::Loose { before: None }),
+        };
+        (window, place)
+    };
+    let lone = moving.tab.panes().len() == 1;
+    let same_window = moving.window.id() == into.id();
+    let already = lone
+        && same_window
+        && place
+            .as_ref()
+            .is_none_or(|place| stands_in(&moving.window, &moving.tab, place));
+    if !already {
+        lays_out(app, caller, &moving.window, &moving.tab)?;
+        let go = rule::go(keyboard(app, caller), into.number());
+        if !same_window && go == Go::Refused {
+            return Err(Failure::new(Kind::Refused, rule::REFUSAL));
+        }
+        let (gap, target) = match place {
+            Some(place) => (into.tab_count(), Some(place)),
+            None => (
+                into.index_of(moving.tab.id()).map_or(0, |index| index + 1),
+                into.beside_target(moving.tab.id()),
+            ),
+        };
+        let done = app.make_move_raising(
+            Move::PaneToNewTab {
+                pane: moving.pane.id(),
+                window: into.id(),
+                gap,
+                target,
+            },
+            go == Go::Raise,
+        );
+        if !done {
+            return Err(failed("the pane could not move there"));
+        }
+    }
+    let landed = pane_or_own(app, server, from, Some(named))?;
+    if let Some(label) = &home.label {
+        landed.window.rename_tab(landed.tab.id(), label);
+    }
+    Ok(stands(&landed.window, &landed.tab))
 }
 
 fn direction_of(side: Side) -> Result<Direction, Failure> {
@@ -448,12 +600,7 @@ fn move_tab(
         .ok_or_else(|| failed("the tab has no window"))?;
     let (into, target) = match to {
         TabHome::Group(group_id) => {
-            let (window, group) = group_numbered(app, *group_id)?;
-            let panes = window
-                .tabs_of_group(group)
-                .iter()
-                .fold(Panes::default(), |sum, tab| sum.and(panes_of(tab, server)));
-            may_change(server, panes, &format!("group {group_id}"))?;
+            let (window, group) = group_judged(app, server, *group_id)?;
             (
                 window,
                 Strip::Group {
@@ -462,16 +609,21 @@ fn move_tab(
                 },
             )
         }
-        TabHome::Window(window_id) => {
-            let window = window_numbered(app, *window_id)?;
-            let panes = window
-                .tabs()
-                .iter()
-                .fold(Panes::default(), |sum, tab| sum.and(panes_of(tab, server)));
-            may_change(server, panes, &format!("window {window_id}"))?;
-            (window, Strip::Loose { before: None })
-        }
+        TabHome::Window(window_id) => (
+            window_judged(app, server, *window_id)?,
+            Strip::Loose { before: None },
+        ),
+        TabHome::NewGroup { name, window } => (
+            match window {
+                Some(window_id) => window_judged(app, server, *window_id)?,
+                None => from.clone(),
+            },
+            Strip::New(name.clone()),
+        ),
     };
+    if from.id() == into.id() && stands_in(&from, &tab, &target) {
+        return Ok(());
+    }
     lays_out(app, caller, &from, &tab)?;
     let keyboard = keyboard(app, caller);
     let go = rule::go(keyboard, into.number());
@@ -719,12 +871,22 @@ mod tests {
         );
         let moved = body("fn move_tab(");
         // The tab, the group or the window it goes to: each judged.
-        assert_eq!(moved.matches("may_change(").count(), 3, "{moved}");
+        assert_eq!(moved.matches("may_change(").count(), 1, "{moved}");
+        assert!(moved.contains("group_judged(") && moved.contains("window_judged("));
         let judged = moved.find("may_change(").expect(moved);
         let lays = moved.find("lays_out(").expect(moved);
         let go = moved.find("rule::go(").expect(moved);
         let made = moved.find("make_move_raising(").expect(moved);
         assert!(judged < lays && lays < go && go < made, "{moved}");
+        // A pane that becomes a tab goes by the same rules: the place judged, the keyboard asked
+        // first, and no window raised unless the rule lets it.
+        let out = body("fn pane_to_new_tab(");
+        assert!(out.contains("group_judged(") && out.contains("window_judged("));
+        let lays = out.find("lays_out(").expect(out);
+        let go = out.find("rule::go(").expect(out);
+        let made = out.find("make_move_raising(").expect(out);
+        assert!(lays < go && go < made, "{out}");
+        assert!(out.contains("go == Go::Raise"), "{out}");
         // A pane moved into another tab is no more allowed to take the person there than a tab:
         // nothing here makes a move that always raises, and the target tab is judged.
         assert!(

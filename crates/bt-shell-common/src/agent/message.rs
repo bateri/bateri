@@ -29,7 +29,10 @@
 //! `resize`) name panes the same way and a tab, a group or a window by its id (`t3`, `g1`, `w1`);
 //! a `focus` that names no id means the one the caller stands in. A pane of another machine is
 //! named with the machine after an `@` (`p9@prod`, this Mac `p9@local`: [`Anchor::address`]),
-//! in `close`, `focus`, `zoom`, `swap`, `move` and `resize`.
+//! in `close`, `focus`, `zoom`, `swap`, `move` and `resize`. A `move` of a pane with `side tab`
+//! and no `beside` makes it a tab of its own, in the place a new tab's lines name; that one and a
+//! `move` of a tab with `new-group` are answered `ok placed`, since they made what the caller has
+//! no id for.
 //!
 //! A pane for a terminal that runs on another machine than the caller's is a `place` with the
 //! `server` line (`server prod`: the name `ssh` takes), and the `ssh` verb asks how to reach that
@@ -308,6 +311,8 @@ pub enum TabHome {
     Group(Id),
     /// Into this window, out of any group.
     Window(Id),
+    /// Into a group made for it, in this window or, with none named, in its own.
+    NewGroup { name: String, window: Option<Id> },
 }
 
 /// The longest a label is, in bytes (kablo's own limit for a terminal's).
@@ -416,6 +421,9 @@ pub enum Arrange {
         beside: Anchor,
         side: Side,
     },
+    /// A pane becomes a tab of its own, where `home` says as a new tab's does ([`Home::check`];
+    /// a window that is there, not a new one). A tab's only pane is the tab: the tab goes.
+    PaneToNewTab { pane: Anchor, home: Home },
     /// The divider of a pane on `side` moves by `steps` cells.
     Resize {
         pane: Option<Anchor>,
@@ -527,23 +535,7 @@ impl Request {
                     push(&mut out, "server", server)?;
                 }
                 place.home.check(place.side)?;
-                if let Some(tab) = place.home.tab {
-                    push(&mut out, "tab", &tab.to_string())?;
-                }
-                if let Some(group) = place.home.group {
-                    push(&mut out, "group", &group.to_string())?;
-                }
-                if let Some(name) = &place.home.new_group {
-                    push(&mut out, "new-group", name)?;
-                }
-                match &place.home.window {
-                    Some(WindowHome::Existing(id)) => push(&mut out, "window", &id.to_string())?,
-                    Some(WindowHome::New) => push(&mut out, "window", "new")?,
-                    None => {}
-                }
-                if let Some(label) = &place.home.label {
-                    push(&mut out, "label", label)?;
-                }
+                push_home(&mut out, &place.home)?;
             }
             Request::Ls(format) => {
                 out.push_str("ls\n");
@@ -586,6 +578,28 @@ impl Request {
     }
 }
 
+/// The lines of a [`Home`], in the order they are read.
+fn push_home(out: &mut String, home: &Home) -> Result<(), Failure> {
+    if let Some(tab) = home.tab {
+        push(out, "tab", &tab.to_string())?;
+    }
+    if let Some(group) = home.group {
+        push(out, "group", &group.to_string())?;
+    }
+    if let Some(name) = &home.new_group {
+        push(out, "new-group", name)?;
+    }
+    match &home.window {
+        Some(WindowHome::Existing(id)) => push(out, "window", &id.to_string())?,
+        Some(WindowHome::New) => push(out, "window", "new")?,
+        None => {}
+    }
+    if let Some(label) = &home.label {
+        push(out, "label", label)?;
+    }
+    Ok(())
+}
+
 fn encode_arrange(out: &mut String, arrange: &Arrange) -> Result<(), Failure> {
     match arrange {
         Arrange::Focus(subject) => {
@@ -624,6 +638,13 @@ fn encode_arrange(out: &mut String, arrange: &Arrange) -> Result<(), Failure> {
             match to {
                 TabHome::Group(group) => push(out, "group", &group.to_string())?,
                 TabHome::Window(window) => push(out, "window", &window.to_string())?,
+                TabHome::NewGroup { name, window } => {
+                    check_label("new-group", name)?;
+                    push(out, "new-group", name)?;
+                    if let Some(window) = window {
+                        push(out, "window", &window.to_string())?;
+                    }
+                }
             }
         }
         Arrange::Zoom(pane) => {
@@ -642,6 +663,18 @@ fn encode_arrange(out: &mut String, arrange: &Arrange) -> Result<(), Failure> {
             push(out, "terminal", &pane.to_string())?;
             push(out, "beside", &beside.to_string())?;
             push(out, "side", pane_side(*side)?.word())?;
+        }
+        Arrange::PaneToNewTab { pane, home } => {
+            home.check(Some(Side::Tab))?;
+            if matches!(home.window, Some(WindowHome::New)) {
+                return Err(Failure::usage(
+                    "a pane becomes a tab in a window that is there: `window` is an id",
+                ));
+            }
+            out.push_str("move\n");
+            push(out, "terminal", &pane.to_string())?;
+            push(out, "side", Side::Tab.word())?;
+            push_home(out, home)?;
         }
         Arrange::Resize { pane, side, steps } => {
             if !(1..=MAX_STEPS).contains(steps) {
@@ -1133,26 +1166,68 @@ fn read_arrange<'a>(
                 verb,
                 lines,
                 &[
-                    "terminal", "beside", "side", "subject", "id", "group", "window",
+                    "terminal",
+                    "beside",
+                    "side",
+                    "subject",
+                    "id",
+                    "group",
+                    "new-group",
+                    "window",
+                    "label",
                 ],
             )?;
+            let group = id_field(&fields, "group", IdKind::Group)?;
+            let window = id_field(&fields, "window", IdKind::Window)?;
+            let new_group = fields.get("new-group");
+            let label = fields.get("label");
             if fields.get("subject").is_some() {
                 let Subject::Tab(Some(tab)) = subject_of(&fields)? else {
                     return Err(Failure::usage(
                         "`move` moves a pane or a tab, and a tab by its `id`",
                     ));
                 };
-                let to = match (
-                    id_field(&fields, "group", IdKind::Group)?,
-                    id_field(&fields, "window", IdKind::Window)?,
-                ) {
-                    (Some(group), None) => TabHome::Group(group),
-                    (None, Some(window)) => TabHome::Window(window),
+                if label.is_some() {
+                    return Err(Failure::usage(
+                        "a tab's label is a `rename`'s, not a `move`'s",
+                    ));
+                }
+                let to = match (group, new_group, window) {
+                    (Some(group), None, None) => TabHome::Group(group),
+                    (None, None, Some(window)) => TabHome::Window(window),
+                    (None, Some(name), window) => {
+                        check_label("new-group", name)?;
+                        TabHome::NewGroup {
+                            name: name.to_owned(),
+                            window,
+                        }
+                    }
                     _ => {
-                        return Err(Failure::usage("a tab moves to one `group` or one `window`"));
+                        return Err(Failure::usage(
+                            "a tab moves to one `group`, one `window` or one `new-group`",
+                        ));
                     }
                 };
                 return Ok(Arrange::MoveTab { tab, to });
+            }
+            if fields.get("beside").is_none() && fields.get("side") == Some(Side::Tab.word()) {
+                let home = Home {
+                    tab: None,
+                    group,
+                    new_group: new_group.map(str::to_owned),
+                    window: window.map(WindowHome::Existing),
+                    label: label.map(str::to_owned),
+                };
+                home.check(Some(Side::Tab))?;
+                return Ok(Arrange::PaneToNewTab {
+                    pane: address_of("terminal", fields.need("terminal")?)?,
+                    home,
+                });
+            }
+            if group.is_some() || new_group.is_some() || window.is_some() || label.is_some() {
+                return Err(Failure::usage(
+                    "`group`, `new-group`, `window` and `label` are for a pane that becomes a tab: the side is `tab`",
+                ));
             }
             Ok(Arrange::Move {
                 pane: address_of("terminal", fields.need("terminal")?)?,
@@ -1529,6 +1604,13 @@ mod tests {
     const V2_RENAME_CLEAR: &str = "bateri 2\nrename\nsubject group\nid g1\n";
     const V2_MOVE_TAB_GROUP: &str = "bateri 2\nmove\nsubject tab\nid t3\ngroup g1\n";
     const V2_MOVE_TAB_WINDOW: &str = "bateri 2\nmove\nsubject tab\nid t3\nwindow w2\n";
+    const V2_MOVE_TAB_NEW_GROUP: &str = "bateri 2\nmove\nsubject tab\nid t3\nnew-group api\n";
+    const V2_MOVE_TAB_NEW_GROUP_THERE: &str =
+        "bateri 2\nmove\nsubject tab\nid t3\nnew-group api\nwindow w2\n";
+    const V2_MOVE_PANE_OUT: &str = "bateri 2\nmove\nterminal p9\nside tab\n";
+    const V2_MOVE_PANE_TO_GROUP: &str = "bateri 2\nmove\nterminal p9@prod\nside tab\ngroup g1\n";
+    const V2_MOVE_PANE_NEW_GROUP: &str =
+        "bateri 2\nmove\nterminal p9\nside tab\nnew-group api\nwindow w2\nlabel web\n";
     const V2_PLACE_IN_TAB: &str = "bateri 2\nplace\nterminal p9\nanchor p4\ntab t3\n";
     const V2_PLACE_IN_GROUP: &str =
         "bateri 2\nplace\nterminal p9\nanchor p4\nside tab\ngroup g1\nlabel web\n";
@@ -1536,6 +1618,48 @@ mod tests {
         "bateri 2\nplace\nterminal p9\nanchor p4\nside tab\nnew-group api\nwindow w2\n";
     const V2_PLACE_NEW_WINDOW: &str =
         "bateri 2\nplace\nterminal p9\nanchor p4\nside tab\nwindow new\n";
+
+    #[test]
+    fn a_move_takes_the_lines_of_where_it_goes_and_no_others() {
+        for text in [
+            // A pane beside another has no place of a tab; a pane that becomes a tab has no other.
+            "bateri 2\nmove\nterminal p9\nbeside p3\nside right\ngroup g1\n",
+            "bateri 2\nmove\nterminal p9\nbeside p3\nside right\nlabel web\n",
+            "bateri 2\nmove\nterminal p9\nbeside p3\nside tab\n",
+            "bateri 2\nmove\nterminal p9\nside tab\ntab t3\n",
+            // What a new tab may not say, nor this.
+            "bateri 2\nmove\nterminal p9\nside tab\ngroup g1\nwindow w1\n",
+            "bateri 2\nmove\nterminal p9\nside tab\ngroup g1\nnew-group api\n",
+            "bateri 2\nmove\nterminal p9\nside tab\nwindow new\n",
+            "bateri 2\nmove\nterminal p9\nside tab\ngroup t3\n",
+            "bateri 2\nmove\nterminal p9\nside tab\nnew-group  \n",
+            // A tab: one place, and its label is a `rename`'s.
+            "bateri 2\nmove\nsubject tab\nid t3\n",
+            "bateri 2\nmove\nsubject tab\nid t3\nnew-group api\ngroup g1\n",
+            "bateri 2\nmove\nsubject tab\nid t3\ngroup g1\nwindow w1\n",
+            "bateri 2\nmove\nsubject tab\nid t3\ngroup g1\nlabel web\n",
+        ] {
+            assert!(Request::parse(text).is_err(), "{text}");
+        }
+        // The other way round: what cannot be read is not written.
+        let pane = Anchor::of(Terminal(9));
+        for home in [
+            Home {
+                window: Some(WindowHome::New),
+                ..Home::default()
+            },
+            Home {
+                tab: Id::new(IdKind::Tab, 3),
+                ..Home::default()
+            },
+        ] {
+            let moving = Request::Arrange(Arrange::PaneToNewTab {
+                pane: pane.clone(),
+                home,
+            });
+            assert!(moving.encode().is_err(), "{moving:?}");
+        }
+    }
 
     #[test]
     fn closing_renaming_and_opening_in_a_place_are_read_and_written_byte_for_byte() {
@@ -1588,6 +1712,55 @@ mod tests {
                 Request::Arrange(Arrange::MoveTab {
                     tab: tab(3).expect("an id"),
                     to: TabHome::Window(Id::new(IdKind::Window, 2).expect("an id")),
+                }),
+            ),
+            (
+                V2_MOVE_TAB_NEW_GROUP,
+                Request::Arrange(Arrange::MoveTab {
+                    tab: tab(3).expect("an id"),
+                    to: TabHome::NewGroup {
+                        name: "api".to_owned(),
+                        window: None,
+                    },
+                }),
+            ),
+            (
+                V2_MOVE_TAB_NEW_GROUP_THERE,
+                Request::Arrange(Arrange::MoveTab {
+                    tab: tab(3).expect("an id"),
+                    to: TabHome::NewGroup {
+                        name: "api".to_owned(),
+                        window: Id::new(IdKind::Window, 2),
+                    },
+                }),
+            ),
+            (
+                V2_MOVE_PANE_OUT,
+                Request::Arrange(Arrange::PaneToNewTab {
+                    pane: Anchor::of(Terminal(9)),
+                    home: Home::default(),
+                }),
+            ),
+            (
+                V2_MOVE_PANE_TO_GROUP,
+                Request::Arrange(Arrange::PaneToNewTab {
+                    pane: Anchor::address("p9@prod").expect("an address"),
+                    home: Home {
+                        group: Id::new(IdKind::Group, 1),
+                        ..Home::default()
+                    },
+                }),
+            ),
+            (
+                V2_MOVE_PANE_NEW_GROUP,
+                Request::Arrange(Arrange::PaneToNewTab {
+                    pane: Anchor::of(Terminal(9)),
+                    home: Home {
+                        new_group: Some("api".to_owned()),
+                        window: Id::new(IdKind::Window, 2).map(WindowHome::Existing),
+                        label: Some("web".to_owned()),
+                        ..Home::default()
+                    },
                 }),
             ),
             (
@@ -1693,11 +1866,11 @@ mod tests {
             ),
             (
                 "bateri 2\nmove\nsubject tab\nid t3\n",
-                "one `group` or one `window`",
+                "one `group`, one `window` or one `new-group`",
             ),
             (
                 "bateri 2\nmove\nsubject tab\nid t3\ngroup g1\nwindow w1\n",
-                "one `group` or one `window`",
+                "one `group`, one `window` or one `new-group`",
             ),
             (
                 "bateri 2\nmove\nsubject group\nid g1\ngroup g2\n",

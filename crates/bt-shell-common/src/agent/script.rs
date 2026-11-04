@@ -2123,6 +2123,259 @@ fn rename_gives_a_tab_or_a_group_a_label_through_the_mac_and_a_pane_one_through_
 
 #[test]
 #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn move_makes_a_tab_of_a_pane_and_a_group_for_a_tab_and_says_which() {
+    use crate::agent::message::{Arrange, Home, TabHome, WindowHome};
+    use crate::ids::{Id, Kind as IdKind};
+    const AT: &str = "bateri 2\nok placed\nlanded as_asked\nsqueezed no\nhidden no\ntab t7\ngroup g2\nwindow w1\n";
+    const LOOSE: &str =
+        "bateri 2\nok placed\nlanded as_asked\nsqueezed no\nhidden no\ntab t7\nwindow w1\n";
+    let group = Id::new(IdKind::Group, 1);
+    let window = Id::new(IdKind::Window, 2);
+    let tab = Id::new(IdKind::Tab, 3).expect("an id");
+    let pane = Anchor::of(Terminal(9));
+    let api = || Some("api".to_owned());
+    for (name, shell) in shells() {
+        let server = Server::new(&format!("move-out-{name}"));
+        for (args, hint) in [
+            (
+                &["move", "pane", "p9", "--new-tab", "--right"][..],
+                "beside another or into a new tab, not both",
+            ),
+            (
+                &["move", "pane", "p9", "--new-tab", "--beside", "p3"],
+                "beside another or into a new tab, not both",
+            ),
+            (
+                &["move", "pane", "p9", "--group", "g1"],
+                "go with --new-tab",
+            ),
+            (
+                &["move", "pane", "p9", "--beside", "p3", "--right", "--json"],
+                "go with --new-tab",
+            ),
+            (
+                &["move", "pane", "--new-tab"],
+                "move names the pane to move",
+            ),
+            (
+                &["move", "pane", "t3", "--new-tab"],
+                "t3 is a tab, not a pane",
+            ),
+            (
+                &["move", "pane", "p9", "--new-tab", "--group", "t3"],
+                "t3 is a tab, not a group",
+            ),
+            (
+                &["move", "pane", "p9", "--new-tab", "--window", "new"],
+                "'new' is not a window",
+            ),
+            (
+                &[
+                    "move",
+                    "pane",
+                    "p9",
+                    "--new-tab",
+                    "--group",
+                    "g1",
+                    "--window",
+                    "w2",
+                ],
+                "a group or into a window, not both",
+            ),
+            (
+                &[
+                    "move",
+                    "pane",
+                    "p9",
+                    "--new-tab",
+                    "--group",
+                    "g1",
+                    "--new-group",
+                    "api",
+                ],
+                "a group or into a new group, not both",
+            ),
+            (
+                &["move", "pane", "p9", "--new-tab", "--new-group", "  "],
+                "--new-group is not only spaces",
+            ),
+            (
+                &["move", "pane", "p9", "--new-tab", "--label"],
+                "--label takes a text",
+            ),
+            (
+                &["move", "tab", "t3", "--new-group", "api", "--group", "g1"],
+                "a group or into a new group, not both",
+            ),
+            (
+                &["move", "tab", "t3", "--new-group"],
+                "--new-group takes the name of the group",
+            ),
+            (
+                &["move", "tab", "t3", "--group", "g1", "--label", "web"],
+                "move tab takes no --label",
+            ),
+            (
+                &["move", "tab", "t3", "--group", "g1", "--json"],
+                "move tab takes --json with --new-group",
+            ),
+        ] {
+            let said = server.run(&shell, Some("p4"), args);
+            assert_eq!(said.status, 64, "{args:?}: {}", said.err);
+            assert!(said.err.contains(hint), "{args:?}: {}", said.err);
+        }
+        assert!(server.told().is_empty());
+
+        // With no Mac nothing was made, and the words say what is missing.
+        let said = server.run(&shell, Some("p4"), &["move", "pane", "p9", "--new-tab"]);
+        assert_eq!(said.status, 69, "{}", said.err);
+        assert_eq!(said.err, "bateri: no Mac is connected to do it\n");
+
+        server.mac_says(AT);
+        let tries: Vec<(Vec<&str>, Arrange, &str, &str)> = vec![
+            (
+                vec!["move", "pane", "p9", "--new-tab"],
+                Arrange::PaneToNewTab {
+                    pane: pane.clone(),
+                    home: Home::default(),
+                },
+                "bateri 2\nmove\nterminal p9\nside tab\n",
+                "t7\n",
+            ),
+            (
+                vec!["move", "pane", "p9", "--new-tab", "--group", "g1"],
+                Arrange::PaneToNewTab {
+                    pane: pane.clone(),
+                    home: Home {
+                        group,
+                        ..Home::default()
+                    },
+                },
+                "bateri 2\nmove\nterminal p9\nside tab\ngroup g1\n",
+                "t7\n",
+            ),
+            (
+                vec![
+                    "move",
+                    "pane",
+                    "p9",
+                    "--new-tab",
+                    "--new-group=api",
+                    "--window=w2",
+                    "--label",
+                    "web",
+                ],
+                Arrange::PaneToNewTab {
+                    pane: pane.clone(),
+                    home: Home {
+                        new_group: api(),
+                        window: window.map(WindowHome::Existing),
+                        label: Some("web".to_owned()),
+                        ..Home::default()
+                    },
+                },
+                "bateri 2\nmove\nterminal p9\nside tab\nnew-group api\nwindow w2\nlabel web\n",
+                "t7\n",
+            ),
+            (
+                vec![
+                    "move",
+                    "pane",
+                    "p9",
+                    "--new-tab",
+                    "--new-group",
+                    "api",
+                    "--json",
+                ],
+                Arrange::PaneToNewTab {
+                    pane: pane.clone(),
+                    home: Home {
+                        new_group: api(),
+                        ..Home::default()
+                    },
+                },
+                "bateri 2\nmove\nterminal p9\nside tab\nnew-group api\n",
+                "{\"pane\":\"p9\",\"tab\":\"t7\",\"group\":\"g2\",\"window\":\"w1\"}\n",
+            ),
+            (
+                vec!["move", "tab", "t3", "--new-group", "api"],
+                Arrange::MoveTab {
+                    tab,
+                    to: TabHome::NewGroup {
+                        name: "api".to_owned(),
+                        window: None,
+                    },
+                },
+                "bateri 2\nmove\nsubject tab\nid t3\nnew-group api\n",
+                "g2\n",
+            ),
+            (
+                vec![
+                    "move",
+                    "tab",
+                    "t3",
+                    "--window",
+                    "w2",
+                    "--new-group",
+                    "api",
+                    "--json",
+                ],
+                Arrange::MoveTab {
+                    tab,
+                    to: TabHome::NewGroup {
+                        name: "api".to_owned(),
+                        window,
+                    },
+                },
+                "bateri 2\nmove\nsubject tab\nid t3\nnew-group api\nwindow w2\n",
+                "{\"tab\":\"t3\",\"group\":\"g2\",\"window\":\"w1\"}\n",
+            ),
+        ];
+        for (args, arrange, text, out) in &tries {
+            server.forget_calls();
+            let said = server.run(&shell, Some("p4"), args);
+            assert_eq!(said.status, 0, "{args:?}: {}", said.err);
+            assert_eq!(said.err, "", "{args:?}");
+            assert_eq!(said.out, *out, "{args:?}");
+            let told = server.told();
+            assert_eq!(told.len(), 1, "{args:?}");
+            assert_eq!(told[0], *text, "{args:?}");
+            assert_eq!(
+                Request::parse(&told[0]),
+                Ok(Request::Arrange(arrange.clone())),
+                "{args:?}"
+            );
+        }
+
+        // A tab in no group: `null` where the Mac said nothing.
+        let server = Server::new(&format!("move-out-loose-{name}"));
+        server.mac_says(LOOSE);
+        let said = server.run(
+            &shell,
+            Some("p4"),
+            &["move", "pane", "p9", "--new-tab", "--json"],
+        );
+        assert_eq!(said.status, 0, "{}", said.err);
+        assert_eq!(
+            said.out,
+            "{\"pane\":\"p9\",\"tab\":\"t7\",\"group\":null,\"window\":\"w1\"}\n"
+        );
+
+        // What the Mac refuses is said, and exits as a refusal does.
+        let server = Server::new(&format!("move-out-refused-{name}"));
+        server.mac_says("bateri 2\nerror refused the person is typing there\n");
+        let said = server.run(
+            &shell,
+            Some("p4"),
+            &["move", "tab", "t3", "--new-group", "api"],
+        );
+        assert_eq!(said.status, 77, "{}", said.err);
+        assert_eq!(said.out, "");
+    }
+}
+
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn move_tab_goes_into_a_group_or_a_window_and_nothing_else() {
     use crate::agent::message::{Arrange, TabHome};
     use crate::ids::{Id, Kind as IdKind};
