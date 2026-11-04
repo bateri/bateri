@@ -116,6 +116,18 @@ pub(crate) fn with_dock(
     }
 }
 
+/// What a pane opened for a program of its own (`bateri split -- sh`) has of the integration: no
+/// dock share. The share is for the shell the integration is read by; a program started by a
+/// command prints no mark, and a share is not given back ([`Integration::dock_rows`]), so it would
+/// stay as an input line nothing writes to. Whatever the program is called: a `zsh` a command
+/// starts has none of the wrapper's files either.
+pub(crate) fn for_program(integration: Integration) -> Integration {
+    Integration {
+        dock_rows: 0,
+        ..integration
+    }
+}
+
 /// What shell integration adds to the child — nothing if not set up.
 ///
 /// **The whole decision is here and pure**: which shell, which setting, where
@@ -588,6 +600,19 @@ pub(crate) fn fallen_back(history: Option<Vec<u8>>, note: Note) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_program_a_command_started_gets_no_dock_and_the_rest_as_it_was() {
+        let shell = super::Integration {
+            env: vec![("ZDOTDIR".to_owned(), "/w".to_owned())],
+            shell_args: vec!["--posix".to_owned()],
+            dock_rows: 3,
+        };
+        let program = super::for_program(shell.clone());
+        assert_eq!(program.dock_rows, 0);
+        assert_eq!(program.env, shell.env);
+        assert_eq!(program.shell_args, shell.shell_args);
+    }
+
     #[test]
     fn a_held_pane_starts_the_pipe_with_the_shell_it_hands_over_to() {
         let environment = vec![

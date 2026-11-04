@@ -468,6 +468,9 @@ impl<'a> World<'a> {
                 run: false,
                 held: None,
                 uuid: uuid.clone(),
+                // No `fresh`: the script started a program in the terminal, and no shell of the
+                // user's is there to fill a dock.
+                program: place.fresh.is_none(),
             }
         } else {
             if !pipe_installed(&app.shell_integration().env) {
@@ -493,6 +496,7 @@ impl<'a> World<'a> {
                     opener: Some(opener),
                 }),
                 uuid: None,
+                program: false,
             }
         };
         let incoming = app.next_id();
@@ -1172,6 +1176,17 @@ mod tests {
     /// place that is not there is a refusal and not a pane in the wrong tab, and a window made for
     /// a pane takes the keyboard only where the rule gives it. A source scan: the windows are
     /// AppKit's and need a window server.
+    /// `bateri split -- sh` on this Mac: the dock is the user's shell's, and `sh` draws none.
+    #[test]
+    fn a_pane_a_program_was_started_for_is_told_so_and_one_with_no_program_is_not() {
+        let source = include_str!("agent.rs");
+        let source = &source[..source.find("#[cfg(test)]").unwrap_or(source.len())];
+        assert!(source.contains("program: place.fresh.is_none(),"));
+        let app = include_str!("app.rs");
+        assert!(app.contains("start.is_some_and(|start| start.program)"));
+        assert!(app.contains("launch::for_program(self.shell_integration())"));
+    }
+
     #[test]
     fn a_place_is_judged_before_the_pane_is_made_and_a_new_window_waits_for_the_rule() {
         let source = include_str!("agent.rs");

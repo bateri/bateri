@@ -425,6 +425,9 @@ pub(crate) struct Start {
     /// program on this Mac asked for, whose terminal the ledger has for it already
     /// ([`crate::hold_service::register_local`]).
     pub(crate) uuid: Option<PaneUuid>,
+    /// The pane shows a program a command started (`bateri split -- sh`), not the user's shell:
+    /// it is born with no dock ([`crate::launch::for_program`]).
+    pub(crate) program: bool,
 }
 
 /// Where a command the palette lists ran, in the same order as the list the palette was handed
@@ -4258,7 +4261,11 @@ impl AppDelegate {
             .and_then(|start| start.directory.clone())
             .or_else(|| session.and_then(|session| session.working_directory()))
             .or_else(child::working_directory);
-        let integration = self.shell_integration();
+        let integration = if start.is_some_and(|start| start.program) {
+            launch::for_program(self.shell_integration())
+        } else {
+            self.shell_integration()
+        };
         // A pane that shows a terminal a server keeps: the new pane's first program is
         // the same `ssh`, and the terminal it asks for starts in the same folder there.
         let served = from.and_then(TerminalPane::server_target);
@@ -5171,6 +5178,7 @@ impl AppDelegate {
                     run: false,
                     held: None,
                     uuid: None,
+                    program: false,
                 };
                 self.new_tab_started(window.id(), Seat::Beside, Some(&start));
             }
@@ -5185,6 +5193,7 @@ impl AppDelegate {
                     run: true,
                     held: None,
                     uuid: None,
+                    program: false,
                 };
                 let split = beside
                     && window
@@ -5299,6 +5308,7 @@ impl AppDelegate {
                 opener: None,
             }),
             uuid: None,
+            program: false,
         })
     }
 
@@ -5693,6 +5703,7 @@ impl AppDelegate {
                 run: false,
                 held: None,
                 uuid: None,
+                program: false,
             })
         };
         match how {
@@ -8892,6 +8903,7 @@ mod tests {
             run: false,
             held: None,
             uuid: None,
+            program: false,
         };
         assert_eq!(
             first_input(Opening::Tab, remote(), Some(&folder)),
@@ -8903,6 +8915,7 @@ mod tests {
             run: false,
             held: None,
             uuid: None,
+            program: false,
         };
         let (input, inherited) = first_input(Opening::Tab, remote(), Some(&history));
         assert_eq!(input, Some(InitialInput::ready("make test")));
@@ -8919,6 +8932,7 @@ mod tests {
             run: true,
             held: None,
             uuid: None,
+            program: false,
         };
         assert_eq!(
             first_input(Opening::Tab, remote(), Some(&server)),
@@ -8982,6 +8996,7 @@ mod tests {
             run: false,
             held: None,
             uuid: None,
+            program: false,
         };
         assert_eq!(
             held(Opening::Tab, Some(&folder), true, Some(&target), &installed),
