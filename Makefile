@@ -914,11 +914,13 @@ linux: LINUX_CMD = cargo build -p bt-core --example demopen --locked && \
 	cargo test $(LINUX_CRATES) --all-targets --locked -- --include-ignored $(NOT_HEAVY) $(LINUX_TODO)
 linux: linux-run
 
-# What bateri runs on a server, which is Linux far more often than not: the agent's `bateri`
-# script, the remote shells' integration and kablo's install steps, in a Linux shell with
-# Linux's tools. `make gate-push` runs it when their files changed. The same test binaries as
-# `linux` (`--lib`), so neither builds the other's again.
-SERVER_TESTS = agent::script:: ssh_wrap::remote_shells:: kablo::install::
+# What bateri runs on a server, which is Linux far more often than not: the line the window
+# sends another machine's shell (`agent::relay`), the agent's one-line command and the remote
+# shells' integration (`ssh_wrap::remote_shells`) and kablo's install steps, in a Linux shell
+# with Linux's tools. (The `bateri` command itself is kablo's: its tests are in kablo's
+# repository, `make e2e` and `make linux` there.) `make gate-push` runs it when their files
+# changed. The same test binaries as `linux` (`--lib`), so neither builds the other's again.
+SERVER_TESTS = agent::relay:: ssh_wrap::remote_shells:: kablo::install::
 linux-server: LINUX_CMD = cargo test $(LINUX_CRATES) --lib --locked -- --include-ignored \
 	$(NOT_HEAVY) $(SERVER_TESTS)
 linux-server: linux-run

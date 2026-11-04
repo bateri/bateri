@@ -282,7 +282,6 @@ fn a_server_at_level_off_gets_the_window_files_and_no_command() {
     assert!(!shell.join("bin/bateri").exists(), "the command stayed");
     // What the window's own panes read is still there, and kablo is not written again.
     assert!(shell.join("boot.sh").is_file());
-    assert!(shell.join("next.sh").is_file());
     assert_eq!(home.uploads(), 1);
     // Written alone, as the ledger path does, the same.
     let installed = ensure(&home, &bundle).expect("found");
@@ -616,12 +615,31 @@ fn the_ssh_channel_sends_the_script_as_one_word_for_sh_and_ends_a_step_that_take
     assert!(started.elapsed() < Duration::from_secs(3));
 }
 
-/// A server for the counter: a directory that is the home, and `HOME` said before the script as
-/// the ssh connection's shell has it.
+/// Where kablo is in the home of [`counting_home`].
+const COUNTING_KABLO: &str = ".local/share/kablo/0.2.0/kablo";
+
+/// A kablo that keeps the counter's contract and nothing else (kablo's own counter, its lock and
+/// what it does with a damaged state are kablo's tests): `bateri --next-number` prints the number
+/// in `~/.local/share/bateri/next` and writes the next one before it does, a state that is not a
+/// number is not counted from, and any other word is a mistake in the command (64).
+const COUNTING_STAND_IN: &str = r#"#!/bin/sh
+[ "$1 $2" = "bateri --next-number" ] || exit 64
+state=$HOME/.local/share/bateri
+n=1
+[ -f "$state/next" ] && n=$(cat "$state/next")
+case $n in '' | *[!0-9]* | 0*) exit 1 ;; esac
+mkdir -p "$state" && echo $((n + 1)) > "$state/next" || exit 1
+echo "$n"
+"#;
+
+/// A server for the counter: a directory that is the home, with [`COUNTING_STAND_IN`] where
+/// kablo is, and `HOME` said before the script as the ssh connection's shell has it.
 fn counting_home(root: &TempRoot, name: &str) -> (Home, PathBuf) {
     let dir = root.0.join(name);
-    std::fs::create_dir_all(&dir).expect("a home");
+    std::fs::create_dir_all(dir.join(COUNTING_KABLO).parent().expect("a directory"))
+        .expect("a home");
     let dir = std::fs::canonicalize(dir).expect("a path");
+    crate::child::tests::write_program(&dir.join(COUNTING_KABLO), COUNTING_STAND_IN);
     let mut home = Home::new(&dir);
     home.prefix =
         Box::leak(format!("HOME={}; export HOME; ", sq(&dir.to_string_lossy())).into_boxed_str());
@@ -633,37 +651,49 @@ fn counting_home(root: &TempRoot, name: &str) -> (Home, PathBuf) {
 fn the_servers_counter_gives_each_terminal_the_next_number_and_never_the_same_twice() {
     let root = TempRoot::new("counter");
     let (home, dir) = counting_home(&root, "home");
+    // The agent's command as the files' script writes it, with kablo's place filled in.
+    assert!(crate::ssh_wrap::seed_files_here(&dir, Some(COUNTING_KABLO), true).success());
     for expected in 1..=5 {
-        assert_eq!(next_number(&home), Some(expected));
+        assert_eq!(next_number(&home, COUNTING_KABLO), Some(expected));
     }
     assert_eq!(
         std::fs::read_to_string(dir.join(".local/share/bateri/next")).expect("the counter"),
         "6\n"
     );
-    // The same counter file as the agent's command draws from (`bin/bateri` runs `next.sh`): a
-    // number the one took is not the other's.
-    let outside = Command::new("sh")
-        .arg("-c")
-        .arg(crate::ssh_wrap::COUNTER)
+    // The same counter file as the agent's command draws from (`bin/bateri` starts `kablo bateri`,
+    // whose `--next-number` this is): a number the one took is not the other's.
+    let outside = Command::new(dir.join(".local/share/bateri/shell/bin/bateri"))
         .env("HOME", &dir)
+        .arg("--next-number")
         .output()
-        .expect("next.sh");
+        .expect("the command");
     assert_eq!(String::from_utf8_lossy(&outside.stdout), "6\n");
-    assert_eq!(next_number(&home), Some(7));
+    assert_eq!(next_number(&home, COUNTING_KABLO), Some(7));
 }
 
 #[test]
 fn a_counter_that_cannot_count_gives_no_number_and_a_made_up_one_is_not_taken() {
     let root = TempRoot::new("counter-broken");
-    // A home where `.local` is a file: nothing can be written under it.
-    let (home, dir) = counting_home(&root, "file-home");
-    std::fs::write(dir.join(".local"), "not a directory").expect("a file");
-    assert_eq!(next_number(&home), None);
+    // A home with no kablo in it is no number.
+    let (home, dir) = counting_home(&root, "no-kablo");
+    std::fs::remove_file(dir.join(COUNTING_KABLO)).expect("no kablo");
+    assert_eq!(next_number(&home, COUNTING_KABLO), None);
     // A counter that is not a number is not guessed at.
     let (home, dir) = counting_home(&root, "bad-counter");
     std::fs::create_dir_all(dir.join(".local/share/bateri")).expect("state");
     std::fs::write(dir.join(".local/share/bateri/next"), "banana\n").expect("a counter");
-    assert_eq!(next_number(&home), None);
+    assert_eq!(next_number(&home, COUNTING_KABLO), None);
+    // A place that is not one kablo's is never put in a script.
+    for place in [
+        "",
+        "/bin/kablo",
+        "../kablo",
+        "a b/kablo",
+        "kablo; rm -rf /",
+        "a//b",
+    ] {
+        assert_eq!(next_number(&home, place), None, "{place:?}");
+    }
     // What a channel says that is no number: a failure, nothing, a zero, a leading zero, words.
     struct Says(Option<i32>, &'static str);
     impl Channel for Says {
@@ -686,10 +716,17 @@ fn a_counter_that_cannot_count_gives_no_number_and_a_made_up_one_is_not_taken() 
         (Some(0), "7 8\n"),
         (Some(0), "99999999999999999999999\n"),
     ] {
-        assert_eq!(next_number(&Says(status, out)), None, "{status:?} {out:?}");
+        assert_eq!(
+            next_number(&Says(status, out), COUNTING_KABLO),
+            None,
+            "{status:?} {out:?}"
+        );
     }
     // A login shell that says something of its own first does not hide the number.
-    assert_eq!(next_number(&Says(Some(0), "Welcome!\n\n12\n")), Some(12));
+    assert_eq!(
+        next_number(&Says(Some(0), "Welcome!\n\n12\n"), COUNTING_KABLO),
+        Some(12)
+    );
     // A channel that fails (the connection broke) is no number.
     struct Down;
     impl Channel for Down {
@@ -697,7 +734,7 @@ fn a_counter_that_cannot_count_gives_no_number_and_a_made_up_one_is_not_taken() 
             Err(io::ErrorKind::TimedOut.into())
         }
     }
-    assert_eq!(next_number(&Down), None);
+    assert_eq!(next_number(&Down, COUNTING_KABLO), None);
 }
 
 // ─── the versions nobody runs ────────────────────────────────────────────
@@ -904,8 +941,8 @@ fn this_mac_gets_kablo_by_the_same_steps_and_of_the_shells_files_only_the_agents
         0o755,
         "runnable"
     );
-    // The Mac's home holds kablo's place, and of a server's files only the agent's command and
-    // its counter (not the bootstrap and not the shells' own).
+    // The Mac's home holds kablo's place, and of a server's files only the agent's command (not
+    // the bootstrap and not the shells' own).
     let names = |dir: &std::path::Path| -> Vec<String> {
         let mut names: Vec<String> = std::fs::read_dir(dir)
             .expect("a directory")
@@ -917,10 +954,7 @@ fn this_mac_gets_kablo_by_the_same_steps_and_of_the_shells_files_only_the_agents
     };
     assert_eq!(names(&home), [".local"]);
     assert_eq!(names(&home.join(".local/share")), ["bateri", "kablo"]);
-    assert_eq!(
-        names(&home.join(".local/share/bateri/shell")),
-        ["bin", "next.sh"]
-    );
+    assert_eq!(names(&home.join(".local/share/bateri/shell")), ["bin"]);
     assert_eq!(
         names(&home.join(".local/share/bateri/shell/bin")),
         ["bateri"]

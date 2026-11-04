@@ -693,17 +693,13 @@ pub fn is_inline(boot: &str) -> bool {
 /// `eval`ed on the server.
 const BOOT_SCRIPT: &str = include_str!("../../../assets/shell/remote/boot.sh");
 
-/// The agent's command (`assets/shell/remote/bin/bateri`) and the counter it
-/// and the Mac number terminals with (`next.sh`): written beside the shells'
-/// files, the command executable. The command carries [`KABLO_PLACEHOLDER`]
-/// where kablo's place goes.
+/// The agent's command (`assets/shell/remote/bin/bateri`): one line that starts kablo's own
+/// `bateri` subcommand (the command is kablo's, and so is the counter that numbers terminals,
+/// `kablo bateri --next-number`). Written beside the shells' files, executable. It carries
+/// [`KABLO_PLACEHOLDER`] where kablo's place goes.
 const AGENT_COMMAND: &str = include_str!("../../../assets/shell/remote/bin/bateri");
 /// Where it lives under the shell directory on a server.
 const AGENT_COMMAND_PATH: &str = "bin/bateri";
-/// The counter's text: written to the server as `next.sh`, and **the same bytes** run over the
-/// ssh connection for the terminal this computer opens itself
-/// ([`crate::kablo::install::next_number`]) — one rule for both, not the same rule twice.
-pub const COUNTER: &str = include_str!("../../../assets/shell/remote/next.sh");
 
 /// The word in [`AGENT_COMMAND`] that [`files_script`] replaces with kablo's place.
 /// Left as it is when the place is not known (or not one [`is_kablo_path`]
@@ -720,9 +716,8 @@ const MAGIC: &str = "bateri_boot=1";
 /// **verbatim**, the remote zsh body beside them, bash's `ENV` file and fish's
 /// `vendor_conf.d` file, with the dock's functions each of the three shares with
 /// the Mac's own wrapper (`zsh/dock.zsh`, `bash/dock.bash`, `fish/dock.fish`: the
-/// same bytes, not a copy), the agent's command with its counter, and the
-/// bootstrap.
-const REMOTE_FILES: [(&str, &str); 14] = [
+/// same bytes, not a copy), the agent's command, and the bootstrap.
+const REMOTE_FILES: [(&str, &str); 13] = [
     (
         "zsh/.zshenv",
         include_str!("../../../assets/shell/zsh/.zshenv"),
@@ -768,15 +763,13 @@ const REMOTE_FILES: [(&str, &str); 14] = [
         include_str!("../../../assets/shell/fish/dock.fish"),
     ),
     (AGENT_COMMAND_PATH, AGENT_COMMAND),
-    ("next.sh", COUNTER),
     // The bootstrap itself, for the terminals an agent opens without a
-    // program: `bin/bateri` runs this file where the one-liner's text ran.
+    // program: `kablo bateri` runs this file where the one-liner's text ran.
     ("boot.sh", BOOT_SCRIPT),
 ];
 
-/// The files this Mac gets of [`REMOTE_FILES`]: the agent's command and its counter
-/// ([`files_script_here`]).
-const HERE_FILES: [&str; 2] = [AGENT_COMMAND_PATH, "next.sh"];
+/// The files this Mac gets of [`REMOTE_FILES`]: the agent's command ([`files_script_here`]).
+const HERE_FILES: [&str; 1] = [AGENT_COMMAND_PATH];
 
 /// The script the server's `sh` reads from its standard input to write
 /// [`REMOTE_FILES`] under `${XDG_DATA_HOME:-~/.local/share}/bateri/shell/`:
@@ -802,23 +795,23 @@ pub fn files_script(kablo: Option<&str>) -> String {
 /// [`files_script`] for a server whose `bateri` command is wanted (`agent`) or not
 /// (`commands = "off"`): without it the command's file is not written and is removed if an
 /// earlier call left it, so a program on the server that runs it stops working. The rest — the
-/// counter, the bootstrap, the shells' files — is what the window's own panes need and stays.
+/// bootstrap, the shells' files — is what the window's own panes need and stays.
 pub fn files_script_for(kablo: Option<&str>, agent: bool) -> String {
     files_script_of(kablo, agent, false)
 }
 
-/// [`files_script_for`] for this Mac (`kablo::install::ensure_here`): only the agent's command
-/// and its counter, which are all the Mac needs of a server's files — a terminal here starts from
+/// [`files_script_for`] for this Mac (`kablo::install::ensure_here`): only the agent's command,
+/// which is all the Mac needs of a server's files — a terminal here starts from
 /// the application's own shells, and the bootstrap is a server pane's. There is no login shell to
 /// ask after (the script is `sh`'s in the home directory, not an ssh command), so none is
-/// looked at. Without the command (`agent` false: `[commands] level = "off"`) neither file is
-/// written, and both are removed if an earlier call left them: nothing of the command is left to
-/// be found, and nothing numbers a pane for it.
+/// looked at. Without the command (`agent` false: `[commands] level = "off"`) it is not
+/// written, and is removed if an earlier call left it: nothing of the command is left to be
+/// found.
 pub fn files_script_here(kablo: Option<&str>, agent: bool) -> String {
     files_script_of(kablo, agent, true)
 }
 
-/// [`files_script_for`] and [`files_script_here`]: `here` writes the Mac's two files
+/// [`files_script_for`] and [`files_script_here`]: `here` writes the Mac's file
 /// ([`HERE_FILES`]) and does not look at `$SHELL`.
 fn files_script_of(kablo: Option<&str>, agent: bool, here: bool) -> String {
     /// Where a server's files go: `XDG_DATA_HOME` as sshd's command has it, else under the home.
@@ -827,7 +820,8 @@ case $bt_data in /*) ;; *) bt_data=$HOME/.local/share ;; esac
 "#;
     /// Where this Mac's go: under the home, whatever `XDG_DATA_HOME` is. The application's
     /// environment is not a login shell's, and the wrappers look in one place
-    /// (`~/.local/share/bateri/shell/bin`), as the counter does ([`COUNTER`]).
+    /// (`~/.local/share/bateri/shell/bin`), as kablo's counter keeps its state
+    /// (`~/.local/share/bateri/next`).
     const HERE_DIR: &str = r#"case ${HOME-} in /*) ;; *) exit 0 ;; esac
 bt_data=$HOME/.local/share
 "#;
@@ -976,8 +970,8 @@ pub(crate) fn seed_files_for(
 
 /// What the call that looks for kablo does to this Mac, for a test: `sh -s` reads
 /// [`files_script_here`] in `home`, with the environment an application has — no `SHELL`, and an
-/// `XDG_DATA_HOME` that is not where the files go. The command and the counter are in place when
-/// it returns (`agent`), or gone.
+/// `XDG_DATA_HOME` that is not where the files go. The command is in place when it returns
+/// (`agent`), or gone.
 #[cfg(test)]
 pub(crate) fn seed_files_here(
     home: &std::path::Path,
@@ -3016,7 +3010,6 @@ mod remote_shells {
         // Off from the start: the window's own files are there, the command is not.
         assert!(super::seed_files_for(sh, shell, &home, &[], Some("k/kablo"), false).success());
         assert!(dir.join("boot.sh").is_file());
-        assert!(dir.join("next.sh").is_file());
         assert!(dir.join("zsh/bateri.zsh").is_file());
         assert!(!dir.join("bin/bateri").exists(), "the command was written");
         // The level was higher once: the command it left is taken away, and comes back with it.
@@ -3024,9 +3017,144 @@ mod remote_shells {
         assert!(dir.join("bin/bateri").is_file());
         assert!(super::seed_files_for(sh, shell, &home, &[], Some("k/kablo"), false).success());
         assert!(!dir.join("bin/bateri").exists(), "the old command stayed");
-        assert!(dir.join("next.sh").is_file());
+        assert!(dir.join("boot.sh").is_file());
         assert!(super::seed_files_for(sh, shell, &home, &[], Some("k/kablo"), true).success());
         assert!(dir.join("bin/bateri").is_file());
+    }
+
+    /// The command is kablo's, and the file on the machine only starts it: one command line, no
+    /// shell of its own (what the 1900-line script did there — telling the Mac from a server,
+    /// naming a shell, counting — is kablo's, and a word of it coming back here is a second copy
+    /// of a rule). The counter file that rode beside it is gone too.
+    #[test]
+    fn the_agents_command_is_one_line_that_starts_kablo() {
+        let command = super::AGENT_COMMAND;
+        let lines: Vec<&str> = command
+            .lines()
+            .filter(|line| !line.trim().is_empty() && !line.trim_start().starts_with('#'))
+            .collect();
+        assert_eq!(lines.len(), 1, "{command}");
+        assert!(lines[0].contains("exec \"$bt\" bateri \"$@\""), "{command}");
+        assert!(command.contains(super::KABLO_PLACEHOLDER));
+        assert!(command.starts_with("#!/bin/sh\n"));
+        for gone in ["bt_on_mac", "bt_work_shell", "next.sh", "--hex", "placing"] {
+            assert!(!command.contains(gone), "{gone} is kablo's now");
+        }
+        assert!(
+            super::REMOTE_FILES
+                .iter()
+                .all(|(path, _)| *path != "next.sh"),
+            "the counter file was written again"
+        );
+        assert!(
+            !Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../assets/shell/remote/next.sh")
+                .exists()
+        );
+    }
+
+    /// The command, as it is written, starts the kablo it was told is there with `bateri` and the
+    /// words it was given, whole; with no place filled in it looks for `kablo` on `PATH`, and
+    /// with none there it says so (127) and starts nothing.
+    #[test]
+    fn the_agents_command_hands_its_words_to_kablo_whole() {
+        let root = TempRoot::new("agent-command");
+        let home = std::fs::canonicalize(&root.0).expect("root").join("home");
+        std::fs::create_dir_all(&home).expect("home");
+        let record = home.join("said");
+        let kablo_program = format!(
+            "#!/bin/sh\nfor word in \"$@\"; do printf '%s\\n' \"$word\"; done > '{}'\n",
+            record.display()
+        );
+        let place = ".local/share/kablo/0.2.0/kablo";
+        std::fs::create_dir_all(home.join(place).parent().expect("dir")).expect("dir");
+        crate::child::tests::write_program(&home.join(place), &kablo_program);
+        let sh = Path::new("/bin/sh");
+        let bash = Path::new("/bin/bash");
+        assert!(super::seed_files_for(sh, bash, &home, &[], Some(place), true).success());
+        let command = home.join(".local/share/bateri/shell/bin/bateri");
+        let words = ["split", "--", "a b", "$HOME", "it's", "x\\y", ""];
+        let ran = std::process::Command::new(&command)
+            .args(words)
+            .env_clear()
+            .env("HOME", &home)
+            .env("PATH", "/usr/bin:/bin")
+            .status()
+            .expect("the command");
+        assert!(ran.success());
+        let said = std::fs::read_to_string(&record).expect("kablo ran");
+        let mut expected = vec!["bateri"];
+        expected.extend(words);
+        assert_eq!(said.lines().collect::<Vec<_>>(), expected);
+
+        // Without a place the file keeps its word, and `kablo` on `PATH` is the one that runs.
+        let other = std::fs::canonicalize(&root.0).expect("root").join("other");
+        std::fs::create_dir_all(other.join("bin")).expect("other");
+        assert!(super::seed_files_for(sh, bash, &other, &[], None, true).success());
+        let bare = other.join(".local/share/bateri/shell/bin/bateri");
+        std::fs::remove_file(&record).expect("again");
+        crate::child::tests::write_program(&other.join("bin/kablo"), &kablo_program);
+        let path = format!("{}:/usr/bin:/bin", other.join("bin").display());
+        let ran = std::process::Command::new(&bare)
+            .args(["ls", "--json"])
+            .env_clear()
+            .env("HOME", &other)
+            .env("PATH", &path)
+            .status()
+            .expect("the command");
+        assert!(ran.success());
+        assert_eq!(
+            std::fs::read_to_string(&record).expect("kablo ran"),
+            "bateri\nls\n--json\n"
+        );
+        // No kablo anywhere: not found, 127.
+        let ran = std::process::Command::new(&bare)
+            .arg("ls")
+            .env_clear()
+            .env("HOME", home.join("nobody"))
+            .env("PATH", "/usr/bin:/bin")
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("the command");
+        assert_eq!(ran.code(), Some(127));
+    }
+
+    /// The bootstrap and the files' script serve the shells bateri has an integration for, and the
+    /// names are kablo's own (`ShellKind`, which the `bateri` command reads a shell named alone
+    /// with): a shell added there and not here (or the other way) is a fault that would show only
+    /// on a server, so the lists are held equal here.
+    #[test]
+    fn the_shells_the_bootstrap_serves_are_the_shells_bateri_knows() {
+        let known = ["zsh", "bash", "fish"];
+        let line = super::BOOT_SCRIPT
+            .lines()
+            .map(str::trim)
+            .find(|line| line.starts_with("zsh |") && line.ends_with(") ;;"))
+            .expect("the bootstrap's list of login shells");
+        let mut boot: Vec<&str> = line
+            .trim_end_matches(") ;;")
+            .split('|')
+            .map(str::trim)
+            .collect();
+        boot.sort_unstable();
+        let mut want = known.to_vec();
+        want.sort_unstable();
+        assert_eq!(boot, want, "the bootstrap's login-shell list");
+        for name in [
+            "zsh", "bash", "fish", "sh", "dash", "ksh", "tcsh", "csh", "nu", "xonsh",
+        ] {
+            assert_eq!(
+                crate::child::ShellKind::of_name(name).is_some(),
+                known.contains(&name),
+                "{name}"
+            );
+        }
+        // The files' script serves the same three.
+        let script = super::files_script(None);
+        assert!(
+            script.contains("case ${SHELL##*/} in zsh | bash | fish) ;;"),
+            "{script}"
+        );
     }
 
     #[test]

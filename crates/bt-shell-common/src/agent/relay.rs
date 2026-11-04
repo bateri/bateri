@@ -1,11 +1,11 @@
 //! The `bateri` command a window runs on another machine for a program on a server it gave `full`.
 //!
 //! A program on a server has no way to another machine: the connection it has is the one to the
-//! Mac. So the Mac does what the program could not — the `ssh` the script on this Mac runs itself
+//! Mac. So the Mac does what the program could not — the `ssh` the command on this Mac runs itself
 //! (`bateri split -S prod`), here run by the window, or, for a pane of this Mac, a shell on this Mac
 //! — and says how the command ended and what it said ([`Relayed`]). The command is the one the
-//! script of the other machine runs: `bateri` there, found where its files are, started by the
-//! login shell (so its `PATH` is the person's). The script on the server that asked builds nothing
+//! person's own `bateri` is on the other machine: `bateri` there, found where its files are, started by the
+//! login shell (so its `PATH` is the person's). The command on the server that asked builds nothing
 //! of it. It names the machine and the words, and the window refuses what is not one of
 //! [`RELAYED`](super::message::RELAYED) before it gets here.
 //!
@@ -58,7 +58,7 @@ const STDERR: usize = 64 * 1024;
 /// hold the pipe open, and the reply does not wait for that.
 const DRAIN: Duration = Duration::from_secs(2);
 
-/// What a machine that has not been set up says when the script is not there.
+/// What a machine that has not been set up says when the command is not there.
 pub fn not_set_up(server: &str) -> String {
     if server == super::LOCAL_SERVER {
         "the bateri command is not set up on this Mac (it is off in the settings, or no terminal of this Mac has run yet)".to_owned()
@@ -75,7 +75,7 @@ fn quote(word: &str) -> String {
 }
 
 /// The command line to run on the other machine, which a shell of any kind reads: a `sh` that hands
-/// over to the login shell, which runs a `sh` that looks for the script where the files of that
+/// over to the login shell, which runs a `sh` that looks for the command where the files of that
 /// machine are (`XDG_DATA_HOME` as the login shell has it, else under the home; `missing` is what it
 /// says, on stderr, with status 127, when it is nowhere) and runs it with the `words`, in hex.
 pub fn remote_line(missing: &str, words: &[String]) -> String {
@@ -83,7 +83,7 @@ pub fn remote_line(missing: &str, words: &[String]) -> String {
         .iter()
         .map(|word| format!(" {}", hex_word(word)))
         .collect();
-    // The text sits between double quotes in the script: only what cannot end them is kept.
+    // The text sits between double quotes in the line: only what cannot end them is kept.
     let missing: String = missing
         .chars()
         .map(|c| {
@@ -113,15 +113,12 @@ pub fn local_command(home: &Path, line: &str) -> Command {
         .arg(line)
         .current_dir(home)
         .env("HOME", home)
-        // This is the Mac, as its panes say: the script does not read that from a file a bootstrap
-        // may have left here.
-        .env("TERM_PROGRAM", bt_core::TERM_PROGRAM)
         .process_group(0);
     command
 }
 
 /// The command that runs `line` on a server: `program` (`ssh`) with the words that reach it
-/// (`argv`, the destination last), as the script on this Mac runs it, and as bateri runs every
+/// (`argv`, the destination last), as the command on this Mac runs it, and as bateri runs every
 /// ssh: in a group of its own, which ends with it, and with the `PATH` a login shell has (a
 /// `ProxyCommand` from `~/.ssh/config` is found).
 pub fn ssh_command(program: &str, argv: &[String], line: &str) -> Command {

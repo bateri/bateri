@@ -1626,3 +1626,78 @@ fn measure_file_receive_over_ssh() {
     drop(session);
     service.stop();
 }
+
+/// The two contracts the window keeps with the `bateri` command of kablo that two repositories
+/// write — the counter (`kablo bateri --next-number`, which numbers the terminals the window
+/// opens) and the words of a relayed command (`--hex`, in the line the window builds) — against
+/// the real kablo, not a stand-in: what kablo's own tests prove of its half, this proves of the
+/// window's.
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn a_real_kablo_counts_for_the_window_and_reads_the_words_of_a_relayed_command_whole() {
+    let Some(bundle) = release() else {
+        eprintln!("SKIPPED: there is no kablo release to run (../kablo/dist or KABLO_DIST)");
+        return;
+    };
+    // The `bateri` command is kablo's from 0.6 on: an earlier release has none to hold to.
+    let mut parts = bundle.version().split(['.', '-', '+']);
+    let at_least_0_6 = match (
+        parts.next().and_then(|part| part.parse::<u32>().ok()),
+        parts.next().and_then(|part| part.parse::<u32>().ok()),
+    ) {
+        (Some(major), Some(minor)) => (major, minor) >= (0, 6),
+        _ => false,
+    };
+    if !at_least_0_6 {
+        eprintln!(
+            "SKIPPED: kablo {} has no `bateri` command (KABLO_DIST names a 0.6 release)",
+            bundle.version()
+        );
+        return;
+    }
+    let ground = Ground::new("contract");
+    let channel = LocalChannel::new(ground.home.clone());
+    let installed = match ensure_here(&channel, &bundle, true) {
+        Ok(installed) => installed,
+        Err(Failure::Impossible(why)) => {
+            eprintln!("SKIPPED: this machine is not one kablo is built for: {why:?}");
+            return;
+        }
+        Err(other) => panic!("kablo was not installed: {other:?}"),
+    };
+
+    // The window's counter is kablo's, run as the install put it: a number, once.
+    let counting = LocalChannel {
+        home: ground.home.clone(),
+        limit: Duration::from_secs(15),
+    };
+    assert_eq!(install::next_number(&counting, &installed.path), Some(1));
+    assert_eq!(install::next_number(&counting, &installed.path), Some(2));
+    assert_eq!(
+        std::fs::read_to_string(ground.home.join(".local/share/bateri/next")).expect("the counter"),
+        "3\n"
+    );
+
+    // The line the window sends another machine reaches `bin/bateri` there, which starts that
+    // machine's kablo with the words as they were, whatever the characters in them: kablo reads
+    // them (hex) and says which one it does not know, in the words it was given.
+    let word = "a b'c\"d$HOME`x`\\z";
+    let line = crate::agent::relay::remote_line(
+        &crate::agent::relay::not_set_up("there"),
+        &[word.to_owned()],
+    );
+    let mut command = crate::agent::relay::local_command(&ground.home, &line);
+    command
+        .env_clear()
+        .env("HOME", &ground.home)
+        .env("SHELL", "/bin/sh")
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env(sockdir_variable(), &ground.sockets);
+    let said = crate::agent::relay::execute(command, Duration::from_secs(30), 1 << 16)
+        .expect("the line ran");
+    assert_eq!(said.status, 64, "{said:?}");
+    assert_eq!(
+        said.stderr.first().map(String::as_str),
+        Some(&*format!("bateri: no command '{word}'"))
+    );
+}

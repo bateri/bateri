@@ -508,7 +508,7 @@ pub trait Backend: Send + Sync + 'static {
     /// the server does.
     fn reachable(&self, _account: &str, _server: &KabloHost) {}
 
-    /// Who opened which of the server's terminals, as the script there wrote it down
+    /// Who opened which of the server's terminals, as the command there wrote it down
     /// ([`crate::agent::notes::RECORDS`]); empty when it cannot be read. Called on a thread of
     /// its own, for a [`Service::survey`], so it may wait on the server.
     fn records(&self, _server: &KabloHost) -> Vec<(Terminal, Record)> {
@@ -520,8 +520,15 @@ pub trait Backend: Send + Sync + 'static {
     /// ride the connection bateri keeps to it. The same gate as the server's own pane
     /// ([`Backend::route`]); `ask` is how a password is asked for when the connection must be
     /// made. It **waits** for that password, so it is called on a thread of its own and never on
-    /// the main one. The `Err` is a line for the program that asked.
-    fn reach(&self, _args: &[String], _ask: crate::ssh_route::Ask) -> Result<Reached, String> {
+    /// the main one. The `Err` is a line for the program that asked. It also sets the server up
+    /// as a terminal does, once a run — kablo, the files, the command — and renews the terminals
+    /// kablo there ran before it (`live` gives the ledger's terminals of an account).
+    fn reach(
+        &self,
+        _args: &[String],
+        _ask: crate::ssh_route::Ask,
+        _live: &dyn Fn(&str) -> Vec<SessionId>,
+    ) -> Result<Reached, String> {
         Err("this build cannot reach a server for a program".to_owned())
     }
 }
@@ -3594,8 +3601,10 @@ impl Core {
                 return;
             }
             // An account the ledger brought back has had no look at its server: its files are
-            // written on the way to the number, once.
-            let files = (!entry.files).then(|| entry.installed.clone());
+            // written on the way to the number, once. Not while its kablo is an earlier release's
+            // (`stale`): the command file would name a binary that has no `bateri` in it and undo
+            // what the renewal of the first dial writes.
+            let files = (!entry.files && !entry.stale).then(|| entry.installed.clone());
             if !self.ask_number(hold, server, account, spec, files) {
                 self.hub.refuse(hold, true, "");
             }

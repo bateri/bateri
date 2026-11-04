@@ -34,7 +34,7 @@
 //! - **`ls` is what is on screen and what the server has, side by side.** The windows, tabs and
 //!   split trees are read where they stand when the server's list arrives ([`windows_of`]); the
 //!   terminals are the server's own words, asked for now ([`hold_service::survey`]), so the
-//!   answer is the same table the script prints without a Mac, with the tabs filled in.
+//!   answer is the same table the command prints without a Mac, with the tabs filled in.
 //! - **Nothing asks the user; the machine's level decides.** What the command may do is the
 //!   server's [`CommandLevel`] ([`bt_shell_common::agent::level`]), read from the settings when
 //!   the request arrives: `off` refuses everything, `own` shows and changes what is the
@@ -123,7 +123,7 @@ fn state<R>(edit: impl FnOnce(&mut State) -> R) -> R {
 // ─── The doors ───────────────────────────────────────────────────────────
 
 /// A program on a server said something to the app (`Backend::mail`, on the service's thread):
-/// the main queue takes it. Nobody to take it hangs up, which the script reads as no Mac.
+/// the main queue takes it. Nobody to take it hangs up, which the command reads as no Mac.
 pub(crate) fn letter(letter: Letter) {
     DispatchQueue::main().exec_async(move || {
         // audit: a block running on the main queue is on the main thread by definition.
@@ -168,7 +168,7 @@ pub(crate) fn terminal_shown(pane: &PaneUuid) {
         return;
     }
     // Whether a terminal can still be shown is asked of the server now: the cache of what runs
-    // there is not told of a terminal the script on the server started, so it cannot say.
+    // there is not told of a terminal the command on the server started, so it cannot say.
     let mut by_server: Vec<(String, Vec<Waiting>)> = Vec::new();
     for waiting in due {
         match by_server
@@ -465,8 +465,8 @@ impl<'a> World<'a> {
         let uuid = local::is_account(&target.account).then(crate::pane::new_pane_uuid);
         let start = if uuid.is_some() {
             Start {
-                // A pane with no program is started where the script was asked to start it; a
-                // program's terminal is where its script put it.
+                // A pane with no program is started where the command was asked to start it; a
+                // program's terminal is where its command put it.
                 directory: place.fresh.as_ref().map(PathBuf::from),
                 line: None,
                 run: false,

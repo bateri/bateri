@@ -82,7 +82,7 @@ pub enum Why {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Verdict {
     Allowed,
-    /// It may not, and it is told why (the script's 77).
+    /// It may not, and it is told why (the command's 77).
     Refused(Why),
     /// It is not there for this level: answered as a name nobody has.
     Unknown,

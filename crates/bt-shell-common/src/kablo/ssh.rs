@@ -121,37 +121,47 @@ pub struct SshBackend {
     /// The application places what was left for it on a server ([`Backend::reachable`]): `Some`
     /// reads the server's notes when a connection to it comes up. `None`: it reads none.
     pub notes: Option<NotesNews>,
-    /// The servers a program's reach has put this build's files on in this run
-    /// ([`SshBackend::refresh_files`]).
+    /// The servers a program's reach has set up in this run ([`SshBackend::install_for_reach`]).
     pub filed: Mutex<std::collections::HashSet<String>>,
 }
 
 impl SshBackend {
-    /// What a program's `bateri` runs on a server is the file there, and only a terminal opened
-    /// on it writes that ([`Backend::install`]): a program that reaches a server before any
-    /// terminal of this run did would run what an earlier build left. Once a run, since `send` and
-    /// `capture` reach too; a write that failed is tried by the next. kablo is not looked at: a
-    /// server without this package's says so through the script and is set up by a terminal,
-    /// which also renews what runs there.
-    fn refresh_files(&self, server: &KabloHost, argv: &[String]) {
+    /// What a program's `bateri` runs on a server is kablo there, and the one-line file that
+    /// starts it: a program that reaches a server before any terminal of this run did would run
+    /// what an earlier build left (or, with no package's kablo there, nothing). So a program's
+    /// reach does the whole of the install ([`install::ensure_for`]: kablo, the shells' files and
+    /// the command) once a run, and renews what runs from an earlier kablo (`live`, the ledger's
+    /// terminals of the server) when it wrote the binary. Once a run, since `send` and `capture`
+    /// reach too; one that failed is tried by the next, and says nothing: the program's own line
+    /// says what is wrong on that server.
+    fn install_for_reach(
+        &self,
+        server: &KabloHost,
+        argv: &[String],
+        live: &dyn Fn(&str) -> Vec<SessionId>,
+    ) {
         let Some(bundle) = &self.bundle else {
             return;
         };
-        if self
-            .filed
-            .lock()
-            .is_ok_and(|filed| filed.contains(&server.key))
-        {
+        // Whether the command is wanted is part of what was done: a server whose level went to
+        // `off` (the file taken away) and back is set up again by the next reach.
+        let agent = self.agent_wanted(server);
+        let done = format!("{}#{agent}", server.key);
+        if self.filed.lock().is_ok_and(|filed| filed.contains(&done)) {
             return;
         }
         let channel = SshChannel {
             argv: argv.to_vec(),
             limit: install::STEP_LIMIT,
         };
-        if install::put_files_at(&channel, &bundle.remote_path(), self.agent_wanted(server))
-            && let Ok(mut filed) = self.filed.lock()
-        {
-            filed.insert(server.key.clone());
+        let Ok(installed) = install::ensure_for(&channel, bundle, agent) else {
+            return;
+        };
+        if installed.fresh {
+            renew(argv, &installed, &live(&server.key));
+        }
+        if let Ok(mut filed) = self.filed.lock() {
+            filed.insert(done);
         }
     }
 
@@ -362,6 +372,7 @@ impl Backend for SshBackend {
         // Only a machine kablo is kept on has numbers to give: the connection is the one the
         // install used. This Mac's terminals are numbered by the same counter, run here, unless
         // the command is not wanted (`off`): they then keep the names they are made with.
+        let kablo = self.bundle.as_ref()?.remote_path();
         if local::is_account(&server.key) {
             if !self.agent_wanted(server) {
                 return None;
@@ -371,15 +382,14 @@ impl Backend for SshBackend {
                 home: home.to_owned(),
                 limit: install::LOCAL_NUMBER_LIMIT,
             };
-            return install::next_number(&channel);
+            return install::next_number(&channel, &kablo);
         }
-        self.bundle.as_ref()?;
         let target = self.target(server);
         let channel = SshChannel {
             argv: ssh_argv_for(&target, &self.route_of(&target)),
             limit: install::NUMBER_LIMIT,
         };
-        install::next_number(&channel)
+        install::next_number(&channel, &kablo)
     }
 
     fn carry(&self, server: &KabloHost, installed: &Installed) -> io::Result<Carried> {
@@ -513,7 +523,12 @@ impl Backend for SshBackend {
         }
     }
 
-    fn reach(&self, args: &[String], ask: Ask) -> Result<Reached, String> {
+    fn reach(
+        &self,
+        args: &[String],
+        ask: Ask,
+        live: &dyn Fn(&str) -> Vec<SessionId>,
+    ) -> Result<Reached, String> {
         let name = args.first().map_or("the server", String::as_str);
         // The gate of the server's own pane: settings, `ssh -G`, what is known of the server.
         let server = self.route(args).ok_or_else(|| {
@@ -553,7 +568,7 @@ impl Backend for SshBackend {
         if argv.iter().any(|word| word.chars().any(char::is_control)) {
             return Err(format!("the connection to {name} cannot be written down"));
         }
-        self.refresh_files(&server, &argv);
+        self.install_for_reach(&server, &argv, live);
         argv.remove(0);
         Ok(Reached {
             server,
@@ -570,7 +585,7 @@ impl Backend for SshBackend {
         if local::is_account(&server.key) {
             return;
         }
-        // Only a server kablo is kept on has been written to by the script.
+        // Only a server kablo is kept on has been written to by the command.
         if self.bundle.is_none() {
             return;
         }
@@ -604,7 +619,7 @@ impl Backend for SshBackend {
         &self,
         server: &KabloHost,
     ) -> Vec<(crate::agent::Terminal, crate::agent::notes::Record)> {
-        // Only a server kablo is kept on has been written to by the script.
+        // Only a server kablo is kept on has been written to by the command.
         if self.bundle.is_none() || local::is_account(&server.key) {
             return Vec::new();
         }

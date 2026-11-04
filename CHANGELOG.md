@@ -30,6 +30,10 @@ of every installed copy. A version without a section is not released.
 
 ### Changed
 
+- **The `bateri` command is kablo's now, the same program on this Mac and on every server.** It was a long shell script that
+  each machine ran for itself; it is now `kablo bateri` (the file `bateri` on your `PATH` only starts it), and bateri on the Mac
+  tells it where it runs. A terminal an agent opens on a server is started the same way as on this Mac, a number is still never
+  given twice, and a server is set up with the new kablo the first time a program reaches it.
 - **A program that prints a lot reaches the screen faster.** Text, colored output and wide
   characters cost less on the way from a program to the window.
 

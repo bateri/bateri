@@ -122,7 +122,7 @@ pub enum Placing {
     /// No pane can be made for it now.
     Unable,
     /// The Mac will not make it, and says why: a tab, group or window that is not there, or that
-    /// the level does not let this machine change. The script ends the terminal it started.
+    /// the level does not let this machine change. The command ends the terminal it started.
     Refused(Failure),
 }
 
@@ -170,7 +170,7 @@ fn waiting_reply(anchor: &Anchor) -> Reply {
 }
 
 /// A pane that could not be made now: the terminal is in the list of what runs in the background
-/// and nothing is kept to place it — no anchor in the answer, which is how the script knows it will
+/// and nothing is kept to place it — no anchor in the answer, which is how the command knows it will
 /// not take its place by itself.
 fn unable_reply() -> Reply {
     Reply::Placed(Placed {
@@ -188,7 +188,7 @@ fn unable_reply() -> Reply {
 /// The answer to a letter: `text` is what the program said, `from` the terminal kablo says it
 /// runs in (never what it says of itself), `server` the server it came on.
 pub fn serve(server: &Server, from: Option<&str>, text: &str, shell: &mut dyn Shell) -> Answer {
-    // `off`: nothing is done for this server, whatever the request is — a script that is still
+    // `off`: nothing is done for this server, whatever the request is — a command that is still
     // there (one that was running when the level changed) is told so, once.
     if server.level == CommandLevel::Off {
         return Answer::Reply(Reply::Failed(Failure::new(
@@ -355,7 +355,7 @@ fn place_for(server: &Server, from: Option<&str>, place: Place, shell: &mut dyn 
     match shell.place(server, &anchor, &place, from) {
         Placing::Done(placed) => Answer::Reply(Reply::Placed(placed)),
         // A pane that has no terminal yet is not kept for later: nothing is running to wait
-        // for, and the script has not started anything to leave behind.
+        // for, and the command has not started anything to leave behind.
         Placing::NoAnchor | Placing::Unable if place.fresh.is_some() => {
             Answer::Reply(Reply::Failed(Failure::new(
                 Kind::Failed,
@@ -410,7 +410,7 @@ pub fn settle_notes(
     shell: &mut dyn Shell,
 ) -> Read {
     let mut read = Read::default();
-    // A note was written by a script a server had; at `off` nothing of it is done any more.
+    // A note was written by a command a server had; at `off` nothing of it is done any more.
     if server.level == CommandLevel::Off {
         return read;
     }
@@ -1040,7 +1040,7 @@ mod tests {
             Answer::Reply(Reply::Placed(_))
         ));
         // Neither a ticket's terminal nor a named anchor: a mistake in the request, and the
-        // answer says so (the script ends the terminal it started for it).
+        // answer says so (the command ends the terminal it started for it).
         let Answer::Reply(Reply::Failed(failure)) =
             serve(&server(), None, &place_text(""), &mut mac)
         else {

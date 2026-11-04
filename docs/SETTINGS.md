@@ -1997,6 +1997,10 @@ level = "own"
 |---|---|---|---|
 | `level` | `"off"` \| `"own"` \| `"screen"` \| `"full"` | `"own"` | what the `bateri` command may do on this Mac, whoever runs it (an agent or you: the command cannot tell) |
 
+The command is kablo's own (`kablo bateri VERB`); the file `bateri` that is on the `PATH` of a bateri terminal
+(`~/.local/share/bateri/shell/bin/bateri`, on this Mac and on a server) is one line that starts it. The command asks
+bateri on the Mac where a pane goes and what it may do; it does not know which machine it runs on until the Mac says so.
+
 What each level allows, in the same four words for this Mac and for a server (a server's level is the
 `commands` key of its `[remote]` `hosts` entry, below):
 

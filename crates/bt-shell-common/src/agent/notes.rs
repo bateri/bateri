@@ -1,8 +1,8 @@
-//! What the script on a server left for the Mac while it was away, and how the Mac reads it.
+//! What the command on a server left for the Mac while it was away, and how the Mac reads it.
 //!
 //! `bateri split` on a server with no Mac connected cannot ask where the pane goes. The terminal
 //! starts anyway and the same `place` message the Mac would have been asked waits in a file,
-//! `~/.local/share/bateri/placing/pN` (the script's own state, under `$HOME`: the Mac's `sh -c` and
+//! `~/.local/share/bateri/placing/pN` (the command's own state, under `$HOME`: the Mac's `sh -c` and
 //! a cron job have no login shell's environment). When a connection to the server comes up and the
 //! server has said what it keeps, the Mac reads the files in one `sh` run on the account's main
 //! connection ([`READ`]) and **removes them as it reads**: a note is read once, and a terminal that
@@ -15,7 +15,7 @@
 //! written.
 //!
 //! `~/.local/share/bateri/terminals/pN` says who opened a terminal and whether it stays open when
-//! its program ends ([`Record`]); the same script writes it, and `ls` ([`RECORDS`] reads them all,
+//! its program ends ([`Record`]); the same command writes it, and `ls` ([`RECORDS`] reads them all,
 //! leaving them) and `close` (who may close a terminal without asking) read it.
 
 use super::message::{MAX_BYTES, Place, Request};
@@ -67,7 +67,7 @@ done
 exit 0
 "#;
 
-/// A note: the pane the Mac was asked for, as the script wrote it.
+/// A note: the pane the Mac was asked for, as the command wrote it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Note {
     pub terminal: Terminal,
@@ -138,7 +138,7 @@ fn note_of(terminal: Terminal, body: &[u8]) -> Option<Note> {
     (place.terminal == terminal && place.anchor.is_some()).then_some(Note { terminal, place })
 }
 
-/// What `~/.local/share/bateri/terminals/pN` says: plain `key value` lines, the keys the script
+/// What `~/.local/share/bateri/terminals/pN` says: plain `key value` lines, the keys the command
 /// writes after `kablo new` has made the terminal.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Record {
@@ -151,7 +151,7 @@ pub struct Record {
 
 impl Record {
     /// The record `text` is. `None` for a text that holds neither key; a key it does not know is
-    /// left alone (a later script may write more), and an `opener` that is no name is none.
+    /// left alone (a later command may write more), and an `opener` that is no name is none.
     pub fn parse(text: &str) -> Option<Record> {
         let mut found = false;
         let mut record = Record {
@@ -402,7 +402,7 @@ mod tests {
         let record = Record::parse(&format!("opener {made}\nkeep-open no\n")).expect("a record");
         assert_eq!(record.opener, Anchor::parse(&made));
         assert!(!record.keep_open);
-        // Opened from no terminal; a key a later script writes is left alone.
+        // Opened from no terminal; a key a later command writes is left alone.
         let record = Record::parse("opener -\nkeep-open no\nlabel x\n").expect("a record");
         assert_eq!(record.opener, None);
         assert_eq!(

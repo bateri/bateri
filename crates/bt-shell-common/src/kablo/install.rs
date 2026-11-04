@@ -74,7 +74,7 @@ pub const NUMBER_LIMIT: Duration = Duration::from_secs(15);
 /// on while the counter is still counting.
 pub const LOCAL_NUMBER_LIMIT: Duration = Duration::from_secs(5);
 
-/// How long reading what the server's script left for the application may take
+/// How long reading what the server's command left for the application may take
 /// ([`crate::agent::notes::READ`]): a few small files, on a connection that is up.
 pub const NOTES_LIMIT: Duration = Duration::from_secs(15);
 
@@ -284,11 +284,11 @@ pub fn ensure_for(
     place(channel, bundle, Files::Server { agent })
 }
 
-/// [`ensure`] for this Mac ([`super::local`]): the same look and the same write, with the two
-/// files of the shells' that this Mac has a reader for — the agent's command and its counter
-/// ([`crate::ssh_wrap::files_script_here`]; with `agent` false, `[commands] level = "off"`, they
-/// are not written and are removed). The rest of a server's files have none: a terminal here
-/// starts from the application's own shells.
+/// [`ensure`] for this Mac ([`super::local`]): the same look and the same write, with the one
+/// file of the shells' that this Mac has a reader for — the agent's command
+/// ([`crate::ssh_wrap::files_script_here`]; with `agent` false, `[commands] level = "off"`, it is
+/// not written and is removed). The rest of a server's files have none: a terminal here starts
+/// from the application's own shells.
 pub fn ensure_here(
     channel: &dyn Channel,
     bundle: &Bundle,
@@ -302,7 +302,7 @@ pub fn ensure_here(
 enum Files {
     /// A server's whole set, with the `bateri` command or without it.
     Server { agent: bool },
-    /// This Mac's two ([`crate::ssh_wrap::files_script_here`]).
+    /// This Mac's one ([`crate::ssh_wrap::files_script_here`]).
     Here { agent: bool },
 }
 
@@ -423,23 +423,15 @@ pub fn probe_and_files_script(version: &str) -> String {
 
 /// Writes the shells' files alone, to a server whose kablo is where `installed` says (the
 /// application's ledger knew it, so there was no look): the same script, the same bytes, as a call
-/// of their own. **Best effort**: what could not be written is found missing by the bootstrap,
+/// of their own (the command file in them is the one line that starts kablo). **Best effort**: what could not be written is found missing by the bootstrap,
 /// which says so.
 pub fn put_files(channel: &dyn Channel, installed: &Installed, agent: bool) {
-    put_files_at(channel, &installed.path, agent);
+    let files = crate::ssh_wrap::files_script_for(Some(&installed.path), agent);
+    let _ = channel.run("sh -s >/dev/null 2>&1; :", files.as_bytes());
 }
 
-/// [`put_files`] with kablo's place as the package has it, for a caller that has not looked at
-/// kablo. Whether the files got there: a connection that failed has not put them.
-pub fn put_files_at(channel: &dyn Channel, kablo: &str, agent: bool) -> bool {
-    let files = crate::ssh_wrap::files_script_for(Some(kablo), agent);
-    channel
-        .run("sh -s >/dev/null 2>&1; :", files.as_bytes())
-        .is_ok_and(|reply| reply.status == Some(0))
-}
-
-/// [`put_files`] for this Mac ([`crate::ssh_wrap::files_script_here`]): the agent's command and
-/// its counter, or their removal when the command is not wanted.
+/// [`put_files`] for this Mac ([`crate::ssh_wrap::files_script_here`]): the agent's command, or
+/// its removal when the command is not wanted.
 pub fn put_files_here(channel: &dyn Channel, installed: &Installed, agent: bool) {
     let files = crate::ssh_wrap::files_script_here(Some(&installed.path), agent);
     let _ = channel.run("sh -s >/dev/null 2>&1; :", files.as_bytes());
@@ -773,13 +765,19 @@ pub fn prune_versions(channel: &dyn Channel, installed: &Installed) -> Vec<Strin
 // ─── the number of a terminal ────────────────────────────────────────────
 
 /// The number of the next terminal on the server (`7`: the `p7` an agent there is told), from
-/// the counter the agent's command uses ([`crate::ssh_wrap::COUNTER`], the same bytes): a number
-/// is never given twice, whoever asks, and one that is lost with a caller that died is not given
-/// again. `None` when the server could not count — no home, a directory it cannot write, a
-/// counter that is not a number, a connection that broke — and the terminal then keeps the name
-/// its holder made.
-pub fn next_number(channel: &dyn Channel) -> Option<u64> {
-    let reply = channel.run(crate::ssh_wrap::COUNTER, &[]).ok()?;
+/// kablo's own counter (`kablo bateri --next-number`, the one the agent's command numbers with;
+/// `kablo` is where kablo is, relative to the home: [`Installed::path`]): a number is never given
+/// twice, whoever asks, and one that is lost with a caller that died is not given again. `None`
+/// when the server could not count — no home, a directory it cannot write, a counter that is not
+/// a number, a kablo that is not there, a connection that broke — and the terminal then keeps the
+/// name its holder made.
+pub fn next_number(channel: &dyn Channel, kablo: &str) -> Option<u64> {
+    if !crate::ssh_wrap::is_kablo_path(kablo) {
+        return None;
+    }
+    let reply = channel
+        .run(&format!("exec \"$HOME/{kablo}\" bateri --next-number"), &[])
+        .ok()?;
     if reply.status != Some(0) {
         return None;
     }
@@ -837,7 +835,7 @@ pub fn run_command_in(
     command.args(args);
     if let Some(dir) = dir {
         // The directory is the home of whoever the step is for: what it writes below `$HOME`
-        // (the counter) goes where its relative paths do.
+        // (the counter's state) goes where its relative paths do.
         command.current_dir(dir).env("HOME", dir);
     }
     let mut child = command

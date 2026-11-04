@@ -158,7 +158,8 @@ or `"off"` in the `[shell]` section of your settings.
 In a terminal bateri opened on this Mac, or on a server over `ssh`, the
 `bateri` command is on the `PATH` (zsh, bash and fish, put there after your own
 files and never written to them; cron jobs call
-`~/.local/share/bateri/shell/bin/bateri`). A pane you open yourself (⌘D, ⌘T) has
+`~/.local/share/bateri/shell/bin/bateri`, one line that starts the `bateri`
+subcommand of kablo, so the command is the same program on every machine). A pane you open yourself (⌘D, ⌘T) has
 a number too, so `bateri send p3 'q'` reaches it. On a server the terminal
 itself lives there, under kablo, so these keep working with your Mac asleep; the
 pane takes its place when bateri connects. bateri on the Mac is never asked to

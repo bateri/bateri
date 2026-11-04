@@ -14,10 +14,13 @@ use crate::settings::TempRoot;
 use crate::ssh_route::SystemSsh;
 use kablo_proto::install::Target;
 
-/// kablo, as a script: it says its version, `attach` echoes and `upgrade` writes down
-/// what it was asked beside the binary.
+/// kablo, as a script: it says its version, `attach` echoes, `upgrade` writes down what it was
+/// asked beside the binary, and `bateri --next-number` counts the way kablo's counter does
+/// (`~/.local/share/bateri/next`, the number to give next, written before it is given).
 const KABLO: &str = "#!/bin/sh\ncase $1 in version) echo \"version=0.2.0 wire_min=1 wire_max=2\";; attach) exec cat;; \
-     upgrade) echo \"$*\" >>\"$(dirname \"$0\")/upgrades\";; esac\n";
+     upgrade) echo \"$*\" >>\"$(dirname \"$0\")/upgrades\";; \
+     bateri) [ \"$2\" = --next-number ] || exit 64; s=$HOME/.local/share/bateri; n=1; \
+     [ -f \"$s/next\" ] && n=$(cat \"$s/next\"); mkdir -p \"$s\" && echo $((n + 1)) >\"$s/next\" && echo $n;; esac\n";
 
 /// The ids of terminals, as the ledger would hand them over.
 fn ids(names: &[&str]) -> Vec<SessionId> {
@@ -398,9 +401,9 @@ fn ending_a_bridge_ends_what_its_ssh_started() {
     }
 }
 
-/// The server's counter is run over the connection the user made, as a step of its own: the same
-/// bytes the agent's command there runs, the home the server says (a stand-in that sets it, as an
-/// ssh login does).
+/// The server's counter is run over the connection the user made, as a step of its own: kablo's
+/// own (`kablo bateri --next-number`, which the agent's command there runs too), in the home the
+/// server says (a stand-in that sets it, as an ssh login does).
 #[test]
 #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn the_counter_is_asked_over_the_master_and_a_build_without_the_package_has_none() {
@@ -409,6 +412,10 @@ fn the_counter_is_asked_over_the_master_and_a_build_without_the_package_has_none
     let host = backend.route(&["rasp".into()]).expect("kablo");
     let argv = backend.master(&host).expect("plan").expect("step");
     assert_eq!(run_argv(&argv), 0);
+    // kablo is on the server before any terminal there is numbered (the install put it).
+    let kablo = world.home.join(".local/share/kablo/0.2.0/kablo");
+    std::fs::create_dir_all(kablo.parent().expect("a directory")).expect("kablo's place");
+    crate::child::tests::write_program(&kablo, KABLO);
     assert_eq!(backend.number(&host), Some(1));
     assert_eq!(backend.number(&host), Some(2));
     assert_eq!(
@@ -768,11 +775,10 @@ fn this_macs_account_takes_the_same_steps_with_no_server_and_no_connection() {
         2
     );
 
-    // The `bateri` command and its counter are written to it, and nothing else of a server's
-    // files: its shells start from the application's own.
+    // The `bateri` command is written to it, and nothing else of a server's files: its shells
+    // start from the application's own.
     let shell = mac.join(".local/share/bateri/shell");
     assert!(shell.join("bin/bateri").is_file());
-    assert!(shell.join("next.sh").is_file());
     assert!(!shell.join("boot.sh").exists() && !shell.join("zsh").exists());
     // Its terminals are numbered by the counter the command runs, under this Mac's home.
     assert_eq!(backend.number(&here), Some(1));
@@ -782,10 +788,10 @@ fn this_macs_account_takes_the_same_steps_with_no_server_and_no_connection() {
         "3\n"
     );
     // What only a server has is not taken for it.
-    std::fs::remove_file(shell.join("next.sh")).expect("removed");
+    std::fs::remove_file(shell.join("bin/bateri")).expect("removed");
     backend.files(&here, &installed);
     assert!(
-        shell.join("next.sh").is_file(),
+        shell.join("bin/bateri").is_file(),
         "the files are written again"
     );
     assert!(backend.records(&here).is_empty());
@@ -822,8 +828,8 @@ fn this_macs_account_takes_the_same_steps_with_no_server_and_no_connection() {
     );
 }
 
-/// `[commands] level = "off"` on this Mac: the command and the counter are not written, are
-/// taken away when an earlier start wrote them, and no terminal is numbered.
+/// `[commands] level = "off"` on this Mac: the command is not written, is taken away when an
+/// earlier start wrote it, and no terminal is numbered.
 #[test]
 #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn this_mac_with_its_commands_off_has_no_command_and_no_numbers() {
@@ -847,7 +853,7 @@ fn this_mac_with_its_commands_off_has_no_command_and_no_numbers() {
     // renewal): the command goes.
     *level.lock().expect("lock") = CommandLevel::Off;
     backend.install(&here, &[]).expect("found");
-    assert!(!shell.join("bin/bateri").exists() && !shell.join("next.sh").exists());
+    assert!(!shell.join("bin/bateri").exists());
     assert_eq!(backend.number(&here), None);
     assert!(
         !mac.join(".local/share/bateri/next").exists(),
@@ -882,10 +888,11 @@ fn this_macs_account_needs_the_package_and_a_home_to_keep_kablo_in() {
 }
 
 /// `bateri split -S rasp` right after an update, with no terminal opened on rasp yet: what runs
-/// there is this build's command, not the one an earlier build left.
+/// there is this build's kablo and command, not what an earlier build left, and the terminals
+/// that run from an earlier kablo are renewed.
 #[test]
 #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
-fn reaching_a_server_leaves_this_builds_command_there_once_a_run() {
+fn reaching_a_server_sets_it_up_with_this_builds_kablo_and_command_once_a_run() {
     let world = stand_in("reach-files", 0);
     let backend = world.backend(Some(world.package()));
     let args = vec!["rasp".to_owned()];
@@ -896,20 +903,42 @@ fn reaching_a_server_leaves_this_builds_command_there_once_a_run() {
     std::fs::create_dir_all(script.parent().expect("a directory")).expect("bin");
     std::fs::write(&script, "an earlier build's").expect("the old command");
 
-    backend.reach(&args, Ask::Never).expect("reached");
+    backend
+        .reach(&args, Ask::Never, &|_| ids(&["t1", "t2"]))
+        .expect("reached");
     assert!(
         std::fs::read_to_string(&script)
             .expect("the command")
             .contains(".local/share/kablo/0.2.0/kablo"),
         "this build's, with the package's kablo"
     );
+    // kablo itself was written (the server had none of this package's), and what ran from the
+    // earlier one is renewed with it.
+    let kablo = world.home.join(".local/share/kablo/0.2.0");
+    assert!(kablo.join("kablo").is_file(), "no kablo was written");
+    let asked = std::fs::read_to_string(kablo.join("upgrades")).expect("the renewal");
+    assert_eq!(asked.lines().count(), 2, "{asked}");
+    assert!(
+        asked.contains("upgrade t1") && asked.contains("upgrade t2"),
+        "{asked}"
+    );
 
     // `send` and `capture` reach too: they pay for no second write.
     std::fs::write(&script, "left alone").expect("a marker");
-    backend.reach(&args, Ask::Never).expect("reached");
+    backend
+        .reach(&args, Ask::Never, &|_| ids(&["t1", "t2"]))
+        .expect("reached");
     assert_eq!(
         std::fs::read_to_string(&script).expect("the command"),
         "left alone"
+    );
+    assert_eq!(
+        std::fs::read_to_string(kablo.join("upgrades"))
+            .expect("the renewal")
+            .lines()
+            .count(),
+        2,
+        "nothing was renewed a second time"
     );
 }
 
@@ -921,7 +950,9 @@ fn a_program_reaches_a_server_through_the_gate_of_its_own_pane_and_only_where_ba
     let args = vec!["rasp".to_owned()];
 
     // A server bateri never opened has no `bateri` to start a terminal with: told to open one.
-    let error = backend.reach(&args, Ask::Never).expect_err("not set up");
+    let error = backend
+        .reach(&args, Ask::Never, &|_| Vec::new())
+        .expect_err("not set up");
     assert!(
         error.contains("has not set up rasp") && error.contains("ssh rasp"),
         "{error}"
@@ -932,7 +963,9 @@ fn a_program_reaches_a_server_through_the_gate_of_its_own_pane_and_only_where_ba
     let mut state = ssh_wrap::HostState::default();
     state.note(Fact::Touched, "u@h:22", 1);
     std::fs::write(&world.state, state.render()).expect("state");
-    let reached = backend.reach(&args, Ask::Never).expect("reached");
+    let reached = backend
+        .reach(&args, Ask::Never, &|_| Vec::new())
+        .expect("reached");
     assert_eq!(reached.server.key, "u@h:22");
     assert_eq!(reached.level, CommandLevel::Own);
     assert_eq!(
@@ -953,18 +986,24 @@ fn a_program_reaches_a_server_through_the_gate_of_its_own_pane_and_only_where_ba
     state.note(Fact::Touched, "u@h:22", 1);
     state.note(Fact::NoKablo, "u@h:22", 1);
     std::fs::write(&world.state, state.render()).expect("state");
-    let error = backend.reach(&args, Ask::Never).expect_err("plain");
+    let error = backend
+        .reach(&args, Ask::Never, &|_| Vec::new())
+        .expect_err("plain");
     assert!(
         error.contains("rasp is not a server bateri keeps terminals on"),
         "{error}"
     );
     let error = world
         .backend(None)
-        .reach(&args, Ask::Never)
+        .reach(&args, Ask::Never, &|_| Vec::new())
         .expect_err("no package");
     assert!(error.contains("not a server bateri keeps"), "{error}");
     let error = backend
-        .reach(&["rasp".to_owned(), "uptime".to_owned()], Ask::Never)
+        .reach(
+            &["rasp".to_owned(), "uptime".to_owned()],
+            Ask::Never,
+            &|_| Vec::new(),
+        )
         .expect_err("a command");
     assert!(error.contains("not a server bateri keeps"), "{error}");
 
@@ -984,7 +1023,7 @@ fn a_program_reaches_a_server_through_the_gate_of_its_own_pane_and_only_where_ba
         ..Settings::default()
     });
     let calls = world.calls().len();
-    let reached = off.reach(&args, Ask::Never).expect("said");
+    let reached = off.reach(&args, Ask::Never, &|_| Vec::new()).expect("said");
     assert_eq!(reached.level, CommandLevel::Off);
     assert!(reached.argv.is_empty());
     assert_eq!(

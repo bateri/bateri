@@ -4,8 +4,9 @@
 //! depend on where the thing stands: moving a tab, putting it in a group or taking it to another
 //! window leaves it as it was. A number that was given is never given again, whatever became of
 //! the thing, and a restart keeps it: the counters live in a file of the session directory and a
-//! number is written **before** it is used (`next.sh`'s rule for a pane's number: a crash between
-//! the two loses a number, which is allowed, and never repeats one). The layout is saved a moment
+//! number is written **before** it is used (the rule of the counter that numbers a pane,
+//! `kablo bateri --next-number`: a crash between the two loses a number, which is allowed, and
+//! never repeats one). The layout is saved a moment
 //! after it changes, so the counters could not live in it — a crash would give a number twice.
 //!
 //! The counters never fall below what a session that was read holds ([`Counters::observe`]): a

@@ -6,7 +6,7 @@
 //! the pane afterwards (a `place` whose `server` is the same name). A program on a server has no
 //! `ssh` to run: it is answered `relay` and sends the command it means, which **this runs** — the
 //! one place a window runs a program, for a server given `full` ([`relay`]). All of
-//! them ask here again whether the machine is one bateri keeps terminals on: nothing the script says
+//! them ask here again whether the machine is one bateri keeps terminals on: nothing the command says
 //! is trusted, and the level of the machine that asked (`full`, [`serve::serve`]) was judged before
 //! any got this far.
 //!
@@ -85,7 +85,11 @@ pub(super) fn ssh(
     let started = thread::Builder::new()
         .name("bateri reach".into())
         .spawn(move || {
-            let reached = backend.reach(std::slice::from_ref(&name), ask);
+            let reached = backend.reach(
+                std::slice::from_ref(&name),
+                ask,
+                &hold_service::terminals_of,
+            );
             letter.answer(reached_reply(reached, relayed).encode().into_bytes());
         });
     if let Err(error) = started {
@@ -214,7 +218,11 @@ fn relayed(
                 "this bateri keeps no connection to servers",
             ));
         };
-        match backend.reach(std::slice::from_ref(&relay.server), ask) {
+        match backend.reach(
+            std::slice::from_ref(&relay.server),
+            ask,
+            &hold_service::terminals_of,
+        ) {
             Err(text) => return Reply::Failed(Failure::new(Kind::Failed, text)),
             Ok(reached) if reached.level == CommandLevel::Off => {
                 return Reply::Failed(refused_off(&reached.server));

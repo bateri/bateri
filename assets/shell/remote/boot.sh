@@ -56,7 +56,7 @@
 #      `XDG_DATA_DIRS` → `vendor_conf.d`. Each one reads the user's own login
 #      files, unchanged; no rc file on the server is written.
 #
-# TWO CALLERS, ONE FILE. Besides the one-liner above, `bin/bateri` starts the
+# TWO CALLERS, ONE FILE. Besides the one-liner above, `kablo bateri` (`bin/bateri`) starts the
 # integrated shell of a terminal an agent opened without a program by running
 # THIS FILE, which is among the files written to `$bt_dir/boot.sh`: `sh boot.sh
 # '' '' <version> -`. It then runs where the files are (`$0`), prints no motd and
@@ -133,7 +133,7 @@ bt_login() {
 
 # 1. The motd: Ubuntu's PAM writes the dynamic one at every login (also this
 # one) and prints it before the static file; the two can be one file. Not for
-# a terminal `bin/bateri` starts (no nonce): that is no login.
+# a terminal `kablo bateri` starts (no nonce): that is no login.
 if [ -n "${2-}" ] && [ ! -e "$HOME/.hushlogin" ]; then
   if [ -r /run/motd.dynamic ]; then
     cat /run/motd.dynamic

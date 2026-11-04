@@ -1,7 +1,7 @@
 //! What an agent on a server asks of bateri with `bateri split`, `tab`, `ls`, `close` and `notify`,
 //! and what is decided about it — the half that needs no AppKit, so `make linux` runs its tests.
 //!
-//! **Who does what.** The terminal itself is the server's: the script on the server starts it
+//! **Who does what.** The terminal itself is the server's: the `bateri` command (kablo's) on the server starts it
 //! with `kablo new`, numbers it (`p9`) and answers `wait`, `capture` and `send` without this Mac.
 //! The Mac only decides where a pane that shows it goes, and shows it — it runs nothing and
 //! writes no byte to any shell, so the request is a *place*, never a *program*. The request
@@ -40,9 +40,6 @@ pub mod relay;
 pub mod serve;
 pub mod summary;
 pub mod wait;
-
-#[cfg(test)]
-mod script;
 
 // The names a pane is written by (`p9`, `p9@prod`) and the machine words are the app's and the
 // command's alike: one definition, in the crate both read the message with.

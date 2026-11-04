@@ -170,6 +170,12 @@ pub(crate) fn backend() -> Option<Arc<dyn Backend>> {
     Some(SERVICE.get()?.backend())
 }
 
+/// The terminals the ledger keeps for the account `account` (a server's), in the order they were
+/// started: what a kablo newly written there renews ([`Backend::reach`]).
+pub(crate) fn terminals_of(account: &str) -> Vec<bt_shell_common::kablo::SessionId> {
+    ledger().terminals_of(account)
+}
+
 /// The terminal of this Mac that carries the pane `pane`'s bytes — the pane's own shell, or the
 /// program a `bateri split` started for it — if the ledger says there is one. A pane that shows a
 /// server's terminal has one too (the pipe to the server runs in it), and it is not what that pane

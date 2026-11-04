@@ -40,7 +40,7 @@ use crate::split::Tree;
 use crate::tab::TerminalTab;
 use crate::window::TerminalWindow;
 
-/// Answers the request: it is done or it is a [`Failure`] with the words the script prints.
+/// Answers the request: it is done or it is a [`Failure`] with the words the command prints.
 pub(super) fn arranged(
     app: &AppDelegate,
     letter: Letter,
