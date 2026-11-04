@@ -268,6 +268,36 @@ fn the_shells_files_go_with_the_look_for_kablo_and_cost_no_call_of_their_own() {
 
 #[test]
 #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn a_server_at_level_off_gets_the_window_files_and_no_command() {
+    let root = TempRoot::new("kablo-files-off");
+    let bundle = package(&root.0, "0.2.0", KABLO);
+    let home = Home::new(&root.0.join("home"));
+    std::fs::create_dir_all(&home.dir).expect("home");
+    let shell = home.dir.join(".local/share/bateri/shell");
+
+    // The command is there from an earlier call; the level is off now and the next call takes it.
+    ensure(&home, &bundle).expect("installed");
+    assert!(shell.join("bin/bateri").is_file());
+    ensure_for(&home, &bundle, false).expect("found");
+    assert!(!shell.join("bin/bateri").exists(), "the command stayed");
+    // What the window's own panes read is still there, and kablo is not written again.
+    assert!(shell.join("boot.sh").is_file());
+    assert!(shell.join("next.sh").is_file());
+    assert_eq!(home.uploads(), 1);
+    // Written alone, as the ledger path does, the same.
+    let installed = ensure(&home, &bundle).expect("found");
+    assert!(shell.join("bin/bateri").is_file());
+    put_files(&home, &installed, false);
+    assert!(
+        !shell.join("bin/bateri").exists(),
+        "put_files left the command"
+    );
+    put_files(&home, &installed, true);
+    assert!(shell.join("bin/bateri").is_file());
+}
+
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn a_binary_that_is_there_and_is_not_the_packages_is_left_alone() {
     let root = TempRoot::new("kablo-differs");
     let bundle = package(&root.0, "0.2.0", KABLO);

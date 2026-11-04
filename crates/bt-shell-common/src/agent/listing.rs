@@ -65,6 +65,13 @@ use crate::split::{Axis, Tree};
 pub enum Pane {
     /// A terminal of this server, by its name there.
     Terminal(String),
+    /// A terminal of another machine, told by that machine's name and, when it is an agent's
+    /// pane, its number there (`p9@prod`). Only a level that sees every machine builds these
+    /// ([`super::level`]); the others get [`Pane::Elsewhere`].
+    Remote {
+        machine: String,
+        name: Option<String>,
+    },
     /// Anything else: nothing of it is told.
     Elsewhere,
 }
@@ -127,7 +134,7 @@ impl Node {
     fn terminals<'a>(&'a self, into: &mut Vec<&'a str>) {
         match self {
             Node::Pane(Pane::Terminal(name)) => into.push(name),
-            Node::Pane(Pane::Elsewhere) => {}
+            Node::Pane(Pane::Remote { .. } | Pane::Elsewhere) => {}
             Node::Split { first, second, .. } => {
                 first.terminals(into);
                 second.terminals(into);
@@ -694,6 +701,14 @@ impl Scene {
                 }
                 out.push('}');
             }
+            Pane::Remote { machine, name } => {
+                out.push('{');
+                json_remote_name(out, machine, name.as_deref());
+                if let Some(on_screen) = on_screen {
+                    let _ = write!(out, ",\"on_screen\":{on_screen}");
+                }
+                out.push('}');
+            }
             Pane::Elsewhere => out.push_str("{\"elsewhere\":true}"),
         }
     }
@@ -703,7 +718,7 @@ impl Scene {
             Node::Pane(pane) => {
                 let shown = match pane {
                     Pane::Terminal(name) => Some(on_screen(name)),
-                    Pane::Elsewhere => None,
+                    Pane::Remote { .. } | Pane::Elsewhere => None,
                 };
                 self.json_pane(out, pane, shown);
             }
@@ -754,6 +769,20 @@ fn cell_name(terminal: &str) -> String {
     match Terminal::parse(terminal) {
         Some(pane) => pane.to_string(),
         None => pane_field(terminal),
+    }
+}
+
+/// How a pane of another machine is told: `id:p9@prod` for an agent's pane there,
+/// `name:"b-0a1b" machine:"prod"` for any other terminal and `machine:"local"` for a pane whose
+/// terminal is not known by name.
+fn remote_field(machine: &str, name: Option<&str>) -> String {
+    let machine = printable(machine);
+    match name {
+        Some(name) => match Terminal::parse(name) {
+            Some(pane) => format!("id:{pane}@{machine}"),
+            None => format!("name:\"{}\" machine:\"{machine}\"", printable(name)),
+        },
+        None => format!("machine:\"{machine}\""),
     }
 }
 
@@ -840,6 +869,10 @@ fn write_tab(
     if !whole {
         match &tab.zoomed {
             Some(Pane::Terminal(name)) => notes.push(format!("zoomed on {}", printable(name))),
+            Some(Pane::Remote { machine, name }) => {
+                let name = name.as_deref().map(printable).unwrap_or_default();
+                notes.push(format!("zoomed on {name}@{}", printable(machine)));
+            }
             Some(Pane::Elsewhere) => notes.push(format!("zoomed on {ELSEWHERE}")),
             None => {}
         }
@@ -887,6 +920,9 @@ fn write_node(
                 out.push_str(" (on screen)");
             }
             out.push('\n');
+        }
+        Node::Pane(Pane::Remote { machine, name }) => {
+            let _ = writeln!(out, "{pad}pane {}", remote_field(machine, name.as_deref()));
         }
         Node::Split {
             axis,
@@ -959,8 +995,8 @@ fn json_id(out: &mut String, id: Option<(IdKind, u64)>) {
     }
 }
 
-/// The two keys that name a terminal: `id` for an agent's pane, else `name`; the other is
-/// `null`, so the keys are always both there.
+/// The keys that name a terminal of this server: `id` for an agent's pane, else `name`; the
+/// other is `null`, so the keys are always both there, and `machine` is `null` for it.
 fn json_pane_name(out: &mut String, terminal: &str) {
     out.push_str("\"id\":");
     match Terminal::parse(terminal) {
@@ -973,6 +1009,24 @@ fn json_pane_name(out: &mut String, terminal: &str) {
             json_string(out, terminal);
         }
     }
+    out.push_str(",\"machine\":null");
+}
+
+/// The same keys for a pane of another machine: `id` is the address (`p9@prod`).
+fn json_remote_name(out: &mut String, machine: &str, name: Option<&str>) {
+    out.push_str("\"id\":");
+    let pane = name.and_then(Terminal::parse);
+    match pane {
+        Some(pane) => json_string(out, &format!("{pane}@{}", printable(machine))),
+        None => out.push_str("null"),
+    }
+    out.push_str(",\"name\":");
+    match (pane, name) {
+        (None, Some(name)) => json_string(out, name),
+        _ => out.push_str("null"),
+    }
+    out.push_str(",\"machine\":");
+    json_string(out, &printable(machine));
 }
 
 #[cfg(test)]

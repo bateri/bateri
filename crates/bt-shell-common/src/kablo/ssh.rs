@@ -34,7 +34,7 @@ use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use bt_core::{PaneUuid, RemoteKind, RemoteTarget, Settings};
+use bt_core::{CommandLevel, PaneUuid, RemoteKind, RemoteTarget, Settings};
 
 use kablo_proto::SessionId;
 
@@ -124,6 +124,12 @@ pub struct SshBackend {
 }
 
 impl SshBackend {
+    /// Whether the `bateri` command goes to this server: not when its level is `off`
+    /// ([`Settings::commands_for`]), where nothing of it is to be found.
+    fn agent_wanted(&self, server: &KabloHost) -> bool {
+        (self.settings)().commands_for(&server.host) != CommandLevel::Off
+    }
+
     /// The server as the file jobs know a target: the user's arguments, with
     /// the ssh program ours.
     fn target(&self, server: &KabloHost) -> RemoteTarget {
@@ -257,7 +263,7 @@ impl Backend for SshBackend {
             argv: ssh_argv_for(&target, &self.route_of(&target)),
             limit: install::STEP_LIMIT,
         };
-        match install::ensure(&channel, bundle) {
+        match install::ensure_for(&channel, bundle, self.agent_wanted(server)) {
             Ok(installed) => {
                 self.remember(Fact::Touched, server);
                 if installed.fresh {
@@ -287,7 +293,7 @@ impl Backend for SshBackend {
             argv: ssh_argv_for(&target, &self.route_of(&target)),
             limit: install::STEP_LIMIT,
         };
-        install::put_files(&channel, installed);
+        install::put_files(&channel, installed, self.agent_wanted(server));
     }
 
     fn stage_folder(&self, server: &KabloHost) -> Option<crate::stage::Folder> {
@@ -405,7 +411,7 @@ impl Backend for SshBackend {
         // A server that cannot keep kablo *now* is not recorded as one that never
         // can: terminals are running there, and what `install` would write down
         // changes what the next `ssh` is.
-        let installed = install::ensure(&channel, bundle).ok()?;
+        let installed = install::ensure_for(&channel, bundle, self.agent_wanted(server)).ok()?;
         renew(&argv, &installed, live);
         Some(installed)
     }
@@ -484,6 +490,7 @@ impl Backend for SshBackend {
                 account: account.to_owned(),
                 host: server.host.clone(),
                 argv: server.argv.clone(),
+                level: (self.settings)().commands_for(&server.host),
             },
             notes,
         );

@@ -973,6 +973,7 @@ fn the_json_is_json_and_says_what_the_text_says() {
         [
             "id",
             "name",
+            "machine",
             "state",
             "activity",
             "program",
@@ -1069,9 +1070,9 @@ fn the_json_of_a_small_scene_is_this_exactly() {
         terminals: vec![row(shell)],
     };
     let expected = "{\"caller\":\"p4\",\"typing\":null,\"windows\":[
-{\"id\":\"w1\",\"visible\":true,\"groups\":[{\"id\":\"g1\",\"label\":\"api\"}],\"tabs\":[{\"id\":\"t3\",\"group\":\"g1\",\"keys\":\"⌘1\",\"label\":null,\"title\":null,\"selected\":true,\"zoomed\":null,\"tree\":{\"axis\":\"stacked\",\"ratio\":0.333,\"first\":{\"id\":\"p4\",\"name\":null,\"label\":null,\"on_screen\":true},\"second\":{\"id\":\"p5\",\"name\":null,\"label\":null,\"on_screen\":true}}}]}
+{\"id\":\"w1\",\"visible\":true,\"groups\":[{\"id\":\"g1\",\"label\":\"api\"}],\"tabs\":[{\"id\":\"t3\",\"group\":\"g1\",\"keys\":\"⌘1\",\"label\":null,\"title\":null,\"selected\":true,\"zoomed\":null,\"tree\":{\"axis\":\"stacked\",\"ratio\":0.333,\"first\":{\"id\":\"p4\",\"name\":null,\"machine\":null,\"label\":null,\"on_screen\":true},\"second\":{\"id\":\"p5\",\"name\":null,\"machine\":null,\"label\":null,\"on_screen\":true}}}]}
 ],\"terminals\":[
-{\"id\":\"p4\",\"name\":null,\"state\":\"running\",\"activity\":\"idle\",\"program\":\"zsh\",\"directory\":\"/home/ada\",\"cols\":120,\"rows\":30,\"exit\":null,\"secret\":false,\"label\":null,\"started\":100,\"front_started\":null,\"front_is_own\":true,\"output_at\":160,\"opened_by\":null,\"placed\":\"tab\",\"window\":\"w1\",\"group\":\"g1\",\"tab\":\"t3\"}
+{\"id\":\"p4\",\"name\":null,\"machine\":null,\"state\":\"running\",\"activity\":\"idle\",\"program\":\"zsh\",\"directory\":\"/home/ada\",\"cols\":120,\"rows\":30,\"exit\":null,\"secret\":false,\"label\":null,\"started\":100,\"front_started\":null,\"front_is_own\":true,\"output_at\":160,\"opened_by\":null,\"placed\":\"tab\",\"window\":\"w1\",\"group\":\"g1\",\"tab\":\"t3\"}
 ]}
 ";
     assert_eq!(scene.json(), expected);
@@ -1086,6 +1087,94 @@ fn the_json_of_a_small_scene_is_this_exactly() {
     assert_eq!(
         nothing.json(),
         "{\"caller\":null,\"typing\":null,\"windows\":[],\"terminals\":[]}\n"
+    );
+}
+
+/// A scene of one tab that holds this server's `p4` and, at a level that sees every machine,
+/// the panes of others: an agent's `p9` on `prod`, a terminal nobody numbered there, one with no
+/// name at all.
+fn seen_by_screen() -> Scene {
+    let remote = |machine: &str, name: Option<&str>| Pane::Remote {
+        machine: machine.to_owned(),
+        name: name.map(str::to_owned),
+    };
+    let shape = pair(
+        Axis::Horizontal,
+        0.5,
+        leaf(1),
+        pair(
+            Axis::Vertical,
+            0.5,
+            leaf(2),
+            pair(Axis::Vertical, 0.5, leaf(3), leaf(4)),
+        ),
+    );
+    let tree = Node::of(&shape, &|id| match id {
+        1 => terminal("p4"),
+        2 => remote("prod", Some("p9")),
+        3 => remote("prod", Some("b-0a1b")),
+        _ => remote("local", None),
+    });
+    Scene {
+        caller: Some("p4".to_owned()),
+        typing: None,
+        windows: Some(vec![Window {
+            id: 1,
+            visible: true,
+            groups: Vec::new(),
+            tabs: vec![Tab {
+                selected: true,
+                tree,
+                ..tab(3, None, None, &leaf(1), &[(1, "p4")])
+            }],
+        }]),
+        terminals: vec![row(status("p4", "zsh"))],
+    }
+}
+
+#[test]
+fn a_pane_of_another_machine_is_told_by_its_machine_where_the_level_sees_it() {
+    let text = seen_by_screen().text(NOW);
+    assert!(text.contains("pane id:p4"), "{text}");
+    assert!(text.contains("pane id:p9@prod\n"), "{text}");
+    assert!(
+        text.contains("pane name:\"b-0a1b\" machine:\"prod\"\n"),
+        "{text}"
+    );
+    assert!(text.contains("pane machine:\"local\"\n"), "{text}");
+    assert!(!text.contains("another machine"), "{text}");
+    let json = seen_by_screen().json();
+    let parsed = Json::parse(&json);
+    assert!(
+        json.contains("\"id\":\"p9@prod\",\"name\":null,\"machine\":\"prod\""),
+        "{json}"
+    );
+    assert!(
+        json.contains("\"id\":null,\"name\":\"b-0a1b\",\"machine\":\"prod\""),
+        "{json}"
+    );
+    assert!(
+        json.contains("\"id\":null,\"name\":null,\"machine\":\"local\""),
+        "{json}"
+    );
+    // This server's own pane is not told by a machine.
+    assert!(
+        json.contains("\"id\":\"p4\",\"name\":null,\"machine\":null"),
+        "{json}"
+    );
+    assert_eq!(parsed.get("caller").string(), "p4");
+    // A zoom on another machine's pane is told by its address.
+    let mut zoomed = seen_by_screen();
+    if let Some(windows) = &mut zoomed.windows {
+        windows[0].tabs[0].zoomed = Some(Pane::Remote {
+            machine: "prod".to_owned(),
+            name: Some("p9".to_owned()),
+        });
+    }
+    assert!(
+        zoomed.text(NOW).contains("zoomed on p9@prod"),
+        "{}",
+        zoomed.text(NOW)
     );
 }
 

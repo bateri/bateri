@@ -100,6 +100,7 @@ mod tests {
                 account: account.into(),
                 host: "rasp".into(),
                 argv: vec!["ssh".into(), "rasp".into()],
+                level: bt_core::CommandLevel::Own,
             },
             anchor: Anchor::parse(anchor).expect("a name"),
             place: Place {

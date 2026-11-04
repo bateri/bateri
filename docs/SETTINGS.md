@@ -409,6 +409,20 @@ python_env = true
 # .nvmrc or .node-version asks for another version.
 node_version = true
 
+[commands]
+# "off" | "own" | "screen" | "full". What the bateri command may do from a
+# program running on this Mac, an agent or you: "off" takes the command away
+# (a program that runs it stops working), "own" lets it see and change this
+# Mac's own panes and the windows, groups and tabs made of them only,
+# "screen" everything bateri has open, other machines' panes included, and
+# "full" also lets it start terminals on other machines and type into or read
+# them. Other machines have a level of their own: a commands key in their
+# [remote] hosts entry, written like integration below. Turning it off ends
+# a program that is using the command here; "full" on a server lets that
+# server run commands on this Mac if it is ever taken over, and is not given
+# to a pattern like prod-*, only to a host's exact name.
+level = "own"
+
 [remote]
 # Colors the dock of an ssh or mosh session by the host it is on, so a
 # production machine is never mistaken for another. A database client (psql,
@@ -422,9 +436,13 @@ node_version = true
 # exact names before wide patterns; "none" stops the search. Shell > Mark
 # "host" as writes the entry for the host of the ssh tab, the database client
 # or the Kubernetes context you are in.
+# An entry may also carry commands = "off" | "own" | "screen" | "full", the
+# level of the bateri command on that host (see [commands]), alone or with a
+# mark.
 # hosts = [
 #   { host = "prod-*", mark = "production" },
 #   { host = "*.staging.example.com", mark = "staging" },
+#   { host = "rasp", commands = "screen" },
 # ]
 hosts = []
 # true | false. Lets a plain ssh set up shell integration on the server, so
@@ -1967,6 +1985,37 @@ Mac's environment. `python_env = false` and `node_version = false` turn each
 part off at once, in every open tab; both are also in the settings window's
 General page.
 
+### `[commands]`
+
+```toml
+[commands]
+level = "own"
+```
+
+| key | type | default | meaning |
+|---|---|---|---|
+| `level` | `"off"` \| `"own"` \| `"screen"` \| `"full"` | `"own"` | what the `bateri` command may do on this Mac, whoever runs it (an agent or you: the command cannot tell) |
+
+What each level allows, in the same four words for this Mac and for a server (a server's level is the
+`commands` key of its `[remote]` `hosts` entry, below):
+
+| level | sees | changes and closes | starts terminals on another machine, types into and reads them |
+|---|---|---|---|
+| `off` | the command does not exist on that machine | nothing | nothing |
+| `own` | the panes of that machine, and the windows, groups and tabs that hold one | its own panes; a tab, group or window only when every pane in it is its own | no |
+| `screen` | everything bateri has open, each pane named with its machine (`p9@prod`) | everything | no |
+| `full` | as `screen` | as `screen` | yes |
+
+`own` is a guard against accidents, not a security boundary. A command refused by the level ends with
+status 77 and one line that names the level and the setting. **`off` ends what is using it:** the command is not
+installed on that machine, and removed from it when it was, so a program that runs it stops working.
+**`full` on a server is a risk:** if that server is ever taken over, whoever holds it can run commands on this Mac through
+the window; give it to a host by its exact name (a pattern such as `prod-*` is read as `own` and the file gets a
+warning).
+
+This Mac's level is also the "bateri command:" row in the settings window's General page and takes effect at
+once. A server's level is read when its next connection is made: that is when its command is installed or removed.
+
 ### `[remote]`
 
 ```toml
@@ -1976,13 +2025,14 @@ hosts = [
   { host = "*.staging.example.com", mark = "staging" },
   { host = "vm", mark = "#c678dd" },
   { host = "router*", integration = false },
+  { host = "rasp", commands = "screen" },
 ]
 integration = true
 ```
 
 | key | type | default | meaning |
 |---|---|---|---|
-| `hosts` | array of `{ host, mark }` | `[]` | marks for hosts: the dock's colors while ssh or mosh is on that host, a database client is connected to it, or kubectl works in that Kubernetes context |
+| `hosts` | array of `{ host, mark, integration, commands }` | `[]` | marks for hosts: the dock's colors while ssh or mosh is on that host, a database client is connected to it, or kubectl works in that Kubernetes context; `commands` (`"off"` \| `"own"` \| `"screen"` \| `"full"`) is the level of the `bateri` command on that server ([`[commands]`](#commands)), and an entry may carry it without a mark |
 | `preview_max_size` | size | `"100MB"` | if a remote file's preview (⌘-click) is larger than this, asks before downloading |
 | `preview_read_only` | `true` \| `false` | `true` | the preview copy opens read-only (`0444`) — a hint, an app can unlock it |
 | `preview_dir` | folder | `"~/Library/Caches/bateri/Previews"` | the folder of preview copies |

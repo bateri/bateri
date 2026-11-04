@@ -36,14 +36,17 @@
 #
 # WHO OPENED WHAT. `~/.local/share/bateri/terminals/pN` says which terminal
 # opened pN (`kablo here` — what the system says of the process, never a
-# variable) and whether it stays open. `close` goes to the Mac, which closes
-# the pane that shows the terminal as the user closing it would (a pane that
-# stays open for `--keep-open` goes too: closing it is the opener's) and
-# asks the user about a terminal the caller did not open; named nothing it is
-# the caller's own terminal, under whatever name it has. With no Mac to ask,
-# what the caller opened (or is) is ended with `kablo end` and the rest is
-# refused. The state is under `$HOME`, not `XDG_DATA_HOME`: the Mac and a cron
-# job do not have a login shell's environment (the counter's reason, `next.sh`).
+# variable) and whether it stays open; `ls` shows it, and nothing decides by
+# it. WHAT MAY BE DONE is the level the Mac has for this machine (`off`,
+# `own`, `screen`, `full`: the `[remote] hosts` entry of settings.toml, whose
+# `commands` key the Mac reads, not this script), and nobody is asked.
+# `close` goes to the Mac, which closes the pane that shows the terminal as the
+# user closing it would (a pane that stays open for `--keep-open` goes too);
+# named nothing it is the caller's own terminal, under whatever name it has.
+# With no Mac to ask, any terminal of this machine is ended with `kablo end`:
+# it is this machine's own at every level that has the command. The state is
+# under `$HOME`, not `XDG_DATA_HOME`: the Mac and a cron job do not have a
+# login shell's environment (the counter's reason, `next.sh`).
 #
 # The quoted word below is filled in when the bootstrap writes this file
 # (`ssh_wrap`): kablo's place relative to home.
@@ -562,21 +565,17 @@ bt_close() {
     esac
   done
   bt_here
-  bt_own=
   if [ -z "$bt_target" ]; then
     [ -n "$bt_me" ] || bt_die 64 'this is run in no terminal; name the pane to close (close p4)'
     # The caller's own terminal under whatever name it has: a target has to be a number
     # only where it is written, and nobody wrote this one.
     bt_target=$bt_me
-    bt_own=yes
   else
     bt_need_terminal "$bt_target"
-    [ "$bt_target" != "$bt_me" ] || bt_own=yes
   fi
 
-  # The Mac closes it (the pane and the terminal as one), and asks the user when the terminal
-  # is not the caller's own or one it opened.
-  bt_mac_failed=
+  # The Mac closes it (the pane and the terminal as one); it refuses (77) with the level it
+  # has for this machine and the setting that changes it.
   bt_ask "bateri 2${nl}close${nl}terminal $bt_target${nl}"
   if [ "$bt_status" = 0 ]; then
     bt_read_reply
@@ -589,45 +588,24 @@ bt_close() {
         rm -f "$bt_state/terminals/$bt_target" "$bt_state/placing/$bt_target"
         exit 0
         ;;
-      'error failed') bt_mac_failed=yes ;;
+      # It could not tell just now (the server's list did not come in time): the terminal is
+      # this machine's own all the same.
+      'error failed') ;;
       'error '*) bt_fail_reply ;;
-      *)
-        bt_mac_failed=yes
-        bt_kind=
-        ;;
     esac
   fi
 
-  # No Mac to ask, or it could not tell: what the caller is or opened is its to end.
-  bt_opener=
-  if [ -r "$bt_state/terminals/$bt_target" ]; then
-    while IFS=' ' read -r bt_k bt_v; do
-      [ "$bt_k" = opener ] && bt_opener=$bt_v
-    done < "$bt_state/terminals/$bt_target"
+  # No Mac to ask, or it could not tell: the terminal is this machine's own and kablo ends it.
+  if [ -n "$bt_force" ]; then
+    "$bt_kablo" end "$bt_target" --force
+  else
+    "$bt_kablo" end "$bt_target"
   fi
-  if [ -n "$bt_own" ] || { [ -n "$bt_me" ] && [ "$bt_opener" = "$bt_me" ]; }; then
-    if [ -n "$bt_force" ]; then
-      "$bt_kablo" end "$bt_target" --force
-    else
-      "$bt_kablo" end "$bt_target"
-    fi
-    bt_code=$?
-    if [ "$bt_code" = 0 ]; then
-      rm -f "$bt_state/terminals/$bt_target" "$bt_state/placing/$bt_target"
-    fi
-    exit "$bt_code"
+  bt_code=$?
+  if [ "$bt_code" = 0 ]; then
+    rm -f "$bt_state/terminals/$bt_target" "$bt_state/placing/$bt_target"
   fi
-
-  if [ -n "$bt_mac_failed" ]; then
-    if [ -n "$bt_kind" ]; then
-      bt_fail_reply
-    fi
-    bt_die 1 'the Mac answered with something this does not read'
-  fi
-  if [ "$bt_status" != 69 ]; then
-    bt_die 77 "$bt_target was not opened by this terminal, and the Mac did not answer"
-  fi
-  bt_die 77 "$bt_target was not opened by this terminal, and no Mac is connected to ask"
+  exit "$bt_code"
 }
 
 bt_ls() {

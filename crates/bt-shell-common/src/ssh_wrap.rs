@@ -698,6 +698,8 @@ const BOOT_SCRIPT: &str = include_str!("../../../assets/shell/remote/boot.sh");
 /// files, the command executable. The command carries [`KABLO_PLACEHOLDER`]
 /// where kablo's place goes.
 const AGENT_COMMAND: &str = include_str!("../../../assets/shell/remote/bin/bateri");
+/// Where it lives under the shell directory on a server.
+const AGENT_COMMAND_PATH: &str = "bin/bateri";
 /// The counter's text: written to the server as `next.sh`, and **the same bytes** run over the
 /// ssh connection for the terminal this computer opens itself
 /// ([`crate::kablo::install::next_number`]) — one rule for both, not the same rule twice.
@@ -765,7 +767,7 @@ const REMOTE_FILES: [(&str, &str); 14] = [
         "fish/dock.fish",
         include_str!("../../../assets/shell/fish/dock.fish"),
     ),
-    ("bin/bateri", AGENT_COMMAND),
+    (AGENT_COMMAND_PATH, AGENT_COMMAND),
     ("next.sh", COUNTER),
     // The bootstrap itself, for the terminals an agent opens without a
     // program: `bin/bateri` runs this file where the one-liner's text ran.
@@ -790,6 +792,14 @@ const REMOTE_FILES: [(&str, &str); 14] = [
 /// sshd sets it); for any other nothing is written. It never fails the call:
 /// what could not be written is found missing by the bootstrap, which says so.
 pub fn files_script(kablo: Option<&str>) -> String {
+    files_script_for(kablo, true)
+}
+
+/// [`files_script`] for a server whose `bateri` command is wanted (`agent`) or not
+/// (`commands = "off"`): without it the command's file is not written and is removed if an
+/// earlier call left it, so a program on the server that runs it stops working. The rest — the
+/// counter, the bootstrap, the shells' files — is what the window's own panes need and stays.
+pub fn files_script_for(kablo: Option<&str>, agent: bool) -> String {
     /// Where the files go, and the function that puts one there.
     const PRELUDE: &str = r#"case ${SHELL##*/} in zsh | bash | fish) ;; *) exit 0 ;; esac
 bt_data=${XDG_DATA_HOME:-}
@@ -826,6 +836,9 @@ bt_put() {
         .join(" ");
     let mut text = format!("{PRELUDE}(umask 077 && mkdir -p {made} && \\\n");
     for (path, content) in REMOTE_FILES {
+        if !agent && path == AGENT_COMMAND_PATH {
+            continue;
+        }
         let content = match kablo {
             Some(kablo) if content.contains(KABLO_PLACEHOLDER) => {
                 std::borrow::Cow::Owned(content.replace(KABLO_PLACEHOLDER, kablo))
@@ -838,7 +851,11 @@ bt_put() {
             crate::upload::sq(&content)
         ));
     }
-    text.push_str("  { chmod u+x \"$bt_dir/bin/bateri\" || :; }) 2>/dev/null\nexit 0\n");
+    if agent {
+        text.push_str("  { chmod u+x \"$bt_dir/bin/bateri\" || :; }) 2>/dev/null\nexit 0\n");
+    } else {
+        text.push_str("  { rm -f \"$bt_dir/bin/bateri\" || :; }) 2>/dev/null\nexit 0\n");
+    }
     text
 }
 
@@ -865,6 +882,19 @@ pub(crate) fn seed_files_with(
     extra: &[(&str, String)],
     kablo: Option<&str>,
 ) -> std::process::ExitStatus {
+    seed_files_for(sh, shell, home, extra, kablo, true)
+}
+
+/// [`seed_files_with`] for a server whose `bateri` command is wanted (`agent`) or not.
+#[cfg(test)]
+pub(crate) fn seed_files_for(
+    sh: &std::path::Path,
+    shell: &std::path::Path,
+    home: &std::path::Path,
+    extra: &[(&str, String)],
+    kablo: Option<&str>,
+    agent: bool,
+) -> std::process::ExitStatus {
     use std::io::Write as _;
     let mut child = std::process::Command::new(sh)
         .arg("-s")
@@ -886,7 +916,7 @@ pub(crate) fn seed_files_with(
         .stdin
         .take()
         .expect("stdin")
-        .write_all(files_script(kablo).as_bytes());
+        .write_all(files_script_for(kablo, agent).as_bytes());
     child.wait().expect("sh ended")
 }
 
@@ -1785,6 +1815,7 @@ mod tests {
                 pattern: "prod".to_owned(),
                 mark: Some(HostMark::Production),
                 integration: None,
+                commands: None,
             }],
             ..Settings::default()
         };
@@ -2887,6 +2918,30 @@ mod remote_shells {
                 "{name}: a write that fails"
             );
         }
+    }
+
+    #[test]
+    fn a_server_at_level_off_gets_no_command_and_loses_the_one_it_had() {
+        let root = TempRoot::new("remote-files-off");
+        let home = std::fs::canonicalize(&root.0).expect("root").join("home");
+        std::fs::create_dir_all(&home).expect("home");
+        let sh = Path::new("/bin/sh");
+        let shell = Path::new("/usr/bin/bash");
+        let dir = home.join(".local/share/bateri/shell");
+        // Off from the start: the window's own files are there, the command is not.
+        assert!(super::seed_files_for(sh, shell, &home, &[], Some("k/kablo"), false).success());
+        assert!(dir.join("boot.sh").is_file());
+        assert!(dir.join("next.sh").is_file());
+        assert!(dir.join("zsh/bateri.zsh").is_file());
+        assert!(!dir.join("bin/bateri").exists(), "the command was written");
+        // The level was higher once: the command it left is taken away, and comes back with it.
+        assert!(super::seed_files_for(sh, shell, &home, &[], Some("k/kablo"), true).success());
+        assert!(dir.join("bin/bateri").is_file());
+        assert!(super::seed_files_for(sh, shell, &home, &[], Some("k/kablo"), false).success());
+        assert!(!dir.join("bin/bateri").exists(), "the old command stayed");
+        assert!(dir.join("next.sh").is_file());
+        assert!(super::seed_files_for(sh, shell, &home, &[], Some("k/kablo"), true).success());
+        assert!(dir.join("bin/bateri").is_file());
     }
 
     #[test]

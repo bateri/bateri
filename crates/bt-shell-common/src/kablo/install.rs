@@ -266,18 +266,33 @@ pub struct Installed {
 /// it if it is not there. See the module documentation for what a [`Failure`]
 /// means.
 pub fn ensure(channel: &dyn Channel, bundle: &Bundle) -> Result<Installed, Failure> {
-    place(channel, bundle, true)
+    ensure_for(channel, bundle, true)
+}
+
+/// [`ensure`] for a server whose `bateri` command is wanted (`agent`) or not
+/// (`commands = "off"`, [`crate::ssh_wrap::files_script_for`]).
+pub fn ensure_for(
+    channel: &dyn Channel,
+    bundle: &Bundle,
+    agent: bool,
+) -> Result<Installed, Failure> {
+    place(channel, bundle, Some(agent))
 }
 
 /// [`ensure`] for this Mac ([`super::local`]): the same look and the same write, without the
 /// shells' files — a terminal here starts from the application's own, and the files of a server
 /// have no reader on the Mac that writes them.
 pub fn ensure_here(channel: &dyn Channel, bundle: &Bundle) -> Result<Installed, Failure> {
-    place(channel, bundle, false)
+    place(channel, bundle, None)
 }
 
-/// What [`ensure`] and [`ensure_here`] are, with the shells' files (`files`) or without.
-fn place(channel: &dyn Channel, bundle: &Bundle, files: bool) -> Result<Installed, Failure> {
+/// What [`ensure`] and [`ensure_here`] are, with the shells' files (`Some`, and whether the
+/// `bateri` command is among them) or without (`None`).
+fn place(
+    channel: &dyn Channel,
+    bundle: &Bundle,
+    files: Option<bool>,
+) -> Result<Installed, Failure> {
     let target = server_target(channel)?;
     let artifact = bundle
         .artifact(target)
@@ -290,8 +305,8 @@ fn place(channel: &dyn Channel, bundle: &Bundle, files: bool) -> Result<Installe
     };
     // The shells' files ride the call that looks for kablo: no step of their own, on a connection
     // that has no limit on how many bytes one call carries ([`probe_and_files_script`]).
-    let probe = if files {
-        let files = crate::ssh_wrap::files_script(Some(&installed.path));
+    let probe = if let Some(agent) = files {
+        let files = crate::ssh_wrap::files_script_for(Some(&installed.path), agent);
         channel.run(&probe_and_files_script(bundle.version()), files.as_bytes())
     } else {
         channel.run(&probe_script(bundle.version()), &[])
@@ -395,8 +410,8 @@ pub fn probe_and_files_script(version: &str) -> String {
 /// application's ledger knew it, so there was no look): the same script, the same bytes, as a call
 /// of their own. **Best effort**: what could not be written is found missing by the bootstrap,
 /// which says so.
-pub fn put_files(channel: &dyn Channel, installed: &Installed) {
-    let files = crate::ssh_wrap::files_script(Some(&installed.path));
+pub fn put_files(channel: &dyn Channel, installed: &Installed, agent: bool) {
+    let files = crate::ssh_wrap::files_script_for(Some(&installed.path), agent);
     let _ = channel.run("sh -s >/dev/null 2>&1; :", files.as_bytes());
 }
 

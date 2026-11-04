@@ -10559,6 +10559,7 @@ mod tests {
             pattern: pattern.into(),
             mark: Some(mark),
             integration: None,
+            commands: None,
         }
     }
 
@@ -10940,6 +10941,7 @@ mod tests {
             pattern: pattern.to_owned(),
             mark: Some(mark),
             integration: None,
+            commands: None,
         }
     }
 

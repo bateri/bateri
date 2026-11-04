@@ -22,11 +22,15 @@
 //! The other three requests need the Mac's windows, a question to the user or the server's own
 //! list, none of which a decision with no window in it has: they are an [`Answer`] of their own
 //! (`List`, `Close`, `Notify`) that the shell carries out — building `ls` from the live windows
-//! and a [`survey`](crate::kablo::service::Service::survey), asking before it closes what the
-//! asker did not open ([`may_close`]), showing a notification — and answers when it has.
+//! and a [`survey`](crate::kablo::service::Service::survey), closing a terminal, showing a
+//! notification — and answers when it has. **Nothing asks the user:** what a machine's commands
+//! may do is its [`CommandLevel`] ([`super::level`]), decided here and by the shell from the
+//! level the server carries, never in a sheet.
 
+use bt_core::CommandLevel;
 use kablo_proto::v1::{State, Status};
 
+use super::level::{self, Why};
 use super::message::{Failure, Format, Kind, Place, Placed, Reply, Request};
 use super::notes::Note;
 use super::place::Landed;
@@ -43,6 +47,9 @@ pub struct Server {
     /// The `ssh` arguments that reach it, the program's name first: what a pane that shows one of
     /// its terminals is started with.
     pub argv: Vec<String>,
+    /// What the `bateri` command may do on it ([`Settings::commands_for`](bt_core::Settings::commands_for)
+    /// at the moment of the request).
+    pub level: CommandLevel,
 }
 
 /// What the Mac's windows are asked.
@@ -86,22 +93,11 @@ pub enum Answer {
     Wait(Reply, Waiting),
     /// `ls`: the shell builds the text from the windows as they are and what the server says.
     List(Format),
-    /// `close` of a terminal of this server: the shell decides with [`may_close`] whether to
-    /// ask, closes it, and answers.
+    /// `close` of a terminal of this server: the shell closes it and answers (the level has been
+    /// judged: it is not `off`, and a terminal of this server is the server's own).
     Close(Anchor),
     /// `notify`: the shell shows it and answers.
     Notify(String),
-}
-
-/// Whether `caller` — the terminal a request runs in, as kablo says it — may close `terminal`
-/// without the user being asked: its own, or one it opened (`opener`, what the server's record of
-/// the terminal says). A program that runs in no terminal opened nothing. Anything else is the
-/// user's to allow.
-pub fn may_close(caller: Option<&str>, terminal: &Anchor, opener: Option<&Anchor>) -> bool {
-    let Some(caller) = caller else {
-        return false;
-    };
-    caller == terminal.name() || opener.is_some_and(|opener| opener.name() == caller)
 }
 
 fn waiting_reply(anchor: &Anchor) -> Reply {
@@ -146,6 +142,14 @@ fn without_a_focus_nobody_spoke_for(place: &Place, anchor: &Anchor, opener: Opti
 /// The answer to a letter: `text` is what the program said, `from` the terminal kablo says it
 /// runs in (never what it says of itself), `server` the server it came on.
 pub fn serve(server: &Server, from: Option<&str>, text: &str, shell: &mut dyn Shell) -> Answer {
+    // `off`: nothing is done for this server, whatever the request is — a script that is still
+    // there (one that was running when the level changed) is told so, once.
+    if server.level == CommandLevel::Off {
+        return Answer::Reply(Reply::Failed(Failure::new(
+            Kind::Refused,
+            level::refusal(server.level, Why::Off, Some(&server.host)),
+        )));
+    }
     match Request::parse(text) {
         Err(failure) => Answer::Reply(Reply::Failed(failure)),
         Ok(Request::Place(place)) => place_for(server, from, place, shell),
@@ -227,6 +231,10 @@ pub fn settle_notes(
     shell: &mut dyn Shell,
 ) -> Read {
     let mut read = Read::default();
+    // A note was written by a script a server had; at `off` nothing of it is done any more.
+    if server.level == CommandLevel::Off {
+        return read;
+    }
     for Note { terminal, place } in notes {
         let Some(anchor) = place.anchor.clone() else {
             continue;
@@ -294,6 +302,7 @@ mod tests {
             account: "ada@rasp:22".into(),
             host: "rasp".into(),
             argv: vec!["ssh".into(), "rasp".into()],
+            level: CommandLevel::Own,
         }
     }
 
@@ -634,23 +643,48 @@ mod tests {
     }
 
     #[test]
-    fn a_terminal_is_closed_unasked_by_itself_and_by_the_one_that_opened_it_and_by_no_other() {
-        let opener = Anchor::parse("p4");
-        let made = format!("b-{}", "0123456789abcdef".repeat(2));
-        // The opener, and the terminal itself (an agent ending the terminal it runs in).
-        let seven = Anchor::of(Terminal(7));
-        assert!(may_close(Some("p4"), &seven, opener.as_ref()));
-        assert!(may_close(Some("p7"), &seven, None));
-        // A terminal the Mac opened before the numbers existed is its own, whatever its name,
-        // and is one that opened others.
-        let older = Anchor::parse(&made).expect("a name");
-        assert!(may_close(Some(&made), &older, None));
-        assert!(may_close(Some(&made), &seven, Some(&older)));
-        // Anybody else, a program that runs in no terminal, a terminal nobody opened.
-        assert!(!may_close(Some("p5"), &seven, opener.as_ref()));
-        assert!(!may_close(None, &seven, opener.as_ref()));
-        assert!(!may_close(Some("p4"), &seven, None));
-        assert!(!may_close(Some("p7"), &Anchor::of(Terminal(70)), None));
+    fn a_close_is_the_shells_to_carry_out_for_every_level_but_off_and_nobody_is_asked() {
+        // The terminal need not be the asker's own or one it opened: the level decides.
+        for level in [CommandLevel::Own, CommandLevel::Screen, CommandLevel::Full] {
+            let server = Server { level, ..server() };
+            let mut mac = Pretend::default();
+            for from in [Some("p4"), Some("p9"), None] {
+                assert_eq!(
+                    serve(&server, from, "bateri 2\nclose\nterminal p7\n", &mut mac),
+                    Answer::Close(Anchor::of(Terminal(7))),
+                    "{level:?} {from:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_server_at_off_gets_a_refusal_for_every_request_and_nothing_is_done() {
+        let server = Server {
+            level: CommandLevel::Off,
+            ..server()
+        };
+        let mut mac = Pretend {
+            anchors: vec!["p4".to_owned()],
+            ..Pretend::default()
+        };
+        for text in [
+            place_text("anchor p4\n"),
+            "bateri 2\nls\n".to_owned(),
+            "bateri 2\nclose\nterminal p7\n".to_owned(),
+            "bateri 2\nnotify\ntext hi\n".to_owned(),
+            "not a message".to_owned(),
+        ] {
+            let Answer::Reply(Reply::Failed(failure)) = serve(&server, Some("p4"), &text, &mut mac)
+            else {
+                panic!("{text:?}");
+            };
+            assert_eq!(failure.kind, Kind::Refused, "{text:?}");
+            assert!(failure.text.contains("rasp"), "{failure:?}");
+            assert!(failure.text.contains("off"), "{failure:?}");
+            assert!(failure.text.contains("[remote] hosts"), "{failure:?}");
+        }
+        assert!(mac.placed.is_empty() && mac.openers.is_empty());
     }
 
     fn note(terminal: u64, anchor: &str, keep_open: bool) -> Note {

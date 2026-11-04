@@ -51,28 +51,6 @@ pub fn notified(program: Option<&str>, host: &str) -> String {
     format!("{} on {host}", who(program))
 }
 
-/// The question the user is asked when a program wants a terminal closed that it did not open:
-/// the text, and the words under it. `caller` is the terminal the program runs in, when it runs
-/// in one, and `program` what runs there.
-pub fn close_question(
-    program: Option<&str>,
-    caller: Option<&str>,
-    terminal: &str,
-    host: &str,
-) -> (String, String) {
-    let host = bt_core::bare_host(host);
-    let clean = |text: &str| -> String { text.chars().filter(|c| !c.is_control()).collect() };
-    let (host, terminal) = (clean(host), clean(terminal));
-    let who = match caller {
-        Some(caller) => format!("{} ({})", who(program), clean(caller)),
-        None => format!("A program on {host} that runs in no terminal"),
-    };
-    (
-        format!("{who} wants to close {terminal} on {host}."),
-        "What runs in it ends, and the terminal goes.".to_owned(),
-    )
-}
-
 /// The words under [`opened`] in a notification: where they are, agreeing with how many.
 pub fn found_in(count: u32) -> &'static str {
     if count == 1 {
@@ -111,21 +89,6 @@ mod tests {
         assert_eq!(notified(Some("claude"), "rasp"), "Claude on rasp");
         assert_eq!(notified(Some("zsh"), "ada@rasp"), "A program on rasp");
         assert_eq!(notified(None, "rasp\u{1b}[31m"), "A program on rasp[31m");
-    }
-
-    #[test]
-    fn the_question_names_who_asks_what_for_and_where() {
-        let (text, under) = close_question(Some("claude"), Some("p4"), "p7", "rasp");
-        assert_eq!(text, "Claude (p4) wants to close p7 on rasp.");
-        assert!(under.contains("ends"));
-        let (text, _) = close_question(None, None, "p7", "rasp");
-        assert_eq!(
-            text,
-            "A program on rasp that runs in no terminal wants to close p7 on rasp."
-        );
-        // Nothing from outside moves the user's screen.
-        let (text, _) = close_question(Some("a\u{7}b"), Some("p\u{1b}4"), "p7", "r\u{0}asp");
-        assert!(!text.chars().any(char::is_control), "{text:?}");
     }
 
     #[test]

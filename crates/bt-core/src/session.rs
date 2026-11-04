@@ -20932,6 +20932,7 @@ mod tests {
             pattern: "db.prod".into(),
             mark: Some(HostMark::Production),
             integration: None,
+            commands: None,
         }];
         assert!(
             !session.set_host_marks(&rules),
@@ -21017,6 +21018,7 @@ mod tests {
                 pattern: "prod-*".to_owned(),
                 mark: Some(HostMark::Staging),
                 integration: None,
+                commands: None,
             }]),
             "nothing visible changes locally"
         );
@@ -21038,6 +21040,7 @@ mod tests {
             pattern: "prod-web".to_owned(),
             mark: Some(HostMark::Production),
             integration: None,
+            commands: None,
         }];
         assert!(session.set_host_marks(&production));
         assert!(

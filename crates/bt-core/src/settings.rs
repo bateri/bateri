@@ -467,6 +467,42 @@ impl KeepRunning {
     }
 }
 
+/// What the `bateri` command may do on a machine (`[commands] level` for this Mac, a `commands`
+/// key in a `[remote] hosts` entry for a server): one answer for every program that runs it, an
+/// agent or a person, because the command cannot tell them apart.
+///
+/// `Off` takes the command away from that machine (a program that runs it there stops working);
+/// `Own` shows and changes only what is that machine's own — the windows, groups and tabs that
+/// hold a pane of it, and a window, group or tab only when every pane in it is — and is the
+/// default everywhere, a guard against accidents and not a security boundary; `Screen` shows and
+/// changes everything bateri has open; `Full` also starts terminals on other machines and types
+/// into and reads them (it hands this Mac's reach to the server, so a server entry takes the
+/// host's exact name and no pattern). The decision itself is `agent::level`'s, a pure function.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CommandLevel {
+    Off,
+    #[default]
+    Own,
+    Screen,
+    Full,
+}
+
+impl CommandLevel {
+    /// The single list of spellings in the settings file (the same rationale as
+    /// [`UnfocusedCaret::NAMES`]).
+    pub const NAMES: &'static [(&'static str, Self)] = &[
+        ("off", Self::Off),
+        ("own", Self::Own),
+        ("screen", Self::Screen),
+        ("full", Self::Full),
+    ];
+
+    /// The spelling in the settings file.
+    pub fn name(self) -> &'static str {
+        name_in(Self::NAMES, self)
+    }
+}
+
 /// `[terminal] scrollbar`: when the scroll bar at the grid's right edge shows.
 ///
 /// It **doesn't enter** `TerminalOptions`: the bar is pure painting plus one
@@ -1122,6 +1158,10 @@ pub struct HostRule {
     /// each by its own first matching entry: turning a host's integration off
     /// must not take its color away.
     pub integration: Option<bool>,
+    /// `commands`: what the `bateri` command may do on this host ([`CommandLevel`]); `None`
+    /// leaves it to the next entry that writes it, and then to `own`. Resolved by
+    /// [`Settings::commands_for`], which reads a `full` on a pattern as `own`.
+    pub commands: Option<CommandLevel>,
 }
 
 /// The host's mark: that of `rules`'s **first** matching entry, or
@@ -1170,6 +1210,11 @@ fn matching<'a>(
         };
         glob_matches(&rule.pattern, subject)
     })
+}
+
+/// Whether a host entry is a pattern and not a name: it carries `*` or `?`.
+fn is_pattern(pattern: &str) -> bool {
+    pattern.contains(['*', '?'])
 }
 
 /// A pattern with `*` and `?`, case insensitive; no class (`[a-z]`) or set
@@ -1572,6 +1617,8 @@ pub struct Settings {
     /// `[terminal] keep_running`: when the programs outlive bateri
     /// ([`KeepRunning`]). Doesn't enter `TerminalOptions`.
     pub keep_running: KeepRunning,
+    /// `[commands] level`: what the `bateri` command may do on this Mac ([`CommandLevel`]).
+    pub commands_level: CommandLevel,
     /// `[terminal] scrollbar`: when the scroll bar shows ([`Scrollbar`]).
     /// Doesn't enter `TerminalOptions`.
     pub scrollbar: Scrollbar,
@@ -1642,6 +1689,7 @@ impl Default for Settings {
             confirm_close: ConfirmClose::default(),
             restore_windows: RestoreWindows::default(),
             keep_running: KeepRunning::default(),
+            commands_level: CommandLevel::default(),
             scrollbar: Scrollbar::default(),
             remote_hosts: Vec::new(),
             remote_files: RemoteFiles::default(),
@@ -1707,6 +1755,7 @@ pub enum SettingsEdit {
     ConfirmClose(ConfirmClose),
     RestoreWindows(RestoreWindows),
     KeepRunning(KeepRunning),
+    CommandLevel(CommandLevel),
     Scrollbar(Scrollbar),
     Theme(String),
     LightTheme(String),
@@ -1834,6 +1883,7 @@ impl SettingsEdit {
             Self::ConfirmClose(_) => ("terminal", "confirm_close", "terminal.confirm_close"),
             Self::RestoreWindows(_) => ("terminal", "restore_windows", "terminal.restore_windows"),
             Self::KeepRunning(_) => ("terminal", "keep_running", "terminal.keep_running"),
+            Self::CommandLevel(_) => ("commands", "level", "commands.level"),
             Self::Scrollbar(_) => ("terminal", "scrollbar", "terminal.scrollbar"),
             Self::Theme(_) => ("appearance", "theme", "appearance.theme"),
             Self::LightTheme(_) => ("appearance", "light_theme", "appearance.light_theme"),
@@ -1915,6 +1965,7 @@ impl SettingsEdit {
             Self::ConfirmClose(confirm) => confirm.name().into(),
             Self::RestoreWindows(restore) => restore.name().into(),
             Self::KeepRunning(keep) => keep.name().into(),
+            Self::CommandLevel(level) => level.name().into(),
             Self::Scrollbar(scrollbar) => scrollbar.name().into(),
             Self::ContentEdge(edge) => edge.name().into(),
             Self::SplitStyle(style) => style.name().into(),
@@ -2202,6 +2253,20 @@ python_env = true
 # .nvmrc or .node-version asks for another version.
 node_version = true
 
+[commands]
+# "off" | "own" | "screen" | "full". What the bateri command may do from a
+# program running on this Mac, an agent or you: "off" takes the command away
+# (a program that runs it stops working), "own" lets it see and change this
+# Mac's own panes and the windows, groups and tabs made of them only,
+# "screen" everything bateri has open, other machines' panes included, and
+# "full" also lets it start terminals on other machines and type into or read
+# them. Other machines have a level of their own: a commands key in their
+# [remote] hosts entry, written like integration below. Turning it off ends
+# a program that is using the command here; "full" on a server lets that
+# server run commands on this Mac if it is ever taken over, and is not given
+# to a pattern like prod-*, only to a host's exact name.
+level = "own"
+
 [remote]
 # Colors the dock of an ssh or mosh session by the host it is on, so a
 # production machine is never mistaken for another. A database client (psql,
@@ -2215,9 +2280,13 @@ node_version = true
 # exact names before wide patterns; "none" stops the search. Shell > Mark
 # "host" as writes the entry for the host of the ssh tab, the database client
 # or the Kubernetes context you are in.
+# An entry may also carry commands = "off" | "own" | "screen" | "full", the
+# level of the bateri command on that host (see [commands]), alone or with a
+# mark.
 # hosts = [
 #   { host = "prod-*", mark = "production" },
 #   { host = "*.staging.example.com", mark = "staging" },
+#   { host = "rasp", commands = "screen" },
 # ]
 hosts = []
 # true | false. Lets a plain ssh set up shell integration on the server, so
@@ -2793,6 +2862,26 @@ stats_interval = 3
             }
             None => {}
         }
+        // `fallback` is deliberately not read, as for `restore_windows`: a value that isn't
+        // accepted is the default, `own`, and never a wider level a broken file left behind.
+        match section(text, root, "commands", &mut parsed.diagnostics) {
+            Some(commands) => {
+                if let Some(item) = commands.get("level") {
+                    parsed.settings.commands_level = named_enum(
+                        text,
+                        item,
+                        "commands.level",
+                        CommandLevel::NAMES,
+                        CommandLevel::Own,
+                        &mut parsed.diagnostics,
+                    );
+                }
+            }
+            None if root.contains_key("commands") => {
+                parsed.settings.commands_level = CommandLevel::Own;
+            }
+            None => {}
+        }
         match section(text, root, "remote", &mut parsed.diagnostics) {
             Some(remote) => {
                 let before = parsed.diagnostics.len();
@@ -2804,6 +2893,19 @@ stats_interval = 3
                 // empty: the production marks and every `integration = false`
                 // would be gone. The integration turns off instead.
                 let hosts_rejected = parsed.diagnostics.len() > before;
+                for rule in &parsed.settings.remote_hosts {
+                    if rule.commands == Some(CommandLevel::Full) && is_pattern(&rule.pattern) {
+                        parsed.diagnostics.push(Diagnostic {
+                            key: Some("remote.hosts"),
+                            line: None,
+                            message: format!(
+                                "`commands = \"full\"` on the pattern {:?} is read as \"own\": \
+                                 \"full\" is given to a host by its exact name",
+                                rule.pattern
+                            ),
+                        });
+                    }
+                }
                 parsed.settings.remote_files = remote_files(
                     text,
                     remote,
@@ -2873,6 +2975,21 @@ stats_interval = 3
             return on;
         }
         host_mark(&self.remote_hosts, host) != HostMark::Production && self.remote_integration
+    }
+
+    /// What the `bateri` command may do on the server `host` (as typed): the first
+    /// `[remote] hosts` entry that matches and writes `commands`, else `own`. A `full` written
+    /// on a pattern (`prod-*`) is read as `own`: it would hand this Mac's reach to every host
+    /// the pattern ever matches ([`CommandLevel`]); the file read says so
+    /// ([`Settings::TEMPLATE`]'s comment, and a diagnostic at load).
+    pub fn commands_for(&self, host: &str) -> CommandLevel {
+        let found = matching(&self.remote_hosts, host, MarkSubject::Host)
+            .find_map(|(_, rule)| rule.commands.map(|level| (level, rule)));
+        match found {
+            Some((CommandLevel::Full, rule)) if is_pattern(&rule.pattern) => CommandLevel::Own,
+            Some((level, _)) => level,
+            None => CommandLevel::Own,
+        }
     }
 
     /// The **name** of the theme to use: `light_theme` or `dark_theme` by
@@ -4310,7 +4427,8 @@ fn host_rules(
         message: format!(
             "`{KEY}` must be a list of {{ host = \"pattern\", mark = \"production\", \
              \"staging\", \"development\", \"none\" or \"#rrggbb\", integration = true \
-             or false }} with a mark, an integration or both, found {found}; keeping the \
+             or false, commands = \"off\", \"own\", \"screen\" or \"full\" }} with a mark, an \
+             integration, a commands level or any of them, found {found}; keeping the \
              previous list"
         ),
     };
@@ -4364,9 +4482,36 @@ fn host_rules(
                 }
             },
         };
-        // `Some(None)`: an `integration`-only entry, without a mark.
-        let mark = match (mark, table.get("mark"), integration) {
-            (None, None, Some(_)) => Some(None),
+        // `commands`: one of [`CommandLevel::NAMES`]; like `integration` it may stand alone.
+        let commands = match table.get("commands") {
+            None => None,
+            Some(item) => {
+                let level = item.as_str().and_then(|word| {
+                    CommandLevel::NAMES
+                        .iter()
+                        .find(|(name, _)| *name == word)
+                        .map(|(_, level)| *level)
+                });
+                if level.is_none() {
+                    let found = format!(
+                        "commands {} for {:?}",
+                        item.as_str()
+                            .map_or_else(|| kind(item).to_owned(), |word| format!("{word:?}")),
+                        pattern.unwrap_or_default()
+                    );
+                    diagnostics.push(reject(span, found));
+                    return fallback.to_vec();
+                }
+                level
+            }
+        };
+        // `Some(None)`: an `integration`- or `commands`-only entry, without a mark.
+        let mark = match (
+            mark,
+            table.get("mark"),
+            integration.is_some() || commands.is_some(),
+        ) {
+            (None, None, true) => Some(None),
             (mark, _, _) => mark.map(Some),
         };
         match (pattern, mark) {
@@ -4374,6 +4519,7 @@ fn host_rules(
                 pattern: pattern.to_owned(),
                 mark,
                 integration,
+                commands,
             }),
             (None, _) => {
                 diagnostics.push(reject(span, "an entry without a host".to_owned()));
@@ -4493,6 +4639,7 @@ mod tests {
             ("terminal", "confirm_close"),
             ("terminal", "restore_windows"),
             ("terminal", "scrollbar"),
+            ("commands", "level"),
             ("appearance", "theme"),
             ("appearance", "light_theme"),
             ("appearance", "dark_theme"),
@@ -4752,6 +4899,7 @@ mod tests {
             confirm_close: ConfirmClose::Always,
             restore_windows: RestoreWindows::Off,
             keep_running: KeepRunning::Quit,
+            commands_level: CommandLevel::Own,
             scrollbar: Scrollbar::Always,
             remote_hosts: Vec::new(),
             remote_files: RemoteFiles::default(),
@@ -5912,6 +6060,90 @@ found 1.5; using 0.1"
     }
 
     #[test]
+    fn commands_level_is_read_defaults_to_own_and_never_widens_on_a_bad_value() {
+        assert_eq!(clean("").commands_level, CommandLevel::Own);
+        for (value, expected) in [
+            ("off", CommandLevel::Off),
+            ("own", CommandLevel::Own),
+            ("screen", CommandLevel::Screen),
+            ("full", CommandLevel::Full),
+        ] {
+            let text = format!("[commands]\nlevel = \"{value}\"\n");
+            assert_eq!(clean(&text).commands_level, expected, "{value}");
+            assert_eq!(expected.name(), value);
+        }
+        // A value that is not accepted is `own`, whatever the settings it replaces held.
+        let current = Settings {
+            commands_level: CommandLevel::Full,
+            ..Settings::default()
+        };
+        for text in [
+            "[commands]\nlevel = \"all\"\n",
+            "[commands]\nlevel = 3\n",
+            "commands = 5\n",
+        ] {
+            let parsed = Settings::parse_keeping(text, &current).expect("a file");
+            assert_eq!(parsed.settings.commands_level, CommandLevel::Own, "{text}");
+        }
+        let parsed =
+            Settings::parse_keeping("[commands]\nlevel = \"all\"\n", &current).expect("a file");
+        assert_eq!(parsed.diagnostics[0].key, Some("commands.level"));
+        // And it is written in place like any other key.
+        let written = Settings::with_edit(
+            "[commands]\nlevel = \"own\" # keep\n",
+            &SettingsEdit::CommandLevel(CommandLevel::Off),
+        )
+        .expect("a write");
+        assert!(written.contains("level = \"off\" # keep"), "{written}");
+    }
+
+    #[test]
+    fn a_server_has_the_level_its_first_entry_that_writes_one_says_and_own_otherwise() {
+        let text = r#"
+[remote]
+hosts = [
+  { host = "rasp", commands = "screen" },
+  { host = "prod-*", mark = "production" },
+  { host = "prod-db", commands = "full" },
+  { host = "prod-*", commands = "off" },
+  { host = "lab-*", commands = "full" },
+  { host = "*.lan", mark = "staging", commands = "screen" },
+]
+"#;
+        let parsed = Settings::parse_keeping(text, &Settings::default()).expect("a file");
+        let settings = parsed.settings.clone();
+        assert_eq!(settings.commands_for("rasp"), CommandLevel::Screen);
+        assert_eq!(settings.commands_for("ada@rasp"), CommandLevel::Screen);
+        // The first entry that writes `commands` decides, not the first that matches.
+        assert_eq!(settings.commands_for("prod-db"), CommandLevel::Full);
+        assert_eq!(settings.commands_for("prod-web"), CommandLevel::Off);
+        assert_eq!(settings.commands_for("box.lan"), CommandLevel::Screen);
+        assert_eq!(settings.commands_for("elsewhere"), CommandLevel::Own);
+        // The entry that carries only a level has no mark; the others keep theirs.
+        assert_eq!(host_mark(&settings.remote_hosts, "rasp"), HostMark::None);
+        assert_eq!(
+            host_mark(&settings.remote_hosts, "prod-web"),
+            HostMark::Production
+        );
+        // `full` is for a name: on a pattern it is `own`, and the file is told.
+        assert_eq!(settings.commands_for("lab-1"), CommandLevel::Own);
+        assert_eq!(parsed.diagnostics.len(), 1, "{:?}", parsed.diagnostics);
+        assert_eq!(parsed.diagnostics[0].key, Some("remote.hosts"));
+        assert!(parsed.diagnostics[0].message.contains("lab-*"));
+        // A level that is not one rejects the list, as a mark that is not one does.
+        let parsed = Settings::parse_keeping(
+            "[remote]\nhosts = [{ host = \"a\", commands = \"most\" }]\n",
+            &Settings::default(),
+        )
+        .expect("a file");
+        assert!(parsed.settings.remote_hosts.is_empty());
+        assert!(parsed.diagnostics[0].message.contains("commands \"most\""));
+        // The level of this Mac is not a server's: the server's is `own` until its entry says.
+        let mac = clean("[commands]\nlevel = \"full\"\n");
+        assert_eq!(mac.commands_for("rasp"), CommandLevel::Own);
+    }
+
+    #[test]
     fn keep_running_change_reaches_no_session() {
         // Read when quitting, applied by the platform shell from the old and
         // the new value: nothing goes to the sessions, the font or the cursor.
@@ -6301,16 +6533,19 @@ found 1.5; using 0.1"
                     pattern: "router*".to_owned(),
                     mark: None,
                     integration: Some(false),
+                    commands: None,
                 },
                 HostRule {
                     pattern: "prod".to_owned(),
                     mark: Some(HostMark::Production),
                     integration: Some(true),
+                    commands: None,
                 },
                 HostRule {
                     pattern: "db".to_owned(),
                     mark: Some(HostMark::Staging),
                     integration: None,
+                    commands: None,
                 },
             ]
         );
@@ -6342,6 +6577,7 @@ found 1.5; using 0.1"
             pattern: pattern.to_owned(),
             mark: Some(mark),
             integration,
+            commands: None,
         };
         let settings = Settings {
             remote_hosts: vec![
@@ -6427,6 +6663,7 @@ found 1.5; using 0.1"
                     pattern: "prod".to_owned(),
                     mark: Some(HostMark::Production),
                     integration: Some(false),
+                    commands: None,
                 }],
                 "{edited}"
             );
@@ -6979,6 +7216,7 @@ found 1.5; using 0.1"
             pattern: pattern.to_owned(),
             mark: Some(mark),
             integration: None,
+            commands: None,
         }
     }
 
@@ -7403,6 +7641,7 @@ cursor = \"spring\"
             SettingsEdit::ConfirmClose(confirm) => settings.confirm_close = confirm,
             SettingsEdit::RestoreWindows(restore) => settings.restore_windows = restore,
             SettingsEdit::KeepRunning(keep) => settings.keep_running = keep,
+            SettingsEdit::CommandLevel(level) => settings.commands_level = level,
             SettingsEdit::Scrollbar(scrollbar) => settings.scrollbar = scrollbar,
             SettingsEdit::Theme(name) => settings.theme = name,
             SettingsEdit::LightTheme(name) => settings.light_theme = name,
@@ -7448,6 +7687,7 @@ cursor = \"spring\"
                     pattern: subject.name(&host).to_owned(),
                     mark: Some(mark),
                     integration: None,
+                    commands: None,
                 },
             ),
             SettingsEdit::RemoteHostIntegration { host, on } => settings.remote_hosts.insert(
@@ -7456,6 +7696,7 @@ cursor = \"spring\"
                     pattern: bare_host(&host).to_owned(),
                     mark: None,
                     integration: Some(on),
+                    commands: None,
                 },
             ),
             SettingsEdit::RemoteIntegration(on) => settings.remote_integration = on,
@@ -7896,16 +8137,19 @@ cursor = \"spring\"
                     pattern: "cache".to_owned(),
                     mark: Some(HostMark::Production),
                     integration: None,
+                    commands: None,
                 },
                 HostRule {
                     pattern: "db".to_owned(),
                     mark: Some(HostMark::Staging),
                     integration: None,
+                    commands: None,
                 },
                 HostRule {
                     pattern: "prod-*".to_owned(),
                     mark: Some(HostMark::Production),
                     integration: None,
+                    commands: None,
                 },
             ],
             "{prepended}"

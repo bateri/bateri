@@ -1204,7 +1204,7 @@ fn a_terminal_without_a_program_runs_the_bootstrap_from_its_file() {
 
 #[test]
 #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
-fn close_goes_to_the_mac_and_without_one_ends_what_the_caller_opened() {
+fn close_goes_to_the_mac_and_without_one_ends_any_terminal_of_the_machine() {
     for (name, shell) in shells() {
         let server = Server::new(&format!("close-{name}"));
         server.mac_says(PLACED);
@@ -1214,7 +1214,7 @@ fn close_goes_to_the_mac_and_without_one_ends_what_the_caller_opened() {
         assert!(server.note("p2").is_some());
         server.forget_calls();
 
-        // No Mac, and its opener closes it: kablo ends it, nobody is asked, the records go.
+        // No Mac: kablo ends it, nobody is asked, the records go.
         let said = server.run(&shell, Some("p4"), &["close", "p1"]);
         assert_eq!(said.status, 0, "{}", said.err);
         assert_eq!(server.calls_of("end"), [["end", "p1"]]);
@@ -1235,16 +1235,16 @@ fn close_goes_to_the_mac_and_without_one_ends_what_the_caller_opened() {
             "a note of a closed terminal goes with it"
         );
 
-        // Somebody else's, with no Mac: refused.
+        // Somebody else's, with no Mac: it is this machine's own, at every level that has the
+        // command, so kablo ends it. Who opened it is not asked.
         server.forget_calls();
         assert_eq!(server.run(&shell, Some("p4"), &["split"]).out, "p3\n");
         let said = server.run(&shell, Some("p9"), &["close", "p3"]);
-        assert_eq!(said.status, 77);
-        assert_eq!(
-            said.err,
-            "bateri: p3 was not opened by this terminal, and no Mac is connected to ask\n"
-        );
-        assert!(server.calls_of("end").is_empty());
+        assert_eq!(said.status, 0, "{}", said.err);
+        assert_eq!(said.err, "");
+        assert_eq!(server.calls_of("end"), [["end", "p3"]]);
+        assert!(!server.state().join("terminals/p3").exists());
+        assert_eq!(server.run(&shell, Some("p4"), &["split"]).out, "p4\n");
 
         // With a Mac the question is its, whoever opened it: it closes the pane and the terminal,
         // and the script ends nothing itself unless it was told to kill.
@@ -1264,35 +1264,38 @@ fn close_goes_to_the_mac_and_without_one_ends_what_the_caller_opened() {
         let said = server.run(&shell, Some("p9"), &["close", "p3", "--force"]);
         assert_eq!(said.status, 0);
         assert_eq!(server.calls_of("end"), [["end", "p3", "--force"]]);
-        // The user said no; the Mac does not know it; the Mac could not tell.
+        // The Mac refuses by the level it has for this machine, and says which and how to change
+        // it; it does not know the pane; it could not tell.
         server.forget_calls();
-        server.mac_says("bateri 2\nerror refused the user said no\n");
-        let said = server.run(&shell, Some("p9"), &["close", "p3"]);
-        assert_eq!(
-            (said.status, said.err.as_str()),
-            (77, "bateri: the user said no\n")
+        server.mac_says(
+            "bateri 2\nerror refused this holds a pane of another machine, which \"own\" does not change on rasp (level \"own\"); set `commands` in the [remote] hosts entry for rasp to \"screen\" in settings.toml to allow it\n",
         );
+        let said = server.run(&shell, Some("p9"), &["close", "p3"]);
+        assert_eq!(said.status, 77);
+        assert!(said.err.contains("\"screen\""), "{}", said.err);
+        assert!(server.calls_of("end").is_empty());
         server.mac_says("bateri 2\nerror unknown p3 is no pane on this server\n");
         let said = server.run(&shell, Some("p9"), &["close", "p3"]);
         assert_eq!(
             (said.status, said.err.as_str()),
             (1, "bateri: p3 is no pane on this server\n")
         );
+        assert!(server.calls_of("end").is_empty());
+        // The Mac could not tell: the terminal is this machine's own all the same.
         server.mac_says("bateri 2\nerror failed the server did not answer\n");
         let said = server.run(&shell, Some("p9"), &["close", "p3"]);
-        assert_eq!(
-            (said.status, said.err.as_str()),
-            (1, "bateri: the server did not answer\n")
-        );
-        assert!(server.calls_of("end").is_empty());
-        // What is the caller's own is ended all the same when the Mac could not tell.
+        assert_eq!(said.status, 0, "{}", said.err);
+        assert_eq!(server.calls_of("end"), [["end", "p3"]]);
+        server.forget_calls();
         let said = server.run(&shell, Some("p9"), &["close"]);
         assert_eq!(said.status, 0, "{}", said.err);
         assert_eq!(server.calls_of("end"), [["end", "p9"]]);
 
-        // Outside every terminal nothing is the caller's own.
+        // Outside every terminal a named pane is closed too; named nothing there is none to close.
         server.no_mac();
-        assert_eq!(server.run(&shell, None, &["close", "p3"]).status, 77);
+        server.forget_calls();
+        assert_eq!(server.run(&shell, None, &["close", "p3"]).status, 0);
+        assert_eq!(server.calls_of("end"), [["end", "p3"]]);
         assert_eq!(server.run(&shell, None, &["close"]).status, 64);
     }
 }

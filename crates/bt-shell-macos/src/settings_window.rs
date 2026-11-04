@@ -28,9 +28,9 @@ use std::path::Path;
 
 use block2::RcBlock;
 use bt_core::{
-    CURSOR_BLINK_RANGE, CURSOR_GLOW_RANGE, CURSOR_RADIUS_RANGE, CaretShape, ConfirmClose,
-    ContentEdge, CursorBlink, CursorMotion, DockArrival, DownloadConflict, Erase, IconColors,
-    KeepRunning, Keypress, LETTER_SPACING_RANGE, LINE_HEIGHT_RANGE, Osc52, PreviewKeep,
+    CURSOR_BLINK_RANGE, CURSOR_GLOW_RANGE, CURSOR_RADIUS_RANGE, CaretShape, CommandLevel,
+    ConfirmClose, ContentEdge, CursorBlink, CursorMotion, DockArrival, DownloadConflict, Erase,
+    IconColors, KeepRunning, Keypress, LETTER_SPACING_RANGE, LINE_HEIGHT_RANGE, Osc52, PreviewKeep,
     ReduceMotion, RemoteStatsMode, RestoreWindows, SCROLLBACK_MAX, STATS_INTERVAL_RANGE,
     SYSTEM_THEME, Scrollbar, Settings, SettingsEdit, ShellIntegration, SmoothScroll, SplitStyle,
     TabDetails, TabPosition, UnfocusedCaret,
@@ -242,11 +242,12 @@ enum Key {
     TabPosition,
     PythonEnv,
     NodeVersion,
+    CommandLevel,
 }
 
 impl Key {
     /// The order is the `tag` itself: `ALL[tag]`.
-    const ALL: [Key; 50] = [
+    const ALL: [Key; 51] = [
         Key::ConfirmClose,
         Key::Clipboard,
         Key::Scrollback,
@@ -297,6 +298,7 @@ impl Key {
         Key::TabPosition,
         Key::PythonEnv,
         Key::NodeVersion,
+        Key::CommandLevel,
     ];
 
     fn tag(self) -> NSInteger {
@@ -362,6 +364,7 @@ impl Key {
             Key::Ports => "shell.ports",
             Key::PythonEnv => "shell.python_env",
             Key::NodeVersion => "shell.node_version",
+            Key::CommandLevel => "commands.level",
         }
     }
 }
@@ -492,6 +495,37 @@ fn keep_running_note(keep: KeepRunning) -> &'static str {
     }
 }
 
+impl Choice for CommandLevel {
+    fn names() -> &'static [(&'static str, Self)] {
+        Self::NAMES
+    }
+    fn title(self) -> &'static str {
+        match self {
+            CommandLevel::Off => "Off",
+            CommandLevel::Own => "Own panes",
+            CommandLevel::Screen => "Whole screen",
+            CommandLevel::Full => "Everything",
+        }
+    }
+}
+
+/// The note under "bateri command:" for the file's value: what a program in a terminal of this
+/// Mac may do with the command. A server has its own level in the `[remote]` hosts entry.
+fn command_level_note(level: CommandLevel) -> &'static str {
+    match level {
+        CommandLevel::Off => "The bateri command does nothing here.",
+        CommandLevel::Own => {
+            "A program here sees and changes only what is made of this Mac's own panes."
+        }
+        CommandLevel::Screen => {
+            "A program here sees and changes every tab, group and window bateri has open."
+        }
+        CommandLevel::Full => {
+            "Like Whole screen, and it starts terminals on servers and types into their panes."
+        }
+    }
+}
+
 impl Choice for Scrollbar {
     fn names() -> &'static [(&'static str, Self)] {
         Self::NAMES
@@ -604,6 +638,7 @@ pub(crate) struct Resolved {
 fn row_description(key: Key, settings: &Settings, resolved: Resolved) -> Option<&'static str> {
     match key {
         Key::KeepRunning => Some(keep_running_note(settings.keep_running)),
+        Key::CommandLevel => Some(command_level_note(settings.commands_level)),
         Key::Scrollbar => scrollbar_note(settings.scrollbar, resolved.scrollbar),
         _ => None,
     }
@@ -1176,6 +1211,7 @@ struct Controls {
     clipboard: Retained<NSSwitch>,
     scrollback: Number,
     shell_integration: Retained<NSPopUpButton>,
+    command_level: Retained<NSPopUpButton>,
     theme: Retained<NSPopUpButton>,
     light_theme: Retained<NSPopUpButton>,
     dark_theme: Retained<NSPopUpButton>,
@@ -1387,6 +1423,7 @@ define_class!(
                 Key::TabIconColors => choice_at(index).map(SettingsEdit::IconColors),
                 Key::TabPosition => choice_at(index).map(SettingsEdit::TabPosition),
                 Key::ShellIntegration => choice_at(index).map(SettingsEdit::ShellIntegration),
+                Key::CommandLevel => choice_at(index).map(SettingsEdit::CommandLevel),
                 Key::Shape => choice_at(index).map(SettingsEdit::Cursor),
                 Key::Blink => choice_at(index).map(SettingsEdit::CursorBlink),
                 Key::Unfocused => choice_at(index).map(SettingsEdit::CursorUnfocused),
@@ -1768,6 +1805,7 @@ impl SettingsWindow {
             &settings.scrollback.to_string(),
         );
         select_choice(&c.shell_integration, settings.shell_integration);
+        select_choice(&c.command_level, settings.commands_level);
 
         let (items, index) = theme_items(&settings.theme, true, embedded, user);
         fill_themes(&c.theme, &items, index);
@@ -2437,6 +2475,7 @@ impl SettingsWindow {
         let ports = self.switch(Key::Ports);
         let python_env = self.switch(Key::PythonEnv);
         let node_version = self.switch(Key::NodeVersion);
+        let command_level = self.popup::<CommandLevel>(Key::CommandLevel);
         let mut general = Form::new(mtm);
         general.row(
             Key::ConfirmClose,
@@ -2501,6 +2540,14 @@ impl SettingsWindow {
             &node_version,
             &[&node_version],
             Some("In a Node project, after the branch: node 22.11. In the warning color when the project asks for another version (.nvmrc)."),
+        );
+        // The description follows the value ([`row_description`]).
+        general.row(
+            Key::CommandLevel,
+            "bateri command:",
+            &command_level,
+            &[&command_level],
+            None,
         );
 
         // Appearance
@@ -2909,6 +2956,7 @@ impl SettingsWindow {
             clipboard,
             scrollback,
             shell_integration,
+            command_level,
             theme,
             light_theme,
             dark_theme,
@@ -3420,6 +3468,7 @@ mod tests {
                     [motion]\ncursor_motion = []\nreduce_motion = []\nsmooth_scroll = []\n\
                     keypress = []\nerase = []\ndock_arrival = []\n\
                     [shell]\nintegration = []\nports = []\npython_env = []\nnode_version = []\n\
+                    [commands]\nlevel = []\n\
                     [remote]\npreview_max_size = []\npreview_read_only = []\n\
                     preview_dir = []\npreview_keep = []\npreview_limit = []\n\
                     download_dir = []\ndownload_conflict = []\ndownload_notify = []\n\
@@ -3476,6 +3525,7 @@ mod tests {
                 Key::Ports => SettingsEdit::ShellPorts(false),
                 Key::PythonEnv => SettingsEdit::ShellPythonEnv(false),
                 Key::NodeVersion => SettingsEdit::ShellNodeVersion(false),
+                Key::CommandLevel => SettingsEdit::CommandLevel(CommandLevel::Off),
                 Key::DimSplits => SettingsEdit::DimUnfocusedSplits(true),
                 Key::FocusFrame => SettingsEdit::FocusFrame(true),
                 Key::ResizeInSteps => SettingsEdit::ResizeInSteps(true),
@@ -3551,6 +3601,7 @@ mod tests {
         check::<IconColors>();
         check::<TabPosition>();
         check::<ShellIntegration>();
+        check::<CommandLevel>();
         check::<CaretShape>();
         check::<CursorBlink>();
         check::<UnfocusedCaret>();
@@ -3596,7 +3647,9 @@ mod tests {
         );
         assert!(quit.contains("\u{2325}\u{2318}Q ends them"), "{quit}");
         assert!(quit.ends_with("Restarting the Mac ends them."), "{quit}");
-        for key in Key::ALL.into_iter().filter(|&key| key != Key::KeepRunning) {
+        // "bateri command:" has a note of its own, which follows `[commands] level`.
+        let followers = [Key::KeepRunning, Key::CommandLevel];
+        for key in Key::ALL.into_iter().filter(|key| !followers.contains(key)) {
             assert_eq!(
                 row_description(key, &with(KeepRunning::Quit), resolved),
                 None,
@@ -3643,7 +3696,7 @@ mod tests {
         }
         for key in Key::ALL
             .into_iter()
-            .filter(|&key| key != Key::Scrollbar && key != Key::KeepRunning)
+            .filter(|&key| ![Key::Scrollbar, Key::KeepRunning, Key::CommandLevel].contains(&key))
         {
             assert_eq!(
                 row_description(key, &system, resolved(ScrollbarMode::Always)),
