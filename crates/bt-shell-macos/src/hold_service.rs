@@ -672,6 +672,7 @@ pub(crate) fn serve(
         move || u32::try_from(settings_of().scrollback).ok()
     };
     let backend = SshBackend {
+        filed: Default::default(),
         ssh: "ssh".to_owned(),
         bases,
         state_path: crate::remote_hosts_path(&home),

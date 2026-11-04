@@ -426,8 +426,16 @@ pub fn probe_and_files_script(version: &str) -> String {
 /// of their own. **Best effort**: what could not be written is found missing by the bootstrap,
 /// which says so.
 pub fn put_files(channel: &dyn Channel, installed: &Installed, agent: bool) {
-    let files = crate::ssh_wrap::files_script_for(Some(&installed.path), agent);
-    let _ = channel.run("sh -s >/dev/null 2>&1; :", files.as_bytes());
+    put_files_at(channel, &installed.path, agent);
+}
+
+/// [`put_files`] with kablo's place as the package has it, for a caller that has not looked at
+/// kablo. Whether the files got there: a connection that failed has not put them.
+pub fn put_files_at(channel: &dyn Channel, kablo: &str, agent: bool) -> bool {
+    let files = crate::ssh_wrap::files_script_for(Some(kablo), agent);
+    channel
+        .run("sh -s >/dev/null 2>&1; :", files.as_bytes())
+        .is_ok_and(|reply| reply.status == Some(0))
 }
 
 /// [`put_files`] for this Mac ([`crate::ssh_wrap::files_script_here`]): the agent's command and

@@ -121,9 +121,40 @@ pub struct SshBackend {
     /// The application places what was left for it on a server ([`Backend::reachable`]): `Some`
     /// reads the server's notes when a connection to it comes up. `None`: it reads none.
     pub notes: Option<NotesNews>,
+    /// The servers a program's reach has put this build's files on in this run
+    /// ([`SshBackend::refresh_files`]).
+    pub filed: Mutex<std::collections::HashSet<String>>,
 }
 
 impl SshBackend {
+    /// What a program's `bateri` runs on a server is the file there, and only a terminal opened
+    /// on it writes that ([`Backend::install`]): a program that reaches a server before any
+    /// terminal of this run did would run what an earlier build left. Once a run, since `send` and
+    /// `capture` reach too; a write that failed is tried by the next. kablo is not looked at: a
+    /// server without this package's says so through the script and is set up by a terminal,
+    /// which also renews what runs there.
+    fn refresh_files(&self, server: &KabloHost, argv: &[String]) {
+        let Some(bundle) = &self.bundle else {
+            return;
+        };
+        if self
+            .filed
+            .lock()
+            .is_ok_and(|filed| filed.contains(&server.key))
+        {
+            return;
+        }
+        let channel = SshChannel {
+            argv: argv.to_vec(),
+            limit: install::STEP_LIMIT,
+        };
+        if install::put_files_at(&channel, &bundle.remote_path(), self.agent_wanted(server))
+            && let Ok(mut filed) = self.filed.lock()
+        {
+            filed.insert(server.key.clone());
+        }
+    }
+
     /// Whether the `bateri` command goes to this server: not when its level is `off`
     /// ([`Settings::commands_for`]), where nothing of it is to be found. This Mac's level is
     /// `[commands] level`.
@@ -519,6 +550,7 @@ impl Backend for SshBackend {
             None => self.route_of(&target),
         };
         let mut argv = ssh_argv_for(&target, &route);
+        self.refresh_files(&server, &argv);
         argv.remove(0);
         if argv.iter().any(|word| word.chars().any(char::is_control)) {
             return Err(format!("the connection to {name} cannot be written down"));

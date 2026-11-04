@@ -109,6 +109,7 @@ impl World {
             staged: Box::new(|_| ()),
             mail: None,
             notes: None,
+            filed: Default::default(),
         }
     }
 
@@ -878,6 +879,38 @@ fn this_macs_account_needs_the_package_and_a_home_to_keep_kablo_in() {
     // Neither a failure nor the lack of a package is remembered against the Mac, which is not a
     // server kablo cannot be kept on.
     assert!(!ssh_wrap::load(&world.state).knows(Fact::NoKablo, ""));
+}
+
+/// `bateri split -S rasp` right after an update, with no terminal opened on rasp yet: what runs
+/// there is this build's command, not the one an earlier build left.
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn reaching_a_server_leaves_this_builds_command_there_once_a_run() {
+    let world = stand_in("reach-files", 0);
+    let backend = world.backend(Some(world.package()));
+    let args = vec!["rasp".to_owned()];
+    let mut state = ssh_wrap::HostState::default();
+    state.note(Fact::Touched, "u@h:22", 1);
+    std::fs::write(&world.state, state.render()).expect("state");
+    let script = world.home.join(".local/share/bateri/shell/bin/bateri");
+    std::fs::create_dir_all(script.parent().expect("a directory")).expect("bin");
+    std::fs::write(&script, "an earlier build's").expect("the old command");
+
+    backend.reach(&args, Ask::Never).expect("reached");
+    assert!(
+        std::fs::read_to_string(&script)
+            .expect("the command")
+            .contains(".local/share/kablo/0.2.0/kablo"),
+        "this build's, with the package's kablo"
+    );
+
+    // `send` and `capture` reach too: they pay for no second write.
+    std::fs::write(&script, "left alone").expect("a marker");
+    backend.reach(&args, Ask::Never).expect("reached");
+    assert_eq!(
+        std::fs::read_to_string(&script).expect("the command"),
+        "left alone"
+    );
 }
 
 #[test]
