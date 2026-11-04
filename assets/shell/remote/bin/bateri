@@ -380,8 +380,13 @@ bt_is_server() {
   [ "${#1}" -le 253 ]
 }
 
-# Whether this runs on the Mac itself: there is no bootstrap file here (`boot.sh`, a server's).
+# Whether this runs on the Mac itself. A pane of this Mac says so (`TERM_PROGRAM`, which ssh does
+# not carry to a server), whatever a bootstrap left in its home when someone ran `ssh` to it. With
+# no pane to say (cron), a machine with no bootstrap file (`boot.sh`, a server's) is the Mac.
 bt_on_mac() {
+  if [ "${TERM_PROGRAM-}" = bateri ] && [ -z "${SSH_CONNECTION-}" ]; then
+    return 0
+  fi
   [ ! -r "$bt_shelldir/boot.sh" ]
 }
 
@@ -814,7 +819,7 @@ bt_open() {
   # stays a program: only a terminal that is started can do those.
   bt_shell=
   if [ -z "$bt_server" ] && [ $# -ge 1 ] && bt_work_shell "$@"; then
-    if [ -r "$bt_shelldir/boot.sh" ] || { [ -z "$bt_wait" ] && [ -z "$bt_orphan" ]; }; then
+    if ! bt_on_mac || { [ -z "$bt_wait" ] && [ -z "$bt_orphan" ]; }; then
       set --
     else
       bt_shell=
@@ -824,7 +829,7 @@ bt_open() {
     # The server starts it with its own `bateri`: its bootstrap's shell, or the program.
     :
   elif [ $# -eq 0 ]; then
-    if [ -r "$bt_shelldir/boot.sh" ]; then
+    if ! bt_on_mac; then
       bt_version=${LC_TERMINAL_VERSION-}
       case $bt_version in
         *[!0-9A-Za-z.+-]*) bt_version= ;;
@@ -836,7 +841,7 @@ bt_open() {
       [ "$(printf '%s' "$bt_cwd" | bt_clean | tr -d '\n')" = "$bt_cwd" ] || bt_die 64 'the directory has a control character in its name'
       bt_fresh=$bt_cwd
     fi
-  elif [ -n "$bt_keep" ] && [ ! -r "$bt_shelldir/boot.sh" ]; then
+  elif [ -n "$bt_keep" ] && bt_on_mac; then
     # No Mac pipe holds this terminal after its program: the terminal itself carries on with
     # the user's login shell.
     set -- sh -c '"$@"; exec "${SHELL:-/bin/sh}" -l' sh "$@"

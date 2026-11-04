@@ -102,6 +102,9 @@ pub fn local_command(home: &Path, line: &str) -> Command {
         .arg(line)
         .current_dir(home)
         .env("HOME", home)
+        // This is the Mac, as its panes say: the script does not read that from a file a bootstrap
+        // may have left here.
+        .env("TERM_PROGRAM", bt_core::TERM_PROGRAM)
         .process_group(0);
     command
 }

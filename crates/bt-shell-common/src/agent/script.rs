@@ -2558,6 +2558,34 @@ fn a_shell_bateri_has_an_integration_for_named_alone_is_a_shell_and_any_other_a_
         assert_eq!(run(None, &["split", "--", "zsh"]).status, 0);
         assert_eq!(mac.calls_of("new").len(), 1);
 
+        // A bootstrap left in this Mac's home (someone ran `ssh` to it once) does not make it a
+        // server: its pane says what it is, and ssh does not carry that word.
+        std::fs::write(mac.shell_dir().join("boot.sh"), "exit 9\n").expect("the file");
+        let pane = [("PATH", path.as_str()), ("TERM_PROGRAM", "bateri")];
+        for (args, program) in [
+            (&["split", "--", "zsh"][..], Some("zsh")),
+            (&["split"], None),
+        ] {
+            mac.forget_calls();
+            let said = mac.run_file_with(&shell, &mac.script(), Some("p4"), args, &pane);
+            assert_eq!(said.status, 0, "{args:?}: {}", said.err);
+            assert!(mac.calls_of("new").is_empty(), "{args:?}: the Mac makes it");
+            let told = mac.told();
+            assert!(told[0].contains("fresh "), "{args:?}: {}", told[0]);
+            assert_eq!(told[0].contains("shell "), program.is_some(), "{}", told[0]);
+        }
+        // Reached over ssh it is a server, whatever came along.
+        mac.forget_calls();
+        let over_ssh = [
+            ("PATH", path.as_str()),
+            ("TERM_PROGRAM", "bateri"),
+            ("SSH_CONNECTION", "10.0.0.1 22 10.0.0.2 22"),
+        ];
+        let said = mac.run_file_with(&shell, &mac.script(), Some("p4"), &["split"], &over_ssh);
+        assert_eq!(said.status, 0, "{}", said.err);
+        assert_eq!(mac.calls_of("new").len(), 1);
+        assert!(!mac.told()[0].contains("fresh "), "{}", mac.told()[0]);
+
         // A server: its bootstrap starts it, with that shell's integration, and waits as a
         // terminal does.
         let server = Server::new(&format!("shell-server-{name}"));
