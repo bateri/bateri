@@ -19,6 +19,7 @@ of every installed copy. A version without a section is not released.
 
 ### Fixed
 
+- A tab title about as wide as its room no longer shakes and flickers at its fade. Every title in the tab list also starts at the same place now, whether it fits or not.
 - A program's view on a server comes back by itself after the connection drops, as when the computer sleeps. It used to leave an empty pane with the program still running behind it, until you quit the program and started it again.
 - If the program ended while the connection was gone, its view closes and nothing is typed at the prompt that took its place.
 - After the computer sleeps and wakes, a server terminal is no longer reported as opened on this same computer, with its keys dead until you brought it back.

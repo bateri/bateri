@@ -6,8 +6,13 @@
 //! The title is a label as wide as its text, in a host view that is as wide as its place and
 //! clips: where the text does not fit, the host's layer carries a mask that runs out over the
 //! last [`tabs::TITLE_FADE`] points, and the label stands at the left end of it. A text that fits
-//! is a label the host's size, as before. The title never moves to show the rest: the owner puts
-//! the whole of it in the tooltip.
+//! stands where its place says, at the left or in the middle. The title never moves to show the
+//! rest: the owner puts the whole of it in the tooltip.
+//!
+//! **The label stays left-aligned, and centring is its frame's.** AppKit measures a centred label
+//! 4 pt wider than a left-aligned one and draws its text 2 pt further in. A label whose alignment
+//! followed the verdict changed the measure the next verdict reads: a text within those 4 pt of
+//! its room faded and stopped fading at every layout, and hopped 2 pt each time.
 //!
 //! The host never takes a press: the view under it decides what a press means.
 
@@ -57,7 +62,8 @@ type Painted = (f64, f64, f64);
 pub(super) struct Title {
     host: Retained<TitleHost>,
     text: Retained<NSTextField>,
-    /// How the text stands in its place while it fits: centred in a chip, at the left in a button.
+    /// How the text stands in its place while it fits: centred in the lone tab's wide place, at the
+    /// left in a button. A chip's and a row's place is as wide as the text, where the two agree.
     rest: NSTextAlignment,
     /// The host's mask while the text does not fit, and what its picture was painted for.
     mask: RefCell<Option<Retained<CALayer>>>,
@@ -73,7 +79,8 @@ impl Title {
         // The text is set as wide as it is: nothing truncates it, the host's edge and the mask
         // are what cut it.
         text.setLineBreakMode(NSLineBreakMode::ByClipping);
-        text.setAlignment(rest);
+        // One alignment for good: `rest` is the label's frame (the module header).
+        text.setAlignment(NSTextAlignment::Left);
         let host = TitleHost::new(mtm);
         host.setWantsLayer(true);
         host.setClipsToBounds(true);
@@ -111,16 +118,19 @@ impl Title {
         still(|| {
             self.host.setFrame(frame);
             let size = frame.size;
+            let width = natural.ceil();
+            let x = if !over && self.rest == NSTextAlignment::Center {
+                ((size.width - width) / 2.0).max(0.0).round()
+            } else {
+                0.0
+            };
+            self.text.setFrame(NSRect::new(
+                NSPoint::new(x, 0.0),
+                NSSize::new(width, size.height),
+            ));
             if over {
-                self.text.setAlignment(NSTextAlignment::Left);
-                self.text.setFrame(NSRect::new(
-                    NSPoint::ZERO,
-                    NSSize::new(natural.ceil().max(size.width), size.height),
-                ));
                 self.fade(size);
             } else {
-                self.text.setAlignment(self.rest);
-                self.text.setFrame(NSRect::new(NSPoint::ZERO, size));
                 self.unfade();
             }
         });
@@ -183,5 +193,17 @@ fn fade_picture(rect: NSRect, fade: f64) {
             NSSize::new(1.0, height),
         ))
         .fill();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// The label's alignment is written once: AppKit measures it by its alignment, so a title that
+    /// set it by whether the text fits would change the measure that answers the question.
+    #[test]
+    fn a_title_never_changes_its_labels_alignment() {
+        let source = include_str!("tab_title.rs");
+        let code = source.split("#[cfg(test)]").next().unwrap_or(source);
+        assert_eq!(code.matches(".setAlignment(").count(), 1);
     }
 }
