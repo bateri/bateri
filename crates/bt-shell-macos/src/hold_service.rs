@@ -28,7 +28,7 @@ use bt_shell_common::kablo::ledger::Ledger;
 use bt_shell_common::kablo::local;
 use bt_shell_common::kablo::roster::Background;
 use bt_shell_common::kablo::service::{
-    PaneInfo, PaneLink, Peer, QUIT_END_WAIT, Screen, Service, Shown, Survey,
+    Backend, PaneInfo, PaneLink, Peer, QUIT_END_WAIT, Screen, Service, Shown, Survey,
 };
 use bt_shell_common::kablo::ssh::SshBackend;
 
@@ -161,6 +161,13 @@ pub(crate) fn rewrite_files(account: &str) {
 /// that shows its own shell and, in a process without the service, for every pane.
 pub(crate) fn shown(pane: &PaneUuid) -> Option<Shown> {
     SERVICE.get()?.shown(pane)
+}
+
+/// What the service asks of the world around it, for what a program wants of a server
+/// (`bateri split -S`): the caller waits on a thread of its own, never the main one. `None` in a
+/// process without the service.
+pub(crate) fn backend() -> Option<Arc<dyn Backend>> {
+    Some(SERVICE.get()?.backend())
 }
 
 /// The terminal of this Mac that carries the pane `pane`'s bytes — the pane's own shell, or the

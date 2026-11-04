@@ -27,7 +27,14 @@
 //!
 //! The verbs that move the keyboard or change the layout (`focus`, `zoom`, `swap`, `move`,
 //! `resize`) name panes the same way and a tab, a group or a window by its id (`t3`, `g1`, `w1`);
-//! a `focus` that names no id means the one the caller stands in.
+//! a `focus` that names no id means the one the caller stands in. A pane of another machine is
+//! named with the machine after an `@` (`p9@prod`, this Mac `p9@local`: [`Anchor::address`]),
+//! in `close`, `focus`, `zoom`, `swap`, `move` and `resize`.
+//!
+//! A pane for a terminal that runs on another machine than the caller's is a `place` with the
+//! `server` line (`server prod`: the name `ssh` takes), and the `ssh` verb asks how to reach that
+//! server (`ssh`, then `server prod`); its reply is the text of one `arg` line for each word of the
+//! `ssh` command, which the script on this Mac runs itself.
 //!
 //! **A reply** starts with `bateri 2` too and then says `ok` (`ok placed` and the lines that
 //! tell how and where, `ok text` and the rest of the message as the text to print) or `error KIND TEXT`
@@ -160,6 +167,9 @@ pub struct Place {
     /// machine that has no bootstrap — this Mac). A directory and a name are all the message has
     /// to say of it; no program is carried (073, Karar 1).
     pub fresh: Option<String>,
+    /// The terminal runs on this server, not on the machine that asks: the name `ssh` takes for it
+    /// (`prod`). The Mac makes the pane that shows it, which connects by its own path (`-S`).
+    pub server: Option<String>,
 }
 
 impl Place {
@@ -184,6 +194,8 @@ pub enum Request {
     Notify(String),
     /// Move the keyboard or the layout.
     Arrange(Arrange),
+    /// How to reach the server a terminal is to be started on: the `ssh` arguments (`-S`).
+    Ssh(String),
 }
 
 /// What `focus` is about: a pane (as kablo names its terminal), or a tab, a group or a window by
@@ -200,7 +212,7 @@ impl Subject {
     /// The id line it writes, if it names one.
     fn id(&self) -> Option<String> {
         match self {
-            Subject::Pane(pane) => pane.as_ref().map(|pane| pane.name().to_owned()),
+            Subject::Pane(pane) => pane.as_ref().map(ToString::to_string),
             Subject::Tab(id) | Subject::Group(id) | Subject::Window(id) => {
                 id.map(|id| id.to_string())
             }
@@ -400,6 +412,9 @@ impl Request {
                 out.push_str("place\n");
                 push(&mut out, "terminal", &place.terminal.to_string())?;
                 if let Some(anchor) = &place.anchor {
+                    if anchor.machine().is_some() {
+                        return Err(Failure::usage("`anchor` is a terminal of the sender"));
+                    }
                     push(&mut out, "anchor", anchor.name())?;
                 }
                 if let Some(side) = place.side {
@@ -424,6 +439,15 @@ impl Request {
                         ));
                     }
                     push(&mut out, "fresh", directory)?;
+                }
+                if let Some(server) = &place.server {
+                    if place.fresh.is_some() {
+                        return Err(Failure::usage(
+                            "`server` and `fresh` do not go together: a terminal on a server is started",
+                        ));
+                    }
+                    check_server("server", server)?;
+                    push(&mut out, "server", server)?;
                 }
                 place.home.check(place.side)?;
                 if let Some(tab) = place.home.tab {
@@ -452,7 +476,12 @@ impl Request {
             }
             Request::Close(terminal) => {
                 out.push_str("close\n");
-                push(&mut out, "terminal", terminal.name())?;
+                push(&mut out, "terminal", &terminal.to_string())?;
+            }
+            Request::Ssh(server) => {
+                out.push_str("ssh\n");
+                check_server("server", server)?;
+                push(&mut out, "server", server)?;
             }
             Request::Notify(text) => {
                 out.push_str("notify\n");
@@ -512,18 +541,18 @@ fn encode_arrange(out: &mut String, arrange: &Arrange) -> Result<(), Failure> {
         Arrange::Zoom(pane) => {
             out.push_str("zoom\n");
             if let Some(pane) = pane {
-                push(out, "terminal", pane.name())?;
+                push(out, "terminal", &pane.to_string())?;
             }
         }
         Arrange::Swap { pane, other } => {
             out.push_str("swap\n");
-            push(out, "terminal", pane.name())?;
-            push(out, "other", other.name())?;
+            push(out, "terminal", &pane.to_string())?;
+            push(out, "other", &other.to_string())?;
         }
         Arrange::Move { pane, beside, side } => {
             out.push_str("move\n");
-            push(out, "terminal", pane.name())?;
-            push(out, "beside", beside.name())?;
+            push(out, "terminal", &pane.to_string())?;
+            push(out, "beside", &beside.to_string())?;
             push(out, "side", pane_side(*side)?.word())?;
         }
         Arrange::Resize { pane, side, steps } => {
@@ -534,7 +563,7 @@ fn encode_arrange(out: &mut String, arrange: &Arrange) -> Result<(), Failure> {
             }
             out.push_str("resize\n");
             if let Some(pane) = pane {
-                push(out, "terminal", pane.name())?;
+                push(out, "terminal", &pane.to_string())?;
             }
             push(out, "side", pane_side(*side)?.word())?;
             push(out, "steps", &steps.to_string())?;
@@ -655,12 +684,47 @@ fn terminal_of(key: &str, value: &str) -> Result<Terminal, Failure> {
     })
 }
 
+/// A terminal of the sender's machine, as kablo names it.
 fn anchor_of(key: &str, value: &str) -> Result<Anchor, Failure> {
     Anchor::parse(value).ok_or_else(|| {
         Failure::usage(format!(
             "`{key}` names a terminal as kablo does (letters, digits, `.`, `_`, `-`; at most 64), not `{value}`"
         ))
     })
+}
+
+/// A terminal of the sender's machine or of another, `p9` or `p9@prod`.
+fn address_of(key: &str, value: &str) -> Result<Anchor, Failure> {
+    Anchor::address(value).ok_or_else(|| {
+        Failure::usage(format!(
+            "`{key}` names a terminal as kablo does, and a machine after an `@` for one of another (`p9@prod`), not `{value}`"
+        ))
+    })
+}
+
+/// The most a server's name may be: a host name's own limit.
+const SERVER_MAX: usize = 253;
+
+/// A server as `ssh` is given it: a host or an alias, `user@host` too — letters, digits and
+/// `. _ - : @`, starting with a letter or a digit, so that it can never be read as an option.
+fn check_server(key: &str, name: &str) -> Result<(), Failure> {
+    let starts_well = name
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphanumeric());
+    if name.len() > SERVER_MAX
+        || name.ends_with('@')
+        || name.matches('@').count() > 1
+        || !starts_well
+        || !name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b':' | b'@'))
+    {
+        return Err(Failure::usage(format!(
+            "`{key}` is a host as `ssh` takes it (letters, digits, `. _ - : @`; it starts with a letter or a digit), not `{name}`"
+        )));
+    }
+    Ok(())
 }
 
 /// The error for a message of a version that is not this build's.
@@ -688,6 +752,7 @@ fn read_request<'a>(
                     "keep-open",
                     "focus",
                     "fresh",
+                    "server",
                     "tab",
                     "group",
                     "new-group",
@@ -730,6 +795,11 @@ fn read_request<'a>(
                 label: fields.get("label").map(str::to_owned),
             };
             home.check(side)?;
+            if fields.get("fresh").is_some() && fields.get("server").is_some() {
+                return Err(Failure::usage(
+                    "`server` and `fresh` do not go together: a terminal on a server is started",
+                ));
+            }
             Ok(Request::Place(Place {
                 terminal: fields.terminal("terminal")?,
                 anchor: fields
@@ -753,7 +823,17 @@ fn read_request<'a>(
                         }
                     })
                     .transpose()?,
+                server: fields
+                    .get("server")
+                    .map(|name| check_server("server", name).map(|()| name.to_owned()))
+                    .transpose()?,
             }))
+        }
+        "ssh" => {
+            let fields = Fields::read(verb, lines, &["server"])?;
+            let name = fields.need("server")?;
+            check_server("server", name)?;
+            Ok(Request::Ssh(name.to_owned()))
         }
         "ls" => {
             let fields = Fields::read(verb, lines, &["format"])?;
@@ -769,7 +849,7 @@ fn read_request<'a>(
             let fields = Fields::read(verb, lines, &["terminal", "subject", "id"])?;
             match (fields.get("terminal"), fields.get("subject")) {
                 (Some(terminal), None) if fields.get("id").is_none() => {
-                    Ok(Request::Close(anchor_of("terminal", terminal)?))
+                    Ok(Request::Close(address_of("terminal", terminal)?))
                 }
                 (None, Some(_)) => match subject_of(&fields)? {
                     Subject::Pane(_) => Err(Failure::usage(
@@ -791,7 +871,7 @@ fn read_request<'a>(
             read_arrange(verb, lines).map(Request::Arrange)
         }
         other => Err(Failure::usage(format!(
-            "`{other}` is no verb: place, ls, close, notify, focus, zoom, swap, move, resize or rename"
+            "`{other}` is no verb: place, ls, close, notify, ssh, focus, zoom, swap, move, resize or rename"
         ))),
     }
 }
@@ -820,7 +900,7 @@ fn subject_of(fields: &Fields<'_>) -> Result<Subject, Failure> {
             .transpose()
     };
     Ok(match fields.need("subject")? {
-        "pane" => Subject::Pane(given.map(|value| anchor_of("id", value)).transpose()?),
+        "pane" => Subject::Pane(given.map(|value| address_of("id", value)).transpose()?),
         "tab" => Subject::Tab(id(IdKind::Tab)?),
         "group" => Subject::Group(id(IdKind::Group)?),
         "window" => Subject::Window(id(IdKind::Window)?),
@@ -849,7 +929,7 @@ fn read_arrange<'a>(
     let pane = |fields: &Fields<'_>, key: &str| -> Result<Option<Anchor>, Failure> {
         fields
             .get(key)
-            .map(|value| anchor_of(key, value))
+            .map(|value| address_of(key, value))
             .transpose()
     };
     match verb {
@@ -887,8 +967,8 @@ fn read_arrange<'a>(
         "swap" => {
             let fields = Fields::read(verb, lines, &["terminal", "other"])?;
             Ok(Arrange::Swap {
-                pane: anchor_of("terminal", fields.need("terminal")?)?,
-                other: anchor_of("other", fields.need("other")?)?,
+                pane: address_of("terminal", fields.need("terminal")?)?,
+                other: address_of("other", fields.need("other")?)?,
             })
         }
         "move" => {
@@ -918,8 +998,8 @@ fn read_arrange<'a>(
                 return Ok(Arrange::MoveTab { tab, to });
             }
             Ok(Arrange::Move {
-                pane: anchor_of("terminal", fields.need("terminal")?)?,
-                beside: anchor_of("beside", fields.need("beside")?)?,
+                pane: address_of("terminal", fields.need("terminal")?)?,
+                beside: address_of("beside", fields.need("beside")?)?,
                 side: side(&fields)?,
             })
         }
@@ -1109,6 +1189,7 @@ mod tests {
             keep_open: true,
             focus: true,
             fresh: None,
+            server: None,
             home: Home::default(),
         }
     }
@@ -1118,6 +1199,7 @@ mod tests {
         const FRESH: &str = "bateri 2\nplace\nterminal p9\nanchor p4\nfresh /Users/ada/api\n";
         let wanted = Place {
             fresh: Some("/Users/ada/api".to_owned()),
+            server: None,
             ..bare_with_anchor()
         };
         assert_eq!(Request::parse(FRESH), Ok(Request::Place(wanted.clone())));
@@ -1129,6 +1211,7 @@ mod tests {
         assert!(failure.text.contains("absolute"), "{}", failure.text);
         let wanted = Place {
             fresh: Some("api".to_owned()),
+            server: None,
             ..bare_with_anchor()
         };
         assert!(Request::Place(wanted).encode().is_err());
@@ -1155,6 +1238,7 @@ mod tests {
             keep_open: false,
             focus: false,
             fresh: None,
+            server: None,
             home: Home::default(),
         }
     }
@@ -1263,6 +1347,7 @@ mod tests {
                 keep_open: false,
                 focus: false,
                 fresh: None,
+                server: None,
                 home,
             })
         };
@@ -1430,6 +1515,7 @@ mod tests {
             keep_open: false,
             focus: false,
             fresh: None,
+            server: None,
             home: Home {
                 new_group: Some("api".to_owned()),
                 ..Home::default()
@@ -1979,5 +2065,115 @@ mod tests {
     fn the_share_of_a_ratio_is_its_percent() {
         assert_eq!(place().share(), Some(0.3));
         assert_eq!(bare().share(), None);
+    }
+    const V2_SSH: &str = "bateri 2\nssh\nserver prod\n";
+    const V2_PLACE_ON: &str = "bateri 2\nplace\nterminal p9\nanchor p4\nserver deploy@prod\n";
+
+    /// The words that reach a server and the pane for a terminal that runs on one are written and
+    /// read byte for byte, and what `ssh` could take for an option, or for two hosts, is no name.
+    #[test]
+    fn a_server_is_asked_for_by_the_name_ssh_takes_and_a_pane_for_its_terminal_names_it() {
+        assert_eq!(Request::parse(V2_SSH), Ok(Request::Ssh("prod".to_owned())));
+        assert_eq!(
+            Request::Ssh("prod".to_owned()).encode().as_deref(),
+            Ok(V2_SSH)
+        );
+        let Ok(Request::Place(on)) = Request::parse(V2_PLACE_ON) else {
+            panic!("a place");
+        };
+        assert_eq!(on.server.as_deref(), Some("deploy@prod"));
+        assert_eq!(Request::Place(on).encode().as_deref(), Ok(V2_PLACE_ON));
+
+        for bad in [
+            "",
+            "-oProxyCommand=x",
+            "-prod",
+            "pr od",
+            "prod\u{7}",
+            "a;b",
+            "$(x)",
+            "prod@",
+            "a@b@c",
+            "@prod",
+            "ünï",
+            &"a".repeat(254),
+        ] {
+            let ask = format!("bateri 2\nssh\nserver {bad}\n");
+            assert_eq!(
+                Request::parse(&ask).map_err(|failure| failure.kind),
+                Err(Kind::Usage),
+                "{bad:?}"
+            );
+            assert!(Request::Ssh(bad.to_owned()).encode().is_err(), "{bad:?}");
+        }
+        assert_eq!(
+            Request::parse("bateri 2\nssh\n").map_err(|failure| failure.kind),
+            Err(Kind::Usage)
+        );
+        assert_eq!(
+            Request::parse("bateri 2\nssh\nserver prod\nextra x\n").map_err(|f| f.kind),
+            Err(Kind::Usage)
+        );
+        // A terminal that is not started and one that runs on a server do not go together.
+        assert_eq!(
+            Request::parse("bateri 2\nplace\nterminal p9\nanchor p4\nfresh /tmp\nserver prod\n")
+                .map_err(|failure| failure.kind),
+            Err(Kind::Usage)
+        );
+        let both = Place {
+            fresh: Some("/tmp".to_owned()),
+            server: Some("prod".to_owned()),
+            ..place()
+        };
+        assert!(Request::Place(both).encode().is_err());
+    }
+
+    /// A pane of another machine is written after an `@` and read back the same, in every verb
+    /// that names a pane to work on; the `anchor` of a `place` is the sender's own and takes none.
+    #[test]
+    fn a_pane_of_another_machine_is_an_address_in_the_verbs_that_work_on_panes() {
+        let address = |text: &str| Anchor::address(text).expect("an address");
+        assert_eq!(address("p9@prod").name(), "p9");
+        assert_eq!(address("p9@prod").machine(), Some("prod"));
+        assert_eq!(address("p9@prod").to_string(), "p9@prod");
+        assert_eq!(address("p9").machine(), None);
+        assert_eq!(address("p9@local").machine(), Some("local"));
+        assert_eq!(address("b-0a1b@10.0.0.5").machine(), Some("10.0.0.5"));
+        assert_eq!(address("p9@fe80::1").machine(), Some("fe80::1"));
+        for bad in [
+            "p9@", "@prod", "p9@-x", "p9@a b", "p9@a@b", "p9@pr/od", "p 9@prod", "p9@é",
+        ] {
+            assert_eq!(Anchor::address(bad), None, "{bad:?}");
+        }
+        // A name is not an address and an address is not a name: kablo's alphabet has no `@`.
+        assert_eq!(Anchor::parse("p9@prod"), None);
+
+        let verbs = [
+            "bateri 2\nclose\nterminal p9@prod\n",
+            "bateri 2\nfocus\nsubject pane\nid p9@prod\n",
+            "bateri 2\nzoom\nterminal p9@prod\n",
+            "bateri 2\nswap\nterminal p9@prod\nother p3\n",
+            "bateri 2\nmove\nterminal p9@prod\nbeside p3@local\nside right\n",
+            "bateri 2\nresize\nterminal p9@prod\nside left\nsteps 2\n",
+        ];
+        for text in verbs {
+            let request = Request::parse(text).expect(text);
+            assert_eq!(request.encode().as_deref(), Ok(text), "{text}");
+        }
+        assert_eq!(
+            Request::parse(verbs[0]),
+            Ok(Request::Close(address("p9@prod")))
+        );
+        // Not in a place, where the pane goes beside a terminal of the sender's.
+        assert_eq!(
+            Request::parse("bateri 2\nplace\nterminal p9\nanchor p4@prod\n")
+                .map_err(|failure| failure.kind),
+            Err(Kind::Usage)
+        );
+        let there = Place {
+            anchor: Some(address("p4@prod")),
+            ..place()
+        };
+        assert!(Request::Place(there).encode().is_err());
     }
 }

@@ -19,6 +19,12 @@
 //! - The terminal already has a pane: the request is done ([`Landed::AsAsked`]), not an error
 //!   — an error would end a terminal the user is looking at.
 //!
+//! **Another machine's terminal** (`-S`): the program on this Mac starts it itself, over the
+//! `ssh` the Mac answered an `ssh` request with, and asks for its pane with a `place` that names the
+//! `server`. Both are for a `full` machine alone ([`may_reach`], [`level::Act::Reach`]); the shell finds
+//! the server, on a thread of its own, and [`place_on`] puts the pane beside a terminal of the
+//! machine that asked while the pane itself is the pipe to the *target's* terminal.
+//!
 //! The other three requests need the Mac's windows, a question to the user or the server's own
 //! list, none of which a decision with no window in it has: they are an [`Answer`] of their own
 //! (`List`, `Close`, `Notify`) that the shell carries out — building `ls` from the live windows
@@ -30,7 +36,7 @@
 use bt_core::CommandLevel;
 use kablo_proto::v1::{State, Status};
 
-use super::level::{self, Why};
+use super::level::{self, Act, Panes, Verdict, Why};
 use super::message::{Arrange, Failure, Format, Kind, Place, Placed, Reply, Request};
 use super::notes::Note;
 use super::place::Landed;
@@ -80,6 +86,21 @@ pub trait Shell {
         place: &Place,
         opener: Option<&str>,
     ) -> Placing;
+
+    /// [`Shell::place`] for a terminal that runs on `target`, a server other than the one that
+    /// asked (`server`): the pane goes beside `anchor`, a terminal of the one that asked, whose
+    /// level judges where it goes; the pane itself is the pipe to `target`'s terminal. A shell
+    /// that cannot say so makes none.
+    fn place_on(
+        &mut self,
+        _server: &Server,
+        _target: &Server,
+        _anchor: &Anchor,
+        _place: &Place,
+        _opener: Option<&str>,
+    ) -> Placing {
+        Placing::Unable
+    }
 }
 
 /// What the shell did.
@@ -113,6 +134,13 @@ pub enum Answer {
     /// `focus`, `zoom`, `swap`, `move`, `resize`: the shell decides by what the keyboard is
     /// doing ([`super::arrange`]) and by the level over the layers it touches, then does it.
     Arrange(Arrange),
+    /// `ssh`: the shell finds how this Mac reaches the server the name stands for — on a thread
+    /// of its own, for it waits for a person's password at times — and answers with the words of
+    /// the `ssh` command. The level has been judged: this Mac's `full`.
+    Ssh(String),
+    /// A `place` whose terminal runs on another server (`server`): the shell finds that server,
+    /// then asks [`place_on`] to put the pane. The level has been judged as for [`Answer::Ssh`].
+    PlaceOn(Place),
 }
 
 fn waiting_reply(anchor: &Anchor) -> Reply {
@@ -157,11 +185,87 @@ pub fn serve(server: &Server, from: Option<&str>, text: &str, shell: &mut dyn Sh
     }
     match Request::parse(text) {
         Err(failure) => Answer::Reply(Reply::Failed(failure)),
+        Ok(Request::Place(place)) if place.server.is_some() => match may_reach(server) {
+            Ok(()) => Answer::PlaceOn(place),
+            Err(failure) => Answer::Reply(Reply::Failed(failure)),
+        },
         Ok(Request::Place(place)) => place_for(server, from, place, shell),
         Ok(Request::Ls(format)) => Answer::List(format),
         Ok(Request::Close(terminal)) => Answer::Close(terminal),
         Ok(Request::Notify(text)) => Answer::Notify(text),
         Ok(Request::Arrange(arrange)) => Answer::Arrange(arrange),
+        Ok(Request::Ssh(name)) => match may_reach(server) {
+            Ok(()) => Answer::Ssh(name),
+            Err(failure) => Answer::Reply(Reply::Failed(failure)),
+        },
+    }
+}
+
+/// Whether the machine that asked may start a terminal on another and work with it: only a
+/// `full` one ([`Act::Reach`]), and — until the window carries a server's request across — only
+/// this Mac.
+fn may_reach(server: &Server) -> Result<(), Failure> {
+    match level::judge(server.level, Act::Reach, Panes::default()) {
+        Verdict::Allowed => {}
+        Verdict::Refused(why) => {
+            return Err(Failure::new(
+                Kind::Refused,
+                level::refusal(server.level, why, server.host_name()),
+            ));
+        }
+        Verdict::Unknown => return Err(Failure::new(Kind::Failed, "there is no such machine")),
+    }
+    if crate::kablo::local::is_account(&server.account) {
+        Ok(())
+    } else {
+        Err(Failure::new(
+            Kind::Failed,
+            "a terminal on another machine is started from this Mac; a server's commands do not reach it",
+        ))
+    }
+}
+
+/// The pane for a terminal that runs on `target`, asked by a program on `server` (this Mac):
+/// beside a terminal of `server`, as [`Place`] says, and a pane that shows it already is done.
+/// Nothing is kept for later — the terminal is the target's and runs on — and a pane that cannot be
+/// made says why.
+pub fn place_on(
+    server: &Server,
+    target: &Server,
+    from: Option<&str>,
+    place: &Place,
+    shell: &mut dyn Shell,
+) -> Reply {
+    let Some(anchor) = place
+        .anchor
+        .clone()
+        .or_else(|| from.and_then(Anchor::parse))
+    else {
+        return Reply::Failed(Failure::new(
+            Kind::Usage,
+            "no terminal for the pane to go beside: it was not asked from a terminal and names none",
+        ));
+    };
+    if shell.shows(target, place.terminal) {
+        return Reply::Placed(Placed {
+            landed: Landed::AsAsked,
+            next_to: Some(anchor),
+            squeezed: false,
+            hidden: false,
+            tab: None,
+            group: None,
+            window: None,
+            keyboard_stayed: false,
+        });
+    }
+    match shell.place_on(server, target, &anchor, place, from) {
+        Placing::Done(placed) => Reply::Placed(placed),
+        Placing::NoAnchor | Placing::Unable => Reply::Failed(Failure::new(
+            Kind::Failed,
+            "the pane to go beside is not on screen, or no pane can be made for the server now; \
+             the terminal runs on the server and is in its list",
+        )),
+        Placing::Refused(failure) => Reply::Failed(failure),
     }
 }
 
@@ -444,6 +548,152 @@ mod tests {
         };
         assert!(failure.text.contains("bootstrap"), "{}", failure.text);
         assert!(mac.placed.is_empty() && mac.openers.is_empty());
+    }
+
+    /// Reaching another machine — starting a terminal there — is a `full` machine's: the others
+    /// are refused (77) with the setting that changes it, `off` first of all; and until the
+    /// window carries a server's request across, only this Mac's `full` is allowed it. Nothing is
+    /// asked of the windows before this is decided.
+    #[test]
+    fn reaching_another_machine_is_for_this_macs_full_level_alone() {
+        let asks = [
+            "bateri 2\nssh\nserver prod\n".to_owned(),
+            place_text("anchor p4\nserver prod\n"),
+        ];
+        for text in &asks {
+            for level in [CommandLevel::Own, CommandLevel::Screen] {
+                for mut server in [this_mac(), self::server()] {
+                    server.level = level;
+                    let mut mac = Pretend {
+                        anchors: vec!["p4".into()],
+                        ..Pretend::default()
+                    };
+                    let Answer::Reply(Reply::Failed(failure)) =
+                        serve(&server, Some("p4"), text, &mut mac)
+                    else {
+                        panic!("{level:?}: refused");
+                    };
+                    assert_eq!(failure.kind, Kind::Refused, "{level:?}");
+                    assert!(failure.text.contains("only \"full\""), "{}", failure.text);
+                    assert!(mac.placed.is_empty() && mac.openers.is_empty());
+                }
+            }
+            // `off` is refused before the request is read.
+            let mut off = this_mac();
+            off.level = CommandLevel::Off;
+            let Answer::Reply(Reply::Failed(failure)) =
+                serve(&off, Some("p4"), text, &mut Pretend::default())
+            else {
+                panic!("off");
+            };
+            assert_eq!(failure.kind, Kind::Refused);
+            // This Mac's `full` goes on to the window, which finds the server on a thread.
+            let mut full = this_mac();
+            full.level = CommandLevel::Full;
+            let mut mac = Pretend {
+                anchors: vec!["p4".into()],
+                ..Pretend::default()
+            };
+            match serve(&full, Some("p4"), text, &mut mac) {
+                Answer::Ssh(name) => assert_eq!(name, "prod"),
+                Answer::PlaceOn(place) => assert_eq!(place.server.as_deref(), Some("prod")),
+                other => panic!("{other:?}"),
+            }
+            assert!(mac.placed.is_empty() && mac.openers.is_empty());
+            // A server's `full` is not carried across yet: it is told so, not refused for its level.
+            let mut server = self::server();
+            server.level = CommandLevel::Full;
+            let Answer::Reply(Reply::Failed(failure)) =
+                serve(&server, Some("p4"), text, &mut Pretend::default())
+            else {
+                panic!("a server");
+            };
+            assert_eq!(failure.kind, Kind::Failed);
+            assert!(failure.text.contains("this Mac"), "{}", failure.text);
+        }
+    }
+
+    /// The pane for a terminal that runs on another server goes beside a terminal of the machine
+    /// that asked and is the pipe to the target's: a pane that shows it already is done, one that
+    /// cannot go beside its anchor says so and keeps nothing.
+    #[test]
+    fn a_pane_for_a_terminal_on_another_server_is_placed_beside_the_askers_anchor() {
+        let mut asker = this_mac();
+        asker.level = CommandLevel::Full;
+        let mut target = server();
+        target.level = CommandLevel::Own;
+        let place = Place {
+            terminal: Terminal(9),
+            anchor: Anchor::parse("p4"),
+            side: None,
+            ratio: None,
+            keep_open: false,
+            focus: false,
+            home: crate::agent::message::Home::default(),
+            fresh: None,
+            server: Some("rasp".into()),
+        };
+
+        struct OnTarget(Pretend, Vec<String>);
+        impl Shell for OnTarget {
+            fn shows(&self, server: &Server, terminal: Terminal) -> bool {
+                self.0.shows(server, terminal)
+            }
+            fn place(
+                &mut self,
+                server: &Server,
+                anchor: &Anchor,
+                place: &Place,
+                opener: Option<&str>,
+            ) -> Placing {
+                self.0.place(server, anchor, place, opener)
+            }
+            fn place_on(
+                &mut self,
+                server: &Server,
+                target: &Server,
+                anchor: &Anchor,
+                place: &Place,
+                opener: Option<&str>,
+            ) -> Placing {
+                self.1
+                    .push(format!("{} -> {}", server.account, target.account));
+                self.0.place(server, anchor, place, opener)
+            }
+        }
+
+        let mut mac = OnTarget(
+            Pretend {
+                anchors: vec!["p4".into()],
+                ..Pretend::default()
+            },
+            Vec::new(),
+        );
+        let Reply::Placed(placed) = place_on(&asker, &target, Some("p4"), &place, &mut mac) else {
+            panic!("placed");
+        };
+        assert_eq!(placed.landed, Landed::AsAsked);
+        assert_eq!(mac.1, ["local -> ada@rasp:22"]);
+        // Asked again, the pane is there: done, nothing is made twice.
+        let Reply::Placed(again) = place_on(&asker, &target, Some("p4"), &place, &mut mac) else {
+            panic!("placed");
+        };
+        assert_eq!(again.landed, Landed::AsAsked);
+        assert_eq!(mac.1.len(), 1);
+
+        // No anchor: named by nobody. An anchor on no pane: said, and nothing is kept for later.
+        let mut lonely = place.clone();
+        lonely.anchor = None;
+        let mut mac = OnTarget(Pretend::default(), Vec::new());
+        let Reply::Failed(failure) = place_on(&asker, &target, None, &lonely, &mut mac) else {
+            panic!("no anchor");
+        };
+        assert_eq!(failure.kind, Kind::Usage);
+        let Reply::Failed(failure) = place_on(&asker, &target, Some("p4"), &place, &mut mac) else {
+            panic!("not on screen");
+        };
+        assert_eq!(failure.kind, Kind::Failed);
+        assert!(failure.text.contains("not on screen"), "{}", failure.text);
     }
 
     /// A refusal names the host the user typed for a server, and for this Mac the setting that
@@ -844,6 +1094,7 @@ mod tests {
                 keep_open,
                 focus: false,
                 fresh: None,
+                server: None,
                 home: crate::agent::message::Home::default(),
             },
         }

@@ -54,6 +54,7 @@
 //! is read and written there only.
 
 mod arrange;
+mod reach;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -71,7 +72,7 @@ use bt_shell_common::agent::place::{Ask, Landed, Landing, Spot};
 use bt_shell_common::agent::serve::{self, Answer, Placing, Server, Shell};
 use bt_shell_common::agent::summary;
 use bt_shell_common::agent::wait::{Queue, Waiting};
-use bt_shell_common::agent::{Anchor, Terminal};
+use bt_shell_common::agent::{Anchor, LOCAL_MACHINE, Terminal};
 use bt_shell_common::kablo::SessionId;
 use bt_shell_common::kablo::local;
 use bt_shell_common::kablo::service::{Letter, Shown, Survey};
@@ -247,11 +248,16 @@ fn take(app: &AppDelegate, mut letter: Letter) {
             letter.answer(reply.encode().into_bytes());
         }
         Answer::List(format) => list(letter, server, from, format),
-        Answer::Close(target) => close(letter, server, target),
+        Answer::Close(target) => match close_target(app, &server, target) {
+            Ok((server, target)) => close(letter, server, target),
+            Err(failure) => letter.answer(Reply::Failed(failure).encode().into_bytes()),
+        },
         Answer::Notify(text) => notify(app, letter, &server, from.as_deref(), &text),
         Answer::Arrange(request) => {
             arrange::arranged(app, letter, &server, from.as_deref(), &request);
         }
+        Answer::Ssh(name) => reach::ssh(app, letter, &server, from.as_deref(), name),
+        Answer::PlaceOn(place) => reach::place_on(letter, server, from, place),
     }
     world.finish();
 }
@@ -416,7 +422,7 @@ impl<'a> World<'a> {
     /// terminal stays in the list.
     fn put(
         &self,
-        server: &Server,
+        target: &Server,
         by: &Beside,
         place: &Place,
         opener: String,
@@ -439,7 +445,7 @@ impl<'a> World<'a> {
         let terminal = SessionId::new(&name).map_err(|e| e.to_string())?;
         // A pane of this Mac is an ordinary one that is born with the identity its terminal was
         // written in the ledger for; a server's is the pipe to a terminal there.
-        let uuid = local::is_account(&server.account).then(crate::pane::new_pane_uuid);
+        let uuid = local::is_account(&target.account).then(crate::pane::new_pane_uuid);
         let start = if uuid.is_some() {
             Start {
                 // A pane with no program is started where the script was asked to start it; a
@@ -454,7 +460,7 @@ impl<'a> World<'a> {
             if !pipe_installed(&app.shell_integration().env) {
                 return Err("there is no pipe to a server in this process".to_owned());
             }
-            let args = server
+            let args = target
                 .argv
                 .get(1..)
                 .filter(|args| !args.is_empty())
@@ -467,7 +473,7 @@ impl<'a> World<'a> {
                 held: Some(Held {
                     args,
                     resume: Some(Resume {
-                        account: server.account.clone(),
+                        account: target.account.clone(),
                         terminal: name,
                     }),
                     close_at_end: !place.keep_open,
@@ -504,7 +510,7 @@ impl<'a> World<'a> {
                 hold_service::register_local(uuid, &terminal);
             }
         } else {
-            hold_service::claim(&server.account, &terminal);
+            hold_service::claim(&target.account, &terminal);
         }
         // `--focus` was decided by [`World::place`]: the keyboard goes to the new pane only if the
         // person is where the pane goes.
@@ -599,14 +605,14 @@ fn shown_in(pane: &TerminalPane, account: &str) -> Option<Shown> {
     hold_service::shown(pane.uuid()).filter(|shown| shown.account == account)
 }
 
+/// A pane of this Mac found by the terminal it shows: its tab, the pane, and what the service
+/// says it shows.
+type Found = (Retained<TerminalTab>, Retained<TerminalPane>, Shown);
+
 /// The pane of this Mac that shows `terminal` of the server `account` (for this Mac's account,
 /// the pane the terminal carries), with its tab and what the service says it shows. Any window,
 /// any tab, on screen or not.
-fn find_pane(
-    app: &AppDelegate,
-    account: &str,
-    terminal: &str,
-) -> Option<(Retained<TerminalTab>, Retained<TerminalPane>, Shown)> {
+fn find_pane(app: &AppDelegate, account: &str, terminal: &str) -> Option<Found> {
     for tab in app.tabs() {
         for pane in tab.panes() {
             if let Some(shown) = shown_in(&pane, account)
@@ -617,6 +623,93 @@ fn find_pane(
         }
     }
     None
+}
+
+/// The pane that shows the terminal `address` names — a terminal of the machine that asked, or
+/// of another written with its machine (`p9@prod`, this Mac `p9@local`), as `ls` prints them. A
+/// terminal of another machine is a pane the level lets the machine change (`screen` and up: it
+/// is not its own), found among the panes on screen by the host the pane shows
+/// ([`bt_core::bare_host`]); one name that two accounts of a host both have is a mistake the
+/// answer says, not a guess.
+fn find_address(
+    app: &AppDelegate,
+    server: &Server,
+    address: &Anchor,
+) -> Result<Option<Found>, Failure> {
+    let own_machine = match address.machine() {
+        None => true,
+        Some(machine) => {
+            if local::is_account(&server.account) {
+                machine == LOCAL_MACHINE
+            } else {
+                server
+                    .host_name()
+                    .is_some_and(|host| bt_core::bare_host(host) == machine)
+            }
+        }
+    };
+    if own_machine {
+        return Ok(find_pane(app, &server.account, address.name()));
+    }
+    arrange::may_change(server, Panes::other(1), &format!("pane {address}"))?;
+    let machine = address.machine().unwrap_or_default();
+    let mut found = Vec::new();
+    for tab in app.tabs() {
+        for pane in tab.panes() {
+            let shown = if machine == LOCAL_MACHINE {
+                hold_service::shown_local(pane.uuid())
+            } else {
+                hold_service::shown(pane.uuid())
+                    .filter(|shown| bt_core::bare_host(&shown.host) == machine)
+            };
+            if let Some(shown) = shown
+                && shown.terminal.as_str() == address.name()
+            {
+                found.push((tab.clone(), pane, shown));
+            }
+        }
+    }
+    let first_account = found.first().map(|(_, _, shown)| shown.account.clone());
+    if found
+        .iter()
+        .any(|(_, _, shown)| Some(&shown.account) != first_account.as_ref())
+    {
+        return Err(Failure::new(
+            Kind::Usage,
+            format!(
+                "{address} is the name of terminals of two accounts on {machine}; none is meant"
+            ),
+        ));
+    }
+    Ok(found.into_iter().next())
+}
+
+/// The server and the terminal a `close` is about, once the machine in its address is told: the
+/// server whose account has the pane, and the terminal's name there. The level is the one of the
+/// machine that asked, which [`find_address`] has judged for the address.
+fn close_target(
+    app: &AppDelegate,
+    server: &Server,
+    target: Anchor,
+) -> Result<(Server, Anchor), Failure> {
+    if target.machine().is_none() {
+        return Ok((server.clone(), target));
+    }
+    let Some((_, _, shown)) = find_address(app, server, &target)? else {
+        return Err(Failure::new(
+            Kind::Unknown,
+            format!("{target} is no pane on screen"),
+        ));
+    };
+    let named = Anchor::parse(target.name())
+        .ok_or_else(|| Failure::new(Kind::Failed, "the terminal's name cannot be read"))?;
+    let closing = Server {
+        account: shown.account,
+        host: shown.host,
+        argv: shown.argv,
+        level: server.level,
+    };
+    Ok((closing, named))
 }
 
 impl Shell for World<'_> {
@@ -634,6 +727,17 @@ impl Shell for World<'_> {
     fn place(
         &mut self,
         server: &Server,
+        anchor: &Anchor,
+        place: &Place,
+        opener: Option<&str>,
+    ) -> Placing {
+        self.place_on(server, server, anchor, place, opener)
+    }
+
+    fn place_on(
+        &mut self,
+        server: &Server,
+        target: &Server,
         anchor: &Anchor,
         place: &Place,
         opener: Option<&str>,
@@ -690,17 +794,17 @@ impl Shell for World<'_> {
             pane: &pane,
             name: anchor,
         };
-        match self.put(server, &by, place, who, (&dest, raise)) {
+        match self.put(target, &by, place, who, (&dest, raise)) {
             Ok(mut placed) => {
                 placed.keyboard_stayed = stayed;
                 state(|state| {
                     state
                         .made
-                        .push((server.account.clone(), place.terminal, Instant::now()));
+                        .push((target.account.clone(), place.terminal, Instant::now()));
                 });
                 self.opened.push(Opened {
-                    account: server.account.clone(),
-                    host: server.host.clone(),
+                    account: target.account.clone(),
+                    host: target.host.clone(),
                     program: shown.program,
                 });
                 Placing::Done(placed)
@@ -708,7 +812,7 @@ impl Shell for World<'_> {
             Err(why) => {
                 eprintln!(
                     "bateri: no pane for {} on {}: {why}",
-                    place.terminal, server.host
+                    place.terminal, target.host
                 );
                 Placing::Unable
             }
@@ -821,15 +925,18 @@ fn pane_of(pane: &TerminalPane, account: &str, level: CommandLevel) -> Pane {
         return Pane::Elsewhere;
     }
     // A pane that shows a terminal of another server is told by that server; any other pane
-    // (a shell of this Mac) is this Mac's, whose terminals have no name an agent can write yet.
+    // (a shell of this Mac) is this Mac's, by the number its terminal has when it has one
+    // (`p3@local`) and by nothing else when it has not.
     match hold_service::shown(pane.uuid()) {
         Some(shown) => Pane::Remote {
             machine: bt_core::bare_host(&shown.host).to_owned(),
             name: Some(shown.terminal.as_str().to_owned()),
         },
         None => Pane::Remote {
-            machine: "local".to_owned(),
-            name: None,
+            machine: LOCAL_MACHINE.to_owned(),
+            name: hold_service::shown_local(pane.uuid())
+                .map(|shown| shown.terminal.as_str().to_owned())
+                .filter(|name| Terminal::parse(name).is_some()),
         },
     }
 }
@@ -1045,7 +1152,7 @@ mod tests {
             let at = source.find(signature).expect(signature);
             &source[at..at + source[at..].find("\n    }\n").expect("its end")]
         };
-        let place = body("    fn place(");
+        let place = body("    fn place_on(");
         let judged = place.find("self.whither(").expect(place);
         let refused = place
             .find("Err(failure) => return Placing::Refused(failure)")
@@ -1065,6 +1172,44 @@ mod tests {
         assert!(put.contains("focus && raise"), "{put}");
     }
 
+    /// What a program asks of a server (`-S`) waits for a program (`ssh -G`) and for a person's
+    /// password, so it never runs on the main queue: the backend is asked on a thread of its own,
+    /// the letter is answered from there, and the pane is made on the main queue afterwards. The
+    /// pane of such a terminal is the pipe to the server's terminal (the target's `Held`), beside
+    /// a terminal of the machine that asked (the sender's level judges where). A source scan.
+    #[test]
+    fn a_program_reaching_a_server_never_waits_on_the_main_queue() {
+        let reach = include_str!("agent/reach.rs");
+        let reach = &reach[..reach.find("#[cfg(test)]").unwrap_or(reach.len())];
+        let body = |signature: &str| {
+            let at = reach.find(signature).expect(signature);
+            &reach[at..at + reach[at..].find("\n}\n").expect("its end")]
+        };
+        let ssh = body("pub(super) fn ssh(");
+        let thread = ssh.find("thread::Builder::new()").expect(ssh);
+        let reached = ssh.find("backend.reach(").expect(ssh);
+        assert!(
+            thread < reached,
+            "the connection is made on a thread: {ssh}"
+        );
+        let place = body("pub(super) fn place_on(");
+        let thread = place.find("thread::Builder::new()").expect(place);
+        let route = place.find("backend.route(").expect(place);
+        let main = place.find("DispatchQueue::main()").expect(place);
+        assert!(
+            thread < route && route < main,
+            "the server is found on a thread, the pane made on the main queue: {place}"
+        );
+        // The target's account and arguments are the pane's pipe; the sender's level judges it.
+        let source = include_str!("agent.rs");
+        let source = &source[..source.find("#[cfg(test)]").unwrap_or(source.len())];
+        let at = source.find("    fn put(").expect("put");
+        let put = &source[at..at + source[at..].find("\n    }\n").expect("its end")];
+        let put: String = put.split_whitespace().collect();
+        assert!(put.contains("target.argv"), "{put}");
+        assert!(put.contains("account:target.account.clone()"), "{put}");
+    }
+
     /// A pane of this Mac is an ordinary pane born with the identity its terminal was written in
     /// the ledger for (`register_local`), or made under the number it was told (`expect_name`);
     /// it holds no pipe to a server (no `Held`, no `ssh-hold`), and an anchor that no pane shows
@@ -1078,7 +1223,7 @@ mod tests {
             &source[at..at + source[at..].find("\n    }\n").expect("its end")]
         };
         let put = body("    fn put(");
-        let local = put.find("local::is_account(&server.account)").expect(put);
+        let local = put.find("local::is_account(&target.account)").expect(put);
         let pipe = put.find("pipe_installed(").expect(put);
         assert!(
             local < pipe,
@@ -1089,7 +1234,7 @@ mod tests {
         let register = put.find("hold_service::register_local(").expect(put);
         let launch = put.find("app.pane_launch_as(").expect(put);
         assert!(register < launch, "the ledger first, the pane after: {put}");
-        let place = body("    fn place(");
+        let place = body("    fn place_on(");
         assert!(
             place.contains("if local::is_account(&server.account)")
                 && place.contains("Kind::Unknown"),

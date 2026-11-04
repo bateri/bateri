@@ -5,11 +5,12 @@
 # the application on this Mac, and put on `PATH` by the integration of zsh, bash and fish.
 #
 #   bateri split [PANE | --tab TAB] [--left|--right|--above|--below] [--ratio PERCENT]
-#          [--label TEXT] [--cwd DIR] [--keep-open] [--wait] [--focus] [--json] [-- PROGRAM...]
-#   bateri tab   [PANE] [--group GROUP | --window WINDOW] [--new-group NAME] [--label TEXT]
-#          [--cwd DIR] [--keep-open] [--wait] [--focus] [--json] [-- PROGRAM...]
-#   bateri window [PANE] [--label TEXT] [--cwd DIR] [--keep-open] [--wait] [--focus] [--json]
+#          [--label TEXT] [--cwd DIR] [--keep-open] [--wait] [--focus] [--json] [-S SERVER]
 #          [-- PROGRAM...]
+#   bateri tab   [PANE] [--group GROUP | --window WINDOW] [--new-group NAME] [--label TEXT]
+#          [--cwd DIR] [--keep-open] [--wait] [--focus] [--json] [-S SERVER] [-- PROGRAM...]
+#   bateri window [PANE] [--label TEXT] [--cwd DIR] [--keep-open] [--wait] [--focus] [--json]
+#          [-S SERVER] [-- PROGRAM...]
 #   bateri close pane|tab|group|window [ID] [--force]
 #   bateri ls [--json]       bateri notify TEXT...
 #   bateri send [PANE] [TEXT | -]           bateri send-key [PANE] KEY...
@@ -72,6 +73,22 @@
 # the program runs, and the user's login shell follows it in the same terminal (a server's is
 # held by the Mac's pipe to it).
 #
+# ANOTHER MACHINE. `-S SERVER` starts the terminal on a server instead of here: the name `ssh` is
+# given (`prod`, an alias of ~/.ssh/config), through the same gate as `ssh prod` in a bateri pane
+# (the settings, `ssh -G`, a server bateri keeps terminals on) and with no list of its own. Only a
+# machine whose level is `full` may (the Mac says 77 to the others), and the server's own
+# `commands` must not be `off`. The Mac is asked first for the `ssh` words that ride the connection
+# it keeps (it asks the person for a password in a sheet when the connection must be made); this
+# runs the `bateri` of the server over that, by its full path in a login shell, in the server's home
+# unless `--cwd` names a directory there, and the terminal is the server's `pN`; then the Mac is
+# asked for the pane (`place`, with `server`) beside this machine's. Nothing is installed on the
+# server: one that was never opened from bateri is told to be. The terminal is written `p9@prod`,
+# as `ls` writes the panes of other machines (this Mac is `@local`): `send`, `send-key`,
+# `capture` and `wait` carry the command to the server over the same connection, and `focus`,
+# `close` and the layout verbs hand the address to the Mac (from level `screen`; they need no
+# connection). The exit code 255 is ssh's for a connection that failed and kablo's for its own
+# trouble: the line printed says which.
+#
 # The quoted word below is filled in when the bootstrap writes this file
 # (`ssh_wrap`): kablo's place relative to home.
 
@@ -100,11 +117,12 @@ bt_usage() {
   printf '%s\n' \
     'usage: bateri split [PANE | --tab TAB] [--left|--right|--above|--below] [--ratio PERCENT]' \
     '                    [--label TEXT] [--cwd DIR] [--keep-open] [--wait] [--focus] [--json]' \
-    '                    [-- PROGRAM [ARG]...]' \
+    '                    [-S SERVER] [-- PROGRAM [ARG]...]' \
     '       bateri tab [PANE] [--group GROUP | --window WINDOW] [--new-group NAME] [--label TEXT]' \
-    '                  [--cwd DIR] [--keep-open] [--wait] [--focus] [--json] [-- PROGRAM [ARG]...]' \
+    '                  [--cwd DIR] [--keep-open] [--wait] [--focus] [--json] [-S SERVER]' \
+    '                  [-- PROGRAM [ARG]...]' \
     '       bateri window [PANE] [--label TEXT] [--cwd DIR] [--keep-open] [--wait] [--focus] [--json]' \
-    '                     [-- PROGRAM [ARG]...]' \
+    '                     [-S SERVER] [-- PROGRAM [ARG]...]' \
     '       bateri close pane|tab|group|window [ID] [--force]' \
     '       bateri ls [--json]' \
     '       bateri notify TEXT...' \
@@ -120,7 +138,9 @@ bt_usage() {
     '       bateri move tab TAB --group GROUP | --window WINDOW' \
     '       bateri resize [PANE] --left|--right|--above|--below [--by N]' \
     'An id is a letter and a number: p9 a pane, t3 a tab, g1 a group, w1 a window; bateri ls shows them.' \
-    'A pane is p and its number (p7); with none named it is the one this runs in.' \
+    'A pane is p and its number (p7); with none named it is the one this runs in. One of another' \
+    'machine is written with the machine after an @ (p9@prod), as bateri ls writes it; -S starts a' \
+    'terminal on a server (full level only).' \
     'Without a program, split, tab and window open a shell. bateri ls lists what is open.'
 }
 
@@ -252,6 +272,61 @@ bt_need_terminal() {
   bt_is_terminal "$1" || bt_not_a_terminal "$1"
 }
 
+# Whether $1 names a machine as `bateri ls` writes it after the @ of an address: the host as `ssh`
+# is given it without its user, or `local` for this Mac (the Mac reads the same alphabet,
+# `agent::is_machine`).
+bt_is_machine() {
+  case $1 in
+    '' | [!A-Za-z0-9]* | *[!A-Za-z0-9._:-]*) return 1 ;;
+  esac
+  [ "${#1}" -le 253 ]
+}
+
+# Whether $1 names a server as `-S` takes it: as `ssh` is given it (`prod`, `deploy@10.0.0.5`),
+# starting with a letter or a digit so that it can never be read as an option, with at most one
+# `@` and a host after it.
+bt_is_server() {
+  case $1 in
+    '' | [!A-Za-z0-9]* | *[!A-Za-z0-9._:@-]* | *@ | *@*@*) return 1 ;;
+  esac
+  [ "${#1}" -le 253 ]
+}
+
+# `bt_address WORD`: a pane written as p9, or p9@prod for one of another machine, in `bt_a_id` and
+# `bt_a_machine` (empty for a plain one); fails for what is neither.
+bt_address() {
+  bt_a_id=$1
+  bt_a_machine=
+  case $1 in
+    *@*)
+      bt_a_id=${1%%@*}
+      bt_a_machine=${1#*@}
+      bt_is_machine "$bt_a_machine" || return 1
+      ;;
+  esac
+  bt_is_terminal "$bt_a_id"
+}
+
+# `bt_quote WORD`: WORD in single quotes in `bt_q`, as every shell a remote command line may meet
+# reads them (a quote in WORD closes them, is written `\'` and opens them again).
+bt_sq="'"
+bt_quote() {
+  bt_qr=$1
+  bt_q=$bt_sq
+  while :; do
+    case $bt_qr in
+      *"$bt_sq"*)
+        bt_q="$bt_q${bt_qr%%"$bt_sq"*}$bt_sq\\$bt_sq$bt_sq"
+        bt_qr=${bt_qr#*"$bt_sq"}
+        ;;
+      *)
+        bt_q="$bt_q$bt_qr$bt_sq"
+        return 0
+        ;;
+    esac
+  done
+}
+
 # `bt_ask MESSAGE`: one conversation with the Mac. `bt_status` is kablo's
 # status (69: no Mac connected) and `bt_reply` what it said, byte for byte (the
 # trailing `x` keeps the substitution from eating the last line breaks).
@@ -302,6 +377,67 @@ bt_fail_reply() {
   bt_die "$bt_code" "$(printf '%s' "$bt_text" | bt_clean)"
 }
 
+# ─── another machine ─────────────────────────────────────────────────────
+
+# `bt_reach SERVER`: asks the Mac how to reach SERVER over ssh. The Mac judges the level (`full`),
+# the name (the gate of `ssh SERVER` in a bateri pane) and the server's own `commands`, makes the
+# connection when it must (a password is asked in a sheet) and answers with the words of the
+# command, one `arg` line each, kept in `bt_ssh_body`.
+bt_reach() {
+  bt_ask "bateri 2${nl}ssh${nl}server $1${nl}"
+  [ "$bt_status" != 69 ] || bt_die 69 "no Mac is connected: it is the Mac that reaches $1"
+  [ "$bt_status" = 0 ] || bt_die 1 'the Mac did not answer'
+  bt_read_reply
+  case $bt_kind in
+    'ok text') bt_ssh_body=$bt_body ;;
+    'error '*) bt_fail_reply ;;
+    *) bt_die 1 'the Mac answered with something this does not read' ;;
+  esac
+  bt_ssh_server=$1
+}
+
+# `bt_remote WORD...`: the `bateri WORD...` of `bt_ssh_server`, over ssh, as the Mac said (`bt_reach`).
+# The server's login shell reads the command line, so it is one `sh` that looks for the file by its
+# full path (nothing is installed here: a server bateri never opened is told to be) and hands over to
+# the login shell, which runs it with the arguments quoted for any shell. The status is the
+# command's, or 255 when ssh could not connect.
+bt_remote() {
+  bt_cmd='exec env BATERI_QUIET_ORPHAN=1 "$HOME/.local/share/bateri/shell/bin/bateri"'
+  for bt_w in "$@"; do
+    bt_quote "$bt_w"
+    bt_cmd="$bt_cmd $bt_q"
+  done
+  bt_gate='[ -x "$HOME/.local/share/bateri/shell/bin/bateri" ] || { echo "bateri: bateri is not set up on '"$bt_ssh_server"': open a terminal on it in bateri first" >&2; exit 127; }; exec "${SHELL:-/bin/sh}" -lc "$1"'
+  bt_quote "$bt_gate"
+  bt_gate_word=$bt_q
+  bt_quote "$bt_cmd"
+  bt_line="exec sh -c $bt_gate_word sh $bt_q"
+  set -- ssh
+  bt_lines=$bt_ssh_body
+  while [ -n "$bt_lines" ]; do
+    bt_split "$bt_lines"
+    bt_lines=$bt_rest
+    case $bt_l1 in
+      'arg '*) set -- "$@" "${bt_l1#arg }" ;;
+    esac
+  done
+  "$@" "$bt_line"
+}
+
+# `bt_carry MACHINE WORD...`: `bateri WORD...` for a pane of another machine, run where it is. This
+# Mac's own panes are this Mac's (`@local` here is the plain pane).
+bt_carry() {
+  bt_via=$1
+  shift
+  bt_reach "$bt_via"
+  bt_remote "$@"
+  bt_code=$?
+  case $bt_code in
+    255) bt_say "could not reach $bt_via over ssh, or kablo had trouble there" ;;
+  esac
+  exit "$bt_code"
+}
+
 # ─── split, tab ──────────────────────────────────────────────────────────
 
 # `bt_open MODE ARGS...` (`split`, `tab` or `window`): starts a terminal here and
@@ -322,11 +458,22 @@ bt_open() {
   bt_home_window=
   bt_home_newgroup=
   bt_label=
+  bt_server=
   while [ $# -gt 0 ]; do
     case $1 in
       --)
         shift
         break
+        ;;
+      -S)
+        [ -z "$bt_server" ] || bt_die 64 'name one server'
+        [ $# -ge 2 ] || bt_die 64 '-S takes a server'
+        shift
+        bt_server=$1
+        case $bt_server in
+          -*) bt_die 64 "a server's name does not start with a dash: '$(printf '%s' "$bt_server" | bt_clean)'" ;;
+        esac
+        bt_is_server "$bt_server" || bt_die 64 "-S takes a server as ssh does ('prod', 'deploy@10.0.0.5'), not '$(printf '%s' "$bt_server" | bt_clean)'"
         ;;
       --left | --right | --above | --below)
         [ "$bt_mode" = split ] || bt_die 64 "$bt_mode takes no side"
@@ -471,22 +618,30 @@ bt_open() {
     bt_orphan=yes
   fi
 
-  # Where it starts: the caller's directory.
-  case $bt_cwd in
-    '~') bt_cwd=$HOME ;;
-    '~/'*) bt_cwd=$HOME/${bt_cwd#'~/'} ;;
-    '')
-      bt_cwd=$PWD
-      [ -d "$bt_cwd" ] || bt_cwd=$HOME
-      ;;
-  esac
-  [ -d "$bt_cwd" ] || bt_die 1 "'$(printf '%s' "$bt_cwd" | bt_clean)' is not a directory"
+  # Where it starts: the caller's directory; on a server (`-S`) the server's, its home unless
+  # `--cwd` names one there (the server says if it is none).
+  if [ -n "$bt_server" ]; then
+    [ "$(printf '%s' "$bt_cwd" | bt_clean | tr -d '\n')" = "$bt_cwd" ] || bt_die 64 'the directory has a control character in its name'
+  else
+    case $bt_cwd in
+      '~') bt_cwd=$HOME ;;
+      '~/'*) bt_cwd=$HOME/${bt_cwd#'~/'} ;;
+      '')
+        bt_cwd=$PWD
+        [ -d "$bt_cwd" ] || bt_cwd=$HOME
+        ;;
+    esac
+    [ -d "$bt_cwd" ] || bt_die 1 "'$(printf '%s' "$bt_cwd" | bt_clean)' is not a directory"
+  fi
 
   # The program, or bateri's shell: the bootstrap's file, run from the file
   # (`boot.sh`), with no parent block, nonce or tab. Where there is none (this Mac) nothing is
   # started: the Mac opens the pane's own shell under the number (`fresh`).
   bt_fresh=
-  if [ $# -eq 0 ]; then
+  if [ -n "$bt_server" ]; then
+    # The server starts it with its own `bateri`: its bootstrap's shell, or the program.
+    :
+  elif [ $# -eq 0 ]; then
     if [ -r "$bt_shelldir/boot.sh" ]; then
       bt_version=${LC_TERMINAL_VERSION-}
       case $bt_version in
@@ -507,8 +662,9 @@ bt_open() {
 
   # The number, and the terminal. A hand-made terminal can hold the number
   # (`kablo new --id t5`): the next is tried.
+  bt_tid=
   bt_tries=0
-  while :; do
+  while [ -z "$bt_server" ]; do
     bt_n=$(sh "$bt_shelldir/next.sh" 2>/dev/null) || bt_n=
     case $bt_n in
       '' | *[!0-9]* | 0*) bt_die 1 "cannot number a pane: $bt_state is not writable, or bateri's files are not in $bt_shelldir" ;;
@@ -536,8 +692,11 @@ bt_open() {
     esac
     bt_die 1 "kablo could not start $bt_id: $(printf '%s' "$bt_err" | bt_clean)"
   done
-
-  bt_record "$bt_id"
+  if [ -n "$bt_server" ]; then
+    bt_start_on "$@"
+  else
+    bt_record "$bt_id"
+  fi
 
   bt_landed=
   bt_mac_waits=
@@ -558,9 +717,32 @@ bt_open() {
     # Not `kablo new --wait`: kablo keeps what a Mac shows for ten minutes after the
     # program ends, and `new --wait` would come back that much later; `wait`
     # does not.
+    if [ -n "$bt_server" ]; then
+      bt_remote wait "$bt_tid" </dev/null
+      exit $?
+    fi
     exec "$bt_kablo" wait "$bt_id"
   fi
   exit 0
+}
+
+# `bt_start_on [PROGRAM...]`: the terminal is started on `bt_server` by its own `bateri split`, run
+# in no terminal there, which numbers it and says the number (`bt_tid`); `bt_id` is the address
+# the Mac and `ls` write it by (`p9@prod`).
+bt_start_on() {
+  bt_reach "$bt_server"
+  set -- split ${bt_cwd:+--cwd "$bt_cwd"} ${bt_pane_label:+--label "$bt_pane_label"} ${bt_keep:+--keep-open} -- "$@"
+  bt_out=$(bt_remote "$@" </dev/null)
+  bt_code=$?
+  if [ "$bt_code" != 0 ]; then
+    [ "$bt_code" != 255 ] || bt_say "could not reach $bt_server over ssh"
+    [ "$bt_code" != 127 ] || bt_code=1
+    exit "$bt_code"
+  fi
+  # A login shell may print lines of its own before: the number is the last line.
+  bt_tid=${bt_out##*"$nl"}
+  bt_is_terminal "$bt_tid" || bt_die 1 "$bt_server did not say which terminal it started"
+  bt_id=$bt_tid@${bt_server##*@}
 }
 
 # Who opened $1, and whether it stays: `~/.local/share/bateri/terminals/pN`,
@@ -579,12 +761,13 @@ bt_record() {
 # conversation. The anchor is always written out: a message that waits is read
 # when no conversation names its sender.
 bt_place() {
-  bt_msg="bateri 2${nl}place${nl}terminal $bt_id${nl}anchor $bt_anchor${nl}"
+  bt_msg="bateri 2${nl}place${nl}terminal ${bt_tid:-$bt_id}${nl}anchor $bt_anchor${nl}"
   [ -z "$bt_side" ] || bt_msg="${bt_msg}side $bt_side${nl}"
   [ -z "$bt_ratio" ] || bt_msg="${bt_msg}ratio $bt_ratio${nl}"
   [ -z "$bt_keep" ] || bt_msg="${bt_msg}keep-open yes${nl}"
   [ -z "$bt_focus" ] || bt_msg="${bt_msg}focus yes${nl}"
   [ -z "$bt_fresh" ] || bt_msg="${bt_msg}fresh $bt_fresh${nl}"
+  [ -z "$bt_server" ] || bt_msg="${bt_msg}server $bt_server${nl}"
   [ -z "$bt_home_tab" ] || bt_msg="${bt_msg}tab $bt_home_tab${nl}"
   [ -z "$bt_home_group" ] || bt_msg="${bt_msg}group $bt_home_group${nl}"
   [ -z "$bt_home_newgroup" ] || bt_msg="${bt_msg}new-group $bt_home_newgroup${nl}"
@@ -600,8 +783,12 @@ bt_place() {
         ;;
       'error '*)
         # The Mac refused: nothing is left running for a request that failed.
-        "$bt_kablo" end "$bt_id" --force >/dev/null 2>&1
-        rm -f "$bt_state/terminals/$bt_id"
+        if [ -n "$bt_server" ]; then
+          bt_remote close pane "$bt_tid" --force </dev/null >/dev/null 2>&1
+        else
+          "$bt_kablo" end "$bt_id" --force >/dev/null 2>&1
+          rm -f "$bt_state/terminals/$bt_id"
+        fi
         bt_fail_reply
         ;;
     esac
@@ -647,6 +834,11 @@ bt_placed() {
 # No Mac to place it: the message waits on the server.
 bt_wait_note() {
   bt_landed=waiting
+  if [ -n "$bt_server" ]; then
+    # The terminal runs on the server and is in its list; the Mac has no pane for it yet.
+    bt_mac_waits=yes
+    return 0
+  fi
   if mkdir -p "$bt_state/placing" 2>/dev/null &&
     printf '%s' "$bt_msg" > "$bt_state/placing/$bt_id.tmp.$$" 2>/dev/null &&
     mv -f "$bt_state/placing/$bt_id.tmp.$$" "$bt_state/placing/$bt_id" 2>/dev/null; then
@@ -686,7 +878,9 @@ bt_open_report() {
   case $bt_landed in
     waiting)
       if [ -n "$bt_orphan" ]; then
-        bt_say "$bt_id waits in the Mac's list of terminals running in the background: this ran in no terminal, so it has no pane to go beside"
+        # A server's script that `-S` started (`bt_remote`) is told not to say it: the caller
+        # says it once, for the address it gives.
+        [ -n "${BATERI_QUIET_ORPHAN-}" ] || bt_say "$bt_id waits in the Mac's list of terminals running in the background: this ran in no terminal, so it has no pane to go beside"
       elif [ -n "$bt_mac_waits" ] && [ -z "$bt_next" ]; then
         # The Mac kept nothing to place it by: it could not make the pane just now.
         bt_say "$bt_id waits in the Mac's list of terminals running in the background: the Mac could not make its pane now"
@@ -776,11 +970,17 @@ bt_close_pane() {
     bt_read_reply
     case $bt_kind in
       ok)
-        # A kill that does not wait out the grace is kablo's to do.
-        if [ -n "$bt_force" ]; then
-          "$bt_kablo" end "$bt_target" --force >/dev/null 2>&1
-        fi
-        rm -f "$bt_state/terminals/$bt_target" "$bt_state/placing/$bt_target"
+        # A kill that does not wait out the grace is kablo's to do; a pane of another machine is
+        # not this machine's terminal to kill, nor to forget.
+        case $bt_target in
+          *@*) ;;
+          *)
+            if [ -n "$bt_force" ]; then
+              "$bt_kablo" end "$bt_target" --force >/dev/null 2>&1
+            fi
+            rm -f "$bt_state/terminals/$bt_target" "$bt_state/placing/$bt_target"
+            ;;
+        esac
         exit 0
         ;;
       # It could not tell just now (the server's list did not come in time): the terminal is
@@ -790,7 +990,11 @@ bt_close_pane() {
     esac
   fi
 
-  # No Mac to ask, or it could not tell: the terminal is this machine's own and kablo ends it.
+  # No Mac to ask, or it could not tell: the terminal is this machine's own and kablo ends it. A
+  # pane of another machine is the Mac's to close, or nobody's.
+  case $bt_target in
+    *@*) bt_die 69 "no Mac is connected to close $bt_target: a pane of another machine is closed through it" ;;
+  esac
   if [ -n "$bt_force" ]; then
     "$bt_kablo" end "$bt_target" --force
   else
@@ -912,7 +1116,7 @@ bt_check_id() {
 # Whether $2 is an id of the kind whose letter is $1.
 bt_is_kind() {
   case $1 in
-    p) bt_is_terminal "$2" ;;
+    p) bt_address "$2" ;;
     *) bt_is_id "$1" "$2" ;;
   esac
 }
@@ -1005,6 +1209,9 @@ bt_rename_verb() {
   bt_rid=$1
   shift
   bt_check_id rename "$bt_rkind" "$bt_rid"
+  case $bt_rid in
+    *@*) bt_die 64 "a pane's label is kablo's own on its machine: rename the pane there ($bt_rid is on another machine)" ;;
+  esac
   [ $# -ge 1 ] || bt_die 64 "rename needs a label: rename $bt_rkind $bt_rid LABEL (an empty one takes it away)"
   bt_rlabel=$*
   [ -z "$bt_rlabel" ] || bt_check_label label "$bt_rlabel"
@@ -1180,6 +1387,62 @@ bt_first_target() {
   return 1
 }
 
+# `bt_on_machine ARGS...`: the command `bt_cverb` for a pane of the machine `bt_cvia`, its first
+# argument the pane's plain id. This Mac's own panes (`@local`) are this machine's when this is the
+# Mac; any other machine is reached over ssh (`bt_carry`).
+bt_on_machine() {
+  if [ "$bt_cvia" = local ]; then
+    [ ! -r "$bt_shelldir/boot.sh" ] || bt_die 64 'a pane of the Mac is not reached from a server by this command'
+    exec "$bt_kablo" "$bt_cverb" "$@"
+  fi
+  bt_carry "$bt_cvia" "$bt_cverb" "$@"
+}
+
+# `bt_carry_first VERB ARGS...`: when the first argument is a pane of another machine
+# (`p9@prod`), the command is run where the pane is and does not return; else it returns.
+bt_carry_first() {
+  bt_cverb=$1
+  shift
+  bt_address "$1" || return 0
+  [ -n "$bt_a_machine" ] || return 0
+  bt_cvia=$bt_a_machine
+  bt_cid=$bt_a_id
+  shift
+  bt_on_machine "$bt_cid" "$@"
+}
+
+# `bt_carry_target VERB ARGS...`: the same for `capture` and `wait`, whose pane is the first word
+# that is no option (nor the value of one).
+bt_carry_target() {
+  bt_cverb=$1
+  shift
+  bt_cn=$#
+  bt_cskip=
+  bt_cvia=
+  while [ "$bt_cn" -gt 0 ]; do
+    bt_ca=$1
+    shift
+    bt_cn=$((bt_cn - 1))
+    if [ -n "$bt_cskip" ]; then
+      bt_cskip=
+    else
+      case $bt_ca in
+        --history | --for) bt_cskip=1 ;;
+        -*) ;;
+        *)
+          if [ -z "$bt_cvia" ] && bt_address "$bt_ca" && [ -n "$bt_a_machine" ]; then
+            bt_cvia=$bt_a_machine
+            bt_ca=$bt_a_id
+          fi
+          ;;
+      esac
+    fi
+    set -- "$@" "$bt_ca"
+  done
+  [ -n "$bt_cvia" ] || return 0
+  bt_on_machine "$@"
+}
+
 # Whether $1 is the name of a key (`send-key` takes a session before the keys).
 bt_is_key() {
   case $(printf '%s' "$1" | tr 'A-Z' 'a-z') in
@@ -1207,20 +1470,26 @@ case $bt_cmd in
   notify) bt_notify "$@" ;;
   send)
     if [ $# -ge 2 ]; then
+      bt_carry_first send "$@"
       bt_need_terminal "$1"
     fi
     exec "$bt_kablo" send "$@"
     ;;
   send-key)
     [ $# -ge 1 ] || bt_die 64 'send-key takes keys to press'
-    bt_is_key "$1" || bt_need_terminal "$1"
+    if ! bt_is_key "$1"; then
+      bt_carry_first send-key "$@"
+      bt_need_terminal "$1"
+    fi
     exec "$bt_kablo" send-key "$@"
     ;;
   capture)
+    bt_carry_target capture "$@"
     bt_first_target "$@"
     exec "$bt_kablo" capture "$@"
     ;;
   wait)
+    bt_carry_target wait "$@"
     bt_first_target "$@" || bt_die 64 'wait takes the pane to wait for (wait p4)'
     exec "$bt_kablo" wait "$@"
     ;;

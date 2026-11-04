@@ -15,6 +15,7 @@
 //! `show_pane`, `swap_panes`, `move_pane`, the moves' planner): the layout is changed the way the
 //! user's own keys and menus change it, with the same undo and the same refusals.
 
+use bt_shell_common::agent::Anchor;
 use bt_shell_common::agent::arrange::{self as rule, Go, Keyboard};
 use bt_shell_common::agent::level::{self, Act, Panes, Verdict};
 use bt_shell_common::agent::message::{Arrange, Failure, Kind, Reply, Subject, TabHome};
@@ -27,7 +28,7 @@ use objc2::MainThreadOnly;
 use objc2::rc::Retained;
 use objc2_app_kit::NSApplication;
 
-use super::{find_pane, terminal_of};
+use super::{find_address, find_pane, terminal_of};
 use crate::app::AppDelegate;
 use crate::groups::GroupId;
 use crate::ids::{Id, Kind as IdKind};
@@ -76,21 +77,35 @@ pub(super) fn spot(app: &AppDelegate, server: &Server, name: &str) -> Option<Spo
     Some(Spot { window, tab, pane })
 }
 
-/// The pane named, or the caller's own.
+/// The pane named — a terminal of the machine that asked, or of another by its address
+/// (`p9@prod`, from `screen` up) — or the caller's own.
 fn pane_or_own(
     app: &AppDelegate,
     server: &Server,
     from: Option<&str>,
-    named: Option<&str>,
+    named: Option<&Anchor>,
 ) -> Result<Spot, Failure> {
-    let name = named.or(from).ok_or_else(|| {
-        Failure::new(
-            Kind::Usage,
-            "this was not asked from a terminal and names none",
-        )
+    let Some(address) = named else {
+        let name = from.ok_or_else(|| {
+            Failure::new(
+                Kind::Usage,
+                "this was not asked from a terminal and names none",
+            )
+        })?;
+        return spot(app, server, name)
+            .ok_or_else(|| unknown(format!("{name} is no pane on screen on this server")));
+    };
+    let (tab, pane, _) = find_address(app, server, address)?.ok_or_else(|| {
+        if address.machine().is_some() {
+            unknown(format!("{address} is no pane on screen"))
+        } else {
+            unknown(format!("{address} is no pane on screen on this server"))
+        }
     })?;
-    spot(app, server, name)
-        .ok_or_else(|| unknown(format!("{name} is no pane on screen on this server")))
+    let window = tab
+        .window()
+        .ok_or_else(|| unknown(format!("{address} is in no window")))?;
+    Ok(Spot { window, tab, pane })
 }
 
 /// Where the keyboard is: bateri in front, the window typed in, whether the cursor is in the pane
@@ -169,14 +184,14 @@ fn carry_out(app: &AppDelegate, server: &Server, from: Option<&str>, request: &A
     match request {
         Arrange::Focus(subject) => focus(app, server, caller.as_ref(), from, subject),
         Arrange::Zoom(named) => {
-            let target = pane_or_own(app, server, from, named.as_ref().map(|name| name.name()))?;
+            let target = pane_or_own(app, server, from, named.as_ref())?;
             lays_out(app, caller.as_ref(), &target.window, &target.tab)?;
             target.tab.zoom_pane(&target.pane);
             Ok(())
         }
         Arrange::Swap { pane, other } => {
-            let first = pane_or_own(app, server, from, Some(pane.name()))?;
-            let second = pane_or_own(app, server, from, Some(other.name()))?;
+            let first = pane_or_own(app, server, from, Some(pane))?;
+            let second = pane_or_own(app, server, from, Some(other))?;
             if first.tab.id() != second.tab.id() {
                 return Err(Failure::new(
                     Kind::Usage,
@@ -196,8 +211,8 @@ fn carry_out(app: &AppDelegate, server: &Server, from: Option<&str>, request: &A
             }
         }
         Arrange::Move { pane, beside, side } => {
-            let moving = pane_or_own(app, server, from, Some(pane.name()))?;
-            let target = pane_or_own(app, server, from, Some(beside.name()))?;
+            let moving = pane_or_own(app, server, from, Some(pane))?;
+            let target = pane_or_own(app, server, from, Some(beside))?;
             lays_out(app, caller.as_ref(), &moving.window, &moving.tab)?;
             lays_out(app, caller.as_ref(), &target.window, &target.tab)?;
             move_beside(app, &moving, &target, *side)
@@ -208,7 +223,7 @@ fn carry_out(app: &AppDelegate, server: &Server, from: Option<&str>, request: &A
         }
         Arrange::MoveTab { tab, to } => move_tab(app, server, caller.as_ref(), *tab, to),
         Arrange::Resize { pane, side, steps } => {
-            let target = pane_or_own(app, server, from, pane.as_ref().map(|name| name.name()))?;
+            let target = pane_or_own(app, server, from, pane.as_ref())?;
             lays_out(app, caller.as_ref(), &target.window, &target.tab)?;
             let direction = direction_of(*side)?;
             if target.tab.resize_pane(&target.pane, direction, *steps) {
@@ -480,7 +495,7 @@ fn focus(
 ) -> Done {
     let target = match subject {
         Subject::Pane(named) => {
-            let spot = pane_or_own(app, server, from, named.as_ref().map(|name| name.name()))?;
+            let spot = pane_or_own(app, server, from, named.as_ref())?;
             // A pane of this server is its machine's own.
             Target {
                 window: spot.window,

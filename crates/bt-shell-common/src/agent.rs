@@ -21,6 +21,11 @@
 //! - [`listing`] is `ls`: the windows and tabs as they stand with each tab's real split tree,
 //!   then a table of the server's terminals, as text and as JSON.
 //!
+//! A terminal that runs on another machine than the one that asked (`bateri split -S prod`, for a
+//! machine whose level is `full`) is started by the asking program itself over `ssh`, with the words
+//! the Mac gives it (the `ssh` verb), and its pane is a `place` that names the `server`; a pane of
+//! another machine is written `p9@prod` ([`Anchor::address`]) in the verbs that work on panes.
+//!
 //! Who asked is never in a message: the Mac knows it from the ticket kablo hands it for the
 //! conversation, which names the terminal the request came from.
 
@@ -74,26 +79,74 @@ impl fmt::Display for Terminal {
 /// existed is `b-` and 32 digits, one a person made with `kablo new` is what they typed. Reading
 /// takes every name kablo allows ([`kablo_proto::SessionId`]'s alphabet and length, so a name is
 /// never a path), which includes every `pN`.
+///
+/// A terminal of another machine is written with the machine after an `@` — `p9@prod`, this Mac
+/// `p9@local`, as `bateri ls` says them ([`Anchor::address`]). The `@` is no part of kablo's
+/// alphabet, so a name and an address never read as one another.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Anchor(kablo_proto::SessionId);
+pub struct Anchor {
+    name: kablo_proto::SessionId,
+    machine: Option<String>,
+}
+
+/// The machine an address may name: what `bateri ls` prints after the `@` — a host name as the
+/// user typed it to `ssh` without its `user@`, or `local`. Letters, digits and `. _ - :`, starting
+/// with a letter or a digit (so it is never an option), at most 253 bytes.
+pub fn is_machine(name: &str) -> bool {
+    name.len() <= 253
+        && name
+            .chars()
+            .next()
+            .is_some_and(|first| first.is_ascii_alphanumeric())
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b':'))
+}
+
+/// The machine of this Mac in an address.
+pub const LOCAL_MACHINE: &str = "local";
 
 impl Anchor {
-    /// The terminal a name stands for, `None` for a name kablo does not allow.
+    /// The terminal a name stands for, `None` for a name kablo does not allow (an address is
+    /// not a name: [`Anchor::address`]).
     pub fn parse(name: &str) -> Option<Anchor> {
-        kablo_proto::SessionId::new(name).ok().map(Anchor)
+        kablo_proto::SessionId::new(name).ok().map(|name| Anchor {
+            name,
+            machine: None,
+        })
+    }
+
+    /// A terminal as a name or as an address — `p9` or `p9@prod` — `None` for what is neither.
+    pub fn address(text: &str) -> Option<Anchor> {
+        let Some((name, machine)) = text.split_once('@') else {
+            return Anchor::parse(text);
+        };
+        if !is_machine(machine) {
+            return None;
+        }
+        Anchor::parse(name).map(|found| Anchor {
+            machine: Some(machine.to_owned()),
+            ..found
+        })
     }
 
     /// An agent's terminal as an anchor.
     pub fn of(terminal: Terminal) -> Anchor {
-        Anchor(
-            kablo_proto::SessionId::new(&terminal.to_string())
+        Anchor {
+            name: kablo_proto::SessionId::new(&terminal.to_string())
                 .expect("`p` and a number is a name kablo allows"),
-        )
+            machine: None,
+        }
     }
 
     /// The name, as kablo has it.
     pub fn name(&self) -> &str {
-        self.0.as_str()
+        self.name.as_str()
+    }
+
+    /// The machine the address names, `None` for a terminal of the machine that asks.
+    pub fn machine(&self) -> Option<&str> {
+        self.machine.as_deref()
     }
 
     /// The agent's number, when the name is one.
@@ -104,7 +157,11 @@ impl Anchor {
 
 impl fmt::Display for Anchor {
     fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
-        out.write_str(self.name())
+        out.write_str(self.name())?;
+        match &self.machine {
+            Some(machine) => write!(out, "@{machine}"),
+            None => Ok(()),
+        }
     }
 }
 

@@ -879,3 +879,85 @@ fn this_macs_account_needs_the_package_and_a_home_to_keep_kablo_in() {
     // server kablo cannot be kept on.
     assert!(!ssh_wrap::load(&world.state).knows(Fact::NoKablo, ""));
 }
+
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn a_program_reaches_a_server_through_the_gate_of_its_own_pane_and_only_where_bateri_has_been() {
+    let world = stand_in("reach", 0);
+    let backend = world.backend(Some(world.package()));
+    let args = vec!["rasp".to_owned()];
+
+    // A server bateri never opened has no `bateri` to start a terminal with: told to open one.
+    let error = backend.reach(&args, Ask::Never).expect_err("not set up");
+    assert!(
+        error.contains("has not set up rasp") && error.contains("ssh rasp"),
+        "{error}"
+    );
+
+    // Opened once, the words of the command are those of the server's own commands: no terminal,
+    // no password, no second master, and the destination last.
+    let mut state = ssh_wrap::HostState::default();
+    state.note(Fact::Touched, "u@h:22", 1);
+    std::fs::write(&world.state, state.render()).expect("state");
+    let reached = backend.reach(&args, Ask::Never).expect("reached");
+    assert_eq!(reached.server.key, "u@h:22");
+    assert_eq!(reached.level, CommandLevel::Own);
+    assert_eq!(
+        reached.argv[..5],
+        ["-T", "-o", "BatchMode=yes", "-o", "ControlMaster=no"]
+    );
+    assert_eq!(reached.argv.last().map(String::as_str), Some("rasp"));
+    assert!(
+        reached
+            .argv
+            .iter()
+            .all(|word| !word.chars().any(char::is_control))
+    );
+
+    // The gate of the server's own pane: a server kablo cannot be kept on, a call that is not a
+    // plain interactive one, a package that is not there.
+    let mut state = ssh_wrap::HostState::default();
+    state.note(Fact::Touched, "u@h:22", 1);
+    state.note(Fact::NoKablo, "u@h:22", 1);
+    std::fs::write(&world.state, state.render()).expect("state");
+    let error = backend.reach(&args, Ask::Never).expect_err("plain");
+    assert!(
+        error.contains("rasp is not a server bateri keeps terminals on"),
+        "{error}"
+    );
+    let error = world
+        .backend(None)
+        .reach(&args, Ask::Never)
+        .expect_err("no package");
+    assert!(error.contains("not a server bateri keeps"), "{error}");
+    let error = backend
+        .reach(&["rasp".to_owned(), "uptime".to_owned()], Ask::Never)
+        .expect_err("a command");
+    assert!(error.contains("not a server bateri keeps"), "{error}");
+
+    // A server whose commands are off is reached by nobody: the level says so and no connection is
+    // made for it.
+    let mut state = ssh_wrap::HostState::default();
+    state.note(Fact::Touched, "u@h:22", 1);
+    std::fs::write(&world.state, state.render()).expect("state");
+    let mut off = world.backend(Some(world.package()));
+    off.settings = Box::new(|| Settings {
+        remote_hosts: vec![bt_core::HostRule {
+            pattern: "rasp".to_owned(),
+            mark: None,
+            integration: None,
+            commands: Some(CommandLevel::Off),
+        }],
+        ..Settings::default()
+    });
+    let calls = world.calls().len();
+    let reached = off.reach(&args, Ask::Never).expect("said");
+    assert_eq!(reached.level, CommandLevel::Off);
+    assert!(reached.argv.is_empty());
+    assert_eq!(
+        world.calls().len(),
+        calls + 1,
+        "only `ssh -G` ran: {:?}",
+        world.calls()
+    );
+}

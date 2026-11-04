@@ -13,7 +13,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use super::message::{Place, Request};
+use super::message::{Place, Reply, Request};
 use super::place::Side;
 use super::{Anchor, Terminal};
 use crate::settings::TempRoot;
@@ -60,6 +60,11 @@ case $cmd in
     seq=$((seq + 1))
     echo "$seq" > "$STUB_DIR/seq"
     cat > "$STUB_DIR/app-in.$(printf '%06d' "$seq")"
+    # A conversation with an answer of its own (`app-reply.NNNNNN`) gets that one.
+    if [ -e "$STUB_DIR/app-reply.$(printf '%06d' "$seq")" ]; then
+      cat "$STUB_DIR/app-reply.$(printf '%06d' "$seq")"
+      exit 0
+    fi
     if [ -e "$STUB_DIR/app-exit" ]; then
       echo "kablo: the app did not take it" >&2
       exit "$(cat "$STUB_DIR/app-exit")"
@@ -78,6 +83,19 @@ case $cmd in
     if [ -e "$STUB_DIR/exit.$cmd" ]; then exit "$(cat "$STUB_DIR/exit.$cmd")"; fi
     ;;
 esac
+"#;
+
+/// The `ssh` a Mac that reaches a server runs, stood in for: it records its arguments and runs the
+/// last one, the command line, as sshd does — a shell in the server's home with the environment
+/// of a login (`HOME`, `SHELL`, and nothing of the caller's), the server's own stand-in kablo
+/// recording in its own directory.
+const SSH: &str = r#"#!/bin/sh
+for a in "$@"; do printf '%s\037' "$a"; done >> "$STUB_DIR/ssh-calls"
+printf '\n' >> "$STUB_DIR/ssh-calls"
+for last; do :; done
+cd "$SERVER_HOME" || exit 255
+exec env -i HOME="$SERVER_HOME" SHELL=/bin/sh PATH="$PATH" STUB_DIR="$SERVER_STUB" \
+  LC_TERMINAL_VERSION="${LC_TERMINAL_VERSION-}" /bin/sh -c "$last"
 "#;
 
 /// Where kablo is, relative to home, as the ledger knows it.
@@ -309,6 +327,42 @@ impl Server {
         std::fs::write(self.stub.join("app-reply"), reply).expect("a reply");
     }
 
+    /// The Mac answers `reply` to its `turn`th conversation (from 1), and what it says for all the
+    /// others otherwise.
+    fn mac_says_in_turn(&self, turn: usize, reply: &str) {
+        std::fs::write(self.stub.join(format!("app-reply.{turn:06}")), reply).expect("a reply");
+    }
+
+    /// This Mac runs the stand-in `ssh`, which goes to `remote`: the environment to run the script
+    /// with.
+    fn ssh_to(&self, remote: &Server) -> Vec<(String, String)> {
+        let bin = self.home.join("ssh-bin");
+        std::fs::create_dir_all(&bin).expect("bin");
+        crate::child::tests::write_program(&bin.join("ssh"), SSH);
+        let path = format!(
+            "{}:{}",
+            bin.display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        vec![
+            ("PATH".to_owned(), path),
+            ("SERVER_HOME".to_owned(), remote.home.display().to_string()),
+            ("SERVER_STUB".to_owned(), remote.stub.display().to_string()),
+        ]
+    }
+
+    /// The words `ssh` was run with, one call a vector.
+    fn ssh_calls(&self) -> Vec<Vec<String>> {
+        let text = std::fs::read_to_string(self.stub.join("ssh-calls")).unwrap_or_default();
+        text.lines()
+            .map(|line| {
+                let mut words: Vec<String> = line.split('\u{1f}').map(str::to_owned).collect();
+                words.pop();
+                words
+            })
+            .collect()
+    }
+
     /// The Mac is not there: kablo's `app` ends with 69 (the default).
     fn no_mac(&self) {
         let _ = std::fs::remove_file(self.stub.join("app-reply"));
@@ -335,6 +389,7 @@ fn place(terminal: u64, anchor: u64) -> Place {
         keep_open: false,
         focus: false,
         fresh: None,
+        server: None,
         home: crate::agent::message::Home::default(),
     }
 }
@@ -492,6 +547,7 @@ fn a_split_with_no_program_on_this_mac_starts_nothing_and_asks_for_a_pane_of_its
         let wanted = Place {
             side: Some(Side::Right),
             fresh: Some(server.home.display().to_string()),
+            server: None,
             ..place(1, 4)
         };
         assert_eq!(server.told(), [encoded(wanted)]);
@@ -2346,5 +2402,315 @@ fn a_window_waits_for_a_mac_as_a_tab_does_and_a_place_the_mac_refuses_ends_the_t
                 "--force".to_owned()
             ])
         );
+    }
+}
+
+/// The Mac's answer to the question how to reach a server: the words of an `ssh` command.
+fn ssh_words() -> String {
+    Reply::Text("arg -T\narg -o\narg BatchMode=yes\narg prod\n".to_owned()).encode()
+}
+
+/// A Mac and a server `prod` it reaches, and the environment the Mac's script runs with.
+fn mac_and_prod(name: &str) -> (Server, Server, Vec<(String, String)>) {
+    let mac = Server::new_here(&format!("{name}-mac"));
+    let prod = Server::new(&format!("{name}-prod"));
+    let env = mac.ssh_to(&prod);
+    (mac, prod, env)
+}
+
+fn borrowed(env: &[(String, String)]) -> Vec<(&str, &str)> {
+    env.iter()
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect()
+}
+
+/// What a `kablo new` call was asked: the name, the directory and the program (its `PATH` is the
+/// login shell's of the machine, which is not what the test is about).
+fn new_parts(call: &[String]) -> (String, String, Vec<String>) {
+    let after = |flag: &str| {
+        let at = call.iter().position(|word| word == flag).expect(flag);
+        call[at + 1].clone()
+    };
+    let program = call
+        .iter()
+        .position(|word| word == "--")
+        .expect("a program");
+    (after("--id"), after("--cwd"), call[program + 1..].to_vec())
+}
+
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn a_split_on_a_server_asks_the_mac_how_to_reach_it_starts_the_terminal_there_and_asks_for_the_pane()
+ {
+    for (name, shell) in shells() {
+        let (mac, prod, env) = mac_and_prod(&format!("on-{name}"));
+        mac.mac_says_in_turn(1, &ssh_words());
+        mac.mac_says_in_turn(2, PLACED);
+        let said = mac.run_file_with(
+            &shell,
+            &mac.script(),
+            Some("p4"),
+            &["split", "--below", "-S", "prod", "--", "make", "it's", "ok"],
+            &borrowed(&env),
+        );
+        assert_eq!(said.status, 0, "{}: {}", shell.display(), said.err);
+        // The terminal is the server's `p1`, written by its machine.
+        assert_eq!(said.out, "p1@prod\n", "{}", said.err);
+        assert_eq!(said.err, "", "a pane that landed as asked is silent");
+
+        // The Mac was asked how, then for the pane: a terminal of the server, beside this Mac's.
+        let told = mac.told();
+        assert_eq!(told.len(), 2, "{told:?}");
+        assert_eq!(
+            Request::parse(&told[0]),
+            Ok(Request::Ssh("prod".to_owned())),
+            "{told:?}"
+        );
+        let wanted = Place {
+            side: Some(Side::Below),
+            server: Some("prod".to_owned()),
+            ..place(1, 4)
+        };
+        assert_eq!(told[1], encoded(wanted));
+
+        // ssh got the Mac's words and one command line.
+        let ssh = mac.ssh_calls();
+        assert_eq!(ssh.len(), 1, "{ssh:?}");
+        assert_eq!(ssh[0][..4], ["-T", "-o", "BatchMode=yes", "prod"]);
+        assert_eq!(ssh[0].len(), 5, "{ssh:?}");
+
+        // The server started the terminal with its own command, in no terminal, in its home, the
+        // program's words as they were written; nothing was started or recorded on the Mac.
+        let calls = prod.calls_of("new");
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        assert_eq!(
+            new_parts(&calls[0]),
+            (
+                "p1".to_owned(),
+                prod.home.display().to_string(),
+                vec!["make".to_owned(), "it's".to_owned(), "ok".to_owned()]
+            )
+        );
+        assert_eq!(mac.calls_of("new"), Vec::<Vec<String>>::new());
+        assert!(!mac.state().join("terminals/p1").exists());
+        assert!(prod.state().join("terminals/p1").is_file());
+        // The server was not asked to place anything: it ran in no terminal.
+        assert!(prod.told().is_empty(), "{:?}", prod.told());
+    }
+}
+
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn a_server_that_cannot_be_reached_is_said_so_before_or_after_anything_is_started() {
+    for (name, shell) in shells() {
+        let (mac, prod, env) = mac_and_prod(&format!("refused-{name}"));
+        let env = borrowed(&env);
+        let run = |args: &[&str]| mac.run_file_with(&shell, &mac.script(), Some("p4"), args, &env);
+
+        // A name that is not a name is a mistake before the Mac is asked.
+        for bad in ["-oProxyCommand=x", "a b", "a;b", "", "p9@"] {
+            let said = run(&["split", "-S", bad]);
+            assert_eq!(said.status, 64, "{bad:?}: {}", said.err);
+        }
+        let said = run(&["split", "-S"]);
+        assert_eq!(said.status, 64, "{}", said.err);
+        let said = run(&["split", "-S", "prod", "-S", "web"]);
+        assert_eq!(said.status, 64, "{}", said.err);
+        assert!(mac.told().is_empty());
+
+        // The level, the server's own `commands` and the gate of `ssh prod` are the Mac's: its
+        // words are the script's, and nothing is started.
+        mac.mac_says(
+            "bateri 2\nerror refused this reaches another machine, which only \"full\" does\n",
+        );
+        let said = run(&["split", "-S", "prod", "--", "make"]);
+        assert_eq!(said.status, 77, "{}", said.err);
+        assert!(said.err.contains("only \"full\""), "{}", said.err);
+        assert_eq!(said.out, "");
+        mac.mac_says("bateri 2\nerror failed prod is not a server bateri keeps terminals on\n");
+        let said = run(&["split", "-S", "prod", "--", "make"]);
+        assert_eq!(said.status, 1, "{}", said.err);
+        assert!(said.err.contains("keeps terminals on"), "{}", said.err);
+        assert_eq!(mac.ssh_calls().len(), 0);
+        assert_eq!(prod.calls_of("new"), Vec::<Vec<String>>::new());
+
+        // No Mac, or one that says nothing.
+        mac.no_mac();
+        let said = run(&["split", "-S", "prod"]);
+        assert_eq!(said.status, 69, "{}", said.err);
+        mac.mac_is_silent();
+        let said = run(&["tab", "-S", "prod"]);
+        assert_eq!(said.status, 1, "{}", said.err);
+        assert_eq!(mac.ssh_calls().len(), 0);
+
+        // A server bateri never opened has no command: it is told to be, with nothing installed.
+        mac.no_mac();
+        mac.forget_calls();
+        mac.mac_says(&ssh_words());
+        std::fs::remove_file(prod.script()).expect("the command");
+        let said = run(&["split", "-S", "prod", "--", "make"]);
+        assert_eq!(said.status, 1, "{}", said.err);
+        assert!(
+            said.err.contains("not set up on prod") && said.err.contains("first"),
+            "{}",
+            said.err
+        );
+        assert!(!prod.script().exists());
+        assert_eq!(prod.calls_of("new"), Vec::<Vec<String>>::new());
+    }
+}
+
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn a_pane_the_mac_refuses_ends_the_terminal_the_server_started() {
+    for (name, shell) in shells() {
+        let (mac, prod, env) = mac_and_prod(&format!("ends-{name}"));
+        mac.mac_says_in_turn(1, &ssh_words());
+        mac.mac_says_in_turn(2, "bateri 2\nerror unknown there is no tab t9\n");
+        let said = mac.run_file_with(
+            &shell,
+            &mac.script(),
+            Some("p4"),
+            &["split", "--tab", "t9", "-S", "prod", "--", "make"],
+            &borrowed(&env),
+        );
+        assert_eq!(
+            (said.status, said.err.as_str()),
+            (1, "bateri: there is no tab t9\n"),
+            "{}",
+            shell.display()
+        );
+        assert_eq!(said.out, "");
+        // The server's own command ended it, with no Mac to ask there.
+        assert_eq!(prod.calls_of("end"), [["end", "p1", "--force"]]);
+        assert!(mac.calls_of("end").is_empty());
+    }
+}
+
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn send_capture_and_wait_for_a_pane_of_a_server_run_there_and_keep_their_status() {
+    for (name, shell) in shells() {
+        let (mac, prod, env) = mac_and_prod(&format!("carried-{name}"));
+        mac.mac_says(&ssh_words());
+        let env = borrowed(&env);
+        let run = |args: &[&str]| mac.run_file_with(&shell, &mac.script(), Some("p4"), args, &env);
+
+        let said = run(&["send", "p9@prod", "echo 'hi' $HOME; ls"]);
+        assert_eq!(said.status, 0, "{}", said.err);
+        // The text arrives as it was written: nothing of it is read by any shell on the way.
+        assert_eq!(
+            prod.calls_of("send"),
+            [["send", "p9", "echo 'hi' $HOME; ls"]]
+        );
+        let said = run(&["send-key", "p9@prod", "Enter"]);
+        assert_eq!(said.status, 0, "{}", said.err);
+        assert_eq!(prod.calls_of("send-key"), [["send-key", "p9", "Enter"]]);
+        // A key first is the caller's own terminal's: no machine is named, nobody is asked.
+        let before = mac.ssh_calls().len();
+        run(&["send-key", "Enter"]);
+        assert_eq!(mac.ssh_calls().len(), before);
+        assert_eq!(mac.calls_of("send-key"), [["send-key", "Enter"]]);
+
+        let said = run(&["capture", "--history", "20", "p9@prod", "--trim"]);
+        assert_eq!(said.status, 0, "{}", said.err);
+        assert_eq!(
+            prod.calls_of("capture"),
+            [["capture", "--history", "20", "p9", "--trim"]]
+        );
+
+        // The program's own status comes back through ssh.
+        std::fs::write(prod.stub.join("exit.wait"), "7").expect("a status");
+        let said = run(&["wait", "p9@prod", "--for", "5s"]);
+        assert_eq!(said.status, 7, "{}", said.err);
+        assert_eq!(prod.calls_of("wait"), [["wait", "p9", "--for", "5s"]]);
+
+        // Each went to the Mac for the connection first.
+        assert!(
+            mac.told()
+                .iter()
+                .all(|text| text.starts_with("bateri 2\nssh\n"))
+        );
+        // And nothing of it was kablo's here.
+        assert!(mac.calls_of("send").is_empty() && mac.calls_of("capture").is_empty());
+
+        // This Mac's own pane written out is this Mac's: no ssh.
+        let before = mac.ssh_calls().len();
+        let said = run(&["capture", "p4@local"]);
+        assert_eq!(said.status, 0, "{}", said.err);
+        assert_eq!(mac.calls_of("capture"), [["capture", "p4"]]);
+        assert_eq!(mac.ssh_calls().len(), before);
+
+        // A malformed address is no pane, and an unreachable server is 255 or the Mac's word.
+        let said = run(&["capture", "p9@pr od"]);
+        assert_eq!(said.status, 64, "{}", said.err);
+        mac.mac_says(
+            "bateri 2\nerror refused this reaches another machine, which only \"full\" does\n",
+        );
+        let said = run(&["wait", "p9@prod"]);
+        assert_eq!(said.status, 77, "{}", said.err);
+    }
+}
+
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn focus_close_and_the_layout_verbs_hand_the_address_of_a_pane_of_another_machine_to_the_mac() {
+    use crate::agent::message::{Arrange, Subject};
+    for (name, shell) in shells() {
+        let (mac, _prod, env) = mac_and_prod(&format!("addresses-{name}"));
+        let env = borrowed(&env);
+        mac.mac_says("bateri 2\nok\n");
+        let run = |args: &[&str]| mac.run_file_with(&shell, &mac.script(), Some("p4"), args, &env);
+        let address = |text: &str| Anchor::address(text).expect("an address");
+
+        assert_eq!(run(&["focus", "pane", "p9@prod"]).status, 0);
+        assert_eq!(run(&["zoom", "p9@prod"]).status, 0);
+        assert_eq!(run(&["swap", "p9@prod", "p3"]).status, 0);
+        assert_eq!(
+            run(&["move", "pane", "p9@prod", "--beside", "p3@local", "--right"]).status,
+            0
+        );
+        assert_eq!(run(&["resize", "p9@prod", "--left"]).status, 0);
+        assert_eq!(run(&["close", "pane", "p9@prod"]).status, 0);
+        let told: Vec<_> = mac
+            .told()
+            .iter()
+            .map(|text| Request::parse(text).expect("a request"))
+            .collect();
+        assert_eq!(
+            told,
+            [
+                Request::Arrange(Arrange::Focus(Subject::Pane(Some(address("p9@prod"))))),
+                Request::Arrange(Arrange::Zoom(Some(address("p9@prod")))),
+                Request::Arrange(Arrange::Swap {
+                    pane: address("p9@prod"),
+                    other: address("p3"),
+                }),
+                Request::Arrange(Arrange::Move {
+                    pane: address("p9@prod"),
+                    beside: address("p3@local"),
+                    side: Side::Right,
+                }),
+                Request::Arrange(Arrange::Resize {
+                    pane: Some(address("p9@prod")),
+                    side: Side::Left,
+                    steps: 1,
+                }),
+                Request::Close(address("p9@prod")),
+            ]
+        );
+        // None of it needed a connection, and none was made.
+        assert!(mac.ssh_calls().is_empty());
+
+        // A pane of another machine is closed by the Mac or by nobody: with none, this machine's
+        // own `kablo end` would end another terminal of the same number.
+        mac.no_mac();
+        let said = run(&["close", "pane", "p9@prod"]);
+        assert_eq!(said.status, 69, "{}", said.err);
+        assert!(mac.calls_of("end").is_empty());
+        // A label is kablo's own where the pane is; and an address is no anchor.
+        assert_eq!(run(&["rename", "pane", "p9@prod", "x"]).status, 64);
+        assert_eq!(run(&["split", "p9@prod"]).status, 64);
+        assert_eq!(run(&["focus", "pane", "p9@"]).status, 64);
     }
 }

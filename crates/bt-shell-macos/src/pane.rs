@@ -8970,7 +8970,7 @@ mod tests {
         // is behind, or the pane goes to another window). `put` gives the keyboard to the new pane
         // only as that gate said.
         let agent = include_str!("agent.rs");
-        let place = &agent[agent.find("    fn place(").expect("place")..];
+        let place = &agent[agent.find("    fn place_on(").expect("place")..];
         let place = &place[..place.find("\n    }\n").expect("its end")];
         let keyboard = place.find("arrange::keyboard(").expect(place);
         let go = place.find("rule::go(").expect(place);

@@ -62,6 +62,8 @@ pub(crate) enum Job {
     /// The terminals the server keeps wait for a login: a pane's ⏎ on
     /// "Needs your password" ([`TerminalPane::log_in_to_reconnect`]).
     Reconnect,
+    /// A program in this pane asked for a terminal on the server (`bateri split -S`).
+    Command,
 }
 
 impl Job {
@@ -72,6 +74,7 @@ impl Job {
             Self::Preview => "Log in to preview the file.".to_owned(),
             Self::Finder => "Log in to copy the file to Finder.".to_owned(),
             Self::Reconnect => format!("Log in to reconnect the terminals on {host}."),
+            Self::Command => format!("Log in so that a program in this pane can use {host}."),
         }
     }
 }
@@ -109,6 +112,12 @@ impl TerminalPane {
         };
         let ask = Ask::Sheet(self.password_asker(target.host.clone(), job, holds));
         Dial::gated(self.masters(), target, ask)
+    }
+
+    /// The password sheet for a program in this pane that wants to reach `host` (`bateri split
+    /// -S`): the thread that waits for it calls the answerer, and the sheet opens on this pane.
+    pub(crate) fn command_ask(&self, host: &str) -> Ask {
+        Ask::Sheet(self.password_asker(host.to_owned(), Job::Command, false))
     }
 
     /// The answerer a job's thread calls for every prompt: the question goes to

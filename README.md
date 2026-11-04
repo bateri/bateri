@@ -191,6 +191,8 @@ bateri move tab t3 --group g1                    # or --window w1, which also ta
 bateri move pane p9 --beside p3 --right
 bateri zoom [p9]    bateri swap p9 p3    bateri resize [p9] --left [--by N]
 bateri notify "tests failed"                     # a notification when bateri is behind or has no tab of it
+bateri split -S prod -- make test                # a terminal on the server prod (full level only); prints p9@prod
+bateri send p9@prod 'q'                          # capture, send-key and wait reach it the same way
 ```
 
 The kind is always written: `close tab t3`, never `close t3`, and an id of
@@ -209,6 +211,18 @@ shell in the pane when the program ends, and `--wait` needs a program.
 the default, lets a program manage what is made of its own machine's panes:
 closing a tab that holds a pane of another machine is refused. Closing ends
 the programs in the panes.
+
+**Another machine.** A pane of another machine is written with the machine
+after an `@`, as `bateri ls` writes it: `p9@prod`, and `p3@local` for this Mac.
+`focus`, `close`, `zoom`, `swap`, `move` and `resize` take such an address from
+level `screen` up. `-S SERVER` starts the terminal on a server instead of here,
+by the name you give `ssh` (`prod`, an alias of `~/.ssh/config`, with no list of
+its own and through the same gate as `ssh prod` in a bateri pane), and `send`,
+`send-key`, `capture` and `wait` for `p9@prod` run there over the connection
+bateri keeps; both are for level `full` alone, and the server's own `commands`
+must not be `off`. bateri asks for a password in its usual sheet when the
+connection must be made, installs nothing on the server (open a terminal on it
+in bateri first), and the pane opens at once and connects by its own path.
 
 **The keyboard has one rule.** A command that would change where you type
 (`focus`, `move`, `zoom`, `swap`, `resize`, `--focus`) is done only from the pane

@@ -41,7 +41,7 @@ use kablo_proto::SessionId;
 use super::Cause;
 use super::install::{self, Bundle, Channel, Failure, Installed, SshChannel};
 use super::local::{self, LocalChannel};
-use super::service::{Backend, Carried, Letter, PaneInfo, PaneLink, Peer, Refusal};
+use super::service::{Backend, Carried, Letter, PaneInfo, PaneLink, Peer, Reached, Refusal};
 use crate::ssh_route::{self, Ask, Asker, Denied, Masters, Plan, Route, SshRunner};
 use crate::ssh_wrap::{self, Fact, KabloHost};
 use crate::upload::ssh_argv_for;
@@ -480,6 +480,54 @@ impl Backend for SshBackend {
         if let Some(mail) = &self.mail {
             mail(letter);
         }
+    }
+
+    fn reach(&self, args: &[String], ask: Ask) -> Result<Reached, String> {
+        let name = args.first().map_or("the server", String::as_str);
+        // The gate of the server's own pane: settings, `ssh -G`, what is known of the server.
+        let server = self.route(args).ok_or_else(|| {
+            format!(
+                "{name} is not a server bateri keeps terminals on: its ssh is a plain one (the \
+                 settings, a command, or a server kablo cannot be kept on)"
+            )
+        })?;
+        if local::is_account(&server.key) {
+            return Err(format!("{name} is this Mac"));
+        }
+        // A server bateri has never put its files on has no `bateri` to start a terminal with.
+        if !ssh_wrap::load(&self.state_path).knows(Fact::Touched, &server.key) {
+            return Err(format!(
+                "bateri has not set up {name} yet: open a terminal on it in bateri first (ssh \
+                 {name}), then try again"
+            ));
+        }
+        let level = (self.settings)().commands_for(&server.host);
+        // Nothing is done for a server whose commands are off, a connection included: the
+        // caller refuses, naming the setting.
+        if level == CommandLevel::Off {
+            return Ok(Reached {
+                server,
+                level,
+                argv: Vec::new(),
+            });
+        }
+        let target = self.target(&server);
+        let route = match &self.masters {
+            Some(masters) => masters
+                .ensure(&target, ask)
+                .map_err(|denied| denied.text())?,
+            None => self.route_of(&target),
+        };
+        let mut argv = ssh_argv_for(&target, &route);
+        argv.remove(0);
+        if argv.iter().any(|word| word.chars().any(char::is_control)) {
+            return Err(format!("the connection to {name} cannot be written down"));
+        }
+        Ok(Reached {
+            server,
+            level,
+            argv,
+        })
     }
 
     fn reachable(&self, account: &str, server: &KabloHost) {

@@ -514,6 +514,28 @@ pub trait Backend: Send + Sync + 'static {
     fn records(&self, _server: &KabloHost) -> Vec<(Terminal, Record)> {
         Vec::new()
     }
+
+    /// How a program on this Mac reaches the server the `ssh` arguments `args` name (`bateri
+    /// split -S prod`): the server, bateri's level for it and the words of the `ssh` command that
+    /// ride the connection bateri keeps to it. The same gate as the server's own pane
+    /// ([`Backend::route`]); `ask` is how a password is asked for when the connection must be
+    /// made. It **waits** for that password, so it is called on a thread of its own and never on
+    /// the main one. The `Err` is a line for the program that asked.
+    fn reach(&self, _args: &[String], _ask: crate::ssh_route::Ask) -> Result<Reached, String> {
+        Err("this build cannot reach a server for a program".to_owned())
+    }
+}
+
+/// A server this Mac can reach for a program ([`Backend::reach`]).
+#[derive(Debug)]
+pub struct Reached {
+    /// The server, as a pane of it is started.
+    pub server: KabloHost,
+    /// What the `bateri` command may do on it.
+    pub level: bt_core::CommandLevel,
+    /// The `ssh` command's words after the program: options, then the destination. One word to
+    /// a line of the reply, so none has a line break.
+    pub argv: Vec<String>,
 }
 
 /// What a [`Service::survey`] came back with.
@@ -1001,6 +1023,9 @@ pub struct Service {
     names: Mutex<HashMap<PaneUuid, SessionId>>,
     /// What [`Service::stage_of`] reads.
     stages: Arc<Mutex<HashMap<String, Staged>>>,
+    /// What the service asks of the world around it, for what a program asks that is not a
+    /// terminal's ([`Service::backend`]).
+    backend: Arc<dyn Backend>,
 }
 
 /// How long a terminal that was asked to hang up has before it is killed.
@@ -1069,6 +1094,7 @@ impl Service {
                 .name("ssh-hold accept".into())
                 .spawn(move || accept_loop(&listener, &tx, &stop))?
         };
+        let kept_backend = Arc::clone(&backend);
         let shown = Arc::new(Mutex::new(HashMap::new()));
         let local_programs = Arc::new(Mutex::new(HashMap::new()));
         let background = Arc::new(Mutex::new(BTreeMap::new()));
@@ -1126,7 +1152,14 @@ impl Service {
             local_gave_up: Mutex::new(None),
             names: Mutex::new(HashMap::new()),
             stages,
+            backend: kept_backend,
         })
+    }
+
+    /// What the service asks of the world around it: the application asks it for what a
+    /// program wants of a server ([`Backend::reach`], [`Backend::route`]) on a thread of its own.
+    pub fn backend(&self) -> Arc<dyn Backend> {
+        Arc::clone(&self.backend)
     }
 
     /// The terminal a server keeps that the pane shows, if it shows one: written by the loop
