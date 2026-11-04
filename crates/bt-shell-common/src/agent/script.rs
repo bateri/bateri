@@ -13,7 +13,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use super::message::{Place, Reply, Request};
+use super::message::{Place, Relay, Relayed, Reply, Request};
 use super::place::Side;
 use super::{Anchor, Terminal};
 use crate::settings::TempRoot;
@@ -86,16 +86,16 @@ esac
 "#;
 
 /// The `ssh` a Mac that reaches a server runs, stood in for: it records its arguments and runs the
-/// last one, the command line, as sshd does — a shell in the server's home with the environment
-/// of a login (`HOME`, `SHELL`, and nothing of the caller's), the server's own stand-in kablo
-/// recording in its own directory.
+/// last one, the command line, as sshd does — the person's shell (`REMOTE_SHELL`, else `sh`) in the
+/// server's home with the environment of a login (`HOME`, `SHELL`, and nothing of the caller's),
+/// the server's own stand-in kablo recording in its own directory.
 const SSH: &str = r#"#!/bin/sh
 for a in "$@"; do printf '%s\037' "$a"; done >> "$STUB_DIR/ssh-calls"
 printf '\n' >> "$STUB_DIR/ssh-calls"
 for last; do :; done
 cd "$SERVER_HOME" || exit 255
-exec env -i HOME="$SERVER_HOME" SHELL=/bin/sh PATH="$PATH" STUB_DIR="$SERVER_STUB" \
-  LC_TERMINAL_VERSION="${LC_TERMINAL_VERSION-}" /bin/sh -c "$last"
+exec env -i HOME="$SERVER_HOME" SHELL="${REMOTE_SHELL:-/bin/sh}" PATH="$PATH" STUB_DIR="$SERVER_STUB" \
+  LC_TERMINAL_VERSION="${LC_TERMINAL_VERSION-}" "${REMOTE_SHELL:-/bin/sh}" -c "$last"
 "#;
 
 /// Where kablo is, relative to home, as the ledger knows it.
@@ -123,6 +123,28 @@ fn shells() -> Vec<(&'static str, PathBuf)> {
         }
     }
     found
+}
+
+/// The login shells a person may have, those that are installed: the two the script is run by and
+/// bash, zsh and fish, which read a line of quotes in three more ways.
+fn login_shells() -> Vec<(&'static str, PathBuf)> {
+    let mut found = shells();
+    for name in ["bash", "zsh", "fish"] {
+        if let Some(path) = which(name) {
+            found.push((name, path));
+        }
+    }
+    found
+}
+
+/// The calls a stand-in recorded: each ends with its unit separator and a line break, and a word
+/// may hold a line break of its own.
+fn records(file: &Path) -> Vec<Vec<String>> {
+    let text = std::fs::read_to_string(file).unwrap_or_default();
+    text.split("\u{1f}\n")
+        .filter(|record| !record.is_empty())
+        .map(|record| record.split('\u{1f}').map(str::to_owned).collect())
+        .collect()
 }
 
 /// What a run said.
@@ -242,6 +264,19 @@ impl Server {
         args: &[&str],
         extra: &[(&str, &str)],
     ) -> Said {
+        self.run_file_input(shell, file, here, args, extra, None)
+    }
+
+    /// [`Self::run_file_with`], with `input` on standard input (none: nothing to read).
+    fn run_file_input(
+        &self,
+        shell: &Path,
+        file: &Path,
+        here: Option<&str>,
+        args: &[&str],
+        extra: &[(&str, &str)],
+        input: Option<&[u8]>,
+    ) -> Said {
         // The caller has a umask of its own (the script must not keep its owner-only one for
         // what it starts) and stands in a tab (which a terminal it starts is not in).
         let mut command = Command::new("/bin/sh");
@@ -261,11 +296,28 @@ impl Server {
             .env("LC_TERMINAL_VERSION", VERSION)
             .envs(extra.iter().copied())
             .current_dir(&self.home)
-            .stdin(Stdio::null());
+            .stdin(if input.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            });
         if let Some(here) = here {
             command.env("STUB_HERE", here);
         }
-        let out = command.output().expect("the script");
+        let out = if let Some(input) = input {
+            use std::io::Write;
+            command.stdout(Stdio::piped()).stderr(Stdio::piped());
+            let mut child = command.spawn().expect("the script");
+            child
+                .stdin
+                .take()
+                .expect("its input")
+                .write_all(input)
+                .expect("the input");
+            child.wait_with_output().expect("the script")
+        } else {
+            command.output().expect("the script")
+        };
         Said {
             status: out.status.code().expect("a status, not a signal"),
             out: String::from_utf8_lossy(&out.stdout).into_owned(),
@@ -275,14 +327,7 @@ impl Server {
 
     /// What kablo was called with, in order, one call a vector.
     fn calls(&self) -> Vec<Vec<String>> {
-        let text = std::fs::read_to_string(self.stub.join("calls")).unwrap_or_default();
-        text.lines()
-            .map(|line| {
-                let mut words: Vec<String> = line.split('\u{1f}').map(str::to_owned).collect();
-                words.pop();
-                words
-            })
-            .collect()
+        records(&self.stub.join("calls"))
     }
 
     /// The calls to kablo with the verb `verb`.
@@ -353,14 +398,7 @@ impl Server {
 
     /// The words `ssh` was run with, one call a vector.
     fn ssh_calls(&self) -> Vec<Vec<String>> {
-        let text = std::fs::read_to_string(self.stub.join("ssh-calls")).unwrap_or_default();
-        text.lines()
-            .map(|line| {
-                let mut words: Vec<String> = line.split('\u{1f}').map(str::to_owned).collect();
-                words.pop();
-                words
-            })
-            .collect()
+        records(&self.stub.join("ssh-calls"))
     }
 
     /// The Mac is not there: kablo's `app` ends with 69 (the default).
@@ -2712,5 +2750,479 @@ fn focus_close_and_the_layout_verbs_hand_the_address_of_a_pane_of_another_machin
         assert_eq!(run(&["rename", "pane", "p9@prod", "x"]).status, 64);
         assert_eq!(run(&["split", "p9@prod"]).status, 64);
         assert_eq!(run(&["focus", "pane", "p9@"]).status, 64);
+    }
+}
+
+// ─── from a server that has `full`: the Mac relays ───────────────────────
+
+/// The Mac's answer to the question how to reach a server, when a program on a server asks: the
+/// word `relay`.
+fn relay_word() -> String {
+    Reply::Text("relay\n".to_owned()).encode()
+}
+
+/// The Mac's answer to a relay: how the command ended and what it said.
+fn relayed(status: u8, stderr: &str, stdout: &str) -> String {
+    Reply::Relayed(Relayed::of(status, stderr, stdout)).encode()
+}
+
+/// The relay a program is to send for `words` on `server`.
+fn relay_text(server: &str, words: &[&str]) -> String {
+    Request::Relay(Relay {
+        server: server.to_owned(),
+        words: words.iter().map(|word| (*word).to_owned()).collect(),
+    })
+    .encode()
+    .expect("a relay")
+}
+
+fn ssh_text(server: &str) -> String {
+    Request::Ssh(server.to_owned()).encode().expect("an ssh")
+}
+
+/// The Mac's answers, one a conversation, in the order the script has them (after the ones it has
+/// had already).
+struct Turns {
+    next: usize,
+}
+
+impl Turns {
+    fn new() -> Turns {
+        Turns { next: 1 }
+    }
+
+    fn say(&mut self, server: &Server, replies: &[String]) {
+        for reply in replies {
+            server.mac_says_in_turn(self.next, reply);
+            self.next += 1;
+        }
+    }
+}
+
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn a_server_given_full_hands_the_commands_for_another_machine_to_the_mac_and_prints_what_comes_back()
+ {
+    for (name, shell) in shells() {
+        let a = Server::new(&format!("relayed-{name}"));
+        let mut turns = Turns::new();
+        let run = |args: &[&str]| a.run(&shell, Some("p4"), args);
+
+        // capture: the Mac is asked how (`relay`), then to run it; stdout comes back as it was.
+        turns.say(&a, &[relay_word(), relayed(0, "", "first\n\ntrail")]);
+        let said = run(&["capture", "--history", "20", "p9@rasp", "--trim"]);
+        assert_eq!(said.status, 0, "{}: {}", shell.display(), said.err);
+        assert_eq!(said.out, "first\n\ntrail");
+        assert_eq!(said.err, "");
+        let told = a.told();
+        assert_eq!(told.len(), 2, "{told:?}");
+        assert_eq!(told[0], ssh_text("rasp"));
+        assert_eq!(
+            told[1],
+            relay_text("rasp", &["capture", "--history", "20", "p9", "--trim"])
+        );
+        // Nothing of it was kablo's here: it runs where the pane is.
+        assert!(a.calls_of("capture").is_empty());
+        assert!(a.ssh_calls().is_empty());
+
+        // send: the text with a line break and a quote arrives as one word.
+        a.forget_calls();
+        turns.say(&a, &[relay_word(), relayed(0, "", "")]);
+        let said = run(&["send", "p9@rasp", "it's\nme"]);
+        assert_eq!(said.status, 0, "{}", said.err);
+        assert_eq!(a.told()[1], relay_text("rasp", &["send", "p9", "it's\nme"]));
+        assert!(a.calls_of("send").is_empty());
+
+        // `send ID -` reads its text here, since standard input does not cross.
+        a.forget_calls();
+        turns.say(&a, &[relay_word(), relayed(0, "", "")]);
+        let said = a.run_file_input(
+            &shell,
+            &a.script(),
+            Some("p4"),
+            &["send", "p9@rasp", "-"],
+            &[],
+            Some(b"from\nstdin\n"),
+        );
+        assert_eq!(said.status, 0, "{}", said.err);
+        assert_eq!(
+            a.told()[1],
+            relay_text("rasp", &["send", "p9", "from\nstdin\n"])
+        );
+
+        // send-key, and the status and stderr of `wait` come back.
+        a.forget_calls();
+        turns.say(&a, &[relay_word(), relayed(0, "", "")]);
+        let said = run(&["send-key", "p9@rasp", "Enter"]);
+        assert_eq!(said.status, 0, "{}", said.err);
+        assert_eq!(
+            a.told()[1],
+            relay_text("rasp", &["send-key", "p9", "Enter"])
+        );
+        a.forget_calls();
+        turns.say(
+            &a,
+            &[relay_word(), relayed(7, "kablo: it ended\nbadly\n", "")],
+        );
+        let said = run(&["wait", "p9@rasp", "--for", "5s"]);
+        assert_eq!(said.status, 7, "{}", said.err);
+        assert_eq!(said.err, "kablo: it ended\nbadly\n");
+        assert_eq!(said.out, "");
+        assert_eq!(
+            a.told()[1],
+            relay_text("rasp", &["wait", "p9", "--for", "5s"])
+        );
+
+        // This Mac is `@local` to a server, and asked for under that word.
+        a.forget_calls();
+        turns.say(&a, &[relay_word(), relayed(0, "", "")]);
+        let said = run(&["send", "p3@local", "hi"]);
+        assert_eq!(said.status, 0, "{}", said.err);
+        let told = a.told();
+        assert_eq!(told[0], ssh_text("@local"));
+        assert_eq!(told[1], relay_text("@local", &["send", "p3", "hi"]));
+
+        // A key first, or a pane with no machine, is this machine's own: nobody is asked.
+        a.forget_calls();
+        run(&["send-key", "Enter"]);
+        assert!(a.told().is_empty());
+        assert_eq!(a.calls_of("send-key"), [["send-key", "Enter"]]);
+        // A malformed address is no pane.
+        let said = run(&["capture", "p9@pr od"]);
+        assert_eq!(said.status, 64, "{}", said.err);
+        assert!(a.told().is_empty());
+    }
+}
+
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn a_server_that_is_not_given_full_is_told_77_and_a_mac_that_is_gone_or_odd_is_said_so() {
+    for (name, shell) in shells() {
+        let a = Server::new(&format!("relay-refused-{name}"));
+        let mut turns = Turns::new();
+        let run = |args: &[&str]| a.run(&shell, Some("p4"), args);
+        let refused =
+            "bateri 2\nerror refused this reaches another machine, which only \"full\" does\n";
+
+        // The first question is the Mac's to refuse: nothing more is asked, nothing is run here.
+        turns.say(&a, &[refused.to_owned()]);
+        let said = run(&["send", "p9@rasp", "x"]);
+        assert_eq!(said.status, 77, "{}", said.err);
+        assert!(said.err.contains("only \"full\""), "{}", said.err);
+        assert_eq!(a.told().len(), 1);
+        assert!(a.calls_of("send").is_empty());
+
+        // So is the relay itself.
+        a.forget_calls();
+        turns.say(&a, &[relay_word(), refused.to_owned()]);
+        let said = run(&["capture", "p9@rasp"]);
+        assert_eq!(said.status, 77, "{}", said.err);
+        assert_eq!(said.out, "");
+
+        // A server whose `commands` are off, or that bateri does not keep terminals on.
+        a.forget_calls();
+        turns.say(
+            &a,
+            &[
+                "bateri 2\nerror failed rasp is not a server bateri keeps terminals on\n"
+                    .to_owned(),
+            ],
+        );
+        let said = run(&["wait", "p9@rasp"]);
+        assert_eq!(said.status, 1, "{}", said.err);
+        assert!(said.err.contains("keeps terminals on"), "{}", said.err);
+
+        // A command the Mac could not run in time, an answer this does not read, no Mac.
+        a.forget_calls();
+        turns.say(
+            &a,
+            &[
+                relay_word(),
+                "bateri 2\nerror failed the command ran longer than 3600 seconds and was ended\n"
+                    .to_owned(),
+            ],
+        );
+        let said = run(&["wait", "p9@rasp"]);
+        assert_eq!(said.status, 1, "{}", said.err);
+        assert!(said.err.contains("longer than"), "{}", said.err);
+        a.forget_calls();
+        turns.say(
+            &a,
+            &[relay_word(), "bateri 2\nok text\nnot this\n".to_owned()],
+        );
+        let said = run(&["wait", "p9@rasp"]);
+        assert_eq!(said.status, 1, "{}", said.err);
+        assert_eq!(said.out, "");
+        a.forget_calls();
+        a.no_mac();
+        let said = run(&["send", "p9@rasp", "x"]);
+        assert_eq!(said.status, 69, "{}", said.err);
+    }
+}
+
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn a_server_given_full_starts_a_terminal_on_another_machine_through_the_mac_and_asks_for_its_pane()
+{
+    for (name, shell) in shells() {
+        let a = Server::new(&format!("relay-split-{name}"));
+        let mut turns = Turns::new();
+        let run = |args: &[&str]| a.run(&shell, Some("p4"), args);
+
+        // The terminal is started there by the command the Mac runs; the pane is asked for beside
+        // this machine's own, with the server's name.
+        turns.say(
+            &a,
+            &[relay_word(), relayed(0, "", "p7\n"), PLACED.to_owned()],
+        );
+        let said = run(&[
+            "split",
+            "--below",
+            "-S",
+            "rasp",
+            "--label",
+            "work",
+            "--keep-open",
+            "--",
+            "make",
+            "it's ok",
+        ]);
+        assert_eq!(said.status, 0, "{}: {}", shell.display(), said.err);
+        assert_eq!(said.out, "p7@rasp\n");
+        assert_eq!(said.err, "");
+        let told = a.told();
+        assert_eq!(told.len(), 3, "{told:?}");
+        assert_eq!(told[0], ssh_text("rasp"));
+        assert_eq!(
+            told[1],
+            relay_text(
+                "rasp",
+                &[
+                    "split",
+                    "--label",
+                    "work",
+                    "--keep-open",
+                    "--",
+                    "make",
+                    "it's ok"
+                ]
+            )
+        );
+        let wanted = Place {
+            side: Some(Side::Below),
+            keep_open: true,
+            server: Some("rasp".to_owned()),
+            ..place(7, 4)
+        };
+        assert_eq!(told[2], encoded(wanted));
+        // Nothing was started or recorded here, and no ssh was run.
+        assert!(a.calls_of("new").is_empty());
+        assert!(!a.state().join("terminals/p7").exists());
+        assert!(a.ssh_calls().is_empty());
+
+        // This Mac is `@local`.
+        a.forget_calls();
+        turns.say(
+            &a,
+            &[relay_word(), relayed(0, "", "p2\n"), PLACED.to_owned()],
+        );
+        let said = run(&["split", "-S", "@local", "--", "make"]);
+        assert_eq!(said.status, 0, "{}", said.err);
+        assert_eq!(said.out, "p2@local\n");
+        let told = a.told();
+        assert_eq!(told[0], ssh_text("@local"));
+        assert_eq!(told[1], relay_text("@local", &["split", "--", "make"]));
+        let wanted = Place {
+            server: Some("@local".to_owned()),
+            ..place(2, 4)
+        };
+        assert_eq!(told[2], encoded(wanted));
+
+        // `--wait` waits there, through the Mac, and ends with the program's status.
+        a.forget_calls();
+        turns.say(
+            &a,
+            &[
+                relay_word(),
+                relayed(0, "", "p8\n"),
+                PLACED.to_owned(),
+                relayed(5, "", ""),
+            ],
+        );
+        let said = run(&["split", "-S", "rasp", "--wait", "--", "make"]);
+        assert_eq!(said.status, 5, "{}", said.err);
+        assert_eq!(a.told()[3], relay_text("rasp", &["wait", "p8"]));
+
+        // A pane the Mac refuses ends the terminal that was started there, through the Mac.
+        a.forget_calls();
+        turns.say(
+            &a,
+            &[
+                relay_word(),
+                relayed(0, "", "p9\n"),
+                "bateri 2\nerror unknown there is no tab t9\n".to_owned(),
+                relayed(0, "", ""),
+            ],
+        );
+        let said = run(&["split", "--tab", "t9", "-S", "rasp", "--", "make"]);
+        assert_eq!(
+            (said.status, said.err.as_str()),
+            (1, "bateri: there is no tab t9\n"),
+            "{}",
+            shell.display()
+        );
+        assert_eq!(
+            a.told()[3],
+            relay_text("rasp", &["close", "pane", "p9", "--force"])
+        );
+
+        // A command that cannot start the terminal is its failure: the status, what it said, and
+        // no pane is asked for.
+        a.forget_calls();
+        turns.say(
+            &a,
+            &[
+                relay_word(),
+                relayed(
+                    127,
+                    "bateri: bateri is not set up on rasp: open a terminal on it in bateri first\n",
+                    "",
+                ),
+            ],
+        );
+        let said = run(&["split", "-S", "rasp", "--", "make"]);
+        assert_eq!(said.status, 1, "{}", said.err);
+        assert!(said.err.contains("not set up on rasp"), "{}", said.err);
+        assert_eq!(a.told().len(), 2);
+    }
+}
+
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn on_this_mac_at_local_is_the_plain_terminal_and_pane_and_nobody_is_asked_for_a_relay() {
+    for (name, shell) in shells() {
+        let mac = Server::new_here(&format!("relay-mac-{name}"));
+        mac.mac_says(PLACED);
+        let said = mac.run(&shell, Some("p4"), &["split", "-S", "@local", "--", "make"]);
+        assert_eq!(said.status, 0, "{}: {}", shell.display(), said.err);
+        // The terminal is this Mac's own: started here, written without a machine, and the Mac
+        // is asked for a plain pane.
+        assert_eq!(said.out, "p1\n", "{}", said.err);
+        assert_eq!(mac.calls_of("new").len(), 1);
+        let told = mac.told();
+        assert_eq!(told.len(), 1, "{told:?}");
+        assert_eq!(told[0], encoded(place(1, 4)));
+        let said = mac.run(&shell, Some("p4"), &["split", "-S", "@local", "-S", "prod"]);
+        assert_eq!(said.status, 64, "{}", said.err);
+        let said = mac.run(&shell, Some("p4"), &["send", "p3@local", "hi"]);
+        assert_eq!(said.status, 0, "{}", said.err);
+        assert_eq!(mac.calls_of("send"), [["send", "p3", "hi"]]);
+        assert_eq!(mac.told().len(), 1);
+    }
+}
+
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn the_command_the_window_runs_for_a_relay_reaches_the_script_of_the_other_machine_with_its_words_whole()
+ {
+    use super::relay;
+    for (name, shell) in login_shells() {
+        let rasp = Server::new(&format!("relay-run-{name}"));
+        // The command the window builds, run as it is on this Mac (a shell in the home of the
+        // machine, which is the login shell of the person: sh, dash, bash, zsh and fish here).
+        let run = |words: &[&str]| {
+            let words: Vec<String> = words.iter().map(|word| (*word).to_owned()).collect();
+            let line = relay::remote_line(&relay::not_set_up("rasp"), &words);
+            let mut command = relay::local_command(&rasp.home, &line);
+            command
+                .env_clear()
+                .env("HOME", &rasp.home)
+                .env("SHELL", &shell)
+                .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+                .env("STUB_DIR", &rasp.stub)
+                .env("LC_TERMINAL_VERSION", VERSION);
+            relay::execute(command, std::time::Duration::from_secs(30), relay::OUTPUT)
+                .expect("the command ran")
+        };
+
+        // The words arrive whole at the script, which hands them to kablo as they are: whatever
+        // the login shell, a backslash, a quote, a dollar, a line break and a trailing backslash
+        // are only text.
+        let odd = [
+            "echo 'hi' $HOME; `x` \"y\" \\z",
+            "C:\\",
+            "\\';echo INJECTED;#",
+            "two\nlines\n",
+            "$(touch /tmp/never-relay)",
+            "",
+            "-",
+            "ünï ✓",
+        ];
+        for word in odd {
+            rasp.forget_calls();
+            let done = run(&["send", "p9", word]);
+            assert_eq!(done.status, 0, "{name} {word:?}: {done:?}");
+            assert_eq!(done.stdout, "", "{name} {word:?}");
+            assert_eq!(rasp.calls_of("send"), [["send", "p9", word]], "{name}");
+        }
+        assert!(!Path::new("/tmp/never-relay").exists());
+
+        // Its status and what it says come back.
+        std::fs::write(rasp.stub.join("exit.wait"), "7").expect("a status");
+        let done = run(&["wait", "p9", "--for", "5s"]);
+        assert_eq!(done.status, 7, "{done:?}");
+        let done = run(&["send", "p 9", "x"]);
+        assert_eq!(done.status, 64, "{done:?}");
+        assert!(!done.stderr.is_empty());
+
+        // A terminal started there prints its number and no note about having no pane.
+        let done = run(&["split", "--label", "work", "--", "make", "it's ok"]);
+        assert_eq!(done.status, 0, "{done:?}");
+        assert_eq!(done.stdout, "p1\n");
+        assert!(done.stderr.is_empty(), "{done:?}");
+        let calls = rasp.calls_of("new");
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        assert_eq!(
+            new_parts(&calls[0]),
+            (
+                "p1".to_owned(),
+                rasp.home.display().to_string(),
+                vec!["make".to_owned(), "it's ok".to_owned()]
+            )
+        );
+
+        // A machine that was never opened from bateri is told to be.
+        std::fs::remove_file(rasp.script()).expect("the command");
+        let done = run(&["capture", "p9"]);
+        assert_eq!(done.status, 127, "{done:?}");
+        assert_eq!(
+            done.stderr,
+            vec!["bateri: bateri is not set up on rasp: open a terminal on it in bateri first"]
+        );
+    }
+}
+
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn the_line_a_mac_sends_a_server_is_read_the_same_by_whatever_shell_the_server_gives_a_person() {
+    for (name, shell) in login_shells() {
+        let (mac, prod, env) = mac_and_prod(&format!("shells-{name}"));
+        mac.mac_says(&ssh_words());
+        let mut env = env;
+        env.push(("REMOTE_SHELL".to_owned(), shell.display().to_string()));
+        let env = borrowed(&env);
+        for word in ["C:\\", "\\';echo INJECTED;#", "it's $HOME `x` \"y\"", "ünï"] {
+            prod.forget_calls();
+            let said = mac.run_file_with(
+                Path::new("/bin/sh"),
+                &mac.script(),
+                Some("p4"),
+                &["send", "p9@prod", word],
+                &env,
+            );
+            assert_eq!(said.status, 0, "{name} {word:?}: {}", said.err);
+            assert_eq!(said.out, "", "{name} {word:?}");
+            assert_eq!(prod.calls_of("send"), [["send", "p9", word]], "{name}");
+        }
     }
 }

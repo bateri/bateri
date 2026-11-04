@@ -69,6 +69,11 @@ pub const STEP_LIMIT: Duration = Duration::from_secs(120);
 /// name its holder made).
 pub const NUMBER_LIMIT: Duration = Duration::from_secs(15);
 
+/// The counter run on this Mac ([`next_number`] over a local process): no connection to wait
+/// for, and shorter than what a local pane waits for its terminal, so the pane is not given up
+/// on while the counter is still counting.
+pub const LOCAL_NUMBER_LIMIT: Duration = Duration::from_secs(5);
+
 /// How long reading what the server's script left for the application may take
 /// ([`crate::agent::notes::READ`]): a few small files, on a connection that is up.
 pub const NOTES_LIMIT: Duration = Duration::from_secs(15);

@@ -35,6 +35,7 @@ pub mod listing;
 pub mod message;
 pub mod notes;
 pub mod place;
+pub mod relay;
 pub mod serve;
 pub mod summary;
 pub mod wait;
@@ -105,6 +106,10 @@ pub fn is_machine(name: &str) -> bool {
 
 /// The machine of this Mac in an address.
 pub const LOCAL_MACHINE: &str = "local";
+
+/// This Mac as `-S` and a `server` line name it: the word `@local`, which is no host `ssh` could be
+/// given (a host starts with a letter or a digit), so it cannot be a server of that name.
+pub const LOCAL_SERVER: &str = "@local";
 
 impl Anchor {
     /// The terminal a name stands for, `None` for a name kablo does not allow (an address is

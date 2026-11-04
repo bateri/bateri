@@ -12,6 +12,20 @@ of every installed copy. A version without a section is not released.
 
 ## [Unreleased]
 
+### Before you update
+
+- **`bateri new` is gone, and a terminal's name is `p9`, not `t9`.** A program that ran `bateri new` opens a tab (`bateri tab`, which does not take the keyboard) or a pane (`bateri split`) instead; the terminals it started before this update keep their old names and still run, but cannot be named in a command. Scripts that read `bateri ls` should read the `id:` it prints.
+- **The question "close this?" is gone.** What the `bateri` command may do is a level for each machine now, `own` by default: see `[commands]` in the settings file. Raise it where you want an agent to see or close more.
+- **The saved window layout remembers the numbers of windows, groups and tabs.** An older bateri cannot read a layout this version saved; your programs keep running in kablo.
+
+### Added
+
+- **The `bateri` command on this Mac, too.** A program in a local pane can open and drive panes, tabs, groups and windows the way it does on a server, and `bateri ls`, `focus`, `close`, `send`, `capture` and `wait` work on it.
+- **Windows, groups and tabs have numbers you can type** (`w1`, `g1`, `t3`, and `p9` for a pane); `bateri ls` shows them with the labels and titles. New commands: `bateri tab`, `window`, `focus`, `zoom`, `swap`, `move`, `resize`, `rename` and `close tab|group|window`.
+- **Four levels for the command, per machine:** `off`, `own` (this machine's own panes), `screen` (everything bateri has open) and `full` (also start terminals on other machines and type into or read them). Set it in Settings, `[commands] level` for this Mac and `commands = …` in a `[remote] hosts` entry for a server. `full` is never given to a pattern like `prod-*`, only to a host's exact name.
+- **A command cannot move the keyboard from where you are typing.** A `focus`, `zoom`, `swap`, `move` or `resize` that would change where your keys go only works when it is run from the pane you are typing in.
+- **Other machines.** `bateri split -S prod -- make test` starts the terminal on a server, and `p9@prod` names a pane of another machine (this Mac is `p3@local`) in `send`, `send-key`, `capture`, `wait`, `focus`, `zoom`, `swap`, `move`, `resize` and `close`. A server you gave `full` can do the same to your other machines and to this Mac (`-S @local`): bateri runs the command for it, which is why `full` on a server is a decision about your other machines too.
+
 ### Changed
 
 - **A program that prints a lot reaches the screen faster.** Text, colored output and wide

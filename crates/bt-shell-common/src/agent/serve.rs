@@ -19,11 +19,18 @@
 //! - The terminal already has a pane: the request is done ([`Landed::AsAsked`]), not an error
 //!   — an error would end a terminal the user is looking at.
 //!
-//! **Another machine's terminal** (`-S`): the program on this Mac starts it itself, over the
-//! `ssh` the Mac answered an `ssh` request with, and asks for its pane with a `place` that names the
-//! `server`. Both are for a `full` machine alone ([`may_reach`], [`level::Act::Reach`]); the shell finds
+//! **Another machine's terminal** (`-S`): the program starts it itself and asks for its pane with a
+//! `place` that names the `server`. A program on this Mac runs the `ssh` the Mac answered an
+//! `ssh` request with. A program on a server cannot: the Mac answers its `ssh` with `relay` and
+//! then runs, in a `relay`, the `bateri` command that program means for the other machine — a
+//! server or this Mac (`@local`) — and says how it ended ([`Answer::Relay`], [`super::relay`]).
+//! All of it is for a `full` machine alone ([`may_reach`], [`level::Act::Reach`]); the shell finds
 //! the server, on a thread of its own, and [`place_on`] puts the pane beside a terminal of the
 //! machine that asked while the pane itself is the pipe to the *target's* terminal.
+//!
+//! **This is where the contract's "the window writes no bytes to a shell and runs no program" is
+//! relaxed, for `full` alone**: a relay is read like any request, then `off`, `own` and `screen` are
+//! refused (77) before anything is run, and a relay runs only the commands of [`RELAYED`].
 //!
 //! The other three requests need the Mac's windows, a question to the user or the server's own
 //! list, none of which a decision with no window in it has: they are an [`Answer`] of their own
@@ -37,7 +44,9 @@ use bt_core::CommandLevel;
 use kablo_proto::v1::{State, Status};
 
 use super::level::{self, Act, Panes, Verdict, Why};
-use super::message::{Arrange, Failure, Format, Kind, Place, Placed, Reply, Request};
+use super::message::{
+    Arrange, Failure, Format, Kind, Place, Placed, RELAYED, Relay, Reply, Request,
+};
 use super::notes::Note;
 use super::place::Landed;
 use super::wait::Waiting;
@@ -136,11 +145,15 @@ pub enum Answer {
     Arrange(Arrange),
     /// `ssh`: the shell finds how this Mac reaches the server the name stands for — on a thread
     /// of its own, for it waits for a person's password at times — and answers with the words of
-    /// the `ssh` command. The level has been judged: this Mac's `full`.
+    /// the `ssh` command; to a server, which cannot run it, with `relay`. The level has been
+    /// judged: a `full` one.
     Ssh(String),
     /// A `place` whose terminal runs on another server (`server`): the shell finds that server,
     /// then asks [`place_on`] to put the pane. The level has been judged as for [`Answer::Ssh`].
     PlaceOn(Place),
+    /// `relay`, from a server: the shell runs the command on the machine it names — on a thread
+    /// of its own — and answers how it ended ([`super::relay`]). The level has been judged.
+    Relay(Relay),
 }
 
 fn waiting_reply(anchor: &Anchor) -> Reply {
@@ -185,44 +198,70 @@ pub fn serve(server: &Server, from: Option<&str>, text: &str, shell: &mut dyn Sh
     }
     match Request::parse(text) {
         Err(failure) => Answer::Reply(Reply::Failed(failure)),
-        Ok(Request::Place(place)) if place.server.is_some() => match may_reach(server) {
-            Ok(()) => Answer::PlaceOn(place),
-            Err(failure) => Answer::Reply(Reply::Failed(failure)),
-        },
+        Ok(Request::Place(place)) if place.server.is_some() => {
+            match may_reach_to(server, place.server.as_deref().unwrap_or_default()) {
+                Ok(()) => Answer::PlaceOn(place),
+                Err(failure) => Answer::Reply(Reply::Failed(failure)),
+            }
+        }
         Ok(Request::Place(place)) => place_for(server, from, place, shell),
         Ok(Request::Ls(format)) => Answer::List(format),
         Ok(Request::Close(terminal)) => Answer::Close(terminal),
         Ok(Request::Notify(text)) => Answer::Notify(text),
         Ok(Request::Arrange(arrange)) => Answer::Arrange(arrange),
-        Ok(Request::Ssh(name)) => match may_reach(server) {
+        Ok(Request::Ssh(name)) => match may_reach_to(server, &name) {
             Ok(()) => Answer::Ssh(name),
+            Err(failure) => Answer::Reply(Reply::Failed(failure)),
+        },
+        Ok(Request::Relay(relay)) => match may_relay(server) {
+            Ok(()) => Answer::Relay(relay),
             Err(failure) => Answer::Reply(Reply::Failed(failure)),
         },
     }
 }
 
 /// Whether the machine that asked may start a terminal on another and work with it: only a
-/// `full` one ([`Act::Reach`]), and — until the window carries a server's request across — only
-/// this Mac.
+/// `full` one ([`Act::Reach`]). A server given `full` is the one whose `full` the window carries
+/// across ([`may_relay`]); this Mac's goes to the other machine itself.
 fn may_reach(server: &Server) -> Result<(), Failure> {
     match level::judge(server.level, Act::Reach, Panes::default()) {
-        Verdict::Allowed => {}
-        Verdict::Refused(why) => {
-            return Err(Failure::new(
-                Kind::Refused,
-                level::refusal(server.level, why, server.host_name()),
-            ));
-        }
-        Verdict::Unknown => return Err(Failure::new(Kind::Failed, "there is no such machine")),
+        Verdict::Allowed => Ok(()),
+        Verdict::Refused(why) => Err(Failure::new(
+            Kind::Refused,
+            level::refusal(server.level, why, server.host_name()),
+        )),
+        Verdict::Unknown => Err(Failure::new(Kind::Failed, "there is no such machine")),
     }
+}
+
+/// [`may_reach`] for the machine `name` stands for. This Mac is not a machine a program on this
+/// Mac reaches: it is where it runs, and the word for it is for a program on a server.
+fn may_reach_to(server: &Server, name: &str) -> Result<(), Failure> {
+    may_reach(server)?;
+    if name == super::LOCAL_SERVER && crate::kablo::local::is_account(&server.account) {
+        return Err(Failure::new(
+            Kind::Usage,
+            "`@local` names this Mac for a program on a server; a program on this Mac is on it already",
+        ));
+    }
+    Ok(())
+}
+
+/// Whether the window may run a command on another machine for the machine that asked: a server
+/// given `full`. This Mac's own `full` reaches servers over the `ssh` it is told and needs no one
+/// to run it.
+fn may_relay(server: &Server) -> Result<(), Failure> {
+    may_reach(server)?;
     if crate::kablo::local::is_account(&server.account) {
-        Ok(())
-    } else {
-        Err(Failure::new(
-            Kind::Failed,
-            "a terminal on another machine is started from this Mac; a server's commands do not reach it",
-        ))
+        return Err(Failure::new(
+            Kind::Usage,
+            format!(
+                "this Mac reaches a server over the `ssh` it is told (an `ssh` request), not through a relay of {}",
+                RELAYED.join(", ")
+            ),
+        ));
     }
+    Ok(())
 }
 
 /// The pane for a terminal that runs on `target`, asked by a program on `server` (this Mac):
@@ -550,15 +589,25 @@ mod tests {
         assert!(mac.placed.is_empty() && mac.openers.is_empty());
     }
 
-    /// Reaching another machine — starting a terminal there — is a `full` machine's: the others
-    /// are refused (77) with the setting that changes it, `off` first of all; and until the
-    /// window carries a server's request across, only this Mac's `full` is allowed it. Nothing is
-    /// asked of the windows before this is decided.
+    /// Reaching another machine — starting a terminal there, or working with one — is a `full`
+    /// machine's, a server's as well as this Mac's: the others are refused (77) with the setting
+    /// that changes it, `off` first of all. Nothing is asked of the windows before this is
+    /// decided, and a relay that is refused runs nothing.
     #[test]
-    fn reaching_another_machine_is_for_this_macs_full_level_alone() {
+    fn reaching_another_machine_is_for_a_full_machine_alone() {
+        let relay = |name: &str| {
+            Request::Relay(Relay {
+                server: name.to_owned(),
+                words: vec!["send".into(), "p9".into(), "q".into()],
+            })
+            .encode()
+            .expect("a relay")
+        };
         let asks = [
             "bateri 2\nssh\nserver prod\n".to_owned(),
             place_text("anchor p4\nserver prod\n"),
+            relay("prod"),
+            relay("@local"),
         ];
         for text in &asks {
             for level in [CommandLevel::Own, CommandLevel::Screen] {
@@ -573,43 +622,92 @@ mod tests {
                     else {
                         panic!("{level:?}: refused");
                     };
-                    assert_eq!(failure.kind, Kind::Refused, "{level:?}");
+                    assert_eq!(failure.kind, Kind::Refused, "{level:?} {text:?}");
                     assert!(failure.text.contains("only \"full\""), "{}", failure.text);
                     assert!(mac.placed.is_empty() && mac.openers.is_empty());
                 }
             }
             // `off` is refused before the request is read.
-            let mut off = this_mac();
-            off.level = CommandLevel::Off;
-            let Answer::Reply(Reply::Failed(failure)) =
-                serve(&off, Some("p4"), text, &mut Pretend::default())
-            else {
-                panic!("off");
-            };
-            assert_eq!(failure.kind, Kind::Refused);
-            // This Mac's `full` goes on to the window, which finds the server on a thread.
-            let mut full = this_mac();
-            full.level = CommandLevel::Full;
+            for mut off in [this_mac(), self::server()] {
+                off.level = CommandLevel::Off;
+                let Answer::Reply(Reply::Failed(failure)) =
+                    serve(&off, Some("p4"), text, &mut Pretend::default())
+                else {
+                    panic!("off");
+                };
+                assert_eq!(failure.kind, Kind::Refused);
+            }
+        }
+
+        // A `full` server goes on to the window: the connection is found on a thread, or the
+        // command is run on one; nothing is placed here.
+        let mut full = self::server();
+        full.level = CommandLevel::Full;
+        for (text, name) in [(&asks[0], "prod"), (&asks[1], "prod")] {
             let mut mac = Pretend {
                 anchors: vec!["p4".into()],
                 ..Pretend::default()
             };
             match serve(&full, Some("p4"), text, &mut mac) {
-                Answer::Ssh(name) => assert_eq!(name, "prod"),
-                Answer::PlaceOn(place) => assert_eq!(place.server.as_deref(), Some("prod")),
+                Answer::Ssh(asked) => assert_eq!(asked, name),
+                Answer::PlaceOn(place) => assert_eq!(place.server.as_deref(), Some(name)),
                 other => panic!("{other:?}"),
             }
             assert!(mac.placed.is_empty() && mac.openers.is_empty());
-            // A server's `full` is not carried across yet: it is told so, not refused for its level.
-            let mut server = self::server();
-            server.level = CommandLevel::Full;
-            let Answer::Reply(Reply::Failed(failure)) =
-                serve(&server, Some("p4"), text, &mut Pretend::default())
-            else {
-                panic!("a server");
+        }
+        for (text, name) in [(&asks[2], "prod"), (&asks[3], "@local")] {
+            match serve(&full, Some("p4"), text, &mut Pretend::default()) {
+                Answer::Relay(relay) => {
+                    assert_eq!(relay.server, name);
+                    assert_eq!(relay.words, ["send", "p9", "q"]);
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+        for text in [
+            "bateri 2\nssh\nserver @local\n".to_owned(),
+            place_text("anchor p4\nserver @local\n"),
+        ] {
+            let mut mac = Pretend {
+                anchors: vec!["p4".into()],
+                ..Pretend::default()
             };
-            assert_eq!(failure.kind, Kind::Failed);
-            assert!(failure.text.contains("this Mac"), "{}", failure.text);
+            assert!(
+                matches!(
+                    serve(&full, Some("p4"), &text, &mut mac),
+                    Answer::Ssh(_) | Answer::PlaceOn(_)
+                ),
+                "{text:?}"
+            );
+        }
+
+        // This Mac's `full` goes to a server over the `ssh` it is told, and a relay is none of
+        // its business; `@local` is the word for it to a server, not to itself.
+        let mut full = this_mac();
+        full.level = CommandLevel::Full;
+        for text in &asks[..2] {
+            let mut mac = Pretend {
+                anchors: vec!["p4".into()],
+                ..Pretend::default()
+            };
+            assert!(matches!(
+                serve(&full, Some("p4"), text, &mut mac),
+                Answer::Ssh(_) | Answer::PlaceOn(_)
+            ));
+            assert!(mac.placed.is_empty() && mac.openers.is_empty());
+        }
+        for text in [
+            asks[2].clone(),
+            asks[3].clone(),
+            "bateri 2\nssh\nserver @local\n".to_owned(),
+            place_text("anchor p4\nserver @local\n"),
+        ] {
+            let Answer::Reply(Reply::Failed(failure)) =
+                serve(&full, Some("p4"), &text, &mut Pretend::default())
+            else {
+                panic!("{text:?}");
+            };
+            assert_eq!(failure.kind, Kind::Usage, "{text:?}");
         }
     }
 

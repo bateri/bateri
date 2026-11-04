@@ -201,7 +201,12 @@ fn settle_due(app: &AppDelegate, due: Vec<Waiting>, survey: Survey) {
         return;
     };
     let mut world = World::new(app);
-    for waiting in due {
+    for mut waiting in due {
+        // A machine whose commands were turned off while the request waited gets no pane.
+        waiting.server.level = command_level(app, &waiting.server.account, &waiting.server.host);
+        if waiting.server.level == CommandLevel::Off {
+            continue;
+        }
         let (again, _) = serve::settle_waiting(
             waiting,
             &|terminal, keep_open| serve::alive_in(&statuses, terminal, keep_open),
@@ -221,16 +226,23 @@ pub(crate) fn seen() {
 
 // ─── A letter ────────────────────────────────────────────────────────────
 
+/// What the `bateri` command may do on the machine of `account` just now: this Mac's own level, or
+/// the host's entry. Read each time it is needed — a request that waited has the level of the
+/// moment it is placed, not of the moment it was asked.
+fn command_level(app: &AppDelegate, account: &str, host: &str) -> CommandLevel {
+    if local::is_account(account) {
+        app.settings().commands_level
+    } else {
+        app.settings().commands_for(host)
+    }
+}
+
 fn take(app: &AppDelegate, mut letter: Letter) {
     let server = Server {
         account: letter.account.clone(),
         host: letter.host.clone(),
         argv: letter.argv.clone(),
-        level: if local::is_account(&letter.account) {
-            app.settings().commands_level
-        } else {
-            app.settings().commands_for(&letter.host)
-        },
+        level: command_level(app, &letter.account, &letter.host),
     };
     let from = letter.from.as_ref().map(|id| id.as_str().to_owned());
     let bytes = std::mem::take(&mut letter.bytes);
@@ -258,6 +270,7 @@ fn take(app: &AppDelegate, mut letter: Letter) {
         }
         Answer::Ssh(name) => reach::ssh(app, letter, &server, from.as_deref(), name),
         Answer::PlaceOn(place) => reach::place_on(letter, server, from, place),
+        Answer::Relay(relay) => reach::relay(app, letter, &server, from.as_deref(), relay),
     }
     world.finish();
 }
@@ -648,11 +661,26 @@ fn find_address(
             }
         }
     };
+    let machine = address.machine().unwrap_or_default();
     if own_machine {
+        // A name with the machine written out is the machine's, not an account's: another account
+        // on the same host may have a terminal of that name too, and which is meant is not told.
+        if address.machine().is_some() && ambiguous(&panes_named(app, machine, address.name())) {
+            return Err(two_accounts(address, machine));
+        }
         return Ok(find_pane(app, &server.account, address.name()));
     }
     arrange::may_change(server, Panes::other(1), &format!("pane {address}"))?;
-    let machine = address.machine().unwrap_or_default();
+    let mut found = panes_named(app, machine, address.name());
+    if ambiguous(&found) {
+        return Err(two_accounts(address, machine));
+    }
+    Ok(found.drain(..).next())
+}
+
+/// The panes of this Mac that show the terminal `name` of `machine` (a host as `ls` writes it, or
+/// this Mac): one for each account that has one.
+fn panes_named(app: &AppDelegate, machine: &str, name: &str) -> Vec<Found> {
     let mut found = Vec::new();
     for tab in app.tabs() {
         for pane in tab.panes() {
@@ -663,25 +691,28 @@ fn find_address(
                     .filter(|shown| bt_core::bare_host(&shown.host) == machine)
             };
             if let Some(shown) = shown
-                && shown.terminal.as_str() == address.name()
+                && shown.terminal.as_str() == name
             {
                 found.push((tab.clone(), pane, shown));
             }
         }
     }
-    let first_account = found.first().map(|(_, _, shown)| shown.account.clone());
-    if found
+    found
+}
+
+/// Whether the panes show terminals of more than one account.
+fn ambiguous(found: &[Found]) -> bool {
+    let first = found.first().map(|(_, _, shown)| &shown.account);
+    found
         .iter()
-        .any(|(_, _, shown)| Some(&shown.account) != first_account.as_ref())
-    {
-        return Err(Failure::new(
-            Kind::Usage,
-            format!(
-                "{address} is the name of terminals of two accounts on {machine}; none is meant"
-            ),
-        ));
-    }
-    Ok(found.into_iter().next())
+        .any(|(_, _, shown)| Some(&shown.account) != first)
+}
+
+fn two_accounts(address: &Anchor, machine: &str) -> Failure {
+    Failure::new(
+        Kind::Usage,
+        format!("{address} is the name of terminals of two accounts on {machine}; none is meant"),
+    )
 }
 
 /// The server and the terminal a `close` is about, once the machine in its address is told: the
@@ -1192,6 +1223,14 @@ mod tests {
             thread < reached,
             "the connection is made on a thread: {ssh}"
         );
+        // A relayed command runs a program, perhaps for as long as a job: on a thread of its own,
+        // and the letter is answered from there.
+        let relay = body("pub(super) fn relay(");
+        let thread = relay.find("thread::Builder::new()").expect(relay);
+        assert!(!relay[..thread].contains("run::execute("), "{relay}");
+        assert!(relay[thread..].contains("letter.answer("), "{relay}");
+        let relayed = body("fn relayed(");
+        assert!(relayed.contains("run::execute("), "{relayed}");
         let place = body("pub(super) fn place_on(");
         let thread = place.find("thread::Builder::new()").expect(place);
         let route = place.find("backend.route(").expect(place);

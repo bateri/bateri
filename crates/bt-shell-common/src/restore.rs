@@ -99,8 +99,8 @@ pub const HEADER: &str = "bateri-session";
 pub const VERSION: u32 = 8;
 
 /// The version before numbers, which a window may say hides its side column and shows Activity.
-/// Nothing is written in it any more: every live window, group and tab has a number, and the
-/// writer gives a session the oldest version that holds what it has — numbers are in all of them.
+/// The writer still writes it for a session with no number in it (only a test makes one): every
+/// window the app saves has a number, so the app's sessions are all in [`VERSION`].
 const FLAGGED: u32 = 7;
 
 /// The version before a window's column and Activity flags, which a session whose windows all

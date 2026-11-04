@@ -2263,8 +2263,9 @@ node_version = true
 # them. Other machines have a level of their own: a commands key in their
 # [remote] hosts entry, written like integration below. Turning it off ends
 # a program that is using the command here; "full" on a server lets that
-# server run commands on this Mac if it is ever taken over, and is not given
-# to a pattern like prod-*, only to a host's exact name.
+# server run commands on this Mac and on your other machines if it is ever
+# taken over (bateri runs them for it), and is not given to a pattern like
+# prod-*, only to a host's exact name.
 level = "own"
 
 [remote]
@@ -3415,7 +3416,25 @@ fn with_host_mark(
                     }
                 }
                 for &index in plan.remove.iter().rev() {
-                    tables.remove(index);
+                    // An entry that says more than the mark and `integration` (its
+                    // `commands`, a key we don't know) is not the menu's to delete:
+                    // dropping it would drop that, and `off` would become `own`. It
+                    // loses what the new entry shadows and stays.
+                    let keeps = tables.get(index).is_some_and(|table| {
+                        table
+                            .iter()
+                            .any(|(key, _)| !matches!(key, "host" | "mark" | "integration"))
+                    });
+                    if keeps {
+                        if let Some(table) = tables.get_mut(index) {
+                            table.remove("mark");
+                            if plan.integration.is_some() {
+                                table.remove("integration");
+                            }
+                        }
+                    } else {
+                        tables.remove(index);
+                    }
                 }
                 if plan.prepend {
                     let mark = plan.prepend_mark.then_some(written.as_str());
@@ -3439,7 +3458,28 @@ fn with_host_mark(
                     }
                 }
                 for &index in plan.remove.iter().rev() {
-                    array.remove(index);
+                    // As above: an entry with a key besides the mark and `integration` stays.
+                    let keeps = array
+                        .get(index)
+                        .and_then(toml_edit::Value::as_inline_table)
+                        .is_some_and(|entry| {
+                            entry
+                                .iter()
+                                .any(|(key, _)| !matches!(key, "host" | "mark" | "integration"))
+                        });
+                    if keeps {
+                        if let Some(entry) = array
+                            .get_mut(index)
+                            .and_then(toml_edit::Value::as_inline_table_mut)
+                        {
+                            entry.remove("mark");
+                            if plan.integration.is_some() {
+                                entry.remove("integration");
+                            }
+                        }
+                    } else {
+                        array.remove(index);
+                    }
                 }
                 if plan.prepend {
                     let mark = plan.prepend_mark.then_some(written.as_str());
@@ -6641,6 +6681,73 @@ hosts = [
             );
             assert!(!integration(&edited), "the integration stays off: {edited}");
         }
+    }
+
+    #[test]
+    fn the_menu_mark_never_drops_what_a_host_may_do_with_the_command() {
+        // The level of the `bateri` command is a security setting: moving or deleting a host's
+        // entry for its mark must not widen it (`off` becoming `own`, a `full` lost).
+        for (text, host, mark) in [
+            // None deletes the exact entry that also writes `commands`.
+            (
+                "[remote]\nhosts = [{ host = \"rasp\", mark = \"production\", commands = \"off\" }]\n",
+                "rasp",
+                HostMark::None,
+            ),
+            // A glob in front moves the exact entry to the start.
+            (
+                "[remote]\nhosts = [{ host = \"ra*\", mark = \"staging\" }, \
+                 { host = \"rasp\", mark = \"development\", commands = \"off\", integration = false }]\n",
+                "rasp",
+                HostMark::Production,
+            ),
+            (
+                "[[remote.hosts]]\nhost = \"ra*\"\nmark = \"staging\"\n\n\
+                 [[remote.hosts]]\nhost = \"rasp\"\nmark = \"development\"\ncommands = \"full\"\n",
+                "rasp",
+                HostMark::Production,
+            ),
+            // An entry with `commands` and `integration` and no mark.
+            (
+                "[remote]\nhosts = [{ host = \"ra*\", mark = \"staging\" }, \
+                 { host = \"rasp\", commands = \"screen\", integration = false }]\n",
+                "rasp",
+                HostMark::Production,
+            ),
+        ] {
+            let before = clean(text);
+            let edited = with_host_mark(text, host, mark, MarkSubject::Host).expect("edit");
+            let after = clean(&edited);
+            assert_eq!(
+                after.commands_for(host),
+                before.commands_for(host),
+                "the level stays: {edited}"
+            );
+            if text.contains("integration = false") {
+                assert!(
+                    !after.integration_for(host),
+                    "the integration stays: {edited}"
+                );
+            }
+            assert_eq!(host_mark(&after.remote_hosts, host), mark, "{edited}");
+            assert!(
+                after
+                    .remote_hosts
+                    .iter()
+                    .any(|rule| rule.commands.is_some()),
+                "the entry that writes `commands` is still there: {edited}"
+            );
+        }
+        // `rasp`'s `off` is still `off` where a glob in front of the entry writes a mark.
+        let text = "[remote]\nhosts = [{ host = \"rasp\", commands = \"off\" }, \
+                    { host = \"ra*\", mark = \"staging\" }]\n";
+        let edited =
+            with_host_mark(text, "rasp", HostMark::Production, MarkSubject::Host).expect("edit");
+        assert_eq!(
+            clean(&edited).commands_for("rasp"),
+            CommandLevel::Off,
+            "{edited}"
+        );
     }
 
     #[test]

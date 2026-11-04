@@ -186,7 +186,9 @@ fn carry_out(app: &AppDelegate, server: &Server, from: Option<&str>, request: &A
         Arrange::Zoom(named) => {
             let target = pane_or_own(app, server, from, named.as_ref())?;
             lays_out(app, caller.as_ref(), &target.window, &target.tab)?;
-            target.tab.zoom_pane(&target.pane);
+            target
+                .tab
+                .zoom_pane(&target.pane, on_screen(&target.window, &target.tab));
             Ok(())
         }
         Arrange::Swap { pane, other } => {
@@ -215,7 +217,16 @@ fn carry_out(app: &AppDelegate, server: &Server, from: Option<&str>, request: &A
             let target = pane_or_own(app, server, from, Some(beside))?;
             lays_out(app, caller.as_ref(), &moving.window, &moving.tab)?;
             lays_out(app, caller.as_ref(), &target.window, &target.tab)?;
-            move_beside(app, &moving, &target, *side)
+            // A pane that joins another tab changes that tab: it is the level's to judge as a
+            // `split --tab` is, a tab of other machines' panes among them included.
+            if moving.tab.id() != target.tab.id() {
+                may_change(
+                    server,
+                    panes_of(&target.tab, server),
+                    &format!("tab {}", tab_name(&target.tab)),
+                )?;
+            }
+            move_beside(app, caller.as_ref(), &moving, &target, *side)
         }
         Arrange::Close(subject) => close(app, server, caller.as_ref(), subject),
         Arrange::Rename { subject, label } => {
@@ -242,7 +253,13 @@ fn direction_of(side: Side) -> Result<Direction, Failure> {
 
 /// `move pane p9 --beside p3 --right`: within a tab the tree takes the pane back beside the other;
 /// into another tab (of this window or another) the move planner joins it as the menus' do.
-fn move_beside(app: &AppDelegate, moving: &Spot, target: &Spot, side: Side) -> Done {
+fn move_beside(
+    app: &AppDelegate,
+    caller: Option<&Spot>,
+    moving: &Spot,
+    target: &Spot,
+    side: Side,
+) -> Done {
     let direction = direction_of(side)?;
     if moving.pane.id() == target.pane.id() {
         return Err(Failure::new(Kind::Usage, "a pane cannot go beside itself"));
@@ -271,11 +288,20 @@ fn move_beside(app: &AppDelegate, moving: &Spot, target: &Spot, side: Side) -> D
             std::slice::from_ref(&moving.pane),
         )
         .ok_or_else(|| failed("there is no room for it there"))?;
-    let done = app.make_move(Move::PaneToTab {
-        pane: moving.pane.id(),
-        into: target.tab.id(),
-        place: Joins::Planned(placement.tree),
-    });
+    // The window the pane comes to is brought forward only where the keyboard rule lets the
+    // command take the person there (`move tab` is the same).
+    let go = rule::go(keyboard(app, caller), target.window.number());
+    if moving.window.id() != target.window.id() && go == Go::Refused {
+        return Err(Failure::new(Kind::Refused, rule::REFUSAL));
+    }
+    let done = app.make_move_raising(
+        Move::PaneToTab {
+            pane: moving.pane.id(),
+            into: target.tab.id(),
+            place: Joins::Planned(placement.tree),
+        },
+        go == Go::Raise,
+    );
     if done {
         Ok(())
     } else {
@@ -699,5 +725,20 @@ mod tests {
         let go = moved.find("rule::go(").expect(moved);
         let made = moved.find("make_move_raising(").expect(moved);
         assert!(judged < lays && lays < go && go < made, "{moved}");
+        // A pane moved into another tab is no more allowed to take the person there than a tab:
+        // nothing here makes a move that always raises, and the target tab is judged.
+        assert!(
+            !source.contains("app.make_move("),
+            "a move that always raises"
+        );
+        let beside = body("fn move_beside(");
+        assert!(
+            beside.contains("rule::go(") && beside.contains("make_move_raising("),
+            "{beside}"
+        );
+        assert!(
+            source.contains("panes_of(&target.tab, server)"),
+            "the target tab is judged"
+        );
     }
 }

@@ -34,7 +34,14 @@
 //! A pane for a terminal that runs on another machine than the caller's is a `place` with the
 //! `server` line (`server prod`: the name `ssh` takes), and the `ssh` verb asks how to reach that
 //! server (`ssh`, then `server prod`); its reply is the text of one `arg` line for each word of the
-//! `ssh` command, which the script on this Mac runs itself.
+//! `ssh` command, which the script on this Mac runs itself. A program on a server cannot run that
+//! `ssh`: its `ssh` verb is answered with the one word `relay`, and what it would have run on the
+//! other machine it hands to the window in a `relay` (`server prod` or `server @local` for this
+//! Mac, then `words`: the words of the `bateri` command, each as `x` and the hex of its bytes, so
+//! that a line break in a `send` survives the line that frames it). The window runs the command
+//! there and answers `ok relayed`: a `status` line, a `stderr` line that counts the lines of
+//! stderr that follow, and the rest as stdout (text: a byte that is none is replaced). Only a server given `full` is
+//! relayed for, and only `split`, `send`, `send-key`, `capture`, `wait` and `close`.
 //!
 //! **A reply** starts with `bateri 2` too and then says `ok` (`ok placed` and the lines that
 //! tell how and where, `ok text` and the rest of the message as the text to print) or `error KIND TEXT`
@@ -47,7 +54,7 @@
 //! build does not read is its own error ([`Kind::Version`]), so a script can try an older one.
 //!
 //! **One version is read.** Nothing relied on the commands of version 1 when it was dropped
-//! (087 Karar 12), so keeping its reader would have been dead weight: a request of any other
+//! (version 2 replaced it), so keeping its reader would have been dead weight: a request of any other
 //! version is a [`Kind::Version`] error that names the version this build reads, and a reply of
 //! another one is not read. The version that is read has its frozen text in the tests (`V2_*`):
 //! changing the format adds a version and its fixtures, it does not rewrite these. (Version 1 had
@@ -65,6 +72,25 @@ pub const GREETING: &str = "bateri";
 
 /// The most a request may be. A notification's words and a terminal's number come nowhere near.
 pub const MAX_BYTES: usize = 8 * 1024;
+
+/// The most a `relay` may be: the words of a `send` are carried as hex, and what a person pastes to
+/// another terminal is more than a notification.
+pub const RELAY_MAX_BYTES: usize = 128 * 1024;
+
+/// The commands a window relays to another machine. The script on a server asks for these and
+/// nothing else: the terminal it starts there (`split`), what it types and reads (`send`,
+/// `send-key`, `capture`, `wait`), and the end of a terminal whose pane could not be made
+/// (`close`).
+pub const RELAYED: [&str; 6] = ["split", "send", "send-key", "capture", "wait", "close"];
+
+/// The most words a `relay` carries.
+const RELAY_WORDS: usize = 256;
+
+/// The most lines of stderr a reply carries; what a command says on stderr is a line or two.
+const STDERR_LINES: usize = 20;
+
+/// The most of one line of stderr a reply carries.
+const STDERR_WIDTH: usize = 400;
 
 /// Why a request was not done. The script maps these to exit codes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -165,7 +191,7 @@ pub struct Place {
     /// The terminal is not started: the Mac opens an ordinary pane of this Mac, its shell started
     /// in this directory, under the name `terminal` gives it (`bateri split` with no program on a
     /// machine that has no bootstrap — this Mac). A directory and a name are all the message has
-    /// to say of it; no program is carried (073, Karar 1).
+    /// to say of it; no program is carried.
     pub fresh: Option<String>,
     /// The terminal runs on this server, not on the machine that asks: the name `ssh` takes for it
     /// (`prod`). The Mac makes the pane that shows it, which connects by its own path (`-S`).
@@ -194,8 +220,54 @@ pub enum Request {
     Notify(String),
     /// Move the keyboard or the layout.
     Arrange(Arrange),
-    /// How to reach the server a terminal is to be started on: the `ssh` arguments (`-S`).
+    /// How to reach the server a terminal is to be started on: the `ssh` arguments (`-S`); to a
+    /// program on a server, that the window relays instead.
     Ssh(String),
+    /// A command for another machine than the sender's, run there by the window (a `full` server).
+    Relay(Relay),
+}
+
+/// A `bateri` command the window runs on another machine for a program on a server.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Relay {
+    /// The machine: the name `ssh` takes for a server, or [`super::LOCAL_SERVER`] for this Mac.
+    pub server: String,
+    /// The words of the command, the first one of [`RELAYED`].
+    pub words: Vec<String>,
+}
+
+/// What a relayed command did: how it ended and what it said.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Relayed {
+    /// The command's exit status (255 for one that was killed by a signal).
+    pub status: u8,
+    /// What it said on stderr, a few short lines.
+    pub stderr: Vec<String>,
+    /// What it printed, byte for byte.
+    pub stdout: String,
+}
+
+impl Relayed {
+    /// The result of a command that ended with `status`, having said `stderr` and `stdout`:
+    /// stderr cut to what a reply carries (a few lines, one line each, no control character).
+    pub fn of(status: u8, stderr: &str, stdout: &str) -> Relayed {
+        let lines = stderr
+            .lines()
+            .map(|line| {
+                line.chars()
+                    .map(|c| if c.is_control() { ' ' } else { c })
+                    .take(STDERR_WIDTH)
+                    .collect::<String>()
+            })
+            .filter(|line| !line.trim().is_empty())
+            .take(STDERR_LINES)
+            .collect();
+        Relayed {
+            status,
+            stderr: lines,
+            stdout: stdout.to_owned(),
+        }
+    }
 }
 
 /// What `focus` is about: a pane (as kablo names its terminal), or a tab, a group or a window by
@@ -378,6 +450,8 @@ pub enum Reply {
     Placed(Placed),
     /// Done, and this is to be printed (an `ls`), byte for byte.
     Text(String),
+    /// A relayed command ran: how it ended and what it said.
+    Relayed(Relayed),
     Failed(Failure),
 }
 
@@ -386,10 +460,13 @@ pub enum Reply {
 impl Request {
     /// The request `text` says.
     pub fn parse(text: &str) -> Result<Request, Failure> {
-        if text.len() > MAX_BYTES {
-            return Err(Failure::usage(format!(
-                "the message is over {MAX_BYTES} bytes"
-            )));
+        let limit = if text.starts_with(&format!("{GREETING} {VERSION}\nrelay\n")) {
+            RELAY_MAX_BYTES
+        } else {
+            MAX_BYTES
+        };
+        if text.len() > limit {
+            return Err(Failure::usage(format!("the message is over {limit} bytes")));
         }
         let body = text.strip_suffix('\n').unwrap_or(text);
         let mut lines = body.split('\n');
@@ -483,16 +560,27 @@ impl Request {
                 check_server("server", server)?;
                 push(&mut out, "server", server)?;
             }
+            Request::Relay(relay) => {
+                out.push_str("relay\n");
+                check_server("server", &relay.server)?;
+                check_relayed(&relay.words)?;
+                push(&mut out, "server", &relay.server)?;
+                let words: Vec<String> = relay.words.iter().map(|word| hex_word(word)).collect();
+                push(&mut out, "words", &words.join(" "))?;
+            }
             Request::Notify(text) => {
                 out.push_str("notify\n");
                 push(&mut out, "text", text)?;
             }
             Request::Arrange(arrange) => encode_arrange(&mut out, arrange)?,
         }
-        if out.len() > MAX_BYTES {
-            return Err(Failure::usage(format!(
-                "the message is over {MAX_BYTES} bytes"
-            )));
+        let limit = if matches!(self, Request::Relay(_)) {
+            RELAY_MAX_BYTES
+        } else {
+            MAX_BYTES
+        };
+        if out.len() > limit {
+            return Err(Failure::usage(format!("the message is over {limit} bytes")));
         }
         Ok(out)
     }
@@ -679,7 +767,7 @@ impl<'a> Fields<'a> {
 fn terminal_of(key: &str, value: &str) -> Result<Terminal, Failure> {
     Terminal::parse(value).ok_or_else(|| {
         Failure::usage(format!(
-            "`{key}` names a terminal as t and its number, not `{value}`"
+            "`{key}` names a terminal as p and its number, not `{value}`"
         ))
     })
 }
@@ -706,8 +794,12 @@ fn address_of(key: &str, value: &str) -> Result<Anchor, Failure> {
 const SERVER_MAX: usize = 253;
 
 /// A server as `ssh` is given it: a host or an alias, `user@host` too — letters, digits and
-/// `. _ - : @`, starting with a letter or a digit, so that it can never be read as an option.
+/// `. _ - : @`, starting with a letter or a digit, so that it can never be read as an option; or
+/// the word that stands for this Mac ([`super::LOCAL_SERVER`]).
 fn check_server(key: &str, name: &str) -> Result<(), Failure> {
+    if name == super::LOCAL_SERVER {
+        return Ok(());
+    }
     let starts_well = name
         .chars()
         .next()
@@ -725,6 +817,56 @@ fn check_server(key: &str, name: &str) -> Result<(), Failure> {
         )));
     }
     Ok(())
+}
+
+/// What a relay carries: one of the commands a window relays, then its words, not too many.
+fn check_relayed(words: &[String]) -> Result<(), Failure> {
+    match words.first() {
+        Some(verb) if RELAYED.contains(&verb.as_str()) => {}
+        Some(verb) => {
+            return Err(Failure::usage(format!(
+                "`relay` carries {}, not `{verb}`",
+                RELAYED.join(", ")
+            )));
+        }
+        None => return Err(Failure::usage("`relay` carries a command")),
+    }
+    if words.len() > RELAY_WORDS {
+        return Err(Failure::usage(format!(
+            "`relay` carries at most {RELAY_WORDS} words"
+        )));
+    }
+    if words.iter().any(|word| word.contains('\0')) {
+        return Err(Failure::usage("a word of a `relay` has a NUL in it"));
+    }
+    Ok(())
+}
+
+/// A word as the `words` line writes it: `x` and the hex of its bytes.
+pub(super) fn hex_word(word: &str) -> String {
+    let mut out = String::with_capacity(1 + word.len() * 2);
+    out.push('x');
+    for byte in word.bytes() {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
+}
+
+/// The word a token of the `words` line stands for.
+fn word_of_hex(token: &str) -> Result<String, Failure> {
+    let digits = token
+        .strip_prefix('x')
+        .ok_or_else(|| Failure::usage("a word of `words` is `x` and the hex of its bytes"))?;
+    if digits.len() % 2 != 0 || !digits.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(Failure::usage(
+            "a word of `words` is `x` and an even number of hex digits",
+        ));
+    }
+    let bytes: Vec<u8> = (0..digits.len())
+        .step_by(2)
+        .map(|at| u8::from_str_radix(&digits[at..at + 2], 16).unwrap_or(0))
+        .collect();
+    String::from_utf8(bytes).map_err(|_| Failure::usage("a word of `words` is not text"))
 }
 
 /// The error for a message of a version that is not this build's.
@@ -835,6 +977,21 @@ fn read_request<'a>(
             check_server("server", name)?;
             Ok(Request::Ssh(name.to_owned()))
         }
+        "relay" => {
+            let fields = Fields::read(verb, lines, &["server", "words"])?;
+            let name = fields.need("server")?;
+            check_server("server", name)?;
+            let words = fields
+                .need("words")?
+                .split(' ')
+                .map(word_of_hex)
+                .collect::<Result<Vec<String>, Failure>>()?;
+            check_relayed(&words)?;
+            Ok(Request::Relay(Relay {
+                server: name.to_owned(),
+                words,
+            }))
+        }
         "ls" => {
             let fields = Fields::read(verb, lines, &["format"])?;
             match fields.get("format") {
@@ -871,7 +1028,7 @@ fn read_request<'a>(
             read_arrange(verb, lines).map(Request::Arrange)
         }
         other => Err(Failure::usage(format!(
-            "`{other}` is no verb: place, ls, close, notify, ssh, focus, zoom, swap, move, resize or rename"
+            "`{other}` is no verb: place, ls, close, notify, ssh, relay, focus, zoom, swap, move, resize or rename"
         ))),
     }
 }
@@ -1061,6 +1218,16 @@ impl Reply {
                 out.push_str("ok text\n");
                 out.push_str(text);
             }
+            Reply::Relayed(relayed) => {
+                out.push_str("ok relayed\n");
+                out.push_str(&format!("status {}\n", relayed.status));
+                out.push_str(&format!("stderr {}\n", relayed.stderr.len()));
+                for line in &relayed.stderr {
+                    out.push_str(line);
+                    out.push('\n');
+                }
+                out.push_str(&relayed.stdout);
+            }
             Reply::Failed(failure) => {
                 // One line, whatever the words held.
                 let text: String = failure
@@ -1091,10 +1258,45 @@ impl Reply {
         match status {
             "ok" => Ok(Reply::Done),
             "ok text" => Ok(Reply::Text(body.to_owned())),
+            "ok relayed" => read_relayed(body),
             "ok placed" => read_placed(body),
             other => Err(Failure::usage(format!("`{other}` is no status"))),
         }
     }
+}
+
+fn read_relayed(body: &str) -> Result<Reply, Failure> {
+    let plain = |value: &str| {
+        value
+            .parse::<usize>()
+            .ok()
+            .filter(|n| n.to_string() == value)
+    };
+    let (first, rest) = body.split_once('\n').unwrap_or((body, ""));
+    let status = first
+        .strip_prefix("status ")
+        .and_then(plain)
+        .and_then(|n| u8::try_from(n).ok())
+        .ok_or_else(|| Failure::usage("a relayed reply starts with `status` and a number"))?;
+    let (second, mut rest) = rest.split_once('\n').unwrap_or((rest, ""));
+    let count = second
+        .strip_prefix("stderr ")
+        .and_then(plain)
+        .filter(|n| *n <= STDERR_LINES)
+        .ok_or_else(|| Failure::usage("a relayed reply then counts the lines of `stderr`"))?;
+    let mut stderr = Vec::new();
+    for _ in 0..count {
+        let (line, after) = rest.split_once('\n').ok_or_else(|| {
+            Failure::usage("a relayed reply has fewer lines of stderr than it counts")
+        })?;
+        stderr.push(line.to_owned());
+        rest = after;
+    }
+    Ok(Reply::Relayed(Relayed {
+        status,
+        stderr,
+        stdout: rest.to_owned(),
+    }))
 }
 
 fn read_placed(body: &str) -> Result<Reply, Failure> {
@@ -2071,6 +2273,176 @@ mod tests {
 
     /// The words that reach a server and the pane for a terminal that runs on one are written and
     /// read byte for byte, and what `ssh` could take for an option, or for two hosts, is no name.
+    const V2_RELAY: &str = "bateri 2\nrelay\nserver prod\nwords x73656e64 x7039 x710a\n";
+    const V2_REPLY_RELAYED: &str =
+        "bateri 2\nok relayed\nstatus 3\nstderr 1\nkablo: no such session\nfirst\nsecond\n";
+
+    fn relay(server: &str, words: &[&str]) -> Relay {
+        Relay {
+            server: server.to_owned(),
+            words: words.iter().map(|word| (*word).to_owned()).collect(),
+        }
+    }
+
+    #[test]
+    fn a_command_for_another_machine_is_relayed_with_its_words_as_hex_so_a_line_break_survives() {
+        let asked = relay("prod", &["send", "p9", "q\n"]);
+        assert_eq!(Request::parse(V2_RELAY), Ok(Request::Relay(asked.clone())));
+        assert_eq!(Request::Relay(asked).encode().as_deref(), Ok(V2_RELAY));
+
+        // Everything a word may hold comes back as it went: empty, a quote, a dollar, unicode,
+        // a tab and a carriage return.
+        let odd = relay(
+            "@local",
+            &["send", "p9", "", "it's $HOME `x`", "ünï\t\r\n\n", "-"],
+        );
+        let text = Request::Relay(odd.clone()).encode().expect("encoded");
+        assert_eq!(text.matches('\n').count(), 4, "{text:?}");
+        assert_eq!(Request::parse(&text), Ok(Request::Relay(odd)));
+
+        // The commands that are relayed are the ones a program needs on the other machine.
+        for verb in RELAYED {
+            let text = Request::Relay(relay("prod", &[verb, "p9"]))
+                .encode()
+                .expect("encoded");
+            assert!(Request::parse(&text).is_ok(), "{verb}");
+        }
+        for verb in ["ls", "focus", "rename", "ssh", "sh", "tab", "window", "-c"] {
+            assert!(
+                Request::Relay(relay("prod", &[verb, "p9"]))
+                    .encode()
+                    .is_err(),
+                "{verb}"
+            );
+            let hex = hex_word(verb);
+            let text = format!("bateri 2\nrelay\nserver prod\nwords {hex}\n");
+            assert_eq!(
+                Request::parse(&text).map_err(|failure| failure.kind),
+                Err(Kind::Usage),
+                "{verb}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_relay_that_is_not_written_plainly_is_a_usage_error() {
+        for bad in [
+            "bateri 2\nrelay\nserver prod\n",
+            "bateri 2\nrelay\nwords x73656e64\n",
+            "bateri 2\nrelay\nserver prod\nwords \n",
+            "bateri 2\nrelay\nserver prod\nwords send\n",
+            "bateri 2\nrelay\nserver prod\nwords x7365 x6\n",
+            "bateri 2\nrelay\nserver prod\nwords x7365  x6e\n",
+            "bateri 2\nrelay\nserver prod\nwords x73656e64 xzz\n",
+            "bateri 2\nrelay\nserver prod\nwords x73656e64 x00\n",
+            "bateri 2\nrelay\nserver prod\nwords x73656e64 xff\n",
+            "bateri 2\nrelay\nserver -oProxyCommand=x\nwords x73656e64\n",
+            "bateri 2\nrelay\nserver @prod\nwords x73656e64\n",
+            "bateri 2\nrelay\nserver prod\nwords x73656e64\nwords x73656e64\n",
+            "bateri 2\nrelay\nserver prod\nwords x73656e64\nextra x\n",
+        ] {
+            assert_eq!(
+                Request::parse(bad).map_err(|failure| failure.kind),
+                Err(Kind::Usage),
+                "{bad:?}"
+            );
+        }
+        // Too many words, and a NUL that no argument can hold.
+        let many = vec!["send"; RELAY_WORDS + 1];
+        assert!(Request::Relay(relay("prod", &many)).encode().is_err());
+        assert!(
+            Request::Relay(relay("prod", &["send", "p9", "a\0b"]))
+                .encode()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn a_relay_may_be_long_where_every_other_request_may_not() {
+        let long = "x".repeat(MAX_BYTES);
+        let text = Request::Relay(relay("prod", &["send", "p9", &long]))
+            .encode()
+            .expect("a long text is relayed");
+        assert!(text.len() > MAX_BYTES);
+        assert!(Request::parse(&text).is_ok());
+        let too_long = "x".repeat(RELAY_MAX_BYTES);
+        assert!(
+            Request::Relay(relay("prod", &["send", "p9", &too_long]))
+                .encode()
+                .is_err()
+        );
+        let text = format!(
+            "bateri 2\nrelay\nserver prod\nwords {}\n",
+            "x".repeat(RELAY_MAX_BYTES)
+        );
+        assert_eq!(
+            Request::parse(&text).map_err(|failure| failure.kind),
+            Err(Kind::Usage)
+        );
+        // A message of another verb is still held to the small limit.
+        let long = format!("bateri 2\nnotify\ntext {}\n", "x".repeat(MAX_BYTES));
+        assert!(Request::parse(&long).is_err());
+    }
+
+    #[test]
+    fn a_relayed_reply_says_how_the_command_ended_and_what_it_said_on_either_channel() {
+        let reply = Reply::Relayed(Relayed {
+            status: 3,
+            stderr: vec!["kablo: no such session".to_owned()],
+            stdout: "first\nsecond\n".to_owned(),
+        });
+        assert_eq!(reply.encode(), V2_REPLY_RELAYED);
+        assert_eq!(Reply::parse(V2_REPLY_RELAYED), Ok(reply));
+
+        // Stdout is as it was said: no trailing line break added, none taken away, and a line
+        // that looks like the header of a reply is only text.
+        for stdout in ["", "no break", "\n\n", "status 9\nstderr 4\n", "a\r\nb"] {
+            let reply = Reply::Relayed(Relayed::of(0, "", stdout));
+            assert_eq!(Reply::parse(&reply.encode()), Ok(reply), "{stdout:?}");
+        }
+
+        // Stderr is cut to a few plain lines.
+        let noisy = "a\tb\n\n  \nsecond\u{7}\n".to_owned() + &"x".repeat(1000) + "\n";
+        let relayed = Relayed::of(1, &noisy, "");
+        assert_eq!(relayed.stderr[0], "a b");
+        assert_eq!(relayed.stderr[1], "second ");
+        assert_eq!(relayed.stderr[2].len(), 400);
+        let many = "l\n".repeat(100);
+        assert_eq!(Relayed::of(1, &many, "").stderr.len(), 20);
+        let reply = Reply::Relayed(relayed);
+        assert_eq!(Reply::parse(&reply.encode()), Ok(reply));
+
+        for bad in [
+            "bateri 2\nok relayed\n",
+            "bateri 2\nok relayed\nstatus x\nstderr 0\n",
+            "bateri 2\nok relayed\nstatus 256\nstderr 0\n",
+            "bateri 2\nok relayed\nstatus 01\nstderr 0\n",
+            "bateri 2\nok relayed\nstatus 1\n",
+            "bateri 2\nok relayed\nstatus 1\nstderr 21\n",
+            "bateri 2\nok relayed\nstatus 1\nstderr 2\none\n",
+        ] {
+            assert!(Reply::parse(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn this_mac_is_named_by_the_word_that_no_host_can_be() {
+        assert_eq!(
+            Request::parse("bateri 2\nssh\nserver @local\n"),
+            Ok(Request::Ssh("@local".to_owned()))
+        );
+        for bad in ["@locale", "@local@", "@Local", "local@", " @local"] {
+            let ask = format!("bateri 2\nssh\nserver {bad}\n");
+            assert!(Request::parse(&ask).is_err(), "{bad:?}");
+        }
+        let Ok(Request::Place(on)) =
+            Request::parse("bateri 2\nplace\nterminal p9\nanchor p4\nserver @local\n")
+        else {
+            panic!("a place");
+        };
+        assert_eq!(on.server.as_deref(), Some("@local"));
+    }
+
     #[test]
     fn a_server_is_asked_for_by_the_name_ssh_takes_and_a_pane_for_its_terminal_names_it() {
         assert_eq!(Request::parse(V2_SSH), Ok(Request::Ssh("prod".to_owned())));

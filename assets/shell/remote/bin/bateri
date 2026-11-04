@@ -89,6 +89,19 @@
 # connection). The exit code 255 is ssh's for a connection that failed and kablo's for its own
 # trouble: the line printed says which.
 #
+# FROM A SERVER. A server has no ssh to the other machine; the Mac does. Run on a server given
+# `full`, the same commands go to the Mac, which answers the `ssh` request with the word `relay`
+# and then runs the command itself: a `relay` message names the machine (`prod`, or `@local` for
+# this Mac) and carries the words, which the Mac turns into the `bateri` of that machine run from
+# its full path in a login shell, as above, and says how it ended (`ok relayed`: the status, the
+# lines of stderr, stdout as it was). So the Mac RUNS A PROGRAM here — the one place it does, for
+# `full` alone (`own` and `screen` end with 77, before a relay is read); a taken-over server given
+# `full` can do on the person's other machines what the person can. Only `split` (the terminal
+# the pane shows), `send`, `send-key`, `capture`, `wait` and `close` are relayed. `-S @local` and
+# `p9@local` are this Mac for a program on a server (on the Mac itself they are the plain pane).
+# A `split` with no program on this Mac needs a pane to go beside, which a relayed command is
+# not in: name a program.
+#
 # The quoted word below is filled in when the bootstrap writes this file
 # (`ssh_wrap`): kablo's place relative to home.
 
@@ -140,7 +153,7 @@ bt_usage() {
     'An id is a letter and a number: p9 a pane, t3 a tab, g1 a group, w1 a window; bateri ls shows them.' \
     'A pane is p and its number (p7); with none named it is the one this runs in. One of another' \
     'machine is written with the machine after an @ (p9@prod), as bateri ls writes it; -S starts a' \
-    'terminal on a server (full level only).' \
+    'terminal on a server, or on this Mac from a server (-S @local) (full level only).' \
     'Without a program, split, tab and window open a shell. bateri ls lists what is open.'
 }
 
@@ -282,14 +295,21 @@ bt_is_machine() {
   [ "${#1}" -le 253 ]
 }
 
-# Whether $1 names a server as `-S` takes it: as `ssh` is given it (`prod`, `deploy@10.0.0.5`),
-# starting with a letter or a digit so that it can never be read as an option, with at most one
-# `@` and a host after it.
+# Whether $1 names a server as `-S` takes it: as `ssh` is given it (`prod`, an alias or a host of
+# ~/.ssh/config), starting with a letter or a digit so that it can never be read as an option; or
+# `@local`, this Mac. No `user@`: a pane of another machine is written with the host alone
+# (`p9@prod`), so two accounts of one host could not be told apart; the user goes in ~/.ssh/config.
 bt_is_server() {
+  [ "$1" != @local ] || return 0
   case $1 in
-    '' | [!A-Za-z0-9]* | *[!A-Za-z0-9._:@-]* | *@ | *@*@*) return 1 ;;
+    '' | [!A-Za-z0-9]* | *[!A-Za-z0-9._:-]*) return 1 ;;
   esac
   [ "${#1}" -le 253 ]
+}
+
+# Whether this runs on the Mac itself: there is no bootstrap file here (`boot.sh`, a server's).
+bt_on_mac() {
+  [ ! -r "$bt_shelldir/boot.sh" ]
 }
 
 # `bt_address WORD`: a pane written as p9, or p9@prod for one of another machine, in `bt_a_id` and
@@ -336,7 +356,7 @@ bt_ask() {
   bt_reply=${bt_out%x*}
 }
 
-# The reply read as `bt_kind` (`ok`, `ok placed`, `ok text` or `error KIND`),
+# The reply read as `bt_kind` (`ok`, `ok placed`, `ok text`, `ok relayed` or `error KIND`),
 # `bt_text` (the words of an error) and `bt_body` (what follows); `bt_kind`
 # is empty for a reply that is not `bateri 2`'s.
 bt_read_reply() {
@@ -348,7 +368,7 @@ bt_read_reply() {
   bt_split "$bt_rest"
   bt_body=$bt_rest
   case $bt_l1 in
-    'ok' | 'ok placed' | 'ok text') bt_kind=$bt_l1 ;;
+    'ok' | 'ok placed' | 'ok text' | 'ok relayed') bt_kind=$bt_l1 ;;
     'error '*)
       bt_words=${bt_l1#error }
       case $bt_words in
@@ -382,7 +402,8 @@ bt_fail_reply() {
 # `bt_reach SERVER`: asks the Mac how to reach SERVER over ssh. The Mac judges the level (`full`),
 # the name (the gate of `ssh SERVER` in a bateri pane) and the server's own `commands`, makes the
 # connection when it must (a password is asked in a sheet) and answers with the words of the
-# command, one `arg` line each, kept in `bt_ssh_body`.
+# command, one `arg` line each, kept in `bt_ssh_body`; to a program on a server, which has no ssh
+# to run, with the one word `relay` (`bt_relay`).
 bt_reach() {
   bt_ask "bateri 2${nl}ssh${nl}server $1${nl}"
   [ "$bt_status" != 69 ] || bt_die 69 "no Mac is connected: it is the Mac that reaches $1"
@@ -396,22 +417,38 @@ bt_reach() {
   bt_ssh_server=$1
 }
 
-# `bt_remote WORD...`: the `bateri WORD...` of `bt_ssh_server`, over ssh, as the Mac said (`bt_reach`).
-# The server's login shell reads the command line, so it is one `sh` that looks for the file by its
-# full path (nothing is installed here: a server bateri never opened is told to be) and hands over to
-# the login shell, which runs it with the arguments quoted for any shell. The status is the
+# `bt_hexwords WORD...`: the words as the other machine's `bateri --hex` takes them, in `bt_hex`
+# (each `x` and the hex of its bytes, a space before it): nothing the caller wrote is ever read by a
+# shell on the way, whichever shell that is.
+bt_hexwords() {
+  bt_hex=
+  for bt_w in "$@"; do
+    bt_hex="$bt_hex x$(printf '%s' "$bt_w" | od -An -v -tx1 | tr -d ' \n')"
+  done
+}
+
+# `bt_remote WORD...`: the `bateri WORD...` of `bt_ssh_server`, over ssh, as the Mac said (`bt_reach`);
+# when the Mac said `relay` (this runs on a server, which has no ssh to it) it runs it (`bt_relay`).
+# The line the server's shells read is fixed text and the words in hex (`bateri --hex`), so that
+# fish, zsh, bash and dash all read it the same: a `sh` hands over to the login shell, which runs a
+# `sh` that looks for the script where the files of that machine are and says so when it is
+# nowhere (nothing is installed here: a server bateri never opened is told to be). The status is the
 # command's, or 255 when ssh could not connect.
 bt_remote() {
-  bt_cmd='exec env BATERI_QUIET_ORPHAN=1 "$HOME/.local/share/bateri/shell/bin/bateri"'
-  for bt_w in "$@"; do
-    bt_quote "$bt_w"
-    bt_cmd="$bt_cmd $bt_q"
-  done
-  bt_gate='[ -x "$HOME/.local/share/bateri/shell/bin/bateri" ] || { echo "bateri: bateri is not set up on '"$bt_ssh_server"': open a terminal on it in bateri first" >&2; exit 127; }; exec "${SHELL:-/bin/sh}" -lc "$1"'
-  bt_quote "$bt_gate"
-  bt_gate_word=$bt_q
-  bt_quote "$bt_cmd"
-  bt_line="exec sh -c $bt_gate_word sh $bt_q"
+  case $bt_ssh_body in
+    relay | relay"$nl"*)
+      bt_relay "$@"
+      return
+      ;;
+  esac
+  bt_hexwords "$@"
+  bt_search='for d in "${XDG_DATA_HOME:-$HOME/.local/share}" "$HOME/.local/share"; do [ -x "$d/bateri/shell/bin/bateri" ] && exec env BATERI_QUIET_ORPHAN=1 "$d/bateri/shell/bin/bateri" --hex "$@"; done; echo "bateri: bateri is not set up on '"$bt_ssh_server"': open a terminal on it in bateri first" >&2; exit 127'
+  bt_quote "$bt_search"
+  bt_login="exec sh -c $bt_q sh$bt_hex"
+  bt_quote "$bt_login"
+  bt_login_word=$bt_q
+  bt_quote 'exec "${SHELL:-/bin/sh}" -lc "$1"'
+  bt_line="exec sh -c $bt_q sh $bt_login_word"
   set -- ssh
   bt_lines=$bt_ssh_body
   while [ -n "$bt_lines" ]; do
@@ -424,11 +461,59 @@ bt_remote() {
   "$@" "$bt_line"
 }
 
+# `bt_relay WORD...`: `bateri WORD...` on `bt_ssh_server`, run by the Mac. The words go as hex (`x` and
+# the bytes in hex: a line break in a `send` cannot ride a line), and what comes back is the
+# command's status, a few lines of its stderr and its stdout as it was, which are printed as they
+# would have been. `send ID -` reads its text here, since standard input does not cross.
+bt_relay() {
+  bt_verb=$1
+  bt_rn=$#
+  while [ "$bt_rn" -gt 0 ]; do
+    bt_w=$1
+    shift
+    bt_rn=$((bt_rn - 1))
+    if [ "$bt_verb" = send ] && [ "$bt_w" = - ]; then
+      bt_w=$(
+        cat
+        printf x
+      )
+      bt_w=${bt_w%x}
+    fi
+    set -- "$@" "$bt_w"
+  done
+  bt_hexwords "$@"
+  bt_ask "bateri 2${nl}relay${nl}server $bt_ssh_server${nl}words$bt_hex${nl}"
+  [ "$bt_status" != 69 ] || bt_die 69 "no Mac is connected: it is the Mac that runs this on $bt_ssh_server"
+  [ "$bt_status" = 0 ] || bt_die 1 'the Mac did not answer'
+  bt_read_reply
+  case $bt_kind in
+    'ok relayed') ;;
+    'error '*) bt_fail_reply ;;
+    *) bt_die 1 'the Mac answered with something this does not read' ;;
+  esac
+  bt_split "$bt_body"
+  bt_rcode=${bt_l1#status }
+  bt_split "$bt_rest"
+  bt_rlines=${bt_l1#stderr }
+  case $bt_rcode in '' | *[!0-9]*) bt_die 1 'the Mac answered with something this does not read' ;; esac
+  case $bt_rlines in '' | *[!0-9]*) bt_die 1 'the Mac answered with something this does not read' ;; esac
+  bt_rout=$bt_rest
+  while [ "$bt_rlines" -gt 0 ]; do
+    bt_split "$bt_rout"
+    printf '%s\n' "$bt_l1" >&2
+    bt_rout=$bt_rest
+    bt_rlines=$((bt_rlines - 1))
+  done
+  printf '%s' "$bt_rout"
+  return "$bt_rcode"
+}
+
 # `bt_carry MACHINE WORD...`: `bateri WORD...` for a pane of another machine, run where it is. This
 # Mac's own panes are this Mac's (`@local` here is the plain pane).
 bt_carry() {
   bt_via=$1
   shift
+  [ "$bt_via" != local ] || bt_via=@local
   bt_reach "$bt_via"
   bt_remote "$@"
   bt_code=$?
@@ -459,6 +544,7 @@ bt_open() {
   bt_home_newgroup=
   bt_label=
   bt_server=
+  bt_server_here=
   while [ $# -gt 0 ]; do
     case $1 in
       --)
@@ -473,7 +559,12 @@ bt_open() {
         case $bt_server in
           -*) bt_die 64 "a server's name does not start with a dash: '$(printf '%s' "$bt_server" | bt_clean)'" ;;
         esac
-        bt_is_server "$bt_server" || bt_die 64 "-S takes a server as ssh does ('prod', 'deploy@10.0.0.5'), not '$(printf '%s' "$bt_server" | bt_clean)'"
+        bt_is_server "$bt_server" || bt_die 64 "-S takes a server as ssh does ('prod', an alias or a host of ~/.ssh/config, with no user@) or @local, not '$(printf '%s' "$bt_server" | bt_clean)'"
+        if [ "$bt_server" = @local ] && bt_on_mac; then
+          # This Mac is where this runs: the terminal "on this Mac" is the plain one. A second -S is
+          # still a mistake, so the name stays until the loop is done.
+          bt_server_here=yes
+        fi
         ;;
       --left | --right | --above | --below)
         [ "$bt_mode" = split ] || bt_die 64 "$bt_mode takes no side"
@@ -582,6 +673,7 @@ bt_open() {
     esac
     shift
   done
+  [ -z "$bt_server_here" ] || bt_server=
   case $bt_mode in
     tab | window) bt_side=tab ;;
   esac
@@ -784,7 +876,9 @@ bt_place() {
       'error '*)
         # The Mac refused: nothing is left running for a request that failed.
         if [ -n "$bt_server" ]; then
-          bt_remote close pane "$bt_tid" --force </dev/null >/dev/null 2>&1
+          # In a subshell: a Mac that relays it answers in the variables of this reply, and
+          # fails in its own way; neither is what the person is told.
+          (bt_remote close pane "$bt_tid" --force) </dev/null >/dev/null 2>&1
         else
           "$bt_kablo" end "$bt_id" --force >/dev/null 2>&1
           rm -f "$bt_state/terminals/$bt_id"
@@ -1389,10 +1483,10 @@ bt_first_target() {
 
 # `bt_on_machine ARGS...`: the command `bt_cverb` for a pane of the machine `bt_cvia`, its first
 # argument the pane's plain id. This Mac's own panes (`@local`) are this machine's when this is the
-# Mac; any other machine is reached over ssh (`bt_carry`).
+# Mac; any other machine is reached over ssh from the Mac, and through the Mac from a server
+# (`bt_carry`).
 bt_on_machine() {
-  if [ "$bt_cvia" = local ]; then
-    [ ! -r "$bt_shelldir/boot.sh" ] || bt_die 64 'a pane of the Mac is not reached from a server by this command'
+  if [ "$bt_cvia" = local ] && bt_on_mac; then
     exec "$bt_kablo" "$bt_cverb" "$@"
   fi
   bt_carry "$bt_cvia" "$bt_cverb" "$@"
@@ -1450,6 +1544,40 @@ bt_is_key() {
   esac
   return 1
 }
+
+# `bateri --hex WORD...`: the words arrive as `x` and the hex of their bytes (what another machine's
+# `bt_remote` and the Mac's relay write, so that no shell reads the caller's bytes); they are turned
+# back into the words and the command is read as usual.
+if [ "${1-}" = --hex ]; then
+  shift
+  bt_rn=$#
+  while [ "$bt_rn" -gt 0 ]; do
+    bt_hexw=$1
+    shift
+    bt_rn=$((bt_rn - 1))
+    case $bt_hexw in
+      x*) bt_hexw=${bt_hexw#x} ;;
+      *) bt_die 64 '--hex takes words written as x and their bytes in hex' ;;
+    esac
+    case $bt_hexw in
+      *[!0-9A-Fa-f]*) bt_die 64 '--hex takes words written as x and their bytes in hex' ;;
+    esac
+    [ $((${#bt_hexw} % 2)) -eq 0 ] || bt_die 64 '--hex takes words written as x and their bytes in hex'
+    bt_fmt=
+    while [ -n "$bt_hexw" ]; do
+      bt_pair=${bt_hexw%"${bt_hexw#??}"}
+      bt_hexw=${bt_hexw#??}
+      bt_byte=$((0x$bt_pair))
+      [ "$bt_byte" -ne 0 ] || bt_die 64 'a word has a NUL in it'
+      bt_fmt="$bt_fmt\\$((bt_byte / 64))$((bt_byte / 8 % 8))$((bt_byte % 8))"
+    done
+    bt_w=$(
+      printf "$bt_fmt"
+      printf x
+    )
+    set -- "$@" "${bt_w%x}"
+  done
+fi
 
 [ $# -gt 0 ] || {
   bt_usage >&2

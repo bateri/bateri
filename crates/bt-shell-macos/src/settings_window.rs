@@ -521,7 +521,7 @@ fn command_level_note(level: CommandLevel) -> &'static str {
             "A program here sees and changes every tab, group and window bateri has open."
         }
         CommandLevel::Full => {
-            "Like Whole screen, and it starts terminals on servers and types into their panes."
+            "Like Whole screen, and it starts terminals on other machines and types into or reads their panes. A server given this is trusted with your other machines too."
         }
     }
 }

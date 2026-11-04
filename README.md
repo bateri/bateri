@@ -224,6 +224,19 @@ must not be `off`. bateri asks for a password in its usual sheet when the
 connection must be made, installs nothing on the server (open a terminal on it
 in bateri first), and the pane opens at once and connects by its own path.
 
+**From a server.** A server you gave `full` (`commands = "full"` in its
+`[remote] hosts` entry, by its exact name) can do the same to your other
+machines: `bateri split -S rasp -- make test`, `bateri send p9@rasp 'q'`,
+`bateri capture p3@local`, and `-S @local` for a terminal on this Mac. It has no
+connection to them, so bateri runs the command for it: the `bateri` of the other
+machine, from its full path in a login shell, and hands back what it printed and
+how it ended. That is the one thing bateri runs for a program, which is why the
+level is spelled out: a server that is taken over can then do on your other
+machines what you can. `split`, `send`, `send-key`, `capture`, `wait` and
+`close` are all it relays; a server at `own` or `screen` gets the same refusal
+as anywhere else. A `split` with no program on this Mac needs a pane to go
+beside, which a relayed command is not in: name a program.
+
 **The keyboard has one rule.** A command that would change where you type
 (`focus`, `move`, `zoom`, `swap`, `resize`, `--focus`) is done only from the pane
 the cursor is in, or while bateri is behind, or in a window other than the one

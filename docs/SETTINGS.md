@@ -419,8 +419,9 @@ node_version = true
 # them. Other machines have a level of their own: a commands key in their
 # [remote] hosts entry, written like integration below. Turning it off ends
 # a program that is using the command here; "full" on a server lets that
-# server run commands on this Mac if it is ever taken over, and is not given
-# to a pattern like prod-*, only to a host's exact name.
+# server run commands on this Mac and on your other machines if it is ever
+# taken over (bateri runs them for it), and is not given to a pattern like
+# prod-*, only to a host's exact name.
 level = "own"
 
 [remote]
@@ -2014,7 +2015,9 @@ the window; give it to a host by its exact name (a pattern such as `prod-*` is r
 warning).
 
 This Mac's level is also the "bateri command:" row in the settings window's General page and takes effect at
-once. A server's level is read when its next connection is made: that is when its command is installed or removed.
+once. A server's level is read again at every request the window gets from it, so a change to `full`, `screen` or
+`own` applies to the next command; what a change to or from `off` does to the installed command waits for that
+server's next connection, which is when the command is installed or removed.
 
 ### `[remote]`
 

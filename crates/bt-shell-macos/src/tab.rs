@@ -854,9 +854,10 @@ impl TerminalTab {
         moved
     }
 
-    /// `bateri zoom p9`: `pane` fills the tab and takes the keyboard, or gives the tab back if it
-    /// filled it already. A no-op with a single pane.
-    pub(crate) fn zoom_pane(&self, pane: &TerminalPane) {
+    /// `bateri zoom p9`: `pane` fills the tab and, when `take_keyboard`, takes the keyboard (a tab
+    /// that is not on screen has none to take), or gives the tab back if it filled it already. A
+    /// no-op with a single pane.
+    pub(crate) fn zoom_pane(&self, pane: &TerminalPane, take_keyboard: bool) {
         if self.panes().len() < 2 {
             return;
         }
@@ -864,7 +865,9 @@ impl TerminalTab {
             self.set_zoom(None);
         } else {
             self.set_zoom(Some(pane.id()));
-            self.focus_pane(pane);
+            if take_keyboard {
+                self.focus_pane(pane);
+            }
         }
         self.layout_changed();
     }

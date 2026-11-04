@@ -338,7 +338,7 @@ impl Backend for SshBackend {
             let (_, home) = self.here()?;
             let channel = LocalChannel {
                 home: home.to_owned(),
-                limit: install::NUMBER_LIMIT,
+                limit: install::LOCAL_NUMBER_LIMIT,
             };
             return install::next_number(&channel);
         }
