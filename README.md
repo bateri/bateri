@@ -160,30 +160,58 @@ the `PATH` (zsh, bash and fish; cron jobs call
 `~/.local/share/bateri/shell/bin/bateri`). The terminal itself lives on the
 server, under kablo, so these keep working with your Mac asleep; the pane takes
 its place when bateri connects. bateri on the Mac is never asked to run
-anything: what a program sends it only places, lists or closes panes and shows a
-notification. A pane is named by its number (`p9`), which is what the opening
-command prints; `--json` prints it with the tab (`t3`), group (`g1`) and window
-(`w1`) it stands in, and `ls` lists every window, group and tab by the same
-names.
+anything: what a program sends it only places, lists, labels, moves or closes
+panes, tabs, groups and windows and shows a notification.
+
+Everything is named by an id, a letter and a number: `p9` a pane, `t3` a tab,
+`g1` a group, `w1` a window. The opening commands print the pane (`--json` prints
+it with the tab, group and window it stands in) and `ls` lists every window,
+group and tab by the same names. An id never changes when the thing moves, and
+a number is not given twice. A label is information, not a name: no command
+takes one in place of an id.
 
 ```sh
 bateri split --below --ratio 30 -- npm run dev   # prints p9; the pane appears below this one
+bateri split --tab t3 --label server -- make up  # a pane in that tab, with a label kablo shows
 bateri tab -- make watch                         # in a tab of its own, next to this one
+bateri tab --new-group api --label web           # in a group made for it; also --group g1, --window w1
+bateri window -- make watch                      # in a window of its own; the keyboard stays where it was
 bateri ls [--json]                               # windows, groups, tabs, splits, and the server's panes
 bateri send p9 'q'                               # type into a pane (kablo's send)
 bateri send-key p9 enter
 bateri capture p9                                # what is on its screen
 bateri wait p9 [--for TIME]                      # until its program ends; exits with its status
-bateri close [p9]                                # asks you first about a pane the caller did not open
+bateri close pane|tab|group|window [ID]          # no question; the programs in it end
+bateri focus pane|tab|group|window [ID]          # take the keyboard there (see below)
+bateri rename pane|tab|group ID LABEL            # an empty label takes it away
+bateri move tab t3 --group g1                    # or --window w1, which also takes it out of its group
+bateri move pane p9 --beside p3 --right
+bateri zoom [p9]    bateri swap p9 p3    bateri resize [p9] --left [--by N]
 bateri notify "tests failed"                     # a notification when bateri is behind or has no tab of it
 ```
 
-`split` takes `--left`, `--right`, `--above` or `--below`, `--ratio PERCENT`,
-`--cwd DIR`, `--keep-open` (the pane stays when the program ends), `--wait` (the
-command waits for the program and exits with its status) and `--focus` (the pane
-takes the keyboard; by default the focus stays where it was). Without a program
-the pane runs bateri's shell. Exit codes: 0, 1, 64 (a mistake in the command),
-69 (needs bateri and none is connected), 77 (refused) and, for `wait`, the
+The kind is always written: `close tab t3`, never `close t3`, and an id of
+another kind (`close group t3`) is a mistake that says what to write. With no id
+the command acts on the one it runs in (`close tab`). `split` takes `--left`,
+`--right`, `--above` or `--below`, `--ratio PERCENT`, `--cwd DIR`, `--keep-open`
+(the pane stays when the program ends), `--wait` (the command waits for the
+program and exits with its status) and `--focus` (the pane takes the keyboard;
+by default the focus stays where it was). Fields that contradict each other
+(`split p9 --tab t3`, `tab --group g1 --window w1`) are refused. Without a
+program the pane runs bateri's shell.
+
+**What a machine may do** is a setting per machine, `off`, `own`, `screen` or
+`full`, and nobody is asked ([`[commands]`](docs/SETTINGS.md#commands)). `own`,
+the default, lets a program manage what is made of its own machine's panes:
+closing a tab that holds a pane of another machine is refused. Closing ends
+the programs in the panes.
+
+**The keyboard has one rule.** A command that would change where you type
+(`focus`, `move`, `zoom`, `swap`, `resize`, `--focus`) is done only from the pane
+the cursor is in, or while bateri is behind, or in a window other than the one
+you are typing in; otherwise it is refused (77) and says so, and `bateri notify`
+is how to ask you to look. Exit codes: 0, 1, 64 (a mistake in the command), 69
+(needs bateri and none is connected), 77 (refused) and, for `wait`, the
 program's own.
 
 ## Building from source

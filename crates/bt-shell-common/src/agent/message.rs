@@ -151,6 +151,8 @@ pub struct Place {
     pub keep_open: bool,
     /// The pane takes the keyboard.
     pub focus: bool,
+    /// Where else than beside the anchor, and the label.
+    pub home: Home,
 }
 
 impl Place {
@@ -188,6 +190,16 @@ pub enum Subject {
 }
 
 impl Subject {
+    /// The id line it writes, if it names one.
+    fn id(&self) -> Option<String> {
+        match self {
+            Subject::Pane(pane) => pane.as_ref().map(|pane| pane.name().to_owned()),
+            Subject::Tab(id) | Subject::Group(id) | Subject::Window(id) => {
+                id.map(|id| id.to_string())
+            }
+        }
+    }
+
     fn word(&self) -> &'static str {
         match self {
             Subject::Pane(_) => "pane",
@@ -196,6 +208,94 @@ impl Subject {
             Subject::Window(_) => "window",
         }
     }
+}
+
+/// Where a tab goes when it moves.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TabHome {
+    /// Into this group (of whatever window it is in).
+    Group(Id),
+    /// Into this window, out of any group.
+    Window(Id),
+}
+
+/// The longest a label is, in bytes (kablo's own limit for a terminal's).
+pub const LABEL_MAX: usize = 64;
+
+/// The window a new tab goes to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WindowHome {
+    /// This one.
+    Existing(Id),
+    /// A window of its own, with the pane as its only tab.
+    New,
+}
+
+/// Where the pane or tab goes when it is not simply beside the anchor, and what it is called.
+/// Every part is optional; some do not go together ([`Home::check`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Home {
+    /// `split --tab t3`: the pane goes into this tab.
+    pub tab: Option<Id>,
+    /// `tab --group g1`: the tab goes into this group.
+    pub group: Option<Id>,
+    /// `tab --new-group api`: the tab goes into a group of its own made for it.
+    pub new_group: Option<String>,
+    /// `tab --window w1`, `window`: the tab goes to this window, or to a new one.
+    pub window: Option<WindowHome>,
+    /// `--label web`: the label of the new tab (`tab`, `window`) or pane (`split`).
+    pub label: Option<String>,
+}
+
+impl Home {
+    /// What does not go together: a pane into a tab and a tab into a group, a group and a new
+    /// group, a group and another window (the group has its window). `side` is what the request
+    /// asked for.
+    pub fn check(&self, side: Option<Side>) -> Result<(), Failure> {
+        let tab_asked = self.group.is_some() || self.new_group.is_some() || self.window.is_some();
+        if self.tab.is_some() && (tab_asked || side == Some(Side::Tab)) {
+            return Err(Failure::usage(
+                "`tab` is the tab a pane goes into; it goes with no group, window or side `tab`",
+            ));
+        }
+        if tab_asked && side != Some(Side::Tab) {
+            return Err(Failure::usage(
+                "`group`, `new-group` and `window` are for a tab: the side is `tab`",
+            ));
+        }
+        if self.group.is_some() && (self.new_group.is_some() || self.window.is_some()) {
+            return Err(Failure::usage(
+                "`group` is a group that is in its window already: it goes with no new group and no window",
+            ));
+        }
+        if matches!(self.window, Some(WindowHome::New))
+            && (self.group.is_some() || self.new_group.is_some())
+        {
+            return Err(Failure::usage(
+                "a new window has no group yet: `window new` goes with no group",
+            ));
+        }
+        if let Some(label) = self.label.as_deref() {
+            if side != Some(Side::Tab) {
+                return Err(Failure::usage(
+                    "`label` is the label of a tab; a pane's is kablo's own (`kablo new --label`)",
+                ));
+            }
+            check_label("label", label)?;
+        }
+        if let Some(name) = self.new_group.as_deref() {
+            check_label("new-group", name)?;
+        }
+        Ok(())
+    }
+}
+
+/// A label a person reads: not empty, one line, short.
+fn check_label(key: &str, label: &str) -> Result<(), Failure> {
+    if label.trim().is_empty() || label.len() > LABEL_MAX {
+        return Err(Failure::usage(format!("`{key}` is 1 to {LABEL_MAX} bytes")));
+    }
+    Ok(())
 }
 
 /// The most steps a `resize` may take at once.
@@ -210,6 +310,15 @@ pub enum Arrange {
     Zoom(Option<Anchor>),
     /// Two panes of one tab trade places.
     Swap { pane: Anchor, other: Anchor },
+    /// Close a tab, a group or a window, without a question: the panes in it end.
+    Close(Subject),
+    /// Give a tab or a group a label; `None` takes the label away. (A pane's label is kablo's.)
+    Rename {
+        subject: Subject,
+        label: Option<String>,
+    },
+    /// A tab goes into a group or a window; into a window it leaves its group.
+    MoveTab { tab: Id, to: TabHome },
     /// A pane goes beside another, on its side, in its tab (which may be another window's).
     Move {
         pane: Anchor,
@@ -301,6 +410,24 @@ impl Request {
                 if place.focus {
                     push(&mut out, "focus", "yes")?;
                 }
+                place.home.check(place.side)?;
+                if let Some(tab) = place.home.tab {
+                    push(&mut out, "tab", &tab.to_string())?;
+                }
+                if let Some(group) = place.home.group {
+                    push(&mut out, "group", &group.to_string())?;
+                }
+                if let Some(name) = &place.home.new_group {
+                    push(&mut out, "new-group", name)?;
+                }
+                match &place.home.window {
+                    Some(WindowHome::Existing(id)) => push(&mut out, "window", &id.to_string())?,
+                    Some(WindowHome::New) => push(&mut out, "window", "new")?,
+                    None => {}
+                }
+                if let Some(label) = &place.home.label {
+                    push(&mut out, "label", label)?;
+                }
             }
             Request::Ls(format) => {
                 out.push_str("ls\n");
@@ -332,12 +459,39 @@ fn encode_arrange(out: &mut String, arrange: &Arrange) -> Result<(), Failure> {
         Arrange::Focus(subject) => {
             out.push_str("focus\n");
             push(out, "subject", subject.word())?;
-            match subject {
-                Subject::Pane(Some(pane)) => push(out, "id", pane.name())?,
-                Subject::Tab(Some(id)) | Subject::Group(Some(id)) | Subject::Window(Some(id)) => {
-                    push(out, "id", &id.to_string())?;
-                }
-                _ => {}
+            if let Some(id) = subject.id() {
+                push(out, "id", &id)?;
+            }
+        }
+        Arrange::Close(subject) => {
+            if matches!(subject, Subject::Pane(_)) {
+                return Err(Failure::usage("a pane is closed by its terminal"));
+            }
+            out.push_str("close\n");
+            push(out, "subject", subject.word())?;
+            if let Some(id) = subject.id() {
+                push(out, "id", &id)?;
+            }
+        }
+        Arrange::Rename { subject, label } => {
+            out.push_str("rename\n");
+            push(out, "subject", subject.word())?;
+            let Some(id) = subject.id() else {
+                return Err(Failure::usage("`rename` needs the `id` of what it renames"));
+            };
+            push(out, "id", &id)?;
+            if let Some(label) = label {
+                check_label("label", label)?;
+                push(out, "label", label)?;
+            }
+        }
+        Arrange::MoveTab { tab, to } => {
+            out.push_str("move\n");
+            push(out, "subject", "tab")?;
+            push(out, "id", &tab.to_string())?;
+            match to {
+                TabHome::Group(group) => push(out, "group", &group.to_string())?,
+                TabHome::Window(window) => push(out, "window", &window.to_string())?,
             }
         }
         Arrange::Zoom(pane) => {
@@ -511,7 +665,19 @@ fn read_request<'a>(
             let fields = Fields::read(
                 verb,
                 lines,
-                &["terminal", "anchor", "side", "ratio", "keep-open", "focus"],
+                &[
+                    "terminal",
+                    "anchor",
+                    "side",
+                    "ratio",
+                    "keep-open",
+                    "focus",
+                    "tab",
+                    "group",
+                    "new-group",
+                    "window",
+                    "label",
+                ],
             )?;
             let ratio = fields
                 .get("ratio")
@@ -535,6 +701,19 @@ fn read_request<'a>(
                     })
                 })
                 .transpose()?;
+            let id = |key: &str, kind: IdKind| id_field(&fields, key, kind);
+            let home = Home {
+                tab: id("tab", IdKind::Tab)?,
+                group: id("group", IdKind::Group)?,
+                new_group: fields.get("new-group").map(str::to_owned),
+                window: match fields.get("window") {
+                    None => None,
+                    Some("new") => Some(WindowHome::New),
+                    Some(_) => id("window", IdKind::Window)?.map(WindowHome::Existing),
+                },
+                label: fields.get("label").map(str::to_owned),
+            };
+            home.check(side)?;
             Ok(Request::Place(Place {
                 terminal: fields.terminal("terminal")?,
                 anchor: fields
@@ -545,6 +724,7 @@ fn read_request<'a>(
                 ratio,
                 keep_open: fields.flag("keep-open")?,
                 focus: fields.flag("focus")?,
+                home,
             }))
         }
         "ls" => {
@@ -558,23 +738,70 @@ fn read_request<'a>(
             }
         }
         "close" => {
-            let fields = Fields::read(verb, lines, &["terminal"])?;
-            Ok(Request::Close(anchor_of(
-                "terminal",
-                fields.need("terminal")?,
-            )?))
+            let fields = Fields::read(verb, lines, &["terminal", "subject", "id"])?;
+            match (fields.get("terminal"), fields.get("subject")) {
+                (Some(terminal), None) if fields.get("id").is_none() => {
+                    Ok(Request::Close(anchor_of("terminal", terminal)?))
+                }
+                (None, Some(_)) => match subject_of(&fields)? {
+                    Subject::Pane(_) => Err(Failure::usage(
+                        "a pane is closed by its `terminal`, not by a `subject`",
+                    )),
+                    subject => Ok(Request::Arrange(Arrange::Close(subject))),
+                },
+                (None, None) => Err(Failure::usage("`close` needs a `terminal` or a `subject`")),
+                _ => Err(Failure::usage(
+                    "`close` takes a `terminal` or a `subject` and its `id`, not both",
+                )),
+            }
         }
         "notify" => {
             let fields = Fields::read(verb, lines, &["text"])?;
             Ok(Request::Notify(fields.need("text")?.to_owned()))
         }
-        "focus" | "zoom" | "swap" | "move" | "resize" => {
+        "focus" | "zoom" | "swap" | "move" | "resize" | "rename" => {
             read_arrange(verb, lines).map(Request::Arrange)
         }
         other => Err(Failure::usage(format!(
-            "`{other}` is no verb: place, ls, close, notify, focus, zoom, swap, move or resize"
+            "`{other}` is no verb: place, ls, close, notify, focus, zoom, swap, move, resize or rename"
         ))),
     }
+}
+
+/// The id a request's `key` line names, which must be of `kind`.
+fn id_field(fields: &Fields<'_>, key: &str, kind: IdKind) -> Result<Option<Id>, Failure> {
+    id_of(fields, key, kind)
+}
+
+/// The `subject` and `id` lines: what a verb is about.
+fn subject_of(fields: &Fields<'_>) -> Result<Subject, Failure> {
+    let given = fields.get("id");
+    let id = |kind: IdKind| -> Result<Option<Id>, Failure> {
+        given
+            .map(|value| {
+                Id::parse(value)
+                    .filter(|id| id.kind() == kind)
+                    .ok_or_else(|| {
+                        Failure::usage(format!(
+                            "`id` is a {} id like `{}1`, not `{value}`",
+                            kind.word(),
+                            kind.prefix()
+                        ))
+                    })
+            })
+            .transpose()
+    };
+    Ok(match fields.need("subject")? {
+        "pane" => Subject::Pane(given.map(|value| anchor_of("id", value)).transpose()?),
+        "tab" => Subject::Tab(id(IdKind::Tab)?),
+        "group" => Subject::Group(id(IdKind::Group)?),
+        "window" => Subject::Window(id(IdKind::Window)?),
+        other => {
+            return Err(Failure::usage(format!(
+                "`subject` is pane, tab, group or window, not `{other}`"
+            )));
+        }
+    })
 }
 
 fn read_arrange<'a>(
@@ -600,34 +827,30 @@ fn read_arrange<'a>(
     match verb {
         "focus" => {
             let fields = Fields::read(verb, lines, &["subject", "id"])?;
-            let given = fields.get("id");
-            let id = |kind: IdKind| -> Result<Option<Id>, Failure> {
-                given
-                    .map(|value| {
-                        Id::parse(value)
-                            .filter(|id| id.kind() == kind)
-                            .ok_or_else(|| {
-                                Failure::usage(format!(
-                                    "`id` is a {} id like `{}1`, not `{value}`",
-                                    kind.word(),
-                                    kind.prefix()
-                                ))
-                            })
-                    })
-                    .transpose()
-            };
-            let subject = match fields.need("subject")? {
-                "pane" => Subject::Pane(pane(&fields, "id")?),
-                "tab" => Subject::Tab(id(IdKind::Tab)?),
-                "group" => Subject::Group(id(IdKind::Group)?),
-                "window" => Subject::Window(id(IdKind::Window)?),
-                other => {
-                    return Err(Failure::usage(format!(
-                        "`subject` is pane, tab, group or window, not `{other}`"
-                    )));
+            Ok(Arrange::Focus(subject_of(&fields)?))
+        }
+        "rename" => {
+            let fields = Fields::read(verb, lines, &["subject", "id", "label"])?;
+            let subject = subject_of(&fields)?;
+            let named = match &subject {
+                Subject::Tab(id) | Subject::Group(id) => id.is_some(),
+                Subject::Pane(_) => {
+                    return Err(Failure::usage(
+                        "a pane's label is kablo's own: `kablo label` on the server",
+                    ));
+                }
+                Subject::Window(_) => {
+                    return Err(Failure::usage("a window has no label to change"));
                 }
             };
-            Ok(Arrange::Focus(subject))
+            if !named {
+                return Err(Failure::usage("`rename` needs the `id` of what it renames"));
+            }
+            let label = fields.get("label").map(str::to_owned);
+            if let Some(label) = &label {
+                check_label("label", label)?;
+            }
+            Ok(Arrange::Rename { subject, label })
         }
         "zoom" => {
             let fields = Fields::read(verb, lines, &["terminal"])?;
@@ -641,7 +864,31 @@ fn read_arrange<'a>(
             })
         }
         "move" => {
-            let fields = Fields::read(verb, lines, &["terminal", "beside", "side"])?;
+            let fields = Fields::read(
+                verb,
+                lines,
+                &[
+                    "terminal", "beside", "side", "subject", "id", "group", "window",
+                ],
+            )?;
+            if fields.get("subject").is_some() {
+                let Subject::Tab(Some(tab)) = subject_of(&fields)? else {
+                    return Err(Failure::usage(
+                        "`move` moves a pane or a tab, and a tab by its `id`",
+                    ));
+                };
+                let to = match (
+                    id_field(&fields, "group", IdKind::Group)?,
+                    id_field(&fields, "window", IdKind::Window)?,
+                ) {
+                    (Some(group), None) => TabHome::Group(group),
+                    (None, Some(window)) => TabHome::Window(window),
+                    _ => {
+                        return Err(Failure::usage("a tab moves to one `group` or one `window`"));
+                    }
+                };
+                return Ok(Arrange::MoveTab { tab, to });
+            }
             Ok(Arrange::Move {
                 pane: anchor_of("terminal", fields.need("terminal")?)?,
                 beside: anchor_of("beside", fields.need("beside")?)?,
@@ -833,6 +1080,7 @@ mod tests {
             ratio: Some(30),
             keep_open: true,
             focus: true,
+            home: Home::default(),
         }
     }
 
@@ -844,6 +1092,7 @@ mod tests {
             ratio: None,
             keep_open: false,
             focus: false,
+            home: Home::default(),
         }
     }
 
@@ -922,6 +1171,210 @@ mod tests {
                 side: Side::Above,
                 steps: 1
             }))
+        );
+    }
+
+    const V2_CLOSE_TAB: &str = "bateri 2\nclose\nsubject tab\nid t3\n";
+    const V2_CLOSE_OWN_WINDOW: &str = "bateri 2\nclose\nsubject window\n";
+    const V2_RENAME: &str = "bateri 2\nrename\nsubject tab\nid t3\nlabel web\n";
+    const V2_RENAME_CLEAR: &str = "bateri 2\nrename\nsubject group\nid g1\n";
+    const V2_MOVE_TAB_GROUP: &str = "bateri 2\nmove\nsubject tab\nid t3\ngroup g1\n";
+    const V2_MOVE_TAB_WINDOW: &str = "bateri 2\nmove\nsubject tab\nid t3\nwindow w2\n";
+    const V2_PLACE_IN_TAB: &str = "bateri 2\nplace\nterminal p9\nanchor p4\ntab t3\n";
+    const V2_PLACE_IN_GROUP: &str =
+        "bateri 2\nplace\nterminal p9\nanchor p4\nside tab\ngroup g1\nlabel web\n";
+    const V2_PLACE_NEW_GROUP: &str =
+        "bateri 2\nplace\nterminal p9\nanchor p4\nside tab\nnew-group api\nwindow w2\n";
+    const V2_PLACE_NEW_WINDOW: &str =
+        "bateri 2\nplace\nterminal p9\nanchor p4\nside tab\nwindow new\n";
+
+    #[test]
+    fn closing_renaming_and_opening_in_a_place_are_read_and_written_byte_for_byte() {
+        let tab = |number| Id::new(IdKind::Tab, number);
+        let place_with = |side: Option<Side>, home: Home| {
+            Request::Place(Place {
+                terminal: Terminal(9),
+                anchor: Some(pane(4)),
+                side,
+                ratio: None,
+                keep_open: false,
+                focus: false,
+                home,
+            })
+        };
+        let cases = [
+            (
+                V2_CLOSE_TAB,
+                Request::Arrange(Arrange::Close(Subject::Tab(tab(3)))),
+            ),
+            (
+                V2_CLOSE_OWN_WINDOW,
+                Request::Arrange(Arrange::Close(Subject::Window(None))),
+            ),
+            (
+                V2_RENAME,
+                Request::Arrange(Arrange::Rename {
+                    subject: Subject::Tab(tab(3)),
+                    label: Some("web".to_owned()),
+                }),
+            ),
+            (
+                V2_RENAME_CLEAR,
+                Request::Arrange(Arrange::Rename {
+                    subject: Subject::Group(Id::new(IdKind::Group, 1)),
+                    label: None,
+                }),
+            ),
+            (
+                V2_MOVE_TAB_GROUP,
+                Request::Arrange(Arrange::MoveTab {
+                    tab: tab(3).expect("an id"),
+                    to: TabHome::Group(Id::new(IdKind::Group, 1).expect("an id")),
+                }),
+            ),
+            (
+                V2_MOVE_TAB_WINDOW,
+                Request::Arrange(Arrange::MoveTab {
+                    tab: tab(3).expect("an id"),
+                    to: TabHome::Window(Id::new(IdKind::Window, 2).expect("an id")),
+                }),
+            ),
+            (
+                V2_PLACE_IN_TAB,
+                place_with(
+                    None,
+                    Home {
+                        tab: tab(3),
+                        ..Home::default()
+                    },
+                ),
+            ),
+            (
+                V2_PLACE_IN_GROUP,
+                place_with(
+                    Some(Side::Tab),
+                    Home {
+                        group: Id::new(IdKind::Group, 1),
+                        label: Some("web".to_owned()),
+                        ..Home::default()
+                    },
+                ),
+            ),
+            (
+                V2_PLACE_NEW_GROUP,
+                place_with(
+                    Some(Side::Tab),
+                    Home {
+                        new_group: Some("api".to_owned()),
+                        window: Some(WindowHome::Existing(
+                            Id::new(IdKind::Window, 2).expect("an id"),
+                        )),
+                        ..Home::default()
+                    },
+                ),
+            ),
+            (
+                V2_PLACE_NEW_WINDOW,
+                place_with(
+                    Some(Side::Tab),
+                    Home {
+                        window: Some(WindowHome::New),
+                        ..Home::default()
+                    },
+                ),
+            ),
+        ];
+        for (text, request) in cases {
+            assert_eq!(Request::parse(text).as_ref(), Ok(&request), "{text:?}");
+            assert_eq!(request.encode().as_deref(), Ok(text), "{request:?}");
+        }
+    }
+
+    #[test]
+    fn what_does_not_go_together_in_a_place_or_a_tab_verb_is_refused_both_ways() {
+        let base = "bateri 2\nplace\nterminal p9\nanchor p4\n";
+        for (extra, word) in [
+            ("tab t3\ngroup g1\nside tab\n", "goes with no group"),
+            ("tab t3\nside tab\n", "goes with no group"),
+            ("group g1\n", "the side is `tab`"),
+            ("side left\nnew-group api\n", "the side is `tab`"),
+            ("side tab\ngroup g1\nnew-group api\n", "no new group"),
+            (
+                "side tab\ngroup g1\nwindow w2\n",
+                "no new group and no window",
+            ),
+            (
+                "side tab\nnew-group api\nwindow new\n",
+                "goes with no group",
+            ),
+            ("side tab\ngroup t3\n", "group id"),
+            ("tab g1\n", "tab id"),
+            ("side tab\nwindow x1\n", "window id"),
+            ("side left\nlabel web\n", "label of a tab"),
+            ("side tab\nlabel   \n", "1 to 64 bytes"),
+        ] {
+            let failure = usage(&format!("{base}{extra}"));
+            assert_eq!(failure.kind, Kind::Usage, "{extra:?}");
+            assert!(failure.text.contains(word), "{extra:?}: {}", failure.text);
+        }
+        let long = "x".repeat(65);
+        assert!(
+            usage(&format!("{base}side tab\nlabel {long}\n"))
+                .text
+                .contains("1 to 64")
+        );
+        for (text, word) in [
+            (
+                "bateri 2\nclose\nsubject pane\nid p9\n",
+                "by its `terminal`",
+            ),
+            ("bateri 2\nclose\nterminal p9\nsubject tab\n", "not both"),
+            ("bateri 2\nclose\nterminal p9\nid t3\n", "not both"),
+            ("bateri 2\nclose\n", "needs a `terminal` or a `subject`"),
+            (
+                "bateri 2\nrename\nsubject tab\nlabel web\n",
+                "needs the `id`",
+            ),
+            ("bateri 2\nrename\nsubject window\nid w1\n", "no label"),
+            (
+                "bateri 2\nrename\nsubject pane\nid p9\nlabel x\n",
+                "kablo's own",
+            ),
+            (
+                "bateri 2\nmove\nsubject tab\nid t3\n",
+                "one `group` or one `window`",
+            ),
+            (
+                "bateri 2\nmove\nsubject tab\nid t3\ngroup g1\nwindow w1\n",
+                "one `group` or one `window`",
+            ),
+            (
+                "bateri 2\nmove\nsubject group\nid g1\ngroup g2\n",
+                "moves a pane or a tab",
+            ),
+        ] {
+            let failure = usage(text);
+            assert_eq!(failure.kind, Kind::Usage, "{text:?}");
+            assert!(failure.text.contains(word), "{text:?}: {}", failure.text);
+        }
+        // What this writes is read back, or it is not written.
+        let place = Place {
+            terminal: Terminal(9),
+            anchor: None,
+            side: Some(Side::Left),
+            ratio: None,
+            keep_open: false,
+            focus: false,
+            home: Home {
+                new_group: Some("api".to_owned()),
+                ..Home::default()
+            },
+        };
+        assert!(Request::Place(place).encode().is_err());
+        assert!(
+            Request::Arrange(Arrange::Close(Subject::Pane(Some(pane(9)))))
+                .encode()
+                .is_err()
         );
     }
 
@@ -1140,8 +1593,8 @@ mod tests {
             ("bateri 2\nnotify\n", "needs a `text`"),
             ("bateri 2\nplace\nterminal p1\nterminal p2\n", "twice"),
             (
-                "bateri 2\nplace\nterminal p1\nlabel work\n",
-                "takes no `label`",
+                "bateri 2\nplace\nterminal p1\ncolour work\n",
+                "takes no `colour`",
             ),
             (
                 "bateri 2\nclose\nterminal p1\nside left\n",
@@ -1288,6 +1741,11 @@ mod tests {
             V2_FOCUS_TAB,
             V2_MOVE,
             V2_RESIZE,
+            V2_CLOSE_TAB,
+            V2_RENAME,
+            V2_MOVE_TAB_GROUP,
+            V2_PLACE_IN_GROUP,
+            V2_PLACE_NEW_GROUP,
             V2_REPLY_PLACED,
             V2_REPLY_TEXT,
             V2_REPLY_ERROR,

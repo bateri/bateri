@@ -1455,6 +1455,37 @@ mod tests {
         }
     }
 
+    /// A tab a program on a server asked for goes into a group made for it (`bateri tab
+    /// --new-group api`): the name that is taken becomes `api 2`, the group is numbered at once,
+    /// the selection stays where it was and the other groups are not touched.
+    #[test]
+    fn a_group_made_for_a_tab_a_program_asked_for_takes_a_free_name_and_a_number() {
+        let (mut tabs, mut groups, api, _) = scene();
+        assert!(groups.set_number(api, Some(1)));
+        tabs.append(9);
+        let made = groups
+            .place(&mut tabs, &[9], Target::New("api".into()))
+            .flatten()
+            .expect("a group");
+        assert_eq!(
+            groups.group(made).map(|group| group.name.as_str()),
+            Some("api 2")
+        );
+        assert_eq!(
+            groups.group(api).map(|group| group.name.as_str()),
+            Some("api")
+        );
+        assert_eq!(groups.group_of(9), Some(made));
+        assert_eq!(tabs.selected(), Some(1), "nothing on screen moved");
+        let mut next = 1;
+        assert!(groups.number_the_rest(|| {
+            next += 1;
+            next
+        }));
+        assert_eq!(groups.group(made).and_then(|group| group.number), Some(3));
+        ok(&groups, &tabs);
+    }
+
     /// A group is known by a number the app gives, apart from the window's own count: a group
     /// made again keeps the one it had, a new one has none until it is numbered, and what is saved
     /// and read back brings the numbers with it.

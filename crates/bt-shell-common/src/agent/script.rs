@@ -19,7 +19,8 @@ use super::{Anchor, Terminal};
 use crate::settings::TempRoot;
 
 /// The program stood in for kablo: every call is a line of its arguments (the unit separator
-/// between them) in `calls`, `kablo app` keeps what it is told in `app-in.PID` and answers with
+/// between them) in `calls`, `kablo app` keeps what it is told in `app-in.NNNNNN` (numbered in
+/// the order of the conversations) and answers with
 /// `app-reply` (or the status in `app-exit`; with neither, 69 as with no Mac), `new` refuses a
 /// number with a `taken.pN` file beside it, and the commands the script only passes on exit with
 /// `exit.COMMAND` when there is one.
@@ -54,7 +55,11 @@ case $cmd in
     printf '%s\n' "$id"
     ;;
   app)
-    cat > "$STUB_DIR/app-in.$$"
+    # In the order they were told, whatever the process numbers are.
+    seq=$(cat "$STUB_DIR/seq" 2>/dev/null || echo 0)
+    seq=$((seq + 1))
+    echo "$seq" > "$STUB_DIR/seq"
+    cat > "$STUB_DIR/app-in.$(printf '%06d' "$seq")"
     if [ -e "$STUB_DIR/app-exit" ]; then
       echo "kablo: the app did not take it" >&2
       exit "$(cat "$STUB_DIR/app-exit")"
@@ -309,6 +314,7 @@ fn place(terminal: u64, anchor: u64) -> Place {
         ratio: None,
         keep_open: false,
         focus: false,
+        home: crate::agent::message::Home::default(),
     }
 }
 
@@ -623,7 +629,7 @@ fn the_callers_own_terminal_is_the_anchor_whatever_it_is_called() {
                     .expect("a record"),
                 format!("opener {here}\nkeep-open no\n")
             );
-            let closed = server.run(&shell, Some(here), &["close", &id]);
+            let closed = server.run(&shell, Some(here), &["close", "pane", &id]);
             assert_eq!(closed.status, 0, "{here}: {}", closed.err);
             assert_eq!(
                 server.calls_of("end").last(),
@@ -828,18 +834,30 @@ fn only_a_plain_terminal_number_is_a_target() {
         for target in ["build", "7", "p07", "P7", "p", "b-0123", "p7x", "t7", "t07"] {
             for args in [
                 vec!["split", target],
-                vec!["close", target],
+                vec!["close", "pane", target],
                 vec!["wait", target],
                 vec!["capture", target],
                 vec!["send", target, "text"],
                 vec!["send-key", target, "enter"],
             ] {
+                // `close pane t7` names a tab: it says which command that is.
+                if args[0] == "close" && target == "t7" {
+                    continue;
+                }
                 let said = server.run(&shell, Some("p4"), &args);
                 assert_eq!(said.status, 64, "{args:?}: {}", said.err);
                 assert!(said.err.contains("is not a pane"), "{args:?}: {}", said.err);
                 assert!(said.err.contains("p1  zsh"), "ls is shown: {}", said.err);
             }
         }
+        let said = server.run(&shell, Some("p4"), &["close", "pane", "t7"]);
+        assert_eq!(said.status, 64);
+        assert!(
+            said.err
+                .contains("t7 is a tab, not a pane. Did you mean: bateri close tab t7"),
+            "{}",
+            said.err
+        );
         assert!(server.calls_of("new").is_empty());
         assert!(server.calls_of("end").is_empty());
         assert!(server.calls_of("wait").is_empty());
@@ -1215,7 +1233,7 @@ fn close_goes_to_the_mac_and_without_one_ends_any_terminal_of_the_machine() {
         server.forget_calls();
 
         // No Mac: kablo ends it, nobody is asked, the records go.
-        let said = server.run(&shell, Some("p4"), &["close", "p1"]);
+        let said = server.run(&shell, Some("p4"), &["close", "pane", "p1"]);
         assert_eq!(said.status, 0, "{}", said.err);
         assert_eq!(server.calls_of("end"), [["end", "p1"]]);
         assert!(!server.state().join("terminals/p1").exists());
@@ -1223,11 +1241,11 @@ fn close_goes_to_the_mac_and_without_one_ends_any_terminal_of_the_machine() {
         assert_eq!(server.told(), ["bateri 2\nclose\nterminal p1\n"]);
         // With the words kablo takes. Named nothing, it is the caller's own terminal.
         server.forget_calls();
-        let said = server.run(&shell, Some("p9"), &["close", "--force"]);
+        let said = server.run(&shell, Some("p9"), &["close", "pane", "--force"]);
         assert_eq!(said.status, 0, "{}", said.err);
         assert_eq!(server.calls_of("end"), [["end", "p9", "--force"]]);
         server.forget_calls();
-        let said = server.run(&shell, Some("p9"), &["close", "p2", "--force"]);
+        let said = server.run(&shell, Some("p9"), &["close", "pane", "p2", "--force"]);
         assert_eq!(said.status, 0);
         assert_eq!(server.calls_of("end"), [["end", "p2", "--force"]]);
         assert!(
@@ -1239,7 +1257,7 @@ fn close_goes_to_the_mac_and_without_one_ends_any_terminal_of_the_machine() {
         // command, so kablo ends it. Who opened it is not asked.
         server.forget_calls();
         assert_eq!(server.run(&shell, Some("p4"), &["split"]).out, "p3\n");
-        let said = server.run(&shell, Some("p9"), &["close", "p3"]);
+        let said = server.run(&shell, Some("p9"), &["close", "pane", "p3"]);
         assert_eq!(said.status, 0, "{}", said.err);
         assert_eq!(said.err, "");
         assert_eq!(server.calls_of("end"), [["end", "p3"]]);
@@ -1250,7 +1268,12 @@ fn close_goes_to_the_mac_and_without_one_ends_any_terminal_of_the_machine() {
         // and the script ends nothing itself unless it was told to kill.
         server.forget_calls();
         server.mac_says("bateri 2\nok\n");
-        assert_eq!(server.run(&shell, Some("p9"), &["close", "p3"]).status, 0);
+        assert_eq!(
+            server
+                .run(&shell, Some("p9"), &["close", "pane", "p3"])
+                .status,
+            0
+        );
         assert_eq!(server.told(), ["bateri 2\nclose\nterminal p3\n"]);
         assert_eq!(
             Request::parse(&server.told()[0]),
@@ -1261,7 +1284,7 @@ fn close_goes_to_the_mac_and_without_one_ends_any_terminal_of_the_machine() {
             !server.state().join("terminals/p3").exists(),
             "the record goes with the terminal"
         );
-        let said = server.run(&shell, Some("p9"), &["close", "p3", "--force"]);
+        let said = server.run(&shell, Some("p9"), &["close", "pane", "p3", "--force"]);
         assert_eq!(said.status, 0);
         assert_eq!(server.calls_of("end"), [["end", "p3", "--force"]]);
         // The Mac refuses by the level it has for this machine, and says which and how to change
@@ -1270,12 +1293,12 @@ fn close_goes_to_the_mac_and_without_one_ends_any_terminal_of_the_machine() {
         server.mac_says(
             "bateri 2\nerror refused this holds a pane of another machine, which \"own\" does not change on rasp (level \"own\"); set `commands` in the [remote] hosts entry for rasp to \"screen\" in settings.toml to allow it\n",
         );
-        let said = server.run(&shell, Some("p9"), &["close", "p3"]);
+        let said = server.run(&shell, Some("p9"), &["close", "pane", "p3"]);
         assert_eq!(said.status, 77);
         assert!(said.err.contains("\"screen\""), "{}", said.err);
         assert!(server.calls_of("end").is_empty());
         server.mac_says("bateri 2\nerror unknown p3 is no pane on this server\n");
-        let said = server.run(&shell, Some("p9"), &["close", "p3"]);
+        let said = server.run(&shell, Some("p9"), &["close", "pane", "p3"]);
         assert_eq!(
             (said.status, said.err.as_str()),
             (1, "bateri: p3 is no pane on this server\n")
@@ -1283,20 +1306,20 @@ fn close_goes_to_the_mac_and_without_one_ends_any_terminal_of_the_machine() {
         assert!(server.calls_of("end").is_empty());
         // The Mac could not tell: the terminal is this machine's own all the same.
         server.mac_says("bateri 2\nerror failed the server did not answer\n");
-        let said = server.run(&shell, Some("p9"), &["close", "p3"]);
+        let said = server.run(&shell, Some("p9"), &["close", "pane", "p3"]);
         assert_eq!(said.status, 0, "{}", said.err);
         assert_eq!(server.calls_of("end"), [["end", "p3"]]);
         server.forget_calls();
-        let said = server.run(&shell, Some("p9"), &["close"]);
+        let said = server.run(&shell, Some("p9"), &["close", "pane"]);
         assert_eq!(said.status, 0, "{}", said.err);
         assert_eq!(server.calls_of("end"), [["end", "p9"]]);
 
         // Outside every terminal a named pane is closed too; named nothing there is none to close.
         server.no_mac();
         server.forget_calls();
-        assert_eq!(server.run(&shell, None, &["close", "p3"]).status, 0);
+        assert_eq!(server.run(&shell, None, &["close", "pane", "p3"]).status, 0);
         assert_eq!(server.calls_of("end"), [["end", "p3"]]);
-        assert_eq!(server.run(&shell, None, &["close"]).status, 64);
+        assert_eq!(server.run(&shell, None, &["close", "pane"]).status, 64);
     }
 }
 
@@ -1307,13 +1330,13 @@ fn a_terminal_named_nothing_is_the_callers_own_whatever_it_is_called() {
     for (name, shell) in shells() {
         let server = Server::new(&format!("close-own-{name}"));
         // No Mac: kablo ends it by the name it has.
-        let said = server.run(&shell, Some(&made), &["close"]);
+        let said = server.run(&shell, Some(&made), &["close", "pane"]);
         assert_eq!(said.status, 0, "{}", said.err);
         assert_eq!(server.calls_of("end"), [["end".to_owned(), made.clone()]]);
         // With one the Mac is told which terminal, so that it closes the pane that shows it.
         server.forget_calls();
         server.mac_says("bateri 2\nok\n");
-        let said = server.run(&shell, Some(&made), &["close"]);
+        let said = server.run(&shell, Some(&made), &["close", "pane"]);
         assert_eq!(said.status, 0, "{}", said.err);
         assert_eq!(
             Request::parse(&server.told()[0]),
@@ -1322,7 +1345,7 @@ fn a_terminal_named_nothing_is_the_callers_own_whatever_it_is_called() {
         assert!(server.calls_of("end").is_empty());
         // The rule that a target is a number is for what is written: this one is not a number.
         server.forget_calls();
-        let said = server.run(&shell, Some("p4"), &["close", &made]);
+        let said = server.run(&shell, Some("p4"), &["close", "pane", &made]);
         assert_eq!(said.status, 64);
         assert!(server.told().is_empty());
     }
@@ -1611,5 +1634,564 @@ fn a_split_with_no_pane_to_go_beside_prints_the_number_and_waits_with_the_progra
         let said = server.run(&shell, None, &["split", "--cwd", "/nowhere/at/all"]);
         assert_eq!(said.status, 1);
         assert_eq!(server.calls_of("new").len(), 2);
+    }
+}
+
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn close_names_its_kind_and_a_tab_a_group_or_a_window_is_the_macs_alone() {
+    use crate::agent::message::{Arrange, Subject};
+    use crate::ids::{Id, Kind as IdKind};
+    for (name, shell) in shells() {
+        let server = Server::new(&format!("close-kinds-{name}"));
+        // No kind, or an id where the kind goes: 64, and what to write. Nothing is asked of kablo
+        // or of the Mac.
+        for (args, hint) in [
+            (&["close"][..], "Did you mean: bateri close pane"),
+            (&["close", "p9"], "Did you mean: bateri close pane p9"),
+            (&["close", "t3"], "Did you mean: bateri close tab t3"),
+            (&["close", "g1"], "Did you mean: bateri close group g1"),
+            (&["close", "w2"], "Did you mean: bateri close window w2"),
+            (
+                &["close", "--force"],
+                "close takes pane, tab, group or window",
+            ),
+            (
+                &["close", "frame", "t3"],
+                "close takes pane, tab, group or window",
+            ),
+            (&["close", "tab", "g1"], "g1 is a group, not a tab"),
+            (&["close", "tab", "t3", "t4"], "close tab names one id"),
+            (&["close", "tab", "t03"], "is not a tab"),
+            (&["close", "tab", "--force"], "close tab takes no option"),
+            (&["close", "window", "web"], "is not a window"),
+            (
+                &["close", "pane", "t3"],
+                "Did you mean: bateri close tab t3",
+            ),
+        ] {
+            let said = server.run(&shell, Some("p4"), args);
+            assert_eq!(said.status, 64, "{args:?}: {}", said.err);
+            assert!(said.err.contains(hint), "{args:?}: {}", said.err);
+        }
+        assert!(server.calls_of("end").is_empty());
+        assert!(server.told().is_empty());
+
+        // No Mac: a tab, a group and a window belong to its windows, so they are 69.
+        for args in [
+            &["close", "tab", "t3"][..],
+            &["close", "group", "g1"],
+            &["close", "window", "w1"],
+            &["close", "tab"],
+        ] {
+            let said = server.run(&shell, Some("p4"), args);
+            assert_eq!(said.status, 69, "{args:?}: {}", said.err);
+        }
+        assert!(
+            server.calls_of("end").is_empty(),
+            "kablo ends no terminal for a layer"
+        );
+
+        // With one the Mac is told which layer, or none: the caller's own.
+        server.forget_calls();
+        server.mac_says("bateri 2\nok\n");
+        let tab = Id::new(IdKind::Tab, 3);
+        let tries: Vec<(Vec<&str>, Arrange)> = vec![
+            (
+                vec!["close", "tab", "t3"],
+                Arrange::Close(Subject::Tab(tab)),
+            ),
+            (vec!["close", "tab"], Arrange::Close(Subject::Tab(None))),
+            (
+                vec!["close", "group", "g1"],
+                Arrange::Close(Subject::Group(Id::new(IdKind::Group, 1))),
+            ),
+            (
+                vec!["close", "window"],
+                Arrange::Close(Subject::Window(None)),
+            ),
+        ];
+        for (args, arrange) in &tries {
+            server.forget_calls();
+            let said = server.run(&shell, Some("p4"), args);
+            assert_eq!(said.status, 0, "{args:?}: {}", said.err);
+            assert_eq!(said.out, "");
+            let told = server.told();
+            assert_eq!(told.len(), 1, "{args:?}");
+            assert_eq!(
+                Request::parse(&told[0]),
+                Ok(Request::Arrange(arrange.clone())),
+                "{args:?}"
+            );
+            if args == &["close", "tab", "t3"] {
+                assert_eq!(
+                    told[0], "bateri 2\nclose\nsubject tab\nid t3\n",
+                    "the words are frozen"
+                );
+            }
+        }
+        // Run in no terminal the caller's own is nothing.
+        let said = server.run(&shell, None, &["close", "tab"]);
+        assert_eq!(said.status, 64, "{}", said.err);
+        // The level for this machine refuses (77); a tab that is not there is 1.
+        server.mac_says("bateri 2\nerror refused this holds a pane of another machine\n");
+        let said = server.run(&shell, Some("p4"), &["close", "tab", "t3"]);
+        assert_eq!(said.status, 77, "{}", said.err);
+        server.mac_says("bateri 2\nerror unknown there is no tab t9\n");
+        let said = server.run(&shell, Some("p4"), &["close", "tab", "t9"]);
+        assert_eq!(
+            (said.status, said.err.as_str()),
+            (1, "bateri: there is no tab t9\n")
+        );
+    }
+}
+
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn rename_gives_a_tab_or_a_group_a_label_through_the_mac_and_a_pane_one_through_kablo() {
+    use crate::agent::message::{Arrange, Subject};
+    use crate::ids::{Id, Kind as IdKind};
+    for (name, shell) in shells() {
+        let server = Server::new(&format!("rename-{name}"));
+        // A pane's label is kablo's: the Mac is not asked, an empty one clears.
+        let said = server.run(&shell, Some("p4"), &["rename", "pane", "p9", "server"]);
+        assert_eq!(said.status, 0, "{}", said.err);
+        assert_eq!(server.calls_of("label"), [["label", "p9", "server"]]);
+        assert!(server.told().is_empty());
+        server.forget_calls();
+        let said = server.run(&shell, Some("p4"), &["rename", "pane", "p9", ""]);
+        assert_eq!(said.status, 0, "{}", said.err);
+        assert_eq!(server.calls_of("label"), [["label", "p9", ""]]);
+        // Words after the id are the label, as `notify`'s are.
+        server.forget_calls();
+        server.run(
+            &shell,
+            Some("p4"),
+            &["rename", "pane", "p9", "unit", "tests"],
+        );
+        assert_eq!(server.calls_of("label"), [["label", "p9", "unit tests"]]);
+
+        // What is wrong is 64 before anything is asked.
+        server.forget_calls();
+        let long = "x".repeat(65);
+        for (args, hint) in [
+            (&["rename"][..], "rename names what gets a label"),
+            (&["rename", "window", "w1", "x"], "a window has no label"),
+            (
+                &["rename", "frame", "t3", "x"],
+                "rename takes pane, tab or group",
+            ),
+            (&["rename", "tab"], "rename names the tab to label"),
+            (&["rename", "tab", "web"], "is not a tab"),
+            (&["rename", "tab", "t3"], "rename needs a label"),
+            (
+                &["rename", "tab", "g1", "web"],
+                "Did you mean: bateri rename group g1",
+            ),
+            (&["rename", "group", "g1", ""], "a group always has a label"),
+            (&["rename", "tab", "t3", &long], "1 to 64 bytes"),
+            (
+                &["rename", "tab", "t3", "a\nwindow w1"],
+                "one line of plain text",
+            ),
+            (&["rename", "tab", "t3", "   "], "only spaces"),
+            (
+                &["rename", "pane", "t3", "x"],
+                "Did you mean: bateri rename tab t3",
+            ),
+        ] {
+            let said = server.run(&shell, Some("p4"), args);
+            assert_eq!(said.status, 64, "{args:?}: {}", said.err);
+            assert!(said.err.contains(hint), "{args:?}: {}", said.err);
+        }
+        assert!(server.calls_of("label").is_empty());
+        assert!(server.told().is_empty());
+
+        // A tab's and a group's are the Mac's: 69 with none.
+        let said = server.run(&shell, Some("p4"), &["rename", "tab", "t3", "web"]);
+        assert_eq!(said.status, 69, "{}", said.err);
+        server.mac_says("bateri 2\nok\n");
+        let tries: Vec<(Vec<&str>, Arrange)> = vec![
+            (
+                vec!["rename", "tab", "t3", "web"],
+                Arrange::Rename {
+                    subject: Subject::Tab(Id::new(IdKind::Tab, 3)),
+                    label: Some("web".to_owned()),
+                },
+            ),
+            (
+                vec!["rename", "tab", "t3", ""],
+                Arrange::Rename {
+                    subject: Subject::Tab(Id::new(IdKind::Tab, 3)),
+                    label: None,
+                },
+            ),
+            (
+                vec!["rename", "group", "g1", "api", "v2"],
+                Arrange::Rename {
+                    subject: Subject::Group(Id::new(IdKind::Group, 1)),
+                    label: Some("api v2".to_owned()),
+                },
+            ),
+        ];
+        for (args, arrange) in &tries {
+            server.forget_calls();
+            let said = server.run(&shell, Some("p4"), args);
+            assert_eq!(said.status, 0, "{args:?}: {}", said.err);
+            let told = server.told();
+            assert_eq!(told.len(), 1, "{args:?}");
+            assert_eq!(
+                Request::parse(&told[0]),
+                Ok(Request::Arrange(arrange.clone())),
+                "{args:?}"
+            );
+            if args == &["rename", "tab", "t3", "web"] {
+                assert_eq!(told[0], "bateri 2\nrename\nsubject tab\nid t3\nlabel web\n");
+            }
+        }
+    }
+}
+
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn move_tab_goes_into_a_group_or_a_window_and_nothing_else() {
+    use crate::agent::message::{Arrange, TabHome};
+    use crate::ids::{Id, Kind as IdKind};
+    for (name, shell) in shells() {
+        let server = Server::new(&format!("move-tab-{name}"));
+        for (args, hint) in [
+            (&["move"][..], "move names what moves"),
+            (&["move", "group", "g1"], "move takes a pane or a tab"),
+            (&["move", "tab"], "move names the tab to move"),
+            (
+                &["move", "tab", "--group", "g1"],
+                "move names the tab to move",
+            ),
+            (&["move", "tab", "t3"], "move tab needs a place"),
+            (
+                &["move", "tab", "t3", "--group", "g1", "--window", "w1"],
+                "a group or into a window, not both",
+            ),
+            (
+                &["move", "tab", "t3", "--group", "t4"],
+                "t4 is a tab, not a group",
+            ),
+            (
+                &["move", "tab", "t3", "--window", "g1"],
+                "g1 is a group, not a window",
+            ),
+            (
+                &["move", "tab", "p9", "--group", "g1"],
+                "Did you mean: bateri move pane p9",
+            ),
+            (
+                &["move", "tab", "t3", "t4", "--group", "g1"],
+                "move names one tab",
+            ),
+            (&["move", "tab", "t3", "--group"], "--group takes a group"),
+            (
+                &["move", "tab", "t3", "--right"],
+                "move tab takes no option",
+            ),
+            (
+                &["move", "tab", "t3", "--group", "g1", "--group", "g2"],
+                "name one group",
+            ),
+        ] {
+            let said = server.run(&shell, Some("p4"), args);
+            assert_eq!(said.status, 64, "{args:?}: {}", said.err);
+            assert!(said.err.contains(hint), "{args:?}: {}", said.err);
+        }
+        assert!(server.told().is_empty());
+        let said = server.run(&shell, Some("p4"), &["move", "tab", "t3", "--group", "g1"]);
+        assert_eq!(said.status, 69, "{}", said.err);
+
+        server.mac_says("bateri 2\nok\n");
+        let tab = Id::new(IdKind::Tab, 3).expect("an id");
+        let tries: Vec<(Vec<&str>, Arrange)> = vec![
+            (
+                vec!["move", "tab", "t3", "--group", "g1"],
+                Arrange::MoveTab {
+                    tab,
+                    to: TabHome::Group(Id::new(IdKind::Group, 1).expect("an id")),
+                },
+            ),
+            (
+                vec!["move", "tab", "t3", "--window=w2"],
+                Arrange::MoveTab {
+                    tab,
+                    to: TabHome::Window(Id::new(IdKind::Window, 2).expect("an id")),
+                },
+            ),
+        ];
+        for (args, arrange) in &tries {
+            server.forget_calls();
+            let said = server.run(&shell, Some("p4"), args);
+            assert_eq!(said.status, 0, "{args:?}: {}", said.err);
+            let told = server.told();
+            assert_eq!(told.len(), 1, "{args:?}");
+            assert_eq!(
+                Request::parse(&told[0]),
+                Ok(Request::Arrange(arrange.clone())),
+                "{args:?}"
+            );
+            if args.contains(&"--group") {
+                assert_eq!(told[0], "bateri 2\nmove\nsubject tab\nid t3\ngroup g1\n");
+            }
+        }
+    }
+}
+
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn a_pane_or_a_tab_opens_where_it_is_told_and_what_contradicts_is_64() {
+    use crate::agent::message::{Home, WindowHome};
+    use crate::ids::{Id, Kind as IdKind};
+    let id = |kind: IdKind, number: u64| Id::new(kind, number);
+    for (name, shell) in shells() {
+        let server = Server::new(&format!("homes-{name}"));
+        server.mac_says(PLACED);
+        let mut tries: Vec<(Vec<&str>, Option<Side>, Home)> = vec![
+            (
+                vec!["split", "--tab", "t3"],
+                None,
+                Home {
+                    tab: id(IdKind::Tab, 3),
+                    ..Home::default()
+                },
+            ),
+            (
+                vec!["split", "--tab=t3", "--right"],
+                Some(Side::Right),
+                Home {
+                    tab: id(IdKind::Tab, 3),
+                    ..Home::default()
+                },
+            ),
+            (
+                vec!["tab", "--group", "g1"],
+                Some(Side::Tab),
+                Home {
+                    group: id(IdKind::Group, 1),
+                    ..Home::default()
+                },
+            ),
+            (
+                vec!["tab", "--window", "w2"],
+                Some(Side::Tab),
+                Home {
+                    window: Some(WindowHome::Existing(id(IdKind::Window, 2).expect("an id"))),
+                    ..Home::default()
+                },
+            ),
+            (
+                vec![
+                    "tab",
+                    "--new-group",
+                    "api",
+                    "--window",
+                    "w2",
+                    "--label",
+                    "web",
+                ],
+                Some(Side::Tab),
+                Home {
+                    new_group: Some("api".to_owned()),
+                    window: Some(WindowHome::Existing(id(IdKind::Window, 2).expect("an id"))),
+                    label: Some("web".to_owned()),
+                    ..Home::default()
+                },
+            ),
+            (
+                vec!["tab", "--new-group", "api v2"],
+                Some(Side::Tab),
+                Home {
+                    new_group: Some("api v2".to_owned()),
+                    ..Home::default()
+                },
+            ),
+            (
+                vec!["window"],
+                Some(Side::Tab),
+                Home {
+                    window: Some(WindowHome::New),
+                    ..Home::default()
+                },
+            ),
+            (
+                vec!["window", "--label", "logs", "--focus"],
+                Some(Side::Tab),
+                Home {
+                    window: Some(WindowHome::New),
+                    label: Some("logs".to_owned()),
+                    ..Home::default()
+                },
+            ),
+        ];
+        for (n, (args, side, home)) in tries.drain(..).enumerate() {
+            server.forget_calls();
+            let said = server.run(&shell, Some("p4"), &args);
+            assert_eq!(said.status, 0, "{args:?}: {}", said.err);
+            assert_eq!(said.out, format!("p{}\n", n + 1), "{args:?}");
+            let told = server.told();
+            assert_eq!(told.len(), 1, "{args:?}");
+            let Ok(Request::Place(placed)) = Request::parse(&told[0]) else {
+                panic!("{args:?}: {:?}", told[0]);
+            };
+            assert_eq!(placed.side, side, "{args:?}");
+            assert_eq!(placed.home, home, "{args:?}");
+            assert_eq!(placed.anchor, Some(Anchor::of(Terminal(4))), "{args:?}");
+            // The words are frozen.
+            if n == 4 {
+                assert_eq!(
+                    told[0],
+                    "bateri 2\nplace\nterminal p5\nanchor p4\nside tab\nnew-group api\nwindow w2\nlabel web\n"
+                );
+            }
+            if n == 6 {
+                assert_eq!(
+                    told[0],
+                    "bateri 2\nplace\nterminal p7\nanchor p4\nside tab\nwindow new\n"
+                );
+            }
+        }
+
+        // What contradicts, and what is not for the command, is 64 before a terminal starts.
+        let started = server.calls_of("new").len();
+        for (args, hint) in [
+            (&["split", "p9", "--tab", "t3"][..], "a pane or into a tab"),
+            (&["split", "--tab", "g1"], "g1 is a group, not a tab"),
+            (&["split", "--tab"], "--tab takes a tab"),
+            (&["split", "--tab", "t3", "--tab", "t4"], "name one tab"),
+            (&["split", "--group", "g1"], "split takes no --group"),
+            (&["split", "--window", "w1"], "split takes no --window"),
+            (
+                &["split", "--new-group", "api"],
+                "split takes no --new-group",
+            ),
+            (&["tab", "--tab", "t3"], "tab takes no --tab"),
+            (
+                &["tab", "--group", "g1", "--window", "w1"],
+                "it goes with no --window",
+            ),
+            (
+                &["tab", "--group", "g1", "--new-group", "api"],
+                "it goes with no --window",
+            ),
+            (&["tab", "--group", "t3"], "t3 is a tab, not a group"),
+            (&["tab", "--window", "g1"], "g1 is a group, not a window"),
+            (&["tab", "--new-group", ""], "--new-group is 1 to 64 bytes"),
+            (&["tab", "--new-group", "   "], "only spaces"),
+            (
+                &["tab", "--label", "a\nwindow w1"],
+                "one line of plain text",
+            ),
+            (&["tab", "--label", "x", "--label", "y"], "name one label"),
+            (&["window", "--tab", "t3"], "window takes no --tab"),
+            (&["window", "--group", "g1"], "window takes no --group"),
+            (&["window", "--window", "w1"], "window takes no --window"),
+            (&["window", "--left"], "window takes no side"),
+            (&["window", "--ratio", "30"], "window takes no ratio"),
+        ] {
+            let said = server.run(&shell, Some("p4"), args);
+            assert_eq!(said.status, 64, "{args:?}: {}", said.err);
+            assert!(said.err.contains(hint), "{args:?}: {}", said.err);
+        }
+        assert_eq!(server.calls_of("new").len(), started);
+    }
+}
+
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn a_label_is_kablos_for_a_pane_and_the_macs_for_a_tab() {
+    for (name, shell) in shells() {
+        let server = Server::new(&format!("labels-{name}"));
+        server.mac_says(PLACED);
+        // A pane's label rides on `kablo new` and is not in the message.
+        let said = server.run(&shell, Some("p4"), &["split", "--label", "dev server"]);
+        assert_eq!(said.status, 0, "{}", said.err);
+        let call = &server.calls_of("new")[0];
+        let at = call
+            .iter()
+            .position(|word| word == "--label")
+            .expect("label");
+        assert_eq!(call[at + 1], "dev server");
+        assert_eq!(call[2], "p1", "the number is still given first");
+        assert_eq!(server.told(), ["bateri 2\nplace\nterminal p1\nanchor p4\n"]);
+        // A tab's is in the message and not in kablo's call.
+        server.forget_calls();
+        let said = server.run(&shell, Some("p4"), &["tab", "--label=web"]);
+        assert_eq!(said.status, 0, "{}", said.err);
+        assert!(
+            !server.calls_of("new")[0]
+                .iter()
+                .any(|word| word == "--label")
+        );
+        assert_eq!(
+            server.told(),
+            ["bateri 2\nplace\nterminal p2\nanchor p4\nside tab\nlabel web\n"]
+        );
+        // Without a label the call has none.
+        server.forget_calls();
+        server.run(&shell, Some("p4"), &["split"]);
+        assert!(
+            !server.calls_of("new")[0]
+                .iter()
+                .any(|word| word == "--label")
+        );
+    }
+}
+
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn a_window_waits_for_a_mac_as_a_tab_does_and_a_place_the_mac_refuses_ends_the_terminal() {
+    use crate::agent::message::{Home, WindowHome};
+    for (name, shell) in shells() {
+        let server = Server::new(&format!("window-waits-{name}"));
+        // No Mac: the number is given, the message waits on the server with its fields, and the
+        // command says so on one line.
+        let said = server.run(&shell, Some("p4"), &["window", "--label", "logs", "--json"]);
+        assert_eq!(said.status, 0, "{}", said.err);
+        assert!(said.out.starts_with("{\"pane\":\"p1\""), "{}", said.out);
+        assert!(said.out.contains("\"window\":null"), "{}", said.out);
+        assert_eq!(
+            said.err,
+            "bateri: p1 will take its place when a Mac connects\n"
+        );
+        let note = server.note("p1").expect("a note");
+        let Ok(Request::Place(waiting)) = Request::parse(&note) else {
+            panic!("{note:?}");
+        };
+        assert_eq!(waiting.side, Some(Side::Tab));
+        assert_eq!(
+            waiting.home,
+            Home {
+                window: Some(WindowHome::New),
+                label: Some("logs".to_owned()),
+                ..Home::default()
+            }
+        );
+        // The Mac that does not have the place the pane asked for refuses it: the terminal the
+        // script started ends and no note is left, with the code the Mac's kind says.
+        server.forget_calls();
+        server.mac_says("bateri 2\nerror unknown there is no tab t9\n");
+        let said = server.run(&shell, Some("p4"), &["split", "--tab", "t9"]);
+        assert_eq!(
+            (said.status, said.err.as_str()),
+            (1, "bateri: there is no tab t9\n")
+        );
+        assert_eq!(server.calls_of("end"), [["end", "p2", "--force"]]);
+        assert_eq!(server.note("p2"), None);
+        server.mac_says("bateri 2\nerror refused this holds a pane of another machine\n");
+        let said = server.run(&shell, Some("p4"), &["tab", "--group", "g1"]);
+        assert_eq!(said.status, 77, "{}", said.err);
+        assert_eq!(
+            server.calls_of("end").last(),
+            Some(&vec![
+                "end".to_owned(),
+                "p3".to_owned(),
+                "--force".to_owned()
+            ])
+        );
     }
 }

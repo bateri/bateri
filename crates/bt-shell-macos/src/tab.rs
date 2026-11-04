@@ -1984,7 +1984,7 @@ impl TerminalTab {
     }
 
     /// [`Self::start`] for a tab that is not on screen and is not going to be (one a program on a
-    /// server asked for, [`TerminalWindow::add_tab_behind`]): its panes' links are told they
+    /// server asked for, [`TerminalWindow::add_tab_lodged`]): its panes' links are told they
     /// are hidden as soon as they exist, so nothing is drawn for a tab nobody sees.
     pub(crate) fn start_hidden(&self, mtm: MainThreadMarker) -> std::io::Result<()> {
         self.start(mtm)?;

@@ -9,20 +9,19 @@
 //! request is a *place*, and an app that is asked cannot be made to run anything by it.
 //!
 //! - **The user's screen does not change.** The pane is born without the keyboard (`--focus`
-//!   gives it, and only when the terminal that asked is the anchor, this window is the key one
-//!   and the keyboard is in the anchor's pane: a program asks from where the person is not, or
-//!   names the person's terminal as the anchor, and cannot take the keyboard from them,
-//!   [`TerminalPane::holds_keyboard`]), in a zoomed tab it is born behind the zoom, and a tab is
-//!   added beside the anchor's tab without being selected ([`TerminalWindow::add_tab_behind`]):
-//!   nothing the user was looking at moves, and the tab strip shows the new one running.
+//!   gives it under the keyboard rule below), in a zoomed tab it is born behind the zoom, and a
+//!   tab is added where it was asked (beside the anchor's tab, in a group, in a window) without
+//!   being selected ([`TerminalWindow::add_tab_lodged`]); a window made for a pane comes in front
+//!   of bateri's others without the keyboard ([`TerminalWindow::show_apart`]): nothing the user
+//!   was looking at moves, and the tab strip shows the new one running.
 //! - **The program is the point of the pane.** Its pipe closes with its terminal
 //!   (`ssh-hold --close-at-end`, [`Held::close_at_end`]) so the pane goes when the program does —
 //!   unless `--keep-open` was asked, when the shell follows as it does for any pane. The pane
 //!   keeps that, and who asked for it ([`Held::opener`], its card's "Opened by"), across a
 //!   restart: session restore saves both with the terminal it shows.
-//! - **A pane that cannot be placed waits, it is never refused.** The terminal runs on the
-//!   server and is in the list of what runs in the background; a request whose anchor is on
-//!   no tab of this Mac is kept here ([`Queue`]) until a pane shows the anchor — a pane opened
+//! - **A pane that cannot be placed waits; a place that is not there is refused.** The terminal
+//!   runs on the server and is in the list of what runs in the background; a request whose
+//!   anchor is on no tab of this Mac is kept here ([`Queue`]) until a pane shows the anchor — a pane opened
 //!   from that list, restored, moved here, any way ([`terminal_shown`]) — and then goes beside
 //!   it. A restart loses the pairing and not the terminal.
 //! - **What was left while the Mac was away** is read when a connection to the server comes up
@@ -65,9 +64,9 @@ use bt_core::PaneUuid;
 use bt_shell_common::agent::arrange::{self as rule, Go};
 use bt_shell_common::agent::level::{self, Panes};
 use bt_shell_common::agent::listing::{self, Node, Pane, Scene, Tab, Window};
-use bt_shell_common::agent::message::{Failure, Format, Kind, Place, Placed, Reply};
+use bt_shell_common::agent::message::{Failure, Format, Kind, Place, Placed, Reply, WindowHome};
 use bt_shell_common::agent::notes::Note;
-use bt_shell_common::agent::place::{Ask, Spot};
+use bt_shell_common::agent::place::{Ask, Landed, Landing, Spot};
 use bt_shell_common::agent::serve::{self, Answer, Placing, Server, Shell};
 use bt_shell_common::agent::summary;
 use bt_shell_common::agent::wait::{Queue, Waiting};
@@ -76,7 +75,7 @@ use bt_shell_common::kablo::SessionId;
 use bt_shell_common::kablo::service::{Letter, Shown, Survey};
 use dispatch2::DispatchQueue;
 use objc2::rc::Retained;
-use objc2::{MainThreadMarker, MainThreadOnly};
+use objc2::{MainThreadMarker, MainThreadOnly, Message};
 use objc2_app_kit::{NSApplication, NSWindow, NSWindowNumberListOptions};
 
 use crate::app::{self, AppDelegate, Opening, Start, pipe_installed};
@@ -87,7 +86,7 @@ use crate::launch::{Held, Resume};
 use crate::pane::TerminalPane;
 use crate::tab::TerminalTab;
 use crate::uploader;
-use crate::window::{TerminalWindow, initial_rect};
+use crate::window::{Lodging, TerminalWindow, initial_rect};
 
 /// What outlives a request.
 #[derive(Default)]
@@ -238,7 +237,7 @@ fn take(app: &AppDelegate, mut letter: Letter) {
     match answer {
         Answer::Reply(reply) => letter.answer(reply.encode().into_bytes()),
         Answer::Wait(reply, waiting) => {
-            state(|state| state.waiting.add(waiting));
+            state(|state| state.waiting.add(*waiting));
             letter.answer(reply.encode().into_bytes());
         }
         Answer::List(format) => list(letter, server, from, format),
@@ -291,6 +290,28 @@ struct Opened {
     program: Option<String>,
 }
 
+/// Where the pane (or tab, or window) a program asked for goes, found among the windows and judged
+/// by the level ([`World::whither`]).
+enum Dest {
+    /// Beside the anchor: in its tab (`split`) or as the tab beside its tab (`tab`).
+    Anchor,
+    /// Into this tab (`split --tab t3`), beside the pane that has its keyboard.
+    Tab(Retained<TerminalTab>),
+    /// As a tab of this window, standing as `Lodging` says (`tab --group`, `--window`,
+    /// `--new-group`).
+    Lodged(Retained<TerminalWindow>, Lodging),
+    /// In a window of its own (`window`, `tab --window new`).
+    Window,
+}
+
+/// The pane of this Mac a request is placed by: the anchor, with its tab and the name the server
+/// knows it by.
+struct Beside<'a> {
+    tab: &'a TerminalTab,
+    pane: &'a TerminalPane,
+    name: &'a Anchor,
+}
+
 /// The Mac's windows, lent to the decision.
 struct World<'a> {
     app: &'a AppDelegate,
@@ -328,20 +349,86 @@ impl<'a> World<'a> {
         }
     }
 
-    /// Makes the pane; `opener` is who asked for it, in the words its tab's card says them. `Err`
-    /// is "not now": the terminal stays in the list.
+    /// Where the request puts the pane: the places it names are looked up and judged by the level
+    /// (a tab, group or window is changed when a pane goes into it, so `own` may do it only to
+    /// one made of its own machine's panes), and a place that is not there is a refusal.
+    fn whither(
+        &self,
+        server: &Server,
+        anchor: &TerminalTab,
+        place: &Place,
+    ) -> Result<Dest, Failure> {
+        let app = self.app;
+        let home = &place.home;
+        if let Some(id) = home.tab {
+            let tab = arrange::tab_numbered(app, id)?;
+            arrange::may_change(
+                server,
+                arrange::panes_of(&tab, server),
+                &format!("tab {id}"),
+            )?;
+            return Ok(Dest::Tab(tab));
+        }
+        if let Some(id) = home.group {
+            let (window, group) = arrange::group_numbered(app, id)?;
+            let panes = window
+                .tabs_of_group(group)
+                .iter()
+                .fold(Panes::default(), |sum, tab| {
+                    sum.and(arrange::panes_of(tab, server))
+                });
+            arrange::may_change(server, panes, &format!("group {id}"))?;
+            return Ok(Dest::Lodged(window, Lodging::Group(group)));
+        }
+        let lodging = match &home.new_group {
+            Some(name) => Lodging::NewGroup(name.clone()),
+            None => Lodging::Loose,
+        };
+        match &home.window {
+            Some(WindowHome::Existing(id)) => {
+                let window = arrange::window_numbered(app, *id)?;
+                let panes = window.tabs().iter().fold(Panes::default(), |sum, tab| {
+                    sum.and(arrange::panes_of(tab, server))
+                });
+                arrange::may_change(server, panes, &format!("window {id}"))?;
+                Ok(Dest::Lodged(window, lodging))
+            }
+            Some(WindowHome::New) => Ok(Dest::Window),
+            // A group made in the window the anchor is in.
+            None if home.new_group.is_some() => {
+                let window = anchor
+                    .window()
+                    .ok_or_else(|| Failure::new(Kind::Failed, "the tab has no window"))?;
+                Ok(Dest::Lodged(window, lodging))
+            }
+            None => Ok(Dest::Anchor),
+        }
+    }
+
+    /// Makes the pane; `opener` is who asked for it, in the words its tab's card says them.
+    /// `raise` is whether the keyboard may go to a window made for it. `Err` is "not now": the
+    /// terminal stays in the list.
     fn put(
         &self,
         server: &Server,
-        tab: &TerminalTab,
-        anchor: &TerminalPane,
-        anchor_name: &Anchor,
+        by: &Beside,
         place: &Place,
         opener: String,
+        (dest, raise): (&Dest, bool),
     ) -> Result<Placed, String> {
         let app = self.app;
         let mtm = app.mtm();
-        let window = tab.window().ok_or("the tab has no window")?;
+        let Beside {
+            tab,
+            pane: anchor,
+            name: anchor_name,
+        } = *by;
+        // The tab the pane is planned in, and the pane it stands beside there.
+        let (into, beside) = match dest {
+            Dest::Tab(target) => (target.clone(), target.focused_pane()),
+            _ => (tab.retain(), anchor.retain()),
+        };
+        let window = into.window().ok_or("the tab has no window")?;
         if !pipe_installed(&app.shell_integration().env) {
             return Err("there is no pipe to a server in this process".to_owned());
         }
@@ -372,41 +459,68 @@ impl<'a> World<'a> {
             side: place.side,
             share: place.share(),
         };
-        let landing = tab
-            .container()
-            .plan_agent_pane(anchor.id(), incoming, &ask)
-            .ok_or("the anchor is not a pane of its tab")?;
+        let landing = match dest {
+            Dest::Anchor | Dest::Tab(_) => into
+                .container()
+                .plan_agent_pane(beside.id(), incoming, &ask)
+                .ok_or("the anchor is not a pane of its tab")?,
+            // A tab or a window of its own has no neighbour to share a room with.
+            Dest::Lodged(..) | Dest::Window => Landing {
+                spot: Spot::NewTab,
+                landed: Landed::AsAsked,
+                squeezed: false,
+                hidden: false,
+            },
+        };
         // A terminal a pane is about to show is no longer one that was asked to end.
         hold_service::claim(&server.account, &terminal);
         // `--focus` was decided by [`World::place`]: the keyboard goes to the new pane only if the
         // person is where the pane goes.
         let focus = place.focus;
-        let (at_tab, at_group, at_window) = match landing.spot {
-            Spot::Beside { tree, landing: at } => {
+        let label = place.home.label.as_deref();
+        let (at_tab, at_group, at_window) = match (landing.spot, dest) {
+            (Spot::Beside { tree, landing: at }, _) => {
                 let (config, _) = app.pane_launch_as(
-                    tab.id(),
+                    into.id(),
                     Some(anchor),
                     Opening::Split,
                     Some(&start),
                     incoming,
                 );
-                let pane = tab.add_planned_pane(mtm, config, tree, at, false)?;
+                let pane = into.add_planned_pane(mtm, config, tree, at, false)?;
                 if focus {
-                    window.show_pane(tab.id(), pane.id());
+                    window.show_pane(into.id(), pane.id());
                 }
-                standing(&window, tab)
+                standing(&window, &into)
             }
-            Spot::NewTab => {
+            (Spot::NewTab, Dest::Window) => {
+                let from = tab.window();
+                let made =
+                    app.open_window_for(from.as_deref(), anchor, &start, incoming, focus && raise)?;
+                let born = made.selected_tab();
+                if let Some(label) = label {
+                    made.rename_tab(born.id(), label);
+                }
+                standing(&made, &born)
+            }
+            (Spot::NewTab, dest) => {
+                let (window, lodging) = match dest {
+                    Dest::Lodged(window, lodging) => (window.clone(), lodging.clone()),
+                    _ => (window, Lodging::Beside(into.id())),
+                };
                 let tab_id = app.next_id();
                 let (config, theme) =
                     app.pane_launch_as(tab_id, Some(anchor), Opening::Tab, Some(&start), incoming);
                 let pane = embed::open(mtm, initial_rect(), config).map_err(|e| e.to_string())?;
                 let born = TerminalTab::new(mtm, tab_id, window.id(), &pane, None);
-                window.add_tab_behind(&born, (theme, app.settings().content_edge), tab.id());
+                window.add_tab_lodged(&born, (theme, app.settings().content_edge), &lodging);
                 pane.observe_frame();
                 if let Err(e) = born.start_hidden(mtm) {
                     window.close_tab_now(tab_id);
                     return Err(format!("could not start the shell: {e}"));
+                }
+                if let Some(label) = label {
+                    window.rename_tab(tab_id, label);
                 }
                 window.refresh_title();
                 if focus {
@@ -492,21 +606,41 @@ impl Shell for World<'_> {
             .and_then(|(_, _, found)| found.program)
             .or_else(|| shown.program.clone());
         let who = summary::opener(program.as_deref(), asker);
+        // Where it goes: a place that is not there, or that the level keeps from this machine, is
+        // a refusal and nothing is made.
+        let dest = match self.whither(server, &tab, place) {
+            Ok(dest) => dest,
+            Err(failure) => return Placing::Refused(failure),
+        };
         // `--focus` is the keyboard moving, so it passes the rule every such command passes
         // ([`bt_shell_common::agent::arrange`]): the cursor is in the pane that asked, or bateri is
         // behind, or the pane goes to another window than the one being typed in. Otherwise the
-        // pane is made all the same and the answer says the keyboard stayed.
-        let stayed = place.focus && {
+        // pane is made all the same and the answer says the keyboard stayed. A window made for
+        // the pane is nobody's yet (no window has number 0): it takes the keyboard only from the
+        // pane that has it.
+        let go = place.focus.then(|| {
             let caller = opener.and_then(|name| arrange::spot(self.app, server, name));
             let keyboard = arrange::keyboard(self.app, caller.as_ref());
-            tab.window()
-                .is_some_and(|window| rule::go(keyboard, window.number()) == Go::Refused)
-        };
+            let target = match &dest {
+                Dest::Anchor => tab.window(),
+                Dest::Tab(target) => target.window(),
+                Dest::Lodged(window, _) => Some(window.clone()),
+                Dest::Window => None,
+            };
+            rule::go(keyboard, target.map_or(0, |window| window.number()))
+        });
+        let stayed = go == Some(Go::Refused);
+        let raise = go == Some(Go::Raise);
         let place = &Place {
             focus: place.focus && !stayed,
             ..place.clone()
         };
-        match self.put(server, &tab, &pane, anchor, place, who) {
+        let by = Beside {
+            tab: &tab,
+            pane: &pane,
+            name: anchor,
+        };
+        match self.put(server, &by, place, who, (&dest, raise)) {
             Ok(mut placed) => {
                 placed.keyboard_stayed = stayed;
                 state(|state| {
@@ -847,4 +981,37 @@ fn tell(mtm: MainThreadMarker, account: &str, host: &str, program: Option<&str>,
         &summary::opened(program, host, total),
         summary::found_in(total),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    /// A place the request names is looked up and judged by the level before anything is made, a
+    /// place that is not there is a refusal and not a pane in the wrong tab, and a window made for
+    /// a pane takes the keyboard only where the rule gives it. A source scan: the windows are
+    /// AppKit's and need a window server.
+    #[test]
+    fn a_place_is_judged_before_the_pane_is_made_and_a_new_window_waits_for_the_rule() {
+        let source = include_str!("agent.rs");
+        let source = &source[..source.find("#[cfg(test)]").unwrap_or(source.len())];
+        let body = |signature: &str| {
+            let at = source.find(signature).expect(signature);
+            &source[at..at + source[at..].find("\n    }\n").expect("its end")]
+        };
+        let place = body("    fn place(");
+        let judged = place.find("self.whither(").expect(place);
+        let refused = place.find("Placing::Refused(").expect(place);
+        let made = place.find("self.put(").expect(place);
+        assert!(judged < refused && refused < made, "{place}");
+        let whither = body("    fn whither(");
+        // The tab, the group and the window a pane goes into are each changed by it.
+        assert_eq!(
+            whither.matches("arrange::may_change(").count(),
+            3,
+            "{whither}"
+        );
+        let put = body("    fn put(");
+        assert!(put.contains("add_tab_lodged("), "{put}");
+        assert!(put.contains("open_window_for("), "{put}");
+        assert!(put.contains("focus && raise"), "{put}");
+    }
 }

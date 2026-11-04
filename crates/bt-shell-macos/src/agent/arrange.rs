@@ -17,9 +17,10 @@
 
 use bt_shell_common::agent::arrange::{self as rule, Go, Keyboard};
 use bt_shell_common::agent::level::{self, Act, Panes, Verdict};
-use bt_shell_common::agent::message::{Arrange, Failure, Kind, Reply, Subject};
+use bt_shell_common::agent::message::{Arrange, Failure, Kind, Reply, Subject, TabHome};
 use bt_shell_common::agent::place::Side;
 use bt_shell_common::agent::serve::Server;
+use bt_shell_common::groups::Target as Strip;
 use bt_shell_common::kablo::service::Letter;
 use bt_shell_common::split::Direction;
 use objc2::MainThreadOnly;
@@ -51,7 +52,7 @@ pub(super) fn arranged(
     letter.answer(reply.encode().into_bytes());
 }
 
-type Done = Result<(), Failure>;
+pub(super) type Done = Result<(), Failure>;
 
 fn unknown(text: impl Into<String>) -> Failure {
     Failure::new(Kind::Unknown, text)
@@ -117,7 +118,7 @@ fn holds(pane: &TerminalPane) -> bool {
 }
 
 /// The panes of a tab by whose they are: this server's or anything else's.
-fn panes_of(tab: &TerminalTab, server: &Server) -> Panes {
+pub(super) fn panes_of(tab: &TerminalTab, server: &Server) -> Panes {
     tab.panes().iter().fold(Panes::default(), |sum, pane| {
         sum.and(if terminal_of(pane, &server.account).is_some() {
             Panes::own(1)
@@ -128,7 +129,7 @@ fn panes_of(tab: &TerminalTab, server: &Server) -> Panes {
 }
 
 /// The level's word on changing a layer of these panes: allowed, or the failure that says why.
-fn may_change(server: &Server, panes: Panes, what: &str) -> Done {
+pub(super) fn may_change(server: &Server, panes: Panes, what: &str) -> Done {
     match level::judge(server.level, Act::Change, panes) {
         Verdict::Allowed => Ok(()),
         Verdict::Refused(why) => Err(Failure::new(
@@ -201,6 +202,11 @@ fn carry_out(app: &AppDelegate, server: &Server, from: Option<&str>, request: &A
             lays_out(app, caller.as_ref(), &target.window, &target.tab)?;
             move_beside(app, &moving, &target, *side)
         }
+        Arrange::Close(subject) => close(app, server, caller.as_ref(), subject),
+        Arrange::Rename { subject, label } => {
+            rename(app, server, caller.as_ref(), subject, label.as_deref())
+        }
+        Arrange::MoveTab { tab, to } => move_tab(app, server, caller.as_ref(), *tab, to),
         Arrange::Resize { pane, side, steps } => {
             let target = pane_or_own(app, server, from, pane.as_ref().map(|name| name.name()))?;
             lays_out(app, caller.as_ref(), &target.window, &target.tab)?;
@@ -259,6 +265,196 @@ fn move_beside(app: &AppDelegate, moving: &Spot, target: &Spot, side: Side) -> D
         Ok(())
     } else {
         Err(failed("the pane could not move there"))
+    }
+}
+
+// ─── close, rename, move tab ─────────────────────────────────────────────
+
+/// The layer a command names, or the caller's own when it names none: its window and the tabs in
+/// it. The level has judged it.
+struct Layer {
+    window: Retained<TerminalWindow>,
+    tabs: Vec<Retained<TerminalTab>>,
+    /// The group, when the layer is one.
+    group: Option<GroupId>,
+}
+
+fn layer(
+    app: &AppDelegate,
+    server: &Server,
+    caller: Option<&Spot>,
+    subject: &Subject,
+) -> Result<Layer, Failure> {
+    let (window, tabs, group, what) = match subject {
+        Subject::Tab(id) => {
+            let tab = match id {
+                Some(id) => tab_numbered(app, *id)?,
+                None => own_tab(caller)?.tab.clone(),
+            };
+            let window = tab
+                .window()
+                .ok_or_else(|| failed("the tab has no window"))?;
+            let what = format!("tab {}", tab_name(&tab));
+            (window, vec![tab], None, what)
+        }
+        Subject::Group(id) => {
+            let (window, group) = match id {
+                Some(id) => group_numbered(app, *id)?,
+                None => {
+                    let own = own_tab(caller)?;
+                    let group = own
+                        .window
+                        .groups()
+                        .group_of(own.tab.id())
+                        .ok_or_else(|| unknown("this tab is in no group"))?;
+                    (own.window.clone(), group)
+                }
+            };
+            let tabs = window.tabs_of_group(group);
+            (window, tabs, Some(group), "group".to_owned())
+        }
+        Subject::Window(id) => {
+            let window = match id {
+                Some(id) => window_numbered(app, *id)?,
+                None => own_tab(caller)?.window.clone(),
+            };
+            let tabs = window.tabs();
+            (window, tabs, None, "window".to_owned())
+        }
+        Subject::Pane(_) => {
+            return Err(Failure::new(
+                Kind::Usage,
+                "a pane is not a layer: a pane's terminal is closed, a pane's label is kablo's",
+            ));
+        }
+    };
+    let panes = tabs
+        .iter()
+        .fold(Panes::default(), |sum, tab| sum.and(panes_of(tab, server)));
+    may_change(server, panes, &what)?;
+    Ok(Layer {
+        window,
+        tabs,
+        group,
+    })
+}
+
+/// `close tab|group|window`: every tab of the layer closes without a question, the programs in
+/// its panes end, and the window closes with its last tab. The level has judged the layer.
+fn close(app: &AppDelegate, server: &Server, caller: Option<&Spot>, subject: &Subject) -> Done {
+    let layer = layer(app, server, caller, subject)?;
+    if matches!(subject, Subject::Window(_)) {
+        layer.window.close();
+        return Ok(());
+    }
+    // The tabs are named by id first: a closing tab takes its neighbours' places.
+    let ids: Vec<u64> = layer.tabs.iter().map(|tab| tab.id()).collect();
+    drop(layer.tabs);
+    for id in ids {
+        layer.window.close_tab_now(id);
+    }
+    Ok(())
+}
+
+/// `rename tab|group ID LABEL`: an empty label takes a tab's name away (its own title shows
+/// again); a group always has one.
+fn rename(
+    app: &AppDelegate,
+    server: &Server,
+    caller: Option<&Spot>,
+    subject: &Subject,
+    label: Option<&str>,
+) -> Done {
+    if matches!(subject, Subject::Window(_)) {
+        return Err(Failure::new(Kind::Usage, "a window has no label"));
+    }
+    let layer = layer(app, server, caller, subject)?;
+    match (subject, layer.group) {
+        (Subject::Group(_), Some(group)) => {
+            let label = label
+                .filter(|label| !label.trim().is_empty())
+                .ok_or_else(|| {
+                    Failure::new(Kind::Usage, "a group always has a label: say which")
+                })?;
+            layer.window.rename_group(group, label);
+        }
+        _ => {
+            let tab = layer
+                .tabs
+                .first()
+                .ok_or_else(|| failed("there is no tab"))?;
+            layer.window.rename_tab(tab.id(), label.unwrap_or(""));
+        }
+    }
+    Ok(())
+}
+
+/// `move tab t3 --group g1|--window w1`: the tab goes into the group, or into the window out of
+/// any group, as the user's own move does, with its Undo Move and its id. The level judges the
+/// tab and where it goes; the keyboard rule looks at the tab if it is on screen and at the window
+/// it comes to.
+fn move_tab(
+    app: &AppDelegate,
+    server: &Server,
+    caller: Option<&Spot>,
+    id: Id,
+    to: &TabHome,
+) -> Done {
+    let tab = tab_numbered(app, id)?;
+    may_change(server, panes_of(&tab, server), &format!("tab {id}"))?;
+    let from = tab
+        .window()
+        .ok_or_else(|| failed("the tab has no window"))?;
+    let (into, target) = match to {
+        TabHome::Group(group_id) => {
+            let (window, group) = group_numbered(app, *group_id)?;
+            let panes = window
+                .tabs_of_group(group)
+                .iter()
+                .fold(Panes::default(), |sum, tab| sum.and(panes_of(tab, server)));
+            may_change(server, panes, &format!("group {group_id}"))?;
+            (
+                window,
+                Strip::Group {
+                    group,
+                    before: None,
+                },
+            )
+        }
+        TabHome::Window(window_id) => {
+            let window = window_numbered(app, *window_id)?;
+            let panes = window
+                .tabs()
+                .iter()
+                .fold(Panes::default(), |sum, tab| sum.and(panes_of(tab, server)));
+            may_change(server, panes, &format!("window {window_id}"))?;
+            (window, Strip::Loose { before: None })
+        }
+    };
+    lays_out(app, caller, &from, &tab)?;
+    let keyboard = keyboard(app, caller);
+    let go = rule::go(keyboard, into.number());
+    if from.id() != into.id() && go == Go::Refused {
+        return Err(Failure::new(Kind::Refused, rule::REFUSAL));
+    }
+    let wanted = if from.id() == into.id() {
+        Move::RegroupTabs {
+            window: from.id(),
+            tabs: vec![tab.id()],
+            target,
+        }
+    } else {
+        Move::TabsToWindow {
+            window: from.id(),
+            tabs: vec![tab.id()],
+            into: into.id(),
+            target,
+        }
+    };
+    if app.make_move_raising(wanted, go == Go::Raise) {
+        Ok(())
+    } else {
+        Err(failed("the tab could not move there"))
     }
 }
 
@@ -376,21 +572,24 @@ fn own_tab(caller: Option<&Spot>) -> Result<&Spot, Failure> {
     })
 }
 
-fn tab_numbered(app: &AppDelegate, id: Id) -> Result<Retained<TerminalTab>, Failure> {
+pub(super) fn tab_numbered(app: &AppDelegate, id: Id) -> Result<Retained<TerminalTab>, Failure> {
     app.tabs()
         .into_iter()
         .find(|tab| tab.number() == id.number())
         .ok_or_else(|| unknown(format!("there is no tab {id}")))
 }
 
-fn window_numbered(app: &AppDelegate, id: Id) -> Result<Retained<TerminalWindow>, Failure> {
+pub(super) fn window_numbered(
+    app: &AppDelegate,
+    id: Id,
+) -> Result<Retained<TerminalWindow>, Failure> {
     app.windows()
         .into_iter()
         .find(|window| window.number() == id.number())
         .ok_or_else(|| unknown(format!("there is no window {id}")))
 }
 
-fn group_numbered(
+pub(super) fn group_numbered(
     app: &AppDelegate,
     id: Id,
 ) -> Result<(Retained<TerminalWindow>, GroupId), Failure> {
@@ -441,4 +640,49 @@ fn reach(target: &Target, go: Go) -> Done {
         Go::Within | Go::Refused => {}
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    /// What changes a tab, a group or a window passes the level before it touches a window; the
+    /// keyboard rule looks at a tab that moves; and nothing here goes through a question (a
+    /// program on a server cannot answer one, and nobody is asked). A source scan: the windows
+    /// are AppKit's and need a window server.
+    #[test]
+    fn closing_renaming_and_moving_a_tab_pass_the_level_and_ask_nobody() {
+        let source = include_str!("arrange.rs");
+        let source = &source[..source.find("#[cfg(test)]").unwrap_or(source.len())];
+        let body = |signature: &str| {
+            let at = source.find(signature).expect(signature);
+            &source[at..at + source[at..].find("\n}\n").expect("its end")]
+        };
+        let layer = body("fn layer(");
+        assert!(layer.contains("may_change(server, panes,"), "{layer}");
+        let close = body("fn close(");
+        assert!(
+            close.contains("layer(app, server, caller, subject)"),
+            "{close}"
+        );
+        assert!(
+            close.contains("close_tab_now(") && close.contains(".close()"),
+            "{close}"
+        );
+        assert!(
+            !close.contains("close_tabs_asking") && !close.contains("close_group("),
+            "{close}"
+        );
+        let rename = body("fn rename(");
+        assert!(
+            rename.contains("layer(app, server, caller, subject)"),
+            "{rename}"
+        );
+        let moved = body("fn move_tab(");
+        // The tab, the group or the window it goes to: each judged.
+        assert_eq!(moved.matches("may_change(").count(), 3, "{moved}");
+        let judged = moved.find("may_change(").expect(moved);
+        let lays = moved.find("lays_out(").expect(moved);
+        let go = moved.find("rule::go(").expect(moved);
+        let made = moved.find("make_move_raising(").expect(moved);
+        assert!(judged < lays && lays < go && go < made, "{moved}");
+    }
 }

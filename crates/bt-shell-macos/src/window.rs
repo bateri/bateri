@@ -180,7 +180,20 @@ pub(crate) enum Placement {
     At(usize),
 }
 
-/// Where a new tab sits among the groups ([`TerminalWindow::add_tab_seated`]).
+/// Where a tab opened by a program stands among the groups ([`TerminalWindow::add_tab_lodged`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Lodging {
+    /// Right of this tab, in its group.
+    Beside(u64),
+    /// At the end of this group.
+    Group(GroupId),
+    /// In a group made for it, with this name.
+    NewGroup(String),
+    /// Among the ungrouped tabs, after the last.
+    Loose,
+}
+
+/// Where a new tab stands in the strip.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Seat {
     /// Beside the tab on screen and in its group, a closed group opening for it: ⌘T, New Tab,
@@ -2819,13 +2832,19 @@ impl TerminalWindow {
         self.layout_changed();
     }
 
-    /// **The applier: a tab a program on a server asked for.** It joins right of tab `after`, in
-    /// its group (a closed group stays closed), and **nothing is selected**: the window shows
-    /// what it showed, and the tab is hidden with its panes until the user goes to it. Its
-    /// container goes under the bar at the content's size like any tab's, so its terminal's first
-    /// size is the final one. The caller starts the tab after this ([`TerminalTab::start_hidden`]).
-    /// A layout edge.
-    pub(crate) fn add_tab_behind(&self, tab: &TerminalTab, look: (Theme, ContentEdge), after: u64) {
+    /// **The applier: a tab a program on a server asked for.** It stands where `lodging` says —
+    /// right of a tab in its group, in a group, in a group made for it, among the ungrouped tabs
+    /// (a closed group stays closed, and a group made for it is numbered at once, as every group
+    /// is) — and **nothing is selected**: the window shows what it showed, and the tab is hidden
+    /// with its panes until the user goes to it. Its container goes under the bar at the content's
+    /// size like any tab's, so its terminal's first size is the final one. The caller starts the
+    /// tab after this ([`TerminalTab::start_hidden`]). A layout edge.
+    pub(crate) fn add_tab_lodged(
+        &self,
+        tab: &TerminalTab,
+        look: (Theme, ContentEdge),
+        lodging: &Lodging,
+    ) {
         let (theme, edge) = look;
         self.forget_undo();
         tab.set_theme(theme);
@@ -2833,7 +2852,28 @@ impl TerminalWindow {
         tab.container().setHidden(true);
         self.ivars().root.add_container(tab.container());
         self.ivars().tabs.borrow_mut().push(tab.retain());
-        self.with_strip(|groups, order| groups.open_beside(order, tab.id(), after));
+        self.with_strip(|groups, order| match lodging {
+            Lodging::Beside(after) => groups.open_beside(order, tab.id(), *after),
+            Lodging::Group(group) => {
+                order.append(tab.id());
+                groups.place(
+                    order,
+                    &[tab.id()],
+                    Target::Group {
+                        group: *group,
+                        before: None,
+                    },
+                );
+            }
+            Lodging::NewGroup(name) => {
+                order.append(tab.id());
+                groups.place(order, &[tab.id()], Target::New(name.clone()));
+            }
+            Lodging::Loose => {
+                order.append(tab.id());
+                groups.place(order, &[tab.id()], Target::Loose { before: None });
+            }
+        });
         self.refresh_bar();
         self.layout_changed();
     }
@@ -4513,6 +4553,16 @@ impl TerminalWindow {
     /// there is one (top-left corner one step right-down), otherwise centred
     /// on the screen.
     pub(crate) fn show_after(&self, from: Option<&TerminalWindow>) {
+        self.show(from, true);
+    }
+
+    /// [`Self::show_after`] for a window nobody asked for with the keyboard (`bateri window`): it
+    /// comes in front of bateri's other windows and the person keeps typing where they were.
+    pub(crate) fn show_apart(&self, from: Option<&TerminalWindow>) {
+        self.show(from, false);
+    }
+
+    fn show(&self, from: Option<&TerminalWindow>, keys: bool) {
         let window = &self.ivars().window;
         match from {
             // A call with `NSZeroPoint` does not move the window, it gives the
@@ -4523,7 +4573,11 @@ impl TerminalWindow {
             }
             None => window.center(),
         }
-        window.makeKeyAndOrderFront(None);
+        if keys {
+            window.makeKeyAndOrderFront(None);
+        } else {
+            window.orderFront(None);
+        }
         self.ivars().root.lay_out();
         self.fit_to_cells();
     }

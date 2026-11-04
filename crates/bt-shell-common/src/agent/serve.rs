@@ -82,6 +82,9 @@ pub enum Placing {
     NoAnchor,
     /// No pane can be made for it now.
     Unable,
+    /// The Mac will not make it, and says why: a tab, group or window that is not there, or that
+    /// the level does not let this machine change. The script ends the terminal it started.
+    Refused(Failure),
 }
 
 /// What the Mac says to a letter.
@@ -90,7 +93,7 @@ pub enum Answer {
     /// This, and that is all.
     Reply(Reply),
     /// This, and the request is kept until its anchor has a pane.
-    Wait(Reply, Waiting),
+    Wait(Reply, Box<Waiting>),
     /// `ls`: the shell builds the text from the windows as they are and what the server says.
     List(Format),
     /// `close` of a terminal of this server: the shell closes it and answers (the level has been
@@ -183,15 +186,16 @@ fn place_for(server: &Server, from: Option<&str>, place: Place, shell: &mut dyn 
             let reply = waiting_reply(&anchor);
             Answer::Wait(
                 reply,
-                Waiting {
+                Box::new(Waiting {
                     server: server.clone(),
                     anchor,
                     place,
                     opener: from.map(str::to_owned),
-                },
+                }),
             )
         }
         Placing::Unable => Answer::Reply(unable_reply()),
+        Placing::Refused(failure) => Answer::Reply(Reply::Failed(failure)),
     }
 }
 
@@ -244,7 +248,8 @@ pub fn settle_notes(
                 place,
                 opener: None,
             }),
-            Placing::Unable => {}
+            // A note read later has nobody to tell: what is refused is not made.
+            Placing::Unable | Placing::Refused(_) => {}
         }
     }
     read
@@ -278,7 +283,7 @@ pub fn settle_waiting(
             }),
             false,
         ),
-        Placing::Unable => (None, false),
+        Placing::Unable | Placing::Refused(_) => (None, false),
     }
 }
 
@@ -304,6 +309,8 @@ mod tests {
         anchors: Vec<String>,
         shown: Vec<Terminal>,
         unable: bool,
+        /// The Mac will not do it, for this reason.
+        refuse: Option<Failure>,
         placed: Vec<(String, Terminal, Option<Side>, bool)>,
         /// Who each ask said it came from, in order.
         openers: Vec<Option<String>>,
@@ -324,6 +331,9 @@ mod tests {
             self.openers.push(opener.map(str::to_owned));
             if self.unable {
                 return Placing::Unable;
+            }
+            if let Some(failure) = self.refuse.clone() {
+                return Placing::Refused(failure);
             }
             if !self.anchors.iter().any(|known| known == anchor.name()) {
                 return Placing::NoAnchor;
@@ -400,7 +410,7 @@ mod tests {
                 panic!("waits: {from:?}");
             };
             idle.anchors.push("p4".to_owned());
-            settle_waiting(waiting, &|_, _| true, &mut idle);
+            settle_waiting(*waiting, &|_, _| true, &mut idle);
             assert!(idle.placed[0].3, "waited, from {from:?}");
             assert_eq!(
                 idle.openers.last().cloned().flatten().as_deref(),
@@ -478,7 +488,7 @@ mod tests {
         assert_eq!(waiting.opener.as_deref(), Some("p9"));
         idle.anchors.push("p4".to_owned());
         idle.openers.clear();
-        settle_waiting(waiting, &|_, _| true, &mut idle);
+        settle_waiting(*waiting, &|_, _| true, &mut idle);
         assert_eq!(idle.openers, [Some("p9".to_owned())]);
     }
 
@@ -544,7 +554,7 @@ mod tests {
 
         // The anchor gets a pane; the queue hands the request back and it is placed.
         let mut queue = Queue::default();
-        queue.add(waiting);
+        queue.add(*waiting);
         mac.anchors.push("p4".to_owned());
         let due = queue.take_beside("ada@rasp:22", "p4");
         assert_eq!(due.len(), 1);
@@ -567,6 +577,40 @@ mod tests {
         };
         assert_eq!(placed.landed, Landed::Waiting);
         assert_eq!(placed.next_to, None, "nothing is kept to place it by");
+    }
+
+    #[test]
+    fn a_pane_the_mac_refuses_is_answered_with_the_reason_and_kept_by_nobody() {
+        let refusal = Failure::new(Kind::Refused, "that tab has a pane of another machine");
+        let mut mac = Pretend {
+            anchors: vec!["p4".into()],
+            refuse: Some(refusal.clone()),
+            ..Pretend::default()
+        };
+        let text = place_text("anchor p4\nside tab\ngroup g1\n");
+        assert_eq!(
+            serve(&server(), Some("p4"), &text, &mut mac),
+            Answer::Reply(Reply::Failed(refusal.clone()))
+        );
+        assert!(mac.placed.is_empty());
+        // A note read later, and a request that waited, have nobody to tell: they are dropped.
+        let read = settle_notes(
+            &server(),
+            vec![note(5, "p4", false)],
+            &|_, _| true,
+            &mut mac,
+        );
+        assert_eq!(read, Read::default());
+        let waiting = Waiting {
+            server: server(),
+            anchor: Anchor::parse("p4").expect("a name"),
+            place: note(6, "p4", false).place,
+            opener: None,
+        };
+        assert_eq!(
+            settle_waiting(waiting, &|_, _| true, &mut mac),
+            (None, false)
+        );
     }
 
     #[test]
@@ -698,6 +742,7 @@ mod tests {
                 ratio: None,
                 keep_open,
                 focus: false,
+                home: crate::agent::message::Home::default(),
             },
         }
     }

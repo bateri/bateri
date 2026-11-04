@@ -3371,12 +3371,49 @@ impl AppDelegate {
         from: Option<&TerminalWindow>,
         opening: Opening,
     ) -> Result<Retained<TerminalWindow>, String> {
+        // Inheritance comes from the active window's selected tab's **focused pane**.
+        let source = from.map(|from| from.selected_tab().focused_pane());
+        self.open_window_as(from, source.as_deref(), opening, None, true)
+    }
+
+    /// [`Self::open_window`] for a window a program on a server asked for (`bateri window`): its
+    /// only pane is `pane`, grown from `source` (the pane that asked) and showing the terminal
+    /// `start` names, and the window comes up in front of bateri's others **without taking the
+    /// keyboard** unless `keys` says the person is not typing anywhere it would be taken from.
+    pub(crate) fn open_window_for(
+        &self,
+        from: Option<&TerminalWindow>,
+        source: &TerminalPane,
+        start: &Start,
+        pane: u64,
+        keys: bool,
+    ) -> Result<Retained<TerminalWindow>, String> {
+        self.open_window_as(
+            from,
+            Some(source),
+            Opening::Window,
+            Some((start, pane)),
+            keys,
+        )
+    }
+
+    /// [`Self::open_window`]'s body. `born` is the start and the id of the pane for a window whose
+    /// pane was decided before it was made; `keys` is whether the window takes the keyboard.
+    fn open_window_as(
+        &self,
+        from: Option<&TerminalWindow>,
+        source: Option<&TerminalPane>,
+        opening: Opening,
+        born: Option<(&Start, u64)>,
+        keys: bool,
+    ) -> Result<Retained<TerminalWindow>, String> {
         let mtm = self.mtm();
         let id = self.next_id();
         let tab = self.next_id();
-        // Inheritance comes from the active window's selected tab's **focused pane**.
-        let source = from.map(|from| from.selected_tab().focused_pane());
-        let (launch, theme) = self.pane_launch(tab, source.as_deref(), opening, None);
+        let (launch, theme) = match born {
+            Some((start, pane)) => self.pane_launch_as(tab, source, opening, Some(start), pane),
+            None => self.pane_launch(tab, source, opening, None),
+        };
         let window = TerminalWindow::new(mtm, id, tab, launch).map_err(|e| e.to_string())?;
         // The side column is as wide as the one the window opens from: a width the user chose
         // is the user's, not one window's accident.
@@ -3393,7 +3430,11 @@ impl AppDelegate {
         // already has it from its birth settings, the same slot.
         let edge = self.settings().content_edge;
         window.set_content_edge(edge);
-        window.show_after(from);
+        if keys {
+            window.show_after(from);
+        } else {
+            window.show_apart(from);
+        }
         // Timed run: the smoke gate must not depend on which app is in front
         // (`TerminalWindow::float_for_timed_run`).
         if self.ivars().run.is_some() {
@@ -3455,8 +3496,21 @@ impl AppDelegate {
     /// window holds a question of its own, the panes do not fit). `true` if the
     /// move was made.
     pub(crate) fn make_move(&self, wanted: Move) -> bool {
+        self.make_move_raising(wanted, true)
+    }
+
+    /// [`Self::make_move`] where the window the move comes to is brought forward only if `raise`
+    /// says so: a move a program on a server asked for does not take the keyboard to the window
+    /// ([`bt_shell_common::agent::arrange`]).
+    pub(crate) fn make_move_raising(&self, wanted: Move, raise: bool) -> bool {
         match moves::plan(&self.world(), wanted, self) {
-            Ok(plan) => self.carry_out(plan),
+            Ok(mut plan) => {
+                if !raise {
+                    plan.after
+                        .retain(|step| !matches!(step, Step::Raise { .. }));
+                }
+                self.carry_out(plan)
+            }
             Err(Refusal::Beep | Refusal::Stale) => {
                 crate::preview::beep();
                 false

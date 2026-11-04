@@ -4,28 +4,37 @@
 # (`boot.sh`) to `~/.local/share/bateri/shell/bin/bateri` and put on `PATH` by
 # the integration of zsh, bash and fish.
 #
-#   bateri split [PANE] [--left|--right|--above|--below] [--ratio PERCENT]
+#   bateri split [PANE | --tab TAB] [--left|--right|--above|--below] [--ratio PERCENT]
+#          [--label TEXT] [--cwd DIR] [--keep-open] [--wait] [--focus] [--json] [-- PROGRAM...]
+#   bateri tab   [PANE] [--group GROUP | --window WINDOW] [--new-group NAME] [--label TEXT]
 #          [--cwd DIR] [--keep-open] [--wait] [--focus] [--json] [-- PROGRAM...]
-#   bateri tab   [PANE] [--cwd DIR] [--keep-open] [--wait] [--focus] [--json] [-- PROGRAM...]
-#   bateri close [PANE] [--force]           bateri ls [--json]       bateri notify TEXT...
+#   bateri window [PANE] [--label TEXT] [--cwd DIR] [--keep-open] [--wait] [--focus] [--json]
+#          [-- PROGRAM...]
+#   bateri close pane|tab|group|window [ID] [--force]
+#   bateri ls [--json]       bateri notify TEXT...
 #   bateri send [PANE] [TEXT | -]           bateri send-key [PANE] KEY...
 #   bateri capture [PANE] [OPTIONS]         bateri wait PANE [--for TIME]
 #   bateri focus pane|tab|group|window [ID]   bateri zoom [PANE]   bateri swap PANE PANE
+#   bateri rename pane|tab|group ID LABEL   (an empty label takes it away)
 #   bateri move pane PANE --beside PANE --left|--right|--above|--below
+#   bateri move tab TAB --group GROUP | --window WINDOW
 #   bateri resize [PANE] --left|--right|--above|--below [--by N]
 #
 # WHO DOES WHAT. The terminal is the server's: `kablo new` starts it here, it
 # gets a number (`p9`, `next.sh`) and `send`, `capture` and `wait` are kablo's
 # own, with no Mac anywhere. The Mac only decides where a pane that shows the
-# terminal goes: `split` and `tab` tell it so over kablo's app channel
+# terminal goes: `split`, `tab` and `window` tell it so over kablo's app channel
 # (`kablo app`, one `bateri 2` message, `agent::message` in bateri) and it
 # answers how the pane landed. It runs nothing and types nothing into any
 # shell. When no Mac is connected the same message waits in
 # `~/.local/share/bateri/placing/pN` and the Mac reads it when it connects.
-# `focus`, `zoom`, `swap`, `move` and `resize` are the Mac's alone (they need its windows): with
-# none connected they end with 69. A word of a kind and an id of another (`focus group t3`) is a
-# mistake that ends with 64 before the Mac is asked, and says what to write. The Mac refuses (77)
-# what would take the keyboard from where the person is typing.
+# `focus`, `zoom`, `swap`, `move`, `resize`, `rename tab|group` and `close tab|group|window` are the
+# Mac's alone (they need its windows): with none connected they end with 69. A word of a kind and
+# an id of another (`focus group t3`), a field that contradicts another (`split p9 --tab t3`) and
+# `close` with no kind are mistakes that end with 64 before the Mac is asked, and say what to
+# write. The Mac refuses (77) what would take the keyboard from where the person is typing and
+# what the level for this machine does not allow. A pane's label is kablo's own (`kablo label`):
+# `split --label` and `rename pane` write it, and no Mac is asked.
 # The pane goes beside the one named (`split p4`) or, with none named,
 # beside the one this runs in, whatever that is called (`kablo here`): a
 # terminal the Mac opened before the numbers existed is `b-` and 32 digits, and one
@@ -47,7 +56,7 @@
 # it. WHAT MAY BE DONE is the level the Mac has for this machine (`off`,
 # `own`, `screen`, `full`: the `[remote] hosts` entry of settings.toml, whose
 # `commands` key the Mac reads, not this script), and nobody is asked.
-# `close` goes to the Mac, which closes the pane that shows the terminal as the
+# `close pane` goes to the Mac, which closes the pane that shows the terminal as the
 # user closing it would (a pane that stays open for `--keep-open` goes too);
 # named nothing it is the caller's own terminal, under whatever name it has.
 # With no Mac to ask, any terminal of this machine is ended with `kablo end`:
@@ -81,10 +90,14 @@ bt_die() {
 
 bt_usage() {
   printf '%s\n' \
-    'usage: bateri split [PANE] [--left|--right|--above|--below] [--ratio PERCENT] [--cwd DIR]' \
-    '                    [--keep-open] [--wait] [--focus] [--json] [-- PROGRAM [ARG]...]' \
-    '       bateri tab [PANE] [--cwd DIR] [--keep-open] [--wait] [--focus] [--json] [-- PROGRAM [ARG]...]' \
-    '       bateri close [PANE] [--force]' \
+    'usage: bateri split [PANE | --tab TAB] [--left|--right|--above|--below] [--ratio PERCENT]' \
+    '                    [--label TEXT] [--cwd DIR] [--keep-open] [--wait] [--focus] [--json]' \
+    '                    [-- PROGRAM [ARG]...]' \
+    '       bateri tab [PANE] [--group GROUP | --window WINDOW] [--new-group NAME] [--label TEXT]' \
+    '                  [--cwd DIR] [--keep-open] [--wait] [--focus] [--json] [-- PROGRAM [ARG]...]' \
+    '       bateri window [PANE] [--label TEXT] [--cwd DIR] [--keep-open] [--wait] [--focus] [--json]' \
+    '                     [-- PROGRAM [ARG]...]' \
+    '       bateri close pane|tab|group|window [ID] [--force]' \
     '       bateri ls [--json]' \
     '       bateri notify TEXT...' \
     '       bateri send [PANE] [TEXT | -]' \
@@ -94,11 +107,13 @@ bt_usage() {
     '       bateri focus pane|tab|group|window [ID]' \
     '       bateri zoom [PANE]' \
     '       bateri swap PANE PANE' \
+    '       bateri rename pane|tab|group ID LABEL' \
     '       bateri move pane PANE --beside PANE --left|--right|--above|--below' \
+    '       bateri move tab TAB --group GROUP | --window WINDOW' \
     '       bateri resize [PANE] --left|--right|--above|--below [--by N]' \
     'An id is a letter and a number: p9 a pane, t3 a tab, g1 a group, w1 a window; bateri ls shows them.' \
     'A pane is p and its number (p7); with none named it is the one this runs in.' \
-    'Without a program, split and tab open a shell. bateri ls lists the panes.'
+    'Without a program, split, tab and window open a shell. bateri ls lists what is open.'
 }
 
 case ${HOME-} in
@@ -207,6 +222,18 @@ bt_clean() {
   tr -d '\000-\010\013-\037\177'
 }
 
+# `bt_check_label WHAT TEXT`: a label the Mac and kablo take: 1 to 64 bytes of one line of
+# plain text, not only spaces (`agent::message`, `LABEL_MAX`; kablo's own limit is the same).
+bt_check_label() {
+  bt_cl_size=$(printf '%s' "$2" | wc -c | tr -d ' ')
+  if [ "$bt_cl_size" -lt 1 ] || [ "$bt_cl_size" -gt 64 ]; then
+    bt_die 64 "$1 is 1 to 64 bytes"
+  fi
+  bt_cl_plain=$(printf '%s' "$2" | tr -d '\000-\037\177' | wc -c | tr -d ' ')
+  [ "$bt_cl_plain" = "$bt_cl_size" ] || bt_die 64 "$1 is one line of plain text"
+  [ -n "$(printf '%s' "$2" | tr -d ' ')" ] || bt_die 64 "$1 is not only spaces"
+}
+
 bt_not_a_terminal() {
   bt_say "'$(printf '%s' "$1" | bt_clean)' is not a pane: name one as p and its number (p7); 'bateri ls' lists them"
   "$bt_kablo" list 2>/dev/null | head -n 30 >&2
@@ -269,7 +296,7 @@ bt_fail_reply() {
 
 # ─── split, tab ──────────────────────────────────────────────────────────
 
-# `bt_open MODE ARGS...`: starts a terminal here and
+# `bt_open MODE ARGS...` (`split`, `tab` or `window`): starts a terminal here and
 # tells the Mac where its pane goes.
 bt_open() {
   bt_mode=$1
@@ -282,6 +309,11 @@ bt_open() {
   bt_wait=
   bt_focus=
   bt_json=
+  bt_home_tab=
+  bt_home_group=
+  bt_home_window=
+  bt_home_newgroup=
+  bt_label=
   while [ $# -gt 0 ]; do
     case $1 in
       --)
@@ -319,6 +351,70 @@ bt_open() {
         esac
         [ -n "$bt_cwd" ] || bt_die 64 '--cwd takes a directory'
         ;;
+      --tab | --tab=*)
+        [ "$bt_mode" = split ] || bt_die 64 "$bt_mode takes no --tab: a pane goes into a tab (split --tab t3)"
+        [ -z "$bt_home_tab" ] || bt_die 64 'name one tab'
+        case $1 in
+          --tab=*) bt_home_tab=${1#--tab=} ;;
+          *)
+            [ $# -ge 2 ] || bt_die 64 '--tab takes a tab'
+            shift
+            bt_home_tab=$1
+            ;;
+        esac
+        bt_check_id split tab "$bt_home_tab"
+        ;;
+      --group | --group=*)
+        [ "$bt_mode" = tab ] || bt_die 64 "$bt_mode takes no --group: a tab goes into a group (tab --group g1)"
+        [ -z "$bt_home_group" ] || bt_die 64 'name one group'
+        case $1 in
+          --group=*) bt_home_group=${1#--group=} ;;
+          *)
+            [ $# -ge 2 ] || bt_die 64 '--group takes a group'
+            shift
+            bt_home_group=$1
+            ;;
+        esac
+        bt_check_id tab group "$bt_home_group"
+        ;;
+      --window | --window=*)
+        [ "$bt_mode" = tab ] || bt_die 64 "$bt_mode takes no --window: a tab goes into a window (tab --window w1)"
+        [ -z "$bt_home_window" ] || bt_die 64 'name one window'
+        case $1 in
+          --window=*) bt_home_window=${1#--window=} ;;
+          *)
+            [ $# -ge 2 ] || bt_die 64 '--window takes a window'
+            shift
+            bt_home_window=$1
+            ;;
+        esac
+        bt_check_id tab window "$bt_home_window"
+        ;;
+      --new-group | --new-group=*)
+        [ "$bt_mode" = tab ] || bt_die 64 "$bt_mode takes no --new-group: a tab goes into a group made for it (tab --new-group api)"
+        [ -z "$bt_home_newgroup" ] || bt_die 64 'name one new group'
+        case $1 in
+          --new-group=*) bt_home_newgroup=${1#--new-group=} ;;
+          *)
+            [ $# -ge 2 ] || bt_die 64 '--new-group takes the name of the group'
+            shift
+            bt_home_newgroup=$1
+            ;;
+        esac
+        bt_check_label '--new-group' "$bt_home_newgroup"
+        ;;
+      --label | --label=*)
+        [ -z "$bt_label" ] || bt_die 64 'name one label'
+        case $1 in
+          --label=*) bt_label=${1#--label=} ;;
+          *)
+            [ $# -ge 2 ] || bt_die 64 '--label takes a text'
+            shift
+            bt_label=$1
+            ;;
+        esac
+        bt_check_label '--label' "$bt_label"
+        ;;
       --keep-open) bt_keep=yes ;;
       --focus) bt_focus=yes ;;
       --wait) bt_wait=yes ;;
@@ -331,7 +427,26 @@ bt_open() {
     esac
     shift
   done
-  [ "$bt_mode" != tab ] || bt_side=tab
+  case $bt_mode in
+    tab | window) bt_side=tab ;;
+  esac
+  [ "$bt_mode" != window ] || bt_home_window=new
+  # What does not go together is a mistake here, before anything is started (the Mac reads the
+  # same rules, `agent::message::Home::check`).
+  if [ -n "$bt_home_tab" ] && [ -n "$bt_anchor" ]; then
+    bt_die 64 'split goes beside a pane or into a tab (--tab), not both'
+  fi
+  if [ -n "$bt_home_group" ] && { [ -n "$bt_home_window" ] || [ -n "$bt_home_newgroup" ]; }; then
+    bt_die 64 '--group is a group that is in its window already: it goes with no --window and no --new-group'
+  fi
+  # A pane's label is kablo's own; a tab's is the Mac's.
+  bt_pane_label=
+  bt_tab_label=
+  if [ "$bt_mode" = split ]; then
+    bt_pane_label=$bt_label
+  else
+    bt_tab_label=$bt_label
+  fi
 
   bt_here
   bt_orphan=
@@ -389,9 +504,9 @@ bt_open() {
       unset LC_BATERI_TAB_URL BATERI_TAB_URL TERM_SESSION_ID
       # The dock's tier (the Mac's `"blocks"`) goes on to the new terminal: its shell reads it.
       if [ "${BATERI_DOCK-}" = off ]; then
-        "$bt_kablo" new --id "$bt_id" --cwd "$bt_cwd" --env "PATH=$PATH" --env BATERI_DOCK=off -- "$@" 2>&1 >/dev/null
+        "$bt_kablo" new --id "$bt_id" ${bt_pane_label:+--label "$bt_pane_label"} --cwd "$bt_cwd" --env "PATH=$PATH" --env BATERI_DOCK=off -- "$@" 2>&1 >/dev/null
       else
-        "$bt_kablo" new --id "$bt_id" --cwd "$bt_cwd" --env "PATH=$PATH" -- "$@" 2>&1 >/dev/null
+        "$bt_kablo" new --id "$bt_id" ${bt_pane_label:+--label "$bt_pane_label"} --cwd "$bt_cwd" --env "PATH=$PATH" -- "$@" 2>&1 >/dev/null
       fi
     ); then
       break
@@ -450,6 +565,11 @@ bt_place() {
   [ -z "$bt_ratio" ] || bt_msg="${bt_msg}ratio $bt_ratio${nl}"
   [ -z "$bt_keep" ] || bt_msg="${bt_msg}keep-open yes${nl}"
   [ -z "$bt_focus" ] || bt_msg="${bt_msg}focus yes${nl}"
+  [ -z "$bt_home_tab" ] || bt_msg="${bt_msg}tab $bt_home_tab${nl}"
+  [ -z "$bt_home_group" ] || bt_msg="${bt_msg}group $bt_home_group${nl}"
+  [ -z "$bt_home_newgroup" ] || bt_msg="${bt_msg}new-group $bt_home_newgroup${nl}"
+  [ -z "$bt_home_window" ] || bt_msg="${bt_msg}window $bt_home_window${nl}"
+  [ -z "$bt_tab_label" ] || bt_msg="${bt_msg}label $bt_tab_label${nl}"
   bt_ask "$bt_msg"
   if [ "$bt_status" = 0 ]; then
     bt_read_reply
@@ -569,7 +689,44 @@ bt_open_report() {
 
 # ─── close, ls, notify ───────────────────────────────────────────────────
 
+# `close pane|tab|group|window [ID]`: the kind is written, never guessed (`close p9` and a bare
+# `close` are mistakes that say what to write).
 bt_close() {
+  [ $# -ge 1 ] || bt_die 64 'close names what closes: pane, tab, group or window. Did you mean: bateri close pane'
+  bt_ckind=$1
+  shift
+  case $bt_ckind in
+    pane | tab | group | window) ;;
+    *)
+      bt_cword=
+      for bt_co in pane:p tab:t group:g window:w; do
+        if bt_is_kind "${bt_co#*:}" "$bt_ckind"; then
+          bt_cword=${bt_co%:*}
+        fi
+      done
+      [ -z "$bt_cword" ] || bt_die 64 "close takes the kind before the id. Did you mean: bateri close $bt_cword $bt_ckind"
+      bt_die 64 "close takes pane, tab, group or window, not '$(printf '%s' "$bt_ckind" | bt_clean)'"
+      ;;
+  esac
+  [ "$bt_ckind" != pane ] || bt_close_pane "$@"
+
+  # A tab, a group or a window belongs to the Mac's windows: with none connected it ends with 69.
+  [ $# -le 1 ] || bt_die 64 "close $bt_ckind names one id"
+  bt_cid=${1-}
+  case $bt_cid in
+    -*) bt_die 64 "close $bt_ckind takes no option '$(printf '%s' "$bt_cid" | bt_clean)'" ;;
+  esac
+  if [ -n "$bt_cid" ]; then
+    bt_check_id close "$bt_ckind" "$bt_cid"
+  else
+    bt_need_here "name the $bt_ckind to close (close $bt_ckind ID)"
+  fi
+  bt_msg="bateri 2${nl}close${nl}subject $bt_ckind${nl}"
+  [ -z "$bt_cid" ] || bt_msg="${bt_msg}id $bt_cid${nl}"
+  bt_do "$bt_msg"
+}
+
+bt_close_pane() {
   bt_force=
   bt_target=
   for bt_a in "$@"; do
@@ -577,19 +734,19 @@ bt_close() {
       --force) bt_force=--force ;;
       -*) bt_die 64 "close takes no option '$(printf '%s' "$bt_a" | bt_clean)'" ;;
       *)
-        [ -z "$bt_target" ] || bt_die 64 'close names one pane'
+        [ -z "$bt_target" ] || bt_die 64 'close pane names one pane'
         bt_target=$bt_a
         ;;
     esac
   done
   bt_here
   if [ -z "$bt_target" ]; then
-    [ -n "$bt_me" ] || bt_die 64 'this is run in no terminal; name the pane to close (close p4)'
+    [ -n "$bt_me" ] || bt_die 64 'this is run in no terminal; name the pane to close (close pane p4)'
     # The caller's own terminal under whatever name it has: a target has to be a number
     # only where it is written, and nobody wrote this one.
     bt_target=$bt_me
   else
-    bt_need_terminal "$bt_target"
+    bt_check_id close pane "$bt_target"
   fi
 
   # The Mac closes it (the pane and the terminal as one); it refuses (77) with the level it
@@ -723,11 +880,12 @@ bt_check_id() {
     [ "$bt_ck_l" != "$bt_ck_letter" ] || continue
     if bt_is_kind "$bt_ck_l" "$bt_ck_id"; then
       case $bt_ck_verb in
-        focus) bt_die 64 "$bt_ck_id is a $bt_ck_word, not a $bt_ck_kind. Did you mean: bateri $bt_ck_verb $bt_ck_word $bt_ck_id" ;;
+        focus | close | rename | move) bt_die 64 "$bt_ck_id is a $bt_ck_word, not a $bt_ck_kind. Did you mean: bateri $bt_ck_verb $bt_ck_word $bt_ck_id" ;;
         *) bt_die 64 "$bt_ck_id is a $bt_ck_word, not a $bt_ck_kind: $bt_ck_verb takes a $bt_ck_kind" ;;
       esac
     fi
   done
+  [ "$bt_ck_kind" != pane ] || bt_not_a_terminal "$bt_ck_id"
   bt_die 64 "'$(printf '%s' "$bt_ck_id" | bt_clean)' is not a $bt_ck_kind: name one as $bt_ck_letter and its number (${bt_ck_letter}1); 'bateri ls' lists them"
 }
 
@@ -812,13 +970,104 @@ bt_take_side() {
   bt_side=${1#--}
 }
 
-bt_move_verb() {
-  [ $# -ge 1 ] || bt_die 64 'move names what moves: move pane p9 --beside p3 --right'
-  case $1 in
-    pane) ;;
-    *) bt_die 64 "move takes a pane (move pane p9 --beside p3 --right), not '$(printf '%s' "$1" | bt_clean)'" ;;
-  esac
+# `rename pane|tab|group ID LABEL`: an empty label takes it away. A pane's label is kablo's own
+# (the Mac is not asked); a tab's and a group's are the Mac's.
+bt_rename_verb() {
+  [ $# -ge 1 ] || bt_die 64 'rename names what gets a label: pane, tab or group (rename tab t3 web)'
+  bt_rkind=$1
   shift
+  case $bt_rkind in
+    pane | tab | group) ;;
+    window) bt_die 64 'a window has no label' ;;
+    *) bt_die 64 "rename takes pane, tab or group, not '$(printf '%s' "$bt_rkind" | bt_clean)'" ;;
+  esac
+  [ $# -ge 1 ] || bt_die 64 "rename names the $bt_rkind to label (rename $bt_rkind ID LABEL)"
+  bt_rid=$1
+  shift
+  bt_check_id rename "$bt_rkind" "$bt_rid"
+  [ $# -ge 1 ] || bt_die 64 "rename needs a label: rename $bt_rkind $bt_rid LABEL (an empty one takes it away)"
+  bt_rlabel=$*
+  [ -z "$bt_rlabel" ] || bt_check_label label "$bt_rlabel"
+  case $bt_rkind in
+    pane) exec "$bt_kablo" label "$bt_rid" "$bt_rlabel" ;;
+    group) [ -n "$bt_rlabel" ] || bt_die 64 'a group always has a label: say which' ;;
+  esac
+  bt_msg="bateri 2${nl}rename${nl}subject $bt_rkind${nl}id $bt_rid${nl}"
+  [ -z "$bt_rlabel" ] || bt_msg="${bt_msg}label $bt_rlabel${nl}"
+  bt_do "$bt_msg"
+}
+
+bt_move_verb() {
+  [ $# -ge 1 ] || bt_die 64 'move names what moves: move pane p9 --beside p3 --right, or move tab t3 --group g1'
+  case $1 in
+    pane)
+      shift
+      bt_move_pane "$@"
+      ;;
+    tab)
+      shift
+      bt_move_tab "$@"
+      ;;
+    *) bt_die 64 "move takes a pane or a tab, not '$(printf '%s' "$1" | bt_clean)'" ;;
+  esac
+}
+
+# `move tab TAB --group GROUP | --window WINDOW`: into the group, or into the window out of any
+# group. The tab keeps its id.
+bt_move_tab() {
+  bt_mtab=
+  bt_mgroup=
+  bt_mwindow=
+  while [ $# -gt 0 ]; do
+    case $1 in
+      --group | --group=*)
+        [ -z "$bt_mgroup" ] || bt_die 64 'name one group'
+        case $1 in
+          --group=*) bt_mgroup=${1#--group=} ;;
+          *)
+            [ $# -ge 2 ] || bt_die 64 '--group takes a group'
+            shift
+            bt_mgroup=$1
+            ;;
+        esac
+        ;;
+      --window | --window=*)
+        [ -z "$bt_mwindow" ] || bt_die 64 'name one window'
+        case $1 in
+          --window=*) bt_mwindow=${1#--window=} ;;
+          *)
+            [ $# -ge 2 ] || bt_die 64 '--window takes a window'
+            shift
+            bt_mwindow=$1
+            ;;
+        esac
+        ;;
+      -*) bt_die 64 "move tab takes no option '$(printf '%s' "$1" | bt_clean)'" ;;
+      *)
+        [ -z "$bt_mtab" ] || bt_die 64 'move names one tab'
+        bt_mtab=$1
+        ;;
+    esac
+    shift
+  done
+  [ -n "$bt_mtab" ] || bt_die 64 'move names the tab to move (move tab t3 --group g1)'
+  bt_check_id move tab "$bt_mtab"
+  if [ -n "$bt_mgroup" ] && [ -n "$bt_mwindow" ]; then
+    bt_die 64 'a tab goes into a group or into a window, not both'
+  fi
+  [ -n "$bt_mgroup$bt_mwindow" ] || bt_die 64 'move tab needs a place: --group GROUP or --window WINDOW'
+  bt_msg="bateri 2${nl}move${nl}subject tab${nl}id $bt_mtab${nl}"
+  if [ -n "$bt_mgroup" ]; then
+    bt_check_id move group "$bt_mgroup"
+    bt_msg="${bt_msg}group $bt_mgroup${nl}"
+  else
+    bt_check_id move window "$bt_mwindow"
+    bt_msg="${bt_msg}window $bt_mwindow${nl}"
+  fi
+  bt_do "$bt_msg"
+}
+
+bt_move_pane() {
   bt_mpane=
   bt_mbeside=
   bt_side=
@@ -926,11 +1175,12 @@ bt_is_key() {
 bt_cmd=$1
 shift
 case $bt_cmd in
-  split | tab) bt_open "$bt_cmd" "$@" ;;
+  split | tab | window) bt_open "$bt_cmd" "$@" ;;
   close) bt_close "$@" ;;
   focus) bt_focus_verb "$@" ;;
   zoom) bt_zoom_verb "$@" ;;
   swap) bt_swap_verb "$@" ;;
+  rename) bt_rename_verb "$@" ;;
   move) bt_move_verb "$@" ;;
   resize) bt_resize_verb "$@" ;;
   ls) bt_ls "$@" ;;
