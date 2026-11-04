@@ -412,29 +412,9 @@ pub fn is_bash(shell: &Path) -> bool {
     shell.file_name().is_some_and(|name| name == "bash")
 }
 
-/// A shell bateri has an integration script for.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ShellKind {
-    Zsh,
-    Fish,
-    Bash,
-}
-
-impl ShellKind {
-    /// The kind of shell at `path`; `None` for one without a script (the terminal then works as
-    /// it always did, only the marks do not arrive).
-    pub fn of(shell: &Path) -> Option<Self> {
-        if is_zsh(shell) {
-            Some(Self::Zsh)
-        } else if is_fish(shell) {
-            Some(Self::Fish)
-        } else if is_bash(shell) {
-            Some(Self::Bash)
-        } else {
-            None
-        }
-    }
-}
+// A shell bateri has an integration script for: written once in `kablo-bateri`, whose message
+// names the shells a pane may be opened with and whose command knows a lone shell by it.
+pub use kablo_bateri::ShellKind;
 
 /// The zsh wrapper's directory: `Contents/Resources/shell/zsh` in the bundle, the repo's
 /// `assets/shell/zsh` in a debug build.

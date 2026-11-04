@@ -37,6 +37,8 @@ libc = { workspace = true }
 # The kablo wire format (`kablo`): the client of a server's relay is written here, on a byte
 # pipe, and the protocol's codecs are kablo's own. See the workspace manifest.
 kablo-proto = { workspace = true }
+# The text the `bateri` command and the app say to each other: the same code the command writes it with.
+kablo-bateri = { workspace = true }
 
 # `watch`'s macOS body: vnode sources on a dispatch queue. The crate's only
 # macOS-specific dependency — no AppKit, Foundation, Quartz or

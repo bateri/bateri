@@ -209,6 +209,9 @@ pub fn serve(server: &Server, from: Option<&str>, text: &str, shell: &mut dyn Sh
         Ok(Request::Close(terminal)) => Answer::Close(terminal),
         Ok(Request::Notify(text)) => Answer::Notify(text),
         Ok(Request::Arrange(arrange)) => Answer::Arrange(arrange),
+        // The machine that asks is no other machine: nothing is reached, and the answer is `here`,
+        // which needs no level (the command does it itself, as it does what is its own).
+        Ok(Request::Ssh(name)) if is_asker(server, &name) => Answer::Ssh(name),
         Ok(Request::Ssh(name)) => match may_reach_to(server, &name) {
             Ok(()) => Answer::Ssh(name),
             Err(failure) => Answer::Reply(Reply::Failed(failure)),
@@ -231,6 +234,16 @@ fn may_reach(server: &Server) -> Result<(), Failure> {
             level::refusal(server.level, why, server.host_name()),
         )),
         Verdict::Unknown => Err(Failure::new(Kind::Failed, "there is no such machine")),
+    }
+}
+
+/// Whether `name` is the machine the asker runs on: this Mac for a program on this Mac (`@local`),
+/// a server's own name for a program on that server.
+fn is_asker(server: &Server, name: &str) -> bool {
+    if crate::kablo::local::is_account(&server.account) {
+        name == super::LOCAL_SERVER
+    } else {
+        server.host_name() == Some(name)
     }
 }
 
@@ -319,14 +332,12 @@ fn place_for(server: &Server, from: Option<&str>, place: Place, shell: &mut dyn 
             "no terminal for the pane to go beside: it was not asked from a terminal and names none",
         )));
     };
-    // A terminal that is not started is this Mac's to open: a server's pane is the pipe to a
-    // terminal there, which is not here to be shown.
+    // A terminal that is not started is this Mac's to open when it is a pane of this Mac's own; a
+    // server's pane is the pipe to a terminal there, which only the server can start: the answer
+    // is `ok start`, and the command starts it with the bootstrap the server has and asks again
+    // for the pane, with no `fresh` this time.
     if place.fresh.is_some() && !crate::kablo::local::is_account(&server.account) {
-        return Answer::Reply(Reply::Failed(Failure::new(
-            Kind::Failed,
-            "this server has no bootstrap file to start a shell from: open a terminal in bateri \
-             on it again, or name a program after `--`",
-        )));
+        return Answer::Reply(Reply::Start);
     }
     if shell.shows(server, place.terminal) {
         return Answer::Reply(Reply::Placed(Placed {
@@ -552,8 +563,9 @@ mod tests {
         }
     }
 
-    /// A pane with no terminal yet is this Mac's to open; a server has no such pane, and one
-    /// that has nothing to stand beside is not kept for later (nothing runs to wait for).
+    /// A pane with no terminal yet is this Mac's to open; a server's is started by the server (`ok
+    /// start`), and one that has nothing to stand beside is not kept for later (nothing runs to
+    /// wait for).
     #[test]
     fn a_pane_with_no_terminal_yet_is_this_macs_and_is_not_kept_waiting() {
         let ask = place_text("anchor p4\nfresh /Users/ada/api\n");
@@ -576,29 +588,39 @@ mod tests {
         };
         assert_eq!(failure.kind, Kind::Failed);
         assert!(failure.text.contains("not on screen"), "{}", failure.text);
-        // And not for a server, whose pane is the pipe to a terminal that is there.
+        // And not for a server, whose pane is the pipe to a terminal there: the server is told to
+        // start it, and nothing is placed.
         let mut mac = Pretend {
             anchors: vec!["p4".into()],
             ..Pretend::default()
         };
-        let Answer::Reply(Reply::Failed(failure)) = serve(&server(), Some("p4"), &ask, &mut mac)
-        else {
-            panic!("refused");
+        let Answer::Reply(reply) = serve(&server(), Some("p4"), &ask, &mut mac) else {
+            panic!("answered");
         };
-        assert!(failure.text.contains("bootstrap"), "{}", failure.text);
+        assert_eq!(reply, Reply::Start);
         assert!(mac.placed.is_empty() && mac.openers.is_empty());
-        // A server cannot have this Mac start a shell by naming one either: nothing of it runs.
+        // Naming a shell does not change it: nothing of it runs here.
         let ask = place_text("anchor p4\nfresh /tmp\nshell /bin/zsh\n");
         let mut mac = Pretend {
             anchors: vec!["p4".into()],
             ..Pretend::default()
         };
-        let Answer::Reply(Reply::Failed(failure)) = serve(&server(), Some("p4"), &ask, &mut mac)
-        else {
-            panic!("refused");
+        let Answer::Reply(reply) = serve(&server(), Some("p4"), &ask, &mut mac) else {
+            panic!("answered");
         };
-        assert!(failure.text.contains("bootstrap"), "{}", failure.text);
+        assert_eq!(reply, Reply::Start);
         assert!(mac.placed.is_empty() && mac.openers.is_empty());
+        // Asked again with no `fresh`, for the terminal the server started, it is a pane like any.
+        let again = place_text("anchor p4\n");
+        let mut mac = Pretend {
+            anchors: vec!["p4".into()],
+            ..Pretend::default()
+        };
+        let Answer::Reply(Reply::Placed(placed)) = serve(&server(), Some("p4"), &again, &mut mac)
+        else {
+            panic!("placed");
+        };
+        assert_eq!(placed.landed, Landed::AsAsked);
     }
 
     /// Reaching another machine — starting a terminal there, or working with one — is a `full`
@@ -711,7 +733,6 @@ mod tests {
         for text in [
             asks[2].clone(),
             asks[3].clone(),
-            "bateri 2\nssh\nserver @local\n".to_owned(),
             place_text("anchor p4\nserver @local\n"),
         ] {
             let Answer::Reply(Reply::Failed(failure)) =
@@ -721,6 +742,49 @@ mod tests {
             };
             assert_eq!(failure.kind, Kind::Usage, "{text:?}");
         }
+    }
+
+    /// The machine that asks is no other machine: asked how to reach it, the window passes the
+    /// question on (to be answered `here`) whatever the level, and a different machine is still a
+    /// `full` one's.
+    #[test]
+    fn the_machine_that_asks_is_reached_by_nothing_and_needs_no_level() {
+        for level in [CommandLevel::Own, CommandLevel::Screen, CommandLevel::Full] {
+            let mut mac = this_mac();
+            mac.level = level;
+            match serve(
+                &mac,
+                Some("p4"),
+                "bateri 2\nssh\nserver @local\n",
+                &mut Pretend::default(),
+            ) {
+                Answer::Ssh(name) => assert_eq!(name, "@local", "{level:?}"),
+                other => panic!("{level:?}: {other:?}"),
+            }
+            let mut rasp = self::server();
+            rasp.level = level;
+            match serve(
+                &rasp,
+                Some("p4"),
+                "bateri 2\nssh\nserver rasp\n",
+                &mut Pretend::default(),
+            ) {
+                Answer::Ssh(name) => assert_eq!(name, "rasp", "{level:?}"),
+                other => panic!("{level:?}: {other:?}"),
+            }
+        }
+        // For a program on a server, `@local` is this Mac: another machine, a `full` one's.
+        let mut rasp = self::server();
+        rasp.level = CommandLevel::Own;
+        let Answer::Reply(Reply::Failed(failure)) = serve(
+            &rasp,
+            Some("p4"),
+            "bateri 2\nssh\nserver @local\n",
+            &mut Pretend::default(),
+        ) else {
+            panic!("refused");
+        };
+        assert_eq!(failure.kind, Kind::Refused);
     }
 
     /// The pane for a terminal that runs on another server goes beside a terminal of the machine

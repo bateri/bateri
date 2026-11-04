@@ -23,7 +23,7 @@ use std::thread;
 use bt_core::CommandLevel;
 use bt_shell_common::agent::LOCAL_SERVER;
 use bt_shell_common::agent::level::{self, Why};
-use bt_shell_common::agent::message::{Failure, Kind, Place, Relay, Reply};
+use bt_shell_common::agent::message::{Failure, Kind, Place, Reach, Relay, Reply};
 use bt_shell_common::agent::relay as run;
 use bt_shell_common::agent::serve::{self, Server};
 use bt_shell_common::kablo::local;
@@ -39,7 +39,8 @@ use crate::ssh_route::Ask;
 
 /// `ssh`: the words of the `ssh` command that ride the connection bateri keeps to the server
 /// `name`, one `arg` line each; to a program on a server, which cannot run it, the word `relay`
-/// once the connection is made (the window runs what the program means to, [`relay`]). The sheet
+/// once the connection is made (the window runs what the program means to, [`relay`]); the machine
+/// that asks is no other machine, and the word is `here` (the command does it itself). The sheet
 /// that asks for a password opens on the pane the program runs in; run in no pane (a cron job)
 /// nothing asks, and a server that wants one is refused.
 pub(super) fn ssh(
@@ -50,14 +51,22 @@ pub(super) fn ssh(
     name: String,
 ) {
     let relayed = !local::is_account(&server.account);
+    // The machine that asks is no other machine: there is nothing to reach, and the command does
+    // it itself (`here`), on this Mac as on the server (`serve` judged that it may, with no level).
+    if (!relayed && name == LOCAL_SERVER) || (relayed && server.host_name() == Some(name.as_str()))
+    {
+        letter.answer(Reply::Text(Reach::Here.text()).encode().into_bytes());
+        return;
+    }
     if name == LOCAL_SERVER {
-        // This Mac needs no connection; it is as `commands` lets it be.
+        // This Mac needs no connection for a program on a server, which has it run there; it is
+        // as `commands` lets it be.
         let reply = match app.settings().commands_level {
             CommandLevel::Off => Reply::Failed(Failure::new(
                 Kind::Refused,
                 level::refusal(CommandLevel::Off, Why::Off, None),
             )),
-            _ => Reply::Text(RELAY.to_owned()),
+            _ => Reply::Text(Reach::Relay.text()),
         };
         letter.answer(reply.encode().into_bytes());
         return;
@@ -84,9 +93,6 @@ pub(super) fn ssh(
     }
 }
 
-/// What the answer to an `ssh` of a program on a server is: it runs nothing itself.
-const RELAY: &str = "relay\n";
-
 /// What a server reached, or not, says to the program that asked.
 fn reached_reply(reached: Result<Reached, String>, relayed: bool) -> Reply {
     let reached = match reached {
@@ -97,7 +103,7 @@ fn reached_reply(reached: Result<Reached, String>, relayed: bool) -> Reply {
         return Reply::Failed(refused_off(&reached.server));
     }
     if relayed {
-        return Reply::Text(RELAY.to_owned());
+        return Reply::Text(Reach::Relay.text());
     }
     let mut words = String::new();
     for word in &reached.argv {

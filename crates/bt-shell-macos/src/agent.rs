@@ -15,10 +15,11 @@
 //!   of bateri's others without the keyboard ([`TerminalWindow::show_apart`]): nothing the user
 //!   was looking at moves, and the tab strip shows the new one running.
 //! - **The program is the point of the pane.** Its pipe closes with its terminal
-//!   (`ssh-hold --close-at-end`, [`Held::close_at_end`]) so the pane goes when the program does —
-//!   unless `--keep-open` was asked, when the shell follows as it does for any pane. The pane
-//!   keeps that, and who asked for it ([`Held::opener`], its card's "Opened by"), across a
-//!   restart: session restore saves both with the terminal it shows.
+//!   (`ssh-hold --close-at-end`, [`Held::close_at_end`]) so the pane goes when the terminal does;
+//!   with `--keep-open` the terminal itself goes on to the login shell after the program (the
+//!   command does that, on every machine). The pane keeps that, and who asked for it
+//!   ([`Held::opener`], its card's "Opened by"), across a restart: session restore saves both
+//!   with the terminal it shows.
 //! - **A pane that cannot be placed waits; a place that is not there is refused.** The terminal
 //!   runs on the server and is in the list of what runs in the background; a request whose
 //!   anchor is on no tab of this Mac is kept here ([`Queue`]) until a pane shows the anchor — a pane opened
@@ -66,7 +67,9 @@ use bt_core::PaneUuid;
 use bt_shell_common::agent::arrange::{self as rule, Go};
 use bt_shell_common::agent::level::{self, Panes};
 use bt_shell_common::agent::listing::{self, Node, Pane, Scene, Tab, Window};
-use bt_shell_common::agent::message::{Failure, Format, Kind, Place, Placed, Reply, WindowHome};
+use bt_shell_common::agent::message::{
+    self, Failure, Format, Kind, Place, Placed, Reply, WindowHome,
+};
 use bt_shell_common::agent::notes::Note;
 use bt_shell_common::agent::place::{Ask, Landed, Landing, Spot};
 use bt_shell_common::agent::serve::{self, Answer, Placing, Server, Shell};
@@ -469,7 +472,7 @@ impl<'a> World<'a> {
                 run: false,
                 held: None,
                 uuid: uuid.clone(),
-                runs: place.runs(),
+                runs: message::runs(place),
             }
         } else {
             if !pipe_installed(&app.shell_integration().env) {
@@ -491,7 +494,10 @@ impl<'a> World<'a> {
                         account: target.account.clone(),
                         terminal: name,
                     }),
-                    close_at_end: !place.keep_open,
+                    // The terminal is what keeps a program's shell after it (`--keep-open`: the
+                    // command follows the program with the login shell, on every machine), so the
+                    // pane goes when the terminal does.
+                    close_at_end: true,
                     opener: Some(opener),
                 }),
                 uuid: None,
@@ -1182,7 +1188,7 @@ mod tests {
     fn what_a_request_runs_reaches_the_pane_it_opens() {
         let source = include_str!("agent.rs");
         let source = &source[..source.find("#[cfg(test)]").unwrap_or(source.len())];
-        assert!(source.contains("runs: place.runs(),"));
+        assert!(source.contains("runs: message::runs(place),"));
         let app = include_str!("app.rs");
         assert!(
             app.contains(

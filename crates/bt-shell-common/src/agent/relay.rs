@@ -29,7 +29,18 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use super::message::{Relayed, hex_word};
+use super::message::Relayed;
+
+/// A word as `bateri --hex` takes it: `x` and the hex of its bytes, so that no shell on the way
+/// reads it (`kablo bateri --hex` is the reader).
+fn hex_word(word: &str) -> String {
+    let mut out = String::with_capacity(1 + word.len() * 2);
+    out.push('x');
+    for byte in word.bytes() {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
+}
 
 /// The longest a relayed command may run. A `wait` for a long job is the reason it is long; the
 /// limit is for a program that went away, whose request nobody answers any more.

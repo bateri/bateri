@@ -131,6 +131,17 @@ pub(crate) fn integration_for(
     }
 }
 
+/// What a pane that runs `runs` says of its shell in its environment: `SHELL` is the shell a
+/// command named alone (`bateri split -- zsh`), so a program in the pane that asks which shell it
+/// is in finds the one the pane is, and not the user's login shell. The user's own shell and a
+/// program leave it as it is.
+pub(crate) fn shell_env(runs: &PaneRuns) -> Vec<(String, String)> {
+    runs.shell()
+        .and_then(Path::to_str)
+        .map(|shell| vec![("SHELL".to_owned(), shell.to_owned())])
+        .unwrap_or_default()
+}
+
 /// What shell integration adds to the child — nothing if not set up.
 ///
 /// **The whole decision is here and pure**: which shell, which setting, where
@@ -636,6 +647,19 @@ mod tests {
                 asked(&super::PaneRuns::Program { keep_open }),
                 (super::Integration::default(), None)
             );
+        }
+    }
+
+    #[test]
+    fn a_pane_that_runs_a_named_shell_says_so_in_its_environment_and_no_other_does() {
+        let fish = std::path::PathBuf::from("/opt/bin/fish");
+        assert_eq!(
+            super::shell_env(&super::PaneRuns::Shell(fish)),
+            [("SHELL".to_owned(), "/opt/bin/fish".to_owned())]
+        );
+        assert!(super::shell_env(&super::PaneRuns::UserShell).is_empty());
+        for keep_open in [false, true] {
+            assert!(super::shell_env(&super::PaneRuns::Program { keep_open }).is_empty());
         }
     }
 

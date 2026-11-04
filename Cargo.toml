@@ -215,13 +215,21 @@ harfrust = { version = "0.13", default-features = false, features = ["std"] }
 
 # The kablo protocol: the wire format `bt-shell-common::kablo` speaks to a server's relay
 # (frames, handshake, messages, and the rules for installing the binary there). Taken from
-# kablo's repository by the same pinned commit as the two forks below, so that one `rev`
+# kablo's repository by the same pinned commit as the forks below, so that one `rev`
 # is the only place bateri names a kablo version — and moving it is the one way a change in
 # kablo reaches bateri. User-approved dependency decision (2026-10-19): the protocol is
 # written once, in kablo, and bateri is a client of it; rewriting it here would be a second
 # copy that drifts. The crate has no dependencies of its own and the same license as
-# bateri (GPL-3.0-or-later); `make audit` fails if the three do not resolve to one commit.
-kablo-proto = { git = "https://github.com/bateri/kablo", rev = "4075e89b2489edc5452c780d2443ad6e67e7cfca" }
+# bateri (GPL-3.0-or-later); `make audit` fails if the four do not resolve to one commit.
+kablo-proto = { git = "https://github.com/bateri/kablo", rev = "38c66ea8c4108a3e141cbbb883b9785b1de8c383" }
+
+# The text a program in a pane and the app say to each other (`bateri 2`: the requests the `bateri`
+# command makes, the replies the window gives, and the types they are written in). Written once,
+# in kablo, where the command runs (`kablo bateri`): this is the reader and the writer the app's
+# side uses, and the command's side is the same code, so the two cannot drift. The same pinned
+# commit as `kablo-proto` and the forks, for the same reason; it has no dependencies of its own
+# but `kablo-proto` (for the validation of a terminal's name).
+kablo-bateri = { git = "https://github.com/bateri/kablo", rev = "38c66ea8c4108a3e141cbbb883b9785b1de8c383" }
 
 # pencere: the protocol a program in a pane speaks to show its view there, and the kit its
 # native views are made with, from its own repository and one pinned commit, like
@@ -300,8 +308,8 @@ bt-shell-macos = { path = "crates/bt-shell-macos" }
 # dependency decision (2026-10-17, the command palette): the same care as vte's — `make audit`
 # fails if the patch stops applying, and a newer upstream release is merged by hand.
 [patch.crates-io]
-vte = { git = "https://github.com/bateri/kablo", rev = "4075e89b2489edc5452c780d2443ad6e67e7cfca" }
-alacritty_terminal = { git = "https://github.com/bateri/kablo", rev = "4075e89b2489edc5452c780d2443ad6e67e7cfca" }
+vte = { git = "https://github.com/bateri/kablo", rev = "38c66ea8c4108a3e141cbbb883b9785b1de8c383" }
+alacritty_terminal = { git = "https://github.com/bateri/kablo", rev = "38c66ea8c4108a3e141cbbb883b9785b1de8c383" }
 
 # On macOS the default development profile keeps full debug info in object files beside every
 # build ("unpacked") and never removes the ones a rebuild replaces: each edit at the bottom

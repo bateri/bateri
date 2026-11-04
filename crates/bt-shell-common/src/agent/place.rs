@@ -19,47 +19,18 @@
 use crate::palette::{Beside, beside};
 use crate::split::{Direction, PANE_EDGE_SHARE, Rect, Room, Tree};
 
-/// A side of the anchor an agent can ask for, or a tab of its own. The words are the ones the
-/// drag's preview writes on the region it shows ([`crate::split::Zone::label`]), lower case.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Side {
-    Left,
-    Right,
-    Above,
-    Below,
-    /// A tab of its own, in the window of the anchor's tab.
-    Tab,
-}
+// A side of the anchor an agent can ask for, or a tab of its own, and how a pane landed: the words
+// the command and the app say to each other, written once in `kablo-bateri`.
+pub use kablo_bateri::{Landed, Side};
 
-impl Side {
-    /// Every side, in the order the words are listed to a person.
-    pub const ALL: [Side; 5] = [Side::Left, Side::Right, Side::Above, Side::Below, Side::Tab];
-
-    /// The word the command line and the message carry.
-    pub fn word(self) -> &'static str {
-        match self {
-            Side::Left => "left",
-            Side::Right => "right",
-            Side::Above => "above",
-            Side::Below => "below",
-            Side::Tab => "tab",
-        }
-    }
-
-    /// The side a word names.
-    pub fn from_word(word: &str) -> Option<Side> {
-        Side::ALL.into_iter().find(|side| side.word() == word)
-    }
-
-    /// The side of a pane this is; `None` for a tab of its own.
-    pub fn direction(self) -> Option<Direction> {
-        match self {
-            Side::Left => Some(Direction::Left),
-            Side::Right => Some(Direction::Right),
-            Side::Above => Some(Direction::Up),
-            Side::Below => Some(Direction::Down),
-            Side::Tab => None,
-        }
+/// The side of a pane a side of the anchor is; `None` for a tab of its own.
+pub fn direction(side: Side) -> Option<Direction> {
+    match side {
+        Side::Left => Some(Direction::Left),
+        Side::Right => Some(Direction::Right),
+        Side::Above => Some(Direction::Up),
+        Side::Below => Some(Direction::Down),
+        Side::Tab => None,
     }
 }
 
@@ -71,44 +42,6 @@ pub struct Ask {
     /// The share of the anchor (of its group, once the pane has moved up to one) the new pane
     /// asks for, within `0..1`; none is half ([`PANE_EDGE_SHARE`]).
     pub share: Option<f64>,
-}
-
-/// How the pane came to be where it is.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Landed {
-    /// What was asked for, or — when nothing was asked — the palette's choice.
-    AsAsked,
-    /// Beside the group the anchor is part of: the anchor itself was too small to share.
-    BesideGroup,
-    /// In a tab of its own because this tab had no room (a tab asked for is [`Landed::AsAsked`]).
-    NewTab,
-    /// In no tab yet: the anchor is in none, and the terminal waits in the list of what runs in
-    /// the background until it is. Only the Mac can say so; [`place`] never answers it.
-    Waiting,
-}
-
-impl Landed {
-    /// The word the reply and the JSON carry.
-    pub fn word(self) -> &'static str {
-        match self {
-            Landed::AsAsked => "as_asked",
-            Landed::BesideGroup => "beside_group",
-            Landed::NewTab => "new_tab",
-            Landed::Waiting => "waiting",
-        }
-    }
-
-    /// The case a word names.
-    pub fn from_word(word: &str) -> Option<Landed> {
-        [
-            Landed::AsAsked,
-            Landed::BesideGroup,
-            Landed::NewTab,
-            Landed::Waiting,
-        ]
-        .into_iter()
-        .find(|landed| landed.word() == word)
-    }
 }
 
 /// Where the pane goes.
@@ -155,7 +88,7 @@ pub fn place(
     let leaf = Tree::Leaf(incoming);
     let direction = match ask.side {
         Some(Side::Tab) => return Some(new_tab(Landed::AsAsked)),
-        Some(side) => side.direction(),
+        Some(side) => direction(side),
         // The palette's rule asks whether each plain half fits: a share that was squeezed or a
         // pane that moved up to a group is not a split of this pane.
         None => {
@@ -270,7 +203,7 @@ mod tests {
     #[test]
     fn the_words_of_a_side_are_the_ones_the_drags_preview_writes() {
         for side in [Side::Left, Side::Right, Side::Above, Side::Below] {
-            let direction = side.direction().expect("a side of a pane");
+            let direction = direction(side).expect("a side of a pane");
             let label = Zone::Beside {
                 target: 1,
                 side: direction,
@@ -279,7 +212,7 @@ mod tests {
             .expect("a zone beside a pane has a label");
             assert_eq!(label.to_lowercase(), side.word());
         }
-        assert_eq!(Side::Tab.direction(), None);
+        assert_eq!(direction(Side::Tab), None);
         for side in Side::ALL {
             assert_eq!(Side::from_word(side.word()), Some(side));
         }

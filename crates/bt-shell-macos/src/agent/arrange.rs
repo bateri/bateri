@@ -21,7 +21,7 @@ use bt_shell_common::agent::level::{self, Act, Panes, Verdict};
 use bt_shell_common::agent::message::{
     Arrange, Failure, Home, Kind, Placed, Reply, Subject, TabHome, WindowHome,
 };
-use bt_shell_common::agent::place::{Landed, Side};
+use bt_shell_common::agent::place::{Landed, Side, direction};
 use bt_shell_common::agent::serve::Server;
 use bt_shell_common::groups::Target as Strip;
 use bt_shell_common::kablo::service::Letter;
@@ -456,7 +456,7 @@ fn pane_into_tab(
 }
 
 fn direction_of(side: Side) -> Result<Direction, Failure> {
-    side.direction()
+    direction(side)
         .ok_or_else(|| Failure::new(Kind::Usage, "`side` is left, right, above or below"))
 }
 

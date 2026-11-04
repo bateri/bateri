@@ -4314,7 +4314,7 @@ impl AppDelegate {
             run: self.ivars().run,
             stats: self.stats(),
             held,
-            env: Vec::new(),
+            env: launch::shell_env(&runs),
             runs,
         };
         (config, theme)
