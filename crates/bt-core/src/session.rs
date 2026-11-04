@@ -2637,6 +2637,9 @@ struct TappedPty {
     /// read may carry the rest of a graphics command. Followed on the same
     /// slice the scanner sees, no second read.
     tail: snapshot::Tail,
+    /// The `ESC`s of the read being walked, found once for the tail, the question
+    /// of a command and the scanner.
+    escapes: crate::skim::Escapes,
 }
 
 impl TappedPty {
@@ -2707,11 +2710,12 @@ impl io::Read for TappedPty {
         // ended in) may carry the rest of a command as much as one with `ESC _`
         // in it.
         let mid_sequence = self.tail.mid_sequence();
-        self.tail.feed(&buf[..read]);
+        self.escapes.find(&buf[..read]);
+        self.tail.feed_with(&buf[..read], &self.escapes);
         // Before the scanner: a remote session that ends in this read is
         // still the one a graphics command in it was written in.
         let hub = &self.adapter.0.graphics;
-        if (graphics::may_carry_command(&buf[..read]) || mid_sequence || hub.is_open())
+        if (self.escapes.may_begin_command(&buf[..read]) || mid_sequence || hub.is_open())
             && hub.in_remote_session()
         {
             hub.note_remote();
@@ -2743,7 +2747,8 @@ impl io::Read for TappedPty {
         let initial_input = &mut self.initial_input;
         let held_input = &self.held_input;
         let adapter = &self.adapter;
-        self.scanner.feed(&buf[..read], |event| {
+        let escapes = &self.escapes;
+        self.scanner.feed_with(&buf[..read], escapes, |event| {
             // The support question is answered here, lock-free: fixed bytes
             // through the same channel the parser's replies take (muted for the
             // past of a stream, like them).
@@ -2863,6 +2868,7 @@ impl io::Read for TappedPty {
         // reads the counter **under that lock**, it can see the state "the counter
         // advanced but the bytes are not applied yet" and uses it there to **set**
         // the flag — not to drop it ([`Session::observe_screen_clear`]).
+        self.escapes.release();
         let clears = self.scanner.take_screen_clears();
         if clears > 0 {
             self.screen_clears.fetch_add(clears, Ordering::Relaxed);
@@ -5760,6 +5766,7 @@ impl Session {
             held_input: Arc::clone(&held_input),
             adapter: adapter.clone(),
             tail: snapshot::Tail::lean(),
+            escapes: crate::skim::Escapes::default(),
         };
         // Asked when a command names a file: a pane in a remote session is
         // not on the machine the name belongs to.

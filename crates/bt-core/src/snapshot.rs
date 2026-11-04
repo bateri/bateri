@@ -1294,7 +1294,52 @@ impl Tail {
     /// What [`Tail::skim`] can take at once it takes at once, the rest is
     /// stepped through a byte at a time: every read of every pane comes
     /// through here, and most of it is text or a sequence's body.
-    pub(crate) fn feed(&mut self, mut bytes: &[u8]) {
+    #[cfg(test)]
+    pub(crate) fn feed(&mut self, bytes: &[u8]) {
+        if self.lean {
+            self.feed_with(bytes, &skim::Escapes::of(bytes));
+        } else {
+            self.feed_stepping(bytes);
+        }
+    }
+
+    /// [`Tail::feed`] for a tail that keeps nothing, given the `ESC`s of `bytes` — found
+    /// once for every walker of the read ([`skim::Escapes`]). In the ground state it
+    /// goes from one to the next: the text between needs no step, only where it leaves
+    /// the tail, and a whole CSI is text to a tail that keeps none of its bytes.
+    pub(crate) fn feed_with(&mut self, bytes: &[u8], escapes: &skim::Escapes) {
+        if !self.lean {
+            return self.feed_stepping(bytes);
+        }
+        let (mut at, mut cursor) = (0, 0);
+        while at < bytes.len() {
+            if self.state == Seq::Ground && self.utf8_need == 0 {
+                let Some(esc) = escapes.next(&mut cursor, at) else {
+                    self.settle_text(bytes.get(at..).unwrap_or_default());
+                    return;
+                };
+                self.settle_text(bytes.get(at..esc.at).unwrap_or_default());
+                if esc.csi > 0 {
+                    at = esc.at + esc.csi;
+                    // The `ESC` that opened it ended whatever the text left half read.
+                    self.utf8_need = 0;
+                    cursor += 1;
+                } else {
+                    self.step(0x1b);
+                    at = esc.at + 1;
+                }
+                continue;
+            }
+            let rest = bytes.get(at..).unwrap_or_default();
+            at += self.skim(rest);
+            if let Some(&byte) = bytes.get(at) {
+                self.step(byte);
+                at += 1;
+            }
+        }
+    }
+
+    fn feed_stepping(&mut self, mut bytes: &[u8]) {
         while !bytes.is_empty() {
             let taken = self.skim(bytes);
             bytes = bytes.get(taken..).unwrap_or_default();
@@ -1311,24 +1356,7 @@ impl Tail {
     /// as stepping through them one by one (the sameness is a test's).
     fn skim(&mut self, bytes: &[u8]) -> usize {
         match self.state {
-            Seq::Ground if self.utf8_need == 0 && !self.lean => ground_run(bytes),
-            // A tail that keeps nothing needs no step through text, only where the text
-            // leaves it, and a whole CSI is text to it.
-            Seq::Ground if self.utf8_need == 0 => {
-                let mut at = 0;
-                loop {
-                    let text =
-                        skim::until(bytes.get(at..).unwrap_or_default(), |byte| byte == 0x1b);
-                    self.settle_text(bytes.get(at..at + text).unwrap_or_default());
-                    at += text;
-                    let Some(len) = bytes.get(at..).and_then(csi_len) else {
-                        return at;
-                    };
-                    at += len;
-                    // The `ESC` that opened it ended whatever the text left half read.
-                    self.utf8_need = 0;
-                }
-            }
+            Seq::Ground if self.utf8_need == 0 => ground_run(bytes),
             Seq::Apc => {
                 let run = skim::until(bytes, |byte| matches!(byte, 0x18 | 0x1a | 0x1b));
                 let room = APC_KEEP.saturating_sub(self.bytes.len());
@@ -1574,17 +1602,6 @@ impl Tail {
             },
         }
     }
-}
-
-/// The length of the CSI `bytes` starts with, when all of it is there: `ESC [`,
-/// parameters and intermediates (0x20..=0x3f) and a final byte (0x40..=0x7e).
-/// [`Tail::step`] takes each of them from the ground state back to it, and a lean
-/// tail keeps none of their bytes. Anything else — a control or a byte above `~`
-/// among them, a cut — is `None`: the step reads those.
-fn csi_len(bytes: &[u8]) -> Option<usize> {
-    let body = bytes.strip_prefix(b"\x1b[")?;
-    let params = skim::until(body, |byte| !matches!(byte, 0x20..=0x3f));
-    matches!(body.get(params), Some(0x40..=0x7e)).then_some(2 + params + 1)
 }
 
 /// How far the ground state goes on unmoved, with no character half read: ASCII

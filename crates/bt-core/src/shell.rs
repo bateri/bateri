@@ -5189,45 +5189,59 @@ impl Scanner {
     ///
     /// It **does not touch** the bytes: the slice is `&[u8]` and on return the caller
     /// passes it to the parser as it is.
-    pub(crate) fn feed(&mut self, bytes: &[u8], mut on_event: impl FnMut(ScanEvent<'_>)) {
-        let mut rest = bytes;
-        while !rest.is_empty() {
+    #[cfg(test)]
+    pub(crate) fn feed(&mut self, bytes: &[u8], on_event: impl FnMut(ScanEvent<'_>)) {
+        self.feed_with(bytes, &skim::Escapes::of(bytes), on_event);
+    }
+
+    /// [`Scanner::feed`] given the `ESC`s of `bytes`, found once for every walker of
+    /// the read ([`skim::Escapes`]).
+    pub(crate) fn feed_with(
+        &mut self,
+        bytes: &[u8],
+        escapes: &skim::Escapes,
+        mut on_event: impl FnMut(ScanEvent<'_>),
+    ) {
+        let (mut at, mut cursor) = (0, 0);
+        while at < bytes.len() {
             // The idle fast path: while outside a sequence we do not walk the buffer byte by
             // byte, we jump to the next `ESC`. Almost all of the ordinary stream is this
             // branch.
             if self.state == ScanState::Ground {
-                match rest.get(skim::until(rest, |b| b == 0x1b) + 1..) {
-                    Some(after) => {
-                        self.state = ScanState::Escape;
-                        rest = after;
+                let Some(esc) = escapes.next(&mut cursor, at) else {
+                    return;
+                };
+                if esc.csi == 0 {
+                    self.state = ScanState::Escape;
+                    at = esc.at + 1;
+                } else {
+                    // A CSI that is all in the read is taken whole: the sequences the
+                    // scanner reads are three, ending in `J`, `t` or `h`, and only those
+                    // have their parameters collected; any other final byte ends the
+                    // sequence with nothing to say, whatever came before it.
+                    let end = esc.at + esc.csi;
+                    let body = bytes.get(esc.at + 2..end - 1).unwrap_or_default();
+                    if let Some(&final_byte @ (b'J' | b't' | b'h')) = bytes.get(end - 1) {
+                        let mut csi = CsiScan::new();
+                        for &byte in body {
+                            csi.take(byte);
+                        }
+                        self.csi_final(csi, final_byte, &mut on_event);
                     }
-                    None => return,
+                    at = end;
+                    cursor += 1;
                 }
                 continue;
-            }
-            // A CSI is taken whole when it is all in the read: the sequences the
-            // scanner reads are three, and the rest of the ordinary stream's are
-            // most of what is walked after the `ESC`.
-            if self.state == ScanState::Escape && rest.first() == Some(&b'[') {
-                if let Some(taken) = self.csi_run(rest.get(1..).unwrap_or_default(), &mut on_event)
-                {
-                    self.state = ScanState::Ground;
-                    rest = rest.get(1 + taken..).unwrap_or_default();
-                    continue;
-                }
             }
             // An OSC that is not ours is skipped the same way, to the byte
             // that ends it: an OSC 52's copy, a long title.
             if self.state == ScanState::Skip {
-                rest = rest
-                    .get(skim::until(rest, is_terminator)..)
-                    .unwrap_or_default();
-                if rest.is_empty() {
-                    return;
-                }
+                at += skim::until(bytes.get(at..).unwrap_or_default(), is_terminator);
             }
-            let byte = rest[0];
-            rest = &rest[1..];
+            let Some(&byte) = bytes.get(at) else {
+                return;
+            };
+            at += 1;
             self.step(byte, &mut on_event);
         }
     }
@@ -5510,30 +5524,6 @@ impl Scanner {
             // happened" — the wrong direction of loss.
             self.screen_clears = self.screen_clears.saturating_add(1);
         }
-    }
-
-    /// Takes a whole CSI that starts at `body` (the bytes after `ESC [`) in one step,
-    /// when it is all there and stepping through it would be all the same: parameters
-    /// and intermediates (0x20–0x3f) and then a final byte. The sequences the scanner
-    /// reads end in `J`, `t` or `h`, and only those have their parameters collected;
-    /// any other final byte ends the sequence with nothing to say, whatever came before
-    /// it. How many bytes it took, `None` when the sequence is cut by the end of the
-    /// read or holds a byte the step reads differently (a control, `DEL`, a byte above
-    /// it): the step walks that one.
-    fn csi_run(&mut self, body: &[u8], on_event: &mut impl FnMut(ScanEvent<'_>)) -> Option<usize> {
-        let params = skim::until(body, |byte| !matches!(byte, 0x20..=0x3f));
-        let final_byte = *body.get(params)?;
-        if !matches!(final_byte, 0x40..=0x7e) {
-            return None;
-        }
-        if matches!(final_byte, b'J' | b't' | b'h') {
-            let mut csi = CsiScan::new();
-            for &byte in body.get(..params).unwrap_or_default() {
-                csi.take(byte);
-            }
-            self.csi_final(csi, final_byte, on_event);
-        }
-        Some(params + 1)
     }
 
     /// Closes the sequence and moves to the next state according to the terminator

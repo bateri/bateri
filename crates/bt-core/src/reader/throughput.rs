@@ -31,7 +31,7 @@ use alacritty_terminal::vte::ansi;
 use polling::{Event as PollingEvent, PollMode, Poller};
 
 use super::{EventLoop, READ_BUFFER_SIZE, State};
-use crate::graphics::{self, Hub, Sink};
+use crate::graphics::{Hub, Sink};
 use crate::handler::KeptModes;
 use crate::pointer::PointerShapes;
 use crate::shell::Scanner;
@@ -201,6 +201,7 @@ struct Tapped<'a> {
     sink: Arc<BenchSink>,
     scanner: Scanner,
     tail: Tail,
+    escapes: crate::skim::Escapes,
     events: usize,
     out: io::Sink,
     scan: bool,
@@ -213,15 +214,18 @@ impl Read for Tapped<'_> {
             return Ok(read);
         }
         let mid_sequence = self.tail.mid_sequence();
-        self.tail.feed(&buf[..read]);
+        self.escapes.find(&buf[..read]);
+        self.tail.feed_with(&buf[..read], &self.escapes);
         let hub = &self.sink.hub;
-        if (graphics::may_carry_command(&buf[..read]) || mid_sequence || hub.is_open())
+        if (self.escapes.may_begin_command(&buf[..read]) || mid_sequence || hub.is_open())
             && hub.in_remote_session()
         {
             hub.note_remote();
         }
         let events = &mut self.events;
-        self.scanner.feed(&buf[..read], |_| *events += 1);
+        self.scanner
+            .feed_with(&buf[..read], &self.escapes, |_| *events += 1);
+        self.escapes.release();
         let _ = self.scanner.take_screen_clears();
         Ok(read)
     }
@@ -296,6 +300,7 @@ fn bateri(load: &'static Workload, path: Path) -> (Run, Arc<BenchSink>) {
         sink: Arc::clone(&sink),
         scanner: Scanner::new(),
         tail: Tail::lean(),
+        escapes: crate::skim::Escapes::default(),
         events: 0,
         out: io::sink(),
         scan: path.scan,

@@ -76,7 +76,6 @@ use crate::handler::KeptModes;
 use crate::pencere::Desk;
 use crate::pointer::PointerShapes;
 use crate::shell::BlockKey;
-use crate::skim;
 
 pub(crate) use apc::Collector;
 pub(crate) use place::Motion;
@@ -536,21 +535,6 @@ pub(crate) struct Hub {
     /// carried a command, since the parser last caught up with the reads
     /// ([`Hub::note_remote`]).
     remote_seen: AtomicBool,
-}
-
-/// Whether a read of the PTY may begin an application program command: it
-/// has `ESC _` in it, or ends in the `ESC` that may be its first half. The
-/// plain shell output's path is the one that answers no.
-pub(crate) fn may_carry_command(bytes: &[u8]) -> bool {
-    let mut rest = bytes;
-    loop {
-        let at = skim::until(rest, |byte| byte == 0x1b);
-        match rest.get(at..) {
-            None | Some([]) => return false,
-            Some([_]) | Some([_, b'_', ..]) => return true,
-            Some([_, after @ ..]) => rest = after,
-        }
-    }
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
