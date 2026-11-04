@@ -110,6 +110,9 @@ fn waiting_reply(anchor: &Anchor) -> Reply {
         next_to: Some(anchor.clone()),
         squeezed: false,
         hidden: false,
+        tab: None,
+        group: None,
+        window: None,
     })
 }
 
@@ -122,6 +125,9 @@ fn unable_reply() -> Reply {
         next_to: None,
         squeezed: false,
         hidden: false,
+        tab: None,
+        group: None,
+        window: None,
     })
 }
 
@@ -166,6 +172,10 @@ fn place_for(server: &Server, from: Option<&str>, place: Place, shell: &mut dyn 
             next_to: Some(anchor),
             squeezed: false,
             hidden: false,
+            // Nothing here says where a pane stands that was already shown.
+            tab: None,
+            group: None,
+            window: None,
         }));
     }
     let asked = without_a_focus_nobody_spoke_for(&place, &anchor, from);
@@ -277,6 +287,7 @@ mod tests {
     use super::*;
     use crate::agent::place::Side;
     use crate::agent::wait::Queue;
+    use crate::ids::{Id, Kind as IdKind};
 
     fn server() -> Server {
         Server {
@@ -328,12 +339,15 @@ mod tests {
                 next_to: Some(anchor.clone()),
                 squeezed: false,
                 hidden: false,
+                tab: Id::new(IdKind::Tab, 3),
+                group: None,
+                window: Id::new(IdKind::Window, 1),
             })
         }
     }
 
     fn place_text(extra: &str) -> String {
-        format!("bateri 1\nplace\nterminal p9\n{extra}")
+        format!("bateri 2\nplace\nterminal p9\n{extra}")
     }
 
     /// Whether the pane that was placed for `text` asked for the keyboard, from `from`, on a Mac
@@ -422,6 +436,13 @@ mod tests {
         };
         assert_eq!(placed.landed, Landed::AsAsked);
         assert_eq!(placed.next_to.as_ref().map(Anchor::name), Some("p4"));
+        // Where the pane stands is the shell's word, passed on as it was given.
+        assert_eq!(placed.tab.map(|id| id.to_string()).as_deref(), Some("t3"));
+        assert_eq!(placed.group, None);
+        assert_eq!(
+            placed.window.map(|id| id.to_string()).as_deref(),
+            Some("w1")
+        );
         assert_eq!(
             mac.placed,
             [("p4".to_owned(), Terminal(9), Some(Side::Below), true)]
@@ -541,22 +562,22 @@ mod tests {
     #[test]
     fn a_request_that_is_wrong_is_answered_with_the_mistake() {
         let mut mac = Pretend::default();
-        for text in [
-            "",
-            "hello\n",
-            "bateri 1\nplace\n",
-            "bateri 2\nplace\nterminal p9\n",
-        ] {
+        for text in ["", "hello\n", "bateri 2\nplace\n"] {
             let Answer::Reply(Reply::Failed(_)) = serve(&server(), None, text, &mut mac) else {
                 panic!("{text:?}");
             };
         }
-        let Answer::Reply(Reply::Failed(failure)) =
-            serve(&server(), None, "bateri 2\nplace\nterminal p9\n", &mut mac)
-        else {
-            panic!("a later version");
-        };
-        assert_eq!(failure.kind, Kind::Version);
+        // The version before this one and a later one are not read, each by its own error.
+        for text in [
+            "bateri 1\nplace\nterminal p9\n",
+            "bateri 3\nplace\nterminal p9\n",
+        ] {
+            let Answer::Reply(Reply::Failed(failure)) = serve(&server(), None, text, &mut mac)
+            else {
+                panic!("{text:?}");
+            };
+            assert_eq!(failure.kind, Kind::Version, "{text:?}");
+        }
         assert!(mac.placed.is_empty());
     }
 
@@ -564,24 +585,24 @@ mod tests {
     fn ls_close_and_notify_are_for_the_shell_to_carry_out() {
         let mut mac = Pretend::default();
         assert_eq!(
-            serve(&server(), None, "bateri 1\nls\n", &mut mac),
+            serve(&server(), None, "bateri 2\nls\n", &mut mac),
             Answer::List(Format::Text)
         );
         assert_eq!(
-            serve(&server(), None, "bateri 1\nls\nformat json\n", &mut mac),
+            serve(&server(), None, "bateri 2\nls\nformat json\n", &mut mac),
             Answer::List(Format::Json)
         );
         assert_eq!(
-            serve(&server(), None, "bateri 1\nclose\nterminal p3\n", &mut mac),
+            serve(&server(), None, "bateri 2\nclose\nterminal p3\n", &mut mac),
             Answer::Close(Anchor::of(Terminal(3)))
         );
         assert_eq!(
-            serve(&server(), None, "bateri 1\nnotify\ntext hi\n", &mut mac),
+            serve(&server(), None, "bateri 2\nnotify\ntext hi\n", &mut mac),
             Answer::Notify("hi".to_owned())
         );
         // A target that is no name kablo has is no request.
         let Answer::Reply(Reply::Failed(failure)) =
-            serve(&server(), None, "bateri 1\nclose\nterminal a b\n", &mut mac)
+            serve(&server(), None, "bateri 2\nclose\nterminal a b\n", &mut mac)
         else {
             panic!("not a terminal name");
         };

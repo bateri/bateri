@@ -15,7 +15,7 @@
 # gets a number (`p9`, `next.sh`) and `send`, `capture` and `wait` are kablo's
 # own, with no Mac anywhere. The Mac only decides where a pane that shows the
 # terminal goes: `split` and `tab` tell it so over kablo's app channel
-# (`kablo app`, one `bateri 1` message, `agent::message` in bateri) and it
+# (`kablo app`, one `bateri 2` message, `agent::message` in bateri) and it
 # answers how the pane landed. It runs nothing and types nothing into any
 # shell. When no Mac is connected the same message waits in
 # `~/.local/share/bateri/placing/pN` and the Mac reads it when it connects.
@@ -27,9 +27,10 @@
 # terminal starts and waits in the Mac's list of terminals running in the
 # background, and the command says so on one line.
 #
-# THE ANSWERS. Standard output has the terminal's number (`--json`: an object
-# of it and how it landed); a pane that did not land as asked says so on one
-# line of standard error. Exit codes: 0, 1, 64 (a mistake in the command), 69
+# THE ANSWERS. Standard output has the pane's number (`--json`: an object of it,
+# where it stands as the Mac says it — its tab, the tab's group, the window,
+# each `null` where there is none — and how it landed); a pane that did not
+# land as asked says so on one line of standard error. Exit codes: 0, 1, 64 (a mistake in the command), 69
 # (what needs a Mac, with none connected), 77 (refused), 128+n, and for `wait`
 # the program's own, 124 when the time ran out, 255 for kablo's trouble.
 #
@@ -152,6 +153,19 @@ bt_is_terminal() {
   [ "${#1}" -le 19 ]
 }
 
+# Whether $2 is the name of a window (`w`), a group (`g`) or a tab (`t`), $1 being that letter:
+# the letter and a number written plainly (`t3`), as the Mac gives it (`ids`).
+bt_is_id() {
+  case $2 in
+    "$1"[1-9]*) ;;
+    *) return 1 ;;
+  esac
+  case ${2#"$1"} in
+    *[!0-9]*) return 1 ;;
+  esac
+  [ "${#2}" -le 19 ]
+}
+
 # Whether $1 is a name kablo gives a terminal: 1 to 64 of `A-Za-z0-9._-` (the Mac
 # reads exactly this where it takes a terminal that is no agent's number, `agent::Anchor`).
 bt_is_name() {
@@ -198,13 +212,13 @@ bt_ask() {
 
 # The reply read as `bt_kind` (`ok`, `ok placed`, `ok text` or `error KIND`),
 # `bt_text` (the words of an error) and `bt_body` (what follows); `bt_kind`
-# is empty for a reply that is not `bateri 1`'s.
+# is empty for a reply that is not `bateri 2`'s.
 bt_read_reply() {
   bt_kind=
   bt_text=
   bt_body=
   bt_split "$bt_reply"
-  [ "$bt_l1" = 'bateri 1' ] || return 0
+  [ "$bt_l1" = 'bateri 2' ] || return 0
   bt_split "$bt_rest"
   bt_body=$bt_rest
   case $bt_l1 in
@@ -380,6 +394,9 @@ bt_open() {
   bt_next=
   bt_squeezed=no
   bt_hidden=no
+  bt_tab=
+  bt_group=
+  bt_window=
   if [ -n "$bt_orphan" ]; then
     bt_landed=waiting
   else
@@ -408,11 +425,11 @@ bt_record() {
   rm -f "$bt_file.tmp.$$"
 }
 
-# The `place` message (`agent::message`, version 1: its text is frozen) and the
+# The `place` message (`agent::message`, version 2: its text is frozen) and the
 # conversation. The anchor is always written out: a message that waits is read
 # when no conversation names its sender.
 bt_place() {
-  bt_msg="bateri 1${nl}place${nl}terminal $bt_id${nl}anchor $bt_anchor${nl}"
+  bt_msg="bateri 2${nl}place${nl}terminal $bt_id${nl}anchor $bt_anchor${nl}"
   [ -z "$bt_side" ] || bt_msg="${bt_msg}side $bt_side${nl}"
   [ -z "$bt_ratio" ] || bt_msg="${bt_msg}ratio $bt_ratio${nl}"
   [ -z "$bt_keep" ] || bt_msg="${bt_msg}keep-open yes${nl}"
@@ -462,6 +479,9 @@ bt_placed() {
       'next-to '*) bt_is_name "$bt_val" && bt_next=$bt_val ;;
       'squeezed yes') bt_squeezed=yes ;;
       'hidden yes') bt_hidden=yes ;;
+      'tab '*) ! bt_is_id t "$bt_val" || bt_tab=$bt_val ;;
+      'group '*) ! bt_is_id g "$bt_val" || bt_group=$bt_val ;;
+      'window '*) ! bt_is_id w "$bt_val" || bt_window=$bt_val ;;
     esac
   done
 }
@@ -479,14 +499,21 @@ bt_wait_note() {
   fi
 }
 
-# The answer: the number, or the object; and one line when the pane is not
-# where it was asked to be.
+# The answer: the number, or the object (every key always there, `null` where the Mac has not
+# said: the pane waits for a window, or its tab is in no group); and one line when the pane is
+# not where it was asked to be.
 bt_open_report() {
   if [ -n "$bt_json" ]; then
     bt_json_next=null
     [ -z "$bt_next" ] || bt_json_next=\"$bt_next\"
-    printf '{"terminal":"%s","landed":"%s","next_to":%s,"squeezed":%s,"hidden":%s}\n' \
-      "$bt_id" "$bt_landed" "$bt_json_next" \
+    bt_json_tab=null
+    [ -z "$bt_tab" ] || bt_json_tab=\"$bt_tab\"
+    bt_json_group=null
+    [ -z "$bt_group" ] || bt_json_group=\"$bt_group\"
+    bt_json_window=null
+    [ -z "$bt_window" ] || bt_json_window=\"$bt_window\"
+    printf '{"pane":"%s","tab":%s,"group":%s,"window":%s,"landed":"%s","next_to":%s,"squeezed":%s,"hidden":%s}\n' \
+      "$bt_id" "$bt_json_tab" "$bt_json_group" "$bt_json_window" "$bt_landed" "$bt_json_next" \
       "$([ "$bt_squeezed" = yes ] && echo true || echo false)" \
       "$([ "$bt_hidden" = yes ] && echo true || echo false)"
   else
@@ -550,7 +577,7 @@ bt_close() {
   # The Mac closes it (the pane and the terminal as one), and asks the user when the terminal
   # is not the caller's own or one it opened.
   bt_mac_failed=
-  bt_ask "bateri 1${nl}close${nl}terminal $bt_target${nl}"
+  bt_ask "bateri 2${nl}close${nl}terminal $bt_target${nl}"
   if [ "$bt_status" = 0 ]; then
     bt_read_reply
     case $bt_kind in
@@ -611,7 +638,7 @@ bt_ls() {
       *) bt_die 64 "ls takes no '$(printf '%s' "$bt_a" | bt_clean)'" ;;
     esac
   done
-  bt_ask "bateri 1${nl}ls${nl}$bt_format"
+  bt_ask "bateri 2${nl}ls${nl}$bt_format"
   bt_why='no Mac is connected'
   if [ "$bt_status" = 0 ]; then
     bt_read_reply
@@ -664,7 +691,7 @@ bt_notify() {
   bt_words=$(printf '%s' "$*" | tr '\n\t\r' '   ' | bt_clean)
   [ -n "$bt_words" ] || bt_die 64 'notify takes the words to show'
   [ "$(printf '%s' "$bt_words" | wc -c | tr -d ' ')" -le 1000 ] || bt_die 64 'notify shows at most 1000 bytes'
-  bt_ask "bateri 1${nl}notify${nl}text $bt_words${nl}"
+  bt_ask "bateri 2${nl}notify${nl}text $bt_words${nl}"
   if [ "$bt_status" = 0 ]; then
     bt_read_reply
     case $bt_kind in

@@ -1,13 +1,13 @@
 //! The text an agent's script and the Mac say to each other on kablo's app channel.
 //!
-//! **A request** is lines: `bateri 1`, then the verb (`place`, `ls`, `close`, `notify`), then one
+//! **A request** is lines: `bateri 2`, then the verb (`place`, `ls`, `close`, `notify`), then one
 //! `key value` line per argument — the key up to the first space, the value the rest of the
 //! line, verbatim. A value has no line break (nor any control character) because the line is
 //! the frame: the script on the server is `sh`, which writes lines and reads none of them
 //! apart. Who asks is not in it; it is the terminal kablo names on the conversation's ticket.
 //!
 //! ```text
-//! bateri 1
+//! bateri 2
 //! place
 //! terminal p9
 //! anchor p4
@@ -23,8 +23,8 @@
 //! `terminal` of a `close` is named the same way, because a `close` that names none closes the
 //! caller's own.
 //!
-//! **A reply** starts with `bateri 1` too and then says `ok` (`ok placed` and the lines that
-//! tell how, `ok text` and the rest of the message as the text to print) or `error KIND TEXT`
+//! **A reply** starts with `bateri 2` too and then says `ok` (`ok placed` and the lines that
+//! tell how and where, `ok text` and the rest of the message as the text to print) or `error KIND TEXT`
 //! on one line. The script turns the kind into an exit code; the Mac builds the text of an `ls`,
 //! the script prints it.
 //!
@@ -33,16 +33,19 @@
 //! over [`MAX_BYTES`] — each is an `error usage` that says which, not a guess. A *version* this
 //! build does not read is its own error ([`Kind::Version`]), so a script can try an older one.
 //!
-//! **A version is read forever.** A script on a server is as old as the last time its terminal
-//! was started, and keeps asking in its own version for as long as it lives, so this reads every
-//! version up to its own and each version's frozen text stays in the tests (`V1_*`): changing the
-//! format adds a version and its fixtures, it never rewrites one.
+//! **One version is read.** Nothing relied on the commands of version 1 when it was dropped
+//! (087 Karar 12), so keeping its reader would have been dead weight: a request of any other
+//! version is a [`Kind::Version`] error that names the version this build reads, and a reply of
+//! another one is not read. The version that is read has its frozen text in the tests (`V2_*`):
+//! changing the format adds a version and its fixtures, it does not rewrite these. (Version 1 had
+//! no names for a window, a group or a tab, and went with `bateri new`.)
 
 use super::place::{Landed, Side};
 use super::{Anchor, Terminal};
+use crate::ids::{Id, Kind as IdKind};
 
-/// The version this build writes. Every version from 1 up to it is read.
-pub const VERSION: u32 = 1;
+/// The version this build writes, and the only one it reads.
+pub const VERSION: u32 = 2;
 
 /// The first line's word; the version follows it after one space.
 pub const GREETING: &str = "bateri";
@@ -176,6 +179,11 @@ pub struct Placed {
     pub next_to: Option<Anchor>,
     pub squeezed: bool,
     pub hidden: bool,
+    /// Where the pane stands, by the names a command takes: its tab, the tab's group and the
+    /// window. `None` where there is none: the pane waits for a window, or the tab is in no group.
+    pub tab: Option<Id>,
+    pub group: Option<Id>,
+    pub window: Option<Id>,
 }
 
 /// What the Mac answers.
@@ -205,13 +213,10 @@ impl Request {
         let verb = lines
             .next()
             .ok_or_else(|| Failure::usage("the message names no verb"))?;
-        match version {
-            1 => read_v1(verb, lines),
-            other => Err(Failure::new(
-                Kind::Version,
-                format!("version {other} is not read; this reads up to {VERSION}"),
-            )),
+        if version != VERSION {
+            return Err(not_read(version));
         }
+        read_request(verb, lines)
     }
 
     /// The request as text, in the order the format lists the keys. A request that could not be
@@ -377,7 +382,18 @@ fn anchor_of(key: &str, value: &str) -> Result<Anchor, Failure> {
     })
 }
 
-fn read_v1<'a>(verb: &'a str, lines: impl Iterator<Item = &'a str>) -> Result<Request, Failure> {
+/// The error for a message of a version that is not this build's.
+fn not_read(version: u32) -> Failure {
+    Failure::new(
+        Kind::Version,
+        format!("version {version} is not read; this reads version {VERSION}"),
+    )
+}
+
+fn read_request<'a>(
+    verb: &'a str,
+    lines: impl Iterator<Item = &'a str>,
+) -> Result<Request, Failure> {
     match verb {
         "place" => {
             let fields = Fields::read(
@@ -466,6 +482,15 @@ impl Reply {
                 }
                 out.push_str(&format!("squeezed {}\n", yes_no(placed.squeezed)));
                 out.push_str(&format!("hidden {}\n", yes_no(placed.hidden)));
+                for (key, id) in [
+                    ("tab", placed.tab),
+                    ("group", placed.group),
+                    ("window", placed.window),
+                ] {
+                    if let Some(id) = id {
+                        out.push_str(&format!("{key} {id}\n"));
+                    }
+                }
             }
             Reply::Text(text) => {
                 out.push_str("ok text\n");
@@ -488,11 +513,8 @@ impl Reply {
     pub fn parse(text: &str) -> Result<Reply, Failure> {
         let (first, rest) = text.split_once('\n').unwrap_or((text, ""));
         let version = version_of(first)?;
-        if version != 1 {
-            return Err(Failure::new(
-                Kind::Version,
-                format!("version {version} is not read; this reads up to {VERSION}"),
-            ));
+        if version != VERSION {
+            return Err(not_read(version));
         }
         let (status, body) = rest.split_once('\n').unwrap_or((rest, ""));
         if let Some(failure) = status.strip_prefix("error ") {
@@ -515,7 +537,9 @@ fn read_placed(body: &str) -> Result<Reply, Failure> {
     let fields = Fields::read(
         "placed",
         lines,
-        &["landed", "next-to", "squeezed", "hidden"],
+        &[
+            "landed", "next-to", "squeezed", "hidden", "tab", "group", "window",
+        ],
     )?;
     let landed = fields.need("landed")?;
     Ok(Reply::Placed(Placed {
@@ -527,35 +551,60 @@ fn read_placed(body: &str) -> Result<Reply, Failure> {
             .transpose()?,
         squeezed: fields.flag("squeezed")?,
         hidden: fields.flag("hidden")?,
+        tab: id_of(&fields, "tab", IdKind::Tab)?,
+        group: id_of(&fields, "group", IdKind::Group)?,
+        window: id_of(&fields, "window", IdKind::Window)?,
     }))
+}
+
+/// The id a reply's `key` line names, which must be of `kind`: a `tab` line with a group's id is
+/// a mistake, not a tab.
+fn id_of(fields: &Fields<'_>, key: &str, kind: IdKind) -> Result<Option<Id>, Failure> {
+    fields
+        .get(key)
+        .map(|value| {
+            Id::parse(value)
+                .filter(|id| id.kind() == kind)
+                .ok_or_else(|| {
+                    Failure::usage(format!(
+                        "`{key}` is a {} id like `{}1`, not `{value}`",
+                        kind.word(),
+                        kind.prefix()
+                    ))
+                })
+        })
+        .transpose()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // Version 1, frozen: a script on a server may be speaking it for as long as its terminal
-    // lives. These are never edited; a later version gets its own constants.
-    const V1_PLACE: &str =
-        "bateri 1\nplace\nterminal p9\nanchor p4\nside below\nratio 30\nkeep-open yes\nfocus yes\n";
-    const V1_PLACE_BARE: &str = "bateri 1\nplace\nterminal p9\n";
-    const V1_LS: &str = "bateri 1\nls\n";
-    const V1_LS_JSON: &str = "bateri 1\nls\nformat json\n";
-    const V1_CLOSE: &str = "bateri 1\nclose\nterminal p7\n";
-    const V1_NOTIFY: &str = "bateri 1\nnotify\ntext The build is done: 3 tests failed\n";
-    // Added to version 1 after it was first written: an anchor that is no agent's number, which
-    // the first spelling of `anchor` did not allow. Reading it changes nothing of the above.
-    const V1_PLACE_MADE: &str =
-        "bateri 1\nplace\nterminal p9\nanchor b-0123456789abcdef0123456789abcdef\nside right\n";
-    const V1_REPLY_PLACED_MADE: &str = "bateri 1\nok placed\nlanded as_asked\nnext-to b-0123456789abcdef0123456789abcdef\nsqueezed no\nhidden no\n";
-    // Added the same way: the terminal `close` names may be one that is no agent's number, because
-    // a request that names none closes the one it comes from.
-    const V1_CLOSE_MADE: &str = "bateri 1\nclose\nterminal b-0123456789abcdef0123456789abcdef\n";
-    const V1_REPLY_DONE: &str = "bateri 1\nok\n";
-    const V1_REPLY_PLACED: &str =
-        "bateri 1\nok placed\nlanded beside_group\nnext-to p4\nsqueezed no\nhidden yes\n";
-    const V1_REPLY_TEXT: &str = "bateri 1\nok text\nWindow 1\n  Tab 1.1\n";
-    const V1_REPLY_ERROR: &str = "bateri 1\nerror refused the user said no\n";
+    // Version 2, frozen: the text a script and the Mac speak. These are never edited; a later
+    // version gets its own constants.
+    const V2_PLACE: &str =
+        "bateri 2\nplace\nterminal p9\nanchor p4\nside below\nratio 30\nkeep-open yes\nfocus yes\n";
+    const V2_PLACE_BARE: &str = "bateri 2\nplace\nterminal p9\n";
+    const V2_LS: &str = "bateri 2\nls\n";
+    const V2_LS_JSON: &str = "bateri 2\nls\nformat json\n";
+    const V2_CLOSE: &str = "bateri 2\nclose\nterminal p7\n";
+    const V2_NOTIFY: &str = "bateri 2\nnotify\ntext The build is done: 3 tests failed\n";
+    // An anchor that is no agent's number: the name of a terminal kablo has, whatever it is.
+    const V2_PLACE_MADE: &str =
+        "bateri 2\nplace\nterminal p9\nanchor b-0123456789abcdef0123456789abcdef\nside right\n";
+    const V2_REPLY_PLACED_MADE: &str = "bateri 2\nok placed\nlanded as_asked\nnext-to b-0123456789abcdef0123456789abcdef\nsqueezed no\nhidden no\n";
+    // The terminal `close` names may be one that is no agent's number, because a request that
+    // names none closes the one it comes from.
+    const V2_CLOSE_MADE: &str = "bateri 2\nclose\nterminal b-0123456789abcdef0123456789abcdef\n";
+    const V2_REPLY_DONE: &str = "bateri 2\nok\n";
+    const V2_REPLY_PLACED: &str =
+        "bateri 2\nok placed\nlanded beside_group\nnext-to p4\nsqueezed no\nhidden yes\n";
+    // Where the pane stands: its tab, the tab's group and the window.
+    const V2_REPLY_PLACED_AT: &str = "bateri 2\nok placed\nlanded as_asked\nsqueezed no\nhidden no\ntab t3\ngroup g1\nwindow w1\n";
+    const V2_REPLY_PLACED_LOOSE: &str =
+        "bateri 2\nok placed\nlanded as_asked\nsqueezed no\nhidden no\ntab t3\nwindow w1\n";
+    const V2_REPLY_TEXT: &str = "bateri 2\nok text\nwindow id:w1\n";
+    const V2_REPLY_ERROR: &str = "bateri 2\nerror refused the user said no\n";
 
     fn place() -> Place {
         Place {
@@ -584,27 +633,27 @@ mod tests {
     }
 
     #[test]
-    fn version_one_is_read_byte_for_byte() {
+    fn version_two_is_read_byte_for_byte() {
         let cases = [
-            (V1_PLACE, Request::Place(place())),
-            (V1_PLACE_BARE, Request::Place(bare())),
-            (V1_LS, Request::Ls(Format::Text)),
-            (V1_LS_JSON, Request::Ls(Format::Json)),
-            (V1_CLOSE, Request::Close(Anchor::of(Terminal(7)))),
+            (V2_PLACE, Request::Place(place())),
+            (V2_PLACE_BARE, Request::Place(bare())),
+            (V2_LS, Request::Ls(Format::Text)),
+            (V2_LS_JSON, Request::Ls(Format::Json)),
+            (V2_CLOSE, Request::Close(Anchor::of(Terminal(7)))),
             (
-                V1_CLOSE_MADE,
+                V2_CLOSE_MADE,
                 Request::Close(
                     Anchor::parse("b-0123456789abcdef0123456789abcdef").expect("a name"),
                 ),
             ),
             (
-                V1_NOTIFY,
+                V2_NOTIFY,
                 Request::Notify("The build is done: 3 tests failed".to_owned()),
             ),
         ];
         for (text, request) in cases {
             assert_eq!(Request::parse(text).as_ref(), Ok(&request), "{text:?}");
-            // And what this writes is what version 1 wrote.
+            // And what this writes is what version 2 wrote.
             assert_eq!(request.encode().as_deref(), Ok(text), "{request:?}");
         }
     }
@@ -618,16 +667,16 @@ mod tests {
             ..bare()
         };
         assert_eq!(
-            Request::parse(V1_PLACE_MADE),
+            Request::parse(V2_PLACE_MADE),
             Ok(Request::Place(wanted.clone()))
         );
         assert_eq!(
             Request::Place(wanted).encode().as_deref(),
-            Ok(V1_PLACE_MADE)
+            Ok(V2_PLACE_MADE)
         );
         // A name a person gave a terminal with kablo is as good, and so is an agent's number.
         for name in ["mine", "build.2", "p04", "p4"] {
-            let text = format!("bateri 1\nplace\nterminal p9\nanchor {name}\n");
+            let text = format!("bateri 2\nplace\nterminal p9\nanchor {name}\n");
             assert_eq!(
                 Request::parse(&text),
                 Ok(Request::Place(Place {
@@ -643,26 +692,29 @@ mod tests {
             next_to: Some(made),
             squeezed: false,
             hidden: false,
+            tab: None,
+            group: None,
+            window: None,
         });
-        assert_eq!(Reply::parse(V1_REPLY_PLACED_MADE).as_ref(), Ok(&placed));
-        assert_eq!(placed.encode(), V1_REPLY_PLACED_MADE);
+        assert_eq!(Reply::parse(V2_REPLY_PLACED_MADE).as_ref(), Ok(&placed));
+        assert_eq!(placed.encode(), V2_REPLY_PLACED_MADE);
         assert_eq!(
-            usage("bateri 1\nplace\nterminal b-0123456789abcdef0123456789abcdef\n").kind,
+            usage("bateri 2\nplace\nterminal b-0123456789abcdef0123456789abcdef\n").kind,
             Kind::Usage
         );
         // `close` names the terminal the same way, since it may close the one it comes from.
         assert_eq!(
-            Request::parse(V1_CLOSE_MADE),
+            Request::parse(V2_CLOSE_MADE),
             Ok(Request::Close(
                 Anchor::parse("b-0123456789abcdef0123456789abcdef").expect("a name")
             ))
         );
         assert_eq!(
-            Request::parse("bateri 1\nclose\nterminal mine\n"),
+            Request::parse("bateri 2\nclose\nterminal mine\n"),
             Ok(Request::Close(Anchor::parse("mine").expect("a name")))
         );
-        assert_eq!(usage("bateri 1\nclose\nterminal a b\n").kind, Kind::Usage);
-        assert_eq!(usage("bateri 1\nclose\nterminal ../x\n").kind, Kind::Usage);
+        assert_eq!(usage("bateri 2\nclose\nterminal a b\n").kind, Kind::Usage);
+        assert_eq!(usage("bateri 2\nclose\nterminal ../x\n").kind, Kind::Usage);
     }
 
     #[test]
@@ -687,11 +739,11 @@ mod tests {
 
     #[test]
     fn a_reader_takes_the_last_newline_or_leaves_it() {
-        for text in [V1_PLACE, V1_PLACE.trim_end_matches('\n')] {
+        for text in [V2_PLACE, V2_PLACE.trim_end_matches('\n')] {
             assert_eq!(Request::parse(text), Ok(Request::Place(place())));
         }
         // The flags may be said `no`, and the keys come in any order.
-        let text = "bateri 1\nplace\nfocus no\nside left\nterminal p2\nkeep-open no\n";
+        let text = "bateri 2\nplace\nfocus no\nside left\nterminal p2\nkeep-open no\n";
         assert_eq!(
             Request::parse(text),
             Ok(Request::Place(Place {
@@ -707,15 +759,15 @@ mod tests {
         let wrote = Request::Notify("two\nlines".to_owned()).encode();
         assert_eq!(wrote.expect_err("no line break").kind, Kind::Usage);
         // Written by hand, the second line is a key of its own.
-        let failure = usage("bateri 1\nnotify\ntext two\nlines\n");
+        let failure = usage("bateri 2\nnotify\ntext two\nlines\n");
         assert_eq!(failure.kind, Kind::Usage);
         assert!(failure.text.contains("`lines`"), "{failure:?}");
         // Another control character is no better than the line break.
         for text in [
-            "bateri 1\nnotify\ntext a\rb\n",
-            "bateri 1\nnotify\ntext a\tb\n",
-            "bateri 1\nnotify\ntext a\u{1b}[31mb\n",
-            "bateri 1\nnotify\ntext a\0b\n",
+            "bateri 2\nnotify\ntext a\rb\n",
+            "bateri 2\nnotify\ntext a\tb\n",
+            "bateri 2\nnotify\ntext a\u{1b}[31mb\n",
+            "bateri 2\nnotify\ntext a\0b\n",
         ] {
             assert_eq!(usage(text).kind, Kind::Usage, "{text:?}");
         }
@@ -738,53 +790,53 @@ mod tests {
             ("bateri 01\nls\n", "plain number"),
             ("bateri 0\nls\n", "plain number"),
             ("bateri x\nls\n", "plain number"),
-            ("bateri 1\n", "no verb"),
-            ("bateri 1\nlist\n", "no verb"),
-            ("bateri 1\nPLACE\nterminal p1\n", "no verb"),
-            ("bateri 1\nplace\n", "needs a `terminal`"),
-            ("bateri 1\nclose\n", "needs a `terminal`"),
-            ("bateri 1\nnotify\n", "needs a `text`"),
-            ("bateri 1\nplace\nterminal p1\nterminal p2\n", "twice"),
+            ("bateri 2\n", "no verb"),
+            ("bateri 2\nlist\n", "no verb"),
+            ("bateri 2\nPLACE\nterminal p1\n", "no verb"),
+            ("bateri 2\nplace\n", "needs a `terminal`"),
+            ("bateri 2\nclose\n", "needs a `terminal`"),
+            ("bateri 2\nnotify\n", "needs a `text`"),
+            ("bateri 2\nplace\nterminal p1\nterminal p2\n", "twice"),
             (
-                "bateri 1\nplace\nterminal p1\nlabel work\n",
+                "bateri 2\nplace\nterminal p1\nlabel work\n",
                 "takes no `label`",
             ),
             (
-                "bateri 1\nclose\nterminal p1\nside left\n",
+                "bateri 2\nclose\nterminal p1\nside left\n",
                 "takes no `side`",
             ),
-            ("bateri 1\nplace\nterminal\n", "no value"),
-            ("bateri 1\nplace\nterminal \n", "no value"),
-            ("bateri 1\nplace\nterminal p1\n\n", "empty"),
-            ("bateri 1\nplace\n\nterminal p1\n", "empty"),
-            ("bateri 1\nplace\nterminal b-0a1b\n", "names a terminal"),
-            ("bateri 1\nplace\nterminal p09\n", "names a terminal"),
+            ("bateri 2\nplace\nterminal\n", "no value"),
+            ("bateri 2\nplace\nterminal \n", "no value"),
+            ("bateri 2\nplace\nterminal p1\n\n", "empty"),
+            ("bateri 2\nplace\n\nterminal p1\n", "empty"),
+            ("bateri 2\nplace\nterminal b-0a1b\n", "names a terminal"),
+            ("bateri 2\nplace\nterminal p09\n", "names a terminal"),
             (
-                "bateri 1\nplace\nterminal p1\nanchor a/b\n",
+                "bateri 2\nplace\nterminal p1\nanchor a/b\n",
                 "names a terminal as kablo does",
             ),
             (
-                "bateri 1\nplace\nterminal p1\nanchor ../p4\n",
+                "bateri 2\nplace\nterminal p1\nanchor ../p4\n",
                 "names a terminal as kablo does",
             ),
             (
-                "bateri 1\nplace\nterminal p1\nanchor not a name\n",
+                "bateri 2\nplace\nterminal p1\nanchor not a name\n",
                 "names a terminal as kablo does",
             ),
-            ("bateri 1\nplace\nterminal p1\nanchor\n", "no value"),
-            ("bateri 1\nplace\nterminal p1\nside top\n", "left, right"),
-            ("bateri 1\nplace\nterminal p1\nside Left\n", "left, right"),
-            ("bateri 1\nplace\nterminal p1\nratio 0\n", "1 to 99"),
-            ("bateri 1\nplace\nterminal p1\nratio 100\n", "1 to 99"),
-            ("bateri 1\nplace\nterminal p1\nratio 030\n", "1 to 99"),
-            ("bateri 1\nplace\nterminal p1\nratio 30%\n", "1 to 99"),
-            ("bateri 1\nplace\nterminal p1\nratio -3\n", "1 to 99"),
+            ("bateri 2\nplace\nterminal p1\nanchor\n", "no value"),
+            ("bateri 2\nplace\nterminal p1\nside top\n", "left, right"),
+            ("bateri 2\nplace\nterminal p1\nside Left\n", "left, right"),
+            ("bateri 2\nplace\nterminal p1\nratio 0\n", "1 to 99"),
+            ("bateri 2\nplace\nterminal p1\nratio 100\n", "1 to 99"),
+            ("bateri 2\nplace\nterminal p1\nratio 030\n", "1 to 99"),
+            ("bateri 2\nplace\nterminal p1\nratio 30%\n", "1 to 99"),
+            ("bateri 2\nplace\nterminal p1\nratio -3\n", "1 to 99"),
             (
-                "bateri 1\nplace\nterminal p1\nkeep-open true\n",
+                "bateri 2\nplace\nterminal p1\nkeep-open true\n",
                 "yes or no",
             ),
-            ("bateri 1\nls\nformat yaml\n", "text or json"),
-            ("bateri 1\nls\nterminal p1\n", "takes no `terminal`"),
+            ("bateri 2\nls\nformat yaml\n", "text or json"),
+            ("bateri 2\nls\nterminal p1\n", "takes no `terminal`"),
         ];
         for (text, mentions) in cases {
             let failure = usage(text);
@@ -795,7 +847,7 @@ mod tests {
             );
         }
         // A message that is too long is refused before it is read.
-        let long = format!("bateri 1\nnotify\ntext {}\n", "x".repeat(MAX_BYTES));
+        let long = format!("bateri 2\nnotify\ntext {}\n", "x".repeat(MAX_BYTES));
         assert!(usage(&long).text.contains("bytes"));
         let long = Request::Notify("x".repeat(MAX_BYTES));
         assert_eq!(long.encode().expect_err("too long").kind, Kind::Usage);
@@ -812,26 +864,88 @@ mod tests {
     }
 
     #[test]
-    fn a_newer_version_is_its_own_error_so_a_script_can_try_an_older_one() {
-        let failure = usage("bateri 2\nplace\nterminal p1\nfuture-key x\n");
-        assert_eq!(failure.kind, Kind::Version);
-        assert!(failure.text.contains("version 2"), "{failure:?}");
-        assert_eq!(usage("bateri 4000000000\nls\n").kind, Kind::Version);
+    fn a_version_that_is_not_read_is_its_own_error_that_names_the_one_that_is() {
+        // Version 1, the one before this, is not read: nobody used its commands when it went.
+        for text in [
+            "bateri 1\nplace\nterminal p1\n",
+            "bateri 1\nls\n",
+            "bateri 3\nplace\nterminal p1\nfuture-key x\n",
+            "bateri 4000000000\nls\n",
+        ] {
+            let failure = usage(text);
+            assert_eq!(failure.kind, Kind::Version, "{text:?}");
+            assert!(
+                failure.text.contains("reads version 2"),
+                "{text:?} -> {failure:?}"
+            );
+        }
+        for text in [
+            "bateri 1\nok\n",
+            "bateri 3\nok\n",
+            "bateri 1\nok placed\nlanded as_asked\n",
+        ] {
+            assert_eq!(
+                Reply::parse(text).expect_err(text).kind,
+                Kind::Version,
+                "{text:?}"
+            );
+        }
         // A number that does not fit is not a version.
         assert_eq!(usage("bateri 99999999999\nls\n").kind, Kind::Usage);
     }
 
     #[test]
+    fn a_placed_reply_names_the_tab_group_and_window_by_their_kind() {
+        // Each line holds an id of its own kind, written plainly.
+        for line in [
+            "tab g1",
+            "tab w1",
+            "tab p1",
+            "tab 3",
+            "tab t03",
+            "tab t0",
+            "tab T3",
+            "group t1",
+            "window t1",
+            "window g1",
+            "tab ",
+        ] {
+            let text =
+                format!("bateri 2\nok placed\nlanded as_asked\nsqueezed no\nhidden no\n{line}\n");
+            let failure = Reply::parse(&text).expect_err(&text);
+            assert_eq!(failure.kind, Kind::Usage, "{line:?}");
+        }
+        // A line twice is refused as any key is.
+        let twice =
+            "bateri 2\nok placed\nlanded as_asked\nsqueezed no\nhidden no\ntab t1\ntab t2\n";
+        assert!(Reply::parse(twice).is_err());
+        // What the Mac writes for a pane no window has yet: no line of the three.
+        let waiting = Reply::Placed(Placed {
+            landed: Landed::Waiting,
+            next_to: None,
+            squeezed: false,
+            hidden: false,
+            tab: None,
+            group: None,
+            window: None,
+        });
+        assert_eq!(
+            waiting.encode(),
+            "bateri 2\nok placed\nlanded waiting\nsqueezed no\nhidden no\n"
+        );
+    }
+
+    #[test]
     fn no_text_makes_the_reader_panic() {
         let seeds = [
-            V1_PLACE,
-            V1_LS,
-            V1_CLOSE,
-            V1_NOTIFY,
-            V1_REPLY_PLACED,
-            V1_REPLY_TEXT,
-            V1_REPLY_ERROR,
-            "bateri 1\nnotify\ntext héllo wörld ✓\n",
+            V2_PLACE,
+            V2_LS,
+            V2_CLOSE,
+            V2_NOTIFY,
+            V2_REPLY_PLACED,
+            V2_REPLY_TEXT,
+            V2_REPLY_ERROR,
+            "bateri 2\nnotify\ntext héllo wörld ✓\n",
         ];
         for seed in seeds {
             // Every prefix on a character boundary, and every character left out.
@@ -852,9 +966,9 @@ mod tests {
             "\n\n\n",
             " ",
             "bateri ",
-            "bateri 1\n\n",
+            "bateri 2\n\n",
             "\u{0}",
-            "bateri 1\nls\n \n",
+            "bateri 2\nls\n \n",
         ] {
             let _ = Request::parse(text);
             let _ = Reply::parse(text);
@@ -862,24 +976,48 @@ mod tests {
     }
 
     #[test]
-    fn the_reply_of_version_one_is_written_and_read_byte_for_byte() {
+    fn the_reply_of_version_two_is_written_and_read_byte_for_byte() {
         let cases = [
-            (V1_REPLY_DONE, Reply::Done),
+            (V2_REPLY_DONE, Reply::Done),
             (
-                V1_REPLY_PLACED,
+                V2_REPLY_PLACED,
                 Reply::Placed(Placed {
                     landed: Landed::BesideGroup,
                     next_to: Some(Anchor::of(Terminal(4))),
                     squeezed: false,
                     hidden: true,
+                    tab: None,
+                    group: None,
+                    window: None,
                 }),
             ),
             (
-                V1_REPLY_TEXT,
-                Reply::Text("Window 1\n  Tab 1.1\n".to_owned()),
+                V2_REPLY_PLACED_AT,
+                Reply::Placed(Placed {
+                    landed: Landed::AsAsked,
+                    next_to: None,
+                    squeezed: false,
+                    hidden: false,
+                    tab: Id::new(IdKind::Tab, 3),
+                    group: Id::new(IdKind::Group, 1),
+                    window: Id::new(IdKind::Window, 1),
+                }),
             ),
             (
-                V1_REPLY_ERROR,
+                V2_REPLY_PLACED_LOOSE,
+                Reply::Placed(Placed {
+                    landed: Landed::AsAsked,
+                    next_to: None,
+                    squeezed: false,
+                    hidden: false,
+                    tab: Id::new(IdKind::Tab, 3),
+                    group: None,
+                    window: Id::new(IdKind::Window, 1),
+                }),
+            ),
+            (V2_REPLY_TEXT, Reply::Text("window id:w1\n".to_owned())),
+            (
+                V2_REPLY_ERROR,
                 Reply::Failed(Failure::new(Kind::Refused, "the user said no")),
             ),
         ];
@@ -906,6 +1044,9 @@ mod tests {
             next_to: None,
             squeezed: false,
             hidden: false,
+            tab: None,
+            group: None,
+            window: None,
         });
         assert_eq!(Reply::parse(&reply.encode()), Ok(reply));
     }
@@ -914,7 +1055,7 @@ mod tests {
     fn an_error_is_one_line_whatever_its_words_held() {
         let reply = Reply::Failed(Failure::new(Kind::Failed, "two\nlines\tand a tab"));
         let text = reply.encode();
-        assert_eq!(text, "bateri 1\nerror failed two lines and a tab\n");
+        assert_eq!(text, "bateri 2\nerror failed two lines and a tab\n");
         assert_eq!(
             Reply::parse(&text),
             Ok(Reply::Failed(Failure::new(
@@ -926,8 +1067,8 @@ mod tests {
             let reply = Reply::Failed(Failure::new(kind, "x"));
             assert_eq!(Reply::parse(&reply.encode()), Ok(reply));
         }
-        assert!(Reply::parse("bateri 1\nerror bad x\n").is_err());
-        assert!(Reply::parse("bateri 1\nmaybe\n").is_err());
+        assert!(Reply::parse("bateri 2\nerror bad x\n").is_err());
+        assert!(Reply::parse("bateri 2\nmaybe\n").is_err());
         assert_eq!(
             Reply::parse("bateri 3\nok\n").expect_err("version").kind,
             Kind::Version

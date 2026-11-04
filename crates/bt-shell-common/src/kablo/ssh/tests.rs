@@ -447,7 +447,7 @@ fn what_the_script_left_for_the_application_is_read_over_the_master_and_removed(
     std::fs::create_dir_all(&placing).expect("dir");
     std::fs::write(
         placing.join("p7"),
-        "bateri 1\nplace\nterminal p7\nanchor p4\nside below\n",
+        "bateri 2\nplace\nterminal p7\nanchor p4\nside below\n",
     )
     .expect("a note");
 

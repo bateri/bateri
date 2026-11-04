@@ -54,14 +54,37 @@ fn leaf(id: u64) -> Tree {
     Tree::Leaf(id)
 }
 
+/// A tab, as the scene builds them: the number, the group's number if it is in one, the shortcut.
+fn tab(
+    id: u64,
+    group: Option<u64>,
+    keys: Option<&str>,
+    shape: &Tree,
+    names: &[(u64, &str)],
+) -> Tab {
+    Tab {
+        id,
+        group,
+        keys: keys.map(str::to_owned),
+        label: None,
+        title: None,
+        selected: false,
+        zoomed: None,
+        tree: tree(shape, names),
+    }
+}
+
 /// A scene with every kind of thing in it.
 fn scene() -> Scene {
+    // In a group, selected, named and titled.
     let first = Tab {
-        keys: Some("⌘1".to_owned()),
-        name: Some("api".to_owned()),
+        label: Some("api".to_owned()),
+        title: Some("npm".to_owned()),
         selected: true,
-        zoomed: None,
-        tree: tree(
+        ..tab(
+            3,
+            Some(1),
+            Some("⌘1"),
             &pair(
                 Axis::Horizontal,
                 0.5,
@@ -69,26 +92,35 @@ fn scene() -> Scene {
                 pair(Axis::Vertical, 0.6, leaf(2), leaf(3)),
             ),
             &[(1, "p4"), (2, "p7"), (3, "p9")],
-        ),
+        )
     };
-    // Zoomed, and not the selected tab: nothing in it is on screen.
+    // Zoomed, and not the selected tab: nothing in it is on screen. Titled, not named.
     let zoomed = Tab {
-        keys: Some("⌘2".to_owned()),
-        name: None,
-        selected: false,
+        title: Some("htop".to_owned()),
         zoomed: Some(terminal("p12")),
-        tree: tree(
+        ..tab(
+            4,
+            Some(1),
+            Some("⌘2"),
             &pair(Axis::Horizontal, 0.5, leaf(4), leaf(5)),
             &[(4, "p12"), (5, "p13")],
-        ),
+        )
     };
-    // No shortcut, and a side that is nothing of this server's folds into one node.
+    // Nothing of this server's, in a group that has tabs that are: one line, no id.
+    let alongside = tab(
+        7,
+        Some(1),
+        Some("⌘3"),
+        &pair(Axis::Horizontal, 0.5, leaf(12), leaf(13)),
+        &[],
+    );
+    // In no group, no shortcut, and a side that is nothing of this server's folds into one node.
     let grouped = Tab {
-        keys: None,
-        name: Some("logs".to_owned()),
-        selected: false,
-        zoomed: None,
-        tree: tree(
+        label: Some("logs".to_owned()),
+        ..tab(
+            5,
+            None,
+            None,
             &pair(
                 Axis::Horizontal,
                 0.3,
@@ -96,23 +128,29 @@ fn scene() -> Scene {
                 pair(Axis::Vertical, 0.5, leaf(7), leaf(8)),
             ),
             &[(6, "p15")],
-        ),
+        )
     };
-    // Nothing of this server's at all: one line, no name.
-    let foreign = Tab {
-        keys: Some("⌘4".to_owned()),
-        name: None,
-        selected: false,
-        zoomed: None,
-        tree: tree(&pair(Axis::Horizontal, 0.5, leaf(9), leaf(10)), &[]),
-    };
+    // A group of nothing but other machines' tabs: one line, no id and no label.
+    let foreign = tab(
+        6,
+        Some(2),
+        Some("⌘4"),
+        &pair(Axis::Horizontal, 0.5, leaf(9), leaf(10)),
+        &[],
+    );
+    let loose = tab(8, None, Some("⌘5"), &leaf(14), &[]);
+    // A terminal nobody numbered stands in a tab by its name.
     let behind = Tab {
-        keys: Some("⌘1".to_owned()),
-        name: None,
         selected: true,
-        zoomed: None,
-        tree: tree(&leaf(11), &[(11, "p30")]),
+        ..tab(
+            9,
+            None,
+            Some("⌘1"),
+            &pair(Axis::Horizontal, 0.5, leaf(11), leaf(15)),
+            &[(11, "p30"), (15, "b-0a1b")],
+        )
     };
+    let elsewhere = tab(10, None, None, &leaf(16), &[]);
 
     let mut shell = status("p4", "zsh");
     shell.started = Some(NOW - 3700);
@@ -179,12 +217,31 @@ fn scene() -> Scene {
         typing: Some("p7".to_owned()),
         windows: Some(vec![
             Window {
+                id: 1,
                 visible: true,
-                tabs: vec![first, zoomed, grouped, foreign],
+                groups: vec![
+                    Group {
+                        id: 1,
+                        label: "api".to_owned(),
+                    },
+                    Group {
+                        id: 2,
+                        label: "vault".to_owned(),
+                    },
+                ],
+                tabs: vec![first, zoomed, alongside, grouped, foreign, loose],
             },
             Window {
+                id: 2,
                 visible: false,
+                groups: Vec::new(),
                 tabs: vec![behind],
+            },
+            Window {
+                id: 5,
+                visible: true,
+                groups: Vec::new(),
+                tabs: vec![elsewhere],
             },
         ]),
         // Not in the order the table prints them.
@@ -204,43 +261,143 @@ fn scene() -> Scene {
 }
 
 #[test]
-fn the_scene_is_told_as_windows_tabs_and_trees_and_then_a_table() {
+fn the_scene_is_told_as_windows_groups_tabs_and_trees_and_then_a_table() {
     let expected = "\
 You are p4. The user is typing in p7.
 
-Window 1
-  Tab 1.1 ⌘1 \"api\" (selected)
-    side by side 50/50
-      p4 (on screen)
-      stacked 60/40
-        p7 (on screen)
-        p9 (on screen)
-  Tab 1.2 ⌘2 (zoomed on p12)
-    side by side 50/50
-      p12
-      p13
-  Tab 1.3 \"logs\"
+window id:w1
+  group id:g1 label:\"api\"
+    tab id:t3 keys:⌘1 label:\"api\" title:\"npm\" (selected)
+      side by side 50/50
+        pane id:p4 (on screen)
+        stacked 60/40
+          pane id:p7 (on screen)
+          pane id:p9 (on screen)
+    tab id:t4 keys:⌘2 title:\"htop\" (zoomed on p12)
+      side by side 50/50
+        pane id:p12 label:\"build\"
+        pane id:p13
+    tab keys:⌘3 another machine
+  tab id:t5 label:\"logs\"
     side by side 30/70
-      p15
+      pane id:p15
       another machine
-  Tab 1.4 ⌘4 another machine
-Window 2 (hidden)
-  Tab 2.1 ⌘1 (selected)
-    p30
+  group another machine
+  tab keys:⌘5 another machine
+window id:w2 (hidden)
+  tab id:t9 keys:⌘1 (selected)
+    side by side 50/50
+      pane id:p30
+      pane name:\"b-0a1b\"
+window another machine
 
-ID      TAB   LABEL  PROGRAM  STATE            AGE      QUIET   SIZE    OPENED BY  DIRECTORY
-p4      1.1   -      zsh      idle             1h 01m   5s      120x30  -          /home/ada/api
-p7      1.1   -      htop     running 2m 05s   15m 00s  0s      120x30  -          /home/ada
-p9      1.1   -      ssh      password prompt  12s      12s     120x30  -          -
-p12     1.2   build  zsh      exited 1         6m 40s   5m 00s  120x30  p4         -
-p13     1.2   -      make     signal 9         -        -       120x30  -          -
-p14     none  -      zsh      broken           -        -       120x30  -          -
-p15     1.3   -      node     running          -        -       120x30  -          -
-p30     2.1   -      node     running 1m 00s   1m 00s   1s      120x30  p4         /srv/app
-p41     none  -      zsh      idle             0s       0s      120x30  p4         -
-b-0a1b  none  -      zsh      idle             25h 00m  2h 00m  120x30  -          -
+ID             TAB   LABEL  PROGRAM  STATE            AGE      QUIET   SIZE    OPENED BY  DIRECTORY
+p4             t3    -      zsh      idle             1h 01m   5s      120x30  -          /home/ada/api
+p7             t3    -      htop     running 2m 05s   15m 00s  0s      120x30  -          /home/ada
+p9             t3    -      ssh      password prompt  12s      12s     120x30  -          -
+p12            t4    build  zsh      exited 1         6m 40s   5m 00s  120x30  p4         -
+p13            t4    -      make     signal 9         -        -       120x30  -          -
+p14            none  -      zsh      broken           -        -       120x30  -          -
+p15            t5    -      node     running          -        -       120x30  -          -
+p30            t9    -      node     running 1m 00s   1m 00s   1s      120x30  p4         /srv/app
+p41            none  -      zsh      idle             0s       0s      120x30  p4         -
+name:\"b-0a1b\"  t9    -      zsh      idle             25h 00m  2h 00m  120x30  -          -
 ";
     assert_eq!(scene().text(NOW), expected);
+}
+
+#[test]
+fn a_tab_with_a_label_and_a_title_says_both_and_a_pane_its_id_and_label() {
+    let mut server = status("p9", "npm");
+    server.label = Some("server".to_owned());
+    let scene = Scene {
+        caller: None,
+        typing: None,
+        windows: Some(vec![Window {
+            id: 1,
+            visible: true,
+            groups: vec![Group {
+                id: 1,
+                label: "api".to_owned(),
+            }],
+            tabs: vec![
+                Tab {
+                    label: Some("web".to_owned()),
+                    title: Some("npm".to_owned()),
+                    selected: true,
+                    ..tab(3, Some(1), None, &leaf(1), &[(1, "p9")])
+                },
+                Tab {
+                    title: Some("zsh".to_owned()),
+                    ..tab(4, Some(1), None, &leaf(2), &[(2, "p12")])
+                },
+            ],
+        }]),
+        terminals: vec![row(server), row(status("p12", "zsh"))],
+    };
+    let text = scene.text(NOW);
+    let layout = text.split("\n\n").next().expect("the layout");
+    assert_eq!(
+        layout,
+        "\
+window id:w1
+  group id:g1 label:\"api\"
+    tab id:t3 label:\"web\" title:\"npm\" (selected)
+      pane id:p9 label:\"server\" (on screen)
+    tab id:t4 title:\"zsh\"
+      pane id:p12"
+    );
+}
+
+#[test]
+fn tabs_of_one_group_stand_together_and_a_tab_in_none_stands_alone() {
+    let one = |id: u64, group: Option<u64>, pane: u64, name: &str| {
+        tab(id, group, None, &leaf(pane), &[(pane, name)])
+    };
+    let scene = Scene {
+        caller: None,
+        typing: None,
+        windows: Some(vec![Window {
+            id: 2,
+            visible: true,
+            groups: vec![
+                Group {
+                    id: 1,
+                    label: "one".to_owned(),
+                },
+                Group {
+                    id: 4,
+                    label: "four".to_owned(),
+                },
+            ],
+            tabs: vec![
+                one(1, None, 1, "p1"),
+                one(2, Some(1), 2, "p2"),
+                one(3, Some(1), 3, "p3"),
+                one(4, Some(4), 4, "p4"),
+                one(5, None, 5, "p5"),
+            ],
+        }]),
+        terminals: Vec::new(),
+    };
+    let text = scene.text(NOW);
+    assert_eq!(
+        text.split("\n\n").next().expect("the layout"),
+        "\
+window id:w2
+  tab id:t1
+    pane id:p1
+  group id:g1 label:\"one\"
+    tab id:t2
+      pane id:p2
+    tab id:t3
+      pane id:p3
+  group id:g4 label:\"four\"
+    tab id:t4
+      pane id:p4
+  tab id:t5
+    pane id:p5"
+    );
 }
 
 #[test]
@@ -319,21 +476,32 @@ fn the_times_are_the_cards_and_the_counters() {
 }
 
 #[test]
-fn a_tab_without_a_pane_of_the_servers_is_one_line_and_a_side_of_other_machines_is_one_node() {
+fn what_is_not_this_servers_is_one_line_without_an_id_and_a_side_of_other_machines_is_one_node() {
     let text = scene().text(NOW);
-    assert_eq!(text.matches("another machine").count(), 2);
-    assert!(text.contains("  Tab 1.4 ⌘4 another machine\n"));
-    // A tab the user named keeps its name even when nothing in it is the server's; the builder
-    // decides what a tab may be called, the listing prints it.
+    // A pane's side, a tab in a group, a group, a tab of its own and a window.
+    assert_eq!(text.matches("another machine").count(), 5, "{text}");
+    assert!(text.contains("    tab keys:⌘3 another machine\n"), "{text}");
+    assert!(text.contains("  group another machine\n"), "{text}");
+    assert!(text.contains("  tab keys:⌘5 another machine\n"), "{text}");
+    assert!(text.contains("\nwindow another machine\n"), "{text}");
+    // The ids and labels of what is not shown are in no line: not t6, t7, t10, w5, g2.
+    for hidden in ["t6", "t7", "t10", "w5", "g2", "vault"] {
+        assert!(!text.contains(hidden), "{hidden} in {text}");
+    }
+    let json = scene().json();
+    for hidden in ["\"t6\"", "\"t7\"", "\"t10\"", "\"w5\"", "\"g2\"", "vault"] {
+        assert!(!json.contains(hidden), "{hidden} in {json}");
+    }
+    // A label the user gave a tab of other machines stays out too: the builder decides what a tab
+    // may be called, and the listing never prints the name of a tab it does not show.
     let mut named = scene();
     if let Some(windows) = &mut named.windows {
-        windows[0].tabs[3].name = Some("Deploy".to_owned());
+        windows[0].tabs[4].label = Some("Deploy".to_owned());
+        windows[0].tabs[5].label = Some("Deploy".to_owned());
+        windows[0].tabs[5].title = Some("Deploy".to_owned());
     }
-    assert!(
-        named
-            .text(NOW)
-            .contains("  Tab 1.4 ⌘4 \"Deploy\" another machine\n")
-    );
+    assert!(!named.text(NOW).contains("Deploy"), "{}", named.text(NOW));
+    assert!(!named.json().contains("Deploy"), "{}", named.json());
     // Whoever built the tree, the folding is the listing's.
     let loose = Node::Split {
         axis: Axis::Vertical,
@@ -353,13 +521,13 @@ fn a_terminal_on_screen_is_in_a_visible_window_in_the_selected_tab_and_not_behin
             caller: None,
             typing: None,
             windows: Some(vec![Window {
+                id: 1,
                 visible,
+                groups: Vec::new(),
                 tabs: vec![Tab {
-                    keys: None,
-                    name: None,
                     selected,
                     zoomed,
-                    tree: tree(&shape, &names),
+                    ..tab(1, None, None, &shape, &names)
                 }],
             }]),
             terminals: Vec::new(),
@@ -699,57 +867,112 @@ fn the_json_is_json_and_says_what_the_text_says() {
     assert_eq!(parsed.get("typing").string(), "p7");
 
     let windows = parsed.get("windows").items();
-    assert_eq!(windows.len(), 2);
-    assert_eq!(windows[0].get("number"), &Json::Number(1.0));
+    assert_eq!(windows.len(), 3);
+    assert_eq!(windows[0].keys(), ["id", "visible", "groups", "tabs"]);
+    assert_eq!(windows[0].get("id").string(), "w1");
     assert_eq!(windows[0].get("visible"), &Json::Bool(true));
+    assert_eq!(windows[1].get("id").string(), "w2");
     assert_eq!(windows[1].get("visible"), &Json::Bool(false));
+    // A window of nothing but other machines' tabs is told as that and nothing more.
+    assert_eq!(
+        windows[2],
+        Json::Object(vec![("elsewhere".to_owned(), Json::Bool(true))])
+    );
+    // The groups that have a tab to see: g1, not g2.
+    let groups = windows[0].get("groups").items();
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0].keys(), ["id", "label"]);
+    assert_eq!(groups[0].get("id").string(), "g1");
+    assert_eq!(groups[0].get("label").string(), "api");
     let tabs = windows[0].get("tabs").items();
-    assert_eq!(tabs.len(), 4);
+    assert_eq!(tabs.len(), 6);
 
     // The tree is the tree: an axis, the first share, two sides.
     let root = tabs[0].get("tree");
     assert_eq!(root.keys(), ["axis", "ratio", "first", "second"]);
     assert_eq!(root.get("axis").string(), "side_by_side");
     assert_eq!(root.get("ratio"), &Json::Number(0.5));
-    assert_eq!(root.get("first").get("terminal").string(), "p4");
+    assert_eq!(root.get("first").get("id").string(), "p4");
+    assert_eq!(root.get("first").get("name"), &Json::Null);
     assert_eq!(root.get("first").get("on_screen"), &Json::Bool(true));
     let stacked = root.get("second");
     assert_eq!(stacked.get("axis").string(), "stacked");
     assert_eq!(stacked.get("ratio"), &Json::Number(0.6));
 
-    // A tab with a name, one without; a zoom; a side of other machines.
-    assert_eq!(tabs[0].get("name").string(), "api");
+    // A tab's id, group, label and title; a zoom; a side of other machines.
+    assert_eq!(
+        tabs[0].keys(),
+        [
+            "id", "group", "keys", "label", "title", "selected", "zoomed", "tree"
+        ]
+    );
+    assert_eq!(tabs[0].get("id").string(), "t3");
+    assert_eq!(tabs[0].get("group").string(), "g1");
+    assert_eq!(tabs[0].get("label").string(), "api");
+    assert_eq!(tabs[0].get("title").string(), "npm");
     assert_eq!(tabs[0].get("keys").string(), "⌘1");
     assert_eq!(tabs[0].get("zoomed"), &Json::Null);
-    assert_eq!(tabs[1].get("name"), &Json::Null);
-    assert_eq!(tabs[1].get("zoomed").get("terminal").string(), "p12");
+    assert_eq!(tabs[1].get("label"), &Json::Null);
+    assert_eq!(tabs[1].get("title").string(), "htop");
+    assert_eq!(tabs[1].get("zoomed").get("id").string(), "p12");
+    assert_eq!(tabs[1].get("zoomed").get("label").string(), "build");
     assert_eq!(
         tabs[1].get("tree").get("first").get("on_screen"),
         &Json::Bool(false)
     );
-    assert_eq!(tabs[2].get("keys"), &Json::Null);
+    // A tab of other machines in a group that has others: no id, no group, no label.
     assert_eq!(
-        tabs[2].get("tree").get("second"),
+        tabs[2],
+        Json::Object(vec![
+            ("elsewhere".to_owned(), Json::Bool(true)),
+            ("keys".to_owned(), Json::String("⌘3".to_owned())),
+            ("selected".to_owned(), Json::Bool(false)),
+        ])
+    );
+    // No group and no shortcut: `null`, the key is there.
+    assert_eq!(tabs[3].get("id").string(), "t5");
+    assert_eq!(tabs[3].get("group"), &Json::Null);
+    assert_eq!(tabs[3].get("keys"), &Json::Null);
+    assert_eq!(
+        tabs[3].get("tree").get("second"),
         &Json::Object(vec![("elsewhere".to_owned(), Json::Bool(true))])
     );
-    assert_eq!(
-        tabs[3].get("tree"),
-        &Json::Object(vec![("elsewhere".to_owned(), Json::Bool(true))])
-    );
+    // A terminal nobody numbered has no id, and its name instead.
+    let behind = windows[1].get("tabs").items()[0].get("tree");
+    assert_eq!(behind.get("second").get("id"), &Json::Null);
+    assert_eq!(behind.get("second").get("name").string(), "b-0a1b");
 
     // The terminals, in the table's order, with kablo's names for what kablo names.
     let rows = parsed.get("terminals").items();
-    let ids: Vec<&str> = rows.iter().map(|row| row.get("id").string()).collect();
+    let ids: Vec<Option<&str>> = rows
+        .iter()
+        .map(|row| match row.get("id") {
+            Json::Null => None,
+            id => Some(id.string()),
+        })
+        .collect();
     assert_eq!(
         ids,
         [
-            "p4", "p7", "p9", "p12", "p13", "p14", "p15", "p30", "p41", "b-0a1b"
+            Some("p4"),
+            Some("p7"),
+            Some("p9"),
+            Some("p12"),
+            Some("p13"),
+            Some("p14"),
+            Some("p15"),
+            Some("p30"),
+            Some("p41"),
+            None
         ]
     );
+    assert_eq!(rows[9].get("name").string(), "b-0a1b");
+    assert_eq!(rows[0].get("name"), &Json::Null);
     assert_eq!(
         rows[0].keys(),
         [
             "id",
+            "name",
             "state",
             "activity",
             "program",
@@ -766,12 +989,13 @@ fn the_json_is_json_and_says_what_the_text_says() {
             "opened_by",
             "placed",
             "window",
+            "group",
             "tab"
         ]
     );
     let by_id = |id: &str| {
         rows.iter()
-            .find(|row| row.get("id").string() == id)
+            .find(|row| row.get("id") != &Json::Null && row.get("id").string() == id)
             .expect(id)
     };
     assert_eq!(by_id("p4").get("activity").string(), "idle");
@@ -785,8 +1009,12 @@ fn the_json_is_json_and_says_what_the_text_says() {
         &Json::Number((NOW - 3700) as f64)
     );
     assert_eq!(by_id("p4").get("placed").string(), "tab");
-    assert_eq!(by_id("p4").get("window"), &Json::Number(1.0));
-    assert_eq!(by_id("p4").get("tab"), &Json::Number(1.0));
+    assert_eq!(by_id("p4").get("window").string(), "w1");
+    assert_eq!(by_id("p4").get("group").string(), "g1");
+    assert_eq!(by_id("p4").get("tab").string(), "t3");
+    // In a tab that is in no group: the key is there, `null`.
+    assert_eq!(by_id("p15").get("tab").string(), "t5");
+    assert_eq!(by_id("p15").get("group"), &Json::Null);
     assert_eq!(by_id("p7").get("activity").string(), "running");
     assert_eq!(by_id("p9").get("activity").string(), "password_prompt");
     assert_eq!(by_id("p9").get("secret"), &Json::Bool(true));
@@ -805,7 +1033,9 @@ fn the_json_is_json_and_says_what_the_text_says() {
     assert_eq!(by_id("p14").get("activity").string(), "broken");
     assert_eq!(by_id("p41").get("placed").string(), "list");
     assert_eq!(by_id("p41").get("window"), &Json::Null);
-    assert_eq!(by_id("p30").get("window"), &Json::Number(2.0));
+    assert_eq!(by_id("p41").get("tab"), &Json::Null);
+    assert_eq!(by_id("p30").get("window").string(), "w2");
+    assert_eq!(rows[9].get("tab").string(), "t9");
 }
 
 #[test]
@@ -819,24 +1049,29 @@ fn the_json_of_a_small_scene_is_this_exactly() {
         caller: Some("p4".to_owned()),
         typing: None,
         windows: Some(vec![Window {
+            id: 1,
             visible: true,
+            groups: vec![Group {
+                id: 1,
+                label: "api".to_owned(),
+            }],
             tabs: vec![Tab {
-                keys: Some("⌘1".to_owned()),
-                name: None,
                 selected: true,
-                zoomed: None,
-                tree: tree(
+                ..tab(
+                    3,
+                    Some(1),
+                    Some("⌘1"),
                     &pair(Axis::Vertical, 1.0 / 3.0, leaf(1), leaf(2)),
                     &[(1, "p4"), (2, "p5")],
-                ),
+                )
             }],
         }]),
         terminals: vec![row(shell)],
     };
     let expected = "{\"caller\":\"p4\",\"typing\":null,\"windows\":[
-{\"number\":1,\"visible\":true,\"tabs\":[{\"number\":1,\"keys\":\"⌘1\",\"name\":null,\"selected\":true,\"zoomed\":null,\"tree\":{\"axis\":\"stacked\",\"ratio\":0.333,\"first\":{\"terminal\":\"p4\",\"on_screen\":true},\"second\":{\"terminal\":\"p5\",\"on_screen\":true}}}]}
+{\"id\":\"w1\",\"visible\":true,\"groups\":[{\"id\":\"g1\",\"label\":\"api\"}],\"tabs\":[{\"id\":\"t3\",\"group\":\"g1\",\"keys\":\"⌘1\",\"label\":null,\"title\":null,\"selected\":true,\"zoomed\":null,\"tree\":{\"axis\":\"stacked\",\"ratio\":0.333,\"first\":{\"id\":\"p4\",\"name\":null,\"label\":null,\"on_screen\":true},\"second\":{\"id\":\"p5\",\"name\":null,\"label\":null,\"on_screen\":true}}}]}
 ],\"terminals\":[
-{\"id\":\"p4\",\"state\":\"running\",\"activity\":\"idle\",\"program\":\"zsh\",\"directory\":\"/home/ada\",\"cols\":120,\"rows\":30,\"exit\":null,\"secret\":false,\"label\":null,\"started\":100,\"front_started\":null,\"front_is_own\":true,\"output_at\":160,\"opened_by\":null,\"placed\":\"tab\",\"window\":1,\"tab\":1}
+{\"id\":\"p4\",\"name\":null,\"state\":\"running\",\"activity\":\"idle\",\"program\":\"zsh\",\"directory\":\"/home/ada\",\"cols\":120,\"rows\":30,\"exit\":null,\"secret\":false,\"label\":null,\"started\":100,\"front_started\":null,\"front_is_own\":true,\"output_at\":160,\"opened_by\":null,\"placed\":\"tab\",\"window\":\"w1\",\"group\":\"g1\",\"tab\":\"t3\"}
 ]}
 ";
     assert_eq!(scene.json(), expected);

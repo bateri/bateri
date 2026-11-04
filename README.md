@@ -162,12 +162,14 @@ server, under kablo, so these keep working with your Mac asleep; the pane takes
 its place when bateri connects. bateri on the Mac is never asked to run
 anything: what a program sends it only places, lists or closes panes and shows a
 notification. A pane is named by its number (`p9`), which is what the opening
-command prints.
+command prints; `--json` prints it with the tab (`t3`), group (`g1`) and window
+(`w1`) it stands in, and `ls` lists every window, group and tab by the same
+names.
 
 ```sh
 bateri split --below --ratio 30 -- npm run dev   # prints p9; the pane appears below this one
 bateri tab -- make watch                         # in a tab of its own, next to this one
-bateri ls [--json]                               # windows, tabs, splits, and the server's panes
+bateri ls [--json]                               # windows, groups, tabs, splits, and the server's panes
 bateri send p9 'q'                               # type into a pane (kablo's send)
 bateri send-key p9 enter
 bateri capture p9                                # what is on its screen

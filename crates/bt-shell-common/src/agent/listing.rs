@@ -1,20 +1,36 @@
 //! `bateri ls`: what is open, as an agent on a server reads it.
 //!
 //! Two parts, in the order a person looks for them. First **where things are**: the windows
-//! front to back, each window's tabs in the order of its strip, and in each tab the split tree
-//! itself — `side by side` or `stacked`, the first and second share, the terminals by their
-//! numbers and nothing else of them. Then **what they are**: one table row per terminal the
-//! server has (`ID TAB LABEL PROGRAM STATE AGE QUIET SIZE OPENED BY DIRECTORY`), every column of
-//! it from the server's own statement ([`kablo_proto::v1::Status`]) so that it reads the same
-//! with the Mac away. A terminal in no tab says `none` there (it is in the list of what runs in
-//! the background) and one whose pane is waiting for the Mac says `waiting`.
+//! front to back, in each window its groups and tabs in the order of the strip, and in each tab
+//! the split tree itself — `side by side` or `stacked`, the first and second share, the panes by
+//! their ids and their labels and nothing else of them. Every line says what it is by a word and
+//! gives its fields as `field:value`:
+//!
+//! ```text
+//! window id:w1
+//!   group id:g1 label:"api"
+//!     tab id:t3 label:"web" title:"npm" (selected)
+//!       pane id:p9 label:"server" (on screen)
+//! ```
+//!
+//! `id:` is what a command is given (`w1`, `g1`, `t3`, `p9`), `label:` the name a person or an
+//! agent gave the thing and `title:` what the program in it calls itself. A terminal that is no
+//! agent's pane (`t9` before the ids, one `kablo new` named) has no id, so it says
+//! `name:"t9"` instead: it cannot be written to a command.
+//!
+//! Then **what they are**: one table row per terminal the server has (`ID TAB LABEL PROGRAM STATE
+//! AGE QUIET SIZE OPENED BY DIRECTORY`), every column of it from the server's own statement
+//! ([`kablo_proto::v1::Status`]) so that it reads the same with the Mac away; `TAB` is the id of
+//! its tab. A terminal in no tab says `none` there (it is in the list of what runs in the
+//! background) and one whose pane is waiting for the Mac says `waiting`.
 //!
 //! **What an agent is not told.** A pane that is not a terminal of this server — a local shell,
-//! another server's terminal — is `another machine` and nothing more: no title, no directory,
-//! no program. A split whose both sides are other machines is one such node, a tab made of
-//! nothing else is one nameless line, and a tab has a name here only when the user gave it one
-//! or it comes from a terminal of this server (the one that builds a [`Tab`] decides; this
-//! prints what it is given).
+//! another server's terminal — is `another machine` and nothing more: no id, no label, no title,
+//! no directory, no program. A split whose both sides are other machines is one such node, and a
+//! tab, a group or a window made of nothing else is one line, `tab another machine`, without an
+//! id (what is not shown is not named). A tab has a label here only when the user or an agent
+//! gave it one, and a title only when it comes from a terminal of this server (the one that builds
+//! a [`Tab`] decides; this prints what it is given).
 //!
 //! **Where the words come from.** What a terminal is doing is one reading of the server's times
 //! ([`crate::kablo::roster::activity_at`], the card's own), `idle` only for a shell waiting for
@@ -24,9 +40,11 @@
 //! the scene ([`crate::palette::tab_keys`]).
 //!
 //! The same scene is also JSON ([`Scene::json`]), written by hand — no dependency for a dozen
-//! keys — with kablo's own names for what kablo calls a thing (`list --json`: `id`, `state`,
-//! `program`, `directory`, `cols`, `rows`, `exit`, `secret`, `label`, `started`, `front_started`,
-//! `front_is_own`, `output_at`) and the rule for strings. Keys are added, never taken away.
+//! keys — with the same fields (`id`, `label`, `title`; ids are always strings) and kablo's own
+//! names for what kablo calls a thing (`list --json`: `state`, `program`, `directory`, `cols`,
+//! `rows`, `exit`, `secret`, `label`, `started`, `front_started`, `front_is_own`, `output_at`) and
+//! the rule for strings. Keys are added, never taken away; version 2 of the message is the one
+//! break (`terminal` became `id`, the numbers of a window and a tab became ids).
 
 use std::fmt::Write as _;
 use std::time::Duration;
@@ -36,6 +54,7 @@ use kablo_proto::v1::{Exit, State, Status};
 
 use super::Terminal;
 use super::notes::Record;
+use crate::ids::Kind as IdKind;
 use crate::kablo::roster::{Activity, activity_at};
 use crate::program::is_shell_name;
 use crate::server_card::running_text;
@@ -120,22 +139,48 @@ impl Node {
 /// A tab.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Tab {
+    /// Its number (`t3`, [`crate::ids`]): the same wherever the tab goes.
+    pub id: u64,
+    /// The number of the group it is in, one of its window's [`Window::groups`].
+    pub group: Option<u64>,
     /// The ⌘ shortcut that selects it, when it has one ([`crate::palette::tab_keys`]).
     pub keys: Option<String>,
-    /// Its name, only if the user gave it or it comes from a terminal of this server.
-    pub name: Option<String>,
+    /// The name the user or an agent gave it.
+    pub label: Option<String>,
+    /// The title of the terminal of this server it shows, when it does: what its program calls
+    /// itself.
+    pub title: Option<String>,
     pub selected: bool,
     /// The pane filling the tab, when one is zoomed.
     pub zoomed: Option<Pane>,
     pub tree: Node,
 }
 
-/// A window. Its place in [`Scene::windows`] is its number, front to back.
+impl Tab {
+    /// Nothing in it is a terminal of this server.
+    fn elsewhere(&self) -> bool {
+        self.tree.folded() == Node::Pane(Pane::Elsewhere)
+    }
+}
+
+/// A group of tabs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Group {
+    /// Its number (`g1`).
+    pub id: u64,
+    pub label: String,
+}
+
+/// A window. Its place in [`Scene::windows`] is how far forward it is, front first.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Window {
+    /// Its number (`w1`).
+    pub id: u64,
     /// It can be seen: not minimized, not on another space.
     pub visible: bool,
-    /// In the order of the tab strip; the place is the tab's number.
+    /// The groups of its strip, which [`Tab::group`] names.
+    pub groups: Vec<Group>,
+    /// In the order of the tab strip.
     pub tabs: Vec<Tab>,
 }
 
@@ -323,16 +368,26 @@ const COLUMNS: [&str; 10] = [
 ];
 
 impl Scene {
-    /// Where a terminal is on screen: its window and tab, counted from 1.
-    fn tab_of(&self, terminal: &str) -> Option<(usize, usize)> {
+    /// Where a terminal is on screen: its window and tab.
+    fn tab_of(&self, terminal: &str) -> Option<(&Window, &Tab)> {
         let windows = self.windows.as_ref()?;
-        windows.iter().enumerate().find_map(|(w, window)| {
-            window.tabs.iter().enumerate().find_map(|(t, tab)| {
+        windows.iter().find_map(|window| {
+            window.tabs.iter().find_map(|tab| {
                 let mut found = Vec::new();
                 tab.tree.terminals(&mut found);
-                found.contains(&terminal).then_some((w + 1, t + 1))
+                found.contains(&terminal).then_some((window, tab))
             })
         })
+    }
+
+    /// The label kablo has for a terminal, as a person set it.
+    fn label_of(&self, terminal: &str) -> Option<String> {
+        self.terminals
+            .iter()
+            .find(|row| row.status.id.as_str() == terminal)
+            .and_then(|row| row.status.label.as_deref())
+            .filter(|label| !label.is_empty())
+            .map(printable)
     }
 
     fn rows(&self) -> Vec<&Row> {
@@ -375,8 +430,8 @@ impl Scene {
             None => out.push_str("The Mac is not connected, so what is on screen is not known.\n"),
             Some(windows) if windows.is_empty() => out.push_str("No windows are open.\n"),
             Some(windows) => {
-                for (w, window) in windows.iter().enumerate() {
-                    write_window(&mut out, w + 1, window);
+                for window in windows {
+                    write_window(&mut out, window, &|name| self.label_of(name));
                 }
             }
         }
@@ -395,13 +450,13 @@ impl Scene {
         for row in rows {
             let status = &row.status;
             let tab = match self.tab_of(status.id.as_str()) {
-                Some((window, tab)) => format!("{window}.{tab}"),
+                Some((_, tab)) => named(IdKind::Tab, tab.id),
                 None if row.waiting => "waiting".to_owned(),
                 None if self.windows.is_none() => "-".to_owned(),
                 None => "none".to_owned(),
             };
             cells.push([
-                status.id.as_str().to_owned(),
+                cell_name(status.id.as_str()),
                 tab,
                 or_dash(status.label.as_deref().map(printable)),
                 or_dash(status.program.as_deref().map(lossy)),
@@ -453,7 +508,7 @@ impl Scene {
                 out.push('[');
                 for (w, window) in windows.iter().enumerate() {
                     out.push_str(if w == 0 { "\n" } else { ",\n" });
-                    json_window(&mut out, w + 1, window);
+                    self.json_window(&mut out, window);
                 }
                 out.push_str(if windows.is_empty() { "]" } else { "\n]" });
             }
@@ -472,8 +527,8 @@ impl Scene {
         let status = &row.status;
         // The one reading of the times is the text's: `ls` says `now` only in words, and the
         // words are not in the data, so the data says what it is doing and when it began.
-        out.push_str("{\"id\":");
-        json_string(out, status.id.as_str());
+        out.push('{');
+        json_pane_name(out, status.id.as_str());
         out.push_str(",\"state\":");
         json_string(out, &state_name(status.state));
         out.push_str(",\"activity\":");
@@ -528,69 +583,281 @@ impl Scene {
         json_number(out, status.output_at);
         out.push_str(",\"opened_by\":");
         json_optional(out, row.opened_by.as_deref());
-        let (placed, window, tab) = match self.tab_of(status.id.as_str()) {
-            Some((window, tab)) => ("tab", Some(window), Some(tab)),
-            None if row.waiting => ("waiting", None, None),
-            None if self.windows.is_none() => ("unknown", None, None),
-            None => ("list", None, None),
+        let (placed, at) = match self.tab_of(status.id.as_str()) {
+            Some(at) => ("tab", Some(at)),
+            None if row.waiting => ("waiting", None),
+            None if self.windows.is_none() => ("unknown", None),
+            None => ("list", None),
         };
         out.push_str(",\"placed\":");
         json_string(out, placed);
         out.push_str(",\"window\":");
-        json_number(out, window.map(|n| n as u64));
+        json_id(out, at.map(|(window, _)| (IdKind::Window, window.id)));
+        out.push_str(",\"group\":");
+        json_id(
+            out,
+            at.and_then(|(window, tab)| group_of(window, tab))
+                .map(|group| (IdKind::Group, group.id)),
+        );
         out.push_str(",\"tab\":");
-        json_number(out, tab.map(|n| n as u64));
+        json_id(out, at.map(|(_, tab)| (IdKind::Tab, tab.id)));
         out.push('}');
+    }
+
+    fn json_window(&self, out: &mut String, window: &Window) {
+        if window.tabs.iter().all(Tab::elsewhere) {
+            out.push_str("{\"elsewhere\":true}");
+            return;
+        }
+        out.push_str("{\"id\":");
+        json_id(out, Some((IdKind::Window, window.id)));
+        let _ = write!(out, ",\"visible\":{},\"groups\":[", window.visible);
+        let mut first = true;
+        for group in &window.groups {
+            // A group none of whose tabs can be seen is not told.
+            let seen = window
+                .tabs
+                .iter()
+                .any(|tab| tab.group == Some(group.id) && !tab.elsewhere());
+            if !seen {
+                continue;
+            }
+            if !first {
+                out.push(',');
+            }
+            first = false;
+            out.push_str("{\"id\":");
+            json_id(out, Some((IdKind::Group, group.id)));
+            out.push_str(",\"label\":");
+            json_string(out, &printable(&group.label));
+            out.push('}');
+        }
+        out.push_str("],\"tabs\":[");
+        for (t, tab) in window.tabs.iter().enumerate() {
+            if t > 0 {
+                out.push(',');
+            }
+            self.json_tab(out, window, tab);
+        }
+        out.push_str("]}");
+    }
+
+    fn json_tab(&self, out: &mut String, window: &Window, tab: &Tab) {
+        let tree = tab.tree.folded();
+        out.push('{');
+        if tree == Node::Pane(Pane::Elsewhere) {
+            out.push_str("\"elsewhere\":true,\"keys\":");
+            json_optional(out, tab.keys.as_deref());
+            let _ = write!(out, ",\"selected\":{}}}", tab.selected);
+            return;
+        }
+        out.push_str("\"id\":");
+        json_id(out, Some((IdKind::Tab, tab.id)));
+        out.push_str(",\"group\":");
+        json_id(
+            out,
+            group_of(window, tab).map(|group| (IdKind::Group, group.id)),
+        );
+        out.push_str(",\"keys\":");
+        json_optional(out, tab.keys.as_deref());
+        out.push_str(",\"label\":");
+        json_optional(out, tab.label.as_deref());
+        out.push_str(",\"title\":");
+        json_optional(out, tab.title.as_deref());
+        let _ = write!(out, ",\"selected\":{},\"zoomed\":", tab.selected);
+        match &tab.zoomed {
+            Some(pane) => self.json_pane(out, pane, None),
+            None => out.push_str("null"),
+        }
+        out.push_str(",\"tree\":");
+        let on_screen = |name: &str| {
+            window.visible
+                && tab.selected
+                && tab
+                    .zoomed
+                    .as_ref()
+                    .is_none_or(|zoomed| *zoomed == Pane::Terminal(name.to_owned()))
+        };
+        self.json_node(out, &tree, &on_screen);
+        out.push('}');
+    }
+
+    fn json_pane(&self, out: &mut String, pane: &Pane, on_screen: Option<bool>) {
+        match pane {
+            Pane::Terminal(name) => {
+                out.push('{');
+                json_pane_name(out, name);
+                out.push_str(",\"label\":");
+                json_optional(out, self.label_of(name).as_deref());
+                if let Some(on_screen) = on_screen {
+                    let _ = write!(out, ",\"on_screen\":{on_screen}");
+                }
+                out.push('}');
+            }
+            Pane::Elsewhere => out.push_str("{\"elsewhere\":true}"),
+        }
+    }
+
+    fn json_node(&self, out: &mut String, node: &Node, on_screen: &dyn Fn(&str) -> bool) {
+        match node {
+            Node::Pane(pane) => {
+                let shown = match pane {
+                    Pane::Terminal(name) => Some(on_screen(name)),
+                    Pane::Elsewhere => None,
+                };
+                self.json_pane(out, pane, shown);
+            }
+            Node::Split {
+                axis,
+                ratio,
+                first,
+                second,
+            } => {
+                out.push_str("{\"axis\":");
+                json_string(
+                    out,
+                    match axis {
+                        Axis::Horizontal => "side_by_side",
+                        Axis::Vertical => "stacked",
+                    },
+                );
+                out.push_str(",\"ratio\":");
+                json_ratio(out, *ratio);
+                out.push_str(",\"first\":");
+                self.json_node(out, first, on_screen);
+                out.push_str(",\"second\":");
+                self.json_node(out, second, on_screen);
+                out.push('}');
+            }
+        }
     }
 }
 
 // ─── The layout, as text ─────────────────────────────────────────────────
 
-fn write_window(out: &mut String, number: usize, window: &Window) {
-    let _ = write!(out, "Window {number}");
+/// A name a command takes: the kind's letter and the number (`t3`).
+fn named(kind: IdKind, number: u64) -> String {
+    format!("{}{number}", kind.prefix())
+}
+
+/// How a terminal is told in a line: `id:p9` for an agent's pane, `name:"b-0a1b"` for any other
+/// terminal, which cannot be written to a command.
+fn pane_field(terminal: &str) -> String {
+    match Terminal::parse(terminal) {
+        Some(pane) => format!("id:{pane}"),
+        None => format!("name:\"{}\"", printable(terminal)),
+    }
+}
+
+/// A terminal in the table's first column: its id, or `name:"…"` when it has none.
+fn cell_name(terminal: &str) -> String {
+    match Terminal::parse(terminal) {
+        Some(pane) => pane.to_string(),
+        None => pane_field(terminal),
+    }
+}
+
+/// The group a tab is in, if the window has it.
+fn group_of<'a>(window: &'a Window, tab: &Tab) -> Option<&'a Group> {
+    let number = tab.group?;
+    window.groups.iter().find(|group| group.id == number)
+}
+
+fn write_window(out: &mut String, window: &Window, label_of: &dyn Fn(&str) -> Option<String>) {
+    if window.tabs.iter().all(Tab::elsewhere) {
+        out.push_str("window another machine\n");
+        return;
+    }
+    let _ = write!(out, "window id:{}", named(IdKind::Window, window.id));
     if !window.visible {
         out.push_str(" (hidden)");
     }
     out.push('\n');
-    for (t, tab) in window.tabs.iter().enumerate() {
-        let tree = tab.tree.folded();
-        let whole = tree == Node::Pane(Pane::Elsewhere);
-        let _ = write!(out, "  Tab {number}.{}", t + 1);
-        if let Some(keys) = &tab.keys {
-            let _ = write!(out, " {}", printable(keys));
+    let mut at = 0;
+    while at < window.tabs.len() {
+        // The tabs of one group stand together; a tab in none stands alone.
+        let group = group_of(window, &window.tabs[at]);
+        let mut end = at + 1;
+        while end < window.tabs.len() && group_of(window, &window.tabs[end]) == group {
+            end += 1;
         }
-        if let Some(name) = &tab.name {
-            let _ = write!(out, " \"{}\"", printable(name));
-        }
-        if whole {
-            let _ = write!(out, " {ELSEWHERE}");
-        }
-        let mut notes: Vec<String> = Vec::new();
-        if tab.selected {
-            notes.push("selected".to_owned());
-        }
-        if !whole {
-            match &tab.zoomed {
-                Some(Pane::Terminal(name)) => notes.push(format!("zoomed on {}", printable(name))),
-                Some(Pane::Elsewhere) => notes.push(format!("zoomed on {ELSEWHERE}")),
-                None => {}
+        let run = &window.tabs[at..end];
+        match group {
+            Some(_) if run.iter().all(Tab::elsewhere) => {
+                out.push_str("  group another machine\n");
+            }
+            Some(group) => {
+                let _ = writeln!(
+                    out,
+                    "  group id:{} label:\"{}\"",
+                    named(IdKind::Group, group.id),
+                    printable(&group.label)
+                );
+                for tab in run {
+                    write_tab(out, window, tab, 4, label_of);
+                }
+            }
+            None => {
+                for tab in run {
+                    write_tab(out, window, tab, 2, label_of);
+                }
             }
         }
-        if !notes.is_empty() {
-            let _ = write!(out, " ({})", notes.join(", "));
+        at = end;
+    }
+}
+
+fn write_tab(
+    out: &mut String,
+    window: &Window,
+    tab: &Tab,
+    indent: usize,
+    label_of: &dyn Fn(&str) -> Option<String>,
+) {
+    let tree = tab.tree.folded();
+    let whole = tree == Node::Pane(Pane::Elsewhere);
+    let _ = write!(out, "{}tab", " ".repeat(indent));
+    if !whole {
+        let _ = write!(out, " id:{}", named(IdKind::Tab, tab.id));
+    }
+    if let Some(keys) = &tab.keys {
+        let _ = write!(out, " keys:{}", printable(keys));
+    }
+    if whole {
+        let _ = write!(out, " {ELSEWHERE}");
+    } else {
+        if let Some(label) = &tab.label {
+            let _ = write!(out, " label:\"{}\"", printable(label));
         }
-        out.push('\n');
-        if !whole {
-            let on_screen = |name: &str| {
-                window.visible
-                    && tab.selected
-                    && tab
-                        .zoomed
-                        .as_ref()
-                        .is_none_or(|zoomed| *zoomed == Pane::Terminal(name.to_owned()))
-            };
-            write_node(out, &tree, 1, &on_screen);
+        if let Some(title) = &tab.title {
+            let _ = write!(out, " title:\"{}\"", printable(title));
         }
+    }
+    let mut notes: Vec<String> = Vec::new();
+    if tab.selected {
+        notes.push("selected".to_owned());
+    }
+    if !whole {
+        match &tab.zoomed {
+            Some(Pane::Terminal(name)) => notes.push(format!("zoomed on {}", printable(name))),
+            Some(Pane::Elsewhere) => notes.push(format!("zoomed on {ELSEWHERE}")),
+            None => {}
+        }
+    }
+    if !notes.is_empty() {
+        let _ = write!(out, " ({})", notes.join(", "));
+    }
+    out.push('\n');
+    if !whole {
+        let on_screen = |name: &str| {
+            window.visible
+                && tab.selected
+                && tab
+                    .zoomed
+                    .as_ref()
+                    .is_none_or(|zoomed| *zoomed == Pane::Terminal(name.to_owned()))
+        };
+        write_node(out, &tree, indent + 2, &on_screen, label_of);
     }
 }
 
@@ -599,14 +866,23 @@ fn percent(ratio: f64) -> (u32, u32) {
     (first, 100 - first)
 }
 
-fn write_node(out: &mut String, node: &Node, depth: usize, on_screen: &dyn Fn(&str) -> bool) {
-    let indent = "  ".repeat(depth + 1);
+fn write_node(
+    out: &mut String,
+    node: &Node,
+    indent: usize,
+    on_screen: &dyn Fn(&str) -> bool,
+    label_of: &dyn Fn(&str) -> Option<String>,
+) {
+    let pad = " ".repeat(indent);
     match node {
         Node::Pane(Pane::Elsewhere) => {
-            let _ = writeln!(out, "{indent}{ELSEWHERE}");
+            let _ = writeln!(out, "{pad}{ELSEWHERE}");
         }
         Node::Pane(Pane::Terminal(name)) => {
-            let _ = write!(out, "{indent}{}", printable(name));
+            let _ = write!(out, "{pad}pane {}", pane_field(name));
+            if let Some(label) = label_of(name) {
+                let _ = write!(out, " label:\"{label}\"");
+            }
             if on_screen(name) {
                 out.push_str(" (on screen)");
             }
@@ -623,9 +899,9 @@ fn write_node(out: &mut String, node: &Node, depth: usize, on_screen: &dyn Fn(&s
                 Axis::Horizontal => "side by side",
                 Axis::Vertical => "stacked",
             };
-            let _ = writeln!(out, "{indent}{word} {a}/{b}");
-            write_node(out, first, depth + 1, on_screen);
-            write_node(out, second, depth + 1, on_screen);
+            let _ = writeln!(out, "{pad}{word} {a}/{b}");
+            write_node(out, first, indent + 2, on_screen, label_of);
+            write_node(out, second, indent + 2, on_screen, label_of);
         }
     }
 }
@@ -675,87 +951,28 @@ fn json_ratio(out: &mut String, ratio: f64) {
     out.push_str(text.trim_end_matches('0').trim_end_matches('.'));
 }
 
-fn json_pane(out: &mut String, pane: &Pane, on_screen: Option<bool>) {
-    match pane {
-        Pane::Terminal(name) => {
-            out.push_str("{\"terminal\":");
-            json_string(out, name);
-            if let Some(on_screen) = on_screen {
-                let _ = write!(out, ",\"on_screen\":{on_screen}");
-            }
-            out.push('}');
-        }
-        Pane::Elsewhere => out.push_str("{\"elsewhere\":true}"),
+/// A name as a JSON string, or `null` for nothing: `"t3"`.
+fn json_id(out: &mut String, id: Option<(IdKind, u64)>) {
+    match id {
+        Some((kind, number)) => json_string(out, &named(kind, number)),
+        None => out.push_str("null"),
     }
 }
 
-fn json_node(out: &mut String, node: &Node, on_screen: &dyn Fn(&str) -> bool) {
-    match node {
-        Node::Pane(pane) => {
-            let shown = match pane {
-                Pane::Terminal(name) => Some(on_screen(name)),
-                Pane::Elsewhere => None,
-            };
-            json_pane(out, pane, shown);
+/// The two keys that name a terminal: `id` for an agent's pane, else `name`; the other is
+/// `null`, so the keys are always both there.
+fn json_pane_name(out: &mut String, terminal: &str) {
+    out.push_str("\"id\":");
+    match Terminal::parse(terminal) {
+        Some(pane) => {
+            json_string(out, &pane.to_string());
+            out.push_str(",\"name\":null");
         }
-        Node::Split {
-            axis,
-            ratio,
-            first,
-            second,
-        } => {
-            out.push_str("{\"axis\":");
-            json_string(
-                out,
-                match axis {
-                    Axis::Horizontal => "side_by_side",
-                    Axis::Vertical => "stacked",
-                },
-            );
-            out.push_str(",\"ratio\":");
-            json_ratio(out, *ratio);
-            out.push_str(",\"first\":");
-            json_node(out, first, on_screen);
-            out.push_str(",\"second\":");
-            json_node(out, second, on_screen);
-            out.push('}');
+        None => {
+            out.push_str("null,\"name\":");
+            json_string(out, terminal);
         }
     }
-}
-
-fn json_window(out: &mut String, number: usize, window: &Window) {
-    let _ = write!(
-        out,
-        "{{\"number\":{number},\"visible\":{},\"tabs\":[",
-        window.visible
-    );
-    for (t, tab) in window.tabs.iter().enumerate() {
-        if t > 0 {
-            out.push(',');
-        }
-        let tree = tab.tree.folded();
-        let _ = write!(out, "{{\"number\":{},\"keys\":", t + 1);
-        json_optional(out, tab.keys.as_deref());
-        out.push_str(",\"name\":");
-        json_optional(out, tab.name.as_deref());
-        let _ = write!(out, ",\"selected\":{},\"zoomed\":", tab.selected);
-        match &tab.zoomed {
-            Some(pane) if tree != Node::Pane(Pane::Elsewhere) => json_pane(out, pane, None),
-            _ => out.push_str("null"),
-        }
-        out.push_str(",\"tree\":");
-        let on_screen = |name: &str| {
-            window.visible
-                && tab.selected
-                && tab
-                    .zoomed
-                    .as_ref()
-                    .is_none_or(|zoomed| *zoomed == Pane::Terminal(name.to_owned()))
-        };
-        json_node(out, &tree, &on_screen);
-        out.push('}');
-    }
-    out.push_str("]}");
 }
 
 #[cfg(test)]

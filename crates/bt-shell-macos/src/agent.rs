@@ -77,6 +77,7 @@ use objc2_foundation::{NSString, ns_string};
 use crate::app::{self, AppDelegate, Opening, Start, pipe_installed};
 use crate::embed;
 use crate::hold_service;
+use crate::ids::{Id, Kind as IdKind};
 use crate::launch::{Held, Resume};
 use crate::pane::TerminalPane;
 use crate::sheets::{self, Asker};
@@ -372,7 +373,7 @@ impl<'a> World<'a> {
         // `--focus` was decided by [`World::place`]: the keyboard goes to the new pane only if the
         // person is where the pane goes.
         let focus = place.focus;
-        match landing.spot {
+        let (at_tab, at_group, at_window) = match landing.spot {
             Spot::Beside { tree, landing: at } => {
                 let (config, _) = app.pane_launch_as(
                     tab.id(),
@@ -385,6 +386,7 @@ impl<'a> World<'a> {
                 if focus {
                     window.show_pane(tab.id(), pane.id());
                 }
+                standing(&window, tab)
             }
             Spot::NewTab => {
                 let tab_id = app.next_id();
@@ -402,15 +404,34 @@ impl<'a> World<'a> {
                 if focus {
                     window.show_pane(tab_id, pane.id());
                 }
+                standing(&window, &born)
             }
-        }
+        };
         Ok(Placed {
             landed: landing.landed,
             next_to: Some(anchor_name.clone()),
             squeezed: landing.squeezed,
             hidden: landing.hidden,
+            tab: at_tab,
+            group: at_group,
+            window: at_window,
         })
     }
+}
+
+/// Where `tab` stands, by the names a command takes: the tab, its group (none when it is in no
+/// group) and its window.
+fn standing(window: &TerminalWindow, tab: &TerminalTab) -> (Option<Id>, Option<Id>, Option<Id>) {
+    let groups = window.groups();
+    let group = groups
+        .group_of(tab.id())
+        .and_then(|group| groups.group(group))
+        .and_then(|group| group.number);
+    (
+        Id::new(IdKind::Tab, tab.number()),
+        group.and_then(|number| Id::new(IdKind::Group, number)),
+        Id::new(IdKind::Window, window.number()),
+    )
 }
 
 /// The pane of this Mac that shows `terminal` of the server `account`, with its tab and what the
@@ -609,6 +630,7 @@ fn windows_of(app: &AppDelegate, account: &str) -> (Vec<Window>, Option<String>)
         } else {
             Vec::new()
         };
+        let groups = window.groups();
         let mut tabs = Vec::new();
         for tab in window.tabs() {
             let panes = tab.panes();
@@ -625,21 +647,36 @@ fn windows_of(app: &AppDelegate, account: &str) -> (Vec<Window>, Option<String>)
                 typing.clone_from(&own);
             }
             tabs.push(Tab {
+                id: tab.number(),
+                group: groups
+                    .group_of(tab.id())
+                    .and_then(|group| groups.group(group))
+                    .and_then(|group| group.number),
                 keys: keys
                     .iter()
                     .find(|(id, _)| *id == tab.id())
                     .map(|(_, hint)| hint.clone()),
-                // The user's name for it, else the title of a terminal of this server.
-                name: tab
-                    .name()
-                    .or_else(|| own.as_ref().and_then(|_| tab.automatic_title())),
+                // The name it was given, and apart from it the title of a terminal of this server.
+                label: tab.name(),
+                title: own.as_ref().and_then(|_| tab.automatic_title()),
                 selected: window.is_selected(tab.id()),
                 tree: Node::of(&tab.container().tree(), &named),
                 zoomed: tab.zoomed().map(named),
             });
         }
         windows.push(Window {
+            id: window.number(),
             visible: window.window_visible(),
+            groups: groups
+                .groups()
+                .iter()
+                .filter_map(|group| {
+                    Some(listing::Group {
+                        id: group.number?,
+                        label: group.name.clone(),
+                    })
+                })
+                .collect(),
             tabs,
         });
     }

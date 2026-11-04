@@ -184,7 +184,7 @@ mod tests {
     use std::process::Command;
 
     fn place_text(terminal: &str, anchor: &str, extra: &str) -> String {
-        format!("bateri 1\nplace\nterminal {terminal}\nanchor {anchor}\n{extra}")
+        format!("bateri 2\nplace\nterminal {terminal}\nanchor {anchor}\n{extra}")
     }
 
     /// Runs [`READ`] with `sh` (and `dash`, the Linux image's) over a home that holds `files`.
@@ -267,6 +267,23 @@ mod tests {
     }
 
     #[test]
+    fn a_note_of_the_version_before_is_removed_and_not_read() {
+        // Written by a script that spoke version 1, left on the server while the Mac was away.
+        let old = "bateri 1\nplace\nterminal p1\nanchor p4\n";
+        let ok = place_text("p2", "p1", "");
+        let (printed, root) = read("old", &[("p1", old.as_bytes()), ("p2", ok.as_bytes())]);
+        // The Mac takes the note off the server (so it is not read again) and finds no request
+        // in it: the terminal has no pane and `ls` lists it as such.
+        assert!(
+            !root.0.join(".local/share/bateri/placing/p1").exists(),
+            "removed"
+        );
+        let notes = parse(&printed);
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert_eq!(notes[0].terminal, Terminal(2));
+    }
+
+    #[test]
     fn no_directory_and_no_home_print_nothing_and_succeed() {
         let root = TempRoot::new("agent-notes-none");
         let output = Command::new("/bin/sh")
@@ -282,8 +299,8 @@ mod tests {
     fn what_a_login_shell_says_and_a_bad_note_are_left_out_and_the_good_one_after_them_is_read() {
         let good = place_text("p5", "p4", "");
         let wrong_name = place_text("p6", "p4", "");
-        let no_anchor = "bateri 1\nplace\nterminal p7\n";
-        let ls = "bateri 1\nls\n";
+        let no_anchor = "bateri 2\nplace\nterminal p7\n";
+        let ls = "bateri 2\nls\n";
         let mut out = b"Welcome to rasp\nbateri-note oops\n".to_vec();
         for (name, body) in [
             ("p5", good.as_str()),
