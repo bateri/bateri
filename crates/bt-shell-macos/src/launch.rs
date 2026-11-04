@@ -18,7 +18,7 @@ use objc2::MainThreadMarker;
 use objc2_app_kit::{NSScroller, NSScrollerStyle, NSWorkspace};
 
 use crate::child;
-use crate::restore::PaneRuns;
+use bt_shell_common::child::PaneRuns;
 
 /// Who the application that opens a pane is, where bateri would say "bateri" —
 /// given by whoever opens the pane, never guessed from the running program

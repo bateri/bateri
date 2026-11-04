@@ -41,7 +41,7 @@ use crate::Run;
 use crate::child;
 use crate::launch::{self, Held, Launch};
 use crate::pane::PaneLaunch;
-use crate::restore::PaneRuns;
+use bt_shell_common::child::PaneRuns;
 
 pub use crate::footer::ListeningPort;
 pub use crate::launch::{Identity, Integration};

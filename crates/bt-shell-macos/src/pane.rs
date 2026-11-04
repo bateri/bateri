@@ -109,7 +109,7 @@ use crate::promise::FinderDrops;
 use crate::quote;
 use crate::remote_helper::RemoteHelper;
 use crate::remote_ports::RemotePorts;
-use crate::restore::{PaneRuns, SavedKept, SavedPane};
+use crate::restore::{SavedKept, SavedPane};
 use crate::search_bar::{SearchBar, selection_query};
 use crate::server_card::ServerCard;
 use crate::ssh_route::Masters;
@@ -120,6 +120,7 @@ use crate::view::BateriView;
 use crate::zoom::Zoom;
 use crate::{Run, Workload};
 use crate::{child, locale};
+use bt_shell_common::child::PaneRuns;
 
 /// Events the pane hands to its owner: `tab::TabHost`, or a test's fake owner.
 ///

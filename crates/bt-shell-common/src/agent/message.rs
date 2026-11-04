@@ -399,8 +399,8 @@ impl Home {
 impl Place {
     /// What the pane this asks for runs: no `fresh` is a program the script started in the
     /// terminal, `fresh` is a shell for the Mac to start, the one named or the user's.
-    pub fn runs(&self) -> crate::restore::PaneRuns {
-        use crate::restore::PaneRuns;
+    pub fn runs(&self) -> crate::child::PaneRuns {
+        use crate::child::PaneRuns;
         match (&self.fresh, &self.shell) {
             (None, _) => PaneRuns::Program {
                 keep_open: self.keep_open,
@@ -1734,13 +1734,13 @@ mod tests {
         // What the pane runs follows from the request, with no second word for it.
         assert_eq!(
             place.runs(),
-            crate::restore::PaneRuns::Shell("/opt/bin/fish".into())
+            crate::child::PaneRuns::Shell("/opt/bin/fish".into())
         );
         let own = Place {
             shell: None,
             ..place.clone()
         };
-        assert_eq!(own.runs(), crate::restore::PaneRuns::UserShell);
+        assert_eq!(own.runs(), crate::child::PaneRuns::UserShell);
         let unfresh = Place {
             fresh: None,
             ..place
@@ -1753,7 +1753,7 @@ mod tests {
         };
         assert_eq!(
             program.runs(),
-            crate::restore::PaneRuns::Program { keep_open: true }
+            crate::child::PaneRuns::Program { keep_open: true }
         );
     }
 

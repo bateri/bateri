@@ -211,6 +211,53 @@ fn passwd_field(pick: impl Fn(&libc::passwd) -> *mut std::ffi::c_char) -> Option
     value.to_str().ok().map(str::to_owned)
 }
 
+/// What a pane runs, when a command asked for it: one answer to what it is born with and what a
+/// restart brings back, because the two must not disagree.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum PaneRuns {
+    /// The user's own shell: every pane the user opens, and `bateri split` with no program.
+    #[default]
+    UserShell,
+    /// A shell a command named alone (`bateri split -- fish`), by its path: that shell's
+    /// integration and dock, and it comes back as that shell.
+    Shell(PathBuf),
+    /// A program a command started in the terminal (`bateri split -- make`). It has no shell to
+    /// fill a dock. With its terminal gone it does not come back, unless it was asked to stay
+    /// open: then it comes back as the user's shell, as a server's does.
+    Program { keep_open: bool },
+}
+
+impl PaneRuns {
+    /// The shell the pane asks to be started with; `None` is the user's own.
+    pub fn shell(&self) -> Option<&Path> {
+        match self {
+            Self::Shell(path) => Some(path),
+            Self::UserShell | Self::Program { .. } => None,
+        }
+    }
+
+    /// What a pane that ran this runs after a restart. `terminal_here`: its terminal is still
+    /// there and the pane shows it again, so it is what it was. Without it a program asked to
+    /// stay open is the user's shell, and so is a shell that is not on the machine any more. A
+    /// program that is not to stay does not get here ([`Self::ends_with_its_terminal`]).
+    pub fn after_restart(
+        &self,
+        terminal_here: bool,
+        shell_exists: impl FnOnce(&Path) -> bool,
+    ) -> Self {
+        match self {
+            Self::Shell(path) if !terminal_here && !shell_exists(path) => Self::UserShell,
+            Self::Program { keep_open: true } if !terminal_here => Self::UserShell,
+            other => other.clone(),
+        }
+    }
+
+    /// Whether the pane goes when its terminal does.
+    pub fn ends_with_its_terminal(&self) -> bool {
+        matches!(self, Self::Program { keep_open: false })
+    }
+}
+
 /// The command that spawns an untimed session's shell and the shell's position
 /// relative to the PTY child — **from one call**, because the process table
 /// (`jobs::foreground`) reads the command's shape through the parent: a Linux

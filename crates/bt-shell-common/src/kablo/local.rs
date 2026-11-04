@@ -33,8 +33,9 @@
 //! reads its bytes from a stream the service holds as a raw holder
 //! ([`super::service::Service::open_local`], [`super::hub::Hub::open_raw`]): the terminal is
 //! started with the command, the environment and the directory the session would have started its
-//! own child with ([`new_session`]), so the shell cannot tell. For now such a pane is not carried
-//! over an update or a quit — its terminal is ended with its session — and it is not in
+//! own child with ([`new_session`]), so the shell cannot tell. A pane that comes back after an
+//! update, a quit that kept the programs or a crash is shown its terminal again
+//! (`Core::local_start`). It is not in
 //! [`super::service::Service::shown`]: the surfaces that ask for a server's terminal of a pane do
 //! not find one.
 

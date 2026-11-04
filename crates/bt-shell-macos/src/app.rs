@@ -60,7 +60,7 @@ use crate::pane::TerminalPane;
 use crate::pane_drag::Session;
 use crate::preview_cache;
 use crate::remote_files::Sweep;
-use crate::restore::{self, Frame, PaneRuns, Saved, SavedKept, SavedPane, SavedWindow};
+use crate::restore::{self, Frame, Saved, SavedKept, SavedPane, SavedWindow};
 use crate::settings_window::SettingsWindow;
 use crate::split::{Axis, Direction, Tree};
 use crate::ssh_route::{self, Masters};
@@ -74,6 +74,7 @@ use crate::window::{self, CloseScope, Placement, Seat, TerminalWindow};
 use crate::zoom::Zoom;
 use crate::{Options, Run, Workload};
 use crate::{child, focus, jobs, retired_holders, settings};
+use bt_shell_common::child::PaneRuns;
 
 /// Guard for zero idle frames: in the [`Workload::Smoke`] workload the window
 /// sits idle for ~`run_seconds` seconds after the first draw.
@@ -4650,7 +4651,7 @@ impl AppDelegate {
         if gone_with_its_terminal(pane, &start, terminal_here) {
             return None;
         }
-        start.runs = pane.runs.after_restart(terminal_here);
+        start.runs = pane.runs.after_restart(terminal_here, Path::exists);
         let (launch, theme) = self.pane_launch(tab, None, Opening::Restore, None);
         let mut launch = launch.with_launch(start);
         if launch.runs != PaneRuns::UserShell {

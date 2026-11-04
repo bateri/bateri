@@ -13,7 +13,7 @@
 //! version ([`HEADER`] + [`VERSION`]), then one `W` line per window, one `T` line per tab under it
 //! and one `P` line per pane under that; the tree is a pre-order token run (`S h|v {ratio} … L
 //! {index}`). **Every version the writer still writes is read**: version 8 gave a pane what it runs
-//! ([`PaneRuns`], the field after the remote line) and a window, a group and a tab the
+//! ([`crate::child::PaneRuns`], the field after the remote line) and a window, a group and a tab the
 //! number it is known by from outside ([`crate::ids`]: the last field of a `W` and a `G` line, a
 //! `T` line's field after the group, `-` for none), version 7 gave a window whether
 //! its side column hides and whether it shows Activity (a `W` line's eighth and ninth fields,
@@ -86,6 +86,7 @@ use std::path::{Path, PathBuf};
 use bt_core::PaneUuid;
 use kablo_proto::SessionId;
 
+use crate::child::PaneRuns;
 use crate::groups::{Groups, Part};
 use crate::split::{Axis, Tree};
 use crate::tabs::Tabs;
@@ -242,49 +243,6 @@ pub struct SavedPane {
     pub history: bool,
     /// What the pane runs.
     pub runs: PaneRuns,
-}
-
-/// What a pane runs, when a command asked for it: one answer to what it is born with and what a
-/// restart brings back, because the two must not disagree.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub enum PaneRuns {
-    /// The user's own shell: every pane the user opens, and `bateri split` with no program.
-    #[default]
-    UserShell,
-    /// A shell a command named alone (`bateri split -- fish`), by its path: that shell's
-    /// integration and dock, and it comes back as that shell.
-    Shell(PathBuf),
-    /// A program a command started in the terminal (`bateri split -- make`). It has no shell to
-    /// fill a dock. With its terminal gone it does not come back, unless it was asked to stay
-    /// open: then it comes back as the user's shell, as a server's does.
-    Program { keep_open: bool },
-}
-
-impl PaneRuns {
-    /// The shell the pane asks to be started with; `None` is the user's own.
-    pub fn shell(&self) -> Option<&Path> {
-        match self {
-            Self::Shell(path) => Some(path),
-            Self::UserShell | Self::Program { .. } => None,
-        }
-    }
-
-    /// What a pane that ran this runs after a restart. `terminal_here`: its terminal is still
-    /// there and the pane shows it again, so it is what it was. Without it a program asked to
-    /// stay open is the user's shell, and so is a shell that is not on the machine any more. A
-    /// program that is not to stay does not get here ([`Self::ends_with_its_terminal`]).
-    pub fn after_restart(&self, terminal_here: bool) -> Self {
-        match self {
-            Self::Shell(path) if !terminal_here && !path.exists() => Self::UserShell,
-            Self::Program { keep_open: true } if !terminal_here => Self::UserShell,
-            other => other.clone(),
-        }
-    }
-
-    /// Whether the pane goes when its terminal does.
-    pub fn ends_with_its_terminal(&self) -> bool {
-        matches!(self, Self::Program { keep_open: false })
-    }
 }
 
 /// A terminal a server keeps (kablo), as far as a restored pane needs to find it again: which
@@ -744,9 +702,9 @@ impl Saved {
             .windows
             .iter()
             .any(|window| window.column_hidden || window.activity);
-        // A session with no number in it is one a test made; every window the app saves has one,
-        // so the app's sessions are all in this version.
-        let numbered = self.windows.iter().any(|window| {
+        // A session with no number in it and no pane that says what it runs is one a test made;
+        // every window the app saves has a number, so the app's sessions are all in this version.
+        let current = self.windows.iter().any(|window| {
             window.id.is_some()
                 || window.groups.iter().any(|group| group.id.is_some())
                 || window.tabs.iter().any(|tab| {
@@ -757,7 +715,7 @@ impl Saved {
                             .any(|pane| pane.runs != PaneRuns::UserShell)
                 })
         });
-        let version = if numbered {
+        let version = if current {
             VERSION
         } else if flagged {
             FLAGGED
@@ -1859,21 +1817,20 @@ mod tests {
     /// A restart brings back what the pane ran, as far as that is still there.
     #[test]
     fn what_a_pane_runs_after_a_restart_follows_its_terminal() {
-        let gone_shell = PaneRuns::Shell(PathBuf::from("/no/such/place/fish"));
-        let shell_here = PaneRuns::Shell(std::env::current_exe().expect("this program"));
+        let shell = PaneRuns::Shell(PathBuf::from("/opt/bin/fish"));
         let program = PaneRuns::Program { keep_open: false };
         let stays = PaneRuns::Program { keep_open: true };
         // Its terminal is there: it is what it was, whatever became of the file.
-        for runs in [&gone_shell, &shell_here, &program, &stays] {
-            assert_eq!(&runs.after_restart(true), runs);
+        for runs in [&shell, &program, &stays] {
+            assert_eq!(&runs.after_restart(true, |_| false), runs);
         }
         // It is not: a shell starts again if it can, and a program asked to stay is the user's.
-        assert_eq!(gone_shell.after_restart(false), PaneRuns::UserShell);
-        assert_eq!(shell_here.after_restart(false), shell_here);
-        assert_eq!(stays.after_restart(false), PaneRuns::UserShell);
+        assert_eq!(shell.after_restart(false, |_| true), shell);
+        assert_eq!(shell.after_restart(false, |_| false), PaneRuns::UserShell);
+        assert_eq!(stays.after_restart(false, |_| true), PaneRuns::UserShell);
         assert!(program.ends_with_its_terminal());
         assert!(!stays.ends_with_its_terminal());
-        assert!(!shell_here.ends_with_its_terminal());
+        assert!(!shell.ends_with_its_terminal());
         assert!(!PaneRuns::UserShell.ends_with_its_terminal());
     }
 

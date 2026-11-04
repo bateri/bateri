@@ -87,10 +87,10 @@ use crate::hold_service;
 use crate::ids::{Id, Kind as IdKind};
 use crate::launch::{Held, Resume};
 use crate::pane::TerminalPane;
-use crate::restore::PaneRuns;
 use crate::tab::TerminalTab;
 use crate::uploader;
 use crate::window::{Lodging, TerminalWindow, initial_rect};
+use bt_shell_common::child::PaneRuns;
 
 /// What outlives a request.
 #[derive(Default)]
