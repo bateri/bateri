@@ -12,6 +12,9 @@
 /// compiler turns into a few vector instructions.
 const BLOCK: usize = 16;
 
+/// How many bytes at the start are looked at one at a time before the blocks.
+const NEAR: usize = 8;
+
 /// How many bytes at the start of `bytes` `stop` says nothing about: the
 /// index of the first byte it stops at, or the length when none.
 ///
@@ -20,18 +23,27 @@ const BLOCK: usize = 16;
 /// and then of the block's bytes one at a time to find which.
 #[inline]
 pub(crate) fn until(bytes: &[u8], stop: impl Fn(u8) -> bool) -> usize {
+    // A stop within the first bytes is the common one in a stream thick with
+    // sequences, and a block's comparison and then the walk of the block for
+    // the byte cost more than the bytes themselves.
+    let (near, far) = bytes.split_at(bytes.len().min(NEAR));
+    if let Some(at) = near.iter().position(|&byte| stop(byte)) {
+        return at;
+    }
     let mut at = 0;
-    for block in bytes.chunks_exact(BLOCK) {
+    for block in far.chunks_exact(BLOCK) {
         if block.iter().fold(false, |any, &byte| any | stop(byte)) {
             break;
         }
         at += BLOCK;
     }
-    let rest = bytes.get(at..).unwrap_or_default();
-    at + rest
-        .iter()
-        .position(|&byte| stop(byte))
-        .unwrap_or(rest.len())
+    let rest = far.get(at..).unwrap_or_default();
+    near.len()
+        + at
+        + rest
+            .iter()
+            .position(|&byte| stop(byte))
+            .unwrap_or(rest.len())
 }
 
 #[cfg(test)]

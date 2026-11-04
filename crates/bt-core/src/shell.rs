@@ -4791,6 +4791,29 @@ impl CsiScan {
         }
     }
 
+    /// Takes a parameter byte (a digit) or an intermediate byte, a separator or a
+    /// private marker (0x20–0x3f).
+    fn take(&mut self, byte: u8) {
+        if byte.is_ascii_digit() {
+            self.param = self
+                .param
+                .saturating_mul(10)
+                .saturating_add(u32::from(byte - b'0'));
+            self.has_digit = true;
+            if self.param > MAX_CSI_PARAM {
+                self.simple = false;
+            }
+        // Intermediate bytes (0x20–0x2F), parameter separators (`;`, `:`) and private
+        // markers (`<=>?`) — the answer for all three is the same: the sequence is not
+        // ours, but **the framing continues**. `ESC [ ? 1049 h` neither sets a flag nor
+        // gets us stuck.
+        } else if byte == b'?' && self.simple && !self.has_digit && !self.private {
+            self.private = true;
+        } else {
+            self.simple = false;
+        }
+    }
+
     /// Whether the sequence is `CSI 2 J` — terminator included.
     fn is_erase_all(&self, final_byte: u8) -> bool {
         self.simple
@@ -5182,6 +5205,17 @@ impl Scanner {
                 }
                 continue;
             }
+            // A CSI is taken whole when it is all in the read: the sequences the
+            // scanner reads are three, and the rest of the ordinary stream's are
+            // most of what is walked after the `ESC`.
+            if self.state == ScanState::Escape && rest.first() == Some(&b'[') {
+                if let Some(taken) = self.csi_run(rest.get(1..).unwrap_or_default(), &mut on_event)
+                {
+                    self.state = ScanState::Ground;
+                    rest = rest.get(1 + taken..).unwrap_or_default();
+                    continue;
+                }
+            }
             // An OSC that is not ours is skipped the same way, to the byte
             // that ends it: an OSC 52's copy, a long title.
             if self.state == ScanState::Skip {
@@ -5441,43 +5475,12 @@ impl Scanner {
                 // C0s inside the sequence are `execute`d in place; the state stays, the
                 // parameter is not affected.
                 0x00..=0x17 | 0x19 | 0x1c..=0x1f => {}
-                b'0'..=b'9' => {
-                    csi.param = csi
-                        .param
-                        .saturating_mul(10)
-                        .saturating_add(u32::from(byte - b'0'));
-                    csi.has_digit = true;
-                    if csi.param > MAX_CSI_PARAM {
-                        csi.simple = false;
-                    }
-                    self.state = ScanState::Csi(csi);
-                }
-                // Intermediate bytes (0x20–0x2F), parameter separators (`;`, `:`) and private
-                // markers (`<=>?`) — the answer for all three is the same: the sequence is not
-                // ours, but **the framing continues**. `ESC [ ? 1049 h` neither sets a flag nor
-                // gets us stuck.
                 0x20..=0x3f => {
-                    if byte == b'?' && csi.simple && !csi.has_digit && !csi.private {
-                        csi.private = true;
-                    } else {
-                        csi.simple = false;
-                    }
+                    csi.take(byte);
                     self.state = ScanState::Csi(csi);
                 }
                 0x40..=0x7e => {
-                    if csi.is_paste_on(byte) {
-                        on_event(ScanEvent::PasteOn);
-                    }
-                    if csi.is_cell_size_query(byte) {
-                        on_event(ScanEvent::CellSizeQuery);
-                    }
-                    if csi.is_erase_all(byte) {
-                        // **Saturating collection, not wrapping.** The consumer drains the counter on
-                        // every read round, so the ceiling is reached only with four billion clears in a
-                        // single `read()`; if it wrapped that read would return `0` and say "no clear
-                        // happened" — the wrong direction of loss.
-                        self.screen_clears = self.screen_clears.saturating_add(1);
-                    }
+                    self.csi_final(csi, byte, on_event);
                     self.state = ScanState::Ground;
                 }
                 // `0x7F` and everything above 0x7F is `anywhere`'s `_ => ()` arm: ignored, the
@@ -5485,6 +5488,52 @@ impl Scanner {
                 _ => {}
             },
         }
+    }
+
+    /// A CSI ends at `final_byte`: what it was, said.
+    fn csi_final(
+        &mut self,
+        csi: CsiScan,
+        final_byte: u8,
+        on_event: &mut impl FnMut(ScanEvent<'_>),
+    ) {
+        if csi.is_paste_on(final_byte) {
+            on_event(ScanEvent::PasteOn);
+        }
+        if csi.is_cell_size_query(final_byte) {
+            on_event(ScanEvent::CellSizeQuery);
+        }
+        if csi.is_erase_all(final_byte) {
+            // **Saturating collection, not wrapping.** The consumer drains the counter on
+            // every read round, so the ceiling is reached only with four billion clears in a
+            // single `read()`; if it wrapped that read would return `0` and say "no clear
+            // happened" — the wrong direction of loss.
+            self.screen_clears = self.screen_clears.saturating_add(1);
+        }
+    }
+
+    /// Takes a whole CSI that starts at `body` (the bytes after `ESC [`) in one step,
+    /// when it is all there and stepping through it would be all the same: parameters
+    /// and intermediates (0x20–0x3f) and then a final byte. The sequences the scanner
+    /// reads end in `J`, `t` or `h`, and only those have their parameters collected;
+    /// any other final byte ends the sequence with nothing to say, whatever came before
+    /// it. How many bytes it took, `None` when the sequence is cut by the end of the
+    /// read or holds a byte the step reads differently (a control, `DEL`, a byte above
+    /// it): the step walks that one.
+    fn csi_run(&mut self, body: &[u8], on_event: &mut impl FnMut(ScanEvent<'_>)) -> Option<usize> {
+        let params = skim::until(body, |byte| !matches!(byte, 0x20..=0x3f));
+        let final_byte = *body.get(params)?;
+        if !matches!(final_byte, 0x40..=0x7e) {
+            return None;
+        }
+        if matches!(final_byte, b'J' | b't' | b'h') {
+            let mut csi = CsiScan::new();
+            for &byte in body.get(..params).unwrap_or_default() {
+                csi.take(byte);
+            }
+            self.csi_final(csi, final_byte, on_event);
+        }
+        Some(params + 1)
     }
 
     /// Closes the sequence and moves to the next state according to the terminator
@@ -6686,6 +6735,82 @@ mod tests {
         assert_eq!(clears(b"\x1b[99999999999999999999J"), 0);
         // Two clears are counted twice: the consumer is a generation counter, not a flag.
         assert_eq!(clears(b"\x1b[2J\x1b[2J"), 2);
+    }
+
+    /// What the scanner makes of `chunks` read in turn: every event it gives, as text, the
+    /// clears it counted, and the state it stands in after each read.
+    fn scanned(chunks: &[&[u8]]) -> (Vec<String>, u32, Vec<ScanState>) {
+        let mut scanner = Scanner::new();
+        let (mut events, mut clears, mut states) = (Vec::new(), 0, Vec::new());
+        for chunk in chunks {
+            scanner.feed(chunk, |event| {
+                events.push(match event {
+                    ScanEvent::Mark(mark) => format!("{mark:?}"),
+                    ScanEvent::PasteOn => "paste".to_owned(),
+                    ScanEvent::CellSizeQuery => "cell".to_owned(),
+                    _ => "other".to_owned(),
+                });
+            });
+            clears += scanner.take_screen_clears();
+            states.push(scanner.state);
+        }
+        (events, clears, states)
+    }
+
+    /// A CSI the scanner takes in one go when it is all in the read is the CSI stepped
+    /// through: the same events, the same clears and, wherever the reads cut it, the same
+    /// state at the end of each. Bytes one at a time never meet the whole-sequence path, so
+    /// they are the stepping the rest is held to; a stream cut in one place and in two
+    /// meets it with the sequence whole, cut at its start, in its parameters and before its
+    /// final byte.
+    #[test]
+    fn a_csi_taken_whole_is_the_csi_stepped_through() {
+        let mut streams: Vec<Vec<u8>> = [
+            "\x1b[m\x1b[?1h\x1b[H\x1b[1;2;3;4:3;31m\x1b[38:5:24;48:2:125:136:147m",
+            "\x1b[2J\x1b[02J\x1b[?2J\x1b[2;2J\x1b[2 J\x1b[16t\x1b[016t\x1b[?16t\x1b[?2004h",
+            "\x1b[?2004l\x1b[2004h\x1b[?2004;1h\x1b[99999999999999999999J\x1b[22J\x1b[2K",
+            "\x1b[2\x07J\x1b[2\x18J\x1b[2\x1b]133;A\x07\x1b[\x7fm\x1b[\u{e9}m\x1b[3\x00J\x1b[",
+            "\x1b[2J\x1b]133;A\x07\x1b[16t\x1b]133;B\x07text\x1b[m\x1b[?2004h\x1b]133;C\x07",
+        ]
+        .iter()
+        .map(|stream| stream.as_bytes().to_vec())
+        .collect();
+        let alphabet: &[u8] = b"\x1b\x1b\x1b[[[]\x07\x18\x1a\x00\x7f\x80\xe9;:?0126 JthmA3 a#";
+        let mut seed: u64 = 0x9e37_79b9_7f4a_7c15;
+        for _ in 0..96 {
+            let stream = (0..40)
+                .map(|_| {
+                    seed ^= seed << 13;
+                    seed ^= seed >> 7;
+                    seed ^= seed << 17;
+                    let pick = usize::try_from(seed % alphabet.len() as u64).unwrap_or(0);
+                    alphabet.get(pick).copied().unwrap_or(b'x')
+                })
+                .collect();
+            streams.push(stream);
+        }
+        for stream in &streams {
+            let ends = |chunks: &[&[u8]]| {
+                let (found, counted, states) = scanned(chunks);
+                (found, counted, states.last().copied())
+            };
+            let one_by_one: Vec<&[u8]> = stream.chunks(1).collect();
+            let stepped = ends(&one_by_one);
+            assert_eq!(ends(&[stream]), stepped, "{stream:?} whole");
+            for first in 0..=stream.len() {
+                let (head, rest) = stream.split_at(first);
+                assert_eq!(ends(&[head, rest]), stepped, "{stream:?} cut at {first}");
+                for second in 0..=rest.len() {
+                    let (middle, tail) = rest.split_at(second);
+                    assert_eq!(
+                        ends(&[head, middle, tail]),
+                        stepped,
+                        "{stream:?} cut at {first} and {}",
+                        first + second
+                    );
+                }
+            }
+        }
     }
 
     #[test]

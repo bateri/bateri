@@ -1311,7 +1311,18 @@ impl Tail {
     /// as stepping through them one by one (the sameness is a test's).
     fn skim(&mut self, bytes: &[u8]) -> usize {
         match self.state {
-            Seq::Ground if self.utf8_need == 0 => ground_run(bytes),
+            Seq::Ground if self.utf8_need == 0 => {
+                let mut at = ground_run(bytes);
+                // A tail that keeps nothing passes a whole CSI that is in the read
+                // as it passes text: stepping through it ends where it began.
+                while self.lean
+                    && let Some(len) = bytes.get(at..).and_then(csi_len)
+                {
+                    at += len;
+                    at += ground_run(bytes.get(at..).unwrap_or_default());
+                }
+                at
+            }
             Seq::Apc => {
                 let run = skim::until(bytes, |byte| matches!(byte, 0x18 | 0x1a | 0x1b));
                 let room = APC_KEEP.saturating_sub(self.bytes.len());
@@ -1326,6 +1337,17 @@ impl Tail {
                 self.keep_all(bytes.get(..taken).unwrap_or_default());
                 taken
             }
+            // The `[` that opens a CSI is the one byte after an `ESC` that every
+            // sequence of the common kind passes through.
+            Seq::Escape if self.lean && bytes.first() == Some(&b'[') => {
+                self.state = Seq::Csi;
+                1
+            }
+            // A tail that keeps nothing steps a CSI's parameters and intermediates
+            // (0x20..=0x3f) without changing anything: [`Tail::keep_param`] has
+            // nothing to keep, and the state moves only at a final byte or a
+            // control.
+            Seq::Csi if self.lean => skim::until(bytes, |byte| !matches!(byte, 0x20..=0x3f)),
             Seq::OscDropped => skim::until(bytes, |byte| byte < 0x20),
             Seq::Ignored => skim::until(bytes, |byte| matches!(byte, 0x18 | 0x1a | 0x1b)),
             Seq::DcsBody => skim::until(bytes, |byte| matches!(byte, 0x18 | 0x1a | 0x1b | 0x9c)),
@@ -1532,6 +1554,17 @@ impl Tail {
             },
         }
     }
+}
+
+/// The length of the CSI `bytes` starts with, when all of it is there: `ESC [`,
+/// parameters and intermediates (0x20..=0x3f) and a final byte (0x40..=0x7e).
+/// [`Tail::step`] takes each of them from the ground state back to it, and a lean
+/// tail keeps none of their bytes. Anything else — a control or a byte above `~`
+/// among them, a cut — is `None`: the step reads those.
+fn csi_len(bytes: &[u8]) -> Option<usize> {
+    let body = bytes.strip_prefix(b"\x1b[")?;
+    let params = skim::until(body, |byte| !matches!(byte, 0x20..=0x3f));
+    matches!(body.get(params), Some(0x40..=0x7e)).then_some(2 + params + 1)
 }
 
 /// How far the ground state goes on unmoved, with no character half read: ASCII
@@ -2469,6 +2502,12 @@ pub(crate) mod tests {
                         stepped.step(byte);
                     }
                     assert_eq!(
+                        (lean.state, lean.utf8_need),
+                        (stepped.state, stepped.utf8_need),
+                        "{:?} read {read} at a time, the lean tail",
+                        String::from_utf8_lossy(stream)
+                    );
+                    assert_eq!(
                         (
                             skimmed.state,
                             skimmed.utf8_need,
@@ -2483,6 +2522,75 @@ pub(crate) mod tests {
                         ),
                         "{:?} read {read} at a time",
                         String::from_utf8_lossy(stream)
+                    );
+                }
+            }
+        }
+    }
+
+    /// The read path's tail takes a CSI's `[`, parameters and intermediates at once
+    /// ([`Tail::skim`]): wherever one cut or two cut a stream of CSIs, it stands where the
+    /// tail stepping byte by byte stands after each read.
+    #[test]
+    fn a_lean_tail_cut_in_one_place_or_two_stands_where_stepping_does() {
+        let mut streams: Vec<Vec<u8>> = [
+            "\x1b[m\x1b[?1h\x1b[H\x1b[1;2;3;4:3;31m\x1b[38:5:24;48:2:125:136:147m",
+            "a\x1b[10`b\x1b[100b\x1b[?1l\x1b[ q\x1b[2\x07J\x1b[3\x18m\x1b[4\x1b[5m\x1b[\x7f6m",
+            "\x1b[1;2\x1b]0;t\x07\x1b[é\x1b[7\u{e9}m \u{e9}\x1b[",
+        ]
+        .iter()
+        .map(|stream| stream.as_bytes().to_vec())
+        .collect();
+        let alphabet: &[u8] =
+            b"\x1b\x1b\x1b[[[]\x07\x18\x1a\x00\x7f\x80\xc3\xa9;:?0126 JthmA_P \\a";
+        let mut seed: u64 = 0xdead_beef_cafe_f00d;
+        for _ in 0..96 {
+            let stream = (0..40)
+                .map(|_| {
+                    seed ^= seed << 13;
+                    seed ^= seed >> 7;
+                    seed ^= seed << 17;
+                    let pick = usize::try_from(seed % alphabet.len() as u64).unwrap_or(0);
+                    alphabet.get(pick).copied().unwrap_or(b'x')
+                })
+                .collect();
+            streams.push(stream);
+        }
+        let stands = |chunks: &[&[u8]]| {
+            let mut lean = Tail::lean();
+            let mut at = Vec::new();
+            for chunk in chunks {
+                lean.feed(chunk);
+                at.push((lean.state, lean.utf8_need, lean.mid_sequence()));
+            }
+            at
+        };
+        let steps = |chunks: &[&[u8]]| {
+            let mut stepped = Tail::default();
+            let mut at = Vec::new();
+            for chunk in chunks {
+                for &byte in *chunk {
+                    stepped.step(byte);
+                }
+                at.push((stepped.state, stepped.utf8_need, stepped.mid_sequence()));
+            }
+            at
+        };
+        for stream in &streams {
+            for first in 0..=stream.len() {
+                let (head, rest) = stream.split_at(first);
+                assert_eq!(
+                    stands(&[head, rest]),
+                    steps(&[head, rest]),
+                    "{stream:?} cut at {first}"
+                );
+                for second in 0..=rest.len() {
+                    let (middle, tail) = rest.split_at(second);
+                    assert_eq!(
+                        stands(&[head, middle, tail]),
+                        steps(&[head, middle, tail]),
+                        "{stream:?} cut at {first} and {}",
+                        first + second
                     );
                 }
             }
