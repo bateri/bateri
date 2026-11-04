@@ -12,7 +12,9 @@
 //! **The format** follows `remote-hosts` (`ssh_wrap`): line based, the first line names the
 //! version ([`HEADER`] + [`VERSION`]), then one `W` line per window, one `T` line per tab under it
 //! and one `P` line per pane under that; the tree is a pre-order token run (`S h|v {ratio} … L
-//! {index}`). **Every version the writer still writes is read**: version 7 gave a window whether
+//! {index}`). **Every version the writer still writes is read**: version 8 gave a window, a group and a tab the
+//! number it is known by from outside ([`crate::ids`]: the last field of a `W` and a `G` line, a
+//! `T` line's field after the group, `-` for none), version 7 gave a window whether
 //! its side column hides and whether it shows Activity (a `W` line's eighth and ninth fields,
 //! `0`/`1` each, after the width), version 6 gave a kept terminal
 //! whether its pane closes when the terminal ends and who asked for the pane (two fields after
@@ -27,10 +29,14 @@
 //! column was resized and no group exists, 2 while only names are, 3 once a width is, 4 once a
 //! window has a group, 5 once a pane shows a terminal a server keeps, 6 once such a pane was
 //! asked for by a program on the server (it closes with its terminal, or says who asked), 7 once
-//! a window hides its side column or shows Activity — so a
+//! a window hides its side column or shows Activity, 8 once anything has a number — so a
 //! session that uses
 //! nothing new stays readable by the bateri before
-//! it, whose reader drops any other number and, with it, the saved layout. A version's frozen
+//! it, whose reader drops any other number and, with it, the saved layout. Every window the app
+//! saves has its number, so the app writes 8 always and a bateri from before numbers does not
+//! read the layout of one that has them; the terminals kablo keeps are not in it and carry on.
+//! A session that was read without numbers is given them when its windows open, from counters
+//! that are never below what was read ([`crate::ids::Counters::observe`]). A version's frozen
 //! text stays in the tests: its reader must keep reading it. The strip a window saves is the
 //! flat order the groups were kept in (`groups::Groups::check`: the ungrouped tabs, then each
 //! group's tabs together, in the groups' order), and the reader builds the grouping through that
@@ -86,11 +92,16 @@ use crate::tabs::Tabs;
 /// The first line's word; the version follows it after one space.
 pub const HEADER: &str = "bateri-session";
 
-/// The format's current version: a window may say that its side column hides and that it shows
-/// Activity. The ones before it ([`ASKED`], [`KEPT`], [`GROUPED`], [`SIDED`], [`NAMED`],
-/// [`UNNAMED`]) are read too; any other number is not read (a newer bateri's file after a
-/// downgrade is dropped, not misread).
-pub const VERSION: u32 = 7;
+/// The format's current version: a window, a group and a tab each carry the number it is known
+/// by (`w1`, `g1`, `t3`, [`crate::ids`]). The ones before it ([`FLAGGED`], [`ASKED`], [`KEPT`],
+/// [`GROUPED`], [`SIDED`], [`NAMED`], [`UNNAMED`]) are read too; any other number is not read (a
+/// newer bateri's file after a downgrade is dropped, not misread).
+pub const VERSION: u32 = 8;
+
+/// The version before numbers, which a window may say hides its side column and shows Activity.
+/// Nothing is written in it any more: every live window, group and tab has a number, and the
+/// writer gives a session the oldest version that holds what it has — numbers are in all of them.
+const FLAGGED: u32 = 7;
 
 /// The version before a window's column and Activity flags, which a session whose windows all
 /// show their column and their tabs is still written in: a kept terminal may say that its pane
@@ -158,6 +169,9 @@ pub struct Frame {
 /// A window: its tabs in tab-bar order.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SavedWindow {
+    /// The number the window is known by (`w1`); `None` for one a session before numbers left,
+    /// which is given one when it is opened again.
+    pub id: Option<u64>,
     pub frame: Frame,
     pub tabs: Vec<SavedTab>,
     /// The selected tab's index in `tabs`.
@@ -181,6 +195,8 @@ pub struct SavedWindow {
 /// A group of a window's tabs.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SavedGroup {
+    /// The number the group is known by (`g1`); `None` as for a window.
+    pub id: Option<u64>,
     pub name: String,
     /// The column shows the header and, while it is of the group, the tab on screen only.
     pub collapsed: bool,
@@ -191,6 +207,8 @@ pub struct SavedGroup {
 /// A tab: the split tree's shape over `panes`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SavedTab {
+    /// The number the tab is known by (`t3`); `None` as for a window.
+    pub id: Option<u64>,
     pub shape: Shape,
     /// The tab's panes; [`Shape`]'s leaves index this list.
     pub panes: Vec<SavedPane>,
@@ -432,6 +450,7 @@ impl SavedTab {
             .map(|(_, pane)| pane.clone())
             .collect();
         Some(SavedTab {
+            id: self.id,
             shape,
             focused: if kept(self.focused) {
                 moved(self.focused)
@@ -467,6 +486,7 @@ pub fn saved_groups<K: Copy + Eq>(
             grouped[index] = Some(saved.len());
         }
         saved.push(SavedGroup {
+            id: group.number,
             name: group.name.clone(),
             collapsed: group.collapsed,
             resident: group
@@ -475,6 +495,25 @@ pub fn saved_groups<K: Copy + Eq>(
         });
     }
     (saved, grouped)
+}
+
+impl Saved {
+    /// Tells `counters` every number the saved windows, groups and tabs carry, so that the ones
+    /// given from now on are above them.
+    pub fn observe(&self, counters: &mut crate::ids::Counters) {
+        use crate::ids::Kind;
+        for window in &self.windows {
+            if let Some(number) = window.id {
+                counters.observe(Kind::Window, number);
+            }
+            for number in window.groups.iter().filter_map(|group| group.id) {
+                counters.observe(Kind::Group, number);
+            }
+            for number in window.tabs.iter().filter_map(|tab| tab.id) {
+                counters.observe(Kind::Tab, number);
+            }
+        }
+    }
 }
 
 impl SavedWindow {
@@ -496,6 +535,7 @@ impl SavedWindow {
                     return None;
                 }
                 Some(Part {
+                    number: group.id,
                     name: group.name.clone(),
                     collapsed: group.collapsed,
                     resident: group.resident.and_then(|tab| {
@@ -532,6 +572,7 @@ impl SavedWindow {
             .iter()
             .enumerate()
             .map(|(at, group)| Part {
+                number: group.id,
                 name: group.name.clone(),
                 collapsed: group.collapsed,
                 resident: group.resident,
@@ -608,6 +649,20 @@ fn parse_optional(token: &str) -> Option<Option<String>> {
     Some(Some(unescape(token.strip_prefix('+')?)?))
 }
 
+/// A number a window, a group or a tab is known by, `-` for none. The number is from 1 and
+/// written plainly.
+fn render_id(id: Option<u64>) -> String {
+    id.map_or("-".to_owned(), |id| id.to_string())
+}
+
+fn parse_id(token: &str) -> Option<Option<u64>> {
+    if token == "-" {
+        return Some(None);
+    }
+    let number: u64 = token.parse().ok()?;
+    (number > 0 && number.to_string() == token).then_some(Some(number))
+}
+
 fn parse_bit(token: &str) -> Option<bool> {
     match token {
         "0" => Some(false),
@@ -643,8 +698,17 @@ impl Saved {
             .windows
             .iter()
             .any(|window| window.column_hidden || window.activity);
-        let version = if flagged {
+        // A session with no number in it is one a test made; every window the app saves has one,
+        // so the app's sessions are all in this version.
+        let numbered = self.windows.iter().any(|window| {
+            window.id.is_some()
+                || window.groups.iter().any(|group| group.id.is_some())
+                || window.tabs.iter().any(|tab| tab.id.is_some())
+        });
+        let version = if numbered {
             VERSION
+        } else if flagged {
+            FLAGGED
         } else if asked_for {
             ASKED
         } else if kept {
@@ -677,22 +741,31 @@ impl Saved {
                     None => out.push_str(" -"),
                 }
             }
-            if version >= VERSION {
+            if version >= FLAGGED {
                 out.push_str(&format!(
                     " {} {}",
                     u8::from(window.column_hidden),
                     u8::from(window.activity)
                 ));
             }
+            if version >= VERSION {
+                out.push(' ');
+                out.push_str(&render_id(window.id));
+            }
             out.push('\n');
             if version >= GROUPED {
                 for group in &window.groups {
                     out.push_str(&format!(
-                        "G {} {} {}\n",
+                        "G {} {} {}",
                         escape(&group.name),
                         u8::from(group.collapsed),
                         group.resident.map_or("-".to_owned(), |tab| tab.to_string()),
                     ));
+                    if version >= VERSION {
+                        out.push(' ');
+                        out.push_str(&render_id(group.id));
+                    }
+                    out.push('\n');
                 }
             }
             for tab in &window.tabs {
@@ -708,6 +781,11 @@ impl Saved {
                 if version >= GROUPED {
                     out.push(' ');
                     out.push_str(&tab.group.map_or("-".to_owned(), |group| group.to_string()));
+                }
+                // The number sits after the group, before the shape, as they do.
+                if version >= VERSION {
+                    out.push(' ');
+                    out.push_str(&render_id(tab.id));
                 }
                 tab.shape.render(&mut out);
                 out.push('\n');
@@ -762,7 +840,10 @@ impl Saved {
             return None;
         }
         let version = header.next()?.parse::<u32>().ok()?;
-        if ![UNNAMED, NAMED, SIDED, GROUPED, KEPT, ASKED, VERSION].contains(&version)
+        if ![
+            UNNAMED, NAMED, SIDED, GROUPED, KEPT, ASKED, FLAGGED, VERSION,
+        ]
+        .contains(&version)
             || header.next().is_some()
         {
             return None;
@@ -787,7 +868,7 @@ impl Saved {
                     if version < GROUPED || !window.tabs.is_empty() {
                         return None;
                     }
-                    window.groups.push(parse_group(&mut tokens)?);
+                    window.groups.push(parse_group(&mut tokens, version)?);
                 }
                 "T" => windows
                     .last_mut()?
@@ -867,12 +948,19 @@ fn parse_window<'a>(
         None
     };
     // Versions before 7 have neither flag: the column shows, and every tab in it.
-    let (column_hidden, activity) = if version >= VERSION {
+    let (column_hidden, activity) = if version >= FLAGGED {
         (parse_bit(tokens.next()?)?, parse_bit(tokens.next()?)?)
     } else {
         (false, false)
     };
+    // Versions before 8 have no numbers: the window is given one when it is opened.
+    let id = if version >= VERSION {
+        parse_id(tokens.next()?)?
+    } else {
+        None
+    };
     Some(SavedWindow {
+        id,
         frame,
         tabs: Vec::new(),
         selected,
@@ -886,18 +974,26 @@ fn parse_window<'a>(
 
 /// A `G` line's fields after the letter: the name (escaped), whether the group is closed, and the
 /// index of the tab it was last on (`-` for none).
-fn parse_group<'a>(tokens: &mut impl Iterator<Item = &'a str>) -> Option<SavedGroup> {
+fn parse_group<'a>(tokens: &mut impl Iterator<Item = &'a str>, version: u32) -> Option<SavedGroup> {
     let name = unescape(tokens.next()?)?;
     if name.trim().is_empty() {
         return None;
     }
+    let collapsed = parse_bit(tokens.next()?)?;
+    let resident = match tokens.next()? {
+        "-" => None,
+        index => Some(index.parse().ok()?),
+    };
+    let id = if version >= VERSION {
+        parse_id(tokens.next()?)?
+    } else {
+        None
+    };
     Some(SavedGroup {
+        id,
         name,
-        collapsed: parse_bit(tokens.next()?)?,
-        resident: match tokens.next()? {
-            "-" => None,
-            index => Some(index.parse().ok()?),
-        },
+        collapsed,
+        resident,
     })
 }
 
@@ -922,8 +1018,14 @@ fn parse_tab<'a>(tokens: &mut impl Iterator<Item = &'a str>, version: u32) -> Op
     } else {
         None
     };
+    let id = if version >= VERSION {
+        parse_id(tokens.next()?)?
+    } else {
+        None
+    };
     let shape = Shape::parse(tokens, 0)?;
     Some(SavedTab {
+        id,
         shape,
         panes: Vec::new(),
         focused,
@@ -1121,6 +1223,7 @@ fn sweep(lock: &Lock, keep: &HashSet<String>) {
             || name == LAYOUT
             || name == RECENT
             || name == ATTEMPT
+            || name == crate::ids::FILE
             || name == LEDGER
             || name == ledger_temporary()
             || keep.contains(name)
@@ -1306,6 +1409,7 @@ mod tests {
 
     fn single(tab: &str) -> SavedTab {
         SavedTab {
+            id: None,
             shape: Shape::Leaf(0),
             panes: vec![pane(tab)],
             focused: 0,
@@ -1317,6 +1421,7 @@ mod tests {
 
     fn window(tabs: Vec<SavedTab>) -> SavedWindow {
         SavedWindow {
+            id: None,
             frame: Frame {
                 x: 120.5,
                 y: -30.0,
@@ -1336,6 +1441,7 @@ mod tests {
     /// Two windows, a nested split with a zoomed pane, tricky directories and a remote line.
     fn rich() -> Saved {
         let split = SavedTab {
+            id: None,
             shape: Shape::Split {
                 axis: Axis::Horizontal,
                 ratio: 0.3333333333333333,
@@ -1415,11 +1521,13 @@ mod tests {
         first.tabs[3].group = Some(1);
         first.groups = vec![
             SavedGroup {
+                id: None,
                 name: "api server".to_owned(),
                 collapsed: false,
                 resident: Some(2),
             },
             SavedGroup {
+                id: None,
                 name: "ünï".to_owned(),
                 collapsed: true,
                 resident: None,
@@ -1634,6 +1742,45 @@ mod tests {
         saved
     }
 
+    const V8_FIXTURE: &str = concat!(
+        "bateri-session 8\n",
+        "W 120.5 -30 800 600.25 1 1 260.5 1 0 1\n",
+        "G api\\sserver 0 2 1\n",
+        "G ünï 1 - 2\n",
+        "T 0 - - - 1 L 0\n",
+        "P 11111111-2222-3333-4444-555555555555 0 0 - - -\n",
+        "T 1 2 - 0 2 S h 0.3333333333333333 L 2 S v 0.71 L 0 L 1\n",
+        r"P 0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0 3 1 +/Users/ömer/My\sDrive/çalışma\\dosya - -",
+        "\n",
+        r"P 11111111-2222-3333-4444-555555555555 -2 0 +/tmp/tab\there\nnew\sline\rcr\s- +ssh\s-p\s2222\sprod +ada@prod:2222 b-0123456789abcdef0123456789abcdef 1 +Claude\s(t4) -p 2222 ada@prod",
+        "\n",
+        "P AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE 0 1 + + -\n",
+        "T 0 - - 0 3 L 0\n",
+        "P AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE 0 0 - - -\n",
+        // A tab with no number: the field is there and says so.
+        "T 0 - - 1 - L 0\n",
+        "P 0F1E2D3C-4B5A-6978-8796-A5B4C3D2E1F0 0 0 - - -\n",
+        "W 120.5 -30 800 600.25 0 0 - 0 1 2\n",
+        "T 0 - - - 7 L 0\n",
+        r"P AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE 0 0 - - +root@rasp:22\svia\sjump:22 b-fedcba9876543210fedcba9876543210 0 +t12 -J my\sjump root@rasp",
+        "\n",
+    );
+
+    /// [`rich_flagged`] with the numbers of [`V8_FIXTURE`]: the numbers of a window, a group and a
+    /// tab are separate counts, and the fourth tab has none.
+    fn rich_numbered() -> Saved {
+        let mut saved = rich_flagged();
+        saved.windows[0].id = Some(1);
+        saved.windows[0].groups[0].id = Some(1);
+        saved.windows[0].groups[1].id = Some(2);
+        saved.windows[0].tabs[0].id = Some(1);
+        saved.windows[0].tabs[1].id = Some(2);
+        saved.windows[0].tabs[2].id = Some(3);
+        saved.windows[1].id = Some(2);
+        saved.windows[1].tabs[0].id = Some(7);
+        saved
+    }
+
     #[test]
     fn the_previous_version_is_read_byte_for_byte() {
         assert_eq!(Saved::parse(V1_FIXTURE), Some(rich()));
@@ -1642,22 +1789,56 @@ mod tests {
         assert_eq!(Saved::parse(V4_FIXTURE), Some(rich_grouped()));
         assert_eq!(Saved::parse(V5_FIXTURE), Some(rich_kept()));
         assert_eq!(Saved::parse(V6_FIXTURE), Some(rich_asked()));
+        // Nothing in it has a number: a window opened from it is given one then.
+        let flagged = Saved::parse(V7_FIXTURE).expect("version 7");
+        assert_eq!(flagged, rich_flagged());
+        assert!(flagged.windows.iter().all(|window| window.id.is_none()
+            && window.groups.iter().all(|group| group.id.is_none())
+            && window.tabs.iter().all(|tab| tab.id.is_none())));
     }
 
     #[test]
     fn the_current_version_is_read_byte_for_byte() {
-        assert_eq!(Saved::parse(V7_FIXTURE), Some(rich_flagged()));
-        // Either flag alone makes the file version 7; neither leaves it at 6.
+        assert_eq!(Saved::parse(V8_FIXTURE), Some(rich_numbered()));
+        // One number anywhere makes the file version 8; the flags alone leave it at 7.
         for (hidden, activity) in [(true, false), (false, true)] {
             let mut one = rich_asked();
             one.windows[1].column_hidden = hidden;
             one.windows[1].activity = activity;
             assert!(one.render().starts_with("bateri-session 7\n"));
+            assert_eq!(Saved::parse(&one.render()), Some(one.clone()));
+            one.windows[0].id = Some(5);
+            assert!(one.render().starts_with("bateri-session 8\n"));
             assert_eq!(Saved::parse(&one.render()), Some(one));
         }
+        // A number that is not a plain one from 1 is not read.
+        for bad in ["0", "01", "+1", "-1", "x", "1.5"] {
+            let text = V8_FIXTURE.replacen("G ünï 1 - 2", &format!("G ünï 1 - {bad}"), 1);
+            assert_eq!(Saved::parse(&text), None, "{bad}");
+        }
+        // A line one field short is not read either.
+        assert_eq!(
+            Saved::parse(&V8_FIXTURE.replacen("T 0 - - - 1 L 0", "T 0 - - - L 0", 1)),
+            None
+        );
         // A flag that is not a bit is not read.
-        let bad = V7_FIXTURE.replacen("260.5 1 0", "260.5 2 0", 1);
+        let bad = V8_FIXTURE.replacen("260.5 1 0 1", "260.5 2 0 1", 1);
         assert_eq!(Saved::parse(&bad), None);
+    }
+
+    /// What was read is what the counters go on from: a number of a restored window is not given
+    /// to a new one.
+    #[test]
+    fn a_saved_session_tells_the_counters_what_is_in_use() {
+        use crate::ids::{Counters, Kind};
+        let mut counters = Counters::in_memory();
+        rich_numbered().observe(&mut counters);
+        assert_eq!(counters.last(Kind::Window), 2);
+        assert_eq!(counters.last(Kind::Group), 2);
+        assert_eq!(counters.last(Kind::Tab), 7);
+        let mut counters = Counters::in_memory();
+        rich_flagged().observe(&mut counters);
+        assert_eq!(counters.last(Kind::Tab), 0);
     }
 
     /// The writer says the oldest version that holds the session — the one before names while no
@@ -1673,6 +1854,8 @@ mod tests {
         assert_eq!(rich_kept().render(), V5_FIXTURE);
         assert_eq!(rich_asked().render(), V6_FIXTURE);
         assert_eq!(rich_flagged().render(), V7_FIXTURE);
+        // The app's windows all have a number, so the app writes this one.
+        assert_eq!(rich_numbered().render(), V8_FIXTURE);
     }
 
     /// A pane a program asked for is what makes the file version 6, either half of it alone: a
@@ -1951,11 +2134,13 @@ mod tests {
         grouped.selected = 1;
         grouped.groups = vec![
             SavedGroup {
+                id: None,
                 name: "a".to_owned(),
                 collapsed: false,
                 resident: Some(2),
             },
             SavedGroup {
+                id: None,
                 name: "b".to_owned(),
                 collapsed: true,
                 resident: Some(3),
@@ -1984,6 +2169,7 @@ mod tests {
         // The strip reads `6 7 8 | 1 2 3 | 4 5`, `api` last left on 2.
         let (saved, of) = saved_groups(&groups, tabs.ids());
         let group = |name: &str, resident| SavedGroup {
+            id: None,
             name: name.to_owned(),
             collapsed: false,
             resident,
@@ -2216,6 +2402,7 @@ mod tests {
         let saved_tab = |tree: &Tree| {
             let order = tree.leaves();
             SavedTab {
+                id: None,
                 shape: Shape::from_tree(tree, &order).expect("every leaf is known"),
                 panes: order.iter().map(|&n| pane(ids[n as usize - 1])).collect(),
                 focused: 0,
@@ -2452,6 +2639,24 @@ mod tests {
         sweep(&lock, &HashSet::new());
         assert!(ledger.exists() && writing.exists());
         assert!(!lock.dir().join("stray").exists());
+    }
+
+    /// A number that was given is not given again, whatever happens to the layout: a launch with
+    /// nothing to restore (`restore_windows = "off"`, a layout that did not parse) goes on from it.
+    #[test]
+    fn the_counters_of_the_numbers_outlast_every_clear_and_sweep() {
+        use crate::ids::{Counters, Kind};
+        let root = TempRoot::new("ids-sweep");
+        let lock = lock(&directory(&root.0, "dev.bateri.test")).expect("the lock");
+        let mut counters = Counters::open(lock.dir());
+        counters.next(Kind::Tab);
+        counters.next(Kind::Tab);
+        save(&lock, &rich_numbered(), &[]).expect("save");
+        clear(&lock).expect("clear");
+        let _ = take(&lock, true);
+        sweep(&lock, &HashSet::new());
+        let mut again = Counters::open(lock.dir());
+        assert_eq!(again.next(Kind::Tab).to_string(), "t3");
     }
 
     #[test]

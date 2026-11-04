@@ -48,6 +48,7 @@ use objc2_foundation::{
 
 use crate::arrange::Hold;
 use crate::embed;
+use crate::ids;
 use crate::launch::{
     self, Held, Identity, Integration, Launch, Note, ProcessEnv, Resume, fallen_back,
 };
@@ -949,6 +950,10 @@ pub(crate) struct Ivars {
     /// one namespace); ids are not reused, so a stale message going to a
     /// closed window, tab or pane cannot find another.
     next_id: Cell<u64>,
+    /// The numbers a window, a group and a tab are known by from outside (`w1`, `g1`, `t3`):
+    /// counted apart from `next_id`, kept in the session directory so a restart goes on from
+    /// them, and held in memory alone when there is no such directory (`Counters`).
+    ids: RefCell<ids::Counters>,
     /// Was the last-seen system appearance dark — the gate of
     /// [`AppDelegate::apply_appearance`]. `None`: no change has arrived yet (the first news always passes).
     ///
@@ -2674,6 +2679,7 @@ impl AppDelegate {
             stats,
             windows: RefCell::new(Vec::new()),
             next_id: Cell::new(0),
+            ids: RefCell::new(ids::Counters::in_memory()),
             appearance_dark: Cell::new(None),
             scrollbar: Cell::new(None),
             settings_window: RefCell::new(None),
@@ -2729,6 +2735,13 @@ impl AppDelegate {
         let id = self.ivars().next_id.get();
         self.ivars().next_id.set(id + 1);
         id
+    }
+
+    /// The number a new window, group or tab is known by: `saved`, when it was read from a saved
+    /// session (which told the counters so, [`restore::Saved::observe`]), else the next one, on
+    /// disk before it is used.
+    pub(crate) fn number(&self, kind: ids::Kind, saved: Option<u64>) -> u64 {
+        saved.unwrap_or_else(|| self.ivars().ids.borrow_mut().next(kind).number())
     }
 
     /// A **copy** of the window list — every walking path uses this.
@@ -3420,7 +3433,7 @@ impl AppDelegate {
         let (launch, theme) = self.pane_launch(tab_id, Some(&source), opening, start);
         let pane =
             embed::open(mtm, crate::window::initial_rect(), launch).map_err(|e| e.to_string())?;
-        let tab = TerminalTab::new(mtm, tab_id, window.id(), &pane);
+        let tab = TerminalTab::new(mtm, tab_id, window.id(), &pane, None);
         let edge = self.settings().content_edge;
         window.add_tab_seated(&tab, (theme, edge), seat);
         // After the container is attached and sized: the geometry is built
@@ -3785,6 +3798,7 @@ impl AppDelegate {
         let window = TerminalWindow::with_tab(
             self.mtm(),
             id,
+            None,
             from.run(),
             moved,
             Some(frame),
@@ -4316,6 +4330,12 @@ impl AppDelegate {
         // shares the ledger but owns nothing of it, and decides nothing about what the bateri
         // before left.
         let lock = self.restore_lock();
+        // The numbers of windows, groups and tabs ([`ids`]) live in the same directory and go on
+        // from where the launches before stopped, whether or not this launch reads the layout.
+        // An instance without the lock owns nothing there and counts in memory.
+        if let Some(lock) = lock.as_ref() {
+            self.ivars().ids.replace(ids::Counters::open(lock.dir()));
+        }
         // A launch that reads the session is counted until it settles: the launches before it
         // that read it and never settled say how much of it is read again.
         if let Some(lock) = lock.as_ref()
@@ -4440,6 +4460,9 @@ impl AppDelegate {
     /// its tab group was already one saved window, and it comes back as one
     /// window with those tabs.
     fn restore_windows(&self, saved: &Saved) -> (bool, Option<Retained<TerminalWindow>>) {
+        // A number the session holds is in use: nothing made while it comes back, nor after,
+        // is given it again.
+        saved.observe(&mut self.ivars().ids.borrow_mut());
         let screens = self.visible_frames();
         let mut key = None;
         let mut restored = false;
@@ -4505,7 +4528,7 @@ impl AppDelegate {
                     .map(|_| ()),
                 None => {
                     let id = self.next_id();
-                    TerminalWindow::restore(mtm, id, tab_id, &tab, launches, |this| {
+                    TerminalWindow::restore(mtm, id, window.id, tab_id, &tab, launches, |this| {
                         // `open_window`'s order: notice, list, chrome, then shown.
                         this.set_notice(&self.ivars().notices.borrow().subtitle());
                         self.ivars().windows.borrow_mut().push(this.clone());
@@ -4674,6 +4697,7 @@ impl AppDelegate {
                 column_hidden: window.column_hidden(),
                 activity: window.activity(),
                 groups,
+                id: Some(window.number()),
             });
         }
         (Saved { windows }, histories)

@@ -391,7 +391,7 @@ impl<'a> World<'a> {
                 let (config, theme) =
                     app.pane_launch_as(tab_id, Some(anchor), Opening::Tab, Some(&start), incoming);
                 let pane = embed::open(mtm, initial_rect(), config).map_err(|e| e.to_string())?;
-                let born = TerminalTab::new(mtm, tab_id, window.id(), &pane);
+                let born = TerminalTab::new(mtm, tab_id, window.id(), &pane, None);
                 window.add_tab_behind(&born, (theme, app.settings().content_edge), tab.id());
                 pane.observe_frame();
                 if let Err(e) = born.start_hidden(mtm) {

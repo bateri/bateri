@@ -57,6 +57,7 @@ use objc2_foundation::{NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize};
 use crate::agent;
 use crate::app;
 use crate::embed;
+use crate::ids::Kind as IdKind;
 use crate::launch::Closing;
 use crate::notices::Source;
 use crate::pane::{PaneHost, TerminalPane};
@@ -403,6 +404,10 @@ pub(crate) struct TabIvars {
     /// From the application's one counter (windows, tabs and panes share
     /// it): the key by which the panes' events find the tab ([`TabHost`]).
     id: u64,
+    /// The number the tab is known by from outside (`t3`, `bt_shell_common::ids`): the app's, not
+    /// a window's, and the tab's own for good — it goes with the tab to another window, and a
+    /// restart brings it back.
+    number: u64,
     /// The id of the window this tab is in — the way up to the tab bar,
     /// the title and the tab's closing ([`TerminalTab::window`]). It changes
     /// when the tab moves to another window ([`TerminalTab::moved_to`]).
@@ -454,13 +459,17 @@ impl TerminalTab {
         id: u64,
         window: u64,
         pane: &TerminalPane,
+        number: Option<u64>,
     ) -> Retained<Self> {
         let container = SplitView::new(mtm, initial_rect(), pane);
+        // A tab read from a saved session has its number; any other is given the next.
+        let number = app::delegate(mtm).map_or(id, |app| app.number(IdKind::Tab, number));
         // A pane that came from another tab (split off, moved here) reaches
         // this one from now on.
         pane.host().rehomed(pane.id(), id);
         let this = Self::alloc(mtm).set_ivars(TabIvars {
             id,
+            number,
             window: Cell::new(window),
             name: RefCell::new(None),
             container,
@@ -483,7 +492,7 @@ impl TerminalTab {
         first: &TerminalPane,
         edge: Option<ContentEdge>,
     ) -> Retained<Self> {
-        let tab = Self::new(mtm, id, window, first);
+        let tab = Self::new(mtm, id, window, first, None);
         if let Some(session) = first.session() {
             tab.set_theme(session.theme());
         }
@@ -495,6 +504,11 @@ impl TerminalTab {
 
     pub(crate) fn id(&self) -> u64 {
         self.ivars().id
+    }
+
+    /// The number the tab is known by from outside (`t3`).
+    pub(crate) fn number(&self) -> u64 {
+        self.ivars().number
     }
 
     /// The splits container — the window puts it under its tab bar.
@@ -1842,6 +1856,7 @@ impl TerminalTab {
             name: self.name(),
             // The window knows the groups: it says which one the tab is in.
             group: None,
+            id: Some(self.number()),
         };
         Some((tab, histories))
     }

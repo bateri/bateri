@@ -125,6 +125,7 @@ use crate::embed;
 use crate::groups::{
     Click, GroupId, GroupSpot, Groups, Item, Part, Picked, Reach, Spot, Target, View,
 };
+use crate::ids::Kind as IdKind;
 use crate::jobs::Foreground;
 use crate::launch::Closing;
 use crate::moves::{self, Joins, Move};
@@ -620,6 +621,9 @@ pub(crate) struct WindowIvars {
     /// and the pane's ids are separate ([`TerminalTab::id`],
     /// [`TerminalPane::id`]) and from the same counter.
     id: u64,
+    /// The number the window is known by from outside (`w1`, `bt_shell_common::ids`): the app's
+    /// own count of windows, which a restart brings back; `id` is neither.
+    number: u64,
     /// The timed run's recipe, a copy of `AppDelegate`'s (`Copy`): the close
     /// question is never asked in a timed run and must be answerable without
     /// reaching the application delegate ([`TerminalWindow::should_close_now`]).
@@ -2175,7 +2179,7 @@ impl TerminalWindow {
     ) -> Result<Retained<Self>, GpuError> {
         let run = launch.run;
         let pane = embed::open(mtm, initial_rect(), launch)?;
-        Ok(Self::with_pane(mtm, id, tab, run, &pane))
+        Ok(Self::with_pane(mtm, id, tab, run, &pane, (None, None)))
     }
 
     /// The window around a new tab `tab` and its first pane —
@@ -2188,9 +2192,10 @@ impl TerminalWindow {
         tab: u64,
         run: Option<Run>,
         pane: &TerminalPane,
+        (window_number, tab_number): (Option<u64>, Option<u64>),
     ) -> Retained<Self> {
-        let tab = TerminalTab::new(mtm, tab, id, pane);
-        let this = Self::with_tab(mtm, id, run, tab, None, tabs::SIDE_WIDTH);
+        let tab = TerminalTab::new(mtm, tab, id, pane, tab_number);
+        let this = Self::with_tab(mtm, id, window_number, run, tab, None, tabs::SIDE_WIDTH);
         // The content's size changes independently of the window too (the
         // title row); so the geometry comes from the view's own notification,
         // its observer the pane (`TerminalPane::observe_frame`). The
@@ -2211,6 +2216,7 @@ impl TerminalWindow {
     pub(crate) fn with_tab(
         mtm: MainThreadMarker,
         id: u64,
+        number: Option<u64>,
         run: Option<Run>,
         tab: Retained<TerminalTab>,
         frame: Option<NSRect>,
@@ -2289,8 +2295,11 @@ impl TerminalWindow {
         // silently does not type. `acceptsFirstResponder` is also required, both together.
         let accepted = window.makeFirstResponder(Some(pane.view()));
         debug_assert!(accepted, "BateriView must be first responder");
+        // A window read from a saved session has its number; any other is given the next.
+        let number = app::delegate(mtm).map_or(id, |app| app.number(IdKind::Window, number));
         let this = Self::alloc(mtm).set_ivars(WindowIvars {
             id,
+            number,
             run,
             window: window.clone(),
             root,
@@ -2329,6 +2338,7 @@ impl TerminalWindow {
     pub(crate) fn restore(
         mtm: MainThreadMarker,
         id: u64,
+        number: Option<u64>,
         tab: u64,
         saved: &SavedTab,
         launches: Vec<embed::Config>,
@@ -2340,7 +2350,7 @@ impl TerminalWindow {
         let (first, extra) = panes
             .split_first()
             .ok_or_else(|| "a saved tab without panes".to_owned())?;
-        let this = Self::with_pane(mtm, id, tab, run, first);
+        let this = Self::with_pane(mtm, id, tab, run, first, (number, saved.id));
         let tab = this.selected_tab();
         tab.set_name(saved.name.clone());
         tab.adopt(tree, extra);
@@ -2373,7 +2383,7 @@ impl TerminalWindow {
         let (first, extra) = panes
             .split_first()
             .ok_or_else(|| "a saved tab without panes".to_owned())?;
-        let tab = TerminalTab::new(mtm, tab, self.id(), first);
+        let tab = TerminalTab::new(mtm, tab, self.id(), first, saved.id);
         tab.set_name(saved.name.clone());
         self.add_tab(&tab, look);
         first.observe_frame();
@@ -2405,7 +2415,7 @@ impl TerminalWindow {
         let (first, extra) = panes
             .split_first()
             .ok_or_else(|| "a tab without panes".to_owned())?;
-        let tab = TerminalTab::new(mtm, tab, self.id(), first);
+        let tab = TerminalTab::new(mtm, tab, self.id(), first, None);
         self.add_tab(&tab, look);
         first.observe_frame();
         tab.adopt(tree, extra);
@@ -2446,6 +2456,11 @@ impl TerminalWindow {
 
     pub(crate) fn id(&self) -> u64 {
         self.ivars().id
+    }
+
+    /// The number the window is known by from outside (`w1`).
+    pub(crate) fn number(&self) -> u64 {
+        self.ivars().number
     }
 
     /// The ⌘ hint of each tab a key reaches in this window, as the palette and the bar say them
@@ -3537,6 +3552,7 @@ impl TerminalWindow {
         );
         self.ivars().order.replace(order);
         self.ivars().groups.replace(groups);
+        self.number_groups();
         self.switch(old.as_deref());
     }
 
@@ -3947,9 +3963,21 @@ impl TerminalWindow {
         match groups {
             Some(groups) => {
                 self.ivars().groups.replace(groups);
+                self.number_groups();
                 self.refresh_bar();
             }
             None => eprintln!("bateri: saved tab groups did not fit the restored tabs"),
+        }
+    }
+
+    /// Gives the groups that have no number one. [`Self::with_strip`] does it as it goes; a
+    /// picture put back whole and groups read from a session before numbers come here.
+    fn number_groups(&self) {
+        if let Some(app) = app::delegate(self.mtm()) {
+            self.ivars()
+                .groups
+                .borrow_mut()
+                .number_the_rest(|| app.number(IdKind::Group, None));
         }
     }
 
@@ -3967,6 +3995,11 @@ impl TerminalWindow {
             "the groups and the strip agree: {:?}",
             groups.check(&order)
         );
+        // A group the change made is known by a number from the moment it exists; one that came
+        // from another window brought its own.
+        if let Some(app) = app::delegate(self.mtm()) {
+            groups.number_the_rest(|| app.number(IdKind::Group, None));
+        }
         result
     }
 

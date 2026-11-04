@@ -45,6 +45,11 @@ impl GroupId {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Group<K> {
     pub id: GroupId,
+    /// The number the group is known by from outside (`g1`, [`crate::ids`]). Unlike [`Self::id`]
+    /// it is the app's, not the window's: the same in every window, and kept when the group goes
+    /// to another one. `None` until the window that holds the group has been given one
+    /// ([`Groups::number_the_rest`]).
+    pub number: Option<u64>,
     pub name: String,
     /// The column shows the header and, while the tab on screen is of the group, that one tab.
     pub collapsed: bool,
@@ -52,6 +57,15 @@ pub struct Group<K> {
 }
 
 impl<K: Copy> Group<K> {
+    /// Where tabs go to stand in a group like this one in another window: a group of their own
+    /// with its name and, when it has one, the number it is known by.
+    pub fn remade<T>(&self) -> Target<T> {
+        match self.number {
+            Some(number) => Target::Numbered(self.name.clone(), number),
+            None => Target::New(self.name.clone()),
+        }
+    }
+
     /// The tab the user was last on in the group, if it is still in it.
     pub fn resident(&self) -> Option<K> {
         self.resident
@@ -117,6 +131,9 @@ pub enum Target<K> {
     /// Into a group of their own, made for them after the others, with this name (made unique,
     /// [`Groups::unique_name`]).
     New(String),
+    /// As [`Self::New`], for a group that came from another window and keeps the number it was
+    /// known by.
+    Numbered(String, u64),
 }
 
 /// A place the side column takes carried tabs at ([`Groups::side_spots`]).
@@ -213,6 +230,8 @@ pub struct Picked<K> {
 /// [`Groups::parts`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Part<K> {
+    /// The number the group is known by ([`Group::number`]).
+    pub number: Option<u64>,
     pub name: String,
     pub collapsed: bool,
     /// The tab the user was last on in the group; one of [`Self::tabs`].
@@ -903,6 +922,11 @@ impl<K: Copy + Eq> Groups<K> {
                 (Some(group), before)
             }
             Target::New(name) => (Some(self.create(&name)), None),
+            Target::Numbered(name, number) => {
+                let group = self.create(&name);
+                self.set_number(group, Some(number));
+                (Some(group), None)
+            }
         };
         // A tab to stand before that is itself on the move is not there to stand before: the
         // next of the cluster that stays is (a row let go on its own place).
@@ -1102,6 +1126,7 @@ impl<K: Copy + Eq> Groups<K> {
         self.groups
             .iter()
             .map(|group| Part {
+                number: group.number,
                 name: group.name.clone(),
                 collapsed: group.collapsed,
                 resident: group.resident,
@@ -1125,6 +1150,7 @@ impl<K: Copy + Eq> Groups<K> {
             groups.next += 1;
             groups.groups.push(Group {
                 id,
+                number: part.number,
                 name: part.name,
                 collapsed: part.collapsed,
                 resident: part.resident,
@@ -1193,11 +1219,42 @@ impl<K: Copy + Eq> Groups<K> {
         let name = self.unique_name(name);
         self.groups.push(Group {
             id,
+            number: None,
             name,
             collapsed: false,
             resident: None,
         });
         id
+    }
+
+    /// Sets the number `group` is known by; `false` for a group that is not here.
+    pub fn set_number(&mut self, group: GroupId, number: Option<u64>) -> bool {
+        match self
+            .groups
+            .iter_mut()
+            .find(|candidate| candidate.id == group)
+        {
+            Some(group) => {
+                group.number = number;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Gives every group that has no number the next one `next` hands out, in the order the groups
+    /// are listed. `true` if any was given.
+    pub fn number_the_rest(&mut self, mut next: impl FnMut() -> u64) -> bool {
+        let mut given = false;
+        for group in self
+            .groups
+            .iter_mut()
+            .filter(|group| group.number.is_none())
+        {
+            group.number = Some(next());
+            given = true;
+        }
+        given
     }
 
     /// The target of a tab let go at place `at` of `list` (the strip without the tab, when it is a
@@ -1396,6 +1453,53 @@ mod tests {
         if let Err(why) = groups.check(tabs) {
             panic!("{why}: {tabs:?} {groups:?}");
         }
+    }
+
+    /// A group is known by a number the app gives, apart from the window's own count: a group
+    /// made again keeps the one it had, a new one has none until it is numbered, and what is saved
+    /// and read back brings the numbers with it.
+    #[test]
+    fn a_group_keeps_the_number_it_is_known_by() {
+        let (mut tabs, mut groups, api, web) = scene();
+        assert_eq!(groups.group(api).and_then(|group| group.number), None);
+        assert!(groups.set_number(api, Some(4)));
+        assert!(!groups.set_number(GroupId(99), Some(1)));
+        // It is made again in another window under its number, the window counting its own way.
+        let again = groups
+            .place(
+                &mut tabs,
+                &[6],
+                groups.group(api).expect("a group").remade(),
+            )
+            .flatten()
+            .expect("a group");
+        assert_eq!(groups.group(again).map(|group| group.number), Some(Some(4)));
+        assert_ne!(again, api);
+        // The ones with no number are given the next, in the order they are listed.
+        let mut next = 10;
+        assert!(groups.number_the_rest(|| {
+            next += 1;
+            next
+        }));
+        let numbers: Vec<_> = groups.groups().iter().map(|group| group.number).collect();
+        assert_eq!(numbers, [Some(4), Some(11), Some(4)]);
+        assert!(!groups.number_the_rest(|| unreachable!("every group has one")));
+        assert_eq!(groups.group(web).and_then(|group| group.number), Some(11));
+        // A saved layout names them, and the groups read back are the same.
+        let parts = groups.parts(&tabs);
+        assert_eq!(
+            parts.iter().map(|part| part.number).collect::<Vec<_>>(),
+            numbers
+        );
+        let back = Groups::from_parts(&tabs, parts).expect("a grouping");
+        assert_eq!(
+            back.groups()
+                .iter()
+                .map(|group| group.number)
+                .collect::<Vec<_>>(),
+            numbers
+        );
+        ok(&back, &tabs);
     }
 
     #[test]

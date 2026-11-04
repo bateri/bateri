@@ -57,6 +57,7 @@ pub mod grid;
 pub mod groups;
 pub mod hold;
 pub mod icon;
+pub mod ids;
 pub mod jobs;
 pub mod kablo;
 pub mod keys;

@@ -912,7 +912,7 @@ fn merge_all_windows(world: &[Window], into: u64) -> Result<Plan, Refusal> {
             steps.push(Step::Regroup {
                 window: into,
                 tabs: other.groups.cluster(&other.order, Some(group.id)),
-                target: Target::New(group.name.clone()),
+                target: group.remade(),
             });
         }
         steps.push(other.close_if_emptied());
@@ -1025,7 +1025,7 @@ fn keep_cluster(
     target: &Target<u64>,
     into: Option<GroupId>,
 ) -> Option<Step> {
-    if !from.one_cluster || matches!(target, Target::New(_)) {
+    if !from.one_cluster || matches!(target, Target::New(_) | Target::Numbered(..)) {
         return None;
     }
     let shown = from
@@ -1071,7 +1071,9 @@ fn group_to_window(
     if from.id == onto.id {
         return move_group(world, window, group, to);
     }
-    let name = from.groups.group(group).ok_or(Refusal::Quiet)?.name.clone();
+    let remade = from.groups.group(group).ok_or(Refusal::Quiet)?;
+    let name = remade.name.clone();
+    let remade = remade.remade();
     let tabs = from.groups.cluster(&from.order, Some(group));
     if from.asking || onto.asking {
         return Err(Refusal::Beep);
@@ -1096,7 +1098,7 @@ fn group_to_window(
     steps.push(Step::Regroup {
         window: onto.id,
         tabs: tabs.clone(),
-        target: Target::New(name),
+        target: remade,
     });
     if at.is_some_and(|at| at != to.min(groups.len() - 1)) {
         steps.push(Step::MoveGroup {
@@ -1191,10 +1193,10 @@ fn group_to_new_window(
     host: &dyn Host,
 ) -> Result<Plan, Refusal> {
     let from = window_named(world, window)?;
-    let name = from.groups.group(group).ok_or(Refusal::Quiet)?.name.clone();
+    let remade = from.groups.group(group).ok_or(Refusal::Quiet)?.remade();
     let tabs = from.groups.cluster(&from.order, Some(group));
     let resident = from.groups.resident(Some(group));
-    new_window_of(from, tabs, Some(name), resident, at, host)
+    new_window_of(from, tabs, Some(remade), resident, at, host)
 }
 
 fn tabs_to_new_window(
@@ -1214,7 +1216,7 @@ fn tabs_to_new_window(
 fn new_window_of(
     from: &Window,
     tabs: Vec<u64>,
-    group: Option<String>,
+    group: Option<Target<u64>>,
     resident: Option<u64>,
     at: Option<(f64, f64)>,
     host: &dyn Host,
@@ -1239,11 +1241,11 @@ fn new_window_of(
         tab,
         slot: Slot::End,
     }));
-    if let Some(name) = group {
+    if let Some(target) = group {
         steps.push(Step::Regroup {
             window,
             tabs: tabs.clone(),
-            target: Target::New(name),
+            target,
         });
     }
     Ok(Plan {
@@ -2217,6 +2219,75 @@ mod tests {
         assert_eq!(
             super::plan(&world, Move::MergeAllWindows { into: 2 }, &Cramped),
             Err(Refusal::Beep)
+        );
+    }
+
+    /// A group that goes to another window, to a window of its own or with the rest in Merge All
+    /// Windows is made again there under the number it was known by (`g5`), not a new one.
+    #[test]
+    fn a_group_that_crosses_windows_keeps_its_number() {
+        let mut world = grouped();
+        let (api, web) = (gid(&world[0], "api"), gid(&world[0], "web"));
+        world[0].groups.set_number(api, Some(5));
+        // `web` has none yet: it is made again with a name alone and is numbered where it lands.
+        let again = |tabs: Vec<u64>, window: u64, target: Target<u64>| Step::Regroup {
+            window,
+            tabs,
+            target,
+        };
+        let numbered = Target::Numbered("api".to_owned(), 5);
+        let to_window = plan(
+            &world,
+            Move::GroupToWindow {
+                window: 1,
+                group: api,
+                into: 2,
+                to: 0,
+            },
+            &Cramped,
+        )
+        .unwrap();
+        assert!(
+            to_window
+                .steps
+                .contains(&again(vec![11, 12], 2, numbered.clone()))
+        );
+        let to_new = plan(
+            &world,
+            Move::GroupToNewWindow {
+                window: 1,
+                group: api,
+                at: None,
+            },
+            &roomy(&world),
+        )
+        .unwrap();
+        assert!(
+            to_new
+                .steps
+                .contains(&again(vec![11, 12], NEW, numbered.clone()))
+        );
+        let unnumbered = plan(
+            &world,
+            Move::GroupToNewWindow {
+                window: 1,
+                group: web,
+                at: None,
+            },
+            &roomy(&world),
+        )
+        .unwrap();
+        assert!(
+            unnumbered
+                .steps
+                .contains(&again(vec![13], NEW, Target::New("web".to_owned())))
+        );
+        let merged = plan(&world, Move::MergeAllWindows { into: 2 }, &Cramped).unwrap();
+        assert!(merged.steps.contains(&again(vec![11, 12], 2, numbered)));
+        assert!(
+            merged
+                .steps
+                .contains(&again(vec![13], 2, Target::New("web".to_owned())))
         );
     }
 
