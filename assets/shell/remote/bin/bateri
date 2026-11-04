@@ -9,19 +9,24 @@
 #          [-- PROGRAM...]
 #   bateri tab   [PANE] [--group GROUP | --window WINDOW] [--new-group NAME] [--label TEXT]
 #          [--cwd DIR] [--keep-open] [--wait] [--focus] [--json] [-S SERVER] [-- PROGRAM...]
-#   bateri window [PANE] [--label TEXT] [--cwd DIR] [--keep-open] [--wait] [--focus] [--json]
-#          [-S SERVER] [-- PROGRAM...]
-#   bateri close pane|tab|group|window [ID] [--force]
+#   bateri window [--cwd DIR] [--keep-open] [--wait] [--focus] [--json] [-S SERVER] [-- PROGRAM...]
+#   bateri close pane [PANE] [--force]      bateri close tab|group|window [ID]
 #   bateri ls [--json]       bateri notify TEXT...
 #   bateri send [PANE] [TEXT | -]           bateri send-key [PANE] KEY...
 #   bateri capture [PANE] [OPTIONS]         bateri wait PANE [--for TIME]
 #   bateri focus pane|tab|group|window [ID]   bateri zoom [PANE]   bateri swap PANE PANE
 #   bateri rename pane|tab|group ID LABEL   (an empty label takes it away)
-#   bateri move pane PANE --beside PANE --left|--right|--above|--below
-#   bateri move pane PANE --new-tab [--group GROUP | --window WINDOW] [--new-group NAME]
-#          [--label TEXT] [--json]
-#   bateri move tab TAB --group GROUP | --window WINDOW | --new-group NAME [--window WINDOW] [--json]
+#   bateri move pane [PANE] --beside PANE --left|--right|--above|--below [--json]
+#   bateri move pane [PANE] --tab TAB [--left|--right|--above|--below] [--json]
+#   bateri move pane [PANE] --new-tab [NAME] [--group GROUP | --window WINDOW] [--new-group NAME] [--json]
+#   bateri move tab [TAB] --group GROUP | --window WINDOW | --new-group NAME [--window WINDOW] [--json]
 #   bateri resize [PANE] --left|--right|--above|--below [--by N]
+#
+# THE RULES OF THE WORDS. The word after a verb is what it acts on, an id; with none named it is
+# the one this runs in (`wait`, `swap` and `rename` name theirs). A verb that takes several kinds
+# says the kind first. Where something goes is a flag. `--label` names what the verb itself opens;
+# `--new-tab NAME` and `--new-group NAME` name what they make along the way; `rename` names what is
+# there. Standard output has the id of what was made, and `--json` says where it stands.
 #
 # WHO DOES WHAT. The terminal is the machine's: `kablo new` starts it here, it
 # gets a number (`p9`, `next.sh`) and `send`, `capture` and `wait` are kablo's
@@ -136,9 +141,10 @@ bt_usage() {
     '       bateri tab [PANE] [--group GROUP | --window WINDOW] [--new-group NAME] [--label TEXT]' \
     '                  [--cwd DIR] [--keep-open] [--wait] [--focus] [--json] [-S SERVER]' \
     '                  [-- PROGRAM [ARG]...]' \
-    '       bateri window [PANE] [--label TEXT] [--cwd DIR] [--keep-open] [--wait] [--focus] [--json]' \
-    '                     [-S SERVER] [-- PROGRAM [ARG]...]' \
-    '       bateri close pane|tab|group|window [ID] [--force]' \
+    '       bateri window [--cwd DIR] [--keep-open] [--wait] [--focus] [--json] [-S SERVER]' \
+    '                     [-- PROGRAM [ARG]...]' \
+    '       bateri close pane [PANE] [--force]' \
+    '       bateri close tab|group|window [ID]' \
     '       bateri ls [--json]' \
     '       bateri notify TEXT...' \
     '       bateri send [PANE] [TEXT | -]' \
@@ -149,10 +155,11 @@ bt_usage() {
     '       bateri zoom [PANE]' \
     '       bateri swap PANE PANE' \
     '       bateri rename pane|tab|group ID LABEL' \
-    '       bateri move pane PANE --beside PANE --left|--right|--above|--below' \
-    '       bateri move pane PANE --new-tab [--group GROUP | --window WINDOW] [--new-group NAME]' \
-    '                         [--label TEXT] [--json]' \
-    '       bateri move tab TAB --group GROUP | --window WINDOW | --new-group NAME [--window WINDOW] [--json]' \
+    '       bateri move pane [PANE] --beside PANE --left|--right|--above|--below [--json]' \
+    '       bateri move pane [PANE] --tab TAB [--left|--right|--above|--below] [--json]' \
+    '       bateri move pane [PANE] --new-tab [NAME] [--group GROUP | --window WINDOW] [--new-group NAME]' \
+    '                               [--json]' \
+    '       bateri move tab [TAB] --group GROUP | --window WINDOW | --new-group NAME [--window WINDOW] [--json]' \
     '       bateri resize [PANE] --left|--right|--above|--below [--by N]' \
     'An id is a letter and a number: p9 a pane, t3 a tab, g1 a group, w1 a window; bateri ls shows them.' \
     'A pane is p and its number (p7); with none named it is the one this runs in. One of another' \
@@ -289,10 +296,28 @@ bt_check_label() {
   bt_cl_plain=$(printf '%s' "$2" | tr -d '\000-\037\177' | wc -c | tr -d ' ')
   [ "$bt_cl_plain" = "$bt_cl_size" ] || bt_die 64 "$1 is one line of plain text"
   [ -n "$(printf '%s' "$2" | tr -d ' ')" ] || bt_die 64 "$1 is not only spaces"
+  # `tab --new-group g1` means the group g1 or is a slip for it: a name is never taken for an id.
+  ! bt_reads_as_id "$2" || bt_die 64 "$1 '$2' reads as an id: give it a name that does not"
+}
+
+# Whether $1 reads as the id of a pane, a tab, a group or a window.
+bt_reads_as_id() {
+  bt_is_kind p "$1" || bt_is_kind t "$1" || bt_is_kind g "$1" || bt_is_kind w "$1"
+}
+
+# `bt_wrong_kind VERB KINDS WORDS WORD`: VERB, which says the kind first, got WORD. An id of one of
+# KINDS (`pane:p tab:t`) gets told what to write; WORDS says what the verb takes.
+bt_wrong_kind() {
+  for bt_wk in $2; do
+    if bt_is_kind "${bt_wk#*:}" "$4"; then
+      bt_die 64 "$1 takes the kind before the id. Did you mean: bateri $1 ${bt_wk%:*} $4"
+    fi
+  done
+  bt_die 64 "$1 takes $3, not '$(printf '%s' "$4" | bt_clean)'"
 }
 
 bt_not_a_terminal() {
-  bt_say "'$(printf '%s' "$1" | bt_clean)' is not a pane: name one as p and its number (p7); 'bateri ls' lists them"
+  bt_say "'$(printf '%s' "$1" | bt_clean)' is not a pane: name one as p and its number (p7)${2-}; 'bateri ls' lists them"
   "$bt_kablo" list 2>/dev/null | head -n 30 >&2
   exit 64
 }
@@ -666,6 +691,7 @@ bt_open() {
         bt_check_label '--new-group' "$bt_home_newgroup"
         ;;
       --label | --label=*)
+        [ "$bt_mode" != window ] || bt_die 64 'window takes no --label: a window has no label; rename tab names the tab in it'
         [ -z "$bt_label" ] || bt_die 64 'name one label'
         case $1 in
           --label=*) bt_label=${1#--label=} ;;
@@ -683,6 +709,7 @@ bt_open() {
       --json) bt_json=yes ;;
       -*) bt_die 64 "$bt_mode takes no option '$(printf '%s' "$1" | bt_clean)'" ;;
       *)
+        [ "$bt_mode" != window ] || bt_die 64 'window goes beside no pane; a program goes after --'
         [ -z "$bt_anchor" ] || bt_die 64 'the program goes after --'
         bt_anchor=$1
         ;;
@@ -702,6 +729,9 @@ bt_open() {
   if [ -n "$bt_home_group" ] && { [ -n "$bt_home_window" ] || [ -n "$bt_home_newgroup" ]; }; then
     bt_die 64 '--group is a group that is in its window already: it goes with no --window and no --new-group'
   fi
+  if [ -n "$bt_anchor" ] && { [ -n "$bt_home_group" ] || [ -n "$bt_home_window" ]; }; then
+    bt_die 64 'tab goes beside a pane or into a group or a window, not both'
+  fi
   # A pane's label is kablo's own; a tab's is the Mac's.
   bt_pane_label=
   bt_tab_label=
@@ -714,8 +744,9 @@ bt_open() {
   bt_here
   bt_orphan=
   if [ -n "$bt_anchor" ]; then
-    # What the agent writes is a number: a name that is no number is no target.
-    bt_need_terminal "$bt_anchor"
+    # What the agent writes is a number: a name that is no number is no target. Most often it is
+    # the program, written where a pane goes.
+    bt_is_terminal "$bt_anchor" || bt_not_a_terminal "$bt_anchor" '; a program goes after --'
   elif [ -n "$bt_me" ]; then
     # The caller's own terminal, whatever it is called (kablo says it, from the system).
     bt_anchor=$bt_me
@@ -1021,16 +1052,7 @@ bt_close() {
   shift
   case $bt_ckind in
     pane | tab | group | window) ;;
-    *)
-      bt_cword=
-      for bt_co in pane:p tab:t group:g window:w; do
-        if bt_is_kind "${bt_co#*:}" "$bt_ckind"; then
-          bt_cword=${bt_co%:*}
-        fi
-      done
-      [ -z "$bt_cword" ] || bt_die 64 "close takes the kind before the id. Did you mean: bateri close $bt_cword $bt_ckind"
-      bt_die 64 "close takes pane, tab, group or window, not '$(printf '%s' "$bt_ckind" | bt_clean)'"
-      ;;
+    *) bt_wrong_kind close 'pane:p tab:t group:g window:w' 'pane, tab, group or window' "$bt_ckind" ;;
   esac
   [ "$bt_ckind" != pane ] || bt_close_pane "$@"
 
@@ -1257,7 +1279,7 @@ bt_focus_verb() {
   shift
   case $bt_fsubject in
     pane | tab | group | window) ;;
-    *) bt_die 64 "focus takes pane, tab, group or window, not '$(printf '%s' "$bt_fsubject" | bt_clean)'" ;;
+    *) bt_wrong_kind focus 'pane:p tab:t group:g window:w' 'pane, tab, group or window' "$bt_fsubject" ;;
   esac
   [ $# -le 1 ] || bt_die 64 "focus $bt_fsubject names one id"
   bt_fid=${1-}
@@ -1313,7 +1335,7 @@ bt_rename_verb() {
   case $bt_rkind in
     pane | tab | group) ;;
     window) bt_die 64 'a window has no label' ;;
-    *) bt_die 64 "rename takes pane, tab or group, not '$(printf '%s' "$bt_rkind" | bt_clean)'" ;;
+    *) bt_wrong_kind rename 'pane:p tab:t group:g' 'pane, tab or group' "$bt_rkind" ;;
   esac
   [ $# -ge 1 ] || bt_die 64 "rename names the $bt_rkind to label (rename $bt_rkind ID LABEL)"
   bt_rid=$1
@@ -1345,7 +1367,7 @@ bt_move_verb() {
       shift
       bt_move_tab "$@"
       ;;
-    *) bt_die 64 "move takes a pane or a tab, not '$(printf '%s' "$1" | bt_clean)'" ;;
+    *) bt_wrong_kind move 'pane:p tab:t' 'a pane or a tab' "$1" ;;
   esac
 }
 
@@ -1359,20 +1381,19 @@ bt_move_place() {
       bt_json=yes
       return 0
       ;;
-    --group | --window | --new-group | --label)
+    --group | --window | --new-group)
       bt_mkey=${1#--}
       if [ $# -lt 2 ]; then
         case $bt_mkey in
           group) bt_die 64 '--group takes a group' ;;
           window) bt_die 64 '--window takes a window' ;;
           new-group) bt_die 64 '--new-group takes the name of the group' ;;
-          label) bt_die 64 '--label takes a text' ;;
         esac
       fi
       bt_mval=$2
       bt_mshift=1
       ;;
-    --group=* | --window=* | --new-group=* | --label=*)
+    --group=* | --window=* | --new-group=*)
       bt_mkey=${1%%=*}
       bt_mkey=${bt_mkey#--}
       bt_mval=${1#*=}
@@ -1392,11 +1413,6 @@ bt_move_place() {
       [ -z "$bt_mnew" ] || bt_die 64 'name one new group'
       bt_check_label '--new-group' "$bt_mval"
       bt_mnew=$bt_mval
-      ;;
-    label)
-      [ -z "$bt_mlabel" ] || bt_die 64 'name one label'
-      bt_check_label '--label' "$bt_mval"
-      bt_mlabel=$bt_mval
       ;;
   esac
 }
@@ -1421,8 +1437,8 @@ bt_move_place_lines() {
   [ -z "$bt_mlabel" ] || bt_msg="${bt_msg}label $bt_mlabel${nl}"
 }
 
-# `bt_moved MESSAGE`: a move that made a tab or a group, which the caller has no id for: `bt_tab`,
-# `bt_group` and `bt_window` say where it stands.
+# `bt_moved MESSAGE`: a move, which the Mac answers with where the pane's or the tab's tab stands:
+# `bt_tab`, `bt_group` and `bt_window`.
 bt_moved() {
   bt_tab=
   bt_group=
@@ -1451,7 +1467,7 @@ bt_json_id() {
   fi
 }
 
-# `move tab TAB --group GROUP | --window WINDOW | --new-group NAME [--window WINDOW]`: into the
+# `move tab [TAB] --group GROUP | --window WINDOW | --new-group NAME [--window WINDOW]`: into the
 # group, into the window out of any group, or into a group made for it, which the answer names.
 # The tab keeps its id.
 bt_move_tab() {
@@ -1466,6 +1482,7 @@ bt_move_tab() {
       shift "$bt_mshift"
     else
       case $1 in
+        --label | --label=*) bt_die 64 'move tab takes no --label: rename tab names it' ;;
         -*) bt_die 64 "move tab takes no option '$(printf '%s' "$1" | bt_clean)'" ;;
         *)
           [ -z "$bt_mtab" ] || bt_die 64 'move names one tab'
@@ -1475,28 +1492,39 @@ bt_move_tab() {
     fi
     shift
   done
-  [ -n "$bt_mtab" ] || bt_die 64 'move names the tab to move (move tab t3 --group g1)'
-  bt_check_id move tab "$bt_mtab"
-  [ -z "$bt_mlabel" ] || bt_die 64 'move tab takes no --label: rename tab gives it one'
+  if [ -n "$bt_mtab" ]; then
+    bt_check_id move tab "$bt_mtab"
+  else
+    bt_need_here 'name the tab to move (move tab t3 --group g1)'
+  fi
   [ -n "$bt_mgroup$bt_mwindow$bt_mnew" ] || bt_die 64 'move tab needs a place: --group GROUP, --window WINDOW or --new-group NAME'
-  [ -n "$bt_mnew" ] || [ -z "$bt_json" ] || bt_die 64 'move tab takes --json with --new-group, which it names; nothing is made otherwise'
-  bt_msg="bateri 2${nl}move${nl}subject tab${nl}id $bt_mtab${nl}"
+  bt_msg="bateri 2${nl}move${nl}subject tab${nl}"
+  [ -z "$bt_mtab" ] || bt_msg="${bt_msg}id $bt_mtab${nl}"
   bt_move_place_lines
-  [ -n "$bt_mnew" ] || bt_do "$bt_msg"
   bt_moved "$bt_msg"
   if [ -n "$bt_json" ]; then
-    printf '{"tab":"%s","group":%s,"window":%s}\n' "$bt_mtab" "$(bt_json_id "$bt_group")" "$(bt_json_id "$bt_window")"
-  else
+    printf '{"tab":%s,"group":%s,"window":%s}\n' "$(bt_json_id "$bt_tab")" "$(bt_json_id "$bt_group")" "$(bt_json_id "$bt_window")"
+  elif [ -n "$bt_mnew" ]; then
     printf '%s\n' "$bt_group"
   fi
   exit 0
 }
 
-# `move pane PANE --new-tab`: a tab of its own, right of the one it leaves and in its group, or
-# where the place says. The answer is the tab: a tab's only pane is the tab, and it keeps its id.
+# The word that names the new tab of `move pane --new-tab`. An id here is the pane written in the
+# wrong place, and taken for a name it would move another pane than the one meant.
+bt_move_tab_name() {
+  ! bt_reads_as_id "$1" || bt_die 64 "'$1' reads as an id, not a name: the pane goes before --new-tab (move pane p9 --new-tab web)"
+  bt_check_label '--new-tab' "$1"
+  bt_mlabel=$1
+}
+
+# `move pane [PANE]`: beside another pane, into a tab beside its focused pane (`split --tab`'s
+# word), or a tab of its own, right of the one it leaves and in its group unless a place is named.
+# A tab's only pane is the tab: it goes as it is, and keeps its id.
 bt_move_pane() {
   bt_mpane=
   bt_mbeside=
+  bt_mintab=
   bt_side=
   bt_mnewtab=
   bt_mgroup=
@@ -1516,37 +1544,84 @@ bt_move_pane() {
           shift
           bt_mbeside=$1
           ;;
-        --new-tab) bt_mnewtab=yes ;;
+        --tab | --tab=*)
+          [ -z "$bt_mintab" ] || bt_die 64 'name one tab'
+          case $1 in
+            --tab=*) bt_mintab=${1#--tab=} ;;
+            *)
+              [ $# -ge 2 ] || bt_die 64 '--tab takes a tab'
+              shift
+              bt_mintab=$1
+              ;;
+          esac
+          ;;
+        --new-tab=*)
+          [ -z "$bt_mnewtab" ] || bt_die 64 'name one new tab'
+          bt_mnewtab=yes
+          bt_move_tab_name "${1#--new-tab=}"
+          ;;
+        --new-tab)
+          [ -z "$bt_mnewtab" ] || bt_die 64 'name one new tab'
+          bt_mnewtab=yes
+          # The word after it is the new tab's name; one that starts with a dash is another option
+          # (`--new-tab=-x` names it).
+          if [ $# -ge 2 ]; then
+            case $2 in
+              -*) ;;
+              *)
+                shift
+                bt_move_tab_name "$1"
+                ;;
+            esac
+          fi
+          ;;
+        --label | --label=*) bt_die 64 "move takes no --label: a new tab's name goes after --new-tab (move pane p9 --new-tab web); rename names what is there" ;;
         -*) bt_die 64 "move takes no option '$(printf '%s' "$1" | bt_clean)'" ;;
         *)
-          [ -z "$bt_mpane" ] || bt_die 64 'move names one pane'
+          [ -z "$bt_mpane" ] || bt_die 64 "move names one pane; a new tab's name goes after --new-tab (move pane p9 --new-tab web)"
           bt_mpane=$1
           ;;
       esac
     fi
     shift
   done
-  [ -n "$bt_mpane" ] || bt_die 64 'move names the pane to move (move pane p9 --beside p3 --right)'
-  if [ -n "$bt_mnewtab" ]; then
-    [ -z "$bt_mbeside$bt_side" ] || bt_die 64 'a pane goes beside another or into a new tab, not both'
-    bt_check_id move pane "$bt_mpane"
-    bt_msg="bateri 2${nl}move${nl}terminal $bt_mpane${nl}side tab${nl}"
-    bt_move_place_lines
-    bt_moved "$bt_msg"
-    if [ -n "$bt_json" ]; then
-      printf '{"pane":"%s","tab":%s,"group":%s,"window":%s}\n' "$bt_mpane" "$(bt_json_id "$bt_tab")" "$(bt_json_id "$bt_group")" "$(bt_json_id "$bt_window")"
-    else
-      printf '%s\n' "$bt_tab"
-    fi
-    exit 0
+  if [ -z "$bt_mnewtab" ] && [ -n "$bt_mgroup$bt_mwindow$bt_mnew" ]; then
+    bt_die 64 '--group, --window and --new-group go with --new-tab (move pane p9 --new-tab --group g1)'
   fi
-  [ -z "$bt_mgroup$bt_mwindow$bt_mnew$bt_mlabel$bt_json" ] || bt_die 64 '--group, --window, --new-group, --label and --json go with --new-tab (move pane p9 --new-tab --group g1)'
-  [ -n "$bt_mbeside" ] || bt_die 64 'move needs --beside and the pane to go beside, or --new-tab'
-  [ -n "$bt_side" ] || bt_die 64 'move needs a side: --left, --right, --above or --below'
-  bt_check_id move pane "$bt_mpane"
-  bt_check_id move pane "$bt_mbeside"
-  [ "$bt_mpane" != "$bt_mbeside" ] || bt_die 64 'a pane cannot go beside itself'
-  bt_do "bateri 2${nl}move${nl}terminal $bt_mpane${nl}beside $bt_mbeside${nl}side $bt_side${nl}"
+  case ${bt_mbeside:+x}${bt_mintab:+x}${bt_mnewtab:+x} in
+    '') bt_die 64 'move needs a place: --beside PANE and a side, --tab TAB or --new-tab' ;;
+    x) ;;
+    *) bt_die 64 'a pane goes beside another (--beside), into a tab (--tab) or into a new tab (--new-tab): one of them' ;;
+  esac
+  if [ -n "$bt_mpane" ]; then
+    bt_check_id move pane "$bt_mpane"
+  else
+    # The caller's own, named by whatever name it has.
+    bt_need_here 'name the pane to move (move pane p4 --new-tab)'
+    bt_mpane=$bt_me
+  fi
+  bt_msg="bateri 2${nl}move${nl}terminal $bt_mpane${nl}"
+  if [ -n "$bt_mnewtab" ]; then
+    [ -z "$bt_side" ] || bt_die 64 'a new tab has no side'
+    bt_msg="${bt_msg}side tab${nl}"
+    bt_move_place_lines
+  elif [ -n "$bt_mintab" ]; then
+    bt_check_id move tab "$bt_mintab"
+    bt_msg="${bt_msg}tab $bt_mintab${nl}"
+    [ -z "$bt_side" ] || bt_msg="${bt_msg}side $bt_side${nl}"
+  else
+    [ -n "$bt_side" ] || bt_die 64 'move needs a side: --left, --right, --above or --below'
+    bt_check_id move pane "$bt_mbeside"
+    [ "$bt_mpane" != "$bt_mbeside" ] || bt_die 64 'a pane cannot go beside itself'
+    bt_msg="${bt_msg}beside $bt_mbeside${nl}side $bt_side${nl}"
+  fi
+  bt_moved "$bt_msg"
+  if [ -n "$bt_json" ]; then
+    printf '{"pane":"%s","tab":%s,"group":%s,"window":%s}\n' "$bt_mpane" "$(bt_json_id "$bt_tab")" "$(bt_json_id "$bt_group")" "$(bt_json_id "$bt_window")"
+  elif [ -n "$bt_mnewtab" ]; then
+    printf '%s\n' "$bt_tab"
+  fi
+  exit 0
 }
 
 bt_resize_verb() {
@@ -1716,6 +1791,22 @@ fi
 }
 bt_cmd=$1
 shift
+# `--help` anywhere a command's own words are options; what comes after `--`, and the text of the
+# verbs that take any text, is not ours to read.
+case $bt_cmd in
+  send | send-key | notify | rename) ;;
+  *)
+    for bt_a in "$@"; do
+      case $bt_a in
+        --) break ;;
+        -h | --help)
+          bt_usage
+          exit 0
+          ;;
+      esac
+    done
+    ;;
+esac
 case $bt_cmd in
   split | tab | window) bt_open "$bt_cmd" "$@" ;;
   close) bt_close "$@" ;;
@@ -1731,6 +1822,9 @@ case $bt_cmd in
     if [ $# -ge 2 ]; then
       bt_carry_first send "$@"
       bt_need_terminal "$1"
+    elif [ $# -eq 1 ] && bt_is_kind p "$1"; then
+      # Alone it would be the text, typed into this very terminal.
+      bt_die 64 "send needs the text: send $1 TEXT (- reads it from standard input)"
     fi
     exec "$bt_kablo" send "$@"
     ;;
@@ -1757,6 +1851,7 @@ case $bt_cmd in
     exit 0
     ;;
   *)
+    bt_say "no command '$(printf '%s' "$bt_cmd" | bt_clean)'"
     bt_usage >&2
     exit 64
     ;;

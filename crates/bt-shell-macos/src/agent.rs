@@ -549,9 +549,6 @@ impl<'a> World<'a> {
                 let made =
                     app.open_window_for(from.as_deref(), anchor, &start, incoming, focus && raise)?;
                 let born = made.selected_tab();
-                if let Some(label) = label {
-                    made.rename_tab(born.id(), label);
-                }
                 standing(&made, &born)
             }
             (Spot::NewTab, dest) => {

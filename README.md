@@ -188,8 +188,8 @@ bateri close pane|tab|group|window [ID]          # no question; the programs in 
 bateri focus pane|tab|group|window [ID]          # take the keyboard there (see below)
 bateri rename pane|tab|group ID LABEL            # an empty label takes it away
 bateri move tab t3 --group g1                    # or --window w1, which also takes it out of its group, or --new-group api
-bateri move pane p9 --beside p3 --right
-bateri move pane p9 --new-tab                    # a tab of its own; --group g1, --new-group api or --window w1 say where; prints the tab
+bateri move pane p9 --beside p3 --right          # or --tab t3, beside its focused pane
+bateri move pane p9 --new-tab web                # a tab of its own, its name optional; --group g1, --new-group api or --window w1 say where; prints the tab
 bateri zoom [p9]    bateri swap p9 p3    bateri resize [p9] --left [--by N]
 bateri notify "tests failed"                     # a notification when bateri is behind or has no tab of it
 bateri split -S prod -- make test                # a terminal on the server prod (full level only); prints p9@prod
