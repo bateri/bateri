@@ -24,6 +24,7 @@
 //! Who asked is never in a message: the Mac knows it from the ticket kablo hands it for the
 //! conversation, which names the terminal the request came from.
 
+pub mod arrange;
 pub mod level;
 pub mod listing;
 pub mod message;

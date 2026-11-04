@@ -8965,16 +8965,17 @@ mod tests {
             .expect("keyboard");
         let keyboard = &pane[at..at + pane[at..].find("\n    }\n").expect("its end")];
         assert!(keyboard.contains("self.0.holds_keyboard()"), "{keyboard}");
-        // The gate stands in `place`, before `put` makes the pane: the person is in the key window,
-        // and the keyboard is in the pane the new one goes beside (its web view's included). `put`
-        // gives the keyboard to the new pane only as that gate said.
+        // The gate stands in `place`, before `put` makes the pane: the rule every keyboard-moving
+        // command passes (the cursor is in the pane that asked, its web view's included, or bateri
+        // is behind, or the pane goes to another window). `put` gives the keyboard to the new pane
+        // only as that gate said.
         let agent = include_str!("agent.rs");
         let place = &agent[agent.find("    fn place(").expect("place")..];
         let place = &place[..place.find("\n    }\n").expect("its end")];
-        let window = place.find("isKeyWindow()").expect(place);
-        let held = place.find("pane.holds_keyboard()").expect(place);
+        let keyboard = place.find("arrange::keyboard(").expect(place);
+        let go = place.find("rule::go(").expect(place);
         let made = place.find("self.put(").expect(place);
-        assert!(window < made && held < made, "{place}");
+        assert!(keyboard < made && go < made, "{place}");
         let put = &agent[agent.find("    fn put(").expect("put")..];
         let put = &put[..put.find("\n    }\n").expect("its end")];
         assert!(

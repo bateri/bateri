@@ -837,6 +837,49 @@ impl TerminalTab {
         self.layout_changed();
     }
 
+    /// `bateri resize p9 --left --by 3`: the divider of `pane` on `direction` moves by `steps`
+    /// of the pane's cells, as ⌃⌘ + arrow does for the focused pane (the zoom ends; the keyboard
+    /// stays where it is). `false` when the divider is at its limit or the pane has no cell yet.
+    pub(crate) fn resize_pane(&self, pane: &TerminalPane, direction: Direction, steps: u8) -> bool {
+        self.set_zoom(None);
+        let Some(cell) = pane.cell_size() else {
+            return false;
+        };
+        let step = match direction {
+            Direction::Left | Direction::Right => cell.width,
+            Direction::Up | Direction::Down => cell.height,
+        } * f64::from(steps);
+        let moved = self.ivars().container.resize(pane.id(), direction, step);
+        self.layout_changed();
+        moved
+    }
+
+    /// `bateri zoom p9`: `pane` fills the tab and takes the keyboard, or gives the tab back if it
+    /// filled it already. A no-op with a single pane.
+    pub(crate) fn zoom_pane(&self, pane: &TerminalPane) {
+        if self.panes().len() < 2 {
+            return;
+        }
+        if self.ivars().container.zoomed() == Some(pane.id()) {
+            self.set_zoom(None);
+        } else {
+            self.set_zoom(Some(pane.id()));
+            self.focus_pane(pane);
+        }
+        self.layout_changed();
+    }
+
+    /// Where `pane` of this tab would land beside `leaf` on `side` within the tab
+    /// ([`SplitView::plan_move_within`]).
+    pub(crate) fn plan_move_within(
+        &self,
+        pane: u64,
+        leaf: u64,
+        side: Direction,
+    ) -> Option<Placement> {
+        self.ivars().container.plan_move_within(pane, leaf, side)
+    }
+
     /// ⌃⌘=: the panes on the same axis are equal.
     pub(crate) fn equalize_splits(&self) {
         self.set_zoom(None);

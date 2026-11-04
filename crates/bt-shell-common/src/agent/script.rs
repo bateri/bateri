@@ -1409,6 +1409,186 @@ fn notify_needs_a_mac_and_sends_one_line() {
 
 #[test]
 #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn the_layout_verbs_are_the_macs_alone_and_say_what_they_asked() {
+    use crate::agent::message::{Arrange, Subject};
+    use crate::ids::{Id, Kind as IdKind};
+    let pane = |number: u64| Anchor::of(Terminal(number));
+    let tab = |number: u64| Id::new(IdKind::Tab, number);
+    for (name, shell) in shells() {
+        let server = Server::new(&format!("layout-{name}"));
+        // With no Mac they are 69, and the words say what is missing.
+        for args in [
+            &["focus", "tab", "t3"][..],
+            &["zoom", "p9"],
+            &["swap", "p9", "p3"],
+            &["move", "pane", "p9", "--beside", "p3", "--right"],
+            &["resize", "p9", "--left"],
+        ] {
+            let said = server.run(&shell, Some("p4"), args);
+            assert_eq!(said.status, 69, "{args:?}: {}", said.err);
+            assert_eq!(said.err, "bateri: no Mac is connected to do it\n");
+        }
+        server.forget_calls();
+        server.mac_says("bateri 2\nok\n");
+        let tries: Vec<(Vec<&str>, Arrange)> = vec![
+            (
+                vec!["focus", "tab", "t3"],
+                Arrange::Focus(Subject::Tab(tab(3))),
+            ),
+            (vec!["focus", "tab"], Arrange::Focus(Subject::Tab(None))),
+            (
+                vec!["focus", "window", "w2"],
+                Arrange::Focus(Subject::Window(Id::new(IdKind::Window, 2))),
+            ),
+            (vec!["focus", "group"], Arrange::Focus(Subject::Group(None))),
+            (
+                vec!["focus", "pane", "p9"],
+                Arrange::Focus(Subject::Pane(Some(pane(9)))),
+            ),
+            (
+                vec!["focus", "pane"],
+                Arrange::Focus(Subject::Pane(Some(pane(4)))),
+            ),
+            (vec!["zoom", "p9"], Arrange::Zoom(Some(pane(9)))),
+            (vec!["zoom"], Arrange::Zoom(None)),
+            (
+                vec!["swap", "p9", "p3"],
+                Arrange::Swap {
+                    pane: pane(9),
+                    other: pane(3),
+                },
+            ),
+            (
+                vec!["move", "pane", "p9", "--beside", "p3", "--right"],
+                Arrange::Move {
+                    pane: pane(9),
+                    beside: pane(3),
+                    side: Side::Right,
+                },
+            ),
+            (
+                vec!["resize", "p9", "--left", "--by", "3"],
+                Arrange::Resize {
+                    pane: Some(pane(9)),
+                    side: Side::Left,
+                    steps: 3,
+                },
+            ),
+            (
+                vec!["resize", "--below"],
+                Arrange::Resize {
+                    pane: None,
+                    side: Side::Below,
+                    steps: 1,
+                },
+            ),
+        ];
+        for (args, arrange) in &tries {
+            let said = server.run(&shell, Some("p4"), args);
+            assert_eq!(said.status, 0, "{args:?}: {}", said.err);
+            assert_eq!(said.out, "");
+            let told = server.told();
+            assert_eq!(
+                Request::parse(told.last().expect("told")),
+                Ok(Request::Arrange(arrange.clone())),
+                "{args:?}"
+            );
+        }
+        // Run in no terminal the caller's own is nothing; a named one is still fine.
+        let said = server.run(&shell, None, &["focus", "tab"]);
+        assert_eq!(said.status, 64, "{}", said.err);
+        assert!(said.err.contains("run in no terminal"), "{}", said.err);
+        let said = server.run(&shell, None, &["focus", "tab", "t3"]);
+        assert_eq!(said.status, 0, "{}", said.err);
+        // The Mac refuses what would take the keyboard: 77, and its words.
+        server.mac_says("bateri 2\nerror refused the keyboard is in another pane\n");
+        let said = server.run(&shell, Some("p4"), &["focus", "pane", "p9"]);
+        assert_eq!(said.status, 77, "{}", said.err);
+        assert_eq!(said.err, "bateri: the keyboard is in another pane\n");
+        server.mac_says("bateri 2\nerror unknown t9 is no tab\n");
+        let said = server.run(&shell, Some("p4"), &["focus", "tab", "t9"]);
+        assert_eq!(said.status, 1, "{}", said.err);
+    }
+}
+
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn a_word_and_an_id_of_another_kind_is_64_and_says_what_to_write() {
+    for (name, shell) in shells() {
+        let server = Server::new(&format!("kinds-{name}"));
+        server.mac_says("bateri 2\nok\n");
+        let said = server.run(&shell, Some("p4"), &["focus", "group", "t3"]);
+        assert_eq!(said.status, 64, "{}", said.err);
+        assert_eq!(
+            said.err,
+            "bateri: t3 is a tab, not a group. Did you mean: bateri focus tab t3\n"
+        );
+        let said = server.run(&shell, Some("p4"), &["focus", "tab", "w1"]);
+        assert!(
+            said.err.contains("w1 is a window, not a tab"),
+            "{}",
+            said.err
+        );
+        let said = server.run(&shell, Some("p4"), &["zoom", "t3"]);
+        assert_eq!(said.status, 64, "{}", said.err);
+        assert_eq!(
+            said.err,
+            "bateri: t3 is a tab, not a pane: zoom takes a pane\n"
+        );
+        for args in [
+            &["focus"][..],
+            &["focus", "frame", "t3"],
+            &["focus", "tab", "t3", "t4"],
+            &["focus", "tab", "t03"],
+            &["focus", "tab", "web"],
+            &["focus", "tab", "--json"],
+            &["zoom", "p4", "p5"],
+            &["swap", "p4"],
+            &["swap", "p4", "p4"],
+            &["swap", "p4", "t3"],
+            &["move"],
+            &["move", "tab", "t3", "--beside", "p3", "--right"],
+            &["move", "pane", "p9", "--right"],
+            &["move", "pane", "p9", "--beside", "p3"],
+            &["move", "pane", "p9", "--beside", "p9", "--right"],
+            &["move", "pane", "p9", "--beside", "p3", "--right", "--left"],
+            &["move", "pane", "p9", "p8", "--beside", "p3", "--right"],
+            &["resize", "p9"],
+            &["resize", "p9", "--left", "--right"],
+            &["resize", "p9", "--left", "--by", "0"],
+            &["resize", "p9", "--left", "--by", "51"],
+            &["resize", "p9", "--left", "--by", "x"],
+            &["resize", "p9", "p8", "--left"],
+            &["resize", "--bogus", "--left"],
+        ] {
+            let said = server.run(&shell, Some("p4"), args);
+            assert_eq!(said.status, 64, "{args:?}: {}", said.err);
+        }
+        assert!(server.told().is_empty(), "nothing reached the Mac");
+    }
+}
+
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn a_pane_that_did_not_take_the_keyboard_says_so_on_one_line() {
+    let server = Server::new("keyboard-stayed");
+    let shell = Path::new("/bin/sh");
+    server.mac_says(&format!("{PLACED}keyboard stayed\n"));
+    let said = server.run(shell, Some("p4"), &["split", "--focus"]);
+    assert_eq!(said.status, 0, "{}", said.err);
+    assert_eq!(said.out, "p1\n");
+    assert_eq!(
+        said.err,
+        "bateri: p1 did not take the keyboard: the cursor is in another pane of that window; bateri notify asks the user to look\n"
+    );
+    // The keyboard went where it was asked: no word.
+    server.mac_says(PLACED);
+    let said = server.run(shell, Some("p4"), &["split", "--focus"]);
+    assert_eq!(said.err, "");
+}
+
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
 fn a_split_with_no_pane_to_go_beside_prints_the_number_and_waits_with_the_programs_status() {
     for (name, shell) in shells() {
         let server = Server::new(&format!("orphan-{name}"));

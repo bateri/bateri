@@ -31,7 +31,7 @@ use bt_core::CommandLevel;
 use kablo_proto::v1::{State, Status};
 
 use super::level::{self, Why};
-use super::message::{Failure, Format, Kind, Place, Placed, Reply, Request};
+use super::message::{Arrange, Failure, Format, Kind, Place, Placed, Reply, Request};
 use super::notes::Note;
 use super::place::Landed;
 use super::wait::Waiting;
@@ -59,11 +59,11 @@ pub trait Shell {
 
     /// Shows `place.terminal` in a pane beside the pane of `anchor` — wherever on this Mac that
     /// is — as `place` asks: where it goes is the rule's ([`super::place::place`]), the pane is
-    /// born without the keyboard unless `place.focus` says so (and the shell finds that the person
-    /// is where the pane goes: the window is the key one and the keyboard is in the anchor's pane),
-    /// and a zoomed tab keeps its zoom. `place.focus` is set only where the terminal the request
-    /// came from is the anchor. `opener` is the terminal the request came from, when it is known
-    /// (a note read later does not say, and the pane is said to be opened from beside its anchor).
+    /// born without the keyboard unless `place.focus` says so and the shell lets it
+    /// ([`super::arrange::go`]: the cursor is in `opener`'s pane, or the person is not typing in
+    /// bateri, or the pane is in another window than the one being typed in), and a zoomed tab
+    /// keeps its zoom. `opener` is the terminal the request came from, when it is known (a note
+    /// read later does not say, and the pane is said to be opened from beside its anchor).
     fn place(
         &mut self,
         server: &Server,
@@ -98,6 +98,9 @@ pub enum Answer {
     Close(Anchor),
     /// `notify`: the shell shows it and answers.
     Notify(String),
+    /// `focus`, `zoom`, `swap`, `move`, `resize`: the shell decides by what the keyboard is
+    /// doing ([`super::arrange`]) and by the level over the layers it touches, then does it.
+    Arrange(Arrange),
 }
 
 fn waiting_reply(anchor: &Anchor) -> Reply {
@@ -109,6 +112,7 @@ fn waiting_reply(anchor: &Anchor) -> Reply {
         tab: None,
         group: None,
         window: None,
+        keyboard_stayed: false,
     })
 }
 
@@ -124,19 +128,8 @@ fn unable_reply() -> Reply {
         tab: None,
         group: None,
         window: None,
+        keyboard_stayed: false,
     })
-}
-
-/// `place` as the shell is asked for it: the keyboard (`--focus`) is the person's word when they say
-/// it in the pane they are in, and a program can say it for them. It is asked of the shell only
-/// where the terminal that asked is the anchor, the pane the pane goes beside; a program in one
-/// terminal that names another as the anchor (the person's, which `ls` shows it), a request whose
-/// sender is not known (one that waited and was kept, a note read later) is placed without it. The
-/// shell adds what only it knows: the window is the key one and the keyboard is in the anchor's pane.
-fn without_a_focus_nobody_spoke_for(place: &Place, anchor: &Anchor, opener: Option<&str>) -> Place {
-    let mut place = place.clone();
-    place.focus = place.focus && opener == Some(anchor.name());
-    place
 }
 
 /// The answer to a letter: `text` is what the program said, `from` the terminal kablo says it
@@ -156,6 +149,7 @@ pub fn serve(server: &Server, from: Option<&str>, text: &str, shell: &mut dyn Sh
         Ok(Request::Ls(format)) => Answer::List(format),
         Ok(Request::Close(terminal)) => Answer::Close(terminal),
         Ok(Request::Notify(text)) => Answer::Notify(text),
+        Ok(Request::Arrange(arrange)) => Answer::Arrange(arrange),
     }
 }
 
@@ -180,10 +174,10 @@ fn place_for(server: &Server, from: Option<&str>, place: Place, shell: &mut dyn 
             tab: None,
             group: None,
             window: None,
+            keyboard_stayed: false,
         }));
     }
-    let asked = without_a_focus_nobody_spoke_for(&place, &anchor, from);
-    match shell.place(server, &anchor, &asked, from) {
+    match shell.place(server, &anchor, &place, from) {
         Placing::Done(placed) => Answer::Reply(Reply::Placed(placed)),
         Placing::NoAnchor => {
             let reply = waiting_reply(&anchor);
@@ -242,8 +236,7 @@ pub fn settle_notes(
         if !alive(terminal, place.keep_open) || shell.shows(server, terminal) {
             continue;
         }
-        let asked = without_a_focus_nobody_spoke_for(&place, &anchor, None);
-        match shell.place(server, &anchor, &asked, None) {
+        match shell.place(server, &anchor, &place, None) {
             Placing::Done(_) => read.placed += 1,
             Placing::NoAnchor => read.waiting.push(Waiting {
                 server: server.clone(),
@@ -274,8 +267,7 @@ pub fn settle_waiting(
     if !alive(place.terminal, place.keep_open) || shell.shows(&server, place.terminal) {
         return (None, false);
     }
-    let asked = without_a_focus_nobody_spoke_for(&place, &anchor, opener.as_deref());
-    match shell.place(&server, &anchor, &asked, opener.as_deref()) {
+    match shell.place(&server, &anchor, &place, opener.as_deref()) {
         Placing::Done(_) => (None, true),
         Placing::NoAnchor => (
             Some(Waiting {
@@ -351,6 +343,7 @@ mod tests {
                 tab: Id::new(IdKind::Tab, 3),
                 group: None,
                 window: Id::new(IdKind::Window, 1),
+                keyboard_stayed: false,
             })
         }
     }
@@ -370,35 +363,37 @@ mod tests {
         mac.placed.first().map(|placed| placed.3)
     }
 
-    /// `--focus` is the person's word when they say it in the pane they are in; a program that
-    /// names another terminal as the anchor (the person's, which it can see in `ls`) asks to take
-    /// the keyboard from where the person is. The shell is told the focus only where the terminal
-    /// that asked is the anchor: a program in p9 naming p4, a request that says who it is from
-    /// nowhere, is placed behind.
+    /// `--focus` reaches the shell as it was asked, with who asked: whether the keyboard moves is
+    /// the shell's to decide by where the cursor is ([`super::super::arrange`]), not the server's
+    /// to guess by whom the pane goes beside.
     #[test]
-    fn the_focus_is_asked_of_the_shell_only_by_the_terminal_the_pane_goes_beside() {
+    fn the_focus_reaches_the_shell_as_asked_with_the_terminal_that_asked() {
         let ask = "anchor p4\nfocus yes\n";
-        // The person in p4, at p4's pane: as asked.
         assert_eq!(focus_for(Some("p4"), ask, &["p4"]), Some(true));
         assert_eq!(
             focus_for(Some("p4"), "focus yes\n", &["p4"]),
             Some(true),
             "no anchor named: the sender's own"
         );
-        // A program in p9 names p4: the pane goes beside p4, behind.
-        assert_eq!(focus_for(Some("p9"), ask, &["p4"]), Some(false));
-        // A request that says who it is from nowhere.
-        assert_eq!(focus_for(None, ask, &["p4"]), Some(false));
+        // A program in p9 that names p4: the shell sees p9 asked, and decides.
+        assert_eq!(focus_for(Some("p9"), ask, &["p4"]), Some(true));
+        assert_eq!(focus_for(None, ask, &["p4"]), Some(true));
         // Without the word, never.
         assert_eq!(focus_for(Some("p4"), "anchor p4\n", &["p4"]), Some(false));
+        let mut mac = Pretend {
+            anchors: vec!["p4".to_owned()],
+            ..Pretend::default()
+        };
+        serve(&server(), Some("p9"), &place_text(ask), &mut mac);
+        assert_eq!(mac.openers, [Some("p9".to_owned())]);
     }
 
-    /// The same for a request that waited for its anchor and for a note that was read later (which
-    /// does not say who wrote it): neither is the person speaking in the pane they are in.
+    /// A request that waited keeps who asked, so the shell decides when the pane is placed; a
+    /// note that was read later does not say, and the shell decides without a caller.
     #[test]
-    fn the_focus_of_a_request_that_waited_or_of_a_note_is_not_asked_of_the_shell() {
+    fn the_focus_of_a_request_that_waited_and_of_a_note_reaches_the_shell_too() {
         let text = "anchor p4\nfocus yes\n";
-        for (from, want) in [(Some("p4"), true), (Some("p9"), false), (None, false)] {
+        for from in [Some("p4"), Some("p9"), None] {
             let mut idle = Pretend::default();
             let Answer::Wait(_, waiting) = serve(&server(), from, &place_text(text), &mut idle)
             else {
@@ -406,7 +401,12 @@ mod tests {
             };
             idle.anchors.push("p4".to_owned());
             settle_waiting(waiting, &|_, _| true, &mut idle);
-            assert_eq!(idle.placed[0].3, want, "waited, from {from:?}");
+            assert!(idle.placed[0].3, "waited, from {from:?}");
+            assert_eq!(
+                idle.openers.last().cloned().flatten().as_deref(),
+                from,
+                "who asked is kept"
+            );
         }
         let Request::Place(place) = Request::parse(&place_text(text)).expect("a place") else {
             panic!("a place");
@@ -424,7 +424,8 @@ mod tests {
             &|_, _| true,
             &mut mac,
         );
-        assert!(!mac.placed[0].3, "a note");
+        assert!(mac.placed[0].3, "a note");
+        assert_eq!(mac.openers, [None]);
     }
 
     #[test]

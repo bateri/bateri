@@ -646,6 +646,40 @@ impl SplitView {
         tree.plan_beside(leaf, side, incoming, &room)
     }
 
+    /// Where pane `moving` of this tab would land if it moved beside `leaf` on `side`, within the
+    /// same tab: the tree without it takes it back, in this container's room
+    /// ([`Tree::plan_beside`]). `None` when `leaf` or `moving` is not a pane here, they are one,
+    /// or not even the whole area has room.
+    pub(crate) fn plan_move_within(
+        &self,
+        moving: u64,
+        leaf: u64,
+        side: Direction,
+    ) -> Option<Placement> {
+        if moving == leaf {
+            return None;
+        }
+        let scale = self.scale();
+        let own = self.ivars().panes.borrow().clone();
+        let min = move |id: u64| {
+            own.iter()
+                .find(|pane| pane.id() == id)
+                .and_then(|pane| pane.min_size())
+                .map_or(Size::new(0.0, 0.0), |min| Size::new(min.width, min.height))
+        };
+        let mut rest = self.ivars().tree.borrow().clone();
+        if !matches!(rest.remove(moving), Removal::Removed { .. }) {
+            return None;
+        }
+        let room = Room {
+            bounds: self.bounds_rect(),
+            scale,
+            spacing: spacing(scale, self.style(), self.beside_tabs()),
+            min: &min,
+        };
+        rest.plan_beside(leaf, side, &Tree::Leaf(moving), &room)
+    }
+
     /// Panes `a` and `b` trade places ([`Tree::swap`]): each takes the
     /// other's frame and the ratios stay, so the grids change size only if
     /// the two frames differ.

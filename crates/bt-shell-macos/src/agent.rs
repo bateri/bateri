@@ -42,6 +42,10 @@
 //!   closes any terminal of its own server, opened by it or not, the way the user closing the
 //!   pane does — the pane goes and the server's terminal ends with it — or, for a terminal with
 //!   no pane, the card's End.
+//! - **The keyboard has one rule** ([`bt_shell_common::agent::arrange`]). `focus`, `zoom`, `swap`,
+//!   `move`, `resize` and `--focus` are done from the pane the cursor is in, while bateri is
+//!   behind, or into a window other than the one being typed in; otherwise they are refused (77)
+//!   or, for `--focus`, the pane is made and the answer says the keyboard stayed ([`arrange`]).
 //! - **`notify` is one notification and a tick.** The notification when bateri is behind, or in
 //!   front with no tab of this Mac showing the program (then nothing else could show it); the tab
 //!   the program runs in is marked as having news unless it is the one on screen.
@@ -50,12 +54,15 @@
 //! to the main queue ([`letter`], [`notes`]), and the state that outlives a request ([`STATE`])
 //! is read and written there only.
 
+mod arrange;
+
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bt_core::CommandLevel;
 use bt_core::PaneUuid;
+use bt_shell_common::agent::arrange::{self as rule, Go};
 use bt_shell_common::agent::level::{self, Panes};
 use bt_shell_common::agent::listing::{self, Node, Pane, Scene, Tab, Window};
 use bt_shell_common::agent::message::{Failure, Format, Kind, Place, Placed, Reply};
@@ -237,6 +244,9 @@ fn take(app: &AppDelegate, mut letter: Letter) {
         Answer::List(format) => list(letter, server, from, format),
         Answer::Close(target) => close(letter, server, target),
         Answer::Notify(text) => notify(app, letter, &server, from.as_deref(), &text),
+        Answer::Arrange(request) => {
+            arrange::arranged(app, letter, &server, from.as_deref(), &request);
+        }
     }
     world.finish();
 }
@@ -413,6 +423,7 @@ impl<'a> World<'a> {
             tab: at_tab,
             group: at_group,
             window: at_window,
+            keyboard_stayed: false,
         })
     }
 }
@@ -481,22 +492,23 @@ impl Shell for World<'_> {
             .and_then(|(_, _, found)| found.program)
             .or_else(|| shown.program.clone());
         let who = summary::opener(program.as_deref(), asker);
-        // `--focus` is the person's word when they say it in the pane they are in. The request says
-        // it only where the terminal that asked is the anchor (`bt_shell_common::agent::serve`); here
-        // the person is also where the pane goes: this window is the key one, and the keyboard is in
-        // the anchor's pane (a web view's included). A program that asks it from where the person is
-        // not, a window they have behind another, would take the keyboard from where they are.
-        let focus = place.focus
-            && tab
-                .window()
-                .is_some_and(|window| window.ns_window().isKeyWindow())
-            && pane.holds_keyboard();
+        // `--focus` is the keyboard moving, so it passes the rule every such command passes
+        // ([`bt_shell_common::agent::arrange`]): the cursor is in the pane that asked, or bateri is
+        // behind, or the pane goes to another window than the one being typed in. Otherwise the
+        // pane is made all the same and the answer says the keyboard stayed.
+        let stayed = place.focus && {
+            let caller = opener.and_then(|name| arrange::spot(self.app, server, name));
+            let keyboard = arrange::keyboard(self.app, caller.as_ref());
+            tab.window()
+                .is_some_and(|window| rule::go(keyboard, window.number()) == Go::Refused)
+        };
         let place = &Place {
-            focus,
+            focus: place.focus && !stayed,
             ..place.clone()
         };
         match self.put(server, &tab, &pane, anchor, place, who) {
-            Ok(placed) => {
+            Ok(mut placed) => {
+                placed.keyboard_stayed = stayed;
                 state(|state| {
                     state
                         .made

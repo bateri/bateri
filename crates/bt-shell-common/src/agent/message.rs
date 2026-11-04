@@ -1,6 +1,6 @@
 //! The text an agent's script and the Mac say to each other on kablo's app channel.
 //!
-//! **A request** is lines: `bateri 2`, then the verb (`place`, `ls`, `close`, `notify`), then one
+//! **A request** is lines: `bateri 2`, then the verb (`place`, `ls`, `close`, `notify`, `focus`, `zoom`, `swap`, `move`, `resize`), then one
 //! `key value` line per argument — the key up to the first space, the value the rest of the
 //! line, verbatim. A value has no line break (nor any control character) because the line is
 //! the frame: the script on the server is `sh`, which writes lines and reads none of them
@@ -22,6 +22,10 @@
 //! it did not (a terminal the Mac opened before the numbers existed is `b-` and 32 digits). The
 //! `terminal` of a `close` is named the same way, because a `close` that names none closes the
 //! caller's own.
+//!
+//! The verbs that move the keyboard or change the layout (`focus`, `zoom`, `swap`, `move`,
+//! `resize`) name panes the same way and a tab, a group or a window by its id (`t3`, `g1`, `w1`);
+//! a `focus` that names no id means the one the caller stands in.
 //!
 //! **A reply** starts with `bateri 2` too and then says `ok` (`ok placed` and the lines that
 //! tell how and where, `ok text` and the rest of the message as the text to print) or `error KIND TEXT`
@@ -169,6 +173,55 @@ pub enum Request {
     Close(Anchor),
     /// Tell the user something.
     Notify(String),
+    /// Move the keyboard or the layout.
+    Arrange(Arrange),
+}
+
+/// What `focus` is about: a pane (as kablo names its terminal), or a tab, a group or a window by
+/// its id. `None` is the one the caller stands in.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Subject {
+    Pane(Option<Anchor>),
+    Tab(Option<Id>),
+    Group(Option<Id>),
+    Window(Option<Id>),
+}
+
+impl Subject {
+    fn word(&self) -> &'static str {
+        match self {
+            Subject::Pane(_) => "pane",
+            Subject::Tab(_) => "tab",
+            Subject::Group(_) => "group",
+            Subject::Window(_) => "window",
+        }
+    }
+}
+
+/// The most steps a `resize` may take at once.
+pub const MAX_STEPS: u8 = 50;
+
+/// What moves the keyboard or the layout of what is open.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Arrange {
+    /// Take the keyboard (and the screen) to this.
+    Focus(Subject),
+    /// Fill the tab with a pane, or give the tab back: the pane named, or the caller's own.
+    Zoom(Option<Anchor>),
+    /// Two panes of one tab trade places.
+    Swap { pane: Anchor, other: Anchor },
+    /// A pane goes beside another, on its side, in its tab (which may be another window's).
+    Move {
+        pane: Anchor,
+        beside: Anchor,
+        side: Side,
+    },
+    /// The divider of a pane on `side` moves by `steps` cells.
+    Resize {
+        pane: Option<Anchor>,
+        side: Side,
+        steps: u8,
+    },
 }
 
 /// How a pane landed, as the reply to a [`Place`] says it.
@@ -184,6 +237,9 @@ pub struct Placed {
     pub tab: Option<Id>,
     pub group: Option<Id>,
     pub window: Option<Id>,
+    /// The pane was asked to take the keyboard and did not: the cursor is in another pane of the
+    /// window being typed in ([`super::arrange`]).
+    pub keyboard_stayed: bool,
 }
 
 /// What the Mac answers.
@@ -260,6 +316,7 @@ impl Request {
                 out.push_str("notify\n");
                 push(&mut out, "text", text)?;
             }
+            Request::Arrange(arrange) => encode_arrange(&mut out, arrange)?,
         }
         if out.len() > MAX_BYTES {
             return Err(Failure::usage(format!(
@@ -268,6 +325,61 @@ impl Request {
         }
         Ok(out)
     }
+}
+
+fn encode_arrange(out: &mut String, arrange: &Arrange) -> Result<(), Failure> {
+    match arrange {
+        Arrange::Focus(subject) => {
+            out.push_str("focus\n");
+            push(out, "subject", subject.word())?;
+            match subject {
+                Subject::Pane(Some(pane)) => push(out, "id", pane.name())?,
+                Subject::Tab(Some(id)) | Subject::Group(Some(id)) | Subject::Window(Some(id)) => {
+                    push(out, "id", &id.to_string())?;
+                }
+                _ => {}
+            }
+        }
+        Arrange::Zoom(pane) => {
+            out.push_str("zoom\n");
+            if let Some(pane) = pane {
+                push(out, "terminal", pane.name())?;
+            }
+        }
+        Arrange::Swap { pane, other } => {
+            out.push_str("swap\n");
+            push(out, "terminal", pane.name())?;
+            push(out, "other", other.name())?;
+        }
+        Arrange::Move { pane, beside, side } => {
+            out.push_str("move\n");
+            push(out, "terminal", pane.name())?;
+            push(out, "beside", beside.name())?;
+            push(out, "side", pane_side(*side)?.word())?;
+        }
+        Arrange::Resize { pane, side, steps } => {
+            if !(1..=MAX_STEPS).contains(steps) {
+                return Err(Failure::usage(format!(
+                    "`steps` is 1 to {MAX_STEPS}, not {steps}"
+                )));
+            }
+            out.push_str("resize\n");
+            if let Some(pane) = pane {
+                push(out, "terminal", pane.name())?;
+            }
+            push(out, "side", pane_side(*side)?.word())?;
+            push(out, "steps", &steps.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+/// A side of a pane: `tab` is a place for a new pane, not a side of one that is there.
+fn pane_side(side: Side) -> Result<Side, Failure> {
+    if side == Side::Tab {
+        return Err(Failure::usage("`side` is left, right, above or below"));
+    }
+    Ok(side)
 }
 
 /// `bateri N` → N.
@@ -456,9 +568,104 @@ fn read_request<'a>(
             let fields = Fields::read(verb, lines, &["text"])?;
             Ok(Request::Notify(fields.need("text")?.to_owned()))
         }
+        "focus" | "zoom" | "swap" | "move" | "resize" => {
+            read_arrange(verb, lines).map(Request::Arrange)
+        }
         other => Err(Failure::usage(format!(
-            "`{other}` is no verb: place, ls, close or notify"
+            "`{other}` is no verb: place, ls, close, notify, focus, zoom, swap, move or resize"
         ))),
+    }
+}
+
+fn read_arrange<'a>(
+    verb: &'a str,
+    lines: impl Iterator<Item = &'a str>,
+) -> Result<Arrange, Failure> {
+    let side = |fields: &Fields<'_>| -> Result<Side, Failure> {
+        let word = fields.need("side")?;
+        Side::from_word(word)
+            .filter(|side| *side != Side::Tab)
+            .ok_or_else(|| {
+                Failure::usage(format!(
+                    "`side` is left, right, above or below, not `{word}`"
+                ))
+            })
+    };
+    let pane = |fields: &Fields<'_>, key: &str| -> Result<Option<Anchor>, Failure> {
+        fields
+            .get(key)
+            .map(|value| anchor_of(key, value))
+            .transpose()
+    };
+    match verb {
+        "focus" => {
+            let fields = Fields::read(verb, lines, &["subject", "id"])?;
+            let given = fields.get("id");
+            let id = |kind: IdKind| -> Result<Option<Id>, Failure> {
+                given
+                    .map(|value| {
+                        Id::parse(value)
+                            .filter(|id| id.kind() == kind)
+                            .ok_or_else(|| {
+                                Failure::usage(format!(
+                                    "`id` is a {} id like `{}1`, not `{value}`",
+                                    kind.word(),
+                                    kind.prefix()
+                                ))
+                            })
+                    })
+                    .transpose()
+            };
+            let subject = match fields.need("subject")? {
+                "pane" => Subject::Pane(pane(&fields, "id")?),
+                "tab" => Subject::Tab(id(IdKind::Tab)?),
+                "group" => Subject::Group(id(IdKind::Group)?),
+                "window" => Subject::Window(id(IdKind::Window)?),
+                other => {
+                    return Err(Failure::usage(format!(
+                        "`subject` is pane, tab, group or window, not `{other}`"
+                    )));
+                }
+            };
+            Ok(Arrange::Focus(subject))
+        }
+        "zoom" => {
+            let fields = Fields::read(verb, lines, &["terminal"])?;
+            Ok(Arrange::Zoom(pane(&fields, "terminal")?))
+        }
+        "swap" => {
+            let fields = Fields::read(verb, lines, &["terminal", "other"])?;
+            Ok(Arrange::Swap {
+                pane: anchor_of("terminal", fields.need("terminal")?)?,
+                other: anchor_of("other", fields.need("other")?)?,
+            })
+        }
+        "move" => {
+            let fields = Fields::read(verb, lines, &["terminal", "beside", "side"])?;
+            Ok(Arrange::Move {
+                pane: anchor_of("terminal", fields.need("terminal")?)?,
+                beside: anchor_of("beside", fields.need("beside")?)?,
+                side: side(&fields)?,
+            })
+        }
+        _ => {
+            let fields = Fields::read(verb, lines, &["terminal", "side", "steps"])?;
+            let steps = match fields.get("steps") {
+                None => 1,
+                Some(value) => value
+                    .parse::<u8>()
+                    .ok()
+                    .filter(|steps| (1..=MAX_STEPS).contains(steps) && steps.to_string() == value)
+                    .ok_or_else(|| {
+                        Failure::usage(format!("`steps` is a number from 1 to {MAX_STEPS}"))
+                    })?,
+            };
+            Ok(Arrange::Resize {
+                pane: pane(&fields, "terminal")?,
+                side: side(&fields)?,
+                steps,
+            })
+        }
     }
 }
 
@@ -490,6 +697,9 @@ impl Reply {
                     if let Some(id) = id {
                         out.push_str(&format!("{key} {id}\n"));
                     }
+                }
+                if placed.keyboard_stayed {
+                    out.push_str("keyboard stayed\n");
                 }
             }
             Reply::Text(text) => {
@@ -538,7 +748,7 @@ fn read_placed(body: &str) -> Result<Reply, Failure> {
         "placed",
         lines,
         &[
-            "landed", "next-to", "squeezed", "hidden", "tab", "group", "window",
+            "landed", "next-to", "squeezed", "hidden", "tab", "group", "window", "keyboard",
         ],
     )?;
     let landed = fields.need("landed")?;
@@ -554,6 +764,15 @@ fn read_placed(body: &str) -> Result<Reply, Failure> {
         tab: id_of(&fields, "tab", IdKind::Tab)?,
         group: id_of(&fields, "group", IdKind::Group)?,
         window: id_of(&fields, "window", IdKind::Window)?,
+        keyboard_stayed: match fields.get("keyboard") {
+            None => false,
+            Some("stayed") => true,
+            Some(other) => {
+                return Err(Failure::usage(format!(
+                    "`keyboard` is stayed, not `{other}`"
+                )));
+            }
+        },
     }))
 }
 
@@ -632,6 +851,128 @@ mod tests {
         Request::parse(text).expect_err(text)
     }
 
+    // The verbs that move the keyboard or the layout, frozen the same way.
+    const V2_FOCUS_TAB: &str = "bateri 2\nfocus\nsubject tab\nid t3\n";
+    const V2_FOCUS_OWN: &str = "bateri 2\nfocus\nsubject group\n";
+    const V2_FOCUS_PANE: &str = "bateri 2\nfocus\nsubject pane\nid p9\n";
+    const V2_ZOOM: &str = "bateri 2\nzoom\nterminal p9\n";
+    const V2_ZOOM_OWN: &str = "bateri 2\nzoom\n";
+    const V2_SWAP: &str = "bateri 2\nswap\nterminal p9\nother p3\n";
+    const V2_MOVE: &str = "bateri 2\nmove\nterminal p9\nbeside p3\nside right\n";
+    const V2_RESIZE: &str = "bateri 2\nresize\nterminal p9\nside left\nsteps 3\n";
+    const V2_RESIZE_OWN: &str = "bateri 2\nresize\nside below\nsteps 1\n";
+
+    fn pane(number: u64) -> Anchor {
+        Anchor::of(Terminal(number))
+    }
+
+    #[test]
+    fn the_layout_verbs_are_read_and_written_byte_for_byte() {
+        let cases = [
+            (
+                V2_FOCUS_TAB,
+                Arrange::Focus(Subject::Tab(Id::new(IdKind::Tab, 3))),
+            ),
+            (V2_FOCUS_OWN, Arrange::Focus(Subject::Group(None))),
+            (V2_FOCUS_PANE, Arrange::Focus(Subject::Pane(Some(pane(9))))),
+            (V2_ZOOM, Arrange::Zoom(Some(pane(9)))),
+            (V2_ZOOM_OWN, Arrange::Zoom(None)),
+            (
+                V2_SWAP,
+                Arrange::Swap {
+                    pane: pane(9),
+                    other: pane(3),
+                },
+            ),
+            (
+                V2_MOVE,
+                Arrange::Move {
+                    pane: pane(9),
+                    beside: pane(3),
+                    side: Side::Right,
+                },
+            ),
+            (
+                V2_RESIZE,
+                Arrange::Resize {
+                    pane: Some(pane(9)),
+                    side: Side::Left,
+                    steps: 3,
+                },
+            ),
+            (
+                V2_RESIZE_OWN,
+                Arrange::Resize {
+                    pane: None,
+                    side: Side::Below,
+                    steps: 1,
+                },
+            ),
+        ];
+        for (text, arrange) in cases {
+            let request = Request::Arrange(arrange);
+            assert_eq!(Request::parse(text).as_ref(), Ok(&request), "{text:?}");
+            assert_eq!(request.encode().as_deref(), Ok(text), "{request:?}");
+        }
+        // A resize that names no steps takes one.
+        assert_eq!(
+            Request::parse("bateri 2\nresize\nside above\n"),
+            Ok(Request::Arrange(Arrange::Resize {
+                pane: None,
+                side: Side::Above,
+                steps: 1
+            }))
+        );
+    }
+
+    #[test]
+    fn a_layout_request_that_is_wrong_says_which_part() {
+        // An id of another kind than the subject, not a plain number, a missing part.
+        for (text, word) in [
+            ("bateri 2\nfocus\nsubject group\nid t3\n", "group id"),
+            ("bateri 2\nfocus\nsubject tab\nid t03\n", "tab id"),
+            ("bateri 2\nfocus\nsubject tab\nid 3\n", "tab id"),
+            (
+                "bateri 2\nfocus\nsubject frame\n",
+                "pane, tab, group or window",
+            ),
+            ("bateri 2\nfocus\n", "needs a `subject`"),
+            ("bateri 2\nswap\nterminal p9\n", "needs a `other`"),
+            ("bateri 2\nmove\nterminal p9\nbeside p3\n", "needs a `side`"),
+            (
+                "bateri 2\nmove\nterminal p9\nbeside p3\nside tab\n",
+                "left, right, above or below",
+            ),
+            ("bateri 2\nresize\nside left\nsteps 0\n", "from 1 to 50"),
+            ("bateri 2\nresize\nside left\nsteps 51\n", "from 1 to 50"),
+            ("bateri 2\nresize\nside left\nsteps 03\n", "from 1 to 50"),
+            ("bateri 2\nzoom\nside left\n", "takes no `side`"),
+        ] {
+            let failure = usage(text);
+            assert_eq!(failure.kind, Kind::Usage, "{text:?}");
+            assert!(failure.text.contains(word), "{text:?}: {}", failure.text);
+        }
+        // A request this writes that it could not read back is the mistake it would be.
+        assert!(
+            Request::Arrange(Arrange::Resize {
+                pane: None,
+                side: Side::Tab,
+                steps: 1
+            })
+            .encode()
+            .is_err()
+        );
+        assert!(
+            Request::Arrange(Arrange::Resize {
+                pane: None,
+                side: Side::Left,
+                steps: 0
+            })
+            .encode()
+            .is_err()
+        );
+    }
+
     #[test]
     fn version_two_is_read_byte_for_byte() {
         let cases = [
@@ -695,6 +1036,7 @@ mod tests {
             tab: None,
             group: None,
             window: None,
+            keyboard_stayed: false,
         });
         assert_eq!(Reply::parse(V2_REPLY_PLACED_MADE).as_ref(), Ok(&placed));
         assert_eq!(placed.encode(), V2_REPLY_PLACED_MADE);
@@ -928,6 +1270,7 @@ mod tests {
             tab: None,
             group: None,
             window: None,
+            keyboard_stayed: false,
         });
         assert_eq!(
             waiting.encode(),
@@ -942,6 +1285,9 @@ mod tests {
             V2_LS,
             V2_CLOSE,
             V2_NOTIFY,
+            V2_FOCUS_TAB,
+            V2_MOVE,
+            V2_RESIZE,
             V2_REPLY_PLACED,
             V2_REPLY_TEXT,
             V2_REPLY_ERROR,
@@ -989,6 +1335,7 @@ mod tests {
                     tab: None,
                     group: None,
                     window: None,
+                    keyboard_stayed: false,
                 }),
             ),
             (
@@ -1001,6 +1348,7 @@ mod tests {
                     tab: Id::new(IdKind::Tab, 3),
                     group: Id::new(IdKind::Group, 1),
                     window: Id::new(IdKind::Window, 1),
+                    keyboard_stayed: false,
                 }),
             ),
             (
@@ -1013,6 +1361,7 @@ mod tests {
                     tab: Id::new(IdKind::Tab, 3),
                     group: None,
                     window: Id::new(IdKind::Window, 1),
+                    keyboard_stayed: false,
                 }),
             ),
             (V2_REPLY_TEXT, Reply::Text("window id:w1\n".to_owned())),
@@ -1025,6 +1374,33 @@ mod tests {
             assert_eq!(Reply::parse(text).as_ref(), Ok(&reply), "{text:?}");
             assert_eq!(reply.encode(), text, "{reply:?}");
         }
+    }
+
+    #[test]
+    fn a_pane_whose_keyboard_stayed_says_so_and_nothing_else_changes() {
+        let placed = Placed {
+            landed: Landed::AsAsked,
+            next_to: Some(Anchor::of(Terminal(4))),
+            squeezed: false,
+            hidden: false,
+            tab: Id::new(IdKind::Tab, 3),
+            group: None,
+            window: Id::new(IdKind::Window, 1),
+            keyboard_stayed: true,
+        };
+        let text = Reply::Placed(placed.clone()).encode();
+        assert!(text.ends_with("window w1\nkeyboard stayed\n"), "{text}");
+        assert_eq!(Reply::parse(&text), Ok(Reply::Placed(placed.clone())));
+        // Without the word the keyboard went where it was asked.
+        let moved = Reply::Placed(Placed {
+            keyboard_stayed: false,
+            ..placed
+        })
+        .encode();
+        assert!(!moved.contains("keyboard"), "{moved}");
+        assert!(
+            Reply::parse(&moved.replace("hidden no\n", "hidden no\nkeyboard moved\n")).is_err()
+        );
     }
 
     #[test]
@@ -1047,6 +1423,7 @@ mod tests {
             tab: None,
             group: None,
             window: None,
+            keyboard_stayed: false,
         });
         assert_eq!(Reply::parse(&reply.encode()), Ok(reply));
     }

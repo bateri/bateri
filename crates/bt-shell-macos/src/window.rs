@@ -3895,6 +3895,31 @@ impl TerminalWindow {
         }
     }
 
+    /// The tabs of group `group`, in the order of the strip.
+    pub(crate) fn tabs_of_group(&self, group: GroupId) -> Vec<Retained<TerminalTab>> {
+        let ids = self
+            .ivars()
+            .groups
+            .borrow()
+            .cluster(&self.ivars().order.borrow(), Some(group));
+        ids.into_iter().filter_map(|id| self.tab(id)).collect()
+    }
+
+    /// `bateri focus group g1`: the tab the user was last on in the group, a closed group opening
+    /// first. `false` when the group is not here or its tab cannot be selected now.
+    pub(crate) fn reach_group_id(&self, group: GroupId) -> bool {
+        let reach = self
+            .ivars()
+            .groups
+            .borrow()
+            .reach_in(&self.ivars().order.borrow(), Some(group));
+        let Reach::Tab { tab, .. } = reach else {
+            return false;
+        };
+        self.arrive(reach);
+        self.ivars().order.borrow().selected() == Some(tab)
+    }
+
     /// Goes where `reach` says: the tab, a closed group opening first.
     fn arrive(&self, reach: Reach<u64>) -> Reach<u64> {
         if let Reach::Tab { tab, expand } = reach {
