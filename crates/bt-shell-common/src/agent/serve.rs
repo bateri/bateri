@@ -333,7 +333,7 @@ mod tests {
     }
 
     fn place_text(extra: &str) -> String {
-        format!("bateri 1\nplace\nterminal t9\n{extra}")
+        format!("bateri 1\nplace\nterminal p9\n{extra}")
     }
 
     /// Whether the pane that was placed for `text` asked for the keyboard, from `from`, on a Mac
@@ -350,38 +350,38 @@ mod tests {
     /// `--focus` is the person's word when they say it in the pane they are in; a program that
     /// names another terminal as the anchor (the person's, which it can see in `ls`) asks to take
     /// the keyboard from where the person is. The shell is told the focus only where the terminal
-    /// that asked is the anchor: a program in t9 naming t4, a request that says who it is from
+    /// that asked is the anchor: a program in p9 naming p4, a request that says who it is from
     /// nowhere, is placed behind.
     #[test]
     fn the_focus_is_asked_of_the_shell_only_by_the_terminal_the_pane_goes_beside() {
-        let ask = "anchor t4\nfocus yes\n";
-        // The person in t4, at t4's pane: as asked.
-        assert_eq!(focus_for(Some("t4"), ask, &["t4"]), Some(true));
+        let ask = "anchor p4\nfocus yes\n";
+        // The person in p4, at p4's pane: as asked.
+        assert_eq!(focus_for(Some("p4"), ask, &["p4"]), Some(true));
         assert_eq!(
-            focus_for(Some("t4"), "focus yes\n", &["t4"]),
+            focus_for(Some("p4"), "focus yes\n", &["p4"]),
             Some(true),
             "no anchor named: the sender's own"
         );
-        // A program in t9 names t4: the pane goes beside t4, behind.
-        assert_eq!(focus_for(Some("t9"), ask, &["t4"]), Some(false));
+        // A program in p9 names p4: the pane goes beside p4, behind.
+        assert_eq!(focus_for(Some("p9"), ask, &["p4"]), Some(false));
         // A request that says who it is from nowhere.
-        assert_eq!(focus_for(None, ask, &["t4"]), Some(false));
+        assert_eq!(focus_for(None, ask, &["p4"]), Some(false));
         // Without the word, never.
-        assert_eq!(focus_for(Some("t4"), "anchor t4\n", &["t4"]), Some(false));
+        assert_eq!(focus_for(Some("p4"), "anchor p4\n", &["p4"]), Some(false));
     }
 
     /// The same for a request that waited for its anchor and for a note that was read later (which
     /// does not say who wrote it): neither is the person speaking in the pane they are in.
     #[test]
     fn the_focus_of_a_request_that_waited_or_of_a_note_is_not_asked_of_the_shell() {
-        let text = "anchor t4\nfocus yes\n";
-        for (from, want) in [(Some("t4"), true), (Some("t9"), false), (None, false)] {
+        let text = "anchor p4\nfocus yes\n";
+        for (from, want) in [(Some("p4"), true), (Some("p9"), false), (None, false)] {
             let mut idle = Pretend::default();
             let Answer::Wait(_, waiting) = serve(&server(), from, &place_text(text), &mut idle)
             else {
                 panic!("waits: {from:?}");
             };
-            idle.anchors.push("t4".to_owned());
+            idle.anchors.push("p4".to_owned());
             settle_waiting(waiting, &|_, _| true, &mut idle);
             assert_eq!(idle.placed[0].3, want, "waited, from {from:?}");
         }
@@ -389,7 +389,7 @@ mod tests {
             panic!("a place");
         };
         let mut mac = Pretend {
-            anchors: vec!["t4".to_owned()],
+            anchors: vec!["p4".to_owned()],
             ..Pretend::default()
         };
         settle_notes(
@@ -407,55 +407,55 @@ mod tests {
     #[test]
     fn a_ticket_a_place_a_landing_and_the_answer() {
         let mut mac = Pretend {
-            anchors: vec!["t4".to_owned()],
+            anchors: vec!["p4".to_owned()],
             ..Pretend::default()
         };
         // Named anchor, a side and a focus: the shell is asked for exactly that.
         let answer = serve(
             &server(),
-            Some("t4"),
-            &place_text("anchor t4\nside below\nratio 30\nfocus yes\n"),
+            Some("p4"),
+            &place_text("anchor p4\nside below\nratio 30\nfocus yes\n"),
             &mut mac,
         );
         let Answer::Reply(Reply::Placed(placed)) = answer else {
             panic!("{answer:?}");
         };
         assert_eq!(placed.landed, Landed::AsAsked);
-        assert_eq!(placed.next_to.as_ref().map(Anchor::name), Some("t4"));
+        assert_eq!(placed.next_to.as_ref().map(Anchor::name), Some("p4"));
         assert_eq!(
             mac.placed,
-            [("t4".to_owned(), Terminal(9), Some(Side::Below), true)]
+            [("p4".to_owned(), Terminal(9), Some(Side::Below), true)]
         );
     }
 
     #[test]
     fn the_shell_is_told_who_asked_and_a_request_that_waits_remembers_it() {
         let mut mac = Pretend {
-            anchors: vec!["t4".to_owned()],
+            anchors: vec!["p4".to_owned()],
             ..Pretend::default()
         };
         // Named anchor and a different sender: the sender is the opener.
-        serve(&server(), Some("t9"), &place_text("anchor t4\n"), &mut mac);
-        assert_eq!(mac.openers, [Some("t9".to_owned())]);
+        serve(&server(), Some("p9"), &place_text("anchor p4\n"), &mut mac);
+        assert_eq!(mac.openers, [Some("p9".to_owned())]);
         // Waiting for its anchor, it keeps who asked and says it when it is placed.
         let mut idle = Pretend::default();
         let Answer::Wait(_, waiting) =
-            serve(&server(), Some("t9"), &place_text("anchor t4\n"), &mut idle)
+            serve(&server(), Some("p9"), &place_text("anchor p4\n"), &mut idle)
         else {
             panic!("waits");
         };
-        assert_eq!(waiting.opener.as_deref(), Some("t9"));
-        idle.anchors.push("t4".to_owned());
+        assert_eq!(waiting.opener.as_deref(), Some("p9"));
+        idle.anchors.push("p4".to_owned());
         idle.openers.clear();
         settle_waiting(waiting, &|_, _| true, &mut idle);
-        assert_eq!(idle.openers, [Some("t9".to_owned())]);
+        assert_eq!(idle.openers, [Some("p9".to_owned())]);
     }
 
     #[test]
     fn with_no_anchor_the_pane_goes_beside_the_terminal_the_ticket_names() {
         let made = format!("b-{}", "0123456789abcdef".repeat(2));
         let mut mac = Pretend {
-            anchors: vec!["t4".to_owned()],
+            anchors: vec!["p4".to_owned()],
             ..Pretend::default()
         };
         // The terminal the Mac opened before the numbers existed is the caller too.
@@ -464,10 +464,10 @@ mod tests {
             ..Pretend::default()
         };
         assert!(matches!(
-            serve(&server(), Some("t4"), &place_text(""), &mut mac),
+            serve(&server(), Some("p4"), &place_text(""), &mut mac),
             Answer::Reply(Reply::Placed(_))
         ));
-        assert_eq!(mac.placed[0].0, "t4");
+        assert_eq!(mac.placed[0].0, "p4");
         assert!(matches!(
             serve(&server(), Some(&made), &place_text(""), &mut older),
             Answer::Reply(Reply::Placed(_))
@@ -486,11 +486,11 @@ mod tests {
     #[test]
     fn a_terminal_that_has_a_pane_is_done_and_is_not_placed_twice() {
         let mut mac = Pretend {
-            anchors: vec!["t4".to_owned()],
+            anchors: vec!["p4".to_owned()],
             shown: vec![Terminal(9)],
             ..Pretend::default()
         };
-        let answer = serve(&server(), Some("t4"), &place_text("anchor t4\n"), &mut mac);
+        let answer = serve(&server(), Some("p4"), &place_text("anchor p4\n"), &mut mac);
         let Answer::Reply(Reply::Placed(placed)) = answer else {
             panic!("{answer:?}");
         };
@@ -501,21 +501,21 @@ mod tests {
     #[test]
     fn an_anchor_in_no_tab_waits_and_the_answer_says_so() {
         let mut mac = Pretend::default();
-        let answer = serve(&server(), Some("t4"), &place_text("anchor t4\n"), &mut mac);
+        let answer = serve(&server(), Some("p4"), &place_text("anchor p4\n"), &mut mac);
         let Answer::Wait(Reply::Placed(placed), waiting) = answer else {
             panic!("{answer:?}");
         };
         assert_eq!(placed.landed, Landed::Waiting);
-        assert_eq!(placed.next_to.as_ref().map(Anchor::name), Some("t4"));
-        assert_eq!(waiting.anchor.name(), "t4");
+        assert_eq!(placed.next_to.as_ref().map(Anchor::name), Some("p4"));
+        assert_eq!(waiting.anchor.name(), "p4");
         assert_eq!(waiting.place.terminal, Terminal(9));
         assert_eq!(waiting.server, server());
 
         // The anchor gets a pane; the queue hands the request back and it is placed.
         let mut queue = Queue::default();
         queue.add(waiting);
-        mac.anchors.push("t4".to_owned());
-        let due = queue.take_beside("ada@rasp:22", "t4");
+        mac.anchors.push("p4".to_owned());
+        let due = queue.take_beside("ada@rasp:22", "p4");
         assert_eq!(due.len(), 1);
         let (again, made) =
             settle_waiting(due.into_iter().next().expect("one"), &|_, _| true, &mut mac);
@@ -530,7 +530,7 @@ mod tests {
             unable: true,
             ..Pretend::default()
         };
-        let answer = serve(&server(), Some("t4"), &place_text("anchor t4\n"), &mut mac);
+        let answer = serve(&server(), Some("p4"), &place_text("anchor p4\n"), &mut mac);
         let Answer::Reply(Reply::Placed(placed)) = answer else {
             panic!("{answer:?}");
         };
@@ -545,14 +545,14 @@ mod tests {
             "",
             "hello\n",
             "bateri 1\nplace\n",
-            "bateri 2\nplace\nterminal t9\n",
+            "bateri 2\nplace\nterminal p9\n",
         ] {
             let Answer::Reply(Reply::Failed(_)) = serve(&server(), None, text, &mut mac) else {
                 panic!("{text:?}");
             };
         }
         let Answer::Reply(Reply::Failed(failure)) =
-            serve(&server(), None, "bateri 2\nplace\nterminal t9\n", &mut mac)
+            serve(&server(), None, "bateri 2\nplace\nterminal p9\n", &mut mac)
         else {
             panic!("a later version");
         };
@@ -572,7 +572,7 @@ mod tests {
             Answer::List(Format::Json)
         );
         assert_eq!(
-            serve(&server(), None, "bateri 1\nclose\nterminal t3\n", &mut mac),
+            serve(&server(), None, "bateri 1\nclose\nterminal p3\n", &mut mac),
             Answer::Close(Anchor::of(Terminal(3)))
         );
         assert_eq!(
@@ -598,9 +598,9 @@ mod tests {
             status
         };
         let list = [
-            status("t5", State::RUNNING),
-            status("t6", State::ENDED),
-            status("t7", State::BROKEN),
+            status("p5", State::RUNNING),
+            status("p6", State::ENDED),
+            status("p7", State::BROKEN),
         ];
         assert!(alive_in(&list, Terminal(5), false));
         assert!(!alive_in(&list, Terminal(6), false));
@@ -614,22 +614,22 @@ mod tests {
 
     #[test]
     fn a_terminal_is_closed_unasked_by_itself_and_by_the_one_that_opened_it_and_by_no_other() {
-        let opener = Anchor::parse("t4");
+        let opener = Anchor::parse("p4");
         let made = format!("b-{}", "0123456789abcdef".repeat(2));
         // The opener, and the terminal itself (an agent ending the terminal it runs in).
         let seven = Anchor::of(Terminal(7));
-        assert!(may_close(Some("t4"), &seven, opener.as_ref()));
-        assert!(may_close(Some("t7"), &seven, None));
+        assert!(may_close(Some("p4"), &seven, opener.as_ref()));
+        assert!(may_close(Some("p7"), &seven, None));
         // A terminal the Mac opened before the numbers existed is its own, whatever its name,
         // and is one that opened others.
         let older = Anchor::parse(&made).expect("a name");
         assert!(may_close(Some(&made), &older, None));
         assert!(may_close(Some(&made), &seven, Some(&older)));
         // Anybody else, a program that runs in no terminal, a terminal nobody opened.
-        assert!(!may_close(Some("t5"), &seven, opener.as_ref()));
+        assert!(!may_close(Some("p5"), &seven, opener.as_ref()));
         assert!(!may_close(None, &seven, opener.as_ref()));
-        assert!(!may_close(Some("t4"), &seven, None));
-        assert!(!may_close(Some("t7"), &Anchor::of(Terminal(70)), None));
+        assert!(!may_close(Some("p4"), &seven, None));
+        assert!(!may_close(Some("p7"), &Anchor::of(Terminal(70)), None));
     }
 
     fn note(terminal: u64, anchor: &str, keep_open: bool) -> Note {
@@ -649,11 +649,11 @@ mod tests {
     #[test]
     fn what_was_left_while_the_mac_was_away_is_placed_when_the_terminal_can_still_be_shown() {
         let mut mac = Pretend {
-            anchors: vec!["t4".to_owned()],
+            anchors: vec!["p4".to_owned()],
             shown: vec![Terminal(3)],
             ..Pretend::default()
         };
-        // t5 runs, t6 ended and was not asked to stay, t7 ended and was, t3 has a pane, t8's
+        // p5 runs, p6 ended and was not asked to stay, p7 ended and was, p3 has a pane, p8's
         // anchor is in no tab.
         let alive = |terminal: Terminal, keep_open: bool| match terminal.0 {
             5 | 3 | 8 => true,
@@ -663,23 +663,23 @@ mod tests {
         let read = settle_notes(
             &server(),
             vec![
-                note(5, "t4", false),
-                note(6, "t4", false),
-                note(7, "t4", true),
-                note(3, "t4", false),
-                note(8, "t1", false),
+                note(5, "p4", false),
+                note(6, "p4", false),
+                note(7, "p4", true),
+                note(3, "p4", false),
+                note(8, "p1", false),
             ],
             &alive,
             &mut mac,
         );
-        assert_eq!(read.placed, 2, "t5 and t7");
+        assert_eq!(read.placed, 2, "p5 and p7");
         assert_eq!(
             mac.placed.iter().map(|p| p.1).collect::<Vec<_>>(),
             [Terminal(5), Terminal(7)]
         );
         assert_eq!(read.waiting.len(), 1);
         assert_eq!(read.waiting[0].place.terminal, Terminal(8));
-        assert_eq!(read.waiting[0].anchor.name(), "t1");
+        assert_eq!(read.waiting[0].anchor.name(), "p1");
     }
 
     #[test]
@@ -688,8 +688,8 @@ mod tests {
         let mut mac = Pretend::default();
         let waiting = |terminal: u64| Waiting {
             server: server(),
-            anchor: Anchor::parse("t4").expect("a name"),
-            place: note(terminal, "t4", false).place,
+            anchor: Anchor::parse("p4").expect("a name"),
+            place: note(terminal, "p4", false).place,
             opener: None,
         };
         // Gone.

@@ -20,7 +20,7 @@ fn who(program: Option<&str>) -> String {
     agent_name(program).unwrap_or_else(|| "A program".to_owned())
 }
 
-/// Who asked for a pane, in the words a card says them: "Claude (t4)" when the program is
+/// Who asked for a pane, in the words a card says them: "Claude (p4)" when the program is
 /// known, the terminal it runs in alone otherwise.
 pub fn opener(program: Option<&str>, terminal: &str) -> String {
     let terminal: String = terminal.chars().filter(|c| !c.is_control()).collect();
@@ -92,18 +92,18 @@ mod tests {
         for program in ["2.1.296", "node", "python3", "zsh", "", "a b"] {
             assert_eq!(who(Some(program)), "A program", "{program}");
         }
-        assert_eq!(opener(Some("2.1.296"), "t4"), "t4");
+        assert_eq!(opener(Some("2.1.296"), "p4"), "p4");
         assert_eq!(who(Some("claude-code")), "Claude");
         assert_eq!(who(Some("gemini")), "Gemini");
     }
 
     #[test]
     fn a_card_says_who_asked_for_a_pane() {
-        assert_eq!(opener(Some("claude"), "t4"), "Claude (t4)");
-        assert_eq!(opener(Some("/usr/bin/codex"), "t12"), "Codex (t12)");
-        assert_eq!(opener(Some("zsh"), "t4"), "t4");
+        assert_eq!(opener(Some("claude"), "p4"), "Claude (p4)");
+        assert_eq!(opener(Some("/usr/bin/codex"), "p12"), "Codex (p12)");
+        assert_eq!(opener(Some("zsh"), "p4"), "p4");
         assert_eq!(opener(None, "b-0a1b"), "b-0a1b");
-        assert_eq!(opener(None, "t\u{1b}4"), "t4");
+        assert_eq!(opener(None, "p\u{1b}4"), "p4");
     }
 
     #[test]
@@ -115,16 +115,16 @@ mod tests {
 
     #[test]
     fn the_question_names_who_asks_what_for_and_where() {
-        let (text, under) = close_question(Some("claude"), Some("t4"), "t7", "rasp");
-        assert_eq!(text, "Claude (t4) wants to close t7 on rasp.");
+        let (text, under) = close_question(Some("claude"), Some("p4"), "p7", "rasp");
+        assert_eq!(text, "Claude (p4) wants to close p7 on rasp.");
         assert!(under.contains("ends"));
-        let (text, _) = close_question(None, None, "t7", "rasp");
+        let (text, _) = close_question(None, None, "p7", "rasp");
         assert_eq!(
             text,
-            "A program on rasp that runs in no terminal wants to close t7 on rasp."
+            "A program on rasp that runs in no terminal wants to close p7 on rasp."
         );
         // Nothing from outside moves the user's screen.
-        let (text, _) = close_question(Some("a\u{7}b"), Some("t\u{1b}4"), "t7", "r\u{0}asp");
+        let (text, _) = close_question(Some("a\u{7}b"), Some("p\u{1b}4"), "p7", "r\u{0}asp");
         assert!(!text.chars().any(char::is_control), "{text:?}");
     }
 

@@ -2,7 +2,7 @@
 //!
 //! `bateri split` on a server with no Mac connected cannot ask where the pane goes. The terminal
 //! starts anyway and the same `place` message the Mac would have been asked waits in a file,
-//! `~/.local/share/bateri/placing/tN` (the script's own state, under `$HOME`: the Mac's `sh -c` and
+//! `~/.local/share/bateri/placing/pN` (the script's own state, under `$HOME`: the Mac's `sh -c` and
 //! a cron job have no login shell's environment). When a connection to the server comes up and the
 //! server has said what it keeps, the Mac reads the files in one `sh` run on the account's main
 //! connection ([`READ`]) and **removes them as it reads**: a note is read once, and a terminal that
@@ -11,10 +11,10 @@
 //!
 //! A note is a request like any other and is read like one ([`Request::parse`], strictly): it can
 //! ask for a pane for the server it is on, and nothing else — no program, no directory, no byte for
-//! a shell. The only file names that are notes are `t` and a number; `tN.tmp.PID` is a note being
+//! a shell. The only file names that are notes are `p` and a number; `pN.tmp.PID` is a note being
 //! written.
 //!
-//! `~/.local/share/bateri/terminals/tN` says who opened a terminal and whether it stays open when
+//! `~/.local/share/bateri/terminals/pN` says who opened a terminal and whether it stays open when
 //! its program ends ([`Record`]); the same script writes it, and `ls` ([`RECORDS`] reads them all,
 //! leaving them) and `close` (who may close a terminal without asking) read it.
 
@@ -22,15 +22,15 @@ use super::message::{MAX_BYTES, Place, Request};
 use super::{Anchor, Terminal};
 
 /// The script that reads and removes the notes: run with `sh -c` on the server, it prints each
-/// note as a header line, `bateri-note tN LENGTH`, then exactly LENGTH bytes and a newline. The
+/// note as a header line, `bateri-note pN LENGTH`, then exactly LENGTH bytes and a newline. The
 /// length frames the note (what is in it is anybody's text, a login shell may say words of its own
 /// before the first header), a note over [`MAX_BYTES`] is removed unread, and a link is no note.
 pub const READ: &str = r#"dir="$HOME/.local/share/bateri/placing"
 [ -d "$dir" ] || exit 0
-for file in "$dir"/t*; do
+for file in "$dir"/p*; do
   [ -f "$file" ] && [ ! -L "$file" ] || continue
   name=${file##*/}
-  case ${name#t} in
+  case ${name#p} in
     '' | *[!0-9]*) continue ;;
   esac
   size=$(wc -c < "$file" 2>/dev/null) || continue
@@ -47,14 +47,14 @@ exit 0
 "#;
 
 /// The script that reads who opened what: run with `sh -c` on the server, it prints every
-/// `terminals/tN` record the way [`READ`] prints a note — `bateri-record tN LENGTH`, the bytes, a
+/// `terminals/pN` record the way [`READ`] prints a note — `bateri-record pN LENGTH`, the bytes, a
 /// newline — and removes nothing. A record over 1 KiB is none (the script writes two short lines).
 pub const RECORDS: &str = r#"dir="$HOME/.local/share/bateri/terminals"
 [ -d "$dir" ] || exit 0
-for file in "$dir"/t*; do
+for file in "$dir"/p*; do
   [ -f "$file" ] && [ ! -L "$file" ] || continue
   name=${file##*/}
-  case ${name#t} in
+  case ${name#p} in
     '' | *[!0-9]*) continue ;;
   esac
   size=$(wc -c < "$file" 2>/dev/null) || continue
@@ -138,7 +138,7 @@ fn note_of(terminal: Terminal, body: &[u8]) -> Option<Note> {
     (place.terminal == terminal && place.anchor.is_some()).then_some(Note { terminal, place })
 }
 
-/// What `~/.local/share/bateri/terminals/tN` says: plain `key value` lines, the keys the script
+/// What `~/.local/share/bateri/terminals/pN` says: plain `key value` lines, the keys the script
 /// writes after `kablo new` has made the terminal.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Record {
@@ -220,15 +220,15 @@ mod tests {
 
     #[test]
     fn the_script_prints_each_note_with_its_length_and_removes_it() {
-        let first = place_text("t7", "t4", "side below\nratio 30\n");
-        let second = place_text("t8", "t4", "keep-open yes\n");
+        let first = place_text("p7", "p4", "side below\nratio 30\n");
+        let second = place_text("p8", "p4", "keep-open yes\n");
         let (printed, root) = read(
             "framed",
             &[
-                ("t7", first.as_bytes()),
-                ("t8", second.as_bytes()),
+                ("p7", first.as_bytes()),
+                ("p8", second.as_bytes()),
                 // A note being written, a name that is none, a directory-like name: not notes.
-                ("t9.tmp.123", b"half"),
+                ("p9.tmp.123", b"half"),
                 ("t10x", b"x"),
                 ("t", b"x"),
                 ("other", b"x"),
@@ -236,12 +236,12 @@ mod tests {
         );
         let text = String::from_utf8(printed.clone()).expect("text");
         assert!(
-            text.starts_with(&format!("bateri-note t7 {}\n{first}\n", first.len())),
+            text.starts_with(&format!("bateri-note p7 {}\n{first}\n", first.len())),
             "{text:?}"
         );
         let placing = root.0.join(".local/share/bateri/placing");
-        assert!(!placing.join("t7").exists() && !placing.join("t8").exists());
-        assert!(placing.join("t9.tmp.123").exists() && placing.join("other").exists());
+        assert!(!placing.join("p7").exists() && !placing.join("p8").exists());
+        assert!(placing.join("p9.tmp.123").exists() && placing.join("other").exists());
         let notes = parse(&printed);
         assert_eq!(notes.len(), 2, "{notes:?}");
         assert_eq!(notes[0].terminal, Terminal(7));
@@ -249,19 +249,19 @@ mod tests {
         assert_eq!(notes[0].place.ratio, Some(30));
         assert_eq!(notes[1].terminal, Terminal(8));
         assert!(notes[1].place.keep_open);
-        assert_eq!(notes[1].place.anchor.as_ref().map(Anchor::name), Some("t4"));
+        assert_eq!(notes[1].place.anchor.as_ref().map(Anchor::name), Some("p4"));
     }
 
     #[test]
     fn a_note_of_a_size_no_request_has_is_removed_unread() {
         let big = vec![b'x'; 9000];
-        let ok = place_text("t2", "t1", "");
-        let (printed, root) = read("big", &[("t1", &big), ("t2", ok.as_bytes())]);
+        let ok = place_text("p2", "p1", "");
+        let (printed, root) = read("big", &[("p1", &big), ("p2", ok.as_bytes())]);
         let notes = parse(&printed);
         assert_eq!(notes.len(), 1);
         assert_eq!(notes[0].terminal, Terminal(2));
         assert!(
-            !root.0.join(".local/share/bateri/placing/t1").exists(),
+            !root.0.join(".local/share/bateri/placing/p1").exists(),
             "removed, not printed"
         );
     }
@@ -280,26 +280,26 @@ mod tests {
 
     #[test]
     fn what_a_login_shell_says_and_a_bad_note_are_left_out_and_the_good_one_after_them_is_read() {
-        let good = place_text("t5", "t4", "");
-        let wrong_name = place_text("t6", "t4", "");
-        let no_anchor = "bateri 1\nplace\nterminal t7\n";
+        let good = place_text("p5", "p4", "");
+        let wrong_name = place_text("p6", "p4", "");
+        let no_anchor = "bateri 1\nplace\nterminal p7\n";
         let ls = "bateri 1\nls\n";
         let mut out = b"Welcome to rasp\nbateri-note oops\n".to_vec();
         for (name, body) in [
-            ("t5", good.as_str()),
-            ("t9", wrong_name.as_str()),
-            ("t7", no_anchor),
-            ("t8", ls),
+            ("p5", good.as_str()),
+            ("p9", wrong_name.as_str()),
+            ("p7", no_anchor),
+            ("p8", ls),
         ] {
             out.extend(format!("bateri-note {name} {}\n{body}\n", body.len()).bytes());
         }
-        out.extend(b"bateri-note t5 99999999\nrest");
-        out.extend(b"bateri-note t3 5\nabc");
+        out.extend(b"bateri-note p5 99999999\nrest");
+        out.extend(b"bateri-note p3 5\nabc");
         let notes = parse(&out);
         assert_eq!(notes.len(), 1, "{notes:?}");
         assert_eq!(notes[0].terminal, Terminal(5));
         // Not text.
-        assert!(parse(b"bateri-note t5 2\n\xff\xfe\n").is_empty());
+        assert!(parse(b"bateri-note p5 2\n\xff\xfe\n").is_empty());
         assert!(parse(b"").is_empty());
     }
 
@@ -338,26 +338,26 @@ mod tests {
         let (printed, root) = records_of(
             "all",
             &[
-                ("t1", b"opener t4\nkeep-open no\n"),
-                ("t2", b"opener -\nkeep-open yes\n"),
+                ("p1", b"opener p4\nkeep-open no\n"),
+                ("p2", b"opener -\nkeep-open yes\n"),
                 // Being written, not a number, too big for a record, no record: not read.
-                ("t3.tmp.9", b"opener t4\n"),
-                ("t4x", b"opener t4\n"),
-                ("t5", &big),
-                ("t6", b"what is this\n"),
+                ("p3.tmp.9", b"opener p4\n"),
+                ("p4x", b"opener p4\n"),
+                ("p5", &big),
+                ("p6", b"what is this\n"),
             ],
         );
         let records = parse_records(&printed);
         assert_eq!(records.len(), 2, "{records:?}");
         assert_eq!(records[0].0, Terminal(1));
-        assert_eq!(records[0].1.opener, Anchor::parse("t4"));
+        assert_eq!(records[0].1.opener, Anchor::parse("p4"));
         assert!(!records[0].1.keep_open);
         assert_eq!(records[1].0, Terminal(2));
         assert_eq!(records[1].1.opener, None);
         assert!(records[1].1.keep_open);
         let dir = root.0.join(".local/share/bateri/terminals");
         assert!(
-            dir.join("t1").exists() && dir.join("t5").exists(),
+            dir.join("p1").exists() && dir.join("p5").exists(),
             "nothing is removed"
         );
         // No directory: nothing printed and no failure.
@@ -371,15 +371,15 @@ mod tests {
         assert!(output.status.success() && output.stdout.is_empty());
         // What a login shell says first, and a frame cut short, are left out.
         let mut text = b"Welcome\nbateri-record oops\n".to_vec();
-        text.extend(b"bateri-record t7 23\nopener t4\nkeep-open no\n\n");
-        text.extend(b"bateri-record t8 99\nshort");
+        text.extend(b"bateri-record p7 23\nopener p4\nkeep-open no\n\n");
+        text.extend(b"bateri-record p8 99\nshort");
         assert_eq!(parse_records(&text).len(), 1);
     }
 
     #[test]
     fn the_record_of_who_opened_a_terminal_is_read_from_the_script_bytes() {
-        let record = Record::parse("opener t4\nkeep-open yes\n").expect("a record");
-        assert_eq!(record.opener, Anchor::parse("t4"));
+        let record = Record::parse("opener p4\nkeep-open yes\n").expect("a record");
+        assert_eq!(record.opener, Anchor::parse("p4"));
         assert!(record.keep_open);
         let made = format!("b-{}", "0123456789abcdef".repeat(2));
         let record = Record::parse(&format!("opener {made}\nkeep-open no\n")).expect("a record");

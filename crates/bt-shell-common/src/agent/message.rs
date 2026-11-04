@@ -9,8 +9,8 @@
 //! ```text
 //! bateri 1
 //! place
-//! terminal t9
-//! anchor t4
+//! terminal p9
+//! anchor p4
 //! side below
 //! ratio 30
 //! keep-open yes
@@ -18,7 +18,7 @@
 //! ```
 //!
 //! The `terminal` is the one just started, and an agent's number. The `anchor` is a terminal as
-//! kablo names it: `t4` when the agent wrote one, and the caller's own name, whatever it is, when
+//! kablo names it: `p4` when the agent wrote one, and the caller's own name, whatever it is, when
 //! it did not (a terminal the Mac opened before the numbers existed is `b-` and 32 digits). The
 //! `terminal` of a `close` is named the same way, because a `close` that names none closes the
 //! caller's own.
@@ -537,23 +537,23 @@ mod tests {
     // Version 1, frozen: a script on a server may be speaking it for as long as its terminal
     // lives. These are never edited; a later version gets its own constants.
     const V1_PLACE: &str =
-        "bateri 1\nplace\nterminal t9\nanchor t4\nside below\nratio 30\nkeep-open yes\nfocus yes\n";
-    const V1_PLACE_BARE: &str = "bateri 1\nplace\nterminal t9\n";
+        "bateri 1\nplace\nterminal p9\nanchor p4\nside below\nratio 30\nkeep-open yes\nfocus yes\n";
+    const V1_PLACE_BARE: &str = "bateri 1\nplace\nterminal p9\n";
     const V1_LS: &str = "bateri 1\nls\n";
     const V1_LS_JSON: &str = "bateri 1\nls\nformat json\n";
-    const V1_CLOSE: &str = "bateri 1\nclose\nterminal t7\n";
+    const V1_CLOSE: &str = "bateri 1\nclose\nterminal p7\n";
     const V1_NOTIFY: &str = "bateri 1\nnotify\ntext The build is done: 3 tests failed\n";
     // Added to version 1 after it was first written: an anchor that is no agent's number, which
     // the first spelling of `anchor` did not allow. Reading it changes nothing of the above.
     const V1_PLACE_MADE: &str =
-        "bateri 1\nplace\nterminal t9\nanchor b-0123456789abcdef0123456789abcdef\nside right\n";
+        "bateri 1\nplace\nterminal p9\nanchor b-0123456789abcdef0123456789abcdef\nside right\n";
     const V1_REPLY_PLACED_MADE: &str = "bateri 1\nok placed\nlanded as_asked\nnext-to b-0123456789abcdef0123456789abcdef\nsqueezed no\nhidden no\n";
     // Added the same way: the terminal `close` names may be one that is no agent's number, because
     // a request that names none closes the one it comes from.
     const V1_CLOSE_MADE: &str = "bateri 1\nclose\nterminal b-0123456789abcdef0123456789abcdef\n";
     const V1_REPLY_DONE: &str = "bateri 1\nok\n";
     const V1_REPLY_PLACED: &str =
-        "bateri 1\nok placed\nlanded beside_group\nnext-to t4\nsqueezed no\nhidden yes\n";
+        "bateri 1\nok placed\nlanded beside_group\nnext-to p4\nsqueezed no\nhidden yes\n";
     const V1_REPLY_TEXT: &str = "bateri 1\nok text\nWindow 1\n  Tab 1.1\n";
     const V1_REPLY_ERROR: &str = "bateri 1\nerror refused the user said no\n";
 
@@ -626,8 +626,8 @@ mod tests {
             Ok(V1_PLACE_MADE)
         );
         // A name a person gave a terminal with kablo is as good, and so is an agent's number.
-        for name in ["mine", "build.2", "t04", "t4"] {
-            let text = format!("bateri 1\nplace\nterminal t9\nanchor {name}\n");
+        for name in ["mine", "build.2", "p04", "p4"] {
+            let text = format!("bateri 1\nplace\nterminal p9\nanchor {name}\n");
             assert_eq!(
                 Request::parse(&text),
                 Ok(Request::Place(Place {
@@ -691,7 +691,7 @@ mod tests {
             assert_eq!(Request::parse(text), Ok(Request::Place(place())));
         }
         // The flags may be said `no`, and the keys come in any order.
-        let text = "bateri 1\nplace\nfocus no\nside left\nterminal t2\nkeep-open no\n";
+        let text = "bateri 1\nplace\nfocus no\nside left\nterminal p2\nkeep-open no\n";
         assert_eq!(
             Request::parse(text),
             Ok(Request::Place(Place {
@@ -740,51 +740,51 @@ mod tests {
             ("bateri x\nls\n", "plain number"),
             ("bateri 1\n", "no verb"),
             ("bateri 1\nlist\n", "no verb"),
-            ("bateri 1\nPLACE\nterminal t1\n", "no verb"),
+            ("bateri 1\nPLACE\nterminal p1\n", "no verb"),
             ("bateri 1\nplace\n", "needs a `terminal`"),
             ("bateri 1\nclose\n", "needs a `terminal`"),
             ("bateri 1\nnotify\n", "needs a `text`"),
-            ("bateri 1\nplace\nterminal t1\nterminal t2\n", "twice"),
+            ("bateri 1\nplace\nterminal p1\nterminal p2\n", "twice"),
             (
-                "bateri 1\nplace\nterminal t1\nlabel work\n",
+                "bateri 1\nplace\nterminal p1\nlabel work\n",
                 "takes no `label`",
             ),
             (
-                "bateri 1\nclose\nterminal t1\nside left\n",
+                "bateri 1\nclose\nterminal p1\nside left\n",
                 "takes no `side`",
             ),
             ("bateri 1\nplace\nterminal\n", "no value"),
             ("bateri 1\nplace\nterminal \n", "no value"),
-            ("bateri 1\nplace\nterminal t1\n\n", "empty"),
-            ("bateri 1\nplace\n\nterminal t1\n", "empty"),
+            ("bateri 1\nplace\nterminal p1\n\n", "empty"),
+            ("bateri 1\nplace\n\nterminal p1\n", "empty"),
             ("bateri 1\nplace\nterminal b-0a1b\n", "names a terminal"),
-            ("bateri 1\nplace\nterminal t09\n", "names a terminal"),
+            ("bateri 1\nplace\nterminal p09\n", "names a terminal"),
             (
-                "bateri 1\nplace\nterminal t1\nanchor a/b\n",
+                "bateri 1\nplace\nterminal p1\nanchor a/b\n",
                 "names a terminal as kablo does",
             ),
             (
-                "bateri 1\nplace\nterminal t1\nanchor ../t4\n",
+                "bateri 1\nplace\nterminal p1\nanchor ../p4\n",
                 "names a terminal as kablo does",
             ),
             (
-                "bateri 1\nplace\nterminal t1\nanchor not a name\n",
+                "bateri 1\nplace\nterminal p1\nanchor not a name\n",
                 "names a terminal as kablo does",
             ),
-            ("bateri 1\nplace\nterminal t1\nanchor\n", "no value"),
-            ("bateri 1\nplace\nterminal t1\nside top\n", "left, right"),
-            ("bateri 1\nplace\nterminal t1\nside Left\n", "left, right"),
-            ("bateri 1\nplace\nterminal t1\nratio 0\n", "1 to 99"),
-            ("bateri 1\nplace\nterminal t1\nratio 100\n", "1 to 99"),
-            ("bateri 1\nplace\nterminal t1\nratio 030\n", "1 to 99"),
-            ("bateri 1\nplace\nterminal t1\nratio 30%\n", "1 to 99"),
-            ("bateri 1\nplace\nterminal t1\nratio -3\n", "1 to 99"),
+            ("bateri 1\nplace\nterminal p1\nanchor\n", "no value"),
+            ("bateri 1\nplace\nterminal p1\nside top\n", "left, right"),
+            ("bateri 1\nplace\nterminal p1\nside Left\n", "left, right"),
+            ("bateri 1\nplace\nterminal p1\nratio 0\n", "1 to 99"),
+            ("bateri 1\nplace\nterminal p1\nratio 100\n", "1 to 99"),
+            ("bateri 1\nplace\nterminal p1\nratio 030\n", "1 to 99"),
+            ("bateri 1\nplace\nterminal p1\nratio 30%\n", "1 to 99"),
+            ("bateri 1\nplace\nterminal p1\nratio -3\n", "1 to 99"),
             (
-                "bateri 1\nplace\nterminal t1\nkeep-open true\n",
+                "bateri 1\nplace\nterminal p1\nkeep-open true\n",
                 "yes or no",
             ),
             ("bateri 1\nls\nformat yaml\n", "text or json"),
-            ("bateri 1\nls\nterminal t1\n", "takes no `terminal`"),
+            ("bateri 1\nls\nterminal p1\n", "takes no `terminal`"),
         ];
         for (text, mentions) in cases {
             let failure = usage(text);
@@ -813,7 +813,7 @@ mod tests {
 
     #[test]
     fn a_newer_version_is_its_own_error_so_a_script_can_try_an_older_one() {
-        let failure = usage("bateri 2\nplace\nterminal t1\nfuture-key x\n");
+        let failure = usage("bateri 2\nplace\nterminal p1\nfuture-key x\n");
         assert_eq!(failure.kind, Kind::Version);
         assert!(failure.text.contains("version 2"), "{failure:?}");
         assert_eq!(usage("bateri 4000000000\nls\n").kind, Kind::Version);

@@ -2,7 +2,7 @@
 //! and what is decided about it — the half that needs no AppKit, so `make linux` runs its tests.
 //!
 //! **Who does what.** The terminal itself is the server's: the script on the server starts it
-//! with `kablo new`, numbers it (`t9`) and answers `wait`, `capture` and `send` without this Mac.
+//! with `kablo new`, numbers it (`p9`) and answers `wait`, `capture` and `send` without this Mac.
 //! The Mac only decides where a pane that shows it goes, and shows it — it runs nothing and
 //! writes no byte to any shell, so the request is a *place*, never a *program*. The request
 //! travels on kablo's app channel as lines of text ([`message`]); when the Mac is not there it
@@ -37,17 +37,18 @@ mod script;
 
 use std::fmt;
 
-/// A terminal's number on its server: the `t9` an agent is told when it opens one and names when it
+/// A terminal's number on its server: the `p9` an agent is told when it opens one and names when it
 /// acts on one. Numbers are per server, count up and are never given twice.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Terminal(pub u64);
 
 impl Terminal {
-    /// The terminal a name stands for: `t` and the number written plainly (`t9`, never `t09` or
-    /// `T9`). A terminal that has another kind of name (one a person made with kablo itself) is
-    /// no terminal for an agent to name.
+    /// The terminal a name stands for: `p` and the number written plainly (`p9`, never `p09` or
+    /// `P9`). A terminal that has another kind of name (one a person made with kablo itself, or
+    /// one numbered `t9` before the unit was the pane) is no terminal for an agent to name; it
+    /// goes on running under that name.
     pub fn parse(name: &str) -> Option<Terminal> {
-        let digits = name.strip_prefix('t')?;
+        let digits = name.strip_prefix('p')?;
         let number: u64 = digits.parse().ok()?;
         // `u64::from_str` takes a `+` and leading zeros; the one spelling is the plain one.
         (number.to_string() == digits).then_some(Terminal(number))
@@ -61,16 +62,16 @@ impl Terminal {
 
 impl fmt::Display for Terminal {
     fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(out, "t{}", self.0)
+        write!(out, "p{}", self.0)
     }
 }
 
 /// The terminal a pane is placed beside: kablo's name for it. An agent *writes* a terminal as its
-/// number (`t4`, [`Terminal`]); the terminal it runs in is the caller's whatever it is called, and
+/// number (`p4`, [`Terminal`]); the terminal it runs in is the caller's whatever it is called, and
 /// a request that defaults to it names it so — a terminal the Mac opened before the numbers
 /// existed is `b-` and 32 digits, one a person made with `kablo new` is what they typed. Reading
 /// takes every name kablo allows ([`kablo_proto::SessionId`]'s alphabet and length, so a name is
-/// never a path), which includes every `tN`.
+/// never a path), which includes every `pN`.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Anchor(kablo_proto::SessionId);
 
@@ -84,7 +85,7 @@ impl Anchor {
     pub fn of(terminal: Terminal) -> Anchor {
         Anchor(
             kablo_proto::SessionId::new(&terminal.to_string())
-                .expect("`t` and a number is a name kablo allows"),
+                .expect("`p` and a number is a name kablo allows"),
         )
     }
 
@@ -111,27 +112,31 @@ mod tests {
 
     #[test]
     fn a_terminal_is_named_by_its_plain_number() {
-        assert_eq!(Terminal::parse("t9"), Some(Terminal(9)));
-        assert_eq!(Terminal::parse("t0"), Some(Terminal(0)));
-        assert_eq!(Terminal(14).to_string(), "t14");
+        assert_eq!(Terminal::parse("p9"), Some(Terminal(9)));
+        assert_eq!(Terminal::parse("p0"), Some(Terminal(0)));
+        assert_eq!(Terminal(14).to_string(), "p14");
         for name in [
             "",
-            "t",
+            "p",
             "9",
-            "T9",
-            "t09",
-            "t+9",
-            "t-9",
-            "t9 ",
-            " t9",
-            "tt9",
-            "t9a",
+            "P9",
+            "p09",
+            "p+9",
+            "p-9",
+            "p9 ",
+            " p9",
+            "pp9",
+            "p9a",
             "b-0123456789",
-            "t99999999999999999999",
+            "p99999999999999999999",
+            // The name the numbers had before the unit was the pane: a terminal that has it
+            // runs on, and is no pane for an agent to name.
+            "t9",
         ] {
             assert_eq!(Terminal::parse(name), None, "{name:?}");
         }
-        assert_eq!(Terminal::number_of("t3"), Some(3));
+        assert_eq!(Terminal::number_of("p3"), Some(3));
+        assert_eq!(Terminal::number_of("t3"), None);
         assert_eq!(Terminal::number_of("b-3"), None);
     }
 
@@ -139,9 +144,10 @@ mod tests {
     fn an_anchor_is_any_name_kablo_allows_and_an_agents_number_is_one() {
         let made = format!("b-{}", "0123456789abcdef".repeat(2));
         for name in [
+            "p4",
+            "p0",
+            "p07",
             "t4",
-            "t0",
-            "t07",
             "mine",
             "b-0a1b",
             &made,
@@ -154,8 +160,8 @@ mod tests {
         }
         for name in [
             "",
-            " t4",
-            "t4 ",
+            " p4",
+            "p4 ",
             "a b",
             "a/b",
             "../x",
@@ -167,14 +173,15 @@ mod tests {
         }
         // The agent's own spelling keeps its number; every other name has none.
         assert_eq!(
-            Anchor::parse("t9").and_then(|a| a.terminal()),
+            Anchor::parse("p9").and_then(|a| a.terminal()),
             Some(Terminal(9))
         );
         assert_eq!(
             Anchor::of(Terminal(9)),
-            Anchor::parse("t9").expect("a name")
+            Anchor::parse("p9").expect("a name")
         );
-        assert_eq!(Anchor::parse("t09").and_then(|a| a.terminal()), None);
+        assert_eq!(Anchor::parse("p09").and_then(|a| a.terminal()), None);
+        assert_eq!(Anchor::parse("t9").and_then(|a| a.terminal()), None);
         assert_eq!(Anchor::parse(&made).and_then(|a| a.terminal()), None);
     }
 }

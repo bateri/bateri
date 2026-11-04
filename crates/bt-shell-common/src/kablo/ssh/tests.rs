@@ -446,8 +446,8 @@ fn what_the_script_left_for_the_application_is_read_over_the_master_and_removed(
     let placing = world.home.join(".local/share/bateri/placing");
     std::fs::create_dir_all(&placing).expect("dir");
     std::fs::write(
-        placing.join("t7"),
-        "bateri 1\nplace\nterminal t7\nanchor t4\nside below\n",
+        placing.join("p7"),
+        "bateri 1\nplace\nterminal p7\nanchor p4\nside below\n",
     )
     .expect("a note");
 
@@ -468,7 +468,7 @@ fn what_the_script_left_for_the_application_is_read_over_the_master_and_removed(
         assert_eq!(got[0].1.len(), 1);
         assert_eq!(got[0].1[0].terminal, crate::agent::Terminal(7));
     }
-    assert!(!placing.join("t7").exists(), "read once");
+    assert!(!placing.join("p7").exists(), "read once");
 
     // Nothing left: one more step on the server, and the application is not told.
     let steps = |world: &World| {
@@ -501,15 +501,15 @@ fn who_opened_what_is_read_over_the_master_and_left_on_the_server() {
         .expect("kablo");
     let dir = world.home.join(".local/share/bateri/terminals");
     std::fs::create_dir_all(&dir).expect("dir");
-    std::fs::write(dir.join("t3"), "opener t4\nkeep-open yes\n").expect("a record");
+    std::fs::write(dir.join("p3"), "opener p4\nkeep-open yes\n").expect("a record");
 
     let backend = world.backend(Some(world.package()));
     let records = backend.records(&host);
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].0, crate::agent::Terminal(3));
-    assert_eq!(records[0].1.opener, crate::agent::Anchor::parse("t4"));
+    assert_eq!(records[0].1.opener, crate::agent::Anchor::parse("p4"));
     assert!(records[0].1.keep_open);
-    assert!(dir.join("t3").exists(), "read, not taken");
+    assert!(dir.join("p3").exists(), "read, not taken");
 
     let bare = world.backend(None);
     let before = world.calls().len();

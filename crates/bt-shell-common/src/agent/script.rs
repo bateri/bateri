@@ -21,7 +21,7 @@ use crate::settings::TempRoot;
 /// The program stood in for kablo: every call is a line of its arguments (the unit separator
 /// between them) in `calls`, `kablo app` keeps what it is told in `app-in.PID` and answers with
 /// `app-reply` (or the status in `app-exit`; with neither, 69 as with no Mac), `new` refuses a
-/// number with a `taken.tN` file beside it, and the commands the script only passes on exit with
+/// number with a `taken.pN` file beside it, and the commands the script only passes on exit with
 /// `exit.COMMAND` when there is one.
 const KABLO: &str = r#"#!/bin/sh
 for a in "$@"; do printf '%s\037' "$a"; done >> "$STUB_DIR/calls"
@@ -67,7 +67,7 @@ case $cmd in
     exit 69
     ;;
   list)
-    if [ "${2-}" = --json ]; then echo '[]'; else printf 'ID  PROGRAM\nt1  zsh\n'; fi
+    if [ "${2-}" = --json ]; then echo '[]'; else printf 'ID  PROGRAM\np1  zsh\n'; fi
     ;;
   *)
     if [ -e "$STUB_DIR/exit.$cmd" ]; then exit "$(cat "$STUB_DIR/exit.$cmd")"; fi
@@ -336,7 +336,7 @@ fn new_call(server: &Server, id: &str, program: &[&str]) -> Vec<String> {
     call
 }
 
-const PLACED: &str = "bateri 1\nok placed\nlanded as_asked\nnext-to t4\nsqueezed no\nhidden no\n";
+const PLACED: &str = "bateri 1\nok placed\nlanded as_asked\nnext-to p4\nsqueezed no\nhidden no\n";
 
 #[test]
 #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
@@ -378,19 +378,19 @@ fn a_split_starts_the_terminal_and_tells_the_mac_where_the_pane_goes() {
         server.mac_says(PLACED);
         let said = server.run(
             &shell,
-            Some("t4"),
+            Some("p4"),
             &[
                 "split", "--below", "--ratio", "30", "--focus", "--", "npm", "run", "dev",
             ],
         );
         assert_eq!(said.status, 0, "{}: {}", shell.display(), said.err);
-        assert_eq!(said.out, "t1\n");
+        assert_eq!(said.out, "p1\n");
         assert_eq!(said.err, "", "a pane that landed as asked is silent");
         // kablo: who is asking, the terminal (in the caller's directory, with its `PATH`), the
         // conversation.
         let calls = server.calls();
         assert_eq!(calls[0], ["here"]);
-        assert_eq!(calls[1], new_call(&server, "t1", &["npm", "run", "dev"]));
+        assert_eq!(calls[1], new_call(&server, "p1", &["npm", "run", "dev"]));
         assert_eq!(calls[2], ["app"]);
         // The message is the one the Mac reads, and the one it writes.
         let told = server.told();
@@ -404,11 +404,11 @@ fn a_split_starts_the_terminal_and_tells_the_mac_where_the_pane_goes() {
         assert_eq!(Request::parse(&told[0]), Ok(Request::Place(wanted)));
         // Who opened it, for `close`.
         assert_eq!(
-            std::fs::read_to_string(server.state().join("terminals/t1")).expect("a record"),
-            "opener t4\nkeep-open no\n"
+            std::fs::read_to_string(server.state().join("terminals/p1")).expect("a record"),
+            "opener p4\nkeep-open no\n"
         );
         // Nothing waits: the Mac took it.
-        assert_eq!(server.note("t1"), None);
+        assert_eq!(server.note("p1"), None);
     }
 }
 
@@ -426,7 +426,7 @@ fn without_a_mac_the_message_waits_on_the_server_and_the_command_still_answers()
                 },
             ),
             (
-                &["tab", "t7", "--focus"][..],
+                &["tab", "p7", "--focus"][..],
                 Place {
                     side: Some(Side::Tab),
                     focus: true,
@@ -435,9 +435,9 @@ fn without_a_mac_the_message_waits_on_the_server_and_the_command_still_answers()
                 },
             ),
         ] {
-            let said = server.run(&shell, Some("t4"), args);
+            let said = server.run(&shell, Some("p4"), args);
             assert_eq!(said.status, 0, "{}: {}", shell.display(), said.err);
-            let id = format!("t{}", wanted.terminal.0);
+            let id = format!("p{}", wanted.terminal.0);
             assert_eq!(said.out, format!("{id}\n"));
             assert_eq!(
                 said.err,
@@ -450,23 +450,23 @@ fn without_a_mac_the_message_waits_on_the_server_and_the_command_still_answers()
             assert_eq!(Request::parse(&note), Ok(Request::Place(wanted)));
         }
         // The answer as an object.
-        let said = server.run(&shell, Some("t4"), &["split", "--json", "--left"]);
+        let said = server.run(&shell, Some("p4"), &["split", "--json", "--left"]);
         assert_eq!(said.status, 0);
         assert_eq!(
             said.out,
-            "{\"terminal\":\"t3\",\"landed\":\"waiting\",\"next_to\":null,\"squeezed\":false,\"hidden\":false}\n"
+            "{\"terminal\":\"p3\",\"landed\":\"waiting\",\"next_to\":null,\"squeezed\":false,\"hidden\":false}\n"
         );
         // A Mac that is there but does not answer is waited for in the same way.
         server.mac_is_silent();
-        let said = server.run(&shell, Some("t4"), &["split"]);
+        let said = server.run(&shell, Some("p4"), &["split"]);
         assert_eq!(said.status, 0);
-        assert_eq!(said.out, "t4\n");
+        assert_eq!(said.out, "p4\n");
         assert!(
             said.err.starts_with("bateri: the Mac did not answer"),
             "{}",
             said.err
         );
-        assert!(server.note("t4").is_some());
+        assert!(server.note("p4").is_some());
     }
 }
 
@@ -475,47 +475,47 @@ fn without_a_mac_the_message_waits_on_the_server_and_the_command_still_answers()
 fn a_pane_that_did_not_land_as_asked_is_told_on_one_line() {
     let server = Server::new("landing");
     let shell = Path::new("/bin/sh");
-    server.mac_says("bateri 1\nok placed\nlanded new_tab\nnext-to t4\nsqueezed yes\nhidden no\n");
-    let said = server.run(shell, Some("t4"), &["split", "--json", "--below"]);
+    server.mac_says("bateri 1\nok placed\nlanded new_tab\nnext-to p4\nsqueezed yes\nhidden no\n");
+    let said = server.run(shell, Some("p4"), &["split", "--json", "--below"]);
     assert_eq!(said.status, 0);
     assert_eq!(
         said.out,
-        "{\"terminal\":\"t1\",\"landed\":\"new_tab\",\"next_to\":\"t4\",\"squeezed\":true,\"hidden\":false}\n"
+        "{\"terminal\":\"p1\",\"landed\":\"new_tab\",\"next_to\":\"p4\",\"squeezed\":true,\"hidden\":false}\n"
     );
     assert_eq!(
         said.err,
-        "bateri: t1 is in a tab of its own: there was no room beside t4\n"
+        "bateri: p1 is in a tab of its own: there was no room beside p4\n"
     );
     // The Mac has it, waiting for the anchor to be on screen: that is not "when a Mac connects".
-    server.mac_says("bateri 1\nok placed\nlanded waiting\nnext-to t4\nsqueezed no\nhidden no\n");
-    let said = server.run(shell, Some("t4"), &["split", "--json"]);
+    server.mac_says("bateri 1\nok placed\nlanded waiting\nnext-to p4\nsqueezed no\nhidden no\n");
+    let said = server.run(shell, Some("p4"), &["split", "--json"]);
     assert_eq!(said.status, 0);
     assert_eq!(
         said.out,
-        "{\"terminal\":\"t2\",\"landed\":\"waiting\",\"next_to\":\"t4\",\"squeezed\":false,\"hidden\":false}\n"
+        "{\"terminal\":\"p2\",\"landed\":\"waiting\",\"next_to\":\"p4\",\"squeezed\":false,\"hidden\":false}\n"
     );
     assert_eq!(
         said.err,
-        "bateri: t2 waits in the Mac's list of terminals running in the background, until t4 is on screen\n"
+        "bateri: p2 waits in the Mac's list of terminals running in the background, until p4 is on screen\n"
     );
     assert_eq!(
-        server.note("t2"),
+        server.note("p2"),
         None,
         "the Mac has it; nothing waits on the server"
     );
     // The Mac could not make the pane just now and kept nothing to place it by: it does not say
     // the pane will come when the anchor is on screen.
     server.mac_says("bateri 1\nok placed\nlanded waiting\nsqueezed no\nhidden no\n");
-    let said = server.run(shell, Some("t4"), &["split"]);
-    assert_eq!(said.out, "t3\n");
+    let said = server.run(shell, Some("p4"), &["split"]);
+    assert_eq!(said.out, "p3\n");
     assert_eq!(
         said.err,
-        "bateri: t3 waits in the Mac's list of terminals running in the background: the Mac could not make its pane now\n"
+        "bateri: p3 waits in the Mac's list of terminals running in the background: the Mac could not make its pane now\n"
     );
-    server.mac_says("bateri 1\nok placed\nlanded as_asked\nnext-to t4\nsqueezed no\nhidden yes\n");
-    let said = server.run(shell, Some("t4"), &["split"]);
-    assert_eq!(said.out, "t4\n");
-    assert_eq!(said.err, "bateri: t4 is behind a pane that fills its tab\n");
+    server.mac_says("bateri 1\nok placed\nlanded as_asked\nnext-to p4\nsqueezed no\nhidden yes\n");
+    let said = server.run(shell, Some("p4"), &["split"]);
+    assert_eq!(said.out, "p4\n");
+    assert_eq!(said.err, "bateri: p4 is behind a pane that fills its tab\n");
 }
 
 /// A terminal the Mac opened before the numbers existed, and one a person made with kablo.
@@ -526,7 +526,7 @@ const MADE: &str = "b-0123456789abcdef0123456789abcdef";
 fn the_callers_own_terminal_is_the_anchor_whatever_it_is_called() {
     for (name, shell) in shells() {
         let server = Server::new(&format!("anchor-{name}"));
-        for here in [MADE, "mine", "build.2"] {
+        for here in [MADE, "mine", "build.2", "t9"] {
             server.forget_calls();
             server.mac_says(&format!(
                 "bateri 1\nok placed\nlanded as_asked\nnext-to {here}\nsqueezed no\nhidden no\n"
@@ -576,7 +576,7 @@ fn the_callers_own_terminal_is_the_anchor_whatever_it_is_called() {
         assert_eq!(said.status, 0, "{}", said.err);
         let said = server.run(&shell, Some(MADE), &["split", MADE]);
         assert_eq!(said.status, 64, "an anchor the agent writes is a number");
-        assert!(said.err.contains("is not a terminal"), "{}", said.err);
+        assert!(said.err.contains("is not a pane"), "{}", said.err);
     }
 }
 
@@ -592,14 +592,14 @@ fn a_pane_that_waits_for_the_terminal_that_asked_says_so_without_its_long_name()
     let said = server.run(shell, Some(MADE), &["split"]);
     assert_eq!(
         said.err,
-        "bateri: t1 waits in the Mac's list of terminals running in the background, until this terminal is on screen\n"
+        "bateri: p1 waits in the Mac's list of terminals running in the background, until this terminal is on screen\n"
     );
     // No Mac: the note is the message, anchor and all, and is read as one.
     server.no_mac();
     let said = server.run(shell, Some(MADE), &["split", "--right", "--keep-open"]);
     assert_eq!(
         said.err,
-        "bateri: t2 will take its place when a Mac connects\n"
+        "bateri: p2 will take its place when a Mac connects\n"
     );
     let wanted = Place {
         terminal: Terminal(2),
@@ -608,20 +608,20 @@ fn a_pane_that_waits_for_the_terminal_that_asked_says_so_without_its_long_name()
         keep_open: true,
         ..place(2, 1)
     };
-    let note = server.note("t2").expect("a note");
+    let note = server.note("p2").expect("a note");
     assert_eq!(note, encoded(wanted.clone()));
     assert_eq!(Request::parse(&note), Ok(Request::Place(wanted)));
     // A terminal that has a number is called by it.
-    server.mac_says("bateri 1\nok placed\nlanded new_tab\nnext-to t4\nsqueezed no\nhidden no\n");
-    let said = server.run(shell, Some("t4"), &["tab"]);
+    server.mac_says("bateri 1\nok placed\nlanded new_tab\nnext-to p4\nsqueezed no\nhidden no\n");
+    let said = server.run(shell, Some("p4"), &["tab"]);
     assert_eq!(
         said.err,
-        "bateri: t3 is in a tab of its own: there was no room beside t4\n"
+        "bateri: p3 is in a tab of its own: there was no room beside p4\n"
     );
     let said = server.run(shell, Some(MADE), &["tab"]);
     assert_eq!(
         said.err,
-        "bateri: t4 is in a tab of its own: there was no room beside this terminal\n"
+        "bateri: p4 is in a tab of its own: there was no room beside this terminal\n"
     );
 }
 
@@ -634,21 +634,21 @@ fn run_in_no_terminal_a_pane_with_no_anchor_leaves_the_terminal_in_the_list() {
         for (mode, number) in [("split", 1), ("tab", 2)] {
             let said = server.run(&shell, None, &[mode, "--keep-open", "--", "sleep", "60"]);
             assert_eq!(said.status, 0, "{mode}: {}", said.err);
-            assert_eq!(said.out, format!("t{number}\n"));
+            assert_eq!(said.out, format!("p{number}\n"));
             assert_eq!(
                 said.err,
                 format!(
-                    "bateri: t{number} waits in the Mac's list of terminals running in the background: this ran in no terminal, so it has no pane to go beside\n"
+                    "bateri: p{number} waits in the Mac's list of terminals running in the background: this ran in no terminal, so it has no pane to go beside\n"
                 )
             );
             // The terminal runs, nobody is asked where to put a pane and no note waits.
             assert_eq!(
                 server.calls_of("new").last(),
-                Some(&new_call(&server, &format!("t{number}"), &["sleep", "60"]))
+                Some(&new_call(&server, &format!("p{number}"), &["sleep", "60"]))
             );
-            assert_eq!(server.note(&format!("t{number}")), None);
+            assert_eq!(server.note(&format!("p{number}")), None);
             assert_eq!(
-                std::fs::read_to_string(server.state().join(format!("terminals/t{number}")))
+                std::fs::read_to_string(server.state().join(format!("terminals/p{number}")))
                     .expect("a record"),
                 "opener -\nkeep-open yes\n"
             );
@@ -660,10 +660,10 @@ fn run_in_no_terminal_a_pane_with_no_anchor_leaves_the_terminal_in_the_list() {
         assert_eq!(said.status, 0);
         assert_eq!(
             said.out,
-            "{\"terminal\":\"t3\",\"landed\":\"waiting\",\"next_to\":null,\"squeezed\":false,\"hidden\":false}\n"
+            "{\"terminal\":\"p3\",\"landed\":\"waiting\",\"next_to\":null,\"squeezed\":false,\"hidden\":false}\n"
         );
         // A name the agent wrote is an anchor even from outside every terminal.
-        let said = server.run(&shell, None, &["split", "t4"]);
+        let said = server.run(&shell, None, &["split", "p4"]);
         assert_eq!(said.status, 0, "{}", said.err);
         assert_eq!(
             server.told(),
@@ -684,16 +684,16 @@ fn run_in_no_terminal_a_pane_with_no_anchor_leaves_the_terminal_in_the_list() {
 fn a_request_the_mac_refuses_leaves_no_terminal_running() {
     let server = Server::new("refused");
     server.mac_says("bateri 1\nerror refused the user said no\n");
-    let said = server.run(Path::new("/bin/sh"), Some("t4"), &["split"]);
+    let said = server.run(Path::new("/bin/sh"), Some("p4"), &["split"]);
     assert_eq!(said.status, 77);
     assert_eq!(said.out, "");
     assert_eq!(said.err, "bateri: the user said no\n");
-    assert_eq!(server.calls_of("end"), [["end", "t1", "--force"]]);
-    assert!(!server.state().join("terminals/t1").exists());
-    assert_eq!(server.note("t1"), None);
+    assert_eq!(server.calls_of("end"), [["end", "p1", "--force"]]);
+    assert!(!server.state().join("terminals/p1").exists());
+    assert_eq!(server.note("p1"), None);
     for (kind, status) in [("usage", 64), ("unknown", 1), ("failed", 1), ("version", 1)] {
         server.mac_says(&format!("bateri 1\nerror {kind} it went wrong\n"));
-        let said = server.run(Path::new("/bin/sh"), Some("t4"), &["tab"]);
+        let said = server.run(Path::new("/bin/sh"), Some("p4"), &["tab"]);
         assert_eq!(said.status, status, "{kind}");
     }
 }
@@ -705,7 +705,7 @@ fn the_terminal_it_starts_has_the_callers_umask_and_none_of_the_callers_tab() {
     for (name, shell) in shells() {
         let server = Server::new(&format!("umask-{name}"));
         server.mac_says(PLACED);
-        let said = server.run(&shell, Some("t4"), &["split", "--", "make"]);
+        let said = server.run(&shell, Some("p4"), &["split", "--", "make"]);
         assert_eq!(said.status, 0, "{}", said.err);
         // What kablo started it with is the caller's, not the owner-only one the state is written with.
         assert_eq!(
@@ -717,7 +717,7 @@ fn the_terminal_it_starts_has_the_callers_umask_and_none_of_the_callers_tab() {
             std::fs::read_to_string(server.stub.join("env.new")).expect("env"),
             ""
         );
-        let record = std::fs::metadata(server.state().join("terminals/t1")).expect("a record");
+        let record = std::fs::metadata(server.state().join("terminals/p1")).expect("a record");
         assert_eq!(record.permissions().mode() & 0o777, 0o600);
     }
 }
@@ -733,19 +733,19 @@ fn the_terminal_it_starts_gets_the_docks_tier_of_the_one_that_asked() {
         let said = server.run_file_with(
             &shell,
             &server.script(),
-            Some("t4"),
+            Some("p4"),
             &["split", "--", "make"],
             &[("BATERI_DOCK", "off")],
         );
         assert_eq!(said.status, 0, "{name}: {}", said.err);
-        let mut call = new_call(&server, "t1", &["make"]);
+        let mut call = new_call(&server, "p1", &["make"]);
         call.insert(7, "--env".to_owned());
         call.insert(8, "BATERI_DOCK=off".to_owned());
         assert_eq!(server.calls_of("new"), [call], "{name}");
 
         server.forget_calls();
         server.mac_says(PLACED);
-        let said = server.run(&shell, Some("t4"), &["split", "--", "make"]);
+        let said = server.run(&shell, Some("p4"), &["split", "--", "make"]);
         assert_eq!(said.status, 0, "{name}: {}", said.err);
         assert!(
             server
@@ -763,8 +763,9 @@ fn only_a_plain_terminal_number_is_a_target() {
     for (name, shell) in shells() {
         let server = Server::new(&format!("targets-{name}"));
         server.mac_says(PLACED);
-        // Labels, bare numbers, a leading zero, a made-up id: none reaches kablo, all are 64.
-        for target in ["build", "7", "t07", "T7", "t", "b-0123", "t7x"] {
+        // Labels, bare numbers, a leading zero, a made-up id, and the `t7` the numbers were called
+        // before panes: none reaches kablo, all are 64.
+        for target in ["build", "7", "p07", "P7", "p", "b-0123", "p7x", "t7", "t07"] {
             for args in [
                 vec!["split", target],
                 vec!["close", target],
@@ -773,14 +774,10 @@ fn only_a_plain_terminal_number_is_a_target() {
                 vec!["send", target, "text"],
                 vec!["send-key", target, "enter"],
             ] {
-                let said = server.run(&shell, Some("t4"), &args);
+                let said = server.run(&shell, Some("p4"), &args);
                 assert_eq!(said.status, 64, "{args:?}: {}", said.err);
-                assert!(
-                    said.err.contains("is not a terminal"),
-                    "{args:?}: {}",
-                    said.err
-                );
-                assert!(said.err.contains("t1  zsh"), "ls is shown: {}", said.err);
+                assert!(said.err.contains("is not a pane"), "{args:?}: {}", said.err);
+                assert!(said.err.contains("p1  zsh"), "ls is shown: {}", said.err);
             }
         }
         assert!(server.calls_of("new").is_empty());
@@ -788,16 +785,16 @@ fn only_a_plain_terminal_number_is_a_target() {
         assert!(server.calls_of("wait").is_empty());
         assert!(server.calls_of("send").is_empty());
         // The words that are not targets pass: the text of a one-word `send`, a key.
-        assert_eq!(server.run(&shell, Some("t4"), &["send", "build"]).status, 0);
+        assert_eq!(server.run(&shell, Some("p4"), &["send", "build"]).status, 0);
         assert_eq!(
             server
-                .run(&shell, Some("t4"), &["send-key", "enter"])
+                .run(&shell, Some("p4"), &["send-key", "enter"])
                 .status,
             0
         );
         assert_eq!(
             server
-                .run(&shell, Some("t4"), &["send-key", "Ctrl+C", "enter"])
+                .run(&shell, Some("p4"), &["send-key", "Ctrl+C", "enter"])
                 .status,
             0
         );
@@ -809,22 +806,22 @@ fn only_a_plain_terminal_number_is_a_target() {
 fn the_commands_that_are_kablos_own_pass_on_with_their_words_and_their_status() {
     for (name, shell) in shells() {
         let server = Server::new(&format!("passing-{name}"));
-        let run = |args: &[&str]| server.run(&shell, Some("t4"), args);
-        assert_eq!(run(&["send", "t3", "cargo test"]).status, 0);
-        assert_eq!(run(&["send-key", "t3", "ctrl+c", "enter"]).status, 0);
+        let run = |args: &[&str]| server.run(&shell, Some("p4"), args);
+        assert_eq!(run(&["send", "p3", "cargo test"]).status, 0);
+        assert_eq!(run(&["send-key", "p3", "ctrl+c", "enter"]).status, 0);
         assert_eq!(
-            run(&["capture", "t3", "--history", "200", "--trim"]).status,
+            run(&["capture", "p3", "--history", "200", "--trim"]).status,
             0
         );
         assert_eq!(run(&["capture", "--trim"]).status, 0);
         std::fs::write(server.stub.join("exit.wait"), "124").expect("a status");
-        let said = run(&["wait", "--for", "10m", "t3"]);
+        let said = run(&["wait", "--for", "10m", "p3"]);
         assert_eq!(
             said.status, 124,
             "the program's own status, not the script's"
         );
         std::fs::write(server.stub.join("exit.wait"), "3").expect("a status");
-        assert_eq!(run(&["wait", "t3"]).status, 3);
+        assert_eq!(run(&["wait", "p3"]).status, 3);
         let kablo: Vec<Vec<String>> = server
             .calls()
             .into_iter()
@@ -833,12 +830,12 @@ fn the_commands_that_are_kablos_own_pass_on_with_their_words_and_their_status() 
         assert_eq!(
             kablo,
             [
-                vec!["send", "t3", "cargo test"],
-                vec!["send-key", "t3", "ctrl+c", "enter"],
-                vec!["capture", "t3", "--history", "200", "--trim"],
+                vec!["send", "p3", "cargo test"],
+                vec!["send-key", "p3", "ctrl+c", "enter"],
+                vec!["capture", "p3", "--history", "200", "--trim"],
                 vec!["capture", "--trim"],
-                vec!["wait", "--for", "10m", "t3"],
-                vec!["wait", "t3"],
+                vec!["wait", "--for", "10m", "p3"],
+                vec!["wait", "p3"],
             ]
         );
         // A `wait` with no terminal is a mistake, not a wait for itself.
@@ -853,35 +850,44 @@ fn a_mistake_in_the_command_is_64_before_anything_is_started() {
         let server = Server::new(&format!("mistakes-{name}"));
         server.mac_says(PLACED);
         let tries: [(&[&str], Option<&str>); 14] = [
-            (&["split", "--ratio", "0"], Some("t4")),
-            (&["split", "--ratio", "100"], Some("t4")),
-            (&["split", "--ratio", "x"], Some("t4")),
-            (&["split", "--ratio"], Some("t4")),
-            (&["split", "--left", "--below"], Some("t4")),
-            (&["tab", "--left"], Some("t4")),
-            (&["tab", "--ratio", "30"], Some("t4")),
-            (&["new", "--keep-open"], Some("t4")),
-            (&["new", "t4"], Some("t4")),
-            (&["split", "t4", "t5"], Some("t4")),
-            (&["split", "--bogus"], Some("t4")),
-            (&["notify"], Some("t4")),
-            (&["frobnicate"], Some("t4")),
-            (&[], Some("t4")),
+            (&["split", "--ratio", "0"], Some("p4")),
+            (&["split", "--ratio", "100"], Some("p4")),
+            (&["split", "--ratio", "x"], Some("p4")),
+            (&["split", "--ratio"], Some("p4")),
+            (&["split", "--left", "--below"], Some("p4")),
+            (&["tab", "--left"], Some("p4")),
+            (&["tab", "--ratio", "30"], Some("p4")),
+            (&["new", "--keep-open"], Some("p4")),
+            (&["new", "p4"], Some("p4")),
+            (&["split", "p4", "p5"], Some("p4")),
+            (&["split", "--bogus"], Some("p4")),
+            (&["notify"], Some("p4")),
+            (&["frobnicate"], Some("p4")),
+            (&[], Some("p4")),
         ];
         for (args, here) in tries {
             let said = server.run(&shell, here, args);
             assert_eq!(said.status, 64, "{args:?} from {here:?}: {}", said.err);
         }
         assert!(server.calls_of("new").is_empty());
-        // From outside every terminal, `new` needs no anchor and the number is still given.
+        // `new` is no command: the mistake is the usage, which does not offer it.
         let said = server.run(&shell, None, &["new", "--", "true"]);
+        assert_eq!(said.status, 64, "{}", said.err);
+        assert!(said.err.starts_with("usage: bateri split"), "{}", said.err);
+        assert!(!said.err.contains("bateri new"), "{}", said.err);
+        assert!(server.calls_of("new").is_empty());
+        // From outside every terminal a `split` needs no anchor and the number is still given.
+        let said = server.run(&shell, None, &["split", "--", "true"]);
         assert_eq!(said.status, 0, "{}", said.err);
-        assert_eq!(said.out, "t1\n");
+        assert_eq!(said.out, "p1\n");
         assert_eq!(
-            std::fs::read_to_string(server.state().join("terminals/t1")).expect("a record"),
+            std::fs::read_to_string(server.state().join("terminals/p1")).expect("a record"),
             "opener -\nkeep-open no\n"
         );
-        assert!(server.told().is_empty(), "`new` tells the Mac nothing");
+        assert!(
+            server.told().is_empty(),
+            "no pane to place, so the Mac is told nothing"
+        );
     }
 }
 
@@ -890,16 +896,25 @@ fn a_mistake_in_the_command_is_64_before_anything_is_started() {
 fn a_number_is_never_given_twice_and_one_a_hand_made_terminal_holds_is_skipped() {
     for (name, shell) in shells() {
         let server = Server::new(&format!("numbers-{name}"));
-        assert_eq!(server.run(&shell, None, &["new", "--", "true"]).out, "t1\n");
-        assert_eq!(server.run(&shell, None, &["new", "--", "true"]).out, "t2\n");
-        // t1 is closed and gone; the next is not t1.
-        let _ = std::fs::remove_file(server.state().join("terminals/t1"));
-        assert_eq!(server.run(&shell, None, &["new", "--", "true"]).out, "t3\n");
-        // A session somebody made with `kablo new --id t4`: kablo refuses the id, the next is tried.
-        std::fs::write(server.stub.join("taken.t4"), "").expect("taken");
-        std::fs::write(server.stub.join("taken.t5"), "").expect("taken");
-        let said = server.run(&shell, None, &["new", "--", "true"]);
-        assert_eq!(said.out, "t6\n", "{}", said.err);
+        assert_eq!(
+            server.run(&shell, None, &["split", "--", "true"]).out,
+            "p1\n"
+        );
+        assert_eq!(
+            server.run(&shell, None, &["split", "--", "true"]).out,
+            "p2\n"
+        );
+        // p1 is closed and gone; the next is not p1.
+        let _ = std::fs::remove_file(server.state().join("terminals/p1"));
+        assert_eq!(
+            server.run(&shell, None, &["split", "--", "true"]).out,
+            "p3\n"
+        );
+        // A session somebody made with `kablo new --id p4`: kablo refuses the id, the next is tried.
+        std::fs::write(server.stub.join("taken.p4"), "").expect("taken");
+        std::fs::write(server.stub.join("taken.p5"), "").expect("taken");
+        let said = server.run(&shell, None, &["split", "--", "true"]);
+        assert_eq!(said.out, "p6\n", "{}", said.err);
         assert_eq!(
             std::fs::read_to_string(server.state().join("next")).expect("the counter"),
             "7\n"
@@ -938,18 +953,18 @@ fn the_mac_and_the_agents_command_never_give_the_same_number() {
         let mac = MacChannel(server.home.clone());
         let mut seen = Vec::new();
         for _ in 0..3 {
-            let said = server.run(&shell, None, &["new", "--", "true"]);
+            let said = server.run(&shell, None, &["split", "--", "true"]);
             assert_eq!(said.status, 0, "{}", said.err);
             seen.push(said.out.trim().to_owned());
             seen.push(format!(
-                "t{}",
+                "p{}",
                 crate::kablo::install::next_number(&mac).expect("a number")
             ));
         }
-        assert_eq!(seen, ["t1", "t2", "t3", "t4", "t5", "t6"], "{name}");
+        assert_eq!(seen, ["p1", "p2", "p3", "p4", "p5", "p6"], "{name}");
         // The Mac's numbers are no terminal the script knows of: it never recorded them, and the
         // server's counter does not forget them.
-        assert!(!server.state().join("terminals/t2").exists());
+        assert!(!server.state().join("terminals/p2").exists());
     }
 }
 
@@ -1080,13 +1095,13 @@ fn a_terminal_without_a_program_runs_the_bootstrap_from_its_file() {
     for (name, shell) in shells() {
         let server = Server::new(&format!("shell-{name}"));
         server.mac_says(PLACED);
-        let said = server.run(&shell, Some("t4"), &["split"]);
+        let said = server.run(&shell, Some("p4"), &["split"]);
         assert_eq!(said.status, 0, "{}", said.err);
         let boot = server.shell_dir().join("boot.sh");
         // The shell is the integrated one, started the way the one-liner starts it: no parent
         // block, no nonce, no tab.
         let program = ["sh", &boot.display().to_string(), "", "", VERSION, "-"];
-        assert_eq!(server.calls_of("new"), [new_call(&server, "t1", &program)]);
+        assert_eq!(server.calls_of("new"), [new_call(&server, "p1", &program)]);
 
         // And run so, the file writes nothing, prints no motd, and hands over to the login shell
         // with the integration's directory (it is where the file is, whatever the environment).
@@ -1133,41 +1148,41 @@ fn close_goes_to_the_mac_and_without_one_ends_what_the_caller_opened() {
     for (name, shell) in shells() {
         let server = Server::new(&format!("close-{name}"));
         server.mac_says(PLACED);
-        assert_eq!(server.run(&shell, Some("t4"), &["split"]).out, "t1\n");
+        assert_eq!(server.run(&shell, Some("p4"), &["split"]).out, "p1\n");
         server.no_mac();
-        assert_eq!(server.run(&shell, Some("t9"), &["split"]).out, "t2\n");
-        assert!(server.note("t2").is_some());
+        assert_eq!(server.run(&shell, Some("p9"), &["split"]).out, "p2\n");
+        assert!(server.note("p2").is_some());
         server.forget_calls();
 
         // No Mac, and its opener closes it: kablo ends it, nobody is asked, the records go.
-        let said = server.run(&shell, Some("t4"), &["close", "t1"]);
+        let said = server.run(&shell, Some("p4"), &["close", "p1"]);
         assert_eq!(said.status, 0, "{}", said.err);
-        assert_eq!(server.calls_of("end"), [["end", "t1"]]);
-        assert!(!server.state().join("terminals/t1").exists());
+        assert_eq!(server.calls_of("end"), [["end", "p1"]]);
+        assert!(!server.state().join("terminals/p1").exists());
         // The Mac was asked first, and nobody was there.
-        assert_eq!(server.told(), ["bateri 1\nclose\nterminal t1\n"]);
+        assert_eq!(server.told(), ["bateri 1\nclose\nterminal p1\n"]);
         // With the words kablo takes. Named nothing, it is the caller's own terminal.
         server.forget_calls();
-        let said = server.run(&shell, Some("t9"), &["close", "--force"]);
+        let said = server.run(&shell, Some("p9"), &["close", "--force"]);
         assert_eq!(said.status, 0, "{}", said.err);
-        assert_eq!(server.calls_of("end"), [["end", "t9", "--force"]]);
+        assert_eq!(server.calls_of("end"), [["end", "p9", "--force"]]);
         server.forget_calls();
-        let said = server.run(&shell, Some("t9"), &["close", "t2", "--force"]);
+        let said = server.run(&shell, Some("p9"), &["close", "p2", "--force"]);
         assert_eq!(said.status, 0);
-        assert_eq!(server.calls_of("end"), [["end", "t2", "--force"]]);
+        assert_eq!(server.calls_of("end"), [["end", "p2", "--force"]]);
         assert!(
-            server.note("t2").is_none(),
+            server.note("p2").is_none(),
             "a note of a closed terminal goes with it"
         );
 
         // Somebody else's, with no Mac: refused.
         server.forget_calls();
-        assert_eq!(server.run(&shell, Some("t4"), &["split"]).out, "t3\n");
-        let said = server.run(&shell, Some("t9"), &["close", "t3"]);
+        assert_eq!(server.run(&shell, Some("p4"), &["split"]).out, "p3\n");
+        let said = server.run(&shell, Some("p9"), &["close", "p3"]);
         assert_eq!(said.status, 77);
         assert_eq!(
             said.err,
-            "bateri: t3 was not opened by this terminal, and no Mac is connected to ask\n"
+            "bateri: p3 was not opened by this terminal, and no Mac is connected to ask\n"
         );
         assert!(server.calls_of("end").is_empty());
 
@@ -1175,49 +1190,49 @@ fn close_goes_to_the_mac_and_without_one_ends_what_the_caller_opened() {
         // and the script ends nothing itself unless it was told to kill.
         server.forget_calls();
         server.mac_says("bateri 1\nok\n");
-        assert_eq!(server.run(&shell, Some("t9"), &["close", "t3"]).status, 0);
-        assert_eq!(server.told(), ["bateri 1\nclose\nterminal t3\n"]);
+        assert_eq!(server.run(&shell, Some("p9"), &["close", "p3"]).status, 0);
+        assert_eq!(server.told(), ["bateri 1\nclose\nterminal p3\n"]);
         assert_eq!(
             Request::parse(&server.told()[0]),
             Ok(Request::Close(Anchor::of(Terminal(3))))
         );
         assert!(server.calls_of("end").is_empty());
         assert!(
-            !server.state().join("terminals/t3").exists(),
+            !server.state().join("terminals/p3").exists(),
             "the record goes with the terminal"
         );
-        let said = server.run(&shell, Some("t9"), &["close", "t3", "--force"]);
+        let said = server.run(&shell, Some("p9"), &["close", "p3", "--force"]);
         assert_eq!(said.status, 0);
-        assert_eq!(server.calls_of("end"), [["end", "t3", "--force"]]);
+        assert_eq!(server.calls_of("end"), [["end", "p3", "--force"]]);
         // The user said no; the Mac does not know it; the Mac could not tell.
         server.forget_calls();
         server.mac_says("bateri 1\nerror refused the user said no\n");
-        let said = server.run(&shell, Some("t9"), &["close", "t3"]);
+        let said = server.run(&shell, Some("p9"), &["close", "p3"]);
         assert_eq!(
             (said.status, said.err.as_str()),
             (77, "bateri: the user said no\n")
         );
-        server.mac_says("bateri 1\nerror unknown t3 is no terminal on this server\n");
-        let said = server.run(&shell, Some("t9"), &["close", "t3"]);
+        server.mac_says("bateri 1\nerror unknown p3 is no pane on this server\n");
+        let said = server.run(&shell, Some("p9"), &["close", "p3"]);
         assert_eq!(
             (said.status, said.err.as_str()),
-            (1, "bateri: t3 is no terminal on this server\n")
+            (1, "bateri: p3 is no pane on this server\n")
         );
         server.mac_says("bateri 1\nerror failed the server did not answer\n");
-        let said = server.run(&shell, Some("t9"), &["close", "t3"]);
+        let said = server.run(&shell, Some("p9"), &["close", "p3"]);
         assert_eq!(
             (said.status, said.err.as_str()),
             (1, "bateri: the server did not answer\n")
         );
         assert!(server.calls_of("end").is_empty());
         // What is the caller's own is ended all the same when the Mac could not tell.
-        let said = server.run(&shell, Some("t9"), &["close"]);
+        let said = server.run(&shell, Some("p9"), &["close"]);
         assert_eq!(said.status, 0, "{}", said.err);
-        assert_eq!(server.calls_of("end"), [["end", "t9"]]);
+        assert_eq!(server.calls_of("end"), [["end", "p9"]]);
 
         // Outside every terminal nothing is the caller's own.
         server.no_mac();
-        assert_eq!(server.run(&shell, None, &["close", "t3"]).status, 77);
+        assert_eq!(server.run(&shell, None, &["close", "p3"]).status, 77);
         assert_eq!(server.run(&shell, None, &["close"]).status, 64);
     }
 }
@@ -1244,7 +1259,7 @@ fn a_terminal_named_nothing_is_the_callers_own_whatever_it_is_called() {
         assert!(server.calls_of("end").is_empty());
         // The rule that a target is a number is for what is written: this one is not a number.
         server.forget_calls();
-        let said = server.run(&shell, Some("t4"), &["close", &made]);
+        let said = server.run(&shell, Some("p4"), &["close", &made]);
         assert_eq!(said.status, 64);
         assert!(server.told().is_empty());
     }
@@ -1257,37 +1272,37 @@ fn ls_prints_what_the_mac_says_and_without_one_what_the_server_has() {
         let server = Server::new(&format!("ls-{name}"));
         // The Mac's text, byte for byte but for the bytes a terminal would act on.
         server.mac_says("bateri 1\nok text\nWindow 1\n  Tab 1.1\n\u{1b}[31mred\u{7}\n\n");
-        let said = server.run(&shell, Some("t4"), &["ls"]);
+        let said = server.run(&shell, Some("p4"), &["ls"]);
         assert_eq!(said.status, 0);
         assert_eq!(said.out, "Window 1\n  Tab 1.1\n[31mred\n\n");
         assert_eq!(server.told(), ["bateri 1\nls\n"]);
         server.forget_calls();
         server.mac_says("bateri 1\nok text\n[]\n");
-        let said = server.run(&shell, Some("t4"), &["ls", "--json"]);
+        let said = server.run(&shell, Some("p4"), &["ls", "--json"]);
         assert_eq!(said.out, "[]\n");
         assert_eq!(server.told(), ["bateri 1\nls\nformat json\n"]);
 
         // No Mac: kablo's own list and what waits to be placed.
         server.no_mac();
-        server.run(&shell, Some("t4"), &["split", "--below", "--ratio", "30"]);
-        let said = server.run(&shell, Some("t4"), &["ls"]);
+        server.run(&shell, Some("p4"), &["split", "--below", "--ratio", "30"]);
+        let said = server.run(&shell, Some("p4"), &["ls"]);
         assert_eq!(said.status, 0);
         assert_eq!(
             said.out,
-            "ID  PROGRAM\nt1  zsh\n\nWaiting for a Mac to place:\n  t1  below t4 (30%)\n"
+            "ID  PROGRAM\np1  zsh\n\nWaiting for a Mac to place:\n  p1  below p4 (30%)\n"
         );
         assert!(said.err.starts_with("bateri: no Mac is connected"));
-        let said = server.run(&shell, Some("t4"), &["ls", "--json"]);
+        let said = server.run(&shell, Some("p4"), &["ls", "--json"]);
         assert_eq!(said.out, "[]\n");
         // The Mac's mistakes are the status, as for any request...
         server.mac_says("bateri 1\nerror usage no such format\n");
-        assert_eq!(server.run(&shell, Some("t4"), &["ls"]).status, 64);
+        assert_eq!(server.run(&shell, Some("p4"), &["ls"]).status, 64);
         // ...but one that is only that it could not tell now leaves the server's own list.
         server.mac_says("bateri 1\nerror failed the server did not give its terminals in time\n");
-        let said = server.run(&shell, Some("t4"), &["ls"]);
+        let said = server.run(&shell, Some("p4"), &["ls"]);
         assert_eq!(said.status, 0);
         assert!(
-            said.out.starts_with("ID  PROGRAM\nt1  zsh\n"),
+            said.out.starts_with("ID  PROGRAM\np1  zsh\n"),
             "{}",
             said.out
         );
@@ -1305,14 +1320,14 @@ fn ls_prints_what_the_mac_says_and_without_one_what_the_server_has() {
 fn notify_needs_a_mac_and_sends_one_line() {
     for (name, shell) in shells() {
         let server = Server::new(&format!("notify-{name}"));
-        let said = server.run(&shell, Some("t4"), &["notify", "the build is done"]);
+        let said = server.run(&shell, Some("p4"), &["notify", "the build is done"]);
         assert_eq!(said.status, 69);
         assert_eq!(said.err, "bateri: no Mac is connected to show it\n");
         server.forget_calls();
         server.mac_says("bateri 1\nok\n");
         let said = server.run(
             &shell,
-            Some("t4"),
+            Some("p4"),
             &["notify", "3 tests\nfailed:", "\u{1b}[31mx\ty"],
         );
         assert_eq!(said.status, 0, "{}", said.err);
@@ -1323,7 +1338,7 @@ fn notify_needs_a_mac_and_sends_one_line() {
         );
         let long = "x".repeat(1001);
         assert_eq!(
-            server.run(&shell, Some("t4"), &["notify", &long]).status,
+            server.run(&shell, Some("p4"), &["notify", &long]).status,
             64
         );
     }
@@ -1331,23 +1346,26 @@ fn notify_needs_a_mac_and_sends_one_line() {
 
 #[test]
 #[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
-fn new_prints_the_number_and_waits_with_the_programs_status() {
+fn a_split_with_no_pane_to_go_beside_prints_the_number_and_waits_with_the_programs_status() {
     for (name, shell) in shells() {
-        let server = Server::new(&format!("new-{name}"));
+        let server = Server::new(&format!("orphan-{name}"));
         let said = server.run(
             &shell,
-            Some("t4"),
-            &["new", "--json", "--cwd", "~", "--", "make"],
+            None,
+            &["split", "--json", "--cwd", "~", "--", "make"],
         );
         assert_eq!(said.status, 0, "{}", said.err);
-        assert_eq!(said.out, "{\"terminal\":\"t1\"}\n");
-        assert_eq!(server.calls_of("new"), [new_call(&server, "t1", &["make"])]);
+        assert_eq!(
+            said.out,
+            "{\"terminal\":\"p1\",\"landed\":\"waiting\",\"next_to\":null,\"squeezed\":false,\"hidden\":false}\n"
+        );
+        assert_eq!(server.calls_of("new"), [new_call(&server, "p1", &["make"])]);
         std::fs::write(server.stub.join("exit.wait"), "7").expect("a status");
-        let said = server.run(&shell, Some("t4"), &["new", "--wait", "--", "make"]);
-        assert_eq!((said.status, said.out.as_str()), (7, "t2\n"));
-        assert_eq!(server.calls_of("wait"), [["wait", "t2"]]);
+        let said = server.run(&shell, None, &["split", "--wait", "--", "make"]);
+        assert_eq!((said.status, said.out.as_str()), (7, "p2\n"));
+        assert_eq!(server.calls_of("wait"), [["wait", "p2"]]);
         // A directory that is not there is said, and nothing is started.
-        let said = server.run(&shell, Some("t4"), &["new", "--cwd", "/nowhere/at/all"]);
+        let said = server.run(&shell, None, &["split", "--cwd", "/nowhere/at/all"]);
         assert_eq!(said.status, 1);
         assert_eq!(server.calls_of("new").len(), 2);
     }

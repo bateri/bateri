@@ -1,7 +1,7 @@
 # bateri's terminal counter — POSIX sh, run on the SERVER.
 #
 # Prints the number of the next terminal, digits only, and never prints one
-# twice: the terminals an agent opens are `t1`, `t2`, … per server, and a
+# twice: the panes an agent opens are `p1`, `p2`, … per server, and a
 # number that was given is not given again, whatever became of its terminal.
 # Two callers share it — `bin/bateri` runs this file, and the Mac runs the
 # same bytes over its connection (`sh -c`) for the terminal it opens itself —

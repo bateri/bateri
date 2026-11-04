@@ -161,19 +161,18 @@ the `PATH` (zsh, bash and fish; cron jobs call
 server, under kablo, so these keep working with your Mac asleep; the pane takes
 its place when bateri connects. bateri on the Mac is never asked to run
 anything: what a program sends it only places, lists or closes panes and shows a
-notification. A terminal is named by its number (`t9`), which is what the
-opening command prints.
+notification. A pane is named by its number (`p9`), which is what the opening
+command prints.
 
 ```sh
-bateri split --below --ratio 30 -- npm run dev   # prints t9; the pane appears below this terminal
+bateri split --below --ratio 30 -- npm run dev   # prints p9; the pane appears below this one
 bateri tab -- make watch                         # in a tab of its own, next to this one
-bateri new -- make                               # a terminal with no pane, listed under "running in the background"
-bateri ls [--json]                               # windows, tabs, splits, and the server's terminals
-bateri send t9 'q'                               # type into a terminal (kablo's send)
-bateri send-key t9 enter
-bateri capture t9                                # what is on its screen
-bateri wait t9 [--for TIME]                      # until its program ends; exits with its status
-bateri close [t9]                                # asks you first about a terminal the caller did not open
+bateri ls [--json]                               # windows, tabs, splits, and the server's panes
+bateri send p9 'q'                               # type into a pane (kablo's send)
+bateri send-key p9 enter
+bateri capture p9                                # what is on its screen
+bateri wait p9 [--for TIME]                      # until its program ends; exits with its status
+bateri close [p9]                                # asks you first about a pane the caller did not open
 bateri notify "tests failed"                     # a notification when bateri is behind or has no tab of it
 ```
 

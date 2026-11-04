@@ -697,9 +697,9 @@ fn a_terminal_is_started_under_the_number_the_servers_counter_gives() {
     let rig = Rig::new("numbered");
     rig.world.counts_from(7);
     let mut first = Holder::new(&rig.socket(), "b-1");
-    rig.has_terminals(&["t7"]);
+    rig.has_terminals(&["p7"]);
     let mut second = Holder::new(&rig.socket(), "b-2");
-    rig.has_terminals(&["t7", "t8"]);
+    rig.has_terminals(&["p7", "p8"]);
     for gone in ["b-1", "b-2"] {
         assert!(
             !rig.world
@@ -717,8 +717,8 @@ fn a_terminal_is_started_under_the_number_the_servers_counter_gives() {
     );
     // Each holder shows its own terminal and types into it.
     let (one, two) = (
-        SessionId::new("t7").expect("a name"),
-        SessionId::new("t8").expect("a name"),
+        SessionId::new("p7").expect("a name"),
+        SessionId::new("p8").expect("a name"),
     );
     rig.world.bridge().write(&one, b"one");
     rig.world.bridge().write(&two, b"two");
@@ -751,7 +751,7 @@ fn a_server_that_cannot_count_leaves_the_terminal_its_holders_name() {
 }
 
 /// The holder is told the number, so the pane that outlives the application asks for the
-/// terminal by it: a restart finds `t7` where the holder first asked for `b-1`.
+/// terminal by it: a restart finds `p7` where the holder first asked for `b-1`.
 #[test]
 fn a_numbered_terminal_is_found_again_by_its_number_after_a_restart() {
     let ledger = Arc::new(Ledger::memory());
@@ -761,8 +761,8 @@ fn a_numbered_terminal_is_found_again_by_its_number_after_a_restart() {
     let first = Rig::kept("number-restart", world.clone(), ledger.clone(), END_GRACE);
     let socket = first.socket();
     let holder = Holder::new(&socket, "b-1");
-    first.has_terminals(&["t7"]);
-    let terminal = SessionId::new("t7").expect("a name");
+    first.has_terminals(&["p7"]);
+    let terminal = SessionId::new("p7").expect("a name");
     world.bridge().write(&terminal, b"abc");
     until("shown", || holder.shown.bytes() == b"abc");
     until("the pane found", || first.service.shown(&pane).is_some());
@@ -950,7 +950,7 @@ fn the_folder_of_a_restarted_account_is_made_when_its_terminal_is_shown_again() 
     assert!(again.service.stage_of("u@rasp:22").is_some());
 }
 
-/// A number a person took by hand (`kablo new --id t7`) is skipped: the counter is asked again,
+/// A number a person took by hand (`kablo new --id p7`) is skipped: the counter is asked again,
 /// the terminal starts under the next number, the holder is shown it and is not let fall back to
 /// a plain `ssh`, and the row written for the number that was taken goes — that terminal is not
 /// the pane's to end.
@@ -960,11 +960,11 @@ fn a_number_a_person_took_by_hand_is_skipped_and_the_terminal_starts_under_the_n
     let world = Fake::new(Bridge::new(Age::Current));
     world.counts_from(7);
     let pane = pane_named(&world);
-    let hand_made = world.bridge().add("t7", Size::default());
+    let hand_made = world.bridge().add("p7", Size::default());
     let rig = Rig::kept("renumber", world, ledger.clone(), END_GRACE);
     let mut holder = Holder::new(&rig.socket(), "b-1");
-    rig.has_terminals(&["t7", "t8"]);
-    let next = SessionId::new("t8").expect("a name");
+    rig.has_terminals(&["p7", "p8"]);
+    let next = SessionId::new("p8").expect("a name");
     rig.world.bridge().write(&next, b"mine");
     // The terminal the person made is a line the holder reads first (it runs in the background);
     // what follows is the new terminal's.
@@ -990,7 +990,7 @@ fn numbers_that_are_all_taken_are_given_up_on_and_the_pane_falls_back() {
     let world = Fake::new(Bridge::new(Age::Current));
     world.counts_from(7);
     for number in 7..20 {
-        world.bridge().add(&format!("t{number}"), Size::default());
+        world.bridge().add(&format!("p{number}"), Size::default());
     }
     let rig = Rig::over("renumber-all", world);
     let mut holder = Holder::new(&rig.socket(), "b-1");
@@ -1038,7 +1038,7 @@ fn a_holder_of_the_version_before_is_not_numbered() {
     assert!(
         !rig.world
             .bridge()
-            .has(&SessionId::new("t7").expect("a name"))
+            .has(&SessionId::new("p7").expect("a name"))
     );
     // What it is sent is what version 2 always read.
     stream

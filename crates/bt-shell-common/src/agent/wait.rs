@@ -117,7 +117,7 @@ mod tests {
     #[test]
     fn a_request_is_known_to_wait_by_its_terminal_on_its_server() {
         let mut queue = Queue::default();
-        queue.add(waiting("a", 7, "t4"));
+        queue.add(waiting("a", 7, "p4"));
         assert!(queue.waits("a", Terminal(7)));
         assert!(!queue.waits("a", Terminal(8)));
         assert!(!queue.waits("b", Terminal(7)));
@@ -128,27 +128,27 @@ mod tests {
     #[test]
     fn the_requests_of_one_server_beside_one_anchor_are_taken_oldest_first() {
         let mut queue = Queue::default();
-        queue.add(waiting("a", 7, "t4"));
-        queue.add(waiting("a", 8, "t5"));
-        queue.add(waiting("b", 9, "t4"));
-        queue.add(waiting("a", 10, "t4"));
-        let due = queue.take_beside("a", "t4");
+        queue.add(waiting("a", 7, "p4"));
+        queue.add(waiting("a", 8, "p5"));
+        queue.add(waiting("b", 9, "p4"));
+        queue.add(waiting("a", 10, "p4"));
+        let due = queue.take_beside("a", "p4");
         assert_eq!(
             due.iter().map(|w| w.place.terminal.0).collect::<Vec<_>>(),
             [7, 10]
         );
         assert_eq!(queue.len(), 2, "another anchor and another server stay");
-        assert!(queue.take_beside("a", "t4").is_empty());
+        assert!(queue.take_beside("a", "p4").is_empty());
     }
 
     #[test]
     fn a_request_for_a_terminal_that_has_a_pane_now_is_forgotten_and_a_newer_one_replaces() {
         let mut queue = Queue::default();
-        queue.add(waiting("a", 7, "t4"));
-        queue.add(waiting("a", 7, "t5"));
+        queue.add(waiting("a", 7, "p4"));
+        queue.add(waiting("a", 7, "p5"));
         assert_eq!(queue.len(), 1);
         assert_eq!(
-            queue.take_beside("a", "t4").len(),
+            queue.take_beside("a", "p4").len(),
             0,
             "the newer one stands"
         );
@@ -166,10 +166,10 @@ mod tests {
     fn the_queue_is_bounded_and_drops_the_oldest() {
         let mut queue = Queue::default();
         for terminal in 0..Queue::LIMIT as u64 + 5 {
-            queue.add(waiting("a", terminal, "t1"));
+            queue.add(waiting("a", terminal, "p1"));
         }
         assert_eq!(queue.len(), Queue::LIMIT);
-        let due = queue.take_beside("a", "t1");
+        let due = queue.take_beside("a", "p1");
         assert_eq!(due[0].place.terminal, Terminal(5));
     }
 }

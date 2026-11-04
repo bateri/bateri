@@ -54,7 +54,7 @@
 //!
 //! **What a terminal is called.** A holder asks for a new terminal with a name of its own (`b-` and
 //! 128 random bits, so that asking again cannot make a second); the service starts it under the
-//! next number of the server's counter instead (`t7`, [`Backend::number`]: the very file the agent's
+//! next number of the server's counter instead (`p7`, [`Backend::number`]: the very file the agent's
 //! command on the server numbers its terminals from), writes that name in the ledger before the
 //! request goes out and tells the holder when the server has made the terminal
 //! ([`crate::hold::wire::ToHold::Bound`]), which asks for the terminal by it from then on. A
@@ -371,7 +371,7 @@ pub trait Backend: Send + Sync + 'static {
     /// with it (never the machine's other terminals).
     fn install(&self, server: &KabloHost, live: &[SessionId]) -> Result<Installed, Refusal>;
 
-    /// The number of the next terminal on the server (`7` for the `t7` an agent there is told
+    /// The number of the next terminal on the server (`7` for the `p7` an agent there is told
     /// and says), from the server's counter, which the agent's command there draws from too.
     /// `None`: the server could not count now; the terminal keeps the name its holder made.
     /// Called on a thread of its own, like the other steps that ask the server.
@@ -3581,9 +3581,9 @@ fn tell(pending: &Pending, outcome: Result<String, Refusal>) {
     }
 }
 
-/// The name of the terminal the server's counter numbered: `t7` for 7.
+/// The name of the terminal the server's counter numbered: `p7` for 7, as an agent names it.
 fn terminal_named(number: Option<u64>) -> Option<SessionId> {
-    number.and_then(|number| SessionId::new(&format!("t{number}")).ok())
+    number.and_then(|number| SessionId::new(&crate::agent::Terminal(number).to_string()).ok())
 }
 
 /// The new terminal's request: the bootstrap as the command (the shells' files are on the server

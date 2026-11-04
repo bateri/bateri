@@ -1,6 +1,6 @@
 //! What a program on a server asks of the app, and the panes that come of it.
 //!
-//! `bateri split` on a server starts a terminal there (kablo's, numbered `t9`) and asks the Mac
+//! `bateri split` on a server starts a terminal there (kablo's, numbered `p9`) and asks the Mac
 //! where its pane goes, over the conversation kablo gives the app ([`Letter`]). The decision is
 //! `bt-shell-common`'s ([`bt_shell_common::agent::serve`], with the rule of where a pane lands
 //! in [`bt_shell_common::agent::place`]); this module lends it the windows ([`Shell`]) and
@@ -683,7 +683,7 @@ fn closing(
         refuse(
             letter,
             Kind::Unknown,
-            &format!("{target} is no terminal on this server"),
+            &format!("{target} is no pane on this server"),
         );
         return;
     }

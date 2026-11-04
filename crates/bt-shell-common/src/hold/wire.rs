@@ -29,7 +29,7 @@
 //!
 //! **Version 3** lets the application name the terminal: the holder makes a name for the terminal
 //! it asks for (so a request repeated after a lost connection cannot make a second one), and the
-//! application, which numbers the terminals of a server (`t7`: what an agent on the server is
+//! application, which numbers the terminals of a server (`p7`: what an agent on the server is
 //! told and says), may start the terminal under that number instead. [`ToHold::Bound`] then
 //! carries the name, and the holder asks for the terminal by it from then on — the pipe that
 //! resumes a terminal after an update or a crash must ask for the name the server knows. A

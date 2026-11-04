@@ -727,7 +727,7 @@ pub fn prune_versions(channel: &dyn Channel, installed: &Installed) -> Vec<Strin
 
 // ─── the number of a terminal ────────────────────────────────────────────
 
-/// The number of the next terminal on the server (`7`: the `t7` an agent there is told), from
+/// The number of the next terminal on the server (`7`: the `p7` an agent there is told), from
 /// the counter the agent's command uses ([`crate::ssh_wrap::COUNTER`], the same bytes): a number
 /// is never given twice, whoever asks, and one that is lost with a caller that died is not given
 /// again. `None` when the server could not count — no home, a directory it cannot write, a
