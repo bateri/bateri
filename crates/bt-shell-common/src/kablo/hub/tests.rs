@@ -1165,6 +1165,43 @@ fn a_holder_of_an_earlier_version_is_not_asked_to_answer_and_its_terminal_is_ask
 // ─── a raw holder: the pane itself ───────────────────────────────────────
 
 #[test]
+fn a_pane_of_this_mac_wants_every_byte_and_a_server_terminal_takes_a_picture() {
+    let mut rig = Rig::new();
+    let (framed_hold, framed) = rig.started("b-1");
+    let (_, wanted) = rig
+        .bridge
+        .attaches(&framed)
+        .last()
+        .cloned()
+        .expect("an attach");
+    assert!(!wanted.expect("a view").every_byte);
+
+    // The pane's own terminal, new and shown again: it is read by the pane itself, as fast as
+    // the pane reads, so the terminal waits for it.
+    let started = rig.hub.open_raw();
+    rig.hub
+        .start_raw(started, ACCOUNT, id("b-2"), NewSession::default(), SIZE)
+        .expect("started");
+    rig.pump();
+    rig.hub.closed(framed_hold);
+    rig.pump();
+    let shown = rig.hub.open_raw();
+    rig.hub
+        .resume_raw(shown, ACCOUNT, framed.clone(), SIZE, true)
+        .expect("resumed");
+    rig.pump();
+    for terminal in [id("b-2"), framed] {
+        let (_, view) = rig
+            .bridge
+            .attaches(&terminal)
+            .last()
+            .cloned()
+            .expect("an attach");
+        assert!(view.expect("a view").every_byte, "{terminal:?}");
+    }
+}
+
+#[test]
 fn a_raw_holder_is_sent_the_words_of_the_wire_as_the_bytes_that_show_them() {
     let mut hub = Hub::new();
     let hold = hub.open_raw();

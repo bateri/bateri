@@ -229,6 +229,11 @@ pub struct Attach {
     /// attached again the ordinary way. For a terminal shown again after the bateri that showed it
     /// was gone, whose bytes are all there is to build the screen from.
     pub replaying: bool,
+    /// The owner reads as fast as it can and wants every byte: the server's terminal waits for
+    /// it, its program with it, rather than give it a picture in place of bytes it has not read
+    /// yet. For a terminal of this Mac, whose stream goes nowhere slower than the pane. A server
+    /// over a slow link is better off with a picture than with a program held to the link.
+    pub every_byte: bool,
 }
 
 impl Attach {
@@ -241,6 +246,15 @@ impl Attach {
             take: false,
             check: false,
             replaying: false,
+            every_byte: false,
+        }
+    }
+
+    /// Wanting every byte ([`Attach::every_byte`]).
+    pub fn every_byte(self) -> Attach {
+        Attach {
+            every_byte: true,
+            ..self
         }
     }
 
@@ -491,6 +505,8 @@ struct Terminal {
     /// The first attach holds the answers back itself ([`Attach::replaying`]) and has not been
     /// served yet.
     replay_wanted: bool,
+    /// The owner wants every byte ([`Attach::every_byte`]), on every attach.
+    every_byte: bool,
     /// What is typed into it and has not got to the program yet.
     input: Input,
 }
@@ -530,6 +546,7 @@ impl Terminal {
             retry: None,
             unavailable: 0,
             replay_wanted: attach.replaying,
+            every_byte: attach.every_byte,
             input: Input::default(),
         }
     }
@@ -1297,6 +1314,7 @@ impl Client {
         view.picture = terminal.picture_wanted;
         view.picture_if_answered = !terminal.replay_wanted;
         view.keep_after_end = true;
+        view.every_byte = terminal.every_byte;
         view.take = terminal.take_wanted;
         view.name = self.name;
         let offset = terminal.next;

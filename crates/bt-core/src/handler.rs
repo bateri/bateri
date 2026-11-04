@@ -73,6 +73,7 @@ use alacritty_terminal::event::EventListener;
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::Point;
 use alacritty_terminal::term::cell::Flags;
+use alacritty_terminal::term::text_width;
 use alacritty_terminal::term::{Term, TermMode};
 use alacritty_terminal::vte::ansi::{
     Attr, CharsetIndex, ClearMode, CursorShape, CursorStyle, Handler, Hyperlink, KeyboardModes,
@@ -611,6 +612,17 @@ impl<'a, U: EventListener> ClusterHandler<'a, U> {
         self.plain = written;
     }
 
+    /// Code points that join nothing, written in one piece. With wrapping off a wide one may find
+    /// no room and not be written, so what stands last is not known then.
+    fn input_unjoined(&mut self, run: &str) {
+        if run.is_empty() {
+            return;
+        }
+        *self.last_input = true;
+        self.plain = self.term.mode().contains(TermMode::LINE_WRAP);
+        self.term.input_text(run);
+    }
+
     /// `Term::input` of a mark that lands on the cell before the cursor: it is that
     /// cell's newest code point.
     fn input_mark(&mut self, c: char) {
@@ -694,6 +706,28 @@ impl<U: EventListener> Handler for ClusterHandler<'_, U> {
                 self.term.input_ascii(s);
             }
         }
+    }
+
+    /// A run of text with something outside ASCII in it. Behind a code point this wrapper wrote,
+    /// and that is not a ZWJ, a code point with columns joins nothing unless it is a flag half or
+    /// a skin tone ([`crate::cluster::joins_alone`]), so most of running text (CJK, accented
+    /// letters) asks nothing of the cell and goes to the grid in one piece. The rest, and the
+    /// first code point when what stands before it is not known, take [`Handler::input`].
+    fn input_text(&mut self, s: &str) {
+        if !self.cluster {
+            return self.term.input_text(s);
+        }
+        let mut from = 0;
+        for (at, c) in s.char_indices() {
+            let known = from < at || !*self.last_input || self.plain;
+            let columns = !matches!(text_width(c), Some(0) | None);
+            if !known || !columns || crate::cluster::joins_alone(c) {
+                self.input_unjoined(s.get(from..at).unwrap_or_default());
+                self.input(c);
+                from = at + c.len_utf8();
+            }
+        }
+        self.input_unjoined(s.get(from..).unwrap_or_default());
     }
 
     fn set_private_mode(&mut self, mode: PrivateMode) {
@@ -1525,11 +1559,11 @@ mod tests {
         assert_eq!(*answers.0.lock().unwrap(), ["\x1b[?1u", "\x1b[?1u"]);
     }
 
-    /// The parser hands a run of ASCII over in one piece; the grid must come out as if it had
+    /// The parser hands a run of text over in one piece; the grid must come out as if it had
     /// been handed over a character at a time, whatever stands around the run, and wherever the
     /// reads cut it.
     #[test]
-    fn a_run_of_ascii_lands_as_its_characters_would_one_at_a_time() {
+    fn a_run_of_text_lands_as_its_characters_would_one_at_a_time() {
         const PIECES: [&str; 22] = [
             "a",
             "1",
@@ -1561,16 +1595,21 @@ mod tests {
             state ^= state << 17;
             usize::try_from(state % bound as u64).unwrap_or(0)
         };
-        for _ in 0..3000 {
+        for round in 0..3000 {
+            // With wrapping on and off: a wide character at the last column is only written
+            // with it on, and what the wrapper knows of the cell behind depends on that.
+            let wrap = if round % 3 == 0 { "\x1b[?7l" } else { "" };
             let text: String = (0..1 + next(24))
                 .map(|_| PIECES[next(PIECES.len())])
                 .collect();
             let text = text.replace('\u{1f}', "\r\n");
 
             let mut whole = term(7, 4);
+            feed(&mut whole, true, wrap);
             feed(&mut whole, true, &text);
 
             let mut single = term(7, 4);
+            feed(&mut single, true, wrap);
             let mut last_input = false;
             let mut handler = ClusterHandler::new(&mut single, true, &mut last_input);
             for c in text.chars() {
@@ -1586,6 +1625,7 @@ mod tests {
             // The same bytes cut by a read, with what the loop keeps between the reads.
             let cut = 1 + next(text.len().max(2) - 1);
             let mut parts = term(7, 4);
+            feed(&mut parts, true, wrap);
             let mut parser: Processor = Processor::new();
             let mut last_input = false;
             for piece in [&text.as_bytes()[..cut], &text.as_bytes()[cut..]] {

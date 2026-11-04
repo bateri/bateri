@@ -907,7 +907,7 @@ impl Hub {
             return Err(Declined::NoClient);
         };
         if client
-            .new_terminal(terminal.clone(), spec, Attach::new(size))
+            .new_terminal(terminal.clone(), spec, Attach::new(size).every_byte())
             .is_err()
         {
             return Err(Declined::Refused);
@@ -946,9 +946,9 @@ impl Hub {
             return Err(Declined::NoClient);
         };
         let attach = if past {
-            Attach::new(size).from(0).replaying()
+            Attach::new(size).from(0).replaying().every_byte()
         } else {
-            Attach::new(size).from_now().with_picture()
+            Attach::new(size).from_now().with_picture().every_byte()
         };
         client.attach(terminal.clone(), attach);
         let silence = Silence::new();
