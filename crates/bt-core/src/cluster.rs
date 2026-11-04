@@ -90,10 +90,10 @@ fn emoji_capable(c: char, width: Option<usize>) -> bool {
 }
 
 /// Can `c` extend **any** cluster — the prefilter of [`extends`] that does
-/// not look at the cluster. The grid's wrapper asks this for every code
-/// point and, if the answer is `false`, never reads the head cell: in
-/// flowing plain text no more than one table question per code point is
-/// paid.
+/// not look at the cluster. The grid's wrapper asks it of ASCII (which
+/// almost never extends) and, if the answer is `false`, never reads the head
+/// cell; past ASCII it asks the width once and goes to [`may_follow`] with it.
+/// The walks ask this of every code point.
 pub(crate) fn may_extend(c: char) -> bool {
     // In ASCII only digits, `#` and `*` can take emoji presentation (keycap
     // `1️⃣`); the rest enter no arm.
@@ -109,8 +109,7 @@ pub(crate) fn may_extend(c: char) -> bool {
 /// cluster. Three of the four arms do not look at the cluster at all; the
 /// fourth needs a ZWJ behind `c`. The grid's wrapper asks this before it
 /// builds the head cell's cluster: in running text — CJK, accented letters —
-/// a character that [`may_extend`] lets through never has its cell's text
-/// copied.
+/// a character this turns back never has its cell's text copied.
 ///
 /// `width` is `c`'s width in the table: the caller asks it once for a code point
 /// however many of these questions it meets.
