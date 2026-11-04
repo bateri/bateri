@@ -72,11 +72,11 @@ fn is_skin_tone(c: char) -> bool {
 /// behind a ZWJ is **text** presentation without VS16 and the intermediate
 /// string (`…‍❤`) is not in the table; had the criterion been the code
 /// point's own width, the ten-code-point kiss would split in two.
-fn emoji_capable(c: char) -> bool {
+fn emoji_capable(c: char, width: Option<usize>) -> bool {
     // A code point that is two columns alone is two with VS16 too (asked of
     // every code point by a test): running CJK text asks this of every
     // character and skips the pair's measure.
-    if UnicodeWidthChar::width(c) == Some(2) {
+    if width == Some(2) {
         return true;
     }
     let mut buf = [0u8; 8];
@@ -100,10 +100,8 @@ pub(crate) fn may_extend(c: char) -> bool {
     if c.is_ascii() {
         return c.is_ascii_digit() || c == '#' || c == '*';
     }
-    UnicodeWidthChar::width(c) == Some(0)
-        || is_regional_indicator(c)
-        || is_skin_tone(c)
-        || emoji_capable(c)
+    let width = UnicodeWidthChar::width(c);
+    width == Some(0) || is_regional_indicator(c) || is_skin_tone(c) || emoji_capable(c, width)
 }
 
 /// Can `c` extend a cluster whose newest code point is `newest` — the
@@ -113,11 +111,21 @@ pub(crate) fn may_extend(c: char) -> bool {
 /// builds the head cell's cluster: in running text — CJK, accented letters —
 /// a character that [`may_extend`] lets through never has its cell's text
 /// copied.
-pub(crate) fn may_follow(newest: char, c: char) -> bool {
-    UnicodeWidthChar::width(c) == Some(0)
+///
+/// `width` is `c`'s width in the table: the caller asks it once for a code point
+/// however many of these questions it meets.
+pub(crate) fn may_follow(newest: char, c: char, width: Option<usize>) -> bool {
+    width == Some(0)
         || is_regional_indicator(c)
         || is_skin_tone(c)
-        || (newest == ZWJ && emoji_capable(c))
+        || (newest == ZWJ && emoji_capable(c, width))
+}
+
+/// Does a cluster headed by `head` have a cell to land on: a head without
+/// columns (a combiner at the start of the stream or after a line break)
+/// takes nothing, [`extends`]'s first rule.
+pub(crate) fn has_columns(head: char) -> bool {
+    crate::dock::column_width(head) != 0
 }
 
 /// Does the open cluster `open` (non-empty) extend with `c`. Four arms, no
@@ -142,15 +150,11 @@ pub(crate) fn may_follow(newest: char, c: char) -> bool {
 /// asked here, before the arms, so the grid, the dock and the walks cut a
 /// long run at the same code point.
 pub(crate) fn extends(open: &str, c: char) -> bool {
-    if is_full(open)
-        || open
-            .chars()
-            .next()
-            .is_none_or(|head| crate::dock::column_width(head) == 0)
-    {
+    if is_full(open) || !open.chars().next().is_some_and(has_columns) {
         return false;
     }
-    if UnicodeWidthChar::width(c) == Some(0) {
+    let columns = UnicodeWidthChar::width(c);
+    if columns == Some(0) {
         return true;
     }
     if is_regional_indicator(c) {
@@ -160,7 +164,7 @@ pub(crate) fn extends(open: &str, c: char) -> bool {
     if is_skin_tone(c) {
         return width(open) == 2;
     }
-    open.ends_with(ZWJ) && emoji_capable(c)
+    open.ends_with(ZWJ) && emoji_capable(c, columns)
 }
 
 /// The columns a cluster takes in the grid: the base character's width, 2 if
@@ -493,7 +497,10 @@ mod tests {
                 if extends(open, c) {
                     assert!(may_extend(c), "{open:?} + {c:?}");
                     let newest = open.chars().next_back().unwrap_or_default();
-                    assert!(may_follow(newest, c), "{open:?} + {c:?}");
+                    assert!(
+                        may_follow(newest, c, UnicodeWidthChar::width(c)),
+                        "{open:?} + {c:?}"
+                    );
                 }
             }
         }

@@ -82,6 +82,7 @@ use alacritty_terminal::vte::ansi::{
 // vte does not re-export this type; the reason for the edge is in the root
 // `Cargo.toml`.
 use cursor_icon::CursorIcon;
+use unicode_width::UnicodeWidthChar;
 
 use crate::graphics::{Commands, Env, Hub, Motion, Outcome, Pending, Sink, screen_of};
 use crate::input::PIXEL_MOUSE_MODE;
@@ -175,6 +176,10 @@ pub(crate) struct ClusterHandler<'a, U: EventListener> {
     /// ([`ClusterHandler::commands`]). `None`: the parser's application
     /// program commands are let go.
     commands: Option<&'a mut Commands>,
+    /// Where an open cluster's text is put together to be asked about: kept
+    /// between the calls of one `advance`, so a stream of marks on narrow
+    /// letters does not pay an allocation for every mark.
+    scratch: String,
 }
 
 impl<'a, U: EventListener> ClusterHandler<'a, U> {
@@ -186,6 +191,7 @@ impl<'a, U: EventListener> ClusterHandler<'a, U> {
             graphics: None,
             modes: None,
             commands: None,
+            scratch: String::new(),
         }
     }
 
@@ -442,15 +448,21 @@ impl<'a, U: EventListener> ClusterHandler<'a, U> {
             .unwrap_or(cell.c)
     }
 
-    /// The head cell's cluster: base character + `zerowidth`, with room for
-    /// the code point it is asked about — one allocation, not one per growth.
-    fn open(&self, at: Point) -> String {
+    /// The head cell's cluster: base character + `zerowidth`, put together in
+    /// the wrapper's own buffer (taken out of it; [`ClusterHandler::keep`]
+    /// puts it back).
+    fn open(&mut self, at: Point) -> String {
+        let mut open = std::mem::take(&mut self.scratch);
+        open.clear();
         let cell = &self.term.grid()[at.line][at.column];
-        let marks = cell.zerowidth().unwrap_or_default();
-        let mut open = String::with_capacity(4 * (marks.len() + 2));
         open.push(cell.c);
-        open.extend(marks);
+        open.extend(cell.zerowidth().unwrap_or_default());
         open
+    }
+
+    /// Gives the buffer [`ClusterHandler::open`] took back.
+    fn keep(&mut self, open: String) {
+        self.scratch = open;
     }
 
     /// Turns the narrow head cell into a wide cell and writes the cluster
@@ -545,29 +557,55 @@ impl<U: EventListener> Handler for ClusterHandler<'_, U> {
             return self.term.input(c);
         }
         let open_cluster = std::mem::replace(self.last_input, true);
-        if !crate::cluster::may_extend(c) {
+        // In ASCII only digits, `#` and `*` enter an arm.
+        if c.is_ascii() && !crate::cluster::may_extend(c) {
+            return self.term.input(c);
+        }
+        // The one question of the table that every arm below is answered from.
+        let width = UnicodeWidthChar::width(c);
+        let mark = width == Some(0);
+        // A code point with columns extends a cluster only behind an open one,
+        // and most of running text — CJK, accented letters — has none to look
+        // at: it goes in without the head cell being read.
+        if !mark && !open_cluster {
             return self.term.input(c);
         }
         let at = self.head();
-        // A zero-width code point lands on the head cell whether the cluster
-        // is open or not — alacritty's own zero-width branch picks the same
-        // cell —, so the ceiling is asked before either path: past it the code
-        // point is dropped. Asked of the cell's length, before `open` is
-        // built, so a long run costs the same per mark however long it is.
-        if crate::dock::column_width(c) == 0 && self.is_full(at) {
-            return;
-        }
-        if !open_cluster {
-            return self.term.input(c);
-        }
-        // Most of what reaches here — a CJK character behind another — is
-        // turned back by the cluster's newest code point, before the cluster
-        // is copied out of the cell to be asked.
-        if !crate::cluster::may_follow(self.newest(at), c) {
-            return self.term.input(c);
+        if mark {
+            // A zero-width code point lands on the head cell whether the cluster
+            // is open or not — alacritty's own zero-width branch picks the same
+            // cell —, so the ceiling is asked before either path: past it the code
+            // point is dropped. Asked of the cell's length, before `open` is
+            // built, so a long run costs the same per mark however long it is.
+            if self.is_full(at) {
+                return;
+            }
+            if !open_cluster {
+                return self.term.input(c);
+            }
+            // A mark behind a head with columns extends it, whatever the rest of
+            // the cluster is ([`crate::cluster::extends`]'s first rule and its
+            // zero-width arm): a wide cell takes it without the cluster being put
+            // together to measure.
+            let cell = &self.term.grid()[at.line][at.column];
+            if !crate::cluster::has_columns(cell.c) {
+                return self.term.input(c);
+            }
+            if cell.flags.contains(Flags::WIDE_CHAR) {
+                self.term.grid_mut()[at.line][at.column].push_zerowidth(c);
+                return;
+            }
+        } else {
+            // Most of what reaches here — a CJK character behind another — is
+            // turned back by the cluster's newest code point, before the cluster
+            // is copied out of the cell to be asked.
+            if !crate::cluster::may_follow(self.newest(at), c, width) {
+                return self.term.input(c);
+            }
         }
         let mut open = self.open(at);
-        if !crate::cluster::extends(&open, c) {
+        if !mark && !crate::cluster::extends(&open, c) {
+            self.keep(open);
             return self.term.input(c);
         }
         let narrow = !self.term.grid()[at.line][at.column]
@@ -584,6 +622,7 @@ impl<U: EventListener> Handler for ClusterHandler<'_, U> {
         } else {
             self.term.grid_mut()[at.line][at.column].push_zerowidth(c);
         }
+        self.keep(open);
     }
 
     fn set_private_mode(&mut self, mode: PrivateMode) {
@@ -869,6 +908,138 @@ mod tests {
         let mut on = term(cols, rows_);
         feed(&mut on, true, bytes);
         (rows(&off), rows(&on))
+    }
+
+    /// `input` as it was when every question of the table was asked afresh at
+    /// every step: the rule of [`crate::cluster`] applied to the cluster put
+    /// together from the cell. What the quicker `input` is held to.
+    fn input_by_asking_everything(handler: &mut ClusterHandler<'_, VoidListener>, c: char) {
+        let open_cluster = std::mem::replace(handler.last_input, true);
+        if !crate::cluster::may_extend(c) {
+            return handler.term.input(c);
+        }
+        let at = handler.head();
+        if crate::dock::column_width(c) == 0 && handler.is_full(at) {
+            return;
+        }
+        if !open_cluster {
+            return handler.term.input(c);
+        }
+        if !crate::cluster::may_follow(handler.newest(at), c, UnicodeWidthChar::width(c)) {
+            return handler.term.input(c);
+        }
+        let mut open = handler.open(at);
+        if !crate::cluster::extends(&open, c) {
+            return handler.term.input(c);
+        }
+        let narrow = !handler.term.grid()[at.line][at.column]
+            .flags
+            .contains(Flags::WIDE_CHAR);
+        open.push(c);
+        if narrow && crate::cluster::widens(&open) {
+            handler.widen(at, &open);
+        } else {
+            handler.term.grid_mut()[at.line][at.column].push_zerowidth(c);
+        }
+    }
+
+    /// The quick `input` leaves the grid, the cursor and the cluster left open
+    /// as the one that asks everything at every step does, on streams made of
+    /// the code points that move a cluster — marks, joiners, selectors, flag
+    /// halves, skin tones, wide and narrow letters, digits — with the calls
+    /// that close one between them, on a grid narrow enough to wrap.
+    #[test]
+    fn the_quick_input_leaves_what_the_one_that_asks_everything_leaves() {
+        let alphabet: Vec<char> = [
+            "a",
+            "e",
+            "1",
+            "#",
+            "*",
+            " ",
+            "é",
+            "ß",
+            "旦",
+            "海",
+            "😀",
+            "👍",
+            "👨",
+            "👩",
+            "🔥",
+            "❤",
+            "☺",
+            "©",
+            "🏳",
+            "🌈",
+            "🇹",
+            "🇷",
+            "🏽",
+            "\u{200D}",
+            "\u{FE0F}",
+            "\u{FE0E}",
+            "\u{20E3}",
+            "\u{301}",
+            "\u{302}",
+            "\u{300}",
+            "\u{E0067}",
+            "\u{0}",
+            "ل",
+            "ا",
+            "\u{3000}",
+        ]
+        .iter()
+        .flat_map(|text| text.chars())
+        .collect();
+        let dump = |term: &Term<VoidListener>, open: bool| {
+            let cursor = &term.grid().cursor;
+            (rows(term), cursor.point, cursor.input_needs_wrap, open)
+        };
+        let mut seed: u64 = 0x1234_5678_9abc_def1;
+        let mut next = |bound: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            usize::try_from(seed % bound as u64).unwrap_or(0)
+        };
+        for round in 0..400 {
+            let (mut quick, mut slow) = (term(7, 4), term(7, 4));
+            let (mut quick_open, mut slow_open) = (false, false);
+            // Some rounds with a cluster that runs to the ceiling.
+            let run = if round % 8 == 0 { 120 } else { 40 };
+            let mut quick_handler = ClusterHandler::new(&mut quick, true, &mut quick_open);
+            let mut slow_handler = ClusterHandler::new(&mut slow, true, &mut slow_open);
+            for _ in 0..run {
+                match next(24) {
+                    0 => {
+                        quick_handler.carriage_return();
+                        slow_handler.carriage_return();
+                    }
+                    1 => {
+                        quick_handler.linefeed();
+                        slow_handler.linefeed();
+                    }
+                    2 => {
+                        quick_handler.backspace();
+                        slow_handler.backspace();
+                    }
+                    pick => {
+                        // A run of the same mark is how a cluster is filled to its ceiling.
+                        let c = alphabet[next(alphabet.len())];
+                        let times = if pick == 3 { 1 + next(40) } else { 1 };
+                        for _ in 0..times {
+                            quick_handler.input(c);
+                            input_by_asking_everything(&mut slow_handler, c);
+                        }
+                    }
+                }
+            }
+            drop((quick_handler, slow_handler));
+            assert_eq!(
+                dump(&quick, quick_open),
+                dump(&slow, slow_open),
+                "round {round}"
+            );
+        }
     }
 
     #[test]
