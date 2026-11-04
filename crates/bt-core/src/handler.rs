@@ -635,6 +635,23 @@ impl<U: EventListener> Handler for ClusterHandler<'_, U> {
         self.input_extending(c, open_cluster);
     }
 
+    /// A run of printable ASCII. Only its first byte has anything before it that it could join:
+    /// a digit, `#` or `*` behind a ZWJ. Every later byte stands behind an ASCII character, which
+    /// no ASCII character extends, so the run past the first goes to the grid in one piece.
+    fn input_ascii(&mut self, s: &str) {
+        if !self.cluster {
+            return self.term.input_ascii(s);
+        }
+        let open_cluster = std::mem::replace(self.last_input, true);
+        match s.chars().next() {
+            Some(first) if open_cluster && crate::cluster::may_extend(first) => {
+                self.input_extending(first, true);
+                self.term.input_ascii(s.get(1..).unwrap_or_default());
+            }
+            _ => self.term.input_ascii(s),
+        }
+    }
+
     fn set_private_mode(&mut self, mode: PrivateMode) {
         if self.kept_mode(mode, true) {
             return;
@@ -1434,5 +1451,78 @@ mod tests {
         feed(&mut term, b"\x1b[=1;3u");
         assert_eq!(level(&term), TermMode::empty());
         assert_eq!(*answers.0.lock().unwrap(), ["\x1b[?1u", "\x1b[?1u"]);
+    }
+
+    /// The parser hands a run of ASCII over in one piece; the grid must come out as if it had
+    /// been handed over a character at a time, whatever stands around the run, and wherever the
+    /// reads cut it.
+    #[test]
+    fn a_run_of_ascii_lands_as_its_characters_would_one_at_a_time() {
+        const PIECES: [&str; 22] = [
+            "a",
+            "1",
+            "#",
+            "*",
+            "abc",
+            "12",
+            "a1b",
+            " ",
+            "\u{200d}",
+            "\u{fe0f}",
+            "\u{20e3}",
+            "\u{1f600}",
+            "\u{1f468}",
+            "\u{1f469}",
+            "\u{1f1f9}",
+            "\u{1f1f7}",
+            "\u{1f3fb}",
+            "\u{301}",
+            "\u{4e2d}",
+            "\u{2764}",
+            "\u{1f}",
+            "long enough to wrap",
+        ];
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut next = move |bound: usize| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            usize::try_from(state % bound as u64).unwrap_or(0)
+        };
+        for _ in 0..3000 {
+            let text: String = (0..1 + next(24))
+                .map(|_| PIECES[next(PIECES.len())])
+                .collect();
+            let text = text.replace('\u{1f}', "\r\n");
+
+            let mut whole = term(7, 4);
+            feed(&mut whole, true, &text);
+
+            let mut single = term(7, 4);
+            let mut last_input = false;
+            let mut handler = ClusterHandler::new(&mut single, true, &mut last_input);
+            for c in text.chars() {
+                match c {
+                    '\r' => handler.carriage_return(),
+                    '\n' => handler.linefeed(),
+                    c => handler.input(c),
+                }
+            }
+            drop(handler);
+            assert_eq!(rows(&whole), rows(&single), "{text:?}");
+
+            // The same bytes cut by a read, with what the loop keeps between the reads.
+            let cut = 1 + next(text.len().max(2) - 1);
+            let mut parts = term(7, 4);
+            let mut parser: Processor = Processor::new();
+            let mut last_input = false;
+            for piece in [&text.as_bytes()[..cut], &text.as_bytes()[cut..]] {
+                parser.advance(
+                    &mut ClusterHandler::new(&mut parts, true, &mut last_input),
+                    piece,
+                );
+            }
+            assert_eq!(rows(&whole), rows(&parts), "{text:?} cut at {cut}");
+        }
     }
 }

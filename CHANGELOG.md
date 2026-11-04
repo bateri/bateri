@@ -12,6 +12,11 @@ of every installed copy. A version without a section is not released.
 
 ## [Unreleased]
 
+### Changed
+
+- **A program that prints a lot reaches the screen faster.** Text, colored output and wide
+  characters cost less on the way from a program to the window.
+
 ### Fixed
 
 - A program's view on a server comes back by itself after the connection drops, as when the computer sleeps. It used to leave an empty pane with the program still running behind it, until you quit the program and started it again.
