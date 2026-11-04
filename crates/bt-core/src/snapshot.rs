@@ -1311,17 +1311,23 @@ impl Tail {
     /// as stepping through them one by one (the sameness is a test's).
     fn skim(&mut self, bytes: &[u8]) -> usize {
         match self.state {
+            Seq::Ground if self.utf8_need == 0 && !self.lean => ground_run(bytes),
+            // A tail that keeps nothing needs no step through text, only where the text
+            // leaves it, and a whole CSI is text to it.
             Seq::Ground if self.utf8_need == 0 => {
-                let mut at = ground_run(bytes);
-                // A tail that keeps nothing passes a whole CSI that is in the read
-                // as it passes text: stepping through it ends where it began.
-                while self.lean
-                    && let Some(len) = bytes.get(at..).and_then(csi_len)
-                {
+                let mut at = 0;
+                loop {
+                    let text =
+                        skim::until(bytes.get(at..).unwrap_or_default(), |byte| byte == 0x1b);
+                    self.settle_text(bytes.get(at..at + text).unwrap_or_default());
+                    at += text;
+                    let Some(len) = bytes.get(at..).and_then(csi_len) else {
+                        return at;
+                    };
                     at += len;
-                    at += ground_run(bytes.get(at..).unwrap_or_default());
+                    // The `ESC` that opened it ended whatever the text left half read.
+                    self.utf8_need = 0;
                 }
-                at
             }
             Seq::Apc => {
                 let run = skim::until(bytes, |byte| matches!(byte, 0x18 | 0x1a | 0x1b));
@@ -1352,6 +1358,20 @@ impl Tail {
             Seq::Ignored => skim::until(bytes, |byte| matches!(byte, 0x18 | 0x1a | 0x1b)),
             Seq::DcsBody => skim::until(bytes, |byte| matches!(byte, 0x18 | 0x1a | 0x1b | 0x9c)),
             _ => 0,
+        }
+    }
+
+    /// Where `text`, which has no `ESC` in it, leaves a tail that keeps nothing and stood
+    /// in the ground state with no character half read: what stepping through it would.
+    ///
+    /// A byte that is not a continuation byte starts afresh whatever stood before it, and
+    /// a character is four bytes at most, so the state is the one the last four bytes
+    /// leave; text that ends in ASCII leaves the ground state as it was.
+    fn settle_text(&mut self, text: &[u8]) {
+        if text.last().is_some_and(|&last| last >= 0x80) {
+            for &byte in text.get(text.len().saturating_sub(4)..).unwrap_or_default() {
+                self.step(byte);
+            }
         }
     }
 
@@ -2537,12 +2557,13 @@ pub(crate) mod tests {
             "\x1b[m\x1b[?1h\x1b[H\x1b[1;2;3;4:3;31m\x1b[38:5:24;48:2:125:136:147m",
             "a\x1b[10`b\x1b[100b\x1b[?1l\x1b[ q\x1b[2\x07J\x1b[3\x18m\x1b[4\x1b[5m\x1b[\x7f6m",
             "\x1b[1;2\x1b]0;t\x07\x1b[é\x1b[7\u{e9}m \u{e9}\x1b[",
+            "旦海\x1b[31m司😀有\x1b[mçay\x1b[2J👍🏽\x1b[?25l",
         ]
         .iter()
         .map(|stream| stream.as_bytes().to_vec())
         .collect();
         let alphabet: &[u8] =
-            b"\x1b\x1b\x1b[[[]\x07\x18\x1a\x00\x7f\x80\xc3\xa9;:?0126 JthmA_P \\a";
+            b"\x1b\x1b\x1b[[[]\x07\x18\x1a\x00\x7f\x80\xc3\xa9\xe6\x97\xf0\x9f\x98\xbf;:?0126 JthmA_P \\a";
         let mut seed: u64 = 0xdead_beef_cafe_f00d;
         for _ in 0..96 {
             let stream = (0..40)
