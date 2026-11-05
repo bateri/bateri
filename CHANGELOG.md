@@ -39,6 +39,9 @@ of every installed copy. A version without a section is not released.
 - **`bateri capture p9@prod` that prints more than 4 MiB ends with an error that says so**, as it already did for a program on a server. What bateri runs on another machine for a program on a server (`bateri wait p9@prod`) lasts as long as the job and ends with the program that asked: no hour limit, and nothing is left running on the server when you press ^C.
 - **A program that prints a lot reaches the screen faster.** Text, colored output and wide
   characters cost less on the way from a program to the window.
+- **A program's view scrolls more smoothly.** A picture a program draws is no longer drawn again with
+  every frame, and text with thousands of colored words takes no longer to draw far down than at the
+  top.
 
 ### Fixed
 
