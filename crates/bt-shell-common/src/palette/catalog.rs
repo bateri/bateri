@@ -33,6 +33,7 @@ use bt_core::{
 };
 
 use super::row::{Kind, Preview, Row, Scope, Slot, Tone};
+use crate::font_options::{self, FontOption};
 
 /// The settings window's grouping, kept as the order the settings are listed in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -251,12 +252,66 @@ pub(super) fn theme_setting(slot: Slot) -> &'static Setting {
         .unwrap_or(&CATALOG[0])
 }
 
-/// A row per setting.
+/// A row per setting, and after the last of the Font section a switch per option the
+/// selected font offers ([`font_rows`]).
 pub fn rows(settings: &Settings) -> Vec<Row> {
-    CATALOG
+    let last_font = CATALOG
         .iter()
-        .map(|setting| setting.row(settings))
+        .rposition(|setting| setting.section == Section::Font);
+    let mut rows = Vec::with_capacity(CATALOG.len());
+    for (at, setting) in CATALOG.iter().enumerate() {
+        rows.push(setting.row(settings));
+        if last_font == Some(at) {
+            rows.extend(font_rows(settings));
+        }
+    }
+    rows
+}
+
+/// The id of a font option's row: the options are the selected font's own and change with it,
+/// so they are not in the static table; a row and its edit are resolved from this prefix
+/// ([`font_edits`]).
+pub(super) const FONT_OPTION: &str = "font.features.";
+
+/// A switch per option of the font in effect: Ligatures, Hide Secrets, the font's sets and
+/// Slashed Zero, whichever it offers; a font that offers none (Menlo) adds no row.
+pub fn font_rows(settings: &Settings) -> Vec<Row> {
+    font_rows_of(
+        &font_options::options(settings.font.family.as_deref()),
+        settings,
+    )
+}
+
+fn font_rows_of(options: &[FontOption], settings: &Settings) -> Vec<Row> {
+    options
+        .iter()
+        .map(|option| {
+            Row::new(
+                Kind::Setting,
+                &format!("{FONT_OPTION}{}", option.id()),
+                option.title(),
+            )
+            .keywords(format!(
+                "font feature opentype {} {}",
+                option.tags().join(" "),
+                option.id()
+            ))
+            .toggle(option.is_on(&settings.font))
+        })
         .collect()
+}
+
+/// The edits that flip the font option `id` of the font in effect; `None` when the key is not
+/// a font option or the font does not offer it.
+pub fn font_edits(key: &str, settings: &Settings) -> Option<Vec<SettingsEdit>> {
+    let id = key.strip_prefix(FONT_OPTION)?;
+    let option = font_options::find(&settings.font, id)?;
+    Some(flip(&option, settings))
+}
+
+/// The edits that make `option` the opposite of what the file has.
+fn flip(option: &FontOption, settings: &Settings) -> Vec<SettingsEdit> {
+    option.edits(&settings.font, !option.is_on(&settings.font))
 }
 
 fn names<T>(table: &'static [(&'static str, T)]) -> Vec<String> {
@@ -888,6 +943,7 @@ static CATALOG: [Setting; 38] = [
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bt_core::FontOptions;
 
     /// What the file says after `edit`, read back by the settings parser — the whole path a
     /// chosen value takes.
@@ -1051,7 +1107,9 @@ mod tests {
         assert_eq!(dark.opens, Some(Scope::Theme(Slot::Dark)));
         assert_eq!(dark.subtitle, "while Theme is Match System");
         assert_eq!(dark.value.as_deref(), Some("bateri"));
-        assert_eq!(rows(&settings).len(), 38);
+        // The font's own options are the machine's, so only the table is counted.
+        assert_eq!(all().len(), 38);
+        assert_eq!(rows(&settings).len(), 38 + font_rows(&settings).len());
     }
 
     #[test]
@@ -1107,5 +1165,93 @@ mod tests {
                 "appearance.tab_running",
             ]
         );
+    }
+
+    fn obel_options() -> Vec<FontOption> {
+        let feature = |tag: &str, name: Option<&str>| bt_gpu::FontFeature {
+            tag: tag.to_owned(),
+            name: name.map(str::to_owned),
+        };
+        font_options::options_of(&[
+            feature("calt", None),
+            feature("ss01", Some("Mask secrets")),
+            feature("ss02", Some("Alternate zero")),
+            feature("zero", None),
+        ])
+    }
+
+    #[test]
+    fn a_font_option_is_a_switch_that_shows_the_file_and_flips_it() {
+        let options = obel_options();
+        let settings = Settings {
+            font: FontOptions {
+                family: Some("Obel Mono".to_owned()),
+                features: [(
+                    "obel mono".to_owned(),
+                    [("ss01".to_owned(), true), ("calt".to_owned(), false)].into(),
+                )]
+                .into(),
+                ..FontOptions::default()
+            },
+            ..Settings::default()
+        };
+        let rows = font_rows_of(&options, &settings);
+        let shown: Vec<(&str, &str, Option<bool>)> = rows
+            .iter()
+            .map(|row| (row.id.as_str(), row.title.as_str(), row.toggle))
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                ("set.font.features.ligatures", "Ligatures", Some(false)),
+                ("set.font.features.secrets", "Hide Secrets", Some(true)),
+                ("set.font.features.ss02", "Alternate zero", Some(false)),
+                ("set.font.features.zero", "Slashed Zero", Some(false)),
+            ]
+        );
+        // A search by what the option does or by its tag finds it.
+        assert!(rows[1].keywords.contains("ss01") && rows[1].keywords.contains("feature"));
+        // Flipping reads the file: Hide Secrets is on, so the edit removes the line;
+        // Ligatures is off, so the edit removes both lines.
+        let tag = |tag: &str, on| SettingsEdit::FontFeature {
+            family: "Obel Mono".to_owned(),
+            tag: tag.to_owned(),
+            on,
+        };
+        assert_eq!(flip(&options[1], &settings), [tag("ss01", None)]);
+        assert_eq!(flip(&options[0], &settings), [tag("calt", None)]);
+        assert_eq!(flip(&options[3], &settings), [tag("zero", Some(true))]);
+    }
+
+    #[test]
+    fn the_font_rows_follow_the_section_and_a_font_without_options_adds_none() {
+        // Menlo lists no feature (and a backend that cannot read tables lists none): the
+        // table's rows and nothing else.
+        let menlo = Settings {
+            font: FontOptions {
+                family: Some("Menlo".to_owned()),
+                ..FontOptions::default()
+            },
+            ..Settings::default()
+        };
+        assert!(font_rows(&menlo).is_empty());
+        assert_eq!(rows(&menlo).len(), all().len());
+        // The options sit right after the Font section, whichever the machine's default is.
+        let rows = rows(&Settings::default());
+        let at = rows.iter().position(|row| row.id == "set.font.line_height");
+        let last = rows
+            .iter()
+            .rposition(|row| row.id.starts_with("set.font.features."));
+        if let (Some(at), Some(last)) = (at, last) {
+            assert!(last > at);
+            assert!(
+                rows[at + 1..=last]
+                    .iter()
+                    .all(|row| row.id.starts_with("set.font.features."))
+            );
+        }
+        // An id the font does not offer is not a write.
+        assert_eq!(font_edits("font.features.ss99", &menlo), None);
+        assert_eq!(font_edits("font.size", &menlo), None);
     }
 }

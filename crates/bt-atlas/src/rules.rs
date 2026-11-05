@@ -82,6 +82,10 @@ pub(crate) struct Faces {
     /// ([`crate::shaping::opens`]); decided once, from the regular face as
     /// the chain opened it, before any feature is given.
     shaping: bool,
+    /// The chosen tags the opened font does not list ([`features::lacking`]);
+    /// empty when the requested family was not found, because the chain's
+    /// font that opened instead was not what the choices were made for.
+    lacking: Vec<String>,
 }
 
 /// The outcome of the requested family that has to be told to the user.
@@ -119,9 +123,18 @@ impl Faces {
         features: &[(String, bool)],
     ) -> (Self, Option<FontIssue>) {
         let (regular, issue) = open_chain(family, size);
+        // A family that was not found is replaced by the chain's font, and the choices
+        // were made for the family that is gone: `ss01` is another thing in every font.
+        let features = if matches!(issue, Some(FontIssue::FamilyNotFound { .. })) {
+            &[]
+        } else {
+            features
+        };
         let shaping = shaping::opens(&regular, features);
+        let lacking = crate::features::lacking(&regular, features);
         let mut faces = Self::derive(regular);
         faces.shaping = shaping;
+        faces.lacking = lacking;
         if shaping && !features.is_empty() {
             for font in &mut faces.fonts {
                 *font = Backend::with_features(font, features);
@@ -167,7 +180,13 @@ impl Faces {
             fonts,
             acquired,
             shaping: false,
+            lacking: Vec::new(),
         }
+    }
+
+    /// The chosen tags the opened font does not list.
+    pub(crate) fn lacking(&self) -> &[String] {
+        &self.lacking
     }
 
     /// Whether the faces are shaped by the font's own rules.

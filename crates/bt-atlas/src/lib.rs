@@ -57,6 +57,7 @@ mod shaping;
 mod system;
 mod text;
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
 pub use features::{FontFeature, font_features};
@@ -486,6 +487,10 @@ pub struct Atlas {
     /// What the chain said about the requested family; `None` → the requested
     /// one opened or no family was requested.
     font_issue: Option<FontIssue>,
+    /// The chosen OpenType tags the opened font does not list. Not a
+    /// [`FontIssue`]: that one is a single outcome and this can come with
+    /// either of its cases.
+    missing_features: Vec<String>,
     /// The grid's (column, row) slot count.
     grid: (u16, u16),
     /// The texture edge the grid was cut from, in pixels: [`edge_for`]'s
@@ -614,8 +619,14 @@ impl Key {
 }
 
 /// `features` as the key holds them: sorted by tag, one entry per tag (the
-/// last one listed wins, as it does in CoreText).
-fn normalized(features: &[(String, bool)]) -> Vec<(String, bool)> {
+/// last one listed wins, as it does in CoreText). A list that is already so
+/// is handed back as it is: the renderer asks on every frame and the list
+/// the settings give is sorted and unique, so the common answer allocates
+/// nothing.
+fn normalized(features: &[(String, bool)]) -> Cow<'_, [(String, bool)]> {
+    if features.windows(2).all(|pair| pair[0].0 < pair[1].0) {
+        return Cow::Borrowed(features);
+    }
     let mut sorted: Vec<(String, bool)> = Vec::with_capacity(features.len());
     for (tag, on) in features {
         match sorted.iter_mut().find(|(held, _)| held == tag) {
@@ -624,7 +635,7 @@ fn normalized(features: &[(String, bool)]) -> Vec<(String, bool)> {
         }
     }
     sorted.sort_by(|a, b| a.0.cmp(&b.0));
-    sorted
+    Cow::Owned(sorted)
 }
 
 impl Atlas {
@@ -660,6 +671,7 @@ impl Atlas {
         let features = normalized(features);
         let (faces, font_issue) =
             Faces::from_chain(family, effective_point_size(point_size, scale), &features);
+        let missing_features = faces.lacking().to_vec();
         // The metric comes **only from the regular face**: the cell grid cannot
         // vary with the face. A bold glyph is rasterized into the same slot and
         // may be clipped by a pixel — every terminal does it this way.
@@ -754,9 +766,10 @@ impl Atlas {
                 point_size,
                 scale,
                 spacing,
-                features,
+                features: features.into_owned(),
             },
             font_issue,
+            missing_features,
             grid,
             edge,
             overflowed: false,
@@ -889,6 +902,21 @@ impl Atlas {
     /// answer.
     pub fn font_issue(&self) -> Option<&FontIssue> {
         self.font_issue.as_ref()
+    }
+
+    /// The OpenType tags that were chosen for this family and that the font
+    /// does not list in its `GSUB` table, in tag order. CoreText ignores such
+    /// a tag without a word, so this is the only place a misspelled or
+    /// copied-from-another-font choice shows. Empty when the family was not
+    /// found (the choices were not made for the font that opened) and on a
+    /// backend that cannot read tables.
+    pub fn missing_features(&self) -> &[String] {
+        &self.missing_features
+    }
+
+    /// The family the atlas was asked for; `None` is the chain's own font.
+    pub fn family(&self) -> Option<&str> {
+        self.key.family.as_deref()
     }
 
     /// The atlas texture's size in pixels; `bt-gpu` allocates the texture

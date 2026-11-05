@@ -34,18 +34,28 @@ pub enum Source {
 ///
 /// The text lives here, not in `bt-gpu`: the subtitle's other strings are also built in this
 /// crate and the language rule (UI strings in English) is applied in one place.
-pub fn font_messages(notice: Option<FontNotice>) -> Vec<String> {
-    match notice {
-        None => Vec::new(),
-        Some(FontNotice::FamilyNotFound { requested, using }) => {
-            vec![format!("font \"{requested}\" not found; using {using}")]
-        }
-        Some(FontNotice::NotMonospaced { family }) => {
-            vec![format!(
-                "font \"{family}\" is not monospaced; text may not line up"
-            )]
-        }
-    }
+pub fn font_messages(notices: impl IntoIterator<Item = FontNotice>) -> Vec<String> {
+    notices
+        .into_iter()
+        .map(|notice| match notice {
+            FontNotice::FamilyNotFound { requested, using } => {
+                format!("font \"{requested}\" not found; using {using}")
+            }
+            FontNotice::NotMonospaced { family } => {
+                format!("font \"{family}\" is not monospaced; text may not line up")
+            }
+            FontNotice::NoFeature { family, tag } => {
+                // The empty family is the default chain's font, which the
+                // palette and the settings window call System Mono.
+                let family = if family.is_empty() {
+                    "System Mono"
+                } else {
+                    &family
+                };
+                format!("font \"{family}\" has no feature \"{tag}\"")
+            }
+        })
+        .collect()
 }
 
 /// The filled slots; an empty slot does not stay in the map.
@@ -142,20 +152,41 @@ mod tests {
         let mut notices = Notices::default();
         notices.replace(
             Source::Font,
-            font_messages(Some(FontNotice::FamilyNotFound {
+            font_messages([FontNotice::FamilyNotFound {
                 requested: "Fira".to_owned(),
                 using: "Menlo".to_owned(),
-            })),
+            }]),
         );
         assert_eq!(notices.subtitle(), "font \"Fira\" not found; using Menlo");
         notices.replace(Source::Theme, vec!["tema".to_owned()]);
         assert_eq!(notices.subtitle(), "tema (+1 more)");
         assert_eq!(
-            font_messages(Some(FontNotice::NotMonospaced {
+            font_messages([FontNotice::NotMonospaced {
                 family: "Helvetica".to_owned()
-            })),
+            }]),
             ["font \"Helvetica\" is not monospaced; text may not line up"]
         );
-        assert!(font_messages(None).is_empty());
+        assert!(font_messages([]).is_empty());
+        // A missing feature is one line each, after the family's own.
+        assert_eq!(
+            font_messages([
+                FontNotice::NotMonospaced {
+                    family: "Obel Mono".to_owned()
+                },
+                FontNotice::NoFeature {
+                    family: "Obel Mono".to_owned(),
+                    tag: "ss99".to_owned()
+                },
+                FontNotice::NoFeature {
+                    family: String::new(),
+                    tag: "calt".to_owned()
+                },
+            ]),
+            [
+                "font \"Obel Mono\" is not monospaced; text may not line up",
+                "font \"Obel Mono\" has no feature \"ss99\"",
+                "font \"System Mono\" has no feature \"calt\"",
+            ]
+        );
     }
 }

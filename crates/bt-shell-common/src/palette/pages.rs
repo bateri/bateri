@@ -176,6 +176,13 @@ pub fn chosen(
     dark: bool,
 ) -> Option<Chosen> {
     if let Some(key) = id.strip_prefix(Kind::Setting.prefix()) {
+        // A font option is the selected font's own and is not in the table.
+        if let Some(edits) = catalog::font_edits(key, settings) {
+            return (modifier == Modifier::None).then_some(Chosen {
+                edits,
+                close: false,
+            });
+        }
         let setting = catalog::find(key)?;
         if modifier != Modifier::None || setting.control() != Control::Toggle {
             return None;

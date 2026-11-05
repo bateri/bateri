@@ -114,6 +114,14 @@ also takes effect at once.
   the file.
 - **When the file changes from outside, the window changes too** — a value you
   saved in the editor, a new theme you put in `themes/`.
+- **Font options.** Under Font, Appearance has an Options row with a switch for
+  each option the selected font offers: Ligatures, Hide Secrets, the font's
+  alternate letters and Slashed Zero (see [Font
+  options](#font-options-ligatures-alternate-letters-and-hiding-secrets)). The
+  list is the font's own, so it changes with the font and a font that offers
+  none (Menlo) shows no row. A switch writes only its own lines under
+  `[font.features."Family"]`; the choices of every family stay in the file when
+  you change the font.
 - **A value that is not accepted** is shown in orange under its own row; the
   control shows the value currently in effect, and picking a new value fixes
   the row. A diagnostic that does not belong to a row (for example the retired
@@ -727,6 +735,8 @@ error (or the ⚠) stays visible there too.
 | a color in the theme file is not accepted | only that color comes from the file's base (`bateri`, `bateri-light` or the shadowed built-in theme), warning |
 | the font family cannot be found | the default font (SF Mono, otherwise Menlo), warning |
 | the font family is not monospaced | the family is still used, warning |
+| a `[font.features]` line that cannot be read (a tag that is not four letters or digits, a value that is not `true` or `false`) | only that line is ignored, warning |
+| a `[font.features]` tag the font does not list | the choice does nothing, warning: `font "Obel Mono" has no feature "ss99"` |
 
 The theme rule is the same when the appearance changes: if the new
 appearance's theme cannot be used, the built-in theme matching that appearance
@@ -744,6 +754,7 @@ warning goes away when you fix and save the file.
 | a key was deleted from the file | that key returns to its default |
 | the chosen theme cannot be found, its file cannot be read, is empty or is invalid TOML | **the theme on screen stays**, warning |
 | the font family cannot be found | the default font, warning; fixing the name and saving clears the warning |
+| a `[font.features]` tag the font does not list | the choice stays in the file and does nothing, warning; fixing the tag and saving clears the warning |
 
 When choosing a theme from the menu, if the file is invalid or cannot be read,
 the file is **not written**; see [View ▸ Theme ▸](#view--theme-).
@@ -1378,7 +1389,8 @@ letter_spacing = 1.0
   (`ss01` is the stylistic set the designer numbered first). A feature that is
   not written stays as the font ships it. A tag is four letters or digits; a
   line that is not (`ss01 = "yes"`, `toolong = true`) is ignored and the title
-  bar says which.
+  bar says which. What the options do and where they are offered is under
+  [Font options](#font-options-ligatures-alternate-letters-and-hiding-secrets).
 - `size` can be an integer or a decimal (`13`, `13.5`). Zero, a negative
   value, `nan`, `inf` or a non-number falls back to the default (`13` at
   launch, the current size when saving) and gives a warning.
@@ -1435,6 +1447,103 @@ letter_spacing = 1.0
   had been resized; long lines are rewrapped.
 - In a family without bold and italic faces, that text is drawn with the
   regular face; this gives no warning (a line goes to standard error).
+
+#### Font options: ligatures, alternate letters and hiding secrets
+
+A font can carry rules that change how text is drawn: code fonts join `->`,
+`!=` and `===` into one shape (ligatures), many have alternate letters and a
+slashed zero, and Obel Mono Masked draws API keys and tokens as dots. bateri
+runs the font's own rules, so what you see is what the font was designed to
+show; a font that carries no rules (Menlo) is drawn character by character,
+exactly as before. The options work on the terminal grid, the history above
+it, the input line at the bottom and the effects of typing in it. They work on
+macOS; the Linux build draws every font as before.
+
+**Where the options are.** The selected font's options are in Settings ▸
+Appearance (the Options row under Font), in the command palette (type the
+option's name; each is a switch and Return flips it without closing the list)
+and in the file. The list comes from the font's own file: Menlo offers none,
+JetBrains Mono offers Ligatures, its stylistic sets and Slashed Zero, Obel Mono
+Masked offers Hide Secrets and its alternate letters.
+
+- **Ligatures** (`calt` and `liga`) is **on** unless you turn it off: the font
+  ships it on. Turning it off writes `calt = false` and `liga = false` (the
+  ones the font lists); turning it on removes the lines.
+- **Hide Secrets** is the stylistic set the font names "Mask secrets" (`ss01` in
+  Obel Mono Masked) and is **off** until you turn it on.
+- The font's other stylistic sets (`ss01`–`ss20`) and character variants
+  (`cv01`–`cv99`) are listed under the names the font gives them
+  (`Single-story a`) and under their tag when it names none (`cv03`), then
+  **Slashed Zero** (`zero`). Turning one on writes `tag = true`; turning it off
+  removes the line, which is the font's own default again.
+- Any other feature — `frac`, `sups`, `salt`, `onum` — is not listed, but it
+  works when written by hand in the file.
+
+**The choice belongs to the font.** `ss01` is a different thing in every font,
+so the choices are kept per family, under `[font.features."Family"]` (the
+family is matched without regard to case; `""` is the default font), and
+changing the font does not carry a choice to it. Switching Hide Secrets on
+for Obel Mono Masked and then moving to JetBrains Mono leaves the Obel Mono
+Masked line where it is.
+
+```toml
+[font]
+family = "Obel Mono"
+
+[font.features."Obel Mono"]
+ss01 = true      # Hide Secrets
+cv02 = true      # Single-story a
+
+[font.features."JetBrains Mono"]
+calt = false     # no ligatures
+```
+
+**A tag the font does not list.** A font's engine ignores a feature the font
+does not have without a word, so a misspelled tag or one copied from another
+font would silently do nothing. The title bar says it instead: `font "Obel
+Mono" has no feature "ss99"`, one line for each such tag (`font "System Mono"`
+for the default font), and fixing the line clears it. The check reads the
+font's glyph-substitution table, so a font without one (Menlo) lists no
+feature and every tag written for it is reported. It is not given for a
+family that cannot be found (the warning for that comes first).
+
+**Ligatures** are drawn as one shape across the cells they cover: `->`, `!=`,
+`===` and `<!--` in JetBrains Mono. Each cell keeps its own colour, selection
+and search highlight, and at a letter spacing other than `1` the shape stays
+whole across the cell edges. A ligature is not formed over a line break — a
+`-` at the end of a row and a `>` at the start of the next stay two characters.
+**The cursor
+(and the caret in the input line) opens the ligature it is on**: both cells of
+`->` show as the two characters while the cursor is on either of them, and the
+shape forms again when it moves away. With `calt = false` they never form.
+
+**Hide Secrets** replaces what the font recognises as a secret (an API key
+such as `sk-ant-…`, a token after `OBEL_TOKEN=`) with dots **on the screen**.
+It is not a safeguard: copying, selection, the shell's history, the files and
+the program's own output keep the real text, and bateri's own text — tab
+titles, summary cards, the palette, notifications — is not masked. What the
+terminal does:
+
+- a key the terminal wrapped onto the next row is masked in both rows, and so
+  is one that starts above the first row on screen; the text before a row is
+  read for up to a few hundred characters (256 characters of context, 16
+  rows), and a key that starts further back is drawn as the font draws it
+  alone;
+- the context ends at a line break or a change of face: a key that starts in
+  bold and continues in the regular face can stay open;
+- blanks at the very end of a row the terminal wrapped are not part of the
+  text the next row is read with, so a key split across a wrap by a trailing
+  blank can still be masked;
+- the font decides what is a secret: a format it does not know is not masked.
+
+**Known limits.** The options reach the terminal's own text; program views
+(the web and native views a program opens) use their own fonts and are not
+shaped. A shape the cells cannot hold — a character the font draws as several
+glyphs, characters the font reorders, ink that reaches outside the cells it
+stands for — is drawn as the plain characters. Obel Mono's glyphs all have the same advance, but macOS does not flag
+the family as monospaced, so `family = "Obel Mono"` gives the `is not
+monospaced` warning above, the family is not in the Font list of the settings
+window or the palette, and the text still lines up.
 
 #### Temporary font size: Cmd +, Cmd −, Cmd 0
 

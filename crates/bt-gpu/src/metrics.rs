@@ -16,6 +16,11 @@ pub enum FontNotice {
     FamilyNotFound { requested: String, using: String },
     /// The family opened but is not monospaced; it was not rejected.
     NotMonospaced { family: String },
+    /// A feature the file chose for the font that the font does not list. The
+    /// font's engine ignores it without a word, so this is the one place it
+    /// shows. `family` is what the file asked for; empty is the default
+    /// chain's font.
+    NoFeature { family: String, tag: String },
 }
 
 impl From<FontIssue> for FontNotice {

@@ -1977,6 +1977,33 @@ impl Renderer {
         Some(FontNotice::from(issue.clone()))
     }
 
+    /// Everything to tell the user about the open atlas's font: the family
+    /// notice ([`Renderer::font_notice`]) and a notice for each chosen
+    /// feature the font does not list, in tag order. Empty without an atlas.
+    pub fn font_notices(&self) -> Vec<FontNotice> {
+        let state = self.state.borrow();
+        let Some(open) = state.atlas.as_ref() else {
+            return Vec::new();
+        };
+        let atlas = &open.atlas;
+        let family = atlas.family().unwrap_or_default();
+        atlas
+            .font_issue()
+            .cloned()
+            .map(FontNotice::from)
+            .into_iter()
+            .chain(
+                atlas
+                    .missing_features()
+                    .iter()
+                    .map(|tag| FontNotice::NoFeature {
+                        family: family.to_owned(),
+                        tag: tag.clone(),
+                    }),
+            )
+            .collect()
+    }
+
     /// The mask plane's slot occupancy (used, total); `(0, 0)` without an
     /// atlas. `slots=`'s source.
     pub fn atlas_occupancy(&self) -> (usize, usize) {

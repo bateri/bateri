@@ -13,7 +13,7 @@
 //! own slot origins.
 
 use bt_atlas::{Atlas, Face, Half, Metrics, Placed, Plane, RuleKind, Shaped, SizeClass, Sprite};
-use bt_core::Clusters;
+use bt_core::{Clusters, LEAD_CHARS};
 
 use crate::frame::{FxCell, FxInstance, GlyphCell, GlyphInstance, RuleCell};
 
@@ -61,8 +61,10 @@ const RUN_MAX: usize = 256;
 
 /// How much of the text before a wrapped row is handed to the shaper with
 /// it: a secret that began further back than this is not found by the
-/// font, which then draws what it would draw on its own.
-const CONTEXT_MAX: usize = 200;
+/// font, which then draws what it would draw on its own. It is as much as
+/// `bt-core` reads above a surface ([`Above::lead`]), so a row below the
+/// first sees as far back as the first does.
+const CONTEXT_MAX: usize = LEAD_CHARS;
 
 /// Whether the shaper may decide this cell: a character in the display font,
 /// one column wide and not an emoji sequence — those are drawn as they were

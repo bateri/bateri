@@ -3766,7 +3766,7 @@ fn block_start_near<T>(term: &Term<T>, line: i64, key: BlockKey, boundary: usize
 }
 
 /// The most characters of context one surface carries ([`Leads`]).
-pub(crate) const LEAD_CHARS: usize = 256;
+pub const LEAD_CHARS: usize = 256;
 
 /// Whether the row at `line` continues the one above it: that row's last cell
 /// carries `WRAPLINE`. The topmost row of the history continues nothing.

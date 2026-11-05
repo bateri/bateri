@@ -13,7 +13,7 @@
 use std::collections::BTreeMap;
 
 use crate::rules::same_family;
-use crate::system::{Backend, FontSystem};
+use crate::system::{Backend, Font, FontSystem};
 
 /// One OpenType feature a font lists.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -62,6 +62,31 @@ pub fn font_features(family: Option<&str>) -> Vec<FontFeature> {
 /// shaped until the user selects a feature.
 pub(crate) fn has_default_rules(gsub: &[u8]) -> bool {
     tags(gsub).any(|tag| DEFAULT_ON.iter().any(|on| **on == tag.tag))
+}
+
+/// The tags among `chosen` that the font behind `font` does not list in its
+/// `GSUB` or `GPOS` table, in the order given. A font that has neither lists
+/// nothing (Menlo), so every chosen tag is one it lacks; a backend that cannot read
+/// tables at all (it has no `head` either) says nothing, because it cannot
+/// tell a font that lacks the tag from a font it cannot read.
+pub(crate) fn lacking(font: &Font, chosen: &[(String, bool)]) -> Vec<String> {
+    if chosen.is_empty() || Backend::table(font, *b"head").is_none() {
+        return Vec::new();
+    }
+    // `GPOS` has the same header and feature list as `GSUB`: a tag the font positions
+    // with (`kern`) is a feature it has, though no rule of `GSUB` carries it.
+    let listed: Vec<[u8; 4]> = [*b"GSUB", *b"GPOS"]
+        .into_iter()
+        .filter_map(|table| Backend::table(font, table))
+        .flat_map(|table| tags(&table).map(|entry| entry.tag).collect::<Vec<_>>())
+        .collect();
+    chosen
+        .iter()
+        .filter(|(tag, _)| {
+            <[u8; 4]>::try_from(tag.as_bytes()).map_or(true, |tag| !listed.contains(&tag))
+        })
+        .map(|(tag, _)| tag.clone())
+        .collect()
 }
 
 /// The features of a `GSUB` table, named from a `name` table, sorted by tag
@@ -383,6 +408,58 @@ mod tests {
             for face in [Face::Regular, Face::Bold] {
                 assert!(!masked(&plain, face, key), "{face:?} masks without asking");
             }
+        }
+
+        #[test]
+        fn a_tag_the_font_lacks_is_reported_and_one_it_has_is_not() {
+            use crate::{Atlas, Spacing};
+            fixture::register_test_fonts();
+            let spacing = Spacing::default();
+            let tags = |family: Option<&str>, chosen: &[(&str, bool)]| {
+                let chosen: Vec<(String, bool)> = chosen
+                    .iter()
+                    .map(|&(tag, on)| (tag.to_owned(), on))
+                    .collect();
+                Atlas::with_features(family, 13.0, 1.0, spacing, &chosen)
+                    .missing_features()
+                    .to_vec()
+            };
+            let obel = Some(fixture::OBEL_MONO);
+            assert!(tags(obel, &[("ss01", true), ("cv02", false)]).is_empty());
+            assert_eq!(
+                tags(obel, &[("ss99", true), ("ss01", true), ("zzzz", false)]),
+                ["ss99", "zzzz"]
+            );
+            assert!(tags(obel, &[]).is_empty());
+            // A font with no `GSUB` lists nothing, so any choice is one it
+            // lacks; the family that is not installed is the chain's font
+            // opened instead and the choice was not made for it.
+            assert_eq!(
+                tags(Some(fixture::DEFAULT_FAMILY), &[("calt", true)]),
+                ["calt"]
+            );
+            assert!(tags(Some("No Such Family 1234"), &[("calt", true)]).is_empty());
+            let atlas =
+                Atlas::with_features(obel, 13.0, 1.0, spacing, &[("ss99".to_owned(), true)]);
+            assert_eq!(atlas.family(), obel);
+        }
+
+        #[test]
+        fn choices_made_for_a_family_that_was_not_found_do_not_reach_the_font_that_replaced_it() {
+            // Every feature of the default font, written for a family that is not
+            // installed: the chain's font opens as if nothing were chosen.
+            let all: Vec<(String, bool)> = font_features(None)
+                .into_iter()
+                .map(|feature| (feature.tag, true))
+                .collect();
+            let (asked, issue) = Faces::from_chain(Some("No Such Family 1234"), 26.0, &all);
+            assert!(matches!(
+                issue,
+                Some(crate::FontIssue::FamilyNotFound { .. })
+            ));
+            let (plain, _) = Faces::from_chain(None, 26.0, &[]);
+            assert_eq!(asked.shaping(), plain.shaping());
+            assert!(asked.lacking().is_empty());
         }
 
         #[test]

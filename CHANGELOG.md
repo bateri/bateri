@@ -12,12 +12,17 @@ of every installed copy. A version without a section is not released.
 
 ## [Unreleased]
 
+### Added
+
+- **A font's own rules now run: ligatures, alternate letters and hiding secrets.** In a code font such as JetBrains Mono, `->`, `!=` and `===` are one shape, each cell keeping its own colour, and the cursor on one opens it into its characters. Obel Mono Masked can draw API keys and tokens as dots, including a key the terminal wrapped onto a second row. Settings ▸ Appearance has an Options row under Font, and the command palette the same switches, for what the selected font offers (Ligatures, Hide Secrets, its alternate letters, Slashed Zero); the choices are kept per font under `[font.features."Family"]`, and a tag the font does not have is named in the title bar. A font with no rules, Menlo included, looks exactly as before.
+
 ### Changed
 
 - **Lists and text in a program's view stop at their ends**, as the terminal's history does, so a file tree or an editor no longer bounces past its end and squeezes its scroll bar. To have them bounce as macOS's own windows do, turn on Bounce at the Ends (`[motion] scroll_bounce = "on"`).
 
 ### Fixed
 
+- The command palette's font list shows only the monospaced families this Mac has, so choosing one no longer ends in `font "JetBrains Mono" not found`.
 - A program with a lot of output keeps what bateri knows about it through later updates of kablo: its folder, its blocks and that a command is running. The first update to this version cannot do that yet, and 0.24.1's check covers it.
 - The number of tabs on a closed group in the sidebar is no longer cut off on its left.
 - The `+` on a group's header says New Tab in Group when you point at it, not Close group.

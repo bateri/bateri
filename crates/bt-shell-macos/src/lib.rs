@@ -94,8 +94,8 @@ mod window;
 // The platform-independent half lives in `bt-shell-common`; imported
 // at the crate root so `crate::settings` and friends keep resolving.
 use bt_shell_common::{
-    child, download, environment, focus, gesture, grid, groups, icon, ids, jobs, keys, links,
-    moves, notices, port_forward, ports, preview_cache, program, quote, remote_files,
+    child, download, environment, focus, font_options, gesture, grid, groups, icon, ids, jobs,
+    keys, links, moves, notices, port_forward, ports, preview_cache, program, quote, remote_files,
     remote_helper, restore, retired_holders, settings, split, ssh_route, tabs, undo, upload, watch,
     zoom,
 };

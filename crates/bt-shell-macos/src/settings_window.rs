@@ -59,11 +59,13 @@ use objc2_foundation::{
 
 use crate::app;
 use crate::child;
+use crate::font_options::FontOption;
 use crate::remote_files::Sweep;
 use crate::settings::{self, FileState};
 use crate::upload::format_bytes;
 use crate::zoom::{MAX_SIZE, MIN_SIZE};
 
+mod font_options;
 mod keyboard;
 mod recorder;
 
@@ -203,6 +205,7 @@ enum Key {
     Size,
     LineHeight,
     LetterSpacing,
+    FontFeatures,
     Shape,
     Blink,
     BlinkSpeed,
@@ -249,7 +252,7 @@ enum Key {
 
 impl Key {
     /// The order is the `tag` itself: `ALL[tag]`.
-    const ALL: [Key; 53] = [
+    const ALL: [Key; 54] = [
         Key::ConfirmClose,
         Key::Clipboard,
         Key::Scrollback,
@@ -261,6 +264,7 @@ impl Key {
         Key::Size,
         Key::LineHeight,
         Key::LetterSpacing,
+        Key::FontFeatures,
         Key::Shape,
         Key::Blink,
         Key::BlinkSpeed,
@@ -343,6 +347,7 @@ impl Key {
             Key::Size => "font.size",
             Key::LineHeight => "font.line_height",
             Key::LetterSpacing => "font.letter_spacing",
+            Key::FontFeatures => "font.features",
             Key::Shape => "terminal.cursor",
             Key::Blink => "terminal.cursor_blink",
             Key::BlinkSpeed => "terminal.cursor_blink_interval",
@@ -1073,7 +1078,8 @@ fn missing_font_title(name: &str, notice: Option<FontNotice>) -> String {
     match notice {
         Some(FontNotice::FamilyNotFound { .. }) => format!("{name} — not found"),
         Some(FontNotice::NotMonospaced { .. }) => format!("{name} — not monospaced"),
-        None => name.to_owned(),
+        // The family question never answers a feature, but the type can.
+        Some(FontNotice::NoFeature { .. }) | None => name.to_owned(),
     }
 }
 
@@ -1243,6 +1249,8 @@ struct Controls {
     light_theme: Retained<NSPopUpButton>,
     dark_theme: Retained<NSPopUpButton>,
     font: Retained<NSPopUpButton>,
+    /// The switches of the options the selected font offers.
+    font_options: font_options::Options,
     size: Number,
     line_height: Number,
     letter_spacing: Number,
@@ -1378,6 +1386,9 @@ pub(crate) struct Ivars {
     light_themes: RefCell<Vec<ThemeItem>>,
     dark_themes: RefCell<Vec<ThemeItem>>,
     fonts: RefCell<Vec<FontItem>>,
+    /// The options the Options row shows, in the order of the switches' tags.
+    /// Rebuilt on every `refresh`.
+    font_options: RefCell<Vec<FontOption>>,
     max_sizes: RefCell<Vec<SizeItem>>,
     limits: RefCell<Vec<SizeItem>>,
     contrasts: RefCell<Vec<ContrastItem>>,
@@ -1482,6 +1493,29 @@ define_class!(
                 _ => None,
             };
             self.save(edit);
+        }
+
+        /// An option of the selected font: its switch's tag is the option's place in the
+        /// list the last refresh showed.
+        #[unsafe(method(fontOptionChanged:))]
+        fn font_option_changed(&self, sender: Option<&AnyObject>) {
+            let Some(switch) = sender.and_then(|s| s.downcast_ref::<NSSwitch>()) else {
+                return;
+            };
+            let on = switch.state() == NSControlStateValueOn;
+            let option = usize::try_from(switch.tag())
+                .ok()
+                .and_then(|at| self.ivars().font_options.borrow().get(at).cloned());
+            let Some(option) = option else {
+                return;
+            };
+            let Some(delegate) = app::delegate(self.mtm()) else {
+                return;
+            };
+            // The file's choices, not what a preview shows: the option may write two lines.
+            let font = delegate.file_settings().font;
+            // A refused write puts the window back to the file by itself.
+            let _ = delegate.save_edits(&option.edits(&font, on));
         }
 
         #[unsafe(method(switchChanged:))]
@@ -1747,6 +1781,7 @@ impl SettingsWindow {
             light_themes: RefCell::new(Vec::new()),
             dark_themes: RefCell::new(Vec::new()),
             fonts: RefCell::new(Vec::new()),
+            font_options: RefCell::new(Vec::new()),
             max_sizes: RefCell::new(Vec::new()),
             contrasts: RefCell::new(Vec::new()),
             limits: RefCell::new(Vec::new()),
@@ -1970,6 +2005,11 @@ impl SettingsWindow {
                 enabled,
             );
         }
+        // The font's options: the selected font's own list, shown as the file chooses.
+        let options = crate::font_options::options(settings.font.family.as_deref());
+        c.font_options
+            .show(self, &options, &settings.font, !status.locked);
+        self.ivars().font_options.replace(options);
         // The value label is a label, not a control: dimming it is by hand.
         let value_color = if !status.locked && blinks {
             NSColor::secondaryLabelColor()
@@ -2643,6 +2683,11 @@ impl SettingsWindow {
             Some("Text a program colors too close to its background, like white on a light theme, is drawn darker or lighter until it reads."),
         );
         appearance.row(Key::Font, "Font:", &font, &[&font], None);
+        // The font's own options: its switches are rebuilt on every refresh (a new font is
+        // other options), and the row is hidden when the font offers none.
+        let options_stack = font_options::Options::stack(mtm);
+        let options_row = appearance.row(Key::FontFeatures, "Options:", &options_stack, &[], None);
+        let font_options = font_options::Options::new(options_stack, options_row);
         appearance.row(
             Key::Size,
             "Size:",
@@ -3014,6 +3059,7 @@ impl SettingsWindow {
             light_theme,
             dark_theme,
             font,
+            font_options,
             size,
             line_height,
             letter_spacing,
@@ -3215,16 +3261,16 @@ impl Form {
         control: &NSView,
         controls: &[&NSControl],
         description: Option<&'static str>,
-    ) {
+    ) -> Retained<NSGridRow> {
         let mtm = self.mtm;
         let text = NSTextField::labelWithString(&NSString::from_str(label), mtm);
         let first = self.grid.numberOfRows() == 0;
-        let row = self
+        let grid_row = self
             .grid
             .addRowWithViews(&NSArray::from_slice(&[text.as_super().as_super(), control]));
         if !first {
             // A gap between row groups wider than the note's padding.
-            row.setTopPadding(10.0);
+            grid_row.setTopPadding(10.0);
         }
         if self.grid.numberOfRows() == 1 {
             let labels = self.grid.columnAtIndex(0);
@@ -3251,6 +3297,7 @@ impl Form {
         };
         row.set_note(None, None, None, true);
         self.rows.push(row);
+        grid_row
     }
 
     /// A row below the last one with only a right-hand view: a folder row's
@@ -3518,7 +3565,7 @@ mod tests {
                     [appearance]\ntheme = []\nlight_theme = []\ndark_theme = []\n\
                     content_edge = []\nminimum_contrast = []\ndim_unfocused_splits = []\n\
                     focus_frame = []\nsplit_style = []\ntab_details = []\nresize_in_steps = []\ntab_icons = []\ntab_icon_colors = []\ntab_running = []\ntab_position = []\n\
-                    [font]\nfamily = []\nsize = []\nline_height = []\nletter_spacing = []\n\
+                    [font]\nfamily = []\nsize = []\nline_height = []\nletter_spacing = []\nfeatures = []\n\
                     [clipboard]\nosc52 = []\n\
                     [motion]\ncursor_motion = []\nreduce_motion = []\nsmooth_scroll = []\nscroll_bounce = []\n\
                     keypress = []\nerase = []\ndock_arrival = []\n\
@@ -3554,6 +3601,11 @@ mod tests {
                 Key::Size => SettingsEdit::FontSize(13.0),
                 Key::LineHeight => SettingsEdit::LineHeight(1.0),
                 Key::LetterSpacing => SettingsEdit::LetterSpacing(1.0),
+                Key::FontFeatures => SettingsEdit::FontFeature {
+                    family: String::new(),
+                    tag: "ss01".to_owned(),
+                    on: None,
+                },
                 Key::Shape => SettingsEdit::Cursor(CaretShape::Beam),
                 Key::Blink => SettingsEdit::CursorBlink(CursorBlink::On),
                 Key::BlinkSpeed => SettingsEdit::BlinkInterval(0.5),

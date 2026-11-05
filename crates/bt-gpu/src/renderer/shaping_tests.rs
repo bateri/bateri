@@ -318,13 +318,18 @@ fn a_wide_character_and_a_blank_stay_where_the_grid_put_them() {
     }
 }
 
-/// A frame whose dock is `text` minus the character at `gone`, built after a
+/// A frame whose dock is [`KEY`] minus the character at `gone`, built after a
 /// frame that had it: the deleted cell is what a ghost is born from.
 fn dock_after_a_delete(r: &Renderer, gone: usize) -> (Frame, Cell) {
+    dock_of_after_a_delete(r, KEY, gone)
+}
+
+/// [`dock_after_a_delete`] for any `text`.
+fn dock_of_after_a_delete(r: &Renderer, text: &str, gone: usize) -> (Frame, Cell) {
     let (cw, ch) = r.cell_metrics(1.0).cell_px();
     let mut frame = Frame::default();
     frame.clear(grid(cw, ch), CaretStyle::default());
-    let cells: Vec<Cell> = KEY
+    let cells: Vec<Cell> = text
         .chars()
         .enumerate()
         .map(|(at, c)| glyph_cell(u16::try_from(at).expect("a short row"), c, None))
@@ -375,6 +380,16 @@ fn a_ghost_of_a_masked_character_fades_as_the_dot_not_the_letter() {
     assert_eq!(ghost_at, column(&on, &masked, Surface::Dock, gone));
     let open = frame_of(&off, Surface::Dock, KEY, false, true);
     assert_ne!(ghost_at, column(&off, &open, Surface::Dock, gone));
+}
+
+#[test]
+fn a_ghost_of_one_slice_of_a_ligature_fades_as_its_character() {
+    let r = renderer_with(JETBRAINS_MONO, &[]);
+    // `a->b`: the `>` was the second slice of the shape `->` drew. A ghost is
+    // one cell and half a shape alone would be a cut-off bar.
+    let (frame, cell) = dock_of_after_a_delete(&r, "a->b", 2);
+    assert_eq!(cell.ch, Some('>'));
+    assert_eq!(frame.recalled(&cell), None);
 }
 
 #[test]
@@ -848,4 +863,29 @@ fn a_pair_split_by_a_wrap_is_not_joined() {
             "{surface:?}"
         );
     }
+}
+
+#[test]
+fn a_chosen_tag_the_font_lacks_is_a_notice_until_it_is_fixed() {
+    use crate::FontNotice;
+    let gaps = |r: &Renderer| -> Vec<FontNotice> {
+        r.font_notices()
+            .into_iter()
+            .filter(|notice| matches!(notice, FontNotice::NoFeature { .. }))
+            .collect()
+    };
+    let typo = renderer_with(OBEL_MONO, &[("ss01", true), ("ss99", true)]);
+    assert_eq!(
+        gaps(&typo),
+        [FontNotice::NoFeature {
+            family: OBEL_MONO.to_owned(),
+            tag: "ss99".to_owned()
+        }]
+    );
+    // Fixing the line is another atlas and says nothing.
+    assert!(gaps(&renderer_with(OBEL_MONO, &[("ss01", true)])).is_empty());
+    // The default chain without a choice has nothing to say, and nothing
+    // before an atlas exists.
+    assert!(plain_renderer().font_notices().is_empty());
+    assert!(Renderer::new().font_notices().is_empty());
 }

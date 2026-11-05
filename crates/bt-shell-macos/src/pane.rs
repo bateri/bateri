@@ -5692,7 +5692,7 @@ impl TerminalPane {
         self.host().post_notices(
             self.ivars().id,
             Source::Font,
-            font_messages(renderer.font_notice()),
+            font_messages(renderer.font_notices()),
         );
         // The scroll bar's reserve: a function of its form alone
         // ([`ScrollbarMode::reserve_px`]), so neither the alternate screen

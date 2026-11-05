@@ -104,12 +104,12 @@ pub use search::{
 };
 pub use session::{
     Activity, Block, BlockHandle, BlockInfo, BlockReport, Blocks, Cell, CellHalf, ChildLaunch,
-    Click, Cursor, DirtyFlag, DockKey, InitialInput, Leads, LinkHit, LinkHover, LinkKind,
-    LinkPoint, LinkSpan, LinkStamp, Osc52, PathCandidate, Pointer, PtyOps, PtySize, SHUTDOWN_GRACE,
-    ScrollGlide, ScrollIntent, ScrollPosition, SelectKind, SelectionPoint, SelectionRun,
-    SelectionRuns, Session, SessionOptions, ShutdownHandle, Silence, Stream, StreamExit, Teardown,
-    TerminalOptions, TrackBlock, TrackMark, TrackMarks, TtyReading, UnderlineStyle, Wheel,
-    load_shell, smoke_shell,
+    Click, Cursor, DirtyFlag, DockKey, InitialInput, LEAD_CHARS, Leads, LinkHit, LinkHover,
+    LinkKind, LinkPoint, LinkSpan, LinkStamp, Osc52, PathCandidate, Pointer, PtyOps, PtySize,
+    SHUTDOWN_GRACE, ScrollGlide, ScrollIntent, ScrollPosition, SelectKind, SelectionPoint,
+    SelectionRun, SelectionRuns, Session, SessionOptions, ShutdownHandle, Silence, Stream,
+    StreamExit, Teardown, TerminalOptions, TrackBlock, TrackMark, TrackMarks, TtyReading,
+    UnderlineStyle, Wheel, load_shell, smoke_shell,
 };
 pub use settings::{
     CURSOR_BLINK_INTERVAL, CURSOR_BLINK_RANGE, CURSOR_GLOW, CURSOR_GLOW_RANGE, CURSOR_RADIUS,

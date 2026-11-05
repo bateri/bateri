@@ -52,6 +52,7 @@ pub mod child;
 pub mod download;
 pub mod environment;
 pub mod focus;
+pub mod font_options;
 pub mod gesture;
 pub mod grid;
 pub mod groups;

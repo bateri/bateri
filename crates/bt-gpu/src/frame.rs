@@ -2693,13 +2693,16 @@ impl Frame {
     }
 
     /// The glyph the previous dock drew at `cell`'s place for its character:
-    /// what a ghost born of that cell keeps drawing as.
+    /// what a ghost born of that cell keeps drawing as. A slice of a joined
+    /// shape is not remembered: the ghost is one cell, and one slice of a
+    /// ligature alone is half a glyph, so it fades as its character.
     pub(crate) fn recalled(&self, cell: &Cell) -> Option<Shaped> {
         let ch = cell.ch?;
         self.dock_memory
             .iter()
             .find(|held| (held.row, held.col, held.ch) == (cell.row, cell.col, ch))
             .map(|held| held.glyph)
+            .filter(|glyph| glyph.cells == 1)
     }
 
     /// Finishes the in-flight arrivals **whose static glyph cannot be found**
