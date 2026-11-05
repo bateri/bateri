@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use kablo_proto::v1::stream::Command;
 
-use super::remote::RemoteCommand;
+use super::remote::{RemoteCommand, RemoteStream};
 use super::service::Backend;
 use crate::ssh_route::Ask;
 use crate::ssh_wrap::KabloHost;
@@ -22,6 +22,15 @@ use crate::ssh_wrap::KabloHost;
 pub trait Runs: Send + Sync {
     /// Runs `command` as [`Backend::command`] says.
     fn run(&self, command: Command, ask: Ask, wait: Duration) -> Result<RemoteCommand, String>;
+
+    /// Has the server connect to `host:port`, as [`Backend::connection`] says.
+    fn connect(
+        &self,
+        host: &str,
+        port: u16,
+        ask: Ask,
+        wait: Duration,
+    ) -> Result<RemoteStream, String>;
 }
 
 /// The backend and the server a job is served by.
@@ -33,6 +42,16 @@ struct Through {
 impl Runs for Through {
     fn run(&self, command: Command, ask: Ask, wait: Duration) -> Result<RemoteCommand, String> {
         self.backend.command(&self.server, command, ask, wait)
+    }
+
+    fn connect(
+        &self,
+        host: &str,
+        port: u16,
+        ask: Ask,
+        wait: Duration,
+    ) -> Result<RemoteStream, String> {
+        self.backend.connection(&self.server, host, port, ask, wait)
     }
 }
 
@@ -61,16 +80,31 @@ impl Served {
     /// of its own and never on the main one. `wait` is how long the connection and the server's
     /// answer may take. The `Err` is a line for the person who asked.
     pub fn sh(&self, script: &str, ask: Ask, wait: Duration) -> Result<RemoteCommand, String> {
-        let runs = self
-            .runs
-            .as_ref()
-            .ok_or_else(|| "bateri's connections are not running".to_owned())?;
+        let runs = self.runs()?;
         let words = ["sh", "-c", script];
         runs.run(
             Command::new(words.iter().map(|word| word.as_bytes().to_vec()).collect()),
             ask,
             wait,
         )
+    }
+
+    /// A TCP connection the server makes to `host:port` (as seen from the server). Waits as
+    /// [`Served::sh`] does.
+    pub fn connection(
+        &self,
+        host: &str,
+        port: u16,
+        ask: Ask,
+        wait: Duration,
+    ) -> Result<RemoteStream, String> {
+        self.runs()?.connect(host, port, ask, wait)
+    }
+
+    fn runs(&self) -> Result<&Arc<dyn Runs>, String> {
+        self.runs
+            .as_ref()
+            .ok_or_else(|| "bateri's connections are not running".to_owned())
     }
 }
 
@@ -91,6 +125,19 @@ pub(crate) mod fake {
     /// `sh -c '<script>'` ([`remote_command`]).
     pub(crate) fn remote_command(script: &str) -> String {
         format!("sh -c {}", crate::upload::sq(script))
+    }
+
+    /// A server that refuses to make connections, and says `why`.
+    struct Refuses(String);
+
+    impl Runs for Refuses {
+        fn run(&self, _: Command, _: Ask, _: Duration) -> Result<RemoteCommand, String> {
+            Err(self.0.clone())
+        }
+
+        fn connect(&self, _: &str, _: u16, _: Ask, _: Duration) -> Result<RemoteStream, String> {
+            Err(self.0.clone())
+        }
     }
 
     /// A program that stands in for ssh: `argv` and then the command, as ssh would be given them.
@@ -115,9 +162,20 @@ pub(crate) mod fake {
                 .map_err(|error| error.to_string())?;
             Ok(RemoteCommand::local(child))
         }
+
+        fn connect(&self, _: &str, _: u16, _: Ask, _: Duration) -> Result<RemoteStream, String> {
+            Err("a stand-in for ssh makes no connections".to_owned())
+        }
     }
 
     impl Served {
+        /// A server that refuses everything it is asked, with `why`.
+        pub(crate) fn refusing(why: &str) -> Self {
+            Self {
+                runs: Some(Arc::new(Refuses(why.to_owned()))),
+            }
+        }
+
         /// A server that is `argv`, run here in place of ssh.
         pub(crate) fn fake(argv: Vec<String>) -> Self {
             Self {

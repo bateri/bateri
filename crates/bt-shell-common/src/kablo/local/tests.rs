@@ -497,6 +497,20 @@ impl Backend for RealMac {
             .ok_or_else(|| "the service is not running".to_owned())?
             .command(&server.key, command, wait)
     }
+
+    fn connection(
+        &self,
+        server: &KabloHost,
+        host: &str,
+        port: u16,
+        _: crate::ssh_route::Ask,
+        wait: Duration,
+    ) -> Result<crate::kablo::remote::RemoteStream, String> {
+        self.streams
+            .get()
+            .ok_or_else(|| "the service is not running".to_owned())?
+            .connection(&server.key, host, port, wait)
+    }
 }
 
 /// What a pane's session says to its owner: only the end of the program is kept.
@@ -2283,5 +2297,86 @@ fn a_write_to_a_program_that_reads_nothing_waits_on_its_window_until_the_program
     assert_eq!(
         written.expect_err("the stream is over").kind(),
         std::io::ErrorKind::BrokenPipe
+    );
+}
+
+#[test]
+#[ignore = "heavy: starts real processes or waits on a clock; make test-heavy"]
+fn a_forward_over_a_real_kablo_carries_both_ways_and_ends_with_its_connections() {
+    use crate::kablo::served::Served;
+    use crate::port_forward::{self, forward};
+    let Some(here) = Here::new("forward") else {
+        return;
+    };
+    let served = Served::new(here.service.backend(), super::host());
+    // A server of the far machine: whatever it is sent it sends back.
+    let echo = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("an echo server");
+    let echo_port = echo.local_addr().expect("an address").port();
+    thread::spawn(move || {
+        for connection in echo.incoming().flatten() {
+            thread::spawn(move || {
+                let mut connection = connection;
+                let mut again = connection.try_clone().expect("a clone");
+                let _ = std::io::copy(&mut connection, &mut again);
+            });
+        }
+    });
+    let local = port_forward::free_local_port(0).expect("a free port");
+    let forwarding = forward(&served, local, [127, 0, 0, 1].into(), echo_port).expect("a forward");
+    assert_eq!(forwarding.local(), local);
+
+    // A megabyte goes through and comes back whole while it is being read.
+    let bytes: Vec<u8> = (0..1 << 20).map(|at| (at * 31 % 251) as u8).collect();
+    let mut client = std::net::TcpStream::connect(("127.0.0.1", local)).expect("the local port");
+    client
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .expect("a timeout");
+    let mut sending = client.try_clone().expect("a clone");
+    let sent = bytes.clone();
+    let writing = thread::spawn(move || {
+        sending.write_all(&sent).expect("the bytes go");
+    });
+    let mut back = vec![0u8; bytes.len()];
+    client.read_exact(&mut back).expect("the bytes come back");
+    writing.join().expect("the writer");
+    assert!(back == bytes, "the same bytes");
+
+    // A second connection is its own.
+    let mut second = std::net::TcpStream::connect(("127.0.0.1", local)).expect("a second one");
+    second
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .expect("a timeout");
+    second.write_all(b"ping").expect("a write");
+    let mut pong = [0u8; 4];
+    second.read_exact(&mut pong).expect("an echo");
+    assert_eq!(&pong, b"ping");
+
+    // Ending the forward closes the open connections and the port.
+    drop(forwarding);
+    let mut rest = Vec::new();
+    let ended = client.read_to_end(&mut rest);
+    assert!(
+        ended.is_ok() || ended.is_err_and(|error| error.kind() != std::io::ErrorKind::WouldBlock),
+        "the connection stayed open"
+    );
+    let waited = Instant::now();
+    while std::net::TcpStream::connect(("127.0.0.1", local)).is_ok()
+        && waited.elapsed() < Duration::from_secs(10)
+    {
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        std::net::TcpStream::connect(("127.0.0.1", local)).is_err(),
+        "the port still listens"
+    );
+
+    // A port that is taken here is told in the words of the system.
+    let taken = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("a taken port");
+    let taken_port = taken.local_addr().expect("an address").port();
+    let error =
+        forward(&served, taken_port, [127, 0, 0, 1].into(), echo_port).expect_err("a taken port");
+    assert_eq!(
+        error,
+        format!("bind [127.0.0.1]:{taken_port}: Address already in use")
     );
 }

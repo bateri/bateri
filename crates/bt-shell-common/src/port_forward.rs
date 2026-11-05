@@ -1,5 +1,5 @@
 //! A server's listening port, opened from this Mac: **directly** when the
-//! Mac reaches it, otherwise **forwarded** through the ssh connection.
+//! Mac reaches it, otherwise **forwarded** through the connection kept to the server.
 //!
 //! - **Reach** ([`reachable`]): the server's `/proc` says where a port is
 //!   bound, not whether a firewall or a cloud security group lets this Mac
@@ -8,28 +8,33 @@
 //!   A port bound to the server's loopback is never reachable and is not
 //!   tried; behind a jump host nothing is tried
 //!   (`ssh_route::direct_hostname`).
-//! - **Forward** ([`forward`]): through the connection the helper session
-//!   rides — `ssh -O forward` on its master (bateri's own, the user's
-//!   terminal session's, or the user's own `ControlMaster`), which keeps the
-//!   forward until it is cancelled ([`cancel`]) — the caller cancels it with
-//!   the remote session, since a master outlives its session for a while (a
-//!   short persist, our helper riding it); without a master a tunnel of its
-//!   own (`ssh -N -L`, `ExitOnForwardFailure`), which the caller ends with the
-//!   remote session. The local port is the server's number when it is free
-//!   here ([`free_local_port`]).
+//! - **Forward** ([`forward`]): a listener on this Mac's loopback, and for every connection
+//!   made to it a connection the server makes to the port ([`Served::connection`]) with the
+//!   bytes copied both ways. The first connection is made when the forward begins, so that a
+//!   server that does not let connections be made through it (an administrator's
+//!   `/etc/kablo/no-forwarding`) says so then and not at the first page load. Dropping the
+//!   [`Forwarding`] closes the listener and every connection it carries. The local port is the
+//!   server's number when it is free here ([`free_local_port`]).
 
-use std::io::Read as _;
-use std::net::{IpAddr, TcpListener, TcpStream, ToSocketAddrs};
-use std::process::{Child, Stdio};
-use std::time::{Duration, Instant};
+use std::collections::HashMap;
+use std::io;
+use std::net::{IpAddr, Shutdown, TcpListener, TcpStream, ToSocketAddrs};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
+use std::thread;
+use std::time::Duration;
+
+use crate::kablo::remote::{End, RemoteStream};
+use crate::kablo::served::Served;
+use crate::ssh_route::Ask;
 
 /// How long a reach test waits for the server — a **design constant**: long
 /// enough for a far server's handshake, short enough that a blocked port
 /// does not keep the test thread long.
 pub const REACH_TIMEOUT: Duration = Duration::from_millis(1500);
 
-/// How long a forward may take to start listening here — a **design
-/// constant**: a tunnel of its own is a full ssh handshake.
+/// How long the server may take to make a connection for a forward — a **design
+/// constant**: the first one may have to bring the connection to the server up.
 pub const FORWARD_WAIT: Duration = Duration::from_secs(8);
 
 /// Whether this Mac reaches `host:port` — a TCP connect to any of the name's
@@ -63,134 +68,168 @@ pub fn free_local_port(preferred: u16) -> Option<u16> {
     Some(listener.local_addr().ok()?.port())
 }
 
-/// ssh's `-L` value: this Mac's `local` to the server's `address:remote`; an
-/// unspecified address (`0.0.0.0`, `::`) as the server's own loopback, an
-/// IPv6 one in brackets.
-pub fn forward_spec(local: u16, address: IpAddr, remote: u16) -> String {
-    let target = match address {
+/// The address the server connects to for the one it lists a port on: an unspecified binding
+/// (`0.0.0.0`, `::`) is reached by the server's own loopback.
+pub fn connect_address(address: IpAddr) -> String {
+    match address {
         IpAddr::V4(v4) if v4.is_unspecified() => "127.0.0.1".to_owned(),
         IpAddr::V6(v6) if v6.is_unspecified() => "127.0.0.1".to_owned(),
-        IpAddr::V4(v4) => v4.to_string(),
-        IpAddr::V6(v6) => format!("[{v6}]"),
-    };
-    format!("{local}:{target}:{remote}")
+        address => address.to_string(),
+    }
 }
 
-/// `ssh -O forward -L {spec} …` on the helper's argv (`ssh` = program,
-/// options, destination): the master the argv names adds the forward.
-pub fn control_argv(ssh: &[String], spec: &str) -> Option<Vec<String>> {
-    let (program, rest) = ssh.split_first()?;
-    let mut argv = vec![
-        program.clone(),
-        "-O".to_owned(),
-        "forward".to_owned(),
-        "-L".to_owned(),
-        spec.to_owned(),
-    ];
-    argv.extend(rest.iter().cloned());
-    Some(argv)
+/// A forward that runs. Dropping it ends it: the listener closes and so does every connection
+/// that went through it.
+pub struct Forwarding {
+    local: u16,
+    shared: Arc<Shared>,
 }
 
-/// `ssh -O cancel -L {spec} …`: the master drops the forward.
-pub fn cancel_argv(ssh: &[String], spec: &str) -> Option<Vec<String>> {
-    let mut argv = control_argv(ssh, spec)?;
-    argv[2] = "cancel".to_owned();
-    Some(argv)
+impl std::fmt::Debug for Forwarding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Forwarding")
+            .field("local", &self.local)
+            .finish_non_exhaustive()
+    }
 }
 
-/// Drops a master's forward ([`Forwarded::Master`]) — a master already gone
-/// has nothing to drop. Blocking (one `ssh -O cancel`); for a thread of its
-/// own.
-pub fn cancel(ssh: &[String], local: u16, address: IpAddr, remote: u16) {
-    let Some(argv) = cancel_argv(ssh, &forward_spec(local, address, remote)) else {
-        return;
-    };
-    let _ = crate::ssh_route::command(&argv[0])
-        .args(&argv[1..])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+/// What the forward's threads and its owner share.
+struct Shared {
+    stopped: AtomicBool,
+    next: AtomicU64,
+    /// The connections that are carried now, by number: what ends them when the forward ends.
+    open: Mutex<HashMap<u64, Carried>>,
 }
 
-/// A tunnel of its own on the helper's argv: `ssh -N -o
-/// ExitOnForwardFailure=yes -L {spec} …` — it ends if the forward cannot be
-/// set up rather than sit there without it.
-pub fn tunnel_argv(ssh: &[String], spec: &str) -> Option<Vec<String>> {
-    let (program, rest) = ssh.split_first()?;
-    let mut argv = vec![
-        program.clone(),
-        "-N".to_owned(),
-        "-o".to_owned(),
-        "ExitOnForwardFailure=yes".to_owned(),
-        "-L".to_owned(),
-        spec.to_owned(),
-    ];
-    argv.extend(rest.iter().cloned());
-    Some(argv)
+struct Carried {
+    socket: TcpStream,
+    end: Arc<End>,
 }
 
-/// A forward that runs.
-pub enum Forwarded {
-    /// The master keeps it until it is cancelled ([`cancel`]) or the master ends.
-    Master,
-    /// A tunnel of its own — the caller ends it with the remote session.
-    Tunnel(Child),
+impl Shared {
+    fn open(&self) -> std::sync::MutexGuard<'_, HashMap<u64, Carried>> {
+        self.open.lock().unwrap_or_else(PoisonError::into_inner)
+    }
 }
 
-/// Forwards this Mac's `local` to the server's `address:remote` over the
-/// helper's argv `ssh` — the master's `-O forward` first, else a tunnel of
-/// its own, waited for until it listens ([`FORWARD_WAIT`]). Blocking; for a
-/// thread of its own. `Err` is ssh's last line.
+impl Forwarding {
+    /// The port on this Mac that the forward listens on.
+    pub fn local(&self) -> u16 {
+        self.local
+    }
+}
+
+impl Drop for Forwarding {
+    fn drop(&mut self) {
+        self.shared.stopped.store(true, Ordering::SeqCst);
+        // The accept that waits sees a connection and then the flag.
+        let _ = TcpStream::connect_timeout(
+            &std::net::SocketAddr::from(([127, 0, 0, 1], self.local)),
+            Duration::from_millis(500),
+        );
+        let carried: Vec<Carried> = self.shared.open().drain().map(|(_, one)| one).collect();
+        for one in carried {
+            one.end.kill();
+            let _ = one.socket.shutdown(Shutdown::Both);
+        }
+    }
+}
+
+/// Forwards this Mac's `local` to the server's `address:remote` over the connection `served`
+/// keeps. Blocking while the first connection is made; for a thread of its own. `Err` is the
+/// line for the person: why the server makes no connection, or why the port here is not free.
 pub fn forward(
-    ssh: &[String],
+    served: &Served,
     local: u16,
     address: IpAddr,
     remote: u16,
-) -> Result<Forwarded, String> {
-    let spec = forward_spec(local, address, remote);
-    let control = control_argv(ssh, &spec).ok_or_else(|| "No ssh command".to_owned())?;
-    let master = crate::ssh_route::command(&control[0])
-        .args(&control[1..])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-    if master.is_ok_and(|status| status.success()) {
-        return Ok(Forwarded::Master);
-    }
-    let tunnel = tunnel_argv(ssh, &spec).ok_or_else(|| "No ssh command".to_owned())?;
-    let mut child = crate::ssh_route::command(&tunnel[0])
-        .args(&tunnel[1..])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| format!("ssh could not be started: {error}"))?;
-    let deadline = Instant::now() + FORWARD_WAIT;
-    loop {
-        if let Ok(Some(_)) = child.try_wait() {
-            let mut stderr = String::new();
-            if let Some(mut pipe) = child.stderr.take() {
-                let _ = pipe.read_to_string(&mut stderr);
+) -> Result<Forwarding, String> {
+    let host = connect_address(address);
+    // The server's answer comes first: a connection it will not make is told while the person
+    // is looking at the port that was clicked.
+    drop(served.connection(&host, remote, Ask::Never, FORWARD_WAIT)?);
+    let listener = TcpListener::bind(("127.0.0.1", local)).map_err(|error| {
+        if error.kind() == io::ErrorKind::AddrInUse {
+            format!("bind [127.0.0.1]:{local}: Address already in use")
+        } else {
+            error.to_string()
+        }
+    })?;
+    let shared = Arc::new(Shared {
+        stopped: AtomicBool::new(false),
+        next: AtomicU64::new(0),
+        open: Mutex::new(HashMap::new()),
+    });
+    let accepting = Arc::clone(&shared);
+    let served = served.clone();
+    thread::Builder::new()
+        .name("port forward".into())
+        .spawn(move || {
+            for socket in listener.incoming() {
+                if accepting.stopped.load(Ordering::SeqCst) {
+                    break;
+                }
+                let Ok(socket) = socket else {
+                    continue;
+                };
+                let (served, shared, host) = (served.clone(), Arc::clone(&accepting), host.clone());
+                let _ = thread::Builder::new()
+                    .name("port forward connection".into())
+                    .spawn(move || carry(socket, &served, &host, remote, &shared));
             }
-            let line = stderr.lines().rev().find(|line| !line.trim().is_empty());
-            return Err(line.unwrap_or("ssh ended").trim().to_owned());
+        })
+        .map_err(|error| error.to_string())?;
+    Ok(Forwarding { local, shared })
+}
+
+/// One connection made to the forward's port: the server's connection to the port, and the bytes
+/// of both copied until each says it has no more.
+fn carry(socket: TcpStream, served: &Served, host: &str, port: u16, shared: &Shared) {
+    // A connection the server does not make closes this one, which is all a client of a port
+    // is told of it.
+    let Ok(RemoteStream {
+        mut reader,
+        writer: Some(mut writer),
+        end,
+    }) = served.connection(host, port, Ask::Never, FORWARD_WAIT)
+    else {
+        return;
+    };
+    let Ok(mut from_client) = socket.try_clone() else {
+        return;
+    };
+    let Ok(mut to_client) = socket.try_clone() else {
+        return;
+    };
+    let id = shared.next.fetch_add(1, Ordering::SeqCst);
+    shared.open().insert(
+        id,
+        Carried {
+            socket,
+            end: Arc::clone(&end),
+        },
+    );
+    // Ended while this was being set up: the owner's sweep may have gone by already.
+    if shared.stopped.load(Ordering::SeqCst) {
+        if let Some(one) = shared.open().remove(&id) {
+            one.end.kill();
+            let _ = one.socket.shutdown(Shutdown::Both);
         }
-        if TcpStream::connect_timeout(
-            &std::net::SocketAddr::from(([127, 0, 0, 1], local)),
-            Duration::from_millis(200),
-        )
-        .is_ok()
-        {
-            return Ok(Forwarded::Tunnel(child));
-        }
-        if Instant::now() >= deadline {
-            crate::program::end_group(&mut child);
-            return Err("The forward did not start in time".to_owned());
-        }
-        std::thread::sleep(Duration::from_millis(100));
+        return;
     }
+    let up = thread::Builder::new()
+        .name("port forward up".into())
+        .spawn(move || {
+            let _ = io::copy(&mut from_client, &mut writer);
+            // The client has no more to say: the server's end hears it end (`writer` drops).
+        });
+    let _ = io::copy(&mut reader, &mut to_client);
+    let _ = to_client.shutdown(Shutdown::Write);
+    if let Ok(up) = up {
+        let _ = up.join();
+    }
+    end.kill();
+    shared.open().remove(&id);
 }
 
 #[cfg(test)]
@@ -198,66 +237,36 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_spec_points_an_unspecified_binding_at_the_servers_loopback() {
+    fn an_unspecified_binding_is_reached_by_the_servers_loopback() {
         let v4 = |a, b, c, d| IpAddr::from([a, b, c, d]);
+        assert_eq!(connect_address(v4(0, 0, 0, 0)), "127.0.0.1");
+        assert_eq!(connect_address(v4(127, 0, 0, 1)), "127.0.0.1");
+        assert_eq!(connect_address(v4(10, 0, 0, 5)), "10.0.0.5");
         assert_eq!(
-            forward_spec(5173, v4(0, 0, 0, 0), 5173),
-            "5173:127.0.0.1:5173"
+            connect_address(IpAddr::from(std::net::Ipv6Addr::LOCALHOST)),
+            "::1"
         );
         assert_eq!(
-            forward_spec(5174, v4(127, 0, 0, 1), 5173),
-            "5174:127.0.0.1:5173"
-        );
-        assert_eq!(forward_spec(80, v4(10, 0, 0, 5), 8080), "80:10.0.0.5:8080");
-        assert_eq!(
-            forward_spec(8080, IpAddr::from(std::net::Ipv6Addr::LOCALHOST), 8080),
-            "8080:[::1]:8080"
-        );
-        assert_eq!(
-            forward_spec(8080, IpAddr::from(std::net::Ipv6Addr::UNSPECIFIED), 8080),
-            "8080:127.0.0.1:8080"
+            connect_address(IpAddr::from(std::net::Ipv6Addr::UNSPECIFIED)),
+            "127.0.0.1"
         );
     }
 
     #[test]
-    fn the_forward_argvs_keep_the_helpers_options_and_destination() {
-        let ssh: Vec<String> = ["ssh", "-T", "-o", "ControlPath=/s", "prod"]
-            .map(str::to_owned)
-            .to_vec();
-        assert_eq!(
-            control_argv(&ssh, "1:127.0.0.1:1").expect("argv"),
-            [
-                "ssh",
-                "-O",
-                "forward",
-                "-L",
-                "1:127.0.0.1:1",
-                "-T",
-                "-o",
-                "ControlPath=/s",
-                "prod"
-            ]
-        );
-        assert_eq!(
-            tunnel_argv(&ssh, "1:127.0.0.1:1").expect("argv"),
-            [
-                "ssh",
-                "-N",
-                "-o",
-                "ExitOnForwardFailure=yes",
-                "-L",
-                "1:127.0.0.1:1",
-                "-T",
-                "-o",
-                "ControlPath=/s",
-                "prod"
-            ]
-        );
-        assert_eq!(
-            cancel_argv(&ssh, "1:127.0.0.1:1").expect("argv")[..3],
-            ["ssh", "-O", "cancel"]
-        );
-        assert_eq!(control_argv(&[], "x"), None);
+    fn a_server_that_makes_no_connection_says_why_and_leaves_no_listener() {
+        let loopback = IpAddr::from([127, 0, 0, 1]);
+        for (served, why) in [
+            (Served::none(), "bateri's connections are not running"),
+            (
+                Served::refusing("turned off by the server's administrator"),
+                "turned off by the server's administrator",
+            ),
+        ] {
+            let local = free_local_port(0).expect("a free port");
+            let error = forward(&served, local, loopback, 8080).expect_err("no connection");
+            assert_eq!(error, why);
+            assert_eq!(free_local_port(local), Some(local), "nothing listens");
+        }
     }
 
     #[test]

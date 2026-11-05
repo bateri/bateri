@@ -238,18 +238,13 @@ impl TerminalPane {
         self.stats_gauge_changed();
     }
 
-    /// The ports the dock shows, the server's first and then the pane's own
-    /// (but not the ones our forwards listen on — those are the server's).
+    /// The ports the dock shows, the server's first and then the pane's own.
     fn shown_ports(&self) -> (Vec<FooterPort>, Vec<FooterPort>) {
-        let (remote, forwarded) = {
-            let remote = self.remote_ports().borrow();
-            (remote.footer_ports(), remote.forwarded_locals())
-        };
+        let remote = self.remote_ports().borrow().footer_ports();
         let local = self
             .listeners()
             .borrow()
             .iter()
-            .filter(|listener| !forwarded.contains(&listener.port))
             .map(|listener| FooterPort {
                 port: listener.port,
                 open: true,
@@ -279,17 +274,8 @@ impl TerminalPane {
     /// The ports menu's content: the tab's own listeners and the server's
     /// ports with the remote host's name.
     pub(crate) fn ports_model(&self) -> PortsModel {
-        let (remote, forwarded) = {
-            let state = self.remote_ports().borrow();
-            (state.menu_items(), state.forwarded_locals())
-        };
-        let local = self
-            .listeners()
-            .borrow()
-            .iter()
-            .filter(|listener| !forwarded.contains(&listener.port))
-            .cloned()
-            .collect();
+        let remote = self.remote_ports().borrow().menu_items();
+        let local = self.listeners().borrow().iter().cloned().collect();
         let host = self
             .server_target()
             // The host without `user@`: `db1:8080` reads as an address,

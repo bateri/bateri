@@ -68,7 +68,7 @@ const KEPT_FLAGS: &str = "46AaCgKkqXxYy";
 const KEPT_VALUED: &str = "BbcFIiJlmoPpS";
 
 /// The ssh argv from the remote session's target, for the connection the service keeps to the
-/// server ([`crate::kablo::ssh`]).
+/// server ([`crate::kablo::ssh`]), on a route ([`crate::ssh_route`]).
 ///
 /// **Our options come first**, because ssh takes the **first** value of a config
 /// key: the user's `-o RequestTTY=force` must stay behind. `-T` (no tty: the
@@ -80,12 +80,8 @@ const KEPT_VALUED: &str = "BbcFIiJlmoPpS";
 /// [`KEPT_VALUED`]); options after the destination are read too (OpenSSH parses
 /// them again) and the remote command (`-t prod tmux`) is dropped. With mosh
 /// there is no ssh argv: only the host, with default ssh settings.
-pub fn ssh_argv(target: &RemoteTarget) -> Vec<String> {
-    ssh_argv_for(target, &Route::Direct)
-}
-
-/// [`ssh_argv`] on a route ([`crate::ssh_route`]): on [`Route::Direct`]
-/// byte for byte today's argv; on [`Route::Ours`] `-o ControlPath=<socket>` goes
+///
+/// On [`Route::Direct`] the options of the target only; on [`Route::Ours`] `-o ControlPath=<socket>` goes
 /// **behind** the user's options, right before the destination — ssh takes a
 /// key's first value, so a `-S`/`-o ControlPath` the user typed is never
 /// overridden, while the config file's value (read after the command line) is.
@@ -3033,6 +3029,11 @@ impl Transfers {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// [`ssh_argv_for`] with no master.
+    fn ssh_argv(target: &RemoteTarget) -> Vec<String> {
+        ssh_argv_for(target, &Route::Direct)
+    }
 
     fn words(argv: &[&str]) -> Vec<String> {
         argv.iter().map(|&arg| arg.to_owned()).collect()

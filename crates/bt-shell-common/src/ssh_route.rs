@@ -2268,7 +2268,7 @@ mod tests {
 
     use bt_core::RemoteKind;
 
-    use crate::upload::{ssh_argv, ssh_argv_for};
+    use crate::upload::ssh_argv_for;
 
     fn target(argv: &[&str]) -> RemoteTarget {
         RemoteTarget {
@@ -2296,12 +2296,7 @@ mod tests {
     #[test]
     fn every_ssh_the_application_runs_is_made_with_the_users_path() {
         let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        for file in [
-            "ssh_route.rs",
-            "port_forward.rs",
-            "kablo/install.rs",
-            "kablo/ssh.rs",
-        ] {
+        for file in ["ssh_route.rs", "kablo/install.rs", "kablo/ssh.rs"] {
             let text = std::fs::read_to_string(source.join(file)).expect(file);
             let code = text
                 .split("\n#[cfg(test)]\nmod tests")
@@ -2391,18 +2386,6 @@ mod tests {
             Check::Absent
         );
         assert_eq!(classify_check(None, ""), Check::Absent);
-    }
-
-    #[test]
-    fn direct_argv_is_todays_byte_for_byte() {
-        for argv in [
-            &["ssh", "-p", "2222", "-l", "deploy", "-J", "jump", "prod"][..],
-            &["ssh", "-tv", "-o", "RequestTTY=force", "prod", "tmux"][..],
-            &["/opt/ssh", "-Ap2222", "prod", "-i", "k"][..],
-        ] {
-            let target = target(argv);
-            assert_eq!(ssh_argv_for(&target, &Route::Direct), ssh_argv(&target));
-        }
     }
 
     #[test]

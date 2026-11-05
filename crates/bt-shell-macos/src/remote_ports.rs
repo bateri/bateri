@@ -17,19 +17,19 @@
 //!   address may be another machine here). Reachable ones draw green and open
 //!   directly; the rest draw dim.
 //! - **Forward**: opening a dim port forwards it first
-//!   (`port_forward::forward`: the master's `-O forward`, or a tunnel of its
-//!   own) to the same number here when it is free, then opens
-//!   `http://localhost:{port}`; the port turns green. Every forward ends with
-//!   the remote session and with the pane ([`RemotePorts::reset`]): a tunnel
-//!   of ours is killed, a master's forward cancelled (`ssh -O cancel`) — a
-//!   master outlives its session for a while (a short persist, the helper
-//!   riding it), and the server's port must not stay open here after `exit`.
+//!   (`port_forward::forward`: a listener here, and a connection the server makes for
+//!   each one made to it) to the same number here when it is free, then opens
+//!   `http://localhost:{port}`; the port turns green. A server that does not let
+//!   connections be made through it says why on the label. Every forward ends with
+//!   the remote session and with the pane ([`RemotePorts::reset`]): the listener
+//!   and its connections close, and the server's port must not stay open here
+//!   after `exit`.
 
 use std::collections::HashMap;
-use std::process::Child;
 use std::time::{Duration, Instant};
 
 use bt_core::FooterPort;
+use bt_shell_common::kablo::served::Served;
 use dispatch2::{DispatchQueue, DispatchTime};
 use objc2::MainThreadMarker;
 use objc2::runtime::AnyObject;
@@ -37,7 +37,7 @@ use objc2_app_kit::NSPasteboard;
 
 use crate::clipboard;
 use crate::pane::TerminalPane;
-use crate::port_forward::{self, Forwarded, REACH_TIMEOUT};
+use crate::port_forward::{self, Forwarding, REACH_TIMEOUT};
 use crate::ports::{self, Bound};
 use crate::remote_files::RemoteListener;
 use crate::remote_helper::{Answer, Query, Request};
@@ -74,55 +74,23 @@ enum Host {
 }
 
 /// A forward of a server's port.
-#[derive(Debug)]
 enum Forward {
     Starting,
-    Running { local: u16, how: Kept },
-}
-
-/// What keeps a running forward — and so how it ends.
-#[derive(Debug)]
-enum Kept {
-    /// A tunnel of ours: killed.
-    Tunnel(Child),
-    /// A master: its forward is cancelled over the same argv, to the same
-    /// server address.
-    Master {
-        ssh: Vec<String>,
-        address: std::net::IpAddr,
+    /// `_held` is what keeps it ([`Forwarding`]): dropping it ends the forward.
+    Running {
+        local: u16,
+        _held: Box<dyn Send>,
     },
 }
 
-/// Ends a forward of the server's `port`: a tunnel at once, a master's
-/// cancel on a thread of its own (it is an ssh call).
-fn end_forward(port: u16, local: u16, how: Kept) {
-    match how {
-        Kept::Tunnel(mut child) => {
-            let _ = child.kill();
-            let _ = child.wait();
+impl std::fmt::Debug for Forward {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Forward::Starting => f.write_str("Starting"),
+            Forward::Running { local, .. } => {
+                f.debug_struct("Running").field("local", local).finish()
+            }
         }
-        Kept::Master { ssh, address } => {
-            let _ = std::thread::Builder::new()
-                .name("remote port cancel".into())
-                .spawn(move || port_forward::cancel(&ssh, local, address, port));
-        }
-    }
-}
-
-impl Forward {
-    fn end(self, port: u16) {
-        if let Forward::Running { local, how } = self {
-            end_forward(port, local, how);
-        }
-    }
-}
-
-/// A forwarded result's [`Kept`]: the master's argv and address kept for
-/// its cancel.
-fn kept(forwarded: Forwarded, ssh: Vec<String>, address: std::net::IpAddr) -> Kept {
-    match forwarded {
-        Forwarded::Master => Kept::Master { ssh, address },
-        Forwarded::Tunnel(child) => Kept::Tunnel(child),
     }
 }
 
@@ -133,8 +101,6 @@ pub(crate) struct RemotePorts {
     generation: Option<u64>,
     /// The last scan.
     listeners: Vec<RemoteListener>,
-    /// The helper's argv the last scan came over — where a forward goes.
-    ssh: Vec<String>,
     host: Host,
     reach: HashMap<u16, Reach>,
     forwards: HashMap<u16, Forward>,
@@ -148,11 +114,9 @@ pub(crate) struct RemotePorts {
 
 impl RemotePorts {
     /// A new generation (`None`: the remote session ended, the pane closes,
-    /// the setting went off): everything goes, our tunnels end.
+    /// the setting went off): everything goes, our forwards end.
     fn reset(&mut self, generation: Option<u64>) {
-        for (port, forward) in self.forwards.drain() {
-            forward.end(port);
-        }
+        // What was forwarded ends with `self`'s forwards.
         *self = Self {
             generation,
             ..Self::default()
@@ -168,18 +132,6 @@ impl RemotePorts {
             (Host::Known(Some(host)), Some(Reach::Direct)) => Some(port_forward::url(host, port)),
             _ => None,
         }
-    }
-
-    /// The local ports our forwards listen on: a master that is the tab's
-    /// own ssh lists them as the tab's — they are this list's, not twice.
-    pub(crate) fn forwarded_locals(&self) -> Vec<u16> {
-        self.forwards
-            .values()
-            .filter_map(|forward| match forward {
-                Forward::Running { local, .. } => Some(*local),
-                Forward::Starting => None,
-            })
-            .collect()
     }
 
     /// The dock's view of the server's ports.
@@ -373,9 +325,7 @@ impl TerminalPane {
                         .filter(|port| !listeners.iter().any(|l| l.port == *port))
                         .collect();
                     for port in gone {
-                        if let Some(forward) = state.forwards.remove(&port) {
-                            forward.end(port);
-                        }
+                        state.forwards.remove(&port);
                     }
                     state.listeners = listeners;
                 }
@@ -496,7 +446,7 @@ impl TerminalPane {
     }
 
     /// The remote ports end: the session ended, the pane closes or the
-    /// setting went off. Our tunnels end with them.
+    /// setting went off. Our forwards end with them.
     pub(crate) fn end_remote_ports(&self) {
         let had = {
             let mut state = self.remote_ports().borrow_mut();
@@ -515,9 +465,12 @@ impl TerminalPane {
     pub(crate) fn open_remote_port(&self, port: u16) {
         enum Next {
             Open(String),
-            Forward(Vec<String>, std::net::IpAddr, u64),
+            Forward(Served, std::net::IpAddr, u64),
             Nothing,
         }
+        let served = self
+            .server_target()
+            .map(|(_, target, _)| self.served(&target));
         let next = {
             let mut state = self.remote_ports().borrow_mut();
             match (state.opens(port), state.generation) {
@@ -528,12 +481,12 @@ impl TerminalPane {
                         .iter()
                         .find(|listener| listener.port == port)
                         .map(|listener| listener.address);
-                    match (address, state.forwards.contains_key(&port)) {
-                        (Some(address), false) if !state.ssh.is_empty() => {
+                    match (address, served, state.forwards.contains_key(&port)) {
+                        (Some(address), Some(served), false) => {
                             state.forwards.insert(port, Forward::Starting);
-                            Next::Forward(state.ssh.clone(), address, generation)
+                            Next::Forward(served, address, generation)
                         }
-                        (Some(_), false) => {
+                        (Some(_), None, false) => {
                             drop(state);
                             self.note_for_a_while(&format!(
                                 "Can't forward :{port} — no connection to the server yet"
@@ -546,12 +499,12 @@ impl TerminalPane {
                 (None, None) => Next::Nothing,
             }
         };
-        let (ssh, address, generation) = match next {
+        let (served, address, generation) = match next {
             Next::Open(url) => {
                 crate::footer::open_url(&url);
                 return;
             }
-            Next::Forward(ssh, address, generation) => (ssh, address, generation),
+            Next::Forward(served, address, generation) => (served, address, generation),
             Next::Nothing => return,
         };
         self.publish_ports();
@@ -561,22 +514,14 @@ impl TerminalPane {
             .spawn(move || {
                 let result = port_forward::free_local_port(port)
                     .ok_or_else(|| "No free local port".to_owned())
-                    .and_then(|local| {
-                        port_forward::forward(&ssh, local, address, port).map(|f| (local, f))
-                    });
-                let ssh = ssh.clone();
+                    .and_then(|local| port_forward::forward(&served, local, address, port));
                 DispatchQueue::main().exec_async(move || {
                     // audit: a block running on the main queue is on the main thread by definition.
                     let mtm = MainThreadMarker::new().expect("the main queue is the main thread");
-                    let result =
-                        result.map(|(local, forwarded)| (local, kept(forwarded, ssh, address)));
-                    let Some(pane) = lookup(mtm, id) else {
-                        if let Ok((local, how)) = result {
-                            end_forward(port, local, how);
-                        }
-                        return;
-                    };
-                    pane.forward_finished(generation, port, result);
+                    // A pane that is gone drops the forward with the closure.
+                    if let Some(pane) = lookup(mtm, id) {
+                        pane.forward_finished(generation, port, result);
+                    }
                 });
             });
         if spawned.is_err() {
@@ -587,18 +532,23 @@ impl TerminalPane {
 
     /// A forward's end, on the main queue: running → the port turns green
     /// and opens; failed → the label says why.
-    fn forward_finished(&self, generation: u64, port: u16, result: Result<(u16, Kept), String>) {
+    fn forward_finished(&self, generation: u64, port: u16, result: Result<Forwarding, String>) {
         let opened = {
             let mut state = self.remote_ports().borrow_mut();
+            // The session this was asked under has moved on: the forward is dropped, and ends.
             if state.generation != Some(generation) {
-                if let Ok((local, how)) = result {
-                    end_forward(port, local, how);
-                }
                 return;
             }
             match result {
-                Ok((local, how)) => {
-                    state.forwards.insert(port, Forward::Running { local, how });
+                Ok(forwarding) => {
+                    let local = forwarding.local();
+                    state.forwards.insert(
+                        port,
+                        Forward::Running {
+                            local,
+                            _held: Box::new(forwarding),
+                        },
+                    );
                     Ok(local)
                 }
                 Err(text) => {
@@ -708,14 +658,10 @@ mod tests {
             5173,
             Forward::Running {
                 local: 5174,
-                how: Kept::Master {
-                    ssh: Vec::new(),
-                    address: std::net::IpAddr::from([127, 0, 0, 1]),
-                },
+                _held: Box::new(()),
             },
         );
         assert_eq!(state.opens(5173).as_deref(), Some("http://localhost:5174"));
-        assert_eq!(state.forwarded_locals(), [5174]);
         let items = state.menu_items();
         assert_eq!(
             items.iter().map(|item| item.state).collect::<Vec<_>>(),
